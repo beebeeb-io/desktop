@@ -20,16 +20,30 @@ pub struct HttpsClient {
     client: Client,
 }
 
+/// The rules every client of ours is built with: https only, no redirect followed, bounded waits.
+fn builder() -> reqwest::blocking::ClientBuilder {
+    Client::builder()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+}
+
 impl HttpsClient {
     pub fn new() -> Result<Self, Unreachable> {
-        Client::builder()
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
+        builder().build().map(|client| Self { client }).map_err(|_| Unreachable)
+    }
+
+    /// The released client's rules, also trusting one certificate made inside a test (the local TLS server's).
+    #[cfg(test)]
+    pub(crate) fn trusting(certificate_pem: &[u8]) -> Self {
+        let root = reqwest::Certificate::from_pem(certificate_pem).expect("a test certificate");
+        let client = builder()
+            .add_root_certificate(root)
+            .no_proxy()
             .build()
-            .map(|client| Self { client })
-            .map_err(|_| Unreachable)
+            .expect("a test client");
+        Self { client }
     }
 }
 

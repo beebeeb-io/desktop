@@ -121,7 +121,84 @@ struct RawPlatform {
     size: Option<u64>,
 }
 
+/// The signed (v2) manifest, read strictly: every field is one we know, and no platform is named twice. What is
+/// signed is exactly what is understood; a new field needs a new manifest address, not a guess by an old build.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictManifest {
+    version: String,
+    #[serde(default)]
+    notes: Option<String>,
+    #[serde(default)]
+    pub_date: Option<String>,
+    product: String,
+    channel: String,
+    #[serde(deserialize_with = "platforms_named_once")]
+    platforms: BTreeMap<String, StrictPlatform>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictPlatform {
+    url: String,
+    signature: String,
+    size: u64,
+}
+
+/// A JSON object as a map, refusing a key that appears twice (serde's own map keeps the last one silently).
+fn platforms_named_once<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<String, StrictPlatform>, D::Error> {
+    struct Once;
+    impl<'de> serde::de::Visitor<'de> for Once {
+        type Value = BTreeMap<String, StrictPlatform>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("platforms, each named once")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut platforms = BTreeMap::new();
+            while let Some((target, platform)) = map.next_entry::<String, StrictPlatform>()? {
+                if platforms.insert(target, platform).is_some() {
+                    return Err(serde::de::Error::custom("a platform is named twice"));
+                }
+            }
+            Ok(platforms)
+        }
+    }
+    deserializer.deserialize_map(Once)
+}
+
 impl Manifest {
+    /// The signed v2 manifest. Strict: an unknown field, a field or a platform given twice, or a missing
+    /// `product`, `channel` or `size` is refused.
+    pub fn parse_signed(bytes: &[u8]) -> Result<Self, ManifestError> {
+        if bytes.len() > MAX_MANIFEST_BYTES {
+            return Err(ManifestError::TooLarge);
+        }
+        let raw: StrictManifest = serde_json::from_slice(bytes).map_err(|_| ManifestError::NotJson)?;
+        let version = Version::parse(&raw.version).ok_or(ManifestError::BadVersion)?;
+        let channel = Channel::parse(&raw.channel).ok_or(ManifestError::BadChannel)?;
+        if raw.platforms.is_empty() {
+            return Err(ManifestError::NoPlatforms);
+        }
+        let platform = |p: StrictPlatform| Platform {
+            url: p.url,
+            signature: p.signature,
+            size: Some(p.size),
+        };
+        Ok(Self {
+            version,
+            notes: raw.notes.unwrap_or_default(),
+            pub_date: raw.pub_date,
+            product: Some(raw.product),
+            channel: Some(channel),
+            platforms: raw.platforms.into_iter().map(|(t, p)| (t, platform(p))).collect(),
+        })
+    }
+
+    /// The 0.8.x (unsigned) format and the v2 one, leniently: for reading what is published, never for trusting it.
     pub fn parse(bytes: &[u8]) -> Result<Self, ManifestError> {
         if bytes.len() > MAX_MANIFEST_BYTES {
             return Err(ManifestError::TooLarge);
@@ -209,7 +286,8 @@ mod tests {
     /// holds the script to this same file, so the script and this reader cannot drift apart unnoticed.
     #[test]
     fn reads_what_the_release_script_writes() {
-        let manifest = Manifest::parse(include_bytes!("../tests/fixtures/native-manifest-shape.json")).expect("parses");
+        let manifest =
+            Manifest::parse_signed(include_bytes!("../tests/fixtures/native-manifest-shape.json")).expect("parses");
         assert_eq!(
             (manifest.version, manifest.product.as_deref(), manifest.channel),
             (Version::new(0, 9, 0), Some("desktop"), Some(Channel::Beta))
@@ -247,6 +325,52 @@ mod tests {
             Manifest::parse(&vec![b' '; MAX_MANIFEST_BYTES + 1]),
             Err(ManifestError::TooLarge)
         );
+    }
+
+    /// The signed manifest is read strictly: what is signed is exactly what is understood.
+    #[test]
+    fn the_signed_manifest_refuses_unknown_and_repeated_fields() {
+        const PLATFORM: &str = r#"{"url":"https://example.invalid/b.exe","signature":"c2ln","size":42}"#;
+        let signed = |top: &str, platforms: &str| {
+            let text = format!(
+                r#"{{"version":"0.9.0","product":"desktop","channel":"beta"{top},"platforms":{{{platforms}}}}}"#
+            );
+            Manifest::parse_signed(text.as_bytes()).map(|manifest| manifest.platforms.len())
+        };
+        let one = format!(r#""windows-x86_64-nsis":{PLATFORM}"#);
+        assert_eq!(signed("", &one), Ok(1), "the control parses");
+        assert_eq!(signed(r#","notes":"n","pub_date":"d""#, &one), Ok(1));
+        assert_eq!(
+            signed(r#","min_version":"0.9.0""#, &one),
+            Err(ManifestError::NotJson),
+            "unknown field"
+        );
+        assert_eq!(
+            signed(r#","channel":"stable""#, &one),
+            Err(ManifestError::NotJson),
+            "channel twice"
+        );
+        assert_eq!(
+            signed("", &format!("{one},{one}")),
+            Err(ManifestError::NotJson),
+            "one platform twice"
+        );
+        let extra = one.replace(r#""size":42"#, r#""size":42,"sha256":"00""#);
+        assert_eq!(
+            signed("", &extra),
+            Err(ManifestError::NotJson),
+            "unknown platform field"
+        );
+        let no_size = one.replace(r#","size":42"#, "");
+        assert_eq!(signed("", &no_size), Err(ManifestError::NotJson), "no size");
+        assert_eq!(
+            Manifest::parse_signed(LEGACY.as_bytes()),
+            Err(ManifestError::NotJson),
+            "the 0.8.x format is not a signed manifest"
+        );
+        // The lenient reader still takes the repeated platform (last wins): it is never used for trust.
+        let lenient = format!(r#"{{"version":"0.9.0","platforms":{{{one},{one}}}}}"#);
+        assert!(Manifest::parse(lenient.as_bytes()).is_ok());
     }
 
     #[test]

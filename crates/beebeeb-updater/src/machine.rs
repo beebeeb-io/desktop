@@ -4,7 +4,8 @@
 //! (`Checking`, `Downloading`, `Verifying`) is continued with [`Event::Tick`]. Every `Tick` does one bounded piece of
 //! blocking work (one request, or one chunk), so the shell runs the loop on a worker thread and can show progress.
 //! The network, the clock, the persisted marks and the installer launch are traits, so every rule is tested without
-//! any of them. Nothing is installed without [`Event::Apply`], which only a person's click sends.
+//! any of them. Nothing is installed without [`Event::Apply`], which only a person's click sends, and the installer
+//! is started only with an [`EngineStopped`] in hand: the machine asks [`Apply::stop_engine`] for it first.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -27,6 +28,9 @@ pub const CHECK_INTERVAL_SECS: u64 = 4 * 60 * 60;
 /// After a check that failed, the next background check waits this long: a release host in trouble is not asked
 /// again on every timer tick by every install.
 pub const RETRY_AFTER_FAILURE_SECS: u64 = 15 * 60;
+/// With no verified check for this long the UI says so ([`Updater::freshness`]): the release server may be out of
+/// reach, or something between it and this PC is holding updates back.
+pub const UNVERIFIED_WARNING_SECS: u64 = 14 * 24 * 60 * 60;
 
 /// A response to one GET. `offset` is where `body` starts in the whole file (0 for a 200, the range start for a
 /// 206) and `total` is the whole file's length when the server states it.
@@ -70,10 +74,36 @@ pub trait Store {
     fn save(&mut self, persisted: &Persisted) -> bool;
 }
 
-/// Starts the verified installer. On success the shell stops the engine's last work and exits the process; the
-/// installer replaces the files and starts the new version.
+/// Proof that the sync engine is stopped and every upload in progress is parked (resumable after the restart).
+/// [`Apply::launch`] cannot be called without one, and the machine gets it only from [`Apply::stop_engine`], so
+/// the installer is never started over a running engine.
+#[derive(Debug)]
+pub struct EngineStopped {
+    _only_from_the_engine_stop_path: (),
+}
+
+impl EngineStopped {
+    /// For the engine-stop path alone: call it after the engine has confirmed that it stopped and parked its
+    /// uploads, inside [`Apply::stop_engine`]. Nothing else may mint one.
+    pub fn engine_stopped_and_uploads_parked() -> Self {
+        Self {
+            _only_from_the_engine_stop_path: (),
+        }
+    }
+}
+
+/// The two things only the shell can do at "Restart to update", in the order the machine calls them.
 pub trait Apply {
-    fn launch(&mut self, installer: &Path, offer: &Offer) -> bool;
+    /// Stops the sync engine and parks uploads in progress, then returns the proof. `None` when the engine did not
+    /// stop in time: nothing is started, the staged update is kept, and the person can try again.
+    fn stop_engine(&mut self) -> Option<EngineStopped>;
+
+    /// Starts the verified installer (Windows: [`crate::host::launch_nsis`]). On `true` the shell exits the
+    /// process; the installer waits for that, replaces the files and starts the new version.
+    fn launch(&mut self, installer: &Path, offer: &Offer, stopped: EngineStopped) -> bool;
+
+    /// The installer did not start after the engine was stopped: start the engine again.
+    fn resume_engine(&mut self);
 }
 
 /// Why a check was asked for: a background check holds an older channel build back, a manual one reports it.
@@ -107,6 +137,13 @@ pub enum State {
     Checking {
         channel: Channel,
         intent: Intent,
+    },
+    /// A background check while the person has an offer, a resumable download or a staged update in front of them:
+    /// the UI keeps drawing `kept`. One `Tick` later it is `kept` again when the channel still offers exactly that,
+    /// and otherwise what the channel says now (an offer that was withdrawn or replaced does not stay installable).
+    Rechecking {
+        channel: Channel,
+        kept: Box<State>,
     },
     UpToDate {
         installed: Version,
@@ -159,7 +196,19 @@ pub enum Failure {
     DowngradeChanged,
     /// The update folder or the updater's own record could not be written.
     Disk,
+    /// The engine did not stop, so the installer was not started. The staged update is kept.
+    EngineStillRunning,
     InstallerDidNotStart,
+}
+
+/// Whether this install has recently heard from the release server in a way it could verify.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// A check passed every rule within [`UNVERIFIED_WARNING_SECS`] (or the build is that young).
+    Verified,
+    /// No check has passed every rule for this many whole days, counted from the last one that did, or from when
+    /// this build was made if none ever did. The UI says so; "up to date" alone would be a guess.
+    Unverified { days: u64 },
 }
 
 pub struct Config {
@@ -209,6 +258,11 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
         &self.state
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_state_for_test(&mut self, state: State) {
+        self.state = state;
+    }
+
     /// True when no check has passed in the last [`CHECK_INTERVAL_SECS`] and none was tried in the last
     /// [`RETRY_AFTER_FAILURE_SECS`]. A clock that went backwards never silences checks.
     pub fn background_check_due(&self) -> bool {
@@ -220,6 +274,19 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
             && at_least(self.last_attempt, RETRY_AFTER_FAILURE_SECS)
     }
 
+    /// For the UI's "last checked" line and its warning. A clock set back never raises the warning.
+    pub fn freshness(&self) -> Freshness {
+        let since = self.persisted.last_check.unwrap_or(0).max(self.config.trust.not_before);
+        let unverified = self.clock.now().saturating_sub(since);
+        if unverified >= UNVERIFIED_WARNING_SECS {
+            Freshness::Unverified {
+                days: unverified / (24 * 60 * 60),
+            }
+        } else {
+            Freshness::Verified
+        }
+    }
+
     /// Applies one event. An event that means nothing in the current state changes nothing.
     pub fn step(&mut self, event: Event) -> &State {
         let state = std::mem::replace(&mut self.state, State::Idle);
@@ -227,20 +294,26 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
             // A check never interrupts work in progress.
             (
                 busy @ (State::Checking { .. }
+                | State::Rechecking { .. }
                 | State::Downloading { .. }
                 | State::Verifying { .. }
                 | State::Restarting { .. }),
                 Event::Check { .. },
             ) => busy,
-            // A background check never takes away what the person is looking at: an offer, a download that can be
-            // resumed, or a staged update waiting for "Restart to update". A manual check is the person's own.
+            // A background check does not blank what the person is looking at (an offer, a download that can be
+            // resumed, a staged update waiting for "Restart to update"), and it does not keep it for ever either:
+            // it is checked against the channel again. A manual check is the person's own.
             (
                 kept @ (State::Available { .. } | State::ReadyToRestart { .. } | State::Failed { resume: Some(_), .. }),
                 Event::Check {
+                    channel,
                     intent: Intent::Background,
-                    ..
                 },
-            ) => kept,
+            ) => State::Rechecking {
+                channel,
+                kept: Box::new(kept),
+            },
+            (State::Rechecking { channel, kept }, Event::Tick) => self.recheck(channel, *kept),
             (_, Event::Check { channel, intent }) => State::Checking { channel, intent },
             (State::Checking { channel, intent }, Event::Tick) => self.run_check(channel, intent),
             (State::Available { offer }, Event::Download) if !offer.downgrade => self.begin_download(offer),
@@ -280,6 +353,30 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
         )
     }
 
+    /// What a background check makes of an offer that was already on screen. No answer, or a refused one, is not
+    /// news about the offer: it stays (and `Apply` verifies the file again in any case).
+    fn recheck(&mut self, channel: Channel, kept: State) -> State {
+        let on_screen = match &kept {
+            State::Available { offer }
+            | State::ReadyToRestart { offer, .. }
+            | State::Failed {
+                resume: Some(offer), ..
+            } => offer.clone(),
+            _ => return kept,
+        };
+        // Asked as a manual check would, to see what the channel offers, older builds included.
+        match self.run_check(channel, Intent::Manual) {
+            State::Failed { .. } => kept,
+            State::Available { offer } if offer == on_screen => kept,
+            // An older channel build that the person was not already looking at: a background check holds it.
+            State::Available { offer } if offer.downgrade => State::UpToDate {
+                installed: self.config.installed,
+                channel,
+            },
+            now => now,
+        }
+    }
+
     fn run_check(&mut self, channel: Channel, intent: Intent) -> State {
         let refused = |refusal| State::Failed {
             failure: Failure::Refused(refusal),
@@ -307,6 +404,7 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
             channel,
             self.config.installed,
             seen,
+            self.clock.now(),
             &manifest,
             &signature,
         ) {
@@ -516,8 +614,7 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
     }
 
     /// The whole staged file against the offer's length and signature. `Ok` only for exactly the signed bytes.
-    fn staged_file_is_signed(&self, path: &Path, offer: &Offer) -> Result<(), Failure> {
-        let file = fs::File::open(path).map_err(|_| Failure::Disk)?;
+    fn staged_file_is_signed(&self, file: &fs::File, offer: &Offer) -> Result<(), Failure> {
         if file.metadata().map_err(|_| Failure::Disk)?.len() != offer.size {
             return Err(Failure::WrongSize);
         }
@@ -525,14 +622,41 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
         if signature.file != offer.file_name {
             return Err(Failure::BadSignature);
         }
-        signature
-            .verify_reader(&self.config.trust.key, file)
-            .map_err(|_| Failure::BadSignature)
+        let key = self
+            .config
+            .trust
+            .signer_for(&signature, offer.version)
+            .ok_or(Failure::BadSignature)?;
+        signature.verify_reader(key, file).map_err(|_| Failure::BadSignature)
+    }
+
+    /// Removes everything in the staging folder but the staged installer, and says whether it is then alone
+    /// there. An installer loads from its own folder first: a stranger's file beside it must not be there.
+    fn staged_installer_is_alone(&self, installer: &Path) -> bool {
+        let Ok(entries) = fs::read_dir(&self.config.staging_dir) else {
+            return false;
+        };
+        let mut alone = true;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path != installer {
+                let removed = if path.is_dir() {
+                    fs::remove_dir_all(&path)
+                } else {
+                    fs::remove_file(&path)
+                };
+                alone &= removed.is_ok();
+            }
+        }
+        alone
     }
 
     fn verify(&mut self, offer: Offer) -> State {
         let (part, staged) = (self.part_path(&offer), self.final_path(&offer));
-        match self.staged_file_is_signed(&part, &offer) {
+        let checked = fs::File::open(&part)
+            .map_err(|_| Failure::Disk)
+            .and_then(|file| self.staged_file_is_signed(&file, &offer));
+        match checked {
             Ok(()) => {}
             // The file could not be read just now (a scanner holds it, say): it is kept and checked again later.
             Err(Failure::Disk) => {
@@ -559,27 +683,39 @@ impl<H: Http, C: Clock, S: Store, A: Apply> Updater<H, C, S, A> {
     }
 
     fn apply(&mut self, offer: Offer, installer: PathBuf) -> State {
+        let kept = |failure, offer| State::Failed {
+            failure,
+            resume: Some(offer),
+        };
+        if installer != self.final_path(&offer) || !self.staged_installer_is_alone(&installer) {
+            return kept(Failure::Disk, offer);
+        }
         // Checked again at the moment of use: the file sat in a folder the person's other programs can write.
-        match self.staged_file_is_signed(&installer, &offer) {
+        // From this open until the installer process exists nothing else can write, replace or delete the file
+        // (`host::open_denying_writes`), so what is verified here is what runs.
+        let Ok(held) = crate::host::open_denying_writes(&installer) else {
+            return kept(Failure::Disk, offer);
+        };
+        match self.staged_file_is_signed(&held, &offer) {
             Ok(()) => {}
-            Err(Failure::Disk) => {
-                return State::Failed {
-                    failure: Failure::Disk,
-                    resume: Some(offer),
-                };
-            }
+            Err(Failure::Disk) => return kept(Failure::Disk, offer),
             Err(failure) => {
+                drop(held);
                 let _ = fs::remove_file(&installer);
                 return State::Failed { failure, resume: None };
             }
         }
-        if self.apply.launch(&installer, &offer) {
+        // The engine stops before the installer starts, never after: the installer replaces the running program.
+        let Some(stopped) = self.apply.stop_engine() else {
+            return kept(Failure::EngineStillRunning, offer);
+        };
+        let started = self.apply.launch(&installer, &offer, stopped);
+        drop(held);
+        if started {
             State::Restarting { offer }
         } else {
-            State::Failed {
-                failure: Failure::InstallerDidNotStart,
-                resume: Some(offer),
-            }
+            self.apply.resume_engine();
+            kept(Failure::InstallerDidNotStart, offer)
         }
     }
 }

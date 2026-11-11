@@ -9,9 +9,11 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
-use crate::machine::{Apply, Clock, Config, Event, Http, Persisted, Response, State, Store, Unreachable, Updater};
+use crate::machine::{
+    Apply, Clock, Config, EngineStopped, Event, Http, Persisted, Response, State, Store, Unreachable, Updater,
+};
 use crate::manifest::Channel;
-use crate::policy::{NATIVE_FLOOR, Offer, Trust};
+use crate::policy::{KeyScope, NATIVE_FLOOR, Offer, Trust, TrustedKey};
 use crate::signature::PublicKey;
 use crate::version::Version;
 
@@ -25,6 +27,12 @@ pub struct TestKey(minisign::KeyPair);
 impl TestKey {
     pub fn generate() -> Self {
         Self(minisign::KeyPair::generate_unencrypted_keypair().expect("a test key pair"))
+    }
+
+    /// The same test key for a server thread (`net_tests`).
+    #[cfg(feature = "net")]
+    pub fn clone_for_thread(&self) -> Self {
+        Self(self.0.clone())
     }
 
     pub fn public(&self) -> PublicKey {
@@ -49,13 +57,21 @@ impl TestKey {
 
 pub fn trust(key: &TestKey) -> Trust {
     Trust {
-        key: key.public(),
+        // For every version, so that the floor and the scope are each tested by their own rule.
+        keys: vec![TrustedKey {
+            key: key.public(),
+            valid_for: KeyScope::from(Version::new(0, 0, 0)),
+        }],
         product: "desktop".to_string(),
         allowed_hosts: vec![HOST.to_string()],
         targets: vec![TARGET.to_string(), "windows-x86_64".to_string()],
         floor: NATIVE_FLOOR,
+        not_before: 0,
     }
 }
+
+/// The clock of every test updater; an honest test manifest is signed 1000 seconds before it.
+pub const NOW: u64 = 1_800_001_000;
 
 pub fn version(text: &str) -> Version {
     Version::parse(text).expect("a plain semver in a test")
@@ -264,18 +280,61 @@ impl Store for MemStore {
     }
 }
 
+/// What the shell did at "Restart to update", in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Did {
+    StoppedEngine,
+    EngineRefused,
+    Launched(PathBuf, Version),
+    LaunchFailed,
+    ResumedEngine,
+}
+
 #[derive(Default)]
 pub struct FakeApply {
-    pub launched: Vec<(PathBuf, Version)>,
+    pub did: Vec<Did>,
     pub refuse: bool,
+    pub engine_will_not_stop: bool,
+    /// Runs inside `launch`, while the updater still holds the staged file.
+    pub during_launch: Option<Box<dyn FnMut(&Path)>>,
+}
+
+impl FakeApply {
+    pub fn launched(&self) -> Vec<(PathBuf, Version)> {
+        self.did
+            .iter()
+            .filter_map(|did| match did {
+                Did::Launched(path, version) => Some((path.clone(), *version)),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 impl Apply for FakeApply {
-    fn launch(&mut self, installer: &Path, offer: &Offer) -> bool {
-        if !self.refuse {
-            self.launched.push((installer.to_path_buf(), offer.version));
+    fn stop_engine(&mut self) -> Option<EngineStopped> {
+        if self.engine_will_not_stop {
+            self.did.push(Did::EngineRefused);
+            return None;
         }
+        self.did.push(Did::StoppedEngine);
+        Some(EngineStopped::engine_stopped_and_uploads_parked())
+    }
+
+    fn launch(&mut self, installer: &Path, offer: &Offer, _stopped: EngineStopped) -> bool {
+        if let Some(hook) = self.during_launch.as_mut() {
+            hook(installer);
+        }
+        self.did.push(if self.refuse {
+            Did::LaunchFailed
+        } else {
+            Did::Launched(installer.to_path_buf(), offer.version)
+        });
         !self.refuse
+    }
+
+    fn resume_engine(&mut self) {
+        self.did.push(Did::ResumedEngine);
     }
 }
 
@@ -288,13 +347,7 @@ pub fn updater(key: &TestKey, installed: &str, staging: &Path, http: FakeHttp, s
         installed: version(installed),
         staging_dir: staging.to_path_buf(),
     };
-    Updater::new(
-        config,
-        http,
-        FakeClock(Cell::new(1_800_001_000)),
-        store,
-        FakeApply::default(),
-    )
+    Updater::new(config, http, FakeClock(Cell::new(NOW)), store, FakeApply::default())
 }
 
 /// Sends `event`, then `Tick`s until the machine has no work left. Returns every state on the way, the last one
@@ -304,7 +357,9 @@ pub fn drive(updater: &mut TestUpdater, event: Event) -> Vec<State> {
     for _ in 0..100_000 {
         if !matches!(
             states.last(),
-            Some(State::Checking { .. } | State::Downloading { .. } | State::Verifying { .. })
+            Some(
+                State::Checking { .. } | State::Rechecking { .. } | State::Downloading { .. } | State::Verifying { .. }
+            )
         ) {
             return states;
         }

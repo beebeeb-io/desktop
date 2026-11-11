@@ -7,9 +7,11 @@
 //! - [`policy`]: the rules a manifest passes before a byte is downloaded (signed, right channel, not replayed,
 //!   trusted address, a signature that names the file and the version, never below the first native release).
 //! - [`machine`]: one [`State`] and one `step`: check, resumable download, verify, stage, hand to the installer.
+//! - [`handoff`]: the note the bridge release 0.8.25 leaves for the first native start.
 //! - [`host`]: the small real pieces: the system clock, the JSON record on disk, the NSIS launch (Windows).
 //! - `net` (feature `net`): the https client.
 
+pub mod handoff;
 pub mod host;
 pub mod machine;
 pub mod manifest;
@@ -21,6 +23,8 @@ pub mod version;
 
 #[cfg(test)]
 mod machine_tests;
+#[cfg(all(test, feature = "net"))]
+mod net_tests;
 #[cfg(test)]
 mod policy_tests;
 #[cfg(test)]
@@ -29,9 +33,10 @@ mod real_release_tests;
 mod testkit;
 
 pub use machine::{
-    Apply, Clock, Config, Event, Failure, Http, Intent, Persisted, Response, State, Store, Unreachable, Updater,
+    Apply, Clock, Config, EngineStopped, Event, Failure, Freshness, Http, Intent, Persisted, Response, State, Store,
+    Unreachable, Updater,
 };
 pub use manifest::{Channel, Manifest, ManifestError, Platform};
-pub use policy::{HighWater, NATIVE_FLOOR, Offer, Refusal, Trust, Verdict};
-pub use signature::{BEEBEEB_DESKTOP_PUBKEY, PublicKey, Signature, SignatureError};
+pub use policy::{HighWater, KeyScope, NATIVE_FLOOR, Offer, Refusal, Trust, TrustedKey, Verdict};
+pub use signature::{LEGACY_0_8_PUBKEY, PublicKey, Signature, SignatureError, UPDATER_V2_PUBKEY};
 pub use version::Version;

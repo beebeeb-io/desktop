@@ -43,7 +43,7 @@ fn reads_the_published_0_8_manifest() {
 #[test]
 fn every_published_signature_is_by_the_baked_key_and_names_its_file() {
     let manifest = Manifest::parse(PUBLISHED).expect("the published manifest parses");
-    let key = PublicKey::beebeeb_desktop();
+    let key = PublicKey::legacy_0_8();
     let mut checked = 0;
     for (target, platform) in &manifest.platforms {
         let signature =
@@ -68,7 +68,18 @@ fn every_published_signature_is_by_the_baked_key_and_names_its_file() {
 /// The 0.8.x manifest has no detached signature, so the native rules refuse it whatever is offered beside it.
 #[test]
 fn the_native_rules_refuse_the_unsigned_0_8_manifest() {
-    let trust = crate::host::windows_release_trust();
+    // Even a build that trusted the 0.8.x key for every version (no native build does) would refuse it.
+    let trust = crate::policy::Trust {
+        keys: vec![crate::policy::TrustedKey {
+            key: PublicKey::legacy_0_8(),
+            valid_for: crate::policy::KeyScope::from(Version::new(0, 0, 0)),
+        }],
+        product: "desktop".to_string(),
+        allowed_hosts: vec![crate::host::RELEASE_HOST.to_string()],
+        targets: vec!["windows-x86_64-nsis".to_string()],
+        floor: crate::policy::NATIVE_FLOOR,
+        not_before: 0,
+    };
     let nsis = &Manifest::parse(PUBLISHED).expect("parses").platforms["windows-x86_64-nsis"].signature;
     for signature in ["", nsis.as_str()] {
         let verdict = check(
@@ -76,6 +87,7 @@ fn the_native_rules_refuse_the_unsigned_0_8_manifest() {
             Channel::Stable,
             Version::new(0, 8, 21),
             None,
+            1_800_000_000,
             PUBLISHED,
             signature,
         );
@@ -94,7 +106,7 @@ fn real_installer_verifies_and_one_changed_byte_does_not() {
     assert_eq!(bytes.len(), 8_854_808, "the published installer's length");
     let manifest = Manifest::parse(PUBLISHED).expect("parses");
     let signature = Signature::from_base64(&manifest.platforms["windows-x86_64-nsis"].signature).expect("decodes");
-    let key = PublicKey::beebeeb_desktop();
+    let key = PublicKey::legacy_0_8();
     assert_eq!(
         signature.verify_reader(&key, std::fs::File::open(&path).expect("opens")),
         Ok(())

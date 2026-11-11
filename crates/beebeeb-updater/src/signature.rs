@@ -5,18 +5,29 @@
 //! so the time and the file name are signed too. Tauri's updater checks only the bytes; this module also hands out
 //! the signed time and name, which the policy uses to tie a signature to one file and one moment.
 //!
-//! The public key is the one baked into every 0.8.x build (`src-tauri/tauri.conf.json`, `plugins.updater.pubkey`):
-//! base64 of the minisign public key text. One key and one format verify old and new clients' updates.
+//! Two keys, one format (Guus, 2026-11-11). The native line (0.9.0 and later: installers and v2 manifests) is
+//! signed by the v2 key, [`UPDATER_V2_PUBKEY`], and a native build trusts only that key. The 0.8.x line keeps the
+//! key every 0.8.x build bakes in ([`LEGACY_0_8_PUBKEY`], `src-tauri/tauri.conf.json`); a client on 0.8.24 or
+//! older therefore cannot verify a native installer. Only the bridge release 0.8.25 trusts both.
 
 use std::io::Read;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
-/// The updater public key every release since 0.3.0 bakes in (minisign key id `C6FADFD59D732197`), copied from
-/// `src-tauri/tauri.conf.json`. A public key: it verifies and cannot sign. `tests::baked_key_matches_tauri_config`
+/// The public key of the native line, in the form `tauri signer generate` writes its `.pub` file (base64 of the
+/// minisign public key text). The file is the one source: this crate, `scripts/native-channel-manifest.mjs` and
+/// the release workflow all read `crates/beebeeb-updater/keys/updater-v2.pub`.
+///
+/// Key id `FED25848C41F2348`. The same file is `src-tauri/updater-v2.pub` in the bridge release 0.8.25, so the two
+/// lines can be diffed. `tests::a_release_build_has_the_v2_key` holds it to: a key, not a placeholder, not the
+/// 0.8.x key.
+pub const UPDATER_V2_PUBKEY: &str = include_str!("../keys/updater-v2.pub");
+
+/// The updater public key every 0.8.x release since 0.3.0 bakes in (minisign key id `C6FADFD59D732197`), copied
+/// from `src-tauri/tauri.conf.json`. A native build does not trust it. `tests::baked_key_matches_tauri_config`
 /// fails if the two drift.
-pub const BEEBEEB_DESKTOP_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM2RkFERkQ1OUQ3MzIxOTcKUldTWElYT2QxZC82eG1ocjBUK0ZUZUZqU25JbmFNdmJoZ0w1dnhidDUxREZMd2wycUlDOGpVNloK";
+pub const LEGACY_0_8_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM2RkFERkQ1OUQ3MzIxOTcKUldTWElYT2QxZC82eG1ocjBUK0ZUZUZqU25JbmFNdmJoZ0w1dnhidDUxREZMd2wycUlDOGpVNloK";
 
 /// Why a key or signature was refused. Never carries key or signature bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,9 +59,14 @@ impl PublicKey {
             .map_err(|_| SignatureError::Malformed)
     }
 
-    /// The key of the released desktop app.
-    pub fn beebeeb_desktop() -> Self {
-        Self::from_tauri_base64(BEEBEEB_DESKTOP_PUBKEY).expect("the baked updater public key decodes")
+    /// The key of the native line. `Err` only if `keys/updater-v2.pub` is not a minisign public key.
+    pub fn updater_v2() -> Result<Self, SignatureError> {
+        Self::from_tauri_base64(UPDATER_V2_PUBKEY)
+    }
+
+    /// The key of the 0.8.x line: for reading what 0.8.x published, never trusted by a native build.
+    pub fn legacy_0_8() -> Self {
+        Self::from_tauri_base64(LEGACY_0_8_PUBKEY).expect("the baked 0.8.x updater public key decodes")
     }
 }
 
@@ -235,10 +251,71 @@ mod tests {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../src-tauri/tauri.conf.json");
         let config: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).expect("src-tauri/tauri.conf.json is readable")).expect("json");
-        assert_eq!(
-            config["plugins"]["updater"]["pubkey"].as_str(),
-            Some(BEEBEEB_DESKTOP_PUBKEY)
+        assert_eq!(config["plugins"]["updater"]["pubkey"].as_str(), Some(LEGACY_0_8_PUBKEY));
+        let _ = PublicKey::legacy_0_8();
+    }
+
+    /// The committed v2 key is a real minisign public key (key id `FED25848C41F2348`), not a placeholder and not
+    /// the 0.8.x key. The release workflow runs this test before it builds anything.
+    #[test]
+    fn a_release_build_has_the_v2_key() {
+        assert!(
+            !UPDATER_V2_PUBKEY.contains("PLACEHOLDER"),
+            "keys/updater-v2.pub is a placeholder"
         );
-        let _ = PublicKey::beebeeb_desktop();
+        assert_ne!(
+            UPDATER_V2_PUBKEY.trim(),
+            LEGACY_0_8_PUBKEY,
+            "the native line has its own key"
+        );
+        let text = decode_text(UPDATER_V2_PUBKEY).expect("base64 of text");
+        assert!(text.starts_with("untrusted comment: minisign public key: FED25848C41F2348\n"));
+        let v2 = PublicKey::updater_v2().expect("keys/updater-v2.pub is a minisign public key");
+        // A signature the 0.8.x key really made is not the v2 key's.
+        let published: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../tests/fixtures/desktop-latest-0.8.22.json")).expect("json");
+        let by_old_key = Signature::from_base64(
+            published["platforms"]["windows-x86_64-nsis"]["signature"]
+                .as_str()
+                .expect("signature"),
+        )
+        .expect("decodes");
+        assert_eq!(by_old_key.made_by(&PublicKey::legacy_0_8()), Ok(()));
+        assert_eq!(by_old_key.made_by(&v2), Err(SignatureError::WrongKey));
+    }
+
+    /// A legacy (not pre-hashed) signature is valid minisign and our own key made it; it is refused all the same,
+    /// before any byte is read: Tauri's signer never writes one, so none of ours exists.
+    #[test]
+    fn refuses_a_legacy_signature_by_our_own_key() {
+        use ed25519_dalek::Signer as _;
+        // An obviously-test key: the seed is 32 times the byte 7.
+        let secret = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let key_id = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let boxed = |algorithm: &[u8; 2], rest: &[u8]| BASE64.encode([&algorithm[..], &key_id[..], rest].concat());
+        let public = format!(
+            "untrusted comment: minisign public key\n{}\n",
+            boxed(b"Ed", secret.verifying_key().as_bytes())
+        );
+        let key = PublicKey::from_tauri_base64(&BASE64.encode(public)).expect("a minisign public key");
+
+        let bytes = b"installer bytes";
+        let comment = "timestamp:1800000000\tfile:Beebeeb_0.9.0_x64-setup.exe";
+        let over_bytes = secret.sign(bytes).to_bytes();
+        let global = secret.sign(&[&over_bytes[..], comment.as_bytes()].concat()).to_bytes();
+        let text = format!(
+            "untrusted comment: legacy\n{}\ntrusted comment: {comment}\n{}\n",
+            boxed(b"Ed", &over_bytes),
+            BASE64.encode(global)
+        );
+        let signature = Signature::from_base64(&BASE64.encode(text)).expect("decodes");
+
+        // The control: with legacy signatures allowed, this one verifies. So only the legacy rule refuses it.
+        assert!(
+            key.0.verify(bytes, &signature.inner, true).is_ok(),
+            "a valid legacy signature"
+        );
+        assert_eq!(signature.made_by(&key), Err(SignatureError::Legacy));
+        assert_eq!(signature.verify_bytes(&key, bytes), Err(SignatureError::Legacy));
     }
 }
