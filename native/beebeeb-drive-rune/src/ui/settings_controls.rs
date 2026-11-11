@@ -70,6 +70,24 @@ pub fn button(index: usize, label: &str, icon: Option<&'static Icon>, emphasis: 
 /// and at most one action at the trailing edge. Neutral: it informs, it does not alarm.
 /// Keys: `banner-<N>`, `banner-<N>-icon`, `banner-<N>-title`, `banner-<N>-text`.
 pub fn banner(index: usize, icon: &'static Icon, title: &str, words: &str, action: Option<El>, t: &Theme) -> El {
+    banner_toned(index, false, icon, title, words, action, t)
+}
+
+/// The same notice, `red` for something that is off or failed and matters (`.tone-red`).
+pub fn banner_toned(
+    index: usize,
+    red: bool,
+    icon: &'static Icon,
+    title: &str,
+    words: &str,
+    action: Option<El>,
+    t: &Theme,
+) -> El {
+    let (fill, ink) = if red {
+        (t.red.alpha(0.12), t.red)
+    } else {
+        (t.tile, t.text_secondary)
+    };
     let key = format!("banner-{index}");
     let mut b = row()
         .key(key.clone())
@@ -81,13 +99,12 @@ pub fn banner(index: usize, icon: &'static Icon, title: &str, words: &str, actio
         .py(11.0)
         .px(13.0)
         .radius(13.0)
-        .fill(t.tile)
-        .child(el().key(format!("{key}-icon-box")).pt(1.0).child(kit::glyph(
-            format!("{key}-icon"),
-            icon,
-            16.0,
-            t.text_secondary,
-        )))
+        .fill(fill)
+        .child(
+            el().key(format!("{key}-icon-box"))
+                .pt(1.0)
+                .child(kit::glyph(format!("{key}-icon"), icon, 16.0, ink)),
+        )
         .child(
             col()
                 .key(format!("{key}-words"))

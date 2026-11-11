@@ -9,7 +9,7 @@
 //! | Leaves the app (a web page) | `Trailing::External` | `item-<L>-<I>-ext` |
 //! | The chosen one of several | `Trailing::Check` | `item-<L>-<I>-check` |
 //! | Pop-up button (a choice) | `Trailing::Pop` | `item-<L>-<I>-pop`, `-pop-label`, `-pop-caret` |
-//! | Switch | `item_with(.., vec![detail_pane::switch("item-<L>-<I>", ..)], ..)` | `item-<L>-<I>-switch`, `-knob` |
+//! | Switch | `item_with(.., vec![switch("item-<L>-<I>", ..)], ..)` | `item-<L>-<I>-switch`, `-knob` |
 //!
 //! A row is 28 pt, 40 pt with a second line; the board rules a row off from the one
 //! above only where the two are siblings in its markup (`Item::ruled`). What a row IS decides how it behaves: `Role::Link` and `Role::Button` rows take
@@ -156,6 +156,34 @@ pub fn pop_button(key: &str, name: &str, choice: &str, open: bool, t: &Theme) ->
             12.0,
             t.text_tertiary,
         ))
+}
+
+/// A switch at a row's trailing edge: ink when on (never Amber: a switch is not the primary
+/// action), the knob in the paper colour when on and white when off, as the board draws it.
+/// (`detail_pane::switch` draws the knob white in both states.) Keys: `<key>-switch`, `<key>-knob`.
+pub fn switch(key: &str, name: &str, on: bool, t: &Theme) -> El {
+    row()
+        .key(format!("{key}-switch"))
+        .role("switch")
+        .label(name)
+        .checked(on)
+        .size(36.0, 20.0)
+        .radius(10.0)
+        .fill(if on { t.text } else { t.paper3 })
+        .border(1.0, if on { t.text } else { t.separator_strong })
+        .border_layout()
+        .center_y()
+        .focusable(true)
+        .child(
+            el().key(format!("{key}-knob"))
+                .size(14.0, 14.0)
+                .radius(7.0)
+                .fill(if on { t.paper } else { t.white })
+                // `shadow-1`: the light theme's ink in both themes.
+                .box_shadow(kit::drop(1.0, 3.0, rune::oklch(0.18, 0.01, 70.0).alpha(0.04)))
+                .box_shadow(kit::drop(1.0, 2.0, rune::oklch(0.18, 0.01, 70.0).alpha(0.06)))
+                .ml(if on { 18.0 } else { 2.0 }),
+        )
 }
 
 /// One row (`.kit-item`). Keys: `item-<L>-<I>` and the pieces named in the module's table.

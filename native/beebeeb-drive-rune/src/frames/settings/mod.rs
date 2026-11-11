@@ -11,6 +11,7 @@
 
 pub mod about;
 pub mod general;
+pub mod notifications;
 pub mod source;
 pub mod storage_location;
 #[cfg(test)]
@@ -32,6 +33,8 @@ pub enum Pane {
     About,
     /// General › Storage location (DW-0788).
     StorageLocation,
+    /// Notifications (DW-0750).
+    Notifications,
 }
 
 /// Which menu a pop-up button drops.
@@ -91,6 +94,8 @@ pub enum Intent {
     Copy(String),
     /// Ask the updater whether a newer version exists, now (About › Check now).
     CheckForUpdates,
+    /// Open Windows Settings › Notifications › Beebeeb (DW-0750b).
+    OpenWindowsNotificationSettings,
 }
 
 /// The settings state of the window.
@@ -154,6 +159,7 @@ impl SettingsUi {
                 self.toggle_menu(MenuKind::Theme);
             }
             "DW-0751" => self.pane = Pane::About,
+            "DW-0750" | "DW-0750b" => self.pane = Pane::Notifications,
             "DW-0788" | "DW-0788b" | "DW-0788c" | "DW-0788d" => self.pane = Pane::StorageLocation,
             "DW-0789" => {
                 self.pane = Pane::About;
@@ -263,6 +269,11 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         });
     }),
     ("DW-0789b", |s| open_on(s, "DW-0789b")),
+    ("DW-0750", |s| open_on(s, "DW-0750")),
+    ("DW-0750b", |s| {
+        s.settings.source = Box::new(BoardSettings::new().with_notifications_off_in_windows());
+        open_on(s, "DW-0750");
+    }),
     ("DW-0788", |s| open_on(s, "DW-0788")),
     ("DW-0788b", |s| {
         open_on(s, "DW-0788");
@@ -299,6 +310,7 @@ impl Pane {
     pub fn section(self) -> Pane {
         match self {
             Pane::General | Pane::About | Pane::StorageLocation => Pane::General,
+            Pane::Notifications => Pane::Notifications,
         }
     }
 }
@@ -340,7 +352,7 @@ const SETTINGS_SECTIONS: &[Section] = &[
         label: "Notifications",
         icon: &ic::BELL,
         frame: "DW-0750",
-        pane: None,
+        pane: Some(Pane::Notifications),
     },
 ];
 
@@ -408,6 +420,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         Pane::General => general::pane(ui, &t),
         Pane::About => about::pane(ui, &t),
         Pane::StorageLocation => storage_location::pane(ui, &t),
+        Pane::Notifications => notifications::pane(ui, &t),
     };
     let mut body = row()
         .key("body")

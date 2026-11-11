@@ -8,7 +8,7 @@ use crate::theme::tokens::Theme;
 use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
 use crate::ui::settings_notice::{self as notices, Tone};
-use crate::ui::{detail_pane, settings_shell as shell};
+use crate::ui::settings_shell as shell;
 use rune::El;
 
 use super::SettingsUi;
@@ -88,7 +88,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     if !chosen.default {
         let title = format!("Only store in {}", chosen.name);
         let on = l.only_here;
-        let switch = detail_pane::switch("item-1-0", &title, on, t)
+        let switch = lists::switch("item-1-0", &title, on, t)
             .on_press(move |s: &mut State| s.settings.source.set_only_here(!on));
         children.push(lists::list(
             1,

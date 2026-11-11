@@ -145,7 +145,35 @@ impl Locations {
     }
 }
 
+/// One alert Beebeeb can send on this PC, and whether it does (DW-0750).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Alert {
+    pub title: String,
+    pub says: String,
+    pub on: bool,
+}
+
+/// The Notifications pane's values.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Notifications {
+    /// `false`: notifications are off for Beebeeb in Windows Settings; nothing arrives (DW-0750b).
+    pub allowed_in_windows: bool,
+    /// The app's own switch.
+    pub allow: bool,
+    /// How many recent alerts have not been seen.
+    pub new_recent: usize,
+    /// The alerts a person can turn on and off, in titled groups.
+    pub groups: Vec<(String, Vec<Alert>)>,
+}
+
 pub trait SettingsSource {
+    /// Engine: the stored alert preferences, the count of unseen account alerts, and what
+    /// Windows says about notifications for this app.
+    fn notifications(&self) -> Notifications;
+    /// Engine: store the app's own "Allow notifications".
+    fn set_allow_notifications(&mut self, on: bool);
+    /// Engine: store one alert's switch (`group`, `index` as in `Notifications::groups`).
+    fn set_alert(&mut self, group: usize, index: usize, on: bool);
     /// Engine: the server's list of storage locations for this account and the stored
     /// choice. `None`: the list could not load.
     fn locations(&self) -> Option<Locations>;
@@ -172,6 +200,7 @@ pub struct BoardSettings {
     general: General,
     about: About,
     locations: Option<Locations>,
+    notifications: Notifications,
 }
 
 impl BoardSettings {
@@ -205,6 +234,7 @@ impl BoardSettings {
                 company: "Initlabs B.V.".into(),
             },
             locations: Some(board_locations()),
+            notifications: board_notifications(),
         }
     }
 
@@ -261,7 +291,75 @@ impl BoardSettings {
     }
 }
 
+/// DW-0750: the alerts and their switches as the board draws them.
+fn board_notifications() -> Notifications {
+    let alert = |title: &str, says: &str, on: bool| Alert {
+        title: title.into(),
+        says: says.into(),
+        on,
+    };
+    Notifications {
+        allowed_in_windows: true,
+        allow: true,
+        new_recent: 2,
+        groups: vec![
+            (
+                "Your account".into(),
+                vec![
+                    alert("Shared with you", "When someone shares a file with you", true),
+                    alert("File updates", "When a file changes on another device", false),
+                    alert("Storage warnings", "When you're close to your limit", true),
+                ],
+            ),
+            (
+                "Sync on this PC".into(),
+                vec![
+                    alert("Sync stopped", "When files couldn't upload", true),
+                    alert("Files need a decision", "When a file changed in two places", true),
+                    alert(
+                        "Sync finished",
+                        "When everything on this PC has synced. Off by default",
+                        false,
+                    ),
+                    alert("Space on this PC", "When downloaded files near their limit", true),
+                ],
+            ),
+            (
+                "Backups on this PC".into(),
+                vec![
+                    alert("Backup finished", "When a backup completes", false),
+                    alert("Backup needs attention", "Such as a folder that can't be read", true),
+                ],
+            ),
+        ],
+    }
+}
+
+impl BoardSettings {
+    /// DW-0750b: notifications are off for Beebeeb in Windows Settings.
+    pub fn with_notifications_off_in_windows(mut self) -> Self {
+        self.notifications.allowed_in_windows = false;
+        self
+    }
+}
+
 impl SettingsSource for BoardSettings {
+    fn notifications(&self) -> Notifications {
+        self.notifications.clone()
+    }
+    fn set_allow_notifications(&mut self, on: bool) {
+        self.notifications.allow = on;
+    }
+    fn set_alert(&mut self, group: usize, index: usize, on: bool) {
+        if let Some(a) = self
+            .notifications
+            .groups
+            .get_mut(group)
+            .and_then(|g| g.1.get_mut(index))
+        {
+            a.on = on;
+        }
+    }
     fn locations(&self) -> Option<Locations> {
         self.locations.clone()
     }
