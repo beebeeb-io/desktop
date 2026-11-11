@@ -156,7 +156,7 @@ pub const FRAMES: &[Frame] = &[
 ];
 
 /// The flyout's content, once the tray lane builds it: `Some(crate::frames::tray::view)`.
-pub const FLYOUT: Option<FlyoutFn> = None;
+pub const FLYOUT: Option<FlyoutFn> = Some(crate::frames::tray::view);
 
 /// A dialog's card: its own content, sized by itself. The shell layers it over the frame
 /// behind (which stays drawn), on the scrim, centred. `dialog` is the route machine's state
@@ -225,6 +225,10 @@ pub fn dialog_frame(group: FrameGroup) -> Option<&'static DialogFrame> {
 /// The main window's view: the registered frame for the state (or the placeholder), and over
 /// it the open dialog on its scrim.
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
+    // The frame gate's scenes of the flyout (`--scene DW-1203 --size 340x520`): never set in the running app.
+    if let Some(flyout) = crate::frames::tray::scene(s, cx) {
+        return flyout;
+    }
     let group = group_for(&s.shell.app);
     let behind = match frame(group) {
         Some(frame) => (frame.view)(s, cx),

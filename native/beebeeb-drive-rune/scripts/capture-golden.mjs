@@ -40,6 +40,9 @@ function loadPlaywright() {
   process.exit(2);
 }
 const { chromium } = loadPlaywright();
+// A frame that draws one of Beebeeb's windows inside a crop of the desktop: the golden is that window, not the
+// desktop around it (which Windows draws). Today: the b's flyout, 340 x 520 (`keymap-tray.js`).
+const OWN_WINDOW = '.wn-crop.wn-fly .mk-pop';
 
 mkdirSync(outDir, { recursive: true });
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.woff2': 'font/woff2' };
@@ -77,30 +80,35 @@ try {
   await page.evaluate(() => document.fonts.ready);
 
   // Only the frame's own screen stays; sticky board chrome would be drawn over it.
-  const clip = await page.evaluate(({ frameId, dark }) => {
+  const clip = await page.evaluate(({ frameId, dark, ownWindow }) => {
     const screen = document.querySelector(`[id="${frameId}"] .kit-screen`);
     for (const el of document.querySelectorAll('*')) {
       const cs = getComputedStyle(el);
       if ((cs.position === 'sticky' || cs.position === 'fixed') && !screen.contains(el)) el.style.display = 'none';
     }
     if (dark) screen.classList.add('dark');
+    // A row of frames snaps (`scroll-snap-type: x`): a frame that is not at a snap point would slide back out of view.
+    for (let el = screen.parentElement; el; el = el.parentElement) el.style.scrollSnapType = 'none';
     screen.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'instant' }); // instant: a smooth scroll of the frame's row is still moving when the box is read
     window.scrollBy(0, -20);
-    const r = screen.getBoundingClientRect();
+    // A window of its own inside the screen (the b's flyout, over Windows' wallpaper and taskbar) is the client area.
+    const root = screen.querySelector(ownWindow) || screen;
+    const r = root.getBoundingClientRect();
     // Viewport coordinates, for a viewport screenshot: a full-page one re-lays the page out and a frame
     // further along its row (a horizontal scroller) is no longer where this box says.
-    return { x: r.x + screen.clientLeft, y: r.y + screen.clientTop, width: screen.clientWidth, height: screen.clientHeight };
-  }, { frameId, dark });
+    return { x: r.x + root.clientLeft, y: r.y + root.clientTop, width: root.clientWidth, height: root.clientHeight };
+  }, { frameId, dark, ownWindow: OWN_WINDOW });
   await page.waitForTimeout(400);
 
   const stem = dark ? `${frameId}-dark` : frameId;
   const png = join(outDir, `${stem}-board.png`);
   await page.screenshot({ path: png, clip });
 
-  const geo = await page.evaluate(({ frameId, keymapSrc }) => {
+  const geo = await page.evaluate(({ frameId, keymapSrc, ownWindow }) => {
     const screen = document.querySelector(`[id="${frameId}"] .kit-screen`);
-    const sr = screen.getBoundingClientRect();
-    const ox = sr.x + screen.clientLeft, oy = sr.y + screen.clientTop;
+    const root = screen.querySelector(ownWindow) || screen;
+    const sr = root.getBoundingClientRect();
+    const ox = sr.x + root.clientLeft, oy = sr.y + root.clientTop;
     const round = (v) => Math.round(v * 100) / 100;
     const box = (b) => ({ x: round(b.x - ox), y: round(b.y - oy), w: round(b.width), h: round(b.height) });
     const probe = document.createElement('canvas'); probe.width = probe.height = 1;
@@ -156,8 +164,8 @@ try {
     };
     // eslint-disable-next-line no-new-func
     new Function('win', 'api', keymapSrc)(screen, api);
-    return { frame: frameId, width: screen.clientWidth, height: screen.clientHeight, elements: out, problems };
-  }, { frameId, keymapSrc: ['keymap.js', ...readdirSync(HERE).filter((f) => /^keymap-.+\.js$/.test(f)).sort()].map((f) => readFileSync(join(HERE, f), 'utf-8')).join('\n') });
+    return { frame: frameId, width: root.clientWidth, height: root.clientHeight, elements: out, problems };
+  }, { frameId, ownWindow: OWN_WINDOW, keymapSrc: ['keymap.js', ...readdirSync(HERE).filter((f) => /^keymap-.+\.js$/.test(f)).sort()].map((f) => readFileSync(join(HERE, f), 'utf-8')).join('\n') });
 
   const flat = JSON.stringify(geo);
   if (/â€|Â·/.test(flat)) { console.error('capture-golden: mojibake in the exported text (the board must be served as utf-8)'); code = 1; }

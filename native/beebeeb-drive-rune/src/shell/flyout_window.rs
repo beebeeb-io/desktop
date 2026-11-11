@@ -27,6 +27,8 @@ pub struct FlyoutState {
     pub source: &'static str,
     /// When the flyout last hid itself because it lost focus (see `flyout::on_tray_click`).
     pub(super) hidden_at: Arc<Mutex<Option<Instant>>>,
+    /// The flyout's content and its own state (the tray lane's).
+    pub tray: crate::frames::tray::Ui,
 }
 
 impl FlyoutState {
@@ -36,6 +38,7 @@ impl FlyoutState {
         hidden_at: Arc<Mutex<Option<Instant>>>,
     ) -> FlyoutState {
         let inputs = actions.tray_inputs();
+        let inputs_for_tray = inputs.clone();
         FlyoutState {
             model: tray_model(&inputs),
             inputs,
@@ -43,6 +46,7 @@ impl FlyoutState {
             main,
             source: "fixture engine",
             hidden_at,
+            tray: crate::frames::tray::Ui::following(&inputs_for_tray),
         }
     }
 
@@ -50,6 +54,7 @@ impl FlyoutState {
     pub fn refresh(&mut self) {
         self.inputs = self.actions.tray_inputs();
         self.model = tray_model(&self.inputs);
+        self.tray.follow(&self.inputs);
     }
 }
 

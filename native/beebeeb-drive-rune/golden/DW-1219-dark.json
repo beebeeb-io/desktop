@@ -1,0 +1,1576 @@
+{
+ "frame": "DW-1219",
+ "width": 340,
+ "height": 520,
+ "elements": {
+  "fly": {
+   "kind": "box",
+   "x": 0,
+   "y": 0,
+   "w": 340,
+   "h": 520,
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ],
+   "css": {
+    "radius": "8px",
+    "shadow": "oklch(0 0 none / 0.26) 0px 18px 50px 0px, oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px"
+   }
+  },
+  "st": {
+   "kind": "box",
+   "x": 0,
+   "y": 0,
+   "w": 340,
+   "h": 76,
+   "css": {
+    "pad": "14px 14px 12px",
+    "gap": "9px"
+   }
+  },
+  "st-tile": {
+   "kind": "box",
+   "x": 14,
+   "y": 22,
+   "w": 34,
+   "h": 34,
+   "bg": [
+    248,
+    113,
+    35,
+    36
+   ],
+   "css": {
+    "radius": "10px"
+   },
+   "tone": "tone-warn"
+  },
+  "st-icon": {
+   "kind": "icon",
+   "x": 22,
+   "y": 30,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"
+   ],
+   "filled": false,
+   "color": [
+    246,
+    114,
+    34,
+    255
+   ]
+  },
+  "st-title": {
+   "kind": "text",
+   "x": 59,
+   "y": 14,
+   "w": 193.55,
+   "h": 17,
+   "text": "Signed out",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13.5,
+   "weight": 650,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.08,
+   "lh": "17px",
+   "align": "start"
+  },
+  "st-line": {
+   "kind": "text",
+   "x": 59,
+   "y": 32,
+   "w": 193.55,
+   "h": 32,
+   "text": "Enter your password to keep syncing. Nothing has been lost.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "16px",
+   "align": "start"
+  },
+  "st-btn": {
+   "kind": "box",
+   "x": 263.55,
+   "y": 28,
+   "w": 62.45,
+   "h": 22,
+   "bg": [
+    247,
+    185,
+    0,
+    255
+   ],
+   "css": {
+    "radius": "6px",
+    "pad": "0px 12px",
+    "gap": "7px"
+   }
+  },
+  "st-btn-label": {
+   "kind": "text",
+   "x": 275.55,
+   "y": 30.43,
+   "w": 38.45,
+   "h": 17.14,
+   "text": "Sign in",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 500,
+   "color": [
+    30,
+    26,
+    22,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "17.1429px",
+   "align": "center"
+  },
+  "label": {
+   "kind": "box",
+   "x": 0,
+   "y": 76,
+   "w": 340,
+   "h": 28.5,
+   "css": {
+    "border": "0.5px 0px 0px 0px oklch(0.92 0.006 85 / 0.12)",
+    "pad": "6px 16px 5px"
+   }
+  },
+  "label-title": {
+   "kind": "text",
+   "x": 16,
+   "y": 84.5,
+   "w": 85.45,
+   "h": 13,
+   "text": "Recent changes",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 600,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0
+  },
+  "label-count": {
+   "kind": "text",
+   "x": 288.64,
+   "y": 82.5,
+   "w": 35.36,
+   "h": 17,
+   "text": "last 50",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "list": {
+   "kind": "box",
+   "x": 0,
+   "y": 104.5,
+   "w": 340,
+   "h": 351,
+   "css": {
+    "pad": "0px 6px",
+    "mask": "linear-gradient(oklch(0.92 0.006 85) calc(100% - 30px), rgba(0, 0, 0, 0))"
+   },
+   "fade": "bottom"
+  },
+  "row-0": {
+   "kind": "box",
+   "x": 6,
+   "y": 104.5,
+   "w": 328,
+   "h": 44,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 8px",
+    "gap": "10px"
+   },
+   "title": "Show in File Explorer"
+  },
+  "row-0-tile": {
+   "kind": "box",
+   "x": 14,
+   "y": 111.5,
+   "w": 30,
+   "h": 30,
+   "bg": [
+    227,
+    227,
+    227,
+    18
+   ],
+   "css": {
+    "radius": "7px"
+   },
+   "thumb": ""
+  },
+  "row-0-icon": {
+   "kind": "icon",
+   "x": 19.5,
+   "y": 117,
+   "w": 19,
+   "h": 19,
+   "icon": [
+    "M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM13 2v7h7M16 13H8M16 17H8M10 9H8"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "row-0-name": {
+   "kind": "text",
+   "x": 54,
+   "y": 111,
+   "w": 228.99,
+   "h": 15,
+   "text": "Moodboard v3.pdf",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12.5,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "row-0-sub-icon": {
+   "kind": "icon",
+   "x": 54,
+   "y": 129,
+   "w": 12,
+   "h": 12,
+   "icon": [
+    "M5 6.5A1.5 1.5 0 0 1 6.5 5h11A1.5 1.5 0 0 1 19 6.5V15H5z",
+    "M2.5 18.5h19"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "row-0-sub": {
+   "kind": "text",
+   "x": 70,
+   "y": 128,
+   "w": 194.51,
+   "h": 14,
+   "text": "Uploaded from this PC · Documents",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11.5,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "14px",
+   "align": "start"
+  },
+  "row-0-time": {
+   "kind": "text",
+   "x": 292.99,
+   "y": 111.5,
+   "w": 33.01,
+   "h": 14.5,
+   "text": "2 min",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "normal",
+   "align": "start"
+  },
+  "row-1": {
+   "kind": "box",
+   "x": 6,
+   "y": 148.5,
+   "w": 328,
+   "h": 44,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 8px",
+    "gap": "10px"
+   },
+   "title": "Show in File Explorer"
+  },
+  "row-1-tile": {
+   "kind": "box",
+   "x": 14,
+   "y": 155.5,
+   "w": 30,
+   "h": 30,
+   "bg": [
+    227,
+    227,
+    227,
+    18
+   ],
+   "css": {
+    "radius": "7px"
+   },
+   "thumb": ""
+  },
+  "row-1-icon": {
+   "kind": "icon",
+   "x": 19.5,
+   "y": 161,
+   "w": 19,
+   "h": 19,
+   "icon": [
+    "M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM13 2v7h7M8 13h2v2H8zM14 13h2v2h-2zM8 17h2v2H8zM14 17h2v2h-2z"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "row-1-name": {
+   "kind": "text",
+   "x": 54,
+   "y": 155,
+   "w": 222.4,
+   "h": 15,
+   "text": "Budget 2026.xlsx",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12.5,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "row-1-sub-icon": {
+   "kind": "icon",
+   "x": 54,
+   "y": 173,
+   "w": 12,
+   "h": 12,
+   "icon": [
+    "M5 6.5A1.5 1.5 0 0 1 6.5 5h11A1.5 1.5 0 0 1 19 6.5V15H5z",
+    "M2.5 18.5h19"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "row-1-sub": {
+   "kind": "text",
+   "x": 70,
+   "y": 172,
+   "w": 157.79,
+   "h": 14,
+   "text": "Uploaded from this PC · Files",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11.5,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "14px",
+   "align": "start"
+  },
+  "row-1-time": {
+   "kind": "text",
+   "x": 286.4,
+   "y": 155.5,
+   "w": 39.6,
+   "h": 14.5,
+   "text": "29 min",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "normal",
+   "align": "start"
+  },
+  "row-2": {
+   "kind": "box",
+   "x": 6,
+   "y": 192.5,
+   "w": 328,
+   "h": 44,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 8px",
+    "gap": "10px"
+   },
+   "title": "Show in File Explorer"
+  },
+  "row-2-tile": {
+   "kind": "box",
+   "x": 14,
+   "y": 199.5,
+   "w": 30,
+   "h": 30,
+   "css": {
+    "radius": "7px",
+    "image": "linear-gradient(170deg, rgb(156, 196, 220), rgb(233, 226, 207) 60%, rgb(141, 154, 120))"
+   },
+   "thumb": "mk-ph mk-ph2"
+  },
+  "row-2-name": {
+   "kind": "text",
+   "x": 54,
+   "y": 199,
+   "w": 222.4,
+   "h": 15,
+   "text": "IMG_4821.heic",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12.5,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "row-2-sub-icon": {
+   "kind": "icon",
+   "x": 54,
+   "y": 217,
+   "w": 12,
+   "h": 12,
+   "icon": [
+    "M8.5 3h7A1.5 1.5 0 0 1 17 4.5v15a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 7 19.5v-15A1.5 1.5 0 0 1 8.5 3z",
+    "M11 18h2"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "row-2-sub": {
+   "kind": "text",
+   "x": 70,
+   "y": 216,
+   "w": 156.29,
+   "h": 14,
+   "text": "From Anna's iPhone · Photos",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11.5,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "14px",
+   "align": "start"
+  },
+  "row-2-time": {
+   "kind": "text",
+   "x": 286.4,
+   "y": 199.5,
+   "w": 39.6,
+   "h": 14.5,
+   "text": "44 min",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "normal",
+   "align": "start"
+  },
+  "row-3": {
+   "kind": "box",
+   "x": 6,
+   "y": 236.5,
+   "w": 328,
+   "h": 44,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 8px",
+    "gap": "10px"
+   },
+   "title": "Show in File Explorer"
+  },
+  "row-3-tile": {
+   "kind": "box",
+   "x": 14,
+   "y": 243.5,
+   "w": 30,
+   "h": 30,
+   "css": {
+    "radius": "7px",
+    "image": "linear-gradient(150deg, rgb(51, 67, 92), rgb(122, 127, 150) 55%, rgb(227, 181, 140))"
+   },
+   "thumb": "mk-ph mk-ph3"
+  },
+  "row-3-name": {
+   "kind": "text",
+   "x": 54,
+   "y": 243,
+   "w": 222.4,
+   "h": 15,
+   "text": "IMG_4820.heic",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12.5,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "row-3-sub-icon": {
+   "kind": "icon",
+   "x": 54,
+   "y": 261,
+   "w": 12,
+   "h": 12,
+   "icon": [
+    "M8.5 3h7A1.5 1.5 0 0 1 17 4.5v15a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 7 19.5v-15A1.5 1.5 0 0 1 8.5 3z",
+    "M11 18h2"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "row-3-sub": {
+   "kind": "text",
+   "x": 70,
+   "y": 260,
+   "w": 156.29,
+   "h": 14,
+   "text": "From Anna's iPhone · Photos",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11.5,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "14px",
+   "align": "start"
+  },
+  "row-3-time": {
+   "kind": "text",
+   "x": 286.4,
+   "y": 243.5,
+   "w": 39.6,
+   "h": 14.5,
+   "text": "44 min",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "normal",
+   "align": "start"
+  },
+  "row-4": {
+   "kind": "box",
+   "x": 6,
+   "y": 280.5,
+   "w": 328,
+   "h": 44,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 8px",
+    "gap": "10px"
+   },
+   "title": "Show in File Explorer"
+  },
+  "row-4-tile": {
+   "kind": "box",
+   "x": 14,
+   "y": 287.5,
+   "w": 30,
+   "h": 30,
+   "bg": [
+    227,
+    227,
+    227,
+    18
+   ],
+   "css": {
+    "radius": "7px"
+   },
+   "thumb": ""
+  },
+  "row-4-icon": {
+   "kind": "icon",
+   "x": 19.5,
+   "y": 293,
+   "w": 19,
+   "h": 19,
+   "icon": [
+    "M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM13 2v7h7M16 13H8M16 17H8M10 9H8"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "row-4-name": {
+   "kind": "text",
+   "x": 54,
+   "y": 287,
+   "w": 242.2,
+   "h": 15,
+   "text": "Invoice 0142.pdf",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12.5,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "row-4-sub-icon": {
+   "kind": "icon",
+   "x": 54,
+   "y": 305,
+   "w": 12,
+   "h": 12,
+   "icon": [
+    "M6.5 3h11A1.5 1.5 0 0 1 19 4.5v15a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 19.5v-15A1.5 1.5 0 0 1 6.5 3z",
+    "M11 18h2"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "row-4-sub": {
+   "kind": "text",
+   "x": 70,
+   "y": 304,
+   "w": 181.57,
+   "h": 14,
+   "text": "From Anna's iPad · Invoices 2026",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11.5,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "14px",
+   "align": "start"
+  },
+  "row-4-time": {
+   "kind": "text",
+   "x": 306.2,
+   "y": 287.5,
+   "w": 19.8,
+   "h": 14.5,
+   "text": "2 h",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "normal",
+   "align": "start"
+  },
+  "row-5": {
+   "kind": "box",
+   "x": 6,
+   "y": 324.5,
+   "w": 328,
+   "h": 44,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 8px",
+    "gap": "10px"
+   },
+   "title": "Show in File Explorer"
+  },
+  "row-5-tile": {
+   "kind": "box",
+   "x": 14,
+   "y": 331.5,
+   "w": 30,
+   "h": 30,
+   "bg": [
+    227,
+    227,
+    227,
+    18
+   ],
+   "css": {
+    "radius": "7px"
+   },
+   "thumb": ""
+  },
+  "row-5-icon": {
+   "kind": "icon",
+   "x": 19.5,
+   "y": 337,
+   "w": 19,
+   "h": 19,
+   "icon": [
+    "M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM13 2v7h7M16 13H8M16 17H8M10 9H8"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "row-5-name": {
+   "kind": "text",
+   "x": 54,
+   "y": 331,
+   "w": 202.59,
+   "h": 15,
+   "text": "Contract draft.pdf",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12.5,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "row-5-sub-icon": {
+   "kind": "icon",
+   "x": 54,
+   "y": 349,
+   "w": 12,
+   "h": 12,
+   "icon": [
+    "M8.5 3h7A1.5 1.5 0 0 1 17 4.5v15a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 7 19.5v-15A1.5 1.5 0 0 1 8.5 3z",
+    "M11 18h2"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "row-5-sub": {
+   "kind": "text",
+   "x": 70,
+   "y": 348,
+   "w": 143.77,
+   "h": 14,
+   "text": "From Anna's iPhone · Files",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11.5,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "14px",
+   "align": "start"
+  },
+  "row-5-time": {
+   "kind": "text",
+   "x": 266.59,
+   "y": 331.5,
+   "w": 59.41,
+   "h": 14.5,
+   "text": "Yesterday",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "normal",
+   "align": "start"
+  },
+  "row-6": {
+   "kind": "box",
+   "x": 6,
+   "y": 368.5,
+   "w": 328,
+   "h": 44,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 8px",
+    "gap": "10px"
+   },
+   "title": "Open Trash"
+  },
+  "row-6-tile": {
+   "kind": "box",
+   "x": 14,
+   "y": 375.5,
+   "w": 30,
+   "h": 30,
+   "bg": [
+    227,
+    227,
+    227,
+    18
+   ],
+   "css": {
+    "radius": "7px"
+   },
+   "thumb": ""
+  },
+  "row-6-icon": {
+   "kind": "icon",
+   "x": 19.5,
+   "y": 381,
+   "w": 19,
+   "h": 19,
+   "icon": [
+    "M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "row-6-name": {
+   "kind": "text",
+   "x": 54,
+   "y": 375,
+   "w": 202.59,
+   "h": 15,
+   "text": "Notes old.md",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12.5,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "row-6-sub-icon": {
+   "kind": "icon",
+   "x": 54,
+   "y": 393,
+   "w": 12,
+   "h": 12,
+   "icon": [
+    "M5 6.5A1.5 1.5 0 0 1 6.5 5h11A1.5 1.5 0 0 1 19 6.5V15H5z",
+    "M2.5 18.5h19"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "row-6-sub": {
+   "kind": "text",
+   "x": 70,
+   "y": 392,
+   "w": 143.05,
+   "h": 14,
+   "text": "Moved to Trash on this PC",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11.5,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "14px",
+   "align": "start"
+  },
+  "row-6-time": {
+   "kind": "text",
+   "x": 266.59,
+   "y": 375.5,
+   "w": 59.41,
+   "h": 14.5,
+   "text": "Yesterday",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "normal",
+   "align": "start"
+  },
+  "row-7": {
+   "kind": "box",
+   "x": 6,
+   "y": 412.5,
+   "w": 328,
+   "h": 44,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 8px",
+    "gap": "10px"
+   },
+   "title": "Show in File Explorer"
+  },
+  "row-7-tile": {
+   "kind": "box",
+   "x": 14,
+   "y": 419.5,
+   "w": 30,
+   "h": 30,
+   "bg": [
+    227,
+    227,
+    227,
+    18
+   ],
+   "css": {
+    "radius": "7px"
+   },
+   "thumb": ""
+  },
+  "row-7-icon": {
+   "kind": "icon",
+   "x": 19.5,
+   "y": 425,
+   "w": 19,
+   "h": 19,
+   "icon": [
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "row-7-name": {
+   "kind": "text",
+   "x": 54,
+   "y": 419,
+   "w": 202.59,
+   "h": 15,
+   "text": "Shoot selects",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12.5,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "row-7-sub-icon": {
+   "kind": "icon",
+   "x": 54,
+   "y": 437,
+   "w": 12,
+   "h": 12,
+   "icon": [
+    "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "row-7-sub": {
+   "kind": "text",
+   "x": 70,
+   "y": 436,
+   "w": 139.34,
+   "h": 14,
+   "text": "Lotte de Wit added 6 files",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11.5,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "14px",
+   "align": "start"
+  },
+  "row-7-time": {
+   "kind": "text",
+   "x": 266.59,
+   "y": 419.5,
+   "w": 59.41,
+   "h": 14.5,
+   "text": "Yesterday",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "normal",
+   "align": "start"
+  },
+  "row-8": {
+   "kind": "box",
+   "x": 6,
+   "y": 456.5,
+   "w": 328,
+   "h": 44,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 8px",
+    "gap": "10px"
+   },
+   "title": "Show in File Explorer"
+  },
+  "row-8-tile": {
+   "kind": "box",
+   "x": 14,
+   "y": 463.5,
+   "w": 30,
+   "h": 30,
+   "css": {
+    "radius": "7px",
+    "image": "linear-gradient(rgb(243, 217, 168), rgb(213, 140, 106) 50%, rgb(63, 58, 88))"
+   },
+   "thumb": "mk-ph mk-ph5"
+  },
+  "row-8-name": {
+   "kind": "text",
+   "x": 54,
+   "y": 463,
+   "w": 222.4,
+   "h": 15,
+   "text": "Harbour.heic",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12.5,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "row-8-sub-icon": {
+   "kind": "icon",
+   "x": 54,
+   "y": 481,
+   "w": 12,
+   "h": 12,
+   "icon": [
+    "M8.5 3h7A1.5 1.5 0 0 1 17 4.5v15a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 7 19.5v-15A1.5 1.5 0 0 1 8.5 3z",
+    "M11 18h2"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "row-8-sub": {
+   "kind": "text",
+   "x": 70,
+   "y": 480,
+   "w": 143.77,
+   "h": 14,
+   "text": "From Anna's iPhone · Files",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11.5,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "14px",
+   "align": "start"
+  },
+  "row-8-time": {
+   "kind": "text",
+   "x": 286.4,
+   "y": 463.5,
+   "w": 39.6,
+   "h": 14.5,
+   "text": "Sunday",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "normal",
+   "align": "start"
+  },
+  "row-9": {
+   "kind": "box",
+   "x": 6,
+   "y": 500.5,
+   "w": 328,
+   "h": 44,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 8px",
+    "gap": "10px"
+   },
+   "title": "Show in File Explorer"
+  },
+  "row-9-tile": {
+   "kind": "box",
+   "x": 14,
+   "y": 507.5,
+   "w": 30,
+   "h": 30,
+   "css": {
+    "radius": "7px",
+    "image": "linear-gradient(160deg, rgb(233, 201, 160), rgb(185, 122, 80) 55%, rgb(94, 74, 74))"
+   },
+   "thumb": "mk-ph mk-ph1"
+  },
+  "row-9-name": {
+   "kind": "text",
+   "x": 54,
+   "y": 507,
+   "w": 242.2,
+   "h": 15,
+   "text": "IMG_4790.heic",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12.5,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "row-9-sub-icon": {
+   "kind": "icon",
+   "x": 54,
+   "y": 525,
+   "w": 12,
+   "h": 12,
+   "icon": [
+    "M8.5 3h7A1.5 1.5 0 0 1 17 4.5v15a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 7 19.5v-15A1.5 1.5 0 0 1 8.5 3z",
+    "M11 18h2"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "row-9-sub": {
+   "kind": "text",
+   "x": 70,
+   "y": 524,
+   "w": 156.29,
+   "h": 14,
+   "text": "From Anna's iPhone · Photos",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11.5,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "14px",
+   "align": "start"
+  },
+  "row-9-time": {
+   "kind": "text",
+   "x": 306.2,
+   "y": 507.5,
+   "w": 19.8,
+   "h": 14.5,
+   "text": "Sat",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "normal",
+   "align": "start"
+  },
+  "foot": {
+   "kind": "box",
+   "x": 0,
+   "y": 455.5,
+   "w": 340,
+   "h": 64.5,
+   "bg": [
+    16,
+    13,
+    9,
+    255
+   ],
+   "css": {
+    "border": "0.5px 0px 0px 0px oklch(0.92 0.006 85 / 0.12)",
+    "pad": "6px",
+    "gap": "4px"
+   }
+  },
+  "foot-0": {
+   "kind": "box",
+   "x": 6,
+   "y": 462,
+   "w": 106.66,
+   "h": 52,
+   "css": {
+    "radius": "8px",
+    "pad": "8px 6px 0px",
+    "gap": "3px"
+   },
+   "off": false
+  },
+  "foot-0-icon": {
+   "kind": "icon",
+   "x": 51.33,
+   "y": 470,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "rect:width=512,height=512,rx=118,mask=url(#mk-bmask)",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z"
+   ],
+   "filled": true,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "state": "template"
+  },
+  "foot-0-label": {
+   "kind": "text",
+   "x": 18.6,
+   "y": 488.5,
+   "w": 81.46,
+   "h": 14,
+   "text": "Open Beebeeb",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11.5,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "13px"
+  },
+  "foot-1": {
+   "kind": "box",
+   "x": 116.66,
+   "y": 462,
+   "w": 106.66,
+   "h": 52,
+   "css": {
+    "radius": "8px",
+    "pad": "8px 6px 0px",
+    "gap": "3px"
+   },
+   "off": false
+  },
+  "foot-1-icon": {
+   "kind": "icon",
+   "x": 161.49,
+   "y": 470,
+   "w": 17,
+   "h": 15,
+   "icon": [
+    "M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2h9A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z",
+    "M3 12.5h18"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "foot-1-label": {
+   "kind": "text",
+   "x": 137.55,
+   "y": 487.5,
+   "w": 64.88,
+   "h": 27,
+   "text": "Open in File Explorer",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11.5,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "13px"
+  },
+  "foot-2": {
+   "kind": "box",
+   "x": 227.33,
+   "y": 462,
+   "w": 106.66,
+   "h": 52,
+   "css": {
+    "radius": "8px",
+    "pad": "8px 6px 0px",
+    "gap": "3px"
+   },
+   "off": false
+  },
+  "foot-2-icon": {
+   "kind": "icon",
+   "x": 272.66,
+   "y": 470,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "foot-2-label": {
+   "kind": "text",
+   "x": 258.1,
+   "y": 488.5,
+   "w": 45.11,
+   "h": 14,
+   "text": "Settings",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11.5,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "13px"
+  }
+ },
+ "theme": "dark"
+}
