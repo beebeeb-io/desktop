@@ -880,6 +880,25 @@
    ],
    "tracking": 0
   },
+  "item-0-0-time": {
+   "kind": "text",
+   "x": 750.99,
+   "y": 175,
+   "w": 33.01,
+   "h": 14,
+   "text": "08:12",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
   "item-0-1": {
    "kind": "box",
    "x": 254,
@@ -935,6 +954,25 @@
    "fontFamily": "Inter",
    "size": 12,
    "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "item-0-1-time": {
+   "kind": "text",
+   "x": 750.99,
+   "y": 215,
+   "w": 33.01,
+   "h": 14,
+   "text": "07:40",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 500,
    "color": [
     108,
     104,
@@ -1038,6 +1076,25 @@
    ],
    "tracking": 0
   },
+  "item-1-0-time": {
+   "kind": "text",
+   "x": 750.99,
+   "y": 288,
+   "w": 33.01,
+   "h": 14,
+   "text": "16:05",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
   "list-2-title": {
    "kind": "text",
    "x": 268,
@@ -1132,6 +1189,115 @@
     255
    ],
    "tracking": 0
+  },
+  "item-2-0-time": {
+   "kind": "text",
+   "x": 750.99,
+   "y": 361,
+   "w": 33.01,
+   "h": 14,
+   "text": "10:31",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "pill-0": {
+   "kind": "box",
+   "x": 691.73,
+   "y": 172,
+   "w": 51.26,
+   "h": 20,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ]
+  },
+  "pill-0-dot": {
+   "kind": "box",
+   "x": 699.73,
+   "y": 179,
+   "w": 6,
+   "h": 6,
+   "bg": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "pill-0-label": {
+   "kind": "text",
+   "x": 710.73,
+   "y": 175.5,
+   "w": 24.26,
+   "h": 13,
+   "text": "New",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 600,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0.11
+  },
+  "pill-1": {
+   "kind": "box",
+   "x": 691.73,
+   "y": 212,
+   "w": 51.26,
+   "h": 20,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ]
+  },
+  "pill-1-dot": {
+   "kind": "box",
+   "x": 699.73,
+   "y": 219,
+   "w": 6,
+   "h": 6,
+   "bg": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "pill-1-label": {
+   "kind": "text",
+   "x": 710.73,
+   "y": 215.5,
+   "w": 24.26,
+   "h": 13,
+   "text": "New",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 600,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0.11
   }
  },
  "theme": "light"

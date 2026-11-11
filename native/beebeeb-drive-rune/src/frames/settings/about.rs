@@ -94,7 +94,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                     .opens(),
                 t,
             )
-            .on_press(|s: &mut State| s.settings.go("DW-0789b")),
+            .on_press(|s: &mut State| super::go(s, "DW-0789b")),
         ],
         Some("Beebeeb checks for updates at launch and every 4 hours."),
         t,
@@ -130,7 +130,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     );
 
     let children = vec![
-        shell::crumb("General", t).on_press(|s: &mut State| s.settings.go("DW-0701")),
+        shell::crumb("General", t).on_press(|s: &mut State| super::go(s, "DW-0701")),
         shell::heading("About Beebeeb", None, t),
         product,
         versions,

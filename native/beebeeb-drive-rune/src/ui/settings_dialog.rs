@@ -3,7 +3,7 @@
 //! | Piece | Function | Keys it gives |
 //! | --- | --- | --- |
 //! | Dialog on its scrim | `dialog(name, width, title, sub, body, foot, t)` | `scrim`, `dlg`, `dlg-title`, `dlg-sub`, `dlg-body`, `dlg-foot` |
-//! | A paragraph of the body | `para(index, words, t)`, `para_rich(index, words, spans, t)` | `dlg-text-<I>` |
+//! | A paragraph of the body | `para_rich(index, words, mono, t)`, `caption(index, words, t)`, `bullets(lines, t)` | `dlg-text-<I>`, `dlg-li-<I>` |
 //! | Button (`.kit-btn.kit-btn-md`, 28 pt) | `button(index, label, Weight, t)` | `btn-<N>`, `btn-<N>-label` |
 //!
 //! The dialog sits in the middle of the window's body, above a scrim that takes every press
@@ -33,8 +33,6 @@ pub enum Weight {
     Primary,
     /// The way out (Cancel, Close): words only, a tint under the pointer.
     Quiet,
-    /// A primary action that removes or turns off something: red.
-    Danger,
 }
 
 /// A dialog-size button. Keys: `btn-<N>`, `btn-<N>-label`.
@@ -43,7 +41,6 @@ pub fn button(index: usize, label: &str, weight: Weight, t: &Theme) -> El {
     let (fill, ink) = match weight {
         Weight::Primary => (t.accent, t.accent_text_on),
         Weight::Quiet => (Color::TRANSPARENT, t.text_secondary),
-        Weight::Danger => (t.red, Color::WHITE),
     };
     let b = row()
         .key(key.clone())
@@ -62,11 +59,6 @@ pub fn button(index: usize, label: &str, weight: Weight, t: &Theme) -> El {
             .press(fill.mix(Color::BLACK, 0.10)),
     };
     b.child(kit::label(format!("{key}-label"), label, BUTTON_MD, ink))
-}
-
-/// A paragraph of a dialog's body (`.wn-dlg-body > p.t-sub`). Key: `dlg-text-<I>`.
-pub fn para(index: usize, words: &str, t: &Theme) -> El {
-    kit::label(format!("dlg-text-{index}"), words, SUB, t.text_tertiary).wrap()
 }
 
 /// A small print line of a dialog's body (`.wn-dlg-body > p.t-cap`). Key: `dlg-text-<I>`.

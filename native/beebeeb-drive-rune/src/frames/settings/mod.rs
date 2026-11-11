@@ -12,12 +12,15 @@
 pub mod about;
 pub mod general;
 pub mod notifications;
+pub mod recent;
 pub mod source;
 pub mod storage_location;
 #[cfg(test)]
 mod tests;
 
 use crate::State;
+use crate::shell::app::{Event, Screen, SettingsPane};
+use crate::shell::host;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{self, Theme};
 use crate::ui::{caption, settings_controls as controls, settings_shell as shell};
@@ -35,6 +38,8 @@ pub enum Pane {
     StorageLocation,
     /// Notifications (DW-0750).
     Notifications,
+    /// Notifications › Recent notifications (DW-0791).
+    Recent,
 }
 
 /// Which menu a pop-up button drops.
@@ -160,6 +165,7 @@ impl SettingsUi {
             }
             "DW-0751" => self.pane = Pane::About,
             "DW-0750" | "DW-0750b" => self.pane = Pane::Notifications,
+            "DW-0791" | "DW-0791b" => self.pane = Pane::Recent,
             "DW-0788" | "DW-0788b" | "DW-0788c" | "DW-0788d" => self.pane = Pane::StorageLocation,
             "DW-0789" => {
                 self.pane = Pane::About;
@@ -252,10 +258,10 @@ pub fn menu_overlay(ui: &SettingsUi, kind: MenuKind, at: (f32, f32), t: &Theme) 
 /// The frames of this group that are built: the id, and what shows it on a fresh `State`.
 /// (`main.rs` adds this table to its scenes; the shell lane registers it.)
 pub const FRAMES: &[(&str, fn(&mut State))] = &[
-    ("DW-0701", |s| s.settings.show(Pane::General)),
+    ("DW-0701", |s| open_on(s, "DW-0701")),
     ("DW-0781", |s| {
         s.settings.source = Box::new(BoardSettings::new().with_update_available());
-        s.settings.show(Pane::General);
+        open_on(s, "DW-0701");
     }),
     ("DW-0782", |s| open_on(s, "DW-0782")),
     ("DW-0787", |s| open_on(s, "DW-0787")),
@@ -274,6 +280,11 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         s.settings.source = Box::new(BoardSettings::new().with_notifications_off_in_windows());
         open_on(s, "DW-0750");
     }),
+    ("DW-0791", |s| open_on(s, "DW-0791")),
+    ("DW-0791b", |s| {
+        s.settings.source = Box::new(BoardSettings::new().with_no_recent_alerts());
+        open_on(s, "DW-0791");
+    }),
     ("DW-0788", |s| open_on(s, "DW-0788")),
     ("DW-0788b", |s| {
         open_on(s, "DW-0788");
@@ -291,10 +302,52 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
 
 fn open_on(s: &mut State, frame: &'static str) {
     s.settings.show(Pane::General);
+    go(s, frame);
+}
+
+/// The shell's name for a section of this lane's panes.
+fn shell_pane(section: Pane) -> SettingsPane {
+    match section {
+        Pane::Notifications | Pane::Recent => SettingsPane::Notifications,
+        _ => SettingsPane::General,
+    }
+}
+
+/// Go where a row, a button or a sidebar item points, and keep the shell's route in step:
+/// the shell owns WHICH section of settings the window shows (and whether it shows settings
+/// at all); this lane owns what is open inside a section.
+pub fn go(s: &mut State, frame: &'static str) {
+    // A sidebar section the shell routes and another lane draws.
+    let foreign = match frame {
+        "DW-A51" => Some(SettingsPane::Account),
+        "DW-A52" => Some(SettingsPane::Security),
+        "DW-A55" => Some(SettingsPane::DevicesAndSessions),
+        "DW-0712" => Some(SettingsPane::Storage),
+        "DW-0737" => Some(SettingsPane::Backups),
+        "DW-0746" => Some(SettingsPane::SyncAndFileExplorer),
+        "DW-0744" => Some(SettingsPane::ThumbnailsAndPreviews),
+        _ => None,
+    };
     s.settings.go(frame);
+    if let Some(pane) = foreign {
+        host::dispatch(s, Event::OpenSettings(pane));
+        return;
+    }
+    let in_settings = matches!(s.shell.app.screen(), Screen::Settings(_));
+    if !s.settings.open {
+        if in_settings {
+            host::dispatch(s, Event::Escape);
+        }
+        return;
+    }
+    let want = shell_pane(s.settings.pane.section());
+    if s.shell.app.screen() != Screen::Settings(want) {
+        host::dispatch(s, Event::OpenSettings(want));
+    }
 }
 
 /// Show the frame `id` on `s` (a scene). `false`: this group has not built it.
+#[cfg(test)]
 pub fn scene(id: &str, s: &mut State) -> bool {
     match FRAMES.iter().find(|(frame, _)| *frame == id) {
         Some((_, apply)) => {
@@ -310,7 +363,7 @@ impl Pane {
     pub fn section(self) -> Pane {
         match self {
             Pane::General | Pane::About | Pane::StorageLocation => Pane::General,
-            Pane::Notifications => Pane::Notifications,
+            Pane::Notifications | Pane::Recent => Pane::Notifications,
         }
     }
 }
@@ -390,20 +443,20 @@ const DRIVE_SECTIONS: &[Section] = &[
     },
 ];
 
-fn sidebar(ui: &SettingsUi, t: &Theme) -> El {
+fn sidebar(section: Pane, t: &Theme) -> El {
     let items = |sections: &'static [Section]| -> Vec<El> {
         sections
             .iter()
             .map(|sec| {
                 let frame = sec.frame;
-                shell::nav_item(sec.label, sec.icon, 16.0, sec.pane == Some(ui.pane.section()), t)
-                    .on_press(move |s: &mut State| s.settings.go(frame))
+                shell::nav_item(sec.label, sec.icon, 16.0, sec.pane == Some(section), t)
+                    .on_press(move |s: &mut State| go(s, frame))
             })
             .collect()
     };
     let back = shell::nav_item("Back to Drive", &ic::BACK, 15.0, false, t)
         .shortcut_hint("Esc")
-        .on_press(|s: &mut State| s.settings.leave());
+        .on_press(|s: &mut State| go(s, "DW-0401"));
     shell::sidebar(
         back,
         vec![("Settings", items(SETTINGS_SECTIONS)), ("Drive", items(DRIVE_SECTIONS))],
@@ -416,19 +469,29 @@ fn sidebar(ui: &SettingsUi, t: &Theme) -> El {
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let ui = &s.settings;
     let t = tokens::theme(ui.dark(cx.system_dark()));
-    let (pane, overlay) = match ui.pane {
+    // The shell says which section shows. What this lane has open inside a section counts
+    // only while it belongs to that section and was opened from here.
+    let section = match s.shell.app.screen() {
+        Screen::Settings(SettingsPane::Notifications) => Pane::Notifications,
+        _ => Pane::General,
+    };
+    let inside = ui.open && ui.pane.section() == section;
+    let pane = if inside { ui.pane } else { section };
+    let (pane_el, overlay) = match pane {
         Pane::General => general::pane(ui, &t),
         Pane::About => about::pane(ui, &t),
         Pane::StorageLocation => storage_location::pane(ui, &t),
         Pane::Notifications => notifications::pane(ui, &t),
+        Pane::Recent => recent::pane(ui, &t),
     };
+    let overlay = overlay.filter(|_| inside);
     let mut body = row()
         .key("body")
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .child(sidebar(ui, &t))
-        .child(pane);
+        .child(sidebar(pane.section(), &t))
+        .child(pane_el);
     if let Some(overlay) = overlay {
         body = body.child(overlay);
     }
@@ -449,13 +512,6 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 /// Enter on the focused control).
 pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     let ui = &mut s.settings;
-    if !ui.open {
-        if ev.is_command(',') {
-            ui.show(Pane::General);
-            return true;
-        }
-        return false;
-    }
     if let Some(Menu { kind, hot }) = ui.menu {
         let last = kind.labels().len() - 1;
         let hot = match ev.key {
@@ -486,7 +542,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
             true
         }
         Key::Escape => {
-            ui.leave();
+            go(s, "DW-0401");
             true
         }
         _ => false,

@@ -20,6 +20,8 @@ use super::settings_card as cards;
 
 /// 12.5px/400 on a 17px line: a notice's words (`.mk-banner`).
 pub const NOTE: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
+/// 11px/600 on a 17px line, tracked .01em: a pill's word (`.kit-pill`).
+pub const PILL: TextStyle = TextStyle::new(11.0, 600.0).lh(17.0).tracking(0.11);
 /// 12.5px/550 on a 17px line: a toast's words (`.mk-toast .kit-toast`).
 pub const TOAST: TextStyle = TextStyle::new(12.5, 550.0).lh(17.0);
 
@@ -137,17 +139,79 @@ pub fn toast(index: usize, words: &str, t: &Theme) -> El {
 
 /// A glyph on its tone's tint (`.kit-tile`), 36 pt, corners 10. Keys: `tile-<N>`, `tile-<N>-icon`.
 pub fn tile(index: usize, tone: Tone, icon: &'static Icon, t: &Theme) -> El {
+    tile_sized(index, tone, icon, 36.0, t)
+}
+
+/// The same tile `size` points across (40 on an empty state): corners and glyph in proportion.
+pub fn tile_sized(index: usize, tone: Tone, icon: &'static Icon, size: f32, t: &Theme) -> El {
     let ink = tone_ink(tone, t);
     let fill = match tone {
-        Tone::Neutral => t.tile,
+        Tone::Neutral => t.text.alpha(0.07),
         _ => ink.alpha(0.12),
     };
     el().key(format!("tile-{index}"))
-        .size(36.0, 36.0)
-        .radius(10.0)
+        .size(size, size)
+        .radius(if size >= 40.0 { 11.0 } else { 10.0 })
         .fill(fill)
         .center()
-        .child(kit::glyph(format!("tile-{index}-icon"), icon, 18.0, ink))
+        .child(kit::glyph(format!("tile-{index}-icon"), icon, size / 2.0, ink))
+}
+
+/// A small pill with a dot (`.kit-pill.tone-neutral`): "New". Keys: `pill-<N>`, `-dot`, `-label`.
+pub fn pill(index: usize, words: &str, t: &Theme) -> El {
+    let key = format!("pill-{index}");
+    row()
+        .key(key.clone())
+        .h(20.0)
+        .px(8.0)
+        .gap(5.0)
+        .center_y()
+        .radius(10.0)
+        .fill(t.text.alpha(0.07))
+        .child(
+            el().key(format!("{key}-dot"))
+                .size(6.0, 6.0)
+                .radius(3.0)
+                .fill(t.text_secondary),
+        )
+        .child(kit::label(format!("{key}-label"), words, PILL, t.text_secondary))
+}
+
+/// The card for a pane with nothing to show (an empty state): a tile, what is empty, and
+/// what will show up here. Centred.
+pub fn empty(card: usize, tile_index: usize, icon: &'static Icon, head: &str, words: &str, t: &Theme) -> El {
+    col()
+        .key(format!("card-{card}"))
+        .role("status")
+        .label(format!("{head}. {words}"))
+        .w_full()
+        .items_center()
+        .py(44.0)
+        .px(36.0)
+        .gap(8.0)
+        .radius(crate::theme::tokens::radius::LG)
+        .fill(t.card)
+        .box_shadow(kit::ring(kit::HAIR, t.separator))
+        .box_shadow(kit::drop(1.0, 2.0, Color::BLACK.alpha(0.04)))
+        .child(tile_sized(tile_index, Tone::Neutral, icon, 40.0, t))
+        .child(kit::label(
+            format!("card-{card}-head"),
+            head,
+            crate::theme::tokens::type_::HEAD,
+            t.text,
+        ))
+        .child(
+            // `max-width: 46ch`.
+            kit::label(
+                format!("card-{card}-sub"),
+                words,
+                super::settings_shell::SUB,
+                t.text_tertiary,
+            )
+            .wrap()
+            .align(rune::Align::Center)
+            .w(348.23),
+        )
 }
 
 /// The card for something that could not load: what failed, what is unchanged, and one

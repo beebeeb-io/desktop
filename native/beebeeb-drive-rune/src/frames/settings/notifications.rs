@@ -57,7 +57,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     children.push(lists::list(
         list,
         None,
-        vec![lists::item(list, 0, &recent.opens(), t).on_press(|s: &mut State| s.settings.go("DW-0791"))],
+        vec![lists::item(list, 0, &recent.opens(), t).on_press(|s: &mut State| super::go(s, "DW-0791"))],
         None,
         t,
     ));

@@ -166,7 +166,32 @@ pub struct Notifications {
     pub groups: Vec<(String, Vec<Alert>)>,
 }
 
+/// One recent alert from the account (DW-0791).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RecentAlert {
+    pub kind: AlertKind,
+    pub title: String,
+    pub says: String,
+    /// The time of day, "08:12".
+    pub time: String,
+    /// Not seen yet: marked "New" until this page has been opened.
+    pub new: bool,
+    /// The board frame the alert leads to.
+    pub leads_to: &'static str,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AlertKind {
+    SignIn,
+    Share,
+    Request,
+    Security,
+}
+
 pub trait SettingsSource {
+    /// Engine: the account's notifications, newest first, grouped by day ("Today",
+    /// "Yesterday", "3 Nov"). Empty: nothing to show.
+    fn recent_alerts(&self) -> Vec<(String, Vec<RecentAlert>)>;
     /// Engine: the stored alert preferences, the count of unseen account alerts, and what
     /// Windows says about notifications for this app.
     fn notifications(&self) -> Notifications;
@@ -201,6 +226,7 @@ pub struct BoardSettings {
     about: About,
     locations: Option<Locations>,
     notifications: Notifications,
+    recent: Vec<(String, Vec<RecentAlert>)>,
 }
 
 impl BoardSettings {
@@ -235,6 +261,7 @@ impl BoardSettings {
             },
             locations: Some(board_locations()),
             notifications: board_notifications(),
+            recent: board_recent(),
         }
     }
 
@@ -343,7 +370,76 @@ impl BoardSettings {
     }
 }
 
+/// DW-0791: the four alerts the board draws.
+fn board_recent() -> Vec<(String, Vec<RecentAlert>)> {
+    let alert = |kind, title: &str, says: &str, time: &str, new, leads_to| RecentAlert {
+        kind,
+        title: title.into(),
+        says: says.into(),
+        time: time.into(),
+        new,
+        leads_to,
+    };
+    vec![
+        (
+            "Today".into(),
+            vec![
+                alert(
+                    AlertKind::SignIn,
+                    "New sign-in on Anna's iPad",
+                    "From Germany. Not you? Sign it out in Devices and sessions.",
+                    "08:12",
+                    true,
+                    "DW-A55",
+                ),
+                alert(
+                    AlertKind::Share,
+                    "Lotte de Wit shared Harbourlight shoot with you",
+                    "6 files, in Shared.",
+                    "07:40",
+                    true,
+                    "DW-0501",
+                ),
+            ],
+        ),
+        (
+            "Yesterday".into(),
+            vec![alert(
+                AlertKind::Request,
+                "Priya Shah asked for a file in Invoices 2026",
+                "Approve or decline it in Shared, Requests.",
+                "16:05",
+                false,
+                "DW-0503",
+            )],
+        ),
+        (
+            "3 Nov".into(),
+            vec![alert(
+                AlertKind::Security,
+                "Security logging is on",
+                "Sign-ins and security changes are recorded from now on.",
+                "10:31",
+                false,
+                "DW-A77",
+            )],
+        ),
+    ]
+}
+
+impl BoardSettings {
+    /// DW-0791b: no recent alerts.
+    pub fn with_no_recent_alerts(mut self) -> Self {
+        self.recent.clear();
+        self.notifications.new_recent = 0;
+        self
+    }
+}
+
 impl SettingsSource for BoardSettings {
+    fn recent_alerts(&self) -> Vec<(String, Vec<RecentAlert>)> {
+        self.recent.clone()
+    }
     fn notifications(&self) -> Notifications {
         self.notifications.clone()
     }

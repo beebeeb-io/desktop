@@ -200,6 +200,7 @@ if (set) {
       api.icon(`${k}-chev`, q('.kit-item-chev svg', item));
       api.icon(`${k}-check`, q('.kit-item-check svg', item));
       api.icon(`${k}-ext`, q(':scope > svg', item));
+      api.text(`${k}-time`, q('span.font-mono.t-cap', item));
       const pop = q('.mk-pop2', item);
       if (pop) { api.box(`${k}-pop`, pop); api.textNode(`${k}-pop-label`, pop); api.icon(`${k}-pop-caret`, q('svg', pop)); }
       const sw = q('[role="switch"] > span', item);
@@ -234,6 +235,11 @@ if (set) {
     api.box(`toast-${i}`, to);
     api.icon(`toast-${i}-icon`, q('svg', to));
     api.text(`toast-${i}-text`, q('span', to));
+  });
+  qa('.kit-pill', set).forEach((pl, i) => {
+    api.box(`pill-${i}`, pl);
+    api.box(`pill-${i}-dot`, q('.kit-dot', pl));
+    api.textNode(`pill-${i}-label`, pl);
   });
   qa('.kit-tile', set).forEach((ti, i) => {
     api.box(`tile-${i}`, ti);

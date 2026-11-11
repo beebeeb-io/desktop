@@ -15,7 +15,7 @@ use super::SettingsUi;
 
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let mut children = vec![
-        shell::crumb("General", t).on_press(|s: &mut State| s.settings.go("DW-0701")),
+        shell::crumb("General", t).on_press(|s: &mut State| super::go(s, "DW-0701")),
         shell::heading(
             "Storage location",
             Some("Where Beebeeb stores the files you add from now on. Every location is in the EU."),

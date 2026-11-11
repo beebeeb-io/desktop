@@ -17,7 +17,6 @@
 //! Nothing here knows which panes exist or what a press does: a frame attaches `.on_press`.
 
 use crate::theme::tokens::{Theme, radius, type_};
-use rune::tok::Family;
 use rune::{Color, El, Icon, TextStyle, col, el, row};
 
 use super::kit;
@@ -31,8 +30,6 @@ pub const COLUMN_W: f32 = 540.0;
 pub const PANE_TITLE: TextStyle = TextStyle::new(22.0, 650.0).lh(28.0).tracking(-0.484);
 /// 12px/400 on a 15px line: a pane's or a card's second line (`.t-sub`).
 pub const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
-/// 12px/400 mono on a 15px line: a machine's value in a second line (`.t-sub.font-mono`).
-pub const SUB_MONO: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(15.0);
 
 /// `a-b-c` from any text, as `scripts/keymap.js` slugs a heading.
 pub fn slug(text: &str) -> String {

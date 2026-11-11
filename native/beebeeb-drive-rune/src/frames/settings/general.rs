@@ -47,14 +47,14 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         Some("Help"),
         vec![
             lists::item(1, 0, &Item::new(Some(&ic::INFO), "Show the guide again").opens(), t)
-                .on_press(|s: &mut State| s.settings.go("DW-0380")),
+                .on_press(|s: &mut State| super::go(s, "DW-0380")),
             lists::item(
                 1,
                 1,
                 &Item::new(Some(&ic::CHAT), "Help and report a problem").opens(),
                 t,
             )
-            .on_press(|s: &mut State| s.settings.go("DW-0782")),
+            .on_press(|s: &mut State| super::go(s, "DW-0782")),
             lists::item(
                 1,
                 2,
@@ -63,7 +63,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                     .opens(),
                 t,
             )
-            .on_press(|s: &mut State| s.settings.go("DW-0790")),
+            .on_press(|s: &mut State| super::go(s, "DW-0790")),
         ],
         None,
         t,
@@ -90,7 +90,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                     .opens(),
                 t,
             )
-            .on_press(|s: &mut State| s.settings.go("DW-0788")),
+            .on_press(|s: &mut State| super::go(s, "DW-0788")),
         ],
         None,
         t,
@@ -121,7 +121,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                     .opens(),
                 t,
             )
-            .on_press(|s: &mut State| s.settings.go("DW-0751")),
+            .on_press(|s: &mut State| super::go(s, "DW-0751")),
         ],
         None,
         t,
@@ -205,7 +205,7 @@ fn report_problem(t: &Theme) -> El {
     let foot = vec![
         dialogs::button(0, "Save and write email", Weight::Primary, t).on_press(|s: &mut State| {
             s.settings.ask(Intent::SaveBundleAndWriteEmail);
-            s.settings.go("DW-0790b");
+            super::go(s, "DW-0790b");
         }),
         dialogs::button(1, "Cancel", Weight::Quiet, t).on_press(|s: &mut State| s.settings.dialog = None),
     ];
