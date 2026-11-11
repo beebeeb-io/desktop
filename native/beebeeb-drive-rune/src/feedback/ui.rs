@@ -13,8 +13,9 @@ pub const NOTE_INPUT: &str = "fb-note-input";
 const PANEL_W: f32 = 360.0;
 const POPOVER_W: f32 = 340.0;
 
-pub const PRIVACY_LINE: &str = "Notes and screenshots stay on this PC, in your own profile. Nothing is sent anywhere. \
-    Screenshots show your file names; password and key fields are blanked.";
+pub const PRIVACY_LINE: &str = "The app sends a note nowhere: notes are files on this PC, in your own profile. When the lead's AI session opens a note, \
+    its text goes to the AI provider, and its screenshot only if the session opens it. Screenshots show your file names and account email; \
+    password and key fields are blanked.";
 
 /// The app, with the feedback chrome over it. During the capture frame there is no chrome at
 /// all: the picture and the tree are the app's alone.
@@ -25,7 +26,11 @@ pub fn wrap(s: &State, cx: &mut Cx<State>, app: El) -> El {
     match fb.mode {
         Mode::Capturing => return root,
         Mode::Picking | Mode::Writing => root = root.child(comment_layer(fb, &t)),
-        Mode::Off => {}
+        Mode::Off => {
+            if let Some(m) = fb.message.as_deref().filter(|_| !fb.panel_open) {
+                root = root.child(notice(m, &t));
+            }
+        }
     }
     if fb.panel_open {
         root = root.child(panel(fb, &t));
@@ -55,7 +60,8 @@ fn button(key: &'static str, label: &'static str, t: &Theme) -> El {
         .child(text(label).font(type_::BODY).color(t.text))
 }
 
-/// The one Amber control on a surface.
+/// The feedback chrome's own main action: strong and neutral. Amber stays the app's (one
+/// Amber action per view, and the app under this chrome already has its own).
 fn primary(key: &'static str, label: &'static str, t: &Theme) -> El {
     row()
         .key(key)
@@ -65,9 +71,9 @@ fn primary(key: &'static str, label: &'static str, t: &Theme) -> El {
         .px(space::MD)
         .center()
         .radius(radius::MD)
-        .fill(t.accent)
+        .fill(t.text)
         .focusable(true)
-        .child(text(label).font(type_::BODY_SEMI).color(t.accent_text_on))
+        .child(text(label).font(type_::BODY_SEMI).color(t.bg))
 }
 
 /// The small entry that is always reachable by Tab: opens the notes panel.
@@ -89,7 +95,7 @@ fn entry(t: &Theme) -> El {
         .focusable(true)
         .on_press(|s: &mut State| s.feedback.toggle_panel())
         .child(text("Feedback").font(type_::BODY_SM).color(t.text_secondary))
-        .child(mono("F8", t))
+        .child(mono(super::PANEL_KEY_LABEL, t))
 }
 
 fn comment_layer(fb: &Feedback, t: &Theme) -> El {
@@ -112,38 +118,43 @@ fn comment_layer(fb: &Feedback, t: &Theme) -> El {
         );
     if let Some(target) = fb.target() {
         let [x, y, w, h] = target.visible;
-        // The last three keys are enough to recognise it; the note records the whole path.
-        let full = app_path(&target.path);
-        let tail: Vec<&str> = full.rsplit('/').take(3).collect();
-        let path = format!(
-            "{}{}",
-            if full.split('/').count() > 3 { "…/" } else { "" },
-            tail.into_iter().rev().collect::<Vec<_>>().join("/")
+        layer = layer.child(
+            el().key("fb-highlight")
+                .absolute(x, y)
+                .size(w.max(1.0), h.max(1.0))
+                .fill(t.selection)
+                .border(1.5, t.text),
         );
-        layer = layer
-            .child(
-                el().key("fb-highlight")
-                    .absolute(x, y)
-                    .size(w.max(1.0), h.max(1.0))
-                    .fill(t.selection)
-                    .border(1.5, t.text),
-            )
-            .child(
-                row()
-                    .key("fb-path")
-                    .absolute(x.max(0.0), if y >= 20.0 { y - 19.0 } else { y + h + 3.0 })
-                    .h(16.0)
-                    .px(5.0)
-                    .center_y()
-                    .radius(radius::SM)
-                    .fill(t.text)
-                    .child(text(path).key("fb-path-text").font(type_::CAPTION_MONO_SM).color(t.bg)),
-            );
         if writing {
             layer = layer.child(popover(fb, t));
         }
     }
     layer.child(hint_bar(fb, t))
+}
+
+/// A bar in the caption's empty drag area: the one place that covers none of the app.
+fn caption_bar() -> El {
+    row()
+        .pin(Some(232.0), Some(4.0), None, None)
+        .h(TITLEBAR_H - 8.0)
+        .px(space::SM)
+        .gap(space::MD)
+        .center_y()
+        .radius(radius::MD)
+}
+
+/// One line while comment mode is off: why it did not start, or that a note was saved.
+fn notice(m: &str, t: &Theme) -> El {
+    caption_bar()
+        .key("fb-notice")
+        .fill(t.card)
+        .border(1.0, t.separator_strong)
+        .child(
+            text(m.to_string())
+                .key("fb-notice-text")
+                .font(type_::BODY_SM)
+                .color(t.text),
+        )
 }
 
 fn hint_bar(fb: &Feedback, t: &Theme) -> El {
@@ -154,15 +165,8 @@ fn hint_bar(fb: &Feedback, t: &Theme) -> El {
             .child(mono(keys, t))
             .child(text(what).font(type_::BODY_SM).color(t.text_secondary))
     };
-    let mut bar = row()
+    let mut bar = caption_bar()
         .key("fb-hint")
-        // In the caption bar's empty drag area: the one place that covers none of the app.
-        .pin(Some(232.0), Some(4.0), None, None)
-        .h(TITLEBAR_H - 8.0)
-        .px(space::SM)
-        .gap(space::MD)
-        .center_y()
-        .radius(radius::MD)
         .fill(t.card)
         .border(1.0, t.separator_strong)
         .child(
@@ -171,6 +175,18 @@ fn hint_bar(fb: &Feedback, t: &Theme) -> El {
                 .font(type_::BODY_SEMI)
                 .color(t.text),
         );
+    if let Some(target) = fb.target() {
+        // The outlined element's key path lives here, where it covers no neighbouring row. The
+        // last three keys are enough to recognise it; the note records the whole path.
+        let full = app_path(&target.path);
+        let tail: Vec<&str> = full.rsplit('/').take(3).collect();
+        let path = format!(
+            "{}{}",
+            if full.split('/').count() > 3 { "…/" } else { "" },
+            tail.into_iter().rev().collect::<Vec<_>>().join("/")
+        );
+        bar = bar.child(text(path).key("fb-path-text").font(type_::KBD).color(t.text));
+    }
     if fb.mode == Mode::Picking {
         bar = bar
             .child(key_hint("Click", "pick"))
@@ -265,24 +281,21 @@ fn popover(fb: &Feedback, t: &Theme) -> El {
         )
 }
 
+/// The status chip: neutral for every state (the words carry it), stronger once answered.
 fn chip(note: &NoteEntry, t: &Theme) -> El {
-    let fixed = note.status.state == StatusState::Fixed;
+    let answered = note.status.state != StatusState::New;
     row()
         .key(format!("fb-chip-{}", note.id))
         .h(18.0)
         .px(6.0)
         .center()
         .radius(radius::SM)
-        .fill(if fixed { t.green_bg } else { t.surface })
+        .fill(if answered { t.selection } else { t.surface })
         .border(1.0, t.card_border)
         .child(
             text(note.status.chip())
                 .font(type_::BODY_SM)
-                .color(if note.status.state == StatusState::New {
-                    t.text_tertiary
-                } else {
-                    t.text
-                }),
+                .color(if answered { t.text } else { t.text_tertiary }),
         )
 }
 
@@ -420,10 +433,13 @@ fn panel(fb: &Feedback, t: &Theme) -> El {
     let body = match opened {
         Some(note) => note_detail(fb, note, t),
         None if fb.notes.is_empty() => col().key("fb-empty").w_full().gap(space::XS).py(space::LG).child(
-            text("No notes yet. Press F8, click an element, type a note and press Enter.")
-                .font(type_::BODY)
-                .color(t.text_secondary)
-                .wrap(),
+            text(format!(
+                "No notes yet. Press {}, click an element, type a note and press Enter.",
+                super::COMMENT_KEY_LABEL
+            ))
+            .font(type_::BODY)
+            .color(t.text_secondary)
+            .wrap(),
         ),
         None => col()
             .key("fb-list")
@@ -462,7 +478,8 @@ fn panel(fb: &Feedback, t: &Theme) -> El {
         .key("fb-panel")
         .role("group")
         .label("Feedback notes")
-        .pin(None, Some(TITLEBAR_H), Some(0.0), Some(0.0))
+        // Under the toolbar: New and search stay reachable.
+        .pin(None, Some(TITLEBAR_H + 47.0), Some(0.0), Some(0.0))
         .w(PANEL_W)
         .fill(t.card)
         .border(1.0, t.separator_strong)
@@ -480,7 +497,7 @@ fn panel(fb: &Feedback, t: &Theme) -> El {
                         .center_y()
                         .child(text("Feedback notes").font(type_::LABEL).color(t.text))
                         .child(
-                            text(fb.notes.len().to_string())
+                            text(format!("{} of {}", fb.notes.len(), model::MAX_NOTES))
                                 .key("fb-count")
                                 .font(type_::KBD)
                                 .color(t.text_tertiary),

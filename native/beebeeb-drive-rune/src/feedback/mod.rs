@@ -5,13 +5,15 @@
 //! Compiled in only with the cargo feature `feedback` (test builds). A release build has none
 //! of it: `scripts/check-feedback-absent.sh`. Schema, keys and limits: `README.md` beside this file.
 //!
-//! This module has no network code (a test greps for it): notes never leave this PC.
+//! This module has no network code (a test greps for it): the app itself sends a note nowhere.
 
 pub mod capture;
 pub mod model;
 pub mod paths;
 mod ui;
 
+#[cfg(test)]
+mod guard_tests;
 #[cfg(test)]
 mod tests;
 
@@ -29,6 +31,54 @@ use model::{ElementSnap, NoteEntry, NoteMeta, Rgba};
 /// Seconds between looks at the inbox for new notes and `status.json` changes. Never faster.
 pub const SCAN_EVERY: f64 = 2.0;
 const ROOT_KEY: &str = "fb-root";
+
+/// The hotkeys, in one place: `(key, with Shift)` and the words the UI shows for them.
+pub const COMMENT_KEY: (Key, bool) = (Key::Function(8), false);
+pub const COMMENT_KEY_LABEL: &str = "F8";
+pub const PANEL_KEY: (Key, bool) = (Key::Function(8), true);
+pub const PANEL_KEY_LABEL: &str = "Shift+F8";
+
+/// At most this many thumbnails are decoded for the panel (newest notes first).
+const MAX_THUMBS: usize = 40;
+
+/// Whether comment mode may run on a frame. A frame that says nothing is denied.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Policy {
+    Allowed,
+    Denied(&'static str),
+}
+
+/// The frame on screen, as the app (later: the shell's route registry) reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameInfo {
+    pub id: String,
+    pub route: String,
+    pub feedback: Policy,
+}
+
+impl FrameInfo {
+    pub fn allowed(id: &str, route: &str) -> FrameInfo {
+        FrameInfo {
+            id: id.into(),
+            route: route.into(),
+            feedback: Policy::Allowed,
+        }
+    }
+
+    pub fn denied(id: &str, route: &str, reason: &'static str) -> FrameInfo {
+        FrameInfo {
+            id: id.into(),
+            route: route.into(),
+            feedback: Policy::Denied(reason),
+        }
+    }
+
+    fn unknown() -> FrameInfo {
+        FrameInfo::denied("unknown", "", "this screen has not opted in")
+    }
+}
+
+pub const DENIED_LINE: &str = "Comment mode is off on this screen";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -48,6 +98,8 @@ pub struct Feedback {
     resolved_for: Option<(f32, f32)>,
     /// The element under the pointer and its ancestors up to the app's root, nearest first.
     pub chain: Vec<ElementSnap>,
+    /// What each of `chain` and its subtree said when it was outlined (`model::fingerprint`).
+    prints: Vec<String>,
     /// Which of `chain` is outlined: Alt+Up and Alt+Down step it.
     pub level: usize,
     pub note: TextEdit,
@@ -57,13 +109,17 @@ pub struct Feedback {
     pub opened: Option<String>,
     pub notes: Vec<NoteEntry>,
     pub inbox: Option<PathBuf>,
-    /// One line under the hint bar or in the panel: "Note saved", or why one was not.
+    /// One line in the hint bar or the panel: "Note saved", or why one was not.
     pub message: Option<String>,
     pub secure_on_screen: bool,
     dark: Cell<bool>,
     last_scan: Option<f64>,
+    /// A failed save puts the keyboard back in the note field on the next frame.
+    refocus: bool,
     thumbs: RefCell<HashMap<String, Pixels>>,
     opened_image: Option<Pixels>,
+    #[cfg(test)]
+    pub frame_override: Option<FrameInfo>,
 }
 
 impl Feedback {
@@ -77,6 +133,7 @@ impl Feedback {
             pointer: None,
             resolved_for: None,
             chain: Vec::new(),
+            prints: Vec::new(),
             level: 0,
             note: TextEdit::new(""),
             tags: [false; model::TAGS.len()],
@@ -88,9 +145,16 @@ impl Feedback {
             secure_on_screen: false,
             dark: Cell::new(false),
             last_scan: None,
+            refocus: false,
             thumbs: RefCell::new(HashMap::new()),
             opened_image: None,
+            #[cfg(test)]
+            frame_override: None,
         };
+        // Start-up reads the small JSON files only; no picture is decoded until the panel opens.
+        if let Some(inbox) = &fb.inbox {
+            model::sweep_temp(inbox);
+        }
         fb.rescan();
         fb
     }
@@ -104,6 +168,7 @@ impl Feedback {
         self.panel_open = false;
         self.resolved_for = None;
         self.chain.clear();
+        self.prints.clear();
         self.level = 0;
         self.message = None;
         tx.blur();
@@ -112,6 +177,7 @@ impl Feedback {
     fn leave(&mut self) {
         self.mode = Mode::Off;
         self.chain.clear();
+        self.prints.clear();
         self.note.clear();
         self.tags = [false; model::TAGS.len()];
     }
@@ -165,8 +231,10 @@ impl Feedback {
         self.opened = None;
         self.opened_image = None;
         self.last_scan = None;
+        self.message = None;
         if self.panel_open {
             self.rescan();
+            self.load_thumbs();
         }
     }
 
@@ -175,44 +243,59 @@ impl Feedback {
             .notes
             .iter()
             .find(|n| n.id == id)
-            .and_then(|n| load_pixels(&n.dir.join("window.png"), 1400));
+            .map(|n| decode_later(n.dir.join("window.png"), 1400));
         self.opened = Some(id.to_string());
     }
 
-    /// Reads the inbox again. True when the list or a status changed.
+    /// Reads the inbox again (only the JSON of notes whose files changed). True when the list or
+    /// a status changed.
     pub fn rescan(&mut self) -> bool {
-        let notes = self.inbox.as_deref().map(model::scan).unwrap_or_default();
-        let mut thumbs = self.thumbs.borrow_mut();
-        thumbs.retain(|id, _| notes.iter().any(|n| &n.id == id));
-        for n in &notes {
-            if !thumbs.contains_key(&n.id) {
-                if let Some(p) = load_pixels(&n.dir.join("window.png"), 256) {
-                    thumbs.insert(n.id.clone(), p);
-                }
-            }
-        }
-        drop(thumbs);
+        let notes = self
+            .inbox
+            .as_deref()
+            .map(|i| model::scan(i, &self.notes))
+            .unwrap_or_default();
+        self.thumbs
+            .borrow_mut()
+            .retain(|id, _| notes.iter().any(|n| &n.id == id));
         let changed = notes != self.notes;
         self.notes = notes;
+        if self.panel_open {
+            self.load_thumbs();
+        }
         changed
+    }
+
+    /// Thumbnails for the newest notes, decoded off the UI thread and only while the panel is open.
+    fn load_thumbs(&mut self) {
+        let mut thumbs = self.thumbs.borrow_mut();
+        for n in self.notes.iter().take(MAX_THUMBS) {
+            if !thumbs.contains_key(&n.id) {
+                // The whole window, small: an element's own crop is often a sliver.
+                thumbs.insert(n.id.clone(), decode_later(n.dir.join("window.png"), 256));
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn thumb_size(&self, id: &str) -> Option<(u32, u32)> {
+        self.thumbs.borrow().get(id).map(Pixels::size)
     }
 }
 
-/// A PNG as an image the panel can show, at most `max` pixels on its longer side.
-fn load_pixels(path: &std::path::Path, max: u32) -> Option<Pixels> {
-    let img = Rgba::read_png(path).ok()?;
-    let k = (img.w.max(img.h)).div_ceil(max).max(1);
-    let (w, h) = ((img.w / k).max(1), (img.h / k).max(1));
-    let mut px = Vec::with_capacity((w * h * 4) as usize);
-    for y in 0..h {
-        for x in 0..w {
-            let i = ((y * k * img.w + x * k) * 4) as usize;
-            px.extend_from_slice(&img.px[i..i + 4]);
+/// An image the panel can show at once and that fills in when a worker thread has decoded the
+/// PNG (size-capped, at most `max` pixels on its longer side). A file that cannot be decoded
+/// leaves it empty.
+fn decode_later(path: PathBuf, max: u32) -> Pixels {
+    let pixels = Pixels::new();
+    let fill = pixels.clone();
+    std::thread::spawn(move || {
+        if let Ok(img) = Rgba::read_png(&path) {
+            let small = img.shrink(max);
+            fill.set(small.w, small.h, small.px);
         }
-    }
-    let p = Pixels::new();
-    p.set(w, h, px);
-    Some(p)
+    });
+    pixels
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +306,7 @@ struct Inner {
     view: fn(&State, &mut Cx<State>) -> El,
     on_key: Option<fn(&mut State, &KeyEvent, &mut Tx) -> bool>,
     poll: Option<fn(&mut State, f64, &mut Tx) -> bool>,
+    frame: fn(&State) -> FrameInfo,
 }
 
 static INNER: OnceLock<Inner> = OnceLock::new();
@@ -231,17 +315,28 @@ fn inner() -> &'static Inner {
     INNER.get().expect("feedback::hook_spec ran before the first frame")
 }
 
-/// Wraps the app's `view`, `on_key` and `poll` with comment mode. The first call wins.
-pub fn hook_spec(mut spec: AppSpec<State>) -> AppSpec<State> {
+/// Wraps the app's `view`, `on_key` and `poll` with comment mode. `frame` says which frame is on
+/// screen and whether it opted in. The first call wins.
+pub fn hook_spec(mut spec: AppSpec<State>, frame: fn(&State) -> FrameInfo) -> AppSpec<State> {
     INNER.get_or_init(|| Inner {
         view: spec.view,
         on_key: spec.on_key,
         poll: spec.poll,
+        frame,
     });
     spec.view = view;
     spec.on_key = Some(on_key);
     spec.poll = Some(poll);
     spec
+}
+
+/// The frame on screen. Without a hook, or on a frame that has not opted in: denied.
+pub fn frame_of(s: &State) -> FrameInfo {
+    #[cfg(test)]
+    if let Some(f) = &s.feedback.frame_override {
+        return f.clone();
+    }
+    INNER.get().map_or_else(FrameInfo::unknown, |i| (i.frame)(s))
 }
 
 /// Attaches the compositor that reads the live window's tree and pixels.
@@ -255,30 +350,24 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     ui::wrap(s, cx, app)
 }
 
-/// F8, or Ctrl+Shift+/ (which a US layout sends as Ctrl+?).
-fn is_comment_key(ev: &KeyEvent) -> bool {
-    match ev.key {
-        Key::Function(8) => !ev.mods.shift,
-        Key::Command('/') | Key::Command('?') => ev.mods.shift,
-        _ => false,
-    }
-}
-
-fn is_panel_key(ev: &KeyEvent) -> bool {
-    ev.key == Key::Function(8) && ev.mods.shift
+fn is_key(ev: &KeyEvent, key: &(Key, bool)) -> bool {
+    ev.key == key.0 && ev.mods.shift == key.1
 }
 
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    let fb = &mut s.feedback;
-    if is_comment_key(ev) {
-        match fb.mode {
-            Mode::Off => fb.enter(tx),
-            Mode::Capturing => {}
-            Mode::Picking | Mode::Writing => fb.leave(),
+    if is_key(ev, &COMMENT_KEY) {
+        let frame = frame_of(s);
+        let fb = &mut s.feedback;
+        match (fb.mode, frame.feedback) {
+            (Mode::Off, Policy::Allowed) => fb.enter(tx),
+            (Mode::Off, Policy::Denied(why)) => fb.message = Some(format!("{DENIED_LINE}: {why}.")),
+            (Mode::Capturing, _) => {}
+            (Mode::Picking | Mode::Writing, _) => fb.leave(),
         }
         return true;
     }
-    if is_panel_key(ev) {
+    let fb = &mut s.feedback;
+    if is_key(ev, &PANEL_KEY) {
         if fb.mode != Mode::Off {
             fb.leave();
         }
@@ -305,11 +394,14 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         }
         Mode::Capturing => true,
         Mode::Off => {
+            // A notice ("off on this screen", "saved") goes with the next key.
+            let had_notice = fb.message.take().is_some();
             if fb.panel_open && ev.key == Key::Escape {
                 fb.toggle_panel();
                 return true;
             }
-            inner().on_key.is_some_and(|f| f(s, ev, tx))
+            // Short-circuit order matters: the app's handler always runs.
+            inner().on_key.is_some_and(|f| f(s, ev, tx)) | had_notice
         }
     }
 }
@@ -317,6 +409,11 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 pub fn poll(s: &mut State, clock: f64, tx: &mut Tx) -> bool {
     let mut changed = inner().poll.is_some_and(|f| f(s, clock, tx));
     let fb = &mut s.feedback;
+    if fb.refocus {
+        fb.refocus = false;
+        tx.focus(ui::NOTE_INPUT, false);
+        changed = true;
+    }
     if fb.panel_open {
         match fb.last_scan {
             // Opening the panel read the folder: the 2 s start now.
@@ -348,9 +445,18 @@ pub fn app_path(path: &str) -> &str {
 }
 
 /// In comment mode, finds the element under the pointer (the window's centre before the pointer
-/// has moved) with Rune's own hit test, restricted to the app's tree. True when the outline has
-/// to be drawn again.
+/// has moved) with Rune's own hit test, restricted to the app's tree. True when the overlay has
+/// to be drawn again. A frame that is (or became) denied ends comment mode.
 pub fn sync(rt: &mut Runtime<State>) -> bool {
+    if rt.state.feedback.mode == Mode::Off {
+        return false;
+    }
+    if let Policy::Denied(why) = frame_of(&rt.state).feedback {
+        let fb = &mut rt.state.feedback;
+        fb.leave();
+        fb.message = Some(format!("{DENIED_LINE}: {why}."));
+        return true;
+    }
     if rt.state.feedback.mode != Mode::Picking {
         return false;
     }
@@ -366,8 +472,10 @@ pub fn sync(rt: &mut Runtime<State>) -> bool {
         .and_then(|p| model::index_of(&tree, p.path()))
         .unwrap_or(root);
     let mut chain: Vec<ElementSnap> = Vec::new();
+    let mut prints = Vec::new();
     for i in model::ancestors(&tree, picked) {
         chain.push(tree[i].clone());
+        prints.push(model::fingerprint(&tree, i));
         if i == root {
             break;
         }
@@ -380,6 +488,7 @@ pub fn sync(rt: &mut Runtime<State>) -> bool {
     }
     let changed = fb.chain != chain;
     fb.chain = chain;
+    fb.prints = prints;
     changed
 }
 
@@ -387,15 +496,16 @@ pub fn capture_due(s: &State) -> bool {
     s.feedback.mode == Mode::Capturing
 }
 
-/// What the note says about where the app was. Reads `State` only: whichever `DriveSource` is
-/// behind it (board fixture, large fixture, the engine's database) makes no difference.
-fn frame_summary(s: &State) -> Value {
+/// What the note says about where the app was: the frame and route the app reports, and what
+/// `State` holds. Whichever `DriveSource` is behind it makes no difference.
+fn frame_summary(s: &State, frame: &FrameInfo) -> Value {
     json!({
-        "id": "DW-0401",
-        "route": format!("files/{}", s.listing.path.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join("/")),
+        "id": frame.id,
+        "route": frame.route,
         "state": {
             "sidebar_section": s.sidebar_section.label(),
             "folder": s.listing.folder.name,
+            "path": s.listing.path.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
             "item_count": s.listing.items.len(),
             "selected_index": s.selected,
             "selected_name": s.selected.and_then(|i| s.listing.items.get(i)).map(|i| i.name.clone()),
@@ -406,19 +516,31 @@ fn frame_summary(s: &State) -> Value {
 }
 
 /// Writes the note from the frame just drawn (`img` is that frame, without feedback chrome).
-/// Comment mode stays on for the next element; a failure reopens the popover with its text.
-pub fn finish_capture(rt: &mut Runtime<State>, mut img: Rgba) {
+/// Comment mode stays on for the next element; a failure reopens the popover with its text and
+/// puts the keyboard back in it.
+pub fn finish_capture(rt: &mut Runtime<State>, img: Result<Rgba, String>) {
     let (tree, rigid) = capture::snapshot(rt);
     let (vw, vh) = rt.window_viewport();
-    let scale = img.w as f32 / vw.max(1.0);
     let result = (|| {
+        let mut img = img?;
+        let scale = img.w as f32 / vw.max(1.0);
+        let frame = frame_of(&rt.state);
+        if let Policy::Denied(why) = frame.feedback {
+            return Err(format!("{DENIED_LINE}: {why}"));
+        }
         let fb = &rt.state.feedback;
         let inbox = fb
             .inbox
             .as_deref()
             .ok_or("no inbox folder: this PC has no local app data folder")?;
         let target = fb.target().ok_or("no element is picked")?;
-        let picked = model::index_of(&tree, &target.path).ok_or("the picked element is no longer on screen")?;
+        let picked =
+            model::index_of(&tree, &target.path).ok_or("the picked element is no longer on screen; pick it again")?;
+        // Rows are keyed by position: the same key may hold another item by now.
+        if fb.prints.get(fb.level) != Some(&model::fingerprint(&tree, picked)) {
+            return Err("the element changed while you were writing; press Esc and pick it again".to_string());
+        }
+        model::still(&tree)?;
         model::redact_pixels(&mut img, &tree, scale, rigid)?;
         // The note's tree is the app's own: paths start at its root, and the root has no parent.
         let root = app_root(&tree);
@@ -432,7 +554,7 @@ pub fn finish_capture(rt: &mut Runtime<State>, mut img: Rgba) {
             })
             .collect();
         let meta = NoteMeta {
-            comment: fb.note.text.trim().to_string(),
+            comment: model::clean_text(fb.note.text.trim(), model::MAX_COMMENT_CHARS),
             tags: model::TAGS
                 .iter()
                 .zip(fb.tags)
@@ -442,8 +564,9 @@ pub fn finish_capture(rt: &mut Runtime<State>, mut img: Rgba) {
             scale,
             dark: fb.dark.get(),
             window_size: [vw, vh],
-            frame: frame_summary(&rt.state),
+            frame: frame_summary(&rt.state, &frame),
         };
+        model::make_room(&model::scan(inbox, &fb.notes), model::MAX_NOTES, model::MAX_INBOX_BYTES)?;
         model::write_note(inbox, &meta, &tree, picked, &img)
     })();
     let fb = &mut rt.state.feedback;
@@ -458,6 +581,7 @@ pub fn finish_capture(rt: &mut Runtime<State>, mut img: Rgba) {
         }
         Err(e) => {
             fb.mode = Mode::Writing;
+            fb.refocus = true;
             fb.message = Some(format!("Not saved: {e}"));
         }
     }

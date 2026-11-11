@@ -378,6 +378,7 @@ dependencies = [
  "rune-kit",
  "rune-notify",
  "serde_json",
+ "wgpu",
 ]
 
 [[package]]

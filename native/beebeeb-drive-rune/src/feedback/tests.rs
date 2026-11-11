@@ -11,24 +11,27 @@ use super::{Feedback, Mode, capture, paths};
 use crate::State;
 use crate::source::{DriveSource, LargeFixtureSource};
 
-const SIZE: (f32, f32) = (1280.0, 800.0);
-const SCALE: f32 = 2.0;
+pub(super) const SIZE: (f32, f32) = (1280.0, 800.0);
+pub(super) const SCALE: f32 = 2.0;
 
-fn temp_inbox(name: &str) -> PathBuf {
+pub(super) fn temp_inbox(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("bb-feedback-test-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir.join("inbox")
 }
 
-fn text_system() -> rune::text::TextSystem {
+pub(super) fn text_system() -> rune::text::TextSystem {
     rune::text::TextSystem::new(crate::FONTS, ("Inter", "JetBrains Mono"))
 }
 
-fn runtime_with(inbox: &Path, dark: bool, change: impl FnOnce(&mut State)) -> Runtime<State> {
-    let spec = super::hook_spec(AppSpec {
-        on_key: Some(crate::on_key),
-        ..AppSpec::new("test", SIZE, crate::init, crate::view)
-    });
+pub(super) fn runtime_with(inbox: &Path, dark: bool, change: impl FnOnce(&mut State)) -> Runtime<State> {
+    let spec = super::hook_spec(
+        AppSpec {
+            on_key: Some(crate::on_key),
+            ..AppSpec::new("test", SIZE, crate::init, crate::view)
+        },
+        crate::feedback_frame,
+    );
     let mut state = crate::init();
     state.feedback = Feedback::with_inbox(Some(inbox.to_path_buf()));
     change(&mut state);
@@ -48,17 +51,17 @@ fn runtime_with(inbox: &Path, dark: bool, change: impl FnOnce(&mut State)) -> Ru
     rt
 }
 
-fn runtime(inbox: &Path) -> Runtime<State> {
+pub(super) fn runtime(inbox: &Path) -> Runtime<State> {
     runtime_with(inbox, false, |_| {})
 }
 
 /// One frame as the window's compositor runs it: frame, pick, capture when due, redraw.
-fn step_by(rt: &mut Runtime<State>, dt: f64) {
+pub(super) fn step_by(rt: &mut Runtime<State>, dt: f64) {
     rt.frame(dt);
     let mut again = super::sync(rt);
     if super::capture_due(&rt.state) {
         let img = capture::render_headless(rt, SCALE);
-        super::finish_capture(rt, img);
+        super::finish_capture(rt, Ok(img));
         again = true;
     }
     if again {
@@ -71,50 +74,51 @@ fn step_by(rt: &mut Runtime<State>, dt: f64) {
     }
 }
 
-fn step(rt: &mut Runtime<State>) {
+pub(super) fn step(rt: &mut Runtime<State>) {
     step_by(rt, 1.0 / 60.0);
 }
 
-fn key(rt: &mut Runtime<State>, key: Key, mods: Mods) {
+pub(super) fn key(rt: &mut Runtime<State>, key: Key, mods: Mods) {
     rt.key(KeyEvent { key, mods });
     step(rt);
 }
 
-fn plain(rt: &mut Runtime<State>, k: Key) {
+pub(super) fn plain(rt: &mut Runtime<State>, k: Key) {
     key(rt, k, Mods::default());
 }
 
-fn hover(rt: &mut Runtime<State>, target: &str) -> (f32, f32) {
+pub(super) fn hover(rt: &mut Runtime<State>, target: &str) -> (f32, f32) {
     let at = rt.find(target).unwrap_or_else(|| panic!("no element keyed {target}"));
     rt.pointer_move(at.0, at.1);
     step(rt);
     at
 }
 
-fn click(rt: &mut Runtime<State>, at: (f32, f32)) {
+pub(super) fn click(rt: &mut Runtime<State>, at: (f32, f32)) {
     rt.pointer_down(at.0, at.1);
     rt.pointer_up(at.0, at.1);
     step(rt);
 }
 
-fn has_key(rt: &Runtime<State>, k: &str) -> bool {
+pub(super) fn has_key(rt: &Runtime<State>, k: &str) -> bool {
     rt.elements().iter().any(|e| e.key.as_deref() == Some(k) && !e.exiting)
 }
 
-fn shown_text(rt: &Runtime<State>) -> String {
+pub(super) fn shown_text(rt: &Runtime<State>) -> String {
     rt.elements()
         .iter()
+        .filter(|e| !e.exiting)
         .filter_map(|e| e.text.clone())
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn close(a: [f32; 4], b: [f32; 4]) -> bool {
+pub(super) fn close(a: [f32; 4], b: [f32; 4]) -> bool {
     a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.51)
 }
 
 /// F8 → hover a row's name → Alt+Up to the row → click → type → Enter. Returns the note's folder.
-fn save_note_on_row(rt: &mut Runtime<State>, row: &str, comment: &str) -> PathBuf {
+pub(super) fn save_note_on_row(rt: &mut Runtime<State>, row: &str, comment: &str) -> PathBuf {
     plain(rt, Key::Function(8));
     let at = hover(rt, &format!("{row}-name"));
     while rt.state.feedback.target().and_then(|t| t.key.as_deref()) != Some(row) {
@@ -162,30 +166,28 @@ fn hotkey_enters_and_leaves_comment_mode() {
     assert_eq!(rt.state.feedback.mode, Mode::Off);
     assert!(!has_key(&rt, "fb-overlay"));
 
-    // Ctrl+Shift+/ arrives as Command('?') on a US layout and Command('/') elsewhere.
+    // Only F8: Ctrl+Shift+/ is the board's Ctrl+/ on layouts where "/" is Shift+7.
     for c in ['?', '/'] {
-        let chord = Mods {
-            cmd: true,
-            ctrl: true,
-            shift: true,
-            ..Mods::default()
-        };
-        key(&mut rt, Key::Command(c), chord);
-        assert_eq!(rt.state.feedback.mode, Mode::Picking, "Ctrl+Shift+{c}");
-        key(&mut rt, Key::Command(c), chord);
-        assert_eq!(rt.state.feedback.mode, Mode::Off);
+        for shift in [true, false] {
+            key(
+                &mut rt,
+                Key::Command(c),
+                Mods {
+                    cmd: true,
+                    ctrl: true,
+                    shift,
+                    ..Mods::default()
+                },
+            );
+            assert_eq!(
+                rt.state.feedback.mode,
+                Mode::Off,
+                "Ctrl+{c} (shift {shift}) is not ours"
+            );
+        }
     }
-    // Ctrl+/ without Shift is the board's own shortcut: not ours.
-    key(
-        &mut rt,
-        Key::Command('/'),
-        Mods {
-            cmd: true,
-            ctrl: true,
-            ..Mods::default()
-        },
-    );
-    assert_eq!(rt.state.feedback.mode, Mode::Off);
+    assert_eq!(super::COMMENT_KEY, (Key::Function(8), false));
+    assert_eq!(super::PANEL_KEY, (Key::Function(8), true));
 
     // Comment mode owns the keyboard: Down does not move the app's selection under it.
     plain(&mut rt, Key::Function(8));
@@ -298,7 +300,7 @@ fn saving_a_note_writes_four_files_that_match_the_window() {
     // Enter with nothing typed saves nothing.
     plain(&mut rt, Key::Enter);
     assert_eq!(rt.state.feedback.mode, Mode::Writing);
-    assert!(model::scan(&inbox).is_empty());
+    assert!(model::scan(&inbox, &[]).is_empty());
 
     plain(&mut rt, Key::Text("Row is too tall".into()));
     key(
@@ -322,7 +324,7 @@ fn saving_a_note_writes_four_files_that_match_the_window() {
     plain(&mut rt, Key::Enter);
     assert_eq!(rt.state.feedback.mode, Mode::Picking, "{:?}", rt.state.feedback.message);
 
-    let notes = model::scan(&inbox);
+    let notes = model::scan(&inbox, &[]);
     assert_eq!(notes.len(), 1);
     let dir = &notes[0].dir;
     let leftovers: Vec<_> = std::fs::read_dir(&inbox)
@@ -608,7 +610,12 @@ fn the_panel_shows_a_status_and_reply_the_lead_wrote_but_looks_no_faster_than_2s
         shown.contains("Folder icon is off-centre") && shown.contains("New"),
         "{shown}"
     );
-    assert!(shown.contains("stay on this PC"), "the privacy line is in the panel");
+    assert!(
+        shown.contains("files on this PC")
+            && shown.contains("AI provider")
+            && !shown.to_lowercase().contains("nothing is sent"),
+        "the privacy line is in the panel"
+    );
     assert!(shown.contains(&inbox.display().to_string()) || has_key(&rt, "fb-inbox-path"));
 
     std::fs::write(
@@ -747,7 +754,7 @@ fn the_module_has_no_network_code() {
         }
         checked += 1;
     }
-    assert_eq!(checked, 6, "mod, model, capture, paths, ui, tests");
+    assert_eq!(checked, 7, "mod, model, capture, paths, ui, tests, guard_tests");
     // The check can fail: the same scan finds a socket in a line that has one.
     let mutant = format!("let s = {}::connect(addr);", banned[1]);
     assert!(banned.iter().any(|b| mutant.contains(b.as_str())));
@@ -820,6 +827,61 @@ fn evidence_pngs() {
     );
     step(&mut rt);
     assert!(shown_text(&rt).contains("Fixed in 4f1c2ab9d"));
+    let id = rt.state.feedback.notes[0].id.clone();
+    for _ in 0..200 {
+        if rt.state.feedback.thumb_size(&id).is_some_and(|s| s.0 > 0) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert_eq!(
+        rt.state.feedback.thumb_size(&id),
+        Some((256, 160)),
+        "the thumbnail was decoded off the UI thread, small"
+    );
     shot(&mut rt, "03-notes-panel-fixed.png");
     eprintln!("evidence: 3 PNGs in {}", out.display());
+}
+
+/// `status.json` is written outside the app: every byte of it is hostile input.
+#[test]
+fn a_hostile_status_json_never_panics_and_never_renders_raw() {
+    let long = "x".repeat(50_000);
+    let cases: Vec<(String, Option<&str>)> = vec![
+        (r#"{"state":"fixed","fixed_in_commit":"ééééé"}"#.into(), Some("Fixed")),
+        (
+            r#"{"state":"fixed","fixed_in_commit":"0123456789abcdef"}"#.into(),
+            Some("Fixed in 012345678"),
+        ),
+        (
+            r#"{"state":"fixed","fixed_in_commit":"not-a-sha; rm"}"#.into(),
+            Some("Fixed"),
+        ),
+        (r#"{"state":"fixed","fixed_in_commit":"abc"}"#.into(), Some("Fixed")),
+        (r#"{"state":"fixed","fixed_in_commit":12}"#.into(), Some("Fixed")),
+        (r#"{"state":"seen","reply":["a"],"by":{"x":1}}"#.into(), Some("Seen")),
+        (r#"{"state":7}"#.into(), None),
+        (r#"["fixed"]"#.into(), None),
+        ("\u{feff}null".into(), None),
+        (format!(r#"{{"state":"seen","reply":"{long}"}}"#), None),
+        (format!("{}{}", "[".repeat(5000), "]".repeat(5000)), None),
+    ];
+    for (src, chip) in &cases {
+        let parsed = Status::parse(src);
+        assert_eq!(
+            parsed.as_ref().map(|s| s.chip()),
+            chip.map(str::to_string),
+            "{}",
+            &src[..src.len().min(60)]
+        );
+    }
+    let s = Status::parse("{\"state\":\"seen\",\"reply\":\"ok\\u202e\\u0007 evil\\u2066\\n next\\u0000\",\"by\":\"le\\u001bad-with-a-very-long-name-that-goes-on-and-on-and-on\"}").unwrap();
+    assert_eq!(
+        s.reply.as_deref(),
+        Some("ok evil\n next"),
+        "bidi and control characters are gone, the newline stays"
+    );
+    assert_eq!(s.by.as_deref().map(|b| b.chars().count()), Some(40));
+    let capped = Status::parse(&format!(r#"{{"state":"seen","reply":"{}"}}"#, "é".repeat(3000))).unwrap();
+    assert_eq!(capped.reply.unwrap().chars().count(), 2000);
 }

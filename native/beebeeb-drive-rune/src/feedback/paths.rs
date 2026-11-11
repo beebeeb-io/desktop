@@ -3,12 +3,15 @@
 //!
 //! The crate has no data-dir resolution of its own yet, so the app id is resolved here, in one
 //! place: `BEEBEEB_APP_ID` at run time, else the `BEEBEEB_APP_ID` the build was compiled with
-//! (the "Beebeeb Test" build sets its own), else the real app's id.
+//! (packaging may set its own), else the test identity `io.beebeeb.app.test`: never the real
+//! app's folder by default.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-pub const DEFAULT_APP_ID: &str = "io.beebeeb.app";
+/// The TEST identity: the feature exists only in test builds, so its notes never land in the
+/// real app's data folder unless the build or the environment names that identity itself.
+pub const DEFAULT_APP_ID: &str = "io.beebeeb.app.test";
 pub const DIR_FLAG: &str = "--feedback-dir";
 pub const DIR_ENV: &str = "BEEBEEB_FEEDBACK_DIR";
 pub const APP_ID_ENV: &str = "BEEBEEB_APP_ID";

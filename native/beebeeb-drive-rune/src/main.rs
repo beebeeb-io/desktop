@@ -210,6 +210,12 @@ static FONTS: &[&[u8]] = &[
     include_bytes!("../assets/fonts/jetbrains-mono-latin-600-normal.ttf"),
 ];
 
+/// Which frame is on screen, and whether comment mode may run on it (default: denied).
+#[cfg(feature = "feedback")]
+fn feedback_frame(_s: &State) -> feedback::FrameInfo {
+    feedback::FrameInfo::allowed("DW-0401", "files")
+}
+
 fn main() {
     let spec = AppSpec::<State> {
         fonts: FONTS,
@@ -230,7 +236,7 @@ fn main() {
     };
 
     #[cfg(feature = "feedback")]
-    let spec = feedback::hook_spec(spec);
+    let spec = feedback::hook_spec(spec, feedback_frame);
     let app = App::new(spec).titlebar(Titlebar::new(TITLEBAR_H));
     #[cfg(feature = "feedback")]
     let app = feedback::install(app);

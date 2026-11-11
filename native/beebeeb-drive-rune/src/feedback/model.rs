@@ -32,6 +32,9 @@ pub struct ElementSnap {
     pub opacity: f32,
     pub secure: bool,
     pub focused: bool,
+    /// A spring still moves it (a flight, a layout change), or it is playing its exit.
+    pub moving: bool,
+    pub exiting: bool,
     pub parent: Option<usize>,
 }
 
@@ -152,10 +155,20 @@ impl Rgba {
         w.finish().map_err(std::io::Error::other)
     }
 
+    /// Decodes a PNG of at most `MAX_PNG_BYTES` and `MAX_PNG_SIDE` pixels a side: the inbox is a
+    /// folder other programs can write to, so a picture in it is checked before it is decoded.
     pub fn read_png(path: &Path) -> std::io::Result<Rgba> {
+        let meta = std::fs::symlink_metadata(path)?;
+        if !meta.is_file() || meta.len() > MAX_PNG_BYTES {
+            return Err(std::io::Error::other("not a plain file, or too large"));
+        }
         let mut dec = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path)?));
         dec.set_transformations(png::Transformations::normalize_to_color8() | png::Transformations::ALPHA);
         let mut reader = dec.read_info().map_err(std::io::Error::other)?;
+        let (w, h) = (reader.info().width, reader.info().height);
+        if w == 0 || h == 0 || w > MAX_PNG_SIDE || h > MAX_PNG_SIDE {
+            return Err(std::io::Error::other("png dimensions out of range"));
+        }
         let size = reader
             .output_buffer_size()
             .ok_or_else(|| std::io::Error::other("png too large"))?;
@@ -171,6 +184,54 @@ impl Rgba {
             px,
         })
     }
+
+    /// At most `max` pixels on the longer side, by dropping pixels (a thumbnail, not a resample).
+    pub fn shrink(&self, max: u32) -> Rgba {
+        let k = self.w.max(self.h).div_ceil(max.max(1)).max(1);
+        let (w, h) = ((self.w / k).max(1), (self.h / k).max(1));
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * k * self.w + x * k) * 4) as usize;
+                px.extend_from_slice(&self.px[i..i + 4]);
+            }
+        }
+        Rgba { w, h, px }
+    }
+}
+
+pub const MAX_PNG_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_PNG_SIDE: u32 = 8192;
+
+/// A capture is refused while anything on screen is still moving or leaving: a secure field in
+/// flight has no settled box to blank, and a half-faded element is not what the note is about.
+pub fn still(tree: &[ElementSnap]) -> Result<(), String> {
+    match tree.iter().find(|e| e.moving || e.exiting) {
+        Some(e) => Err(format!(
+            "the screen is still moving ({}); press Enter again",
+            e.key.as_deref().unwrap_or("an element")
+        )),
+        None => Ok(()),
+    }
+}
+
+/// What an element and everything inside it says, to tell whether the element a note was opened
+/// on is still the one on screen when the note is saved (rows are keyed by position).
+pub fn fingerprint(tree: &[ElementSnap], i: usize) -> String {
+    (0..tree.len())
+        .filter(|&j| in_subtree(tree, i, j))
+        .map(|j| {
+            let e = &tree[j];
+            format!(
+                "{}|{}|{}|{}",
+                e.role,
+                e.key.as_deref().unwrap_or(""),
+                e.label.as_deref().unwrap_or(""),
+                e.text.as_deref().unwrap_or("")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Paints every secure element's visible box in `BLANK_RGBA`, then checks each one: the
@@ -293,7 +354,40 @@ pub enum StatusState {
     WontFix,
 }
 
-/// `status.json`, as the lead's `feedback.sh set` writes it next to a note.
+pub const MAX_STATUS_BYTES: u64 = 16 * 1024;
+pub const MAX_NOTE_JSON_BYTES: u64 = 256 * 1024;
+pub const MAX_REPLY_CHARS: usize = 2000;
+pub const MAX_BY_CHARS: usize = 40;
+pub const MAX_COMMENT_CHARS: usize = 4000;
+/// The inbox holds at most this many notes and bytes; see [`make_room`].
+pub const MAX_NOTES: usize = 200;
+pub const MAX_INBOX_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Text from a file as the panel may show it: no control characters (a newline stays), no bidi
+/// overrides or isolates, at most `max` characters.
+pub fn clean_text(s: &str, max: usize) -> String {
+    s.chars()
+        .filter(|&c| c == '\n' || !(c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{feff}')))
+        .take(max)
+        .collect()
+}
+
+fn is_sha(s: &str) -> bool {
+    (7..=40).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A note's id is its folder name; only these may become element keys and paths.
+pub fn valid_id(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 80
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// `status.json`, as the lead's `feedback.sh set` writes it next to a note. It comes from outside
+/// the app: anything that is not exactly the expected shape is dropped, never trusted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Status {
     pub state: StatusState,
@@ -313,9 +407,18 @@ impl Status {
     };
 
     pub fn parse(src: &str) -> Option<Status> {
+        if src.len() as u64 > MAX_STATUS_BYTES {
+            return None;
+        }
         let v: Value = serde_json::from_str(src).ok()?;
-        let s = |k: &str| v[k].as_str().filter(|s| !s.is_empty()).map(str::to_string);
-        let state = match v["state"].as_str()? {
+        let v = v.as_object()?;
+        let text = |k: &str, max: usize| {
+            v.get(k)
+                .and_then(Value::as_str)
+                .map(|s| clean_text(s, max))
+                .filter(|s| !s.trim().is_empty())
+        };
+        let state = match v.get("state")?.as_str()? {
             "new" => StatusState::New,
             "seen" => StatusState::Seen,
             "fixing" => StatusState::Fixing,
@@ -325,10 +428,14 @@ impl Status {
         };
         Some(Status {
             state,
-            reply: s("reply"),
-            fixed_in_commit: s("fixed_in_commit"),
-            updated_at: s("updated_at"),
-            by: s("by"),
+            reply: text("reply", MAX_REPLY_CHARS),
+            fixed_in_commit: v
+                .get("fixed_in_commit")
+                .and_then(Value::as_str)
+                .filter(|s| is_sha(s))
+                .map(str::to_ascii_lowercase),
+            updated_at: text("updated_at", 40),
+            by: text("by", MAX_BY_CHARS),
         })
     }
 
@@ -339,7 +446,7 @@ impl Status {
             StatusState::Seen => "Seen".into(),
             StatusState::Fixing => "Being fixed".into(),
             StatusState::Fixed => match &self.fixed_in_commit {
-                Some(c) => format!("Fixed in {}", &c[..c.len().min(9)]),
+                Some(c) => format!("Fixed in {}", c.chars().take(9).collect::<String>()),
                 None => "Fixed".into(),
             },
             StatusState::WontFix => "Won't fix".into(),
@@ -347,7 +454,9 @@ impl Status {
     }
 }
 
-/// A note as the panel lists it.
+type Stamp = (Option<std::time::SystemTime>, Option<std::time::SystemTime>);
+
+/// A note as the panel lists it. `id` is the folder's name.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NoteEntry {
     pub id: String,
@@ -357,41 +466,131 @@ pub struct NoteEntry {
     pub tags: Vec<String>,
     pub element_path: String,
     pub status: Status,
+    /// Bytes of the note's own files.
+    pub bytes: u64,
+    stamp: Stamp,
 }
 
-/// Every complete note in `inbox`, newest first. Half-written folders (dot-prefixed) and folders
-/// without a readable `note.json` are skipped; an unreadable `status.json` counts as "new".
-pub fn scan(inbox: &Path) -> Vec<NoteEntry> {
+/// A plain file of at most `max` bytes (never a symlink), or nothing.
+fn read_capped(path: &Path, max: u64) -> Option<Vec<u8>> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    (meta.is_file() && meta.len() <= max)
+        .then(|| std::fs::read(path).ok())
+        .flatten()
+}
+
+fn mtime(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::symlink_metadata(path).ok()?.modified().ok()
+}
+
+const NOTE_FILES: [&str; 5] = ["note.json", "status.json", "window.png", "element.png", "tree.json"];
+
+fn read_entry(dir: PathBuf, id: String, stamp: Stamp) -> Option<NoteEntry> {
+    let v: Value = serde_json::from_slice(&read_capped(&dir.join("note.json"), MAX_NOTE_JSON_BYTES)?).ok()?;
+    // The folder's name is the id: a copied folder cannot bring a second note with the same id.
+    if v["schema"].as_str() != Some(NOTE_SCHEMA) || v["id"].as_str() != Some(id.as_str()) {
+        return None;
+    }
+    let status = read_capped(&dir.join("status.json"), MAX_STATUS_BYTES)
+        .and_then(|b| Status::parse(std::str::from_utf8(&b).ok()?))
+        .unwrap_or(Status::NEW);
+    let bytes = NOTE_FILES
+        .iter()
+        .filter_map(|f| std::fs::symlink_metadata(dir.join(f)).ok())
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+        .sum();
+    Some(NoteEntry {
+        created_at: clean_text(v["created_at"].as_str().unwrap_or_default(), 40),
+        comment: clean_text(v["comment"].as_str().unwrap_or_default(), MAX_COMMENT_CHARS),
+        tags: v["tags"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .filter(|t| TAGS.contains(t))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        element_path: clean_text(v["element"]["key_path"].as_str().unwrap_or_default(), 400),
+        status,
+        bytes,
+        stamp,
+        id,
+        dir,
+    })
+}
+
+/// Every complete note in `inbox`, newest first. A note whose `note.json` and `status.json` have
+/// the modification times `previous` saw is taken from there without reading a byte. Skipped:
+/// half-written (dot-prefixed) folders, symlinks, names that are not ids, and folders without a
+/// readable `note.json` naming that folder. An unreadable `status.json` counts as "new".
+pub fn scan(inbox: &Path, previous: &[NoteEntry]) -> Vec<NoteEntry> {
     let Ok(dir) = std::fs::read_dir(inbox) else {
         return Vec::new();
     };
     let mut out: Vec<NoteEntry> = dir
         .flatten()
-        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
         .filter_map(|e| {
-            let dir = e.path();
-            let v: Value = serde_json::from_slice(&std::fs::read(dir.join("note.json")).ok()?).ok()?;
-            if v["schema"].as_str() != Some(NOTE_SCHEMA) {
+            let id = e.file_name().into_string().ok().filter(|n| valid_id(n))?;
+            if !e.file_type().ok()?.is_dir() {
                 return None;
             }
-            let status = std::fs::read_to_string(dir.join("status.json"))
-                .ok()
-                .and_then(|s| Status::parse(&s))
-                .unwrap_or(Status::NEW);
-            Some(NoteEntry {
-                id: v["id"].as_str()?.to_string(),
-                created_at: v["created_at"].as_str().unwrap_or_default().to_string(),
-                comment: v["comment"].as_str().unwrap_or_default().to_string(),
-                tags: v["tags"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|t| t.as_str().map(str::to_string)).collect())
-                    .unwrap_or_default(),
-                element_path: v["element"]["key_path"].as_str().unwrap_or_default().to_string(),
-                status,
-                dir,
-            })
+            let dir = e.path();
+            let stamp: Stamp = (mtime(&dir.join("note.json")), mtime(&dir.join("status.json")));
+            stamp.0?;
+            match previous.iter().find(|p| p.id == id && p.stamp == stamp) {
+                Some(p) => Some(p.clone()),
+                None => read_entry(dir, id, stamp),
+            }
         })
         .collect();
     out.sort_by(|a, b| b.id.cmp(&a.id));
     out
+}
+
+/// Removes temp folders a crash left behind (older than ten minutes: never one being written).
+pub fn sweep_temp(inbox: &Path) {
+    let Ok(dir) = std::fs::read_dir(inbox) else { return };
+    for e in dir.flatten() {
+        let old = e
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|d| d.as_secs() > 600);
+        if old && e.file_name().to_string_lossy().starts_with(".tmp-") && e.file_type().is_ok_and(|t| t.is_dir()) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+/// Makes room for one more note under the caps: the oldest notes the lead marked "fixed" are
+/// removed first, and only those. Nothing else is ever deleted; with no fixed note left, the new
+/// note is refused and the message says why.
+pub fn make_room(notes: &[NoteEntry], max_notes: usize, max_bytes: u64) -> Result<Vec<String>, String> {
+    let mut count = notes.len();
+    let mut bytes: u64 = notes.iter().map(|n| n.bytes).sum();
+    let full = format!(
+        "the inbox is full ({count} notes, {} MB) and too few are marked fixed: ask the lead to answer the oldest",
+        bytes / (1024 * 1024)
+    );
+    // Plan first: when the fixed notes cannot make enough room, nothing is deleted.
+    let mut plan = Vec::new();
+    let mut fixed = notes.iter().rev().filter(|n| {
+        n.status.state == StatusState::Fixed
+            && valid_id(&n.id)
+            && n.dir.file_name().and_then(|f| f.to_str()) == Some(n.id.as_str())
+    });
+    while count >= max_notes || bytes > max_bytes {
+        let n = fixed.next().ok_or_else(|| full.clone())?;
+        plan.push(n);
+        count -= 1;
+        bytes = bytes.saturating_sub(n.bytes);
+    }
+    for n in &plan {
+        std::fs::remove_dir_all(&n.dir).map_err(|e| format!("could not remove the fixed note {}: {e}", n.id))?;
+    }
+    Ok(plan.into_iter().map(|n| n.id.clone()).collect())
 }

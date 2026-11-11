@@ -18,10 +18,12 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 serde_json = "1"
 # Only for the `feedback` feature (already in the tree through rune: no new crate is compiled).
 png = { version = "0.18", optional = true }
+# Names the surface format and device types of the capture; the same wgpu rune already builds.
+wgpu = { version = "30", default-features = false, optional = true }
 
 [features]
 # Live feedback mode (src/feedback/): on for test builds, OFF for release.
-feedback = ["dep:png"]
+feedback = ["dep:png", "dep:wgpu"]
 
 [dev-dependencies]
 # For headless golden-PNG tests.
