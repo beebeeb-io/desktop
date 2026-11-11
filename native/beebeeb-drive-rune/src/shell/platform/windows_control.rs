@@ -566,6 +566,139 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), vec![Request::Show]);
     }
 
+    /// A pipe somebody made before the app: `sddl` is its security descriptor. It takes one
+    /// client, keeps what that client wrote, and answers a forged `ok`.
+    struct Squatter {
+        name: String,
+        received: Arc<Mutex<Vec<u8>>>,
+        stop: Arc<AtomicBool>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl Squatter {
+        fn received(&self) -> Vec<u8> {
+            self.received.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for Squatter {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            let Some(worker) = self.worker.take() else { return };
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !worker.is_finished() && Instant::now() < deadline {
+                drop(open_client(&self.name));
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if worker.is_finished() {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    /// `Err`: the Win32 error of creating the pipe (a descriptor this user may not set).
+    fn squat(name: &str, sddl: &str) -> Result<Squatter, u32> {
+        let sddl_w = wide(sddl);
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: `sddl_w` is NUL-terminated and outlives the call; `descriptor` is a live local
+        // that receives a LocalAlloc'd descriptor on success, freed below.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl_w.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        };
+        assert!(ok != 0 && !descriptor.is_null(), "{sddl} is SDDL");
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        let name_w = wide(name);
+        // SAFETY: `name_w` is NUL-terminated; `attributes` and its descriptor are alive for the
+        // call, which copies the descriptor onto the new pipe object.
+        let pipe = unsafe {
+            CreateNamedPipeW(
+                name_w.as_ptr(),
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                1024,
+                1024,
+                0,
+                &attributes,
+            )
+        };
+        let error = last_error();
+        // SAFETY: allocated by the conversion above, freed exactly once.
+        unsafe { LocalFree(descriptor) };
+        if pipe == INVALID_HANDLE_VALUE || pipe.is_null() {
+            return Err(error);
+        }
+        let pipe = Handle(pipe as isize);
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (sink, thread_stop) = (received.clone(), stop.clone());
+        let worker = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::SeqCst) {
+                // SAFETY: `pipe` is this thread's live pipe handle; no OVERLAPPED.
+                let connected = unsafe { ConnectNamedPipe(pipe.raw(), ptr::null_mut()) } != 0
+                    || last_error() == ERROR_PIPE_CONNECTED;
+                if connected && !thread_stop.load(Ordering::SeqCst) {
+                    let line = read_until(&pipe, MAX_REQUEST, Instant::now() + Duration::from_millis(600), |b| {
+                        b.contains(&b'\n')
+                    });
+                    if let Some(line) = line {
+                        sink.lock().unwrap().extend_from_slice(&line);
+                        write_all(&pipe, b"ok\n");
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                }
+                // SAFETY: `pipe` is this thread's live pipe handle.
+                unsafe { DisconnectNamedPipe(pipe.raw()) };
+            }
+        });
+        Ok(Squatter {
+            name: name.to_owned(),
+            received,
+            stop,
+            worker: Some(worker),
+        })
+    }
+
+    /// Task 2455, the review's scenario as far as one account can stage it: somebody created
+    /// the app's pipe name FIRST, with an access list that lets everyone in, and answers `ok`
+    /// to anything. A launch must not take that for the running Beebeeb: it writes nothing (no
+    /// verb, no link) and reports the channel unreachable, and the app cannot serve the name.
+    #[test]
+    fn a_pipe_that_admits_everyone_is_not_the_running_app_and_gets_no_request() {
+        let name = test_name("squat-open");
+        let sid = current_user_sid().unwrap();
+        // Everyone (WD) and this user: the squatter lets its victim connect.
+        let squatter = squat(&name, &format!("D:(A;;GA;;;WD)(A;;GA;;;{sid})")).unwrap();
+        let (handler, _) = recording(Reply::Ok);
+        assert!(
+            matches!(serve(&name, REAL, handler), Err(ServeError::AlreadyRunning)),
+            "the name is taken: the app is not the instance"
+        );
+        let link = Request::Open("beebeeb://open/files?folder=Secret_1".into());
+        for request in [link, Request::QuitForUpdate, Request::Show] {
+            assert_eq!(
+                send(&name, &request, Duration::from_secs(2)),
+                Delivery::Unreachable,
+                "{request:?}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            String::from_utf8_lossy(&squatter.received()),
+            "",
+            "the squatter was handed a request"
+        );
+    }
+
     /// A panic in the handler is a "busy" answer, not the end of the channel.
     #[test]
     fn a_panicking_handler_does_not_end_the_channel() {
