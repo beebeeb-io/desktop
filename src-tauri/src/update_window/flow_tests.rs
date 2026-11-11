@@ -320,7 +320,8 @@ async fn an_accepted_manifest_becomes_the_replay_mark_and_a_refused_one_never_do
 /// The order a native install needs: sync quiet first, then the record and the hand-off note, then the installer.
 #[test]
 fn a_native_install_makes_sync_quiet_before_the_note_and_the_installer() {
-    let source = include_str!("flow.rs");
+    // A Windows checkout may hold CRLF line endings.
+    let source = include_str!("flow.rs").replace("\r\n", "\n");
     let body = &source[source.find("pub(crate) async fn download_record_install(").unwrap()..];
     let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("{needle} is gone"));
     let order = [
