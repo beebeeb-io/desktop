@@ -1,0 +1,8 @@
+2026-11-11T01:11:04+01:00
+frame DW-0801: section=1 field=1 data-search=recent
+frame DW-1105: section=1 field=1 data-search=results
+files: fields=1 ctrlF=true filter=0 sort=1 asList=1 asGrid=1
+enter: focused=Search names
+enter: url=http://localhost:5251/?window=main-app&platform=windows&section=search searchSectionsBefore=0 searchSectionsAfter=1
+frames=2/2 pageErrors=0
+walkthrough exit=0

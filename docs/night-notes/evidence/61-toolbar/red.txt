@@ -1,0 +1,36 @@
+2026-11-11T00:47:26+01:00
+bun test v1.3.4 (5eb2145b)
+
+tests/filesToolbar.test.tsx:
+44 | test('the toolbar draws one labelled search field and no Search names button', () => {
+45 |   const tree = expand(Toolbar({ p: props, h: {} }))
+46 |   const fields = elementsOf(tree).filter((node) => node.type === 'input'
+47 |     && node.props['aria-label'] === 'Search names'
+48 |     && node.props.placeholder === 'Search names')
+49 |   expect(fields.length).toBe(1)
+                             ^
+error: expect(received).toBe(expected)
+
+Expected: 1
+Received: 0
+
+      at <anonymous> (/home/guus/code/bb-worktrees/desktop-v2-night-2/tests/filesToolbar.test.tsx:49:25)
+(fail) the toolbar draws one labelled search field and no Search names button [10.96ms]
+53 | 
+54 | test('Enter in the field calls onFind once and is prevented; other keys do not', () => {
+55 |   let finds = 0
+56 |   const tree = expand(Toolbar({ p: props, h: { onFind: () => { finds += 1 } } }))
+57 |   const input = elementsOf(tree).find((node) => node.type === 'input' && node.props['aria-label'] === 'Search names')
+58 |   expect(input).toBeDefined()
+                     ^
+error: expect(received).toBeDefined()
+
+Received: undefined
+
+      at <anonymous> (/home/guus/code/bb-worktrees/desktop-v2-night-2/tests/filesToolbar.test.tsx:58:17)
+(fail) Enter in the field calls onFind once and is prevented; other keys do not [0.74ms]
+
+ 1 pass
+ 2 fail
+ 6 expect() calls
+Ran 3 tests across 1 file. [342.00ms]
