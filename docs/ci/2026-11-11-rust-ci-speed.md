@@ -267,18 +267,25 @@ head, run 42993261171: 58 more tests than A, several of them KDF-heavy, and the 
 | Job | Run | Total | Compile | Test execution | Truth line (library) | Count guard |
 |---|---|---|---|---|---|---|
 | Rust test (Linux) | cold cache, 43001294259 | 318 s | 199 s | 82.15 s | `test result: ok. 2732 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 82.15s` | `6 harnesses; 2778 executed tests; cargo exit 0` |
-| | warm cache, @@R6@@ | @@LT@@ | @@LC@@ | @@LE@@ | @@LL@@ | @@LG@@ |
+| | warm cache, 43004717263 (head `f98f1ac8`) | **187 s** | 51.65 s | 82.50 s | `test result: ok. 2732 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 82.50s` | `6 harnesses; 2778 executed tests; cargo exit 0` |
 | Rust check (Windows) | cold cache | 587 s | 350 s | 198.45 s | `test result: ok. 2597 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 198.45s` | `6 harnesses; 2643 executed tests; cargo exit 0` |
-| | warm cache | @@WT@@ | @@WC@@ | @@WE@@ | @@WL@@ | @@WG@@ |
+| | warm cache | **439 s** | 129 s | 242.00 s | `test result: ok. 2597 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 242.00s` | `6 harnesses; 2643 executed tests; cargo exit 0` |
 | Rust check (macOS) | cold cache | 496 s | 238 s | 229.49 s | `test result: ok. 3077 passed; 0 failed; 9 ignored; 0 measured; 0 filtered out; finished in 229.49s` | `6 harnesses; 3123 executed tests; cargo exit 0` |
-| | warm cache | @@MT@@ | @@MC@@ | @@ME@@ | @@ML@@ | @@MG@@ |
+| | warm cache | **381 s** | 131 s | 213.58 s | `test result: ok. 3077 passed; 0 failed; 9 ignored; 0 measured; 0 filtered out; finished in 213.58s` | `6 harnesses; 3123 executed tests; cargo exit 0` |
 
 Compile and test seconds come from the action's own lines in each job log (`rust-suite compile line`,
 `rust-suite truth line`); totals from `gh run view <id> --json jobs`. "Cold" = the dependency cache missed
 (`No cache found.`), so every dependency was compiled: that is the worst case, and after the merge only the
 first run on each base branch pays it.
 
-Test execution, same tests, B → after: **Linux 280.82 → 82.15 s, Windows 414.66 → 198.45 s, macOS 388.20 →
+**Job totals, B → after with a warm cache: Linux 436 → 187 s, Windows 799 → 439 s, macOS 841 → 381 s**
+(against A: 295 → 187, 661 → 439, 666 → 381). In the warm run the cache restore took 14 s (Linux, 698 MB),
+33 s (Windows, 733 MB) and 17 s (macOS); what is compiled after it is the crate itself (52 s, 129 s, 131 s),
+once instead of two or three times. Hosted runners differ from run to run: Windows executed the same tests in
+198.45 s in the cold run and 242.00 s in the warm one, macOS in 229.49 s and 213.58 s (and 137.56 s in run
+43002780533).
+
+Test execution, same tests, B → after (cold run): **Linux 280.82 → 82.15 s, Windows 414.66 → 198.45 s, macOS 388.20 →
 229.49 s.** The pass counts are B's plus its 6 red pins, which the base fixed meanwhile (Linux 2726 + 6 = 2732,
 Windows 2591 + 6 = 2597, macOS 3071 + 6 = 3077); ignored counts are unchanged (7, 7, 9).
 
@@ -304,7 +311,7 @@ input (`test-threads`) away; see §8.
 `finder_lock_and_sign_out_tests::a_sign_out_leaves_no_account_row_and_no_owner` failed at
 `finder_lock_and_sign_out_tests.rs:742:13` ("Finder accepts are open…"), `3076 passed; 1 failed; 9 ignored`,
 137.56 s. That is workspace task LD-0075, word for word (first seen 2026-11-05 on a docs-only pull request,
-again on 2026-11-08). The same job passed in runs 43001294259 and @@R6@@ with the same configuration. What this
+again on 2026-11-08). The same job passed in runs 43001294259 and 43004717263 with the same configuration. What this
 pull request does to that flake's RATE is not known: 1 red in 3 macOS runs of the final configuration is too
 few runs to tell, and the test's race (a shared scratch state directory) is sensitive to timing, which this
 pull request changes. It is reported, not fixed (the file belongs to the sign-out lane).
