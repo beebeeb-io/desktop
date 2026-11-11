@@ -162,7 +162,7 @@ fn never_overwrite_nonempty_path_with_empty() {
 }
 
 #[test]
-fn heal_clears_blocked_and_resnapshots() {
+fn heal_detects_blocked_rows_and_prepareownedrows_resets_them() {
     let master = beebeeb_core::kdf::MasterKey::from_bytes([7; 32]);
     let file_id = "a0000000-0000-4000-8000-000000000003";
     let file_name = beebeeb_core::encrypt::encrypt_name(&master, file_id, "notes.txt", None).unwrap();
@@ -193,32 +193,34 @@ fn heal_clears_blocked_and_resnapshots() {
     db.upsert_file(&entry).unwrap();
     db.set_sync_cursor(42).unwrap();
 
-    // The heal migration must clear blocked fingerprints and request a resnapshot.
+    // The heal mechanism must detect blocked/nameless rows.
     assert!(!db.envelope_heal_done().unwrap());
-    let cleared = db.clear_all_blocked_fingerprints().unwrap();
-    assert_eq!(cleared, 1);
-    db.request_resnapshot().unwrap();
-    db.mark_envelope_heal_done().unwrap();
-    assert!(db.envelope_heal_done().unwrap());
-
-    // After clearing, the record's blocked_fingerprint is gone.
-    let record = db.get_owned_key_record(file_id).unwrap().unwrap();
     assert!(
-        record.blocked_fingerprint.is_none(),
-        "the heal must clear blocked_fingerprint"
+        db.has_blocked_or_nameless_rows().unwrap(),
+        "must detect blocked records or empty-path rows"
     );
 
-    // A resnapshot was requested.
+    // Requesting a resnapshot is the heal action.
+    db.request_resnapshot().unwrap();
     assert!(
         db.take_needs_resnapshot().unwrap(),
         "the heal must request a resnapshot"
     );
 
-    // Now a snapshot with the correct key should name the file.
+    // prepare_owned_rows resets blocked_fingerprint on every pass (line 747:
+    // `record.blocked_fingerprint = None;`). With the fixed request_envelope,
+    // the prod-shaped row resolves and the record is no longer blocked.
     let bridge = crate::engine_bridge::EngineBridge::new(Arc::new(db), Arc::new(fixture.api()));
     let row = prod_row(file_id, None, &file_name, false, 100);
     let prepared = run(bridge.prepare_owned_rows(&[row])).unwrap();
-    assert!(prepared[0].readable, "after clearing blocked, the row must be readable");
+    assert!(
+        prepared[0].readable,
+        "prepare_owned_rows resets blocked_fingerprint; the row is readable with the correct key"
+    );
+    assert!(
+        prepared[0].record.blocked_fingerprint.is_none(),
+        "blocked_fingerprint is cleared by prepare_owned_rows"
+    );
 
     let snapshot = crate::api_client::SyncSnapshot {
         seq_id: 43,
@@ -228,6 +230,24 @@ fn heal_clears_blocked_and_resnapshots() {
 
     let entry = bridge.db().get_file(file_id).unwrap().unwrap();
     assert_eq!(entry.path, "notes.txt", "the healed row must have its real name");
+
+    // Mark heal done; a DB without blocked rows does not request another snapshot.
+    bridge.db().mark_envelope_heal_done().unwrap();
+    assert!(bridge.db().envelope_heal_done().unwrap());
+}
+
+#[test]
+fn heal_not_needed_when_no_blocked_rows() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = StateDb::open(temp.path().join("db")).unwrap();
+    assert!(!db.envelope_heal_done().unwrap());
+    assert!(
+        !db.has_blocked_or_nameless_rows().unwrap(),
+        "an empty DB has no blocked rows"
+    );
+    // The heal logic would skip the resnapshot and just mark done.
+    db.mark_envelope_heal_done().unwrap();
+    assert!(db.envelope_heal_done().unwrap());
 }
 
 #[test]

@@ -249,20 +249,17 @@ pub async fn sync_tick_outcome(
     // place), we re-bootstrap from a fresh snapshot — the snapshot is always
     // authoritative, so a re-bootstrap can never lose data.
 
-    // Task 2445: a one-time heal for DBs whose owned_key_records were blocked by
-    // the null-envelope bug (request_envelope treated JSON null as "carries an
-    // envelope"). Clears all blocked fingerprints and forces a re-snapshot so
-    // every row is re-prepared with the fixed request_envelope.
-    if !bridge.db().envelope_heal_done()? {
-        let cleared = bridge.db().clear_all_blocked_fingerprints()?;
-        if cleared > 0 {
-            tracing::info!(
-                cleared,
-                "task 2445: cleared blocked fingerprints from the null-envelope bug"
-            );
-            bridge.db().request_resnapshot()?;
-        }
-        bridge.db().mark_envelope_heal_done()?;
+    // Task 2445: a one-time heal for DBs hit by the null-envelope bug. Forces a
+    // re-snapshot so every row is re-prepared with the fixed request_envelope.
+    // P2-A: do NOT clear blocked_fingerprint (that would lift legitimate blocks
+    // from malformed envelopes and lost adoption races). prepare_owned_rows
+    // already resets blocked_fingerprint on every pass.
+    // P1-B: mark done only AFTER the snapshot succeeds (see below); requesting
+    // here and marking after bootstrap prevents a lost heal on network failure.
+    let needs_envelope_heal = !bridge.db().envelope_heal_done()? && bridge.db().has_blocked_or_nameless_rows()?;
+    if needs_envelope_heal {
+        tracing::info!("task 2445: requesting re-snapshot for the null-envelope heal");
+        bridge.db().request_resnapshot()?;
     }
 
     // A pending re-snapshot request (e.g. a `file_restore` op the previous tick
@@ -296,6 +293,10 @@ pub async fn sync_tick_outcome(
                     bridge.db().clear_resnapshot_request(seen)?;
                 }
             }
+            // P1-B: mark the heal done only after a successful bootstrap.
+            if needs_envelope_heal {
+                bridge.db().mark_envelope_heal_done()?;
+            }
             applied_item_ids.extend(applied);
             return Ok(SyncTickOutcome {
                 conflicts,
@@ -313,6 +314,10 @@ pub async fn sync_tick_outcome(
                         if let Some(seen) = resnapshot_request {
                             bridge.db().clear_resnapshot_request(seen)?;
                         }
+                    }
+                    // P1-B: mark the heal done only after a successful bootstrap.
+                    if needs_envelope_heal {
+                        bridge.db().mark_envelope_heal_done()?;
                     }
                     applied_item_ids.extend(applied);
                     return Ok(SyncTickOutcome {
@@ -579,8 +584,13 @@ pub(crate) fn apply_snapshot(
         {
             if !rel_path.is_empty() {
                 resolved_paths.insert(file_id.to_string(), rel_path);
+                applied.push(file_id.to_string());
+            } else {
+                // P2-B: a blocked folder returns ("", kind). Its children must
+                // not be placed at the root; treat it as unplaced.
+                applied.push(file_id.to_string());
+                unplaced.insert(file_id.to_string());
             }
-            applied.push(file_id.to_string());
         } else if let Some(stored) = bridge.db().get_file(file_id)?.filter(|row| !row.path.is_empty()) {
             // A stored row the store refused now keeps its place; the rows below it stay under it.
             resolved_paths.insert(file_id.to_string(), stored.path);

@@ -733,35 +733,6 @@ impl StateDb {
         })?;
         Ok((rows.collect::<Result<Vec<_>>>()?, total))
     }
-    /// Task 2445: count of children for each folder id in `folder_ids`, in one query.
-    /// P3-5: chunks the id list to avoid SQLite's variable limit.
-    pub fn child_counts(&self, folder_ids: &[&str]) -> Result<std::collections::HashMap<String, i64>> {
-        if folder_ids.is_empty() {
-            return Ok(std::collections::HashMap::new());
-        }
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        let mut result = std::collections::HashMap::new();
-        // SQLite's SQLITE_MAX_VARIABLE_NUMBER is 999 by default; chunk to stay under.
-        for chunk in folder_ids.chunks(500) {
-            let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let sql = format!(
-                "SELECT parent_id, COUNT(*) FROM files
-                 WHERE parent_id IN ({placeholders}) AND status != 'trashing'
-                 GROUP BY parent_id"
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let params: Vec<&dyn rusqlite::types::ToSql> =
-                chunk.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
-            let rows = stmt.query_map(params.as_slice(), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })?;
-            for pair in rows {
-                let (k, v) = pair?;
-                result.insert(k, v);
-            }
-        }
-        Ok(result)
-    }
     pub fn list_contract_states_by_namespace(&self, namespace: Namespace) -> Result<Vec<FileContractState>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt = conn.prepare(

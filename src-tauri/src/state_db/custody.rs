@@ -221,20 +221,22 @@ impl StateDb {
         conn.execute("DELETE FROM owned_key_records WHERE file_id = ?1", [id])?;
         Ok(())
     }
-    /// Task 2445: clear all `blocked_fingerprint` values so blocked records are
-    /// re-evaluated on the next `prepare_owned_rows` pass.
-    pub fn clear_all_blocked_fingerprints(&self) -> Result<usize> {
+    /// Task 2445: whether any owned_key_records are blocked or any files have
+    /// empty paths (the symptom the null-envelope bug left). Used to decide
+    /// whether a re-snapshot is needed.
+    pub fn has_blocked_or_nameless_rows(&self) -> Result<bool> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let records = self.list_owned_key_records()?;
-        let mut cleared = 0usize;
-        for mut record in records {
-            if record.blocked_fingerprint.is_some() {
-                record.blocked_fingerprint = None;
-                Self::put_owned_key_record_conn(&conn, &record)?;
-                cleared += 1;
-            }
-        }
-        Ok(cleared)
+        let has: bool = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM owned_key_records
+                WHERE json_extract(record, '$.blocked_fingerprint') IS NOT NULL
+            ) OR EXISTS(
+                SELECT 1 FROM files WHERE path = '' AND status != 'trashing'
+            )",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(has)
     }
     /// Task 2445: whether the envelope-heal migration has run.
     pub fn envelope_heal_done(&self) -> Result<bool> {
