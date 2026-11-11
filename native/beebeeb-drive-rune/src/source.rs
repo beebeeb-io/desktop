@@ -45,7 +45,8 @@ pub struct StorageSummary {
 /// the real engine source will use channels or `rune::Latest` for async.
 pub trait DriveSource: Send + 'static {
     fn list(&self, folder_id: Option<&str>) -> Listing;
-    fn storage(&self) -> StorageSummary;
+    /// `None`: this source cannot know the account's used and total bytes (they are the server's).
+    fn storage(&self) -> Option<StorageSummary>;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,10 +160,10 @@ impl DriveSource for FixtureSource {
         }
     }
 
-    fn storage(&self) -> StorageSummary {
-        StorageSummary {
+    fn storage(&self) -> Option<StorageSummary> {
+        Some(StorageSummary {
             used_bytes: 235_000_000_000,    // 235 GB
             quota_bytes: 1_000_000_000_000, // 1 TB
-        }
+        })
     }
 }

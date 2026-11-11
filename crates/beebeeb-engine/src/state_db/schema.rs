@@ -23,6 +23,17 @@ impl StateDb {
         }
         Ok(Self(Mutex::new(conn), std::sync::atomic::AtomicU64::new(0)))
     }
+    /// Open an existing state database for reading only: nothing is created, migrated or written (not even the
+    /// journal mode), so a viewer can look at a database the engine owns. A database from an older build that lacks
+    /// a column a query names fails that query; it is never altered here.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(Self(Mutex::new(conn), std::sync::atomic::AtomicU64::new(0)))
+    }
     /// The schema of a state database, created if missing and brought up to today's columns. Runs inside
     /// [`StateDb::open`]'s `BEGIN IMMEDIATE`, so one opener applies it and any other opener waits and then finds it
     /// finished. `CREATE TABLE IF NOT EXISTS` covers both the first-run case and a re-open of a database that already

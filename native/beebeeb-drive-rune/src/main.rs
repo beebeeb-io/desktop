@@ -17,6 +17,7 @@
 //! ```
 
 mod source;
+mod source_engine;
 mod tokens;
 
 use rune::tok::motion;
@@ -39,7 +40,7 @@ const ROW_HEIGHT: f32 = 32.0;
 struct State {
     source: Box<dyn DriveSource>,
     listing: Listing,
-    storage: source::StorageSummary,
+    storage: Option<source::StorageSummary>,
     selected: Option<usize>,
     search: TextEdit,
     sidebar_section: SidebarSection,
@@ -77,8 +78,29 @@ impl SidebarSection {
     }
 }
 
+/// `--db <path>`: show the files of that `state.db` (opened read-only) instead of the fixture.
+fn db_arg() -> Option<std::path::PathBuf> {
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--db" {
+            return args.next().map(std::path::PathBuf::from);
+        }
+    }
+    None
+}
+
 fn init() -> State {
-    let source = Box::new(FixtureSource::new(5000));
+    let source: Box<dyn DriveSource> = match db_arg() {
+        Some(path) => match source_engine::EngineSource::open(&path) {
+            Ok(source) => Box::new(source),
+            Err(error) => {
+                // A fixed word and the path the person typed; never a name from the database.
+                eprintln!("beebeeb-drive: cannot open --db {}: {error}", path.display());
+                std::process::exit(2);
+            }
+        },
+        None => Box::new(FixtureSource::new(5000)),
+    };
     let listing = source.list(None);
     let storage = source.storage();
     State {
@@ -160,14 +182,19 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
 // ---------------------------------------------------------------------------
 
 fn sidebar(s: &State, t: &tokens::Theme, _dark: bool) -> El {
-    let storage = s.storage;
-    let used_pct = if storage.quota_bytes > 0 {
-        (storage.used_bytes as f64 / storage.quota_bytes as f64).min(1.0)
-    } else {
-        0.0
+    let used_pct = match s.storage {
+        Some(storage) if storage.quota_bytes > 0 => (storage.used_bytes as f64 / storage.quota_bytes as f64).min(1.0),
+        _ => 0.0,
     };
-    let used_label = format_bytes(storage.used_bytes);
-    let quota_label = format_bytes(storage.quota_bytes);
+    // No figure without the server (a `--db` source reads one file and never the network).
+    let storage_text = match s.storage {
+        Some(storage) => format!(
+            "{} of {}",
+            format_bytes(storage.used_bytes),
+            format_bytes(storage.quota_bytes)
+        ),
+        None => "Storage unavailable".to_string(),
+    };
 
     let mut sections = col().key("sections-list").grow(1.0).px(space::S2).gap(space::S1);
 
@@ -228,7 +255,7 @@ fn sidebar(s: &State, t: &tokens::Theme, _dark: bool) -> El {
                 ),
         )
         .child(
-            text(format!("{used_label} of {quota_label}"))
+            text(storage_text)
                 .key("storage-text")
                 .font(type_::CAPTION)
                 .color(t.text_tertiary),
