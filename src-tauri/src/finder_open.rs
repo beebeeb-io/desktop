@@ -175,9 +175,11 @@ mod tests {
             guard_statement.contains(&squeeze("finder_open::item_namespace(&db, id)")),
             "the namespace comes from `item_namespace`:\n{guard_statement}"
         );
+        // `item_namespace` moved to the engine's `finder_show.rs`; read here, the needle matched this test's own
+        // text.
         let own = squeeze(body_between(
-            &read("src/finder_open.rs"),
-            "pub(crate) fn item_namespace(",
+            &read("../crates/beebeeb-engine/src/finder_show.rs"),
+            "pub fn item_namespace(",
             "\n}\n",
         ));
         assert!(

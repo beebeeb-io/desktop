@@ -20,7 +20,7 @@ pub const TEST_ITEM_GATES: [&str; 4] = [
     "#[cfg(all(any(test, feature = \"test-support\")",
 ];
 
-fn shell_src() -> PathBuf {
+pub fn shell_src() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/src")
 }
 

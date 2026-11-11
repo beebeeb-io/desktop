@@ -141,8 +141,13 @@ fn no_macos_path_queues_content_through_the_entry_points_that_mint_nothing() {
     ];
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let read = |path: &Path| std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
-    // The top-level modules a Mac compiles: their `mod` lines survive in `lib.rs`.
-    let lib = macos_compiled(&read(&src.join("lib.rs")));
+    // The shell's top-level modules a Mac compiles: their `mod` lines survive in the SHELL's `lib.rs` (this test
+    // moved to the engine crate; read with the engine's `lib.rs`, 40 shell modules were no longer scanned).
+    let lib = macos_compiled(&read(&crate::source_census::shell_src().join("lib.rs")));
+    assert!(
+        lib.lines().any(|line| line.trim() == "mod account_commands;"),
+        "the shell's lib.rs is the one read"
+    );
     let compiled = |module: &str| {
         lib.lines().map(str::trim).any(|line| {
             line == format!("mod {module};")
@@ -218,7 +223,8 @@ fn no_macos_path_queues_content_through_the_entry_points_that_mint_nothing() {
             }
             let start = (0..i).rev().find(|&j| starts_fn(lines[j])).unwrap_or(0);
             let Some(k) = allowed.iter().position(|(file, call, function, guards, _)| {
-                *file == rel.strip_prefix(crate::source_census::ENGINE_PREFIX).unwrap_or(rel)
+                // Every allowed call is in an engine file: a shell file of the same name is not excused.
+                rel.strip_prefix(crate::source_census::ENGINE_PREFIX) == Some(*file)
                     && call == line
                     && lines[start].starts_with(function)
                     && guards.iter().all(|guard| lines[start..i].contains(guard))
@@ -238,7 +244,7 @@ fn no_macos_path_queues_content_through_the_entry_points_that_mint_nothing() {
     // The upload driver starts only through `watcher::spawn`, and nothing a Mac compiles calls it.
     let starts: Vec<String> = sources
         .iter()
-        .filter(|(rel, _)| rel != "watcher.rs")
+        .filter(|(rel, _)| rel.strip_prefix(crate::source_census::ENGINE_PREFIX) != Some("watcher.rs"))
         .flat_map(|(rel, mac)| {
             mac.lines()
                 .map(str::trim)
