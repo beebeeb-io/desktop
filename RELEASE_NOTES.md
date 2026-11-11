@@ -5,13 +5,15 @@
 **Known limitations:**
 - **Windows, after the names come back:** the app renames each affected file and folder on this PC back to its real name, one by one. With many files this can take a while. <!-- lead: state what the native rehearsal saw in Explorer for an install that was hit (leftover "Unavailable file …" folders or none), or remove this item -->
 - **Windows, moving to 0.9.0:** an install must be on 0.8.25 before it is offered 0.9.0. This happens by itself through two updates: first to 0.8.25, then to 0.9.0.
+- **macOS is not protected by the stricter update rules yet.** 0.8.25 is not released for macOS, so a Mac stays on its current version and keeps reading today's update address, checked with the first update key only. Someone able to change the update list there could still make a Mac show an update that is not the newest one. A Mac on 0.8.21 or later never installs an update by itself: it shows a "Download update" link to the Beebeeb site.
 - **Linux:** the Linux app still cannot sign in: it has no support for a system password store, and its sign-in window says "This feature is not available on this device."
 - **Still as in 0.8.24:** the limitations listed in 0.8.24's notes still apply.
 
 ### What's New
 
-- **[Windows] Ready for the next version of the app.** 0.9.0 will be a new build of Beebeeb for Windows. From 0.8.25 on, a Windows install looks for it at a new update address first. A list of updates at that address must be signed by Beebeeb, for this app and for the channel you follow, before the app uses it. If the list is not there yet, the app uses today's address as before. If the list is there and its signature, app name or channel is wrong, the app refuses it and installs nothing: it does not fall back to the old address.
-- **[Windows] A second update key.** 0.8.25 trusts two Beebeeb update keys: the one every release so far was signed with, and a new one that 0.9.0 and later use. 0.8.25 itself is signed with the first, so every earlier install accepts it.
+- **[Windows] Ready for the next version of the app.** 0.9.0 will be a new build of Beebeeb for Windows. From 0.8.25 on, a Windows install looks for it at a new update address first. A list of updates at that address must be signed by Beebeeb with the new update key, for this app and for the channel you follow, before the app uses it, and it may only offer 0.9.0 or later. The app also refuses a list that says it was signed before the new key existed, one signed more than 24 hours ahead of this PC's clock, and one older than a list it already accepted. If the list is not there yet, the app uses today's address as before. If the list is there and anything about it is wrong, the app refuses it and installs nothing: it does not fall back to the old address.
+- **[Windows] [Linux] Two update keys, each for its own versions.** 0.8.25 trusts two Beebeeb update keys and never mixes them. The key every release so far was signed with is accepted only at today's update address and only for versions below 0.9.0. The new key is accepted only at the new address and only for 0.9.0 and later. An update signed with the right key for the wrong kind of version is refused. 0.8.25 itself is signed with the first key, so every earlier install accepts it.
+- **[Windows] Sync is stopped cleanly before 0.9.0 installs.** Before the installer of 0.9.0 or later starts, the app lets uploads that are running finish (it waits up to two minutes), stops sync, and disconnects the Beebeeb folder from Explorer. If an upload is still running after two minutes, the app does not install the update, interrupts nothing, and says so; try again when the upload has finished.
 
 ### Bug Fixes / Hardening
 
@@ -22,7 +24,7 @@
 - **[Windows] [Linux] An update cannot be swapped for an older build (task 2449).**
   - **Before:** the app checked that an update was signed by Beebeeb, but not that it was the version the update list claimed. Someone able to change that list could have pointed the app at an older, signed installer with its known faults. This needed control of the release host first; no key was at risk and nothing unsigned could run.
   - **Now:** before it offers or installs an update, the app requires that the version is newer than the installed one, and that the update's signature names the very file being offered and that file's name carries the version. An older installer under a newer version number is refused. Choosing an older version on purpose in Settings (a channel downgrade) still works, and installs exactly the version it names.
-  - **Tests:** 11 new tests of the rules, with keys made inside the tests. Each of 8 deliberate breakages was caught by a test. <!-- lead: confirm 8 of 8 from the PR body -->
+  - **Tests:** 22 new tests of the update rules, with keys made inside the tests. Each of 26 deliberate breakages (8 of the first rules, 18 of the key, time and pre-install rules) was caught by a test. <!-- lead: confirm both counts from the PR body ("Delta (H1b)") -->
 - **[Windows] The app records which channel an update came from.** After an in-app update on Windows, "current channel" in About could be wrong, because the app wrote it down after the installer had already closed it. It is now written before the installer starts, and taken back if the install fails.
 <!-- lead: keep the next item only if the key-owner fix (task 2447, lane H2) is merged into this release; fill its tests from that PR -->
 - **[Windows] A safer sign-in when two accounts used one PC (task 2447).** If signing out could not remove an account's saved vault key from Windows, and another account then signed in on the same Windows user, the app could have started with the first account's key: the second account's names would not have been readable, and new uploads would have been unreadable on its other devices. The app now records which account a saved key belongs to and refuses a key that is not this account's. No key ever left the PC. An update from 0.8.24 keeps you signed in and does not ask for your recovery phrase.
@@ -35,7 +37,7 @@
 - Real hardware smoke test: <!-- lead: install 0.8.24, update to 0.8.25 from a locally served update list: signed in without the recovery phrase, names present, current channel right -->
 - Release workflow check: `node scripts/release-channel-checks.mjs notes 0.8.25 alpha --no-macos` passes on these notes.
 - Not verified:
-  - the move from 0.8.25 to 0.9.0: no 0.9.0 exists yet, so the new update address was tested against a local server with test keys only;
+  - the move from 0.8.25 to 0.9.0: no 0.9.0 exists yet, so the new update address was tested against a local server with test keys only, and stopping sync before the installer starts was tested without a running sync engine;
   - Linux on real hardware.
 
 ### Install / Update

@@ -1,13 +1,15 @@
 //! The rules an update must pass before this build offers or installs it (tasks 2449 and 2451). Pure: text and bytes
 //! in, a verdict or a refusal out; no network, no Tauri.
 //!
-//! Owns: the updater keys this build trusts (the one baked into `tauri.conf.json` and the next one, in
-//! `updater-v2.pub`); what a Tauri-format signature says (its key id, its signed file name); the rule that an
-//! artefact's signature names the file the address ends in and the version the manifest claims; and the check of a
-//! signed `desktop/v2/<channel>.json` manifest: signed by a trusted key for that channel's file, for this product and
-//! channel, never below the first native release, its artefact on our own host.
-//! Must not: fetch anything, read the clock, or fall back to an unsigned feed (the caller decides what a missing
-//! manifest means; a refusal here is final).
+//! Owns: the two updater keys this build trusts, each for its own release line and never the other's (the key baked
+//! into `tauri.conf.json`: the legacy feed, versions below 0.9.0; the key in `updater-v2.pub`: the v2 manifest,
+//! 0.9.0 and later); what a Tauri-format signature says (its key id, its signed file name, its signed time); the
+//! rule that an artefact's signature names the file the address ends in and the version the manifest claims; and
+//! the check of a signed `desktop/v2/<channel>.json` manifest: signed by the v2 key for that channel's file, for
+//! this product and channel, never below the first native release, signed inside the time bounds, its artefact on
+//! our own host and signed by the v2 key too.
+//! Must not: fetch anything, read the clock (the caller passes `now`), or fall back to an unsigned feed (the caller
+//! decides what a missing manifest means; a refusal here is final).
 //! Tests: `trust_tests`.
 
 use base64::Engine as _;
@@ -20,7 +22,16 @@ pub(crate) const ALLOWED_HOST: &str = "releases.beebeeb.io";
 pub(crate) const NATIVE_FLOOR: (u64, u64, u64) = (0, 9, 0);
 /// The largest artefact a v2 manifest may name.
 pub(crate) const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
-/// The next updater public key (task 2451), in the form `tauri signer generate` writes its `.pub` file. Until the
+/// The v2 key was made on 2026-11-11: `2026-11-11T00:00:00Z` in unix seconds. No manifest of the native line can
+/// honestly carry an earlier signed time, so an earlier one is refused. One fixed value for the whole 0.8.x bridge
+/// line, on purpose (lead ruling 2026-11-11 12:10 CET, after the security review): a per-build time would strand
+/// installs (0.9.0 published first and 0.8.25 built after it would make 0.8.25 refuse 0.9.0; a later 0.8.26 hotfix
+/// would refuse an already published 0.9.1).
+pub(crate) const V2_KEY_NOT_BEFORE: u64 = 1_794_355_200;
+/// A signed time may be this far ahead of this PC's clock. Beyond it the manifest is refused and never becomes a
+/// replay mark: one signature made with a wrong clock must not block a channel for good.
+pub(crate) const MAX_CLOCK_SKEW_SECS: u64 = 24 * 60 * 60;
+/// The v2 updater public key (task 2451), in the form `tauri signer generate` writes its `.pub` file. Until the
 /// real key is in the file it holds a line that starts with [`PLACEHOLDER_PREFIX`], and `build.rs` refuses a release
 /// build.
 pub(crate) const NEXT_PUBKEY_FILE: &str = include_str!("../../updater-v2.pub");
@@ -49,8 +60,17 @@ pub(crate) enum Refusal {
     SignatureForOtherFile,
     /// The offered version is not newer than the installed one.
     NotNewer,
-    /// A native release offered by a feed that is not signed.
+    /// A native release (0.9.0 or later), or a version this build cannot read, offered by the legacy feed.
     NativeFromUnsignedFeed,
+    /// Signed by a key this build trusts, but not for this release line: the legacy key on the v2 line, or the v2
+    /// key on the legacy line.
+    KeyScope,
+    /// The manifest's signed time is earlier than the v2 key itself ([`V2_KEY_NOT_BEFORE`]).
+    OlderThanKey,
+    /// The manifest's signed time is more than [`MAX_CLOCK_SKEW_SECS`] ahead of this PC's clock.
+    SignedInTheFuture,
+    /// Older than a manifest this install already accepted on the channel (a replay).
+    StaleManifest,
 }
 
 impl Refusal {
@@ -67,6 +87,10 @@ impl Refusal {
             Refusal::SignatureForOtherFile => "update_signature_other_file",
             Refusal::NotNewer => "update_not_newer",
             Refusal::NativeFromUnsignedFeed => "update_native_needs_signed_manifest",
+            Refusal::KeyScope => "update_key_not_for_this_line",
+            Refusal::OlderThanKey => "update_manifest_older_than_key",
+            Refusal::SignedInTheFuture => "update_manifest_signed_in_future",
+            Refusal::StaleManifest => "update_manifest_stale",
         }
     }
 
@@ -115,48 +139,72 @@ impl TrustedKey {
     }
 }
 
-/// The keys an update may be signed with: the baked one first, then the next one when its file holds a key.
-pub(crate) struct TrustedKeys(Vec<TrustedKey>);
+/// The release line an address serves: which key signs it and which versions it may offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Line {
+    /// `desktop/<latest|beta|alpha>.json`: the key in `tauri.conf.json`, versions below 0.9.0 only.
+    Legacy,
+    /// `desktop/v2/<channel>.json`: the v2 key, 0.9.0 and later only.
+    Native,
+}
+
+/// The two keys this build trusts, each for its own line. A signature by one of them on the other's line is
+/// refused: the legacy key has no password and was a repository secret (see task 2451), so it must never be able
+/// to sign a native release; and nothing signed by the v2 key belongs on the legacy feed.
+pub(crate) struct TrustedKeys {
+    legacy: TrustedKey,
+    native: Option<TrustedKey>,
+}
 
 impl TrustedKeys {
     /// `baked` is `plugins.updater.pubkey`; `next_file` is the text of `updater-v2.pub`. The baked key must parse.
-    /// The placeholder is no key; anything else in the file must parse, so a damaged key file is an error, never a
-    /// silently shorter list.
+    /// The placeholder is no key (this build then takes nothing from the native line); anything else in the file
+    /// must parse and must be another key than the baked one, so a damaged key file is an error, never a build
+    /// that silently trusts one key for both lines.
     pub(crate) fn new(baked: &str, next_file: &str) -> Result<Self, String> {
-        let mut keys = vec![TrustedKey::parse(baked).ok_or("the baked updater public key does not parse")?];
-        if !is_placeholder(next_file) {
+        let legacy = TrustedKey::parse(baked).ok_or("the baked updater public key does not parse")?;
+        let native = if is_placeholder(next_file) {
+            None
+        } else {
             let next = TrustedKey::parse(next_file).ok_or("updater-v2.pub does not hold a public key")?;
-            if next.key_id != keys[0].key_id {
-                keys.push(next);
+            if next.key_id == legacy.key_id {
+                return Err("updater-v2.pub holds the baked key: the two lines need two keys".into());
             }
+            Some(next)
+        };
+        Ok(Self { legacy, native })
+    }
+
+    /// The one key a line's signatures must be made with. `None`: this build has no key for that line.
+    pub(crate) fn for_line(&self, line: Line) -> Option<&TrustedKey> {
+        match line {
+            Line::Legacy => Some(&self.legacy),
+            Line::Native => self.native.as_ref(),
         }
-        Ok(Self(keys))
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// The baked key: the one the Tauri updater uses when it is given no other.
-    pub(crate) fn baked(&self) -> &TrustedKey {
-        &self.0[0]
-    }
-
-    /// The trusted key whose id a signature carries, before any byte is checked: which key to verify with.
-    pub(crate) fn key_for_signature(&self, signature: &str) -> Option<&TrustedKey> {
+    /// The line whose key made `signature`, by the key id it carries, before any byte is checked.
+    fn line_of(&self, signature: &str) -> Option<Line> {
         let text = minisign_text(signature)?;
         let id = key_id_of_line(text.lines().nth(1)?)?;
-        self.0.iter().find(|key| key.key_id == id)
+        if self.legacy.key_id == id {
+            Some(Line::Legacy)
+        } else {
+            self.native
+                .as_ref()
+                .is_some_and(|key| key.key_id == id)
+                .then_some(Line::Native)
+        }
     }
 
-    /// Verifies `bytes` against `signature` with whichever trusted key made it (the trusted comment included), and
-    /// returns the file name that signature signs.
-    fn verify(&self, bytes: &[u8], signature: &str) -> Option<String> {
-        let key = self.key_for_signature(signature)?;
-        let text = minisign_text(signature)?;
-        let parsed = minisign_verify::Signature::decode(&text).ok()?;
-        key.key.verify(bytes, &parsed, true).ok()?;
-        signed_file_name(signature)
+    /// The key of `line` when `signature` carries its id. A signature by the other line's key is
+    /// [`Refusal::KeyScope`]; one by no key of ours is `unknown`.
+    fn signer_on(&self, line: Line, signature: &str, unknown: Refusal) -> Result<&TrustedKey, Refusal> {
+        match self.line_of(signature) {
+            Some(made_by) if made_by == line => self.for_line(line).ok_or(unknown),
+            Some(_) => Err(Refusal::KeyScope),
+            None => Err(unknown),
+        }
     }
 }
 
@@ -176,6 +224,40 @@ pub(crate) fn signed_file_name(signature: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The time a Tauri signature was made (`timestamp:<n>` in its trusted comment, unix seconds). Covered by the
+/// signature like the file name. Digits only, at most 12 of them.
+pub(crate) fn signed_time(signature: &str) -> Option<u64> {
+    let text = minisign_text(signature)?;
+    let comment = text.lines().nth(2)?.strip_prefix("trusted comment: ")?;
+    let digits = comment.split('\t').find_map(|field| field.strip_prefix("timestamp:"))?;
+    (!digits.is_empty() && digits.len() <= 12 && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| digits.parse().ok())?
+}
+
+/// The time bounds of a v2 manifest, in unix seconds (no time zone anywhere). `signed_at` is the manifest
+/// signature's own time, `now` this PC's clock, `seen` the newest signed time this install accepted on the channel.
+/// A mark further ahead than the future bound lets in was written under a clock that has since been set back: it
+/// would refuse every honest manifest, so it is not believed here (and never lowered where it is stored).
+pub(crate) fn check_signed_time(signed_at: u64, now: u64, seen: Option<u64>) -> Result<(), Refusal> {
+    if signed_at < V2_KEY_NOT_BEFORE {
+        return Err(Refusal::OlderThanKey);
+    }
+    let latest_believable = now.saturating_add(MAX_CLOCK_SKEW_SECS);
+    if signed_at > latest_believable {
+        return Err(Refusal::SignedInTheFuture);
+    }
+    if seen.is_some_and(|seen| seen <= latest_believable && signed_at < seen) {
+        return Err(Refusal::StaleManifest);
+    }
+    Ok(())
+}
+
+/// The replay mark to store after a manifest signed at `accepted` passed: never lower than the stored one, so a
+/// clock set back cannot lower it.
+pub(crate) fn next_replay_mark(stored: Option<u64>, accepted: u64) -> u64 {
+    stored.map_or(accepted, |stored| stored.max(accepted))
+}
+
 /// A plain `major.minor.patch` version, nothing else.
 pub(crate) fn plain_version(version: &str) -> Option<(u64, u64, u64)> {
     let mut parts = version.split('.');
@@ -188,7 +270,7 @@ pub(crate) fn plain_version(version: &str) -> Option<(u64, u64, u64)> {
 }
 
 /// Whether `version` is a native release (0.9.0 or later). A version this build cannot read counts as native, so
-/// an unsigned feed cannot offer it.
+/// the legacy feed cannot offer it, on any OS.
 pub(crate) fn is_native_line(version: &str) -> bool {
     plain_version(version).is_none_or(|version| version >= NATIVE_FLOOR)
 }
@@ -248,23 +330,33 @@ struct RawPlatform {
 /// A v2 manifest whose detached signature verified for this channel. Everything in it is ours.
 pub(crate) struct SignedManifest {
     pub(crate) version: String,
+    /// The signed time of the manifest's signature: the channel's next replay mark.
+    pub(crate) signed_at: u64,
     platforms: Vec<RawPlatform>,
 }
 
-/// Checks a `desktop/v2/<channel>.json` manifest and its detached signature. In order: signed by a trusted key
-/// for these bytes; the signature signs this channel's manifest file name (another channel's manifest, validly
-/// signed, stops here); it parses; it is for this product and channel; its version is a plain one at or above the
-/// first native release.
+/// Checks a `desktop/v2/<channel>.json` manifest and its detached signature. In order: signed by the v2 key (the
+/// legacy key is [`Refusal::KeyScope`], any other key or other bytes [`Refusal::ManifestSignature`]); the signature
+/// signs this channel's manifest file name (another channel's manifest, validly signed, stops here); it parses; it
+/// is for this product and channel; its version is a plain one at or above the first native release; its signed
+/// time is inside the bounds of [`check_signed_time`].
 pub(crate) fn verify_v2_manifest(
     keys: &TrustedKeys,
     channel: &str,
     manifest: &[u8],
     detached_signature: &str,
+    now: u64,
+    seen: Option<u64>,
 ) -> Result<SignedManifest, Refusal> {
-    let signed_name = keys
-        .verify(manifest, detached_signature)
+    let key = keys.signer_on(Line::Native, detached_signature, Refusal::ManifestSignature)?;
+    let parsed = minisign_text(detached_signature)
+        .and_then(|text| minisign_verify::Signature::decode(&text).ok())
         .ok_or(Refusal::ManifestSignature)?;
-    if Some(signed_name.as_str()) != v2_manifest_file(channel) {
+    // The trusted comment (file name and time) is verified with the bytes.
+    key.key
+        .verify(manifest, &parsed, true)
+        .map_err(|_| Refusal::ManifestSignature)?;
+    if signed_file_name(detached_signature).as_deref() != v2_manifest_file(channel) {
         return Err(Refusal::WrongChannel);
     }
     let raw: RawManifest = serde_json::from_slice(manifest).map_err(|_| Refusal::ManifestUnreadable)?;
@@ -275,16 +367,21 @@ pub(crate) fn verify_v2_manifest(
     if version < NATIVE_FLOOR {
         return Err(Refusal::BelowFloor);
     }
+    // A signature without a readable time has no place inside the bounds.
+    let signed_at = signed_time(detached_signature).ok_or(Refusal::ManifestUnreadable)?;
+    check_signed_time(signed_at, now, seen)?;
     Ok(SignedManifest {
         version: raw.version,
+        signed_at,
         platforms: raw.platforms.into_values().collect(),
     })
 }
 
 impl SignedManifest {
     /// Whether the update the Tauri updater read (its version, address and signature) is one this signed manifest
-    /// offers, at an address we trust, with a length, signed by a trusted key for that file and this version.
-    /// Returns the key the artefact's bytes must verify with.
+    /// offers, at an address we trust, with a length, signed by the v2 key (the same line as the manifest; the
+    /// legacy key is [`Refusal::KeyScope`]) for that file and this version. Returns the key the artefact's bytes
+    /// must verify with.
     pub(crate) fn artifact<'k>(
         &self,
         keys: &'k TrustedKeys,
@@ -307,9 +404,7 @@ impl SignedManifest {
         {
             return Err(Refusal::BadSize);
         }
-        let key = keys
-            .key_for_signature(&platform.signature)
-            .ok_or(Refusal::ArtifactSignature)?;
+        let key = keys.signer_on(Line::Native, &platform.signature, Refusal::ArtifactSignature)?;
         if !artifact_names_version(&self.version, &platform.url, &platform.signature) {
             return Err(Refusal::SignatureForOtherFile);
         }
@@ -319,7 +414,7 @@ impl SignedManifest {
 
 /// Where an update came from.
 pub(crate) enum Feed<'a> {
-    /// Today's unsigned `desktop/<channel>.json`.
+    /// Today's unsigned `desktop/<channel>.json`: the legacy line.
     Unsigned,
     /// A verified `desktop/v2/<channel>.json`.
     Signed(&'a SignedManifest),
@@ -340,11 +435,11 @@ pub(crate) enum Direction {
 pub(crate) struct Host {
     /// A Mac's artefact (`Beebeeb.app.tar.gz`) carries no version, and a Mac never installs in place (task 2176).
     pub(crate) macos: bool,
-    /// Windows reads the v2 manifest first; there a native release comes from a signed manifest only.
-    pub(crate) windows: bool,
 }
 
-/// The one decision before an update is offered or installed. Returns the key its bytes must verify with.
+/// The one decision before an update is offered or installed. Returns the key its bytes must verify with: the v2
+/// key for an update of a signed manifest, the legacy key for one of the legacy feed, never the other way round.
+/// The legacy feed offers only versions below 0.9.0, on every OS; the signed manifest only 0.9.0 and later.
 pub(crate) fn accept<'k>(
     keys: &'k TrustedKeys,
     feed: &Feed<'_>,
@@ -369,10 +464,10 @@ pub(crate) fn accept<'k>(
             manifest.artifact(keys, version, download_url, signature)
         }
         Feed::Unsigned => {
-            if host.windows && is_native_line(version) {
+            if is_native_line(version) {
                 return Err(Refusal::NativeFromUnsignedFeed);
             }
-            let key = keys.key_for_signature(signature).ok_or(Refusal::ArtifactSignature)?;
+            let key = keys.signer_on(Line::Legacy, signature, Refusal::ArtifactSignature)?;
             if !host.macos && !artifact_names_version(version, download_url, signature) {
                 return Err(Refusal::SignatureForOtherFile);
             }
