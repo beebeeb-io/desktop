@@ -591,7 +591,7 @@ impl EngineBridge {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(super) async fn do_hydrate(
+    pub async fn do_hydrate(
         &self,
         file_id: &str,
         progress: Option<&HydrateProgressFn>,

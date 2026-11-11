@@ -17,6 +17,13 @@ impl EngineBridge {
         decrypt_shared_name_with_key(&file_key, name_encrypted)
     }
 
+    /// For the tests of another crate: whether [`Self::shared_folder_material`] opens the folder. That function stays
+    /// private (it returns the folder key); this one returns nothing but the refusal.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn shared_folder_material_for_test(&self, root: &SharedRootMapping) -> Result<(), EngineError> {
+        self.shared_folder_material(root).await.map(|_| ())
+    }
+
     pub(super) async fn shared_folder_material(
         &self,
         root: &SharedRootMapping,

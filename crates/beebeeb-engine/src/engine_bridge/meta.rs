@@ -48,7 +48,7 @@ pub struct SharedRootRefreshOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct SharedRootMapping {
+pub struct SharedRootMapping {
     pub(super) invite_id: String,
     pub(super) file_id: String,
     pub(super) display_name: String,

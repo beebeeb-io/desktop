@@ -42,7 +42,11 @@ use crate::state_db::{
 };
 
 pub struct EngineBridge {
+    #[cfg(not(any(test, feature = "test-support")))]
     db: Arc<StateDb>,
+    /// Tests of another crate read the database the bridge writes.
+    #[cfg(any(test, feature = "test-support"))]
+    pub db: Arc<StateDb>,
     api: Arc<ApiClient>,
     /// Wire-byte counters shared with the heartbeat producer. Both are
     /// drained (swapped to 0) once per beat; incremented by the chunk loops.
@@ -146,7 +150,7 @@ thread_local! {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-thread_local! { static LEGACY_CHILD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+thread_local! { pub static LEGACY_CHILD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 // ── Periodic sync tick ────────────────────────────────────────────────────────
 
@@ -468,6 +472,11 @@ pub use meta::{
     wire_id_fields, write_hydrated_from_reader, write_hydrated_plaintext,
 };
 pub use meta::{HydrateSource, SharedRootRefreshOutcome};
+// The shell-side engine tests (`src-tauri/src/engine_shell_tests.rs`) build the shared-folder fixture.
+#[cfg(any(test, feature = "test-support"))]
+pub use meta::SharedRootMapping;
+#[cfg(any(test, feature = "test-support"))]
+pub use meta_2::shared_roots_from_invite_response;
 
 mod meta_2;
 pub(crate) use meta_2::decrypt_shared_name_with_key;

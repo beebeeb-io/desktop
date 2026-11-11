@@ -18,6 +18,7 @@ Modules 1–65, sorted by path.
 | `desktop_main_window.rs` | The main window's size and kept frame on Windows and Linux (v2 W1): the board's 1280 x 800 with a 960 x 640 minimum, fitted to the work area | — |
 | `diagnostics_export_tests.rs` | (no //! header) | — |
 | `engine_host.rs` | The Tauri shell as the engine's host (`beebeeb_engine::host::EngineHost`): each engine event goes out under its Tauri event name with the JS | — |
+| `engine_shell_tests.rs` | Engine tests whose last step is the shell's sign-out purge or its account reset (`local_state_purge`, `session_reauth`), which the engine cr | — |
 | `extension_log_pin.rs` | The File Provider extension writes every log line through its one `os.Logger` (`BeebeebFileProvider/ExtensionLog.swift`, spec 2026-10-09 §11 | — |
 | `file_open_commands.rs` | `file_open_commands` items split out of `lib.rs`. | — |
 | `finder_engine_tests.rs` | (no //! header) | — |
@@ -70,4 +71,3 @@ Modules 1–65, sorted by path.
 | `signout_teardown_tests.rs` | (no //! header) | — |
 | `speedtest_tests.rs` | (no //! header) | — |
 | `startup_session_tests.rs` | (no //! header) | — |
-| `state_db_purge_tests.rs` | State-db resolution, purge-path and file-versions tests, split out of `tests.rs` (file-size ratchet; moved unchanged). | — |

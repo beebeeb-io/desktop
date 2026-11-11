@@ -365,6 +365,10 @@ mod reveal_and_open_file_tests;
 mod selective_sync_wave2_tests;
 #[cfg(test)]
 mod state_db_purge_tests;
+// The engine's fixture files are included whole; the parts these three tests do not use are dead here.
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+mod engine_shell_tests;
 #[cfg(test)]
 mod state_db_shell_tests;
 // The walker the source censuses share: the shell's tree and the engine crate's.

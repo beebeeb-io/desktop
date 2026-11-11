@@ -24,7 +24,7 @@ pub(super) fn operation_metadata(op: &PendingOperation) -> Result<serde_json::Va
         .unwrap_or_else(|| serde_json::json!({})))
 }
 
-pub(super) fn shared_roots_from_invite_response(body: &serde_json::Value) -> Vec<SharedRootMapping> {
+pub fn shared_roots_from_invite_response(body: &serde_json::Value) -> Vec<SharedRootMapping> {
     body.get("invites")
         .and_then(|value| value.as_array())
         .into_iter()
