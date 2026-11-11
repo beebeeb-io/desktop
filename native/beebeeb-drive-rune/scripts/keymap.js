@@ -174,6 +174,10 @@ if (foot) {
 // Everything below is keyed by class, per occurrence in document order, and only outside the
 // details pane (`.mk-det`): what the pane draws is keyed above, by the Files lane, under its own
 // names. `scripts/check-keymap-scope.sh` proves a Files capture exports the same keys as before.
+// Not in a settings frame (`.mk-set`) and not in an account window (`.au-mac`): those lanes key their
+// own lists, buttons, pills and menus (below, and in keymap-signin.js) under their own names. Without
+// this scope a recapture of DW-0701 exported 4 keys more and DW-A02 8 more (integration I2).
+if (!q('.mk-set') && !q('.au-mac')) {
 const inDet = (el) => !!el.closest('.mk-det');
 // A button (`.kit-btn`): `btn-<its words>`, `-label`, `-icon`.
 const btnSeen = {};
@@ -274,6 +278,7 @@ if (mkBanner) {
   api.box('banner-bar', q('.mk-bar', mkBanner));
   api.box('banner-bar-fill', q('.mk-bar i', mkBanner));
 }
+} // not a settings frame, not an account window
 
 // ---- Settings, inside the window (`.mk-set`: lane f-settings, src/frames/settings) ----
 // One scheme for every pane: lists and their rows by order (`list-<L>`, `item-<L>-<I>`), every
