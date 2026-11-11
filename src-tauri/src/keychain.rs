@@ -11,16 +11,6 @@ use std::fmt;
 const KEYCHAIN_SERVICE: &str = "io.beebeeb.app";
 const MASTER_KEY_BYTES: usize = 32;
 
-
-
-
-
-
-
-
-
-
-
 #[derive(PartialEq, Eq)]
 pub struct SecretBytes(Vec<u8>);
 
@@ -66,14 +56,6 @@ impl fmt::Debug for SecretBytes {
     }
 }
 
-
-
-
-
-
-
-
-
 // ── Keychain account segmentation (task 0800 — multi-account Phase 1) ─────────
 //
 // Every store carries an optional `account_prefix`. When set, all six secret
@@ -88,7 +70,6 @@ impl fmt::Debug for SecretBytes {
 // `None` prefix = the legacy flat layout, used ONLY by `legacy_platform_keychain_store`
 // for the one-time migration read/sweep. New code must construct stores via
 // `platform_keychain_store_for(id)` so a reviewer can grep every legacy access.
-
 
 // The real Keychain store does not EXIST in a macOS test build (Task 9 fix round 2): a test that names it
 // fails to compile, instead of reaching the developer's own Keychain items. `TestKeychainStore` takes its
@@ -523,7 +504,9 @@ impl AuthSecretStore for TestKeychainStore {
     }
 
     fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
-        self.load(KeychainAccount::WrappedMasterKey).map(SecretBytes::new).transpose()
+        self.load(KeychainAccount::WrappedMasterKey)
+            .map(SecretBytes::new)
+            .transpose()
     }
 
     fn delete_wrapped_master_key(&self) -> AuthResult<()> {
@@ -587,8 +570,6 @@ pub type PlatformKeychainStore = WindowsCredentialStore;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub type PlatformKeychainStore = MacOsKeychainStore;
 
-
-
 // ── Lazy migration: legacy flat trio → id-segmented trio (task 0800) ─────────
 //
 // VAULT-LOCKOUT-class change. The contract that protects against lockout:
@@ -596,9 +577,6 @@ pub type PlatformKeychainStore = MacOsKeychainStore;
 //   • a legacy READ FALLBACK on the unlock path (lib.rs) — two independent nets.
 // The function is IDEMPOTENT and INTERRUPT-CONVERGENT: interrupted after a crash
 // at any step, a re-run ends fully-migrated-with-legacy-gone.
-
-
-
 
 #[cfg(target_os = "windows")]
 mod windows_credentials {
@@ -921,29 +899,27 @@ mod macos_keychain {
 
 #[path = "../src/keychain/errors.rs"]
 mod errors;
-pub use errors::{AuthStoreError, AuthResult, VaultLockState};
+pub use errors::{AuthResult, AuthStoreError, VaultLockState};
 
 #[path = "../src/keychain/session.rs"]
 mod session;
-pub use session::{SessionToken};
+pub use session::SessionToken;
 
 #[path = "../src/keychain/vault.rs"]
 mod vault;
 pub use vault::{AuthSecretStore, AuthVault};
 /// The non-Windows trace and "what is left of this account" paths ask these, and so do the keychain tests.
 #[cfg(any(test, not(target_os = "windows")))]
-pub use vault::{holds_session_token, holds_account_email, holds_vault_key};
+pub use vault::{holds_account_email, holds_session_token, holds_vault_key};
 
 #[path = "../src/keychain/accounts.rs"]
 mod accounts;
 use accounts::*;
-pub use accounts::{platform_keychain_store_for, legacy_platform_keychain_store};
+pub use accounts::{legacy_platform_keychain_store, platform_keychain_store_for};
 
 #[path = "../src/keychain/legacy.rs"]
 mod legacy;
-pub use legacy::migrate_legacy_keychain_to_account;
 /// Tests only: the migration's own tests drive the two-store variant directly; production runs the account variant.
 #[cfg(test)]
 pub use legacy::migrate_legacy_keychain_between;
-
-
+pub use legacy::migrate_legacy_keychain_to_account;

@@ -157,7 +157,6 @@ pub(super) static VAULT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic:
 #[cfg(test)]
 pub(super) static EPOCH_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
-
 pub(super) fn bump_vault_epoch() {
     #[cfg(test)]
     let _shared =

@@ -34,9 +34,9 @@ mod direct_download;
 mod download_pin;
 mod engine_bridge;
 mod engine_status;
+mod finder_removal;
 mod owner_keys;
 mod shared_folder_index;
-mod finder_removal;
 // Task 1885: how the bridge's answer to "open this in Finder" becomes a command's result, and the pins that keep
 // the macOS code from spawning `open` again. Only macOS calls it.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -96,8 +96,8 @@ mod name_alias;
 // Tasks 1888 + 2226: the reconcile pass over the queue (ghost folder creates folded into their server twins), planned in
 // memory. Windows and Linux run it; macOS keeps its own resume.
 mod held_queue;
-mod popover_data;
 mod macos_popover;
+mod popover_data;
 // Ruling R8 (spec 2026-10-06): the pure decision between a first sign-in, the same account signing in again and
 // an account switch. Windows keeps its refusal while a session exists and never asks.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
@@ -199,13 +199,13 @@ macro_rules! session_command {
 
 mod session_state;
 use session_state::*;
-pub use session_state::{Session, AppState};
+pub use session_state::{AppState, Session};
 mod login_commands;
+pub(crate) use login_commands::open_onboarding_window_impl;
 use login_commands::*;
-pub(crate) use login_commands::{open_onboarding_window_impl};
 mod session_apply;
+pub(crate) use session_apply::apply_session;
 use session_apply::*;
-pub(crate) use session_apply::{apply_session};
 mod sign_out_commands;
 use sign_out_commands::*;
 mod vault_lock_commands;
@@ -222,7 +222,7 @@ mod finder_setup_commands;
 use finder_setup_commands::*;
 mod file_open_commands;
 use file_open_commands::*;
-pub(crate) use file_open_commands::{reject_unsafe_rel_path, is_contained, FreeUpSpaceResult, free_up_space_blocking};
+pub(crate) use file_open_commands::{FreeUpSpaceResult, free_up_space_blocking, is_contained, reject_unsafe_rel_path};
 mod settings_commands;
 use settings_commands::*;
 // Task 2409: the "Not sent" list and its Try again.
@@ -234,12 +234,14 @@ mod account_commands;
 use account_commands::*;
 mod activity_conflict_commands;
 use activity_conflict_commands::*;
-pub use activity_conflict_commands::{SpeedtestResult, SpeedtestLatency};
-pub(crate) use activity_conflict_commands::{open_conflict_window_impl, notify_conflict_impl, notify_sync_complete_impl, notify_quota_warning_impl};
+pub use activity_conflict_commands::{SpeedtestLatency, SpeedtestResult};
+pub(crate) use activity_conflict_commands::{
+    notify_conflict_impl, notify_quota_warning_impl, notify_sync_complete_impl, open_conflict_window_impl,
+};
 mod update_window;
 use update_window::*;
 mod app_run;
-pub use app_run::{run};
+pub use app_run::run;
 mod native_menu;
 use native_menu::*;
 mod tray_window;
@@ -253,9 +255,9 @@ use config::{DesktopConfig, HeldConfig, ReleaseChannel};
 // un-segmented pre-Phase-1 layout, used read-only by the migration + the
 // anti-lockout legacy fallback. All session/vault persistence below routes
 // through these so secrets land in the OS-native credential vault.
+use account::{AccountId, AccountRuntime, synthesize_single_account};
 use keychain::{AuthVault, SecretBytes, SessionToken, platform_keychain_store_for};
 use runner::EngineRunner;
-use account::{AccountId, AccountRuntime, synthesize_single_account};
 // Set on a thread that holds `EPOCH_GATE` exclusively, so its own `lock_vault` bump does not wait for itself.
 #[cfg(test)]
 thread_local! {
@@ -302,8 +304,6 @@ tokio::task_local! {
 mod open_folder_tests;
 // ── Unit tests for reveal_and_open_file security helpers ─────────────────────
 #[cfg(test)]
-mod reveal_and_open_file_tests;
-#[cfg(test)]
 mod diagnostics_export_tests;
 /// Task 1683 slice 1 (two-surface spec `docs/specs/2026-10-24-macos-two-surface-app.md`): the Beebeeb window's request
 /// slot, what the menu may offer around it, and the macOS menu bar (§5.F rows F1-F15, §9.2). Pure, so they run on
@@ -312,6 +312,8 @@ mod diagnostics_export_tests;
 mod main_window_tests;
 #[cfg(test)]
 mod menu_update_check_tests;
+#[cfg(test)]
+mod reveal_and_open_file_tests;
 #[cfg(test)]
 mod tests;
 

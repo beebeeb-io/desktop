@@ -420,8 +420,6 @@ pub(super) const FINDER_LOCK_TIMEOUT: std::time::Duration = std::time::Duration:
 #[cfg(target_os = "macos")]
 pub(super) const FINDER_REMOVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-
-
 #[cfg(all(test, target_os = "macos"))]
 pub(super) fn signal_lock_holds_the_engine_slot() {
     let _ = LOCK_HOLDS_THE_ENGINE_SLOT.try_with(|signal| signal.notify_one());
