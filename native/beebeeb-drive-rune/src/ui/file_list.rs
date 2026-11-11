@@ -293,19 +293,7 @@ fn file_type_color(mime: Option<&str>, is_folder: bool) -> Color {
 }
 
 fn format_size(bytes: i64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = 1024.0 * 1024.0;
-    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
-    let b = bytes as f64;
-    if b >= GB {
-        format!("{:.1} GB", b / GB)
-    } else if b >= MB {
-        format!("{:.1} MB", b / MB)
-    } else if b >= KB {
-        format!("{} KB", (b / KB).round() as i64)
-    } else {
-        format!("{bytes} B")
-    }
+    crate::source::format_size(bytes)
 }
 
 /// Format a date string from ISO to the board's relative format.

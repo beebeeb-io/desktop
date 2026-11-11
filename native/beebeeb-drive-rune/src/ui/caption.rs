@@ -5,11 +5,10 @@
 //! transparent right half for drag + caption buttons.
 
 use crate::State;
+use crate::TITLEBAR_H;
 use crate::theme::icons;
 use crate::theme::tokens::{self, Theme, space, type_};
 use rune::{Cx, El, el, icon, row, text};
-
-const TITLEBAR_H: f32 = 32.0;
 
 pub fn caption_bar(t: &Theme, cx: &mut Cx<State>) -> El {
     let insets = cx.chrome_insets();

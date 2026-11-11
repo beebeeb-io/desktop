@@ -34,7 +34,9 @@ use rune::AppSpec;
 // State
 // ---------------------------------------------------------------------------
 
-const TITLEBAR_H: f32 = 32.0;
+/// Titlebar height in points — the single source of truth used by both
+/// `App::titlebar` and `ui::caption::caption_bar`.
+pub const TITLEBAR_H: f32 = 32.0;
 
 pub struct State {
     source: Box<dyn DriveSource>,
