@@ -68,7 +68,7 @@ pub(super) fn item_id(id: &str) -> Answer<String> {
 /// foreign id with no record is unavailable. A folder answers `unsupported` before any key lookup:
 /// folder shares and folder links are not in core yet.
 pub(super) fn state_db() -> Answer<crate::state_db::StateDb> {
-    let cfg = crate::config::DesktopConfig::load().map_err(|_| "failed".to_string())?;
+    let cfg = crate::config::DesktopConfig::load_for(crate::APP).map_err(|_| "failed".to_string())?;
     crate::local_state_purge::state_db_for_config(&cfg)
         .map_err(|_| "failed".to_string())?
         .ok_or_else(|| "not-found".to_string())

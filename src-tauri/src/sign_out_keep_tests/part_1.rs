@@ -6,7 +6,7 @@ use crate::sign_out::copy::{
     UNSENT_COUNT_FAILED_CODE, coded,
 };
 use crate::sign_out::keep::{Acknowledge, KeepInputs, KeptSet, keep_unsent};
-use crate::sign_out::kept_names::{APP_BUNDLE_ID, kept_root};
+use crate::sign_out::kept_names::kept_root;
 use crate::sign_out::kept_record::{saved_kept_unsent_at, unfinished_at};
 use crate::sign_out::kept_writer::SystemClone;
 use crate::sign_out::snapshot::AskSnapshot;
@@ -114,6 +114,7 @@ fn the_kept_folder_is_out_of_every_purges_reach() {
     let data = container.join("Library").join("Application Support");
     let cache = container.join("Library").join("Caches");
     let staging = FinderStagingBases {
+        folder: "beebeeb",
         data: Some(data.clone()),
         cache: Some(cache.clone()),
         temp: container.join("tmp"),
@@ -138,8 +139,8 @@ fn the_kept_folder_is_out_of_every_purges_reach() {
         "the old Caches root stays"
     );
     let kept = [
-        kept_root(Some(&container.join("Documents")), Some(&data), APP_BUNDLE_ID).unwrap(),
-        kept_root(Some(Path::new("/Users/a/Documents")), Some(&data), APP_BUNDLE_ID).unwrap(),
+        kept_root(Some(&container.join("Documents")), Some(&data), crate::APP).unwrap(),
+        kept_root(Some(Path::new("/Users/a/Documents")), Some(&data), crate::APP).unwrap(),
     ];
     for kept in &kept {
         for root in roots.iter().chain(staging_list.iter()) {
@@ -163,7 +164,7 @@ fn the_kept_folder_is_out_of_every_purges_reach() {
     );
     let wrapper = super::finder_setup_command_tests::body_between(
         &production,
-        "pub fn disposable_cache_roots() -> Vec<PathBuf> {",
+        "pub fn disposable_cache_roots(identity: &crate::identity::EngineIdentity) -> Vec<PathBuf> {",
         "\n}\n",
     );
     assert_eq!(wrapper.matches("disposable_cache_roots_in(").count(), 1, "{wrapper}");
@@ -181,8 +182,9 @@ fn the_kept_folder_is_out_of_every_purges_reach() {
         .collect();
     assert_eq!(
         body.replace(",)", ")"),
-        "disposable_cache_roots_in(std::env::temp_dir(),dirs::cache_dir(),macos_hydrate_cache_root(),\
-             &crate::engine_bridge::FinderStagingBases::current())",
+        "disposable_cache_roots_in(identity.scratch_dir_in(&std::env::temp_dir()),\
+             dirs::cache_dir().map(|dir|identity.scratch_dir_in(&dir)),macos_hydrate_cache_root(identity),\
+             &crate::engine_bridge::FinderStagingBases::current(identity))",
         "the wrapper is one call to its core and nothing else: {wrapper}"
     );
 }

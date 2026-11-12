@@ -133,7 +133,7 @@ fn sf2276_a_no_custody_repair_stops_retrying_the_index() {
     });
     let temp = tempfile::tempdir().unwrap();
     let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
-    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db.clone(), Arc::new(fixture.api()));
     db.mark_shared_index_dirty(root).unwrap();
     run(bridge.maintain_owned_keys(1_000)).unwrap();
     let after_first = seen.lock().unwrap().len();
@@ -181,6 +181,7 @@ fn sf2276_a_404_from_the_custody_put_does_not_abort_the_snapshot() {
     );
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
+        &crate::identity::REAL,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
@@ -241,6 +242,7 @@ fn sf2276_a_501_that_does_not_name_the_feature_stays_an_error() {
     );
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
+        &crate::identity::REAL,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );

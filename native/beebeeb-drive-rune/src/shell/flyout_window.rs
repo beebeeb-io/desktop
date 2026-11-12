@@ -1,6 +1,6 @@
 //! The flyout as a Rune window: borderless, always on top, 340 x 520 points, hidden until the
 //! b is clicked; it closes on Esc and when it loses focus (DW-1201). What it draws is the tray
-//! lane's (`registry::FLYOUT`); until then the placeholder.
+//! lane's (`registry::FLYOUT`: `frames/tray`).
 //!
 //! It takes focus when it opens. A window that never activates cannot hear that the person
 //! clicked elsewhere, and "closes when it loses focus" is the board's rule.
@@ -27,6 +27,8 @@ pub struct FlyoutState {
     pub source: &'static str,
     /// When the flyout last hid itself because it lost focus (see `flyout::on_tray_click`).
     pub(super) hidden_at: Arc<Mutex<Option<Instant>>>,
+    /// The flyout's content and its own state (the tray lane's).
+    pub tray: crate::frames::tray::Ui,
 }
 
 impl FlyoutState {
@@ -36,6 +38,7 @@ impl FlyoutState {
         hidden_at: Arc<Mutex<Option<Instant>>>,
     ) -> FlyoutState {
         let inputs = actions.tray_inputs();
+        let inputs_for_tray = inputs.clone();
         FlyoutState {
             model: tray_model(&inputs),
             inputs,
@@ -43,6 +46,7 @@ impl FlyoutState {
             main,
             source: "fixture engine",
             hidden_at,
+            tray: crate::frames::tray::Ui::following(&inputs_for_tray),
         }
     }
 
@@ -50,6 +54,7 @@ impl FlyoutState {
     pub fn refresh(&mut self) {
         self.inputs = self.actions.tray_inputs();
         self.model = tray_model(&self.inputs);
+        self.tray.follow(&self.inputs);
     }
 }
 
@@ -67,12 +72,13 @@ pub fn view(s: &FlyoutState, cx: &mut Cx<FlyoutState>) -> El {
 }
 
 /// Esc closes the flyout.
-pub fn on_key(_: &mut FlyoutState, ev: &KeyEvent, tx: &mut Tx) -> bool {
+pub fn on_key(s: &mut FlyoutState, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if ev.key == Key::Escape {
         tx.close_window();
         return true;
     }
-    false
+    // The list's keys, also before anything in the flyout has focus (the tray lane's).
+    crate::frames::tray::on_window_key(s, ev, tx)
 }
 
 /// A click outside it (the flyout lost focus) closes it, and notes when.

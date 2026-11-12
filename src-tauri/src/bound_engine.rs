@@ -304,6 +304,7 @@ pub(super) fn spawn_bound_engine(
     let surface_app = app.clone();
     let started = start_engine_bound(state, acct, engine_slot, &paths, |sync_root, token, key| {
         EngineRunner::spawn(
+            crate::APP,
             crate::engine_host::host(&app),
             sync_root,
             token,

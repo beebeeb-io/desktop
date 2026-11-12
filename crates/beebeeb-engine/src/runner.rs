@@ -130,6 +130,7 @@ async fn next_wake(
 /// [`TICK_INTERVAL`] running [`sync_tick`], exits when the cancel
 /// channel fires.
 async fn run(
+    identity: &'static crate::identity::EngineIdentity,
     app: Host,
     sync_root: PathBuf,
     session_token: zeroize::Zeroizing<String>,
@@ -165,13 +166,19 @@ async fn run(
     crate::backup_protect::set_notifier(app.clone());
     // macOS: the working-set signal goes through the host's File Provider bridge (a host without one: no-op).
     crate::file_provider_port::install_from(app.as_ref());
+    // Never in a folder another sync provider registered (the test build in the real app's, or the reverse).
+    if let Err(msg) = crate::sync_root_owner::check(identity, &sync_root) {
+        tracing::error!(error = %msg, "the sync folder belongs to another provider; the engine does not start");
+        emit_status(&app, "error", Some(&sync_root), Some(&msg));
+        return;
+    }
     // Windows Cloud Files: connect the sync root before any placeholder work.
     // Beebeeb metadata now lives in the app-local state dir, but Cloud Files
     // placeholder seeding still needs a connected root later in this task.
     #[cfg(target_os = "windows")]
-    crate::windows_cf::connect_root(&sync_root);
+    crate::windows_cf::connect_root(identity, &sync_root);
 
-    if let Err(e) = state_paths::prepare_beebeeb_state_dir_for_sync_root(&sync_root) {
+    if let Err(e) = state_paths::prepare_beebeeb_state_dir_for_sync_root(identity, &sync_root) {
         let msg = format!("prepare app-local state dir: {e}");
         tracing::error!(error = %msg);
         emit_status(&app, "error", Some(&sync_root), Some(&msg));
@@ -180,7 +187,7 @@ async fn run(
 
     // Acquire the mutual-exclusion lock in app-local state, outside the user's
     // synced files.
-    let _lock = match LockFile::acquire("desktop") {
+    let _lock = match LockFile::acquire(identity, "desktop") {
         Ok(l) => l,
         Err(msg) => {
             tracing::error!(error = %msg, "could not acquire .beebeeb-sync.lock");
@@ -191,7 +198,7 @@ async fn run(
 
     // Open the state DB from app-local data. The migration step above already
     // created the directory and moved any legacy sync-root metadata out.
-    let state_dir = match state_paths::beebeeb_state_dir() {
+    let state_dir = match state_paths::beebeeb_state_dir_for(identity) {
         Ok(path) => path,
         Err(e) => {
             let msg = format!("resolve state dir: {e}");
@@ -211,7 +218,7 @@ async fn run(
     };
     // LD-0113 §6.3: what this device backs up now (the device folder from the state DB's resolved layout), before
     // the engine bridge is registered for the delete and rename callbacks to ask.
-    crate::backup_protect::refresh_own_backups(&db);
+    crate::backup_protect::refresh_own_backups(identity, &db);
     // No runner survives a restart: clear every queue claim. On macOS, also remove
     // the staged copies the queue released and nothing references any more
     // (spec §8.7 S3, S6).
@@ -240,7 +247,7 @@ async fn run(
     // own transaction requires its copy's journal row, which the sweep deletes before it unlinks
     // the copy, so such an accept either committed first or queues nothing and is retried.
     #[cfg(target_os = "macos")]
-    match crate::staged_payload::sweep_unreferenced(&db, &crate::engine_bridge::finder_staging_candidates()) {
+    match crate::staged_payload::sweep_unreferenced(&db, &crate::engine_bridge::finder_staging_candidates(identity)) {
         Ok(sweep) => {
             if sweep.unfinished > 0 || sweep.unjournalled > 0 {
                 tracing::info!(
@@ -326,7 +333,7 @@ async fn run(
     // Spec D11 (review P2): the bridge's queue reads the account's pass requests, so it sends nothing while a release
     // waits for a pass.
     let bridge = Arc::new(
-        EngineBridge::new_with_stop_flag(db.clone(), api.clone(), stopping)
+        EngineBridge::new_with_stop_flag(identity, db.clone(), api.clone(), stopping)
             .with_transfers(transfers.clone())
             .with_resume(resume.clone()),
     );
@@ -400,13 +407,13 @@ async fn run(
     // so a fresh session never inherits a stale entry. `purge_macos_hydrate_cache`
     // is a no-op on non-macOS (called unconditionally, like its other two call
     // sites in `lib.rs`, so this file doesn't need its own cfg gate).
-    crate::purge_macos_hydrate_cache("daemon-startup");
+    crate::purge_macos_hydrate_cache(identity, "daemon-startup");
     // Write contents the File Provider extension hands over arrive in the App
     // Group upload-staging directory. Harden it and purge copies orphaned by a
     // crash. Age-bound, not "everything": the extension may be staging a copy
     // right now (see `ipc_socket::UPLOAD_STAGING_MAX_AGE`).
     #[cfg(target_os = "macos")]
-    crate::ipc_socket::macos_prepare_upload_staging();
+    crate::ipc_socket::macos_prepare_upload_staging(identity);
 
     // Spawn the Unix-socket IPC server alongside the sync loop. It
     // shares the same StateDb + EngineBridge handles, so OS extensions
@@ -439,7 +446,7 @@ async fn run(
                 let msg = format!("{e}");
                 tracing::error!(
                     error = %msg,
-                    path = %crate::ipc_socket::ipc_socket_path().display(),
+                    path = %crate::ipc_socket::ipc_socket_path(identity).display(),
                     "IPC socket failed to bind; Finder/File Provider cannot reach the sync daemon this session"
                 );
                 if let Ok(mut guard) = ipc_bind_error.lock() {
@@ -531,7 +538,7 @@ async fn run(
                 #[cfg(target_os = "macos")]
                 {
                     if hydrate_sweep_tick_count.is_multiple_of(MACOS_HYDRATE_SWEEP_EVERY_N_TICKS) {
-                        let dir = crate::ipc_socket::macos_hydrate_cache_dir();
+                        let dir = crate::ipc_socket::macos_hydrate_cache_dir(identity);
                         match crate::ipc_socket::macos_sweep_stale_hydrate_cache_entries(
                             &dir,
                             crate::ipc_socket::MACOS_HYDRATE_CACHE_TTL,
@@ -562,7 +569,7 @@ async fn run(
                 #[cfg(target_os = "macos")]
                 {
                     if upload_staging_sweep_tick_count.is_multiple_of(MACOS_UPLOAD_STAGING_SWEEP_EVERY_N_TICKS) {
-                        crate::ipc_socket::macos_sweep_upload_staging();
+                        crate::ipc_socket::macos_sweep_upload_staging(identity);
                     }
                     upload_staging_sweep_tick_count = upload_staging_sweep_tick_count.wrapping_add(1);
                 }
@@ -621,7 +628,7 @@ async fn run(
                 // LD-0113: the backup passes. Each reads a backed-up folder in place and queues its uploads
                 // (`origin = 'backup'`), which this tick's queue sends; nothing is written under the sync root.
                 // An unreadable config runs no pass, as the mirror did.
-                match crate::config::DesktopConfig::load() {
+                match crate::config::DesktopConfig::load_for(identity) {
                     Ok(cfg) => {
                         let sources = crate::backup::sources::backup_sources(
                             &db,
@@ -949,7 +956,7 @@ async fn run(
         {
             ipc_task.abort();
             let _ = ipc_task.await;
-            let _ = std::fs::remove_file(crate::ipc_socket::ipc_socket_path());
+            let _ = std::fs::remove_file(crate::ipc_socket::ipc_socket_path(identity));
         }
     }
     // _lock + bridge drop here; SQLite closes, lock file deleted.

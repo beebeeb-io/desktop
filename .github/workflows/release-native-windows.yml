@@ -90,7 +90,7 @@ jobs:
           bash scripts/native-release-ref-check.sh ref "$REF"
 
       # The public key the native line trusts is pinned in a second place: a change to the committed file that
-      # does not also change this line (and the same line in tests/nativeChannelManifest.test.ts) stops here.
+      # does not also change this line (and the same line in scripts/tests/nativeChannelManifest.test.ts) stops here.
       - name: Refuse another updater public key than the pinned one
         shell: bash
         run: |
@@ -155,11 +155,8 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
       - name: Release script tests
-        run: bun test tests/nativeChannelManifest.test.ts tests/releaseChannelChecks.test.ts
+        run: bun test scripts/tests/nativeChannelManifest.test.ts scripts/tests/releaseChannelChecks.test.ts
 
       # The count line is asserted: a run that executed no test is a failure, not a pass.
       - name: Updater tests
@@ -239,8 +236,10 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+      # Install the Tauri CLI for signing (from the committed lockfile, no key in this step).
+      - name: Install signer dependencies
+        working-directory: scripts/updater-signer
+        run: bun install --frozen-lockfile --ignore-scripts
 
       # The engine's test helpers (in-memory credential store, loopback API default) are on no normal or build edge
       # of what is built here, and the engine names no tauri crate: from cargo's dependency graph, before the build.
@@ -260,6 +259,9 @@ jobs:
         shell: bash
         env:
           BEEBEEB_RELEASE_VERSION: ${{ inputs.version }}
+          # A release names its identity: the build script refuses a release build without it, and one with the
+          # test identifier (native/beebeeb-drive-rune/build.rs).
+          BEEBEEB_APP_IDENTIFIER: io.beebeeb.app
         run: |
           set -euo pipefail
           BEEBEEB_BUILD_NOT_BEFORE="$(git log -1 --format=%ct HEAD)"
@@ -272,6 +274,13 @@ jobs:
       # the updater's mark with exactly the commit's time, once, and that time must be a plausible one (not before
       # 2026-11-11, the day the v2 key was made). A binary without the mark has no updater in it, or was built
       # without the time and would refuse every update: neither is released.
+      # The binary that ships must be the real app: exactly one identity mark, the real one. A binary built as the
+      # test app, or built by a script that lost the variable, is not released (the bare identifiers cannot be
+      # searched for: both are in every binary).
+      - name: Refuse a binary that is not built as the real app
+        shell: bash
+        run: bash scripts/native-identity-mark.sh native/beebeeb-drive-rune/target/x86_64-pc-windows-msvc/release/beebeeb-drive.exe io.beebeeb.app
+
       - name: Refuse a binary that does not report the commit's time as its build time
         shell: bash
         run: |
@@ -362,7 +371,7 @@ jobs:
           fi
           installer="release-assets/Beebeeb_${RELEASE_VERSION}_x64-setup.exe"
           test -s "$installer"
-          bun run tauri signer sign "$installer" > /dev/null
+          ./scripts/updater-signer/node_modules/.bin/tauri signer sign "$installer" > /dev/null
           test -s "$installer.sig"
 
       - name: Verify the installer's updater signature against the committed v2 key
@@ -500,10 +509,10 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
-      # Before any step holds the signing key, and never in one that does.
-      - name: Install dependencies (no key in this step)
-        working-directory: desktop-src
-        run: bun install --frozen-lockfile
+      # Install the Tauri CLI for signing (from the committed lockfile, no key in this step).
+      - name: Install signer dependencies (no key in this step)
+        working-directory: desktop-src/scripts/updater-signer
+        run: bun install --frozen-lockfile --ignore-scripts
 
       # The installer and its signature come from the GitHub release this workflow created (assets API, the
       # authenticated route release.yml uses), and the installer is published under our own host name:
@@ -562,7 +571,7 @@ jobs:
             echo "::error::UPDATER_V2_PRIVATE_KEY and UPDATER_V2_PRIVATE_KEY_PASSWORD must be secrets of the desktop-release environment."
             exit 1
           fi
-          bun run tauri signer sign "../stage/desktop/v2/$MANIFEST_FILE" > /dev/null
+          ./scripts/updater-signer/node_modules/.bin/tauri signer sign "../stage/desktop/v2/$MANIFEST_FILE" > /dev/null
 
       - name: Verify the manifest's signature against the committed v2 key
         working-directory: desktop-src

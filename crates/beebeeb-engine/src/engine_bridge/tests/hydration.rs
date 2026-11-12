@@ -67,8 +67,8 @@ fn hydrate_file_range_falls_back_when_chunk_size_absent_even_if_size_and_count_p
 /// among them.
 #[test]
 fn the_swept_staging_directories_are_the_ones_the_engine_stages_into() {
-    let bases = FinderStagingBases::current();
-    let candidates = finder_staging_candidates();
+    let bases = FinderStagingBases::current(&crate::identity::REAL);
+    let candidates = finder_staging_candidates(&crate::identity::REAL);
     #[cfg(target_os = "macos")]
     let expected = vec![
         bases.durable_root().expect("the test sandbox has a data dir"),
@@ -79,7 +79,8 @@ fn the_swept_staging_directories_are_the_ones_the_engine_stages_into() {
     let expected = vec![bases.cache_root(), bases.temp_root()];
     assert_eq!(candidates, expected);
     assert!(
-        candidates.contains(&default_finder_staging_root().expect("the sandbox root is writable")),
+        candidates
+            .contains(&default_finder_staging_root(&crate::identity::REAL).expect("the sandbox root is writable")),
         "the engine stages somewhere the sweep covers"
     );
 }
@@ -97,6 +98,7 @@ fn the_staging_root_is_under_the_data_dir_never_the_cache_or_temp_dir() {
         base.path().join("temp"),
     );
     let bases = FinderStagingBases {
+        folder: "beebeeb",
         data: Some(data.clone()),
         cache: Some(cache.clone()),
         temp: temp.clone(),
@@ -144,6 +146,7 @@ fn the_staging_root_is_under_the_data_dir_never_the_cache_or_temp_dir() {
 
     // No data dir: refused, with no fallback.
     let no_data = FinderStagingBases {
+        folder: "beebeeb",
         data: None,
         ..bases.clone()
     };
@@ -157,6 +160,7 @@ fn the_staging_root_is_under_the_data_dir_never_the_cache_or_temp_dir() {
     std::fs::create_dir(&blocked).unwrap();
     std::fs::write(blocked.join("beebeeb"), b"in the way").unwrap();
     let refused = durable_finder_staging_root(&FinderStagingBases {
+        folder: "beebeeb",
         data: Some(blocked),
         ..bases.clone()
     })
@@ -180,7 +184,7 @@ fn unit_tests_stage_finder_writes_in_a_sandbox_never_the_real_cache() {
     // on this machine, so a test build must resolve to a per-process sandbox next to the test
     // binary: otherwise every test that queues a Finder write drops plaintext files there.
     // Only paths are computed (and the sandbox dir is created); the real dir is not touched.
-    let root = default_finder_staging_root().expect("the sandbox root is writable");
+    let root = default_finder_staging_root(&crate::identity::REAL).expect("the sandbox root is writable");
     // The specific real directories, not the whole cache or data dir: a `CARGO_TARGET_DIR` under
     // `~/Library/Caches` (or `~/.cache`) puts the sandbox inside the cache dir legitimately.
     let real_staging = dirs::cache_dir()

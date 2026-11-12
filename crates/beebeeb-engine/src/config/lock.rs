@@ -84,8 +84,8 @@ impl From<DesktopConfig> for HeldConfig {
 
 impl HeldConfig {
     /// [`DesktopConfig::load`], as a copy to hold.
-    pub fn load() -> Result<Self, String> {
-        DesktopConfig::load().map(Self::from)
+    pub fn load_for(identity: &'static crate::identity::EngineIdentity) -> Result<Self, String> {
+        DesktopConfig::load_for(identity).map(Self::from)
     }
 
     /// Writes through the file, never through the copy. `change` is applied to the file as it is now
@@ -98,8 +98,12 @@ impl HeldConfig {
     /// Records queued by [`Self::queue_for_next_write`] are applied first, in the same write; they make a write that
     /// says "nothing changed" a write when they changed something.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub fn update_held<R>(&mut self, change: impl FnOnce(&mut DesktopConfig) -> (bool, R)) -> Result<R, String> {
-        self.update_held_at(&DesktopConfig::path()?, change)
+    pub fn update_held_for<R>(
+        &mut self,
+        identity: &'static crate::identity::EngineIdentity,
+        change: impl FnOnce(&mut DesktopConfig) -> (bool, R),
+    ) -> Result<R, String> {
+        self.update_held_at(&DesktopConfig::path_for(identity)?, change)
     }
 
     /// [`Self::update_held`] on the config file at `path` (a seam for the tests).

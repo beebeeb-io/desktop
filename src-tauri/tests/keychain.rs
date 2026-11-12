@@ -5,6 +5,9 @@
 // The include also re-exports the production migration entry point, which only the lib calls.
 #![allow(unused_imports)]
 
+// The stores take the app identity, so its one file comes along (it names nothing outside itself).
+#[path = "../../crates/beebeeb-engine/src/identity.rs"]
+mod identity;
 #[path = "../../crates/beebeeb-engine/src/keychain.rs"]
 mod keychain;
 

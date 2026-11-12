@@ -29,6 +29,7 @@ fn sf2265_prepare_blocks_foreign_row_under_forged_folder() {
     );
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
+        &crate::identity::REAL,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
@@ -82,6 +83,7 @@ fn sf2265_prepare_never_pins_l8_under_a_legacy_proven_key() {
     );
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
+        &crate::identity::REAL,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
@@ -134,6 +136,7 @@ fn sf2265_prepare_swallows_a_501_from_the_custody_put() {
     );
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
+        &crate::identity::REAL,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
@@ -187,6 +190,7 @@ fn sf2265_prepare_rereads_the_winner_after_key_version_conflict() {
     );
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
+        &crate::identity::REAL,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
@@ -234,6 +238,7 @@ fn sf2265_prepare_asks_custody_once_per_folder_not_once_per_row() {
     );
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
+        &crate::identity::REAL,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
@@ -389,7 +394,7 @@ fn a1b_persisted_owner_record_is_cleared_and_never_posted() {
         ..Default::default()
     })
     .unwrap();
-    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db.clone(), Arc::new(fixture.api()));
     // A1b: a persisted pre-L12 owner record never adopts.
     assert_eq!(run(bridge.retry_owner_adoptions()).unwrap(), 0);
     assert_eq!(count(&seen, "/owner-key"), 0, "{seen:?}");
@@ -492,6 +497,7 @@ fn a1_owner_class_ignores_a_member_wrap_and_never_posts() {
     });
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
+        &crate::identity::REAL,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );

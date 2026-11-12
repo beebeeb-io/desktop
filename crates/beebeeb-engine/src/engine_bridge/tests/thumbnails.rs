@@ -245,6 +245,7 @@ async fn an_accept_whose_copy_the_start_sweep_removed_is_retried_later() {
     let (dir, _sync_root, server, bridge) = rule3_setup([168u8; 32]);
     seed_uploaded_row(&bridge, &server, "7051838c-b073-5630-90fc-7e9c7964ba46");
     let bases = FinderStagingBases {
+        folder: "beebeeb",
         data: Some(dir.path().join("data")),
         cache: Some(dir.path().join("cache")),
         temp: dir.path().join("tmp"),

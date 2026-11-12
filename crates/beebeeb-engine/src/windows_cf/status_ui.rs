@@ -84,11 +84,14 @@ use windows::core::{GUID, HSTRING, Interface, PCWSTR, Result as WinResult, imple
 // Minted once (UUIDv4) and hardcoded so the registry binding written at
 // registration and the `CoRegisterClassObject` at startup always agree, and so
 // `unregister` can find and remove the same key. Distinct from
-// `BEEBEEB_PROVIDER_GUID` (the sync-root identity GUID) — this is the COM class
+// the provider GUID (the sync-root identity GUID) — this is the COM class
 // id of the *factory*, not the provider.
 //
-// `{c0b33b33-5217-4c0a-9e3f-2f3b8d5e9fa1}`
-pub const STATUS_UI_FACTORY_CLSID: GUID = GUID::from_u128(0xc0b3_3b33_5217_4c0a_9e3f_2f3b8d5e9fa1);
+// The value is the app identity's (`EngineIdentity::status_ui_class_id`, pinned in `identity.rs`): the
+// test build registers its own class, so it never replaces the real app's `LocalServer32`.
+pub(super) fn status_ui_factory_clsid(identity: &crate::identity::EngineIdentity) -> GUID {
+    GUID::from_u128(identity.status_ui_class_id())
+}
 
 // ── Cached, lock-light status snapshot read by the COM `GetStatusUI` ────────
 //
@@ -206,7 +209,9 @@ fn command_icon_uri() -> WinResult<Uri> {
 // reachable from this thread). Bounded, best-effort: a reclaim error is logged,
 // never surfaced as a COM failure that would make the flyout look broken.
 #[implement(IStorageProviderUICommand)]
-struct FreeUpSpaceCommand;
+struct FreeUpSpaceCommand {
+    app: &'static crate::identity::EngineIdentity,
+}
 
 // windows-rs 0.58 convention: `#[implement(IFoo)] struct Bar;` generates a
 // `Bar_Impl` wrapper, and the `IFoo_Impl` trait must be implemented on the
@@ -232,7 +237,7 @@ impl IStorageProviderUICommand_Impl for FreeUpSpaceCommand_Impl {
         Ok(StorageProviderUICommandState::Enabled)
     }
     fn Invoke(&self) -> WinResult<()> {
-        match crate::free_up_space_blocking() {
+        match crate::free_up_space_blocking(self.this.app) {
             Ok(result) => {
                 tracing::info!(
                     bytes_freed = result.bytes_freed,
@@ -279,7 +284,9 @@ impl IStorageProviderUICommand_Impl for InfoCommand_Impl {
 
 // ── The status UI source: builds the flyout's StorageProviderStatusUI ───────
 #[implement(IStorageProviderStatusUISource)]
-struct StatusUiSource;
+struct StatusUiSource {
+    app: &'static crate::identity::EngineIdentity,
+}
 
 impl IStorageProviderStatusUISource_Impl for StatusUiSource_Impl {
     fn GetStatusUI(&self) -> WinResult<StorageProviderStatusUI> {
@@ -342,7 +349,7 @@ impl IStorageProviderStatusUISource_Impl for StatusUiSource_Impl {
         }
 
         // ── Primary command: "Free up space" (the textual button) ──
-        let free_up: IStorageProviderUICommand = FreeUpSpaceCommand.into();
+        let free_up: IStorageProviderUICommand = FreeUpSpaceCommand { app: self.this.app }.into();
         ui.SetProviderPrimaryCommand(&free_up)?;
 
         Ok(ui)
@@ -368,14 +375,16 @@ impl IStorageProviderStatusUISource_Impl for StatusUiSource_Impl {
 
 // ── The factory Windows asks for the source, keyed by sync-root id ──────────
 #[implement(IStorageProviderStatusUISourceFactory)]
-struct StatusUiSourceFactory;
+struct StatusUiSourceFactory {
+    app: &'static crate::identity::EngineIdentity,
+}
 
 impl IStorageProviderStatusUISourceFactory_Impl for StatusUiSourceFactory_Impl {
     fn GetStatusUISource(&self, _syncrootid: &HSTRING) -> WinResult<IStorageProviderStatusUISource> {
         // Single-account today: every sync-root id maps to the one source that
         // reads the shared snapshot. (A future multi-account build would branch
         // on `_syncrootid` here, mirroring CloudMirror's note.)
-        Ok(StatusUiSource.into())
+        Ok(StatusUiSource { app: self.this.app }.into())
     }
 }
 
@@ -385,7 +394,9 @@ impl IStorageProviderStatusUISourceFactory_Impl for StatusUiSourceFactory_Impl {
 // (Queried to the requested `riid`). We ignore aggregation (`punkouter`), as the
 // shell never aggregates these.
 #[implement(IClassFactory)]
-struct StatusUiClassFactory;
+struct StatusUiClassFactory {
+    app: &'static crate::identity::EngineIdentity,
+}
 
 impl IClassFactory_Impl for StatusUiClassFactory_Impl {
     fn CreateInstance(
@@ -404,7 +415,7 @@ impl IClassFactory_Impl for StatusUiClassFactory_Impl {
         if punkouter.is_some() {
             return Err(CLASS_E_NOAGGREGATION.into());
         }
-        let factory: IStorageProviderStatusUISourceFactory = StatusUiSourceFactory.into();
+        let factory: IStorageProviderStatusUISourceFactory = StatusUiSourceFactory { app: self.this.app }.into();
         // SAFETY: `riid`/`ppvobject` come from the shell's QueryInterface-style
         // call; `query` writes the requested interface (or an error) into
         // `ppvobject` and returns the HRESULT, which `.ok()` maps to Result.
@@ -439,35 +450,32 @@ static CLASS_OBJECT_COOKIE: OnceLock<u32> = OnceLock::new();
 /// `com_initialized_sta` MUST be true: `CoRegisterClassObject` requires the
 /// calling thread to have initialized COM. The caller
 /// ([`super::register_status_ui_for_sync_root`]) handles that.
-pub fn rebind(shell_id: &str) -> anyhow::Result<()> {
+pub fn rebind(identity: &'static crate::identity::EngineIdentity, shell_id: &str) -> anyhow::Result<()> {
     anyhow::ensure!(CLASS_OBJECT_COOKIE.get().is_some(), "COM factory is not ready");
-    register_status_ui_source(shell_id)
+    register_status_ui_source(identity, shell_id)
 }
 
-pub fn register_status_ui_source(shell_id: &str) -> anyhow::Result<()> {
+pub fn register_status_ui_source(
+    identity: &'static crate::identity::EngineIdentity,
+    shell_id: &str,
+) -> anyhow::Result<()> {
+    let clsid = status_ui_factory_clsid(identity);
     // 1. Register the class object so this running exe is the local server for
     //    the CLSID. Once per process (Windows rejects a duplicate).
     if CLASS_OBJECT_COOKIE.get().is_none() {
-        let factory: IClassFactory = StatusUiClassFactory.into();
-        // SAFETY: `STATUS_UI_FACTORY_CLSID` is a valid CLSID; `factory` outlives
+        let factory: IClassFactory = StatusUiClassFactory { app: identity }.into();
+        // SAFETY: `clsid` is a valid CLSID; `factory` outlives
         // the call (it is moved into COM's keeping via the cookie). We pass
         // `CLSCTX_LOCAL_SERVER | REGCLS_MULTIPLEUSE` exactly as CloudMirror does.
-        let cookie = unsafe {
-            CoRegisterClassObject(
-                &STATUS_UI_FACTORY_CLSID,
-                &factory,
-                CLSCTX_LOCAL_SERVER,
-                REGCLS_MULTIPLEUSE,
-            )
-        }
-        .map_err(|e| anyhow::anyhow!("CoRegisterClassObject(status-ui factory) failed: {e}"))?;
+        let cookie = unsafe { CoRegisterClassObject(&clsid, &factory, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE) }
+            .map_err(|e| anyhow::anyhow!("CoRegisterClassObject(status-ui factory) failed: {e}"))?;
         let _ = CLASS_OBJECT_COOKIE.set(cookie);
         tracing::info!(cookie, "status-UI source factory class object registered");
     }
 
     // 2. Write HKCU\Software\Classes\CLSID\{clsid}\LocalServer32 = "<exe>" so the
     //    shell can launch us on demand if we are not already running.
-    let clsid_str = format!("{{{:?}}}", STATUS_UI_FACTORY_CLSID);
+    let clsid_str = format!("{{{:?}}}", clsid);
     let exe = std::env::current_exe().map_err(|e| anyhow::anyhow!("resolve current exe for LocalServer32: {e}"))?;
     let exe_str = exe.to_string_lossy().into_owned();
     let local_server_key = format!("Software\\Classes\\CLSID\\{clsid_str}\\LocalServer32");
@@ -500,7 +508,7 @@ pub fn register_status_ui_source(shell_id: &str) -> anyhow::Result<()> {
 /// Keeps the credential-free COM class object and deletes the
 /// CLSID + the sync-root binding value. Best-effort: every step is independent
 /// and a failure is logged, never propagated past the caller's log-and-continue.
-pub fn unregister_status_ui_source(shell_id: &str) {
+pub fn unregister_status_ui_source(identity: &'static crate::identity::EngineIdentity, shell_id: &str) {
     // The credential-free class factory stays registered on its original STA.
     // Callback leases deny all account access while locked/signed out. Re-login
     // restores the registry binding without reusing a revoked COM cookie.
@@ -517,7 +525,7 @@ pub fn unregister_status_ui_source(shell_id: &str) {
     }
 
     // Remove the CLSID subtree.
-    let clsid_str = format!("{{{:?}}}", STATUS_UI_FACTORY_CLSID);
+    let clsid_str = format!("{{{:?}}}", status_ui_factory_clsid(identity));
     let clsid_key = HSTRING::from(format!("Software\\Classes\\CLSID\\{clsid_str}"));
     // SAFETY: deletes our own CLSID subtree under HKCU.
     let _ = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &clsid_key) };

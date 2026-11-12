@@ -23,8 +23,12 @@ other file, a test build prints a `NOTE` line and goes on.
 `beebeeb-desktop-test.exe`: its own install folder, data folder (`%LOCALAPPDATA%\io.beebeeb.app.test`), config and
 credentials. The installer looks only at processes of its own binary name and **never ends a process**: it asks a
 running native app to quit (`--quit-for-update`), waits 20 seconds, then says "still running" and offers Retry or
-Cancel. `build-installer.ps1 -Mode test` refuses a binary that was not built with
-`BEEBEEB_APP_IDENTIFIER=io.beebeeb.app.test`, because such a binary would open the real account's data.
+Cancel. Which app a binary is, is decided when it is built (`native\beebeeb-drive-rune\build.rs`):
+`BEEBEEB_APP_IDENTIFIER=io.beebeeb.app.test`, or the variable unset, gives the test app; `io.beebeeb.app` gives the
+real one; any other value, and a release (`BEEBEEB_RELEASE_VERSION` set) that is not `io.beebeeb.app`, stops the
+build. The profile (`--release`) decides nothing. `build-installer.ps1 -Mode test` refuses a binary that does not
+carry the test app's mark (`beebeeb-app-identity=io.beebeeb.app.test;`), because any other binary would open the
+real account's data; `-Mode release` refuses one without the real app's mark.
 
 **The installer refuses to run over an install older than 0.8.25** (review P2-2): a message says to update through
 the app first, nothing is changed, exit code 3; when an old updater started it (`/UPDATE`), the old app is started
@@ -39,7 +43,7 @@ running: nothing below looks at it. Check that afterwards (step 8).
 # 1. Build the native binary (its own toolchain: native\beebeeb-drive-rune\rust-toolchain.toml).
 $env:CARGO_TARGET_DIR = 'C:\bb-win\native\target'
 Set-Location C:\bb-win\native\desktop\native\beebeeb-drive-rune
-$env:BEEBEEB_APP_IDENTIFIER = 'io.beebeeb.app.test'     # the test identity is compiled in; the packager checks it
+$env:BEEBEEB_APP_IDENTIFIER = 'io.beebeeb.app.test'     # the test identity is compiled in (also the default); the packager checks the binary's mark
 cargo build --release --locked
 if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 Remove-Item Env:BEEBEEB_APP_IDENTIFIER
@@ -73,9 +77,9 @@ Start-Process -FilePath "$env:LOCALAPPDATA\Beebeeb Test\uninstall.exe" -Argument
 
 **Native checks added by the security review's delta (never run; the lead's):**
 
-1. Step 2 with a binary built WITHOUT `BEEBEEB_APP_IDENTIFIER` must print `FAILED the binary was not built as the
-   test app` and exit 1 (the guard can fail). Until the shell lane makes the native binary honour
-   `BEEBEEB_APP_IDENTIFIER`, every test build is refused: that is the intended state, not a bug in the script.
+1. Step 2 with a binary built with `BEEBEEB_APP_IDENTIFIER=io.beebeeb.app` must print `FAILED the binary was not
+   built as the test app` and exit 1 (the guard can fail). A build with `BEEBEEB_APP_IDENTIFIER=banana` must not
+   compile at all (`is not an app`).
 2. With the test app running, run the installer without `/S`: after about 20 seconds it must show "Beebeeb Test is
    still running" with Retry and Cancel, and `Get-Process beebeeb-desktop-test` must still list the same id.
 3. (Also with `/S`, and also over an MSI install: the scan runs in `.onInit` since Delta 3.) The version refusal: `reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Beebeeb Test" /v

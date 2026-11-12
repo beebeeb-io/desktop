@@ -8,7 +8,7 @@
 //! Tests: `crate::config::tests`.
 
 use super::lock::config_write_guard;
-use super::paths::{APP_CONFIG_DIR, CONFIG_FILENAME};
+use super::paths::CONFIG_FILENAME;
 use super::*;
 
 /// Which OS a load is for, named so both branches run on any test host.
@@ -32,9 +32,11 @@ impl DesktopConfig {
     /// Resolve the absolute path to `desktop.toml` for the current user,
     /// creating the parent directory if missing. Errors propagate as
     /// strings so they can flow through Tauri commands.
-    pub fn path() -> Result<PathBuf, String> {
+    ///
+    /// The folder is the identity's (`EngineIdentity::config_dir_name`): there is no path without one.
+    pub fn path_for(identity: &'static crate::identity::EngineIdentity) -> Result<PathBuf, String> {
         let base = Self::config_base_dir().map_err(String::from)?;
-        let dir = base.join(APP_CONFIG_DIR);
+        let dir = base.join(identity.config_dir_name());
         fs::create_dir_all(&dir)
             .map_err(ConfigError::CreateConfigDirectory)
             .map_err(String::from)?;
@@ -64,8 +66,8 @@ impl DesktopConfig {
     /// launch and yields `DesktopConfig::default()` rather than an
     /// error. A corrupt or unparseable file IS an error — surfacing
     /// it loud avoids silently overwriting a user's settings on save.
-    pub fn load() -> Result<Self, String> {
-        Self::load_from(&Self::path()?).map_err(String::from)
+    pub fn load_for(identity: &'static crate::identity::EngineIdentity) -> Result<Self, String> {
+        Self::load_from(&Self::path_for(identity)?).map_err(String::from)
     }
 
     /// [`Self::load`] from `path`. A seam so a test can run the real load against its own file.
@@ -128,8 +130,8 @@ impl DesktopConfig {
     ///
     /// Task 1889: the read, the mint and the write are one [`Self::update_at`], so two callers at once
     /// cannot mint two ids, and the mint cannot replace a setting another writer saved meanwhile.
-    pub fn ensure_account_id() -> Result<String, String> {
-        Self::ensure_account_id_at(&Self::path()?).map_err(String::from)
+    pub fn ensure_account_id_for(identity: &'static crate::identity::EngineIdentity) -> Result<String, String> {
+        Self::ensure_account_id_at(&Self::path_for(identity)?).map_err(String::from)
     }
 
     /// [`Self::ensure_account_id`] against an explicit file, so a test can run the real read, mint
@@ -149,8 +151,11 @@ impl DesktopConfig {
     /// Load the config, let `change` modify it, and save it if `change` says so, all under the
     /// config-write lock ([`Self::update_at`] on [`Self::path`]). Every writer of `desktop.toml`
     /// outside this file goes through here (task 1889). `change` returns `(save, value)`.
-    pub fn update<R>(change: impl FnOnce(&mut Self) -> (bool, R)) -> Result<R, String> {
-        Self::update_at(&Self::path()?, change)
+    pub fn update_for<R>(
+        identity: &'static crate::identity::EngineIdentity,
+        change: impl FnOnce(&mut Self) -> (bool, R),
+    ) -> Result<R, String> {
+        Self::update_at(&Self::path_for(identity)?, change)
     }
 
     /// Load the config at `path`, let `change` modify it, and save it if `change` says so, all

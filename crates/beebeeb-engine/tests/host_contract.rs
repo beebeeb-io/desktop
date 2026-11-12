@@ -239,7 +239,7 @@ fn open(credentials: &MemoryCredentials) -> Host {
         "the handle talks to the fake API, never to production"
     );
     Host {
-        engine: Engine::open(config, host, credentials.clone()).unwrap(),
+        engine: Engine::open(&beebeeb_engine::identity::REAL, config, host, credentials.clone()).unwrap(),
         messages,
         wakes,
     }
@@ -282,7 +282,7 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     let _serial = serial();
     let credentials = MemoryCredentials::default();
     let sync_root: PathBuf = tempfile::tempdir().unwrap().keep();
-    DesktopConfig::update(|cfg| {
+    DesktopConfig::update_for(&beebeeb_engine::identity::REAL, |cfg| {
         cfg.sync_root = Some(sync_root.clone());
         (true, ())
     })
@@ -354,12 +354,18 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     host.engine.pause().unwrap();
     assert!(host.engine.is_paused() && host.engine.is_syncing());
     assert!(
-        DesktopConfig::load().unwrap().pause_sync,
+        DesktopConfig::load_for(&beebeeb_engine::identity::REAL)
+            .unwrap()
+            .pause_sync,
         "the pause is written, so a restart stays paused"
     );
     host.engine.resume().unwrap();
     assert!(!host.engine.is_paused());
-    assert!(!DesktopConfig::load().unwrap().pause_sync);
+    assert!(
+        !DesktopConfig::load_for(&beebeeb_engine::identity::REAL)
+            .unwrap()
+            .pause_sync
+    );
     let pauses: Vec<String> = host
         .messages
         .try_iter()

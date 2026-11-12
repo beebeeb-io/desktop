@@ -52,6 +52,7 @@ fn prod_shaped_row_is_readable_and_nested() {
     let fixture = lost_fixture();
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
+        &crate::identity::REAL,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
@@ -126,6 +127,7 @@ fn never_overwrite_nonempty_path_with_empty() {
     let fixture = lost_fixture();
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
+        &crate::identity::REAL,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
@@ -210,7 +212,7 @@ fn heal_detects_blocked_rows_and_prepareownedrows_resets_them() {
     // prepare_owned_rows resets blocked_fingerprint on every pass (line 747:
     // `record.blocked_fingerprint = None;`). With the fixed request_envelope,
     // the prod-shaped row resolves and the record is no longer blocked.
-    let bridge = crate::engine_bridge::EngineBridge::new(Arc::new(db), Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, Arc::new(db), Arc::new(fixture.api()));
     let row = prod_row(file_id, None, &file_name, false, 100);
     let prepared = run(bridge.prepare_owned_rows(&[row])).unwrap();
     assert!(
@@ -282,6 +284,7 @@ fn a_file_row_with_an_unreadable_name_survives_the_key_walk() {
     let fixture = lost_fixture();
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
+        &crate::identity::REAL,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
@@ -345,6 +348,7 @@ fn a_healed_row_gets_its_real_name_on_the_next_sync() {
     let fixture = lost_fixture();
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
+        &crate::identity::REAL,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );

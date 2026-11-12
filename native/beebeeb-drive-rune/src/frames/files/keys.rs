@@ -8,7 +8,7 @@
 //! | Ctrl+A | select every row |
 //! | Enter | open: a folder in place, a file in its app |
 //! | Space | Preview (DW-0408) of a file; nothing on a folder |
-//! | Alt+Enter, F2 | Details (DW-0411), Rename (DW-0410) |
+//! | Alt+Enter, F2 | Details (DW-0411); Rename in the row (DW-0410: Enter saves, Esc cancels) |
 //! | Delete | Move to Trash, with Undo |
 //! | Ctrl+Z, Ctrl+D | Undo the move to Trash; Duplicate |
 //! | Menu, Shift+F10 | the file menu, at the selected row |
@@ -83,7 +83,7 @@ fn reveal(row: Option<usize>, tx: &mut Tx) -> bool {
 
 /// After the folder changed: the keyboard stays in the list (the table, or the empty folder's
 /// area), so the next key is still the list's.
-fn focus_list(s: &State, tx: &mut Tx) {
+pub(super) fn focus_list(s: &State, tx: &mut Tx) {
     tx.focus(
         if s.list_error.is_some() {
             "file-list-error"
@@ -97,6 +97,17 @@ fn focus_list(s: &State, tx: &mut Tx) {
 }
 
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    // A dialog takes every key; so does a name being typed in a row (its field has the keyboard,
+    // and what the field does not use is nobody's).
+    if s.actions.dialog.is_some() {
+        return s.dialog_key(ev, tx);
+    }
+    if s.actions.rename.is_some() {
+        if ev.key == Key::Escape {
+            s.cancel_rename(tx);
+        }
+        return true;
+    }
     if s.actions.menu.is_some() {
         return menu_key(s, ev, tx);
     }
@@ -110,7 +121,9 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         match c {
             // Nothing is added to Backups, a service folder, Trash or Shared with me (DW-0414).
             'n' | 'o' if !s.can_add() => return false,
-            'n' if m.shift => s.intent(Intent::Frame("DW-0417")),
+            'n' if m.shift => {
+                s.begin_new_folder();
+            }
             'n' => s.intent(Intent::Frame("DW-1521")),
             'o' => s.intent(Intent::Frame("DW-0415")),
             '1'..='5' => match SidebarSection::all().get(c as usize - '1' as usize) {
@@ -187,10 +200,7 @@ fn list_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         }
         // Preview: of a file. On a folder Space does nothing (DW-0402: "Preview is dimmed").
         Key::Text(ref space) if space == " " && s.selected.is_some() => s.preview(),
-        Key::Function(2) if s.selected.is_some() => {
-            s.intent(Intent::Frame("DW-0410"));
-            true
-        }
+        Key::Function(2) if s.selected.is_some() => s.begin_rename(tx),
         Key::Delete => s.trash_selection(tx),
         Key::ContextMenu if s.selected.is_some() => {
             s.open_file_menu(menu_point(s));

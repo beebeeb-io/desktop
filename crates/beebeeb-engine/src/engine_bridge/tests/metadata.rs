@@ -148,7 +148,7 @@ async fn test_process_due_operations_stops_immediately_once_engine_is_stopping()
         [7u8; 32],
     ));
     let stopping = Arc::new(AtomicBool::new(false));
-    let bridge = EngineBridge::new_with_stop_flag(db.clone(), api, stopping.clone());
+    let bridge = EngineBridge::new_with_stop_flag(&crate::identity::REAL, db.clone(), api, stopping.clone());
 
     db.enqueue_operation(&PendingOperation {
         op_id: "op-pin-1".into(),
@@ -223,7 +223,7 @@ fn test_queue_finder_writes_refuse_to_enqueue_once_engine_is_stopping() {
         [7u8; 32],
     ));
     let stopping = Arc::new(AtomicBool::new(true));
-    let bridge = EngineBridge::new_with_stop_flag(db.clone(), api, stopping);
+    let bridge = EngineBridge::new_with_stop_flag(&crate::identity::REAL, db.clone(), api, stopping);
 
     let create_result = bridge.queue_finder_create(FinderWriteTarget {
         file_id: None,

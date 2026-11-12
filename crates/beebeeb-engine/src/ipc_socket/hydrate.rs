@@ -85,12 +85,14 @@ pub(super) async fn hydrate_over_ipc(
     // periodic sweep in `runner.rs` are now a crash backstop —
     // they only ever find staging orphaned by a crash between
     // decrypt and that copy, not a file the system still holds.
-    let sync_root = crate::config::DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root);
-    let temp_root = std::env::temp_dir();
+    let sync_root = crate::config::DesktopConfig::load_for(bridge.identity)
+        .ok()
+        .and_then(|cfg| cfg.sync_root);
+    let temp_root = bridge.identity.scratch_dir_in(&std::env::temp_dir());
     let dest = std::path::Path::new(dest_path);
     #[cfg(target_os = "macos")]
     let macos_hydrate_dir = {
-        let dir = macos_hydrate_cache_dir();
+        let dir = macos_hydrate_cache_dir(bridge.identity);
         if let Err(e) = macos_ensure_hydrate_cache_dir(&dir) {
             tracing::warn!(error = %e, dir = %dir.display(), "could not create macOS hydrate-cache dir");
         }

@@ -416,7 +416,7 @@ fn t18_free_up_space_keeps_a_file_pinned_on_disk_the_db_thinks_unpinned() {
         "pinned and hydrated on disk"
     );
 
-    crate::free_up_space_windows(&r.db, &r.root).unwrap();
+    crate::free_up_space_windows(&crate::identity::REAL, &r.db, &r.root).unwrap();
 
     assert_eq!(direct_bits(&free) & RECALL, RECALL, "the control is freed");
     assert_eq!(r.status_in_db("b/free.txt"), FileStatus::CloudOnly);

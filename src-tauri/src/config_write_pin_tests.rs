@@ -1,5 +1,6 @@
 use super::finder_setup_command_tests::without_items;
 use super::{DesktopConfig, ReleaseChannel};
+use crate::AppConfig;
 
 /// Every `.rs` file under `src` as `(name relative to src, production text)`: LF line ends, test modules
 /// dropped, and lines that are comments dropped.
@@ -322,7 +323,10 @@ fn test_1889_no_desktop_config_load_modify_save_span_exists_outside_the_one_help
         ("    pub fn try_update_at<R>(", "Self::try_update_at_then("),
         ("    pub fn update_at_then<R>(", "Self::try_update_at_then("),
         ("    pub fn update_at_durable_with<R>(", "Self::try_update_at_then("),
-        ("    pub fn update<R>(", "Self::update_at(&Self::path()?, change)"),
+        (
+            "    pub fn update_for<R>(",
+            "Self::update_at(&Self::path_for(identity)?, change)",
+        ),
         ("    pub fn update_held_at<R>(", "DesktopConfig::update_at(path,"),
         ("    pub fn ensure_account_id_at(", "Self::try_update_at(path,"),
     ] {

@@ -9,11 +9,16 @@
 //! not built, is `shared/FRAMES.md`.
 
 pub mod account;
+pub mod backups;
 pub mod files;
+pub mod global;
+pub mod photos;
 pub mod settings;
 pub mod shared;
 pub mod signin;
+pub mod this_pc;
 pub mod trash;
+pub mod tray;
 
 use std::sync::OnceLock;
 
@@ -32,10 +37,14 @@ pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
         [
             shell,
             files::SCENES,
+            global::FRAMES,
             settings::FRAMES,
             account::FRAMES,
             signin::FRAMES,
             signin::setup::FRAMES,
+            this_pc::scenes::FRAMES,
+            backups::FRAMES,
+            tray::FRAMES,
         ]
         .concat()
     })

@@ -22,15 +22,18 @@ pub fn thumbnail_variant(max_dimension: u32) -> &'static str {
 /// directory (ensured to exist, owner-only and backup-excluded, and swept for
 /// crash-orphaned staging files first — the extension deletes its staging
 /// file right after reading it, so the sweep stays a crash backstop).
-pub(super) fn thumbnail_allowed_roots() -> Vec<std::path::PathBuf> {
+pub(super) fn thumbnail_allowed_roots(identity: &'static crate::identity::EngineIdentity) -> Vec<std::path::PathBuf> {
     let mut roots = Vec::new();
-    if let Some(root) = crate::config::DesktopConfig::load().ok().and_then(|cfg| cfg.sync_root) {
+    if let Some(root) = crate::config::DesktopConfig::load_for(identity)
+        .ok()
+        .and_then(|cfg| cfg.sync_root)
+    {
         roots.push(root);
     }
-    roots.push(std::env::temp_dir());
+    roots.push(identity.scratch_dir_in(&std::env::temp_dir()));
     #[cfg(target_os = "macos")]
     {
-        let dir = macos_hydrate_cache_dir();
+        let dir = macos_hydrate_cache_dir(identity);
         if let Err(e) = macos_ensure_hydrate_cache_dir(&dir) {
             tracing::warn!(error = %e, dir = %dir.display(), "could not create macOS hydrate-cache dir");
         }

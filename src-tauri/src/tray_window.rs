@@ -318,7 +318,7 @@ fn tray_inputs_now<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> TrayInputs {
         locked,
         paused,
         explorer_ready: true,
-        update_available: crate::macos_popover::update_offer().is_some(),
+        update_available: crate::popover_data::update_offer().is_some(),
         conflicts: 0,
         engine_state,
         files_remaining,
@@ -666,9 +666,8 @@ pub(super) fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         // positioned near the bottom-right corner so it appears above the
         // system tray area. The main app opens from the context menu or
         // the tray flyout itself.
-        // On macOS: show/hide the menu-bar popover (`macos_popover::toggle`,
-        // task 1683 slice 3), placed under the status item by
-        // `surfaces::anchor` from the status item's own frame.
+        // On macOS: the menu-bar popover was toggled here (`macos_popover::toggle`,
+        // task 1683 slice 3); deleted, the native app has its own flyout.
         // On Linux: toggle the compact app window exactly as before.
         if let TrayIconEvent::Click {
             button,
@@ -713,7 +712,8 @@ pub(super) fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
             #[cfg(target_os = "macos")]
             {
                 let _ = (position, rect);
-                macos_popover::toggle(app);
+                // macos_popover::toggle deleted; the native app has its own flyout.
+                show_main_window(app, MainNav::Home);
             }
 
             #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -1064,7 +1064,7 @@ pub(super) fn show_main_app_window_with_nav(app: &tauri::AppHandle, nav: Option<
             .build()
         {
             Ok(win) => {
-                place_desktop_main_window(app, &win);
+                // place_desktop_main_window: deleted (web-view window frame; the builder's inner_size applies).
                 let _ = win.show();
                 let _ = win.set_focus();
                 if let Some(nav) = nav {

@@ -4,11 +4,14 @@
 
 use std::path::PathBuf;
 
-pub fn state_db_for_config(cfg: &crate::config::DesktopConfig) -> Result<Option<crate::state_db::StateDb>, String> {
+pub fn state_db_for_config(
+    identity: &'static crate::identity::EngineIdentity,
+    cfg: &crate::config::DesktopConfig,
+) -> Result<Option<crate::state_db::StateDb>, String> {
     let Some(_) = &cfg.sync_root else {
         return Ok(None);
     };
-    let db_path = crate::state_paths::beebeeb_state_dir()?.join(crate::state_paths::STATE_DB_FILENAME);
+    let db_path = crate::state_paths::beebeeb_state_dir_for(identity)?.join(crate::state_paths::STATE_DB_FILENAME);
     if !db_path.exists() {
         return Ok(None);
     }
@@ -30,8 +33,8 @@ pub fn state_db_for_config(cfg: &crate::config::DesktopConfig) -> Result<Option<
 /// logout/lock must always appear to succeed, and daemon startup must never
 /// block on this.
 #[cfg(target_os = "macos")]
-pub fn purge_macos_hydrate_cache(context: &str) {
-    let dir = crate::ipc_socket::macos_hydrate_cache_dir();
+pub fn purge_macos_hydrate_cache(identity: &crate::identity::EngineIdentity, context: &str) {
+    let dir = crate::ipc_socket::macos_hydrate_cache_dir(identity);
     match crate::ipc_socket::macos_purge_hydrate_cache_dir(&dir) {
         Ok(removed) if removed > 0 => {
             tracing::info!(removed, context, "purged macOS hydrate-cache staged plaintext");
@@ -44,25 +47,26 @@ pub fn purge_macos_hydrate_cache(context: &str) {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn purge_macos_hydrate_cache(_context: &str) {}
+pub fn purge_macos_hydrate_cache(_identity: &crate::identity::EngineIdentity, _context: &str) {}
 
-pub fn disposable_cache_roots() -> Vec<PathBuf> {
+pub fn disposable_cache_roots(identity: &crate::identity::EngineIdentity) -> Vec<PathBuf> {
     disposable_cache_roots_in(
-        std::env::temp_dir(),
-        dirs::cache_dir(),
-        macos_hydrate_cache_root(),
-        &crate::engine_bridge::FinderStagingBases::current(),
+        identity.scratch_dir_in(&std::env::temp_dir()),
+        dirs::cache_dir().map(|dir| identity.scratch_dir_in(&dir)),
+        macos_hydrate_cache_root(identity),
+        &crate::engine_bridge::FinderStagingBases::current(identity),
     )
 }
 
 /// The hydrate cache's root on a Mac (task 1670); none elsewhere.
-pub fn macos_hydrate_cache_root() -> Option<PathBuf> {
+pub fn macos_hydrate_cache_root(identity: &crate::identity::EngineIdentity) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        Some(crate::ipc_socket::macos_hydrate_cache_dir())
+        Some(crate::ipc_socket::macos_hydrate_cache_dir(identity))
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = identity;
         None
     }
 }
@@ -103,18 +107,18 @@ pub fn disposable_cache_roots_in(
     roots
 }
 
-/// `…/Logs/Beebeeb` anywhere in `path`: the lifecycle log's directory, in the home or in the app's
+/// `…/Logs/<the identity's log folder>` (`Logs/Beebeeb` for the real app) anywhere in `path`: the lifecycle log's directory, in the home or in the app's
 /// container (spec 2026-10-06 §8). It survives sign-out, Repair and the account reset (lead ruling
 /// T5-⚠c), so no purge may treat anything under it as disposable, whatever root it sits in.
-pub fn is_lifecycle_log_path(path: &std::path::Path) -> bool {
+pub fn is_lifecycle_log_path(identity: &crate::identity::EngineIdentity, path: &std::path::Path) -> bool {
     let names: Vec<&str> = path.components().filter_map(|part| part.as_os_str().to_str()).collect();
     names
         .windows(2)
-        .any(|pair| pair[0].eq_ignore_ascii_case("Logs") && pair[1].eq_ignore_ascii_case("Beebeeb"))
+        .any(|pair| pair[0].eq_ignore_ascii_case("Logs") && pair[1].eq_ignore_ascii_case(identity.logs_dir_name()))
 }
 
-pub fn is_disposable_cache_path(path: &std::path::Path) -> bool {
-    if is_lifecycle_log_path(path) {
+pub fn is_disposable_cache_path(identity: &crate::identity::EngineIdentity, path: &std::path::Path) -> bool {
+    if is_lifecycle_log_path(identity, path) {
         return false;
     }
     let canonical_path = match path.canonicalize() {
@@ -133,10 +137,10 @@ pub fn is_disposable_cache_path(path: &std::path::Path) -> bool {
         }
     };
     // A symlink into the log directory is the same directory.
-    if is_lifecycle_log_path(&canonical_path) {
+    if is_lifecycle_log_path(identity, &canonical_path) {
         return false;
     }
-    disposable_cache_roots()
+    disposable_cache_roots(identity)
         .into_iter()
         .filter_map(|root| root.canonicalize().ok())
         .any(|root| canonical_path.starts_with(root))

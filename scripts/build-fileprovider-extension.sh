@@ -77,7 +77,7 @@ require_cmd codesign
 VERSION="$(python3 - <<'PY'
 import json
 from pathlib import Path
-print(json.loads(Path("package.json").read_text())["version"])
+print(json.loads(Path("src-tauri/tauri.conf.json").read_text())["version"])
 PY
 )"
 

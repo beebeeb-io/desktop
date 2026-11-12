@@ -38,60 +38,66 @@ use crate::state_db::{FileEntry, TransferActivity, TransferBacklog};
 use crate::surfaces::phase::{FinderFailureReason, FinderSetup, PopoverPhase, PopoverSnapshot, popover_phase};
 use crate::transfer_progress::{Direction, Transfer, TransferBoard, display_name, parent_folder};
 
+// ── Cross-platform flyout state (moved from macos_popover.rs) ──────────────
 
+/// An available update, shown in the flyout's badge and the Beebeeb window's banner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct UpdateOffer {
+    pub channel: String,
+    pub version: String,
+}
 
+/// Progress while sign-out sends the last changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct Sending {
+    pub changes_left: usize,
+}
 
+/// The count the popover shows while sign-out sends the last changes. A read that fails leaves the count out for that
+/// tick (`progressLine` shows none for 0), never the whole snapshot of the popover and the Beebeeb window (review P3-5
+/// of #160).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn changes_left(read: Result<crate::sign_out::waiting::WaitingChanges, String>) -> usize {
+    match read {
+        Ok(waiting) => {
+            let counts = waiting.counts();
+            counts.files.saturating_add(counts.others)
+        }
+        Err(_) => {
+            tracing::warn!("could not count the changes sign-out is still sending");
+            0
+        }
+    }
+}
 
+static UPDATE: Mutex<Option<(String, String)>> = Mutex::new(None);
 
+pub(crate) fn note_update(channel: &str, version: Option<&str>) {
+    *UPDATE.lock().unwrap_or_else(|p| p.into_inner()) = version.map(|v| (channel.to_owned(), v.to_owned()));
+}
+
+pub(crate) fn update_offer() -> Option<UpdateOffer> {
+    let channel = crate::configured_release_channel();
+    UPDATE
+        .lock()
+        .ok()?
+        .as_ref()
+        .filter(|(c, _)| c == channel.as_str())
+        .map(|(channel, version)| UpdateOffer {
+            channel: channel.clone(),
+            version: version.clone(),
+        })
+}
 
 // ── Shared runtime state ────────────────────────────────────────────────────
 
-
-
 // ── Storage summary, cached ─────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // ── Finder ──────────────────────────────────────────────────────────────────
 
-
 // ── The snapshot ────────────────────────────────────────────────────────────
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // ── The review window's retarget event ──────────────────────────────────────
-
-
-
-
-
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
@@ -100,22 +106,27 @@ mod tests;
 
 mod constants;
 use constants::*;
-pub use constants::{POPOVER_HIDDEN_EVENT, STORAGE_TTL_SECS, STORAGE_WAIT, STORAGE_FAILURE_BACKOFF_SECS, DEFAULT_ACTIVITY_LIMIT, CONFLICT_FILES_LIMIT};
-// Emitted by the macOS popover window code (`macos_popover.rs`).
+pub use constants::{
+    CONFLICT_FILES_LIMIT, DEFAULT_ACTIVITY_LIMIT, POPOVER_HIDDEN_EVENT, STORAGE_FAILURE_BACKOFF_SECS, STORAGE_TTL_SECS,
+    STORAGE_WAIT,
+};
+// Emitted by the macOS popover window code (was in `macos_popover.rs`, deleted).
 #[cfg(target_os = "macos")]
 pub use constants::POPOVER_SHOWN_EVENT;
 
 mod runtime;
-pub use runtime::{PopoverRuntime};
+pub use runtime::PopoverRuntime;
 
 mod storage;
-pub use storage::{StorageUsage, StorageCache, clear_storage, StorageDto, cached_storage, fetch_storage_usage, storage_is_full};
+pub use storage::{
+    StorageCache, StorageDto, StorageUsage, cached_storage, clear_storage, fetch_storage_usage, storage_is_full,
+};
 // The seam a snapshot test fetches through (`cached_storage` is the caller's form).
 #[cfg(test)]
 pub use storage::cached_storage_with;
 
 mod snapshot;
-pub use snapshot::{PopoverSnapshotDto, SnapshotInputs, DbView, gather_db_view, assemble};
+pub use snapshot::{DbView, PopoverSnapshotDto, SnapshotInputs, assemble, gather_db_view};
 // The row/conflict shapes and builders are exercised from this module's tests.
 #[cfg(test)]
 pub use snapshot::{ActivityState, ConflictFile, build_activity_rows, finder_reason_line};
