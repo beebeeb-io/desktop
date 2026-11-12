@@ -4,6 +4,8 @@
 //! Tests only (`test` or the `test-support` feature). Invented accounts and keys; it never talks to another host.
 //! Must not: be reachable from a release build, or hold anything a test did not put there.
 
+pub mod fake_account;
+
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
