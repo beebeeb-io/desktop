@@ -1,0 +1,12 @@
+# Flaky Windows Cloud Files tests — allowed a CI retry (task 2448, 2026-11-12).
+#
+# Each line is the exact test path printed by `cargo test` on failure. Tests on this list are
+# retried up to 2 extra times when they fail in CI; a test NOT on this list fails the job at once.
+#
+# Format: <exact test path>   # task id, date added, one-line reason
+#
+# ERROR 379 (provider terminated): the hosted runner's Cloud Files driver times out under the load
+# of ~1800 parallel tests; the provider's callback thread is starved and Windows reports it as
+# terminated. Passes reliably on dedicated hardware (Legion: 102/0).
+windows_cf::ld0105_native_tests::f2b::ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces   # 2448, 2026-11-12, ERROR 379 under CI load
+windows_cf::ld0105_native_tests::ld0105_p1_native_a_write_into_a_partly_downloaded_file_is_kept                       # 2448, 2026-11-12, callback not routed under CI load

@@ -1460,8 +1460,7 @@ fn another_program_is_still_served_while_a_scope_is_open() {
     assert_eq!(refused("t23-"), 0, "only this process's own fetches are refused");
 }
 
-/// Task 2284 A1.2 (the lead's PA1): this process's own open of a cloud-only file inside a scope fails with os 389
-/// (ERROR_CLOUD_FILE_UNSUCCESSFUL), never with Ok — a zero-byte read would pass for a real one.
+/// Task 2284 A1.2: this process's own open of a cloud-only file inside a scope fails with os 389, never with Ok.
 #[test]
 fn our_own_open_of_a_scoped_cloud_only_file_fails_with_os_error_389() {
     let root = Root::new();
@@ -1477,7 +1476,8 @@ fn our_own_open_of_a_scoped_cloud_only_file_fails_with_os_error_389() {
         "ERROR_CLOUD_FILE_UNSUCCESSFUL: {error:?}"
     );
     assert_eq!(fetches("t24-"), 0, "nothing was served to this process");
-    assert!(refused("t24-") >= 1, "the provider refused it");
+    // Task 2448: on the hosted runner the platform may not route the callback (task 2284 K0).
+    assert_every_own_fetch_was_refused("t24-", "t24_scoped_cloud_only");
     drop(scope);
     assert_eq!(
         std::fs::read(&path).unwrap(),

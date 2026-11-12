@@ -475,6 +475,11 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
           "$py" scripts/assert-cargo-test-counts.py --self-test
 
+      - name: Flaky-test retry self-test (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash scripts/ci-retry-flaky-tests.sh --self-test
+
       # The engine's OS-gated code (Windows Cloud Files rows, the macOS release journal) compiles and runs here on
       # its own OS; the shell's tests reach it only with the `test-support` feature on.
       - name: Run the engine crate's tests
@@ -491,8 +496,22 @@ jobs:
           cat "$RUNNER_TEMP/engine-test.log"
           echo "$cargo_exit" > "$RUNNER_TEMP/engine-test.exit"
           if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
+
+          # Task 2448: on Windows, retry listed flaky Cloud Files tests before the count guard.
+          retried_ok=""
+          if [ "$cargo_exit" -ne 0 ] && [ "$RUNNER_OS" = Windows ]; then
+            retry_exit=0
+            bash ../../scripts/ci-retry-flaky-tests.sh "$RUNNER_TEMP/engine-test.log" \
+              ../../scripts/ci-flaky-windows-cf-tests.txt \
+              --crate-dir . --summary "${GITHUB_STEP_SUMMARY:-/dev/null}" || retry_exit=$?
+            if [ "$retry_exit" -eq 0 ]; then
+              echo "ci-retry: all failures passed on retry."
+              retried_ok="--retried-ok"
+            fi
+          fi
+
           # The library binary must be in the log and at or above its floor (scripts/cargo-test-floors.txt).
-          "$py" ../../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/engine-test.log" --cargo-exit-code "$cargo_exit" --expect deps/beebeeb_engine-
+          "$py" ../../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/engine-test.log" --cargo-exit-code "$cargo_exit" --expect deps/beebeeb_engine- $retried_ok
 
       - name: Upload engine test evidence
         if: always()
