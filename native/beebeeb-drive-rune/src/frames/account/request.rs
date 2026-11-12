@@ -35,14 +35,20 @@ impl BoardApprovals {
     }
 
     pub fn begin(&mut self, request: &str) {
-        let answer = match request {
-            "req-expired" => Approval::Expired,
-            "req-handled" => Approval::AlreadyHandled,
-            "req-cancelled" => Approval::Cancelled,
-            "req-dropped" => Approval::Offline,
-            _ => Approval::Approved,
+        let answers: &[Approval] = match request {
+            "req-expired" => &[Approval::Expired],
+            "req-handled" => &[Approval::AlreadyHandled],
+            "req-cancelled" => &[Approval::Cancelled],
+            // The connection is gone before anything is sent; gone after the claim was sent;
+            // and gone after it, with a later check that finds the request approved.
+            "req-dropped" => &[Approval::Offline],
+            "req-unknown" => &[Approval::Unknown, Approval::AlreadyHandled],
+            "req-found-later" => &[Approval::Unknown, Approval::Approved],
+            _ => &[Approval::Approved],
         };
-        self.answers.push((request.to_owned(), answer));
+        for answer in answers {
+            self.answers.push((request.to_owned(), *answer));
+        }
     }
 
     pub fn answer(&mut self) -> Option<(String, Approval)> {
@@ -60,7 +66,15 @@ impl BoardApprovals {
     }
 
     pub fn deny(&mut self, request: &str) -> Denial {
+        // A claim that could not be recalled got there first.
+        let before = self.answers.len();
+        self.answers
+            .retain(|(id, answer)| !(id == request && *answer == Approval::Approved));
+        if self.answers.len() != before {
+            return Denial::ApprovedHere;
+        }
         match request {
+            "req-dropped" => Denial::Offline,
             "req-expired" => Denial::Expired,
             "req-handled" => Denial::AlreadyHandled,
             _ => Denial::Denied,

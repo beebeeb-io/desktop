@@ -1127,6 +1127,10 @@ fn the_approval_code_screens_are_secret_and_the_window_is_excluded_while_they_sh
         !AccountDialog::ApproveExpired { handled: false }.shows_secret(),
         "DW-A17"
     );
+    // The ends with no board frame show after the code is wiped too.
+    assert!(!AccountDialog::ApproveUnsure { denying: false }.shows_secret());
+    assert!(!AccountDialog::ApproveUnsure { denying: true }.shows_secret());
+    assert!(!AccountDialog::ApproveTooLate.shows_secret());
     assert!(
         !Pane::ApproveReview.shows_secret(),
         "the pane under the dialogs has no secret of its own"
