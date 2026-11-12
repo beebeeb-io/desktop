@@ -190,9 +190,9 @@ pub fn arrive(ui: &mut AccountUi) {
 /// End the flow: a prompt that is still up is dismissed, and the code is wiped.
 pub fn leave(ui: &mut AccountUi) {
     if ui.approve.waiting
-        && let Some(source) = ui.source.as_mut()
+        && let (Some(request), Some(source)) = (ui.approve.request.as_ref(), ui.source.as_mut())
     {
-        source.cancel_approval();
+        source.cancel_approval(&request.id);
     }
     ui.approve = Approve::default();
 }
@@ -284,16 +284,16 @@ pub fn notification(request: &SignInRequest) -> (String, String) {
     )
 }
 
-/// The toast was clicked (DW-A11's one action): the review opens, its code field empty.
-/// `false`: no request waits any more.
+/// The toast of the request `request` was clicked (DW-A11's one action): the review of that
+/// request opens, its code field empty. `false`: that request waits no more.
 // Phase 2 (the shell's toast activation) calls this; until then only the tests do.
 #[allow(dead_code)]
-pub fn notification_clicked(s: &mut State) -> bool {
+pub fn notification_clicked(s: &mut State, request: &str) -> bool {
     let Some(request) = s
         .account
         .source
         .as_ref()
-        .and_then(|source| source.waiting_sign_in_request())
+        .and_then(|source| source.waiting_sign_in_request(request))
     else {
         return false;
     };
@@ -322,6 +322,10 @@ pub(super) fn approve(s: &mut State) {
     ui.dialog = Some(Dialog::ApproveHello);
 }
 
+#[cfg(test)]
+pub fn look_up_for_tests(s: &mut State) -> Option<&'static str> {
+    look_up(&mut s.account)
+}
 /// Tests outside this lane press Approve through these.
 #[cfg(test)]
 pub fn press_approve(s: &mut State) {
@@ -339,7 +343,7 @@ fn deny(s: &mut State) {
         return;
     };
     if ui.approve.waiting {
-        source.cancel_approval();
+        source.cancel_approval(&request.id);
         ui.approve.waiting = false;
     }
     let end = match source.deny_sign_in(&request.id) {
@@ -368,10 +372,16 @@ pub fn poll(s: &mut State) -> bool {
     let Some(source) = ui.source.as_mut() else {
         return false;
     };
+    // An answer names its request. One that is not for the wait that is open (a prompt that was
+    // left, a request that is not the one on screen) is taken and dropped.
+    let answer = source.approval_answer();
     if ui.approve.waiting && ui.dialog == Some(Dialog::ApproveHello) {
-        let Some(answer) = source.approval_answer() else {
+        let Some((id, answer)) = answer else {
             return false;
         };
+        if ui.approve.request.as_ref().is_none_or(|shown| shown.id != id) {
+            return false;
+        }
         ui.approve.waiting = false;
         match answer {
             Approval::Approved => finish(ui, Dialog::ApproveApproved),

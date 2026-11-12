@@ -187,7 +187,7 @@ fn approve_is_inert_until_the_typed_code_is_the_requests_code() {
     let mut state = init();
     state.account.source = Some(Box::new(BoardAccount::new()));
     let mut rt = window(state);
-    rt.update(|s, _| assert!(approve::notification_clicked(s), "a request waits"));
+    rt.update(|s, _| assert!(approve::notification_clicked(s, "req-iphone"), "a request waits"));
     settle(&mut rt);
     assert_eq!(dialog(&rt), Some(Dialog::ApproveReview), "the toast opens the review");
     assert!(
@@ -232,7 +232,7 @@ fn the_approve_handler_itself_refuses_without_the_code_and_while_it_waits() {
     let mut state = init();
     state.account.source = Some(Box::new(BoardAccount::new().holding_hello()));
     let mut rt = window(state);
-    rt.update(|s, _| assert!(approve::notification_clicked(s)));
+    rt.update(|s, _| assert!(approve::notification_clicked(s, "req-iphone")));
     rt.update(|s, _| approve::approve(s));
     assert_eq!(dialog(&rt), Some(Dialog::ApproveReview), "no code, no approval");
     assert!(!wire(&rt).iter().any(|l| l.contains("/approve")));
@@ -512,7 +512,7 @@ fn leaving_the_section_ends_the_flow_and_wipes_the_code() {
     );
     assert!(!rt.state.account.approve.waiting);
     assert!(
-        wire(&rt).iter().any(|l| l == "cancel approval"),
+        wire(&rt).iter().any(|l| l == "cancel approval req-iphone"),
         "and the prompt was dismissed"
     );
 }
@@ -582,7 +582,7 @@ fn enter_approves_once_the_code_was_typed_on_the_review_itself() {
     let mut state = init();
     state.account.source = Some(Box::new(BoardAccount::new().holding_hello()));
     let mut rt = window(state);
-    rt.update(|s, _| assert!(approve::notification_clicked(s)));
+    rt.update(|s, _| assert!(approve::notification_clicked(s, "req-iphone")));
     settle(&mut rt);
     key(&mut rt, Key::Enter);
     assert_eq!(
@@ -594,4 +594,63 @@ fn enter_approves_once_the_code_was_typed_on_the_review_itself() {
     assert!(rt.state.account.approve.matches && rt.state.account.approve.typed_here);
     key(&mut rt, Key::Enter);
     assert_eq!(dialog(&rt), Some(Dialog::ApproveHello), "Enter is Approve now");
+}
+
+/// Review P2-4: an answer names its request. Windows Hello is up for one request, the person
+/// leaves, and its answer is already on its way; then another request is approved. The late
+/// answer is dropped: the second request ends as its own answer says.
+#[test]
+fn a_late_answer_for_another_request_is_dropped() {
+    let mut rt = on_code_page();
+    rt.update(|s, _| s.account.source = Some(Box::new(BoardAccount::new().late_answers())));
+    type_(&mut rt, &BOARD_REQUEST_CODE.replace('-', ""));
+    rt.update(|s, _| {
+        // Approve and leave before the answer is read: the cancel cannot recall it.
+        assert_eq!(approve::look_up_for_tests(s), Some("DW-A13"));
+        crate::frames::account::go(s, "DW-A13");
+        approve::press_approve(s);
+        assert!(s.account.approve.waiting);
+        crate::frames::account::go(s, "DW-A12");
+        assert!(!s.account.approve.waiting && s.account.approve.request.is_none());
+        // The second request, before any poll could read the first one's answer: Windows Hello
+        // will be cancelled for it.
+        super::form::type_in(&mut s.account.approve.code, CANCELLED_REQUEST_CODE);
+        assert_eq!(approve::look_up_for_tests(s), Some("DW-A13"));
+        crate::frames::account::go(s, "DW-A13");
+        approve::press_approve(s);
+        assert!(s.account.approve.waiting);
+    });
+    for _ in 0..4 {
+        settle(&mut rt);
+    }
+    assert_eq!(
+        dialog(&rt),
+        Some(Dialog::ApproveReview),
+        "the second request's own answer (cancelled): back on the review, not Approved"
+    );
+    assert!(!rt.state.account.approve.waiting);
+}
+
+/// Review P2-5: two requests wait. The toast that was clicked names its request: that one is
+/// reviewed, and Deny ends that one.
+#[test]
+fn with_two_requests_waiting_the_clicked_one_is_reviewed_and_deny_ends_it() {
+    let mut state = init();
+    state.account.source = Some(Box::new(BoardAccount::new()));
+    let mut rt = window(state);
+    rt.update(|s, _| assert!(!approve::notification_clicked(s, "req-gone"), "no such request"));
+    assert_eq!(dialog(&rt), None);
+    rt.update(|s, _| assert!(approve::notification_clicked(s, "req-unusual")));
+    settle(&mut rt);
+    assert_eq!(says(&rt, "item-1-0-value"), "Brazil", "the request that was clicked");
+    click(&mut rt, "btn-1");
+    assert_eq!(dialog(&rt), Some(Dialog::ApproveDenied));
+    assert_eq!(wire(&rt), vec!["POST /cli-auth/deny req-unusual".to_string()]);
+    rt.update(|s, _| assert!(approve::notification_clicked(s, "req-iphone")));
+    settle(&mut rt);
+    assert_eq!(
+        says(&rt, "item-1-0-value"),
+        "Germany",
+        "and the other one by its own toast"
+    );
 }
