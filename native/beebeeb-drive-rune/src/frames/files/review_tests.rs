@@ -98,6 +98,10 @@ fn the_grid_switch_the_column_headers_and_the_status_line_act() {
     let (mut rt, calls, _) = spied();
     click(&mut rt, "view-grid");
     assert_eq!(rt.state.actions.intents, [Intent::Frame("DW-1102")]);
+    // The folder is a grid now (`frames::global::grid`, DW-0119): no column headers. Back to the list.
+    assert!(find(&rt, "grid-0").is_some() && find(&rt, "column-headers").is_none());
+    click(&mut rt, "view-list");
+    assert!(find(&rt, "grid").is_none());
 
     // A column header sorts by that column; a second click reverses the order (DW-0404).
     let header = info(&rt, "col-size-cell");
