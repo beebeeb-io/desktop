@@ -397,7 +397,8 @@ fn polled(rt: &mut Runtime<State>) -> bool {
 #[test]
 fn the_poll_draws_an_arriving_answer_and_asks_no_wake_when_idle() {
     let account = account("settings-poll@example.eu");
-    account.delay_ms.store(300, Ordering::SeqCst);
+    // Long enough that building and drawing the window (slow on a CI runner) is over before it answers.
+    account.delay_ms.store(3_000, Ordering::SeqCst);
     let mut rt = window_on(signed_in(&account));
     rt.poll = None; // only the polls below
     assert!(!polled(&mut rt), "nothing arrived yet");
