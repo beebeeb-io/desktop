@@ -12,11 +12,21 @@ import {
   loadAcross, saveAcross, ACROSS, cellMeta, devicesOf, folderKey, groupByDay, idOf, loadHidden, saveHidden, shown, totalsOf, type Across, type PhotoCell,
 } from './model'
 import { useDriveExtras, type PhotoMeta, type PhotoSource, type TransferRow } from '../../source/extras'
+import { command } from '../../../desktopApi'
+import { actionFailure } from '../files/model'
 import { noteListedPhotos, PhotosView } from './PhotosView'
 import { PhotoViewer } from './Viewer'
 import { DetailsDialog, failedWords, PhotoMove, RenameDialog, ShareDialog, SourcesDialog, type FolderChoice, type SourceChoice } from './Dialogs'
 
 type Dialog = 'sources' | 'share' | 'details' | 'move' | 'rename'
+
+/** Copies the decrypted photo out through the OS save dialog (drive_save_copy, slice 01a); says so only when Rust
+ *  wrote it, and a refusal uses actionFailure's words, never the host's text (slice 01b). */
+async function saveCopy(id: string) {
+  const r = await command<boolean>('drive_save_copy', { id })
+  if (!r.ok) return showToast({ kind: 'failed', text: actionFailure('save a copy to this PC', r.unsupported ? 'unsupported' : 'failed').text })
+  if (r.value) showToast({ kind: 'done', text: 'Saved a copy' })
+}
 
 export default function Section(_props: SectionProps) {
   const source = useDriveSource()
@@ -215,8 +225,7 @@ export default function Section(_props: SectionProps) {
             if (a === 'duplicate') source.duplicate([id]).then(() => { showToast({ kind: 'done', text: 'Duplicated' }); return load() }, (e: unknown) => showToast({ kind: 'failed', text: failedWords(e, 'duplicate it') }))
             else if (a === 'move') setDialog('move')
             else if (a === 'rename') setDialog('rename')
-            // A save panel that writes a plain decrypted copy needs a command this version does not have: say so.
-            else showToast({ kind: 'failed', text: 'Saving a copy to this PC isn’t available in this version of Beebeeb.' })
+            else void saveCopy(id)
           }}
           onShare={() => setDialog('share')} onDetails={() => setDialog('details')}
           onOffline={() => keep([id], true)} onRemoveLocal={() => keep([id], false)} onTrash={() => trash([id])}
