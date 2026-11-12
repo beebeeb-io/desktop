@@ -22,7 +22,7 @@
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use beebeeb_engine::account_dto::{StorageChoice, UserRegionResponse};
+use beebeeb_engine::account_dto::UserRegionResponse;
 use beebeeb_engine::app::settings_api::AccountCallError;
 use beebeeb_engine::app::{CredentialStores, Engine};
 use beebeeb_engine::config::{DesktopConfig, DesktopTheme};
@@ -118,17 +118,17 @@ pub fn version_words() -> String {
 
 /// One row of Beebeeb's list as a place a pane may show: the default, or a country. Anything else (an older
 /// server's row per data center) is left out, so a city can never reach a pane.
-fn place_of(choice: &StorageChoice) -> Option<Location> {
-    let live = choice.status == "live" && choice.selectable;
-    match choice.kind.as_str() {
-        "region" if choice.id == DEFAULT_ID => Some(Location {
+fn place_of(id: &str, kind: &str, name: &str, status: &str, selectable: bool) -> Option<Location> {
+    let live = status == "live" && selectable;
+    match kind {
+        "region" if id == DEFAULT_ID => Some(Location {
             name: "Default".into(),
             says: Some("Europe: Beebeeb places each new file in the EU".into()),
             live,
             default: true,
         }),
         "country" => Some(Location {
-            name: choice.name.clone(),
+            name: name.to_string(),
             says: None,
             live,
             default: false,
@@ -142,7 +142,13 @@ fn listed(region: &UserRegionResponse) -> Option<(Locations, Vec<String>)> {
     let mut choices = Vec::new();
     let mut ids = Vec::new();
     for choice in &region.choices {
-        if let Some(place) = place_of(choice) {
+        if let Some(place) = place_of(
+            &choice.id,
+            &choice.kind,
+            &choice.name,
+            &choice.status,
+            choice.selectable,
+        ) {
             choices.push(place);
             ids.push(choice.id.clone());
         }
