@@ -60,7 +60,7 @@ pub struct Status<'a> {
 /// "DRIVE" is `line-height: normal`, 11.5 for 9px JetBrains Mono, where `type_::CAPTION_MONO_SM`
 /// has 12. Half a point matters where the lockup is in a centred column: it moves everything
 /// under it a quarter point, off the board's pixel grid.
-pub fn lockup(prefix: &str, mark: f32, product: &str, t: &Theme) -> El {
+pub fn lockup(prefix: &str, mark: f32, name: &str, product: &str, t: &Theme) -> El {
     let word = "beebeeb.io";
     let io = rune::Span {
         color: Some(t.accent),
@@ -69,7 +69,7 @@ pub fn lockup(prefix: &str, mark: f32, product: &str, t: &Theme) -> El {
     row()
         .key(format!("{prefix}-lockup"))
         .role("image")
-        .label(format!("Beebeeb {product}"))
+        .label(format!("{name} {product}"))
         .gap(mark * 6.461_54 / 24.0)
         .center_y()
         .child(kit::mark(format!("{prefix}-mark"), mark))
@@ -134,7 +134,14 @@ fn steps_list(steps: &[(&str, StepState)], check: &'static Icon, t: &Theme) -> E
     list
 }
 
-fn side_panel(product: &str, steps: &[(&str, StepState)], check: &'static Icon, status: &Status<'_>, t: &Theme) -> El {
+fn side_panel(
+    name: &str,
+    product: &str,
+    steps: &[(&str, StepState)],
+    check: &'static Icon,
+    status: &Status<'_>,
+    t: &Theme,
+) -> El {
     let ink = if status.failed {
         au::red_text(t)
     } else {
@@ -152,7 +159,7 @@ fn side_panel(product: &str, steps: &[(&str, StepState)], check: &'static Icon, 
         .fill(t.card)
         .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
         .border_layout()
-        .child(lockup("side", 34.0, product, t))
+        .child(lockup("side", 34.0, name, product, t))
         .child(kit::label(
             "side-tagline",
             format!("Set up {product} on this PC"),
@@ -184,6 +191,7 @@ fn side_panel(product: &str, steps: &[(&str, StepState)], check: &'static Icon, 
 /// everything under the caption, on the scrim.
 #[allow(clippy::too_many_arguments)]
 pub fn page(
+    name: &str,
     product: &str,
     steps: &[(&str, StepState)],
     check: &'static Icon,
@@ -213,7 +221,7 @@ pub fn page(
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .child(side_panel(product, steps, check, status, t))
+        .child(side_panel(name, product, steps, check, status, t))
         .child(main);
     if let Some(over) = over {
         body = body
@@ -237,11 +245,11 @@ pub fn page(
     col()
         .key("window")
         .role("window")
-        .label(format!("Beebeeb {product}"))
+        .label(format!("{name} {product}"))
         .w_full()
         .h_full()
         .fill(t.surface)
-        .child(caption::caption_bar(t, cx))
+        .child(caption::caption_bar(&format!("{name} {product}"), t, cx))
         .child(body)
 }
 

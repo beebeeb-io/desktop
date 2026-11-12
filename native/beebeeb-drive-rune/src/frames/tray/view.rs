@@ -75,17 +75,17 @@ pub fn row_key(row: usize) -> String {
 }
 
 /// The whole flyout.
-pub fn flyout<S: 'static>(ui: &Ui, host: Host<S>, dark: bool) -> El {
+pub fn flyout<S: 'static>(ui: &Ui, name: &str, host: Host<S>, dark: bool) -> El {
     let t = tokens::theme(dark);
     let snapshot = ui.snapshot();
     col()
         .key("fly")
         .role("dialog")
-        .label(crate::shell::identity::AppIdentity::CURRENT.flyout_window_title())
+        .label(name)
         .size(SIZE.0, SIZE.1)
         .fill(t.card)
         .on_key(super::on_key(host))
-        .child(status_block(snapshot, host, &t))
+        .child(status_block(snapshot, name, host, &t))
         .child(changes_label(snapshot, &t))
         .child(changes_list(ui, host, &t))
         .child(footer(snapshot, host, &t))
@@ -152,7 +152,7 @@ fn bar(key: &str, lead: f32, fill: f32, color: Color, t: &Theme) -> El {
     )
 }
 
-fn status_block<S: 'static>(snapshot: &Snapshot, host: Host<S>, t: &Theme) -> El {
+fn status_block<S: 'static>(snapshot: &Snapshot, name: &str, host: Host<S>, t: &Theme) -> El {
     let status = &snapshot.status;
     let (mark, wash) = tone(status.tone(), t);
     let checking = *status == Status::Checking;
@@ -179,12 +179,12 @@ fn status_block<S: 'static>(snapshot: &Snapshot, host: Host<S>, t: &Theme) -> El
             .child(el().key("st-skel-2").w_frac(0.84).h(9.0).radius(5.0).fill(skeleton));
     } else {
         words = words.gap(1.0).child(
-            kit::label("st-title", status.title(), type_fly::TITLE, t.text)
+            kit::label("st-title", status.title(name), type_fly::TITLE, t.text)
                 .w_full()
                 .wrap()
                 .max_lines(2),
         );
-        if let Some(line) = status.line() {
+        if let Some(line) = status.line(name) {
             words = words.child(
                 kit::label("st-line", line, type_fly::LINE, t.text_tertiary)
                     .w_full()
@@ -224,9 +224,9 @@ fn status_block<S: 'static>(snapshot: &Snapshot, host: Host<S>, t: &Theme) -> El
     let mut block = col()
         .key("st")
         .role("status")
-        .label(match status.line() {
-            Some(line) => format!("{}. {line}", status.title()),
-            None => status.title(),
+        .label(match status.line(name) {
+            Some(line) => format!("{}. {line}", status.title(name)),
+            None => status.title(name),
         })
         .w_full()
         .pt(14.0)

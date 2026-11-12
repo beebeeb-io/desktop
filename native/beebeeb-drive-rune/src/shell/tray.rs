@@ -119,7 +119,7 @@ impl MenuAction {
 pub enum MenuEntry {
     Item {
         action: MenuAction,
-        label: &'static str,
+        label: String,
         enabled: bool,
     },
     Separator,
@@ -188,28 +188,29 @@ pub fn tray_model_for(inputs: &TrayInputs, identity: AppIdentity) -> TrayModel {
     } else {
         (I::UpToDate, "Up to date", "up to date")
     };
-    let tooltip = format!("{}: {state}", identity.product_name());
-    let item = |action, label, enabled| MenuEntry::Item { action, label, enabled };
+    let name = identity.product_name();
+    let tooltip = format!("{name}: {state}");
+    let item = |action, label: String, enabled| MenuEntry::Item { action, label, enabled };
     let pause = if inputs.paused {
-        item(MenuAction::ResumeSyncing, "Resume syncing", inputs.signed_in)
+        item(MenuAction::ResumeSyncing, "Resume syncing".into(), inputs.signed_in)
     } else {
-        item(MenuAction::PauseSyncing, "Pause syncing", inputs.signed_in)
+        item(MenuAction::PauseSyncing, "Pause syncing".into(), inputs.signed_in)
     };
     let menu = vec![
-        item(MenuAction::OpenBeebeeb, "Open Beebeeb", true),
-        // Disabled while Beebeeb is not in File Explorer (DW-1215, DW-1216).
+        item(MenuAction::OpenBeebeeb, format!("Open {name}"), true),
+        // Disabled while the app is not in File Explorer (DW-1215, DW-1216).
         item(
             MenuAction::OpenInFileExplorer,
-            "Open in File Explorer",
+            "Open in File Explorer".into(),
             inputs.signed_in && inputs.explorer_ready,
         ),
         MenuEntry::Separator,
         pause,
         // Settings is unavailable until signed in (DW-A02).
-        item(MenuAction::Settings, "Settings\u{2026}", inputs.signed_in),
+        item(MenuAction::Settings, "Settings\u{2026}".into(), inputs.signed_in),
         MenuEntry::Separator,
         // Quit lives only here, and always works.
-        item(MenuAction::Quit, "Quit Beebeeb", true),
+        item(MenuAction::Quit, format!("Quit {name}"), true),
     ];
     let left_click = if inputs.signed_in || inputs.session_expired {
         LeftClick::ToggleFlyout
@@ -236,12 +237,12 @@ mod tests {
             ..TrayInputs::default()
         }
     }
-    fn labels(model: &TrayModel) -> Vec<(&'static str, bool)> {
+    fn labels(model: &TrayModel) -> Vec<(&str, bool)> {
         model
             .menu
             .iter()
             .filter_map(|e| match e {
-                MenuEntry::Item { label, enabled, .. } => Some((*label, *enabled)),
+                MenuEntry::Item { label, enabled, .. } => Some((label.as_str(), *enabled)),
                 MenuEntry::Separator => None,
             })
             .collect()
@@ -412,15 +413,16 @@ mod tests {
 
     #[test]
     fn the_menu_is_the_boards_five_items_in_order() {
+        let name = AppIdentity::CURRENT.product_name();
         let model = tray_model(&signed_in());
         assert_eq!(
             labels(&model),
             vec![
-                ("Open Beebeeb", true),
+                (&*format!("Open {name}"), true),
                 ("Open in File Explorer", true),
                 ("Pause syncing", true),
                 ("Settings\u{2026}", true),
-                ("Quit Beebeeb", true)
+                (&*format!("Quit {name}"), true)
             ]
         );
         assert_eq!(model.left_click, LeftClick::ToggleFlyout);
@@ -434,11 +436,7 @@ mod tests {
         });
         assert_eq!(labels(&model)[2], ("Resume syncing", true));
         let action = model.menu.iter().find_map(|e| match e {
-            MenuEntry::Item {
-                action,
-                label: "Resume syncing",
-                ..
-            } => Some(*action),
+            MenuEntry::Item { action, label, .. } if label == "Resume syncing" => Some(*action),
             _ => None,
         });
         assert_eq!(action, Some(MenuAction::ResumeSyncing));
@@ -455,6 +453,7 @@ mod tests {
 
     #[test]
     fn signed_out_leaves_open_and_quit_and_a_click_opens_sign_in() {
+        let name = AppIdentity::CURRENT.product_name();
         let model = tray_model(&TrayInputs {
             explorer_ready: true,
             ..TrayInputs::default()
@@ -462,11 +461,11 @@ mod tests {
         assert_eq!(
             labels(&model),
             vec![
-                ("Open Beebeeb", true),
+                (&*format!("Open {name}"), true),
                 ("Open in File Explorer", false),
                 ("Pause syncing", false),
                 ("Settings\u{2026}", false),
-                ("Quit Beebeeb", true)
+                (&*format!("Quit {name}"), true)
             ]
         );
         assert_eq!(model.left_click, LeftClick::OpenSignIn);

@@ -100,7 +100,7 @@ pub enum Tone {
 }
 
 impl Status {
-    pub fn title(&self) -> String {
+    pub fn title(&self, name: &str) -> String {
         match self {
             Status::Checking => "Checking".into(),
             Status::UpToDate { .. } => "Up to date".into(),
@@ -112,22 +112,22 @@ impl Status {
                 count(*files),
                 plural(*files, "file needs", "files need")
             ),
-            Status::Offline => "Can't reach Beebeeb".into(),
+            Status::Offline => format!("Can't reach {name}"),
             Status::Stopped { .. } => "Sync stopped".into(),
             Status::StorageAlmostFull { .. } => "Storage almost full".into(),
             Status::StorageFull { .. } => "Your storage is full".into(),
             Status::UpdateAvailable { version } => format!("Version {version} is available"),
-            Status::UpdateRequired => "Update Beebeeb".into(),
-            Status::Locked => "Beebeeb is locked".into(),
+            Status::UpdateRequired => format!("Update {name}"),
+            Status::Locked => format!("{name} is locked"),
             Status::NoPlan { .. } => "Choose a plan".into(),
-            Status::AddingToExplorer => "Adding Beebeeb to File Explorer\u{2026}".into(),
-            Status::ExplorerFailed { .. } => "Couldn't add Beebeeb to File Explorer".into(),
+            Status::AddingToExplorer => format!("Adding {name} to File Explorer\u{2026}"),
+            Status::ExplorerFailed { .. } => format!("Couldn't add {name} to File Explorer"),
             Status::SignedOut => "Signed out".into(),
         }
     }
 
     /// The line under the title. `None` only while checking.
-    pub fn line(&self) -> Option<String> {
+    pub fn line(&self, name: &str) -> Option<String> {
         Some(match self {
             Status::Checking => return None,
             Status::UpToDate { files, last_change } => format!(
@@ -156,14 +156,16 @@ impl Status {
                 plural(*waiting, "change", "changes")
             ),
             Status::UpdateAvailable { .. } => "Restart to apply the update.".into(),
-            Status::UpdateRequired => "This version of Beebeeb is too old to connect. Update to continue.".into(),
+            Status::UpdateRequired => format!("This version of {name} is too old to connect. Update to continue."),
             Status::Locked => "Sync keeps running while it's locked.".into(),
             Status::NoPlan { waiting: false } => {
-                "Your account is ready. Choose a plan on beebeeb.io, including the free trial. Beebeeb continues here by itself.".into()
+                format!(
+                    "Your account is ready. Choose a plan on beebeeb.io, including the free trial. {name} continues here by itself."
+                )
             }
             Status::NoPlan { waiting: true } => "Waiting for your plan.".into(),
-            Status::AddingToExplorer => "Beebeeb adds itself to File Explorer after sign-in.".into(),
-            Status::ExplorerFailed { .. } => "Windows didn't finish adding Beebeeb to File Explorer.".into(),
+            Status::AddingToExplorer => format!("{name} adds itself to File Explorer after sign-in."),
+            Status::ExplorerFailed { .. } => format!("Windows didn't finish adding {name} to File Explorer."),
             Status::SignedOut => "Enter your password to keep syncing. Nothing has been lost.".into(),
         })
     }

@@ -6,13 +6,13 @@ use rune::{Cx, El, KeyEvent, Tx};
 use crate::State;
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
-    crate::frames::files::view(s, cx)
+    crate::frames::search::over_files(s, cx).unwrap_or_else(|| crate::frames::files::view(s, cx))
 }
 
 /// The Files window's keys (arrows, Enter, back, Ctrl+F). The shell's own shortcuts ran first
 /// (`host::on_key`).
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    crate::frames::files::keys::on_key(s, ev, tx)
+    crate::frames::search::files_key(s, ev, tx).unwrap_or_else(|| crate::frames::files::keys::on_key(s, ev, tx))
 }
 
 /// The tests `main.rs` held on `v2-native` (PRs 280 and 286), re-homed with the entry point.

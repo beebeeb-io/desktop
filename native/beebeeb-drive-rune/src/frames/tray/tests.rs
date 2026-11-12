@@ -523,7 +523,9 @@ fn the_list_ends_with_the_way_to_the_full_history() {
 fn names_and_roles() {
     let rt = runtime("DW-1203");
     let fly = info(&rt, "fly");
-    let name = crate::shell::identity::AppIdentity::CURRENT.flyout_window_title();
+    // The scene renders with the GOLDEN identity (the real app's name), so the flyout's
+    // dialog label is the real product name, matching the design board.
+    let name = crate::shell::identity::AppIdentity::GOLDEN.product_name();
     assert_eq!((fly.role, fly.label.as_deref()), ("dialog", Some(name)));
     let st = info(&rt, "st");
     assert_eq!(
@@ -564,10 +566,13 @@ fn names_and_roles() {
             fraction: 0.0,
             speed: String::new()
         }
-        .title(),
+        .title("Beebeeb"),
         "Syncing 1 file"
     );
-    assert_eq!(Status::NeedsDecision { files: 1 }.title(), "1 file needs a decision");
+    assert_eq!(
+        Status::NeedsDecision { files: 1 }.title("Beebeeb"),
+        "1 file needs a decision"
+    );
     assert_eq!(count(1284), "1,284");
     assert_eq!(count(1_000_000), "1,000,000");
     assert_eq!(count(7), "7");
@@ -672,15 +677,19 @@ fn the_fixture_follows_the_shells_tray_state_in_the_boards_order() {
     let mut ui = Ui::following(&with(|i| i.engine = EngineState::Offline));
     assert_eq!(ui.snapshot().status, Status::Offline);
     ui.press_action();
-    assert_eq!(ui.snapshot().status.title(), "Up to date", "Try again reached Beebeeb");
+    assert_eq!(
+        ui.snapshot().status.title("Beebeeb"),
+        "Up to date",
+        "Try again reached Beebeeb"
+    );
     ui.follow(&with(|i| i.engine = EngineState::Offline));
     assert_eq!(
-        ui.snapshot().status.title(),
+        ui.snapshot().status.title("Beebeeb"),
         "Up to date",
         "the same shell state is not news"
     );
     ui.follow(&with(|i| i.paused = true));
-    assert_eq!(ui.snapshot().status.title(), "Sync is paused");
+    assert_eq!(ui.snapshot().status.title("Beebeeb"), "Sync is paused");
 }
 
 // ---------------------------------------------------------------------------

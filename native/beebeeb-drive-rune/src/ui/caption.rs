@@ -20,7 +20,7 @@ use super::kit;
 /// A caption button is 46 pt wide on Windows 11 (and on the board).
 pub const CAPTION_BUTTON_W: f32 = 46.0;
 
-pub fn caption_bar(t: &Theme, cx: &mut Cx<State>) -> El {
+pub fn caption_bar(title: &str, t: &Theme, cx: &mut Cx<State>) -> El {
     let insets = cx.chrome_insets();
     cx.caption_color(if t.dark { Color::WHITE } else { Color::BLACK });
 
@@ -39,7 +39,7 @@ pub fn caption_bar(t: &Theme, cx: &mut Cx<State>) -> El {
         .pl(insets.leading + 12.0)
         .child(kit::mark("cap-mark", 16.0))
         .child(
-            kit::label("cap-title", "Beebeeb Drive", type_::BODY, t.text_secondary)
+            kit::label("cap-title", title, type_::BODY, t.text_secondary)
                 .grow(1.0)
                 .truncate(),
         );
