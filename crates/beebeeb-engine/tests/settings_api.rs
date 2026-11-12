@@ -3,8 +3,9 @@
 //! with no session asks nothing. A failure comes back as its kind with fixed words, never the server's body. Every
 //! account, name and key here is invented; nothing touches the OS credential store or another host.
 //!
-//! The TEST identity is refused on macOS (`EngineIdentity::refusal_on`), so these tests run on Windows and Linux.
-#![cfg(not(target_os = "macos"))]
+//! The TEST identity is refused on macOS (`EngineIdentity::refusal_on`), so the 4 tests that open an Engine
+//! are gated with `#[cfg(not(target_os = "macos"))]`; the platform-neutral test runs everywhere.
+#![cfg_attr(target_os = "macos", allow(unused_imports, dead_code))]
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -221,6 +222,7 @@ fn gone(account: Account) {
     drop(fake);
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn the_storage_location_is_read_by_country_and_refusals_are_kinds() {
     let account = account("region-read@example.eu");
@@ -250,6 +252,7 @@ fn the_storage_location_is_read_by_country_and_refusals_are_kinds() {
     );
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_new_storage_location_is_sent_with_its_strict_rule() {
     let account = account("region-write@example.eu");
@@ -286,6 +289,7 @@ fn a_new_storage_location_is_sent_with_its_strict_rule() {
     assert_eq!(set(&engine).expect_err("no answer"), AccountCallError::Offline);
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn the_accounts_notifications_are_read_with_the_unread_count() {
     let account = account("notifications@example.eu");
@@ -304,6 +308,7 @@ fn the_accounts_notifications_are_read_with_the_unread_count() {
     );
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn the_accounts_alert_switches_are_read_and_one_change_is_sent_alone() {
     let account = account("preferences@example.eu");
