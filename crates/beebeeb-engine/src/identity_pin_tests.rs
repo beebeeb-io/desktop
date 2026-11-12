@@ -121,11 +121,6 @@ const LITERALS_ALLOWED: &[(&str, &[&str], &str)] = &[
         "the name of the first list of commands (DW-1232: Beebeeb, File, Edit): the brand, for both builds",
     ),
     (
-        "native/beebeeb-drive-rune/src/frames/tray/view.rs",
-        &["Beebeeb"],
-        "the flyout's accessibility label (the brand, for both builds)",
-    ),
-    (
         "native/beebeeb-drive-rune/src/ui/kit.rs",
         &["Beebeeb"],
         "the logo's accessibility label (the brand, for both builds)",
