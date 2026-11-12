@@ -98,6 +98,16 @@ saved by Microsoft Office, and nothing here was compared against Microsoft Offic
   `formats`) reach none. **Rule: the viewer links WordCraft below `wordcraft-engine`, never the engine crate
   itself, and its dependency graph contains no socket, TLS or HTTP crate.** A lockfile lists every optional
   dependency, so the walk is an upper bound; the real answer is `cargo tree` on our crate, which CI checks (§3, §5).
+  **Measured afterwards** (`cargo metadata` at the three release tags, normal dependencies, default features, on the
+  Linux build VM): 7 of 19 WordCraft crates reach a network client (`wordcraft-engine` through `craft-font-store` →
+  `ureq`, `rustls`), 3 of 18 GridCraft crates and 3 of 24 DeckCraft crates (the app, the egui UI and the web build
+  in each). ~~`deckcraft-pptx`, `deckcraft-pdf` and `deckcraft-engine` reach `tokio`~~: with default features they
+  reach no network or async-runtime crate; the lockfile walk was the upper bound it warned of. The closures a viewer
+  would link (`wordcraft-render` + `-docx` + `-docbin`: 165 packages; `gridcraft-engine`: 128; `deckcraft-render` +
+  `-pptx`: 123) contain 0 network crates. `cargo audit` on the whole workspaces: 4, 5 and 4 vulnerabilities; the one
+  in those three closures is `zip 3.0.0` (4 advisories about extracting to disk; the projects call no
+  extract-to-disk function: 0 calls against 270 uses of `ZipArchive`). The tables are in the README of
+  `beebeeb-io/desktop-office` (private), which now exists with the three subtrees at the measured tags.
 - **Code execution exists upstream:** GridCraft can run a workbook's Python cells in a sandbox (Linux, macOS; on
   Windows it refuses and shows `#BLOCKED!`); WordCraft has command macros. Neither is reachable from the viewer API,
   and the viewer build leaves those crates out.
@@ -108,7 +118,8 @@ saved by Microsoft Office, and nothing here was compared against Microsoft Offic
 
 ## 3. `desktop-office`: one repository of ours
 
-Not created by this PR. Three forks already exist, untouched, with 0 commits of ours:
+Created after this contract's delta, private, on the lead's instruction: the three subtrees at v0.18.1 / v0.19.1 /
+v0.18.1, a README, `deny.toml` and the first audit's output; no viewer crate, no CI. Three forks also exist, untouched, with 0 commits of ours:
 `beebeeb-io/wordcraft`, `beebeeb-io/gridcraft`, `beebeeb-io/deckcraft`.
 
 ```mermaid
@@ -374,7 +385,7 @@ the sheet grid or the sandbox fights back. The macOS sandbox is not in this coun
 | 1 | `desktop-office`: the `viewer` crate with documents only, `deny.toml`, CI | M | builds on Windows and macOS; **pass / fail: 0 socket, TLS or HTTP crates in `cargo tree -p beebeeb-office-viewer`**; `cargo deny` and `cargo audit` with counts; the corpus test with a count; the loopback, `file:` and UNC cases, each first seen to fail |
 | 2 | desktop: `crates/beebeeb-office-sandbox` (Windows module), `native/beebeeb-office-render`, the transport, the limits; one .docx page as a texture in the Rune window | L | five sandbox claims, each with a test first seen to fail without the sandbox: no network; no read of a user file; no write anywhere; the memory cap; a hang fixture killed in time. Plus: `beebeeb-engine` and the Rune app do not link the viewer |
 | 3 | DW-1507 viewer: pages, scroll, zoom, DPI, outline, status bar | M | `compare.sh` at 0 failing against the board's read-only drawing |
-| 4 | `viewer`: slides (this PR settles what pulls `tokio` into `deckcraft-pptx` and with which features); DW-1509 and DW-1561 | M | filmstrip, present mode, capture exclusion of the Present window |
+| 4 | `viewer`: slides (links `deckcraft-render` and `deckcraft-pptx`, not `deckcraft-engine`, which brings MPL-2.0 audio decoders); DW-1509 and DW-1561 | M | filmstrip, present mode, capture exclusion of the Present window |
 | 5 | `viewer`: workbook cell data, chart and picture pixels; DW-1508 grid | L | the largest unknown: a native grid from the model |
 | 6 | DW-1511, DW-1556, DW-1557, DW-1562, "Open in another app…" as ruled (§5.4), the copy changes | S | every state of §7 reachable in a test |
 | 7 | the fidelity corpus: 20+ real files per type saved by Microsoft Office, pages counted, as a CI gate | M | the number that decides whether a type ships in 0.9.0 |
@@ -447,7 +458,7 @@ header only compiles as C++, and the official build ships `mergedlo.dll` (148 MB
 - Review 12: PR 2's five sandbox tests are now named in §8; none exists yet.
 - Review 13: "download or decryption failed" is cited to the viewers contract (task 2472), which must define it.
 - Review 14: system fonts and embedded fonts are a threat-model row with two unknowns; PR 1 answers them.
-- P3, `tokio` in DeckCraft: moved to PR 4 with PR 1's pass / fail rule on socket crates.
+- P3, `tokio` in DeckCraft: answered by the measurement in §2 (not reached with default features); PR 1's pass / fail rule stays.
 - P3, sheet objects and formula text: added to the API in §3; not designed further.
 - P3, corpus origin, licence and metadata scrub: a rule in §8; no corpus exists.
 - P3, "6 files": corrected to 5 in §9.
