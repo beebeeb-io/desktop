@@ -457,6 +457,41 @@ new (the modal's card); no existing frame changes.
   `pub(crate)` for the port and its pin follows the new order; `E/test_api/mod.rs` gains `Reply::hang_up`, which
   stands for "a closed port" in `only_a_positive_answer_opens_the_vault` (the handle has one API base, so only that
   one request can be made unreachable).
+- *The F tests are one binary each* (`E/tests/<test name>.rs` and `E/tests/common/mod.rs`), not one
+  `tests/fake_api_account.rs`: the state folder is a process-wide global, so a request count or "no `state.db`" is
+  one test's only in a process of its own. Each binary asserts the test build's refusal on macOS instead, so every
+  binary runs one test on every OS. One more F test, `an_engine_that_ends_by_itself_is_not_running`, holds the
+  step-2 amendment above. The unit tests that read the handle's private parts are in `E/sync_start_tests.rs`.
+- *Contradiction §4.3 and this table ("`sync_state` is `None` when no engine runs") vs §2.1 and §4.3's status words
+  ("Sync is off", "Starting…" while the gate is Ready):* both cannot hold, since the status line shows exactly
+  `sync_state`. Built: `None` only while the gate is not Ready (the window shows no Files); while it is Ready and no
+  engine runs, "Sync is off" (`NotAsked`, `Refused`) or "Starting…" (`Starting`). I12 holds as the test asserts it:
+  no running engine's word (Syncing, Up to date, Paused) without a running engine.
+- *Status words added for a running engine:* "Checking" (it runs and has not finished a check, DW-1212: never a
+  guess) and "Sync stopped" (it reported an error), the tray's words for the same states (DW-1201, DW-1207). The
+  tray keeps its own words (#334: "Not syncing", "Signed out"); §4.3's list is the status line's.
+- *`SyncView.reported`:* the running engine's last reported state, so the status line says Syncing or Up to date only
+  for what the engine said; reset at every start. The banner's offline (DW-0101) is set only while an engine runs
+  and its last finished check time is known ("This list is from …" needs it).
+- *The live reads of §4.3 cover two more places:* the files source's `can_add` and the tray's facts read
+  `Engine::view()` too.
+- *The first finished check shows the files* (`N/shell/host.rs`: `read_again_after_a_check`, one `Shell` field, one
+  line in `refresh`, one in `poll`): the window reads the folder once when the gate opens, before the first start,
+  and on a PC where nothing has synced there is no `state.db` yet, so it said "Your files cannot be read right now."
+  while sync ran (R1.1 and §2.1 need the rows without a click). Each check the running engine finishes reads that
+  folder again while the list shows an error or nothing; a list with rows is never changed. DW-0118 (the strip
+  while the first list loads) is still not fed: §4.3 gives S1 exactly two fields of the banner's source. Open.
+- *Contradiction R1.1 and R2.1 ("7 rows") vs the fixture:* the account's root holds 2 folders with the 5 files in
+  them, so the window's root has 2 rows. The rung counts the folder's 7 items on disk and the root's 2 rows by name.
+- *Files outside the S1 file list:* `N/shell/actions.rs` (`sync_refusal` on the actions seam; the fixture's setter),
+  `N/shell/state.rs` (the live banner source, one line), `N/ui/status_line.rs` (the words), `N/engine_host/tray.rs`
+  and its tests (the tray's facts read the view; the tests set it), `N/frames/global/mod.rs` (one `mod` line),
+  `N/shell/host_tests.rs` (the test of the first finished check).
+- *Rungs that cannot pass on the fake API, said in the script's output:* R1.3's "open one small file" (the fake
+  serves no file content) and R1.5's callback generations (the app installs no log subscriber, so the engine's
+  "Cloud Files callbacks connected" line goes nowhere). Behind an open modal the accessibility tree holds only the
+  modal, so R1.6 reads "Sync is off" after "Close", and the modal's "Try again" after the outside fix is run on the
+  next launch, whose start is refused the same way.
 
 **Native rungs (Windows build VM, desktop session; a test-identity build; preconditions P below):**
 
