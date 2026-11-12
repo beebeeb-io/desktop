@@ -266,15 +266,14 @@ fn enter_on_a_file_asks_to_open_it_and_space_asks_for_the_preview() {
     let (mut rt, calls, _) = spied();
     press(&mut rt, Key::Enter, NONE);
     press(&mut rt, Key::Text(" ".into()), NONE);
+    // F2 renames in the row (DW-0410; `rest_tests.rs`), Esc leaves it.
     press(&mut rt, Key::Function(2), NONE);
+    assert!(rt.state.actions.rename.is_some());
+    press(&mut rt, Key::Escape, NONE);
     press(&mut rt, Key::Enter, ALT);
     assert_eq!(
         rt.state.actions.intents,
-        [
-            Intent::Frame("DW-0408"),
-            Intent::Frame("DW-0410"),
-            Intent::Frame("DW-0411")
-        ]
+        [Intent::Frame("DW-0408"), Intent::Frame("DW-0411")]
     );
     assert_eq!(asked(&calls), [Call::Open(ids(&["contract"]))]);
 }
@@ -333,6 +332,8 @@ fn a_right_click_the_menu_key_and_shift_f10_open_the_file_menu() {
             "Share\u{2026}",
             "Copy link",
             "Make available offline",
+            // Harbour.heic is downloaded: there is a copy on this PC to free (PR 305).
+            "Free up space",
             "Show in File Explorer",
             "Details",
             "Rename",
@@ -436,8 +437,6 @@ fn menu_entries_pick_with_a_click_and_go_where_the_board_sends_them() {
     for (label, intent) in [
         ("Share\u{2026}", Intent::Frame("DW-0407")),
         ("Preview", Intent::Frame("DW-0408")),
-        ("Move\u{2026}", Intent::Frame("DW-0409")),
-        ("Rename", Intent::Frame("DW-0410")),
         ("Details", Intent::Frame("DW-0411")),
         ("Version history\u{2026}", Intent::Frame("DW-0413")),
         // These two are calls on the source, not frames: the last frame asked for stays.
@@ -639,28 +638,37 @@ fn new_opens_its_menu_and_every_entry_and_shortcut_goes_to_its_frame() {
             "Upload a folder\u{2026}"
         ]
     );
-    for expected in ["DW-0417", "DW-1521", "DW-1558", "DW-0415", "DW-0480"] {
+    for (n, expected) in ["DW-0417", "DW-1521", "DW-1558", "DW-0415", "DW-0480"]
+        .into_iter()
+        .enumerate()
+    {
         if rt.state.actions.menu.is_none() {
             click(&mut rt, "new-btn");
         }
-        let at = rt.state.actions.intents.len();
-        for _ in 0..=at {
+        for _ in 0..=n {
             press(&mut rt, Key::Down, NONE);
         }
         press(&mut rt, Key::Enter, NONE);
+        if n == 0 {
+            // New folder is this group's own dialog (DW-0417; `rest_tests.rs`).
+            assert!(matches!(
+                rt.state.actions.dialog,
+                Some(super::dialogs::Dialog::NewFolder(_))
+            ));
+            press(&mut rt, Key::Escape, NONE);
+            continue;
+        }
         assert_eq!(rt.state.actions.intents.last(), Some(&Intent::Frame(expected)));
     }
     rt.state.actions.intents.clear();
     press(&mut rt, Key::Command('n'), Mods { shift: true, ..CTRL });
+    assert!(rt.state.actions.dialog.is_some(), "Ctrl+Shift+N: New folder");
+    press(&mut rt, Key::Escape, NONE);
     press(&mut rt, Key::Command('n'), CTRL);
     press(&mut rt, Key::Command('o'), CTRL);
     assert_eq!(
         rt.state.actions.intents,
-        [
-            Intent::Frame("DW-0417"),
-            Intent::Frame("DW-1521"),
-            Intent::Frame("DW-0415")
-        ]
+        [Intent::Frame("DW-1521"), Intent::Frame("DW-0415")]
     );
 }
 

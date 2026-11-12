@@ -3563,6 +3563,187 @@
     255
    ],
    "tracking": 0
+  },
+  "scrim": {
+   "kind": "box",
+   "x": 0,
+   "y": 32,
+   "w": 1278,
+   "h": 766,
+   "bg": [
+    0,
+    0,
+    0,
+    71
+   ]
+  },
+  "dlg": {
+   "kind": "box",
+   "x": 449,
+   "y": 322.75,
+   "w": 380,
+   "h": 184.5,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ]
+  },
+  "dlg-title": {
+   "kind": "text",
+   "x": 473,
+   "y": 342.75,
+   "w": 332,
+   "h": 22,
+   "text": "New folder",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 17,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.2
+  },
+  "dlg-foot": {
+   "kind": "box",
+   "x": 449,
+   "y": 446.75,
+   "w": 380,
+   "h": 60.5,
+   "bg": [
+    246,
+    244,
+    240,
+    255
+   ]
+  },
+  "btn-0": {
+   "kind": "box",
+   "x": 665.23,
+   "y": 463.25,
+   "w": 65.01,
+   "h": 28,
+   "bg": [
+    247,
+    185,
+    0,
+    255
+   ]
+  },
+  "btn-0-label": {
+   "kind": "text",
+   "x": 677.23,
+   "y": 467.96,
+   "w": 41.01,
+   "h": 18.57,
+   "text": "Create",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    30,
+    26,
+    22,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "btn-1": {
+   "kind": "box",
+   "x": 738.23,
+   "y": 463.25,
+   "w": 66.77,
+   "h": 28
+  },
+  "btn-1-label": {
+   "kind": "text",
+   "x": 750.23,
+   "y": 467.96,
+   "w": 42.77,
+   "h": 18.57,
+   "text": "Cancel",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "field-0": {
+   "kind": "box",
+   "x": 473,
+   "y": 378.75,
+   "w": 332,
+   "h": 28,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ],
+   "focus": true
+  },
+  "field-0-value": {
+   "kind": "text",
+   "x": 482,
+   "y": 385.25,
+   "w": 87.16,
+   "h": 15.5,
+   "text": "Untitled folder",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "field-0-caret": {
+   "kind": "box",
+   "x": 570.16,
+   "y": 383.75,
+   "w": 1.5,
+   "h": 17,
+   "bg": [
+    153,
+    87,
+    0,
+    255
+   ]
+  },
+  "field-0-msg": {
+   "kind": "text",
+   "x": 477,
+   "y": 412.75,
+   "w": 324,
+   "h": 16,
+   "text": "Goes into Files. The name is encrypted too.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
   }
  },
  "theme": "light"

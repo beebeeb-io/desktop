@@ -1,7 +1,8 @@
 // keymap-shortcuts.js: the gate keys of "Commands and keyboard shortcuts" (the board's `.wn-dlg`
 // that holds a `.wn-cmds` grid: DW-1232, DW-1233, DW-1234). Runs after keymap.js, in the same
 // scope (`win`, `api`, `q`, `qa`). The window behind the dialog keeps the keys keymap.js gives it;
-// the dialog's one button is `btn-close` there already (a `.kit-btn` by its words).
+// the dialog's one button is `btn-close` (a `.kit-btn` by its words): keyed below, where keymap.js's
+// Shared and Trash section does not run (it gave the key when this golden was made).
 //
 // Keys are class names and running numbers in document order: `sc-1-4-name` is the command of the
 // 5th row of the 2nd list, `sc-1-4-home` its key or where it lives, `sc-1-4-line` the hairline under it. Never positions or strings.
@@ -27,6 +28,14 @@ if (cmds) {
   text('sc-title', q('.wn-dlg-head .t-title', dlg));
   text('sc-sub', q('.wn-dlg-head .t-sub', dlg));
   api.box('sc-foot', q('.wn-dlg-foot', dlg), css(q('.wn-dlg-foot', dlg)));
+  if (groupOf !== 'shared-trash' && groupOf !== 'this-pc') {
+    qa('.wn-dlg-foot .kit-btn', dlg).forEach((b) => {
+      const k = `btn-${slug(b.textContent)}`;
+      api.box(k, b);
+      api.icon(`${k}-icon`, q('svg', b));
+      api.text(`${k}-label`, q('span', b));
+    });
+  }
   qa(':scope > *', cmds).forEach((list, c) => {
     text(`sc-${c}-head`, q('.wn-cmdhead', list));
     qa('.wn-cmd', list).forEach((cmd, r) => {

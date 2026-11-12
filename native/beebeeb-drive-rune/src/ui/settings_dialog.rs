@@ -13,6 +13,7 @@
 use crate::theme::tokens::{Theme, radius, type_};
 use rune::{Color, El, Span, TextStyle, col, rich, row};
 
+use super::dialog;
 use super::kit;
 use super::settings_shell::SUB;
 
@@ -93,59 +94,11 @@ pub fn para_rich(index: usize, words: &str, mono: &[std::ops::Range<usize>], t: 
 /// A dialog in the middle of the body, on its scrim. `foot` holds the buttons, the primary
 /// first, the way out last, as the board orders them.
 pub fn dialog(name: &str, width: f32, title: &str, sub: Option<&str>, body: Vec<El>, foot: Vec<El>, t: &Theme) -> El {
-    let mut head = col().key("dlg-head").pt(20.0).px(24.0).pb(4.0).gap(3.0).child(
-        kit::label("dlg-title", title, DIALOG_TITLE, t.text)
-            .role("heading")
-            .level(2)
-            .w_full(),
-    );
-    if let Some(sub) = sub {
-        head = head.child(kit::label("dlg-sub", sub, SUB, t.text_tertiary).wrap());
-    }
-    let mut b = col().key("dlg-body").pt(10.0).px(24.0).pb(18.0).gap(12.0).min_h(0.0);
-    for child in body {
-        b = b.child(child);
-    }
-    let mut f = row()
-        .key("dlg-foot")
-        .center_y()
-        .justify_end()
-        .gap(8.0)
-        .py(16.0)
-        .px(24.0)
-        .fill(t.surface)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout();
+    // The card and the scrim are `ui::dialog`'s, the same for every window's dialogs.
+    let mut f = row().center_y().justify_end();
     for child in foot {
         f = f.child(child);
     }
-    // The shadow and the hairline ring are outside the card; the clip that rounds the foot's
-    // corners would cut them, so it sits one level in.
-    let dlg = col()
-        .key("dlg")
-        .role("dialog")
-        .label(name)
-        // The foot's hairline makes a dialog's height end in a half point, so centring puts
-        // its top on a quarter point. The board draws it there, edges half covered; so does this.
-        .pixel_snap(false)
-        .w(width)
-        .radius(8.0)
-        .fill(t.card)
-        .box_shadow(kit::drop(24.0, 60.0, Color::BLACK.alpha(0.28)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .child(
-            col()
-                .key("dlg-clip")
-                .w_full()
-                .clip_rounded(8.0)
-                .child(head)
-                .child(b)
-                .child(f),
-        );
-    col()
-        .key("scrim")
-        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-        .center()
-        .fill(scrim_color(t))
-        .child(dlg)
+    let card = dialog::card(name, width, title, sub.map(dialog::Sub::Wrap), body, f, t);
+    dialog::scrim(0.0, card, t)
 }
