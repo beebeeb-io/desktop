@@ -117,7 +117,9 @@ fn every_engine_start_is_bound_first() {
         authorize[bind..].contains("Ok(StartPermit::Go(keys))"),
         "the keys leave only after the binding"
     );
-    let keys_code = body_between(&production, "fn keys_for_engine_start(", "\n}\n");
+    // `keys_for_engine_start` lives in the engine (`signin/start.rs`).
+    let start = include_str!("../../crates/beebeeb-engine/src/signin/start.rs").replace("\r\n", "\n");
+    let keys_code = body_between(&start, "fn keys_for_engine_start(", "\n}\n");
     assert!(
         keys_code.contains("identity_of_session(email.as_deref(), profile.as_ref())")
             && keys_code.contains("session.email.clone()"),
@@ -225,7 +227,8 @@ fn the_keys_travel_as_zeroizing_values_and_no_start_takes_them_as_parameters() {
         !production.contains("token_clone"),
         "apply_session no longer keeps a plain copy of the token"
     );
-    let keys = body_between(&production, "fn keys_for_engine_start(", "\n}\n");
+    let start = include_str!("../../crates/beebeeb-engine/src/signin/start.rs").replace("\r\n", "\n");
+    let keys = body_between(&start, "fn keys_for_engine_start(", "\n}\n");
     assert!(
         keys.contains("EngineKeys")
             && keys.contains("zeroize::Zeroizing::new(session.token.clone())")
@@ -233,7 +236,7 @@ fn the_keys_travel_as_zeroizing_values_and_no_start_takes_them_as_parameters() {
         "the keys come out wrapped:\n{keys}"
     );
     assert!(
-        production.contains("type EngineKeys = (zeroize::Zeroizing<String>, zeroize::Zeroizing<[u8; 32]>);"),
+        start.contains("type EngineKeys = (zeroize::Zeroizing<String>, zeroize::Zeroizing<[u8; 32]>);"),
         "the alias is the wrapped pair"
     );
     let runner = [

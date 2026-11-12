@@ -234,6 +234,10 @@ macro_rules! session_command {
 }
 
 mod session_state;
+// The session rules and steps that live in the engine (`beebeeb_engine::signin`), under their old lib-level names.
+pub(crate) use beebeeb_engine::signin::recovery::*;
+pub(crate) use beebeeb_engine::signin::start::*;
+pub(crate) use beebeeb_engine::signin::store::*;
 use session_state::*;
 pub use session_state::{AppState, Session};
 mod login_commands;

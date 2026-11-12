@@ -101,8 +101,8 @@ fn item(item: dto::DriveItem) -> DriveItem {
             // Syncing and failed have no mark in this column yet.
             dto::LocalState::Syncing | dto::LocalState::Failed => None,
         }),
-        // Not read yet: the Backups root's flag (`system_role`) is not in the listing's row.
-        is_protected: false,
+        // The Backups root (LD-0113): the engine's listing marks it, hides the manifest and puts the root first.
+        is_protected: item.backup.is_protected,
     }
 }
 

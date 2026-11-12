@@ -9,6 +9,7 @@
 //! not built, is `shared/FRAMES.md`.
 
 pub mod backups;
+pub mod files;
 pub mod settings;
 pub mod shared;
 pub mod signin;
@@ -28,7 +29,16 @@ use rune::{KeyEvent, Tx};
 /// then every group's board frames. Built once.
 pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
     static ALL: OnceLock<Vec<Scene<State>>> = OnceLock::new();
-    ALL.get_or_init(|| [shell, settings::FRAMES, this_pc::scenes::FRAMES, backups::FRAMES].concat())
+    ALL.get_or_init(|| {
+        [
+            shell,
+            files::SCENES,
+            settings::FRAMES,
+            this_pc::scenes::FRAMES,
+            backups::FRAMES,
+        ]
+        .concat()
+    })
 }
 
 /// Somewhere a control wants to go that this lane does not draw: the shell's route machine
