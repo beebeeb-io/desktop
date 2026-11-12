@@ -151,8 +151,14 @@ fn caption_buttons_and_controls_have_their_roles_and_names() {
         ("search-input", "textbox", "Search names"),
         ("settings-btn", "button", "Settings"),
         ("Files-row", "button", "Files"),
-        ("rows", "list", "Files"),
-        ("row-6", "listitem", "Contract draft.pdf"),
+        // DW-0401, Accessibility: "The list is a table: Narrator reads name, modified, size,
+        // shared and the PC state per row" (review of PR 294, P2.8).
+        ("rows", "table", "Files"),
+        (
+            "row-6",
+            "row",
+            "Contract draft.pdf, changed Yesterday, 16:42, 1.2 MB, shared with 1 person, online only",
+        ),
         ("row-1-pc", "image", "Available offline"),
         ("row-0-pc", "image", "Online only"),
         ("row-7-pc", "image", "Downloaded"),
