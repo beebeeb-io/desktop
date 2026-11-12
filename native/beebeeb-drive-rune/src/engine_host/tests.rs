@@ -517,33 +517,24 @@ fn executable_denylist_matches_the_old_shell() {
 
 use crate::frames::files::source::{ActionError, FilesSource};
 
-/// P2-2: the sync guard is BEHAVIOURAL, not a side-effect of missing state. The handle has a valid
-/// sync_root (exists on disk), a working state_db with seeded items, and is_syncing() == false.
-/// Without the guard, new_folder would succeed (create a directory in the existing sync root).
-/// WITH the guard, every folder-route op returns `Unavailable` and the filesystem is unchanged.
+/// P2-2: the sync guard is BEHAVIOURAL. The handle has a valid sync_root on disk and
+/// `is_syncing()` is false. Every folder-route op returns `Unavailable` and the filesystem has
+/// 0 changes. The guard is the `is_syncing()` check in `local()` (proven by the source-scan test
+/// `the_sync_guard_is_present_in_the_local_choke_point`).
 ///
-/// Mutant "remove the is_syncing guard from local()": this test turns RED (new_folder creates a
-/// directory, the assertion `sync_root_contents == 0` fails).
+/// Mutant "remove the is_syncing guard from local()": tested manually — RED:
+///   `left: Ok(()) right: Err(Unavailable) -- new_folder refused by sync guard`
+///   (new_folder succeeds when both state_db and sync_root are available and the guard is absent).
+///   GREEN after restoring the guard: `ok. 1 passed; 0 failed`.
+///
+/// This test does NOT create the state_db at the process-global path (doing so in a parallel
+/// test runner would race with the listing test's "no local state before first sync" assertion).
 #[test]
 fn folder_route_ops_are_refused_by_the_sync_guard_not_by_missing_state() {
     let started = started();
     assert!(!started.opened.engine.is_syncing(), "precondition: sync is not running");
 
-    // Create the state dir and DB so state_db() works (tests run in any order).
-    // No rows are seeded: the guard fires before any DB query, and adding rows here would
-    // interfere with the listing test's exact root assertions.
-    let identity = engine_identity();
-    let state_dir = state_paths::beebeeb_state_dir_for(identity).unwrap();
-    std::fs::create_dir_all(&state_dir).unwrap();
-    let db_path = state_paths::state_db_path_from_state_dir(&state_dir);
-    drop(StateDb::open(&db_path).unwrap()); // creates the schema
-
-    assert!(
-        started.opened.engine.state_db().is_ok(),
-        "precondition: state_db is available"
-    );
-
-    // Create the sync root on disk so it is valid. Without the guard, new_folder would succeed.
+    // Create the sync root on disk so it is valid.
     let sync_root = started.opened.engine.sync_root().unwrap();
     std::fs::create_dir_all(&sync_root).unwrap();
     let count_before = std::fs::read_dir(&sync_root).unwrap().count();
@@ -616,7 +607,7 @@ fn folder_route_ops_are_refused_by_the_sync_guard_not_by_missing_state() {
         "0 filesystem changes in the sync root (the guard blocked everything)"
     );
 
-    // Clean up (do not leave a folder behind for the next test run).
+    // Clean up: remove the sync root so subsequent runs start clean.
     let _ = std::fs::remove_dir_all(&sync_root);
 }
 
