@@ -69,5 +69,13 @@ pub fn window(s: &State, cx: &mut Cx<State>, t: &Theme, toolbar: El, body: El, s
     if let Some(layer) = layer {
         window = window.child(layer);
     }
-    window
+    // The lane's dialog over this section (`frames::shared::dialogs`), when one is open.
+    let dialogs = crate::frames::shared::dialogs::layers(s, t);
+    if !dialogs.is_empty() {
+        // Keyboard as Windows has it in a dialog, as settings has it: Tab visits every control,
+        // Space and Enter press the focused one (Rune's default leaves Enter on a button to the
+        // default button, as macOS does).
+        cx.web_focus();
+    }
+    window.children(dialogs)
 }

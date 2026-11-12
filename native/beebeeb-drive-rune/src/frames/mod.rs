@@ -49,6 +49,7 @@ pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
             backups::FRAMES,
             tray::FRAMES,
             viewers::FRAMES,
+            shared::scenes::FRAMES,
         ]
         .concat()
     })

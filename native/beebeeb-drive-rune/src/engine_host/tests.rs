@@ -50,6 +50,13 @@ fn started() -> &'static Started {
     })
 }
 
+/// The process's state folder, which the start path makes once (`started`): every other engine handle a test
+/// opens is on it (the engine refuses another). A test that opens one must not write in it.
+pub(super) fn process_state_dir() -> PathBuf {
+    started();
+    state_paths::beebeeb_state_dir_for(engine_identity()).expect("the process's state folder")
+}
+
 fn put(db: &StateDb, id: &str, path: &str, parent: Option<&str>, folder: bool) {
     let entry = FileEntry {
         file_id: id.to_string(),

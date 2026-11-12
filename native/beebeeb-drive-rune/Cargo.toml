@@ -55,6 +55,7 @@ beebeeb-engine = { path = "../../crates/beebeeb-engine", features = ["test-suppo
 tempfile = "3"
 # The timing test asks SQLite for its query plan; same version the engine links.
 rusqlite = { version = "0.32", features = ["bundled"] }
+tokio = { version = "1", features = ["rt"] } # the tray tests hold a task in the engine's slot (`hold_running`)
 # For headless golden-PNG tests.
 
 [[bin]]
