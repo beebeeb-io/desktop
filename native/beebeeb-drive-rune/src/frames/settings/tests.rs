@@ -208,9 +208,9 @@ fn the_sidebar_is_navigation_of_links_with_the_current_one_selected() {
 /// request to the shell. By pointer and by keyboard.
 #[test]
 fn every_row_of_general_acts() {
+    // (Diagnostics, item-1-2, opens its own page: `tests_more.rs`.)
     let asks: [(&str, Intent); 5] = [
         ("item-1-0", Intent::Show("DW-0380")),
-        ("item-1-2", Intent::Show("DW-0790")),
         ("item-2-0", Intent::Open("privacy")),
         ("item-2-1", Intent::Open("export-my-data")),
         ("item-3-0", Intent::Web("terms-and-privacy-policy")),
@@ -373,8 +373,8 @@ fn an_available_update_is_said_once_with_one_primary_action() {
 fn every_built_frame_renders_and_names_no_city_and_no_provider() {
     assert_eq!(
         super::FRAMES.len(),
-        38,
-        "the frames the settings lanes built (28, and Bandwidth's 10)"
+        44,
+        "the frames the settings lanes built (28, Bandwidth's 10, Diagnostics' 2 and Keep on this PC's 4)"
     );
     for (frame, _) in super::FRAMES {
         let rt = runtime(frame);
@@ -419,7 +419,8 @@ fn a_dialog_is_modal_takes_esc_first_and_its_buttons_act() {
     key(&mut rt, Key::Enter);
     assert_eq!(
         rt.state.settings.intents,
-        vec![Intent::SaveBundleAndWriteEmail, Intent::Show("DW-0790b")]
+        vec![Intent::SaveBundleAndWriteEmail],
+        "and Diagnostics shows where the file went (DW-0790b)"
     );
 }
 
@@ -1078,7 +1079,7 @@ fn a_dialog_keeps_the_keyboard_inside_and_enter_is_its_primary_button() {
     key(&mut rt, Key::Enter);
     assert_eq!(
         rt.state.settings.intents,
-        vec![Intent::SaveBundleAndWriteEmail, Intent::Show("DW-0790b")],
+        vec![Intent::SaveBundleAndWriteEmail],
         "Enter is the primary button"
     );
 

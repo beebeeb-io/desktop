@@ -235,10 +235,53 @@ pub trait DriveSettings {
     fn pump(&mut self, _seconds: f64) -> (bool, bool) {
         (false, false)
     }
+    /// Diagnostics (DW-0790). Engine: the app's own CPU, memory and transfer rates, sampled
+    /// every 2 seconds only while the page is open, and where the last export ended.
+    fn diagnostics(&self) -> super::diagnostics::Diagnostics {
+        super::diagnostics::Diagnostics::default()
+    }
+    /// Save a support bundle, show it in File Explorer and open a draft to support (DW-0790b):
+    /// `diagnostics().bundle` then says where the file is, or why there is none. Called once
+    /// per press of Export… or "Save and write email"; never by showing a page.
+    ///
+    /// **The privacy contract a source must keep** (the page promises it in words, DW-0790):
+    /// - The bundle holds three things only: queue counts, an error code, and the last error
+    ///   message.
+    /// - It never holds: a file or folder name, a path, the account's email address, a device
+    ///   name, a key or any key material, a sign-in or session token, the recovery phrase.
+    /// - Every string goes through the engine's export redaction
+    ///   (`beebeeb_engine::diagnostic_redaction`) BEFORE anything is written to disk: the file
+    ///   on disk is already the redacted one, there is no unredacted copy to clean up.
+    /// - Nothing is sent anywhere: no upload, no request. The file stays on this PC; the
+    ///   draft names the file, never its folder, and the person attaches it themselves.
+    /// - `Bundle::Failed`'s reason is shown on the page as given: it must be a fixed sentence
+    ///   or a redacted one, never an OS error with a path in it.
+    fn export_bundle(&mut self) {}
+    /// Keep on this PC (DW-0784). Engine: the folder tree with sizes and the kept set
+    /// (the same thing as Available offline for folders). Until a source answers: not loaded.
+    fn keep(&self) -> super::keep::Keep {
+        super::keep::Keep::Failed
+    }
+    /// Load the folder list again (DW-0784c, Try again).
+    fn reload_keep(&mut self) {}
+    /// What the person changed in Keep on this PC, and nothing else: `keep` are the folders
+    /// newly kept (each with everything in it, also what is added later), `release` the
+    /// folders newly NOT kept (their downloaded copies leave this PC). Top-most ids only.
+    ///
+    /// A source must treat this as a change to those folders alone. Every folder that is in
+    /// neither list stays exactly as it is: the dialog's tree may have been partial (folders
+    /// not loaded) or stale (kept on another device meanwhile), so the lists are never "the
+    /// whole kept set". Releasing a folder inside a kept folder releases that folder only:
+    /// files directly in the folder above, and its other folders, stay on this PC.
+    /// Nothing is deleted from Beebeeb; a change that has not uploaded yet stays until it has.
+    /// Never called with both lists empty.
+    fn apply_keep(&mut self, _keep: &[String], _release: &[String]) {}
 }
 
 /// The board's sample content for Drive's settings panes.
 pub struct BoardDrive {
+    /// Diagnostics and Keep on this PC (lane settings-rest).
+    more: super::more::BoardMore,
     storage: Storage,
     insights: Insights,
     sync: SyncPane,
@@ -261,6 +304,7 @@ impl BoardDrive {
         };
         let same = |path: &str, kind: &str, size: &str| large(path, path, kind, size);
         Self {
+            more: super::more::BoardMore::new(),
             storage: Storage {
                 used: "240 GB".into(),
                 total: "1 TB".into(),
@@ -394,6 +438,25 @@ impl BoardDrive {
         self
     }
 
+    /// A support bundle was just saved (DW-0790b).
+    pub fn with_bundle_saved(mut self) -> Self {
+        self.more.diagnostics.bundle = super::more::BoardMore::board_bundle();
+        self
+    }
+
+    /// Where an export ended, for the states the board gives as rules (DW-0790b).
+    #[cfg(test)]
+    pub fn with_bundle(mut self, bundle: super::diagnostics::Bundle) -> Self {
+        self.more.diagnostics.bundle = bundle;
+        self
+    }
+
+    /// Keep on this PC in another state (DW-0784c: `Keep::Failed`; DW-0784d: no folders).
+    pub fn with_keep(mut self, keep: super::keep::Keep) -> Self {
+        self.more.keep = keep;
+        self
+    }
+
     /// Storage insights in another state (DW-0783b, c, d).
     pub fn with_insights(mut self, insights: Insights) -> Self {
         self.insights = insights;
@@ -481,6 +544,24 @@ impl DriveSettings for BoardDrive {
     }
     fn pump(&mut self, seconds: f64) -> (bool, bool) {
         self.bandwidth.pump(seconds)
+    }
+    fn diagnostics(&self) -> super::diagnostics::Diagnostics {
+        self.more.diagnostics.clone()
+    }
+    fn export_bundle(&mut self) {
+        self.more.diagnostics.bundle = super::more::BoardMore::board_bundle();
+    }
+    fn keep(&self) -> super::keep::Keep {
+        self.more.keep.clone()
+    }
+    fn reload_keep(&mut self) {
+        self.more.keep = super::keep::Keep::Ready {
+            folders: super::more::board_folders(),
+            total_mb: super::more::BOARD_TOTAL_MB,
+        };
+    }
+    fn apply_keep(&mut self, keep: &[String], release: &[String]) {
+        self.more.apply_keep(keep, release);
     }
 }
 

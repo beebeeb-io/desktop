@@ -17,9 +17,12 @@
 pub mod about;
 pub mod bandwidth;
 pub mod bandwidth_data;
+pub mod diagnostics;
 pub mod drive;
 pub mod general;
 pub mod insights;
+pub mod keep;
+pub mod more;
 pub mod notifications;
 pub mod recent;
 pub mod source;
@@ -32,6 +35,8 @@ mod tests;
 mod tests_bandwidth;
 #[cfg(test)]
 mod tests_drive;
+#[cfg(test)]
+mod tests_more;
 
 use crate::State;
 use crate::shell::app::{Event, Screen, SettingsPane};
@@ -64,6 +69,8 @@ pub enum Pane {
     Sync,
     /// Bandwidth (DW-0785), with the speed test (DW-0786).
     Bandwidth,
+    /// General › Diagnostics (DW-0790).
+    Diagnostics,
 }
 
 /// Which menu a pop-up button drops.
@@ -128,6 +135,10 @@ pub enum Dialog {
     TurnOffExplorer,
     /// Repair… (DW-0746c).
     Repair,
+    /// Sync and File Explorer › Choose folders… (DW-0784, DW-0784c, DW-0784d).
+    Keep,
+    /// Before downloaded copies leave this PC (DW-0784b), over Keep's choices.
+    KeepConfirm,
 }
 
 /// What settings asks of the app around it. The shell lane drains `SettingsUi::intents`.
@@ -171,6 +182,8 @@ pub struct SettingsUi {
     pub draft_gb: u32,
     /// What the Bandwidth pane holds between draws: the chart's hovered bucket (DW-0785).
     pub bandwidth: bandwidth::Held,
+    /// What Diagnostics and Keep on this PC hold open (lane settings-rest).
+    pub more: more::MoreUi,
 }
 
 impl Default for SettingsUi {
@@ -186,6 +199,7 @@ impl Default for SettingsUi {
             drive: drive::first(instance::DEV_BUILD),
             draft_gb: 0,
             bandwidth: bandwidth::Held::default(),
+            more: more::MoreUi::default(),
         }
     }
 }
@@ -420,6 +434,39 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-0786b", |s| bandwidth::scene(s, "DW-0786b")),
     ("DW-0786c", |s| bandwidth::scene(s, "DW-0786c")),
     ("DW-0786d", |s| bandwidth::scene(s, "DW-0786d")),
+    ("DW-0790", |s| open_on(s, "DW-0790")),
+    ("DW-0790b", |s| {
+        // Showing the page exports nothing: the scene starts on a source that has just saved.
+        s.settings.drive = Box::new(drive::BoardDrive::new().with_bundle_saved());
+        open_on(s, "DW-0790b");
+    }),
+    ("DW-0784", |s| {
+        open_on(s, "DW-0784");
+        // The board draws the dialog two choices in: Lisbon trip open, Documents unchecked,
+        // Day 1 checked.
+        let draft = &mut s.settings.more.keep;
+        draft.toggle_open("lisbon");
+        draft.toggle("documents");
+        draft.toggle("lisbon/day-1");
+    }),
+    ("DW-0784b", |s| {
+        open_on(s, "DW-0784");
+        let draft = &mut s.settings.more.keep;
+        draft.toggle("documents");
+        draft.toggle("lisbon/day-1");
+        go(s, "DW-0784b");
+    }),
+    ("DW-0784c", |s| {
+        s.settings.drive = Box::new(drive::BoardDrive::new().with_keep(keep::Keep::Failed));
+        open_on(s, "DW-0784");
+    }),
+    ("DW-0784d", |s| {
+        s.settings.drive = Box::new(drive::BoardDrive::new().with_keep(keep::Keep::Ready {
+            folders: Vec::new(),
+            total_mb: 0.0,
+        }));
+        open_on(s, "DW-0784");
+    }),
 ];
 
 pub(super) fn open_on(s: &mut State, frame: &'static str) {
@@ -466,6 +513,9 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>, Option<MenuKind>)> {
             Some(MenuKind::SpeedLimit(bandwidth_data::Direction::Upload)),
         ),
         "DW-0786" | "DW-0786b" | "DW-0786c" | "DW-0786d" => (Pane::Bandwidth, None, None),
+        "DW-0790" | "DW-0790b" => (Pane::Diagnostics, None, None),
+        "DW-0784" | "DW-0784c" | "DW-0784d" => (Pane::Sync, Some(Dialog::Keep), None),
+        "DW-0784b" => (Pane::Sync, Some(Dialog::KeepConfirm), None),
         _ => return None,
     })
 }
@@ -570,6 +620,8 @@ pub fn go(s: &mut State, frame: &'static str) {
     ui.source.opened(pane);
     match dialog {
         Some(Dialog::Limit(which)) => ui.open_limit(which),
+        Some(Dialog::Keep) => keep::open(ui),
+        Some(Dialog::KeepConfirm) => keep::open_question(ui),
         other => ui.dialog = other,
     }
     if let Some(kind) = menu {
@@ -593,7 +645,7 @@ impl Pane {
     /// The sidebar section a pane belongs to (a pane opened from General stays under General).
     pub fn section(self) -> Pane {
         match self {
-            Pane::General | Pane::About | Pane::StorageLocation => Pane::General,
+            Pane::General | Pane::About | Pane::StorageLocation | Pane::Diagnostics => Pane::General,
             Pane::Notifications | Pane::Recent => Pane::Notifications,
             Pane::Storage | Pane::Insights => Pane::Storage,
             Pane::Sync => Pane::Sync,
@@ -728,6 +780,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         Pane::Insights => insights::pane(ui, &t),
         Pane::Sync => sync::pane(ui, &t),
         Pane::Bandwidth => bandwidth::pane(ui, &t),
+        Pane::Diagnostics => diagnostics::pane(ui, &t),
     };
     let overlay = overlay.filter(|_| inside);
     let mut body = row()

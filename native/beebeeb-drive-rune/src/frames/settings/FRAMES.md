@@ -52,10 +52,10 @@ Status after the Bandwidth lane (2026-11-12): Bandwidth's 6 and the speed test's
 | `DW-0783b` | Loading: the page's shape in skeletons, never a spinner on a blank page. | built (light and dark: 0 failing on all six lines) |
 | `DW-0783c` | Couldn't load: say so plainly, with Try again. | built (light and dark: 0 failing on all six lines) |
 | `DW-0783d` | Nothing stored yet. | built (light and dark: 0 failing on all six lines) |
-| `DW-0784` | Choose which folders stay on this PC, many at once, and see what each choice does before it happens. | not built (lane f-settings-rest stopped at its budget) |
-| `DW-0784b` | Before downloaded copies leave the PC, say what leaves, that nothing is deleted, and what downloads. | not built (lane f-settings-rest stopped at its budget) |
-| `DW-0784c` | The folder list couldn't load: nothing is changed. | not built (lane f-settings-rest stopped at its budget) |
-| `DW-0784d` | No folders yet. | not built (lane f-settings-rest stopped at its budget) |
+| `DW-0784` | Choose which folders stay on this PC, many at once, and see what each choice does before it happens. | built (light: 7 and dark: 3 pixel lines red, all on Sync and File Explorer's own rows UNDER the dialog (`btn-2`, `item-2-1`, `item-2-2` and their parts): the dialog's text runs through their edges; the other five lines 0 failing, frame tiles 0 failing) |
+| `DW-0784b` | Before downloaded copies leave the PC, say what leaves, that nothing is deleted, and what downloads. | built (light and dark: 0 failing on all six lines) |
+| `DW-0784c` | The folder list couldn't load: nothing is changed. | built (light: 0 failing on all six lines; dark: 1 pixel line red, `Notifications-row edge 10 > 9`: the sidebar row is under the dialog's edge) |
+| `DW-0784d` | No folders yet. | built (light: 0 failing on all six lines; dark: 1 pixel line red, `Notifications-row edge 10 > 9`: the sidebar row is under the dialog's edge) |
 | `DW-0787` | Light, dark, or follow Windows. | built; dark: 1 pixel line red (`item-0-0-pop edge 14 > 9`: the pop-up button is under the open menu, its edge runs through the menu's text) |
 | `DW-0788` | Choose where new files are stored, inside the EU. | built (light and dark: 0 failing on all six lines) |
 | `DW-0788b` | A country is chosen; decide what happens if it can't take a file. | built (light and dark: 0 failing on all six lines) |
@@ -63,8 +63,8 @@ Status after the Bandwidth lane (2026-11-12): Bandwidth's 6 and the speed test's
 | `DW-0788d` | The locations couldn't load. | built (light and dark: 0 failing on all six lines) |
 | `DW-0789` | Choose which releases this PC is offered. | built (light and dark: 0 failing on all six lines) |
 | `DW-0789b` | What a version changes, before downloading it. | built; dark: 1 pixel line red (`item-1-1 edge 10 > 9`: the row is under the dialog, its edge runs through the dialog's text) |
-| `DW-0790` | See what Beebeeb is doing on this PC, and save a support bundle you can read before you send it. | not built (lane f-settings-rest stopped at its budget) |
-| `DW-0790b` | The bundle is saved: say where, and what happens next. | not built (lane f-settings-rest stopped at its budget) |
+| `DW-0790` | See what Beebeeb is doing on this PC, and save a support bundle you can read before you send it. | built (light and dark: 0 failing on all six lines) |
+| `DW-0790b` | The bundle is saved: say where, and what happens next. | built (light and dark: 0 failing on all six lines) |
 | `DW-0746c` | When File Explorer stops showing Beebeeb's files or their state, put Beebeeb back in File Explorer without losing anything. | built (light and dark: 0 failing on all six lines) |
 | `DW-0746d` | The repair didn't finish: say that nothing needs undoing. | built (light and dark: 0 failing on all six lines) |
 | `DW-0746e` | Sync is waiting because the PC is on a metered connection: say so where sync's status lives, and offer to sync anyway. | built (light and dark: 0 failing on all six lines) |
