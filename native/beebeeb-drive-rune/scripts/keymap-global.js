@@ -43,10 +43,14 @@
     }
   }
   // The preview panel in front of the window (DW-0121): the scrim, the card, its title bar.
+  // Only that panel: a dialog or a viewer also stands on a scrim, and their keys are their lanes'
+  // (without this test the section threw on DW-0417 and DW-0504, whose card has no title bar button).
   const scrim = q('.mk-scrim');
-  if (scrim) {
+  const scrimCard = scrim && scrim.nextElementSibling;
+  const blockedCard = scrimCard && scrimCard.firstElementChild && q('.mk-tbtn', scrimCard.firstElementChild) && q('.kit-empty', scrimCard) ? scrimCard : null;
+  if (blockedCard) {
     api.box('scrim', scrim);
-    const card = scrim.nextElementSibling;
+    const card = blockedCard;
     api.box('preview-card', card, gcss(card));
     const bar = card.firstElementChild;
     api.box('preview-bar', bar, gcss(bar));

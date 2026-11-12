@@ -1,5 +1,7 @@
-//! Tests of the grid (DW-0119): what a tile shows before and after its thumbnail arrives, the
-//! view switch and the arrows from the keyboard (scripted input), the pointer, roles and names.
+//! Tests of the grid (DW-0119) and of the banner on the other views of the window: what a tile
+//! shows before and after its thumbnail arrives, the view switch and the arrows from the keyboard
+//! (scripted input), the pointer, roles and names; the banner on Shared and Trash, and at the
+//! window's smallest size.
 
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
@@ -296,4 +298,108 @@ fn the_banner_shows_on_shared_and_trash_too() {
     let rt = super::tests::runtime_of(state);
     assert_eq!(info(&rt, "banner").label.as_deref(), Some("Emptying Trash"));
     assert!(find(&rt, "banner-action").is_none());
+}
+
+/// At the window's smallest size (960 x 640) every banner's sentence still fits on its line
+/// beside its button: nothing is cut and nothing overlaps.
+#[test]
+fn every_sentence_fits_the_smallest_window() {
+    use super::source::board;
+    use super::{GlobalFixture, Ui};
+    assert_eq!(crate::shell::surfaces::WindowKind::Main.min_size(), (960.0, 640.0));
+    // The longest figures the sentences can carry beside the board's samples.
+    let mut many = board::sync_problem();
+    many.sync_problems = 1_000_000;
+    for status in [
+        board::offline(),
+        board::sync_problem(),
+        board::storage_almost_full(),
+        board::storage_full(),
+        board::signed_out(),
+        board::backup_problem(),
+        many,
+    ] {
+        let mut state = init();
+        state.global = Ui::new(Box::new(GlobalFixture::of(status.clone())));
+        let env = Env {
+            system_dark: false,
+            scale: 2.0,
+        };
+        let mut rt = Runtime::new(state, view, (960.0, 640.0), env);
+        rt.frame(0.0);
+        settle(&mut rt, 0.0);
+        let banner = info(&rt, "banner").rect;
+        let text = info(&rt, "banner-text-box").rect;
+        let last = rt
+            .elements()
+            .into_iter()
+            .filter(|e| {
+                e.key
+                    .as_deref()
+                    .is_some_and(|k| k.starts_with("banner-text-run-") || k.starts_with("banner-figure-"))
+            })
+            .map(|e| e.rect[0] + e.rect[2])
+            .fold(0.0_f32, f32::max);
+        assert!(last > text[0], "{status:?}: the sentence is drawn");
+        assert!(
+            last <= text[0] + text[2] + 0.5,
+            "{status:?}: the sentence ends at {last}, its box at {}",
+            text[0] + text[2]
+        );
+        let limit = find(&rt, "banner-action")
+            .or_else(|| find(&rt, "banner-dismiss"))
+            .map_or(banner[0] + banner[2] - 10.0, |next| next.rect[0] - 10.0);
+        assert!(
+            last <= limit + 0.5,
+            "{status:?}: the sentence ends at {last}, what follows starts at {limit}"
+        );
+    }
+}
+
+/// Space on a file that is only online, while there is no connection: the panel of DW-0121, not
+/// the viewer. A file that is on this PC still opens in the viewer, and so does any file once
+/// the connection is back.
+#[test]
+fn a_preview_without_a_connection_opens_the_panel() {
+    use super::source::board;
+    use super::{GlobalFixture, Ui};
+    use crate::frames::files::Intent as FilesIntent;
+    let offline_window = || {
+        let mut state = init();
+        state.global = Ui::new(Box::new(GlobalFixture::of(board::offline())));
+        super::tests::runtime_of(state)
+    };
+    let row_of = |rt: &Runtime<State>, status: &str| {
+        rt.state
+            .listing
+            .items
+            .iter()
+            .position(|i| !i.is_folder && i.pc_status.as_deref() == Some(status))
+            .unwrap_or_else(|| panic!("the board has a file that is {status}"))
+    };
+    let mut rt = offline_window();
+    let online_only = row_of(&rt, "online_only");
+    let name = rt.state.listing.items[online_only].name.clone();
+    click(&mut rt, &format!("row-{online_only}-date"), NONE);
+    press(&mut rt, Key::Text(" ".into()));
+    assert_eq!(
+        info(&rt, "preview-card").label,
+        Some(format!("{name}: Needs a connection"))
+    );
+    assert!(rt.state.actions.intents.is_empty(), "the viewer was not asked for");
+    press(&mut rt, Key::Escape);
+    assert!(find(&rt, "preview-card").is_none());
+
+    let mut rt = offline_window();
+    let here = row_of(&rt, "on_this_pc");
+    click(&mut rt, &format!("row-{here}-date"), NONE);
+    press(&mut rt, Key::Text(" ".into()));
+    assert!(find(&rt, "preview-card").is_none(), "it is on this PC");
+    assert_eq!(rt.state.actions.intents, [FilesIntent::Frame("DW-0408")]);
+
+    let mut rt = super::tests::runtime_of(init());
+    click(&mut rt, &format!("row-{online_only}-date"), NONE);
+    press(&mut rt, Key::Text(" ".into()));
+    assert!(find(&rt, "preview-card").is_none(), "there is a connection");
+    assert_eq!(rt.state.actions.intents, [FilesIntent::Frame("DW-0408")]);
 }

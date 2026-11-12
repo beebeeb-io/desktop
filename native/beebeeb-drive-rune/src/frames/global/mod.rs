@@ -9,13 +9,13 @@
 //! `frames::files`): an action there shows them.
 
 pub mod grid;
-#[cfg(test)]
-mod grid_tests;
 pub mod samples;
 pub mod source;
 #[cfg(test)]
 mod tests;
 mod view;
+#[cfg(test)]
+mod window_tests;
 
 use rune::Tx;
 
@@ -325,6 +325,24 @@ impl State {
         }
         false
     }
+}
+
+/// A preview of the selected file was asked for. Without a connection, a file that is not on this
+/// PC cannot open: the panel says so (DW-0121) and this answers `true`. Otherwise `false`: the
+/// viewer opens it (DW-0408).
+pub fn preview_needs_connection(s: &mut State) -> bool {
+    if s.global.source.status().offline.is_none() {
+        return false;
+    }
+    let Some(item) = s.selected.and_then(|i| s.listing.items.get(i)) else {
+        return false;
+    };
+    if item.is_folder || item.pc_status.as_deref() != Some("online_only") {
+        return false;
+    }
+    let (id, name) = (item.id.clone(), item.name.clone());
+    s.block_preview(id, name);
+    true
 }
 
 fn act_banner(s: &mut State, _: &mut Tx) {
