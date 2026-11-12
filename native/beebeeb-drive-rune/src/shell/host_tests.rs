@@ -878,3 +878,52 @@ fn the_account_panes_change_password_and_2fa_setup_are_secret() {
     assert!(!AccountDialog::SignOutApp.shows_secret(), "DW-A57");
     assert!(!AccountDialog::LeaveCodes.shows_secret());
 }
+
+/// DW-0401 to DW-1201: the window's status line shows the b's flyout, as a click on the b does.
+/// The click asks the flyout to read the engine once and open (that a window shows is Rune's
+/// window host's to say, as above); the Search window's status line does the same.
+#[test]
+fn the_status_line_of_the_window_opens_the_flyout() {
+    let shell_with_flyout = || {
+        let flyout = rune::App::new(rune::AppSpec::new(
+            "flyout",
+            WindowKind::Flyout.default_size(),
+            flyout_window::fixture_state,
+            flyout_window::view,
+        ))
+        .handle();
+        let wiring = Wiring {
+            flyout: Some(flyout),
+            ..Wiring::default()
+        };
+        let platform = Arc::new(FakePlatform::default());
+        let actions = Arc::new(HostActions::new(Arc::new(FixtureEngine::ready()), platform.clone()));
+        Shell::new(actions, platform, wiring)
+    };
+    let click_status = |rt: &mut Runtime<State>| {
+        let r = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("status-text") && !e.exiting)
+            .expect("the status line")
+            .rect;
+        let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        settle(rt);
+    };
+    // Files.
+    let mut rt = runtime(state::init_with(shell_with_flyout()));
+    assert_eq!(rt.state.shell.flyout_reads, 0);
+    click_status(&mut rt);
+    assert_eq!(
+        rt.state.shell.flyout_reads, 1,
+        "the click reads the flyout and opens it"
+    );
+    // Search (the Files window while searching).
+    let mut state = state::init_with(shell_with_flyout());
+    crate::frames::search::dw_0802(&mut state);
+    let mut rt = runtime(state);
+    click_status(&mut rt);
+    assert_eq!(rt.state.shell.flyout_reads, 1);
+}
