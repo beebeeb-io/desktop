@@ -219,6 +219,11 @@ then listed add up to 15 (9 small-disc rim, 4 Windows Hello, 2 overlaid text).
   note describes the real app. `frames/tray/view.rs`, `tray::tests::names_and_roles`.
 - **The Files toolbar** has a button and a command the board does not draw (2a): there the board changes, not the
   code.
+- **Honest empty states (A4, lane a4-honest-empty).** A live run with an engine shows the shell's "not built yet"
+  frame for Shared, Trash, Photos, This PC and Backups: each uses the Settings `Unwired` pattern. The board has no
+  dedicated unwired state for these groups; they reuse the shell's `placeholder::window` (the same card that a
+  route with no registered frame shows). Deviation: the board draws each group's own empty state (DW-0508, DW-0117,
+  DW-0116, DW-1305); the app shows the generic "not built yet" card until the engine lane wires each group.
 
 ## 2f. The app names itself from the build's identity: open
 
