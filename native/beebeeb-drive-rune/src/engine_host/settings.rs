@@ -55,6 +55,8 @@ pub struct EngineSettingsSource<C: CredentialStores> {
     identity: &'static EngineIdentity,
     theme: ThemeChoice,
     region: Region,
+    /// Whose account `region` is (`account_of`): another account never shows it.
+    region_of: Option<String>,
     /// When the region was last answered.
     read_at: Option<Instant>,
     reading: bool,
@@ -79,9 +81,10 @@ enum Region {
 
 /// What a worker sends back.
 enum Answer {
-    Region(Result<UserRegionResponse, AccountCallError>),
+    /// What Beebeeb said, and the account it was asked for.
+    Region(Option<String>, Result<UserRegionResponse, AccountCallError>),
     /// A change of the storage location: what Beebeeb stored, or why not.
-    Chosen(Result<(Option<String>, bool), AccountCallError>),
+    Chosen(Option<String>, Result<(Option<String>, bool), AccountCallError>),
     /// A theme write: the theme it wrote, the one before it, and whether the file took it.
     Theme {
         wanted: ThemeChoice,
@@ -174,6 +177,12 @@ fn listed(region: &UserRegionResponse) -> Option<(Locations, Vec<String>)> {
     ))
 }
 
+/// Whose account a read is for: the stored email, else the user id the server named (one of them, the same one for
+/// one account in one run, as `LiveEngine::session` names it). In memory only: never waits.
+fn account_of<C: CredentialStores>(engine: &Engine<C>) -> Option<String> {
+    engine.account_email().or_else(|| engine.user_id())
+}
+
 impl<C: CredentialStores> EngineSettingsSource<C> {
     /// The source of the running app. Reads this PC's settings file now (local and small: the first paint is
     /// local) and asks Beebeeb for the storage location on a worker.
@@ -195,6 +204,7 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
             identity,
             theme,
             region: Region::Unknown,
+            region_of: None,
             read_at: None,
             reading: false,
             writing: false,
@@ -216,7 +226,8 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
         let started = std::thread::Builder::new()
             .name("settings-region".into())
             .spawn(move || {
-                let _ = answers.send(Answer::Region(engine.storage_region()));
+                let whose = account_of(&engine);
+                let _ = answers.send(Answer::Region(whose, engine.storage_region()));
             });
         self.reading = started.is_ok();
         if started.is_err() {
@@ -233,18 +244,22 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
         let started = std::thread::Builder::new()
             .name("settings-region-set".into())
             .spawn(move || {
+                let whose = account_of(&engine);
                 let stored = engine
                     .set_storage_region(Some(&id), Some(strict))
                     .map(|answer| (answer.preferred_region, answer.region_strict));
-                let _ = answers.send(Answer::Chosen(stored));
+                let _ = answers.send(Answer::Chosen(whose, stored));
             });
         self.writing = started.is_ok();
         self.writing
     }
 
+    /// What Beebeeb said, while it is the account signed in now.
     fn known(&self) -> Option<&UserRegionResponse> {
         match &self.region {
-            Region::Known(region) => Some(region),
+            Region::Known(region) if self.region_of.is_some() && self.region_of == account_of(&self.engine) => {
+                Some(region)
+            }
             _ => None,
         }
     }
@@ -277,9 +292,10 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
         while let Ok(answer) = self.inbox.try_recv() {
             pumped.changed = true;
             match answer {
-                Answer::Region(result) => {
+                Answer::Region(whose, result) => {
                     self.reading = false;
                     self.read_at = Some(Instant::now());
+                    self.region_of = whose;
                     self.region = match result {
                         Ok(region) => Region::Known(region),
                         Err(kind) => {
@@ -288,10 +304,11 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
                         }
                     };
                 }
-                Answer::Chosen(result) => {
+                Answer::Chosen(whose, result) => {
                     self.writing = false;
+                    let same = whose.is_some() && whose == self.region_of;
                     match (result, &mut self.region) {
-                        (Ok((preferred, strict)), Region::Known(region)) => {
+                        (Ok((preferred, strict)), Region::Known(region)) if same => {
                             region.preferred_region = preferred;
                             region.region_strict = strict;
                             pumped.toast = Some(CHOSEN);

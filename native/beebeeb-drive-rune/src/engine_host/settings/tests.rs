@@ -67,6 +67,7 @@ fn account(email: &str) -> Account {
         if req.bearer() != Some(token.as_str()) {
             return Reply::json(401, json!({}));
         }
+        std::thread::sleep(Duration::from_millis(delay_in.load(Ordering::SeqCst)));
         if route.starts_with("PUT") {
             let body = req.json();
             writes_in.lock().unwrap().push(body.clone());
@@ -76,7 +77,6 @@ fn account(email: &str) -> Account {
             });
             return Reply::ok(stored.lock().unwrap().clone());
         }
-        std::thread::sleep(Duration::from_millis(delay_in.load(Ordering::SeqCst)));
         let choices = if mode_in.load(Ordering::SeqCst) == EMPTY {
             json!([])
         } else {
@@ -288,6 +288,23 @@ fn a_slow_reply_never_holds_the_window() {
     assert_eq!(general.storage_location, "");
     settle(&mut source);
     assert_eq!(source.general().storage_location, "Germany");
+}
+
+/// The session ends while a change is on its way: nothing of the account shows any more, and the late answer
+/// changes nothing on screen.
+#[test]
+fn a_session_that_ends_mid_change_shows_nothing_of_the_account() {
+    let account = account("settings-ended@example.eu");
+    let engine = signed_in(&account);
+    let mut source = EngineSettingsSource::new(engine.clone());
+    settle(&mut source);
+    assert_eq!(source.general().storage_location, "Germany");
+    account.delay_ms.store(400, Ordering::SeqCst);
+    source.choose_location(2);
+    engine.sign_out_keeping_local_data().expect("signs out");
+    settle(&mut source);
+    assert!(source.locations().is_none(), "no list of an account that signed out");
+    assert_eq!(source.general().storage_location, "", "and no place in General");
 }
 
 #[test]
