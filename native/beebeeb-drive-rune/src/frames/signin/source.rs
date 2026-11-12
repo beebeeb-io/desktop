@@ -206,6 +206,14 @@ pub trait SignInSource {
     fn begin_set_password(&mut self, password: &str);
     /// The next finished answer, if any.
     fn poll(&mut self) -> Option<SignInEvent>;
+    /// Added by lane f-signin-rest (a default, so an implementation written before it compiles):
+    /// the person went back from a step after the password (the code, the twelve words, the
+    /// vault password). The partial session is discarded (`auth_v2`: drop the partial token) and
+    /// no `TwoFactor`, `PhraseRestored` or `VaultUnlocked` event of it may arrive after this call.
+    fn discard_partial_sign_in(&mut self) {}
+    /// Added by lane f-signin-rest (a default): the person left while Windows' passkey dialog
+    /// was up: dismiss it. No `Passkey` event of that attempt may arrive after this call.
+    fn cancel_passkey(&mut self) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +251,9 @@ pub struct Script {
     pub hello: HelloOutcome,
     pub device: Option<DeviceStatus>,
     pub passkey: PasskeyOutcome,
+    /// What a two-factor code gets instead of the check against the board's code (DW-A27 draws
+    /// the board's own six digits as the wrong ones).
+    pub two_factor_problem: Option<TwoFactorProblem>,
     /// `true`: answers wait until [`FixtureSignInSource::release`] (the board's in-flight frames).
     pub hold: bool,
 }
@@ -263,6 +274,7 @@ impl Default for Script {
             hello: HelloOutcome::Succeeded(NextAfterSignIn::Drive),
             device: None,
             passkey: PasskeyOutcome::NeedsPassword,
+            two_factor_problem: None,
             hold: false,
         }
     }
@@ -381,11 +393,12 @@ impl SignInSource for FixtureSignInSource {
             CodeKind::Authenticator => board::TOTP,
             CodeKind::Backup => board::BACKUP_CODE,
         };
-        self.queue.push_back(SignInEvent::TwoFactor(if code == right {
-            Ok(self.after_proof())
-        } else {
-            Err(TwoFactorProblem::WrongCode)
-        }));
+        self.queue
+            .push_back(SignInEvent::TwoFactor(match self.script.two_factor_problem {
+                Some(problem) => Err(problem),
+                None if code == right => Ok(self.after_proof()),
+                None => Err(TwoFactorProblem::WrongCode),
+            }));
     }
 
     fn begin_restore(&mut self, words: &[&str]) {
@@ -427,6 +440,21 @@ impl SignInSource for FixtureSignInSource {
             return None;
         }
         self.queue.pop_front()
+    }
+
+    fn discard_partial_sign_in(&mut self) {
+        self.called("discard_partial_sign_in");
+        self.queue.retain(|e| {
+            !matches!(
+                e,
+                SignInEvent::TwoFactor(_) | SignInEvent::PhraseRestored(_) | SignInEvent::VaultUnlocked(_)
+            )
+        });
+    }
+
+    fn cancel_passkey(&mut self) {
+        self.called("cancel_passkey");
+        self.queue.retain(|e| !matches!(e, SignInEvent::Passkey(_)));
     }
 }
 

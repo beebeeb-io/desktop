@@ -243,6 +243,8 @@ impl Ui {
         }
     }
 
+    /// What the shell should open, oldest first.
+    #[cfg_attr(not(test), allow(dead_code))] // waits for its reader in the shell (PR body)
     pub fn take_intents(&mut self) -> Vec<Intent> {
         std::mem::take(&mut self.intents)
     }
