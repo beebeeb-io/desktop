@@ -511,6 +511,7 @@ impl State {
         self.actions.undo.clear();
         self.actions.menu = None;
         self.actions.rename = None;
+        self.actions.protected.alert = None;
         self.selected = None;
         self.actions.sort = self
             .actions
@@ -646,7 +647,7 @@ impl State {
             return false;
         }
         // Refused before the source is asked (`protected.rs`).
-        if self.protection_of(&items).is_some() {
+        if self.protects(&items) {
             self.failed(Action::Trash, ActionError::Protected, tx);
             return true;
         }
@@ -701,7 +702,7 @@ impl State {
         if items.is_empty() {
             return false;
         }
-        if self.protection_of(&items).is_some() {
+        if self.protects(&items) {
             self.failed(Action::Duplicate, ActionError::Protected, tx);
             return true;
         }
@@ -764,7 +765,7 @@ impl State {
         if items.is_empty() {
             return false;
         }
-        if self.protection_of(&items).is_some() {
+        if self.protects(&items) {
             self.failed(Action::CopyLink, ActionError::Protected, tx);
             return true;
         }
@@ -917,6 +918,10 @@ impl State {
 
     /// Change this folder's sort and put the rows in that order.
     pub fn set_sort(&mut self, sort: Sort) {
+        // A protected folder keeps its owner's order: no choice of the Sort menu applies there.
+        if self.in_protected_folder() {
+            return;
+        }
         self.actions.sort = sort;
         // The order of the rows is the window's; the source hears of it only with a session.
         if !self.session_ended() {
