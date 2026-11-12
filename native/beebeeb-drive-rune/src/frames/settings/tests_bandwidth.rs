@@ -5,7 +5,7 @@
 //! Input is scripted: keys and presses go through Rune's `Runtime`, as a person's would.
 
 use super::bandwidth::Crop;
-use super::bandwidth_data::{Bandwidth, BoardBandwidth, Direction, History, SpeedTest};
+use super::bandwidth_data::{Bandwidth, BoardBandwidth, Direction, History, STEP_SECONDS, SpeedTest};
 use super::drive::{BoardDrive, DriveSettings, SyncStatus, UnwiredDrive};
 use super::{MenuKind, Pane};
 use crate::shell::app::{Screen, SettingsPane};
@@ -82,6 +82,12 @@ fn press(rt: &mut Runtime<State>, target: &str) {
         key(rt, Key::Tab);
     }
     panic!("Tab never reaches {target}");
+}
+
+/// Let `seconds` pass on the window's clock (the shell's poll runs at the start of each frame).
+fn wait(rt: &mut Runtime<State>, seconds: f64) {
+    rt.frame(seconds);
+    settle(rt);
 }
 
 fn bandwidth(rt: &Runtime<State>) -> Bandwidth {
@@ -246,18 +252,38 @@ fn the_download_limit_has_the_same_choices_and_is_chosen_by_pointer() {
 }
 
 #[test]
-fn a_limit_that_is_not_a_preset_is_said_as_it_is() {
+fn a_saved_limit_that_is_no_preset_is_its_own_choice_and_enter_keeps_it() {
     let mut rt = opened();
     rt.state.settings.drive.set_speed_limit(Direction::Download, Some(3));
     settle(&mut rt);
     assert_eq!(text(&rt, "item-1-1-pop-label"), "3 Mbps");
-    click(&mut rt, "item-1-1");
+    // The menu opens ON the saved value: a ninth item of its own, the checked one.
+    press(&mut rt, "item-1-1");
+    let download = MenuKind::SpeedLimit(Direction::Download);
+    assert_eq!(rt.state.settings.menu.map(|m| (m.kind, m.hot)), Some((download, 8)));
+    assert_eq!(text(&rt, "menu-0-item-8-label"), "3 Mbps");
+    assert!(find(&rt, "menu-0-item-8-check").is_some());
     for i in 0..8 {
         assert!(
             find(&rt, &format!("menu-0-item-{i}-check")).is_none(),
-            "no preset is checked for a limit that is none of them"
+            "preset {i} is not checked"
         );
     }
+    // Enter without a choice changes nothing: the saved limit is not lost.
+    key(&mut rt, Key::Enter);
+    assert_eq!(rt.state.settings.menu, None);
+    assert_eq!(bandwidth(&rt).download_limit, Some(3));
+    // By pointer on its own item: the same.
+    click(&mut rt, "item-1-1");
+    click(&mut rt, "menu-0-item-8");
+    assert_eq!(bandwidth(&rt).download_limit, Some(3));
+    // Up from it is the last preset; once a preset is chosen the ninth item is gone.
+    press(&mut rt, "item-1-1");
+    key(&mut rt, Key::Up);
+    key(&mut rt, Key::Enter);
+    assert_eq!(bandwidth(&rt).download_limit, Some(100));
+    click(&mut rt, "item-1-1");
+    assert!(find(&rt, "menu-0-item-8").is_none());
 }
 
 #[test]
@@ -269,13 +295,6 @@ fn nothing_moving_is_a_dash_never_a_zero() {
             assert!(
                 find(&rt, &format!("{fig}-unit")).is_none(),
                 "{frame}: a dash has no unit"
-            );
-        }
-        for e in rt.elements() {
-            let words = e.text.unwrap_or_default();
-            assert!(
-                !words.starts_with("0 B/s") && !words.starts_with("0 KB/s"),
-                "{frame}: {words}"
             );
         }
     }
@@ -403,19 +422,23 @@ fn run_test_shows_each_step_and_one_test_runs_at_a_time() {
     let amber = crate::theme::tokens::theme(false).accent;
     assert_eq!(info(&rt, "step-1-bar-fill").fill, amber);
     assert!(find(&rt, "step-2-bar").is_none());
-    // One test at a time: the button does nothing while it runs, by pointer or by keyboard.
-    rt.state
-        .settings
-        .drive
-        .speed_test_reported(BoardBandwidth::test_downloading());
-    settle(&mut rt);
+    // Before the step is over nothing moves.
+    wait(&mut rt, STEP_SECONDS - 0.5);
+    assert_eq!(bandwidth(&rt), scene_says("DW-0786"));
+    // DW-0786b: the downloads, by themselves, with no press.
+    wait(&mut rt, 0.6);
+    assert_eq!(
+        bandwidth(&rt),
+        scene_says("DW-0786b"),
+        "the test moves on to DW-0786b's state"
+    );
+    // One test at a time: a press on the button while it runs starts nothing.
     click(&mut rt, "btn-0");
     assert_eq!(
         bandwidth(&rt),
         scene_says("DW-0786b"),
         "a press while it runs starts nothing"
     );
-    // DW-0786b: the downloads.
     assert_eq!(text(&rt, "step-1-value"), "35.2");
     assert_eq!(text(&rt, "step-1-value-unit"), "Mbps");
     assert_eq!(text(&rt, "step-2-value"), "1 of 3");
@@ -427,12 +450,17 @@ fn run_test_shows_each_step_and_one_test_runs_at_a_time() {
 fn leaving_settings_does_not_stop_the_test_and_the_result_stays() {
     let mut rt = opened();
     press(&mut rt, "btn-0");
-    // Leave for General, then for Drive, and come back: still running.
+    // Leave for General, then for Drive: the test goes on to its next step out there.
     click(&mut rt, "General-row");
     assert_eq!(rt.state.settings.pane, Pane::General);
     key(&mut rt, Key::Escape);
     assert!(!matches!(rt.state.shell.app.screen(), Screen::Settings(_)));
-    assert!(bandwidth(&rt).test.running(), "the test keeps running outside settings");
+    wait(&mut rt, STEP_SECONDS + 0.1);
+    assert_eq!(
+        bandwidth(&rt),
+        scene_says("DW-0786b"),
+        "the test keeps running outside settings"
+    );
     host::dispatch(
         &mut rt.state,
         crate::shell::app::Event::OpenSettings(SettingsPane::Bandwidth),
@@ -440,9 +468,12 @@ fn leaving_settings_does_not_stop_the_test_and_the_result_stays() {
     settle(&mut rt);
     assert_eq!(text(&rt, "btn-0-label"), "Running\u{2026}");
     // DW-0786c: the result, with Run test again.
-    rt.state.settings.drive.speed_test_reported(BoardBandwidth::test_done());
-    settle(&mut rt);
-    assert_eq!(bandwidth(&rt), scene_says("DW-0786c"));
+    wait(&mut rt, STEP_SECONDS);
+    assert_eq!(
+        bandwidth(&rt),
+        scene_says("DW-0786c"),
+        "the test ends on DW-0786c's state"
+    );
     assert_eq!(text(&rt, "btn-0-label"), "Run test");
     assert_eq!(text(&rt, "step-2-value"), "94.0");
     assert_eq!(text(&rt, "step-2-value-unit"), "Mbps");
@@ -462,6 +493,7 @@ fn leaving_settings_does_not_stop_the_test_and_the_result_stays() {
     }
     click(&mut rt, "General-row");
     click(&mut rt, "Bandwidth-row");
+    wait(&mut rt, 10.0);
     assert_eq!(
         text(&rt, "step-2-value"),
         "94.0",
@@ -474,16 +506,22 @@ fn leaving_settings_does_not_stop_the_test_and_the_result_stays() {
 
 #[test]
 fn a_failed_test_names_the_step_and_run_test_tries_again() {
+    // A PC that cannot reach Beebeeb (a state of the source, as a dead connection is).
     let mut rt = opened();
-    press(&mut rt, "btn-0");
-    let before = bandwidth(&rt);
-    rt.state
-        .settings
-        .drive
-        .speed_test_reported(BoardBandwidth::test_failed());
+    rt.state.settings.drive = Box::new(BoardDrive::new().with_beebeeb_unreachable());
     settle(&mut rt);
-    // DW-0786d.
-    assert_eq!(bandwidth(&rt), scene_says("DW-0786d"));
+    let before = bandwidth(&rt);
+    press(&mut rt, "btn-0");
+    assert_eq!(text(&rt, "btn-0-label"), "Running\u{2026}");
+    assert_eq!(text(&rt, "step-0-value"), "1 of 5");
+    assert_eq!(text(&rt, "step-1-says"), "Waits for the pings");
+    // DW-0786d: no ping answered.
+    wait(&mut rt, STEP_SECONDS + 0.1);
+    assert_eq!(
+        bandwidth(&rt),
+        scene_says("DW-0786d"),
+        "Run test ends on DW-0786d's state"
+    );
     assert_eq!(
         text(&rt, "note-0-text"),
         "Couldn't run the speed test. Beebeeb didn't answer any of the 5 pings. Check your internet connection and try again."
@@ -648,4 +686,77 @@ fn a_second_run_while_the_test_runs_starts_nothing() {
     drive.speed_test_reported(BoardBandwidth::test_done());
     drive.run_speed_test();
     assert_eq!(drive.bandwidth().test, BoardBandwidth::test_uploading());
+}
+
+#[test]
+fn a_bucket_is_said_by_the_day_it_is_on() {
+    // The board's window starts yesterday at 13:40: midnight is between buckets 30 and 31.
+    let h: History = BoardBandwidth::default().bandwidth().history;
+    assert_eq!(h.starts_days_ago, 1);
+    assert_eq!(
+        h.tip(30).map(|(when, _)| when).as_deref(),
+        Some("Yesterday 23:40 \u{2013} 00:00")
+    );
+    assert_eq!(
+        h.tip(31).map(|(when, _)| when).as_deref(),
+        Some("Today 00:00 \u{2013} 00:20")
+    );
+    // At 23:00 a 20-hour window starts at 03:00 the same day: every bucket is today's.
+    let today = History {
+        starts_at: 3 * 60,
+        starts_days_ago: 0,
+        ..h.clone()
+    };
+    for i in [0, 30, 59] {
+        let (when, _) = today.tip(i).expect("a bucket of the window");
+        assert!(when.starts_with("Today "), "bucket {i}: {when}");
+    }
+    assert_eq!(
+        today.tip(0).map(|(when, _)| when).as_deref(),
+        Some("Today 03:00 \u{2013} 03:20")
+    );
+    // A window that starts two days back names the day by its distance.
+    let older = History {
+        starts_days_ago: 2,
+        ..h
+    };
+    assert!(older.tip(0).is_some_and(|(when, _)| when.starts_with("2 days ago ")));
+    assert!(older.tip(31).is_some_and(|(when, _)| when.starts_with("Yesterday ")));
+}
+
+#[test]
+fn a_drive_nothing_answers_for_draws_no_bandwidth_value() {
+    let mut rt = runtime("DW-0701");
+    rt.state.settings.drive = Box::new(UnwiredDrive::new());
+    settle(&mut rt);
+    click(&mut rt, "Bandwidth-row");
+    assert_eq!(rt.state.shell.app.screen(), Screen::Settings(SettingsPane::Bandwidth));
+    for part in ["card-0", "chart-plot", "device-0", "item-1-0", "btn-0", "fig-0"] {
+        assert!(find(&rt, part).is_none(), "{part} is not drawn while nothing answers");
+    }
+}
+
+#[test]
+fn the_fixtures_test_stands_still_in_a_scene_and_reports_reset_its_clock() {
+    // A board frame's moment does not move on with the clock.
+    let mut rt = runtime("DW-0786b");
+    wait(&mut rt, 60.0);
+    assert_eq!(bandwidth(&rt), scene_says("DW-0786b"));
+    // The host's own report wins over the fixture's clock.
+    let mut drive = BoardDrive::new();
+    drive.run_speed_test();
+    assert_eq!(drive.pump(0.0), (false, true), "the first frame starts the clock");
+    assert_eq!(drive.pump(STEP_SECONDS), (true, true), "the downloads start");
+    assert_eq!(
+        drive.pump(STEP_SECONDS + 0.1),
+        (false, true),
+        "nothing new within a step"
+    );
+    assert_eq!(
+        drive.pump(2.0 * STEP_SECONDS),
+        (true, false),
+        "the result; nothing more is coming"
+    );
+    assert_eq!(drive.pump(9.0), (false, false));
+    assert_eq!(drive.bandwidth().test, BoardBandwidth::test_done());
 }

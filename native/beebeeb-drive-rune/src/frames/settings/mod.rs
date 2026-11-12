@@ -267,7 +267,10 @@ impl SettingsUi {
                 let now = self.source.about().channel;
                 Channel::ALL.iter().position(|c| *c == now).unwrap_or(0)
             }
-            MenuKind::SpeedLimit(direction) => bandwidth::chosen(self, direction).unwrap_or(0),
+            // A saved limit that is no preset is the menu's ninth item: Enter on it changes nothing.
+            MenuKind::SpeedLimit(direction) => {
+                bandwidth::chosen(self, direction).unwrap_or(bandwidth_data::PRESETS.len())
+            }
         }
     }
 

@@ -228,6 +228,12 @@ pub trait DriveSettings {
     /// The engine's host says where the speed test stands now: each step as it starts, the
     /// result, or the failure (DW-0786 build note). The shell passes it on.
     fn speed_test_reported(&mut self, _now: SpeedTest) {}
+    /// Called at the start of a frame with the window's clock, for what arrives between
+    /// presses (the speed test's steps). Answers (something changed, more is coming: draw
+    /// again soon).
+    fn pump(&mut self, _seconds: f64) -> (bool, bool) {
+        (false, false)
+    }
 }
 
 /// The board's sample content for Drive's settings panes.
@@ -363,6 +369,18 @@ impl BoardDrive {
         self
     }
 
+    /// The speed test `seconds` after Run test, standing still there (DW-0786, b, c, d).
+    pub fn with_speed_test_at(mut self, seconds: f64) -> Self {
+        self.bandwidth = self.bandwidth.test_at(seconds);
+        self
+    }
+
+    /// This PC cannot reach Beebeeb: a speed test ends in the failure (DW-0786d).
+    pub fn with_beebeeb_unreachable(mut self) -> Self {
+        self.bandwidth = self.bandwidth.unreachable();
+        self
+    }
+
     /// Bandwidth with nothing moving (DW-0785b).
     pub fn with_bandwidth_idle(mut self) -> Self {
         self.bandwidth = self.bandwidth.idle();
@@ -459,6 +477,9 @@ impl DriveSettings for BoardDrive {
     }
     fn speed_test_reported(&mut self, now: SpeedTest) {
         self.bandwidth.report_test(now);
+    }
+    fn pump(&mut self, seconds: f64) -> (bool, bool) {
+        self.bandwidth.pump(seconds)
     }
 }
 

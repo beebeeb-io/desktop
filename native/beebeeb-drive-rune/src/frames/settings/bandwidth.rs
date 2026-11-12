@@ -21,7 +21,7 @@ use rune::tok::Family;
 use rune::{Align, Color, El, LineCap, Shape, Side, Span, TextStyle, canvas, col, el, oklch, rich, row};
 
 use super::bandwidth_data::{
-    Bandwidth, BoardBandwidth, Device, DeviceKind, DeviceState, Direction, Flow, History, PRESET_LABELS, PRESETS,
+    Bandwidth, Device, DeviceKind, DeviceState, Direction, Flow, History, PRESET_LABELS, PRESETS, STEP_SECONDS,
     SpeedTest, Step, limit_label,
 };
 use super::drive::BoardDrive;
@@ -99,6 +99,14 @@ pub fn scene(s: &mut State, frame: &'static str) {
         "DW-0785e" => (board.with_no_traffic_recorded(), Crop::Head),
         "DW-0785f" => (board.with_metered_wait(), Crop::HeadAndLimits),
         "DW-0785" | "DW-0785c" => (board, Crop::Whole),
+        // The test as Run test starts it, and one and two steps later.
+        "DW-0786" => (board.with_speed_test_at(0.0), Crop::FromDevices),
+        "DW-0786b" => (board.with_speed_test_at(STEP_SECONDS), Crop::FromDevices),
+        "DW-0786c" => (board.with_speed_test_at(2.0 * STEP_SECONDS), Crop::FromDevices),
+        "DW-0786d" => (
+            board.with_beebeeb_unreachable().with_speed_test_at(STEP_SECONDS),
+            Crop::FromDevices,
+        ),
         _ => (board, Crop::FromDevices),
     };
     s.settings.drive = Box::new(drive);
@@ -112,21 +120,22 @@ pub fn scene(s: &mut State, frame: &'static str) {
         "DW-0785c" => ui.choose(upload, 1),
         // The board draws the pointer over 1 Mbps.
         "DW-0785d" => ui.menu = Some(Menu { kind: upload, hot: 1 }),
-        "DW-0786" => ui.drive.run_speed_test(),
-        "DW-0786b" | "DW-0786c" | "DW-0786d" => {
-            ui.drive.run_speed_test();
-            ui.drive.speed_test_reported(match frame {
-                "DW-0786b" => BoardBandwidth::test_downloading(),
-                "DW-0786c" => BoardBandwidth::test_done(),
-                _ => BoardBandwidth::test_failed(),
-            });
-        }
         _ => {}
     }
 }
 
+/// What arrived since the last frame (the speed test's steps). The shell calls it at the start
+/// of every frame; while a test runs it asks for another frame, so the steps show without a press.
+pub fn poll(s: &mut State, seconds: f64, tx: &mut rune::Tx) -> bool {
+    let (changed, more) = s.settings.drive.pump(seconds);
+    if more {
+        tx.wake_after(std::time::Duration::from_millis(100));
+    }
+    changed
+}
+
 /// The index of a direction's limit among the presets. `None`: a limit an older version
-/// saved that is not a preset (the pop-up button says it; no item of the menu is checked).
+/// saved that is not a preset (the menu then holds it as a ninth item of its own, checked).
 pub fn chosen(ui: &SettingsUi, direction: Direction) -> Option<usize> {
     let bw = ui.drive.bandwidth();
     let limit = match direction {
@@ -294,12 +303,17 @@ fn legend(key: &str, direction: Direction, total: &str, t: &Theme) -> El {
             type_::CAPTION,
             t.text_tertiary,
         ))
-        .child(kit::label(
-            format!("{key}-total"),
-            total,
-            type_::CAPTION.family(Family::Mono),
-            t.text_tertiary,
-        ))
+        .child(
+            kit::label(
+                format!("{key}-total"),
+                total,
+                type_::CAPTION.family(Family::Mono),
+                t.text_tertiary,
+            )
+            // The exact advance (0.6 em a character): a hug width is snapped up to a device pixel,
+            // and the legend is anchored at its right end.
+            .w(total.chars().count() as f32 * 6.6),
+        )
 }
 
 /// Last 20 hours (`.kit-card`): the legend with the totals, and the chart; or that nothing
@@ -785,6 +799,19 @@ fn limit_menu(ui: &SettingsUi, direction: Direction, t: &Theme) -> Option<El> {
         items.push(
             controls::menu_item(0, i, label, checked == Some(i), i == open.hot, t)
                 .on_press(move |s: &mut State| s.settings.choose(kind, i)),
+        );
+    }
+    if checked.is_none() {
+        // A limit an older version saved: kept, and shown as its own choice (DW-0785c).
+        let bw = ui.drive.bandwidth();
+        let saved = limit_label(match direction {
+            Direction::Upload => bw.upload_limit,
+            Direction::Download => bw.download_limit,
+        });
+        let own = PRESETS.len();
+        items.push(
+            controls::menu_item(0, own, &saved, true, open.hot == own, t)
+                .on_press(move |s: &mut State| s.settings.choose(kind, own)),
         );
     }
     Some(

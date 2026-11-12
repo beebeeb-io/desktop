@@ -64,6 +64,9 @@ pub struct History {
     pub starts_at: u32,
     /// How long a bucket is, in minutes (20).
     pub bucket_minutes: u32,
+    /// How many days ago the first bucket's day is: 0 when the window starts today, 1 when it
+    /// starts yesterday.
+    pub starts_days_ago: u32,
 }
 
 impl History {
@@ -89,11 +92,12 @@ impl History {
     pub fn tip(&self, i: usize) -> Option<(String, String)> {
         let (up, down) = (*self.up_mb.get(i)?, *self.down_mb.get(i)?);
         let from = i as u32 * self.bucket_minutes;
-        // The chart ends now, so a bucket that starts after midnight is today's.
-        let day = if self.starts_at + from >= 24 * 60 {
-            "Today"
-        } else {
-            "Yesterday"
+        // The day the bucket starts on, counted back from today.
+        let later = (self.starts_at + from) / (24 * 60);
+        let day = match self.starts_days_ago.saturating_sub(later) {
+            0 => "Today".to_string(),
+            1 => "Yesterday".to_string(),
+            days => format!("{days} days ago"),
         };
         Some((
             format!(
@@ -233,6 +237,12 @@ pub struct BoardBandwidth {
     /// Sync anyway was chosen for this connection (DW-0746e): the setting stays off.
     anyway: bool,
     test: SpeedTest,
+    /// When the running test started, on the window's clock; `None` until the first frame.
+    test_since: Option<f64>,
+    /// This PC cannot reach Beebeeb: a test ends in the failure (DW-0786d).
+    test_fails: bool,
+    /// The test stands still where it is (a board frame's moment).
+    test_held: bool,
 }
 
 impl Default for BoardBandwidth {
@@ -245,9 +255,15 @@ impl Default for BoardBandwidth {
             on_metered: false,
             anyway: false,
             test: SpeedTest::Idle,
+            test_since: None,
+            test_fails: false,
+            test_held: false,
         }
     }
 }
+
+/// How long the board's test stays on a step, in seconds.
+pub const STEP_SECONDS: f64 = 1.5;
 
 fn done(figure: &str, unit: &str, says: &str) -> Step {
     Step::Done(figure.into(), unit.into(), says.into())
@@ -323,11 +339,67 @@ impl BoardBandwidth {
     /// One test at a time: a running test is not started again.
     pub fn run_test(&mut self) {
         if !self.test.running() {
-            self.test = Self::test_uploading();
+            self.test = if self.test_fails {
+                Self::test_pinging()
+            } else {
+                Self::test_uploading()
+            };
+            self.test_since = None;
         }
     }
     pub fn report_test(&mut self, now: SpeedTest) {
         self.test = now;
+        self.test_since = None;
+    }
+
+    /// This PC cannot reach Beebeeb: the next test ends in the failure (DW-0786d).
+    pub fn unreachable(mut self) -> Self {
+        self.test_fails = true;
+        self
+    }
+
+    /// The test `seconds` after Run test, standing still there (a board frame's moment).
+    pub fn test_at(mut self, seconds: f64) -> Self {
+        self.run_test();
+        self.pump(0.0);
+        self.pump(seconds);
+        self.test_held = true;
+        self
+    }
+
+    /// The pings (no board frame draws this moment; the failing test starts on it).
+    pub fn test_pinging() -> SpeedTest {
+        SpeedTest::Running([
+            Step::Measuring("1 of 5".into(), 0.2),
+            Step::Waiting("Waits for the pings".into()),
+            Step::Waiting("Waits for the uploads".into()),
+        ])
+    }
+
+    /// The running test moves on with the window's clock: the uploads for `STEP_SECONDS`, the
+    /// downloads as long, then the result; a PC that cannot reach Beebeeb fails after the
+    /// pings. Answers (something changed, more is coming).
+    pub fn pump(&mut self, seconds: f64) -> (bool, bool) {
+        if !self.test.running() || self.test_held {
+            return (false, false);
+        }
+        let Some(since) = self.test_since else {
+            self.test_since = Some(seconds);
+            return (false, true);
+        };
+        let elapsed = seconds - since;
+        let now = if elapsed < STEP_SECONDS {
+            return (false, true);
+        } else if self.test_fails {
+            Self::test_failed()
+        } else if elapsed < 2.0 * STEP_SECONDS {
+            Self::test_downloading()
+        } else {
+            Self::test_done()
+        };
+        let changed = now != self.test;
+        self.test = now;
+        (changed, self.test.running())
     }
 
     /// Sync waits: on a metered connection, the setting off, and no Sync anyway.
@@ -369,6 +441,7 @@ impl BoardBandwidth {
             top_mb: 400.0,
             starts_at: 13 * 60 + 40,
             bucket_minutes: 20,
+            starts_days_ago: 1,
         }
     }
 
