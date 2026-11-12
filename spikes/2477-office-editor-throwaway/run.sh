@@ -124,15 +124,18 @@ fi
 # ---- run ----
 [ -x "$BIN/zz-bb-wc-edit" ] || { echo "run 'build' first"; exit 1; }
 RES=$WORK/res; mkdir -p "$RES"
-# the network block: every measured command runs in its own empty network namespace (no interface but a down loopback)
-NONET="unshare -rn"
-$NONET true 2>/dev/null || { echo "unshare -rn is not allowed here: NO NETWORK BLOCK, STOP"; exit 1; }
+# the network block: every measured command runs in its own empty network namespace (bubblewrap --unshare-net:
+# no interface but a loopback that reaches nothing outside the namespace)
+NONET="bwrap --unshare-net --dev-bind / /"
+$NONET true 2>/dev/null || { echo "bwrap --unshare-net is not allowed here: NO NETWORK BLOCK, STOP"; exit 1; }
 python3 -c 'import socket
 s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1",47811)); s.listen(8)
 while True:
     c,_=s.accept(); c.close()' & LISTENER=$!
 sleep 1
 for b in zz-bb-wc-edit zz-bb-wc-engine zz-bb-gc-edit zz-bb-dc-edit; do
+  $NONET "$BIN/$b" probe 127.0.0.1:47811 >/dev/null && { echo "$b CONNECTED inside the block: the block does not work, STOP"; kill "$LISTENER"; exit 1; }
+  "$BIN/$b" probe 127.0.0.1:47811 >/dev/null || { echo "$b cannot connect WITHOUT the block: the probe proves nothing, STOP"; kill "$LISTENER"; exit 1; }
   echo "network proof $b: open: [$("$BIN/$b" probe 127.0.0.1:47811)] [$("$BIN/$b" probe github.com:443)]  blocked: [$($NONET "$BIN/$b" probe 127.0.0.1:47811)] [$($NONET "$BIN/$b" probe github.com:443)]"
 done
 kill "$LISTENER"
