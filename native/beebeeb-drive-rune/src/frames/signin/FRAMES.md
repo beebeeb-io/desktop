@@ -26,14 +26,14 @@ Gate state per frame is in the PR body; `0` = all six counts at 0 failing in bot
 | DW-A20 | Sign in: offline | built; light 0, dark 1 pixel line open (`card-0-avatar`) |
 | DW-A21 | Sign in: too many tries from this network | built; light 0, dark 1 pixel line open (`card-0-avatar`) |
 | DW-A22 | Sign in: the lock explained | built; the note wraps one word later than the board (3 pixel lines), dark also `card-0-avatar` |
-| DW-A31 | Create an account, step 1: the email | built; gate in the PR body |
-| DW-A32 | Step 2: the 8-digit code from the email, four digits typed | built; gate in the PR body |
-| DW-A33 | Step 2: that code is not right, or it has expired | built; gate in the PR body |
-| DW-A34 | Step 2: a new code was sent | built; gate in the PR body |
-| DW-A35 | Step 3: the terms, both boxes ticked | built; gate in the PR body |
-| DW-A36 | Step 4: the password, strong | built; gate in the PR body |
-| DW-A37 | Step 4: the password is two characters short | built; gate in the PR body |
-| DW-A38 | Step 4: the password is known from a breach | built; gate in the PR body |
+| DW-A31 | Create an account, step 1: the email | built; tree gate 0, pixels owed (PR body) |
+| DW-A32 | Step 2: the 8-digit code from the email, four digits typed | built; tree gate 0, pixels owed (PR body) |
+| DW-A33 | Step 2: that code is not right, or it has expired | built; tree gate 0, pixels owed (PR body) |
+| DW-A34 | Step 2: a new code was sent | built; tree gate 0, pixels owed (PR body) |
+| DW-A35 | Step 3: the terms, both boxes ticked | built; tree gate 0, pixels owed (PR body) |
+| DW-A36 | Step 4: the password, strong | built; tree gate 0, pixels owed (PR body) |
+| DW-A37 | Step 4: the password is two characters short | built; tree gate 0, pixels owed (PR body) |
+| DW-A38 | Step 4: the password is known from a breach | built; tree gate 0, pixels owed (PR body) |
 | DW-A39 | Step 5: the recovery phrase, shown once | drawn and linked; its scene and gate are the next PR |
 | DW-A40 | Step 5: three words typed back, with suggestions | drawn and linked; its scene and gate are the next PR |
 | DW-A41 | Step 5: the words do not match | drawn and linked; its scene and gate are the next PR |
