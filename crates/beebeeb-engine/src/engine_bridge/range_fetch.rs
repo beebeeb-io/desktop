@@ -43,7 +43,7 @@ impl EngineBridge {
         if !recorded {
             return false;
         }
-        let config = crate::config::DesktopConfig::load().ok();
+        let config = crate::config::DesktopConfig::load_for(self.identity).ok();
         let forced_api = self.download_transport(config.as_ref().and_then(|c| c.transport.as_deref()))
             == crate::direct_download::Transport::Api;
         let offered = !forced_api && self.api.direct_download_offer().await.is_some();
@@ -90,7 +90,7 @@ impl EngineBridge {
             .await
             .map_err(|e| failed(e.into()))?;
         let expected = recorded_content_format(&name_key, &meta).map_err(|e| failed(e.into()))?;
-        let config = crate::config::DesktopConfig::load().ok();
+        let config = crate::config::DesktopConfig::load_for(self.identity).ok();
         let kbps_limit = config.as_ref().map(|c| c.download_kbps_limit).unwrap_or(0);
         let transport = self.download_transport(config.as_ref().and_then(|c| c.transport.as_deref()));
         let ticket = self.begin_fetch(file_id);

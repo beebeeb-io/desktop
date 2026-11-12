@@ -34,6 +34,10 @@ mod browser_login;
 pub(crate) use beebeeb_engine::callback_gate;
 #[allow(unused_imports)]
 pub(crate) use beebeeb_engine::config;
+// Which app this is. The Tauri shell is the real app: every engine entry that takes an identity gets `REAL`
+// from here (`real_app`), never a value chosen at run time.
+pub(crate) use beebeeb_engine::identity;
+mod real_app;
 #[allow(unused_imports)]
 pub(crate) use beebeeb_engine::conflict;
 #[allow(unused_imports)]
@@ -49,6 +53,8 @@ pub(crate) use beebeeb_engine::download_pin;
 pub(crate) use beebeeb_engine::engine_bridge;
 #[allow(unused_imports)]
 pub(crate) use beebeeb_engine::engine_status;
+#[allow(unused_imports)]
+pub(crate) use real_app::{APP, AppConfig, AppHeldConfig};
 mod finder_removal;
 #[allow(unused_imports)]
 pub(crate) use beebeeb_engine::owner_keys;
@@ -83,7 +89,7 @@ pub(crate) use beebeeb_engine::ipc_socket;
 #[allow(unused_imports)]
 pub(crate) use beebeeb_engine::ipc_write_dedup;
 #[allow(unused_imports)]
-pub(crate) use beebeeb_engine::keychain;
+pub(crate) use real_app::keychain;
 // LD-0113: backups from source (`backup`: the host for core's pass, the scheduler, sources, device identity) and
 // the known-folder catalog with the old mirror's legacy paths (`known_folder`; the mirror itself is gone).
 mod backup;
@@ -136,7 +142,7 @@ mod sign_out;
 pub(crate) use beebeeb_engine::staged_payload;
 pub(crate) use beebeeb_engine::state_db;
 #[allow(unused_imports)]
-pub(crate) use beebeeb_engine::state_paths;
+pub(crate) use real_app::state_paths;
 // 0.8.15: the read Settings › Sync and the Windows tray poll to say what sync is doing (counts only).
 #[allow(unused_imports)]
 pub(crate) use beebeeb_engine::sync_activity;

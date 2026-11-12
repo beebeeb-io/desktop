@@ -584,7 +584,7 @@ pub(super) async fn install_finder_location(
 
     let root = path
         .map(PathBuf::from)
-        .unwrap_or_else(config::default_sync_root_suggestion);
+        .unwrap_or_else(|| config::default_sync_root_suggestion(crate::APP));
     if !root.is_absolute() {
         return Err(format!("Finder location must be absolute: {}", root.display()));
     }
@@ -683,7 +683,7 @@ pub(super) async fn continue_without_finder_location(
 
     let root = path
         .map(PathBuf::from)
-        .unwrap_or_else(config::default_sync_root_suggestion);
+        .unwrap_or_else(|| config::default_sync_root_suggestion(crate::APP));
     if !root.is_absolute() {
         return Err(format!("Finder location must be absolute: {}", root.display()));
     }
@@ -787,7 +787,7 @@ pub(super) async fn install_windows_shell_integration(
     {
         let root = path
             .map(PathBuf::from)
-            .unwrap_or_else(config::default_sync_root_suggestion);
+            .unwrap_or_else(|| config::default_sync_root_suggestion(crate::APP));
         if !root.is_absolute() {
             return Err(format!("Sync root must be absolute: {}", root.display()));
         }
@@ -799,7 +799,7 @@ pub(super) async fn install_windows_shell_integration(
         // layer. The engine runner re-registers + connects callbacks on spawn;
         // doing it here gives immediate feedback in onboarding before the engine
         // ticks.
-        if let Err(error) = windows_cf::register_sync_root(&root) {
+        if let Err(error) = windows_cf::register_sync_root(crate::APP, &root) {
             let error = error.to_string();
             persist_finder_install_result(&mut cfg, false, Some(error.clone()))?;
             return Err(error);
@@ -814,7 +814,7 @@ pub(super) async fn install_windows_shell_integration(
         // re-login reconverges. Best-effort: a shell-registration failure must
         // NOT fail onboarding (placeholders + hydration still work without it),
         // so we log and continue rather than returning an error here.
-        if let Err(error) = windows_cf::register_shell_sync_root(&root) {
+        if let Err(error) = windows_cf::register_shell_sync_root(crate::APP, &root) {
             tracing::warn!(error = %error, "Explorer shell sync-root registration failed during onboarding; overlays/column/sidebar may be absent (hydration unaffected)");
         }
 
@@ -951,7 +951,7 @@ pub(super) async fn reset_macos_integration(
     #[cfg(target_os = "windows")]
     {
         if let Some(root) = cfg.sync_root.clone() {
-            if let Err(error) = windows_cf::unregister_shell_sync_root(&root) {
+            if let Err(error) = windows_cf::unregister_shell_sync_root(crate::APP, &root) {
                 warnings.push(format!("Could not remove Explorer shell sync-root entry: {error}"));
             }
         }

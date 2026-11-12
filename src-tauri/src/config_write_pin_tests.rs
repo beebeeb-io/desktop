@@ -1,5 +1,6 @@
 use super::finder_setup_command_tests::without_items;
 use super::{DesktopConfig, ReleaseChannel};
+use crate::AppConfig;
 
 /// Every `.rs` file under `src` as `(name relative to src, production text)`: LF line ends, test modules
 /// dropped, and lines that are comments dropped.

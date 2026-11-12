@@ -1,7 +1,15 @@
 //! `local_state_purge` items split out of `lib.rs`.
 
 use super::*;
-pub(crate) use beebeeb_engine::local_state::{purge_macos_hydrate_cache, state_db_for_config};
+// The engine's local-state entries take the app identity; this app's is bound here (`crate::APP`), so the shell's
+// callers and their source pins keep the names they had.
+pub(crate) fn state_db_for_config(cfg: &crate::config::DesktopConfig) -> Result<Option<state_db::StateDb>, String> {
+    beebeeb_engine::local_state::state_db_for_config(crate::APP, cfg)
+}
+
+pub(crate) fn purge_macos_hydrate_cache(context: &str) {
+    beebeeb_engine::local_state::purge_macos_hydrate_cache(crate::APP, context)
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub(super) struct FinderInstallState {
@@ -283,10 +291,27 @@ pub(super) fn state_db_from_state_dir(state_dir: &std::path::Path) -> Result<Opt
 }
 
 // The purge's one deletion gate and its roots live in the engine (the Windows sign-out purge calls the gate too).
-pub(crate) use beebeeb_engine::local_state::{
-    disposable_cache_roots, disposable_cache_roots_in, is_disposable_cache_path, is_lifecycle_log_path,
-    macos_hydrate_cache_root,
-};
+#[allow(unused_imports)]
+pub(crate) use beebeeb_engine::local_state::disposable_cache_roots_in;
+
+#[allow(dead_code)]
+pub(crate) fn disposable_cache_roots() -> Vec<PathBuf> {
+    beebeeb_engine::local_state::disposable_cache_roots(crate::APP)
+}
+
+pub(crate) fn is_disposable_cache_path(path: &std::path::Path) -> bool {
+    beebeeb_engine::local_state::is_disposable_cache_path(crate::APP, path)
+}
+
+#[allow(dead_code)]
+pub(crate) fn is_lifecycle_log_path(path: &std::path::Path) -> bool {
+    beebeeb_engine::local_state::is_lifecycle_log_path(crate::APP, path)
+}
+
+#[allow(dead_code)]
+pub(crate) fn macos_hydrate_cache_root() -> Option<PathBuf> {
+    beebeeb_engine::local_state::macos_hydrate_cache_root(crate::APP)
+}
 
 /// Counts from [`purge_local_state_files`] (task 1538), logged by the
 /// sign-out caller.
@@ -350,7 +375,7 @@ pub(super) fn production_staging_dirs() -> Vec<PathBuf> {
 /// every build, so a test can look at the list a release build would use (`production_staging_dirs` is the test
 /// override in a test build).
 pub(super) fn release_staging_dirs() -> Vec<PathBuf> {
-    engine_bridge::finder_staging_candidates()
+    engine_bridge::finder_staging_candidates(crate::APP)
 }
 
 /// Unit tests only: empty (nothing is swept) unless a test sets it, so the production call sites can be driven with
@@ -626,7 +651,7 @@ pub(super) fn resolve_purge_placeholder_paths(
     candidates: &[(String, String)],
     sync_root: &std::path::Path,
 ) -> Vec<(String, PathBuf)> {
-    let allowed_roots = free_up_space_allowed_roots(sync_root);
+    let allowed_roots = free_up_space_allowed_roots(crate::APP, sync_root);
     candidates
         .iter()
         .filter_map(|(file_id, rel_path)| {
@@ -646,7 +671,7 @@ pub(super) fn resolve_purge_placeholder_paths(
 
 #[cfg(unix)]
 pub(super) fn remove_stale_ipc_socket() -> Result<bool, String> {
-    let path = ipc_socket::ipc_socket_path();
+    let path = ipc_socket::ipc_socket_path(crate::APP);
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -806,7 +831,7 @@ pub(super) async fn wait_for_file_provider_ipc_ready(
     use tokio::net::UnixStream;
     use tokio::time::{Duration, Instant, sleep, timeout};
 
-    let path = ipc_socket::ipc_socket_path();
+    let path = ipc_socket::ipc_socket_path(crate::APP);
     let deadline = Instant::now() + Duration::from_secs(3);
     // One `\n`-terminated frame (task 1670 issue 3; see `docs/IPC_PROTOCOL.md`).
     let mut request = serde_json::to_vec(&ipc_socket::IpcRequest::GetSyncSummary)

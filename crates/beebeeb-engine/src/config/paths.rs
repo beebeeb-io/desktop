@@ -11,11 +11,6 @@ use super::*;
 /// Filename inside the platform config dir.
 pub(super) const CONFIG_FILENAME: &str = "desktop.toml";
 
-/// Subdirectory inside the user's config dir (e.g.
-/// `~/.config/beebeeb/` on Linux, `~/Library/Application Support/beebeeb/`
-/// on macOS).
-pub(super) const APP_CONFIG_DIR: &str = "beebeeb";
-
 #[cfg(not(target_os = "macos"))]
 pub(super) fn user_visible_home_dir() -> Option<PathBuf> {
     dirs::home_dir()
@@ -29,21 +24,21 @@ pub(super) fn user_visible_home_dir() -> Option<PathBuf> {
 /// folder. Other platforms keep the traditional user-chosen folder model until
 /// their native virtualization layers are implemented.
 #[cfg(target_os = "macos")]
-pub fn default_sync_root_suggestion() -> PathBuf {
+pub fn default_sync_root_suggestion(identity: &'static crate::identity::EngineIdentity) -> PathBuf {
     dirs::data_dir()
         .or_else(dirs::config_dir)
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(APP_CONFIG_DIR)
+        .join(identity.config_dir_name())
         .join("file-provider-state")
 }
 
 /// Default sync root if the user accepts the suggestion on platforms that
 /// expose an actual local folder as the user-facing sync surface.
 #[cfg(not(target_os = "macos"))]
-pub fn default_sync_root_suggestion() -> PathBuf {
+pub fn default_sync_root_suggestion(identity: &'static crate::identity::EngineIdentity) -> PathBuf {
     user_visible_home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("Beebeeb")
+        .join(identity.sync_folder_name())
 }
 
 /// Ensure `path` exists as a directory, creating it (and any missing

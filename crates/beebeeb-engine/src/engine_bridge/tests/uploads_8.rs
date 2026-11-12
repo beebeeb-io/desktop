@@ -738,6 +738,7 @@ async fn a_finder_write_outlives_thirty_connection_errors_and_lands() {
     let server = VersionedServerMock::start();
     server.seed_file("c66134ff-51c8-549b-96fd-32d350309854", 1);
     let bridge = EngineBridge::new(
+        &crate::identity::REAL,
         offline.db.clone(),
         Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key)),
     );

@@ -43,7 +43,7 @@ fn api(state: &State<'_, AppState>) -> Result<api_client::ApiClient, DriveError>
 /// The state DB and the sync root. No sync root or no database yet (before the first sync) is
 /// `None`: a read shows an empty, stale listing, an action fails.
 pub(super) fn local() -> Result<Option<(StateDb, PathBuf)>, DriveError> {
-    let cfg = crate::config::DesktopConfig::load().map_err(|_| DriveError::Failed("config"))?;
+    let cfg = crate::config::DesktopConfig::load_for(crate::APP).map_err(|_| DriveError::Failed("config"))?;
     let Some(root) = cfg.sync_root.clone() else {
         return Ok(None);
     };
@@ -158,7 +158,7 @@ pub(crate) async fn drive_thumbnail(
     if entry.is_dir() {
         return Ok(tauri::ipc::Response::new(Vec::new()));
     }
-    let bridge = crate::engine_bridge::EngineBridge::new(Arc::new(db), api);
+    let bridge = crate::engine_bridge::EngineBridge::new(crate::APP, Arc::new(db), api);
     match bridge.finder_thumbnail(&entry.file_id, variant).await {
         Ok(bytes) => Ok(tauri::ipc::Response::new(bytes.to_vec())),
         Err(_) => Ok(tauri::ipc::Response::new(Vec::new())),

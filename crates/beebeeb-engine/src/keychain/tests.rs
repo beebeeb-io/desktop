@@ -18,6 +18,57 @@ mod tests {
     use crate::keychain::*;
     use std::sync::Mutex;
 
+    /// Every platform store names its items under its identity's service, and under no other: the real app's
+    /// names are today's bytes (an install in the field finds its key by them), the test build's share no prefix
+    /// an OS lookup would match.
+    #[test]
+    fn a_store_names_its_items_under_its_identitys_service() {
+        use crate::identity::{REAL, TEST};
+        let real = platform_keychain_store_for(&REAL, "acct-1");
+        assert_eq!(
+            real.item_name_of(KeychainAccount::SessionToken),
+            "io.beebeeb.app/acct-1/session-token"
+        );
+        assert_eq!(
+            real.item_name_of(KeychainAccount::WrappedMasterKey),
+            "io.beebeeb.app/acct-1/wrapped-master-key"
+        );
+        assert_eq!(
+            real.item_name_of(KeychainAccount::VaultKeyOwner),
+            "io.beebeeb.app/acct-1/vault-key-owner"
+        );
+        assert_eq!(
+            real.item_name_of(KeychainAccount::SessionOwner),
+            "io.beebeeb.app/acct-1/session-owner"
+        );
+        assert_eq!(
+            real.item_name_of(KeychainAccount::AccountEmail),
+            "io.beebeeb.app/acct-1/account-email"
+        );
+        let legacy = legacy_platform_keychain_store(&REAL);
+        assert_eq!(
+            legacy.item_name_of(KeychainAccount::SessionToken),
+            "io.beebeeb.app/session-token"
+        );
+        assert_eq!(
+            legacy.item_name_of(KeychainAccount::WrappedMasterKey),
+            "io.beebeeb.app/wrapped-master-key"
+        );
+
+        let test = platform_keychain_store_for(&TEST, "acct-1");
+        let test_legacy = legacy_platform_keychain_store(&TEST);
+        for account in KeychainAccount::ALL {
+            let (mine, theirs) = (test.item_name_of(account), real.item_name_of(account));
+            assert_eq!(mine, format!("io.beebeeb.app.test/acct-1/{}", account.leaf()));
+            assert_ne!(mine, theirs);
+            assert_eq!(
+                test_legacy.item_name_of(account),
+                format!("io.beebeeb.app.test/{}", account.leaf())
+            );
+            assert_ne!(test_legacy.item_name_of(account), legacy.item_name_of(account));
+        }
+    }
+
     /// In-memory `AuthSecretStore` standing in for the OS credential vault.
     #[derive(Default)]
     struct MemoryStore {

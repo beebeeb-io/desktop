@@ -70,7 +70,7 @@ fn sf2279_index_repair_waits_for_custody_and_resumes_when_it_appears() {
     });
     let temp = tempfile::tempdir().unwrap();
     let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
-    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db.clone(), Arc::new(fixture.api()));
     db.mark_shared_index_dirty(root).unwrap();
     run(bridge.maintain_owned_keys(1_000)).unwrap();
     assert!(
@@ -132,7 +132,7 @@ fn sf2279_an_upgrade_required_folder_is_not_retried_every_pass() {
     );
     let temp = tempfile::tempdir().unwrap();
     let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
-    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db.clone(), Arc::new(fixture.api()));
     db.mark_shared_index_dirty(root).unwrap();
     run(bridge.maintain_owned_keys(1_000)).unwrap();
     let put = format!("PUT /api/v1/shared-folders/{root}/key");
@@ -175,7 +175,7 @@ fn sf2279_a_seen_custody_404_blocks_only_its_row() {
     );
     let temp = tempfile::tempdir().unwrap();
     let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
-    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db.clone(), Arc::new(fixture.api()));
     // This device has seen custody for the folder before (L7c/L7d).
     db.remember_folder_custody_at_revision(root, db.account_revision())
         .unwrap();
@@ -225,7 +225,7 @@ fn sf2279_a_seen_custody_root_keeps_its_dirty_marker() {
     );
     let temp = tempfile::tempdir().unwrap();
     let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
-    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db.clone(), Arc::new(fixture.api()));
     db.remember_folder_custody_at_revision(root, db.account_revision())
         .unwrap();
     db.mark_shared_index_dirty(root).unwrap();
@@ -320,7 +320,7 @@ fn sf2279_a_custody_write_during_the_pass_is_not_stranded() {
         };
         Some((status, serde_json::to_vec(&body).unwrap()))
     });
-    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db.clone(), Arc::new(fixture.api()));
     db.mark_shared_index_dirty(root).unwrap();
     let report = run(bridge.repair_shared_folder_index(root)).unwrap();
     assert_eq!(
@@ -413,7 +413,7 @@ fn sf2279_prepare_owned_rows_revives_a_deferred_root() {
     });
     let temp = tempfile::tempdir().unwrap();
     let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
-    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db.clone(), Arc::new(fixture.api()));
     db.mark_shared_index_dirty(root).unwrap();
     let report = run(bridge.repair_shared_folder_index(root)).unwrap();
     assert_eq!(report.deferred, 1, "a never-seen root is deferred: {seen:?}");
@@ -491,7 +491,7 @@ fn l14_world(
 fn l14_bridge(fixture: &Fixture) -> (Arc<StateDb>, crate::engine_bridge::EngineBridge) {
     let temp = tempfile::tempdir().unwrap();
     let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
-    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db.clone(), Arc::new(fixture.api()));
     // Keep the temp dir alive for the DB's lifetime by leaking it: the test
     // process is the only user.
     std::mem::forget(temp);
@@ -858,7 +858,7 @@ fn review_p2_1_an_earlier_indexed_owner_folder_is_removed() {
     });
     let temp = tempfile::tempdir().unwrap();
     let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
-    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db.clone(), Arc::new(fixture.api()));
     let row = |id: &str, path: &str, kind: crate::state_db::ItemKind| crate::state_db::FileEntry {
         file_id: id.into(),
         path: path.into(),

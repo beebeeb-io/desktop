@@ -61,7 +61,7 @@ pub(super) async fn restore_file_version(
         let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
         let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
         let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
-        let bridge = engine_bridge::EngineBridge::new(db, api);
+        let bridge = engine_bridge::EngineBridge::new(crate::APP, db, api);
         let op = bridge
             .queue_restore_version(&file_id, &version_id, None)
             .map_err(|e| format!("queue restore version: {e}"))?;
@@ -116,7 +116,7 @@ pub(super) async fn pick_sync_root(
 
     #[cfg(not(target_os = "macos"))]
     {
-        let suggestion = config::default_sync_root_suggestion();
+        let suggestion = config::default_sync_root_suggestion(crate::APP);
         // Best-effort create — the dialog still opens even if this fails,
         // pointed at the parent dir.
         let _ = config::ensure_directory(&suggestion);
@@ -204,7 +204,9 @@ pub(super) async fn pick_sync_root(
 /// native picker.
 #[tauri::command]
 pub(super) fn default_sync_root() -> String {
-    config::default_sync_root_suggestion().to_string_lossy().into_owned()
+    config::default_sync_root_suggestion(crate::APP)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Read-only support snapshot. Tauri's embedded bundle marker is also used by
@@ -717,7 +719,7 @@ pub(super) fn sync_root_for_menu_file_action() -> Result<PathBuf, String> {
     let root = DesktopConfig::load()
         .ok()
         .and_then(|cfg| cfg.sync_root)
-        .unwrap_or_else(config::default_sync_root_suggestion);
+        .unwrap_or_else(|| config::default_sync_root_suggestion(crate::APP));
     config::ensure_directory(&root)?;
     Ok(root)
 }
@@ -1026,7 +1028,7 @@ pub(super) struct KnownFolderStatus {
 #[tauri::command]
 pub(super) fn get_known_folder_backup() -> Result<Vec<KnownFolderStatus>, String> {
     let cfg = DesktopConfig::load()?;
-    let stops = crate::backup::stop::stopped_backups(&cfg);
+    let stops = crate::backup::stop::stopped_backups(crate::APP, &cfg);
     let mut out = Vec::with_capacity(known_folder::KNOWN_FOLDERS.len());
     for kf in known_folder::KNOWN_FOLDERS {
         let enabled = cfg.known_folder_enabled(kf.key);
@@ -1095,7 +1097,7 @@ pub(super) async fn set_known_folder_backup(key: String, enabled: bool) -> Resul
     // LD-0113 §6.2: protection follows the switch at once. With no state DB there is no drive to protect yet; the
     // runner's start sets it.
     if let Ok(Some(db)) = &db {
-        crate::backup_protect::refresh_own_backups(db);
+        crate::backup_protect::refresh_own_backups(crate::APP, db);
     }
 
     // On DISABLE, purge this folder's pending backup ops so they stop now and do

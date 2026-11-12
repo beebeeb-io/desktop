@@ -208,7 +208,11 @@ impl World {
     }
 }
 fn bridge(db: &std::path::Path, fixture: &Fixture) -> EngineBridge {
-    EngineBridge::new(Arc::new(StateDb::open(db).unwrap()), Arc::new(fixture.api()))
+    EngineBridge::new(
+        &crate::identity::REAL,
+        Arc::new(StateDb::open(db).unwrap()),
+        Arc::new(fixture.api()),
+    )
 }
 fn tick(bridge: &EngineBridge, root: &std::path::Path) {
     run(sync_tick_outcome(bridge, root)).unwrap();

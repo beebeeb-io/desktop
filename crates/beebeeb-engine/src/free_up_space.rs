@@ -14,7 +14,10 @@ pub struct FreeUpSpaceResult {
 /// Cloud Files placeholders) and under the system cache dir
 /// (`dirs::cache_dir()/beebeeb`, e.g. the macOS File Provider staging area).
 /// Both are trusted, engine-written locations.
-pub fn free_up_space_allowed_roots(sync_root: &std::path::Path) -> Vec<PathBuf> {
+pub fn free_up_space_allowed_roots(
+    identity: &crate::identity::EngineIdentity,
+    sync_root: &std::path::Path,
+) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Ok(canon) = sync_root.canonicalize() {
         roots.push(canon);
@@ -22,7 +25,7 @@ pub fn free_up_space_allowed_roots(sync_root: &std::path::Path) -> Vec<PathBuf> 
         roots.push(sync_root.to_path_buf());
     }
     if let Some(cache_dir) = dirs::cache_dir() {
-        let beebeeb_cache = cache_dir.join("beebeeb");
+        let beebeeb_cache = cache_dir.join(identity.config_dir_name());
         match beebeeb_cache.canonicalize() {
             Ok(canon) => roots.push(canon),
             Err(_) => roots.push(beebeeb_cache),
@@ -34,7 +37,7 @@ pub fn free_up_space_allowed_roots(sync_root: &std::path::Path) -> Vec<PathBuf> 
     // path too, not just sign-out's purge.
     #[cfg(target_os = "macos")]
     {
-        let hydrate_dir = crate::ipc_socket::macos_hydrate_cache_dir();
+        let hydrate_dir = crate::ipc_socket::macos_hydrate_cache_dir(identity);
         match hydrate_dir.canonicalize() {
             Ok(canon) => roots.push(canon),
             Err(_) => roots.push(hydrate_dir),
@@ -73,12 +76,12 @@ pub fn remove_linux_freedesktop_thumbnails_for_evicted_files(
 // (the WebView IPC and the shell flyout button). It is a synchronous blocking fn
 // (DB + filesystem work), so the COM `Invoke` can call it directly off the
 // arbitrary thread Windows delivers the command on, without a tokio runtime.
-pub fn free_up_space_blocking() -> Result<FreeUpSpaceResult, String> {
-    let cfg = crate::config::DesktopConfig::load()?;
+pub fn free_up_space_blocking(identity: &'static crate::identity::EngineIdentity) -> Result<FreeUpSpaceResult, String> {
+    let cfg = crate::config::DesktopConfig::load_for(identity)?;
     let Some(sync_root) = cfg.sync_root.clone() else {
         return Ok(FreeUpSpaceResult { bytes_freed: 0 });
     };
-    let db_path = crate::state_paths::beebeeb_state_dir()?.join(crate::state_paths::STATE_DB_FILENAME);
+    let db_path = crate::state_paths::beebeeb_state_dir_for(identity)?.join(crate::state_paths::STATE_DB_FILENAME);
     if !db_path.exists() {
         return Ok(FreeUpSpaceResult { bytes_freed: 0 });
     }
@@ -86,7 +89,7 @@ pub fn free_up_space_blocking() -> Result<FreeUpSpaceResult, String> {
 
     #[cfg(target_os = "windows")]
     {
-        free_up_space_windows(&db, &sync_root)
+        free_up_space_windows(identity, &db, &sync_root)
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -96,7 +99,7 @@ pub fn free_up_space_blocking() -> Result<FreeUpSpaceResult, String> {
         let paths = db
             .disposable_unpinned_cache_paths()
             .map_err(|e| format!("list cache paths: {e}"))?;
-        free_up_space_unix(&db, &sync_root, paths)
+        free_up_space_unix(identity, &db, &sync_root, paths)
     }
 }
 
@@ -113,6 +116,7 @@ pub fn free_up_space_blocking() -> Result<FreeUpSpaceResult, String> {
 /// (or the engine cache dir), never an arbitrary path from a corrupt DB row.
 #[cfg(target_os = "windows")]
 pub fn free_up_space_windows(
+    identity: &crate::identity::EngineIdentity,
     db: &crate::state_db::StateDb,
     sync_root: &std::path::Path,
 ) -> Result<FreeUpSpaceResult, String> {
@@ -126,7 +130,7 @@ pub fn free_up_space_windows(
         .unpinned_local_files_for_dehydration()
         .map_err(|e| format!("list dehydration candidates: {e}"))?;
 
-    let allowed_roots = free_up_space_allowed_roots(sync_root);
+    let allowed_roots = free_up_space_allowed_roots(identity, sync_root);
     let mut bytes_freed: u64 = 0;
     let mut dehydrated_ids: Vec<String> = Vec::new();
 
@@ -229,6 +233,7 @@ pub fn free_up_space_windows(
 /// cloud_only and the on-disk cache copies are unlinked.
 #[cfg(not(target_os = "windows"))]
 pub fn free_up_space_unix(
+    identity: &crate::identity::EngineIdentity,
     db: &crate::state_db::StateDb,
     sync_root: &std::path::Path,
     paths: Vec<String>,
@@ -247,7 +252,7 @@ pub fn free_up_space_unix(
     // Sum the real file sizes we remove so `bytes_freed` is an exact count, not
     // an estimate. A missing file contributes 0 (already gone — nothing
     // reclaimed by us).
-    let allowed_roots = free_up_space_allowed_roots(sync_root);
+    let allowed_roots = free_up_space_allowed_roots(identity, sync_root);
     let mut bytes_freed: u64 = 0;
     for path in paths {
         let path_buf = PathBuf::from(&path);

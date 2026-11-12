@@ -340,7 +340,9 @@ pub async fn resolve_device_folder(
             .unwrap_or_default()
     };
     let manifest = serialize_manifest(&device_manifest(me, enabled));
-    match find_device_folder(me, &candidates) {
+    let choice =
+        super::device::permitted_choice(bridge.identity, find_device_folder(me, &candidates)).map_err(LayoutError)?;
+    match choice {
         DeviceFolderChoice::Existing(id) => Ok((id.to_string(), name_of(id))),
         DeviceFolderChoice::AdoptLegacy(id) => {
             let folder = id.to_string();

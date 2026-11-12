@@ -289,7 +289,7 @@ impl EngineBridge {
             &self.db,
             file_id,
             dest_path,
-            &crate::ipc_socket::macos_hydrate_cache_dir(),
+            &crate::ipc_socket::macos_hydrate_cache_dir(self.identity),
         )?;
         #[cfg(not(target_os = "macos"))]
         {
@@ -720,7 +720,7 @@ impl EngineBridge {
         let expected_format = recorded_content_format(&name_key, meta)?;
 
         // Rate-limit ceiling for downloads, and the transport (task 2173).
-        let config = crate::config::DesktopConfig::load().ok();
+        let config = crate::config::DesktopConfig::load_for(self.identity).ok();
         let download_kbps_limit = config.as_ref().map(|c| c.download_kbps_limit).unwrap_or(0);
         let transport = self.download_transport(config.as_ref().and_then(|c| c.transport.as_deref()));
 
@@ -1111,7 +1111,7 @@ impl EngineBridge {
 
         let (file_key, name_key) = self.file_keys_for_download(file_id).await?;
         let expected_format = recorded_content_format(&name_key, meta)?;
-        let download_kbps_limit = crate::config::DesktopConfig::load()
+        let download_kbps_limit = crate::config::DesktopConfig::load_for(self.identity)
             .map(|c| c.download_kbps_limit)
             .unwrap_or(0);
 

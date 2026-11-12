@@ -148,6 +148,7 @@ impl EngineRunner {
     ///
     /// `resume` is the account's resume requests (spec D11): off macOS the engine serves them after its reconcile pass.
     pub fn spawn(
+        identity: &'static crate::identity::EngineIdentity,
         app: Host,
         sync_root: PathBuf,
         session_token: zeroize::Zeroizing<String>,
@@ -166,6 +167,7 @@ impl EngineRunner {
 
         let task = tokio::spawn(async move {
             run(
+                identity,
                 app,
                 sync_root,
                 session_token,

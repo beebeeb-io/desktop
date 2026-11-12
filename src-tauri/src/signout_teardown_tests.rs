@@ -137,7 +137,7 @@ async fn a_sign_out_empties_upload_staging_and_the_staged_copies_in_every_stagin
     *acct.engine.lock().await = Some(finished_engine());
     let (root, upload_staging) = staging_with_copies();
     // The roots of the test sandbox (never the person's real folders, never the shared temp dir).
-    let bases = crate::engine_bridge::FinderStagingBases::current();
+    let bases = crate::engine_bridge::FinderStagingBases::current(crate::APP);
     #[cfg(target_os = "macos")]
     let staging_roots = [
         bases.durable_root().expect("the test sandbox has a data dir"),

@@ -196,7 +196,8 @@ fn engine_start_sweeps_unreferenced_staged_copies_on_macos_after_the_repair_befo
     let source = include_str!("../../runner.rs").replace("\r\n", "\n");
     let start = source.find("async fn run(\n    app: Host").expect("run exists");
     let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
-    let call = "crate::staged_payload::sweep_unreferenced(&db, &crate::engine_bridge::finder_staging_candidates())";
+    let call =
+        "crate::staged_payload::sweep_unreferenced(&db, &crate::engine_bridge::finder_staging_candidates(identity))";
     assert_eq!(body.matches(call).count(), 1, "`run` sweeps once");
     assert!(
         body.contains(&format!("#[cfg(target_os = \"macos\")]\n    match {call}")),

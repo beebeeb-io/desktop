@@ -448,8 +448,11 @@ pub(super) fn encode_base83(mut value: u32, length: usize) -> String {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn linux_thumbnail_source_path_for_entry(entry: &FileEntry) -> Option<PathBuf> {
-    let sync_root = crate::config::DesktopConfig::load().ok()?.sync_root?;
+pub(super) fn linux_thumbnail_source_path_for_entry(
+    identity: &'static crate::identity::EngineIdentity,
+    entry: &FileEntry,
+) -> Option<PathBuf> {
+    let sync_root = crate::config::DesktopConfig::load_for(identity).ok()?.sync_root?;
     crate::linux_thumbnail::source_path_under_sync_root(&sync_root, &entry.path)
 }
 

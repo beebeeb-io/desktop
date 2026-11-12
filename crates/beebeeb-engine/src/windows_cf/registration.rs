@@ -8,7 +8,7 @@ use std::os::windows::ffi::OsStrExt;
 use windows::Win32::Storage::CloudFilters::*;
 use windows::core::*;
 
-use super::{BEEBEEB_PROVIDER_GUID, PROVIDER_ID, PROVIDER_VERSION};
+use super::PROVIDER_VERSION;
 
 /// Who registers a sync root: the name and version Windows shows, and the provider GUID.
 #[derive(Debug, Clone, Copy)]
@@ -18,13 +18,17 @@ pub struct SyncProvider {
     pub guid: GUID,
 }
 
-/// The app's own provider identity. Never used by a test (LD-0105 rule: a test registers its own
-/// root with [`QA_PROVIDER`], so nothing a test does can touch the person's Beebeeb registration).
-pub const BEEBEEB_PROVIDER: SyncProvider = SyncProvider {
-    name: PROVIDER_ID,
-    version: PROVIDER_VERSION,
-    guid: BEEBEEB_PROVIDER_GUID,
-};
+/// The app's own provider, from its identity: the real app and the test build register under
+/// different names and GUIDs, so a test build never takes over the real app's sync root. Never used by
+/// a unit test (LD-0105 rule: a test registers its own root with [`QA_PROVIDER`], so nothing a test does
+/// can touch the person's Beebeeb registration).
+pub fn app_provider(identity: &'static crate::identity::EngineIdentity) -> SyncProvider {
+    SyncProvider {
+        name: identity.cloud_files_provider_name(),
+        version: PROVIDER_VERSION,
+        guid: GUID::from_u128(identity.cloud_files_provider_guid()),
+    }
+}
 
 /// The identity every test sync root registers with: its own name and GUID (minted 2026-11-05 for
 /// LD-0105, `2e0cdc60-1a9c-48f3-81c9-3e402af235b0`), never the app's.
@@ -141,10 +145,13 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 /// extra deps and trivial reconstruction at sign-out.
 ///
 /// The `Beebeeb!` prefix namespaces the provider (mirrors OneDrive/ProtonDrive's
-/// `<Provider>!…` convention) and matches the Win32 [`PROVIDER_ID`] name so the
-/// two registrations read as the same provider in tooling.
-pub(super) fn shell_sync_root_id(sync_root: &std::path::Path) -> String {
-    shell_sync_root_id_as(sync_root, PROVIDER_ID)
+/// `<Provider>!…` convention) and is the Win32 provider name, so the two registrations read as the
+/// same provider in tooling. The test build's ids start `BeebeebTest!`.
+pub(super) fn shell_sync_root_id(
+    identity: &'static crate::identity::EngineIdentity,
+    sync_root: &std::path::Path,
+) -> String {
+    shell_sync_root_id_as(sync_root, identity.cloud_files_provider_name())
 }
 
 /// [`shell_sync_root_id`] for the provider called `provider_name` (a test root uses its own).
@@ -178,5 +185,69 @@ pub fn shell_step(registered: Option<Option<&str>>) -> ShellStep {
         Some(Some(version)) if version == PROVIDER_VERSION => ShellStep::Keep("current"),
         Some(Some(_)) => ShellStep::Keep("other_version_kept"),
         Some(None) => ShellStep::Keep("version_unreadable_kept"),
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use crate::identity::{REAL, TEST};
+    use crate::windows_cf::status_ui::status_ui_factory_clsid;
+    use crate::windows_cf::thumbnail_provider::thumbnail_provider_clsid;
+
+    fn root() -> &'static std::path::Path {
+        std::path::Path::new(r"C:\Users\a\Beebeeb")
+    }
+
+    /// The real app registers as it always has: the provider's name and GUID, the Explorer id's prefix and the
+    /// two COM classes, as literals. A change here orphans every existing install's placeholders.
+    #[test]
+    fn the_real_apps_cloud_files_identity_is_unchanged() {
+        let provider = app_provider(&REAL);
+        assert_eq!(provider.name, "Beebeeb");
+        assert_eq!(provider.version, PROVIDER_VERSION);
+        assert_eq!(provider.guid, GUID::from_u128(0xb33b33b0_5217_4c0a_9e3f_1f2a7c4d8e90));
+        assert_eq!(
+            shell_sync_root_id(&REAL, root()),
+            shell_sync_root_id_as(root(), "Beebeeb")
+        );
+        assert!(shell_sync_root_id(&REAL, root()).starts_with("Beebeeb!"));
+        assert_eq!(
+            status_ui_factory_clsid(&REAL),
+            GUID::from_u128(0xc0b3_3b33_5217_4c0a_9e3f_2f3b8d5e9fa1)
+        );
+        assert_eq!(
+            thumbnail_provider_clsid(&REAL),
+            GUID::from_u128(0xb2e0_a7d4_9c61_4f3a_8d2e_7a1c5e9b0f44)
+        );
+    }
+
+    /// The test build is another provider: its own name, GUID, id prefix and COM classes, so connecting it never
+    /// re-registers the real app's root or points the real app's `LocalServer32` at the test binary. It is not
+    /// the unit tests' QA provider either.
+    #[test]
+    fn the_test_build_registers_as_its_own_provider() {
+        let (test, real) = (app_provider(&TEST), app_provider(&REAL));
+        assert_eq!(test.name, "BeebeebTest");
+        assert_eq!(test.guid, GUID::from_u128(0x1876bd5b_c73c_452a_a40c_e2501f3de243));
+        assert_ne!(test.guid, real.guid);
+        assert_ne!(test.guid, QA_PROVIDER.guid);
+        assert_ne!(test.name, QA_PROVIDER.name);
+        let (test_id, real_id) = (shell_sync_root_id(&TEST, root()), shell_sync_root_id(&REAL, root()));
+        assert!(test_id.starts_with("BeebeebTest!"), "{test_id}");
+        assert_ne!(
+            test_id, real_id,
+            "the same folder under the two providers is two registrations"
+        );
+        assert_eq!(
+            status_ui_factory_clsid(&TEST),
+            GUID::from_u128(0xecbe203e_9c20_4ba7_babf_bfc6dad89f0e)
+        );
+        assert_eq!(
+            thumbnail_provider_clsid(&TEST),
+            GUID::from_u128(0x691049a8_86db_450a_885a_fde5b4dc1431)
+        );
+        assert_ne!(status_ui_factory_clsid(&TEST), status_ui_factory_clsid(&REAL));
+        assert_ne!(thumbnail_provider_clsid(&TEST), thumbnail_provider_clsid(&REAL));
     }
 }

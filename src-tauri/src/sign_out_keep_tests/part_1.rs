@@ -114,6 +114,7 @@ fn the_kept_folder_is_out_of_every_purges_reach() {
     let data = container.join("Library").join("Application Support");
     let cache = container.join("Library").join("Caches");
     let staging = FinderStagingBases {
+        folder: "beebeeb",
         data: Some(data.clone()),
         cache: Some(cache.clone()),
         temp: container.join("tmp"),
@@ -182,7 +183,7 @@ fn the_kept_folder_is_out_of_every_purges_reach() {
     assert_eq!(
         body.replace(",)", ")"),
         "disposable_cache_roots_in(std::env::temp_dir(),dirs::cache_dir(),macos_hydrate_cache_root(),\
-             &crate::engine_bridge::FinderStagingBases::current())",
+             &crate::engine_bridge::FinderStagingBases::current(crate::APP))",
         "the wrapper is one call to its core and nothing else: {wrapper}"
     );
 }

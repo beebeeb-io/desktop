@@ -579,7 +579,7 @@ pub(super) async fn resolve_conflict(
         let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
         let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
         let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
-        let bridge = engine_bridge::EngineBridge::new(db, api);
+        let bridge = engine_bridge::EngineBridge::new(crate::APP, db, api);
 
         let outcome: Result<(), String> = match choice.as_str() {
             "local" => bridge
@@ -637,7 +637,7 @@ pub(super) fn parked_conflict_bridge(state: &State<'_, AppState>) -> Result<engi
     let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
     let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
     let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
-    Ok(engine_bridge::EngineBridge::new(db, api))
+    Ok(engine_bridge::EngineBridge::new(crate::APP, db, api))
 }
 
 /// Task 2190 (plan §3.2, D1): "Keep the other" keeps the Mac's bytes in the "Changes not sent"
@@ -827,7 +827,7 @@ pub(super) async fn conflict_content_preview(
         let db_path = state_paths::beebeeb_state_dir()?.join(state_paths::STATE_DB_FILENAME);
         let db = std::sync::Arc::new(state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?);
         let api = std::sync::Arc::new(api_client::ApiClient::new(runner::api_base_url(), token, master_key));
-        let bridge = engine_bridge::EngineBridge::new(db, api);
+        let bridge = engine_bridge::EngineBridge::new(crate::APP, db, api);
 
         bridge
             .conflict_content_preview(&file_id, &sync_root)

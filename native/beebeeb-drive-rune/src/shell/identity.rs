@@ -1,28 +1,39 @@
-//! Which app this binary is: the real Beebeeb or a test build. The ONE place a per-app name
-//! comes from in the native crate.
+//! Which app this binary is: the real Beebeeb or the test build. The ONE place a per-app name
+//! comes from in the native crate; every name the ENGINE owns (credentials, the settings folder,
+//! the sync folder, the Cloud Files registration, the backup device, the socket) comes from the
+//! engine's identity, reached through [`AppIdentity::engine`], so the two cannot disagree.
 //!
-//! The same shape, names and values as `src-tauri/src/app_identity.rs` (branch
-//! `fix/2445-test-build-isolation`), so the two can become one module: `AppIdentity::{Real,
-//! Test}`, `REAL_BUNDLE_IDENTIFIER`, `TEST_BUNDLE_IDENTIFIER`, `from_bundle_identifier` (only
-//! the exact real identifier is the real app), `bundle_identifier()`, `product_name()`. The
-//! values below those are the native shell's own derivations.
+//! The identifier is fixed at build time by `build.rs` from `BEEBEEB_APP_IDENTIFIER`:
 //!
-//! The identifier is fixed at build time: `BEEBEEB_APP_IDENTIFIER=io.beebeeb.app.test cargo
-//! build` makes a "Beebeeb Test". Unset, the build is the real app. A test build shares NOTHING
-//! with the real one: not the control channel (so neither answers the other's second launch),
-//! not the state folder, not the start-at-login value, not the window titles or classes, not
-//! the link scheme. `every_derived_value_differs_between_the_two_identities` asserts each one.
+//! | `BEEBEEB_APP_IDENTIFIER` | `BEEBEEB_RELEASE_VERSION` | the build is |
+//! |---|---|---|
+//! | `io.beebeeb.app` | set or unset | the real app |
+//! | `io.beebeeb.app.test` | unset | the test build ("Beebeeb Test") |
+//! | `io.beebeeb.app.test` | set | refused: a release is the real app |
+//! | unset | unset | the test build: `cargo build`, `cargo run` and `cargo test` |
+//! | unset | set | refused: a release names its identity |
+//! | anything else | any | refused |
+//!
+//! Nothing reads the profile (`debug_assertions`), an environment variable at run time or an
+//! argument. A test build shares NOTHING with the real one: not the control channel (so neither
+//! answers the other's second launch), not the state folder, not the start-at-login value, not
+//! the window titles or classes, not the link scheme.
+//! `every_derived_value_differs_between_the_two_identities` asserts each one. The tests name the
+//! identity they mean, so they pass under either build.
 
 /// The real app's bundle identifier (Tauri's `identifier`): the state and config folders of an
 /// install in the field are named by it.
 pub const REAL_BUNDLE_IDENTIFIER: &str = "io.beebeeb.app";
 /// The test build's bundle identifier.
 pub const TEST_BUNDLE_IDENTIFIER: &str = "io.beebeeb.app.test";
-/// The identifier this binary was built with.
-pub const BUILT_BUNDLE_IDENTIFIER: &str = match option_env!("BEEBEEB_APP_IDENTIFIER") {
-    Some(identifier) => identifier,
-    None => REAL_BUNDLE_IDENTIFIER,
-};
+/// The identifier this binary was built with (`build.rs`: one of the two, or the build stops).
+pub const BUILT_BUNDLE_IDENTIFIER: &str = env!("BEEBEEB_APP_IDENTIFIER");
+
+/// `beebeeb-app-identity=<identifier>;`, written by `build.rs` and kept in the binary by `main`. The packager
+/// (`packaging/windows/build-installer.ps1`) and the release workflow read it out of the built file and refuse a
+/// binary whose mark is not the one they package: what is checked is the binary, not the environment it was
+/// meant to be built in. Exactly one mark is in a binary; the bare identifiers of both apps are in every binary.
+pub static BUILD_MARK: &str = env!("BEEBEEB_APP_IDENTITY_MARK");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppIdentity {
@@ -47,19 +58,42 @@ const fn bytes_equal(a: &[u8], b: &[u8]) -> bool {
 }
 
 impl AppIdentity {
-    /// This binary's identity, fixed at compile time.
-    pub const CURRENT: Self = Self::from_bundle_identifier(BUILT_BUNDLE_IDENTIFIER);
+    /// This binary's identity, fixed at compile time. An identifier that is neither app does not compile
+    /// (`build.rs` refuses it first; this is the second lock, for a build that bypasses the build script).
+    pub const CURRENT: Self = match Self::from_bundle_identifier(BUILT_BUNDLE_IDENTIFIER) {
+        Some(identity) => identity,
+        None => panic!("BEEBEEB_APP_IDENTIFIER is neither io.beebeeb.app nor io.beebeeb.app.test"),
+    };
     #[cfg_attr(not(test), allow(dead_code))]
     pub const BOTH: [Self; 2] = [Self::Real, Self::Test];
 
-    /// Only the exact real identifier is the real app. Anything else (a typo, a fork's id, an
-    /// empty value) is a test build: an unknown build must never touch what the real app owns.
-    pub const fn from_bundle_identifier(identifier: &str) -> Self {
+    /// Only the two exact identifiers name an app. Anything else (a typo, a fork's id, an empty
+    /// value, another case) names none: an unknown build is not built.
+    pub const fn from_bundle_identifier(identifier: &str) -> Option<Self> {
         if bytes_equal(identifier.as_bytes(), REAL_BUNDLE_IDENTIFIER.as_bytes()) {
-            Self::Real
+            Some(Self::Real)
+        } else if bytes_equal(identifier.as_bytes(), TEST_BUNDLE_IDENTIFIER.as_bytes()) {
+            Some(Self::Test)
         } else {
-            Self::Test
+            None
         }
+    }
+
+    /// The engine's identity for this app: what `Engine::open` and every engine entry take. The one bridge
+    /// between the two types (a test pins that they name the same bundle identifier).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub const fn engine(self) -> &'static beebeeb_engine::identity::EngineIdentity {
+        match self {
+            Self::Real => &beebeeb_engine::identity::REAL,
+            Self::Test => &beebeeb_engine::identity::TEST,
+        }
+    }
+
+    /// Why this app must not start on `os` (`std::env::consts::OS`), or `None` when it may. The engine's
+    /// rule: the test build has no macOS App Group and no File Provider extension of its own, so there it
+    /// would have to use the real app's. `shell::run` asks before anything else exists.
+    pub fn start_refusal(self, os: &str) -> Option<&'static str> {
+        self.engine().refusal_on(os)
     }
 
     pub const fn bundle_identifier(self) -> &'static str {
@@ -207,24 +241,103 @@ mod tests {
 
     #[test]
     fn only_the_exact_real_identifier_is_the_real_app() {
-        assert_eq!(AppIdentity::from_bundle_identifier("io.beebeeb.app"), AppIdentity::Real);
+        assert_eq!(
+            AppIdentity::from_bundle_identifier("io.beebeeb.app"),
+            Some(AppIdentity::Real)
+        );
+        assert_eq!(
+            AppIdentity::from_bundle_identifier("io.beebeeb.app.test"),
+            Some(AppIdentity::Test)
+        );
         for other in [
-            "io.beebeeb.app.test",
             "",
             "io.beebeeb.App",
             "io.beebeeb.app ",
+            "io.beebeeb.app.test2",
+            "io.beebeeb.app.tes",
             "com.example",
         ] {
-            assert_eq!(
-                AppIdentity::from_bundle_identifier(other),
-                AppIdentity::Test,
-                "{other:?}"
-            );
-        }
-        // This build: the default is the real app.
-        if option_env!("BEEBEEB_APP_IDENTIFIER").is_none() {
-            assert_eq!(AppIdentity::CURRENT, AppIdentity::Real);
+            assert_eq!(AppIdentity::from_bundle_identifier(other), None, "{other:?}");
         }
         assert_eq!(AppIdentity::BOTH.len(), 2);
+    }
+
+    /// `main` asks, and leaves, before the shell runs: the refusal has a caller.
+    #[test]
+    fn main_asks_before_it_runs_the_shell() {
+        let main = include_str!("../main.rs").replace("\r\n", "\n");
+        let body = &main[main.find("fn main() {").expect("main")..];
+        let ask = body
+            .find("AppIdentity::CURRENT.start_refusal(std::env::consts::OS)")
+            .expect("main asks whether this identity may start on this OS");
+        let run = body.find("shell::run();").expect("main runs the shell");
+        assert!(ask < run, "the question comes before the shell");
+        assert!(
+            body[ask..run].contains("std::process::exit(2);"),
+            "a refusal ends the process"
+        );
+        assert_eq!(body.matches("shell::run();").count(), 1);
+    }
+
+    /// The mark names this build's identifier, in the exact form the packager and the workflow search for.
+    #[test]
+    fn the_build_mark_names_this_build() {
+        assert_eq!(
+            BUILD_MARK,
+            format!("beebeeb-app-identity={};", AppIdentity::CURRENT.bundle_identifier())
+        );
+        let main = include_str!("../main.rs");
+        assert!(
+            main.contains("std::hint::black_box(shell::identity::BUILD_MARK);"),
+            "main keeps the mark in the binary"
+        );
+    }
+
+    /// A build nobody named is the test build (plain `cargo test`, as CI runs it, is one): the default never
+    /// reaches the real app's data.
+    #[test]
+    fn an_unnamed_build_is_the_test_build() {
+        match env!("BEEBEEB_APP_IDENTIFIER_SOURCE") {
+            "default" => assert_eq!(AppIdentity::CURRENT, AppIdentity::Test),
+            "named" => {}
+            other => panic!("the build script says {other:?}"),
+        }
+    }
+
+    /// The build script's answer is one of the two, and this binary is that one.
+    #[test]
+    fn this_build_is_the_identity_it_was_built_as() {
+        assert_eq!(
+            AppIdentity::from_bundle_identifier(BUILT_BUNDLE_IDENTIFIER),
+            Some(AppIdentity::CURRENT)
+        );
+        assert_eq!(AppIdentity::CURRENT.bundle_identifier(), BUILT_BUNDLE_IDENTIFIER);
+    }
+
+    /// The native identity and the engine's are the same app: one bundle identifier each way.
+    #[test]
+    fn the_engine_identity_is_the_same_app() {
+        for identity in AppIdentity::BOTH {
+            assert_eq!(identity.engine().bundle_identifier(), identity.bundle_identifier());
+            assert_eq!(
+                beebeeb_engine::identity::EngineIdentity::from_bundle_identifier(identity.bundle_identifier())
+                    .map(std::ptr::from_ref),
+                Some(std::ptr::from_ref(identity.engine()))
+            );
+        }
+        assert!(AppIdentity::Real.engine().is_real());
+        assert!(!AppIdentity::Test.engine().is_real());
+    }
+
+    /// The test build does not start on macOS; the real app starts everywhere, the test build elsewhere.
+    #[test]
+    fn the_test_build_is_refused_on_macos_only() {
+        assert!(AppIdentity::Test.start_refusal("macos").is_some());
+        for os in ["windows", "linux"] {
+            assert_eq!(AppIdentity::Test.start_refusal(os), None, "{os}");
+        }
+        for os in ["macos", "windows", "linux"] {
+            assert_eq!(AppIdentity::Real.start_refusal(os), None, "{os}");
+        }
     }
 }

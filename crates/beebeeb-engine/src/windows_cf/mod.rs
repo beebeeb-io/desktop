@@ -84,13 +84,13 @@ use windows::Win32::Storage::CloudFilters::*;
 use windows::core::*;
 
 use crate::engine_bridge::EngineBridge;
+use crate::identity::EngineIdentity;
 
-/// Identifier shown to Windows for our sync provider. Surfaced in the
-/// Sync settings UI ("Files synced by Beebeeb"). Keep stable —
-/// changing this between releases would orphan existing placeholders.
-pub const PROVIDER_ID: &str = "Beebeeb";
+// The provider's name (the Sync settings UI's "Files synced by …", and the prefix of the Explorer sync-root id) and
+// its GUID are the app identity's, read through [`app_provider`]. Stable per identity: a change between releases
+// would orphan existing placeholders.
 
-/// Provider version reported alongside `PROVIDER_ID`. It is written into the
+/// Provider version reported alongside the provider's name. It is written into the
 /// Explorer SHELL registration (`StorageProviderSyncRootInfo::SetVersion`) when a root
 /// is first registered.
 ///
@@ -151,19 +151,9 @@ pub fn sync_root() -> Option<std::path::PathBuf> {
     SYNC_ROOT.read().ok().and_then(|root| root.clone())
 }
 
-/// Stable provider GUID for the Beebeeb sync root.
-///
-/// Minted once (UUIDv4 `b33b33b0-5217-4c0a-9e3f-1f2a7c4d8e90`) and
-/// hardcoded so the sync-root identity is stable across releases and
-/// machines. Previously `GUID::zeroed()`, a dev shortcut that let
-/// Windows pick a per-machine default — fine for local testing but it
-/// would orphan placeholders if the default ever changed. A fixed GUID
-/// keeps the provider identity deterministic.
-///
-/// `GUID::from_u128` lays the value out in the canonical
-/// big-endian-string order, so the literal here matches the dashed
-/// form above.
-pub const BEEBEEB_PROVIDER_GUID: GUID = GUID::from_u128(0xb33b33b0_5217_4c0a_9e3f_1f2a7c4d8e90);
+// The provider GUID is fixed per app identity (`EngineIdentity::cloud_files_provider_guid`; `identity.rs` pins the
+// real app's): minted once (UUIDv4) and never changed, so the sync-root identity is stable across releases and
+// machines. A changed GUID would orphan existing placeholders.
 
 /// Sender into the upload driver's debounce loop (`crate::watcher`). The
 /// `extern "system"` NOTIFY callbacks can't capture state, so they reach the
@@ -383,8 +373,8 @@ pub fn runtime() -> Option<tokio::runtime::Handle> {
 ///
 /// Idempotent at the OS layer: re-registering the same path with the
 /// same provider id returns success.
-pub fn register_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()> {
-    register_sync_root_with(sync_root_path, &BEEBEEB_PROVIDER, HYDRATION_POLICY)
+pub fn register_sync_root(identity: &'static EngineIdentity, sync_root_path: &std::path::Path) -> anyhow::Result<()> {
+    register_sync_root_with(sync_root_path, &app_provider(identity), HYDRATION_POLICY)
 }
 
 /// [`register_sync_root`] as `provider`, with the Win32 hydration policy `hydration` (a test passes
@@ -416,7 +406,7 @@ pub fn register_sync_root_with(
             SyncRootIdentityLength: 0,
             FileIdentity: std::ptr::null(),
             FileIdentityLength: 0,
-            // Stable, hardcoded provider GUID (see BEEBEEB_PROVIDER_GUID)
+            // Stable, hardcoded provider GUID (the app identity's, see `app_provider`)
             // so the sync-root identity is deterministic across releases
             // and machines, rather than the previous GUID::zeroed() dev
             // shortcut that let Windows pick a per-machine default.
@@ -530,8 +520,8 @@ pub fn register_sync_root_with(
 /// skip the re-register (a duplicate `Register` for the same Id throws), and a
 /// "already registered" error is swallowed as success.
 #[cfg(target_os = "windows")]
-pub fn register_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result<()> {
-    register_shell_sync_root_as(sync_root, &BEEBEEB_PROVIDER)
+pub fn register_shell_sync_root(identity: &'static EngineIdentity, sync_root: &std::path::Path) -> anyhow::Result<()> {
+    register_shell_sync_root_as(sync_root, &app_provider(identity))
 }
 
 /// [`register_shell_sync_root`] as `provider` (a test root registers as [`QA_PROVIDER`]).
@@ -712,11 +702,14 @@ pub fn register_shell_sync_root_as(sync_root: &std::path::Path, provider: &SyncP
 /// [`shell_sync_root_id`] scheme used to register, so the caller only needs the
 /// persisted `DesktopConfig.sync_root` — not the running engine.
 #[cfg(target_os = "windows")]
-pub fn unregister_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result<()> {
+pub fn unregister_shell_sync_root(
+    identity: &'static EngineIdentity,
+    sync_root: &std::path::Path,
+) -> anyhow::Result<()> {
     use windows::Storage::Provider::StorageProviderSyncRootManager;
     use windows::core::HSTRING;
 
-    let id = shell_sync_root_id(sync_root);
+    let id = shell_sync_root_id(identity, sync_root);
     let id_h = HSTRING::from(id.as_str());
 
     // Tear down the breadcrumb status-flyout registration FIRST (revoke the COM
@@ -724,14 +717,14 @@ pub fn unregister_shell_sync_root(sync_root: &std::path::Path) -> anyhow::Result
     // the sync-root key still exists. Best-effort and self-contained; it logs its
     // own failures and never returns an error, so it cannot block the shell
     // unregister below. Inverse of `register_status_ui_for_sync_root`.
-    status_ui::unregister_status_ui_source(&id);
+    status_ui::unregister_status_ui_source(identity, &id);
 
     // Tear down the media thumbnail-provider registration (revoke the COM class
     // object + remove the `ThumbnailProvider` binding under the sync-root key +
     // the CLSID subtree), while the sync-root key still exists. Best-effort and
     // self-contained; logs its own failures, never blocks the shell unregister.
     // Inverse of `register_thumbnail_provider_for_sync_root`.
-    thumbnail_provider::unregister_thumbnail_provider(&id);
+    thumbnail_provider::unregister_thumbnail_provider(identity, &id);
 
     let roots = StorageProviderSyncRootManager::GetCurrentSyncRoots()?;
     let mut registered = false;
@@ -824,14 +817,14 @@ static THUMBNAIL_PROVIDER_THREAD: OnceLock<()> = OnceLock::new();
 /// [`THUMBNAIL_PROVIDER_THREAD`]). Best-effort: any failure is logged inside the
 /// thread — missing thumbnails only cost the tiles; overlays, the Status column,
 /// the flyout, and hydration are unaffected.
-pub fn register_thumbnail_provider_for_sync_root(sync_root: &std::path::Path) {
+pub fn register_thumbnail_provider_for_sync_root(identity: &'static EngineIdentity, sync_root: &std::path::Path) {
     if THUMBNAIL_PROVIDER_THREAD.get().is_some() {
-        if let Err(error) = thumbnail_provider::rebind(&shell_sync_root_id(sync_root)) {
+        if let Err(error) = thumbnail_provider::rebind(identity, &shell_sync_root_id(identity, sync_root)) {
             tracing::warn!(%error, "shell binding refresh failed");
         }
         return;
     }
-    let shell_id = shell_sync_root_id(sync_root);
+    let shell_id = shell_sync_root_id(identity, sync_root);
     let _ = THUMBNAIL_PROVIDER_THREAD.set(());
 
     let spawned = std::thread::Builder::new()
@@ -849,7 +842,7 @@ pub fn register_thumbnail_provider_for_sync_root(sync_root: &std::path::Path) {
                 return;
             }
 
-            if let Err(e) = thumbnail_provider::register_thumbnail_provider(&shell_id) {
+            if let Err(e) = thumbnail_provider::register_thumbnail_provider(identity, &shell_id) {
                 tracing::warn!(error = %e, "thumbnail provider registration failed; media tiles absent (overlays/column/flyout/hydration unaffected)");
                 // SAFETY: balance the CoInitializeEx above before exiting.
                 unsafe { CoUninitialize() };
@@ -926,14 +919,14 @@ pub fn register_thumbnail_provider_for_sync_root(sync_root: &std::path::Path) {
 /// reuses the existing registration. Best-effort: any failure is logged inside
 /// the thread and never propagated — the flyout is a nicety; overlays, the
 /// Status column, the nav-pane entry and hydration are unaffected.
-pub fn register_status_ui_for_sync_root(sync_root: &std::path::Path) {
+pub fn register_status_ui_for_sync_root(identity: &'static EngineIdentity, sync_root: &std::path::Path) {
     if STATUS_UI_THREAD.get().is_some() {
-        if let Err(error) = status_ui::rebind(&shell_sync_root_id(sync_root)) {
+        if let Err(error) = status_ui::rebind(identity, &shell_sync_root_id(identity, sync_root)) {
             tracing::warn!(%error, "shell binding refresh failed");
         }
         return;
     }
-    let shell_id = shell_sync_root_id(sync_root);
+    let shell_id = shell_sync_root_id(identity, sync_root);
     let _ = STATUS_UI_THREAD.set(());
 
     let spawned = std::thread::Builder::new()
@@ -951,7 +944,7 @@ pub fn register_status_ui_for_sync_root(sync_root: &std::path::Path) {
                 return;
             }
 
-            if let Err(e) = status_ui::register_status_ui_source(&shell_id) {
+            if let Err(e) = status_ui::register_status_ui_source(identity, &shell_id) {
                 tracing::warn!(error = %e, "status-UI source registration failed; breadcrumb flyout absent (overlays/column/hydration unaffected)");
                 // SAFETY: balance the CoInitializeEx above before exiting — no
                 // point holding an apartment for a failed registration.
@@ -1076,7 +1069,7 @@ fn connect_callbacks(sync_root_path: &std::path::Path, generation: u64) -> anyho
 
 /// Connect once per runner generation. Existing placeholders may call us before
 /// the bridge is installed; those requests fail promptly until activation.
-pub fn connect_root(sync_root: &std::path::Path) {
+pub fn connect_root(identity: &'static EngineIdentity, sync_root: &std::path::Path) {
     if ensure_reactivation_allowed().is_err() {
         return;
     }
@@ -1101,7 +1094,7 @@ pub fn connect_root(sync_root: &std::path::Path) {
     // `NormalizedPath` is unavailable (task 0783 resolve-or-error fallback).
     *SYNC_ROOT.write().unwrap() = Some(sync_root.to_path_buf());
 
-    if let Err(e) = register_sync_root(sync_root) {
+    if let Err(e) = register_sync_root(identity, sync_root) {
         tracing::error!(error = %e, "Cloud Files sync root registration failed; connect skipped");
         return;
     }
@@ -1112,7 +1105,7 @@ pub fn connect_root(sync_root: &std::path::Path) {
     // NOT abort the connect/hydration path (which runs entirely off the Win32
     // registration), so we log-and-continue exactly like a Cloud Files hiccup.
     // Re-running on every engine spawn makes a re-login reconverge the shell entry.
-    if let Err(e) = register_shell_sync_root(sync_root) {
+    if let Err(e) = register_shell_sync_root(identity, sync_root) {
         tracing::warn!(error = %e, "Explorer shell sync-root registration failed; overlays/column/sidebar may be absent (hydration unaffected)");
     }
 
@@ -1144,7 +1137,7 @@ pub fn connect_root(sync_root: &std::path::Path) {
     // shell registration above, the callbacks, or hydration. Idempotent across
     // re-logins (spawns at most once per process). Failures are logged inside the
     // thread, so this call is infallible from connect_root's perspective.
-    register_status_ui_for_sync_root(sync_root);
+    register_status_ui_for_sync_root(identity, sync_root);
 
     // Stand up the Explorer media THUMBNAIL provider (task 0823) so cloud-only
     // image/video placeholders render real tiles. An in-process IThumbnailProvider
@@ -1154,7 +1147,7 @@ pub fn connect_root(sync_root: &std::path::Path) {
     // writes plaintext to disk). PURELY ADDITIVE: a dedicated STA COM thread,
     // independent of the Win32/shell registrations, the callbacks, and hydration.
     // Idempotent across re-logins; failures are logged inside the thread.
-    register_thumbnail_provider_for_sync_root(sync_root);
+    register_thumbnail_provider_for_sync_root(identity, sync_root);
 
     let generation = NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     match connect_callbacks(sync_root, generation) {

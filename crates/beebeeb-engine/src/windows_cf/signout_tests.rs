@@ -343,7 +343,7 @@ fn round6_unregister_removes_empty_owned_hkcu_key() {
     use windows::Win32::System::Registry::*;
     use windows::core::HSTRING;
     let f = Fixture::new();
-    let id = crate::windows_cf::shell_sync_root_id(&f.root);
+    let id = crate::windows_cf::shell_sync_root_id(&crate::identity::REAL, &f.root);
     let key = HSTRING::from(format!(
         "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{id}"
     ));
@@ -364,7 +364,7 @@ fn round6_unregister_removes_empty_owned_hkcu_key() {
             ERROR_SUCCESS
         );
         assert_eq!(RegCloseKey(handle), ERROR_SUCCESS);
-        let result = crate::windows_cf::unregister_shell_sync_root(&f.root);
+        let result = crate::windows_cf::unregister_shell_sync_root(&crate::identity::REAL, &f.root);
         let remaining = RegOpenKeyExW(HKEY_CURRENT_USER, &key, 0, KEY_READ, &mut handle);
         if remaining == ERROR_SUCCESS {
             assert_eq!(RegCloseKey(handle), ERROR_SUCCESS);

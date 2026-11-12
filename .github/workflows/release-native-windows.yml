@@ -260,6 +260,9 @@ jobs:
         shell: bash
         env:
           BEEBEEB_RELEASE_VERSION: ${{ inputs.version }}
+          # A release names its identity: the build script refuses a release build without it, and one with the
+          # test identifier (native/beebeeb-drive-rune/build.rs).
+          BEEBEEB_APP_IDENTIFIER: io.beebeeb.app
         run: |
           set -euo pipefail
           BEEBEEB_BUILD_NOT_BEFORE="$(git log -1 --format=%ct HEAD)"
@@ -272,6 +275,21 @@ jobs:
       # the updater's mark with exactly the commit's time, once, and that time must be a plausible one (not before
       # 2026-11-11, the day the v2 key was made). A binary without the mark has no updater in it, or was built
       # without the time and would refuse every update: neither is released.
+      # The binary that ships must be the real app: exactly one identity mark, the real one. A binary built as the
+      # test app, or built by a script that lost the variable, is not released (the bare identifiers cannot be
+      # searched for: both are in every binary).
+      - name: Refuse a binary that is not built as the real app
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe=native/beebeeb-drive-rune/target/x86_64-pc-windows-msvc/release/beebeeb-drive.exe
+          marks="$(grep -a -o 'beebeeb-app-identity=[0-9a-z.]*;' "$exe" | sort -u || true)"
+          echo "identity marks in the binary: ${marks:-none}"
+          if [[ "$marks" != "beebeeb-app-identity=io.beebeeb.app;" ]]; then
+            echo "::error::the built binary is not the real app (found: ${marks:-no mark})."
+            exit 1
+          fi
+
       - name: Refuse a binary that does not report the commit's time as its build time
         shell: bash
         run: |

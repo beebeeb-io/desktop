@@ -587,7 +587,7 @@ fn real_api_a_tick_is_synced_then_offline_when_the_server_goes_away() {
     let db = Arc::new(state_db::StateDb::open(dir.path().join("state.db")).unwrap());
     let api = Arc::new(api_client::ApiClient::new(base.clone(), token, [0u8; 32]));
     let link = api.link();
-    let bridge = engine_bridge::EngineBridge::new(db, api);
+    let bridge = engine_bridge::EngineBridge::new(crate::APP, db, api);
     // A multi-thread runtime, like the engine's: it keeps polling the pooled connection
     // between ticks, so it notices the server closing it (a runtime that is only ever
     // driven inside `block_on` would write the next request to a dead socket and get a

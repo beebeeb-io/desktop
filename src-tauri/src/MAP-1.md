@@ -54,6 +54,7 @@ Modules 1–62, sorted by path.
 | `popover_data.rs` | The data the menu-bar popover reads (task 1683 slice 2; spec `docs/specs/2026-09-30-macos-menubar-popover.md` section 9). | POPOVER_HIDDEN_EVENT, STORAGE_TTL_SECS, STORAGE_WAIT, STORAGE_FAILURE_BACKOFF_SECS, DEFAULT_ACTIVITY_LIMIT, CONFLICT_FILES_LIMIT, POPOVER_SHOWN_EVENT, PopoverRuntime (2), StorageUsage (2), StorageCache, clear_storage, StorageDto (4), … (+16 more) |
 | `popover_snapshot_command_tests.rs` | (no //! header) | — |
 | `popover_wiring_tests.rs` | (no //! header) | — |
+| `real_app.rs` | The Tauri shell is the real app. | — |
 | `reauth_tests.rs` | (no //! header) | — |
 | `recovery_phrase_unlock_tests.rs` | (no //! header) | — |
 | `repair_kept_folder_tests.rs` | (no //! header) | — |
@@ -67,4 +68,3 @@ Modules 1–62, sorted by path.
 | `settings_commands.rs` | `settings_commands` items split out of `lib.rs`. | — |
 | `sign_out_commands.rs` | `sign_out_commands` items split out of `lib.rs`. | — |
 | `sign_out_keep_tests.rs` | (no //! header) | — |
-| `sign_out_revoke_tests.rs` | (no //! header) | — |

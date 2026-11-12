@@ -196,7 +196,7 @@ fn ipc_rejects_hydrate_write_outside_allowed_roots() {
 
     let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
     let api = Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key));
-    let bridge = Arc::new(EngineBridge::new(db.clone(), api));
+    let bridge = Arc::new(EngineBridge::new(&crate::identity::REAL, db.clone(), api));
     seed_bridge_row(&bridge, TEST_FILE_ID, "/secret.bin", None, FileStatus::CloudOnly, 24);
 
     // Destination under a non-existent subdirectory of a real temp dir: it
@@ -250,7 +250,7 @@ fn ipc_allows_hydrate_write_under_allowed_root() {
 
     let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
     let api = Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key));
-    let bridge = Arc::new(EngineBridge::new(db.clone(), api));
+    let bridge = Arc::new(EngineBridge::new(&crate::identity::REAL, db.clone(), api));
     seed_bridge_row(
         &bridge,
         TEST_FILE_ID,
@@ -365,7 +365,7 @@ fn ipc_hydrate_streams_progress_frames_before_the_final_reply() {
     let server = IpcHydrationMock::start(file_key, chunks);
     let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
     let api = Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key));
-    let bridge = Arc::new(EngineBridge::new(db.clone(), api));
+    let bridge = Arc::new(EngineBridge::new(&crate::identity::REAL, db.clone(), api));
     seed_bridge_row(
         &bridge,
         TEST_FILE_ID,
@@ -427,7 +427,7 @@ fn ipc_hydrate_without_opt_in_sends_no_progress_frames() {
     let server = IpcHydrationMock::start(file_key, chunks);
     let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
     let api = Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key));
-    let bridge = Arc::new(EngineBridge::new(db.clone(), api));
+    let bridge = Arc::new(EngineBridge::new(&crate::identity::REAL, db.clone(), api));
     seed_bridge_row(
         &bridge,
         TEST_FILE_ID,
@@ -477,7 +477,7 @@ fn ipc_hydrate_is_cancelled_and_status_restored_when_the_client_hangs_up() {
     let server = IpcHydrationMock::start_with_chunk_delay(file_key, chunks, Duration::from_millis(1000));
     let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
     let api = Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key));
-    let bridge = Arc::new(EngineBridge::new(db.clone(), api));
+    let bridge = Arc::new(EngineBridge::new(&crate::identity::REAL, db.clone(), api));
     seed_bridge_row(&bridge, TEST_FILE_ID, "/slow.bin", None, FileStatus::CloudOnly, 30);
     let dest = dest_dir.path().join("slow.bin");
     let request = hydrate_request_line(&dest, true);
@@ -546,7 +546,7 @@ fn ipc_socket_file_is_chmod_0600_after_bind() {
         "token".into(),
         [7u8; 32],
     ));
-    let bridge = Arc::new(EngineBridge::new(db.clone(), api));
+    let bridge = Arc::new(EngineBridge::new(&crate::identity::REAL, db.clone(), api));
 
     let sp = sock_path.clone();
     tokio::runtime::Runtime::new().unwrap().block_on(async move {
