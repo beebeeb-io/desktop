@@ -9,6 +9,7 @@ pub mod details;
 pub mod dialogs;
 pub mod keys;
 pub mod list;
+pub mod long_list;
 pub mod menus;
 pub mod names;
 pub mod protected;
@@ -19,6 +20,8 @@ pub mod source;
 pub mod toolbar;
 pub mod window;
 
+#[cfg(test)]
+mod long_list_tests;
 #[cfg(test)]
 mod protected_tests;
 #[cfg(test)]
@@ -174,6 +177,11 @@ pub struct Actions {
     pub host: names::Host,
     /// The protected folders: the open message, the section last seen (`protected.rs`).
     pub protected: protected::Ui,
+    /// The letters typed in the list, which jump to a name (`long_list.rs`).
+    pub typed: long_list::Typed,
+    /// A board frame that draws a long list from this row on (DW-0420b: the gate draws one frame
+    /// and cannot scroll). 0 in the app.
+    pub board_first_row: usize,
 }
 
 pub const INTENTS_KEPT: usize = 32;
@@ -201,6 +209,8 @@ impl Actions {
             made: Vec::new(),
             host: names::Host::this(),
             protected: protected::Ui::default(),
+            typed: long_list::Typed::default(),
+            board_first_row: 0,
         }
     }
 }
@@ -902,7 +912,7 @@ impl State {
             } else {
                 Ordering::Equal
             };
-            let name = a.name.to_lowercase().cmp(&b.name.to_lowercase());
+            let name = long_list::sort_key(&a.name).cmp(&long_list::sort_key(&b.name));
             let by = match sort.by {
                 SortBy::Name => name,
                 // Newest first, largest first: the board's first Order choice for these.

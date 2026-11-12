@@ -58,17 +58,19 @@ pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
                 .w_full()
                 .growth(rune::GrowthSpec::default())
                 .virtual_rows(
-                    count,
+                    // A board frame of a long list starts at a later row (`Actions::board_first_row`).
+                    count.saturating_sub(s.actions.board_first_row),
                     ROW_H,
                     |s: &State, i| {
-                        if i < s.listing.items.len() {
+                        if i + s.actions.board_first_row < s.listing.items.len() {
                             Cow::Owned(format!("row-{i}"))
                         } else {
                             Cow::Borrowed("row-oob")
                         }
                     },
-                    move |s: &State, i| match s.listing.items.get(i) {
+                    move |s: &State, shown| match s.listing.items.get(shown + s.actions.board_first_row) {
                         Some(item) => {
+                            let i = shown + s.actions.board_first_row;
                             // The file that could not open without a connection says so in its
                             // row, at 45 % (`frames::global`, DW-0121).
                             let blocked = crate::frames::global::dims(s, &item.id);
@@ -83,7 +85,11 @@ pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
                             // A protected folder draws its own rows (`protected.rs`).
                             let mut row = match super::protected::row_of(s, i, item, &t) {
                                 Some(row) => row,
-                                None => file_row(i, item, s.is_selected(i), date, field, &t),
+                                None => {
+                                    let k = format!("row-{shown}");
+                                    let tile = super::long_list::picture_tile(s, &k, item, &t);
+                                    file_row_with(shown, item, s.is_selected(i), date, field, tile, &t)
+                                }
                             };
                             if blocked {
                                 row = row.opacity(0.45);
@@ -226,6 +232,19 @@ pub fn file_row(
     renaming: Option<El>,
     t: &Theme,
 ) -> El {
+    file_row_with(i, item, selected, date, renaming, None, t)
+}
+
+/// [`file_row`], with the tile to draw in place of the kind's own (a fixture's picture).
+pub fn file_row_with(
+    i: usize,
+    item: &DriveItem,
+    selected: bool,
+    date: Option<String>,
+    renaming: Option<El>,
+    tile: Option<El>,
+    t: &Theme,
+) -> El {
     let k = format!("row-{i}");
     let date = date.unwrap_or_else(|| format_date(&item.modified_at));
     let meta = if selected { t.text_secondary } else { t.text_tertiary };
@@ -237,12 +256,10 @@ pub fn file_row(
         .min_w(0.0)
         .center_y()
         .gap(8.0)
-        .child(file_tile(&k, item, t))
+        .child(tile.unwrap_or_else(|| file_tile(&k, item, t)))
         .child(match renaming {
             Some(field) => field,
-            None => kit::label(format!("{k}-name"), item.name.clone(), type_::LIST_ITEM, t.text)
-                .truncate()
-                .min_w(0.0),
+            None => super::long_list::name_label(&k, &item.name, t),
         });
     if item.is_protected {
         name = name.child(
@@ -257,7 +274,7 @@ pub fn file_row(
         let unit = if item.is_protected { "devices" } else { "items" };
         item.child_count.map(|c| format!("{c} {unit}")).unwrap_or_default()
     } else {
-        item.size.map(crate::source::format_size).unwrap_or_default()
+        item.size.map(super::long_list::size_words).unwrap_or_default()
     };
 
     let mut pc = el().key("pc-cell").w(COL_PC_W).center();
