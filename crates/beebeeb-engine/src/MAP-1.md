@@ -33,10 +33,10 @@ Modules 1–34, sorted by path.
 | `engine_bridge.rs` | Bridge between the Tauri runner, the SQLite state DB, and the Beebeeb API client. | BackupChild (6), BackupFolderState (2), tighter_clock, PrepEnd (3), RangePrep (5), FetchedBytes (3), CacheCleanupOutcome (1), CachePolicy (2), ConflictContentPreview (4), ConflictContentSide (3), ConflictDetected (3), FetchTicket, … (+72 more) |
 | `engine_status.rs` | What the engine says about itself, and what the popover reads back (task 1683 slice 2; spec `docs/specs/2026-09-30-macos-menubar-popover.md` | — |
 | `file_provider_port.rs` | What the engine asks of the macOS File Provider bridge: one working-set signal, through the shell's bridge gate. | — |
-| `finder_setup.rs` | The part of the macOS Finder setup the configuration file stores: the failure record. | — |
-| `finder_setup/error.rs` | One NSError as the ObjC bridge saw it (spec §6.1), plus the errors we synthesize ourselves. | — |
+| `finder_setup.rs` | The part of the macOS Finder setup that is pure policy: the failure record, the error classifier and retry schedule (§6.2, §7), and the laun | — |
 | `finder_show.rs` | Whether a Mac may ask for an item's Finder location: only for one of the person's own rows. | — |
 | `found_while_paused.rs` | Task 2267 (fix round 2): what the person decides about the changes Beebeeb found while sync was paused. | — |
 | `found_while_paused/tests.rs` | `found_while_paused` unit tests, split out of `found_while_paused.rs`. | — |
 | `free_up_space.rs` | Free up space: make unpinned local files online-only again. | — |
 | `held_queue.rs` | Tasks 1888 + 2226 (spec `docs/superpowers/specs/2026-10-28-1888-2226-reconcile-then-resume-design.md`, workspace): the reconcile pass over t | Counts (21), NEEDS_REVIEW, Op (8), Options (2), Row (6), Unit (3), is_parent_404, same_leaf, PresendBlock (2), plan, presend_block |
+| `hexfmt.rs` | Lower-case hex for digests and 32-byte public keys: the one encoder and the one strict decoder the v2 modules share (`office_v2` checks a pi | — |
