@@ -12,19 +12,19 @@ use std::path::{Path, PathBuf};
 use super::kept_names::{MAX_NAME_BYTES, with_suffix};
 
 /// `sys/clonefile.h:33`. `libc` 0.2.189 has `clonefile` but not this flag.
-pub(crate) const CLONE_NOFOLLOW: u32 = 0x0001;
+pub const CLONE_NOFOLLOW: u32 = 0x0001;
 /// `sys/syslimits.h:103`, counting the terminating NUL: a path of 1024 bytes or more cannot be made.
-pub(crate) const PATH_MAX_BYTES: usize = 1024;
+pub const PATH_MAX_BYTES: usize = 1024;
 /// The attribute that keeps an item out of Time Machine. A kept file is the person's, so it is backed up.
-pub(crate) const BACKUP_EXCLUSION_ATTRIBUTE: &str = "com.apple.metadata:com_apple_backup_excludeItem";
+pub const BACKUP_EXCLUSION_ATTRIBUTE: &str = "com.apple.metadata:com_apple_backup_excludeItem";
 
-pub(crate) trait CloneFile {
+pub trait CloneFile {
     /// Make `dst` as a copy of `src`. Never replaces an existing `dst`: that is `AlreadyExists`.
     fn clone_file(&self, src: &Path, dst: &Path) -> io::Result<()>;
 }
 
 /// The production copy: an APFS clone, or, where the volume cannot clone, a new file and a byte copy.
-pub(crate) struct SystemClone;
+pub struct SystemClone;
 
 fn c_path(path: &Path) -> io::Result<CString> {
     CString::new(path.as_os_str().as_bytes()).map_err(|_| io::Error::new(ErrorKind::InvalidInput, "a path holds a NUL"))
@@ -116,7 +116,7 @@ fn directory_candidate(name: &str, n: u32) -> String {
 }
 
 /// One event folder being written.
-pub(crate) struct KeptWriter<'a> {
+pub struct KeptWriter<'a> {
     /// Resolved (`canonicalize`), so every length below is the kernel's.
     root: PathBuf,
     event: PathBuf,
@@ -129,7 +129,7 @@ pub(crate) struct KeptWriter<'a> {
     files: usize,
 }
 
-pub(crate) struct KeptFolder {
+pub struct KeptFolder {
     pub path: PathBuf,
     pub files: usize,
 }
@@ -138,7 +138,7 @@ impl<'a> KeptWriter<'a> {
     /// Make `<root>/<event_name>`, or `… (2)`, `… (3)` when the name is taken (§7.1). The folder is new and empty.
     /// The root is resolved once it exists: a symlink anywhere in its prefix (`/var` → `private/var` on a Mac) makes
     /// the kernel's path longer than the one given, and §7.2's 1024-byte rule is about the kernel's.
-    pub(crate) fn create(root: &Path, event_name: &str, clone: &'a dyn CloneFile) -> io::Result<Self> {
+    pub fn create(root: &Path, event_name: &str, clone: &'a dyn CloneFile) -> io::Result<Self> {
         let missing = missing_ancestors(root);
         std::fs::create_dir_all(root)?;
         let made_root = missing
@@ -166,7 +166,7 @@ impl<'a> KeptWriter<'a> {
         })
     }
 
-    pub(crate) fn event(&self) -> &Path {
+    pub fn event(&self) -> &Path {
         &self.event
     }
 
@@ -213,7 +213,7 @@ impl<'a> KeptWriter<'a> {
     /// Copy `source` to the vault path `components` (the last is the file name) and flush it. A destination of 1024
     /// bytes or more, planned or after any " (n)" on its directories or its name, goes to the top of the event folder
     /// under its last component.
-    pub(crate) fn keep(&mut self, components: &[String], source: &Path) -> io::Result<PathBuf> {
+    pub fn keep(&mut self, components: &[String], source: &Path) -> io::Result<PathBuf> {
         let name = components
             .last()
             .expect("kept_relative_path never returns an empty path")
@@ -260,7 +260,7 @@ impl<'a> KeptWriter<'a> {
 
     /// What `finish` flushes, in order: every directory this keep made (deepest first), the event folder, the root,
     /// then the parent of each directory `create` made, which holds that directory's entry.
-    pub(crate) fn flush_list(&self) -> Vec<PathBuf> {
+    pub fn flush_list(&self) -> Vec<PathBuf> {
         let parents_of_made_root = self
             .made_root
             .iter()
@@ -275,7 +275,7 @@ impl<'a> KeptWriter<'a> {
     }
 
     /// Flush [`Self::flush_list`], then hand back the folder.
-    pub(crate) fn finish(self) -> io::Result<KeptFolder> {
+    pub fn finish(self) -> io::Result<KeptFolder> {
         for directory in self.flush_list() {
             File::open(&directory)?.sync_all()?;
         }
@@ -286,7 +286,7 @@ impl<'a> KeptWriter<'a> {
     }
 
     /// A failed keep (W8): the half-made folder holds only copies of bytes still in the queue, so it goes.
-    pub(crate) fn abandon(self) {
+    pub fn abandon(self) {
         if let Err(error) = std::fs::remove_dir_all(&self.event) {
             tracing::warn!(kind = %error.kind(), "could not remove a half-made kept folder");
         }
