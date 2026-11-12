@@ -569,6 +569,48 @@ mod tests {
         assert_eq!(printed.len(), 6);
     }
 
+    /// Review of PR 296, P3-1: a type added here with a text or path field cannot derive `Debug` unseen. Every
+    /// item of this file that derives `Debug` and holds a `String` or a `PathBuf` is on this list, and the list
+    /// holds only ids and release text, never a name, a path or a sentence shown to the person.
+    #[test]
+    fn no_type_with_text_derives_debug_unless_it_is_listed_as_carrying_no_name_or_path() {
+        const IDS_AND_RELEASE_TEXT_ONLY: [&str; 3] = ["ConflictResolved", "UpdateAvailable", "VersionReview"];
+        let source = include_str!("host.rs").replace("\r\n", "\n");
+        let production = &source[..source.find("#[cfg(test)]\nmod tests").expect("the test module")];
+        let mut derived = Vec::new();
+        for (at, _) in production.match_indices("#[derive(") {
+            let item = &production[at..];
+            let attribute = &item[..item.find(")]").expect("the derive ends")];
+            let body = &item[..item.find("\n}\n").map_or(item.len(), |end| end + 3)];
+            let name = body
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("pub struct ")
+                        .or_else(|| line.strip_prefix("pub enum "))
+                })
+                .and_then(|rest| rest.split([' ', '{', '(', ';']).next())
+                .expect("a derive sits on a pub struct or enum");
+            if attribute.contains("Debug") && (body.contains("String") || body.contains("PathBuf")) {
+                derived.push(name.to_string());
+            }
+        }
+        derived.sort();
+        assert_eq!(
+            derived, IDS_AND_RELEASE_TEXT_ONLY,
+            "give the new type a redacting Debug (redacted_debug!)"
+        );
+        // The instrument sees the types it must: the redacted ones exist and do not derive Debug.
+        for redacted in [
+            "EngineStatus",
+            "ConflictNotice",
+            "ConflictAutoResolved",
+            "FolderCreated",
+        ] {
+            assert!(production.contains(&format!("pub struct {redacted} ")), "{redacted}");
+        }
+        assert!(production.matches("#[derive(").count() >= 12);
+    }
+
     #[test]
     fn a_channel_host_queues_in_order_and_wakes_once_per_message() {
         let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));

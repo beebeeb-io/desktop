@@ -109,7 +109,8 @@ pub struct Engine<C: CredentialStores> {
     /// A token is stored: someone is signed in, unlocked or not.
     auth_present: Mutex<bool>,
     /// A proven password waiting for its second factor (core holds the partial token, wiped on drop).
-    pending_2fa: Mutex<Option<(PendingSecondFactor, String)>>,
+    /// The email is wiped with it (the shell's `Pending2fa` does the same).
+    pending_2fa: Mutex<Option<(PendingSecondFactor, Zeroizing<String>)>>,
     /// Wrong passwords in a row, for the lock hint.
     failures: AtomicU32,
 }
@@ -271,7 +272,8 @@ impl<C: CredentialStores> Engine<C> {
                     if !self.acct.session_unchanged_since(turn) {
                         return Err(SignInProblem::Other);
                     }
-                    *self.pending_2fa.lock().map_err(|_| SignInProblem::Other)? = Some((pending, email));
+                    *self.pending_2fa.lock().map_err(|_| SignInProblem::Other)? =
+                        Some((pending, Zeroizing::new(email)));
                     Ok(NextAfterSignIn::TwoFactor)
                 }
                 PasswordLegs::SignedIn(token) => self
@@ -310,7 +312,10 @@ impl<C: CredentialStores> Engine<C> {
                 };
                 password::second_factor_answer(challenge, response).map_err(|e| words(&e))?
             };
-            let next = self.finish_sign_in(turn, token, email).await.map_err(|e| words(&e))?;
+            let next = self
+                .finish_sign_in(turn, token, (*email).clone())
+                .await
+                .map_err(|e| words(&e))?;
             if let Ok(mut pending) = self.pending_2fa.lock() {
                 *pending = None;
             }
@@ -403,7 +408,7 @@ impl<C: CredentialStores> Engine<C> {
             }
             let words = |code: &str| gate::phrase_error(code);
             let vault = self.vault();
-            let token = match vault.session_token() {
+            let mut token = match vault.session_token() {
                 Ok(Some(token)) => Zeroizing::new(token.expose_for_request().to_string()),
                 _ => return Err(words("Sign in before unlocking the vault.")),
             };
@@ -432,7 +437,8 @@ impl<C: CredentialStores> Engine<C> {
                 }
                 let mut guard = self.acct.session.lock().map_err(|_| words("failed"))?;
                 *guard = Some(Session {
-                    token: token.to_string(),
+                    // Moved out of the wiped buffer, not copied: the session holds the one copy from here on.
+                    token: std::mem::take(&mut *token),
                     master_key: *key,
                     email,
                 });

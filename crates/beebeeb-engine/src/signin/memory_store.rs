@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::keychain::{AuthResult, AuthSecretStore, SecretBytes, SessionToken};
 
+/// Values are wiped when they are replaced, removed or dropped, as a platform store would not leave them.
 #[derive(Clone, Default)]
-pub struct MemoryCredentials(Arc<Mutex<HashMap<(String, &'static str), Vec<u8>>>>);
+pub struct MemoryCredentials(Arc<Mutex<HashMap<(String, &'static str), zeroize::Zeroizing<Vec<u8>>>>>);
 
 /// The items of one account in a [`MemoryCredentials`].
 #[derive(Clone)]
@@ -39,13 +40,13 @@ impl MemoryCredentials {
 impl MemoryStore {
     fn save(&self, leaf: &'static str, bytes: &[u8]) -> AuthResult<()> {
         let mut items = self.all.0.lock().expect("memory credentials");
-        items.insert((self.account.clone(), leaf), bytes.to_vec());
+        items.insert((self.account.clone(), leaf), zeroize::Zeroizing::new(bytes.to_vec()));
         Ok(())
     }
 
     fn load(&self, leaf: &'static str) -> Option<Vec<u8>> {
         let items = self.all.0.lock().expect("memory credentials");
-        items.get(&(self.account.clone(), leaf)).cloned()
+        items.get(&(self.account.clone(), leaf)).map(|bytes| bytes.to_vec())
     }
 
     fn delete(&self, leaf: &'static str) -> AuthResult<()> {
