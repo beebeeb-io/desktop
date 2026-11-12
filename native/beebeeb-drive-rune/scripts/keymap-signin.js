@@ -164,11 +164,13 @@ if (auMac) {
     text('suggest-label', q(':scope > span:not(.kit-chip)', suggest));
     each(':scope > .kit-chip', suggest, (c, i) => { box(`chip-${i}`, c); api.textNode(`chip-${i}-text`, c); });
   }
-  // The "Next" card of DW-A44: a tile, a caption and the product's step.
-  each(':scope > .kit-card', col, (c, i) => {
+  // The "Next" card of DW-A44: a tile, a caption and the product's step. Only a card built that way: the
+  // first run's own cards (DW-0204, DW-0206) are keyed in keymap-signin-setup.js.
+  qa(':scope > .kit-card', col).filter((c) => q(':scope > .kit-card-body > .au-row > .kit-tile', c)).forEach((c, i) => {
     box(`next-${i}`, c);
     const tile = q('.kit-tile', c);
-    if (tile) { box(`next-${i}-tile`, tile); icon(`next-${i}-icon`, q('svg', tile)); }
+    box(`next-${i}-tile`, tile);
+    icon(`next-${i}-icon`, q('svg', tile));
     text(`next-${i}-cap`, q('.t-cap', c));
     text(`next-${i}-title`, q('.t-head', c));
   });
