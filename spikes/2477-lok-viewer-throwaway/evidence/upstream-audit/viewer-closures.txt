@@ -1,0 +1,45 @@
+== wordcraft roots=wordcraft-render+wordcraft-docx+wordcraft-docbin: packages=165 (workspace 8) network_crates=0 [] git_packages=1 advisory_packages=1 licence_outside_allow_list=0
+   git: craft-proof (storytold/craft-libs)
+   advisory: zip 3.0.0: VULN RUSTSEC-2026-0367, VULN RUSTSEC-2026-0368, VULN RUSTSEC-2026-0369, VULN RUSTSEC-2026-0429
+== gridcraft roots=gridcraft-engine: packages=128 (workspace 11) network_crates=0 [] git_packages=0 advisory_packages=1 licence_outside_allow_list=0
+   advisory: zip 3.0.0: VULN RUSTSEC-2026-0367, VULN RUSTSEC-2026-0368, VULN RUSTSEC-2026-0369, VULN RUSTSEC-2026-0429
+== deckcraft roots=deckcraft-render+deckcraft-pptx: packages=123 (workspace 9) network_crates=0 [] git_packages=1 advisory_packages=1 licence_outside_allow_list=0
+   git: epaint_default_fonts (storytold/egui.git)
+   advisory: zip 3.0.0: VULN RUSTSEC-2026-0367, VULN RUSTSEC-2026-0368, VULN RUSTSEC-2026-0369, VULN RUSTSEC-2026-0429
+== deckcraft roots=deckcraft-engine: packages=194 (workspace 18) network_crates=0 [] git_packages=5 advisory_packages=3 licence_outside_allow_list=16
+   git: craft-audio (storytold/craft-libs)
+   git: craft-media (storytold/craft-libs)
+   git: craft-pdf (storytold/craft-libs)
+   git: epaint_default_fonts (storytold/egui.git)
+   git: krilla (storytold/craft-libs)
+   advisory: rustybuzz 0.20.1: unmaintained RUSTSEC-2026-0206
+   advisory: ttf-parser 0.25.1: unmaintained RUSTSEC-2026-0192
+   advisory: zip 3.0.0: VULN RUSTSEC-2026-0367, VULN RUSTSEC-2026-0368, VULN RUSTSEC-2026-0369, VULN RUSTSEC-2026-0429
+   licence: symphonia 0.5.5: MPL-2.0
+   licence: symphonia-bundle-flac 0.5.5: MPL-2.0
+   licence: symphonia-bundle-mp3 0.5.5: MPL-2.0
+   licence: symphonia-codec-aac 0.5.5: MPL-2.0
+   licence: symphonia-codec-adpcm 0.5.5: MPL-2.0
+   licence: symphonia-codec-alac 0.5.5: MPL-2.0
+   licence: symphonia-codec-pcm 0.5.5: MPL-2.0
+   licence: symphonia-codec-vorbis 0.5.5: MPL-2.0
+   licence: symphonia-core 0.5.5: MPL-2.0
+   licence: symphonia-format-caf 0.5.5: MPL-2.0
+   licence: symphonia-format-isomp4 0.5.5: MPL-2.0
+   licence: symphonia-format-mkv 0.5.5: MPL-2.0
+   licence: symphonia-format-ogg 0.5.5: MPL-2.0
+   licence: symphonia-format-riff 0.5.5: MPL-2.0
+   licence: symphonia-metadata 0.5.5: MPL-2.0
+   licence: symphonia-utils-xiph 0.5.5: MPL-2.0
+== wordcraft roots=wordcraft-engine: packages=282 (workspace 11) network_crates=2 ['rustls', 'ureq'] git_packages=6 advisory_packages=2 licence_outside_allow_list=2
+   git: craft-atomic (storytold/craft-libs)
+   git: craft-font-catalog (storytold/craft-libs)
+   git: craft-font-store (storytold/craft-libs)
+   git: craft-pdf (storytold/craft-libs)
+   git: craft-proof (storytold/craft-libs)
+   git: krilla (storytold/craft-libs)
+   advisory: rustix 1.1.5: unsound RUSTSEC-2026-0486
+   advisory: zip 3.0.0: VULN RUSTSEC-2026-0367, VULN RUSTSEC-2026-0368, VULN RUSTSEC-2026-0369, VULN RUSTSEC-2026-0429
+   licence: webpki-root-certs 1.0.11: CDLA-Permissive-2.0
+   licence: webpki-roots 1.0.11: CDLA-Permissive-2.0
+closure-upstreams: done

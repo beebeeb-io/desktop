@@ -1,0 +1,19 @@
+# THROWAWAY spike for task 2477 (native Office viewer on LibreOfficeKit). Not product code, not in
+# any workspace, never shipped. Delete this folder when step 2 lands its own bridge.
+[package]
+name = "lok-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-or-later"
+
+[workspace]
+
+[dependencies]
+png = "0.17"
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+debug = false
