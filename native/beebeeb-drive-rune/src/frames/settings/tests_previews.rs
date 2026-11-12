@@ -220,6 +220,18 @@ fn esc_in_the_compare_view_is_done() {
         rt.state.settings.previews.draft,
         Some((PreviewSize::P720, PreviewFormat::Heic))
     );
+    // The same with no control of the view focused (a choice made with the pointer): the
+    // open view holds the keyboard itself, so Esc is always its dismiss.
+    let mut rt = runtime("DW-0745");
+    rt.state.settings.pick_in_compare(Some(PreviewSize::K2), None);
+    settle(&mut rt);
+    assert_eq!(focused(&rt).as_deref(), Some("scrim"));
+    key(&mut rt, Key::Escape);
+    assert_eq!(rt.state.settings.dialog, Some(Dialog::ApplyPreviews));
+    assert_eq!(
+        rt.state.settings.previews.draft,
+        Some((PreviewSize::K2, PreviewFormat::Heic))
+    );
     // And with nothing chosen it only closes the view; settings stays open.
     let mut rt = runtime("DW-0745");
     key(&mut rt, Key::Escape);
