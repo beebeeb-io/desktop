@@ -87,26 +87,34 @@ pub fn details_pane(item: Option<(&DriveItem, Details)>, t: &Theme) -> El {
     }
     facts = facts.child(meta_row("detail-shared", "Shared", &d.shared, false, t));
 
-    let mut offline = col().key("offline-group").w_full().gap(8.0).child(offline_card(
-        "offline",
-        "Available offline",
-        &d.offline_note,
-        d.kept_offline,
-        t,
-    ));
-    if on_this_pc {
-        offline = offline.child(
-            row().key("free-up-row").child(
-                action_button("free-up", "Free up space", &icons::CLOUD, t)
-                    .description(
-                        "Removes the copy on this PC. It stays in Beebeeb and downloads again when you open it.",
-                    )
-                    .on_press_tx(|s: &mut State, tx: &mut Tx| {
-                        s.free_up_space(tx);
-                    }),
-            ),
-        );
-    }
+    let offline = offline_card("offline", "Available offline", &d.offline_note, d.kept_offline, t);
+    // `.mk-det > button.kit-btn-ghost`: as wide as the panel, words and mark in its middle, no
+    // box. It is a child of the panel like the card above it and the two buttons below it.
+    let free_up = on_this_pc.then(|| {
+        row()
+            .key("free-up-box")
+            .role("button")
+            .label("Free up space")
+            .description("Removes the copy on this PC. It stays in Beebeeb and downloads again when you open it.")
+            .w_full()
+            .h(22.0)
+            .gap(7.0)
+            .center()
+            .radius(radius::MD)
+            .hover(t.hover)
+            .press(t.press)
+            .focusable(true)
+            .child(kit::glyph("free-up-icon", &icons::CLOUD, 14.0, t.text_secondary))
+            .child(kit::label(
+                "free-up-btn",
+                "Free up space",
+                type_::BUTTON_SM,
+                t.text_secondary,
+            ))
+            .on_press_tx(|s: &mut State, tx: &mut Tx| {
+                s.free_up_space(tx);
+            })
+    });
 
     pane(t)
         .child(picture)
@@ -123,6 +131,7 @@ pub fn details_pane(item: Option<(&DriveItem, Details)>, t: &Theme) -> El {
         .child(encrypted_badge(t))
         .child(facts)
         .child(offline)
+        .children(free_up)
         .child(
             row()
                 .key("detail-actions")
