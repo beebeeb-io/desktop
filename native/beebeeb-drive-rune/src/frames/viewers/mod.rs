@@ -20,6 +20,7 @@ mod fixture_text;
 pub mod icons;
 mod markdown;
 mod md_source;
+pub mod new_file;
 pub mod source;
 mod states;
 mod style;
@@ -60,6 +61,11 @@ pub enum Intent {
     OpenInDrive(String),
     /// A link in a note to the web: the browser opens it, never this window.
     OpenInBrowser(String),
+    /// DW-1522's Create file: make `name` in `folder` (`None`: the top of Files), encrypted on
+    /// this PC before it uploads, and open it in the editor (DW-1523). Nothing is made here.
+    CreateFile { folder: Option<String>, name: String },
+    /// DW-1521's Continue on an office type: New document with that app's templates (DW-1558).
+    NewDocument(new_file::Kind),
 }
 
 /// The file being edited (DW-1523): the text as typed, and the text it started from.
@@ -354,6 +360,17 @@ pub struct Slot {
     /// route shows the shell's placeholder. The board's fixture is here only in the board's
     /// sample window ([`board_fixture`]), never as a fallback.
     route: Option<RouteSource>,
+    /// The New file dialog over the Files window (DW-1521, DW-1522), while it is open.
+    pub(crate) new_file: Option<new_file::NewFile>,
+    /// What the New file dialog asked of the shell, oldest first ([`take_asked`]).
+    pub(crate) asked: Vec<Intent>,
+}
+
+/// What the New file dialog asked for that is outside this group (make a file, New document),
+/// oldest first. For the shell, as [`Ui::take_intents`].
+#[cfg_attr(not(test), allow(dead_code))] // waits for its caller in `shell/host.rs` (PR body)
+pub fn take_asked(s: &mut State) -> Vec<Intent> {
+    std::mem::take(&mut s.viewer.asked)
 }
 
 /// Makes one source per opened file.
@@ -466,6 +483,7 @@ pub fn copy_text(s: &mut State, tx: &mut Tx) {
 /// The engine's answers that arrive between presses, and the route leaving the file. `true`:
 /// the view must run again. For `shell::host::poll`.
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    let mut new_file = new_file_poll(s, tx);
     let had = s.viewer.ui.is_some();
     sync(s);
     // The route names a file that is not open yet (Files dispatched `Event::OpenItem`): ask the
@@ -476,11 +494,31 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
             return true;
         }
     }
-    let Some(ui) = ui(s) else { return had };
+    let Some(ui) = ui(s) else { return had || new_file };
     let changed = ui.pump();
     if let Some(key) = ui.focus.take() {
         // Not after a key of this group (those take it in `on_key`): no ring is drawn.
         tx.focus(key, false);
+    }
+    new_file |= changed;
+    new_file
+}
+
+/// The New file dialog between presses: Files' "New file…" and Ctrl+N name this group's frame
+/// (`Intent::Frame("DW-1521")`): it opens here; the route leaving Files closes it.
+fn new_file_poll(s: &mut State, tx: &mut Tx) -> bool {
+    let mut changed = false;
+    let asked = crate::frames::files::Intent::Frame("DW-1521");
+    if let Some(i) = s.actions.intents.iter().position(|intent| *intent == asked) {
+        s.actions.intents.remove(i);
+        changed |= new_file::begin(s);
+    }
+    let open = s.viewer.new_file.is_some();
+    new_file::sync(s);
+    changed |= open && s.viewer.new_file.is_none();
+    if let Some(key) = new_file::take_focus(s) {
+        tx.focus(key, false);
+        changed = true;
     }
     changed
 }
@@ -666,8 +704,42 @@ pub fn set_scene(s: &mut State, frame: &str) {
     }
 }
 
+/// DW-1520 to DW-1522: the Files window as the board draws it under New (Contract draft.pdf
+/// selected, the details panel open), then New's menu on "New file…", or the dialog.
+pub fn set_new_file_scene(s: &mut State, frame: &str) {
+    s.select_only(6);
+    match frame {
+        "DW-1520" => {
+            s.actions.menu = Some(crate::frames::files::OpenMenu {
+                kind: crate::frames::files::MenuKind::New,
+                at: (0.0, 0.0),
+                hot: Some(1),
+            });
+        }
+        "DW-1521" => {
+            new_file::begin(s);
+        }
+        "DW-1522" => {
+            // Text, Continue, "export_invoices" typed and selected, .py picked.
+            new_file::begin(s);
+            new_file::choose(s, new_file::Kind::Text);
+            new_file::go_on(s);
+            new_file::choose_ext(s, ".py");
+            if let Some(nf) = s.viewer.new_file.as_mut() {
+                nf.name = rune::TextEdit::new("export_invoices");
+                nf.name.set_selection(0, nf.name.text.len());
+                nf.name.focused = true;
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The group's board frames and the scene that shows each (`frames::scenes`).
 pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
+    ("DW-1520", |s| set_new_file_scene(s, "DW-1520")),
+    ("DW-1521", |s| set_new_file_scene(s, "DW-1521")),
+    ("DW-1522", |s| set_new_file_scene(s, "DW-1522")),
     ("DW-1516", |s| set_scene(s, "DW-1516")),
     ("DW-1517", |s| set_scene(s, "DW-1517")),
     ("DW-1518", |s| set_scene(s, "DW-1518")),

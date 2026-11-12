@@ -6,7 +6,10 @@
 // Boxes carry `css` (radius, shadow, border, padding, gap, opacity): the gate ignores it, the person
 // building the frame reads the measurements from the golden.
 const vwFrame = (win.closest('[id^="DW-"]') || {}).id || '';
-if (/^DW-15(0[1-6]|1[2-9]|2[0-7])$/.test(vwFrame)) {
+// DW-1520 to DW-1522 are the Files window with New's menu or the New file dialog over it: keyed
+// below ("New file"), by the Files window's names; the open-file sections do not apply to them.
+const vwNewFile = /^DW-152[0-2]$/.test(vwFrame);
+if (/^DW-15(0[1-6]|1[2-9]|2[0-7])$/.test(vwFrame) && !vwNewFile) {
   const css = (el) => {
     const cs = getComputedStyle(el);
     const out = {};
@@ -141,5 +144,72 @@ if (/^DW-15(0[1-6]|1[2-9]|2[0-7])$/.test(vwFrame)) {
     text('dlg-note', q('.wn-dlg-body > p.t-cap', dlg));
     box('dlg-foot', q('.wn-dlg-foot', dlg));
     qa('.wn-dlg-foot button.kit-btn', dlg).forEach((b, i) => button(`dlg-btn-${i}`, b));
+  }
+}
+
+// ---- New file (DW-1520 to DW-1522): the Files window with New's menu, then the dialog that picks the
+// type (DW-1521) and names the file (DW-1522). The menu by the Files window's names (keymap-files.js:
+// `menu`, `menu-item-<n>`); the dialog's card by `ui::dialog`'s (`scrim`, `dlg`, `dlg-title`, `dlg-sub`,
+// `dlg-foot`), its buttons and fields by the Files dialogs' (`btn-<n>`, `field-<n>`).
+if (vwNewFile) {
+  // The helpers of the open-file block above, in this block's own scope.
+  const css = (el) => {
+    const cs = getComputedStyle(el);
+    const out = {};
+    if (cs.borderRadius !== '0px') out.radius = cs.borderRadius;
+    if (cs.boxShadow !== 'none') out.shadow = cs.boxShadow;
+    if (parseFloat(cs.borderTopWidth) || parseFloat(cs.borderRightWidth) || parseFloat(cs.borderBottomWidth) || parseFloat(cs.borderLeftWidth)) out.border = `${cs.borderTopWidth} ${cs.borderRightWidth} ${cs.borderBottomWidth} ${cs.borderLeftWidth} ${cs.borderTopColor}`;
+    if (cs.padding !== '0px') out.pad = cs.padding;
+    if (cs.gap !== 'normal') out.gap = cs.gap;
+    if (cs.opacity !== '1') out.opacity = cs.opacity;
+    return { css: out };
+  };
+  const shown = (el) => !!el && el.getClientRects().length > 0;
+  const box = (key, el, extra = {}) => { if (shown(el)) api.box(key, el, { ...css(el), ...extra }); };
+  const tcss = (el) => { const cs = getComputedStyle(el); return { lh: cs.lineHeight, align: cs.textAlign, italic: cs.fontStyle === 'italic' }; };
+  const text = (key, el, extra = {}) => { if (shown(el) && el.textContent.trim()) api.text(key, el, { ...tcss(el), ...extra }); };
+  qa('.wn-menu').forEach((m, mi) => {
+    const mk = mi ? `menu-${mi}` : 'menu';
+    api.box(mk, m);
+    qa('.wn-mi', m).forEach((it, i) => {
+      const k = `${mk}-item-${i}`;
+      api.box(k, it, { hot: it.classList.contains('is-hot') });
+      api.icon(`${k}-check`, q('.ck svg', it));
+      api.text(`${k}-label`, q('.lb', it));
+      if (q('.sc', it)) api.textNode(`${k}-shortcut`, q('.sc', it));
+    });
+    qa('.wn-msep', m).forEach((s, i) => api.box(`${mk}-sep-${i}`, s));
+  });
+  const nf = q('.wn-dlg');
+  if (nf) {
+    box('scrim', q('.mk-scrim'));
+    box('dlg', nf);
+    text('dlg-title', q('.wn-dlg-head .t-title', nf));
+    text('dlg-sub', q('.wn-dlg-head .t-sub', nf));
+    text('dlg-label', q('.wn-dlg-body > .t-label', nf));
+    // The five types (DW-1521): a tile each, the outline of a document with its extension, the word.
+    qa('.wn-dlg-body .grid-cols-5 > div', nf).forEach((tile, i) => {
+      box(`type-${i}`, tile);
+      const doc = q(':scope > span:first-child', tile);
+      box(`type-${i}-doc`, doc);
+      if (doc) text(`type-${i}-ext`, q('.font-mono', doc));
+      text(`type-${i}-label`, q(':scope > .t-sub', tile));
+    });
+    // The name and the extension, each its own field (DW-1522); the selected name, its caret.
+    qa('.wn-dlg-body .kit-field', nf).forEach((f, i) => {
+      box(`field-${i}`, f, { focus: f.classList.contains('is-focus') });
+      text(`field-${i}-value`, q('.kit-field-value > span', f) || q('.kit-field-value', f));
+      box(`field-${i}-caret`, q('.kit-caret', f));
+    });
+    // The extensions offered (DW-1522): a chip each, the chosen one dark.
+    qa('.wn-dlg-body .kit-chip', nf).forEach((c, i) => {
+      box(`chip-${i}`, c, { on: c.classList.contains('is-active') });
+      api.textNode(`chip-${i}-label`, c, tcss(c));
+    });
+    box('dlg-foot', q('.wn-dlg-foot', nf));
+    qa('.wn-dlg-foot button.kit-btn', nf).forEach((b, i) => {
+      box(`btn-${i}`, b);
+      text(`btn-${i}-label`, q('span', b));
+    });
   }
 }
