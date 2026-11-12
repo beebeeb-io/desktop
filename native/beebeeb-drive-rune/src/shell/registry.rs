@@ -178,6 +178,8 @@ pub const FRAMES: &[Frame] = &[
     crate::frames::backups::FRAME,
     crate::frames::SHARED,
     crate::frames::shared::dialogs::TRASH,
+    crate::frames::signin::before_files::LOCKED,
+    crate::frames::signin::before_files::NO_PLAN,
     Frame {
         group: FrameGroup::Settings(SettingsPane::General),
         view: crate::frames::settings::view,
