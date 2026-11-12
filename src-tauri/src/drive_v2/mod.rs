@@ -16,14 +16,14 @@ mod commands;
 pub(crate) use beebeeb_engine::drive_v2::dto;
 mod events;
 mod fsops;
-/// The window's view models, under their old path: the engine crate's, plus the two that read a shell module.
+/// The window's view models, under their old path: the engine crate's, plus the two that moved there.
 pub(crate) mod model {
-    pub(crate) use super::model_shell::*;
     pub(crate) use beebeeb_engine::drive_v2::model::*;
+    pub(crate) use beebeeb_engine::drive_v2::model_shell::*;
 }
-mod model_shell;
-mod photo_meta; // v2 b02b
-mod status; // v2 b02b
+pub(crate) use beebeeb_engine::drive_v2::model_shell;
+pub(crate) use beebeeb_engine::drive_v2::photo_meta;
+pub(crate) use beebeeb_engine::drive_v2::status;
 mod status_cmds; // v2 b02b
 #[cfg(test)]
 mod status_tests; // v2 b02b
