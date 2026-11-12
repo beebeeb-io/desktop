@@ -13,18 +13,29 @@
 //! The shell registers the group with one line (`shell/registry.rs`: [`frame`], [`on_key`]) and
 //! opens a file with [`open`].
 
+mod archive;
+mod audio;
 mod chrome;
 mod details;
 mod dialogs;
+mod fixture_media;
 mod fixture_text;
 pub mod icons;
+pub mod kinds;
 mod markdown;
 mod md_source;
+pub mod media;
+mod media_icons;
+mod pdf;
+mod photo;
 pub mod source;
 mod states;
 mod style;
+mod table;
 mod text;
 
+#[cfg(test)]
+mod media_tests;
 #[cfg(test)]
 mod tests;
 
@@ -60,6 +71,10 @@ pub enum Intent {
     OpenInDrive(String),
     /// A link in a note to the web: the browser opens it, never this window.
     OpenInBrowser(String),
+    /// DW-1508: a CSV's Edit opens it in Sheets (saved back as CSV).
+    EditInSheets,
+    /// Move this file to Trash (a photo's Trash; Undo is the toast's, in Files).
+    Trash,
 }
 
 /// The file being edited (DW-1523): the text as typed, and the text it started from.
@@ -121,6 +136,8 @@ pub struct Ui {
     pub toast: Option<String>,
     /// When this session last saved the file ("09:41"): the status line says so.
     pub saved_at: Option<String>,
+    /// What is open inside a photo, a recording, a PDF, a table or an archive (`media.rs`).
+    pub media: media::Media,
     /// The element that takes keyboard focus once this change is on screen.
     focus: Option<&'static str>,
     intents: Vec<Intent>,
@@ -132,6 +149,7 @@ impl Ui {
         let file = source.open(file_id)?;
         Ok(Ui {
             source,
+            media: media::Media::of(&file),
             file,
             show_details: false,
             wrap: false,
@@ -378,12 +396,19 @@ fn route_source(s: &State) -> Option<Box<dyn ViewerSource>> {
 
 /// Open a file in the viewer: the route goes to it and its content is asked of the window's
 /// source. `false`: there is no such file, or the window has no source (the route does not move).
-#[cfg_attr(not(test), allow(dead_code))] // the call for Files' preview and open (DW-0408, another lane)
 pub fn open(s: &mut State, file_id: &str) -> bool {
     match route_source(s) {
         Some(source) => open_from(s, source, file_id),
         None => false,
     }
+}
+
+/// The router by file type, and the ONE way a file of a list opens here: a file whose type has
+/// a viewer (`kinds::viewer_of`) and that the window's source has goes to the route
+/// (`Event::OpenItem`, through [`open`]). `false`: not a file for this group; the caller opens
+/// it as it did before (its own app).
+pub fn open_item(s: &mut State, item: &crate::source::DriveItem) -> bool {
+    !item.is_folder && kinds::viewer_of(&item.name).is_some() && open(s, &item.id)
 }
 
 /// [`open`] with the source to read from (the engine's, once it is wired).
@@ -400,7 +425,8 @@ pub fn open_from(s: &mut State, source: Box<dyn ViewerSource>, file_id: &str) ->
 /// Back to the folder the file was opened from; the decrypted content is dropped.
 pub fn close(s: &mut State) {
     if let Some(ui) = s.viewer.ui.as_mut() {
-        if ui.hold_for_changes() {
+        // Find, or a folder inside an archive, closes before the file does.
+        if ui.hold_for_changes() || ui.close_inner() {
             return;
         }
         ui.cancel();
@@ -422,12 +448,14 @@ pub fn sync(s: &mut State) {
     {
         // Unsaved changes: the route comes back to the file and the question is asked
         // (DW-1525). An open question is answered first: Esc there is "keep editing".
+        let still_drive = matches!(s.shell.app.screen(), Screen::Drive(_));
         let held = s.viewer.ui.as_mut().is_some_and(|ui| {
             if ui.dialog.is_some() {
                 ui.keep_editing();
                 true
             } else {
-                ui.hold_for_changes()
+                // Esc and Back close find, or step out of an archive's folder, before the file.
+                ui.hold_for_changes() || (still_drive && ui.close_inner())
             }
         });
         if held {
@@ -477,7 +505,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         }
     }
     let Some(ui) = ui(s) else { return had };
-    let changed = ui.pump();
+    let changed = ui.pump() | ui.refind();
     if let Some(key) = ui.focus.take() {
         // Not after a key of this group (those take it in `on_key`): no ring is drawn.
         tx.focus(key, false);
@@ -580,6 +608,29 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
             &t,
         );
     }
+    match &ui.file.body {
+        Body::Photo(doc) => {
+            let (tools, body, status) = (photo::tools(doc, &t), photo::body(ui, doc, &t), photo::status(ui, doc));
+            return chrome::window(s, cx, ui, head, tools, None, body, &status, &t);
+        }
+        Body::Audio(doc) => {
+            let (tools, body) = (audio::tools(&t), audio::body(ui, doc, &t));
+            return chrome::window(s, cx, ui, head, tools, None, body, &audio::status(doc), &t);
+        }
+        Body::Pdf(doc) => {
+            let (tools, bar, body) = (pdf::tools(ui, &t), pdf::find_bar(ui, &t), pdf::body(ui, doc, &t));
+            return chrome::window(s, cx, ui, pdf::head(ui, doc), tools, bar, body, &pdf::status(), &t);
+        }
+        Body::Table(doc) => {
+            let (tools, body) = (table::tools(&t), table::body(ui, doc, &t));
+            return chrome::window(s, cx, ui, head, tools, None, body, &table::status(), &t);
+        }
+        Body::Archive(doc) => {
+            let (tools, note, body) = (archive::tools(&t), archive::banner(doc, &t), archive::body(ui, &t));
+            return chrome::window(s, cx, ui, head, tools, Some(note), body, &archive::status(), &t);
+        }
+        _ => {}
+    }
     let (body, status) = match (states::body(&ui.file, &t), states::status(&ui.file.body)) {
         (Some(body), Some(status)) => (body, status),
         _ => return crate::shell::placeholder::window(s, cx, FrameGroup::Viewer),
@@ -591,6 +642,12 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
 /// left the file, and [`sync`] drops it here.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     sync(s);
+    if media::on_key(s, ev) {
+        if let Some(key) = ui(s).and_then(|ui| ui.focus.take()) {
+            tx.focus(key, true);
+        }
+        return true;
+    }
     let Some(ui) = ui(s) else { return false };
     let handled = match &ev.key {
         // Alt+Shift+P: the details panel.
@@ -629,6 +686,12 @@ pub fn scene_file(frame: &str) -> Option<&'static str> {
         "DW-1512" => board::CODE,
         "DW-1527" => board::LOG,
         "DW-1513" | "DW-1519" | "DW-1523" | "DW-1524" | "DW-1525" | "DW-1526" => board::NOTES,
+        "DW-1501" | "DW-1502" => board::RAW,
+        "DW-1503" => board::AUDIO,
+        "DW-1505" => board::PDF,
+        "DW-1506" => board::PDF_FIND,
+        "DW-1514" => board::CSV,
+        "DW-1515" => board::ZIP,
         _ => return None,
     })
 }
@@ -646,8 +709,22 @@ pub fn set_scene(s: &mut State, frame: &str) {
     };
     open_from(s, Box::new(source), file);
     let Some(ui) = ui(s) else { return };
-    // The board draws the note and its saved version with the details panel open.
-    ui.show_details = matches!(frame, "DW-1513" | "DW-1524");
+    // The board draws the note, its saved version and the RAW's facts with the details panel open.
+    ui.show_details = matches!(frame, "DW-1513" | "DW-1524" | "DW-1502");
+    match frame {
+        // Ctrl+F, "terrace", Enter: the second of three.
+        "DW-1506" => {
+            ui.open_find();
+            if let Some(find) = ui.media.find.as_mut() {
+                find.edit.insert("terrace");
+                find.edit.focused = true;
+            }
+            ui.find_step(1);
+        }
+        // A press on the cell of the third row's amount.
+        "DW-1514" => ui.select_cell(2, 5),
+        _ => {}
+    }
     if matches!(frame, "DW-1523" | "DW-1524" | "DW-1525" | "DW-1526") {
         ui.edit();
         if let Some(editor) = ui.editor.as_mut() {
@@ -679,4 +756,11 @@ pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1524", |s| set_scene(s, "DW-1524")),
     ("DW-1525", |s| set_scene(s, "DW-1525")),
     ("DW-1526", |s| set_scene(s, "DW-1526")),
+    ("DW-1501", |s| set_scene(s, "DW-1501")),
+    ("DW-1502", |s| set_scene(s, "DW-1502")),
+    ("DW-1503", |s| set_scene(s, "DW-1503")),
+    ("DW-1505", |s| set_scene(s, "DW-1505")),
+    ("DW-1506", |s| set_scene(s, "DW-1506")),
+    ("DW-1514", |s| set_scene(s, "DW-1514")),
+    ("DW-1515", |s| set_scene(s, "DW-1515")),
 ];

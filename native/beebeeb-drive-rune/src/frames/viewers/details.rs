@@ -43,7 +43,8 @@ pub fn panel(file: &OpenFile, t: &Theme) -> El {
     } else {
         "Online only now"
     };
-    let sub = if d.size.is_empty() {
+    // A file that is not kept on this PC takes no room on it: no size after "Online only now".
+    let sub = if d.size.is_empty() || !d.offline {
         state.to_string()
     } else {
         format!("{state} \u{00B7} {}", d.size)
