@@ -81,7 +81,7 @@ pub fn flyout<S: 'static>(ui: &Ui, host: Host<S>, dark: bool) -> El {
     col()
         .key("fly")
         .role("dialog")
-        .label("Beebeeb")
+        .label(crate::shell::identity::AppIdentity::CURRENT.flyout_window_title())
         .size(SIZE.0, SIZE.1)
         .fill(t.card)
         .on_key(super::on_key(host))
