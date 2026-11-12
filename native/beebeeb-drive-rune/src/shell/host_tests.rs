@@ -81,7 +81,7 @@ fn files_is_the_registered_frame_and_draws_dw_0401() {
 #[test]
 fn an_unbuilt_route_draws_the_placeholder_that_names_its_group() {
     let (_, _, mut rt) = fixture();
-    go(&mut rt, Section::Photos);
+    go(&mut rt, Section::Backups);
     assert!(rt.find("not-built").is_some());
     assert!(
         rt.find("file-list").is_none(),
@@ -90,7 +90,10 @@ fn an_unbuilt_route_draws_the_placeholder_that_names_its_group() {
     assert!(rt.find("detail-pane").is_none());
     let texts = texts(&rt);
     assert!(texts.iter().any(|t| t == "NOT BUILT YET"), "{texts:?}");
-    assert!(texts.iter().any(|t| t == "Board: Photos (DW-0601)"), "{texts:?}");
+    assert!(
+        texts.iter().any(|t| t == "Board: Backups on Windows (DW-0737)"),
+        "{texts:?}"
+    );
     // The window's real chrome stays: caption and sidebar.
     assert!(rt.find("caption-bar").is_some());
     assert!(rt.find("sidebar").is_some());
