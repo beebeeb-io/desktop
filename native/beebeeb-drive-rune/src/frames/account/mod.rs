@@ -177,6 +177,13 @@ pub enum Dialog {
     ApproveExpired {
         handled: bool,
     },
+    /// No board frame: the server could not be reached, so the end is not known (`denying`:
+    /// the denial was not sent; else the approval may or may not have gone through).
+    ApproveUnsure {
+        denying: bool,
+    },
+    /// No board frame: Deny came after this PC's own approval had gone through.
+    ApproveTooLate,
 }
 
 impl Dialog {
@@ -189,7 +196,11 @@ impl Dialog {
             // DW-A13, DW-A14: the approval code is typed and shown.
             Dialog::ApproveReview | Dialog::ApproveHello => true,
             // DW-A15 to DW-A17: results; the code is wiped before they show.
-            Dialog::ApproveApproved | Dialog::ApproveDenied | Dialog::ApproveExpired { .. } => false,
+            Dialog::ApproveApproved
+            | Dialog::ApproveDenied
+            | Dialog::ApproveExpired { .. }
+            | Dialog::ApproveUnsure { .. }
+            | Dialog::ApproveTooLate => false,
             // Confirmations without key material.
             Dialog::SignOutDevice(_)
             | Dialog::SignOutElsewhere

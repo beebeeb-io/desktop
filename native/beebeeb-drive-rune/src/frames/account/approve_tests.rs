@@ -3,7 +3,8 @@
 
 use super::approve::{
     self, BOARD_REQUEST_CODE, CANCELLED_REQUEST_CODE, CODE_KEY, DROPPED_REQUEST_CODE, EXPIRED_REQUEST_CODE,
-    HANDLED_REQUEST_CODE, Lookup, OFFLINE_REQUEST_CODE, UNUSUAL_REQUEST_CODE,
+    FOUND_LATER_REQUEST_CODE, HANDLED_REQUEST_CODE, Lookup, OFFLINE_REQUEST_CODE, UNKNOWN_REQUEST_CODE,
+    UNUSUAL_REQUEST_CODE,
 };
 use super::source::{AccountSource, BoardAccount};
 use super::{Dialog, Pane};
@@ -653,4 +654,106 @@ fn with_two_requests_waiting_the_clicked_one_is_reviewed_and_deny_ends_it() {
         "Germany",
         "and the other one by its own toast"
     );
+}
+
+/// Every text the window shows now.
+fn all_words(rt: &Runtime<State>) -> String {
+    rt.elements()
+        .iter()
+        .filter(|e| !e.exiting)
+        .filter_map(|e| e.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Review P2-3: the connection goes after Windows Hello, with the claim sent. The screen says
+/// the result is not known and never "nothing was approved"; a later word that is not
+/// "approved" does not change that.
+#[test]
+fn an_approval_whose_result_is_not_known_says_so_and_never_that_nothing_was_approved() {
+    let mut rt = review_of(UNKNOWN_REQUEST_CODE);
+    click(&mut rt, "btn-0");
+    for _ in 0..4 {
+        settle(&mut rt);
+    }
+    assert_eq!(dialog(&rt), Some(Dialog::ApproveUnsure { denying: false }));
+    assert_eq!(says(&rt, "dlg-title"), "Result not known");
+    let words = all_words(&rt);
+    assert!(
+        words.contains("does not know whether Anna's iPhone was signed in"),
+        "{words}"
+    );
+    assert!(!words.contains("Nothing was approved"), "{words}");
+    assert!(rt.state.account.approve.code.text.is_empty(), "the code is wiped");
+    assert_eq!(info(&rt, "dlg").role, "alertdialog");
+    click(&mut rt, "btn-0");
+    assert_eq!(
+        rt.state.account.pane,
+        Pane::Sessions,
+        "the button leads to Devices and sessions"
+    );
+}
+
+/// Review P2-3: the same, and a later check finds the request approved: the screen says so.
+#[test]
+fn a_result_that_was_not_known_becomes_approved_when_a_later_check_says_so() {
+    let mut rt = review_of(FOUND_LATER_REQUEST_CODE);
+    rt.update(|s, _| approve::press_approve(s));
+    rt.update(|s, _| assert!(approve::poll(s)));
+    assert_eq!(dialog(&rt), Some(Dialog::ApproveUnsure { denying: false }));
+    for _ in 0..3 {
+        settle(&mut rt);
+    }
+    assert_eq!(dialog(&rt), Some(Dialog::ApproveApproved));
+    assert_eq!(says(&rt, "dlg-title"), "Approved");
+}
+
+/// Review P2-3: Deny with no connection. The denial was not sent, so the screen does not say
+/// "Denied" or "no keys were shared": the request is still open, and Deny can be tried again.
+#[test]
+fn a_denial_that_could_not_be_sent_says_the_request_is_still_open() {
+    let mut rt = review_of(DROPPED_REQUEST_CODE);
+    click(&mut rt, "btn-1");
+    assert_eq!(dialog(&rt), Some(Dialog::ApproveUnsure { denying: true }));
+    assert_eq!(says(&rt, "dlg-title"), "Not denied");
+    let words = all_words(&rt);
+    assert!(words.contains("the request is still open"), "{words}");
+    assert!(
+        !words.contains("no keys were shared") && !words.contains("Nothing was approved"),
+        "{words}"
+    );
+    let denials = |rt: &Runtime<State>| wire(rt).iter().filter(|l| l.contains("/deny")).count();
+    assert_eq!(denials(&rt), 1);
+    click(&mut rt, "btn-0");
+    assert_eq!(denials(&rt), 2, "Try again sends the denial again");
+    click(&mut rt, "btn-1");
+    assert_eq!(rt.state.account.pane, Pane::Account, "Close leads back to Account");
+}
+
+/// Review P2-3: Deny just after Windows Hello succeeded, with the claim already on its way.
+/// The end says what happened: this PC approved it, and where to undo that.
+#[test]
+fn a_denial_that_loses_to_this_pcs_own_approval_says_what_happened() {
+    let mut rt = on_code_page();
+    rt.update(|s, _| s.account.source = Some(Box::new(BoardAccount::new().late_answers())));
+    type_(&mut rt, &BOARD_REQUEST_CODE.replace('-', ""));
+    rt.update(|s, _| {
+        assert_eq!(approve::look_up_for_tests(s), Some("DW-A13"));
+        crate::frames::account::go(s, "DW-A13");
+        approve::press_approve(s);
+        assert!(approve::on_escape(s), "Esc on Windows Hello is Deny");
+    });
+    for _ in 0..3 {
+        settle(&mut rt);
+    }
+    assert_eq!(dialog(&rt), Some(Dialog::ApproveTooLate));
+    assert_eq!(says(&rt, "dlg-title"), "Already approved");
+    let words = all_words(&rt);
+    assert!(words.contains("Drive is signed in on Anna's iPhone"), "{words}");
+    assert!(
+        !words.contains("Denied") && !words.contains("no keys were shared"),
+        "{words}"
+    );
+    click(&mut rt, "btn-0");
+    assert_eq!(rt.state.account.pane, Pane::Sessions);
 }

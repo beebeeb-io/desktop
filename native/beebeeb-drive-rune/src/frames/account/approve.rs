@@ -70,7 +70,12 @@ pub enum Approval {
     Expired,
     /// Another device answered first.
     AlreadyHandled,
+    /// The server could not be reached and the claim was provably NOT sent: nothing was
+    /// approved. A source that cannot prove that answers `Unknown`.
     Offline,
+    /// The claim was sent and its result is not known (the connection went after Windows Hello).
+    /// The source keeps checking: it may answer `Approved` for the same request later.
+    Unknown,
 }
 
 /// How a denial ended.
@@ -79,6 +84,10 @@ pub enum Denial {
     Denied,
     Expired,
     AlreadyHandled,
+    /// This PC's own approval went through before the denial: that device is signed in.
+    ApprovedHere,
+    /// The server could not be reached: the denial was not sent, the request is still open.
+    Offline,
 }
 
 /// The codes of the fixture's waiting sign-in requests: the board's (DW-A12, DW-A13), one that
@@ -92,6 +101,10 @@ pub const UNUSUAL_REQUEST_CODE: &str = "N3WP-L4C3";
 /// The server cannot be reached for the lookup; and for the approval, after Windows Hello.
 pub const OFFLINE_REQUEST_CODE: &str = "0FFL-1NE0";
 pub const DROPPED_REQUEST_CODE: &str = "DR0P-5NET";
+/// The connection goes after Windows Hello, with the claim sent: the result is not known. For
+/// the second one a later check finds it approved.
+pub const UNKNOWN_REQUEST_CODE: &str = "UNKN-0WN0";
+pub const FOUND_LATER_REQUEST_CODE: &str = "L4T3-R0K0";
 
 /// The board's waiting request (DW-A13): Drive on Anna's iPhone, asked from Germany.
 pub fn board_request(id: &str, country: &str, unusual_place: bool) -> SignInRequest {
@@ -116,6 +129,8 @@ pub fn board_lookup(code: &str) -> Lookup {
         CANCELLED_REQUEST_CODE => ("req-cancelled", "Germany", false),
         UNUSUAL_REQUEST_CODE => ("req-unusual", "Brazil", true),
         DROPPED_REQUEST_CODE => ("req-dropped", "Germany", false),
+        UNKNOWN_REQUEST_CODE => ("req-unknown", "Germany", false),
+        FOUND_LATER_REQUEST_CODE => ("req-found-later", "Germany", false),
         OFFLINE_REQUEST_CODE => return Lookup::Offline,
         _ => return Lookup::NotFound,
     };
@@ -350,6 +365,8 @@ fn deny(s: &mut State) {
         Denial::Denied => Dialog::ApproveDenied,
         Denial::Expired => Dialog::ApproveExpired { handled: false },
         Denial::AlreadyHandled => Dialog::ApproveExpired { handled: true },
+        Denial::ApprovedHere => Dialog::ApproveTooLate,
+        Denial::Offline => Dialog::ApproveUnsure { denying: true },
     };
     finish(ui, end);
 }
@@ -375,6 +392,16 @@ pub fn poll(s: &mut State) -> bool {
     // An answer names its request. One that is not for the wait that is open (a prompt that was
     // left, a request that is not the one on screen) is taken and dropped.
     let answer = source.approval_answer();
+    if ui.dialog == Some(Dialog::ApproveUnsure { denying: false }) {
+        // The result was not known. Only "approved", for this request, settles it: any other
+        // late word cannot say whether this PC's claim went through.
+        let settled = matches!((&answer, ui.approve.request.as_ref()),
+            (Some((id, Approval::Approved)), Some(shown)) if *id == shown.id);
+        if settled {
+            finish(ui, Dialog::ApproveApproved);
+        }
+        return settled;
+    }
     if ui.approve.waiting && ui.dialog == Some(Dialog::ApproveHello) {
         let Some((id, answer)) = answer else {
             return false;
@@ -389,10 +416,12 @@ pub fn poll(s: &mut State) -> bool {
             Approval::AlreadyHandled => finish(ui, Dialog::ApproveExpired { handled: true }),
             // Back to the review; nothing was sent.
             Approval::Cancelled => ui.dialog = Some(Dialog::ApproveReview),
+            // Provably not sent: back to the review, which says so.
             Approval::Offline => {
                 ui.approve.problem = Some(Problem::Offline);
                 ui.dialog = Some(Dialog::ApproveReview);
             }
+            Approval::Unknown => finish(ui, Dialog::ApproveUnsure { denying: false }),
         }
         return true;
     }
@@ -412,8 +441,13 @@ pub fn poll(s: &mut State) -> bool {
 pub fn on_escape(s: &mut State) -> bool {
     match s.account.dialog {
         Some(Dialog::ApproveReview | Dialog::ApproveHello) => deny(s),
-        Some(Dialog::ApproveApproved | Dialog::ApproveDenied) => super::go(s, "DW-A55"),
-        Some(Dialog::ApproveExpired { .. }) => super::go(s, "DW-A51"),
+        Some(
+            Dialog::ApproveApproved
+            | Dialog::ApproveDenied
+            | Dialog::ApproveTooLate
+            | Dialog::ApproveUnsure { denying: false },
+        ) => super::go(s, "DW-A55"),
+        Some(Dialog::ApproveExpired { .. } | Dialog::ApproveUnsure { denying: true }) => super::go(s, "DW-A51"),
         _ => return false,
     }
     true
@@ -869,6 +903,66 @@ fn expired(handled: bool, t: &Theme) -> El {
     shell("alertdialog", title, children, one_button("Done", "DW-A51", t), t)
 }
 
+/// No board frame. The server could not be reached, so this PC cannot say how the request
+/// ended, and says exactly that: never "nothing was approved".
+fn unsure(denying: bool, request: &SignInRequest, t: &Theme) -> El {
+    if denying {
+        let children = result_head(
+            &icons::CLOCK,
+            Tone::Neutral,
+            "Not denied",
+            "Beebeeb can't be reached, so the request is still open. It closes by itself 5 minutes after it was asked.",
+            t,
+        );
+        let (again, again_b) = foot_button(0, "Try again", Look::Plain, false, t);
+        let (close, close_b) = foot_button(1, "Close", Look::Plain, false, t);
+        let foot = vec![
+            (again.on_press(deny), again_b),
+            (close.on_press(|s: &mut State| super::go(s, "DW-A51")), close_b),
+        ];
+        return shell("alertdialog", "Not denied", children, foot, t);
+    }
+    let children = result_head(
+        &icons::CLOCK,
+        Tone::Neutral,
+        "Result not known",
+        &format!(
+            "Beebeeb could not be reached after Windows Hello, so this PC does not know whether {} was signed in. It keeps checking. A new session in Devices and sessions means it was.",
+            request.device
+        ),
+        t,
+    );
+    shell(
+        "alertdialog",
+        "Result not known",
+        children,
+        one_button("Check devices and sessions", "DW-A55", t),
+        t,
+    )
+}
+
+/// No board frame. Deny came after this PC's own approval had gone through: say what happened
+/// and where to undo it.
+fn too_late(request: &SignInRequest, t: &Theme) -> El {
+    let children = result_head(
+        &icons::CHECK,
+        Tone::Neutral,
+        "Already approved",
+        &format!(
+            "This PC's approval reached Beebeeb before the denial. {} is signed in on {}. Sign that device out in Devices and sessions if that was a mistake.",
+            request.product, request.device
+        ),
+        t,
+    );
+    shell(
+        "alertdialog",
+        "Already approved",
+        children,
+        one_button("See devices and sessions", "DW-A55", t),
+        t,
+    )
+}
+
 /// The pane under this flow's dialogs, and the dialog that is open.
 pub fn review_pane(source: &dyn AccountSource, a: &Approve, dialog: Option<&Dialog>, t: &Theme) -> (El, Option<El>) {
     let over = match (dialog, a.request.as_ref()) {
@@ -877,6 +971,8 @@ pub fn review_pane(source: &dyn AccountSource, a: &Approve, dialog: Option<&Dial
         (Some(Dialog::ApproveApproved), Some(request)) => Some(approved(request, t)),
         (Some(Dialog::ApproveDenied), Some(request)) => Some(denied(request, t)),
         (Some(Dialog::ApproveExpired { handled }), _) => Some(expired(*handled, t)),
+        (Some(Dialog::ApproveUnsure { denying }), Some(request)) => Some(unsure(*denying, request, t)),
+        (Some(Dialog::ApproveTooLate), Some(request)) => Some(too_late(request, t)),
         _ => None,
     };
     (behind(source, t), over)
