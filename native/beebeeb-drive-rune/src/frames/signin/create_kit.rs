@@ -88,7 +88,8 @@ pub fn steps_line(step: usize, name: &str, t: &Theme) -> El {
 }
 
 /// A real checkbox with its full sentence as its name. Keys `check-<i>`, `-icon`, `-label`.
-pub fn checkbox(k: &mut Keys, on: bool, sentence: &str, t: &Theme) -> El {
+/// `wraps`: the sentence fills the row and breaks (in the terms card); else it is as wide as its words.
+pub fn checkbox(k: &mut Keys, on: bool, sentence: &str, wraps: bool, t: &Theme) -> El {
     let key = k.next("check");
     let mut tick = el()
         .key(key.clone())
@@ -101,6 +102,7 @@ pub fn checkbox(k: &mut Keys, on: bool, sentence: &str, t: &Theme) -> El {
     if on {
         tick = tick.child(kit::glyph(format!("{key}-icon"), &TICK, 12.0, Color::WHITE));
     }
+    let words = kit::label(format!("{key}-label"), sentence, CHECK_LABEL, t.text_secondary).a11y_hidden();
     row()
         .key(format!("{key}-row"))
         .role("checkbox")
@@ -114,13 +116,48 @@ pub fn checkbox(k: &mut Keys, on: bool, sentence: &str, t: &Theme) -> El {
         .radius(4.0)
         .cursor(rune::Cursor::Pointer)
         .child(tick)
+        .child(if wraps {
+            words.wrap().grow(1.0).min_w(0.0)
+        } else {
+            words
+        })
+}
+
+/// A row of a list that opens a page (`.kit-item` with a second line set as `.t-sub`: 12px/400,
+/// where `au::item` sets it as a caption). Keys as `au::item`'s.
+pub fn page_item(k: &mut Keys, icon: &'static Icon, title: &str, sub: &str, chevron: &'static Icon, t: &Theme) -> El {
+    let key = k.next("item");
+    let mut r = row()
+        .key(key.clone())
+        .w_full()
+        .h(40.0)
+        .px(10.0)
+        .gap(8.0)
+        .center_y()
         .child(
-            kit::label(format!("{key}-label"), sentence, CHECK_LABEL, t.text_secondary)
-                .a11y_hidden()
-                .wrap()
-                .grow(1.0)
-                .min_w(0.0),
+            el().w(30.0)
+                .center()
+                .child(kit::glyph(format!("{key}-icon"), icon, 18.0, t.text_secondary)),
         )
+        .child(
+            col()
+                .gap(1.0)
+                .grow(1.0)
+                .min_w(0.0)
+                .child(kit::label(format!("{key}-title"), title, type_::ITEM_TITLE, t.text))
+                .child(kit::label(format!("{key}-sub"), sub, type_au::SUB, t.text_tertiary)),
+        )
+        .child(kit::glyph(format!("{key}-chev"), chevron, 14.0, t.text_quaternary));
+    if !key.ends_with("-0") {
+        r = r.child(
+            el().key(format!("{key}-rule"))
+                .absolute(48.0, 0.0)
+                .w(296.0)
+                .h(kit::HAIR)
+                .fill(t.separator),
+        );
+    }
+    r
 }
 
 /// A suggestion (`.kit-chip`): the word as a secure text node, because which words are
@@ -221,7 +258,7 @@ pub fn next_card(icon: &'static Icon, step: &str, t: &Theme) -> El {
                 .a11y_hidden()
                 .size(40.0, 40.0)
                 .radius(11.0)
-                .fill(t.separator)
+                .fill(au::tone(Tone::Ink, t).2)
                 .center()
                 .child(kit::glyph("next-0-icon", icon, 20.0, t.text)),
         )

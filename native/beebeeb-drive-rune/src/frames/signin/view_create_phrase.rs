@@ -108,7 +108,7 @@ pub fn phrase(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         ))
         .child(row().w_full().gap(10.0).center_y().child(copy).child(save).child(print))
         .child(
-            ck::checkbox(k, ui.phrase_saved(), "I have saved my recovery phrase offline.", t)
+            ck::checkbox(k, ui.phrase_saved(), "I have saved my recovery phrase offline.", false, t)
                 .on_press_tx(cact(Ui::toggle_saved)),
         )
         .child(actions(6.0).child(primary(

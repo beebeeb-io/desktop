@@ -220,28 +220,24 @@ fn terms(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     };
     let rows = vec![
         page(
-            au::item(
+            ck::page_item(
                 k,
                 &crate::theme::icons::DOC_GENERIC,
                 "Terms of Service",
-                Some("Opens beebeeb.io/terms"),
-                None,
-                Some(&icons::CHEVRON),
-                false,
+                "Opens beebeeb.io/terms",
+                &icons::CHEVRON,
                 t,
             ),
             "Terms of Service",
             |ui| ui.open_page(Intent::OpenTerms),
         ),
         page(
-            au::item(
+            ck::page_item(
                 k,
                 &icons::SHIELD,
                 "Privacy Policy",
-                Some("Opens beebeeb.io/privacy"),
-                None,
-                Some(&icons::CHEVRON),
-                false,
+                "Opens beebeeb.io/privacy",
+                &icons::CHEVRON,
                 t,
             ),
             "Privacy Policy",
@@ -263,6 +259,7 @@ fn terms(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
                     k,
                     accepted,
                     "I accept the Terms of Service and the Privacy Policy.",
+                    true,
                     t,
                 )
                 .on_press_tx(cact(Ui::toggle_accepted)),
@@ -272,6 +269,7 @@ fn terms(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
                     k,
                     understood,
                     "I understand that Beebeeb cannot recover my account if I lose both my password and my recovery phrase.",
+                    true,
                     t,
                 )
                 .on_press_tx(cact(Ui::toggle_understood)),
