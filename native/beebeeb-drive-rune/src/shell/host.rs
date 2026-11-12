@@ -421,13 +421,13 @@ pub fn request(s: &mut State, intent: Intent) -> Outcome {
 /// section by writing `State::sidebar_section`; this turns that write into a navigation, so
 /// the sidebar already routes. A ui lane that calls [`dispatch`] itself makes this a no-op.
 pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
-    let mut changed = poll_screen(s, tx);
+    let mut changed = poll_screen(s, _seconds, tx);
     changed |= poll_capture(s, tx);
     changed
 }
 
 /// Everything a poll does but the capture decision.
-fn poll_screen(s: &mut State, tx: &mut Tx) -> bool {
+fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // The open file: the engine's answers, and a route that left it (lane f-viewers).
     let mut changed = crate::frames::viewers::poll(s, tx);
     // The engine's answers that arrive between presses (a sign-in that took a second, the other device).
