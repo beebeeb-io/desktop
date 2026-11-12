@@ -106,6 +106,12 @@ fn no_phrase_copy_outlives_the_call() {
         normalized.contains("zeroize::Zeroizing::new(String::with_capacity(input.len()))"),
         "one wiping buffer, sized up front:\n{normalized}"
     );
+    // A `.to_string()` in an `Err("…".to_string())` return is a string literal, not a copy of the phrase.
+    let without_err_returns: String = normalized
+        .lines()
+        .filter(|l| !(l.trim_start().starts_with("return Err(") && l.contains(".to_string()")))
+        .collect::<Vec<_>>()
+        .join("\n");
     for copy in [
         ".collect",
         "String::new",
@@ -115,7 +121,10 @@ fn no_phrase_copy_outlives_the_call() {
         ".join(",
         "Vec<String>",
     ] {
-        assert!(!normalized.contains(copy), "normalized_phrase makes a copy with {copy}");
+        assert!(
+            !without_err_returns.contains(copy),
+            "normalized_phrase makes a copy with {copy}"
+        );
     }
     let proof = body(&recovery, "pub async fn verify_vault_key_from_phrase(");
     assert!(

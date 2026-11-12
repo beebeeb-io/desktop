@@ -82,6 +82,13 @@ mod tests {
         };
         std::fs::write(&lock, held_by(std::process::id())).unwrap();
         assert!(os.engine_lock_held(dir.path()), "a live process holds it");
+        // A dead process's lock is free (acquire would overwrite it). PID 4_000_000_000 is above Linux's
+        // default `pid_max` (4_194_304) and Windows' ceiling, so it is not alive on any test machine.
+        std::fs::write(&lock, held_by(4_000_000_000)).unwrap();
+        assert!(
+            !os.engine_lock_held(dir.path()),
+            "a dead process's lock is free (acquire would overwrite it)"
+        );
         std::fs::write(&lock, "not json").unwrap();
         assert!(
             !os.engine_lock_held(dir.path()),
