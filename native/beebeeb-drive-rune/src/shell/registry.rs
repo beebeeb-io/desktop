@@ -200,6 +200,12 @@ pub const FRAMES: &[Frame] = &[
         on_key: Some(crate::frames::signin::setup::on_key),
         feedback: FeedbackPolicy::Denied("its lane has not opted in yet"),
     },
+    Frame {
+        group: FrameGroup::Viewer,
+        view: crate::frames::viewers::frame,
+        on_key: Some(crate::frames::viewers::on_key),
+        feedback: FeedbackPolicy::Denied("an open file shows its decrypted content"),
+    },
 ];
 
 /// The flyout's content, once the tray lane builds it: `Some(crate::frames::tray::view)`.

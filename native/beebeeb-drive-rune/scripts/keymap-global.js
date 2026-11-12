@@ -17,7 +17,8 @@
   };
   const banner = q('.mk-tb + .mk-banner');
   // Not in Sync history and Available offline: their note is keyed in keymap-this-pc.js (`note-icon`).
-  if (banner && groupOf !== 'this-pc') {
+  // Not over an open file: keymap-viewers.js keys its banner (`banner-btn`).
+  if (banner && groupOf !== 'this-pc' && groupOf !== 'viewers') {
     api.box('banner', banner, { ...gcss(banner), role: banner.getAttribute('role') || '' });
     api.icon('banner-icon', q(':scope > svg', banner));
     const tx = q(':scope > .tx', banner);
