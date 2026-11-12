@@ -37,6 +37,7 @@ describe('PersonDialog safety-number state (delta 1)', () => {
   const Segmented = () => null
   const PersonDialog = loadComponent('v2/sections/shared/Dialogs.tsx', 'PersonDialog', {
     React: { createElement, Fragment }, Modal, Icon, Segmented, BTN: '', RED_TEXT: '', FOCUS: '', safetyState: (model as any).safetyState,
+    MARK_UNREADABLE: (model as any).MARK_UNREADABLE,
   })
   const shown = (member: Record<string, unknown>) =>
     textOf(expand(PersonDialog({ member: { id: 'm', name: 'Jonas Meier', email: 'jonas@northwind.studio', ...member } })))

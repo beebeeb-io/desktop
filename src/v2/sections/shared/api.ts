@@ -4,7 +4,7 @@
 import { DriveSourceError } from '@beebeeb/shared/drive-ui'
 import { command, commandUnavailableLabel, type CommandResult } from '../../../desktopApi'
 import { actionFailure } from '../files/model'
-import type { Access, FileRequestRow, Invitation, LinkShare, Member } from './model'
+import { MARK_UNREADABLE, type Access, type FileRequestRow, type Invitation, type LinkShare, type Member } from './model'
 import { publishCount } from '../../chrome/counts'
 
 export interface ShareLists { invitations: Invitation[]; links: LinkShare[]; requests: FileRequestRow[]; pending: string[] }
@@ -77,5 +77,6 @@ export function failureText(r: CommandResult<unknown>): string {
   if (/^signed-out/.test(r.reason)) return 'You’re signed out. Sign in again, then try again.'
   if (/^rate_limited/.test(r.reason)) return 'Too many attempts. Wait a minute, then try again.'
   if (/^(invalid_credentials|wrong_code)/.test(r.reason)) return 'That didn’t work. Check it and try again.'
+  if (/^mark_unreadable/.test(r.reason)) return MARK_UNREADABLE
   return 'Something went wrong. Try again.'
 }
