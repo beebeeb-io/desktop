@@ -812,3 +812,44 @@ pub(crate) async fn drive_save_bytes(
     events::changed(&app, parent);
     Ok(serde_json::json!({ "versionId": version_id }))
 }
+
+/// The source of `drive_save_copy`: the file's path in the sync root and its name for the dialog.
+/// A folder is refused before any dialog opens.
+pub(super) fn save_copy_source(
+    db: &StateDb,
+    root: &std::path::Path,
+    id: &str,
+) -> Result<(PathBuf, String), DriveError> {
+    let entry = model::resolve(db, id)?;
+    if entry.is_dir() {
+        return Err(DriveError::NotFound);
+    }
+    let path = fsops::full_path(root, &entry.path)?;
+    let name = crate::vault_tree::folder_leaf_name(&entry.path).ok_or(DriveError::NotFound)?;
+    Ok((path, name))
+}
+
+/// Save a copy: the person picks a path outside the sync root and the file's bytes are written
+/// there. `true` when a copy was written, `false` when the dialog was cancelled. The picked path
+/// never reaches the web view.
+#[tauri::command]
+pub(crate) async fn drive_save_copy(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Answer<bool> {
+    require_session(&state)?;
+    let (src, name, root) = blocking(move || {
+        let (db, root) = local_required()?;
+        let (src, name) = save_copy_source(&db, &root, &id)?;
+        Ok((src, name, root))
+    })
+    .await?;
+    let picked =
+        tauri::async_runtime::spawn_blocking(move || app.dialog().file().set_file_name(&name).blocking_save_file())
+            .await
+            .map_err(|_| String::from(DriveError::Failed("task")))?;
+    let Some(dest) = picked.and_then(|p| p.into_path().ok()) else {
+        return Ok(false);
+    };
+    // A sign-out or Lock during the dialog refuses the copy.
+    require_session(&state)?;
+    blocking(move || fsops::copy_out(&root, &src, &dest)).await?;
+    Ok(true)
+}

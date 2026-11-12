@@ -2,7 +2,7 @@
 //! and sync root stand in for the engine's), plus the DTO no-secret guard (spec 2.1).
 
 use super::DriveError;
-use super::commands::{check_trashable, frame, remember_undo, take_undo, unframe};
+use super::commands::{check_trashable, frame, remember_undo, save_copy_source, take_undo, unframe};
 use super::dto::*;
 use super::fsops;
 use super::model::{self, Sort, SortDir, SortKey};
@@ -571,6 +571,87 @@ fn drive_v2_open_and_reveal_stay_inside_the_sync_root() {
         fsops::full_path(&f.root, "../outside.txt").unwrap_err(),
         DriveError::NotFound
     );
+}
+
+mod drive_save_copy {
+    use super::*;
+
+    #[test]
+    fn copy_out_writes_the_bytes() {
+        let f = fixture();
+        drive(&f);
+        let src = f.root.join("Docs").join("notes.txt");
+        let out = tempfile::tempdir().unwrap();
+        let dest = out.path().join("notes.txt");
+        fsops::copy_out(&f.root, &src, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), std::fs::read(&src).unwrap());
+        assert!(!out.path().join("notes.txt.bb-tmp").exists(), "no temp left behind");
+    }
+
+    #[test]
+    fn copy_out_refuses_an_existing_file() {
+        let f = fixture();
+        drive(&f);
+        let src = f.root.join("Docs").join("notes.txt");
+        let out = tempfile::tempdir().unwrap();
+        let dest = out.path().join("notes.txt");
+        std::fs::write(&dest, "mine").unwrap();
+        assert_eq!(fsops::copy_out(&f.root, &src, &dest).unwrap_err(), DriveError::Conflict);
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "mine", "never an overwrite");
+    }
+
+    #[test]
+    fn copy_out_leaves_no_temp_behind() {
+        let f = fixture();
+        drive(&f);
+        let src = f.root.join("Docs").join("notes.txt");
+        let out = tempfile::tempdir().unwrap();
+        // A copy that succeeds leaves no temp either.
+        let ok = out.path().join("ok.txt");
+        fsops::copy_out(&f.root, &src, &ok).unwrap();
+        assert!(!out.path().join("ok.txt.bb-tmp").exists(), "no temp left behind");
+        // An unwritable destination directory: a file stands where the folder must be.
+        let blocker = out.path().join("blocker");
+        std::fs::write(&blocker, "file").unwrap();
+        let blocked = blocker.join("notes.txt");
+        assert!(fsops::copy_out(&f.root, &src, &blocked).is_err());
+        assert!(!blocked.exists(), "no partial destination");
+        // A failure after the temp exists (a folder source): the temp is removed again.
+        let dest = out.path().join("Docs");
+        assert!(fsops::copy_out(&f.root, &f.root.join("Docs"), &dest).is_err());
+        assert!(!dest.exists(), "no partial destination");
+        assert!(!out.path().join("Docs.bb-tmp").exists(), "no temp left behind");
+    }
+
+    #[test]
+    fn copy_out_refuses_a_folder_entry() {
+        let f = fixture();
+        drive(&f);
+        assert_eq!(
+            save_copy_source(&f.db, &f.root, "d0c5").unwrap_err(),
+            DriveError::NotFound,
+            "a folder is never saved as a copy"
+        );
+        assert_eq!(
+            save_copy_source(&f.db, &f.root, "missing").unwrap_err(),
+            DriveError::NotFound
+        );
+    }
+
+    #[test]
+    fn copy_out_refuses_a_destination_inside_the_sync_root() {
+        let f = fixture();
+        drive(&f);
+        let src = f.root.join("Docs").join("notes.txt");
+        for dest in [f.root.join("copy.txt"), f.root.join("Docs").join("copy.txt")] {
+            assert_eq!(
+                fsops::copy_out(&f.root, &src, &dest).unwrap_err(),
+                DriveError::Failed("inside the sync folder")
+            );
+            assert!(!dest.exists(), "nothing written");
+        }
+        assert!(!f.root.join("copy.txt.bb-tmp").exists());
+    }
 }
 
 #[test]
