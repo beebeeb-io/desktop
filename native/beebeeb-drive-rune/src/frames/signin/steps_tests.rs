@@ -7,13 +7,13 @@ use rune::{Key, Runtime};
 use super::source::{
     FixtureSignInSource, NextAfterSignIn, PasskeyOutcome, PhraseProblem, Script, SignInAnswer, TwoFactorProblem, board,
 };
-use super::steps::{BACKUP_KEY, CODE_KEY, Pictured, WORD_KEYS};
+use super::steps::{BACKUP_KEY, CODE_KEY, CONFIRM_KEY, Pictured, WORD_KEYS};
 use super::tests::{click, focused, has, info, press, readable, runtime, runtime_of, space, tab_to, ui};
-use super::{FRAMES, Intent, PASSWORD_KEY, Screen, TITLE_KEY, Ui, scene};
+use super::{EMAIL_KEY, FRAMES, Intent, PASSWORD_KEY, Screen, TITLE_KEY, Ui, scene};
 use crate::State;
 use crate::ui::kit;
 
-const BUILT: [(&str, &str); 11] = [
+const BUILT: [(&str, &str); 15] = [
     ("DW-A23", "Set up this device"),
     ("DW-A24", "Set up this device"),
     ("DW-A25", "We can't restore your keys"),
@@ -24,6 +24,10 @@ const BUILT: [(&str, &str); 11] = [
     ("DW-A30", "Unlock your vault"),
     ("DW-A45", "Trouble signing in?"),
     ("DW-A46", "We cannot recover your account"),
+    ("DW-A47", "Recover with your phrase"),
+    ("DW-A48", "Recover with your phrase"),
+    ("DW-A49", "Set a new password"),
+    ("DW-A50", "Password updated"),
     ("DW-A63", "Sign in to Drive"),
 ];
 
@@ -98,6 +102,10 @@ fn every_scene_keeps_the_products_secure_fields() {
         assert!(
             ui.password.is_secure() && !ui.password.is_revealed(),
             "{frame}: the password"
+        );
+        assert!(
+            ui.confirm.is_secure() && !ui.confirm.is_revealed(),
+            "{frame}: its confirmation"
         );
     }
     let running = super::start().expect("a state");
@@ -223,6 +231,8 @@ fn back_from_the_code_discards_the_partial_sign_in_and_a_late_answer_changes_not
     ui_.apply(super::source::SignInEvent::PhraseRestored(Ok(NextAfterSignIn::Drive)));
     ui_.apply(super::source::SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::Drive)));
     ui_.apply(super::source::SignInEvent::Passkey(PasskeyOutcome::NeedsPassword));
+    ui_.apply(super::source::SignInEvent::RecoveryPhraseVerified(Ok(())));
+    ui_.apply(super::source::SignInEvent::PasswordSet(Ok(())));
     assert!(ui_.take_intents().is_empty());
     assert_eq!(ui_.screen, Screen::SignIn);
 }
@@ -505,7 +515,9 @@ fn forgot_password_offers_three_honest_options_from_the_keyboard() {
     }
     tab_to(&mut rt, "btn-0");
     press(&mut rt, Key::Enter);
-    assert_eq!(ui(&mut rt).take_intents(), vec![Intent::RecoverWithPhrase]);
+    assert_eq!(ui(&mut rt).screen, Screen::Recover, "Recover with phrase");
+    press(&mut rt, Key::Escape);
+    assert_eq!(ui(&mut rt).screen, Screen::Forgot, "Escape is the back link");
     tab_to(&mut rt, "btn-2");
     space(&mut rt);
     assert_eq!(ui(&mut rt).screen, Screen::CannotRecover);
@@ -576,6 +588,8 @@ fn a_scenes_pictured_focus_goes_with_the_first_key_or_press() {
         ("DW-A23", Pictured::Word(5), "word-5-caret"),
         ("DW-A28", Pictured::BackupCode, "field-0-caret"),
         ("DW-A30", Pictured::VaultPassword, "field-0-caret"),
+        ("DW-A47", Pictured::Word(8), "word-8-caret"),
+        ("DW-A49", Pictured::NewPassword, "field-0-caret"),
     ] {
         let mut rt = runtime(frame);
         assert_eq!(ui(&mut rt).pictured(), Some(pictured), "{frame}");
@@ -583,7 +597,7 @@ fn a_scenes_pictured_focus_goes_with_the_first_key_or_press() {
         let field = match pictured {
             Pictured::Word(i) => WORD_KEYS[i],
             Pictured::BackupCode => BACKUP_KEY,
-            Pictured::VaultPassword => PASSWORD_KEY,
+            Pictured::VaultPassword | Pictured::NewPassword => PASSWORD_KEY,
         };
         click(&mut rt, field);
         type_(&mut rt, "a1");
@@ -593,4 +607,107 @@ fn a_scenes_pictured_focus_goes_with_the_first_key_or_press() {
     let mut rt = runtime("DW-A23");
     click(&mut rt, "back-link");
     assert_eq!(ui(&mut rt).pictured(), None, "a press clears it");
+}
+
+// ---------------------------------------------------------------------------
+// Recovery with the phrase
+// ---------------------------------------------------------------------------
+
+#[test]
+fn recovery_proves_the_phrase_then_sets_a_new_password_from_the_keyboard() {
+    const NEW: &str = "Moss-trail-9xQ";
+    assert_eq!(NEW.chars().count(), board::PASSWORD_LEN);
+    let (mut rt, calls) = form(Script::default());
+    click(&mut rt, "link-0-box");
+    tab_to(&mut rt, "btn-0");
+    press(&mut rt, Key::Enter);
+    assert_eq!(ui(&mut rt).screen, Screen::Recover);
+    assert_eq!(info(&rt, EMAIL_KEY).label.as_deref(), Some("Email"));
+    assert_eq!(
+        focused(&rt).as_deref(),
+        Some(WORD_KEYS[0]),
+        "the email is there: the first word is next"
+    );
+    assert!(!info(&rt, "btn-0").focusable, "Verify phrase waits for twelve words");
+    // "Enter moves to the next word."
+    type_(&mut rt, board::WORDS[0]);
+    press(&mut rt, Key::Enter);
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[1]));
+    assert!(calls.borrow().is_empty(), "and asks nothing of the engine");
+    rt.paste(board::WORDS.join(" "));
+    rt.frame(0.0);
+    assert!(ui(&mut rt).can_verify_phrase());
+    assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[11]));
+    // In the last box Enter is the screen's button.
+    press(&mut rt, Key::Enter);
+    assert_eq!(*calls.borrow(), ["recovery_verify"]);
+    assert_eq!(ui(&mut rt).screen, Screen::NewPassword);
+    assert!(
+        ui(&mut rt).words.iter().all(|w| w.text.is_empty()),
+        "the words did their work"
+    );
+    assert_eq!(focused(&rt).as_deref(), Some(PASSWORD_KEY));
+    assert!(!has(&rt, "field-0-strength"), "no verdict before a password is typed");
+
+    type_(&mut rt, NEW);
+    assert_eq!(info(&rt, "field-0-strength").text.as_deref(), Some("Strong."));
+    assert_eq!(
+        info(&rt, "field-0-meter").label.as_deref(),
+        Some("Password strength: Strong.")
+    );
+    assert!(
+        !info(&rt, "btn-0").focusable,
+        "Set new password waits for the confirmation"
+    );
+    tab_to(&mut rt, CONFIRM_KEY);
+    assert_eq!(info(&rt, CONFIRM_KEY).label.as_deref(), Some("Confirm password"));
+    type_(&mut rt, "Moss-trail-9x");
+    assert!(!ui(&mut rt).can_set_password(), "the two differ");
+    type_(&mut rt, "Q");
+    // Neither password is in a tree, typed into the product's own fields.
+    let mut dumps = readable(&rt).to_vec();
+    dumps.push(("Debug", {
+        let ui = ui(&mut rt);
+        format!("{:?}{:?}", ui.password, ui.confirm)
+    }));
+    for (name, dump) in &dumps {
+        assert!(!dump.contains("trail"), "the new password is in the {name}");
+    }
+    press(&mut rt, Key::Enter);
+    assert_eq!(*calls.borrow(), ["recovery_verify", "set_password"]);
+    assert_eq!(ui(&mut rt).screen, Screen::PasswordUpdated);
+    assert_eq!(
+        focused(&rt).as_deref(),
+        Some(TITLE_KEY),
+        "success is announced: focus is on the heading"
+    );
+    assert!(ui(&mut rt).password.text.is_empty() && ui(&mut rt).confirm.text.is_empty());
+    press(&mut rt, Key::Enter);
+    assert_eq!(
+        ui(&mut rt).take_intents(),
+        vec![Intent::Next(NextAfterSignIn::Drive)],
+        "Continue to Drive"
+    );
+}
+
+#[test]
+fn a_phrase_that_does_not_verify_changes_nothing_and_offers_the_dead_end() {
+    let mut rt = runtime("DW-A48");
+    assert_eq!(ui(&mut rt).screen, Screen::Recover);
+    assert_eq!(info(&rt, "banner-0").role, "alert");
+    assert_eq!(a11y(&rt).matches("not a recovery word").count(), 1);
+    assert!(a11y(&rt).contains("your password is as it was"));
+    tab_to(&mut rt, "btn-1");
+    assert_eq!(info(&rt, "btn-1").label.as_deref(), Some("I don't have it"));
+    space(&mut rt);
+    assert_eq!(ui(&mut rt).screen, Screen::CannotRecover);
+    assert!(
+        ui(&mut rt).words.iter().all(|w| w.text.is_empty()),
+        "the words are forgotten"
+    );
+    // Back from a new password is recovery's first step, with nothing typed left behind.
+    let mut rt = runtime("DW-A49");
+    click(&mut rt, "back-link");
+    assert_eq!(ui(&mut rt).screen, Screen::Recover);
+    assert!(ui(&mut rt).password.text.is_empty() && ui(&mut rt).confirm.text.is_empty());
 }

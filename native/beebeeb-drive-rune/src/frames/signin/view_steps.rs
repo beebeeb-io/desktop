@@ -14,13 +14,13 @@ use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys, Tone};
 use crate::ui::au_entry::{self, DigitsState, FocusedSpec, WordState};
 use crate::ui::kit;
 
-fn open(s: &mut State) -> &mut Ui {
+pub(super) fn open(s: &mut State) -> &mut Ui {
     s.signin.as_mut().expect("the sign-in window is open")
 }
 
 /// A field's change handler: `f` on the sign-in state, then the engine's ready answers, then
 /// the focus the change asked for.
-fn then(f: impl Fn(&mut Ui) + 'static) -> impl Fn(&mut State, &mut Tx) + 'static {
+pub(super) fn then(f: impl Fn(&mut Ui) + 'static) -> impl Fn(&mut State, &mut Tx) + 'static {
     move |s: &mut State, tx: &mut Tx| {
         if let Some(ui) = s.signin.as_mut() {
             f(ui);
@@ -32,12 +32,12 @@ fn then(f: impl Fn(&mut Ui) + 'static) -> impl Fn(&mut State, &mut Tx) + 'static
 
 /// A focused field takes Escape for itself; on these screens Escape is the back link, so each
 /// field hands it to the group's keys first (`super::on_key`).
-fn escape_first(s: &mut State, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
+pub(super) fn escape_first(s: &mut State, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
     ev.key == Key::Escape && super::on_key(s, ev, tx)
 }
 
 /// A link by itself on a line, centred.
-fn centered(link: El) -> El {
+pub(super) fn centered(link: El) -> El {
     el().w_full().h(15.0).center().child(link)
 }
 
@@ -48,7 +48,7 @@ fn caption(k: &mut Keys, words: &str, t: &Theme) -> El {
         .w_full()
 }
 
-fn primary(
+pub(super) fn primary(
     k: &mut Keys,
     label: &str,
     icon: Option<&'static rune::Icon>,
@@ -266,17 +266,9 @@ fn phrase_banner(k: &mut Keys, problem: &PhraseProblem, t: &Theme) -> El {
     }
 }
 
-pub fn phrase(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
-    let mut c = au::column().child(back(t)).child(au::heading(
-        "Set up this device",
-        Some("This PC doesn't have your encryption keys yet. Restore them to continue."),
-        false,
-        t,
-    ));
-    c = match ui.phrase_problem() {
-        Some(problem) => c.child(phrase_banner(k, problem, t)),
-        None => c.child(paste_hint(k, t)),
-    };
+/// The twelve numbered boxes, three to a row (DW-A23, DW-A47): each a secure field that shows
+/// its word as typed. A word that is not in the word list is marked; a pasted phrase fills them.
+pub(super) fn word_grid(ui: &Ui, t: &Theme) -> El {
     // Only a word that is not in the word list is marked; a valid word in the wrong place is not.
     let not_a_word = match ui.phrase_problem() {
         Some(PhraseProblem::WrongPhrase { bad_word }) => *bad_word,
@@ -309,7 +301,14 @@ pub fn phrase(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             let input = au_entry::word_input(&ui.words[i], WORD_KEYS[i], i, not_a_word == Some(i), t)
                 .on_edit(edit_access(move |s: &mut State| &mut open(s).words[i]))
                 .on_input_change(then(move |ui| ui.word_changed(i)))
-                .on_input_key(escape_first)
+                .on_input_key(move |s: &mut State, ev: &rune::KeyEvent, tx: &mut Tx| {
+                    // Enter moves to the next word; in the last box it is the screen's button.
+                    if ev.key == Key::Enter && i + 1 < WORD_KEYS.len() {
+                        tx.focus(WORD_KEYS[i + 1], tx.focus_visible());
+                        return true;
+                    }
+                    escape_first(s, ev, tx)
+                })
                 // Twelve words pasted into any box fill them all.
                 .on_input_paste(move |s: &mut State, content: &rune::ClipboardContent, tx: &mut Tx| {
                     let ui = open(s);
@@ -321,6 +320,21 @@ pub fn phrase(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         }
         grid = grid.child(r);
     }
+    grid
+}
+
+pub fn phrase(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
+    let mut c = au::column().child(back(t)).child(au::heading(
+        "Set up this device",
+        Some("This PC doesn't have your encryption keys yet. Restore them to continue."),
+        false,
+        t,
+    ));
+    c = match ui.phrase_problem() {
+        Some(problem) => c.child(phrase_banner(k, problem, t)),
+        None => c.child(paste_hint(k, t)),
+    };
+    let grid = word_grid(ui, t);
     let state = if ui.restoring() {
         ButtonState::Busy
     } else if ui.can_restore() {

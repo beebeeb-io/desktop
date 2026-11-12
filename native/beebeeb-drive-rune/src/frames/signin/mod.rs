@@ -21,6 +21,7 @@ pub mod setup;
 pub mod source;
 pub mod steps;
 mod view;
+mod view_recover;
 mod view_recovery;
 mod view_steps;
 
@@ -87,6 +88,12 @@ pub enum Screen {
     Forgot,
     /// DW-A46.
     CannotRecover,
+    /// DW-A47 and DW-A48: recovery, step 1: the email and the twelve words.
+    Recover,
+    /// DW-A49: recovery, last step: a new password.
+    NewPassword,
+    /// DW-A50.
+    PasswordUpdated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,8 +112,6 @@ pub enum Intent {
     /// A sign-in step succeeded and what follows is outside this group: the frame `gate.rs`
     /// names for it (DW-0201). The two-factor code and the twelve words are screens of this group.
     Next(NextAfterSignIn),
-    /// "Recover with phrase" (DW-A45): recovery, at its email step DW-A47 (not built yet).
-    RecoverWithPhrase,
     /// DW-A25's rows: Drive's own dialogs (cancel billing; erase all files; delete the account).
     CancelBilling,
     EraseAllFiles,
@@ -154,6 +159,13 @@ pub struct Ui {
     unlock_problem: Option<SignInProblem>,
     /// The field a scene draws holding the keyboard (`steps::Pictured`).
     pictured: Option<Pictured>,
+    /// Recovery: the phrase is being verified (DW-A47).
+    recovering: bool,
+    /// "Confirm password" (DW-A49): secure, made in `Ui::new`. The new password itself is
+    /// typed into `password`, the one password field.
+    pub confirm: TextEdit,
+    setting: bool,
+    set_problem: Option<SignInProblem>,
 }
 
 impl Ui {
@@ -194,6 +206,10 @@ impl Ui {
             unlocking: false,
             unlock_problem: None,
             pictured: None,
+            recovering: false,
+            confirm: TextEdit::new("").secure(),
+            setting: false,
+            set_problem: None,
         }
     }
 
@@ -534,7 +550,9 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if ev.key == Key::Escape {
         // Escape goes where the screen's back link goes.
         match ui.screen {
-            Screen::Welcome | Screen::SignIn | Screen::Approved { .. } => return false,
+            Screen::Welcome | Screen::SignIn | Screen::Approved { .. } | Screen::PasswordUpdated => return false,
+            Screen::Recover => ui.leave_recovery(),
+            Screen::NewPassword => ui.recover_with_phrase(),
             Screen::NoPhrase => ui.lost_phrase(false),
             Screen::CannotRecover => ui.cannot_recover(false),
             _ => ui.open_sign_in(),
@@ -698,8 +716,48 @@ pub fn scene(frame: &str) -> Option<Ui> {
             ui.cannot_recover(true);
             ui
         }
+        // Eight words typed: the ninth box holds the keyboard.
+        "DW-A47" => {
+            let mut ui = recovery(&board::WORDS[..8]);
+            ui.pictured = Some(Pictured::Word(8));
+            ui
+        }
+        "DW-A48" => {
+            let mut words = board::WORDS;
+            words[2] = board::WRONG_WORD;
+            let mut ui = recovery(&words);
+            ui.verify_phrase();
+            ui
+        }
+        "DW-A49" => new_password(),
+        "DW-A50" => {
+            let mut ui = new_password();
+            ui.set_password();
+            ui
+        }
         _ => return None,
     })
+}
+
+/// Recovery at its first step (DW-A47), with `words` typed.
+fn recovery(words: &[&str]) -> Ui {
+    let mut ui = fixture(Script::default());
+    ui.forgot();
+    ui.recover_with_phrase();
+    for (i, word) in words.iter().enumerate() {
+        ui.words[i].replace_text(*word);
+    }
+    ui
+}
+
+/// The phrase was verified and the new password is typed twice (DW-A49).
+fn new_password() -> Ui {
+    let mut ui = recovery(&board::WORDS);
+    ui.verify_phrase();
+    ui.password.replace_text("x".repeat(board::PASSWORD_LEN));
+    ui.confirm.replace_text("x".repeat(board::PASSWORD_LEN));
+    ui.pictured = Some(Pictured::NewPassword);
+    ui
 }
 
 /// The password was right and a code is asked for (DW-A26); `problem` is what the code gets.
@@ -738,6 +796,10 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-A30", |s| set_scene(s, "DW-A30")),
     ("DW-A45", |s| set_scene(s, "DW-A45")),
     ("DW-A46", |s| set_scene(s, "DW-A46")),
+    ("DW-A47", |s| set_scene(s, "DW-A47")),
+    ("DW-A48", |s| set_scene(s, "DW-A48")),
+    ("DW-A49", |s| set_scene(s, "DW-A49")),
+    ("DW-A50", |s| set_scene(s, "DW-A50")),
     ("DW-A63", |s| set_scene(s, "DW-A63")),
 ];
 

@@ -144,6 +144,15 @@ pub enum PasskeyOutcome {
     Unavailable,
 }
 
+/// What the strength meter under a new password shows (`.kit-strength`): how many of its four
+/// bars are lit and the engine's words for it ("Strong."). The rules are the engine's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasswordStrength {
+    /// 1 to 4.
+    pub bars: u8,
+    pub words: String,
+}
+
 /// What a `begin_*` call answers with, later.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignInEvent {
@@ -211,6 +220,12 @@ pub trait SignInSource {
     /// vault password). The partial session is discarded (`auth_v2`: drop the partial token) and
     /// no `TwoFactor`, `PhraseRestored` or `VaultUnlocked` event of it may arrive after this call.
     fn discard_partial_sign_in(&mut self) {}
+    /// Added by lane f-signin-rest (a default): how strong a password being chosen is, by the
+    /// same rules as sign-up (DW-A49). Local and at once (it runs on every keystroke); `None`:
+    /// no verdict, the meter stays empty.
+    fn password_strength(&self, _password: &str) -> Option<PasswordStrength> {
+        None
+    }
     /// Added by lane f-signin-rest (a default): the person left while Windows' passkey dialog
     /// was up: dismiss it. No `Passkey` event of that attempt may arrive after this call.
     fn cancel_passkey(&mut self) {}
@@ -450,6 +465,14 @@ impl SignInSource for FixtureSignInSource {
                 SignInEvent::TwoFactor(_) | SignInEvent::PhraseRestored(_) | SignInEvent::VaultUnlocked(_)
             )
         });
+    }
+
+    fn password_strength(&self, password: &str) -> Option<PasswordStrength> {
+        // The board draws one verdict, for its own password: the fixture has no other.
+        (password.chars().count() == board::PASSWORD_LEN).then(|| PasswordStrength {
+            bars: 4,
+            words: "Strong.".into(),
+        })
     }
 
     fn cancel_passkey(&mut self) {

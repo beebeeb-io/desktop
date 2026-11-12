@@ -33,6 +33,9 @@ pub const WORD_KEYS: [&str; 12] = [
     "signin-word-12",
 ];
 
+/// "Confirm password" (DW-A49).
+pub const CONFIRM_KEY: &str = "signin-confirm-password";
+
 pub const CODE_DIGITS: usize = 6;
 pub const BACKUP_DIGITS: usize = 8;
 
@@ -44,6 +47,7 @@ pub enum Pictured {
     Word(usize),
     BackupCode,
     VaultPassword,
+    NewPassword,
 }
 
 /// Keep only the characters `keep` allows, at most `max` of them, without the text passing
@@ -102,6 +106,14 @@ impl Ui {
             self.source.cancel_passkey();
             self.passkey_waiting = false;
         }
+        // A new password that was being chosen is not the sign-in form's.
+        if matches!(self.screen, Screen::NewPassword) {
+            self.password.clear();
+        }
+        self.confirm.clear();
+        self.recovering = false;
+        self.setting = false;
+        self.set_problem = None;
         self.code.clear();
         self.backup_code.clear();
         self.clear_words();
@@ -273,7 +285,7 @@ impl Ui {
 
     /// A row of DW-A25: Drive's own dialog for it is the shell's to open.
     pub fn exit(&mut self, intent: Intent) {
-        if self.screen == Screen::NoPhrase || self.screen == Screen::CannotRecover {
+        if matches!(self.screen, Screen::NoPhrase | Screen::CannotRecover) {
             self.go(intent);
         }
     }
@@ -331,16 +343,105 @@ impl Ui {
         self.focus = Some(TITLE_KEY);
     }
 
-    /// "Recover with phrase": recovery starts at its email step (DW-A47), outside what is built.
+    /// "Recover with phrase" (DW-A45), and Back from the new password: recovery's first step,
+    /// the email and the twelve words (DW-A47).
     pub fn recover_with_phrase(&mut self) {
-        if self.screen == Screen::Forgot {
-            self.go(Intent::RecoverWithPhrase);
+        if !matches!(self.screen, Screen::Forgot | Screen::NewPassword) || self.setting {
+            return;
+        }
+        self.drop_steps();
+        self.screen = Screen::Recover;
+        self.focus = Some(if self.email.text.trim().is_empty() {
+            super::EMAIL_KEY
+        } else {
+            WORD_KEYS[0]
+        });
+    }
+
+    /// Back from recovery's first step: the three options, and the words forgotten.
+    pub fn leave_recovery(&mut self) {
+        if self.screen != Screen::Recover {
+            return;
+        }
+        self.drop_steps();
+        self.screen = Screen::Forgot;
+        self.focus = Some(TITLE_KEY);
+    }
+
+    pub fn recovering(&self) -> bool {
+        self.recovering
+    }
+
+    /// Verify phrase is dimmed until the email and all twelve words are in (DW-A47).
+    pub fn can_verify_phrase(&self) -> bool {
+        self.screen == Screen::Recover
+            && !self.recovering
+            && self.email.text.contains('@')
+            && self.words.iter().all(|w| !w.text.is_empty())
+    }
+
+    /// Verify phrase: the key is derived on this device; the phrase never leaves it.
+    pub fn verify_phrase(&mut self) {
+        if !self.can_verify_phrase() {
+            return;
+        }
+        self.recovering = true;
+        self.phrase_problem = None;
+        let words: Vec<&str> = self.words.iter().map(|w| w.text.as_str()).collect();
+        self.source.begin_recovery_verify(self.email.text.trim(), &words);
+        self.pump();
+    }
+
+    pub fn setting(&self) -> bool {
+        self.setting
+    }
+
+    pub fn set_problem(&self) -> Option<SignInProblem> {
+        self.set_problem
+    }
+
+    /// What the meter under the new password shows: the engine's verdict, by sign-up's rules.
+    pub fn strength(&self) -> Option<super::source::PasswordStrength> {
+        if self.password.text.is_empty() {
+            return None;
+        }
+        self.source.password_strength(&self.password.text)
+    }
+
+    /// Set new password works once both fields hold the same password. Whether it is strong
+    /// enough is the engine's answer (`PasswordSet`), by the same rules as sign-up.
+    pub fn can_set_password(&self) -> bool {
+        self.screen == Screen::NewPassword
+            && !self.setting
+            && !self.password.text.is_empty()
+            && self.password.text == self.confirm.text
+    }
+
+    /// Set new password (DW-A49): the vault key is wrapped under it; other sessions are signed out.
+    pub fn set_password(&mut self) {
+        if !self.can_set_password() {
+            return;
+        }
+        self.setting = true;
+        self.set_problem = None;
+        self.source.begin_set_password(&self.password.text);
+        self.pump();
+    }
+
+    /// "Continue to Drive" (DW-A50).
+    pub fn continue_to_drive(&mut self) {
+        if self.screen == Screen::PasswordUpdated {
+            self.go(Intent::Next(NextAfterSignIn::Drive));
         }
     }
 
-    /// "Show my options" and "Back to recovery options".
+    /// "Show my options" and "Back to recovery options"; "I don't have it" (DW-A48).
     pub fn cannot_recover(&mut self, open: bool) {
         match (&self.screen, open) {
+            (Screen::Recover, true) if !self.recovering => {
+                self.drop_steps();
+                self.screen = Screen::CannotRecover;
+            }
             (Screen::Forgot, true) => self.screen = Screen::CannotRecover,
             (Screen::CannotRecover, false) => self.screen = Screen::Forgot,
             _ => return,
@@ -419,6 +520,45 @@ impl Ui {
                     }
                     Err(problem) => {
                         self.unlock_problem = Some(problem);
+                        self.focus = Some(PASSWORD_KEY);
+                    }
+                }
+            }
+            SignInEvent::RecoveryPhraseVerified(result) if self.recovering && self.screen == Screen::Recover => {
+                self.recovering = false;
+                match result {
+                    Ok(()) => {
+                        // The words did their work. The new password is typed into the one
+                        // password field, which starts empty.
+                        self.clear_words();
+                        self.password.clear();
+                        self.confirm.clear();
+                        self.set_problem = None;
+                        self.screen = Screen::NewPassword;
+                        self.focus = Some(PASSWORD_KEY);
+                    }
+                    Err(problem) => {
+                        let at = match &problem {
+                            PhraseProblem::WrongPhrase { bad_word: Some(i) } if *i < WORD_KEYS.len() => *i,
+                            _ => 0,
+                        };
+                        self.phrase_problem = Some(problem);
+                        self.focus = Some(WORD_KEYS[at]);
+                    }
+                }
+            }
+            SignInEvent::PasswordSet(result) if self.setting && self.screen == Screen::NewPassword => {
+                self.setting = false;
+                match result {
+                    Ok(()) => {
+                        self.password.clear();
+                        self.confirm.clear();
+                        self.screen = Screen::PasswordUpdated;
+                        // "Success is announced": focus moves to the heading.
+                        self.focus = Some(TITLE_KEY);
+                    }
+                    Err(problem) => {
+                        self.set_problem = Some(problem);
                         self.focus = Some(PASSWORD_KEY);
                     }
                 }

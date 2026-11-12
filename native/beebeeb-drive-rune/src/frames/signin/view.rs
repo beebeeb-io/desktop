@@ -5,8 +5,8 @@ use rune::{Color, Cx, El, col, el, row};
 
 use super::source::{SharedSession, SignInProblem};
 use super::{
-    EMAIL_KEY, HelloFailure, Intent, PASSWORD_KEY, REQUEST_SECONDS, Screen, Ui, act, icons, qr, view_recovery,
-    view_steps,
+    EMAIL_KEY, HelloFailure, Intent, PASSWORD_KEY, REQUEST_SECONDS, Screen, Ui, act, icons, qr, view_recover,
+    view_recovery, view_steps,
 };
 use crate::State;
 use crate::theme::tokens::{self, Theme, type_};
@@ -40,6 +40,9 @@ pub fn view(ui: &Ui, cx: &mut Cx<State>) -> El {
         Screen::NoPhrase => view_recovery::no_phrase(&mut k, &t),
         Screen::Forgot => view_recovery::forgot(&mut k, &t),
         Screen::CannotRecover => view_recovery::cannot_recover(&mut k, &t),
+        Screen::Recover => view_recover::recover(ui, &mut k, &t),
+        Screen::NewPassword => view_recover::new_password(ui, &mut k, &t),
+        Screen::PasswordUpdated => view_recover::password_updated(&mut k, &t),
     };
     au::page(PRODUCT, [&icons::LOCK, &icons::PEOPLE, &icons::GLOBE], column, &t, cx).on_key(super::on_key)
 }
