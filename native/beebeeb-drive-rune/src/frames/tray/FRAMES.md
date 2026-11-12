@@ -64,7 +64,7 @@ lanes have changed since. The 19 flyout frames are at 0 in both themes, both tim
 - When the editor exists: capture `golden/DW-1234*` (keymap-tray.js keys the dialog already, as for DW-1232), point
   the scene at the document the board has open instead of the note, and gate it light and dark.
 - The dialog shares DW-1232's card, so its known reds apply here too once gated (the fallback font of "▾", "←", "→").
-- Until then the commands are bound word for word by `the_three_contents_hold_the_boards_lists_and_counts`.
+- Until then the lists are held by tests: their names and counts (`the_three_contents_hold_the_boards_lists_and_counts`), and the first and last command of each (the scene's test).
 
 ## The engine calls each action needs
 
