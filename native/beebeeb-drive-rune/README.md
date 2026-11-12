@@ -72,9 +72,9 @@ one JSON record per key. The board loads Inter and JetBrains Mono from Google Fo
 
 ## Adding a frame
 
-1. **Scene**: add `("<frame-id>", |s| { … })` to `SCENES` in `src/main.rs`: what the frame sets on a fresh `State`.
-   That is the one line a frame adds to `main.rs`.
-2. **Keys**: open `scripts/keymap.js`. Everything the Files window draws is keyed there already, by the board's
+1. **Scene**: add `("<frame-id>", |s| { … })` to your group's `SCENES` (`src/frames/<group>/mod.rs`; `shell::scenes`
+   joins the groups' tables: one line per group): what the frame sets on a fresh `State`.
+2. **Keys**: open `scripts/keymap.js` (a frame group adds its own file `scripts/keymap-<group>.js`, read after it). Everything the Files window draws is keyed there already, by the board's
    class names. For what your frame draws in addition, add `api.box` / `api.text` / `api.textNode` / `api.icon`
    lines, by class name, never by position or by string. Key every element a person can see: each icon, each text,
    each box with a fill or a border.
@@ -106,6 +106,15 @@ one JSON record per key. The board loads Inter and JetBrains Mono from Google Fo
 | Details panel | `detail_pane::pane(t)`, `preview`, `page_preview`, `encrypted_badge`, `meta_row`, `switch_card`, `switch`, `action_button` | see each function's doc |
 | Avatar, mark, shadows | `kit::avatar`, `kit::mark`, `kit::ring`, `kit::ring_inset`, `kit::drop` | the key you pass |
 | Status line | `status_bar::status_bar(t)` | `status-bar`, `status-dot`, `status-text`, `status-details` |
+| Status line, own words | `status_line::status_line(Option<state>, details, t)` | the same keys |
+| Menu | `menu::menu(key, name, width, entries, hot, t, pick, hover, close)`, `menu::Entry` (`.dimmed(off)` for an item that cannot be picked now), `menu::item_key` | `<key>`, `<key>-item-<i>` (+`-label`, `-shortcut`, `-check`), `<key>-sep-<j>` |
+| Toast | `toast::layer(toast::toast(icon, tone, message, Option<ToastAction>, t))`; `Tone::Failed` is the red one (DW-0109) | `toast`, `toast-icon`, `toast-text`, `toast-action`, `toast-action-text` |
+| Outline button | `button::outline_button(key, label, icon, t)` | `<key>`, `<key>-icon`, `<key>-label` |
+| Empty state | `empty::empty_state(key, icon, title, sentence, t)` | `<key>`, `<key>-tile`, `<key>-icon`, `<key>-title`, `<key>-text` |
+| Banner under the toolbar | `banner::banner(&Banner { tone, icon, runs, action, dismiss }, t)`; `Run::Words` / `Run::Figure` (a figure is set in JetBrains Mono); `banner::pressable(button, handler)` makes Enter press a button too | `banner`, `banner-icon`, `banner-text`, `banner-figure-<i>`, `banner-action` (+`-label`), `banner-dismiss` (+`-icon`) |
+| Loading strip | `load_strip::load_strip(title, count_runs, fraction, detail, t)` | `banner`, `strip-title`, `strip-count`, `strip-figure-<i>`, `strip-bar`, `strip-bar-fill`, `strip-detail` |
+| Panel of a preview that cannot open | `blocked_preview::blocked_preview(name, icon, title, sentence, (word, retry), close, t)` | `preview-card`, `preview-close`, `blocked`, `blocked-tile/icon/title/text`, `blocked-retry` (+`-label`) |
+| Grid of a folder | `grid_tiles::grid(rows, tiles)`, `grid_tiles::tile(i, &Tile { name, sub, thumb, length, selected }, t)`, `Thumb::Glyph / Plain / Picture`, `grid_tiles::columns(width)` | `grid`, `rows`, `grid-<i>`, `grid-<i>-thumb/icon/badge/badge-icon/badge-text/name/sub` |
 
 ### Settings, inside the window (`src/frames/settings/`, `src/ui/settings_*.rs`)
 
@@ -144,6 +153,9 @@ src/
   theme/
     tokens.rs       the board's colours (light and dark), type scale, radii, spacing
     icons.rs        the board's SVG icons, and the Beebeeb mark
+  frames/
+    files/          the Files frames: menus, selection, toasts, folders (FRAMES.md is the checklist)
+    global/         what sits on every view: the one banner, the loading strip, a preview that needs a connection, a folder as a grid (FRAMES.md is the checklist)
   ui/
     kit.rs          label / glyph / avatar / mark / shadows, and the notes the gate reads
     gate.rs         --gate-export: the native element tree as JSON

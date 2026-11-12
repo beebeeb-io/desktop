@@ -28,15 +28,26 @@ pub struct State {
     /// The shell: the route machine, the gate, the b, the actions (`shell/host.rs`).
     pub shell: Shell,
     // --- one line per frame group below ---
+    /// What the Files frames keep: selection, menus, toasts (`frames::files`).
+    pub(crate) actions: crate::frames::files::Actions,
+    /// The global elements: the banner, the loading strip (`frames::global`).
+    pub(crate) global: crate::frames::global::Ui,
     /// The live feedback mode (test builds only).
     #[cfg(feature = "feedback")]
     pub(crate) feedback: crate::feedback::Feedback,
+    pub(crate) photos: crate::frames::photos::Ui,
     pub frames: crate::frames::Ui,
     pub settings: crate::frames::settings::SettingsUi,
+    pub account: crate::frames::account::AccountUi,
     pub(crate) signin: Option<crate::frames::signin::Ui>,
     /// The b's flyout as a scene of this window (the frame gate); `None` in the running app.
     pub(crate) tray: Option<crate::frames::tray::Ui>,
     pub(crate) shortcuts: crate::frames::tray::shortcuts::Shortcuts,
+    pub(crate) setup: Option<crate::frames::signin::setup::Ui>,
+    /// Sync history and Available offline (`frames::this_pc`).
+    pub(crate) this_pc: crate::frames::this_pc::Ui,
+    /// Backups, a section of settings (`frames::backups`).
+    pub(crate) backups: crate::frames::backups::BackupsUi,
 }
 
 /// The state headless renders and tests start from: the fixture engine, nothing wired.
@@ -45,7 +56,7 @@ pub fn init() -> State {
 }
 
 pub fn init_with(shell: Shell) -> State {
-    init_from(shell, Box::new(BoardFixtureSource::new()), Some(6))
+    crate::frames::files::board_fixture(init_from(shell, Box::new(BoardFixtureSource::new()), Some(6)))
 }
 
 /// The folder as the window holds it: the listing, or an empty one and the reason it could not be read.
@@ -87,12 +98,19 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         show_detail_pane: true,
         files: crate::ui::FilesUi::default(),
         shell,
+        actions: crate::frames::files::Actions::default(),
+        global: crate::frames::global::Ui::default(),
         #[cfg(feature = "feedback")]
         feedback: crate::feedback::Feedback::new(),
+        photos: crate::frames::photos::start(),
         frames: crate::frames::Ui::default(),
         settings: Default::default(),
+        account: Default::default(),
         signin: crate::frames::signin::start(),
         tray: None,
         shortcuts: Default::default(),
+        setup: None,
+        this_pc: crate::frames::this_pc::Ui::fixture(),
+        backups: crate::frames::backups::BackupsUi::first(crate::shell::instance::DEV_BUILD),
     }
 }

@@ -180,6 +180,7 @@ impl EngineBridge {
         Ok(())
     }
 
+    #[cfg(not(target_os = "windows"))]
     pub(super) fn enqueue_hydrate_operation(&self, entry: &FileEntry, now: i64) -> Result<(), EngineError> {
         let op = PendingOperation {
             op_id: uuid::Uuid::new_v4().to_string(),

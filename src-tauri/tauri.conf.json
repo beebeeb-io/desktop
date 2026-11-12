@@ -4,10 +4,7 @@
   "version": "0.1.0",
   "identifier": "io.beebeeb.app",
   "build": {
-    "beforeBuildCommand": "bun run build",
-    "beforeBundleCommand": "node scripts/before-bundle.mjs",
-    "devUrl": "http://localhost:5173",
-    "frontendDist": "../dist"
+    "frontendDist": "frontend-stub"
   },
   "app": {
     "windows": [

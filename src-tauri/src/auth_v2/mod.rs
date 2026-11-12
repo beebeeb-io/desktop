@@ -15,23 +15,16 @@ pub(crate) mod hello;
 pub(crate) mod key_owner;
 pub(crate) mod password;
 pub(crate) mod phrase;
-pub(crate) mod private_screen;
+// private_screen: deleted (auth_screen_private was web-view capture exclusion; copy_for_60s moved to the engine's
+// clipboard module behind ClipboardAccess).
 pub(crate) mod qr;
 /// v2 b11: create an account, recover one (declared here: lib.rs is not rustfmt-clean on v2).
 #[path = "../signup_v2/mod.rs"]
 pub(crate) mod signup_v2;
 pub(crate) mod transport;
-pub(crate) mod webview_autofill;
+// webview_autofill: deleted (v2-native has no web views; task 2422's autofill switches are not needed).
 
 #[cfg(test)]
 mod dto_tests;
 
-use beebeeb_core::auth_flow::AuthFlowError;
-
-/// The code string the web view maps to the board's words (`rate_limited:30` carries the wait).
-pub(crate) fn flow_code(e: &AuthFlowError) -> String {
-    match e {
-        AuthFlowError::RateLimited { retry_after_secs } => format!("rate_limited:{retry_after_secs}"),
-        other => other.code().to_string(),
-    }
-}
+pub(crate) use beebeeb_engine::signin::flow_code;

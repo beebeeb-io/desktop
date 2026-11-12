@@ -1,0 +1,7 @@
+{
+  "name": "beebeeb-updater-signer",
+  "private": true,
+  "dependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  }
+}

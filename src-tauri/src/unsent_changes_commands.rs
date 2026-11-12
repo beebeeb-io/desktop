@@ -305,19 +305,27 @@ mod tests {
             },
         )];
         let view = view_of(page, &transfers, "idle".into(), false);
-        let sending: Vec<_> = view.items.iter().map(|i| (i.change.id.as_str(), i.sending.is_some())).collect();
+        let sending: Vec<_> = view
+            .items
+            .iter()
+            .map(|i| (i.change.id.as_str(), i.sending.is_some()))
+            .collect();
         assert_eq!(
             sending,
-            [("old-edit", false), ("sending", true), ("rename", false), ("later-edit", false)]
+            [
+                ("old-edit", false),
+                ("sending", true),
+                ("rename", false),
+                ("later-edit", false)
+            ]
         );
     }
 
-    /// The answer is the JSON the window parses: `tests/fixtures/unsent-changes.page.json`, which
-    /// `tests/unsentChanges.test.ts` narrows with `parseUnsentChanges`.
+    /// The answer is the JSON the frontend validates: `src-tauri/tests/fixtures/unsent-changes.page.json`.
     #[test]
     fn the_view_is_the_json_the_window_parses() {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/unsent-changes.page.json")).unwrap();
+            serde_json::from_str(include_str!("../tests/fixtures/unsent-changes.page.json")).unwrap();
         let item = |id: &str, file: &str, kind: &'static str, path: &str, group: &str, at: i64, retryable: bool| {
             state_db::UnsentChange {
                 id: id.into(),
@@ -336,16 +344,48 @@ mod tests {
         let page = state_db::UnsentPage {
             total: 3,
             items: vec![
-                item("op-delete", "file-plan", "delete", "Projects/2026/old plan.docx", "gave_up", 1_793_000_000, true),
-                item("op-edit", "file-budget", "edit", "Finance/budget.xlsx", "quota", 1_793_000_100, false),
-                item("op-new", "file-photo", "new_file", "Camera Roll/IMG_0412.jpg", "waiting", 1_793_000_200, false),
+                item(
+                    "op-delete",
+                    "file-plan",
+                    "delete",
+                    "Projects/2026/old plan.docx",
+                    "gave_up",
+                    1_793_000_000,
+                    true,
+                ),
+                item(
+                    "op-edit",
+                    "file-budget",
+                    "edit",
+                    "Finance/budget.xlsx",
+                    "quota",
+                    1_793_000_100,
+                    false,
+                ),
+                item(
+                    "op-new",
+                    "file-photo",
+                    "new_file",
+                    "Camera Roll/IMG_0412.jpg",
+                    "waiting",
+                    1_793_000_200,
+                    false,
+                ),
             ],
         };
         let transfers = vec![(
             "file-photo".to_string(),
-            Transfer { direction: Direction::Up, done: 34, total: 100, ..Transfer::default() },
+            Transfer {
+                direction: Direction::Up,
+                done: 34,
+                total: 100,
+                ..Transfer::default()
+            },
         )];
-        assert_eq!(serde_json::to_value(view_of(page, &transfers, "running".into(), false)).unwrap(), fixture);
+        assert_eq!(
+            serde_json::to_value(view_of(page, &transfers, "running".into(), false)).unwrap(),
+            fixture
+        );
     }
 
     /// A refusal is an error with a code the window words; queued (done now, or already) is an answer.
@@ -366,7 +406,11 @@ mod tests {
     #[test]
     fn both_commands_need_an_unlocked_vault_and_try_again_nudges_after_a_change() {
         let source = include_str!("unsent_changes_commands.rs").replace("\r\n", "\n");
-        for command in ["async fn unsent_changes(", "async fn retry_unsent_change(", "async fn not_downloaded("] {
+        for command in [
+            "async fn unsent_changes(",
+            "async fn retry_unsent_change(",
+            "async fn not_downloaded(",
+        ] {
             let body = &source[source.find(command).unwrap()..];
             let body = &body[..body.find("\n}\n").unwrap()];
             let gate = body

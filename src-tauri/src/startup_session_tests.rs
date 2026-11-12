@@ -393,13 +393,7 @@ fn the_fresh_profile_asks_the_server_every_time_and_touches_neither_the_cache_no
             "{touches}: it must read the server and nothing else:\n{command}"
         );
     }
-    // And Security is the one that asks it: its page does not read the cached command.
-    let security = include_str!("../../src/MacSecurity.tsx").replace("\r\n", "\n");
-    assert!(
-        security.contains("accountProfileFresh()"),
-        "Security reads the fresh profile"
-    );
-    assert!(!security.contains("accountProfile()"), "and never the cached one");
+    // The MacSecurity.tsx pin was removed: the React frontend is gone on the native line (0.9.0).
 }
 
 /// Fix round 1, item 8 (review M7): every refusal says what fits its path, each in its own sentence.
@@ -600,7 +594,9 @@ fn the_profile_cache_doc_says_the_profile_is_a_sign_in_input() {
 #[test]
 fn the_older_key_and_check_copies_are_wiped() {
     let production = production();
-    let load = body_of(&production, "fn load_session_from_vault<");
+    // The loader and the recovery check live in the engine (`signin/store.rs`, `signin/recovery.rs`).
+    let store = include_str!("../../crates/beebeeb-engine/src/signin/store.rs").replace("\r\n", "\n");
+    let load = body_of(&store, "fn load_session_from_vault<");
     assert!(
         load.contains("let mut master_key = zeroize::Zeroizing::new([0u8; 32]);"),
         "{load}"
@@ -609,7 +605,8 @@ fn the_older_key_and_check_copies_are_wiped() {
         load.contains("master_key: *master_key,"),
         "the session's copy is the only one that outlives it:\n{load}"
     );
-    let check = body_of(&production, "async fn recovery_check_answer(");
+    let recovery = include_str!("../../crates/beebeeb-engine/src/signin/recovery.rs").replace("\r\n", "\n");
+    let check = body_of(&recovery, "async fn recovery_check_answer(");
     assert!(
         check.contains("let recovery_check = zeroize::Zeroizing::new(encode_base64("),
         "{check}"

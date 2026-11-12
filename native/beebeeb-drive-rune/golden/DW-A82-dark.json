@@ -1,0 +1,1117 @@
+{
+ "frame": "DW-A82",
+ "width": 958,
+ "height": 638,
+ "elements": {
+  "caption-bar": {
+   "kind": "box",
+   "x": 0,
+   "y": 0,
+   "w": 958,
+   "h": 32,
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ]
+  },
+  "cap-mark": {
+   "kind": "icon",
+   "x": 12,
+   "y": 7.5,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": true,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "mark": true
+  },
+  "cap-title": {
+   "kind": "text",
+   "x": 37,
+   "y": 7.5,
+   "w": 774,
+   "h": 16,
+   "text": "Beebeeb Drive",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "cap-min": {
+   "kind": "box",
+   "x": 820,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-min-icon": {
+   "kind": "icon",
+   "x": 838,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M0 5.5h10"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "cap-max": {
+   "kind": "box",
+   "x": 866,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-max-icon": {
+   "kind": "icon",
+   "x": 884,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "rect:x=.5,y=.5,width=9,height=9,rx=1.5"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "cap-close": {
+   "kind": "box",
+   "x": 912,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-close-icon": {
+   "kind": "icon",
+   "x": 930,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M.5.5l9 9M9.5.5l-9 9"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "sidebar": {
+   "kind": "box",
+   "x": 0,
+   "y": 32,
+   "w": 224,
+   "h": 606,
+   "bg": [
+    16,
+    13,
+    9,
+    255
+   ],
+   "css": {
+    "border": "0px 0.5px 0px 0px oklch(0.92 0.006 85)",
+    "pad": "14px 10px",
+    "gap": "14px"
+   }
+  },
+  "Back to Drive-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 46,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Back to Drive-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 53.5,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M15 5l-7 7 7 7"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Back to Drive": {
+   "kind": "text",
+   "x": 41,
+   "y": 52.5,
+   "w": 82.43,
+   "h": 17,
+   "text": "Back to Drive",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "General-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 112,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "General-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 119,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "General": {
+   "kind": "text",
+   "x": 46,
+   "y": 118.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "General",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Account-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 143,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Account-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 150,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Account": {
+   "kind": "text",
+   "x": 46,
+   "y": 149.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Account",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Security-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 174,
+   "w": 203.5,
+   "h": 30,
+   "bg": [
+    233,
+    233,
+    222,
+    23
+   ],
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": true
+  },
+  "Security-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 181,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "Security": {
+   "kind": "text",
+   "x": 46,
+   "y": 180.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Security",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Devices and sessions-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 205,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Devices and sessions-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 212,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M8 3h8a1.5 1.5 0 0 1 1.5 1.5v15A1.5 1.5 0 0 1 16 21H8a1.5 1.5 0 0 1-1.5-1.5v-15A1.5 1.5 0 0 1 8 3z",
+    "M11 18h2"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Devices and sessions": {
+   "kind": "text",
+   "x": 46,
+   "y": 211.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Devices and sessions",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Notifications-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 236,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Notifications-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 243,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Notifications": {
+   "kind": "text",
+   "x": 46,
+   "y": 242.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Notifications",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Storage-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 302,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Storage-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 309,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Storage": {
+   "kind": "text",
+   "x": 46,
+   "y": 308.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Storage",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Backups-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 333,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Backups-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 340,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Backups": {
+   "kind": "text",
+   "x": 46,
+   "y": 339.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Backups",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Sync and File Explorer-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 364,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Sync and File Explorer-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 371,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Sync and File Explorer": {
+   "kind": "text",
+   "x": 46,
+   "y": 370.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Sync and File Explorer",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Thumbnails and previews-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 395,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Thumbnails and previews-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 402,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Thumbnails and previews": {
+   "kind": "text",
+   "x": 46,
+   "y": 401.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Thumbnails and previews",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Bandwidth-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 426,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Bandwidth-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 433,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Bandwidth": {
+   "kind": "text",
+   "x": 46,
+   "y": 432.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Bandwidth",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "side-title-settings": {
+   "kind": "text",
+   "x": 20,
+   "y": 92,
+   "w": 58.51,
+   "h": 12.5,
+   "text": "SETTINGS",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10.5,
+   "weight": 600,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0.74
+  },
+  "side-title-drive": {
+   "kind": "text",
+   "x": 20,
+   "y": 282,
+   "w": 35.02,
+   "h": 12.5,
+   "text": "DRIVE",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10.5,
+   "weight": 600,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0.74
+  },
+  "side-foot-box": {
+   "kind": "box",
+   "x": 10,
+   "y": 585.5,
+   "w": 203.5,
+   "h": 38.5,
+   "css": {
+    "border": "0.5px 0px 0px 0px oklch(0.92 0.006 85 / 0.12)",
+    "pad": "10px 6px 0px"
+   }
+  },
+  "side-foot": {
+   "kind": "text",
+   "x": 16,
+   "y": 596.5,
+   "w": 174.48,
+   "h": 27,
+   "text": "Settings open inside the app. Esc goes back.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0
+  },
+  "set-main": {
+   "kind": "box",
+   "x": 224,
+   "y": 32,
+   "w": 734,
+   "h": 606,
+   "bg": [
+    16,
+    13,
+    9,
+    255
+   ],
+   "css": {
+    "pad": "22px 30px",
+    "gap": "14px"
+   }
+  },
+  "set-title": {
+   "kind": "text",
+   "x": 254,
+   "y": 54,
+   "w": 520,
+   "h": 28,
+   "text": "Deletion scheduled",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22,
+   "weight": 650,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.48,
+   "lh": "28px"
+  },
+  "set-sub": {
+   "kind": "text",
+   "x": 254,
+   "y": 88,
+   "w": 520,
+   "h": 15,
+   "text": "Your account will be deleted in 72 hours, on 8 November at 19:42.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px"
+  },
+  "btn-0": {
+   "kind": "box",
+   "x": 254,
+   "y": 278,
+   "w": 256,
+   "h": 28,
+   "bg": [
+    247,
+    185,
+    0,
+    255
+   ],
+   "css": {
+    "radius": "6px",
+    "pad": "0px 12px",
+    "gap": "7px"
+   }
+  },
+  "btn-0-label": {
+   "kind": "text",
+   "x": 339.04,
+   "y": 282.71,
+   "w": 85.91,
+   "h": 18.57,
+   "text": "Undo deletion",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    30,
+    26,
+    22,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "18.5714px"
+  },
+  "btn-1": {
+   "kind": "box",
+   "x": 518,
+   "y": 278,
+   "w": 256,
+   "h": 28,
+   "css": {
+    "radius": "6px",
+    "pad": "0px 12px",
+    "gap": "7px"
+   }
+  },
+  "btn-1-label": {
+   "kind": "text",
+   "x": 620.7,
+   "y": 282.71,
+   "w": 50.59,
+   "h": 18.57,
+   "text": "Sign out",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "18.5714px"
+  },
+  "banner-0": {
+   "kind": "box",
+   "x": 254,
+   "y": 145,
+   "w": 520,
+   "h": 75,
+   "bg": [
+    227,
+    227,
+    227,
+    18
+   ],
+   "css": {
+    "radius": "13px",
+    "pad": "11px 13px",
+    "gap": "10px"
+   }
+  },
+  "banner-0-icon": {
+   "kind": "icon",
+   "x": 267,
+   "y": 157,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "banner-0-title": {
+   "kind": "text",
+   "x": 293,
+   "y": 156,
+   "w": 468,
+   "h": 17,
+   "text": "You can undo it until then",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 600,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "banner-0-text": {
+   "kind": "text",
+   "x": 293,
+   "y": 175,
+   "w": 468,
+   "h": 34,
+   "text": "We sent a second email to anna@northwind.studio with a link to undo it. You can also undo it here or by signing in. Until then everything works as usual.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12.5,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "steps": {
+   "kind": "box",
+   "x": 254,
+   "y": 117,
+   "w": 520,
+   "h": 14,
+   "css": {
+    "gap": "10px"
+   }
+  },
+  "step-0": {
+   "kind": "box",
+   "x": 254,
+   "y": 122.5,
+   "w": 98.1,
+   "h": 3,
+   "bg": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "css": {
+    "radius": "2px"
+   },
+   "on": true
+  },
+  "step-1": {
+   "kind": "box",
+   "x": 356.1,
+   "y": 122.5,
+   "w": 98.1,
+   "h": 3,
+   "bg": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "css": {
+    "radius": "2px"
+   },
+   "on": true
+  },
+  "step-2": {
+   "kind": "box",
+   "x": 458.2,
+   "y": 122.5,
+   "w": 98.1,
+   "h": 3,
+   "bg": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "css": {
+    "radius": "2px"
+   },
+   "on": true
+  },
+  "step-3": {
+   "kind": "box",
+   "x": 560.3,
+   "y": 122.5,
+   "w": 98.1,
+   "h": 3,
+   "bg": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "css": {
+    "radius": "2px"
+   },
+   "on": true
+  },
+  "steps-count": {
+   "kind": "text",
+   "x": 668.41,
+   "y": 117,
+   "w": 39.61,
+   "h": 14,
+   "text": "4 of 4",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "14px"
+  },
+  "steps-label": {
+   "kind": "text",
+   "x": 718.02,
+   "y": 117,
+   "w": 55.98,
+   "h": 14,
+   "text": "Scheduled",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "14px"
+  },
+  "note-0": {
+   "kind": "text",
+   "x": 254,
+   "y": 234,
+   "w": 520,
+   "h": 30,
+   "text": "After 72 hours every product's data is deleted and shredded within 30 days. Then nothing can bring it back, not you, not Beebeeb.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px"
+  }
+ },
+ "theme": "dark"
+}
