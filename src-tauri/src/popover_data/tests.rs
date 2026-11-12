@@ -276,13 +276,12 @@ fn a_401_error_is_not_a_connectivity_phase() {
 
 // ── the serialized contract ─────────────────────────────────────────────
 
-/// The JSON the TypeScript side validates (`tests/popoverContract.test.ts` runs the same
-/// files through `parsePopoverSnapshot`), so the two languages cannot drift apart silently.
+/// The JSON the popover snapshot validates (`src-tauri/tests/fixtures/popover-snapshot.*.json`).
 fn fixture(name: &str) -> serde_json::Value {
     let text = match name {
-        "synced" => include_str!("../../../tests/fixtures/popover-snapshot.synced.json"),
-        "syncing" => include_str!("../../../tests/fixtures/popover-snapshot.syncing.json"),
-        "error" => include_str!("../../../tests/fixtures/popover-snapshot.error.json"),
+        "synced" => include_str!("../../tests/fixtures/popover-snapshot.synced.json"),
+        "syncing" => include_str!("../../tests/fixtures/popover-snapshot.syncing.json"),
+        "error" => include_str!("../../tests/fixtures/popover-snapshot.error.json"),
         other => panic!("no fixture {other}"),
     };
     serde_json::from_str(text).expect("fixture is JSON")
@@ -896,9 +895,9 @@ fn the_review_event_is_camel_case_like_the_url_it_replaces() {
         serde_json::to_value(&ev).unwrap(),
         json!({ "fileId": "f-1", "fileName": "ledger.xlsx", "isText": false, "mode": "conflict" })
     );
-    // The same file the TypeScript test parses.
+    // The same fixture the popover validates.
     let shared: serde_json::Value =
-        serde_json::from_str(include_str!("../../../tests/fixtures/review-open.conflict.json")).unwrap();
+        serde_json::from_str(include_str!("../../tests/fixtures/review-open.conflict.json")).unwrap();
     assert_eq!(serde_json::to_value(&ev).unwrap(), shared);
     let back: ReviewOpen =
         serde_json::from_value(json!({ "fileId": "f-2", "fileName": "a", "isText": true, "mode": "versions" }))

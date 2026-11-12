@@ -7,13 +7,15 @@ list or any error also turns every area on, so a broken filter can only cost tim
 skip a suite.
 
 `rust` is the Tauri engine suite (`src-tauri`). Its tests read files outside `src-tauri`
-(source pins on `src/*.tsx`, `scripts/`, `BeebeebFileProvider/`, `tauri` configs), so only
-the paths below are known NOT to reach it:
+(`scripts/`, `BeebeebFileProvider/`, `tauri` configs, `crates/` fixtures), so only the
+paths below are known NOT to reach it:
 
   docs/**, design/**   prose and design sources (no Rust test opens them)
   *.md, LICENSE*       at any depth outside src-tauri (src-tauri/** always counts)
   native/**            the native UI crates: their own jobs, not this suite
   .github/ISSUE_TEMPLATE/**, .github/*.md
+
+The React sources (`src/`) were removed for 0.9.0 (native app, no web view).
 
 Usage:
   ci-changed-areas.py <file-with-one-path-per-line>     # prints rust=...
@@ -62,7 +64,7 @@ def self_test():
         ("rust source", ["src-tauri/src/lib.rs"], True),
         ("markdown inside src-tauri still counts", ["src-tauri/MAP.md"], True),
         ("docs plus one rust file", ["docs/a.md", "src-tauri/Cargo.toml"], True),
-        ("frontend source (Rust tests pin TSX)", ["src/main.tsx"], True),
+        ("removed frontend source (fails open)", ["src/main.tsx"], True),
         ("workflow", [".github/workflows/ci.yml"], True),
         ("composite action", [".github/actions/rust-suite/action.yml"], True),
         ("toolchain", ["rust-toolchain.toml"], True),

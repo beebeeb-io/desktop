@@ -183,8 +183,10 @@ if (foot) {
 // Measured without it: a recapture of DW-0701 exported 4 keys more, DW-A02 8 more, DW-0402 33 more
 // (`mi-*`), DW-0505 17 more (`menu-item-*`), and DW-0508 did not capture at all.
 const sectionOn = (() => { const on = q('.mk-side-item.on .mk-side-label'); return on ? on.textContent.trim() : ''; })();
-const groupOf = q('.mk-set') ? 'settings' : q('.au-mac') ? 'account' : q('.au-set') ? 'account-settings' : (sectionOn === 'Shared' || sectionOn === 'Trash') ? 'shared-trash' : 'files';
-if (groupOf === 'shared-trash') {
+const groupOf = q('.mk-set') ? 'settings' : q('.au-mac') ? 'account' : q('.au-set') ? 'account-settings' : (sectionOn === 'Shared' || sectionOn === 'Trash') ? 'shared-trash' : (sectionOn === 'Sync history' || sectionOn === 'Available offline') ? 'this-pc' : 'files';
+// The This PC sections (Sync history, Available offline) were keyed with this section's names too
+// (`btn-<words>`, `seg-<n>`, `label-<words>`), plus their own in keymap-this-pc.js.
+if (groupOf === 'shared-trash' || groupOf === 'this-pc') {
 const inDet = (el) => !!el.closest('.mk-det');
 // A button (`.kit-btn`): `btn-<its words>`, `-label`, `-icon`.
 const btnSeen = {};
@@ -285,7 +287,7 @@ if (mkBanner) {
   api.box('banner-bar', q('.mk-bar', mkBanner));
   api.box('banner-bar-fill', q('.mk-bar i', mkBanner));
 }
-} // groupOf === 'shared-trash'
+} // groupOf === 'shared-trash' or 'this-pc'
 
 // ---- Settings, inside the window (`.mk-set`: lane f-settings, src/frames/settings) ----
 // One scheme for every pane: lists and their rows by order (`list-<L>`, `item-<L>-<I>`), every
