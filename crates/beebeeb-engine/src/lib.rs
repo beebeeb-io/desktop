@@ -94,6 +94,8 @@ pub mod state_paths;
 pub mod surfaces;
 pub mod sync_activity;
 pub mod sync_root_owner;
+pub mod sync_root_port;
+pub mod sync_view;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_api;
 #[cfg(any(test, feature = "test-support"))]

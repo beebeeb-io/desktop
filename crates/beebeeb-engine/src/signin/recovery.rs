@@ -97,24 +97,33 @@ pub async fn recovered_key_matches_account(
         .map(|answer| answer == RecoveryCheckAnswer::Matches)
 }
 
-pub fn normalize_recovery_phrase_input(input: &str) -> Result<String, String> {
-    let words = input
-        .split_whitespace()
-        .map(|word| {
-            word.trim()
-                .to_ascii_lowercase()
-                .chars()
-                .filter(|c| c.is_ascii_alphabetic())
-                .collect::<String>()
-        })
-        .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>();
-
-    if words.len() != 12 {
+/// The 12 words as the phrase's derivation reads them: lower case, letters only, one space between. One wiping
+/// buffer, sized up front so it never moves (a moved buffer would leave a copy of the words behind); no word is
+/// copied anywhere else (invariant I2, task 2470).
+pub fn normalized_phrase(input: &str) -> Result<zeroize::Zeroizing<String>, String> {
+    // Never longer than the input: each kept letter is one byte of it, each space stands for at least one.
+    let mut phrase = zeroize::Zeroizing::new(String::with_capacity(input.len()));
+    let mut words = 0;
+    for word in input.split_whitespace() {
+        let mut letters = word.chars().filter(char::is_ascii_alphabetic).peekable();
+        if letters.peek().is_none() {
+            continue;
+        }
+        if words > 0 {
+            phrase.push(' ');
+        }
+        phrase.extend(letters.map(|letter| letter.to_ascii_lowercase()));
+        words += 1;
+    }
+    if words != 12 {
         return Err("Recovery phrase must contain exactly 12 words.".to_string());
     }
+    Ok(phrase)
+}
 
-    Ok(words.join(" "))
+/// [`normalized_phrase`] as a plain `String`, for the old shell's callers. The native phrase path never calls it.
+pub fn normalize_recovery_phrase_input(input: &str) -> Result<String, String> {
+    normalized_phrase(input).map(|phrase| phrase.as_str().to_owned())
 }
 
 /// Decode a base64 string (standard alphabet, with or without padding).
@@ -139,7 +148,7 @@ pub async fn verify_vault_key_from_phrase(
     session_token: &str,
     recovery_phrase: &str,
 ) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
-    let recovery_phrase = normalize_recovery_phrase_input(recovery_phrase)?;
+    let recovery_phrase = normalized_phrase(recovery_phrase)?;
     let master_key_struct = beebeeb_core::recovery::recover_from_phrase(&recovery_phrase)
         .map_err(|_| "Recovery phrase does not match a valid 12-word Beebeeb phrase.".to_string())?;
     if !recovered_key_matches_account(client, base_url, session_token, &master_key_struct).await? {

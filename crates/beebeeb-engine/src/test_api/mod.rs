@@ -96,7 +96,16 @@ impl Reply {
     pub fn error(status: u16, code: &str) -> Self {
         Self::json(status, json!({ "error": code }))
     }
+
+    /// No answer at all: the connection is closed after the request is read (a server that cannot be reached for
+    /// this request, as the client sees it).
+    pub fn hang_up() -> Self {
+        Self::empty(HANG_UP)
+    }
 }
+
+/// The status of [`Reply::hang_up`]: never sent, the connection closes instead.
+const HANG_UP: u16 = 0;
 
 pub type Handler = Arc<dyn Fn(&Request) -> Reply + Send + Sync>;
 
@@ -172,6 +181,10 @@ fn serve(mut stream: TcpStream, handler: &Handler, log: &Mutex<Vec<Request>>) {
     };
     log.lock().expect("fake API log").push(request.clone());
     let reply = handler(&request);
+    if reply.status == HANG_UP {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        return;
+    }
     let reason = if (200..300).contains(&reply.status) {
         "OK"
     } else {

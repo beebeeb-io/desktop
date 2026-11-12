@@ -438,6 +438,26 @@ new (the modal's card); no existing frame changes.
 | U (native) `the_refusal_modal_opens_once_per_refused_attempt` (Q3) | one refused attempt seen on 5 polls → 1 modal; closed, it stays closed; the next refused attempt → 1 more; a refusal while the gate is not Ready → none | open it on every poll |
 | U (native) `the_modals_try_again_asks_for_one_start` (Q3) | "Try again" closes the modal and asks for exactly 1 start | close without asking |
 
+**The build lane's amendments (2026-11-12), each flagged here and in the PR body; the code follows them:**
+- *Contradiction §4.2 vs §9 (a folder "by its name" vs no name in the type):* `SyncStartRefused` carries no name and
+  its `Display` says "the sync folder"; the native modal names the folder from the start worker (§4.3), so §9 holds.
+- *Additions to `SyncView`:* `attempt` (one more for every start that refused or made an engine, so a window says a
+  refusal once per attempt, including a refusal the engine task reports after the start returned) and
+  `last_check_at` (the engine's last finished check, for DW-0101's "This list is from …"). Neither is a path, a
+  name, an email or an id.
+- *`SyncRootPort::register` answers `Result<(), Option<i32>>`*, not `Result<(), i32>`: Windows does not always give a
+  code (`RegistrationFailed { code: Option<i32> }` already allows none).
+- *Step 2 also clears an engine that ended by itself:* a runner whose task ended (a failed connect, a taken lock)
+  left the slot occupied and every later start answered `AlreadyRunning`, so the modal's "Try again" could never
+  work. Its end is confirmed (`abort`) and it leaves the slot; an unconfirmed end refuses with `StopUnconfirmed`.
+- *Outside the S1 file list, one line each:* `E/windows_cf/mod.rs` `register_sync_root_with` keeps Windows' error as
+  the error's source (the code reaches `RegistrationFailed`); `E/host.rs` gains two default methods,
+  `start_report` (the engine task's connect, refusal and end reach the handle's view) and `wake` (the view changed;
+  `ChannelHost` wakes its loop); `E/lockfile.rs` gains the read half; `E/sync_root_owner.rs` makes `registered`
+  `pub(crate)` for the port and its pin follows the new order; `E/test_api/mod.rs` gains `Reply::hang_up`, which
+  stands for "a closed port" in `only_a_positive_answer_opens_the_vault` (the handle has one API base, so only that
+  one request can be made unreachable).
+
 **Native rungs (Windows build VM, desktop session; a test-identity build; preconditions P below):**
 
 | Rung | Run | Proves |

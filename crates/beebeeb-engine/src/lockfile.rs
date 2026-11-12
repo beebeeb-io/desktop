@@ -120,6 +120,15 @@ impl LockFile {
     }
 }
 
+/// Whether [`LockFile::acquire`] would refuse now: the lock in `state_dir` names a live process, or it is there and
+/// cannot be read. Reads only: it never writes and never breaks a stale lock (`sync_root_port`, step 4 of a start).
+pub fn held_by_a_live_process(state_dir: &std::path::Path) -> bool {
+    match fs::read_to_string(state_dir.join(crate::state_paths::LOCK_FILENAME)) {
+        Ok(raw) => serde_json::from_str::<LockContents>(&raw).is_ok_and(|prior| pid_alive(prior.pid)),
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
 impl Drop for LockFile {
     fn drop(&mut self) {
         // Best-effort: a failed delete just leaves a stale lock that
