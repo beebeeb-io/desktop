@@ -188,6 +188,11 @@ pub struct Kept {
 
 /// What the two This PC sections read and ask. Engine calls: see the PR body.
 pub trait ThisPcSource {
+    /// `false`: nothing answers yet (`Unwired`), and the view draws the shell's "not built yet"
+    /// frame instead of sample sync history.
+    fn wired(&self) -> bool {
+        true
+    }
     /// This PC's date, for "Today" and "Yesterday".
     fn today(&self) -> NaiveDate;
     /// The last 30 days, newest first.
@@ -488,5 +493,42 @@ impl ThisPcSource for FixtureSource {
 
     fn remove_all_from_pc(&mut self) {
         self.kept.clear();
+    }
+}
+
+/// The source of a build that ships before the engine lane has wired This PC: it answers
+/// nothing, and the view draws the shell's "not built yet" frame instead of sample history.
+pub struct Unwired;
+
+impl ThisPcSource for Unwired {
+    fn wired(&self) -> bool {
+        false
+    }
+    fn today(&self) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 1, 1).unwrap_or_default()
+    }
+    fn history(&self) -> Vec<Change> {
+        Vec::new()
+    }
+    fn problems(&self) -> Vec<Change> {
+        Vec::new()
+    }
+    fn retry(&mut self, _problem: &str) {}
+    fn retry_all(&mut self) {}
+    fn kept(&self) -> Vec<Kept> {
+        Vec::new()
+    }
+    fn remove_from_pc(&mut self, _id: &str) {}
+    fn remove_all_from_pc(&mut self) {}
+}
+
+/// The source This PC starts on. A development build (and every test and headless render)
+/// starts on the board's sample content; a build that ships starts on `Unwired`, so sample
+/// history is never shown as a person's own. The engine lane replaces this.
+pub fn first(dev_build: bool) -> Box<dyn ThisPcSource> {
+    if dev_build {
+        Box::new(FixtureSource::board())
+    } else {
+        Box::new(Unwired)
     }
 }

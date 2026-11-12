@@ -124,6 +124,11 @@ impl Ui {
         Ui::new(Box::new(FixtureSource::board()))
     }
 
+    /// `false`: nothing answers yet (the engine lane has not wired This PC).
+    pub fn wired(&self) -> bool {
+        self.source.wired()
+    }
+
     pub fn problem_count(&self) -> usize {
         self.source.problems().len()
     }

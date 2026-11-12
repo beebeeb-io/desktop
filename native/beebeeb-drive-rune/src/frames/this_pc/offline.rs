@@ -35,6 +35,11 @@ fn summary(kept: &[Kept]) -> String {
 }
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
+    // Nothing answers for This PC yet (a build that ships before the engine lane wires it):
+    // the shell's "not built yet" frame, never sample kept items.
+    if !s.this_pc.wired() {
+        return crate::shell::placeholder::window(s, cx, crate::shell::registry::group_for(&s.shell.app));
+    }
     let t = tokens::theme(cx.system_dark());
     let ui = &s.this_pc;
     let focused = chrome::search_focused(cx);
