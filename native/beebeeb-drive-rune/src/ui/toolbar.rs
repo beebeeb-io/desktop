@@ -120,6 +120,9 @@ pub fn press(f: impl Fn(&mut State, &mut rune::Tx) + 'static) -> Option<Press> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
     NotHere,
+    /// As `NotHere`, with the dimming on a well of its own around the switch (key
+    /// `view-toggle-dim`, which the Viewers goldens hold).
+    NotHereWell,
     List,
     Grid,
 }
@@ -254,7 +257,7 @@ pub fn bar(bar: Bar, t: &Theme) -> El {
         let seg = segment(key, name, ic, bar.view == if grid { View::Grid } else { View::List }, t);
         match (bar.view, &on_view) {
             // One layout: the board draws the switch dimmed, and neither side takes a press.
-            (View::NotHere, _) => seg.disabled(true).focusable(false),
+            (View::NotHere | View::NotHereWell, _) => seg.disabled(true).focusable(false),
             _ if bar.inert => seg.disabled(true).focusable(false),
             (_, Some(on_view)) => {
                 let on_view = on_view.clone();
@@ -275,6 +278,13 @@ pub fn bar(bar: Bar, t: &Theme) -> El {
     if bar.view == View::NotHere {
         // `.mk-tgroup` at 45 %.
         view_toggle = view_toggle.disabled(true).opacity(0.45);
+    } else if bar.view == View::NotHereWell {
+        view_toggle = el()
+            .key("view-toggle-dim")
+            .radius(9.0)
+            .fill(t.field)
+            .opacity(0.45)
+            .child(view_toggle);
     } else if bar.inert {
         view_toggle = view_toggle.disabled(true).focusable(false);
     }

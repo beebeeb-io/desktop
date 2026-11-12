@@ -233,7 +233,12 @@ fn command(c: usize, r: usize, name: &str, home: &str, t: &Theme) -> El {
     col()
         .key(key.clone())
         .role("listitem")
-        .label(format!("{name}: {home}"))
+        // A row with no home (Free up space) is read by its name alone.
+        .label(if home.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name}: {home}")
+        })
         .w_full()
         .child(
             row()
