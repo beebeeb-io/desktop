@@ -312,6 +312,11 @@ fn the_code_takes_eight_digits_and_a_wrong_one_is_said_without_saying_which() {
         sample::WRONG_CODE,
         "digits only, eight at most"
     );
+    let mut dumps = readable(&rt).to_vec();
+    dumps.push(("Debug", format!("{:?}", ui(&mut rt).create.code)));
+    for (name, dump) in &dumps {
+        assert!(!dump.contains(sample::WRONG_CODE), "the code is in the {name}");
+    }
     press(&mut rt, Key::Enter);
     assert_eq!(at(&mut rt), Step::Verify);
     assert_eq!(
