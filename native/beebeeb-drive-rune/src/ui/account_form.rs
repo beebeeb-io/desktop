@@ -164,7 +164,9 @@ pub fn field(
             inner = inner.child(
                 el().key(format!("{key}-caret"))
                     .a11y_hidden()
-                    .absolute(x + 1.0, 4.5)
+                    // 5 pt under the field's top (measured: the caret at 143 in a field at 138,
+                    // DW-A64 and DW-A65), which is 4 under the well's 1 pt border.
+                    .absolute(x + 1.0, 4.0)
                     .size(1.5, 17.0)
                     .radius(1.0)
                     .fill(t.accent_deep),
@@ -248,9 +250,18 @@ pub fn digits(
             .radius(12.0)
             .center();
         b = if active {
+            // The board's two shadows as shadows (`0 0 0 3px` outside, `inset 0 0 0 1px`). On a
+            // box that sits on half a device pixel (a confirm centred on a quarter point) the
+            // browser gives the inner line a quarter of its ink on the half-covered row, Rune a
+            // half (measured, DW-A72: board 227 201 150, here 202 167 113): the PR's Rune notes.
             b.fill(t.card)
                 .box_shadow(kit::ring(3.0, t.accent.alpha(0.40)))
-                .border(1.0, t.accent_deep)
+                .box_shadow(rune::Shadow {
+                    spread: 1.0,
+                    color: t.accent_deep,
+                    inset: true,
+                    ..rune::Shadow::default()
+                })
         } else {
             b.fill(t.field).box_shadow(kit::ring_inset(t.separator))
         };
@@ -301,7 +312,10 @@ fn underline_bars(label: &str, style: TextStyle) -> Vec<(f32, f32)> {
         let end = rune::text::advance(&label[..i + ch.len_utf8()], style);
         let w = end - x;
         let gap = match ch {
-            'g' | 'j' => Some((0.02, 0.98)),
+            // Only the foot of Inter's g reaches the line 2px under the baseline. Measured on the
+            // board ("Send again", 11px, DW-A66 and DW-A81): a gap of 3.5 of the g's 7.3px.
+            'g' => Some((0.23, 0.71)),
+            'j' => Some((0.02, 0.98)),
             'p' => Some((0.02, 0.46)),
             'q' => Some((0.54, 0.98)),
             'y' => Some((0.10, 0.72)),
