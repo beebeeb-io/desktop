@@ -98,9 +98,9 @@ fn idle_after_check() -> HostMessage {
 }
 
 /// A task that never ends in the account's engine slot: `Engine::is_syncing` says true, as it does while the
-/// engine runs, and nothing syncs, so nothing is written in the process's state folder. The task never runs;
-/// the runtime that holds it is returned to outlive the reads. Nothing that holds it may stop the engine (a
-/// stop waits for the task).
+/// engine runs, and the handle's view says it runs, as a start leaves it (S1: the b reads the view). Nothing syncs,
+/// so nothing is written in the process's state folder. The task never runs; the runtime that holds it is returned
+/// to outlive the reads. Nothing that holds it may stop the engine (a stop waits for the task).
 fn hold_running(engine: &Engine<MemoryCredentials>) -> tokio::runtime::Runtime {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -108,6 +108,7 @@ fn hold_running(engine: &Engine<MemoryCredentials>) -> tokio::runtime::Runtime {
     let task = runtime.spawn(std::future::pending::<()>());
     let account = engine.accounts().active_account().expect("the account");
     *account.engine.try_lock().expect("the engine slot is free") = Some(EngineRunner::for_test_with_task(task));
+    engine.set_view_for_test(|view| view.start = Start::Running);
     runtime
 }
 
@@ -661,9 +662,11 @@ fn a_running_engine_gives_the_b_its_reports_and_up_to_date_only_after_a_finished
         assert_eq!(listed, rows, "after {:?}", live.status_view().state);
     }
 
-    // Sync stops: not syncing, whatever the last report said.
+    // Sync stops: not syncing, whatever the last report said (the slot is empty and the view says so, as a stop
+    // leaves them).
     reports.send(idle_after_check()).unwrap();
     *account.engine.try_lock().unwrap() = None;
+    engine.set_view_for_test(|view| view.start = Start::NotAsked);
     assert!(!engine.is_syncing());
     assert_eq!(b(&live), (EngineState::NotRunning, None, "Not syncing"));
 }

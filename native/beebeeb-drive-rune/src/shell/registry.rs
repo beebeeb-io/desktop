@@ -34,6 +34,8 @@ pub enum FrameGroup {
     Settings(SettingsPane),
     ConflictDialog,
     ShortcutsDialog,
+    /// A refused sync start: what happened and how to fix it (Q3 of the sync-start contract).
+    SyncOffDialog,
     /// The notification-area flyout (its own window).
     Flyout,
 }
@@ -52,6 +54,7 @@ impl FrameGroup {
             FrameGroup::Settings(pane) => format!("Settings: {}", pane.label()),
             FrameGroup::ConflictDialog => "Two versions".into(),
             FrameGroup::ShortcutsDialog => "Commands and keyboard shortcuts".into(),
+            FrameGroup::SyncOffDialog => "Sync is off".into(),
             FrameGroup::Flyout => "Flyout".into(),
         }
     }
@@ -77,6 +80,7 @@ impl FrameGroup {
             FrameGroup::Settings(_) => "Settings, inside the window (DW-0701)",
             FrameGroup::ConflictDialog => "Folders, Backups and uploads: two versions (DW-0429)",
             FrameGroup::ShortcutsDialog => "The b, its menu, and the app menus (DW-1232)",
+            FrameGroup::SyncOffDialog => "no board frame (the sync-start contract's refusal modal, Q3)",
             FrameGroup::Flyout => "The notification area: the b and its flyout (DW-1201)",
         }
     }
@@ -106,6 +110,7 @@ impl FrameGroup {
             | FrameGroup::Settings(_)
             | FrameGroup::ConflictDialog
             | FrameGroup::ShortcutsDialog
+            | FrameGroup::SyncOffDialog
             | FrameGroup::Flyout => false,
         }
     }
@@ -132,6 +137,7 @@ impl FrameGroup {
             FrameGroup::Settings(_) => Some("DW-0701"),
             FrameGroup::ConflictDialog => Some("DW-0429"),
             FrameGroup::ShortcutsDialog => Some("DW-1232"),
+            FrameGroup::SyncOffDialog => None,
             FrameGroup::Flyout => Some("DW-1201"),
         }
     }
@@ -270,6 +276,7 @@ pub struct DialogFrame {
 /// The built dialogs. ONE line per dialog.
 pub const DIALOGS: &[DialogFrame] = &[
     crate::frames::tray::shortcuts::DIALOG,
+    crate::frames::global::sync_off::DIALOG,
     // DialogFrame { group: FrameGroup::ConflictDialog, view: crate::frames::conflict::card, on_key: None, feedback: FeedbackPolicy::Denied("its lane has not opted in yet") },
 ];
 
@@ -304,6 +311,7 @@ pub fn dialog_group_for(app: &AppMachine) -> Option<FrameGroup> {
     app.dialog().map(|dialog| match dialog {
         Dialog::Conflict { .. } => FrameGroup::ConflictDialog,
         Dialog::Shortcuts => FrameGroup::ShortcutsDialog,
+        Dialog::SyncOff => FrameGroup::SyncOffDialog,
     })
 }
 
@@ -404,6 +412,7 @@ mod tests {
             FrameGroup::Viewer,
             FrameGroup::ConflictDialog,
             FrameGroup::ShortcutsDialog,
+            FrameGroup::SyncOffDialog,
             FrameGroup::Flyout,
         ];
         for s in Section::ALL {
@@ -416,10 +425,10 @@ mod tests {
         for group in &all {
             let _ = group.shows_secret();
         }
-        // 10 base + 7 sections + 9 settings panes = 26.
+        // 11 base + 7 sections + 9 settings panes = 27.
         assert_eq!(
             all.len(),
-            26,
+            27,
             "a FrameGroup variant was added without updating this test"
         );
     }
@@ -445,6 +454,7 @@ mod tests {
         assert!(!FrameGroup::Flyout.shows_secret());
         assert!(!FrameGroup::ConflictDialog.shows_secret());
         assert!(!FrameGroup::ShortcutsDialog.shows_secret());
+        assert!(!FrameGroup::SyncOffDialog.shows_secret());
     }
 
     /// The FRAMES array's entry count: a frame added without updating this test fails.
@@ -457,7 +467,7 @@ mod tests {
         );
         assert_eq!(
             DIALOGS.len(),
-            1,
+            2,
             "a dialog was added to DIALOGS without updating this test"
         );
     }

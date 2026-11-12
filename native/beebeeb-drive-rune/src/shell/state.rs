@@ -144,6 +144,8 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     s.identity = AppIdentity::CURRENT;
     s.actions =
         crate::frames::files::Actions::new(Box::new(crate::engine_host::EngineFilesSource::new(engine.clone())));
+    // The banner's two fields S1 feeds from the engine's view (the session ended, offline).
+    s.global = crate::frames::global::Ui::new(Box::new(crate::engine_host::EngineGlobalSource::new(engine.clone())));
     s.signin = Some(crate::frames::signin::Ui::new(Box::new(
         crate::engine_host::EngineSignInSource::new(engine),
     )));

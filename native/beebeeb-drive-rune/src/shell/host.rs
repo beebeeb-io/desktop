@@ -22,6 +22,7 @@ use super::tray::{LeftClick, MenuAction, TrayInputs, TrayModel, tray_model};
 use super::window_state::{self, Observed, SavedWindows};
 use super::{registry, surfaces};
 use crate::State;
+use crate::frames::global::sync_off::SyncOff;
 use crate::ui::sidebar::SidebarSection;
 
 /// One line for the developer's console. Never a link, a path of the person's, or a secret.
@@ -74,6 +75,13 @@ pub struct Shell {
     /// How many reads the shell asked of the flyout ([`Shell::read_flyout`]), for the tests.
     #[cfg(test)]
     flyout_reads: u32,
+    /// The refused start the refusal modal shows ([`open_sync_refusal`]).
+    sync_off: Option<SyncOff>,
+    /// The attempt the refusal modal was last opened for, or seen without a gate to open over: once per attempt.
+    refusal_seen: Option<u64>,
+    /// How often the refusal modal opened, for the tests.
+    #[cfg(test)]
+    sync_off_opened: u32,
 }
 
 impl Shell {
@@ -100,6 +108,10 @@ impl Shell {
             flyout_behind: false,
             #[cfg(test)]
             flyout_reads: 0,
+            sync_off: None,
+            refusal_seen: None,
+            #[cfg(test)]
+            sync_off_opened: 0,
         }
     }
 
@@ -130,6 +142,17 @@ impl Shell {
     /// Which kind of window the one window is right now (main, or first-run).
     pub fn window_kind(&self) -> WindowKind {
         self.window_kind
+    }
+
+    /// The refused start the refusal modal shows.
+    pub fn sync_off(&self) -> Option<&SyncOff> {
+        self.sync_off.as_ref()
+    }
+
+    /// How often the refusal modal opened.
+    #[cfg(test)]
+    pub(crate) fn sync_off_opened(&self) -> u32 {
+        self.sync_off_opened
     }
 
     /// Asks the engine to start syncing; refused while another agent holds the profile.
@@ -393,6 +416,8 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         on_gate_change(s);
         changed = true;
     }
+    // A refused sync start says so, once per attempt (the refusal modal, Q3).
+    changed |= open_sync_refusal(s);
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {
@@ -462,6 +487,41 @@ fn on_gate_change(s: &mut State) {
     if s.shell.app.gate() == super::app::GateState::Ready {
         s.shell.start_sync();
     }
+}
+
+/// The refusal modal (the owner's ruling Q3 on the sync-start contract): it opens once per refused start attempt,
+/// over whatever the window shows, only while the gate is Ready. An attempt refused while the gate is closed is
+/// never shown later (a stale refusal); another dialog in front keeps it waiting until that one closes. `true`: it
+/// opened.
+fn open_sync_refusal(s: &mut State) -> bool {
+    let Some(refusal) = s.shell.actions.sync_refusal() else {
+        return false;
+    };
+    if s.shell.refusal_seen == Some(refusal.attempt) {
+        return false;
+    }
+    if s.shell.app.gate() != super::app::GateState::Ready {
+        s.shell.refusal_seen = Some(refusal.attempt);
+        return false;
+    }
+    if s.shell.app.dialog().is_some() {
+        return false;
+    }
+    s.shell.refusal_seen = Some(refusal.attempt);
+    s.shell.sync_off = Some(refusal);
+    #[cfg(test)]
+    {
+        s.shell.sync_off_opened += 1;
+    }
+    dispatch(s, Event::OpenDialog(Dialog::SyncOff)) == Outcome::Changed
+}
+
+/// The refusal modal's "Try again": it closes, and one start is asked for (the start worker runs one at a time).
+pub fn try_sync_again(s: &mut State) {
+    if s.shell.app.dialog() == Some(&Dialog::SyncOff) {
+        dispatch(s, Event::Escape);
+    }
+    s.shell.start_sync();
 }
 
 /// The shell's own keys, then the current frame's (DW-1232, DW-1233: Windows' words).

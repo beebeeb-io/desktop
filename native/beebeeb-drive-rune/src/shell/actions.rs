@@ -12,6 +12,7 @@ use super::app::{AccountId, GateState, Session};
 use super::instance::ProfileHolder;
 use super::platform::{Platform, PlatformError};
 use super::tray::{EngineState, TrayInputs};
+use crate::frames::global::sync_off::SyncOff;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActionError {
@@ -55,6 +56,11 @@ pub trait EngineActions: Send + Sync {
     fn stop_for_quit(&self);
     /// A Windows shutdown that ran [`EngineActions::stop_for_quit`] was cancelled: carry on.
     fn resume_after_cancelled_quit(&self);
+    /// The last start's refusal while it stands, with the attempt it was (the refusal modal, Q3). Cheap: asked on
+    /// every frame.
+    fn sync_refusal(&self) -> Option<SyncOff> {
+        None
+    }
 }
 
 /// Everything a frame, the tray menu or the flyout may ask the shell to do beyond navigation.
@@ -73,6 +79,8 @@ pub trait ShellActions: Send + Sync {
     /// "Open Beebeeb when you log in" (DW-0281, Settings).
     fn autostart_enabled(&self) -> bool;
     fn set_autostart(&self, enabled: bool) -> Result<(), ActionError>;
+    /// See [`EngineActions::sync_refusal`].
+    fn sync_refusal(&self) -> Option<SyncOff>;
 }
 
 /// The real [`ShellActions`]: the engine for what is the engine's, the OS for the rest.
@@ -124,6 +132,9 @@ impl ShellActions for HostActions {
     fn set_autostart(&self, enabled: bool) -> Result<(), ActionError> {
         Ok(self.platform.set_autostart(enabled)?)
     }
+    fn sync_refusal(&self) -> Option<SyncOff> {
+        self.engine.sync_refusal()
+    }
 }
 
 /// What a [`FixtureEngine`] was asked to do, for tests.
@@ -144,6 +155,7 @@ struct Fixture {
     inputs: TrayInputs,
     holder: Option<ProfileHolder>,
     calls: Vec<FixtureCall>,
+    refusal: Option<SyncOff>,
 }
 
 /// An engine that is not there: a signed-in, up-to-date account in memory. Pause and resume
@@ -178,6 +190,7 @@ impl FixtureEngine {
                 inputs,
                 holder: None,
                 calls: Vec::new(),
+                refusal: None,
             }),
         }
     }
@@ -208,6 +221,12 @@ impl FixtureEngine {
 
     pub fn calls(&self) -> Vec<FixtureCall> {
         self.lock().calls.clone()
+    }
+
+    /// A start's refusal stands (or none does), as the engine's view would say.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_sync_refusal(&self, refusal: Option<SyncOff>) {
+        self.lock().refusal = refusal;
     }
 }
 
@@ -258,6 +277,9 @@ impl EngineActions for FixtureEngine {
     }
     fn profile_holder(&self) -> Option<ProfileHolder> {
         self.lock().holder.clone()
+    }
+    fn sync_refusal(&self) -> Option<SyncOff> {
+        self.lock().refusal.clone()
     }
 }
 
