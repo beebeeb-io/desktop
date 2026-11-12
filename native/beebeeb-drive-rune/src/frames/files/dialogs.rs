@@ -4,8 +4,10 @@
 //! stays inside it, Esc and Cancel close it, Return presses its amber button. What it does is a
 //! call on `FilesSource` (`new_folder`, `move_to`); a name is checked by `names::check_on` first.
 //!
-//! The shell (`shell`) is `ui::settings_dialog::dialog` with the Files window's scrim and a
-//! footer that can stack its buttons (`.wn-dlg-foot.is-stack`, DW-0409).
+//! The card and the scrim are `ui::dialog`'s, the ones `ui::settings_dialog::dialog` draws;
+//! `shell` adds what the Files window needs around them: the scrim under the caption bar, a
+//! footer that can stack its buttons (`.wn-dlg-foot.is-stack`, DW-0409: the caller's `col()`),
+//! and the modal layer with the dialog's own key.
 
 use super::names::{self, NameError};
 use super::source::{Action, ActionError};
@@ -13,10 +15,10 @@ use crate::State;
 use crate::source::{Crumb, DriveItem};
 use crate::theme::tokens::{Theme, radius};
 use crate::theme::{icons, icons_settings};
-use crate::ui::settings_dialog::{self, DIALOG_TITLE, Weight};
+use crate::ui::settings_dialog::{self, Weight};
 use crate::ui::settings_list::VALUE_MONO;
 use crate::ui::settings_shell::SUB;
-use crate::ui::{button, field, kit};
+use crate::ui::{button, dialog, field, kit};
 use rune::{Color, El, KeyEvent, TextEdit, TextStyle, Tx, col, el, row};
 
 /// The key of the New folder dialog's text input.
@@ -445,54 +447,11 @@ const PATH_HERE: TextStyle = TextStyle::new(12.0, 500.0).lh(15.0);
 /// one under the other, each as wide as the dialog (`.wn-dlg-foot.is-stack`).
 /// Keys: `scrim`, `dlg`, `dlg-title`, `dlg-sub`, `dlg-body`, `dlg-foot`.
 fn shell(name: &str, width: f32, title: &str, sub: Option<&str>, body: Vec<El>, foot: El, t: &Theme) -> El {
-    let mut head = col().key("dlg-head").pt(20.0).px(24.0).pb(4.0).gap(3.0).child(
-        kit::label("dlg-title", title, DIALOG_TITLE, t.text)
-            .role("heading")
-            .level(2)
-            .w_full(),
-    );
-    if let Some(sub) = sub {
-        head = head.child(kit::label("dlg-sub", sub, SUB, t.text_tertiary).truncate());
-    }
-    let mut b = col().key("dlg-body").pt(10.0).px(24.0).pb(18.0).gap(12.0).min_h(0.0);
-    for child in body {
-        b = b.child(child);
-    }
-    let foot = foot
-        .key("dlg-foot")
-        .gap(8.0)
-        .py(16.0)
-        .px(24.0)
-        .fill(t.surface)
-        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout();
-    let dlg = col()
-        .key("dlg")
-        .role("dialog")
-        .label(name)
-        // As `settings_dialog::dialog`: the foot's hairline puts the centred top on a quarter point.
-        .pixel_snap(false)
-        .w(width)
-        .radius(8.0)
-        .fill(t.card)
-        .box_shadow(kit::drop(24.0, 60.0, Color::BLACK.alpha(0.28)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .child(
-            col()
-                .key("dlg-clip")
-                .w_full()
-                .clip_rounded(8.0)
-                .child(head)
-                .child(b)
-                .child(foot),
-        );
-    let scrim = col()
-        .key("scrim")
-        // Under the caption: the window can still be moved and closed (`.mk-scrim`).
-        .pin(Some(0.0), Some(32.0), Some(0.0), Some(0.0))
-        .center()
-        .fill(settings_dialog::scrim_color(t))
-        .child(dlg);
+    // The card is `ui::dialog`'s, the one `settings_dialog::dialog` draws; a file's name under
+    // the title stays on one line. Under the caption: the window can still be moved and closed
+    // (`.mk-scrim`).
+    let card = dialog::card(name, width, title, sub.map(dialog::Sub::Truncate), body, foot, t);
+    let scrim = dialog::scrim(32.0, card, t);
     // The modal layer has the dialog's own key: one dialog opened from another (New folder from
     // Move to) is a new modal, so the keyboard goes to ITS first field. A modal's keys are heard
     // on the modal itself, not on the window under it.

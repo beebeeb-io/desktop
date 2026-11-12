@@ -4,6 +4,7 @@ pub mod au;
 pub mod button;
 pub mod caption;
 pub mod detail_pane;
+pub mod dialog;
 pub mod empty;
 pub mod field;
 pub mod file_list;
