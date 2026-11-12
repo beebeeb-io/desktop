@@ -5,8 +5,11 @@ lane opens S1 with code on top of this file; a separate security review checks e
 **Code read at:** `v2-native` = `bd94b159`. Every `file:line` below is from that commit. Paths are relative to the
 repository root; `E/` is `crates/beebeeb-engine/src/`, `N/` is `native/beebeeb-drive-rune/src/`.
 **Tasks:** 2445 (the path), 2465 (sign-out), 2462 and PR #335 (the test build's server), and by number only: 2456,
-2457, 2464, 2466. Server behaviour and every known weakness are in the private notes of task 2445
+2457, 2464, 2466, 2470, 2471. Server behaviour and every known weakness are in the private notes of task 2445
 ("task 2445 notes", sections N1 to N7); this file states only what the client does and what each PR must guarantee.
+**The owner's rulings (2026-11-12, task 2471):** the five open questions of §11 are answered. This file was changed
+for them before any code: §11 holds the answers; what they change is marked "(Q1)" to "(Q5)" where it changes, in §2.1,
+§5, §6, §8 (S1 gains the refusal modal, S2 the folder chooser, S3 keeps the local data), §9 and §10.
 
 **What I did not verify** (the build lane and the review must): nothing was run, not the app, not a test, not on
 Windows. PR #335 was read from its description, not its code (it is open, head `4eeadea5`, and not in this tree).
@@ -33,7 +36,7 @@ were not rendered here; the build lane renders them in the PR and fixes syntax i
 | Phrase screens | `EngineSignInSource::begin_restore`, `N/engine_host.rs:436-451`; DW-A23, A24, A25 (`N/frames/signin/FRAMES.md`) | built |
 | First run, 11 frames | `N/frames/signin/setup/**`; `SetupSource` `N/frames/signin/setup/source.rs:113-154` | drawn on a fixture; nothing routes to it in the live app (`N/frames/signin/setup/mod.rs:601` is a scene) |
 | Sign-out, keep everything | `Engine::sign_out_keeping_local_data`, `E/app.rs:621-649` | built, no caller |
-| Sign-out, Windows purge | `E/windows_cf/signout.rs:69`; the order is in the old shell, `src-tauri/src/sign_out_commands.rs:9-425` | engine parts built; the order is not in the engine |
+| Sign-out, Windows purge | `E/windows_cf/signout.rs:69`; the order is in the old shell, `src-tauri/src/sign_out_commands.rs:9-425` | engine parts built; the order is not in the engine; not used by the native sign-out (Q1) |
 | Account pane on a live engine | `N/engine_host/tests.rs:397` (`account_has_no_source_on_a_live_engine`) | no source: DW-A57 cannot be reached |
 | Fake API | `E/test_api/**`, `crates/beebeeb-engine/tests/fake_api_account.rs` | built (#323): OPAQUE, one account, 7 encrypted items |
 
@@ -104,9 +107,10 @@ Only frames that are on the board. Where the board has no frame for a state, the
 | Ready, Syncing / Paused | engine runs | Files (DW-0401) | Syncing, Paused, Up to date |
 | Ready, Offline | engine status says no connection | Files with DW-0101 | offline |
 | Ready, SessionEnded | the engine's auth health says rejected (`E/runner.rs:832`) | Files with DW-0105 ("Sign in") | "Sign in again" |
-| Ready, Refused: another provider's folder | `sync_root_owner::refusal` (`E/sync_root_owner.rs:46`) | first run: DW-0280; later starts: no board frame, see D1 | "Sync is off" |
-| Ready, Refused: registration failed | Windows answered an error | first run: DW-0280 with Windows' code; later: D1 | "Sync is off" |
-| Ready, Refused: another account's data | `account_binding::OTHER_ACCOUNT_ON_WINDOWS` | no board frame, D1 | "Sync is off" |
+| Ready, Refused: another provider's folder | `sync_root_owner::refusal` (`E/sync_root_owner.rs:46`) | the refusal modal (S1, Q3): what happened and how to fix it; in the first run too (S2) | "Sync is off" |
+| Ready, Refused: registration failed | Windows answered an error | the refusal modal with Windows' code (S1, Q3) | "Sync is off" |
+| Ready, Refused: another account's data | `account_binding::OTHER_ACCOUNT_ON_WINDOWS` | the refusal modal (S1, Q3): it says plainly that no fix exists in this version | "Sync is off" |
+| Ready, Refused: any other kind (§4.2) | the start's typed refusal | the refusal modal (S1, Q3), one per kind | "Sync is off" |
 | Locked | `Engine::lock` | DW-0009, not built: unreachable, §1 | locked |
 
 `start_sync` is asked from exactly two places, as today: once after the event loop is up (`N/shell/mod.rs:426`) and
@@ -154,27 +158,25 @@ sequenceDiagram
     end
 ```
 
-### 3.2 Sign-out (S3)
+### 3.2 Sign-out (S3, keeps this PC's local data: Q1)
 
 ```mermaid
 sequenceDiagram
     participant UI as UI thread
     participant W as worker thread "sign-out"
     participant E as Engine handle
-    participant OS as Folder, state.db, credential store, Cloud Files
+    participant OS as Credential store, Cloud Files
     participant API as API
 
     UI->>W: confirm on DW-A57
-    W->>E: sign_out(Unsent::KeepCopies)
+    W->>E: sign_out()
     E->>E: stop the engine, confirmed (else refuse: nothing changed)
     E->>OS: disconnect Cloud Files callbacks
-    E->>OS: purge: prepare every item, then delete (all or nothing before the first delete)
-    E->>OS: clear the account rows of state.db
-    E->>OS: unregister the sync root and its Explorer entry (ours only)
+    Note over E,OS: Q1: the sync folder, state.db and the caches stay; nothing is unregistered
     E->>E: forget the session in memory (under the engine slot)
     E->>OS: clear the credential slot: token, key, email, both owner tags
     E->>API: POST /auth/logout (best effort, bounded, offline changes nothing above)
-    W-->>UI: SignedOut, with the kept folder and its file count if any
+    W-->>UI: SignedOut
     Note over UI: next poll: gate SignedOut : DW-A02/A03
 ```
 
@@ -221,14 +223,15 @@ from the `EngineIdentity` the handle was opened with.
 | One start at a time | `LiveEngine::start_sync` (`:328`), moved with `start_sync_now` to new `N/engine_host/sync.rs` | at most one `start-sync` worker; the result is in `SyncView`, and the UI is woken; the log line stays, with the refusal's kind only |
 | Status words | `N/shell/tray.rs` inputs, `N/ui/status_line.rs` | Starting, Syncing, Paused, Up to date, Offline, "Sync is off" (D1), "Sign in again" |
 | Banners | the global banner's source (`N/frames/global/`) | S1 feeds exactly two fields from `SyncView`: offline (DW-0101) and session ended (DW-0105). The banner's "Sign in" is wired in S3 |
+| The refusal modal (Q3) | a shell dialog (`N/shell/app.rs` `Dialog`, one `DIALOGS` line in `N/shell/registry.rs`), its card in `N/frames/global/sync_off.rs` (new), drawn with the one dialog card (`N/ui/dialog.rs`) | opens once per refused start attempt, over whatever the window shows, only while the gate is Ready. One copy per refusal kind: what happened, what the person can do, and a fix action only where one exists in this build ("Try again" where a retry can succeed after an outside fix or a passing fault, "Quit" where only a restart helps); a kind with no fix says so plainly and has only "Close". The folder's name is read by the native start worker (the folder it asked for) and shown in the modal; no engine type carries it. No board frame: no frame gate, a UI test and a look at the headless render instead |
 
 ### 4.4 What moves from `src-tauri`, what stays
 
 | From `src-tauri` | To | PR |
 | --- | --- | --- |
 | "Create the folder, register, then start" (`finder_setup_commands.rs:794-834`) | the order of `Engine::start_sync` (§4.2) | S1 |
-| The Windows arm of `clear_session_impl` (`sign_out_commands.rs:131-153`, `:187-258`, `:330-399`) and `kept_unknown_files_dir` | `Engine::sign_out`, new `E/app/sign_out.rs` | S3 |
-| Persisting the folder and the "installed" status (`finder_setup_commands.rs:823-838`) | `EngineSetupSource`, S2 (§5.1) | S2 |
+| ~~The Windows arm of `clear_session_impl` (`sign_out_commands.rs:131-153`, `:187-258`, `:330-399`) and `kept_unknown_files_dir`~~ | not moved (Q1: the native sign-out keeps the local data; the purge is not built) | ~~S3~~ |
+| Persisting the folder and the "installed" status (`finder_setup_commands.rs:823-838`) | `EngineSetupSource`, S2 (§5.1), with the folder the person chose (Q2) | S2 |
 
 Stays in `src-tauri` (not this contract): the macOS keep step, send phase and flow windows (`sign_out_commands.rs`
 from `:602`), the Finder reconciler, the startup probe of the old shell. `src-tauri` is not edited by S1 to S3 except
@@ -238,21 +241,26 @@ to delete what moved when nothing there still calls it.
 
 ### 5.1 Who chooses the folder, and when
 
-- **The board has no folder chooser.** First run step 5 is "Beebeeb is in File Explorer" (DW-0206, 0206b, 0280);
-  `SetupSource` has no folder call (`N/frames/signin/setup/source.rs:113-154`). So the folder is the identity's
-  suggestion: the home folder joined with `identity.sync_folder_name()` (`E/config/paths.rs:38-42`), "Beebeeb" for
-  the real app and "Beebeeb Test" for the test build (`E/identity.rs:44`, `:63`). A chooser is new UI: §11 Q2.
+- **The board has no folder chooser; the owner asked for one (Q2).** First run step 5 is "Beebeeb is in File
+  Explorer" (DW-0206, 0206b, 0280); `SetupSource` has no folder call (`N/frames/signin/setup/source.rs:113-154`).
+  Until S2 the folder is the identity's suggestion: the home folder joined with `identity.sync_folder_name()`
+  (`E/config/paths.rs:38-42`), "Beebeeb" for the real app and "Beebeeb Test" for the test build (`E/identity.rs:44`,
+  `:63`). S2 adds the chooser: the OS folder picker (DW-0738's), the suggestion preselected.
 - **S1:** every start resolves the folder the same way (`Engine::sync_root`) and registers before the engine.
   Nothing is persisted yet; the suggestion is stable for one Windows user.
-- **S2:** the folder is written to the settings (`DesktopConfig.sync_root`, `E/config/types.rs:70`) by the start
-  worker after the first `Ok(Started)`, through `DesktopConfig::update_at_then`, and only when the settings name none.
-  From then on a changed home folder cannot move the sync folder. A new settings field `native_setup_done`
-  (`E/config/types.rs`, default `false`, never part of the settings IPC) is set by `SetupSource::finish`.
-  An install that already has `sync_root` set when the native app first opens (an upgrade from 0.8.x) gets
-  `native_setup_done = true` in `open()`, before anything else writes: it never sees the first run.
-- **The first run does not hold sync back.** Sync starts when the engine gate is Ready (S1's rule, unchanged by
-  S2); the seven steps are settings. Step 5 shows what the start did: `Adding` while `start` is `Starting`, `Added`
-  when the engine runs and `explorer` is `Added`, `Failed { code }` otherwise. "Try again" asks for a start again.
+- **S2:** the first run asks for the folder (Q2) before the first start: the person keeps the suggestion or picks
+  another one with the OS folder picker; a folder another provider owns, or one the engine refuses, is answered by the
+  refusal modal (Q3) and the picker opens again. The chosen folder is written to the settings
+  (`DesktopConfig.sync_root`, `E/config/types.rs:70`) by the start worker after the first `Ok(Started)`, through
+  `DesktopConfig::update_at_then`, and only when the settings name none. From then on a changed home folder cannot move
+  the sync folder. A new settings field `native_setup_done` (`E/config/types.rs`, default `false`, never part of the
+  settings IPC) is set by `SetupSource::finish`. An install that already has `sync_root` set when the native app first
+  opens (an upgrade from 0.8.x) gets `native_setup_done = true` in `open()`, before anything else writes: it never sees
+  the first run.
+- **The first run holds sync back only until a folder is chosen (Q2).** Once it is, sync starts when the engine gate
+  is Ready (S1's rule); the other steps are settings. Step 5 shows what the start did: `Adding` while `start` is
+  `Starting`, `Added` when the engine runs and `explorer` is `Added`, `Failed { code }` otherwise; a refused start
+  shows the refusal modal (Q3). "Try again" asks for a start again.
 
 ### 5.2 Registration
 
@@ -265,11 +273,12 @@ to delete what moved when nothing there still calls it.
   `unregister_sync_root` (`E/windows_cf/registration.rs:126-129`). S1 keeps all of them and adds none that reads the
   registration from anywhere else.
 - **Later starts:** every start registers again with the same provider (idempotent at the OS, `E/windows_cf/mod.rs:341`)
-  and never unregisters (unregistering deletes cloud-only placeholders; only sign-out does it, on purpose). A folder
+  and never unregisters (unregistering deletes cloud-only placeholders; with Q1 no native path does it). A folder
   that is gone while account data is recorded refuses the start (§4.2 step 6).
 - **Explorer entry:** best effort. When only the Explorer (WinRT) registration fails, sync runs and step 5 shows
   DW-0280, whose words ("the Beebeeb window works without File Explorer", `N/frames/signin/setup/view.rs:639`) are
-  then true. When the Cloud Files registration itself fails, no engine runs and those words are not true: §11 Q3.
+  then true. When the Cloud Files registration itself fails, no engine runs and those words are not true: the refusal
+  modal says what happened and how to fix it, where a fix exists (Q3); there is no window-only mode.
 
 ### 5.3 Beside the released app, and beside an older test build
 
@@ -303,8 +312,8 @@ not in an error value that reaches the UI.
 | I12 | The app never says it syncs when it does not | S1: §4.3, `SyncView` |
 | I13 | The test build's data stays with the server it was made for | PR #335; S1 keeps `Engine::open` and `restore` behind it and opens `state.db` nowhere earlier |
 | I14 | The test build never reads or writes the real app's folder, settings, state or credentials, and the reverse | `E/identity.rs`, `identity_pin_tests.rs`, `N/engine_host/tests.rs:153` |
-| I15 | Sign-out deletes a file only when it is proven to hold nothing the server lacks; anything else is copied out first or refuses the sign-out with nothing deleted | `E/windows_cf/signout.rs:69-236`, `prepare` `:240-325`; S3 calls it, changes none of it |
-| I16 | Sign-out never unregisters or empties another provider's folder | `E/windows_cf/registration.rs:126-129` |
+| I15 | ~~Sign-out deletes a file only when it is proven to hold nothing the server lacks; anything else is copied out first or refuses the sign-out with nothing deleted~~ Superseded by Q1: the native sign-out deletes no file of the sync folder, the state folder or the caches | Q1: `windows_cf::signout::purge` is not called by S3 |
+| I16 | Sign-out never unregisters or empties another provider's folder | `E/windows_cf/registration.rs:126-129`; with Q1 S3 unregisters and empties nothing, so it holds by construction |
 | I17 | After sign-out the credential slot holds 0 of its 5 entries (token, key, email, key owner, session owner), memory holds no session, and no engine can start with the old keys | `AuthVault::clear_session` (`E/keychain/vault.rs:263-274`); the session is forgotten under the engine slot |
 | I18 | A sign-out's local result does not depend on the network; the server call reports a status word only | `E/app.rs:795-801`; `CLAUDE.md` "Never break" (task 1886) |
 
@@ -323,11 +332,11 @@ Where each invariant is tested (§8 tables unless a file is named):
 | I9 | `a_vanished_folder_with_account_data_is_refused` |
 | I10 | `a_refused_start_makes_no_request`; existing binding tests of `E/account_binding.rs` |
 | I11 | `locked_writes_nothing`, `no_engine_starts_after_sign_out` |
-| I12 | `the_status_is_never_up_to_date_without_an_engine`, `a_refusal_reaches_the_tray_and_the_status_line`, `step_5_follows_the_view` |
+| I12 | `the_status_is_never_up_to_date_without_an_engine`, `a_refusal_reaches_the_tray_and_the_status_line`, `step_5_follows_the_view`, `each_refusal_says_what_happened_and_offers_a_fix_only_where_one_exists`, `the_refusal_modal_opens_once_per_refused_attempt` |
 | I13 | PR #335's own tests; `nothing_reads_local_state_before_the_server_binding` |
 | I14 | existing `the_two_identities_share_no_value` (`E/identity.rs:283`), `the_test_build_refuses_the_real_apps_state_folder_and_sync_folder` (`N/engine_host/tests.rs:153`), `E/identity_pin_tests.rs`; rung R1.2 |
-| I15 | `an_unsent_file_is_copied_never_deleted`, `refuse_changes_nothing`, rung R3.1 |
-| I16 | `another_providers_folder_is_never_unregistered`, rung R3.3 |
+| I15 | superseded by Q1; instead `sign_out_keeps_the_local_data`, rung R3.1 |
+| I16 | `sign_out_unregisters_nothing` (Q1), rung R3.3 |
 | I17 | `sign_out_leaves_0_of_5_entries`, `no_engine_starts_after_sign_out`, rung R3.2 |
 | I18 | `sign_out_offline_is_complete`, rung R3.7 |
 
@@ -357,7 +366,8 @@ What the client sends (all of it; what the server makes of it is in task 2445 no
 - **Backups are off and stay off unless the person switches a folder on.** In a test build the first run's step 3
   starts with all six switches off (the real app keeps the board's three on), and `start_backup` is not wired by
   this contract in either build. The test build's backup device is its own (`E/identity.rs:68-69`), so a later
-  backup lane cannot write into the real app's device folder.
+  backup lane cannot write into the real app's device folder. The owner's ruling (Q4): off and unwired in the test
+  build for now; later the test build may back up as a device of its own, under the backup lane's own contract.
 - **A first sync downloads no file content:** placeholders only (`E/windows_cf/populate.rs`), content on open.
 - **Nothing is uploaded that the person did not put in the test sync folder.**
 - Acceptable for a first test with a real account: one more sign-in session, the device registration and one more
@@ -392,11 +402,14 @@ red; the PR body pastes red and green for each. One full test run, just before t
 **File area:** `E/app.rs`, `E/sync_view.rs` (new), `E/windows_cf/mod.rs` (`connect_root` only), `E/runner.rs` (the
 lines around `:187`), `E/signin/recovery.rs` (I2 only), `crates/beebeeb-engine/examples/fake_api.rs` (new),
 `crates/beebeeb-engine/tests/fake_api_account.rs`, `N/engine_host.rs`, `N/engine_host/sync.rs` (new),
-`N/engine_host/tests.rs`, the two status sources (§4.3). No frame file changes.
+`N/engine_host/tests.rs`, the two status sources (§4.3). The refusal modal (Q3): `N/shell/app.rs` (one `Dialog`
+variant), `N/shell/registry.rs` (its group and one `DIALOGS` line), `N/shell/host.rs` (it opens once per refused
+attempt; its "Try again"), `N/frames/global/sync_off.rs` (new: its card). ~~No frame file changes.~~ One frame file is
+new (the modal's card); no existing frame changes.
 
 **Functions:** `Engine::start_sync` (order, `SyncStartRefused`), `Engine::view`, `windows_cf::connect_root`,
 `runner::run` (ends on a failed connect), the phrase path of `E/signin/recovery.rs` (I2), `LiveEngine::{session, tray_inputs, start_sync}`,
-`EngineFilesSource::sync_state`.
+`EngineFilesSource::sync_state`, the refusal modal (`frames::global::sync_off`, opened from `host::poll`).
 
 | Test (unit U, fake-API integration F) | Asserts | Mutant that must turn it red |
 | --- | --- | --- |
@@ -421,6 +434,9 @@ lines around `:187`), `E/signin/recovery.rs` (I2 only), `crates/beebeeb-engine/e
 | F `the_phrase_and_key_are_in_no_log` | with a capturing `tracing` subscriber and captured stderr over the whole happy path and the wrong-phrase path: 0 occurrences of any of the 12 words' joined form, the key bytes (hex and base64) and the token | log the phrase error with its input |
 | U (native) `a_refusal_reaches_the_tray_and_the_status_line` | `Refused(kind)` → tray inputs not syncing, status "Sync is off", `explorer_ready == false` | map `Refused` to `Idle`/"Up to date" |
 | U (native) `the_ui_thread_reads_the_view_only` | source pin: `session`, `tray_inputs`, `sync_state`, `gate` call no `engine.gate()`, `is_syncing()` or `is_paused()` | call `engine.is_syncing()` again |
+| U (native) `each_refusal_says_what_happened_and_offers_a_fix_only_where_one_exists` (Q3) | every refusal kind has its own title and words, names no path, and its actions: "Try again" where a retry can succeed, "Quit" for `StopUnconfirmed`, only "Close" and a plain "no fix" sentence for `OtherAccountsData` and `IdentityUnknown` | give `OtherAccountsData` a "Try again" |
+| U (native) `the_refusal_modal_opens_once_per_refused_attempt` (Q3) | one refused attempt seen on 5 polls → 1 modal; closed, it stays closed; the next refused attempt → 1 more; a refusal while the gate is not Ready → none | open it on every poll |
+| U (native) `the_modals_try_again_asks_for_one_start` (Q3) | "Try again" closes the modal and asks for exactly 1 start | close without asking |
 
 **Native rungs (Windows build VM, desktop session; a test-identity build; preconditions P below):**
 
@@ -431,7 +447,7 @@ lines around `:187`), `E/signin/recovery.rs` (I2 only), `crates/beebeeb-engine/e
 | R1.3 | list the test folder | 7 placeholders, all cloud-only (attributes), 0 bytes on disk; open one small file: it hydrates and its content equals the fixture |
 | R1.4 | type a wrong phrase first | DW-A24; credential entries of the test identity before = after (count); no folder; fake's request log: 1 verify |
 | R1.5 | with a second provider folder registered by the engine's QA provider (the crate's native tests' helper), start | both stay registered; each keeps its own files; no callback of one fires for the other (the engine log's connected generation, 1 per provider) |
-| R1.6 | pre-register the test folder's path to another provider name, then start | "Sync is off"; no placeholder created; the foreign registration unchanged |
+| R1.6 | pre-register the test folder's path to another provider name, then start | "Sync is off"; the refusal modal for another provider's folder (screenshot, Q3); no placeholder created; the foreign registration unchanged |
 | R1.7 | quit and start again | Ready without the phrase; Syncing; still 1 registration, 7 placeholders |
 
 P (every rung of S1 to S3): task 2464's precondition holds on the VM (the check is in task 2445 notes N5; a failed
@@ -441,18 +457,23 @@ check stops the rung); no network route except loopback; the lead runs it under 
 
 **File area:** `N/engine_host/setup.rs` (new: `EngineSetupSource`), `N/engine_host.rs` (the gate mapping only),
 `N/shell/host.rs` (`on_gate_change`, taking setup intents), `N/shell/state.rs` (which source the first run gets),
-`E/config/types.rs` + `E/config/settings.rs` (`native_setup_done`), `N/engine_host/open.rs` (the upgrade mark).
+`E/config/types.rs` + `E/config/settings.rs` (`native_setup_done`), `N/engine_host/open.rs` (the upgrade mark). The
+folder chooser (Q2): a first-run step that shows the suggested folder and opens the OS folder picker (DW-0738's), in
+the setup frames (`N/frames/signin/setup/**`), and the picker's call on the platform seam (`N/shell/platform/`).
 
-**Functions:** `EngineSetupSource::{explorer, retry_explorer, show_in_explorer, finish, poll, folders}`; the shell
-gate is `FirstRun` when the engine gate is `Ready` and `native_setup_done` is false; `on_gate_change` starts sync
-when the ENGINE gate is Ready (so also under `FirstRun`); the start worker persists the folder (§5.1). Every other
-`SetupSource` call keeps today's not-wired behaviour (logged), and the "You're set up" summary shows them as off.
+**Functions:** `EngineSetupSource::{explorer, retry_explorer, show_in_explorer, finish, poll, folders, choose_folder}`;
+the shell gate is `FirstRun` when the engine gate is `Ready` and `native_setup_done` is false; `on_gate_change` starts
+sync when the ENGINE gate is Ready (so also under `FirstRun`) once the first run has a folder (Q2); the start worker
+persists the folder (§5.1). Every other `SetupSource` call keeps today's not-wired behaviour (logged), and the
+"You're set up" summary shows them as off. Backups (Q4): off and unwired in the test build.
 
 | Test | Asserts | Mutant |
 | --- | --- | --- |
 | U `first_ready_on_a_new_pc_is_first_run` | fresh settings + engine Ready → shell gate `FirstRun`; after `finish` → `Ready`; after a restart → `Ready` | never write `native_setup_done` |
 | U `an_08x_install_never_sees_the_first_run` | settings with `sync_root` set, flag absent → `open()` writes the flag; gate `Ready` | drop the upgrade mark |
-| U `sync_starts_under_first_run` | gate turns `FirstRun` → 1 `start_sync` call | start only on shell `Ready` |
+| U `sync_starts_under_first_run` | gate turns `FirstRun` and a folder is chosen → 1 `start_sync` call | start only on shell `Ready` |
+| U `the_first_run_asks_for_the_folder_before_the_first_start` (Q2) | fresh settings + engine Ready → 0 starts until a folder is chosen; keeping the suggestion → 1 start with it; a picked folder → 1 start with that folder | start before the choice |
+| U `a_refused_folder_shows_the_modal_and_persists_nothing` (Q2, Q3) | the chosen folder answers `FolderOfAnotherProvider` → the refusal modal, and the picker can be opened again from it; `sync_root` stays unset | persist the refused folder |
 | U `step_5_follows_the_view` | `Starting` → `Adding`; `Running` + `Added` → `Added`; `Refused(RegistrationFailed{code})` → `Failed{code}` with that code as text; `Running` + Explorer entry failed → `Failed` | map every refusal to `Adding` |
 | U `retry_asks_for_one_start` | `retry_explorer` → 1 start request | call nothing |
 | F `the_folder_is_persisted_once` | after `Started`, the settings name the folder; a second start with another suggestion keeps the first | write on every start |
@@ -463,98 +484,92 @@ when the ENGINE gate is Ready (so also under `FirstRun`); the start worker persi
 
 | Rung | Run | Proves |
 | --- | --- | --- |
-| R2.1 | R1.1 on a clean identity, walk the seven steps with "Not now" | DW-0206b then DW-0206 (screenshots); "You're set up"; main window opens with 7 rows |
+| R2.1 | R1.1 on a clean identity, keep the suggested folder (Q2), walk the seven steps with "Not now" | the folder step (screenshot); DW-0206b then DW-0206 (screenshots); "You're set up"; main window opens with 7 rows |
+| R2.1b | R2.1 again on a clean identity, pick another folder with the OS picker (Q2) | the settings name the picked folder; it holds the 7 placeholders; the suggested folder was not made |
 | R2.2 | read the settings file | `sync_root` = the test folder, `native_setup_done = true`, `known_folder_backup` empty (3 values) |
 | R2.3 | Explorer's navigation pane | 1 entry of the test provider; the real app's entry (if any) unchanged |
-| R2.4 | make registration fail (the path pre-registered to another provider), start | DW-0280 with the engine's words; no engine (fake's log: 0 device registrations); "Try again" after removing the foreign registration → DW-0206 |
+| R2.4 | make registration fail (the path pre-registered to another provider), start | the refusal modal for another provider's folder (Q3); no engine (fake's log: 0 device registrations); "Try again" after removing the foreign registration → DW-0206 |
 | R2.5 | restart | no first run; Files |
 
-### S3: sign-out
+### S3: sign-out (keeps this PC's local data: Q1)
+
+**The owner's ruling (Q1, 2026-11-12):** sign-out keeps this PC's local data, as DW-A57 says ("Your data stays
+encrypted on this PC; signing in again opens it"). The purge order this section held (stop, purge, unregister) is not
+built; the base is `Engine::sign_out_keeping_local_data` (`E/app.rs:621-649`). What still goes: the session token and
+everything that would let another user of this PC in (the key, the email, both owner tags), and the session in memory.
+**Open for S3's own contract update, before its code** (not decided here): the ruling asks that what stays be
+encrypted at rest, while the files a person opened are ordinary files in the sync folder (task 2466); whether the
+sync root stays registered while signed out; how another account signs in on this PC, since the binding refuses
+another account's data (I10) and nothing removes it any more.
 
 **File area:** `E/app.rs` (the `mod sign_out;` line and visibility only), `E/app/sign_out.rs` (new),
-`crates/beebeeb-engine/tests/fake_api_account.rs`, `E/windows_cf/signout_tests.rs` (native additions),
-`N/engine_host/account.rs` (new: the live account source's sign-out), `N/frames/account/source.rs` (only if the
-trait needs a result type), `N/shell/host.rs` (the intent), `N/engine_host/tests.rs`.
+`crates/beebeeb-engine/tests/` (S3's own test binaries), `N/engine_host/account.rs` (new: the live account source's
+sign-out), `N/frames/account/source.rs` (only if the trait needs a result type), `N/shell/host.rs` (the intent),
+`N/engine_host/tests.rs`. ~~`E/windows_cf/signout_tests.rs` (native additions)~~ (Q1: no purge).
 
-**`Engine::sign_out(unsent: Unsent) -> Result<SignedOut, SignOutRefused>`**, one transition, in this order. A refusal
-before step 4's first delete changes nothing; after it, the refusal says what was kept and where.
+**`Engine::sign_out() -> Result<SignedOut, SignOutRefused>`**, one transition, in this order. A refusal changes
+nothing.
 
-1. Take the transition lock. Already signed out (no token flag, no session in memory, no stored token): skip to 4
-   (the purge is never skipped), then 7.
+1. Take the transition lock. Already signed out (no token flag, no session in memory, no stored token): skip to 5.
 2. Read the token for the later server call. Stop the engine and wait for the confirmed stop, keeping the engine
    slot; unconfirmed → `SignOutRefused::StopUnconfirmed`, still signed in (as `E/app.rs:624-626`).
 3. Windows: disconnect the Cloud Files callbacks and wait for the credentials' release
    (`windows_cf::revoke_callbacks`, `wait_for_credential_release`, `E/windows_cf/mod.rs:248`, `:307`).
-4. Purge the local account data.
-   - Windows: `windows_cf::signout::purge(identity, &db, root, &choice)` (`E/windows_cf/signout.rs:69`). It prepares
-     every item under exclusive handles before deleting any; deletes placeholders and files proven to hold only what
-     the server has; staged and cached copies behind `is_disposable_cache_path`; then clears the account rows
-     (`finish_windows_signout`, `E/state_db/signout.rs:210-243`). `Unsent::KeepCopies` (the default) copies whatever
-     is not proven sent (untracked files, unsent edits, unknown content, staged uploads) into a new folder beside
-     the sync folder before deleting it; `Unsent::Refuse` refuses instead. No `state.db` and a non-empty folder:
-     refuse (`sign_out_commands.rs:236-243`).
-   - Other OSes: clear the queue, the staged and cached copies and the account rows
-     (`StateDb::purge_all_local_state`, `clear_account_data`); the sync folder is not touched (there it holds
-     ordinary files).
-5. Windows, only when a session existed: `unregister_sync_root` then `unregister_shell_sync_root` (this order;
-   ours only, I16).
-6. Under the engine slot: forget the session and any pending second factor in memory; then release the slot.
-7. Clear the credential slot (`AuthVault::clear_session`); clear the email, the profile, the token flag.
-8. End the session on the server: `POST /auth/logout`, bounded (5 s), result as a status word, never changing 1 to 7.
+4. Under the engine slot: forget the session and any pending second factor in memory; then release the slot.
+5. Clear the credential slot (`AuthVault::clear_session`); clear the email, the profile, the token flag.
+6. End the session on the server: `POST /auth/logout`, bounded (5 s), result as a status word, never changing 1 to 5.
+
+~~4. Purge the local account data (`windows_cf::signout::purge`, `Unsent::KeepCopies`) and 5. unregister the sync
+root~~: not built (Q1).
 
 **What it deletes:** the session token, the wrapped key, the stored email, both owner tags (5 entries); the session
-and keys in memory; the account's rows in `state.db` (files, queue, cursors, owner, device statistics); every staged
-and cached plaintext copy; this app's Cloud Files registration and Explorer entry; every placeholder, and every file
-in the sync folder that is proven identical to what the server holds.
-**What it never deletes:** a file in the sync folder that holds bytes the server does not have (it is copied out
-first, or the sign-out refuses); anything outside the sync folder, the state folder and the app's cache folders;
-anything of another provider or identity; the kept-copies folder; the settings' account slot id (a random id, not an
-account's; the handle of this process keeps using it, so removing it would orphan the next sign-in's entries); the
-`state.db` file itself and its device custody rows (`E/state_db/signout.rs:233-235`); the record of PR #335 (the data
-folder stays bound to its server). What an uninstall must still remove: task 2466.
-**Offline:** steps 1 to 7 are local and complete; step 8 fails quietly and is not retried later (the token is gone
+and keys in memory.
+**What it keeps (Q1):** the sync folder and every file in it, `state.db` with the account's rows, the staged and
+cached copies (task 2466 decides what of them must be encrypted at rest), the settings, the settings' account slot id
+(the handle of this process keeps using it), the record of PR #335. What an uninstall must still remove: task 2466.
+**Offline:** steps 1 to 5 are local and complete; step 6 fails quietly and is not retried later (the token is gone
 from this PC). What that leaves on the server: task 2445 notes N3; the PR body states it.
 **Settings after sign-out:** `sync_root` and `native_setup_done` stay. They describe this PC, not an account: the
-next sign-in uses the same folder (S1 creates and registers it again) and shows no first run.
-**The session-ended banner (DW-0105 "Sign in"):** `Engine::end_rejected_session()` in the same file: stop the
-engine, forget the memory session, remove the token and its owner only (`AuthVault::clear_session_token`,
-`E/keychain/vault.rs:254-259`), keep the key, the email and all local data. Gate → SignedOut; the same account signs
-in with its password and needs no phrase (`E/app.rs:368-377`). It has a second caller: a 401 from the phrase check
+next sign-in of the same account uses the same folder and the same local data, and shows no first run.
+**The session-ended banner (DW-0105 "Sign in", confirmed by the owner's ruling Q5):** `Engine::end_rejected_session()`
+in the same file: stop the engine, forget the memory session, remove the token and its owner only
+(`AuthVault::clear_session_token`, `E/keychain/vault.rs:254-259`), keep the key, the email and all local data. Gate →
+SignedOut; the same account signs in with its password and needs no phrase (`E/app.rs:368-377`). It has a second caller: a 401 from the phrase check
 (`PhraseProblem::SessionEnded`, a new kind mapped from the proof's own 401 answer, never from a wrong phrase)
 makes the `restore` worker call it, so the phrase screen can never trap a person whose session ended; another account's sign-in removes the key first
 (`E/signin/key_owner.rs:141-173`) and is then refused by the binding at start (I10).
 
-**Shell:** DW-A57's "Sign out" → `sign-out` worker → `Engine::sign_out(KeepCopies)`; while it runs the dialog's
-button is disabled; on `Ok` the gate turns SignedOut on the next poll. `SignedOut.kept` and every refusal need words
-the board does not have: D2. DW-A57a ("all Beebeeb apps") stays not wired. The Security pane needs a live source to
+**Shell:** DW-A57's "Sign out" → `sign-out` worker → `Engine::sign_out()`; while it runs the dialog's button is
+disabled; on `Ok` the gate turns SignedOut on the next poll. DW-A57's sentence stays as the board has it (Q1). A
+refusal needs words the board does not have: D2. ~~`SignedOut.kept`~~ (Q1: nothing is copied out). DW-A57a ("all Beebeeb apps") stays not wired. The Security pane needs a live source to
 be reachable at all (§1): S3 adds the smallest one; panes it cannot fill show the not-built frame, never samples.
 
 | Test | Asserts | Mutant |
 | --- | --- | --- |
 | F `sign_out_leaves_0_of_5_entries` | after sign-in + phrase + sync: entries = 5; after `sign_out`: 0; gate `SignedOut`; `view().start == NotAsked`; fake saw exactly 1 `POST /auth/logout` with the old token | skip `clear_session` |
-| F `sign_out_clears_the_account_rows` | `list_files()` 7 → 0; `owner()` `None`; `has_account_data()` false; the `state.db` file exists | skip the row clear |
-| F `sign_out_offline_is_complete` | fake stopped before `sign_out`: `Ok`; 0 entries; rows cleared | return `Err` when logout fails |
+| F `sign_out_keeps_the_local_data` (Q1) | `list_files()` 7 before = 7 after; `owner()` unchanged; the sync folder's listing before = after; the `state.db` file exists | clear the account rows |
+| ~~F `sign_out_clears_the_account_rows`~~ | superseded (Q1) | |
+| F `sign_out_offline_is_complete` | fake stopped before `sign_out`: `Ok`; 0 entries; rows kept | return `Err` when logout fails |
 | F `no_engine_starts_after_sign_out` | `start_sync` right after → `NoSession`; a `start_sync` racing the sign-out (two threads, 100 rounds) never returns `Started` after `sign_out` returned | forget the session after releasing the slot |
 | F `the_old_token_is_refused_after_sign_out` | a request with the old token to the fake → 401 | (harness check: the fake must record the logout) |
-| U `an_unconfirmed_stop_refuses_and_keeps_everything` | `StopUnconfirmed`; 5 entries; rows intact | purge before the stop is confirmed |
-| U `already_signed_out_still_purges` | no token, rows present → rows cleared, `Ok` | skip step 4 on the short path |
+| U `an_unconfirmed_stop_refuses_and_keeps_everything` | `StopUnconfirmed`; 5 entries; rows intact | clear the credentials before the stop is confirmed |
+| ~~U `already_signed_out_still_purges`~~ | superseded (Q1) | |
 | U `the_slot_id_survives` | settings `account_id` before = after; a sign-in after sign-out finds its entries after a reopen | delete `account_id` |
-| U `the_order_is_stop_purge_unregister_forget_clear_revoke` | a recording double for the 6 effects: the exact sequence | swap clear and purge |
+| U `the_order_is_stop_revoke_forget_clear_logout` | a recording double for the 5 effects: the exact sequence | swap forget and clear |
+| U `sign_out_unregisters_nothing` (Q1, I16) | the recording double sees no unregister and no delete; Windows: the registration before = after | call `unregister_sync_root` |
 | F `a_session_ended_during_the_phrase_check_returns_to_sign_in` | the fake answers the check with 401: the worker ends the rejected session; gate `SignedOut`; entries: token and session owner gone, nothing else written; a wrong phrase (400, the exact code) still stays on DW-A24 with the token kept | map every phrase failure to `SessionEnded` |
-| F `end_rejected_session_keeps_the_key_and_the_data` | entries 5 → 3 (key, key owner, email); rows intact; password sign-in → `Drive` without the phrase | call `clear_session` |
+| F `end_rejected_session_keeps_the_key_and_the_data` (Q5) | entries 5 → 3 (key, key owner, email); rows intact; password sign-in → `Drive` without the phrase | call `clear_session` |
 | U (native) `sign_out_runs_off_the_ui_thread_and_once` | 2 presses → 1 call, on the worker | call from the handler |
-| Windows-native (`signout_tests.rs`, build VM) `an_unsent_file_is_copied_never_deleted` | sync folder with 3 placeholders, 1 hydrated in-sync file, 1 untracked file, 1 edited file: after `KeepCopies` the folder is empty, the kept folder holds 2 files byte-equal to the originals, `kept.files == 2` | delete untracked files without the copy |
-| Windows-native `refuse_changes_nothing` | same folder, `Unsent::Refuse`: `Err`; listing before = after; registration still present | delete before all items are prepared |
-| Windows-native `another_providers_folder_is_never_unregistered` | root registered to the QA provider: sign-out refuses at the purge; registration unchanged | call `unregister_any_sync_root` |
+| ~~Windows-native `an_unsent_file_is_copied_never_deleted`, `refuse_changes_nothing`, `another_providers_folder_is_never_unregistered`~~ | superseded (Q1: no purge) | |
 
 | Rung | Run | Proves |
 | --- | --- | --- |
-| R3.1 | after R1.1: add one new file to the test folder and wait until it is uploaded; add a second with the fake stopped; sign out from Settings › Sign-in and security | sign-in screen; tray signed out; test folder gone or empty (count 0); kept folder holds exactly the 1 unsent file, byte-equal |
+| R3.1 | after R1.1: add one new file to the test folder and wait until it is uploaded; sign out from Settings › Sign-in and security | sign-in screen; tray signed out; the test folder's listing before = after (count), the new file byte-equal |
 | R3.2 | count credential entries of the test identity | before 5, after 0 |
-| R3.3 | sync roots of the user | the test provider's registration is gone; every other registration unchanged (before/after, 0 other lines different); no Explorer entry of the test provider |
-| R3.4 | the state folder and cache folders | `state.db` present with 0 file rows; 0 staged and 0 cached files (counts) |
-| R3.5 | the fake's request log | 0 delete or trash requests for the 7 items during the sign-out; 1 logout |
-| R3.6 | sign in again, phrase | Syncing, 7 placeholders again plus the 1 uploaded file |
+| R3.3 | sync roots of the user | every registration before = after (0 lines different), unless S3's contract update decides otherwise (open, Q1) |
+| R3.4 | the state folder | `state.db` present, its file rows before = after (count) |
+| R3.5 | the fake's request log | 0 delete or trash requests during the sign-out; 1 logout |
+| R3.6 | sign in again, same account, phrase (the key left with the sign-out) | Syncing, the same 7 items plus the 1 uploaded file, nothing downloaded again |
 | R3.7 | sign out with the fake stopped | same local result as R3.2 to R3.4 |
 
 ## 9. Review checklist (security review, per PR)
@@ -587,17 +602,17 @@ be reachable at all (§1): S3 adds the smallest one; panes it cannot fill show t
 - [ ] Step 5 never shows "Added" without a running engine and an Explorer entry.
 - [ ] "Show in File Explorer" opens the registered folder only, through the existing no-shell open (`N/engine_host.rs:148`).
 
-**S3**
-- [ ] The order is exactly §8 S3; the purge runs only after a confirmed stop and the callback disconnect.
-- [ ] `windows_cf::signout::purge` and `prepare` are called, not copied or changed.
-- [ ] No delete outside the sync folder, the state folder and paths `is_disposable_cache_path` accepts.
-- [ ] `unregister_sync_root` (with the owner check) is the only unregister call; `unregister_any_sync_root` stays
-      test-only.
+**S3** (keeps the local data: Q1)
+- [ ] The order is exactly §8 S3; nothing is cleared before the stop is confirmed and the callbacks are disconnected.
+- [ ] No file of the sync folder, the state folder or a cache is deleted, and nothing is unregistered (Q1).
+- [ ] ~~`windows_cf::signout::purge` and `prepare` are called, not copied or changed~~; ~~no delete outside the sync
+      folder, the state folder and paths `is_disposable_cache_path` accepts~~; ~~`unregister_sync_root` is the only
+      unregister call~~: superseded (Q1). `unregister_any_sync_root` stays test-only.
 - [ ] The session is forgotten while the engine slot is held; the credential clear's error is returned, not logged
       away (task 2447's rule: every removal is tried, the first failure is the result).
 - [ ] The logout call is last, bounded, and its failure changes nothing; no token in its log line.
-- [ ] `end_rejected_session` removes the token and its owner only.
-- [ ] The kept folder's path reaches the UI as a folder to show, and is never logged.
+- [ ] `end_rejected_session` removes the token and its owner only (Q5).
+- [ ] ~~The kept folder's path reaches the UI as a folder to show, and is never logged~~: superseded (Q1).
 
 ## 10. Decisions taken in this contract
 
@@ -606,17 +621,20 @@ be reachable at all (§1): S3 adds the smallest one; panes it cannot fill show t
 - Decision (design lane, 2026-11-12): the binding (step 7) runs before the folder is created and registered, because
   another account's data must refuse with nothing new registered.
 - Decision (design lane, 2026-11-12): the first run does not gate sync, because the board's steps are settings and
-  step 5 reports a result ("Adding…" has no button that starts it).
-- Decision (design lane, 2026-11-12): the default sign-out keeps copies of unsent work (`KeepCopies`), because the
-  board's confirmation offers no choice and a refusal would leave the person signed in with no way forward.
+  step 5 reports a result ("Adding…" has no button that starts it). Changed by the owner's ruling Q2: the first run
+  holds the first start until a folder is chosen (§5.1).
+- ~~Decision (design lane, 2026-11-12): the default sign-out keeps copies of unsent work (`KeepCopies`)~~:
+  superseded by Q1 (nothing is deleted, so nothing is copied out).
 - Decision (design lane, 2026-11-12): the account slot id is kept at sign-out, because the running handle keeps
   using it (§8 S3).
-- Deviation from the brief, flagged: "sign-out deletes `state.db`" is built as "clears its account rows"; the file
-  and its device custody rows stay, as the released Windows sign-out does (`E/state_db/signout.rs:233-235`).
+- ~~Deviation from the brief, flagged: "sign-out deletes `state.db`" is built as "clears its account rows"~~:
+  superseded by Q1 (the rows stay).
+- The owner's rulings of 2026-11-12 (task 2471) are in §11; each is applied where its "(Qn)" mark stands.
 
-## 11. Open questions for the owner (the default is built; only Q1 holds a merge, S3's)
+## 11. Questions for the owner: answered 2026-11-12 (task 2471)
 
-Product decisions:
+Product decisions. Each question is kept as it was asked; the answer under it is the owner's, dated, and wins over
+the recommendation.
 
 - **Q1. Sign-out: purge or keep?** The board's DW-A57 says "Your data stays encrypted on this PC; signing in again
   opens it" (`N/frames/account/security.rs:171`). The brief for this contract, task 2465 and the released Windows
@@ -627,27 +645,42 @@ Product decisions:
   in S3. **S3 does not merge before this is answered:** a purging sign-out under a dialog that says the data stays
   would be a false statement in the product. With (a) the board's sentence changes first and S3 carries the new
   one; with (b) S3 shrinks to calling `sign_out_keeping_local_data` and the purge order of §8 is not built.
+  - **Answer (the owner, 2026-11-12): keep**, not the recommended purge: sign-out keeps this PC's local data, as
+    DW-A57 says. S3 is designed to that (§8 S3: the purge order is not built). To reconcile with task 2466: what
+    stays must be encrypted at rest, and the session token and anything that would let another user of this PC in
+    still goes. Open for S3's contract update: the files a person opened are ordinary files in the sync folder, so
+    "encrypted at rest" does not hold for them today.
 - **Q2. A folder chooser in the first run?** The board has none. Options: (a) none in 0.9.0, the folder is
   "Beebeeb" in the home folder (default); (b) a new step. **Recommendation: (a)**, and a "Location" row in Settings
   later.
+  - **Answer (the owner, 2026-11-12): yes**, a folder chooser in the first run: the OS folder picker (DW-0738's).
+    S2 adds it (§5.1, §8 S2).
 - **Q3. DW-0280 when Cloud Files itself refuses.** The frame says the window works without File Explorer. That is
   true when only the Explorer entry fails, not when the sync root cannot be registered: then nothing syncs and the
   window has no list. Options: (a) keep the frame for the first case and add one sentence for the second ("Beebeeb
   can't sync on this PC yet") (default: the engine's own sentence in the frame's text slot); (b) build a
   window-only mode that lists and opens files without a sync folder. **Recommendation: (a)** for 0.9.0.
+  - **Answer (the owner, 2026-11-12):** when Cloud Files refuses, the app "nicely shows a modal with how to fix it if
+    possible": one modal per refusal kind, with the steps that fix it where a fix exists; no window-only mode. S1
+    builds the typed refusals and the modal (§4.3, §8 S1); the first run uses the same modal (S2).
 - **Q4. Backups in the test build.** Default: every switch off, and "Turn on backup" not wired. Options: keep it
   that way until the backup lane's own contract (**recommended**), or allow an explicit opt-in.
+  - **Answer (the owner, 2026-11-12): off and unwired for now**; later the test build may back up as a new device
+    of its own (§7).
 - **Q5. After the session ended:** default is the banner's "Sign in" → sign-in screen, local data and key kept, no
   phrase for the same account. Alternative: a full sign-out (purge). **Recommendation: the default.**
+  - **Answer (the owner, 2026-11-12): yes**, the default: "Sign in" keeps the key and the local data, and the same
+    account needs no phrase again (§8 S3, `end_rejected_session`).
 
 Design questions (words or a frame the board lacks; the build uses the default and marks it in the PR):
 
 - **D1.** A start that is refused outside the first run (another provider's folder, another account's data,
-  registration failed, folder gone, state in use) has no frame. Default: the status line and the tray say "Sync is
-  off", and the failed toast (DW-0109's component) shows the engine's sentence once, with "Try again". Right after
-  the phrase, the engine already has words for "the phrase is right, sync did not start"
-  (`gate::UNLOCKED_SYNC_NOT_STARTED`, `E/signin/gate.rs:183`).
+  registration failed, folder gone, state in use) has no frame. ~~Default: the status line and the tray say "Sync is
+  off", and the failed toast (DW-0109's component) shows the engine's sentence once, with "Try again".~~ Settled by
+  Q3: the status line and the tray say "Sync is off", and the refusal modal (§4.3) says what happened and how to fix
+  it, once per refused attempt. Right after the phrase, the engine already has words for "the phrase is right, sync
+  did not start" (`gate::UNLOCKED_SYNC_NOT_STARTED`, `E/signin/gate.rs:183`).
 - **D3.** The sign-in form after a session ended during the phrase check has no words. Default: under the form, the
   engine's existing "Your sign-in expired. Start again from the password." (`E/signin/gate.rs:152`).
-- **D2.** Sign-out's results have no words: "kept N files in <folder>" (default: the toast with "Show"), and a
-  refusal (default: the failed toast with the engine's sentence; the dialog closes).
+- **D2.** Sign-out's refusal has no words (default: the failed toast with the engine's sentence; the dialog closes).
+  ~~"kept N files in <folder>"~~: gone with Q1 (nothing is copied out).
