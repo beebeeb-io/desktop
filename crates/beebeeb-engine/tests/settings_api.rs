@@ -169,14 +169,16 @@ fn asked(fake: &FakeApi) -> Vec<String> {
         .collect()
 }
 
-/// What each failure looks like for one method: a server error, a session that ended, no answer at all. The
-/// error's words never carry the server's body.
-fn refusals<T: std::fmt::Debug>(name: &str, call: impl Fn(&Engine<MemoryCredentials>) -> Result<T, AccountCallError>) {
-    let account = account(&format!("{name}-refusals@example.eu"));
-    let engine = signed_in(&account);
-
+/// A server error and a session that ended, for one method of a signed-in handle: each its own kind, and the
+/// error's words never carry the server's body. The fake answers again afterwards.
+fn refusals<T: std::fmt::Debug>(
+    name: &str,
+    account: &Account,
+    engine: &Engine<MemoryCredentials>,
+    call: impl Fn(&Engine<MemoryCredentials>) -> Result<T, AccountCallError>,
+) {
     account.mode.store(SERVER_ERROR, Ordering::SeqCst);
-    let error = call(&engine).expect_err("a server error is an error");
+    let error = call(engine).expect_err("a server error is an error");
     assert_eq!(error, AccountCallError::ServerError, "{name}: a 500");
     assert!(
         !format!("{error} {error:?}").contains(BODY_MARKER),
@@ -184,39 +186,39 @@ fn refusals<T: std::fmt::Debug>(name: &str, call: impl Fn(&Engine<MemoryCredenti
     );
 
     account.mode.store(SESSION_ENDED, Ordering::SeqCst);
-    let error = call(&engine).expect_err("a refused session is an error");
+    let error = call(engine).expect_err("a refused session is an error");
     assert_eq!(error, AccountCallError::SessionEnded, "{name}: a 401");
     assert!(
         !format!("{error} {error:?}").contains(BODY_MARKER),
         "{name}: no body in the error"
     );
-
-    // Beebeeb gone: the fake stops listening.
-    let Account { fake, .. } = account;
-    drop(fake);
-    assert_eq!(
-        call(&engine).expect_err("no answer"),
-        AccountCallError::Offline,
-        "{name}: offline"
-    );
+    account.mode.store(ANSWER, Ordering::SeqCst);
 }
 
-/// Signed out: nothing is asked, and the kind says so.
+/// Signed out on the same fake: nothing is asked, and the kind says so.
 fn not_signed_in<T: std::fmt::Debug>(
     name: &str,
+    account: &Account,
     call: impl Fn(&Engine<MemoryCredentials>) -> Result<T, AccountCallError>,
 ) {
-    let account = account(&format!("{name}-signed-out@example.eu"));
     let engine = engine_at(&account.fake.base);
+    let before = asked(&account.fake).len();
     assert_eq!(
         call(&engine).expect_err("signed out"),
         AccountCallError::NotSignedIn,
         "{name}"
     );
-    assert!(
-        asked(&account.fake).is_empty(),
+    assert_eq!(
+        asked(&account.fake).len(),
+        before,
         "{name}: nothing is asked without a session"
     );
+}
+
+/// Beebeeb gone: the fake stops listening, and every call after that is offline.
+fn gone(account: Account) {
+    let Account { fake, .. } = account;
+    drop(fake);
 }
 
 #[test]
@@ -239,8 +241,13 @@ fn the_storage_location_is_read_by_country_and_refusals_are_kinds() {
     );
     assert_eq!(asked(&account.fake), ["GET /api/v1/me/region"]);
 
-    refusals("storage_region", |engine| engine.storage_region());
-    not_signed_in("storage_region", |engine| engine.storage_region());
+    refusals("storage_region", &account, &engine, |engine| engine.storage_region());
+    not_signed_in("storage_region", &account, |engine| engine.storage_region());
+    gone(account);
+    assert_eq!(
+        engine.storage_region().expect_err("no answer"),
+        AccountCallError::Offline
+    );
 }
 
 #[test]
@@ -272,12 +279,11 @@ fn a_new_storage_location_is_sent_with_its_strict_rule() {
         ]
     );
 
-    refusals("set_storage_region", |engine| {
-        engine.set_storage_region(Some("fi"), Some(false))
-    });
-    not_signed_in("set_storage_region", |engine| {
-        engine.set_storage_region(Some("fi"), Some(false))
-    });
+    let set = |engine: &Engine<MemoryCredentials>| engine.set_storage_region(Some("fi"), Some(false));
+    refusals("set_storage_region", &account, &engine, set);
+    not_signed_in("set_storage_region", &account, set);
+    gone(account);
+    assert_eq!(set(&engine).expect_err("no answer"), AccountCallError::Offline);
 }
 
 #[test]
@@ -289,8 +295,13 @@ fn the_accounts_notifications_are_read_with_the_unread_count() {
     let ids: Vec<_> = list.notifications.iter().map(|n| (n.id.as_str(), n.read)).collect();
     assert_eq!(ids, [("n-2", false), ("n-1", true)]);
 
-    refusals("notifications", |engine| engine.notifications());
-    not_signed_in("notifications", |engine| engine.notifications());
+    refusals("notifications", &account, &engine, |engine| engine.notifications());
+    not_signed_in("notifications", &account, |engine| engine.notifications());
+    gone(account);
+    assert_eq!(
+        engine.notifications().expect_err("no answer"),
+        AccountCallError::Offline
+    );
 }
 
 #[test]
@@ -321,14 +332,15 @@ fn the_accounts_alert_switches_are_read_and_one_change_is_sent_alone() {
         "only the switch that changed is sent"
     );
 
-    refusals("notification_preferences", |engine| engine.notification_preferences());
-    not_signed_in("notification_preferences", |engine| engine.notification_preferences());
-    refusals("set_notification_preferences", |engine| {
-        engine.set_notification_preferences(&update)
-    });
-    not_signed_in("set_notification_preferences", |engine| {
-        engine.set_notification_preferences(&update)
-    });
+    let read = |engine: &Engine<MemoryCredentials>| engine.notification_preferences();
+    let write = |engine: &Engine<MemoryCredentials>| engine.set_notification_preferences(&update);
+    refusals("notification_preferences", &account, &engine, read);
+    refusals("set_notification_preferences", &account, &engine, write);
+    not_signed_in("notification_preferences", &account, read);
+    not_signed_in("set_notification_preferences", &account, write);
+    gone(account);
+    assert_eq!(read(&engine).expect_err("no answer"), AccountCallError::Offline);
+    assert_eq!(write(&engine).expect_err("no answer"), AccountCallError::Offline);
 }
 
 #[test]

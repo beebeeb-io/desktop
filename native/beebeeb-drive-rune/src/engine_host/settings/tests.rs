@@ -333,9 +333,9 @@ fn the_theme_applies_at_once_and_is_there_after_a_restart() {
     assert_eq!(EngineSettingsSource::new(engine).general().theme, before);
 }
 
-fn window_on(source: EngineSettingsSource<MemoryCredentials>) -> Runtime<State> {
-    let mut state = crate::init();
-    state.settings.source = Box::new(source);
+/// The running app's window on `engine` (`state::init_on_engine`, as `shell::run` builds it), in Settings.
+fn window_on(engine: Arc<Engine<MemoryCredentials>>) -> Runtime<State> {
+    let state = crate::shell::state::init_on_engine(crate::shell::host::Shell::fixture(), engine);
     let env = Env {
         system_dark: false,
         scale: 2.0,
@@ -372,7 +372,7 @@ fn polled(rt: &mut Runtime<State>) -> bool {
 fn the_poll_draws_an_arriving_answer_and_asks_no_wake_when_idle() {
     let account = account("settings-poll@example.eu");
     account.delay_ms.store(300, Ordering::SeqCst);
-    let mut rt = window_on(EngineSettingsSource::new(signed_in(&account)));
+    let mut rt = window_on(signed_in(&account));
     rt.poll = None; // only the polls below
     assert!(!polled(&mut rt), "nothing arrived yet");
     assert!(rt.wake_deadline().is_some(), "an answer is out: the loop looks again");
@@ -395,7 +395,7 @@ fn the_poll_draws_an_arriving_answer_and_asks_no_wake_when_idle() {
 #[test]
 fn the_running_apps_settings_show_no_sample_value() {
     let account = account("settings-samples@example.eu");
-    let mut rt = window_on(EngineSettingsSource::new(signed_in(&account)));
+    let mut rt = window_on(signed_in(&account));
     let began = Instant::now();
     while !shows(&rt, "Germany") {
         assert!(began.elapsed() < Duration::from_secs(10));
