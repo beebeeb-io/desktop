@@ -141,7 +141,7 @@ fn figures_carry_their_unit_and_say_it_in_full() {
     assert_eq!(text(&rt, "card-0-now"), "2 of 3 devices syncing");
     assert_eq!(
         info(&rt, "fig-0-tile").label.as_deref(),
-        Some("Upload, 3.2 megabytes per second. Encrypting and uploading 12 files \u{b7} 48 MB left")
+        Some("Upload, 3.2 megabytes per second. Encrypting and uploading 12 files \u{b7} 48\u{a0}MB left")
     );
     assert_eq!(
         info(&rt, "fig-1-tile").label.as_deref(),
@@ -154,8 +154,10 @@ fn figures_carry_their_unit_and_say_it_in_full() {
         chart.label.as_deref(),
         Some("Upload and download over the last 20 hours: upload 5.2 GB, download 1.3 GB")
     );
-    assert_eq!(text(&rt, "legend-up-text"), "Upload 5.2 GB");
-    assert_eq!(text(&rt, "legend-down-text"), "Download 1.3 GB");
+    assert_eq!(text(&rt, "legend-up-name"), "Upload");
+    assert_eq!(text(&rt, "legend-up-total"), "5.2 GB");
+    assert_eq!(text(&rt, "legend-down-name"), "Download");
+    assert_eq!(text(&rt, "legend-down-total"), "1.3 GB");
 }
 
 #[test]
@@ -279,7 +281,7 @@ fn nothing_moving_is_a_dash_never_a_zero() {
     }
     let rt = runtime("DW-0785b");
     assert_eq!(text(&rt, "card-0-now"), "Nothing is moving");
-    assert_eq!(text(&rt, "fig-0-says"), "Up to date \u{b7} last change 2\u{a0}min ago");
+    assert_eq!(text(&rt, "fig-0-says"), "Up to date \u{b7} last change 2 min ago");
     assert_eq!(text(&rt, "fig-1-says"), "Files download when you open them");
     assert!(find(&rt, "chart-plot").is_some(), "the history is still drawn");
     assert!(
@@ -450,7 +452,7 @@ fn leaving_settings_does_not_stop_the_test_and_the_result_stays() {
     );
     assert_eq!(
         text(&rt, "list-2-foot"),
-        "Measured just now, from this PC to Beebeeb's servers in Europe. The test moved 60\u{a0}MB."
+        "Measured just now, from this PC to Beebeeb's servers in Europe. The test moved 60 MB."
     );
     for i in 0..3 {
         assert!(
@@ -494,7 +496,7 @@ fn a_failed_test_names_the_step_and_run_test_tries_again() {
     assert_eq!(text(&rt, "btn-0-label"), "Run test");
     assert_eq!(
         text(&rt, "item-2-0-sub"),
-        "5 pings, then 3 uploads and 3 downloads of 10\u{a0}MB \u{b7} 30 to 90\u{a0}s"
+        "5 pings, then 3 uploads and 3 downloads of 10 MB \u{b7} 30 to 90 s"
     );
     // A failed test changes nothing else: sync goes on.
     let after = bandwidth(&rt);
@@ -625,7 +627,10 @@ fn the_history_tells_its_times_and_a_limit_above_the_speed_changes_nothing() {
     board.set_limit(Direction::Upload, Some(50));
     let now = board.bandwidth();
     assert_eq!(now.upload.speed, Some(("3.2".into(), "MB/s".into())));
-    assert_eq!(now.upload.says, "Encrypting and uploading 12 files \u{b7} 48 MB left");
+    assert_eq!(
+        now.upload.says,
+        "Encrypting and uploading 12 files \u{b7} 48\u{a0}MB left"
+    );
     // 2 Mbps is 250 KB/s.
     board.set_limit(Direction::Upload, Some(2));
     assert_eq!(board.bandwidth().upload.speed, Some(("250".into(), "KB/s".into())));

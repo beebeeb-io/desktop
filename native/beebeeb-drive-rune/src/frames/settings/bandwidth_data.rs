@@ -297,7 +297,7 @@ impl BoardBandwidth {
                 done("35.2", "Mbps", "3 of 3 \u{b7} 30 MB"),
                 done("94.0", "Mbps", "3 of 3 \u{b7} 30 MB"),
             ],
-            "Measured just now, from this PC to Beebeeb's servers in Europe. The test moved 60\u{a0}MB.".into(),
+            "Measured just now, from this PC to Beebeeb's servers in Europe. The test moved 60 MB.".into(),
         )
     }
     /// No ping answered (DW-0786d).
@@ -393,13 +393,14 @@ impl BoardBandwidth {
         } else if !moving {
             (
                 "Nothing is moving",
-                flow(None, "Up to date \u{b7} last change 2\u{a0}min ago"),
+                flow(None, "Up to date \u{b7} last change 2 min ago"),
                 flow(None, "Files download when you open them"),
             )
         } else {
             let says = match limited {
                 Some(mbps) => format!("Limited to {mbps} Mbps \u{b7} 12 files, 48 MB left"),
-                None => "Encrypting and uploading 12 files \u{b7} 48 MB left".into(),
+                // The board keeps "48 MB" together when the line wraps.
+                None => "Encrypting and uploading 12 files \u{b7} 48\u{a0}MB left".into(),
             };
             (
                 "2 of 3 devices syncing",

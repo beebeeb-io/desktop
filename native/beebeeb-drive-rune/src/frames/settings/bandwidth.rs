@@ -66,7 +66,7 @@ const PLOT_W: f32 = 448.0;
 const PLOT_H: f32 = 104.0;
 const PLOT_TOP: f32 = 4.0;
 
-const SPEED_HINT: &str = "5 pings, then 3 uploads and 3 downloads of 10\u{a0}MB \u{b7} 30 to 90\u{a0}s";
+const SPEED_HINT: &str = "5 pings, then 3 uploads and 3 downloads of 10 MB \u{b7} 30 to 90 s";
 
 /// The part of the pane a board frame draws. The app draws `Whole`, always.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -282,18 +282,22 @@ fn legend(key: &str, direction: Direction, total: &str, t: &Theme) -> El {
         Direction::Upload => swatch.fill(t.accent).border(1.0, t.accent_deep),
         Direction::Download => swatch.fill(t.text_tertiary),
     };
-    let words = format!("{} {total}", direction.label());
-    let value = words.len() - total.len()..words.len();
+    // The swatch, the name and the total are 6 points apart (`gap-1.5`); the total is a machine's value.
     row()
         .key(key.to_string())
         .gap(6.0)
         .center_y()
         .child(swatch)
-        .child(meters::mixed(
-            &format!("{key}-text"),
-            &words,
-            &[value],
+        .child(kit::label(
+            format!("{key}-name"),
+            direction.label(),
             type_::CAPTION,
+            t.text_tertiary,
+        ))
+        .child(kit::label(
+            format!("{key}-total"),
+            total,
+            type_::CAPTION.family(Family::Mono),
             t.text_tertiary,
         ))
 }
