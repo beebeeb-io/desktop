@@ -52,6 +52,7 @@ use std::time::Duration;
 use rune::{App, AppSpec, Titlebar, WindowSpec};
 use surfaces::WindowKind;
 
+use crate::engine_host::open::OpenError;
 use crate::source::{DriveSource, LargeFixtureSource};
 use actions::{EngineActions, FixtureEngine, HostActions, ShellActions};
 use app::{Dialog, Event, GateState, Route, Section, SettingsPane};
@@ -259,7 +260,13 @@ pub fn run() {
     let real_engine = if matches!(plan, Plan::BeTheApp) && launch.db.is_none() {
         match open_engine(identity, &api_base, wake_target.clone()) {
             Ok(opened) => Some(opened),
-            Err(error) => {
+            // The test build's data here was made for another server: said like a refused `--api-base`, and
+            // nothing was opened (decision 2462).
+            Err(OpenError::OtherServer(other)) => {
+                eprintln!("beebeeb-drive: {other}");
+                std::process::exit(2);
+            }
+            Err(OpenError::Failed(error)) => {
                 let message = format!(
                     "{} could not open its data on this computer. {error}",
                     identity.product_name()
@@ -494,7 +501,7 @@ fn open_engine(
     identity: AppIdentity,
     api_base: &crate::engine_host::open::ApiBase,
     wake: WakeTarget,
-) -> Result<RealEngine, String> {
+) -> Result<RealEngine, OpenError> {
     let dirs = rune::dirs::AppDirs::new(identity.state_dir_id())
         .ok_or_else(|| "The folder for app data could not be found.".to_string())?;
     // Never a reason not to start: a closed or broken stdout loses the line, it does not stop the app.

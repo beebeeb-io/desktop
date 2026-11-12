@@ -9,11 +9,18 @@
 //! build or the test build, checked first ([`Refused`]: the app then does not start). The real app in a build that
 //! ships never reads the flag.
 //!
+//! [`bind_to_server`] keeps the test build's local data with the server it was made for (the lead's ruling inside
+//! decision 2462): the first open records that server in [`SERVER_FILE`], in the identity's state folder, and a later
+//! open for another server is refused ([`OtherServer`]) before the engine reads a stored session or `state.db`.
+//!
 //! Must not: run before the single-instance claim (a second launch must not open a second handle), run in a
 //! tooling run, read `BB_API_BASE` (the API base is the caller's argument or the engine's built-in default), hand
-//! the engine a `--api-base` value that was not checked (an [`ApiBase`] is made in this file and nowhere else).
+//! the engine a `--api-base` value that was not checked (an [`ApiBase`] is made in this file and nowhere else), let
+//! the engine read a test build's stored session or `state.db` for a server they were not made for.
 
 use std::fmt;
+use std::fs;
+use std::io::{self, Write as _};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::sync::{Arc, mpsc};
@@ -21,6 +28,7 @@ use std::sync::{Arc, mpsc};
 use beebeeb_engine::app::{CredentialStores, Engine, EngineConfig};
 use beebeeb_engine::host::{ChannelHost, HostMessage};
 use beebeeb_engine::identity::EngineIdentity;
+use beebeeb_engine::keychain::{AuthSecretStore, AuthStoreError};
 use beebeeb_engine::signin::gate::GateState;
 use url::{Host, Url};
 
@@ -67,6 +75,12 @@ impl ApiBase {
     /// Whether `--api-base` chose it; else it is the engine's default.
     pub fn from_flag(&self) -> bool {
         self.from_flag
+    }
+
+    /// Which server this is for the binding of local data ([`bind_to_server`]): the default when its origin is the
+    /// engine's default, however it was given, else a custom one.
+    pub fn server(&self) -> Server {
+        Server::of(&self.origin)
     }
 
     /// The one line the app prints when it opens the engine (stdout): the origin and where it came from. Nothing
@@ -181,23 +195,211 @@ fn is_loopback(host: &Host<&str>) -> bool {
     }
 }
 
+/// The file in the test build's state folder that names the server its local data was made for: `default`, or the
+/// origin `--api-base` gave. The first open writes it, before the engine makes anything in that folder; it lives and
+/// goes with `state.db`, beside it.
+pub const SERVER_FILE: &str = "server-origin";
+/// Where [`SERVER_FILE`] is written before it is renamed into place, so a crash never leaves half a record.
+const SERVER_FILE_PARTIAL: &str = "server-origin.partial";
+
+/// A server, as the binding of a test build's local data names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Server {
+    /// The engine's built-in default. Recorded by that word, not by its origin, so the record keeps naming the
+    /// default if the default's address ever changes.
+    Default,
+    /// Any other origin (an [`ApiBase::origin`]).
+    Custom(String),
+}
+
+impl Server {
+    fn of(origin: &str) -> Self {
+        if origin == beebeeb_engine::runner::default_api_base() {
+            Self::Default
+        } else {
+            Self::Custom(origin.to_owned())
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Default => "the default server",
+            Self::Custom(_) => "a custom server (--api-base)",
+        }
+    }
+}
+
+/// The test build's local data on this computer was made for another server than this run's: nothing was opened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OtherServer {
+    /// The server the data was made for; `None` when its record cannot be read.
+    pub made_for: Option<Server>,
+    /// This run's server.
+    pub asked: Server,
+}
+
+impl fmt::Display for OtherServer {
+    /// The two servers' kinds and nothing else: never an origin, a token or an account.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let made = self
+            .made_for
+            .as_ref()
+            .map_or("a server its record no longer names", Server::kind);
+        let asked = match (&self.made_for, &self.asked) {
+            (Some(Server::Custom(_)), Server::Custom(_)) => "a different custom server (--api-base)",
+            (_, asked) => asked.kind(),
+        };
+        write!(
+            f,
+            "this test build's data on this computer was made for {made}, and this run asks for {asked}. The app did \
+             not start."
+        )
+    }
+}
+
+/// Why [`open`] opened nothing.
+#[derive(Debug)]
+pub enum OpenError {
+    /// The test build's local data belongs to another server (`shell::run`: one line on stderr, exit 2).
+    OtherServer(OtherServer),
+    /// Anything else: the folders, the settings file, the engine (`shell::run`: the start-refusal box, exit 1).
+    Failed(String),
+}
+
+impl From<String> for OpenError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+/// How many of the account's credential entries are stored (a session token, a vault key, an account email): what
+/// the engine's restore reads, asked the engine's own way (`AuthSecretStore::holds_*`), counted and never read out. An
+/// entry the store cannot answer for counts as stored: the rule of the engine's `keychain::vault::presence`, which a
+/// Windows build does not compile, so it is written out here (fail closed).
+pub fn stored_account_entries<S: AuthSecretStore>(store: &S) -> usize {
+    [
+        store.holds_session_token(),
+        store.holds_wrapped_master_key(),
+        store.holds_account_email(),
+    ]
+    .into_iter()
+    .filter(|answer| match answer {
+        Ok(present) => *present,
+        Err(AuthStoreError::Unsupported(_) | AuthStoreError::NotFound) => false,
+        Err(_) => true,
+    })
+    .count()
+}
+
+/// What [`SERVER_FILE`] says.
+enum Record {
+    Missing,
+    Names(Server),
+    Unreadable,
+}
+
+fn could_not(what: &str) -> OpenError {
+    OpenError::Failed(format!("This test build could not {what}."))
+}
+
+fn read_record(state_dir: &Path) -> Result<Record, OpenError> {
+    match fs::read_to_string(state_dir.join(SERVER_FILE)) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Record::Missing),
+        Err(_) => Err(could_not("read which server its data on this computer was made for")),
+        Ok(text) => Ok(match text.trim() {
+            "default" => Record::Names(Server::Default),
+            origin if checked_origin(origin).as_deref() == Ok(origin) => Record::Names(Server::of(origin)),
+            _ => Record::Unreadable,
+        }),
+    }
+}
+
+/// Whether the state folder holds anything besides the record: the engine's database, its lock, a device identity, a
+/// kept copy. A folder that is not there holds nothing.
+fn holds_local_state(state_dir: &Path) -> Result<bool, OpenError> {
+    let entries = match fs::read_dir(state_dir) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(could_not("look into its data folder")),
+        Ok(entries) => entries,
+    };
+    for entry in entries {
+        let name = entry.map_err(|_| could_not("look into its data folder"))?.file_name();
+        if name != SERVER_FILE && name != SERVER_FILE_PARTIAL {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Record `server` as the one this data is made for: written beside, synced, then renamed into place.
+fn write_record(state_dir: &Path, server: &Server) -> Result<(), OpenError> {
+    let text = match server {
+        Server::Default => "default",
+        Server::Custom(origin) => origin.as_str(),
+    };
+    let fail = |_: io::Error| could_not("record which server its data on this computer is for");
+    fs::create_dir_all(state_dir).map_err(fail)?;
+    let partial = state_dir.join(SERVER_FILE_PARTIAL);
+    let mut file = fs::File::create(&partial).map_err(fail)?;
+    writeln!(file, "{text}").map_err(fail)?;
+    file.sync_all().map_err(fail)?;
+    drop(file);
+    fs::rename(&partial, state_dir.join(SERVER_FILE)).map_err(fail)
+}
+
+/// The test build's local data belongs to the server it was made for (the lead's ruling inside decision 2462).
+/// `state_dir` is the identity's state folder, `account_entries` [`stored_account_entries`] for its account slot.
+///
+/// A record that names this run's server opens; one that names another, or that cannot be read, is refused. Without a
+/// record, data that is already here (anything in the folder, or a credential entry) is from before the record
+/// existed and counts as the default's: a custom server is refused, the default opens it. Nothing here at all is a
+/// first open, for any server. Whenever it opens without a record, this run's server is recorded first.
+pub fn bind_to_server(state_dir: &Path, account_entries: usize, asked: &ApiBase) -> Result<(), OpenError> {
+    let asked = asked.server();
+    match read_record(state_dir)? {
+        Record::Names(made_for) if made_for == asked => Ok(()),
+        Record::Names(made_for) => Err(OpenError::OtherServer(OtherServer {
+            made_for: Some(made_for),
+            asked,
+        })),
+        Record::Unreadable => Err(OpenError::OtherServer(OtherServer { made_for: None, asked })),
+        Record::Missing => {
+            let here = account_entries > 0 || holds_local_state(state_dir)?;
+            if here && asked != Server::Default {
+                return Err(OpenError::OtherServer(OtherServer {
+                    made_for: Some(Server::Default),
+                    asked,
+                }));
+            }
+            write_record(state_dir, &asked)
+        }
+    }
+}
+
 /// Open the engine for this binary's identity, with its local state under `local_data` (the OS's per-user
 /// app-data folder; the engine adds the identity's own folder name), `api_base` as its server and `stores` for its
 /// credentials. `wake` runs on an engine thread after each report: post a wake-up to the UI loop there and nothing
 /// else.
 ///
 /// Refused, with nothing opened: on a second call with another folder, on macOS for the test build, when the
-/// settings file cannot be read or written.
+/// settings file cannot be read or written, and for the test build when its local data was made for another server
+/// ([`bind_to_server`]).
 pub fn open<C: CredentialStores>(
     local_data: &Path,
     api_base: &ApiBase,
     stores: C,
     wake: impl Fn() + Send + Sync + 'static,
-) -> Result<(Opened<C>, mpsc::Receiver<HostMessage>), String> {
+) -> Result<(Opened<C>, mpsc::Receiver<HostMessage>), OpenError> {
     let identity = crate::shell::identity::engine_identity();
     beebeeb_engine::state_paths::init_from_app_local_data_dir(identity, local_data)?;
     let state_dir = beebeeb_engine::state_paths::beebeeb_state_dir_for(identity)?;
     let account_id = beebeeb_engine::config::DesktopConfig::ensure_account_id_for(identity)?;
+    // Before the engine reads a stored session or `state.db`. The real app never talks to another server, so its data
+    // gets no record.
+    if !identity.is_real() {
+        let entries = stored_account_entries(&stores.for_account(identity, &account_id));
+        bind_to_server(&state_dir, entries, api_base)?;
+    }
     let (host, messages) = ChannelHost::new(wake);
     let config = EngineConfig {
         account_id,

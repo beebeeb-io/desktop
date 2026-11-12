@@ -22,9 +22,14 @@
     Credential Manager targets containing io.beebeeb.app.test; only counts are printed), and an
     outbound firewall block for the binary can be added (needs an elevated shell; -SkipFirewall
     falls back to the proxy layer only and says so). The app also gets HTTP(S)_PROXY pointed at a
-    closed local port. The app is stopped by its PID only. Captures are kept in the printed temp
-    folder; what the app created on this machine is removed afterwards (only paths that did not
-    exist before the run).
+    closed local port, and is started with --api-base http://127.0.0.1:9 (decision 2462): its own
+    server is that closed port too, so it never talks to the production server. The TEST build
+    itself refuses a custom server when it already has data on this machine (data made for the
+    default server, or for another one: one stderr line, exit 2), but that is the app's own check:
+    this script's clean-state refusal above stays the first line of defence, before anything is
+    started. The app is stopped by its PID only. Captures are kept in the printed temp folder;
+    what the app created on this machine is removed afterwards (only paths that did not exist
+    before the run, so the record of the server it was started for goes with them).
 
     Ends with "N checks, M failing"; exit 0 only when M = 0; exit 1 on a failing check; exit 2 on
     a refusal. -ParseOnly compiles the helper and exits (proves the script and its C# parse).
@@ -243,7 +248,8 @@ try {
     # reqwest honours these: every HTTP(S) request of the app goes to a closed local port.
     $env:HTTPS_PROXY = 'http://127.0.0.1:9'; $env:HTTP_PROXY = 'http://127.0.0.1:9'; $env:ALL_PROXY = 'http://127.0.0.1:9'; $env:NO_PROXY = ''
     # A console-subsystem exe: -NoNewWindow keeps it in this console, so no console window of its own appears.
-    $proc = Start-Process -FilePath $Binary -NoNewWindow -PassThru
+    # --api-base: the TEST build's own server is the same closed local port (it says so on stdout: "api base: ...").
+    $proc = Start-Process -FilePath $Binary -ArgumentList '--api-base', 'http://127.0.0.1:9' -NoNewWindow -PassThru
     Restore-Proxy
     Write-Host "  started PID $($proc.Id)"
 

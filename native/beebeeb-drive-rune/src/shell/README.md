@@ -194,7 +194,13 @@ by the real app in a build that ships (`engine_host::open::reads_api_base_flag`,
 on stderr and exit 2, before the control channel or a window exists, never the default in its place.
 The instance that opens the engine prints `api base: <origin> (default)` or `(--api-base)` on stdout,
 and nothing else about the server. It keeps that server while it runs: a later launch that names one
-is refused (`Refusal::ServerAlreadyChosen`, exit 1), never handed over.
+is refused (`Refusal::ServerAlreadyChosen`, exit 1), never handed over. The test build's data on a
+computer stays with the server it was made for (`engine_host::open::bind_to_server`): the first open
+writes `server-origin` (`default`, or the origin) in its state folder, before the engine makes
+anything there; a later open for another server is refused with one line on stderr naming the two
+kinds (default or custom, never the origin), exit 2, before the engine reads a stored session or
+`state.db`. Data from before that record (anything in the state folder, or a stored session) counts
+as the default's. A clean computer starts on any server, and records it.
 
 One instance per identity, user AND Windows session (exclusivity across sessions comes from the
 engine/profile lock, which is not linked yet): `control.rs` is the protocol and `platform/windows_control.rs`
