@@ -46,8 +46,8 @@ Gate state per frame is in the PR body; `0` = all six counts at 0 failing in bot
 | DW-0014 | No plan yet (the main window, gate `NoPlan`) | built (`before_files.rs`); geometry, text, icons and fills 0 failing in both themes; pixels NOT measured: the same `--snap` regression |
 | DW-0380, DW-0301 to DW-0305 | The first-time guide | not built; no goldens yet |
 
-Built: 30 of 59 here, and the 11 frames of the first run below: 41 of 70. Not built: 29, none with a golden yet
-(DW-A11 to A17, DW-A31 to A44, DW-0009, DW-0014, DW-0380, DW-0301 to 0305).
+Built: 32 of 59 here (DW-0009 and DW-0014 since `before_files.rs`), and the 11 frames of the first run below: 43 of 70.
+Not built in this group's files: 27 (DW-A11 to A17, DW-A31 to A44, DW-0380, DW-0301 to 0305); other lanes have them.
 
 ## First run on Windows (lane f-signin-rest): `setup/`
 

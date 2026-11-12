@@ -300,7 +300,7 @@ pub fn toolbar_in(s: &State, t: &Theme, trailing_inset: f32, closed: Option<&Clo
         })
         .child(kbd("kbd-hint", "Ctrl+F", t));
 
-    row()
+    let bar = row()
         .key("toolbar")
         .role("toolbar")
         .label("Files")
@@ -318,8 +318,19 @@ pub fn toolbar_in(s: &State, t: &Theme, trailing_inset: f32, closed: Option<&Clo
         .child(el().key("toolbar-spacer").grow(1.0))
         .child(view_toggle)
         .child(sort_btn)
-        .child(panel_btn)
-        .child(sep)
-        .child(new_btn)
-        .child(search_field)
+        .child(panel_btn);
+    // The board's toolbar has "Open in File Explorer" as its last icon button since b4ffef881. The
+    // Files frame draws its own (`frames/files/toolbar.rs`); closed, it is here and off like the rest.
+    let bar = match closed {
+        Some(_) => bar.child(tool_button(
+            "open-explorer",
+            "Open in File Explorer",
+            &crate::theme::icons_settings::FOLDER,
+            16.0,
+            ToolState::Off,
+            t,
+        )),
+        None => bar,
+    };
+    bar.child(sep).child(new_btn).child(search_field)
 }
