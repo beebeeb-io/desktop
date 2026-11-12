@@ -51,6 +51,7 @@ pub mod backups;
 #[cfg(test)]
 mod binding_tests;
 pub mod open;
+pub mod settings;
 pub mod sync;
 #[cfg(test)]
 mod tests;

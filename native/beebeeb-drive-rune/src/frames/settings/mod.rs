@@ -225,10 +225,18 @@ impl SettingsUi {
 
     /// The theme the window draws in: the person's choice, or the system's.
     pub fn dark(&self, system_dark: bool) -> bool {
-        match self.source.general().theme {
+        match self.source.theme() {
             ThemeChoice::System => system_dark,
             ThemeChoice::Light => false,
             ThemeChoice::Dark => true,
+        }
+    }
+
+    /// Whether `pane` draws from a source that answers for it (Drive's own panes ask `drive`).
+    pub fn wired(&self, pane: Pane) -> bool {
+        match pane {
+            Pane::Storage | Pane::Insights | Pane::Sync => self.drive.wired(pane),
+            _ => self.source.wired(pane),
         }
     }
 
@@ -243,7 +251,7 @@ impl SettingsUi {
     pub fn chosen(&self, kind: MenuKind) -> usize {
         match kind {
             MenuKind::Theme => {
-                let now = self.source.general().theme;
+                let now = self.source.theme();
                 ThemeChoice::ALL.iter().position(|c| *c == now).unwrap_or(0)
             }
             MenuKind::Channel => {
@@ -424,10 +432,33 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>, Option<MenuKind>)> {
 /// the window left settings, is forgotten, so nothing is still open on the next visit.
 pub fn sync(s: &mut State) {
     match routed(s) {
-        Some(section) if s.settings.pane.section() == section => {}
-        Some(section) => s.settings.show(section),
+        Some(section) if s.settings.pane.section() == section => {
+            let pane = s.settings.pane;
+            s.settings.source.opened(pane);
+        }
+        Some(section) => {
+            s.settings.show(section);
+            s.settings.source.opened(section);
+        }
         None => s.settings.reset(),
     }
+}
+
+/// How soon the window looks again while a settings source's answer is still out.
+pub const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// What the settings source's workers answered since the last frame (`SettingsSource::pump`),
+/// for the shell's poll: `true` when the window must draw again. While an answer is still out
+/// the loop is woken again in `POLL_EVERY`, never otherwise. Never calls the engine, never waits.
+pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    let pumped = s.settings.source.pump();
+    if let Some(toast) = pumped.toast {
+        s.settings.toast = Some(toast);
+    }
+    if pumped.busy {
+        tx.wake_after(POLL_EVERY);
+    }
+    pumped.changed || pumped.toast.is_some()
 }
 
 /// The frame a recent alert leads to.
@@ -476,7 +507,8 @@ pub fn go(s: &mut State, frame: &'static str) {
         }
         return;
     }
-    let Some((pane, dialog, menu)) = local(frame) else {
+    let local = local(frame).filter(|_| s.settings.source.opens(frame));
+    let Some((pane, dialog, menu)) = local else {
         // Not a frame of this lane's: asked of the shell, and the window stays where it is.
         let ui = &mut s.settings;
         (ui.dialog, ui.toast) = (None, None);
@@ -490,6 +522,7 @@ pub fn go(s: &mut State, frame: &'static str) {
     }
     let ui = &mut s.settings;
     ui.show(pane);
+    ui.source.opened(pane);
     match dialog {
         Some(Dialog::Limit(which)) => ui.open_limit(which),
         other => ui.dialog = other,
@@ -625,28 +658,26 @@ fn sidebar(section: Pane, t: &Theme) -> El {
 /// The window while settings is open.
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let ui = &s.settings;
-    // Nothing answers for settings yet (a build that ships before the engine lane wires it):
+    // The shell says which section shows. What this lane has open inside a section counts
+    // only while it belongs to that section (`sync` forgets the rest on the next input).
+    let section = routed(s).unwrap_or(Pane::General);
+    let inside = ui.pane.section() == section;
+    let pane = if inside { ui.pane } else { section };
+    // A pane nothing answers for yet (a build that ships before the engine lane wires it):
     // the shell's "not built yet" frame, never a pane of sample values.
-    if !ui.source.wired() {
+    if !ui.wired(pane) {
         return placeholder::window(s, cx, registry::group_for(&s.shell.app));
     }
     // Keyboard as Windows has it: Tab visits every control, Space and Enter press the focused
     // one (Rune's default leaves Enter on a button to the default button, as macOS does).
     cx.web_focus();
     let t = tokens::theme(ui.dark(cx.system_dark()));
-    // The shell says which section shows. What this lane has open inside a section counts
-    // only while it belongs to that section (`sync` forgets the rest on the next input).
-    let section = routed(s).unwrap_or(Pane::General);
-    let inside = ui.pane.section() == section;
-    let pane = if inside { ui.pane } else { section };
     let (pane_el, overlay) = match pane {
         Pane::General => general::pane(ui, &t),
         Pane::About => about::pane(ui, &t),
         Pane::StorageLocation => storage_location::pane(ui, &t),
         Pane::Notifications => notifications::pane(ui, &t),
         Pane::Recent => recent::pane(ui, &t),
-        // Drive's own panes: never sample values in a build nothing answers for yet.
-        _ if !ui.drive.wired() => return placeholder::window(s, cx, registry::group_for(&s.shell.app)),
         Pane::Storage => storage::pane(ui, &t),
         Pane::Insights => insights::pane(ui, &t),
         Pane::Sync => sync::pane(ui, &t),

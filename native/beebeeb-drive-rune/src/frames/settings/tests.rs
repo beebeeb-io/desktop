@@ -939,7 +939,7 @@ fn a_build_that_ships_never_shows_the_sample_content() {
     );
     let shipped = source::first(false);
     assert!(!shipped.sample());
-    assert!(!shipped.wired());
+    assert!(!shipped.wired(super::Pane::General));
 
     let mut state = init();
     state.settings.source = Box::new(Unwired);
