@@ -137,6 +137,14 @@ fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() 
         !state.backups.has_source(),
         "Backups is 'not built yet' on a real engine"
     );
+    // Shared, Trash, Photos, This PC: all unwired on a real engine, never sample data.
+    assert!(
+        !state.frames.shared.source.wired(),
+        "Shared is unwired on a real engine"
+    );
+    assert!(!state.frames.trash.source.wired(), "Trash is unwired on a real engine");
+    assert!(!state.photos.source.wired(), "Photos is unwired on a real engine");
+    assert!(!state.this_pc.wired(), "This PC is unwired on a real engine");
     assert_eq!(started.live.drain(), 0, "nothing reported, nothing queued");
 }
 
@@ -324,6 +332,99 @@ fn an_engine_refusal_becomes_the_screens_kind_and_an_unknown_one_is_other() {
     assert_eq!(phrase_problem(gate::phrase_error("offline")), PhraseProblem::Offline);
     assert_eq!(phrase_problem(gate::UNLOCKED_SYNC_NOT_STARTED), PhraseProblem::Other);
     assert_eq!(phrase_problem(gate::phrase_error("failed")), PhraseProblem::Other);
+}
+
+/// A live source selection with an engine yields the unwired state for every area the engine does
+/// not yet back: Shared, Trash, Photos, This PC, Backups. Not one fixture row is shown beside a
+/// real account's files. The snapshot path (`init_with`, `--snap`) keeps the board's fixtures.
+#[test]
+fn a_live_engine_shows_no_fixture_rows_and_the_snapshot_path_keeps_fixtures() {
+    let started = started();
+    let engine_state =
+        crate::shell::state::init_on_engine(crate::shell::host::Shell::fixture(), started.opened.engine.clone());
+
+    // --- Shared: 0 fixture rows on the engine path ---
+    assert!(!engine_state.frames.shared.source.wired());
+    assert_eq!(
+        engine_state.frames.shared.source.with_me().len(),
+        0,
+        "Shared with-me: 0 fixture rows on the engine"
+    );
+    assert_eq!(
+        engine_state.frames.shared.source.people_shares().len(),
+        0,
+        "Shared people: 0 fixture rows on the engine"
+    );
+    assert_eq!(
+        engine_state.frames.shared.source.invitations().len(),
+        0,
+        "Shared invitations: 0 fixture rows on the engine"
+    );
+
+    // --- Trash: 0 fixture rows on the engine path ---
+    assert!(!engine_state.frames.trash.source.wired());
+    assert_eq!(
+        engine_state.frames.trash.source.items().len(),
+        0,
+        "Trash: 0 fixture rows on the engine"
+    );
+    assert_eq!(engine_state.frames.trash.source.totals().items, 0);
+
+    // --- Photos: 0 fixture days on the engine path ---
+    assert!(!engine_state.photos.source.wired());
+    assert_eq!(
+        engine_state.photos.source.days(None).len(),
+        0,
+        "Photos: 0 fixture days on the engine"
+    );
+    assert_eq!(
+        engine_state.photos.source.devices().len(),
+        0,
+        "Photos: 0 fixture devices on the engine"
+    );
+
+    // --- This PC: 0 fixture changes on the engine path ---
+    assert!(!engine_state.this_pc.wired());
+    assert_eq!(
+        engine_state.this_pc.changes().len(),
+        0,
+        "This PC history: 0 fixture changes on the engine"
+    );
+    assert_eq!(
+        engine_state.this_pc.kept_count(),
+        0,
+        "This PC kept: 0 fixture items on the engine"
+    );
+
+    // --- Backups: no source at all on the engine path ---
+    assert!(!engine_state.backups.has_source());
+
+    // --- The snapshot path keeps the board's fixtures (not unwired) ---
+    let snap_state = crate::shell::state::init_with(crate::shell::host::Shell::fixture());
+    assert!(snap_state.frames.shared.source.wired(), "snap: shared is wired");
+    assert!(
+        snap_state.frames.shared.source.with_me().len() > 0,
+        "snap: shared has fixture rows"
+    );
+    assert!(snap_state.frames.trash.source.wired(), "snap: trash is wired");
+    assert!(
+        snap_state.frames.trash.source.items().len() > 0,
+        "snap: trash has fixture rows"
+    );
+    assert!(snap_state.photos.source.wired(), "snap: photos is wired");
+    assert!(
+        snap_state.photos.source.days(None).len() > 0,
+        "snap: photos has fixture days"
+    );
+    assert!(snap_state.this_pc.wired(), "snap: this_pc is wired");
+    assert!(
+        snap_state.this_pc.changes().len() > 0,
+        "snap: this_pc has fixture changes"
+    );
+    assert!(
+        snap_state.this_pc.kept_count() > 0,
+        "snap: this_pc has fixture kept items"
+    );
 }
 
 /// Where the local state lives is where the 0.8.x app kept it: the per-user LOCAL app data on Windows.

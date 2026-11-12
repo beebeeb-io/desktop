@@ -591,6 +591,11 @@ fn requests(ui: &SharedUi, t: &Theme) -> (El, String, usize) {
 }
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
+    // Nothing answers for Shared yet (a build that ships before the engine lane wires it):
+    // the shell's "not built yet" frame, never a section of sample values.
+    if !s.frames.shared.source.wired() {
+        return crate::shell::placeholder::window(s, cx, crate::shell::registry::group_for(&s.shell.app));
+    }
     let t = tokens::theme(cx.system_dark());
     let ui = &s.frames.shared;
     let (body, status, count) = match ui.tab {

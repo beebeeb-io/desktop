@@ -134,6 +134,11 @@ pub enum SourceRef {
 }
 
 pub trait PhotosSource {
+    /// `false`: nothing answers yet (`Unwired`), and the view draws the shell's "not built yet"
+    /// frame instead of a library of sample photos.
+    fn wired(&self) -> bool {
+        true
+    }
     fn devices(&self) -> Vec<Device>;
     fn folders(&self) -> Vec<Folder>;
     /// Shows or hides a source (Photo sources, Done).
@@ -597,4 +602,62 @@ impl PhotosSource for LargePhotos {
     fn keep_offline(&mut self, _: PhotoId, _: bool) {}
     fn trash(&mut self, _: &[PhotoId]) {}
     fn restore(&mut self, _: &[PhotoId]) {}
+}
+
+/// The source of a build that ships before the engine lane has wired Photos: it answers
+/// nothing, and the view draws the shell's "not built yet" frame instead of sample photos.
+pub struct Unwired;
+
+impl PhotosSource for Unwired {
+    fn wired(&self) -> bool {
+        false
+    }
+    fn devices(&self) -> Vec<Device> {
+        Vec::new()
+    }
+    fn folders(&self) -> Vec<Folder> {
+        Vec::new()
+    }
+    fn set_shown(&mut self, _source: SourceRef, _shown: bool) {}
+    fn totals(&self, _device: Option<usize>) -> Totals {
+        Totals::default()
+    }
+    fn backup_status(&self) -> Option<BackupStatus> {
+        None
+    }
+    fn origin(&self) -> String {
+        String::new()
+    }
+    fn days(&self, _device: Option<usize>) -> Vec<Day> {
+        Vec::new()
+    }
+    fn photo(&self, _device: Option<usize>, _day: usize, _index: usize) -> Option<Photo> {
+        None
+    }
+    fn thumbnail(&self, _id: PhotoId, _shape: Shape) -> Option<Pixels> {
+        None
+    }
+    fn viewing(&self, _id: PhotoId) -> Option<Viewing> {
+        None
+    }
+    fn details(&self, _id: PhotoId) -> Vec<Detail> {
+        Vec::new()
+    }
+    fn kept_offline(&self, _id: PhotoId) -> bool {
+        false
+    }
+    fn keep_offline(&mut self, _id: PhotoId, _keep: bool) {}
+    fn trash(&mut self, _ids: &[PhotoId]) {}
+    fn restore(&mut self, _ids: &[PhotoId]) {}
+}
+
+/// The source Photos starts on. A development build (and every test and headless render)
+/// starts on the board's sample content; a build that ships starts on `Unwired`, so sample
+/// photos are never shown as a person's own. The engine lane replaces this.
+pub fn first(dev_build: bool) -> Box<dyn PhotosSource> {
+    if dev_build {
+        Box::new(FixturePhotos::new())
+    } else {
+        Box::new(Unwired)
+    }
 }

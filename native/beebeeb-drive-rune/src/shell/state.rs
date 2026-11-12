@@ -118,9 +118,9 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
     }
 }
 
-/// The window on the real engine: Files and sign-in ask the handle. Every other group keeps what it shows
-/// without an engine, and Backups shows "not built yet" (never the board's sample devices beside a real
-/// account; `engine_host/backups.rs`).
+/// The window on the real engine: Files and sign-in ask the handle. Every area not yet
+/// backed by the engine starts on its `Unwired` state (the shell's "not built yet" frame),
+/// never the board's sample data presented as the person's own.
 pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     shell: Shell,
     engine: std::sync::Arc<beebeeb_engine::app::Engine<C>>,
@@ -133,5 +133,11 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
         crate::engine_host::EngineSignInSource::new(engine),
     )));
     s.backups = crate::frames::backups::BackupsUi::new(None);
+    // Shared, Trash, Photos and This PC: the engine lane has not wired them yet. Each shows
+    // the shell's "not built yet" frame, never sample rows beside a real account.
+    s.frames.shared.source = Box::new(crate::frames::shared::source::Unwired);
+    s.frames.trash.source = Box::new(crate::frames::trash::source::Unwired);
+    s.photos = crate::frames::photos::Ui::new(Box::new(crate::frames::photos::source::Unwired));
+    s.this_pc = crate::frames::this_pc::Ui::new(Box::new(crate::frames::this_pc::source::Unwired));
     s
 }
