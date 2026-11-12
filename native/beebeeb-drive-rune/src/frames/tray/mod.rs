@@ -264,7 +264,8 @@ const FLYOUT: Host<FlyoutState> = Host {
 
 /// The flyout's content (`registry::FLYOUT`).
 pub fn view(s: &FlyoutState, cx: &mut Cx<FlyoutState>) -> El {
-    view::flyout(&s.tray, FLYOUT, cx.system_dark())
+    let name = crate::shell::identity::AppIdentity::CURRENT.product_name();
+    view::flyout(&s.tray, name, FLYOUT, cx.system_dark())
 }
 
 /// Carries out what the flyout asked for, through the shell: the window moves by
@@ -362,7 +363,7 @@ pub fn set_scene(s: &mut State, frame: &str) {
 /// The flyout as the window's whole content, while a scene asked for it.
 pub fn scene(s: &State, cx: &mut Cx<State>) -> Option<El> {
     let ui = s.tray.as_ref()?;
-    Some(view::flyout(ui, SCENE, cx.system_dark()))
+    Some(view::flyout(ui, s.identity.product_name(), SCENE, cx.system_dark()))
 }
 
 // ---------------------------------------------------------------------------

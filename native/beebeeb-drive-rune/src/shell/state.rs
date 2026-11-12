@@ -7,10 +7,15 @@
 use rune::TextEdit;
 
 use super::host::Shell;
+use super::identity::AppIdentity;
 use crate::source::{self, BoardFixtureSource, DriveSource, Listing};
 use crate::ui::sidebar::SidebarSection;
 
 pub struct State {
+    /// Which build this window names itself as: the live app reads `AppIdentity::CURRENT` (so
+    /// "Beebeeb Test" in a test build); a headless golden export reads `AppIdentity::GOLDEN`
+    /// (always "Beebeeb"), so the rendered text matches the design board.
+    pub(crate) identity: AppIdentity,
     // --- Files (DW-0401): read by `ui/**` ---
     pub(crate) source: Box<dyn DriveSource>,
     pub(crate) listing: Listing,
@@ -93,6 +98,7 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
     const BOARD_FILES_BYTES: i64 = 24_000_000_000;
     let storage_split = storage.map(|s| (BOARD_FILES_BYTES, (s.used_bytes - BOARD_FILES_BYTES).max(0)));
     State {
+        identity: AppIdentity::GOLDEN,
         source,
         listing,
         list_error,
@@ -135,6 +141,7 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
 ) -> State {
     let drive: Box<dyn DriveSource> = Box::new(crate::engine_host::EngineDriveSource::new(engine.clone()));
     let mut s = init_from(shell, drive, None);
+    s.identity = AppIdentity::CURRENT;
     s.actions =
         crate::frames::files::Actions::new(Box::new(crate::engine_host::EngineFilesSource::new(engine.clone())));
     s.signin = Some(crate::frames::signin::Ui::new(Box::new(

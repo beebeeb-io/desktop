@@ -339,11 +339,11 @@ fn window(s: &State, cx: &mut Cx<State>, here: Section, main: El) -> El {
     rune::col()
         .key("window")
         .role("window")
-        .label("Beebeeb Drive")
+        .label(s.identity.main_window_title())
         .w_full()
         .h_full()
         .fill(t.bg)
-        .child(crate::ui::caption::caption_bar(&t, cx))
+        .child(crate::ui::caption::caption_bar(s.identity.main_window_title(), &t, cx))
         .child(
             rune::row()
                 .key("body")

@@ -502,8 +502,9 @@ pub fn act(f: impl Fn(&mut Ui) + 'static) -> impl Fn(&mut State, &mut Tx) + 'sta
 /// until the engine lane adds the first-run state to the gate) the shell's "not built yet"
 /// frame shows, never sample values.
 pub fn frame(s: &State, cx: &mut Cx<State>) -> El {
+    let name = s.identity.product_name();
     match &s.setup {
-        Some(ui) => view(ui, cx),
+        Some(ui) => view(ui, name, cx),
         None => crate::shell::placeholder::window(s, cx, crate::shell::registry::FrameGroup::FirstRun),
     }
 }

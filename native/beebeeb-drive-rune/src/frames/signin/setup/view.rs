@@ -24,7 +24,7 @@ const NAV: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
 /// `.t-cap.font-mono`: a weight under a size in the compare view.
 const CAP_MONO: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
 
-pub fn view(ui: &Ui, cx: &mut Cx<State>) -> El {
+pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
     let t = tokens::theme(cx.system_dark());
     // On Windows, Enter presses the focused button or link (and Space does too).
     cx.web_focus();
@@ -56,26 +56,25 @@ pub fn view(ui: &Ui, cx: &mut Cx<State>) -> El {
             (step.label(), state)
         })
         .collect();
-    let failed_words;
+    let adding_words = format!("Adding {name} to File Explorer\u{2026}");
+    let added_words = format!("{name} is in File Explorer");
+    let failed_words = format!("Couldn't add {name} to File Explorer");
     let status = match &ui.explorer {
         Explorer::Adding => Status {
             icon: &icons::ADDING,
-            words: "Adding Beebeeb to File Explorer\u{2026}",
+            words: &adding_words,
             failed: false,
         },
         Explorer::Added => Status {
             icon: &icons::ADDED,
-            words: "Beebeeb is in File Explorer",
+            words: &added_words,
             failed: false,
         },
-        Explorer::Failed { .. } => {
-            failed_words = "Couldn't add Beebeeb to File Explorer";
-            Status {
-                icon: &icons::ALERT,
-                words: failed_words,
-                failed: true,
-            }
-        }
+        Explorer::Failed { .. } => Status {
+            icon: &icons::ALERT,
+            words: &failed_words,
+            failed: true,
+        },
     };
     // While the compare view is up, what is behind it takes no press and no focus.
     let behind = ui.compare.is_some();
@@ -89,6 +88,7 @@ pub fn view(ui: &Ui, cx: &mut Cx<State>) -> El {
     });
     let over = ui.compare.map(|compare| compare_sheet(ui, compare, &t));
     setup::page(
+        name,
         PRODUCT,
         &steps,
         &signin_icons::CHECK,

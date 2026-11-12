@@ -21,14 +21,14 @@ const DELETED: &str = "This account has been deleted. We can't recover it.";
 const LOCK_NOTE: &str =
     "Five wrong tries lock an account for 30\u{a0}s to 15\u{a0}min. We email its owner an unlock link.";
 
-pub fn view(ui: &Ui, cx: &mut Cx<State>) -> El {
+pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
     let t = tokens::theme(cx.system_dark());
     // On Windows, Enter presses the focused button or link (and Space does too).
     cx.web_focus();
     let mut k = Keys::new();
     let column = match &ui.screen {
         Screen::Welcome => welcome(&mut k, &t),
-        Screen::SignIn => sign_in(ui, &mut k, &t),
+        Screen::SignIn => sign_in(ui, name, &mut k, &t),
         Screen::ContinueAs(failure) => continue_as(ui, *failure, &mut k, &t),
         Screen::Device { expired } => device(ui, *expired, &mut k, &t),
         Screen::Approved { by } => approved(by, &mut k, &t),
@@ -44,14 +44,23 @@ pub fn view(ui: &Ui, cx: &mut Cx<State>) -> El {
         Screen::NewPassword => view_recover::new_password(ui, &mut k, &t),
         Screen::PasswordUpdated => view_recover::password_updated(&mut k, &t),
     };
-    au::page(PRODUCT, [&icons::LOCK, &icons::PEOPLE, &icons::GLOBE], column, &t, cx).on_key(super::on_key)
+    au::page(
+        name,
+        PRODUCT,
+        [&icons::LOCK, &icons::PEOPLE, &icons::GLOBE],
+        column,
+        &t,
+        cx,
+    )
+    .on_key(super::on_key)
 }
 
 /// The window with nothing in its column: the state was dropped (signed in) and the shell has
 /// not left this group yet.
-pub fn closed(cx: &mut Cx<State>) -> El {
+pub fn closed(name: &str, cx: &mut Cx<State>) -> El {
     let t = tokens::theme(cx.system_dark());
     au::page(
+        name,
         PRODUCT,
         [&icons::LOCK, &icons::PEOPLE, &icons::GLOBE],
         au::column(),
@@ -232,7 +241,7 @@ fn other_device_button(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     }
 }
 
-fn sign_in(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
+fn sign_in(ui: &Ui, name: &str, k: &mut Keys, t: &Theme) -> El {
     let offline = ui.problem == Some(SignInProblem::Offline);
     let message = if ui.deleted() {
         Some(DELETED.to_string())
@@ -240,7 +249,7 @@ fn sign_in(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         ui.problem.and_then(problem_message)
     };
     let mut c = au::column()
-        .child(au::lockup("col", 28.0, PRODUCT, t))
+        .child(au::lockup("col", 28.0, name, PRODUCT, t))
         .child(au::heading("Sign in to Drive", Some(ONE_ACCOUNT), false, t));
     if offline {
         c = c.child(au::banner(

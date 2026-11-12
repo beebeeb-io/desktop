@@ -277,13 +277,13 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let window = col()
         .key("window")
         .role("window")
-        .label("Beebeeb Drive")
+        .label(s.identity.main_window_title())
         .on_key(super::keys::on_key)
         .on_layout(|s: &mut State, [_, _, w, h]| s.actions.window = (w, h))
         .w_full()
         .h_full()
         .fill(t.bg)
-        .child(caption::caption_bar(&t, cx))
+        .child(caption::caption_bar(s.identity.main_window_title(), &t, cx))
         .child(body);
     // What lies over the window: the open menu, the reason a name cannot be given, a dialog.
     let layers: Vec<El> = [menu_layer(s, &t), rename::tip_layer(s, &t), dialogs::layer(s, &t)]
