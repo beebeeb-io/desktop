@@ -8,7 +8,7 @@
 //! 1. **Literals** ([`literal_hits`]): a string or number that IS a per-app name (a bundle identifier or any text
 //!    holding `io.beebeeb`, the config folder, the sync folder, the provider name, the daemon socket, the app
 //!    group's team prefix, one of the six GUIDs in any digit grouping) may stand only in a file of
-//!    [`LITERALS_ALLOWED`], and exactly as often as listed there. The list is by whole file path, so a new
+//!    [`LITERALS_ALLOWED`], and exactly the literals listed there, by their text. The list is by whole file path, so a new
 //!    `…/provider_identity.rs` is not on it.
 //! 2. **Naming an identity** ([`naming_hits`]): `identity::REAL` and `identity::TEST` (also through a `use` list
 //!    or a glob) may stand only where [`NAMING_ALLOWED`] says: the shell's `real_app.rs` and the native
@@ -43,67 +43,103 @@ const GUID_DIGITS: [&str; 6] = [
     "691049a886db450a885afde5b4dc1431",
 ];
 
-/// Rule 1's allow-list: `(file, literals, why)`. Exact counts: a literal added to one of these files is seen too.
-const LITERALS_ALLOWED: [(&str, usize, &str); 14] = [
+/// Rule 1's allow-list: `(file, the literals themselves, why)`. The TEXTS, not a count (review of #309, P2-5 and
+/// F): a literal added to one of these files, or one swapped for another name, is seen.
+const LITERALS_ALLOWED: &[(&str, &[&str], &str)] = &[
     (
         "crates/beebeeb-engine/src/identity.rs",
-        24,
+        &[
+            "Beebeeb",
+            "Beebeeb",
+            "Beebeeb",
+            "Beebeeb Test",
+            "Beebeeb Test",
+            "BeebeebTest",
+            "R8352WDJJR.io.beebeeb.app.fileprovider",
+            "R8352WDJJR.io.beebeeb.app.test.fileprovider",
+            "beebeeb",
+            "beebeeb-daemon.sock",
+            "beebeeb-test",
+            "beebeeb-test",
+            "beebeeb-test-daemon.sock",
+            "guid:1876bd5bc73c452aa40ce2501f3de243",
+            "guid:691049a886db450a885afde5b4dc1431",
+            "guid:b2e0a7d49c614f3a8d2e7a1c5e9b0f44",
+            "guid:b33b33b052174c0a9e3f1f2a7c4d8e90",
+            "guid:c0b33b3352174c0a9e3f2f3b8d5e9fa1",
+            "guid:ecbe203e9c204ba7babfbfc6dad89f0e",
+            "io.beebeeb.app",
+            "io.beebeeb.app",
+            "io.beebeeb.app.test",
+            "io.beebeeb.app.test",
+            "io.beebeeb.app.test",
+        ],
         "the engine's one identity file: REAL and TEST",
     ),
     (
         "crates/beebeeb-engine/src/finder_setup/error.rs",
-        2,
-        "two in-process NSError-style domain labels (`io.beebeeb.bridge`, `io.beebeeb.app`): tags an error is \
-         classified by, never a name anything is stored or registered under",
+        &["io.beebeeb.app", "io.beebeeb.bridge"],
+        "two in-process NSError-style domain labels: tags an error is classified by, never a name anything is \
+         stored or registered under",
     ),
     (
         "native/beebeeb-drive-rune/build.rs",
-        2,
+        &["io.beebeeb.app", "io.beebeeb.app.test"],
         "the build script's two allowed identifiers",
     ),
     (
         "native/beebeeb-drive-rune/src/shell/identity.rs",
-        9,
+        &[
+            "BEEBEEB_APP_IDENTIFIER is neither io.beebeeb.app nor io.beebeeb.app.test",
+            "Beebeeb",
+            "Beebeeb Test",
+            "beebeeb",
+            "beebeeb-test",
+            "io.beebeeb.app",
+            "io.beebeeb.app.control",
+            "io.beebeeb.app.test",
+            "io.beebeeb.app.test.control",
+        ],
         "the native shell's one identity file",
     ),
     (
         "native/beebeeb-drive-rune/src/frames/backups/source.rs",
-        1,
-        "the FIXTURE source's stand-in for 'the sync folder is not a backup folder' (no disk, no engine): the engine source must ask the identity",
+        &["Beebeeb"],
+        "the FIXTURE source's stand-in for 'the sync folder is not a backup folder' (no disk, no engine); the \
+         engine source asks the identity (`engine_host/backups.rs`)",
     ),
     (
         "native/beebeeb-drive-rune/src/frames/signin/setup/view.rs",
-        1,
+        &["Beebeeb"],
         "a drawn picture of Explorer's navigation pane (the board's frame): the label in the picture, not a folder",
     ),
     (
+        "native/beebeeb-drive-rune/src/frames/tray/commands.rs",
+        &["Beebeeb"],
+        "the name of the first list of commands (DW-1232: Beebeeb, File, Edit): the brand, for both builds",
+    ),
+    (
+        "native/beebeeb-drive-rune/src/frames/tray/view.rs",
+        &["Beebeeb"],
+        "the flyout's accessibility label (the brand, for both builds)",
+    ),
+    (
         "native/beebeeb-drive-rune/src/ui/kit.rs",
-        1,
+        &["Beebeeb"],
         "the logo's accessibility label (the brand, for both builds)",
     ),
     (
         "macos_file_provider.rs",
-        1,
+        &["io.beebeeb.app.domain"],
         "the macOS File Provider domain id; the test build does not run on macOS",
     ),
-    ("engine_host.rs", 1, "a notification's title (the brand)"),
-    ("native_menu.rs", 3, "menu titles (the brand)"),
-    ("tray_window.rs", 2, "window titles (the brand)"),
+    ("engine_host.rs", &["Beebeeb"], "a notification's title (the brand)"),
     (
-        "finder_setup/policy.rs",
-        0,
-        "placeholder row: compares against `APP_DOMAIN`, names nothing",
+        "native_menu.rs",
+        &["Beebeeb", "Beebeeb", "Beebeeb"],
+        "menu titles (the brand)",
     ),
-    (
-        "real_app.rs",
-        0,
-        "the shell names its identity by `identity::REAL`, not by a literal",
-    ),
-    (
-        "crates/beebeeb-engine/src/test_sandbox.rs",
-        0,
-        "its three literals are in test-gated items, so none is production text",
-    ),
+    ("tray_window.rs", &["Beebeeb", "Beebeeb"], "window titles (the brand)"),
 ];
 
 /// Rule 2's allow-list: `(file, namings, why)`.
@@ -280,24 +316,31 @@ fn digits_only(text: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Rule 1: how many per-app literals `production` holds.
-fn literal_hits(production: &str) -> usize {
+/// Rule 1: the per-app literals `production` holds, sorted: each literal's own text, and `guid:<32 digits>` for
+/// one of the six GUIDs in any spelling.
+fn literal_names(production: &str) -> Vec<String> {
     let lexed = lex(production);
-    let mut hits = 0;
+    let mut names = Vec::new();
     for literal in &lexed.strings {
         let lower = literal.to_ascii_lowercase();
         if EXACT_NAMES.contains(&literal.as_str()) || NAME_PARTS.iter().any(|part| lower.contains(part)) {
-            hits += 1;
+            names.push(literal.clone());
         }
     }
     // A GUID in any spelling: a number in the code (`0xb33b33b0_5217_…`) or a string (`"{B33B33B0-5217-…}"`).
     let digits =
         digits_only(&lexed.code) + "|" + &lexed.strings.iter().map(|s| digits_only(s) + "|").collect::<String>();
-    hits += GUID_DIGITS
-        .iter()
-        .map(|guid| digits.matches(guid).count())
-        .sum::<usize>();
-    hits
+    for guid in GUID_DIGITS {
+        for _ in 0..digits.matches(guid).count() {
+            names.push(format!("guid:{guid}"));
+        }
+    }
+    names.sort();
+    names
+}
+
+fn literal_hits(production: &str) -> usize {
+    literal_names(production).len()
 }
 
 /// Rule 2: how often `production` names an identity itself instead of being handed one.
@@ -375,14 +418,6 @@ fn production_files() -> Vec<(String, String)> {
     files
 }
 
-fn found(files: &[(String, String)], rule: fn(&str) -> usize) -> BTreeMap<String, usize> {
-    files
-        .iter()
-        .map(|(name, text)| (name.clone(), rule(text)))
-        .filter(|(_, hits)| *hits > 0)
-        .collect()
-}
-
 fn allowed(list: &[(&str, usize, &str)]) -> BTreeMap<String, usize> {
     list.iter()
         .filter(|(_, hits, _)| *hits > 0)
@@ -393,9 +428,22 @@ fn allowed(list: &[(&str, usize, &str)]) -> BTreeMap<String, usize> {
 #[test]
 fn a_per_app_literal_stands_only_in_an_identity_file() {
     let files = production_files();
+    let found: BTreeMap<String, Vec<String>> = files
+        .iter()
+        .map(|(name, text)| (name.clone(), literal_names(text)))
+        .filter(|(_, names)| !names.is_empty())
+        .collect();
+    let allowed: BTreeMap<String, Vec<String>> = LITERALS_ALLOWED
+        .iter()
+        .filter(|(_, names, _)| !names.is_empty())
+        .map(|(name, names, _)| {
+            let mut names: Vec<String> = names.iter().map(|text| text.to_string()).collect();
+            names.sort();
+            (name.to_string(), names)
+        })
+        .collect();
     assert_eq!(
-        found(&files, literal_hits),
-        allowed(&LITERALS_ALLOWED),
+        found, allowed,
         "a per-app name (identifier, folder, provider name, socket, GUID) outside the files that may hold one, or a \
          changed count inside one: take the name from the identity the code is handed (left: found, right: allowed)"
     );
@@ -404,8 +452,13 @@ fn a_per_app_literal_stands_only_in_an_identity_file() {
 #[test]
 fn only_a_host_names_an_identity() {
     let files = production_files();
+    let found: BTreeMap<String, usize> = files
+        .iter()
+        .map(|(name, text)| (name.clone(), naming_hits(text)))
+        .filter(|(_, hits)| *hits > 0)
+        .collect();
     assert_eq!(
-        found(&files, naming_hits),
+        found,
         allowed(&NAMING_ALLOWED),
         "`identity::REAL` / `identity::TEST` outside the files that may name one: engine code is handed its \
          identity (left: found, right: allowed)"
