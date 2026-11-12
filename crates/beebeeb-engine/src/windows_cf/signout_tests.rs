@@ -1,5 +1,10 @@
 //! Real Windows filesystem/CFAPI and SQLite tests; no provider registration or account.
 use super::*;
+
+/// The suite signs out as the real app (today's names; every root here is a temp one).
+fn purge(db: &StateDb, root: Option<&Path>, unknown: &UnknownFiles) -> anyhow::Result<KeptAtSignOut> {
+    super::purge(&crate::identity::REAL, db, root, unknown)
+}
 use crate::state_db::{FileContractState, FileEntry, FileStatus, ItemKind, Namespace, PinState};
 
 struct Fixture {
