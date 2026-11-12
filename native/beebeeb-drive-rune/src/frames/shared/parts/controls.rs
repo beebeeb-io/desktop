@@ -25,6 +25,14 @@ pub enum ButtonKind {
     GhostDanger,
     /// Words only, unavailable for now: drawn at 40 %, not a Tab stop.
     GhostOff,
+    /// A dialog's main action (`variant="amber"`): ink on Amber.
+    Amber,
+    /// Words only, in the second ink (`variant="ghost"`): a dialog's way out.
+    Ghost,
+    /// White on red (`variant="danger"`): the destructive answer of a confirmation.
+    Danger,
+    /// `Danger` that cannot be pressed yet (`.opacity-50`), not a Tab stop.
+    DangerOff,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,6 +48,11 @@ pub fn button(words: &str, kind: ButtonKind, ic: Option<&'static Icon>, t: &Them
     button_keyed(format!("btn-{}", slug(words)), words, kind, ButtonSize::Small, ic, t)
 }
 
+/// A dialog's button (`.kit-btn.kit-btn-md`, 28 pt). Keys: `btn-<words>`, `-icon`, `-label`.
+pub fn button_md(words: &str, kind: ButtonKind, ic: Option<&'static Icon>, t: &Theme) -> El {
+    button_keyed(format!("btn-{}", slug(words)), words, kind, ButtonSize::Medium, ic, t)
+}
+
 /// A button under the key `k` (the second button with the same words in a frame is `btn-<words>-2`).
 pub fn button_keyed(
     k: String,
@@ -52,7 +65,9 @@ pub fn button_keyed(
     let ink = match kind {
         ButtonKind::Outline => t.text,
         ButtonKind::GhostDanger => red_text(t),
-        ButtonKind::GhostOff => t.text_secondary,
+        ButtonKind::GhostOff | ButtonKind::Ghost => t.text_secondary,
+        ButtonKind::Amber => t.accent_text_on,
+        ButtonKind::Danger | ButtonKind::DangerOff => t.white,
     };
     let (h, glyph, type_style) = match size {
         ButtonSize::Small => (22.0, 14.0, type_::BUTTON_SM),
@@ -67,10 +82,21 @@ pub fn button_keyed(
         .gap(7.0)
         .center()
         .radius(radius::MD);
-    b = if kind == ButtonKind::GhostOff {
-        b.disabled(true).opacity(0.4)
-    } else {
-        b.hover(t.hover).press(t.press).focusable(true)
+    // A filled button darkens under the pointer, as the board's `hover:brightness` does.
+    let solid = |fill: Color| (fill, fill.mix(Color::BLACK, 0.05), fill.mix(Color::BLACK, 0.10));
+    b = match kind {
+        ButtonKind::GhostOff => b.disabled(true).opacity(0.4),
+        ButtonKind::DangerOff => b.fill(crate::theme::tokens::red_fill()).disabled(true).opacity(0.5),
+        ButtonKind::Amber | ButtonKind::Danger => {
+            let base = if kind == ButtonKind::Amber {
+                t.accent
+            } else {
+                crate::theme::tokens::red_fill()
+            };
+            let (fill, hover, press) = solid(base);
+            b.fill(fill).hover(hover).press(press).focusable(true)
+        }
+        _ => b.hover(t.hover).press(t.press).focusable(true),
     };
     if kind == ButtonKind::Outline {
         b = b.fill(t.paper).border(1.0, t.card_border).border_layout();

@@ -140,14 +140,21 @@ fn arrows_select_and_enter_asks_to_open_what_is_selected() {
     press(&mut rt, Key::Enter);
     assert_eq!(rt.state.frames.intents, vec![Intent::OpenItem("s-harbourlight".into())]);
 
-    // By me: a share with people opens People with access.
+    // By me: a share with people opens People with access, here (DW-0511): nothing is asked of
+    // another frame.
     let mut rt = runtime(super::scenes::dw_0502);
     press(&mut rt, Key::Down);
     press(&mut rt, Key::Enter);
-    assert_eq!(
-        rt.state.frames.intents,
-        vec![Intent::About("DW-0511", "p-lisbon".into())]
-    );
+    assert_eq!(rt.state.frames.shared.dialog, Some(people_of("p-lisbon")));
+    assert!(rt.find("dialog-people").is_some() && rt.state.frames.intents.is_empty());
+}
+
+/// People with access to a share, as it opens (DW-0511).
+fn people_of(share: &str) -> super::dialogs::Dialog {
+    super::dialogs::Dialog::People {
+        share: share.into(),
+        key_changed: None,
+    }
 }
 
 #[test]
@@ -248,10 +255,17 @@ fn the_menu_is_the_boards_takes_the_keyboard_and_does_what_it_says() {
         rt.find("mi-people").is_some() && rt.find("mi-stop-sharing").is_some() && rt.find("mi-copy-link").is_none()
     );
     click(&mut rt, "mi-people");
+    assert_eq!(rt.state.frames.shared.dialog, Some(people_of("p-lisbon")));
+    assert!(rt.find("menu").is_none() && rt.state.frames.intents.is_empty());
+    // A link has no list of people (whoever has it can open it): its People is asked of
+    // another frame, as before.
+    let mut rt = runtime(super::scenes::dw_0506);
+    click(&mut rt, "mi-people");
     assert_eq!(
         rt.state.frames.intents,
-        vec![Intent::About("DW-0511", "p-lisbon".into())]
+        vec![Intent::About("DW-0511", "l-budget".into())]
     );
+    assert_eq!(rt.state.frames.shared.dialog, None);
 
     // DW-0507: Close request closes it; a closed request then offers View files and Remove.
     let mut rt = runtime(super::scenes::dw_0507);
@@ -448,7 +462,7 @@ fn the_more_button_opens_its_items_menu() {
 
 /// P2-5: "Click the people: People with access DW-0511".
 #[test]
-fn a_click_on_the_people_asks_for_people_with_access() {
+fn a_click_on_the_people_opens_people_with_access() {
     let mut rt = runtime(super::scenes::dw_0502);
     let people = info(&rt, "item-0-1-people");
     assert_eq!(
@@ -456,10 +470,9 @@ fn a_click_on_the_people_asks_for_people_with_access() {
         (Some("button"), Some("People with access to Invoices 2026"))
     );
     click(&mut rt, "item-0-1-people");
-    assert_eq!(
-        rt.state.frames.intents,
-        vec![Intent::About("DW-0511", "p-invoices".into())]
-    );
+    assert_eq!(rt.state.frames.shared.dialog, Some(people_of("p-invoices")));
+    assert_eq!(info(&rt, "item-2-1-title").text.as_deref(), Some("Priya Shah"));
+    assert!(rt.state.frames.intents.is_empty());
     assert_eq!(rt.state.frames.shared.selected, Some(1));
 }
 

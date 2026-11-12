@@ -27,3 +27,9 @@ pub static REQUEST: Icon = icon24!(
     "request",
     r#"<path d="M4 13l2.5-7.5A1.5 1.5 0 0 1 7.9 4.5h8.2a1.5 1.5 0 0 1 1.4 1L20 13"></path><path d="M4 13v5.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V13"></path><path d="M4 13h4.5l1.5 2.5h4l1.5-2.5H20"></path>"#
 );
+
+/// A file, nothing written on it: New request's "Most files" (DW-0504).
+pub static FILE: Icon = icon24!(
+    "file",
+    r#"<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM13 2v7h7"></path>"#
+);
