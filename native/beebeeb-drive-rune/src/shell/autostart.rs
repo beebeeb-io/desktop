@@ -171,8 +171,8 @@ mod tests {
         );
         // Quoted also without a space, so the value has one shape.
         assert_eq!(
-            command_line("C:\\Users\\anna\\AppData\\Local\\Beebeeb\\Beebeeb.exe"),
-            "\"C:\\Users\\anna\\AppData\\Local\\Beebeeb\\Beebeeb.exe\" --autostart"
+            command_line("C:\\home\\anna\\AppData\\Local\\Beebeeb\\Beebeeb.exe"),
+            "\"C:\\home\\anna\\AppData\\Local\\Beebeeb\\Beebeeb.exe\" --autostart"
         );
     }
 

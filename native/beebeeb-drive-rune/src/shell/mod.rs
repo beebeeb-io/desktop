@@ -34,6 +34,8 @@ pub mod instance;
 pub mod placeholder;
 pub mod platform;
 pub mod registry;
+#[cfg(test)]
+mod start_refusal_tests;
 pub mod state;
 pub mod surfaces;
 pub mod tray;
@@ -45,12 +47,14 @@ pub mod tray_icon;
 pub mod tray_win;
 pub mod window_state;
 
+use std::io::Write as _;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use rune::{App, AppSpec, Titlebar, WindowSpec};
 use surfaces::WindowKind;
 
+use crate::engine_host::open::OpenError;
 use crate::source::{DriveSource, LargeFixtureSource};
 use actions::{EngineActions, FixtureEngine, HostActions, ShellActions};
 use app::{Dialog, Event, GateState, Route, Section, SettingsPane};
@@ -59,7 +63,7 @@ use flyout_window::FlyoutState;
 use host::{Shell, Wiring};
 use identity::AppIdentity;
 use instance::{Claim, Plan, Start};
-use platform::ServeError;
+use platform::{Platform, ServeError};
 use state::State;
 
 /// Titlebar height in points — the single source of truth used by both
@@ -188,14 +192,28 @@ fn control_handler(target: Arc<Mutex<Option<rune::AppHandle<State>>>>) -> platfo
 /// Starts the app and returns when it quits.
 ///
 /// In order: read the launch arguments (`instance::parse_args`: a link silences every other
-/// flag; a shipped build ignores every dev flag); unless this is a tooling run of a dev build,
-/// claim this identity's control channel (serving it IS being the one instance; a later launch
-/// hands over one request, waits for the answer and exits, or says why it could not) and
-/// refuse to start beside another agent that holds the profile's sync lock; then run the two
-/// windows, in the notification area when Windows started the app at login.
+/// flag; a shipped build ignores every dev flag) and check `--api-base` (a dev build or the
+/// test build reads it; a value the app may not talk to ends the start); unless this is a
+/// tooling run of a dev build, claim this identity's control channel (serving it IS being the
+/// one instance; a later launch hands over one request, waits for the answer and exits, or says
+/// why it could not) and refuse to start beside another agent that holds the profile's sync
+/// lock; then run the two windows, in the notification area when Windows started the app at
+/// login.
 pub fn run() {
     let identity = AppIdentity::CURRENT;
-    let launch = instance::parse_args(std::env::args().skip(1), instance::DEV_BUILD);
+    // Decision 2462: a dev build and the test build read `--api-base`; the real app in a build that ships does not.
+    // One answer, fixed at build time, for the parse and for the check.
+    let reads_api_base =
+        crate::engine_host::open::reads_api_base_flag(instance::DEV_BUILD, self::identity::engine_identity());
+    let launch = instance::parse_args(std::env::args().skip(1), instance::DEV_BUILD, reads_api_base);
+    // Made here only so a refusal below can show the start-refusal box; nothing is started with it yet.
+    let platform = platform::current();
+    // The server of this run, before anything else exists: a `--api-base` the app may not talk to ends the start
+    // here (`refuse_start`: stderr and the box, exit 2), never the default in its place.
+    let api_base = match crate::engine_host::open::api_base(launch.api_base.as_deref(), reads_api_base) {
+        Ok(api_base) => api_base,
+        Err(refused) => std::process::exit(refuse_start(&*platform, &launch, identity, &refused.to_string())),
+    };
     // `--gate-export out.json --scene DW-0401 [--theme dark] [--size 1278x798]`: the frame gate's
     // native half (`ui::gate`). A diagnostic flag: dev builds only, never on a link's command line.
     if launch.tooling
@@ -213,7 +231,6 @@ pub fn run() {
     // Before any state exists: the feedback mode's inbox is chosen when the state is made.
     #[cfg(feature = "feedback")]
     crate::feedback::paths::set_flag_dir(launch.feedback_dir.clone());
-    let platform = platform::current();
 
     let control_target = Arc::new(Mutex::new(None));
     let (claim, _control_server) = if launch.tooling {
@@ -241,17 +258,9 @@ pub fn run() {
     // sample files in place of an account's.
     let wake_target: WakeTarget = Arc::new(Mutex::new(None));
     let real_engine = if matches!(plan, Plan::BeTheApp) && launch.db.is_none() {
-        match open_engine(identity, &launch, wake_target.clone()) {
+        match open_engine(identity, &api_base, wake_target.clone()) {
             Ok(opened) => Some(opened),
-            Err(error) => {
-                let message = format!(
-                    "{} could not open its data on this computer. {error}",
-                    identity.product_name()
-                );
-                host::log(&message);
-                platform.show_start_refusal(identity.product_name(), &message);
-                std::process::exit(1);
-            }
+            Err(error) => std::process::exit(engine_not_opened(&*platform, &launch, identity, &error)),
         }
     } else {
         None
@@ -412,7 +421,11 @@ pub fn run() {
         }
     });
     let flyout_main = main.clone();
-    let flyout_app = flyout_app.init(move || FlyoutState::new(actions, Some(flyout_main), flyout_hidden_at));
+    let flyout_engine = real_engine.as_ref().map(|(_, live)| live.clone());
+    let flyout_app = flyout_app.init(move || {
+        let flyout = FlyoutState::new(actions, Some(flyout_main), flyout_hidden_at);
+        crate::frames::tray::on_engine(flyout, flyout_engine)
+    });
 
     if !tooling {
         match platform.adopt_autostart() {
@@ -471,13 +484,54 @@ pub(crate) fn local_data_of(dirs: &rune::dirs::AppDirs, os: &str) -> std::path::
     if os == "windows" { dirs.state() } else { dirs.data() }.to_path_buf()
 }
 
+/// Ends a start that stops for a reason the person must read (decision 2462: a refused `--api-base`, the test
+/// build's data on this computer not for this run's server, stored credentials without local data). `line` names no
+/// value. It goes to stderr, and into the start-refusal box unless this start shows none (`instance::refusal_is_shown`:
+/// not at login, not the installer's call, not a tooling run): a release build has no console, so without the box such
+/// a start would stop without a word. Returns 2, the exit code `run` ends with.
+fn refuse_start(platform: &dyn Platform, launch: &instance::Launch, identity: AppIdentity, line: &str) -> i32 {
+    eprintln!("beebeeb-drive: {line}");
+    if instance::refusal_is_shown(launch) {
+        platform.show_start_refusal(identity.product_name(), line);
+    }
+    2
+}
+
+/// What `run` says when the engine was not opened, and the exit code it ends with: the test build's data not for this
+/// run's server ([`refuse_start`], 2); anything else in the start-refusal box, as before (1).
+fn engine_not_opened(
+    platform: &dyn Platform,
+    launch: &instance::Launch,
+    identity: AppIdentity,
+    error: &OpenError,
+) -> i32 {
+    match error {
+        OpenError::OtherServer(other) => refuse_start(platform, launch, identity, &other.to_string()),
+        OpenError::CredentialsWithoutData(alone) => refuse_start(platform, launch, identity, &alone.to_string()),
+        OpenError::Failed(error) => {
+            let message = format!(
+                "{} could not open its data on this computer. {error}",
+                identity.product_name()
+            );
+            host::log(&message);
+            platform.show_start_refusal(identity.product_name(), &message);
+            1
+        }
+    }
+}
+
 /// Open the real engine for this binary's identity (`engine_host::open` asks for it, once) on the platform's
-/// credential store. `--api-base` reaches the engine as an argument (dev builds only); no environment
-/// variable is read for it.
-fn open_engine(identity: AppIdentity, launch: &instance::Launch, wake: WakeTarget) -> Result<RealEngine, String> {
+/// credential store, talking to `api_base` (checked in `run`; no environment variable is read for it). The server
+/// is said once on stdout first: its origin and where it came from, nothing else.
+fn open_engine(
+    identity: AppIdentity,
+    api_base: &crate::engine_host::open::ApiBase,
+    wake: WakeTarget,
+) -> Result<RealEngine, OpenError> {
     let dirs = rune::dirs::AppDirs::new(identity.state_dir_id())
         .ok_or_else(|| "The folder for app data could not be found.".to_string())?;
-    let api_base = crate::engine_host::open::api_base(launch.api_base.as_deref(), instance::DEV_BUILD);
+    // Never a reason not to start: a closed or broken stdout loses the line, it does not stop the app.
+    let _ = writeln!(std::io::stdout(), "{}", api_base.start_line());
     let (opened, messages) = crate::engine_host::open::open(
         &local_data_of(&dirs, std::env::consts::OS),
         api_base,

@@ -29,9 +29,14 @@ pub const QUIT_FOR_UPDATE_FLAG: &str = "--quit-for-update";
 pub const OPEN_LINK_FLAG: &str = "--open-link";
 /// Development only: show the files of that `state.db` (read-only) instead of the fixture.
 pub const DB_FLAG: &str = "--db";
-/// Development only: the API base URL (`engine_host`). Non-release builds only; never in a
-/// shipped build, and set BEFORE any engine thread exists (it goes into `EngineConfig.api_base`).
+/// The API base URL (`engine_host::open::api_base`): read by a dev build and by the test build
+/// (decision 2462), never by the real app in a build that ships. Set BEFORE any engine thread
+/// exists (it goes into `EngineConfig.api_base`).
 pub const API_BASE_FLAG: &str = "--api-base";
+/// `--api-base=<url>`: not a form the app reads. Where the build reads the flag, such an argument
+/// is handed to the check whole, which refuses it (`Refused::Glued`), so the spelling never turns
+/// into a run on the default server.
+pub const API_BASE_GLUED: &str = "--api-base=";
 /// Development only: the frame gate's element export (`ui::gate::run_from_args`).
 pub const GATE_EXPORT_FLAG: &str = "--gate-export";
 
@@ -60,7 +65,10 @@ pub struct Launch {
     pub tooling: bool,
     /// `--db <path>` (dev builds only). `Err`: the flag was given without a path.
     pub db: Option<Result<PathBuf, &'static str>>,
-    /// `--api-base <url>` (dev builds only). The engine's API base URL.
+    /// `--api-base <url>`, unchecked (`engine_host::open::api_base` checks it), when the build
+    /// reads it (`engine_host::open::reads_api_base_flag`). Empty: nothing, or another flag,
+    /// followed it. A whole `--api-base=<url>` argument ([`API_BASE_GLUED`]), which the check
+    /// refuses.
     pub api_base: Option<String>,
     /// `--feedback-dir <path>` (dev builds with the `feedback` feature only).
     #[cfg(feature = "feedback")]
@@ -100,7 +108,9 @@ const TOOLING_FLAGS: [&str; 25] = [
     "--help",
 ];
 
-/// Reads the command line (without the program name). `dev`: [`DEV_BUILD`].
+/// Reads the command line (without the program name). `dev`: [`DEV_BUILD`]; `api_base`: whether
+/// this build reads [`API_BASE_FLAG`] (`engine_host::open::reads_api_base_flag`: a dev build or
+/// the test build).
 ///
 /// - **A link wins and silences everything else.** If `--open-link` appears anywhere, the
 ///   launch is that link and nothing more: no other flag is honoured, in any build. The OS
@@ -108,8 +118,9 @@ const TOOLING_FLAGS: [&str; 25] = [
 ///   its quote can append arguments; they must do nothing. A bare `scheme://…` argument
 ///   without `--open-link` is not a link to this app.
 /// - `--autostart` and `--quit-for-update` are the app's own flags.
-/// - Dev and diagnostic flags are read only when `dev` is true.
-pub fn parse_args<I: IntoIterator<Item = String>>(args: I, dev: bool) -> Launch {
+/// - `--api-base` is read only when `api_base` is true; the other dev and diagnostic flags only
+///   when `dev` is.
+pub fn parse_args<I: IntoIterator<Item = String>>(args: I, dev: bool, api_base: bool) -> Launch {
     let args: Vec<String> = args.into_iter().collect();
     if let Some(at) = args.iter().position(|arg| arg == OPEN_LINK_FLAG) {
         return Launch {
@@ -124,7 +135,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I, dev: bool) -> Launch 
         };
     }
     let mut launch = Launch::default();
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
     while let Some(arg) = args.next() {
         #[cfg(feature = "feedback")]
         if dev && arg == FEEDBACK_DIR_FLAG {
@@ -138,6 +149,13 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I, dev: bool) -> Launch 
             launch.autostart = true;
         } else if arg == QUIT_FOR_UPDATE_FLAG {
             launch.quit_for_update = true;
+        } else if api_base && arg == API_BASE_FLAG {
+            // Without a value it is an empty one, which the check refuses: never the default in
+            // its place. A flag after it stays a flag.
+            launch.api_base = Some(args.next_if(|url| !url.starts_with("--")).unwrap_or_default());
+        } else if api_base && arg.starts_with(API_BASE_GLUED) {
+            // Not read as the flag, and not ignored either: the check refuses it.
+            launch.api_base = Some(arg);
         } else if !dev {
             // A shipped build: nothing else means anything.
         } else if arg == DB_FLAG {
@@ -145,8 +163,6 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I, dev: bool) -> Launch 
                 Some(path) if !path.is_empty() && !path.starts_with("--") => Ok(PathBuf::from(path)),
                 _ => Err("--db needs the path of a state.db"),
             });
-        } else if arg == API_BASE_FLAG {
-            launch.api_base = args.next().filter(|url| !url.is_empty() && !url.starts_with("--"));
         } else {
             launch.tooling |= TOOLING_FLAGS.contains(&arg.as_str());
             launch.rune_args.push(arg);
@@ -215,6 +231,9 @@ pub enum Refusal {
     /// The control channel is unusable. Fail closed: two instances on one identity would both
     /// write the window file and both show a b.
     ChannelUnavailable,
+    /// `--api-base` was given while an instance runs: it keeps the server it started with, so
+    /// handing this launch over would show that server as if it were the one asked for.
+    ServerAlreadyChosen,
 }
 
 /// What to do once the channel has been asked for.
@@ -238,6 +257,7 @@ pub fn plan(launch: &Launch, claim: Claim, identity: AppIdentity) -> Plan {
     match claim {
         Claim::First if launch.quit_for_update => Plan::ExitQuietly,
         Claim::First => Plan::BeTheApp,
+        Claim::Running if launch.api_base.is_some() => Plan::Refuse(Refusal::ServerAlreadyChosen),
         Claim::Running => Plan::Hand(request_for(launch, identity)),
         Claim::Unavailable => Plan::Refuse(Refusal::ChannelUnavailable),
     }
@@ -272,9 +292,10 @@ pub fn start(launch: &Launch, holder: Option<ProfileHolder>) -> Start {
 }
 
 /// Whether a refusal is shown in a native message box. Not for a start at login (a box at
-/// every login) and not for the installer's call (its exit code is the answer).
+/// every login), not for the installer's call (its exit code is the answer) and not for a
+/// tooling run of a dev build (a renderer or a script: nobody there to close a box).
 pub fn refusal_is_shown(launch: &Launch) -> bool {
-    !launch.autostart && !launch.quit_for_update
+    !launch.autostart && !launch.quit_for_update && !launch.tooling
 }
 
 /// What the running instance does with one argument a later launch (or the OS) handed it.
@@ -315,6 +336,10 @@ pub fn refusal_message(refusal: &Refusal, identity: AppIdentity) -> String {
         Refusal::ChannelUnavailable => format!(
             "{name} could not check whether it is already running, so it did not start a second time. \
              Sign out of Windows and back in, then open {name} again."
+        ),
+        Refusal::ServerAlreadyChosen => format!(
+            "{name} is already running, on the server it started with: --api-base cannot change that. \
+             Quit {name}, then start it again with --api-base."
         ),
     }
 }
@@ -362,8 +387,13 @@ mod tests {
         assert!(!refusal_is_shown(&parse(&["--autostart"], false)));
     }
 
+    /// A dev build, or the real app's shipped build: `--api-base` is read exactly when `dev` is.
     fn parse(list: &[&str], dev: bool) -> Launch {
-        parse_args(list.iter().map(|s| (*s).to_owned()), dev)
+        parse_as(list, dev, dev)
+    }
+
+    fn parse_as(list: &[&str], dev: bool, api_base: bool) -> Launch {
+        parse_args(list.iter().map(|s| (*s).to_owned()), dev, api_base)
     }
 
     fn holder() -> ProfileHolder {
@@ -409,13 +439,153 @@ mod tests {
             let launch = parse(flags, false);
             assert_eq!(launch, Launch::default(), "{flags:?}");
             assert!(launch.rune_args.is_empty(), "Rune is handed nothing: {flags:?}");
+            // The test build's shipped profile reads `--api-base` and none of these (decision 2462).
+            assert_eq!(parse_as(flags, false, true), Launch::default(), "test build: {flags:?}");
         }
         for flag in TOOLING_FLAGS {
             assert_eq!(parse(&[flag, "x"], false), Launch::default(), "{flag}");
+            assert_eq!(
+                parse_as(&[flag, "x"], false, true),
+                Launch::default(),
+                "test build: {flag}"
+            );
         }
         // The app's own two flags still work.
         assert!(parse(&["--snap", "x.png", "--autostart"], false).autostart);
         assert!(parse(&["--quit-for-update", "--db", "x"], false).quit_for_update);
+    }
+
+    /// Decision 2462: `--api-base` is read when the build reads it (a dev build or the test build,
+    /// `engine_host::open::reads_api_base_flag`), kept as given (the check is
+    /// `engine_host::open::api_base`), and never beside a link or on the installer's call.
+    #[test]
+    fn api_base_is_read_only_when_the_build_reads_it_and_never_beside_a_link() {
+        let args = [
+            "--snap",
+            "x.png",
+            "--api-base",
+            "http://127.0.0.1:9",
+            "--db",
+            "s.db",
+            "--autostart",
+        ];
+        let read = Some("http://127.0.0.1:9".to_string());
+        // The test build in a shipped profile: `--api-base` and the app's own flags, nothing else.
+        assert_eq!(
+            parse_as(&args, false, true),
+            Launch {
+                autostart: true,
+                api_base: read.clone(),
+                ..Launch::default()
+            }
+        );
+        // The real app's shipped build: not even the flag.
+        assert_eq!(
+            parse_as(&args, false, false),
+            Launch {
+                autostart: true,
+                ..Launch::default()
+            }
+        );
+        // A dev build: beside its other flags.
+        let dev = parse_as(&args, true, true);
+        assert_eq!(dev.api_base, read);
+        assert!(dev.tooling && dev.db.is_some());
+        // The flag with nothing after it, or with another flag after it: an empty value, which the
+        // check refuses (never the default in its place), and the flag after it is still read.
+        assert_eq!(parse_as(&["--api-base"], false, true).api_base.as_deref(), Some(""));
+        let then_autostart = parse_as(&["--api-base", "--autostart"], false, true);
+        assert_eq!(then_autostart.api_base.as_deref(), Some(""));
+        assert!(then_autostart.autostart, "--autostart is not taken as the value");
+        let then_installer = parse_as(&["--api-base", "--quit-for-update"], false, true);
+        assert!(
+            then_installer.quit_for_update,
+            "--quit-for-update is not taken as the value"
+        );
+        assert_eq!(then_installer.api_base, None, "the installer's call reads no server");
+        for (dev, api_base) in [(false, true), (true, true), (false, false)] {
+            let link = parse_as(
+                &[
+                    "--api-base",
+                    "http://127.0.0.1:9",
+                    "--open-link",
+                    "beebeeb://open/photos",
+                ],
+                dev,
+                api_base,
+            );
+            assert_eq!(link.api_base, None, "a link: dev={dev} api_base={api_base}");
+            let installer = parse_as(
+                &["--api-base", "http://127.0.0.1:9", "--quit-for-update"],
+                dev,
+                api_base,
+            );
+            assert!(installer.quit_for_update);
+            assert_eq!(installer.api_base, None, "the installer: dev={dev} api_base={api_base}");
+        }
+    }
+
+    /// `--api-base=<url>` (#335 review P3-2): where the build reads the flag it is handed to the
+    /// check whole, which refuses it, so the spelling never becomes a run on the default server;
+    /// where the build does not read the flag it means nothing, like `--api-base` itself.
+    #[test]
+    fn a_glued_api_base_is_refused_where_the_flag_is_read_and_means_nothing_elsewhere() {
+        use crate::engine_host::open::{Refused, api_base};
+        for glued in [
+            "--api-base=http://127.0.0.1:9",
+            "--api-base=",
+            "--api-base=https://api.example.com",
+        ] {
+            for dev in [false, true] {
+                let launch = parse_as(&[glued, "--autostart"], dev, true);
+                assert_eq!(launch.api_base.as_deref(), Some(glued), "dev={dev}");
+                assert!(launch.autostart && launch.rune_args.is_empty(), "dev={dev}");
+                assert_eq!(
+                    api_base(launch.api_base.as_deref(), true),
+                    Err(Refused::Glued),
+                    "dev={dev}"
+                );
+            }
+            let real = parse_as(&[glued, "--autostart"], false, false);
+            assert_eq!(real.api_base, None);
+            assert_eq!(real.rune_args.len(), 0);
+            let installer = parse_as(&[glued, "--quit-for-update"], false, true);
+            assert_eq!(installer.api_base, None, "the installer's call reads no server");
+        }
+        // The spelled-out form after it is still the flag's value; a glued one after a flag is still refused.
+        assert_eq!(
+            parse_as(&["--api-base", "http://127.0.0.1:9"], false, true)
+                .api_base
+                .as_deref(),
+            Some("http://127.0.0.1:9")
+        );
+        let both = parse_as(&["--api-base", "--api-base=http://127.0.0.1:9"], false, true);
+        assert_eq!(api_base(both.api_base.as_deref(), true), Err(Refused::Glued));
+    }
+
+    /// A running instance keeps the server it started with. A later launch that names one with
+    /// `--api-base` is refused (said, exit 1), never handed over: handing it over would bring
+    /// that other server's window forward as if it were the one asked for.
+    #[test]
+    fn a_second_launch_with_api_base_is_refused_never_handed_over() {
+        let named = parse_as(&["--api-base", "http://127.0.0.1:9"], false, true);
+        assert_eq!(
+            plan(&named, Claim::Running, AppIdentity::Test),
+            Plan::Refuse(Refusal::ServerAlreadyChosen)
+        );
+        assert!(refusal_is_shown(&named));
+        // The first instance starts with it; a later launch without it is handed over as before.
+        assert_eq!(plan(&named, Claim::First, AppIdentity::Test), Plan::BeTheApp);
+        assert_eq!(
+            plan(&parse_as(&[], false, true), Claim::Running, AppIdentity::Test),
+            Plan::Hand(Request::Show)
+        );
+        let words = refusal_message(&Refusal::ServerAlreadyChosen, AppIdentity::Test);
+        assert_eq!(
+            words,
+            "Beebeeb Test is already running, on the server it started with: --api-base cannot change \
+             that. Quit Beebeeb Test, then start it again with --api-base."
+        );
     }
 
     #[test]
@@ -442,7 +612,7 @@ mod tests {
                 "--open-link",
                 "beebeeb://open/photos",
                 "--snap",
-                "C:\\Users\\x\\Startup\\a.png",
+                "C:\\home\\x\\Startup\\a.png",
             ][..],
             &["--snap", "C:\\a.png", "--open-link", "beebeeb://open/photos"],
             &[

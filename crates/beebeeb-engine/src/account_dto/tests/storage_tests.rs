@@ -23,7 +23,7 @@ fn extension_of_handles_edge_cases() {
     assert_eq!(extension_of("noext"), "");
     assert_eq!(extension_of("/path/.gitignore"), "");
     assert_eq!(extension_of("archive.tar.gz"), "gz");
-    assert_eq!(extension_of("C:\\Users\\g\\file.txt"), "txt");
+    assert_eq!(extension_of("C:\\home\\g\\file.txt"), "txt");
 }
 
 #[test]

@@ -900,7 +900,7 @@
   },
   "view-toggle": {
    "kind": "box",
-   "x": 800.23,
+   "x": 764.23,
    "y": 40.75,
    "w": 61,
    "h": 28,
@@ -913,7 +913,7 @@
   },
   "view-list": {
    "kind": "box",
-   "x": 802.23,
+   "x": 766.23,
    "y": 42.75,
    "w": 28,
    "h": 24,
@@ -927,7 +927,7 @@
   },
   "view-list-icon": {
    "kind": "icon",
-   "x": 808.73,
+   "x": 772.73,
    "y": 47.25,
    "w": 15,
    "h": 15,
@@ -949,7 +949,7 @@
   },
   "view-grid": {
    "kind": "box",
-   "x": 831.23,
+   "x": 795.23,
    "y": 42.75,
    "w": 28,
    "h": 24,
@@ -957,7 +957,7 @@
   },
   "view-grid-icon": {
    "kind": "icon",
-   "x": 837.73,
+   "x": 801.73,
    "y": 47.25,
    "w": 15,
    "h": 15,
@@ -977,7 +977,7 @@
   },
   "sort-btn": {
    "kind": "box",
-   "x": 869.23,
+   "x": 833.23,
    "y": 40.75,
    "w": 42,
    "h": 28,
@@ -985,7 +985,7 @@
   },
   "sort-icon": {
    "kind": "icon",
-   "x": 875.23,
+   "x": 839.23,
    "y": 47.25,
    "w": 15,
    "h": 15,
@@ -1005,7 +1005,7 @@
   },
   "sort-caret": {
    "kind": "icon",
-   "x": 894.23,
+   "x": 858.23,
    "y": 49.25,
    "w": 11,
    "h": 11,
@@ -1022,7 +1022,7 @@
   },
   "panel-toggle-btn": {
    "kind": "box",
-   "x": 919.23,
+   "x": 883.23,
    "y": 40.75,
    "w": 28,
    "h": 28,
@@ -1036,7 +1036,7 @@
   },
   "panel-icon": {
    "kind": "icon",
-   "x": 925.23,
+   "x": 889.23,
    "y": 46.75,
    "w": 16,
    "h": 16,
@@ -3288,7 +3288,7 @@
   "share-box": {
    "kind": "box",
    "x": 1010.5,
-   "y": 529.5,
+   "y": 563.5,
    "w": 90.81,
    "h": 22,
    "bg": [
@@ -3301,7 +3301,7 @@
   "share-icon": {
    "kind": "icon",
    "x": 1023.5,
-   "y": 533.5,
+   "y": 567.5,
    "w": 14,
    "h": 14,
    "icon": [
@@ -3318,7 +3318,7 @@
   "share-btn": {
    "kind": "text",
    "x": 1044.5,
-   "y": 531.93,
+   "y": 565.93,
    "w": 43.81,
    "h": 17.14,
    "text": "Share…",
@@ -3337,7 +3337,7 @@
   "versions-box": {
    "kind": "box",
    "x": 1109.31,
-   "y": 529.5,
+   "y": 563.5,
    "w": 132.45,
    "h": 22,
    "bg": [
@@ -3350,7 +3350,7 @@
   "versions-icon": {
    "kind": "icon",
    "x": 1122.31,
-   "y": 533.5,
+   "y": 567.5,
    "w": 14,
    "h": 14,
    "icon": [
@@ -3367,7 +3367,7 @@
   "versions-btn": {
    "kind": "text",
    "x": 1143.31,
-   "y": 531.93,
+   "y": 565.93,
    "w": 85.45,
    "h": 17.14,
    "text": "Version history",
@@ -3447,12 +3447,79 @@
    ],
    "tracking": 0
   },
+  "open-explorer": {
+   "kind": "box",
+   "x": 919.23,
+   "y": 40.75,
+   "w": 28,
+   "h": 28
+  },
+  "open-explorer-icon": {
+   "kind": "icon",
+   "x": 925.23,
+   "y": 46.75,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "free-up-box": {
+   "kind": "box",
+   "x": 1010.5,
+   "y": 529.5,
+   "w": 251.5,
+   "h": 22
+  },
+  "free-up-icon": {
+   "kind": "icon",
+   "x": 1085.59,
+   "y": 533.5,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "free-up-btn": {
+   "kind": "text",
+   "x": 1106.59,
+   "y": 531.93,
+   "w": 80.31,
+   "h": 17.14,
+   "text": "Free up space",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": -0.06
+  },
   "menu": {
    "kind": "box",
    "x": 420,
    "y": 346,
    "w": 236,
-   "h": 402,
+   "h": 432,
    "bg": [
     25,
     21,
@@ -3653,7 +3720,7 @@
    "y": 523.5,
    "w": 184,
    "h": 17,
-   "text": "Show in File Explorer",
+   "text": "Free up space",
    "family": "sans",
    "fontFamily": "Inter",
    "size": 13,
@@ -3678,6 +3745,33 @@
    "kind": "text",
    "x": 456,
    "y": 553.5,
+   "w": 184,
+   "h": 17,
+   "text": "Show in File Explorer",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0
+  },
+  "menu-item-7": {
+   "kind": "box",
+   "x": 424,
+   "y": 577,
+   "w": 228,
+   "h": 30,
+   "hot": false
+  },
+  "menu-item-7-label": {
+   "kind": "text",
+   "x": 456,
+   "y": 583.5,
    "w": 97.38,
    "h": 17,
    "text": "Details",
@@ -3693,59 +3787,13 @@
    ],
    "tracking": 0
   },
-  "menu-item-6-shortcut": {
+  "menu-item-7-shortcut": {
    "kind": "text",
    "x": 587.38,
-   "y": 554.75,
+   "y": 584.75,
    "w": 52.62,
    "h": 14.5,
    "text": "Alt+Enter",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 12,
-   "weight": 400,
-   "color": [
-    137,
-    134,
-    129,
-    255
-   ],
-   "tracking": 0
-  },
-  "menu-item-7": {
-   "kind": "box",
-   "x": 424,
-   "y": 585.5,
-   "w": 228,
-   "h": 30,
-   "hot": false
-  },
-  "menu-item-7-label": {
-   "kind": "text",
-   "x": 456,
-   "y": 592,
-   "w": 135.59,
-   "h": 17,
-   "text": "Rename",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 13,
-   "weight": 400,
-   "color": [
-    230,
-    228,
-    224,
-    255
-   ],
-   "tracking": 0
-  },
-  "menu-item-7-shortcut": {
-   "kind": "text",
-   "x": 625.59,
-   "y": 593.25,
-   "w": 14.41,
-   "h": 14.5,
-   "text": "F2",
    "family": "sans",
    "fontFamily": "Inter",
    "size": 12,
@@ -3770,9 +3818,9 @@
    "kind": "text",
    "x": 456,
    "y": 622,
-   "w": 184,
+   "w": 135.59,
    "h": 17,
-   "text": "Move…",
+   "text": "Rename",
    "family": "sans",
    "fontFamily": "Inter",
    "size": 13,
@@ -3781,6 +3829,25 @@
     230,
     228,
     224,
+    255
+   ],
+   "tracking": 0
+  },
+  "menu-item-8-shortcut": {
+   "kind": "text",
+   "x": 625.59,
+   "y": 623.25,
+   "w": 14.41,
+   "h": 14.5,
+   "text": "F2",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
     255
    ],
    "tracking": 0
@@ -3799,7 +3866,7 @@
    "y": 652,
    "w": 184,
    "h": 17,
-   "text": "Duplicate",
+   "text": "Move…",
    "family": "sans",
    "fontFamily": "Inter",
    "size": 13,
@@ -3826,7 +3893,7 @@
    "y": 682,
    "w": 184,
    "h": 17,
-   "text": "Version history…",
+   "text": "Duplicate",
    "family": "sans",
    "fontFamily": "Inter",
    "size": 13,
@@ -3842,7 +3909,7 @@
   "menu-item-11": {
    "kind": "box",
    "x": 424,
-   "y": 714,
+   "y": 705.5,
    "w": 228,
    "h": 30,
    "hot": false
@@ -3850,7 +3917,34 @@
   "menu-item-11-label": {
    "kind": "text",
    "x": 456,
-   "y": 720.5,
+   "y": 712,
+   "w": 184,
+   "h": 17,
+   "text": "Version history…",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0
+  },
+  "menu-item-12": {
+   "kind": "box",
+   "x": 424,
+   "y": 744,
+   "w": 228,
+   "h": 30,
+   "hot": false
+  },
+  "menu-item-12-label": {
+   "kind": "text",
+   "x": 456,
+   "y": 750.5,
    "w": 113.63,
    "h": 17,
    "text": "Move to Trash",
@@ -3866,10 +3960,10 @@
    ],
    "tracking": 0
   },
-  "menu-item-11-shortcut": {
+  "menu-item-12-shortcut": {
    "kind": "text",
    "x": 603.63,
-   "y": 721.75,
+   "y": 751.75,
    "w": 36.37,
    "h": 14.5,
    "text": "Delete",
@@ -3914,7 +4008,7 @@
   "menu-sep-2": {
    "kind": "box",
    "x": 424,
-   "y": 581,
+   "y": 611,
    "w": 228,
    "h": 0.5,
    "bg": [
@@ -3927,7 +4021,7 @@
   "menu-sep-3": {
    "kind": "box",
    "x": 424,
-   "y": 709.5,
+   "y": 739.5,
    "w": 228,
    "h": 0.5,
    "bg": [

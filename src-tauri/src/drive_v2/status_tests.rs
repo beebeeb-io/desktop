@@ -88,10 +88,10 @@ fn upload_rate_counts_uploads_only_and_rounds_time_up() {
 fn free_space_takes_the_longest_mount_prefix() {
     let disks = [
         (PathBuf::from("/"), 10),
-        (PathBuf::from("/home"), 20),
-        (PathBuf::from("/home/guus/other"), 30),
+        (PathBuf::from("/data"), 20),
+        (PathBuf::from("/data/usr/other"), 30),
     ];
-    assert_eq!(free_space_for(&PathBuf::from("/home/guus/Beebeeb"), &disks), Some(20));
+    assert_eq!(free_space_for(&PathBuf::from("/data/usr/Beebeeb"), &disks), Some(20));
     assert_eq!(free_space_for(&PathBuf::from("/srv"), &disks), Some(10));
     assert_eq!(free_space_for(&PathBuf::from("/srv"), &[]), None);
 }

@@ -294,10 +294,10 @@ fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Optio
 /// real identity too, so no build writes a note into the real app's folder by default.
 #[test]
 fn the_inbox_is_the_flag_then_the_env_then_the_test_identitys_folder() {
-    let base: &[(&str, &str)] = &[("HOME", "/home/t"), ("LOCALAPPDATA", "C:\\Users\\t\\AppData\\Local")];
+    let base: &[(&str, &str)] = &[("HOME", "/data/t"), ("LOCALAPPDATA", "C:\\home\\t\\AppData\\Local")];
     let both: &[(&str, &str)] = &[
-        ("HOME", "/home/t"),
-        ("LOCALAPPDATA", "C:\\Users\\t\\AppData\\Local"),
+        ("HOME", "/data/t"),
+        ("LOCALAPPDATA", "C:\\home\\t\\AppData\\Local"),
         (paths::DIR_ENV, "/env/inbox"),
     ];
     assert_eq!(
@@ -334,19 +334,24 @@ fn the_inbox_is_the_flag_then_the_env_then_the_test_identitys_folder() {
 #[test]
 fn feedback_dir_is_read_only_by_a_dev_build_and_never_beside_a_link() {
     let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    let dev = instance::parse_args(args(&[FEEDBACK_DIR_FLAG, "/tmp/inbox"]), true);
+    let dev = instance::parse_args(args(&[FEEDBACK_DIR_FLAG, "/tmp/inbox"]), true, true);
     assert_eq!(dev.feedback_dir, Some(PathBuf::from("/tmp/inbox")));
     assert!(!dev.tooling && dev.rune_args.is_empty(), "it is not a renderer's flag");
-    let shipped = instance::parse_args(args(&[FEEDBACK_DIR_FLAG, "/tmp/inbox"]), false);
+    let shipped = instance::parse_args(args(&[FEEDBACK_DIR_FLAG, "/tmp/inbox"]), false, false);
     assert_eq!(shipped.feedback_dir, None);
     assert!(shipped.rune_args.is_empty());
     let link = instance::parse_args(
         args(&[FEEDBACK_DIR_FLAG, "/tmp/inbox", "--open-link", "beebeeb://open"]),
         true,
+        true,
     );
     assert_eq!(link.feedback_dir, None);
-    let no_path = instance::parse_args(args(&[FEEDBACK_DIR_FLAG, "--autostart"]), true);
+    let no_path = instance::parse_args(args(&[FEEDBACK_DIR_FLAG, "--autostart"]), true, true);
     assert_eq!((no_path.feedback_dir, no_path.autostart), (None, false));
-    let installer = instance::parse_args(args(&[FEEDBACK_DIR_FLAG, "/tmp/inbox", "--quit-for-update"]), true);
+    let installer = instance::parse_args(
+        args(&[FEEDBACK_DIR_FLAG, "/tmp/inbox", "--quit-for-update"]),
+        true,
+        true,
+    );
     assert_eq!(installer.feedback_dir, None);
 }

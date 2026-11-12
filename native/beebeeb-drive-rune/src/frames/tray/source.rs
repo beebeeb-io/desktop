@@ -6,23 +6,32 @@
 //! a button does come from here.
 //!
 //! [`BoardFixture`] holds exactly what the board draws for each frame (DW-1202 to DW-1222) and
-//! answers each action with the frame the board sends it to. The engine lane replaces it; the
-//! call each action needs is listed in `FRAMES.md`.
+//! answers each action with the frame the board sends it to: the frame gate's scenes and the
+//! runs without an engine draw it. The running app's flyout reads the engine instead
+//! (`engine_host::EngineTraySource`, the words in `live.rs`); `FRAMES.md` lists what is wired.
 
-/// The states of the status block, in the board's order of frames.
+/// The states of the status block, in the board's order of frames, then the states of the
+/// running app that the board draws no frame for (`FRAMES.md`, "States the board does not
+/// draw").
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
     /// DW-1212: the first moment, before the state is known. A skeleton, no words.
     Checking,
-    /// DW-1202.
-    UpToDate { files: u32, last_change: String },
-    /// DW-1203. `fraction`: bytes done of the whole batch.
+    /// DW-1202. `files`: how many files Beebeeb keeps on this PC, `None` when not counted;
+    /// `last_change`: the words after "last change" ("2 min ago"), `None` before any change.
+    UpToDate {
+        files: Option<u32>,
+        last_change: Option<String>,
+    },
+    /// DW-1203. `files`: files left, 0 when not known ("Syncing"). `left`: what is still to
+    /// go, `about`: how long that takes, `fraction`: bytes done of the whole batch, `speed`:
+    /// the upload speed; each `None` when not known, and then not drawn.
     Syncing {
         files: u32,
-        left: String,
-        about: String,
-        fraction: f32,
-        speed: String,
+        left: Option<String>,
+        about: Option<String>,
+        fraction: Option<f32>,
+        speed: Option<String>,
     },
     /// DW-1204.
     Paused { waiting: u32 },
@@ -52,6 +61,43 @@ pub enum Status {
     ExplorerFailed { code: String },
     /// DW-1219: signed out after 90 days without use.
     SignedOut,
+    /// Locked while nothing syncs: DW-1211's title, with the sentence that is true for an app
+    /// whose sync stops while its keys are not in memory (DW-1211 says "Sync keeps running").
+    LockedSyncOff,
+    /// Signed in, and this PC holds no key of the account: the recovery phrase restores it
+    /// (the window's DW-A23). Nothing syncs until then.
+    NeedsRecoveryPhrase,
+    /// Signed in, and Windows did not say whether the key is on this PC.
+    KeysUnreadable,
+    /// Signed in and unlocked, and sync is not running on this PC.
+    NotSyncing,
+}
+
+/// Why Recent changes shows no rows while there may be some (DW-1211: no file names while
+/// locked).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hidden {
+    /// DW-1211.
+    Locked,
+    SignedOut,
+    /// The account's keys are not in memory on this PC (the recovery phrase, an unreadable
+    /// credential store).
+    NoKeys,
+}
+
+impl Hidden {
+    pub fn title(self) -> &'static str {
+        "Recent changes are hidden"
+    }
+
+    /// `name` is the app's (the build's identity).
+    pub fn sentence(self, name: &str) -> String {
+        match self {
+            Hidden::Locked => format!("Unlock {name} to see file names. Nothing shows while it's locked."),
+            Hidden::SignedOut => "Sign in to see file names.".into(),
+            Hidden::NoKeys => "File names show once your keys are on this PC.".into(),
+        }
+    }
 }
 
 /// The status block's one button.
@@ -104,6 +150,7 @@ impl Status {
         match self {
             Status::Checking => "Checking".into(),
             Status::UpToDate { .. } => "Up to date".into(),
+            Status::Syncing { files: 0, .. } => "Syncing".into(),
             Status::Syncing { files, .. } => format!("Syncing {} {}", count(*files), plural(*files, "file", "files")),
             Status::Paused { .. } => "Sync is paused".into(),
             Status::WaitingMetered => "Sync is waiting".into(),
@@ -118,24 +165,35 @@ impl Status {
             Status::StorageFull { .. } => "Your storage is full".into(),
             Status::UpdateAvailable { version } => format!("Version {version} is available"),
             Status::UpdateRequired => format!("Update {name}"),
-            Status::Locked => format!("{name} is locked"),
+            Status::Locked | Status::LockedSyncOff => format!("{name} is locked"),
             Status::NoPlan { .. } => "Choose a plan".into(),
             Status::AddingToExplorer => format!("Adding {name} to File Explorer\u{2026}"),
             Status::ExplorerFailed { .. } => format!("Couldn't add {name} to File Explorer"),
             Status::SignedOut => "Signed out".into(),
+            Status::NeedsRecoveryPhrase => "Recovery phrase needed".into(),
+            Status::KeysUnreadable => "Can't read your keys".into(),
+            Status::NotSyncing => "Sync isn't running".into(),
         }
     }
 
-    /// The line under the title. `None` only while checking.
+    /// The line under the title. `None` while checking, and where nothing in it is known.
     pub fn line(&self, name: &str) -> Option<String> {
         Some(match self {
             Status::Checking => return None,
-            Status::UpToDate { files, last_change } => format!(
-                "{} {} \u{00B7} last change {last_change} ago",
-                count(*files),
-                plural(*files, "file", "files")
-            ),
-            Status::Syncing { left, about, .. } => format!("{left} left \u{00B7} {about}"),
+            Status::UpToDate { files, last_change } => {
+                let files = files.map(|n| format!("{} {}", count(n), plural(n, "file", "files")));
+                match (files, last_change) {
+                    (Some(files), Some(change)) => format!("{files} \u{00B7} last change {change}"),
+                    (Some(files), None) => files,
+                    (None, Some(change)) => format!("Last change {change}"),
+                    (None, None) => return None,
+                }
+            }
+            Status::Syncing { left, about, .. } => match (left, about) {
+                (Some(left), Some(about)) => format!("{left} left \u{00B7} {about}"),
+                (Some(left), None) => format!("{left} left"),
+                (None, _) => return None,
+            },
             Status::Paused { waiting } => format!(
                 "{} {} on this PC",
                 count(*waiting),
@@ -144,6 +202,8 @@ impl Status {
             Status::WaitingMetered => "This PC is on a metered connection".into(),
             Status::NeedsDecision { .. } => "Changed in two places".into(),
             Status::Offline => "Files on this PC are unchanged".into(),
+            // Stopped by an error on this PC with no file given up: nothing to count.
+            Status::Stopped { files: 0 } => return None,
             Status::Stopped { files } => format!(
                 "{} {} couldn't upload. Nothing was lost.",
                 count(*files),
@@ -158,6 +218,10 @@ impl Status {
             Status::UpdateAvailable { .. } => "Restart to apply the update.".into(),
             Status::UpdateRequired => format!("This version of {name} is too old to connect. Update to continue."),
             Status::Locked => "Sync keeps running while it's locked.".into(),
+            Status::LockedSyncOff => "Nothing syncs while it's locked.".into(),
+            Status::NeedsRecoveryPhrase => format!("Enter it in {name} to sync this PC."),
+            Status::KeysUnreadable => "Windows didn't answer. Nothing syncs until it does.".into(),
+            Status::NotSyncing => "Files on this PC are unchanged.".into(),
             Status::NoPlan { waiting: false } => {
                 format!(
                     "Your account is ready. Choose a plan on beebeeb.io, including the free trial. {name} continues here by itself."
@@ -181,20 +245,27 @@ impl Status {
     pub fn tone(&self) -> Tone {
         match self {
             Status::UpToDate { .. } => Tone::Green,
-            Status::NeedsDecision { .. } | Status::SignedOut => Tone::Warn,
+            Status::NeedsDecision { .. } | Status::SignedOut | Status::NeedsRecoveryPhrase => Tone::Warn,
             Status::Stopped { .. }
             | Status::StorageFull { .. }
             | Status::UpdateRequired
-            | Status::ExplorerFailed { .. } => Tone::Red,
+            | Status::ExplorerFailed { .. }
+            | Status::KeysUnreadable => Tone::Red,
             _ => Tone::Neutral,
         }
     }
 
-    /// The one button, and whether it is the state's main action (amber: "the only amber in
-    /// the flyout when it is the state's main action", DW-1201).
+    /// The board's one button for this state, and whether it is the state's main action (amber:
+    /// "the only amber in the flyout when it is the state's main action", DW-1201). What the
+    /// flyout draws is [`Snapshot::button`]: a source offers only what it can carry out.
     pub fn action(&self) -> Option<(Action, bool)> {
         Some(match self {
-            Status::Checking | Status::UpToDate { .. } | Status::AddingToExplorer => return None,
+            Status::Checking
+            | Status::UpToDate { .. }
+            | Status::AddingToExplorer
+            | Status::NeedsRecoveryPhrase
+            | Status::KeysUnreadable
+            | Status::NotSyncing => return None,
             Status::Syncing { .. } => (Action::Pause, false),
             Status::Paused { .. } => (Action::Resume, true),
             Status::WaitingMetered => (Action::SyncAnyway, false),
@@ -205,7 +276,7 @@ impl Status {
             Status::StorageFull { .. } => (Action::AddStorage, true),
             Status::UpdateAvailable { .. } => (Action::RestartToUpdate, false),
             Status::UpdateRequired => (Action::RestartToUpdate, true),
-            Status::Locked => (Action::Unlock, true),
+            Status::Locked | Status::LockedSyncOff => (Action::Unlock, true),
             Status::NoPlan { .. } => (Action::ChoosePlan, true),
             Status::ExplorerFailed { .. } => (Action::RetryExplorer, true),
             Status::SignedOut => (Action::SignIn, true),
@@ -227,11 +298,14 @@ impl Status {
             Status::StorageFull { .. } => "storage full",
             Status::UpdateAvailable { .. } => "update available",
             Status::UpdateRequired => "update required",
-            Status::Locked => "locked",
+            Status::Locked | Status::LockedSyncOff => "locked",
             Status::NoPlan { .. } => "no plan yet",
             Status::AddingToExplorer => "adding to File Explorer",
             Status::ExplorerFailed { .. } => "not in File Explorer",
             Status::SignedOut => "signed out",
+            Status::NeedsRecoveryPhrase => "needs the recovery phrase",
+            Status::KeysUnreadable => "can't read the keys",
+            Status::NotSyncing => "not syncing",
         }
     }
 }
@@ -265,9 +339,12 @@ pub enum Tile {
     Folder,
     /// A file that was moved to Trash.
     Trashed,
-    /// A photo's thumbnail. Until the engine hands over pixels: the board's sample photo of
-    /// that number (`.mk-ph1` to `.mk-ph6`).
+    /// The board's sample photo of that number (`.mk-ph1` to `.mk-ph6`): the fixture's
+    /// thumbnails. Never a real file's: that is [`Tile::Image`].
     Photo(u8),
+    /// A photo or another image of the account, drawn as a glyph: the flyout has no thumbnail
+    /// pixels from the engine yet.
+    Image,
 }
 
 /// Where a change came from: the small icon before the row's second line.
@@ -285,8 +362,13 @@ pub enum What {
     /// It happened: "Uploaded from this PC · Documents".
     Done { origin: Origin, text: String },
     /// It is moving: "Uploading · 3.4 of 8.1 MB" and its bar (amber for an upload, the
-    /// encryption step; grey for a download).
-    Moving { text: String, fraction: f32, upload: bool },
+    /// encryption step; grey for a download). `fraction` `None`: how far it is is not known,
+    /// and no bar is drawn (never a guessed one).
+    Moving {
+        text: String,
+        fraction: Option<f32>,
+        upload: bool,
+    },
     /// It could not be synced: the reason, in red, on up to two lines.
     Failed { text: String },
 }
@@ -308,8 +390,8 @@ pub struct Change {
 /// The Recent changes list.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Changes {
-    /// Locked: no file names (DW-1211).
-    Hidden,
+    /// No file names, and why (DW-1211: locked).
+    Hidden(Hidden),
     /// Nothing yet, and the sentence that says when there will be (DW-1213, DW-1215).
     Empty { text: String },
     /// Newest first. `complete`: these are the last 50, so the list ends with "That's the last
@@ -328,6 +410,9 @@ pub struct Snapshot {
     /// Beebeeb is in File Explorer: "Open in File Explorer" works (DW-1213, DW-1215, DW-1216
     /// draw it disabled).
     pub explorer_ready: bool,
+    /// The status block's button as drawn: the state's own ([`Status::action`]) when this
+    /// source can carry it out, else none (a button that would do nothing is not drawn).
+    pub button: Option<(Action, bool)>,
 }
 
 /// What the flyout asks of the engine. Every call returns at once; the engine reports a change
@@ -384,6 +469,7 @@ impl TraySource for BoardFixture {
             *waiting = self.plan_opened;
         }
         Snapshot {
+            button: status.action(),
             status,
             changes,
             explorer_ready: !matches!(self.frame, "DW-1213" | "DW-1215" | "DW-1216" | "DW-1221"),
@@ -517,7 +603,7 @@ fn moving(name: &str, tile: Tile, text: &str, fraction: f32, upload: bool) -> Ch
         tile,
         what: What::Moving {
             text: text.to_string(),
-            fraction,
+            fraction: Some(fraction),
             upload,
         },
         when: "now".to_string(),
@@ -530,8 +616,8 @@ fn frame_content(frame: &str) -> (Status, Changes) {
     let dot = "\u{00B7}";
     let rows = |rows: Vec<Change>| Changes::Rows { rows, complete: false };
     let up_to_date = Status::UpToDate {
-        files: 1284,
-        last_change: "2 min".into(),
+        files: Some(1284),
+        last_change: Some("2 min ago".into()),
     };
     let explorer_failed = Status::ExplorerFailed {
         code: "0x8007017C".into(),
@@ -558,10 +644,10 @@ fn frame_content(frame: &str) -> (Status, Changes) {
             (
                 Status::Syncing {
                     files: 12,
-                    left: "48 MB".into(),
-                    about: "about a minute".into(),
-                    fraction: 0.38,
-                    speed: "3.2 MB/s".into(),
+                    left: Some("48 MB".into()),
+                    about: Some("about a minute".into()),
+                    fraction: Some(0.38),
+                    speed: Some("3.2 MB/s".into()),
                 },
                 rows(list),
             )
@@ -597,7 +683,7 @@ fn frame_content(frame: &str) -> (Status, Changes) {
             },
             rows(recent()),
         ),
-        "DW-1211" => (Status::Locked, Changes::Hidden),
+        "DW-1211" => (Status::Locked, Changes::Hidden(Hidden::Locked)),
         "DW-1212" => (Status::Checking, rows(recent())),
         "DW-1213" => (
             Status::NoPlan { waiting: false },

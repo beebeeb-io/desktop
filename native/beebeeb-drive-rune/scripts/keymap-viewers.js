@@ -10,6 +10,13 @@ const vwFrame = (win.closest('[id^="DW-"]') || {}).id || '';
 // below ("New file"), by the Files window's names; the open-file sections do not apply to them.
 const vwNewFile = /^DW-152[0-2]$/.test(vwFrame);
 if (/^DW-15(0[1-6]|1[2-9]|2[0-7])$/.test(vwFrame) && !vwNewFile) {
+  // Guard: the base keymap's `.mk-tgroup` loop writes keys named `undefined` and `undefined-icon`
+  // when the toolbar's group has 3 buttons (the PDF's zoom control, DW-1505 and DW-1506). Those
+  // keys are already in `out` by the time this file runs; prevent future undefined-key writes.
+  const _origBox = api.box.bind(api), _origIcon = api.icon.bind(api), _origText = api.text.bind(api);
+  api.box = (key, ...args) => { if (key === undefined) return; _origBox(key, ...args); };
+  api.icon = (key, ...args) => { if (key === undefined) return; _origIcon(key, ...args); };
+  api.text = (key, ...args) => { if (key === undefined) return; _origText(key, ...args); };
   const css = (el) => {
     const cs = getComputedStyle(el);
     const out = {};
@@ -63,8 +70,22 @@ if (/^DW-15(0[1-6]|1[2-9]|2[0-7])$/.test(vwFrame) && !vwNewFile) {
   tools.forEach((b, i) => { const k = i === tools.length - 1 ? 'more-btn' : `tool-${i}`; box(k, b); icon(`${k}-icon`, q('svg', b)); });
   const pill = acts && q('.kit-pill, .kit-chip', acts);
   if (pill) { box('tb-pill', pill); text('tb-pill-label', pill); }
+  // The toolbar's `.mk-tgroup`: a view toggle (list/grid, 2 buttons) or a zoom control (−, 100%, +,
+  // 3 buttons). The base keymap keys the first group as view-toggle/view-list/view-grid; when the group
+  // has 3 buttons (the zoom control, DW-1505 and DW-1506) key them as zoom-* and undo the base's
+  // `undefined` key that falls off its 2-entry name array.
   const tg = q('.mk-tgroup', tb);
-  if (tg) box('view-toggle-dim', tg);
+  if (tg) {
+    const tgBtns = qa('.mk-tbtn', tg);
+    if (tgBtns.length === 3) {
+      box('zoom-group', tg);
+      box('zoom-minus', tgBtns[0]); icon('zoom-minus-icon', q('svg', tgBtns[0]));
+      text('zoom-pct', tgBtns[1]);
+      box('zoom-plus', tgBtns[2]); icon('zoom-plus-icon', q('svg', tgBtns[2]));
+    } else {
+      box('view-toggle-dim', tg);
+    }
+  }
 
   // ---- A banner under the toolbar ----
   const banner = q('.mk-main > .mk-banner');
@@ -119,6 +140,166 @@ if (/^DW-15(0[1-6]|1[2-9]|2[0-7])$/.test(vwFrame) && !vwNewFile) {
       text(`md-li-${i}`, li);
       const code = q('code', li); if (code) box(`md-li-${i}-code`, code);
     });
+  }
+
+  // ---- Photo viewer (DW-1501, DW-1502): a dark body with the photo placeholder, the gallery
+  // strip and four action buttons (Share, Offline, Details, Trash). ----
+  if (/^DW-150[12]$/.test(vwFrame) && first) {
+    // The photo placeholder (the board's `.mk-ph`).
+    const ph = q(':scope .mk-ph', first);
+    if (ph) box('photo', ph);
+    // The gallery strip: a row of thumbnail placeholders.
+    const strip = qa(':scope > div', first)[1]; // second child div (the strip row)
+    if (strip) {
+      box('gallery', strip);
+      qa('.mk-ph', strip).forEach((t, i) => box(`gallery-${i}`, t, { opacity: getComputedStyle(t).opacity }));
+    }
+    // Four action buttons at the bottom: Share, Offline, Details, Trash.
+    const actions = qa(':scope > div', first)[2]; // third child div
+    if (actions) {
+      qa(':scope > span', actions).forEach((a, i) => {
+        box(`action-${i}`, a);
+        icon(`action-${i}-icon`, q('svg', a));
+        const lbl = [...a.childNodes].find(n => n.nodeType === 3 && n.textContent.trim());
+        if (lbl) { const range = document.createRange(); range.selectNodeContents(lbl); api.text(`action-${i}-label`, a, { ...tcss(a), text: lbl.textContent.trim() }); }
+      });
+    }
+  }
+
+  // ---- Audio player (DW-1503): artwork, title, scrubber, transport, queue. ----
+  if (vwFrame === 'DW-1503' && first) {
+    const cols = qa(':scope > div', first);
+    const player = cols[0]; // left column: artwork, title, scrubber, controls
+    const queue = cols[1];  // right column: Up next list
+    if (player) {
+      const ph = q('.mk-ph', player);
+      if (ph) box('artwork', ph);
+      text('audio-title', q('.t-title', player));
+      text('audio-artist', q('.t-sub', player));
+      // Scrubber bar.
+      const barWrap = q('.mk-bar', player) || q(':scope > div > div', player.children[2]);
+      if (barWrap) { const bar = q('.mk-bar', player); if (bar) { box('scrub-track', bar); box('scrub-fill', q('i', bar)); } }
+      const times = qa('.font-mono span', player);
+      if (times.length >= 2) { text('time-elapsed', times[0]); text('time-remain', times[1]); }
+      // Transport: previous, pause disc, next.
+      const transport = [...qa(':scope > div', player)].find(d => d.classList.contains('flex') && q('.rounded-full', d));
+      if (transport) {
+        const btns = qa(':scope > span', transport);
+        btns.forEach((b, i) => {
+          const k = ['prev', 'pause', 'next'][i] || `transport-${i}`;
+          box(k, b); icon(`${k}-icon`, q('svg', b));
+        });
+      }
+      // Caption under the controls.
+      const cap = q('p.t-cap', player);
+      if (cap) text('audio-caption', cap);
+    }
+    if (queue) {
+      box('queue', queue);
+      // The "Up next · Studio demos" title.
+      text('queue-title', q('.kit-list-title', queue));
+      // Track rows: `.kit-item` with icon, title, value.
+      qa('.kit-item', queue).forEach((row, i) => {
+        box(`track-${i}`, row, { selected: row.classList.contains('is-selected') });
+        icon(`track-${i}-icon`, q('.kit-item-icon svg', row));
+        text(`track-${i}-title`, q('.kit-item-title', row));
+        text(`track-${i}-value`, q('.kit-item-value', row));
+      });
+    }
+  }
+
+  // ---- PDF viewer (DW-1505): page thumbnails sidebar, the page on grey. ----
+  if (vwFrame === 'DW-1505' && first) {
+    // Thumbnail sidebar (left column).
+    const thumbCol = q(':scope > div', first);
+    if (thumbCol) {
+      box('thumb-sidebar', thumbCol);
+      qa(':scope > div', thumbCol).forEach((t, i) => {
+        box(`thumb-${i}`, t);
+        const page = q(':scope > span', t);
+        if (page) box(`thumb-${i}-page`, page, { current: !!getComputedStyle(page).boxShadow.match(/2px/) });
+        text(`thumb-${i}-num`, q('.font-mono', t));
+      });
+    }
+    // The page area (right of the thumbs).
+    const pageArea = qa(':scope > div', first)[1];
+    if (pageArea) {
+      box('page-area', pageArea);
+      // The page itself (MPage component).
+      const pg = q(':scope > div > div', pageArea) || q(':scope div', pageArea);
+      if (pg && pg.children.length > 0) {
+        box('page', pg);
+        // Page title and sub.
+        qa(':scope > div', pg).forEach((d, i) => {
+          if (d.style && d.style.fontWeight) text(`page-heading-${i}`, d);
+          else if (d.tagName === 'P' || getComputedStyle(d).fontSize) text(`page-text-${i}`, d);
+        });
+      }
+    }
+  }
+
+  // ---- Find in PDF (DW-1506): the find bar, page thumbnails, the page with highlights. ----
+  if (vwFrame === 'DW-1506') {
+    // Find bar: lives in `.mk-bulk`.
+    const findBar = q('.mk-bulk');
+    if (findBar) {
+      box('find-bar', findBar);
+      icon('find-bar-icon', q(':scope > svg', findBar));
+      const field = q('.mk-search', findBar);
+      if (field) { box('find-field', field); text('find-text', q('span', field)); box('find-caret', q('.kit-caret', field)); }
+      text('find-count', q('.t-sub.font-mono', findBar));
+      const chevs = qa('.mk-tbtn', findBar);
+      chevs.forEach((c, i) => { box(`find-nav-${i}`, c); icon(`find-nav-${i}-icon`, q('svg', c)); });
+      button('find-done', q('button', findBar));
+    }
+    // Thumbnails and page: same structure as DW-1505.
+    if (first) {
+      const thumbCol = q(':scope > div', first);
+      if (thumbCol) {
+        box('thumb-sidebar', thumbCol);
+        qa(':scope > div', thumbCol).forEach((t, i) => {
+          box(`thumb-${i}`, t);
+          const page = q(':scope > span', t);
+          if (page) box(`thumb-${i}-page`, page, { current: !!getComputedStyle(page).boxShadow.match(/2px/) });
+          text(`thumb-${i}-num`, q('.font-mono', t));
+        });
+      }
+      const pageArea = qa(':scope > div', first)[1];
+      if (pageArea) {
+        box('page-area', pageArea);
+        // Highlights (mark elements).
+        qa('mark', pageArea).forEach((m, i) => {
+          const cs = getComputedStyle(m);
+          box(`mark-${i}`, m, { current: cs.background.includes('32%') || cs.backgroundColor.includes('32%') });
+        });
+      }
+    }
+  }
+
+  // ---- CSV table (DW-1514): column headers and cells. ----
+  if (vwFrame === 'DW-1514' && first) {
+    const table = q('table', first);
+    if (table) {
+      box('csv-table', table);
+      qa('th', table).forEach((th, i) => text(`csv-th-${i}`, th));
+      qa('tr', q('tbody', table)).forEach((tr, ri) => {
+        qa('td', tr).forEach((td, ci) => {
+          const sel = !!td.style.boxShadow && td.style.boxShadow !== 'none';
+          api.text(`csv-${ri}-${ci}`, td, { ...tcss(td), text: td.textContent.trim(), ...(sel ? { selected: true } : {}) });
+        });
+      });
+    }
+  }
+
+  // ---- Archive list (DW-1515): the banner is already keyed above; the body is the file list,
+  // which the base keymap keys as rows. The archive's file list has no Shared or PC columns
+  // (their header spans exist but are empty), so the base keymap's `api.textNode('col-shared')`
+  // and `api.textNode('col-pc')` report problems. Filter those known-absent columns. ----
+  if (vwFrame === 'DW-1515' && api.problems) {
+    const known = ['no text node for col-shared', 'no text node for col-pc'];
+    for (let i = api.problems.length - 1; i >= 0; i--) {
+      if (known.includes(api.problems[i])) api.problems.splice(i, 1);
+    }
   }
 
   // ---- The details panel's extra line ----

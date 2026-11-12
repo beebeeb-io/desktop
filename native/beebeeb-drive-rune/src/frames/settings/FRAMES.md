@@ -11,13 +11,13 @@ Status after lane f-settings-rest (2026-11-12): 28 of 50 built, 23 of them with 
 | `DW-0781` | A new version is available: General says so with Download update. | built (light and dark: 0 failing on all six lines) |
 | `DW-0751` | Versions to quote in a problem report, and where the code is. | built (light and dark: 0 failing on all six lines) |
 | `DW-0782` | Report a problem the way the desktop app does: a support bundle the person can read first, and an email they send themselves. | built (light and dark: 0 failing on all six lines) |
-| `DW-0708` | The plan, read only. | not built (a dialog over the Account pane, which is lane f-account's) |
+| `DW-0708` | The plan, read only. | built on the account pane (`frames/account/plan.rs`, over DW-A51); the board draws them in the Drive settings kit: board follow-up task 2480 (`frames/account/FRAMES.md` has the counts) |
 | `DW-0712` | What uses the account's space, and what Beebeeb keeps on this PC. | built (light and dark: 0 failing on all six lines) |
 | `DW-0713` | How much room previews may take on this PC. | built; light and dark: 1 pixel line red (`slider-knob edge`: the knob's rim and shadow) |
 | `DW-0714` | How much room downloaded files may take on this PC. | built; light and dark: 1 pixel line red (`slider-knob edge`: the knob's rim and shadow) |
 | `DW-0780` | Remove downloaded copies to get space back on Windows. | built (light and dark: 0 failing on all six lines) |
-| `DW-0716` | Lock Beebeeb's screens with Windows Hello: the one Security pane, choosing how soon it locks again. | not built (the Security pane is lane f-account's, DW-A52) |
-| `DW-0716b` | App lock is off: no time choice. The same pane as DW-A52. | not built (the Security pane is lane f-account's, DW-A52) |
+| `DW-0716` | Lock Beebeeb's screens with Windows Hello: the one Security pane, choosing how soon it locks again. | built on the account pane (`frames/account/app_lock.rs`, the delay menu over DW-A52); the board draws them in the Drive settings kit: board follow-up task 2480 (`frames/account/FRAMES.md` has the counts) |
+| `DW-0716b` | App lock is off: no time choice. The same pane as DW-A52. | built on the account pane (DW-A52 with the lock off); the board draws them in the Drive settings kit: board follow-up task 2480 (`frames/account/FRAMES.md` has the counts) |
 | `DW-0750` | Which alerts Beebeeb sends on this PC. | built (light and dark: 0 failing on all six lines) |
 | `DW-0750b` | Notifications are off for Beebeeb in Windows: say so, and that nothing arrives. | built (light and dark: 0 failing on all six lines) |
 

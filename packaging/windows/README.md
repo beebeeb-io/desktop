@@ -10,18 +10,29 @@ Plain `makensis`, no Tauri CLI. Spec: `docs/superpowers/specs/2026-11-11-native-
 | `verify-install.ps1` | Read-only checks of an installed or uninstalled state; ends with a count line. |
 | `rehearsal/serve.ts`, `rehearsal/db-fingerprint.ts` | Helpers for the upgrade rehearsal below. |
 
-**Status: written on Linux, never run on Windows.** A lane cannot run Windows binaries; every command below is for
-the lead, on the Windows host, under the native-windows lock. Expect to fix small things on the first run and
-record them in the PR.
+**Status.** Section A and native check 1 ran on Windows for the first time on 2026-11-12, on the build VM
+`bb-build-win11` (Windows 11 23H2, beside an installed Beebeeb 0.8.25), and the scripts needed no change: steps 1 to
+7 printed what they say below. Two parts are still open: that VM has no interactive desktop, so the app started
+there but drew no window and step 5's "look at it" was not done; and 0.8.25 was not running, so step 8 had nothing to
+compare. Native check 4 runs in CI; native checks 2 and 3 and section B have never run.
 
-Needs: NSIS 3.11 and `nsis_tauri_utils.dll` 0.5.3. Both are in `%LOCALAPPDATA%\tauri\NSIS` on a PC that has built
-0.8.x (the lead's has: `C:\Users\GuusLangelaar\AppData\Local\tauri\NSIS`). The plugin, `Bin\makensis.exe` and the
-stub `Stubs\lzma_solid-x86-unicode` are checked by SHA-256 (NSIS 3.11 as released): a release build refuses any
-other file, a test build prints a `NOTE` line and goes on.
+Needs: NSIS 3.11 and `nsis_tauri_utils.dll` 0.5.3. On a PC that has built 0.8.x both are in
+`%LOCALAPPDATA%\tauri\NSIS`, where the script looks by default. Elsewhere: NSIS 3.11 from its official release, the
+plugin from `github.com/tauri-apps/nsis-tauri-utils` (release `nsis_tauri_utils-v0.5.3`) in
+`<NSIS folder>\Plugins\x86-unicode\additional\`, and `-NsisDir <NSIS folder>` on the command line (the build VM:
+`-NsisDir 'C:\Program Files (x86)\NSIS'`). Every file is checked by SHA-256. A plugin that is not 0.5.3 is refused
+in both modes. `makensis.exe`, `Bin\makensis.exe` and the stub `Stubs\lzma_solid-x86-unicode` must be NSIS 3.11 as
+released: a release build refuses any other file, a test build prints a `NOTE` line and goes on. The output folder
+`out\` is ignored by git.
 
 **A test build shares nothing with the real Beebeeb (review P2-4).** It is `Beebeeb Test`, `io.beebeeb.app.test`,
-`beebeeb-desktop-test.exe`: its own install folder, data folder (`%LOCALAPPDATA%\io.beebeeb.app.test`), config and
-credentials. The installer looks only at processes of its own binary name and **never ends a process**: it asks a
+`beebeeb-desktop-test.exe`: its own install folder, data folder (`%LOCALAPPDATA%\io.beebeeb.app.test`), config
+(`%APPDATA%\beebeeb-test\desktop.toml`) and credentials (`io.beebeeb.app.test/…`). It has no server of its own:
+without a flag its API base is the engine's built-in default, production (`https://api.beebeeb.io`; the closed
+loopback port is a unit-test build's only). It takes `--api-base <url>` in any profile (decision 2462; so does a dev
+build of either app, and the real app as it ships never does), and its data on a computer stays with the server it
+was first opened for (`native/beebeeb-drive-rune/src/shell/README.md`, "Starting").
+The installer looks only at processes of its own binary name and **never ends a process**: it asks a
 running native app to quit (`--quit-for-update`), waits 20 seconds, then says "still running" and offers Retry or
 Cancel. Which app a binary is, is decided when it is built (`native\beebeeb-drive-rune\build.rs`):
 `BEEBEEB_APP_IDENTIFIER=io.beebeeb.app.test`, or the variable unset, gives the test app; `io.beebeeb.app` gives the
@@ -55,15 +66,25 @@ Set-Location C:\bb-win\native\desktop\packaging\windows
 $installer = Join-Path $PWD 'out\Beebeeb Test_0.9.0_x64-setup.exe'
 
 # 3. Install silently (per user, no prompt) and wait for it.
-Start-Process -FilePath $installer -ArgumentList '/S' -Wait
+#    Exit 3 = refused: an existing install is older than 0.8.25 (update through the app first).
+$proc = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru
+if ($proc.ExitCode -ne 0) { throw "Installer exited $($proc.ExitCode)" }
 # 4. Verify: must end with "VERIFY installed: 14 passed, 0 failed".
 .\verify-install.ps1 -Mode test -Version 0.9.0 -Phase installed
 
 # 5. Start it once, look at it, quit it. Then: no WebView2 process may belong to it, and no profile may appear.
-Start-Process "$env:LOCALAPPDATA\Beebeeb Test\beebeeb-desktop-test.exe"
+#    Do not sign in: its server is production (see above). A signed-out start makes no request; the firewall lines
+#    (elevated shell only) make sure of it for this step, as on the build VM. Without an interactive desktop (an SSH
+#    session, the build VM) it starts and stays up, but Rune cannot create its windows ("the window's GPU surface
+#    refused its configuration").
+$exe = "$env:LOCALAPPDATA\Beebeeb Test\beebeeb-desktop-test.exe"
+New-NetFirewallRule -DisplayName 'Beebeeb Test: no network' -Direction Outbound -Action Block -Program $exe | Out-Null
+$app = Start-Process $exe -PassThru
 Start-Sleep 10
 @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -like '*io.beebeeb.app.test*' }).Count   # must print 0
 Test-Path "$env:LOCALAPPDATA\io.beebeeb.app.test\EBWebView"                                                                            # must print False
+if (!$app.HasExited) { Stop-Process -Id $app.Id }        # quit it by its own process id
+Remove-NetFirewallRule -DisplayName 'Beebeeb Test: no network'
 
 # 6. Uninstall silently (the uninstaller copies itself to %TEMP% and returns at once: wait for the folder to go).
 Start-Process -FilePath "$env:LOCALAPPDATA\Beebeeb Test\uninstall.exe" -ArgumentList '/S' -Wait
@@ -71,15 +92,18 @@ Start-Process -FilePath "$env:LOCALAPPDATA\Beebeeb Test\uninstall.exe" -Argument
 # 7. Verify: must end with "VERIFY uninstalled: 6 passed, 0 failed".
 .\verify-install.ps1 -Mode test -Version 0.9.0 -Phase uninstalled
 
-# 8. The real Beebeeb was never touched: the same process ids as before step 1. Must print True.
-"$(@(Get-Process beebeeb-desktop -ErrorAction SilentlyContinue | ForEach-Object Id))" -eq "$real"
+# 8. The real Beebeeb was never closed: the same process ids as before step 1. Must print True. Without a real
+#    Beebeeb running at step 1 there is nothing to compare, and it says so instead of a True that proves nothing.
+$now = "$(@(Get-Process beebeeb-desktop -ErrorAction SilentlyContinue | ForEach-Object Id))"
+if ($real.Count -eq 0) { 'NOT CHECKED: no real Beebeeb was running at step 1' } else { $now -eq "$real" }
 ```
 
-**Native checks added by the security review's delta (never run; the lead's):**
+**Native checks added by the security review's delta (the lead's; 1 ran on the build VM, 4 runs in CI, 2 and 3
+have not run):**
 
 1. Step 2 with a binary built with `BEEBEEB_APP_IDENTIFIER=io.beebeeb.app` must print `FAILED the binary was not
    built as the test app` and exit 1 (the guard can fail). A build with `BEEBEEB_APP_IDENTIFIER=banana` must not
-   compile at all (`is not an app`).
+   compile at all (`is not an app`). Both seen on 2026-11-12 (cargo exit 101 for `banana`).
 2. With the test app running, run the installer without `/S`: after about 20 seconds it must show "Beebeeb Test is
    still running" with Retry and Cancel, and `Get-Process beebeeb-desktop-test` must still list the same id.
 3. (Also with `/S`, and also over an MSI install: the scan runs in `.onInit` since Delta 3.) The version refusal: `reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Beebeeb Test" /v
@@ -87,18 +111,30 @@ Start-Process -FilePath "$env:LOCALAPPDATA\Beebeeb Test\uninstall.exe" -Argument
    0.8.25`: it installs. Then with `/d banana`: refused (a version that does not parse is not "at least 0.8.25").
 4. `cargo test --locked --features net` in `crates\beebeeb-updater` on Windows: the two `#[cfg(windows)]` tests
    (`a_held_installer_cannot_be_written_replaced_renamed_or_deleted`,
-   `the_staged_file_cannot_be_replaced_between_the_check_and_the_start`) run only there. CI runs them too
-   (`ci.yml`, job `updater-windows`, hosted `windows-latest`, each test named in the gate); the first run of that
-   job on this PR is the first time they execute anywhere.
+   `the_staged_file_cannot_be_replaced_between_the_check_and_the_start`) run only there. CI runs them (`ci.yml`,
+   job `updater-windows`, hosted `windows-latest`, each test named in the gate): on `v2-native` on 2026-11-12 both
+   printed `ok` (`test result: ok. 78 passed; 0 failed`). Not yet run on the lead's PC or the build VM.
 
 Prove the checker can fail before trusting it: run step 4 with `-Version 9.9.9` (must print `FAIL  uninstall entry:
 DisplayVersion` and exit 1), and step 7 while the app is still installed (must fail 5 of 6).
 
-The silent uninstall keeps the data folder (`%LOCALAPPDATA%\io.beebeeb.app.test`) on purpose. The real Beebeeb's
-files and registry entries (`%LOCALAPPDATA%\Beebeeb`, `io.beebeeb.app`) are not touched by any step, but a running
-real Beebeeb is closed (see above), and the two builds share the credentials
-(`io.beebeeb.app/...` in Credential Manager) and `%APPDATA%\beebeeb\desktop.toml`, as the Tauri test build does
-today (spec §3).
+What a silent uninstall leaves, on purpose. Measured after a signed-out start: the settings file
+`%APPDATA%\beebeeb-test\desktop.toml` and the install-location key `HKCU\Software\beebeeb\Beebeeb Test` (the 0.8.25
+uninstaller leaves `HKCU\Software\beebeeb\Beebeeb` the same way); that start made no data folder. By the code, after
+a signed-in session, also: the state folder `%LOCALAPPDATA%\io.beebeeb.app.test`, the scratch and cache folders
+`%TEMP%\beebeeb-test` and `%LOCALAPPDATA%\beebeeb-test`, the rest of `%APPDATA%\beebeeb-test` (for example
+`Changes not sent`, where a sign-out keeps unsent changes), the `io.beebeeb.app.test/…` credentials and the
+Explorer sync root (spec §5). "Delete the application data" removes only `%APPDATA%\io.beebeeb.app.test` and
+`%LOCALAPPDATA%\io.beebeeb.app.test`. After it, a test build that was signed in does not start again (one line on
+stderr and the start-refusal box, exit 2): its stored credentials are left with no local data to say which server
+they were made for, so no server gets them. It starts once those `io.beebeeb.app.test/…` credentials are removed too.
+
+No step changed anything of the real Beebeeb (`%LOCALAPPDATA%\Beebeeb`, `%LOCALAPPDATA%\io.beebeeb.app`,
+`%APPDATA%\beebeeb`, `%APPDATA%\io.beebeeb.app`, its registry keys, shortcuts and `io.beebeeb.app/…` credentials),
+and none looks at its processes: the installer waits only for `beebeeb-desktop-test.exe`. Every name the test build
+writes is its own. What the two share is the parent key `HKCU\Software\beebeeb`, which holds one subkey each (the
+uninstaller removes the parent only when it is empty, and only with "Delete the application data" ticked), and the
+uninstall entries' publisher, `beebeeb`.
 
 ## B. Upgrade rehearsal: a Tauri build updates itself to the native build
 

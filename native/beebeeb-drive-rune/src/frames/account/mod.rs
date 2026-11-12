@@ -14,12 +14,14 @@
 //! queue of requests to drain (`SettingsUi::take_intents`).
 
 mod activity;
+mod app_lock;
 mod delete;
 mod form;
 mod forms;
 pub mod icons;
 mod overview;
 mod passkeys;
+mod plan;
 mod security;
 mod sessions;
 pub mod source;
@@ -156,6 +158,10 @@ pub enum Dialog {
     RemovePasskey(String),
     /// Leaving the backup codes without "I've saved them" (DW-A70's rule).
     LeaveCodes,
+    /// The plan, read only, over Account (DW-0708).
+    Plan,
+    /// The menu of App lock's delays (DW-0716): the item under the pointer or the keys.
+    LockDelay(Option<usize>),
 }
 
 impl Dialog {
@@ -173,6 +179,10 @@ impl Dialog {
             | Dialog::PasskeyMenu(_)
             | Dialog::RemovePasskey(_)
             | Dialog::LeaveCodes => false,
+            // DW-0708: the plan's size, use, renewal day and billing period. No key material.
+            Dialog::Plan => false,
+            // DW-0716: four lengths of time. No key material.
+            Dialog::LockDelay(_) => false,
         }
     }
 }
@@ -270,6 +280,10 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>)> {
         "DW-A81" => (Pane::DeleteLink, None),
         "DW-A82" => (Pane::DeleteScheduled, None),
         "DW-A83" => (Pane::DeleteUndone, None),
+        "DW-0708" => (Pane::Account, Some(Dialog::Plan)),
+        // The menu opens on the current choice (`app_lock::arrive`).
+        "DW-0716" => (Pane::Security, Some(Dialog::LockDelay(None))),
+        "DW-0716b" => (Pane::Security, None),
         _ => return None,
     })
 }
@@ -290,6 +304,11 @@ pub fn go(s: &mut State, frame: &'static str) {
     s.account.show(pane);
     s.account.dialog = dialog;
     form::arrive(&mut s.account);
+    app_lock::arrive(&mut s.account);
+    if plan::arrive(&mut s.account) {
+        // Nothing can say what the plan is: the website can.
+        s.settings.ask(settings::Intent::Web(plan::PLAN_PAGE));
+    }
 }
 
 /// A handler of a page: it works on what this lane holds, and names the frame to show next
@@ -428,6 +447,14 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         go(s, "DW-A82");
     }),
     ("DW-A83", |s| open_on(s, "DW-A83")),
+    ("DW-0708", |s| open_on(s, "DW-0708")),
+    ("DW-0716", |s| open_on(s, "DW-0716")),
+    ("DW-0716b", |s| {
+        open_on(s, "DW-0716b");
+        if let Some(source) = s.account.source.as_mut() {
+            source.set_app_lock(false);
+        }
+    }),
 ];
 
 /// Show the frame `id` on `s` (a scene). `false`: this group has not built it.
@@ -535,7 +562,13 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     }
     let form = &ui.form;
     let (pane_el, overlay) = match pane {
-        Pane::Account => (overview::pane(source, &t), None),
+        Pane::Account => (
+            overview::pane(source, &t),
+            dialog
+                .filter(|d| **d == Dialog::Plan)
+                .and_then(|_| source.plan_details())
+                .map(|plan| plan::overlay(&plan, &t)),
+        ),
         Pane::Security => security::pane(source, dialog, &t),
         Pane::Checkup => (security::checkup(source, &t), None),
         Pane::Sessions => sessions::pane(source, dialog, &t),
@@ -577,6 +610,11 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 /// control; in a confirm Enter is its default button, the safe choice).
 pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     sync(s);
+    if let Some(Dialog::LockDelay(hot)) = s.account.dialog {
+        if let Some(taken) = app_lock::on_key(s, hot, ev) {
+            return taken;
+        }
+    }
     if ev.key != Key::Escape {
         return false;
     }

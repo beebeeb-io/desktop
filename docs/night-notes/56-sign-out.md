@@ -33,7 +33,7 @@ error: expect(received).toBe(expected)
 Expected: "Files from before the last update"
 Received: "Sign out of Drive?"
 
-      at <anonymous> (/home/guus/code/bb-worktrees/desktop-v2-night-1/tests/signOutAsks.test.tsx:83:36)
+      at <anonymous> (~/code/bb-worktrees/desktop-v2-night-1/tests/signOutAsks.test.tsx:83:36)
 (fail) sign out asks about files from before the last update > (a) a count above zero shows the question and clears nothing, in Settings and on the no-plan screen [51.15ms]
 (fail) ... (b) Keep copies signs out with keep and the folder the question named [12.01ms]
 (fail) ... (c) Delete them signs out with delete [8.78ms]
@@ -94,7 +94,7 @@ walkthrough: headless Chromium (Playwright), Settings > Sign-in and security > S
 3 cleared before choice: null
 4 after cancel dialog: Sign out of Drive?
 4 after cancel cleared: null
-5 cleared args: {"unknownFiles":"keep","keptFolder":"C:\\Users\\GuusLangelaar\\Beebeeb kept files 2026-11-10 0909"}
+5 cleared args: {"unknownFiles":"keep","keptFolder":"%USERPROFILE%\\Beebeeb kept files 2026-11-10 0909"}
 5 url after: http://localhost:5173/?window=main-app&platform=windows
 5b gate: Beebeeb Drive ... Welcome
 6 failure title: Files from before the last update
@@ -108,7 +108,7 @@ Screenshots: `walk-1-security.png`, `walk-2-confirm.png`,
 
 ## Evidence
 
-`/home/guus/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/sign-out-asks/`
+`~/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/sign-out-asks/`
 holds `red.txt`, `green.txt`, `green-rerun.txt`, `tsc.txt`, `walkthrough.txt` and
 the `walk-*.png` screenshots. The red, green, tsc and walkthrough output is also
 pasted above so the note stands on its own.

@@ -200,7 +200,7 @@ Store.
 # 2. Submit and wait. Replace the placeholders.
 xcrun notarytool submit \
   "src-tauri/target/universal-apple-darwin/release/bundle/dmg/Beebeeb_<version>_universal.dmg" \
-  --apple-id "guus@beebeeb.io" \
+  --apple-id "<apple-id>" \
   --team-id "<TEAMID>" \
   --password "<app-specific-password>" \
   --wait

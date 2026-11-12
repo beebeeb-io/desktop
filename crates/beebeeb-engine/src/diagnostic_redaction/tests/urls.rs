@@ -18,7 +18,7 @@ fn url_keeps_host_and_drops_path_and_query() {
 
 #[test]
 fn url_with_userinfo_is_not_trusted() {
-    let out = redact_for_export("request to https://guus:pw@evil.example/x failed", &KnownNames::new());
-    assert!(!out.text.contains("guus"), "{}", out.text);
+    let out = redact_for_export("request to https://alice:pw@evil.example/x failed", &KnownNames::new());
+    assert!(!out.text.contains("alice"), "{}", out.text);
     assert!(!out.text.contains("evil"), "{}", out.text);
 }

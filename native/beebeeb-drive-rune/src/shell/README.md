@@ -187,6 +187,28 @@ acknowledged, exits 0 at once when nothing runs, and exits 1 when the instance d
 Development and diagnostic flags (Rune's `--snap`, `--out`, `--html`, `--script`, …, and `--db`) are
 read only in a dev build (`instance::DEV_BUILD`: a debug build, or the `dev-tools` feature); a
 shipped build ignores every one, and Rune is handed an empty argument list (`App::args`).
+`--api-base <url>` (decision 2462) is read by a dev build and by the test build in any profile, never
+by the real app in a build that ships (`engine_host::open::reads_api_base_flag`, fixed at build time).
+`engine_host::open::api_base` takes an `https://` origin, or `http://` to exactly `127.0.0.1`,
+`[::1]` or `localhost`, with no user name, path, query or fragment; any other value, and the
+`--api-base=<url>` spelling, ends the start with exit 2 before the control channel or a window
+exists, never the default in its place. The instance that opens the engine prints
+`api base: <origin> (default)` or `(--api-base)` on stdout, and nothing else about the server (a
+release build on Windows is GUI-subsystem, so that line and stderr reach only a redirected handle;
+the box is what a person sees). It keeps that server while it runs: a later launch that names one is refused
+(`Refusal::ServerAlreadyChosen`, exit 1), never handed over. The test build's data on a computer
+stays with the server it was made for (`engine_host::open::bind_to_server`): the first open writes
+`server-origin` (`default`, or the origin) in its state folder, before the engine makes anything
+there, and a later open for another server is refused, exit 2, before the engine reads a stored
+session or `state.db`. Files in the state folder from before that record count as the default's.
+Stored credentials with nothing in the state folder (the folder removed, or the uninstaller's
+"Delete the application data", which keeps the credentials) are refused for every server, the
+default included. A record with nothing beside it (no other file, no stored credential) is replaced
+by the next run's server. A clean computer starts on any server, and records it. Every one of these
+refusals is one line that names a reason or the servers' kinds (default or custom, never the value,
+an origin, a token or an account), on stderr and in the start-refusal box (`shell::refuse_start`;
+no box at login, for the installer's call or in a tooling run). The engine's clients for an
+`http://` loopback API base never go through a proxy (`api_client::api_base_client_builder`).
 
 One instance per identity, user AND Windows session (exclusivity across sessions comes from the
 engine/profile lock, which is not linked yet): `control.rs` is the protocol and `platform/windows_control.rs`
