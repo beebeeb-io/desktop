@@ -82,7 +82,7 @@ fn roundtrip(path: &str, outdir: &str) {
     let first = read(&mut s, "J1:J3");
     step(&mut s, "cell.set", json!({"cell": "J2", "input": "5"}));
     let after = read(&mut s, "J1:J3");
-    step(&mut s, "home.bold", json!({"range": "J1:J3"}));
+    step(&mut s, "home.bold", json!({"range": "J1:J3", "on": true}));
     let n = ok.len();
     let undo = run(&mut s, "edit.undo", json!({"steps": n}));
     let undone = read(&mut s, "J1:J3");
