@@ -168,12 +168,11 @@ pub fn pill(index: usize, words: &str, t: &Theme) -> El {
         .center_y()
         .radius(10.0)
         .fill(t.text.alpha(0.07))
-        .child(
-            el().key(format!("{key}-dot"))
-                .size(6.0, 6.0)
-                .radius(3.0)
-                .fill(t.text_secondary),
-        )
+        .child(super::settings_meter::disc(
+            &format!("{key}-dot"),
+            6.0,
+            t.text_secondary,
+        ))
         .child(kit::label(format!("{key}-label"), words, PILL, t.text_secondary))
 }
 

@@ -201,11 +201,9 @@ fn ready(d: &InsightsData, t: &Theme) -> Vec<El> {
                 )
                 .child(meters::chip(i + 1, None, &file.kind, t))
                 .child(
-                    row()
-                        .key(format!("lrow-{i}-size-box"))
+                    kit::label(format!("lrow-{i}-size"), file.size.clone(), SIZE, t.text)
                         .w(72.0)
-                        .justify_end()
-                        .child(kit::label(format!("lrow-{i}-size"), file.size.clone(), SIZE, t.text)),
+                        .align(rune::Align::End),
                 ),
         );
     }
@@ -217,13 +215,7 @@ fn ready(d: &InsightsData, t: &Theme) -> Vec<El> {
                 .h(30.0)
                 .px(16.0)
                 .center_y()
-                .child(meters::then_value(
-                    "lrow-more",
-                    words,
-                    size,
-                    type_::CAPTION,
-                    t.text_tertiary,
-                )),
+                .child(meters::then_value("lrow-more", words, size, type_::CAPTION, t.text_tertiary).w(412.0)),
         );
     }
     let largest = cards::column(2, 0.0, 0.0, t).child(rows);

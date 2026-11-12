@@ -24,36 +24,113 @@ pub const CHIP: TextStyle = TextStyle::new(12.0, 600.0).lh(17.0);
 /// a share of the whole (0 to 1) in its own ink. Keys: `meter-<N>`, `meter-<N>-part-<J>`.
 pub fn meter(index: usize, width: f32, height: f32, parts: &[(f32, Color)], t: &Theme) -> El {
     let key = format!("meter-{index}");
+    let r = height / 2.0;
     let mut m = row()
         .key(key.clone())
         .role("meter")
         .size(width, height)
-        .fill(t.separator)
-        .clip_rounded(height / 2.0);
+        .radius(r)
+        .fill(t.separator);
+    let mut drawn = 0.0;
     for (j, (share, ink)) in parts.iter().enumerate() {
-        m = m.child(
-            el().key(format!("{key}-part-{j}"))
-                .size(width * share.clamp(0.0, 1.0), height)
-                .fill(*ink),
-        );
+        let w = width * share.clamp(0.0, 1.0);
+        let left = j == 0 && w >= height;
+        let right = drawn + w >= width - 0.01 && w >= height;
+        drawn += w;
+        let part_key = format!("{key}-part-{j}");
+        m = m.child(if left || right {
+            capped(&part_key, w, height, left, right, *ink)
+        } else {
+            el().key(part_key).size(w, height).fill(*ink)
+        });
     }
     m
+}
+
+/// A filled circle as a vector shape. Rune draws a box's rounded corner by distance from its
+/// outline (`crates/rune/src/shader.wgsl:180`, `clamp(0.5 - d, 0.0, 1.0)`), a glyph by the
+/// area it covers (`outline.wgsl`, `outline_coverage`); on a radius of a few points the two
+/// rims differ, and the board's (Chromium's) is by area.
+pub static DISC: Icon = Icon {
+    name: "disc",
+    view: 24.0,
+    body: r#"<circle cx="12" cy="12" r="12" fill="currentColor"></circle>"#,
+};
+
+/// A small disc (a pill's dot), `d` across, drawn as a vector circle. The keyed box carries
+/// the declared fill for the element tree and draws nothing itself. Key: the one given.
+pub fn disc(key: &str, d: f32, ink: Color) -> El {
+    el().key(format!("{key}-shape"))
+        .size(d, d)
+        .child(
+            el().key(key.to_string())
+                .pin(Some(0.0), Some(0.0), None, None)
+                .size(d, d)
+                .radius(d / 2.0)
+                .fill(ink)
+                .opacity(0.0),
+        )
+        .child(
+            rune::icon(&DISC, d)
+                .key(format!("{key}-disc"))
+                .color(ink)
+                .absolute(0.0, 0.0),
+        )
+}
+
+/// A bar `w` by `h` in an opaque ink with a round end at its left, its right or both, the
+/// ends drawn as vector circles (see `DISC`). The keyed box carries the declared fill.
+fn capped(key: &str, w: f32, h: f32, left: bool, right: bool, ink: Color) -> El {
+    let r = h / 2.0;
+    let (x0, x1) = (if left { r } else { 0.0 }, if right { w - r } else { w });
+    let mut bar = el()
+        .key(format!("{key}-shape"))
+        .size(w, h)
+        .child(
+            el().key(key.to_string())
+                .pin(Some(0.0), Some(0.0), None, None)
+                .size(w, h)
+                .fill(ink)
+                .opacity(0.0),
+        )
+        .child(
+            el().key(format!("{key}-body"))
+                .pin(Some(x0), Some(0.0), None, None)
+                .size(x1 - x0, h)
+                .fill(ink),
+        );
+    if left {
+        bar = bar.child(
+            rune::icon(&DISC, h)
+                .key(format!("{key}-cap-l"))
+                .color(ink)
+                .absolute(0.0, 0.0),
+        );
+    }
+    if right {
+        bar = bar.child(
+            rune::icon(&DISC, h)
+                .key(format!("{key}-cap-r"))
+                .color(ink)
+                .absolute(w - h, 0.0),
+        );
+    }
+    bar
 }
 
 /// A share bar (`.mk-insbar`): one kind's size against the largest kind's.
 /// Keys: `insbar-<N>`, `insbar-<N>-fill`.
 pub fn bar(index: usize, width: f32, share: f32, ink: Color, t: &Theme) -> El {
     let key = format!("insbar-{index}");
+    let w = width * share.clamp(0.0, 1.0);
+    let fill_key = format!("{key}-fill");
+    // (A 9 pt bar's ends stay Rune's own rounded clip: as vector circles they come out
+    // further from the board's than this does; an 8 pt meter's come out nearer.)
     el().key(key.clone())
         .size(width, 9.0)
         .fill(t.text.alpha(0.08))
         .clip_rounded(4.5)
-        .child(
-            el().key(format!("{key}-fill"))
-                .size(width * share.clamp(0.0, 1.0), 9.0)
-                .radius(4.5)
-                .fill(ink),
-        )
+        .child(el().key(fill_key).size(w, 9.0).radius(4.5).fill(ink))
 }
 
 /// A slider (`.mk-slider`), `width` wide, its knob `at` (0 to 1) along the track. The caller
@@ -81,11 +158,11 @@ pub fn slider(name: &str, width: f32, at: f32, t: &Theme) -> El {
                 .fill(t.text_secondary),
         )
         .child(
-            el().key("slider-knob")
+            disc("slider-knob", 18.0, Color::WHITE)
                 .pin(Some(width * at - 9.0), Some(2.0), None, None)
-                .size(18.0, 18.0)
+                // The knob sits where the value is, between device pixels if need be.
+                .pixel_snap(false)
                 .radius(9.0)
-                .fill(Color::WHITE)
                 .box_shadow(kit::drop(1.0, 3.0, Color::BLACK.alpha(0.30)))
                 .box_shadow(kit::ring(kit::HAIR, t.separator)),
         )

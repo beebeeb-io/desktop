@@ -154,12 +154,17 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             .w_full()
             .gap(8.0)
             .child(lists::list(0, Some("In your Beebeeb account"), account, None, t))
-            .child(el().key("cap-0-box").px(4.0).child(kit::label(
-                "cap-0",
-                "Need more space? Plans are on beebeeb.io.",
-                type_::CAPTION,
-                t.text_tertiary,
-            ))),
+            .child(
+                el().key("cap-0-box").w_full().px(4.0).child(
+                    kit::label(
+                        "cap-0",
+                        "Need more space? Plans are on beebeeb.io.",
+                        type_::CAPTION,
+                        t.text_tertiary,
+                    )
+                    .w_full(),
+                ),
+            ),
         lists::list(
             1,
             Some("On this PC"),
