@@ -1,4 +1,7 @@
 // keymap-files.js: the keys the Files frames add (menus, toasts). Same rules as keymap.js: by the board's class names.
+// Only in a Files frame (`groupOf`, keymap.js): Shared, Trash, settings and the account windows key
+// their own menus and empty states under their own names (integration I2).
+if (groupOf === 'files') {
 
 // ---- Menus (`.wn-menu`): the file menu, Sort, New, the list's background menu and its submenu ----
 qa('.wn-menu').forEach((m, mi) => {
@@ -49,3 +52,4 @@ if (empty) {
   api.text('empty-add-label', q('span', add));
   api.text('empty-hint', q('.t-cap', empty));
 }
+} // groupOf === 'files'
