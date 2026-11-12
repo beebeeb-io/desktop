@@ -29,6 +29,7 @@ pub mod backup_protect;
 pub mod callback_gate;
 pub mod cf_keepalive;
 pub mod cf_range;
+pub mod clipboard;
 pub mod config;
 pub mod conflict;
 pub mod desktop_capabilities;

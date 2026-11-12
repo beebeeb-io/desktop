@@ -13,6 +13,7 @@
 use crate::theme::tokens::{Theme, radius, type_};
 use rune::{Color, El, Span, TextStyle, col, rich, row};
 
+use super::dialog;
 use super::kit;
 use super::settings_shell::SUB;
 
@@ -93,20 +94,13 @@ pub fn para_rich(index: usize, words: &str, mono: &[std::ops::Range<usize>], t: 
 /// A dialog in the middle of the body, on its scrim. `foot` holds the buttons, the primary
 /// first, the way out last, as the board orders them.
 pub fn dialog(name: &str, width: f32, title: &str, sub: Option<&str>, body: Vec<El>, foot: Vec<El>, t: &Theme) -> El {
-    let mut head = col().key("dlg-head").pt(20.0).px(24.0).pb(4.0).gap(3.0).child(
-        kit::label("dlg-title", title, DIALOG_TITLE, t.text)
-            .role("heading")
-            .level(2)
-            .w_full(),
-    );
-    if let Some(sub) = sub {
-        head = head.child(kit::label("dlg-sub", sub, SUB, t.text_tertiary).wrap());
+    // The card and the scrim are `ui::dialog`'s, the same for every window's dialogs.
+    let mut f = row().center_y().justify_end();
+    for child in foot {
+        f = f.child(child);
     }
-    let mut b = col().key("dlg-body").pt(10.0).px(24.0).pb(18.0).gap(12.0).min_h(0.0);
-    for child in body {
-        b = b.child(child);
-    }
-    on_scrim(name, width, vec![head, b, foot_row(foot, None, t)], t)
+    let card = dialog::card(name, width, title, sub.map(dialog::Sub::Wrap), body, f, t);
+    dialog::scrim(0.0, card, t)
 }
 
 /// A dialog's foot (`.wn-dlg-foot`): the buttons at its trailing edge, or `even` (`.is-even`):
@@ -129,11 +123,6 @@ pub fn foot_row(buttons: Vec<El>, even: Option<f32>, t: &Theme) -> El {
         });
     }
     f
-}
-
-/// A dialog card of `parts` (head, body, foot) in the middle of the body, on its scrim.
-pub fn on_scrim(name: &str, width: f32, parts: Vec<El>, t: &Theme) -> El {
-    scrimmed("dialog", name, width, parts, t)
 }
 
 fn scrimmed(role: &'static str, name: &str, width: f32, parts: Vec<El>, t: &Theme) -> El {

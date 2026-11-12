@@ -126,9 +126,9 @@ pub struct PopoverSnapshotDto {
     pub conflicts: ConflictsDto,
     pub activity: Vec<ActivityRow>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub update: Option<crate::macos_popover::UpdateOffer>,
+    pub update: Option<super::UpdateOffer>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sign_out_sending: Option<crate::macos_popover::Sending>,
+    pub sign_out_sending: Option<super::Sending>,
 }
 
 /// Everything the command gathered.

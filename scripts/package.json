@@ -1,0 +1,5 @@
+{
+  "name": "beebeeb-desktop-scripts",
+  "private": true,
+  "description": "Release and repo tooling tests (no React, no Vite). Run from the repo root: bun test scripts/tests/<file>."
+}

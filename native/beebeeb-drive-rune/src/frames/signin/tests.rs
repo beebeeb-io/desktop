@@ -34,7 +34,7 @@ const BUILT: [(&str, &str); 15] = [
     ("DW-A22", "Sign in to Drive"),
 ];
 
-fn runtime_of(ui: Ui, dark: bool) -> Runtime<State> {
+pub(super) fn runtime_of(ui: Ui, dark: bool) -> Runtime<State> {
     let mut state = init();
     // Signed out: the registry draws this group (`shell/registry.rs`).
     crate::shell::host::dispatch(&mut state, Event::Gate(crate::shell::app::GateState::SignedOut));
@@ -50,28 +50,28 @@ fn runtime_of(ui: Ui, dark: bool) -> Runtime<State> {
     rt
 }
 
-fn runtime(frame: &str) -> Runtime<State> {
+pub(super) fn runtime(frame: &str) -> Runtime<State> {
     runtime_of(scene(frame).unwrap_or_else(|| panic!("no scene {frame}")), false)
 }
 
-fn ui(rt: &mut Runtime<State>) -> &mut Ui {
+pub(super) fn ui(rt: &mut Runtime<State>) -> &mut Ui {
     rt.state.signin.as_mut().expect("the sign-in window is open")
 }
 
-fn info(rt: &Runtime<State>, key: &str) -> rune::ElementInfo {
+pub(super) fn info(rt: &Runtime<State>, key: &str) -> rune::ElementInfo {
     rt.elements()
         .into_iter()
         .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
         .unwrap_or_else(|| panic!("no element keyed {key}"))
 }
 
-fn has(rt: &Runtime<State>, key: &str) -> bool {
+pub(super) fn has(rt: &Runtime<State>, key: &str) -> bool {
     rt.elements()
         .iter()
         .any(|e| e.key.as_deref() == Some(key) && !e.exiting)
 }
 
-fn press(rt: &mut Runtime<State>, key: Key) {
+pub(super) fn press(rt: &mut Runtime<State>, key: Key) {
     rt.key(KeyEvent {
         key,
         mods: Mods::default(),
@@ -80,11 +80,11 @@ fn press(rt: &mut Runtime<State>, key: Key) {
 }
 
 /// Space presses the focused control.
-fn space(rt: &mut Runtime<State>) {
+pub(super) fn space(rt: &mut Runtime<State>) {
     press(rt, Key::Text(" ".into()));
 }
 
-fn click(rt: &mut Runtime<State>, key: &str) {
+pub(super) fn click(rt: &mut Runtime<State>, key: &str) {
     // A screen that just replaced another is still moving in: let it land before aiming.
     rt.settle_all();
     rt.frame(0.0);
@@ -95,12 +95,12 @@ fn click(rt: &mut Runtime<State>, key: &str) {
     rt.frame(0.0);
 }
 
-fn focused(rt: &Runtime<State>) -> Option<String> {
+pub(super) fn focused(rt: &Runtime<State>) -> Option<String> {
     rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key)
 }
 
 /// Tab until `key` has focus (at most 20 stops).
-fn tab_to(rt: &mut Runtime<State>, key: &str) {
+pub(super) fn tab_to(rt: &mut Runtime<State>, key: &str) {
     for _ in 0..20 {
         if focused(rt).as_deref() == Some(key) {
             return;
@@ -185,10 +185,9 @@ fn enter_in_a_field_signs_in_and_the_engine_names_the_next_frame() {
     let mut rt = runtime("DW-A02");
     click(&mut rt, PASSWORD_KEY);
     press(&mut rt, Key::Enter);
-    assert_eq!(
-        ui(&mut rt).take_intents(),
-        vec![Intent::Next(NextAfterSignIn::TwoFactor)]
-    );
+    // The fixture's account has two-factor on: the code is this group's next screen (DW-A26).
+    assert_eq!(ui(&mut rt).screen, Screen::TwoFactor { backup: false });
+    assert!(ui(&mut rt).take_intents().is_empty());
     assert!(!ui(&mut rt).busy);
     assert!(
         ui(&mut rt).password.text.is_empty(),
@@ -361,7 +360,7 @@ fn an_answer_for_a_screen_already_left_changes_nothing() {
 
 /// What a tool or assistive technology can read of the window: every element's key, label,
 /// text and path, and the accessibility tree.
-fn readable(rt: &Runtime<State>) -> [(&'static str, String); 2] {
+pub(super) fn readable(rt: &Runtime<State>) -> [(&'static str, String); 2] {
     let tree: String = rt
         .elements()
         .iter()
@@ -642,7 +641,9 @@ fn while_a_sign_in_runs_no_other_path_leaves() {
         ui(&mut rt).take_intents().is_empty(),
         "Forgot password?, Use a passkey and Create an account lead nowhere while it runs"
     );
-    ui(&mut rt).leave(Intent::ForgotPassword);
+    ui(&mut rt).forgot();
+    ui(&mut rt).use_passkey();
+    ui(&mut rt).leave(Intent::CreateAccount);
     assert!(ui(&mut rt).take_intents().is_empty(), "not from the keyboard either");
     assert_eq!(ui(&mut rt).screen, Screen::SignIn);
     assert_eq!(*calls.borrow(), ["sign_in"], "and nothing else was asked of the engine");
@@ -655,11 +656,7 @@ fn while_a_sign_in_runs_no_other_path_leaves() {
     deliver(&mut rt, &queue, SignInEvent::AccountDeleted);
     assert!(ui(&mut rt).take_intents().is_empty());
     click(&mut rt, "link-0-box");
-    assert_eq!(
-        ui(&mut rt).take_intents(),
-        vec![Intent::ForgotPassword],
-        "the paths work again"
-    );
+    assert_eq!(ui(&mut rt).screen, Screen::Forgot, "the paths work again");
 }
 
 /// Review P2-6, focus. DW-A05: "focus returns to Try again".
@@ -912,14 +909,12 @@ fn signed_out_the_registry_draws_sign_in_without_an_invented_person() {
 #[test]
 fn the_links_leave_for_their_frames() {
     let mut rt = runtime("DW-A02");
-    click(&mut rt, "link-0-box");
-    click(&mut rt, "link-1-box");
     tab_to(&mut rt, "link-2-box");
     press(&mut rt, Key::Enter);
-    assert_eq!(
-        ui(&mut rt).take_intents(),
-        vec![Intent::ForgotPassword, Intent::UsePasskey, Intent::CreateAccount]
-    );
+    assert_eq!(ui(&mut rt).take_intents(), vec![Intent::CreateAccount]);
+    // "Forgot password?" is a screen of this group (DW-A45).
+    click(&mut rt, "link-0-box");
+    assert_eq!(ui(&mut rt).screen, Screen::Forgot);
     let mut rt = runtime("DW-A07");
     click(&mut rt, "back-link");
     assert_eq!(ui(&mut rt).screen, Screen::SignIn);

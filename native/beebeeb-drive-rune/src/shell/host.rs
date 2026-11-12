@@ -287,7 +287,9 @@ pub fn dispatch(s: &mut State, event: Event) -> Outcome {
     let outcome = s.shell.app.apply(event);
     sync_sidebar(s);
     crate::frames::settings::sync(s); // what was open inside settings is forgotten when the route leaves it
+    crate::frames::backups::sync(s); // the same for Backups, and its one-time code is wiped
     crate::frames::account::sync(s); // and what was open inside the account sections
+    crate::frames::tray::shortcuts::sync(s); // a closed shortcuts list forgets its page
     outcome
 }
 
@@ -303,6 +305,8 @@ pub fn request(s: &mut State, intent: Intent) -> Outcome {
 /// section by writing `State::sidebar_section`; this turns that write into a navigation, so
 /// the sidebar already routes. A ui lane that calls [`dispatch`] itself makes this a no-op.
 pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
+    // The open file: the engine's answers, and a route that left it (lane f-viewers).
+    let viewer = crate::frames::viewers::poll(s, tx);
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {
@@ -313,14 +317,14 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         s.shell.window_kind = kind;
     }
     if s.sidebar_section == s.shell.sidebar_seen {
-        return false;
+        return viewer;
     }
     let outcome = s
         .shell
         .app
         .apply(Event::Navigate(Route::section(section_for(s.sidebar_section))));
     sync_sidebar(s);
-    outcome == Outcome::Changed
+    outcome == Outcome::Changed || viewer
 }
 
 /// The shell's own keys, then the current frame's (DW-1232, DW-1233: Windows' words).

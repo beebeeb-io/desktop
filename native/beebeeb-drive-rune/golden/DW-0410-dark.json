@@ -3544,6 +3544,51 @@
     255
    ],
    "tracking": 0
+  },
+  "rename-field": {
+   "kind": "box",
+   "x": 266,
+   "y": 298,
+   "w": 121.51,
+   "h": 22,
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ]
+  },
+  "rename-text": {
+   "kind": "text",
+   "x": 266,
+   "y": 298,
+   "w": 121.51,
+   "h": 22,
+   "text": "Contract draft.pdf",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0
+  },
+  "rename-caret": {
+   "kind": "box",
+   "x": 356.53,
+   "y": 303.5,
+   "w": 1.5,
+   "h": 14,
+   "bg": [
+    235,
+    159,
+    44,
+    255
+   ]
   }
  },
  "theme": "dark"

@@ -18,6 +18,8 @@ beebeeb-engine = { path = "../../crates/beebeeb-engine" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
 serde_json = "1"
+# Parses Markdown for the viewer (`frames/viewers/markdown.rs`): MIT, pure Rust, no network, no HTML output.
+pulldown-cmark = { version = "0.13", default-features = false }
 # Decodes the bundled b glyph for the notification-area icons (`shell/tray_icon.rs`).
 png = "0.18"
 # Only for the `feedback` feature: names the surface format and device types of the capture;
@@ -35,7 +37,7 @@ feedback = ["dep:wgpu"]
 [target.'cfg(windows)'.dependencies]
 # The same windows-sys Rune builds with: the notification-area icon, the registry Run value,
 # the taskbar's mode and the control channel's named pipe (`shell/platform/windows*.rs`).
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 # Names the Win32 window handle Rune's `WindowHandle::with_raw_handle` lends.
 raw-window-handle = "0.6"
 
