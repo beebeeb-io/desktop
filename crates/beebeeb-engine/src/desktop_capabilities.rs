@@ -147,7 +147,7 @@ mod tests {
             ("unknown", HostOs::Unknown, InstallFormat::Unknown),
         ];
         let fixtures: serde_json::Value =
-            serde_json::from_str(include_str!("../../../tests/fixtures/desktop-capabilities.json")).unwrap();
+            serde_json::from_str(include_str!("../tests/fixtures/desktop-capabilities.json")).unwrap();
         assert_eq!(fixtures.as_object().unwrap().len(), cases.len());
         for (name, host, format) in cases {
             assert_eq!(

@@ -8,9 +8,9 @@ name: Desktop CI
 # Job names are stable on purpose: branch protection requires them by name.
 #
 # The job "Frontend (bun test + tsc + eslint)" was removed from this line for 0.9.0 by owner ruling 2026-11-12:
-# the app has no web view. The React suite still runs on `main` for the 0.8.x line. The React sources and package
-# files stay (the Tauri shell builds from them until the Mac port exists). The two core pin steps that job also
-# ran are Rust checks, not React ones: they now run in "Changed areas".
+# the app has no web view. The React sources and package files were removed by native/remove-react; only the
+# dist/index.html stub remains (Tauri's generate_context! needs frontendDist at compile time). The two core pin
+# steps that job also ran are Rust checks, not React ones: they now run in "Changed areas".
 
 on:
   pull_request:
