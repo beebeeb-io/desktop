@@ -157,9 +157,9 @@ fn the_real_command_reads_the_session_the_engine_status_and_the_storage_api() {
             first["finder"]["setup"], "ready",
             "an installed Finder state reads as ready"
         );
-        // The same shape the TypeScript side validates.
+        // The same shape the fixture validates.
         let shared: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/popover-snapshot.synced.json")).unwrap();
+            serde_json::from_str(include_str!("../tests/fixtures/popover-snapshot.synced.json")).unwrap();
         for key in shared.as_object().unwrap().keys() {
             assert!(first.get(key).is_some(), "the command's snapshot lacks `{key}`");
         }

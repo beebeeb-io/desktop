@@ -43,6 +43,11 @@ jobs:
       contents: read
 
     steps:
+      - name: Native line guard
+        run: |
+          echo "::error::The Tauri release workflow is not used on the native line (0.9.0+). Use release-native-windows.yml instead."
+          exit 1
+
       - name: Validate version and channel
         shell: bash
         env:
