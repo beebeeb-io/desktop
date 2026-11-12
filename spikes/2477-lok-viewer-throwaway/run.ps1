@@ -122,7 +122,8 @@ Say "headers: $($Headers.Count) of $($Headers.Count) match their pinned SHA-256 
 $env:LOK_INCLUDE_DIR = "$Root\inc"
 Push-Location $Here
 $ErrorActionPreference = 'Continue'
-& cargo build --release 2>&1 | Select-Object -Last 3 | ForEach-Object { Say "cargo: $_" }
+& cargo build --release 2>&1 | ForEach-Object { "$_" } | Set-Content -LiteralPath "$out\cargo.log"
+Get-Content -LiteralPath "$out\cargo.log" | Where-Object { $_ -match 'error|shim\.c\(|LibreOfficeKit.*\.h\(|Finished' } | Select-Object -First 25 | ForEach-Object { Say "cargo: $_" }
 $ErrorActionPreference = 'Stop'
 Pop-Location
 $exe = "$env:CARGO_TARGET_DIR\release\lok-spike.exe"
