@@ -185,8 +185,8 @@ fn a_mark_row_that_cannot_be_decoded_stops_the_share() {
         );
         assert_eq!(
             expectation_in(&db, &sent, OWN, EMAIL),
-            Err("failed".to_string()),
-            "{name}: never NotCompared"
+            Err("mark_unreadable".to_string()),
+            "{name}: never NotCompared, and its own reason"
         );
         stopped += 1;
     }
@@ -244,7 +244,7 @@ fn two_account_ids_with_different_or_unreadable_marks_stop_the_share() {
         plant(&db, &format!("share_compared:{OWN}:{UID_B2}"), "not a mark");
         assert_eq!(
             expectation_in(&db, &sent, OWN, EMAIL),
-            Err("failed".to_string()),
+            Err("mark_unreadable".to_string()),
             "{first} first: one mark cannot be read"
         );
     }
@@ -516,10 +516,38 @@ fn an_approval_that_got_no_answer_ends_as_a_withdrawal() {
     );
 }
 
-/// Review of delta 1 (`safety.rs:595`): a read that fails on the database (here: the table is gone)
-/// says nothing about the mark. People leaves the row as it was; the seal still stops.
+/// Task 2440 item 2: a mark this build cannot decode gets its own reason, so the window can offer
+/// Compare again instead of a retry that would fail the same way for good.
 #[test]
-fn a_failed_database_read_is_not_shown_as_an_unreadable_mark() {
+fn mark_unreadable_refuses_a_share_with_its_own_reason() {
+    let (_dir, db) = db();
+    let sent = json!({ "invites": [
+        { "id": INVITE, "file_id": FILE, "recipient_email": EMAIL, "recipient_id": UID_B, "status": "approved" },
+    ]});
+    plant(&db, &format!("share_compared:{OWN}:{UID_B}"), "no colon here");
+    assert_eq!(
+        expectation_in(&db, &sent, OWN, EMAIL),
+        Err("mark_unreadable".to_string()),
+        "a mark we cannot decode, not a failed read"
+    );
+}
+
+/// Task 2440 item 2: a fingerprint that is not 32 bytes of hex is the same class: a mark we cannot
+/// read, never NotCompared (which would seal to a swapped key unpinned).
+#[test]
+fn mark_unreadable_covers_an_undecodable_fingerprint() {
+    assert_eq!(
+        expectation_of(&[("zz".into(), MarkKind::Matched)]),
+        Err("mark_unreadable".to_string()),
+        "not a fingerprint, so a mark we cannot read"
+    );
+}
+
+/// Review of delta 1 (`safety.rs:595`): a read that fails on the database (here: the table is gone)
+/// says nothing about the mark. People leaves the row as it was; the seal still stops, and the
+/// reason stays `failed`, never `mark_unreadable` (there is no mark to compare again).
+#[test]
+fn mark_unreadable_keeps_a_busy_database_as_failed() {
     let (_dir, db) = db();
     let peers = ids(&[UID_B]);
     db.set_share_sealed_key(OWN, INVITE, &hex(&key(ALICE_PK))).unwrap();
@@ -533,6 +561,11 @@ fn a_failed_database_read_is_not_shown_as_an_unreadable_mark() {
         expectation_in(&db, &json!({ "invites": [] }), OWN, EMAIL),
         Err("failed".to_string()),
         "the seal still stops"
+    );
+    assert_ne!(
+        expectation_in(&db, &json!({ "invites": [] }), OWN, EMAIL),
+        Err("mark_unreadable".to_string()),
+        "a busy database is not an unreadable mark"
     );
 }
 

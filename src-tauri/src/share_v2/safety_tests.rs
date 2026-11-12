@@ -256,8 +256,8 @@ fn a_mark_that_cannot_be_read_stops_the_share() {
         .unwrap();
     assert_eq!(
         expectation_in(&db, &sent(), UID_A, EMAIL),
-        Err("failed".to_string()),
-        "never NotCompared"
+        Err("mark_unreadable".to_string()),
+        "never NotCompared, and its own reason"
     );
 }
 

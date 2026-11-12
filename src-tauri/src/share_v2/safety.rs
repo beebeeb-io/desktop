@@ -43,6 +43,10 @@ const ME: &str = "/api/v1/auth/me";
 /// sealed until the person chooses on DW-0515.
 const NO_KEY_MATCHES: [u8; 32] = [0; 32];
 const NO_PEER_ID: &str = "unsupported: the server does not list this person's account id yet";
+/// The reason a share stops on a mark this build cannot read (a row it cannot decode, or a
+/// fingerprint that is not 64 hex digits). Distinct from a database that was busy, so the window
+/// can offer Compare again rather than a retry: the literal frontend slice 04b reads.
+const MARK_UNREADABLE: &str = "mark_unreadable";
 const NO_SEALED_KEY: &str = "unsupported: this share was sealed before this app kept the key it sealed to";
 /// What a claimed invite answers when core sealed (or could not seal) and the approval did not go
 /// through: the invite was withdrawn, so nothing was shared and Try again starts afresh.
@@ -205,14 +209,21 @@ pub(super) fn person_of(sent: &Value, invite: &Value) -> (Option<String>, Vec<St
 }
 
 /// Every mark this app holds for a person (their address and each account id). A mark that cannot
-/// be read is an error, never "no mark".
+/// be read is an error, never "no mark", and gets its own reason ([`MARK_UNREADABLE`]) so the window
+/// can tell it from a database that was busy: only the former offers Compare again.
 pub(super) fn person_marks_in(
     db: &StateDb,
     own: &str,
     email: Option<&str>,
     peers: &[String],
 ) -> Answer<Vec<(String, MarkKind)>> {
-    db.person_marks(own, email, peers).map_err(|_| "failed".to_string())
+    db.person_marks(own, email, peers).map_err(|e| {
+        if is_unreadable_mark(&e) {
+            MARK_UNREADABLE.to_string()
+        } else {
+            "failed".to_string()
+        }
+    })
 }
 
 /// Writes one mark to every key of the person in one transaction, so no key can pin another key.
@@ -231,12 +242,12 @@ pub(super) fn write_person_mark_in(
 /// What a person's marks expect of the key a seal goes to: `NotCompared` with no mark; no key at
 /// all ([`NO_KEY_MATCHES`]) for any "They don't match" or for marks that pin different keys, so
 /// nothing is sealed until the person chooses on DW-0515; else the one key they all pin. A
-/// fingerprint that is not 64 hex digits is an error, never `NotCompared`.
+/// fingerprint that is not 64 hex digits is a mark this build cannot read, never `NotCompared`.
 pub(super) fn expectation_of(marks: &[(String, MarkKind)]) -> Answer<PeerKeyExpectation> {
     let mut pinned: Option<[u8; 32]> = None;
     let mut no_key = false;
     for (fp, kind) in marks {
-        let fp = decode32(fp).ok_or_else(|| "failed".to_string())?;
+        let fp = decode32(fp).ok_or_else(|| MARK_UNREADABLE.to_string())?;
         no_key |= *kind == MarkKind::NotMatched || pinned.is_some_and(|p| p != fp);
         pinned = Some(fp);
     }
