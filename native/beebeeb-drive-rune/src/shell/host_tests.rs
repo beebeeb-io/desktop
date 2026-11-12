@@ -879,5 +879,5 @@ fn the_account_panes_change_password_and_2fa_setup_are_secret() {
     assert!(!AccountDialog::LeaveCodes.shows_secret());
     // The plan (size, use, renewal day) and App lock's delay menu hold no key material.
     assert!(!AccountDialog::Plan.shows_secret(), "DW-0708");
-    assert!(!AccountDialog::LockDelay(1).shows_secret(), "DW-0716");
+    assert!(!AccountDialog::LockDelay(Some(1)).shows_secret(), "DW-0716");
 }

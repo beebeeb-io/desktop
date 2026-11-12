@@ -161,7 +161,7 @@ pub enum Dialog {
     /// The plan, read only, over Account (DW-0708).
     Plan,
     /// The menu of App lock's delays (DW-0716): the item under the pointer or the keys.
-    LockDelay(usize),
+    LockDelay(Option<usize>),
 }
 
 impl Dialog {
@@ -282,7 +282,7 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>)> {
         "DW-A83" => (Pane::DeleteUndone, None),
         "DW-0708" => (Pane::Account, Some(Dialog::Plan)),
         // The menu opens on the current choice (`app_lock::arrive`).
-        "DW-0716" => (Pane::Security, Some(Dialog::LockDelay(0))),
+        "DW-0716" => (Pane::Security, Some(Dialog::LockDelay(None))),
         "DW-0716b" => (Pane::Security, None),
         _ => return None,
     })

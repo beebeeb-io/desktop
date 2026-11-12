@@ -973,7 +973,7 @@ fn the_delay_menu_opens_on_the_current_choice_and_the_keys_choose() {
     key(&mut rt, Key::Enter);
     assert_eq!(
         rt.state.account.dialog,
-        Some(Dialog::LockDelay(1)),
+        Some(Dialog::LockDelay(Some(1))),
         "on 5 min, the current choice"
     );
     assert_eq!(asked(&rt), Vec::new(), "nothing is asked of the shell");
@@ -992,13 +992,13 @@ fn the_delay_menu_opens_on_the_current_choice_and_the_keys_choose() {
         "{menu:?} under {pop:?}"
     );
     key(&mut rt, Key::Down);
-    assert_eq!(rt.state.account.dialog, Some(Dialog::LockDelay(2)));
+    assert_eq!(rt.state.account.dialog, Some(Dialog::LockDelay(Some(2))));
     key(&mut rt, Key::End);
-    assert_eq!(rt.state.account.dialog, Some(Dialog::LockDelay(3)));
+    assert_eq!(rt.state.account.dialog, Some(Dialog::LockDelay(Some(3))));
     key(&mut rt, Key::Down);
     assert_eq!(
         rt.state.account.dialog,
-        Some(Dialog::LockDelay(3)),
+        Some(Dialog::LockDelay(Some(3))),
         "the last stays the last"
     );
     key(&mut rt, Key::Up);
@@ -1012,8 +1012,13 @@ fn the_delay_menu_opens_on_the_current_choice_and_the_keys_choose() {
 #[test]
 fn the_delay_menu_takes_a_press_and_esc_changes_nothing() {
     let mut rt = runtime("DW-0716");
-    assert_eq!(rt.state.account.dialog, Some(Dialog::LockDelay(1)));
+    assert_eq!(rt.state.account.dialog, Some(Dialog::LockDelay(Some(1))));
     key(&mut rt, Key::Home);
+    assert_eq!(
+        rt.state.account.dialog,
+        Some(Dialog::LockDelay(Some(0))),
+        "Home is the first"
+    );
     key(&mut rt, Key::Escape);
     assert_eq!(rt.state.account.dialog, None);
     assert_eq!(source(&rt).security().lock_after, "5 min", "Esc chooses nothing");
@@ -1052,4 +1057,37 @@ fn neither_the_plan_nor_the_delay_menu_is_a_secret_screen() {
             "{frame} has a field"
         );
     }
+}
+
+#[test]
+fn a_stored_delay_the_menu_does_not_have_checks_no_row() {
+    // Another build's value: the pop-up button shows it, and the menu must not contradict it
+    // by checking a delay of its own (least of all "Immediately", the strictest).
+    let mut rt = runtime("DW-A52");
+    rt.update(|s, _| {
+        if let Some(source) = s.account.source.as_mut() {
+            source.set_lock_after("15 min");
+        }
+    });
+    settle(&mut rt);
+    assert_eq!(says(&rt, "item-0-0-pop-label"), "15 min");
+    click(&mut rt, "item-0-0-pop-button");
+    assert_eq!(rt.state.account.dialog, Some(Dialog::LockDelay(None)));
+    for i in 0..4 {
+        assert!(
+            find(&rt, &format!("menu-0-item-{i}-check")).is_none(),
+            "row {i} is checked"
+        );
+        assert_eq!(info(&rt, &format!("menu-0-item-{i}")).fill.a, 0.0, "row {i} is hot");
+    }
+    // Enter with no row under the keys takes nothing; the stored delay stays.
+    key(&mut rt, Key::Enter);
+    assert_eq!(rt.state.account.dialog, None);
+    assert_eq!(source(&rt).security().lock_after, "15 min");
+    // The keys still reach every row: Down starts at the first.
+    click(&mut rt, "item-0-0-pop-button");
+    key(&mut rt, Key::Down);
+    assert_eq!(rt.state.account.dialog, Some(Dialog::LockDelay(Some(0))));
+    key(&mut rt, Key::Enter);
+    assert_eq!(source(&rt).security().lock_after, "Immediately", "chosen, not assumed");
 }
