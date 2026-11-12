@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 use beebeeb_engine::app::{Engine, EngineConfig};
 use beebeeb_engine::config::DesktopConfig;
 use beebeeb_engine::host::ChannelHost;
-use beebeeb_engine::identity::{REAL, TEST};
+use beebeeb_engine::identity::{EngineIdentity, REAL, TEST};
 use beebeeb_engine::keychain::{AuthSecretStore, SessionToken};
 use beebeeb_engine::signin::gate::GateState as EngineGate;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
@@ -18,10 +18,11 @@ use beebeeb_engine::sync_root_owner::{self, Registration};
 use beebeeb_engine::{signin::gate, state_paths};
 
 use super::backups::may_back_up;
-use super::open::{self, Opened};
+use super::open::{self, ApiBase, Opened, Refused};
 use super::*;
 use crate::shell::app::GateState as Shell;
 use crate::shell::identity::engine_identity;
+use crate::shell::instance;
 
 struct Started {
     opened: Opened<MemoryCredentials>,
@@ -43,7 +44,7 @@ fn started() -> &'static Started {
             .save_session_token(&SessionToken::new("an-invented-token").unwrap())
             .unwrap();
         let (opened, messages) =
-            open::open(&base, open::api_base(None, true), stores, || {}).expect("the engine opens");
+            open::open(&base, &ApiBase::engine_default(), stores, || {}).expect("the engine opens");
         let live = LiveEngine::new(&opened, messages);
         Started { opened, live, base }
     })
@@ -164,7 +165,7 @@ fn the_test_build_refuses_the_real_apps_state_folder_and_sync_folder() {
         let config = EngineConfig {
             account_id: "slot".into(),
             state_dir,
-            api_base: open::api_base(None, true),
+            api_base: ApiBase::engine_default().origin().to_owned(),
         };
         Engine::open(identity, config, host, MemoryCredentials::default()).map(|_| ())
     };
@@ -181,7 +182,7 @@ fn the_test_build_refuses_the_real_apps_state_folder_and_sync_folder() {
     assert!(
         open::open(
             elsewhere.path(),
-            open::api_base(None, true),
+            &ApiBase::engine_default(),
             MemoryCredentials::default(),
             || {}
         )
@@ -237,27 +238,229 @@ fn the_sync_folder_is_not_a_backup_folder_for_the_identity_that_owns_it() {
     }
 }
 
-/// `--api-base` reaches the engine as an argument, in a dev build only; nothing on the start path reads the
-/// environment for it.
+/// Source text without any whitespace: what the pins below compare, so a reflow by rustfmt is not a red.
+fn squeezed(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Decision 2462, the rule, from the command line to the server: the test build takes `--api-base` in any profile,
+/// a dev build takes it, and the real app in a build that ships ignores it whatever it holds (not even checked).
 #[test]
-fn the_api_base_is_an_argument_never_the_environment() {
+fn the_test_build_and_a_dev_build_take_api_base_and_the_real_app_ignores_it() {
+    let line = ["--api-base", "http://127.0.0.1:3001/"];
+    let run = |dev: bool, identity: &'static EngineIdentity| {
+        let reads = open::reads_api_base_flag(dev, identity);
+        let launch = instance::parse_args(line.map(String::from), dev, reads);
+        open::api_base(launch.api_base.as_deref(), reads)
+    };
+    for (dev, identity, who) in [
+        (false, &TEST, "the test build, shipped profile"),
+        (true, &TEST, "the test build, dev profile"),
+        (true, &REAL, "a dev build of the real app"),
+    ] {
+        let base = run(dev, identity).expect(who);
+        assert_eq!(
+            (base.origin(), base.from_flag()),
+            ("http://127.0.0.1:3001", true),
+            "{who}"
+        );
+        assert_eq!(
+            base.start_line(),
+            "api base: http://127.0.0.1:3001 (--api-base)",
+            "{who}"
+        );
+    }
+    // The real app in a build that ships: the default, from the parse on, whatever the flag holds.
+    assert_eq!(run(false, &REAL), Ok(ApiBase::engine_default()));
+    let real = open::reads_api_base_flag(false, &REAL);
+    assert_eq!(
+        open::api_base(Some("http://127.0.0.1:3001"), real),
+        Ok(ApiBase::engine_default())
+    );
+    assert_eq!(
+        open::api_base(Some("ftp://someone@elsewhere"), real),
+        Ok(ApiBase::engine_default()),
+        "not even checked"
+    );
+    // The rule itself, and this binary (`cargo test` is the test build).
+    assert!(open::reads_api_base_flag(false, &TEST) && open::reads_api_base_flag(true, &TEST));
+    assert!(open::reads_api_base_flag(true, &REAL) && !open::reads_api_base_flag(false, &REAL));
+    assert!(open::reads_api_base_flag(false, engine_identity()));
+}
+
+/// No flag, any build: the engine's built-in default, said as "(default)". Outside a unit-test build that default is
+/// production, so the owner's own test of the test build talks to it as it is, and no build moves to another server
+/// unless `--api-base` says so.
+#[test]
+fn without_the_flag_every_build_talks_to_the_engines_default_which_is_production() {
     let default = beebeeb_engine::runner::default_api_base();
     assert_eq!(
         default,
         beebeeb_engine::runner::TEST_API_BASE,
-        "a test build's default is a closed port"
+        "a unit-test build's default is a closed port"
     );
-    assert_eq!(open::api_base(None, true), default);
+    for (dev, identity) in [(false, &TEST), (true, &TEST), (true, &REAL), (false, &REAL)] {
+        let base = open::api_base(None, open::reads_api_base_flag(dev, identity)).expect("no flag is never refused");
+        assert_eq!(base, ApiBase::engine_default());
+        assert_eq!((base.origin(), base.from_flag()), (default.as_str(), false));
+        assert_eq!(base.start_line(), format!("api base: {default} (default)"));
+    }
+    // A unit-test build cannot reach the production default (the engine's `test-support` replaces it), so the source
+    // says it: the engine's default outside a unit-test build is production, and the native default is the engine's,
+    // for the test build too.
+    let runner = squeezed(include_str!("../../../../crates/beebeeb-engine/src/runner.rs"));
+    assert!(runner.contains(&squeezed(
+        "const PRODUCTION_API_BASE: &str = \"https://api.beebeeb.io\";"
+    )));
+    assert!(runner.contains(&squeezed(
+        "pub fn default_api_base() -> String { api_base_url_from(None) }"
+    )));
+    let from = &runner[runner.find(&squeezed("fn api_base_url_from(")).unwrap()..];
+    let from = &from[..from.find("//").unwrap_or(from.len())];
+    assert!(from.contains(&squeezed(
+        "#[cfg(not(any(test, feature = \"test-support\")))] return PRODUCTION_API_BASE.to_string();"
+    )));
+    let open_rs = squeezed(include_str!("open.rs"));
+    assert!(open_rs.contains(&squeezed("None => Ok(ApiBase::engine_default()),")));
+    assert!(open_rs.contains(&squeezed("origin: beebeeb_engine::runner::default_api_base(),")));
+}
+
+/// Decision 2462, what `--api-base` may be: `https://` to any host, `http://` only to 127.0.0.1, ::1 or localhost,
+/// and nothing else: another scheme, a user name or password, no host, a path, a query, a fragment. The engine gets
+/// the parser's origin, never the text. A refusal is one line naming the reason, never the value.
+#[test]
+fn api_base_takes_an_https_origin_or_a_loopback_http_one_and_refuses_every_other_shape() {
+    let reads = open::reads_api_base_flag(false, &TEST);
+    let took = |text: &str| open::api_base(Some(text), reads).map(|base| base.origin().to_string());
+    let accepted = [
+        ("https://api.example.com", "https://api.example.com"),
+        ("https://api.example.com/", "https://api.example.com"),
+        ("https://API.Example.COM:443/", "https://api.example.com"),
+        ("https://203.0.113.7:8443", "https://203.0.113.7:8443"),
+        ("https://bücher.example", "https://xn--bcher-kva.example"),
+        ("http://127.0.0.1:9", "http://127.0.0.1:9"),
+        ("http://127.0.0.1:3001/", "http://127.0.0.1:3001"),
+        ("http://[::1]:3001", "http://[::1]:3001"),
+        ("http://localhost:3001", "http://localhost:3001"),
+        ("HTTP://LOCALHOST", "http://localhost"),
+        ("  http://localhost:3001  ", "http://localhost:3001"),
+    ];
+    let refused = [
+        ("", Refused::Missing),
+        ("   ", Refused::Missing),
+        ("api.example.com", Refused::NotAUrl),
+        ("127.0.0.1:9", Refused::NotAUrl),
+        ("http://127.0.0.1:99999", Refused::NotAUrl),
+        ("http://[]:9", Refused::NotAUrl),
+        ("ftp://api.example.com", Refused::Scheme),
+        ("file:///etc/hosts", Refused::Scheme),
+        ("ws://127.0.0.1:9", Refused::Scheme),
+        ("localhost:3001", Refused::Scheme),
+        ("http://api.example.com", Refused::PlainHttp),
+        ("http://127.0.0.2:9", Refused::PlainHttp),
+        ("http://0.0.0.0:9", Refused::PlainHttp),
+        ("http://[::ffff:127.0.0.1]:9", Refused::PlainHttp),
+        ("http://localhost.example.com", Refused::PlainHttp),
+        ("http://127.0.0.1@evil.example", Refused::UserInfo),
+        ("https://127.0.0.1@evil.example", Refused::UserInfo),
+        ("http://someone:hunter2@127.0.0.1:9", Refused::UserInfo),
+        ("https://someone@api.example.com", Refused::UserInfo),
+        ("https://:hunter2@api.example.com", Refused::UserInfo),
+        ("http://@127.0.0.1:9", Refused::UserInfo),
+        ("https://", Refused::NoHost),
+        ("http://:9", Refused::NoHost),
+        ("https://api.example.com/v1", Refused::Path),
+        ("http://127.0.0.1:9/api/v1/", Refused::Path),
+        ("https://api.example.com/a@b", Refused::Path),
+        ("https://api.example.com?x=1", Refused::Query),
+        ("https://api.example.com/?", Refused::Query),
+        ("https://api.example.com/?ref=a@b", Refused::Query),
+        ("https://api.example.com#top", Refused::Fragment),
+        ("http://127.0.0.1:9/#", Refused::Fragment),
+        ("https://api.example.com/#me@x", Refused::Fragment),
+    ];
+    // Every shape is tried before the verdict, so a red names all that changed.
+    let mut wrong = Vec::new();
+    for (text, origin) in accepted {
+        let got = took(text);
+        if got != Ok(origin.to_string()) {
+            wrong.push(format!("{text:?} -> {got:?}, not Ok({origin:?})"));
+        }
+    }
+    for (text, reason) in refused {
+        let got = took(text);
+        if got != Err(reason) {
+            wrong.push(format!("{text:?} -> {got:?}, not Err({reason:?})"));
+        }
+        let line = reason.to_string();
+        assert!(
+            line.starts_with("--api-base was refused: ")
+                && line.ends_with(". The app did not start.")
+                && !line.contains('\n'),
+            "{line}"
+        );
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} of {} shapes are wrong:\n{}",
+        wrong.len(),
+        accepted.len() + refused.len(),
+        wrong.join("\n")
+    );
+    // The reason, never the value: it may hold a password.
+    let line = took("https://someone:hunter2@api.example.com").unwrap_err().to_string();
     assert_eq!(
-        open::api_base(Some("http://127.0.0.1:3001/"), true),
-        "http://127.0.0.1:3001"
+        line,
+        "--api-base was refused: it holds a user name or password (an @). The app did not start."
     );
-    assert_eq!(open::api_base(Some("  "), true), default);
-    assert_eq!(
-        open::api_base(Some("http://127.0.0.1:3001"), false),
-        default,
-        "a shipped build ignores the flag"
+    assert!(!line.contains("hunter2") && !line.contains("someone"));
+}
+
+/// `run` checks `--api-base` before anything exists (the gate export, the platform, the control channel, the engine):
+/// a refused value ends the start with one line on stderr and exit 2. The engine is opened with the checked value,
+/// which is said once on stdout, first.
+#[test]
+fn run_checks_api_base_before_anything_starts_and_says_the_server_once() {
+    let shell = squeezed(include_str!("../shell/mod.rs"));
+    let run = &shell[shell.find(&squeezed("pub fn run() {")).unwrap()..];
+    let at = |step: &str| run.find(&squeezed(step)).unwrap_or_else(|| panic!("run has {step}"));
+    let (rule, parse, check) = (
+        at(
+            "let reads_api_base = crate::engine_host::open::reads_api_base_flag(instance::DEV_BUILD, \
+            self::identity::engine_identity());",
+        ),
+        at("instance::parse_args(std::env::args().skip(1), instance::DEV_BUILD, reads_api_base);"),
+        at("crate::engine_host::open::api_base(launch.api_base.as_deref(), reads_api_base)"),
     );
+    assert!(rule < parse && parse < check);
+    let later = [
+        "crate::ui::gate::run_from_args(",
+        "platform::current()",
+        "platform.serve_control(",
+        "open_engine(",
+    ];
+    for step in later {
+        assert!(check < at(step), "the check comes before {step}");
+    }
+    let refusal = &run[check..at(later[0])];
+    assert!(refusal.contains(&squeezed(
+        "Err(refused) => { eprintln!(\"beebeeb-drive: {refused}\"); std::process::exit(2); }"
+    )));
+    assert_eq!(shell.matches("instance::parse_args(").count(), 1);
+    // Said once, before the engine opens, from the value that was checked.
+    let opener = &shell[shell.find(&squeezed("fn open_engine(")).unwrap()..];
+    let say = opener
+        .find(&squeezed(
+            "let _ = writeln!(std::io::stdout(), \"{}\", api_base.start_line());",
+        ))
+        .unwrap();
+    assert!(say < opener.find("crate::engine_host::open::open(").unwrap());
+    assert_eq!(shell.matches(".start_line()").count(), 1);
+}
+
+/// `--api-base` reaches the engine as an argument; nothing on the start path reads the environment for it.
+#[test]
+fn the_api_base_is_an_argument_never_the_environment() {
     let production = |text: &str| text.split("#[cfg(test)]").next().unwrap().to_string();
     for (file, text) in [
         ("engine_host.rs", production(include_str!("../engine_host.rs"))),
@@ -287,7 +490,8 @@ fn run_opens_the_engine_after_the_claim_and_never_falls_back_to_the_fixture() {
     let (claim, plan, open) = (
         run.find("platform.serve_control(").unwrap(),
         run.find("instance::plan(&launch, claim, identity)").unwrap(),
-        run.find("open_engine(identity, &launch, wake_target.clone())").unwrap(),
+        run.find("open_engine(identity, &api_base, wake_target.clone())")
+            .unwrap(),
     );
     assert!(claim < plan && plan < open);
     assert!(run.contains("if matches!(plan, Plan::BeTheApp) && launch.db.is_none() {"));

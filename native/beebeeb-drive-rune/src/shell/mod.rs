@@ -45,6 +45,7 @@ pub mod tray_icon;
 pub mod tray_win;
 pub mod window_state;
 
+use std::io::Write as _;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -188,14 +189,29 @@ fn control_handler(target: Arc<Mutex<Option<rune::AppHandle<State>>>>) -> platfo
 /// Starts the app and returns when it quits.
 ///
 /// In order: read the launch arguments (`instance::parse_args`: a link silences every other
-/// flag; a shipped build ignores every dev flag); unless this is a tooling run of a dev build,
-/// claim this identity's control channel (serving it IS being the one instance; a later launch
-/// hands over one request, waits for the answer and exits, or says why it could not) and
-/// refuse to start beside another agent that holds the profile's sync lock; then run the two
-/// windows, in the notification area when Windows started the app at login.
+/// flag; a shipped build ignores every dev flag) and check `--api-base` (a dev build or the
+/// test build reads it; a value the app may not talk to ends the start); unless this is a
+/// tooling run of a dev build, claim this identity's control channel (serving it IS being the
+/// one instance; a later launch hands over one request, waits for the answer and exits, or says
+/// why it could not) and refuse to start beside another agent that holds the profile's sync
+/// lock; then run the two windows, in the notification area when Windows started the app at
+/// login.
 pub fn run() {
     let identity = AppIdentity::CURRENT;
-    let launch = instance::parse_args(std::env::args().skip(1), instance::DEV_BUILD);
+    // Decision 2462: a dev build and the test build read `--api-base`; the real app in a build that ships does not.
+    // One answer, fixed at build time, for the parse and for the check.
+    let reads_api_base =
+        crate::engine_host::open::reads_api_base_flag(instance::DEV_BUILD, self::identity::engine_identity());
+    let launch = instance::parse_args(std::env::args().skip(1), instance::DEV_BUILD, reads_api_base);
+    // The server of this run, before anything else exists: a `--api-base` the app may not talk to ends the start
+    // here, with one line on stderr, never the default in its place.
+    let api_base = match crate::engine_host::open::api_base(launch.api_base.as_deref(), reads_api_base) {
+        Ok(api_base) => api_base,
+        Err(refused) => {
+            eprintln!("beebeeb-drive: {refused}");
+            std::process::exit(2);
+        }
+    };
     // `--gate-export out.json --scene DW-0401 [--theme dark] [--size 1278x798]`: the frame gate's
     // native half (`ui::gate`). A diagnostic flag: dev builds only, never on a link's command line.
     if launch.tooling
@@ -241,7 +257,7 @@ pub fn run() {
     // sample files in place of an account's.
     let wake_target: WakeTarget = Arc::new(Mutex::new(None));
     let real_engine = if matches!(plan, Plan::BeTheApp) && launch.db.is_none() {
-        match open_engine(identity, &launch, wake_target.clone()) {
+        match open_engine(identity, &api_base, wake_target.clone()) {
             Ok(opened) => Some(opened),
             Err(error) => {
                 let message = format!(
@@ -472,12 +488,17 @@ pub(crate) fn local_data_of(dirs: &rune::dirs::AppDirs, os: &str) -> std::path::
 }
 
 /// Open the real engine for this binary's identity (`engine_host::open` asks for it, once) on the platform's
-/// credential store. `--api-base` reaches the engine as an argument (dev builds only); no environment
-/// variable is read for it.
-fn open_engine(identity: AppIdentity, launch: &instance::Launch, wake: WakeTarget) -> Result<RealEngine, String> {
+/// credential store, talking to `api_base` (checked in `run`; no environment variable is read for it). The server
+/// is said once on stdout first: its origin and where it came from, nothing else.
+fn open_engine(
+    identity: AppIdentity,
+    api_base: &crate::engine_host::open::ApiBase,
+    wake: WakeTarget,
+) -> Result<RealEngine, String> {
     let dirs = rune::dirs::AppDirs::new(identity.state_dir_id())
         .ok_or_else(|| "The folder for app data could not be found.".to_string())?;
-    let api_base = crate::engine_host::open::api_base(launch.api_base.as_deref(), instance::DEV_BUILD);
+    // Never a reason not to start: a closed or broken stdout loses the line, it does not stop the app.
+    let _ = writeln!(std::io::stdout(), "{}", api_base.start_line());
     let (opened, messages) = crate::engine_host::open::open(
         &local_data_of(&dirs, std::env::consts::OS),
         api_base,

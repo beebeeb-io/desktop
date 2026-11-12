@@ -187,6 +187,14 @@ acknowledged, exits 0 at once when nothing runs, and exits 1 when the instance d
 Development and diagnostic flags (Rune's `--snap`, `--out`, `--html`, `--script`, …, and `--db`) are
 read only in a dev build (`instance::DEV_BUILD`: a debug build, or the `dev-tools` feature); a
 shipped build ignores every one, and Rune is handed an empty argument list (`App::args`).
+`--api-base <url>` (decision 2462) is read by a dev build and by the test build in any profile, never
+by the real app in a build that ships (`engine_host::open::reads_api_base_flag`, fixed at build time).
+`engine_host::open::api_base` takes an `https://` origin, or `http://` to `127.0.0.1`, `[::1]` or
+`localhost`, with no user name, path, query or fragment; any other value ends the start with one line
+on stderr and exit 2, before the control channel or a window exists, never the default in its place.
+The instance that opens the engine prints `api base: <origin> (default)` or `(--api-base)` on stdout,
+and nothing else about the server. It keeps that server while it runs: a later launch that names one
+is refused (`Refusal::ServerAlreadyChosen`, exit 1), never handed over.
 
 One instance per identity, user AND Windows session (exclusivity across sessions comes from the
 engine/profile lock, which is not linked yet): `control.rs` is the protocol and `platform/windows_control.rs`
