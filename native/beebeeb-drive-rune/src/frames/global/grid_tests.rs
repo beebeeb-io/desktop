@@ -264,3 +264,36 @@ fn the_figures_under_a_name() {
     assert_eq!(sub_of(&one), "");
     assert_eq!(tile_name(&one, "", None), "Day 1, folder");
 }
+
+/// "The banner sits under the toolbar on every view": Shared and Trash show it too, its button
+/// works from the keyboard there, and Trash's own note has the place while Trash empties.
+#[test]
+fn the_banner_shows_on_shared_and_trash_too() {
+    use super::source::board;
+    use super::{GlobalFixture, Intent, Ui};
+    use crate::shell::app::Section;
+    for section in [Section::Shared, Section::Trash] {
+        let mut state = init();
+        state.global = Ui::new(Box::new(GlobalFixture::of(board::sync_problem())));
+        crate::frames::go(&mut state, section);
+        let mut rt = super::tests::runtime_of(state);
+        let banner = info(&rt, "banner");
+        assert_eq!(banner.role, "status", "{section:?}");
+        let toolbar = info(&rt, "toolbar").rect;
+        assert!(banner.rect[1] >= toolbar[1] + toolbar[3], "under the toolbar");
+        tab_to(&mut rt, "banner-action");
+        press(&mut rt, Key::Enter);
+        assert_eq!(rt.state.global.intents, [Intent::Frame("DW-0428")], "{section:?}");
+    }
+    // A quiet window draws none there.
+    let mut state = init();
+    crate::frames::go(&mut state, Section::Shared);
+    assert!(find(&super::tests::runtime_of(state), "banner").is_none());
+    // Trash while it empties (DW-0749b) keeps its own note: one at a time.
+    let mut state = init();
+    crate::frames::trash::scenes::dw_0749b(&mut state);
+    state.global = Ui::new(Box::new(GlobalFixture::of(board::sync_problem())));
+    let rt = super::tests::runtime_of(state);
+    assert_eq!(info(&rt, "banner").label.as_deref(), Some("Emptying Trash"));
+    assert!(find(&rt, "banner-action").is_none());
+}

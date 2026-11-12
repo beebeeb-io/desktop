@@ -70,8 +70,20 @@ fn strip_el(loading: &source::Loading, t: &Theme) -> El {
     )
 }
 
-/// What sits between the toolbar and the list: the one banner, or the loading strip when
-/// nothing else is to be said.
+/// The one banner of the whole window, for a view that has the toolbar and no list of files of
+/// its own to load (Shared, Trash): "the banner sits under the toolbar on every view". `None`
+/// while that view shows a note of its own in the same place (Trash while it empties): one at a time.
+pub fn banner_under_toolbar(s: &State, t: &Theme) -> Option<El> {
+    use crate::ui::sidebar::SidebarSection;
+    if s.sidebar_section == SidebarSection::Trash && s.frames.trash.source.emptying().is_some() {
+        return None;
+    }
+    let (kind, status) = s.global.banner()?;
+    Some(banner_el(kind, &status, t))
+}
+
+/// What sits between the toolbar and the list of Files: the one banner, or the loading strip
+/// when nothing else is to be said.
 pub fn under_toolbar(s: &State, t: &Theme) -> Option<El> {
     let ui: &Ui = &s.global;
     if let Some((kind, status)) = ui.banner() {

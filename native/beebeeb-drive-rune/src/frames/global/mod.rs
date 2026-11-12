@@ -24,7 +24,7 @@ use crate::ui::banner::Run;
 use crate::ui::gate::Scene;
 pub use grid::grid_body;
 pub use source::{GlobalFixture, GlobalSource, GlobalStatus, Quiet, StorageLevel};
-pub use view::{dims, fit, over_body, status_line, status_words, under_toolbar};
+pub use view::{banner_under_toolbar, dims, fit, over_body, status_line, status_words, under_toolbar};
 
 /// The banners, in the order the board gives them the window: "One banner at a time, in this
 /// order: signed out, storage full, sync problem, backup problem, storage almost full, offline."
@@ -332,7 +332,7 @@ fn act_banner(s: &mut State, _: &mut Tx) {
 }
 
 fn dismiss_banner(s: &mut State, tx: &mut Tx) {
-    if s.global.dismiss() {
+    if s.global.dismiss() && s.sidebar_section == crate::ui::sidebar::SidebarSection::Files {
         // The cross is gone with the banner: the list takes the keyboard back.
         tx.focus("rows", false);
     }
