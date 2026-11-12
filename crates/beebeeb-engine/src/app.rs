@@ -137,7 +137,8 @@ impl<C: CredentialStores> Engine<C> {
             .thread_name("beebeeb-engine")
             .build()
             .map_err(|_| "could not start the engine's runtime".to_string())?;
-        let client = auth_transport::client()?;
+        // For this handle's API base, with that base's proxy rule (not the process's `BB_API_BASE`).
+        let client = auth_transport::client_for(&config.api_base)?;
         // The running engine reads the process-wide state dir; a handle that names another one would bind one
         // database and sync into another.
         if state_paths::beebeeb_state_dir_for(identity).ok().as_deref() != Some(config.state_dir.as_path()) {

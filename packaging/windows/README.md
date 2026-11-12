@@ -27,9 +27,11 @@ released: a release build refuses any other file, a test build prints a `NOTE` l
 
 **A test build shares nothing with the real Beebeeb (review P2-4).** It is `Beebeeb Test`, `io.beebeeb.app.test`,
 `beebeeb-desktop-test.exe`: its own install folder, data folder (`%LOCALAPPDATA%\io.beebeeb.app.test`), config
-(`%APPDATA%\beebeeb-test\desktop.toml`) and credentials (`io.beebeeb.app.test/…`). It has no server of its own: its
-API base is the engine's built-in default, production (`https://api.beebeeb.io`; the closed loopback port is a
-unit-test build's only), and only a dev build (a debug build, or the `dev-tools` feature) takes `--api-base`.
+(`%APPDATA%\beebeeb-test\desktop.toml`) and credentials (`io.beebeeb.app.test/…`). It has no server of its own:
+without a flag its API base is the engine's built-in default, production (`https://api.beebeeb.io`; the closed
+loopback port is a unit-test build's only). It takes `--api-base <url>` in any profile (decision 2462; so does a dev
+build of either app, and the real app as it ships never does), and its data on a computer stays with the server it
+was first opened for (`native/beebeeb-drive-rune/src/shell/README.md`, "Starting").
 The installer looks only at processes of its own binary name and **never ends a process**: it asks a
 running native app to quit (`--quit-for-update`), waits 20 seconds, then says "still running" and offers Retry or
 Cancel. Which app a binary is, is decided when it is built (`native\beebeeb-drive-rune\build.rs`):
@@ -121,7 +123,9 @@ a signed-in session, also: the state folder `%LOCALAPPDATA%\io.beebeeb.app.test`
 `%TEMP%\beebeeb-test` and `%LOCALAPPDATA%\beebeeb-test`, the rest of `%APPDATA%\beebeeb-test` (for example
 `Changes not sent`, where a sign-out keeps unsent changes), the `io.beebeeb.app.test/…` credentials and the
 Explorer sync root (spec §5). "Delete the application data" removes only `%APPDATA%\io.beebeeb.app.test` and
-`%LOCALAPPDATA%\io.beebeeb.app.test`.
+`%LOCALAPPDATA%\io.beebeeb.app.test`. After it, a test build that was signed in does not start again (one line on
+stderr and the start-refusal box, exit 2): its stored credentials are left with no local data to say which server
+they were made for, so no server gets them. It starts once those `io.beebeeb.app.test/…` credentials are removed too.
 
 No step changed anything of the real Beebeeb (`%LOCALAPPDATA%\Beebeeb`, `%LOCALAPPDATA%\io.beebeeb.app`,
 `%APPDATA%\beebeeb`, `%APPDATA%\io.beebeeb.app`, its registry keys, shortcuts and `io.beebeeb.app/…` credentials),

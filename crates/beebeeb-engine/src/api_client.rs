@@ -43,6 +43,9 @@ pub use direct::{BodyBytes, ChunkApiError, GrantReply, OnBody, fetch_from_storag
 mod headers;
 pub use headers::provenance_headers;
 use headers::*;
+// #335 review P2-1: a plain-http API base on this computer never goes through a proxy.
+mod proxy;
+pub use proxy::api_base_client_builder;
 
 mod error;
 pub use error::{ApiResult, ErrorChain};
@@ -241,6 +244,7 @@ mod tests {
     mod ids;
     mod link;
     mod provenance;
+    mod proxy;
     mod region;
     mod retry;
     mod serialization;

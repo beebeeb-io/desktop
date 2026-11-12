@@ -11,7 +11,8 @@
 //!
 //! [`bind_to_server`] keeps the test build's local data with the server it was made for (the lead's ruling inside
 //! decision 2462): the first open records that server in [`SERVER_FILE`], in the identity's state folder, and a later
-//! open for another server is refused ([`OtherServer`]) before the engine reads a stored session or `state.db`.
+//! open for another server is refused ([`OtherServer`]) before the engine reads a stored session or `state.db`. Stored
+//! credentials with no local data beside them are refused for every server ([`CredentialsWithoutData`]).
 //!
 //! Must not: run before the single-instance claim (a second launch must not open a second handle), run in a
 //! tooling run, read `BB_API_BASE` (the API base is the caller's argument or the engine's built-in default), hand
@@ -32,7 +33,7 @@ use beebeeb_engine::keychain::{AuthSecretStore, AuthStoreError};
 use beebeeb_engine::signin::gate::GateState;
 use url::{Host, Url};
 
-use crate::shell::instance::API_BASE_FLAG;
+use crate::shell::instance::{API_BASE_FLAG, API_BASE_GLUED};
 
 /// The handle, whose it is, and what the stored session said at start.
 pub struct Opened<C: CredentialStores> {
@@ -113,6 +114,9 @@ pub enum Refused {
     Query,
     /// A fragment (`#`), even an empty one.
     Fragment,
+    /// Written `--api-base=<url>`: the flag takes its URL as the next argument, and no other form is read, so the run
+    /// never falls back to the default because of the spelling.
+    Glued,
 }
 
 impl fmt::Display for Refused {
@@ -128,6 +132,7 @@ impl fmt::Display for Refused {
             Self::Path => "it has a path; give only the scheme, the host and the port",
             Self::Query => "it has a query (?)",
             Self::Fragment => "it has a fragment (#)",
+            Self::Glued => "write it as --api-base <url>, with a space, not with =",
         };
         write!(f, "--api-base was refused: {why}. The app did not start.")
     }
@@ -150,6 +155,10 @@ pub fn api_base(flag: Option<&str>, reads_flag: bool) -> Result<ApiBase, Refused
 /// checked is what is used, and the engine gets the parser's own serialization of the origin (lower case, no
 /// default port, no slash at the end), never `text` itself.
 fn checked_origin(text: &str) -> Result<String, Refused> {
+    // The parse hands over a whole `--api-base=<url>` argument as it was written (`shell::instance::parse_args`).
+    if text.starts_with(API_BASE_GLUED) {
+        return Err(Refused::Glued);
+    }
     if text.trim().is_empty() {
         return Err(Refused::Missing);
     }
@@ -257,11 +266,30 @@ impl fmt::Display for OtherServer {
     }
 }
 
+/// The test build's account slot holds stored credentials, and its state folder holds no data and no record: the
+/// record went with the folder and the credentials stayed (the folder removed by hand, or the uninstaller's "Delete the
+/// application data", which keeps the credentials and the settings file). Nothing says which server they were made
+/// for, so no server gets them, the default included: nothing was opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CredentialsWithoutData;
+
+impl fmt::Display for CredentialsWithoutData {
+    /// The state and nothing else: never a token, an account or an origin.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(
+            "this test build has stored credentials without local data on this computer: nothing says which server \
+             they were made for, so no server gets them. The app did not start.",
+        )
+    }
+}
+
 /// Why [`open`] opened nothing.
 #[derive(Debug)]
 pub enum OpenError {
-    /// The test build's local data belongs to another server (`shell::run`: one line on stderr, exit 2).
+    /// The test build's local data belongs to another server (`shell::run`: stderr and the start-refusal box, exit 2).
     OtherServer(OtherServer),
+    /// The test build's stored credentials have no local data beside them (`shell::run`: as [`Self::OtherServer`]).
+    CredentialsWithoutData(CredentialsWithoutData),
     /// Anything else: the folders, the settings file, the engine (`shell::run`: the start-refusal box, exit 1).
     Failed(String),
 }
@@ -347,32 +375,41 @@ fn write_record(state_dir: &Path, server: &Server) -> Result<(), OpenError> {
     fs::rename(&partial, state_dir.join(SERVER_FILE)).map_err(fail)
 }
 
-/// The test build's local data belongs to the server it was made for (the lead's ruling inside decision 2462).
+/// The test build's local data belongs to the server it was made for (the lead's rulings inside decision 2462).
 /// `state_dir` is the identity's state folder, `account_entries` [`stored_account_entries`] for its account slot.
 ///
-/// A record that names this run's server opens; one that names another, or that cannot be read, is refused. Without a
-/// record, data that is already here (anything in the folder, or a credential entry) is from before the record
-/// existed and counts as the default's: a custom server is refused, the default opens it. Nothing here at all is a
-/// first open, for any server. Whenever it opens without a record, this run's server is recorded first.
+/// - A record that names this run's server opens.
+/// - A record with nothing beside it (no other entry in the folder, no credential entry) is replaced by this run's
+///   server: nothing was made for the server it names.
+/// - Any other record that names another server, or that cannot be read, is refused ([`OtherServer`]).
+/// - No record, and credential entries with nothing in the folder: refused for every server
+///   ([`CredentialsWithoutData`]).
+/// - No record, but files in the folder: data from before the record existed, the default's. A custom server is
+///   refused, the default opens it.
+/// - Nothing at all: a first open, for any server.
+///
+/// Whenever it opens on anything but a record of this run's server, this run's server is recorded first.
 pub fn bind_to_server(state_dir: &Path, account_entries: usize, asked: &ApiBase) -> Result<(), OpenError> {
     let asked = asked.server();
-    match read_record(state_dir)? {
-        Record::Names(made_for) if made_for == asked => Ok(()),
+    let record = read_record(state_dir)?;
+    if matches!(&record, Record::Names(made_for) if *made_for == asked) {
+        return Ok(());
+    }
+    let files = holds_local_state(state_dir)?;
+    let credentials = account_entries > 0;
+    match record {
+        Record::Names(_) | Record::Unreadable if !files && !credentials => write_record(state_dir, &asked),
         Record::Names(made_for) => Err(OpenError::OtherServer(OtherServer {
             made_for: Some(made_for),
             asked,
         })),
         Record::Unreadable => Err(OpenError::OtherServer(OtherServer { made_for: None, asked })),
-        Record::Missing => {
-            let here = account_entries > 0 || holds_local_state(state_dir)?;
-            if here && asked != Server::Default {
-                return Err(OpenError::OtherServer(OtherServer {
-                    made_for: Some(Server::Default),
-                    asked,
-                }));
-            }
-            write_record(state_dir, &asked)
-        }
+        Record::Missing if credentials && !files => Err(OpenError::CredentialsWithoutData(CredentialsWithoutData)),
+        Record::Missing if files && asked != Server::Default => Err(OpenError::OtherServer(OtherServer {
+            made_for: Some(Server::Default),
+            asked,
+        })),
+        Record::Missing => write_record(state_dir, &asked),
     }
 }
 
@@ -382,8 +419,8 @@ pub fn bind_to_server(state_dir: &Path, account_entries: usize, asked: &ApiBase)
 /// else.
 ///
 /// Refused, with nothing opened: on a second call with another folder, on macOS for the test build, when the
-/// settings file cannot be read or written, and for the test build when its local data was made for another server
-/// ([`bind_to_server`]).
+/// settings file cannot be read or written, and for the test build when its local data was made for another server or
+/// its stored credentials have no local data beside them ([`bind_to_server`]).
 pub fn open<C: CredentialStores>(
     local_data: &Path,
     api_base: &ApiBase,

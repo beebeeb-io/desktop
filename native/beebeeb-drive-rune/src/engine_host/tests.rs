@@ -10,7 +10,7 @@ use beebeeb_engine::app::{Engine, EngineConfig};
 use beebeeb_engine::config::DesktopConfig;
 use beebeeb_engine::host::ChannelHost;
 use beebeeb_engine::identity::{EngineIdentity, REAL, TEST};
-use beebeeb_engine::keychain::{AuthResult, AuthSecretStore, AuthStoreError, SecretBytes, SessionToken};
+use beebeeb_engine::keychain::{AuthSecretStore, SessionToken};
 use beebeeb_engine::signin::gate::GateState as EngineGate;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
@@ -18,25 +18,30 @@ use beebeeb_engine::sync_root_owner::{self, Registration};
 use beebeeb_engine::{signin::gate, state_paths};
 
 use super::backups::may_back_up;
-use super::open::{self, ApiBase, OpenError, Opened, OtherServer, Refused, Server};
+use super::open::{self, ApiBase, Opened, Refused};
 use super::*;
 use crate::shell::app::GateState as Shell;
 use crate::shell::identity::engine_identity;
 use crate::shell::instance;
 
-struct Started {
-    opened: Opened<MemoryCredentials>,
+pub(super) struct Started {
+    pub(super) opened: Opened<MemoryCredentials>,
     live: LiveEngine<MemoryCredentials>,
     /// The "local app data" folder the host passed.
-    base: PathBuf,
+    pub(super) base: PathBuf,
 }
 
 /// The start path, once per process (the state folder of an identity is set once): a stored session token
-/// for the settings file's account slot, then `open::open` as `shell::run` calls it.
-fn started() -> &'static Started {
+/// for the settings file's account slot, beside a state folder a run before the server record left (one file in
+/// it), then `open::open` as `shell::run` calls it, which records the default (`binding_tests`). Without the file
+/// it would be stored credentials without local data, which no server gets.
+pub(super) fn started() -> &'static Started {
     static STARTED: OnceLock<Started> = OnceLock::new();
     STARTED.get_or_init(|| {
         let base = tempfile::tempdir().expect("a temp home").keep();
+        let state_dir = engine_identity().state_dir_in(&base);
+        std::fs::create_dir_all(&state_dir).expect("the state folder");
+        std::fs::write(state_dir.join("from-an-earlier-run"), b"").expect("a file of an earlier run");
         let stores = MemoryCredentials::default();
         let slot = DesktopConfig::ensure_account_id_for(engine_identity()).expect("the sandboxed settings file");
         stores
@@ -246,7 +251,7 @@ fn the_sync_folder_is_not_a_backup_folder_for_the_identity_that_owns_it() {
 }
 
 /// Source text without any whitespace: what the pins below compare, so a reflow by rustfmt is not a red.
-fn squeezed(text: &str) -> String {
+pub(super) fn squeezed(text: &str) -> String {
     text.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
@@ -368,6 +373,10 @@ fn api_base_takes_an_https_origin_or_a_loopback_http_one_and_refuses_every_other
         ("http://0.0.0.0:9", Refused::PlainHttp),
         ("http://[::ffff:127.0.0.1]:9", Refused::PlainHttp),
         ("http://localhost.example.com", Refused::PlainHttp),
+        // Exactly `localhost` (#335 review P3-1): not a name that ends in it, not the name with a dot at the end.
+        ("http://evil.localhost", Refused::PlainHttp),
+        ("http://xlocalhost:3001", Refused::PlainHttp),
+        ("http://localhost.", Refused::PlainHttp),
         ("http://127.0.0.1@evil.example", Refused::UserInfo),
         ("https://127.0.0.1@evil.example", Refused::UserInfo),
         ("http://someone:hunter2@127.0.0.1:9", Refused::UserInfo),
@@ -385,6 +394,9 @@ fn api_base_takes_an_https_origin_or_a_loopback_http_one_and_refuses_every_other
         ("https://api.example.com#top", Refused::Fragment),
         ("http://127.0.0.1:9/#", Refused::Fragment),
         ("https://api.example.com/#me@x", Refused::Fragment),
+        // The whole `--api-base=<url>` argument, as the parse hands it over (#335 review P3-2).
+        ("--api-base=http://127.0.0.1:9", Refused::Glued),
+        ("--api-base=", Refused::Glued),
     ];
     // Every shape is tried before the verdict, so a red names all that changed.
     let mut wrong = Vec::new();
@@ -439,10 +451,11 @@ fn run_checks_api_base_before_anything_starts_and_says_the_server_once() {
         at("instance::parse_args(std::env::args().skip(1), instance::DEV_BUILD, reads_api_base);"),
         at("crate::engine_host::open::api_base(launch.api_base.as_deref(), reads_api_base)"),
     );
-    assert!(rule < parse && parse < check);
+    // The platform object comes first, so a refusal can show the start-refusal box; it starts nothing.
+    let platform = at("let platform = platform::current();");
+    assert!(rule < parse && parse < platform && platform < check);
     let later = [
         "crate::ui::gate::run_from_args(",
-        "platform::current()",
         "platform.serve_control(",
         "open_engine(",
     ];
@@ -451,8 +464,9 @@ fn run_checks_api_base_before_anything_starts_and_says_the_server_once() {
     }
     let refusal = &run[check..at(later[0])];
     assert!(refusal.contains(&squeezed(
-        "Err(refused) => { eprintln!(\"beebeeb-drive: {refused}\"); std::process::exit(2); }"
+        "Err(refused) => std::process::exit(refuse_start(&*platform, &launch, identity, &refused.to_string())),"
     )));
+    assert_eq!(shell.matches(&squeezed("platform::current()")).count(), 1);
     assert_eq!(shell.matches("instance::parse_args(").count(), 1);
     // Said once, before the engine opens, from the value that was checked.
     let opener = &shell[shell.find(&squeezed("fn open_engine(")).unwrap()..];
@@ -463,300 +477,6 @@ fn run_checks_api_base_before_anything_starts_and_says_the_server_once() {
         .unwrap();
     assert!(say < opener.find("crate::engine_host::open::open(").unwrap());
     assert_eq!(shell.matches(".start_line()").count(), 1);
-}
-
-// --- The binding of the test build's local data to one server (the lead's ruling inside decision 2462) ---
-
-/// A custom server for the binding tests. Not `http://127.0.0.1:9`: that is a unit-test build's DEFAULT (the engine's
-/// `test-support`), while in a shipped test build it is a custom server (the capture rung's closed port).
-fn custom(origin: &str) -> ApiBase {
-    let base = open::api_base(Some(origin), true).expect("a custom origin");
-    assert_eq!(base.server(), Server::Custom(origin.to_string()), "{origin}");
-    base
-}
-
-fn record_in(state_dir: &std::path::Path) -> Option<String> {
-    std::fs::read_to_string(state_dir.join(open::SERVER_FILE)).ok()
-}
-
-fn other_server(result: Result<(), OpenError>) -> OtherServer {
-    match result {
-        Err(OpenError::OtherServer(other)) => other,
-        other => panic!("refused for another server, not {other:?}"),
-    }
-}
-
-/// Data signed in on the default server is refused for a custom one: recorded by a first open after this change, or
-/// from before it (a stored session, no record). The default still opens it, and records itself on the way.
-#[test]
-fn data_signed_in_on_the_default_server_is_refused_for_a_custom_one() {
-    let (default, local) = (ApiBase::engine_default(), custom("http://127.0.0.1:3001"));
-    let asked_local = Server::Custom("http://127.0.0.1:3001".to_string());
-    // Made after this change: the first open recorded the default, then the engine made its database.
-    let dir = tempfile::tempdir().unwrap();
-    open::bind_to_server(dir.path(), 0, &default).expect("a first open on the default");
-    assert_eq!(record_in(dir.path()).as_deref(), Some("default\n"));
-    std::fs::write(dir.path().join("state.db"), b"").unwrap();
-    let other = other_server(open::bind_to_server(dir.path(), 1, &local));
-    assert_eq!(
-        other,
-        OtherServer {
-            made_for: Some(Server::Default),
-            asked: asked_local.clone()
-        }
-    );
-    // Signed in before this change: a stored session, no record, nothing in the folder.
-    let dir = tempfile::tempdir().unwrap();
-    let other = other_server(open::bind_to_server(dir.path(), 1, &local));
-    assert_eq!(other.made_for, Some(Server::Default));
-    assert_eq!(record_in(dir.path()), None, "a refusal records nothing");
-    open::bind_to_server(dir.path(), 1, &default).expect("the default opens its own data");
-    assert_eq!(record_in(dir.path()).as_deref(), Some("default\n"));
-}
-
-/// Data made for a custom server is refused without the flag (the default) and for another custom server; the record
-/// stays as it was.
-#[test]
-fn data_made_for_a_custom_server_is_refused_for_the_default_and_for_another_custom_one() {
-    let dir = tempfile::tempdir().unwrap();
-    open::bind_to_server(dir.path(), 0, &custom("http://127.0.0.1:3001")).expect("a clean first open");
-    std::fs::write(dir.path().join("state.db"), b"").unwrap();
-    let made_for = Some(Server::Custom("http://127.0.0.1:3001".to_string()));
-    let other = other_server(open::bind_to_server(dir.path(), 1, &ApiBase::engine_default()));
-    assert_eq!(
-        other,
-        OtherServer {
-            made_for: made_for.clone(),
-            asked: Server::Default
-        }
-    );
-    let other = other_server(open::bind_to_server(dir.path(), 1, &custom("https://staging.example")));
-    assert_eq!(
-        (other.made_for, other.asked),
-        (made_for, Server::Custom("https://staging.example".into()))
-    );
-    assert_eq!(record_in(dir.path()).as_deref(), Some("http://127.0.0.1:3001\n"));
-    // A record nobody can read opens for no server.
-    std::fs::write(dir.path().join(open::SERVER_FILE), "not a server\n").unwrap();
-    for asked in [ApiBase::engine_default(), custom("http://127.0.0.1:3001")] {
-        assert_eq!(other_server(open::bind_to_server(dir.path(), 1, &asked)).made_for, None);
-    }
-}
-
-/// Local data from before the record existed (anything in the state folder) counts as the default's: a custom server
-/// is refused, the default opens it and records itself. A half-written record alone is not data.
-#[test]
-fn local_data_without_a_record_counts_as_the_default_servers() {
-    let local = custom("http://127.0.0.1:3001");
-    for leftover in ["state.db", ".beebeeb-sync.lock", ".device.json"] {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(leftover), b"").unwrap();
-        let other = other_server(open::bind_to_server(dir.path(), 0, &local));
-        assert_eq!(other.made_for, Some(Server::Default), "{leftover}");
-        assert_eq!(record_in(dir.path()), None, "{leftover}");
-        open::bind_to_server(dir.path(), 0, &ApiBase::engine_default()).expect(leftover);
-        assert_eq!(record_in(dir.path()).as_deref(), Some("default\n"), "{leftover}");
-    }
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join(format!("{}.partial", open::SERVER_FILE)), "http://").unwrap();
-    open::bind_to_server(dir.path(), 0, &local).expect("a half-written record is not data");
-    assert_eq!(record_in(dir.path()).as_deref(), Some("http://127.0.0.1:3001\n"));
-}
-
-/// A clean computer (no state folder yet, no credential entry) starts on a custom server, the capture rung's case, and
-/// records it before the engine makes anything there.
-#[test]
-fn a_clean_computer_starts_on_a_custom_server_and_records_it() {
-    let base = tempfile::tempdir().unwrap();
-    let state_dir = base.path().join("not-made-yet");
-    open::bind_to_server(&state_dir, 0, &custom("http://127.0.0.1:3001")).expect("a clean computer starts");
-    assert_eq!(record_in(&state_dir).as_deref(), Some("http://127.0.0.1:3001\n"));
-    let names: Vec<_> = std::fs::read_dir(&state_dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    assert_eq!(names, [open::SERVER_FILE], "the record, and nothing else yet");
-}
-
-/// The same server twice starts twice, the default and a custom one. The default's own origin given with
-/// `--api-base` is the default server.
-#[test]
-fn the_same_server_twice_starts_twice() {
-    for asked in [
-        ApiBase::engine_default(),
-        custom("http://127.0.0.1:3001"),
-        custom("https://staging.example"),
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        open::bind_to_server(dir.path(), 0, &asked).expect("the first open");
-        std::fs::write(dir.path().join("state.db"), b"").unwrap();
-        open::bind_to_server(dir.path(), 1, &asked).expect("the second open");
-        open::bind_to_server(dir.path(), 1, &asked).expect("and the third");
-    }
-    let default_by_flag =
-        open::api_base(Some(&format!("{}/", beebeeb_engine::runner::default_api_base())), true).unwrap();
-    assert!(default_by_flag.from_flag());
-    assert_eq!(default_by_flag.server(), Server::Default);
-}
-
-/// A store that cannot answer whether it holds anything.
-struct Unanswering;
-
-impl AuthSecretStore for Unanswering {
-    fn save_session_token(&self, _: &SessionToken) -> AuthResult<()> {
-        Err(AuthStoreError::Backend("down".into()))
-    }
-    fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
-        Err(AuthStoreError::Backend("down".into()))
-    }
-    fn delete_session_token(&self) -> AuthResult<()> {
-        Err(AuthStoreError::Backend("down".into()))
-    }
-    fn save_wrapped_master_key(&self, _: SecretBytes) -> AuthResult<()> {
-        Err(AuthStoreError::Backend("down".into()))
-    }
-    fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
-        Err(AuthStoreError::Backend("down".into()))
-    }
-    fn delete_wrapped_master_key(&self) -> AuthResult<()> {
-        Err(AuthStoreError::Backend("down".into()))
-    }
-}
-
-/// A stored session is counted through the engine's own probes of the account's store, never read out; a store that
-/// cannot answer counts as holding something.
-#[test]
-fn a_stored_session_is_counted_the_engines_way_and_a_silent_store_counts_as_one() {
-    let stores = MemoryCredentials::default();
-    assert_eq!(open::stored_account_entries(&stores.store_for("slot-a")), 0);
-    stores
-        .store_for("slot-a")
-        .save_session_token(&SessionToken::new("an-invented-token").unwrap())
-        .unwrap();
-    assert_eq!(open::stored_account_entries(&stores.store_for("slot-a")), 1);
-    assert_eq!(
-        open::stored_account_entries(&stores.store_for("slot-b")),
-        0,
-        "another slot's"
-    );
-    assert!(open::stored_account_entries(&Unanswering) > 0, "fail closed");
-}
-
-/// The refusal names the two kinds, default or custom, and nothing else: no origin, no token, no account.
-#[test]
-fn the_refusal_names_the_two_servers_kinds_and_nothing_else() {
-    let (a, b) = (
-        Server::Custom("http://127.0.0.1:3001".to_string()),
-        Server::Custom("https://staging.example".to_string()),
-    );
-    let line = |made_for: Option<Server>, asked: Server| OtherServer { made_for, asked }.to_string();
-    let start = "this test build's data on this computer was made for ";
-    for (text, made, asked) in [
-        (
-            line(Some(Server::Default), a.clone()),
-            "the default server",
-            "a custom server (--api-base)",
-        ),
-        (
-            line(Some(a.clone()), Server::Default),
-            "a custom server (--api-base)",
-            "the default server",
-        ),
-        (
-            line(Some(a.clone()), b.clone()),
-            "a custom server (--api-base)",
-            "a different custom server (--api-base)",
-        ),
-        (
-            line(None, b.clone()),
-            "a server its record no longer names",
-            "a custom server (--api-base)",
-        ),
-    ] {
-        assert_eq!(
-            text,
-            format!("{start}{made}, and this run asks for {asked}. The app did not start.")
-        );
-        assert!(
-            !text.contains("127.0.0.1") && !text.contains("staging") && !text.contains('\n'),
-            "{text}"
-        );
-    }
-}
-
-/// The start path binds the test build's data: the shared start (`started`, a stored session and the default) left
-/// the default's record, and the binding sits after the account slot and before the engine (which takes the stores
-/// and the state folder, so it cannot come later). `run` says a refusal on one stderr line and ends with 2.
-#[test]
-fn the_start_path_binds_the_test_builds_data_before_the_engine_reads_it() {
-    let started = started();
-    let state_dir = state_paths::beebeeb_state_dir_for(started.opened.identity).unwrap();
-    assert_eq!(record_in(&state_dir).as_deref(), Some("default\n"));
-    let open_rs = squeezed(include_str!("open.rs"));
-    let body = &open_rs[open_rs.find(&squeezed("pub fn open<C: CredentialStores>(")).unwrap()..];
-    let at = |step: &str| body.find(&squeezed(step)).unwrap_or_else(|| panic!("open has {step}"));
-    let order = [
-        "DesktopConfig::ensure_account_id_for(identity)?;",
-        "if !identity.is_real() {",
-        "let entries = stored_account_entries(&stores.for_account(identity, &account_id));",
-        "bind_to_server(&state_dir, entries, api_base)?;",
-        "Engine::open(identity, config, host, stores)?",
-        "engine.restore()",
-    ]
-    .map(at);
-    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
-    let shell = squeezed(include_str!("../shell/mod.rs"));
-    assert!(shell.contains(&squeezed(
-        "Err(OpenError::OtherServer(other)) => { eprintln!(\"beebeeb-drive: {other}\"); std::process::exit(2); }"
-    )));
-}
-
-/// Runs a future that waits on nothing (a synchronous `open` inside the engine's state-folder scope) to its end.
-fn run_now<F: std::future::Future>(future: F) -> F::Output {
-    let mut future = std::pin::pin!(future);
-    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-    match std::future::Future::poll(future.as_mut(), &mut context) {
-        std::task::Poll::Ready(output) => output,
-        std::task::Poll::Pending => panic!("the future waited on something"),
-    }
-}
-
-/// Through `open` itself, in a state folder of its own (the engine's test scope, same process folder as `started`):
-/// a test build signed in on the default before the record existed (the account slot's stored session, nothing in
-/// the folder) is refused for a custom server, before the engine opens, and nothing is recorded.
-#[test]
-fn open_refuses_a_test_build_signed_in_on_the_default_for_a_custom_server() {
-    let base = &started().base;
-    let state_dir = tempfile::tempdir().unwrap();
-    let stores = MemoryCredentials::default();
-    let slot = DesktopConfig::ensure_account_id_for(engine_identity()).expect("the sandboxed settings file");
-    stores
-        .store_for(&slot)
-        .save_session_token(&SessionToken::new("an-invented-token").unwrap())
-        .unwrap();
-    let local = custom("http://127.0.0.1:3001");
-    let result = run_now(
-        state_paths::STATE_DIR_OVERRIDE.scope(state_dir.path().to_path_buf(), async {
-            open::open(base, &local, stores, || {})
-        }),
-    );
-    match result {
-        Err(OpenError::OtherServer(other)) => assert_eq!(
-            other,
-            OtherServer {
-                made_for: Some(Server::Default),
-                asked: Server::Custom("http://127.0.0.1:3001".to_string())
-            }
-        ),
-        Err(OpenError::Failed(error)) => panic!("refused for another server, not: {error}"),
-        Ok(_) => panic!("the engine opened a test build's signed-in data for another server"),
-    }
-    assert_eq!(record_in(state_dir.path()), None);
-    assert_eq!(
-        std::fs::read_dir(state_dir.path()).unwrap().count(),
-        0,
-        "nothing made in the folder"
-    );
 }
 
 /// `--api-base` reaches the engine as an argument; nothing on the start path reads the environment for it.
@@ -798,8 +518,11 @@ fn run_opens_the_engine_after_the_claim_and_never_falls_back_to_the_fixture() {
     assert!(run.contains("if matches!(plan, Plan::BeTheApp) && launch.db.is_none() {"));
     let failed = &run[open..];
     let failed = &failed[..failed.find("None => Arc::new(FixtureEngine::ready()),").unwrap()];
+    // A handle that was not opened ends the start (`engine_not_opened`: exit 1, or 2 for the binding's refusals).
     assert!(
-        failed.contains("std::process::exit(1);"),
+        squeezed(failed).contains(&squeezed(
+            "Err(error) => std::process::exit(engine_not_opened(&*platform, &launch, identity, &error)),"
+        )),
         "a failed open ends the start"
     );
     assert_eq!(

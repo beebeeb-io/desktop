@@ -25,9 +25,10 @@
     closed local port, and is started with --api-base http://127.0.0.1:9 (decision 2462): its own
     server is that closed port too, so it never talks to the production server. The TEST build
     itself refuses a custom server when it already has data on this machine (data made for the
-    default server, or for another one: one stderr line, exit 2), but that is the app's own check:
-    this script's clean-state refusal above stays the first line of defence, before anything is
-    started. The app is stopped by its PID only. Captures are kept in the printed temp folder;
+    default server, or for another one), and refuses every server when only its credentials are
+    left: one stderr line and its start-refusal box, exit 2 (C4 reads the box as a refusal). That
+    is the app's own check: this script's clean-state refusal above stays the first line of
+    defence, before anything is started. The app is stopped by its PID only. Captures are kept in the printed temp folder;
     what the app created on this machine is removed afterwards (only paths that did not exist
     before the run, so the record of the server it was started for goes with them).
 

@@ -33,6 +33,10 @@ pub const DB_FLAG: &str = "--db";
 /// (decision 2462), never by the real app in a build that ships. Set BEFORE any engine thread
 /// exists (it goes into `EngineConfig.api_base`).
 pub const API_BASE_FLAG: &str = "--api-base";
+/// `--api-base=<url>`: not a form the app reads. Where the build reads the flag, such an argument
+/// is handed to the check whole, which refuses it (`Refused::Glued`), so the spelling never turns
+/// into a run on the default server.
+pub const API_BASE_GLUED: &str = "--api-base=";
 /// Development only: the frame gate's element export (`ui::gate::run_from_args`).
 pub const GATE_EXPORT_FLAG: &str = "--gate-export";
 
@@ -63,7 +67,8 @@ pub struct Launch {
     pub db: Option<Result<PathBuf, &'static str>>,
     /// `--api-base <url>`, unchecked (`engine_host::open::api_base` checks it), when the build
     /// reads it (`engine_host::open::reads_api_base_flag`). Empty: nothing, or another flag,
-    /// followed it.
+    /// followed it. A whole `--api-base=<url>` argument ([`API_BASE_GLUED`]), which the check
+    /// refuses.
     pub api_base: Option<String>,
     /// `--feedback-dir <path>` (dev builds with the `feedback` feature only).
     #[cfg(feature = "feedback")]
@@ -148,6 +153,9 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I, dev: bool, api_base: 
             // Without a value it is an empty one, which the check refuses: never the default in
             // its place. A flag after it stays a flag.
             launch.api_base = Some(args.next_if(|url| !url.starts_with("--")).unwrap_or_default());
+        } else if api_base && arg.starts_with(API_BASE_GLUED) {
+            // Not read as the flag, and not ignored either: the check refuses it.
+            launch.api_base = Some(arg);
         } else if !dev {
             // A shipped build: nothing else means anything.
         } else if arg == DB_FLAG {
@@ -284,9 +292,10 @@ pub fn start(launch: &Launch, holder: Option<ProfileHolder>) -> Start {
 }
 
 /// Whether a refusal is shown in a native message box. Not for a start at login (a box at
-/// every login) and not for the installer's call (its exit code is the answer).
+/// every login), not for the installer's call (its exit code is the answer) and not for a
+/// tooling run of a dev build (a renderer or a script: nobody there to close a box).
 pub fn refusal_is_shown(launch: &Launch) -> bool {
-    !launch.autostart && !launch.quit_for_update
+    !launch.autostart && !launch.quit_for_update && !launch.tooling
 }
 
 /// What the running instance does with one argument a later launch (or the OS) handed it.
@@ -514,6 +523,44 @@ mod tests {
             assert!(installer.quit_for_update);
             assert_eq!(installer.api_base, None, "the installer: dev={dev} api_base={api_base}");
         }
+    }
+
+    /// `--api-base=<url>` (#335 review P3-2): where the build reads the flag it is handed to the
+    /// check whole, which refuses it, so the spelling never becomes a run on the default server;
+    /// where the build does not read the flag it means nothing, like `--api-base` itself.
+    #[test]
+    fn a_glued_api_base_is_refused_where_the_flag_is_read_and_means_nothing_elsewhere() {
+        use crate::engine_host::open::{Refused, api_base};
+        for glued in [
+            "--api-base=http://127.0.0.1:9",
+            "--api-base=",
+            "--api-base=https://api.example.com",
+        ] {
+            for dev in [false, true] {
+                let launch = parse_as(&[glued, "--autostart"], dev, true);
+                assert_eq!(launch.api_base.as_deref(), Some(glued), "dev={dev}");
+                assert!(launch.autostart && launch.rune_args.is_empty(), "dev={dev}");
+                assert_eq!(
+                    api_base(launch.api_base.as_deref(), true),
+                    Err(Refused::Glued),
+                    "dev={dev}"
+                );
+            }
+            let real = parse_as(&[glued, "--autostart"], false, false);
+            assert_eq!(real.api_base, None);
+            assert_eq!(real.rune_args.len(), 0);
+            let installer = parse_as(&[glued, "--quit-for-update"], false, true);
+            assert_eq!(installer.api_base, None, "the installer's call reads no server");
+        }
+        // The spelled-out form after it is still the flag's value; a glued one after a flag is still refused.
+        assert_eq!(
+            parse_as(&["--api-base", "http://127.0.0.1:9"], false, true)
+                .api_base
+                .as_deref(),
+            Some("http://127.0.0.1:9")
+        );
+        let both = parse_as(&["--api-base", "--api-base=http://127.0.0.1:9"], false, true);
+        assert_eq!(api_base(both.api_base.as_deref(), true), Err(Refused::Glued));
     }
 
     /// A running instance keeps the server it started with. A later launch that names one with

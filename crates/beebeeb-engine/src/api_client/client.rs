@@ -58,17 +58,20 @@ impl ApiClient {
     /// chunk-at-a-time so a single slow chunk doesn't kill a large
     /// download.
     pub fn new(base_url: String, token: String, master_key: [u8; 32]) -> Self {
+        let base_url = base_url.trim_end_matches('/').to_string();
+        // The proxy rule of the API base (`api_client::proxy`), like every client built here.
+        let client = api_base_client_builder(&base_url)
+            .timeout(Duration::from_secs(crate::link_health::API_REQUEST_TIMEOUT_SECS))
+            .default_headers(provenance_headers())
+            .build()
+            .expect("reqwest client");
         Self {
             #[cfg(target_os = "windows")]
             credential_lifetime: std::sync::Arc::new(()),
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url,
             token,
             master_key,
-            client: Client::builder()
-                .timeout(Duration::from_secs(crate::link_health::API_REQUEST_TIMEOUT_SECS))
-                .default_headers(provenance_headers())
-                .build()
-                .expect("reqwest client"),
+            client,
             link: std::sync::Arc::new(crate::link_health::LinkMonitor::new()),
             direct_discovery: tokio::sync::Mutex::new(beebeeb_core::direct_transfer::DiscoveryCache::new()),
             storage_client: std::sync::OnceLock::new(),
@@ -80,7 +83,7 @@ impl ApiClient {
     /// that nobody waits on (task 2267's ownership proof, self-review F5).
     #[cfg(target_os = "windows")]
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
-        self.client = Client::builder()
+        self.client = api_base_client_builder(&self.base_url)
             .timeout(timeout)
             .default_headers(provenance_headers())
             .build()
@@ -104,7 +107,7 @@ impl ApiClient {
             base_url: self.base_url.clone(),
             token: self.token.clone(),
             master_key: self.master_key,
-            client: Client::builder()
+            client: api_base_client_builder(&self.base_url)
                 .timeout(Duration::from_secs(crate::link_health::API_REQUEST_TIMEOUT_SECS))
                 .default_headers(headers)
                 .build()
