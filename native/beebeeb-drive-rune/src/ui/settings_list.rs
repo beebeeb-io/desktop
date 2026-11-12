@@ -9,6 +9,7 @@
 //! | Leaves the app (a web page) | `Trailing::External` | `item-<L>-<I>-ext` |
 //! | The chosen one of several | `Trailing::Check` | `item-<L>-<I>-check` |
 //! | Pop-up button (a choice) | `Trailing::Pop` | `item-<L>-<I>-pop`, `-pop-label`, `-pop-caret`, `-menu-at` |
+//! | Destructive row | `item_danger(list, index, icon, title, t)` | `item-<L>-<I>`, `-icon`, `-title` |
 //! | Switch | `item_with(.., vec![switch("item-<L>-<I>", ..)], ..)` | `item-<L>-<I>-switch`, `-knob` |
 //!
 //! A row is 28 pt, 40 pt with a second line; the board rules a row off from the one
@@ -326,4 +327,38 @@ pub fn list(index: usize, title: Option<&str>, rows: Vec<El>, foot: Option<&str>
         );
     }
     l
+}
+
+/// `--color-red-text`: the ink of a destructive row's title.
+pub fn danger_ink(t: &Theme) -> rune::Color {
+    crate::theme::tokens::red_text(t.dark)
+}
+
+/// A destructive row (`.kit-item.is-danger`): its title in red ink, a button to assistive
+/// technology. Keys: `item-<L>-<I>`, `-icon`, `-title`.
+pub fn item_danger(list: usize, index: usize, icon: &'static Icon, title: &str, t: &Theme) -> El {
+    let key = format!("item-{list}-{index}");
+    row()
+        .key(key.clone())
+        .role("button")
+        .label(title)
+        .w_full()
+        .min_h(28.0)
+        .px(10.0)
+        .gap(8.0)
+        .center_y()
+        .hover(t.hover)
+        .press(t.press)
+        .focusable(true)
+        .child(el().key(format!("{key}-icon-box")).w(30.0).center().child(kit::glyph(
+            format!("{key}-icon"),
+            icon,
+            18.0,
+            t.text_secondary,
+        )))
+        .child(
+            kit::label(format!("{key}-title"), title, type_::ITEM_TITLE, danger_ink(t))
+                .grow(1.0)
+                .truncate(),
+        )
 }

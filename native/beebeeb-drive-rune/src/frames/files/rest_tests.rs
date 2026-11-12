@@ -651,7 +651,7 @@ fn the_toolbars_last_icon_button_opens_the_folder_shown_in_file_explorer() {
     settle(&mut rt);
     rt.update(|_, tx| tx.focus("open-explorer", true));
     settle(&mut rt);
-    // Space presses a focused button (Return does only under `Cx::web_focus`: wave-1-open.md, Rune limitation 5).
+    // Space presses a focused button (Return does only under `Cx::web_focus`: docs/frames-open.md, Rune limitation 5).
     press(&mut rt, Key::Text(" ".into()), NONE);
     assert_eq!(
         asked(&calls).last(),

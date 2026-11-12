@@ -44,7 +44,7 @@ const GUID_DIGITS: [&str; 6] = [
 ];
 
 /// Rule 1's allow-list: `(file, literals, why)`. Exact counts: a literal added to one of these files is seen too.
-const LITERALS_ALLOWED: [(&str, usize, &str); 16] = [
+const LITERALS_ALLOWED: [(&str, usize, &str); 15] = [
     (
         "crates/beebeeb-engine/src/identity.rs",
         24,
@@ -80,11 +80,6 @@ const LITERALS_ALLOWED: [(&str, usize, &str); 16] = [
         "native/beebeeb-drive-rune/src/frames/tray/commands.rs",
         1,
         "the board's table of commands (DW-1232): the heading of the app's own command list, a drawn word",
-    ),
-    (
-        "native/beebeeb-drive-rune/src/frames/tray/view.rs",
-        1,
-        "the flyout's accessible name (the board's Accessibility note: a dialog named Beebeeb; the brand, for both builds); the flyout WINDOW's title is the identity's",
     ),
     (
         "native/beebeeb-drive-rune/src/ui/kit.rs",

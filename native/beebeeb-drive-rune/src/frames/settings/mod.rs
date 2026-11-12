@@ -15,13 +15,19 @@
 //! do (show a frame another lane owns, open a web page, start a download).
 
 pub mod about;
+pub mod drive;
 pub mod general;
+pub mod insights;
 pub mod notifications;
 pub mod recent;
 pub mod source;
+pub mod storage;
 pub mod storage_location;
+pub mod sync;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_drive;
 
 use crate::State;
 use crate::shell::app::{Event, Screen, SettingsPane};
@@ -31,6 +37,7 @@ use crate::theme::tokens::{self, Theme};
 use crate::ui::{caption, settings_controls as controls, settings_shell as shell};
 use rune::{Align, Cx, El, Key, KeyEvent, Side, Tx, col, row};
 
+use drive::{DriveSettings, Kept};
 use source::{AlertTarget, BoardSettings, Channel, SettingsSource, ThemeChoice};
 
 /// A pane of settings.
@@ -45,6 +52,12 @@ pub enum Pane {
     Notifications,
     /// Notifications › Recent notifications (DW-0791).
     Recent,
+    /// Storage (DW-0712).
+    Storage,
+    /// Storage › Storage insights (DW-0783).
+    Insights,
+    /// Sync and File Explorer (DW-0746).
+    Sync,
 }
 
 /// Which menu a pop-up button drops.
@@ -94,6 +107,14 @@ pub enum Dialog {
     ReportProblem,
     /// About › Release notes (DW-0789b).
     ReleaseNotes,
+    /// Storage › Change limit (DW-0713, DW-0714).
+    Limit(Kept),
+    /// Clear… downloaded files (DW-0780).
+    FreeUp,
+    /// Turn off Beebeeb in File Explorer… (DW-0746b).
+    TurnOffExplorer,
+    /// Repair… (DW-0746c).
+    Repair,
 }
 
 /// What settings asks of the app around it. The shell lane drains `SettingsUi::intents`.
@@ -115,6 +136,8 @@ pub enum Intent {
     CheckForUpdates,
     /// Open Windows Settings › Notifications › Beebeeb (DW-0750b).
     OpenWindowsNotificationSettings,
+    /// Show this file in Files, selected: its whole path (DW-0783, a largest file).
+    ShowInFiles(String),
 }
 
 /// The most requests kept for the shell while nothing takes them: the oldest fall off.
@@ -129,6 +152,10 @@ pub struct SettingsUi {
     pub toast: Option<&'static str>,
     pub source: Box<dyn SettingsSource>,
     pub intents: Vec<Intent>,
+    /// What Drive's own panes show (Storage, Sync and File Explorer, Bandwidth, ...).
+    pub drive: Box<dyn DriveSettings>,
+    /// The limit a limit dialog's slider stands on, until Save (DW-0713, DW-0714).
+    pub draft_gb: u32,
 }
 
 impl Default for SettingsUi {
@@ -141,6 +168,8 @@ impl Default for SettingsUi {
             // Sample content only where tooling runs; a build that ships starts unwired.
             source: source::first(instance::DEV_BUILD),
             intents: Vec::new(),
+            drive: drive::first(instance::DEV_BUILD),
+            draft_gb: 0,
         }
     }
 }
@@ -162,6 +191,16 @@ impl SettingsUi {
         self.menu = None;
         self.dialog = None;
         self.toast = None;
+    }
+
+    /// Open a limit dialog on the stored limit (DW-0713, DW-0714).
+    pub fn open_limit(&mut self, which: Kept) {
+        let st = self.drive.storage();
+        self.draft_gb = match which {
+            Kept::Downloaded => st.downloaded.limit.gb,
+            Kept::Previews => st.previews.limit.gb,
+        };
+        self.dialog = Some(Dialog::Limit(which));
     }
 
     /// What settings asked of the shell since the last call, oldest first.
@@ -307,6 +346,36 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         s.settings.source = Box::new(BoardSettings::new().with_locations_failed());
         open_on(s, "DW-0788");
     }),
+    ("DW-0746", |s| open_on(s, "DW-0746")),
+    ("DW-0746b", |s| open_on(s, "DW-0746b")),
+    ("DW-0746c", |s| open_on(s, "DW-0746c")),
+    ("DW-0746d", |s| {
+        s.settings.drive = Box::new(drive::BoardDrive::new().with_repair_failed());
+        open_on(s, "DW-0746");
+    }),
+    ("DW-0746e", |s| {
+        s.settings.drive = Box::new(drive::BoardDrive::new().with_metered_wait());
+        open_on(s, "DW-0746");
+    }),
+    ("DW-0780", |s| open_on(s, "DW-0780")),
+    ("DW-0712", |s| open_on(s, "DW-0712")),
+    ("DW-0713", |s| open_on(s, "DW-0713")),
+    ("DW-0714", |s| open_on(s, "DW-0714")),
+    ("DW-0783", |s| open_on(s, "DW-0783")),
+    ("DW-0783b", |s| {
+        s.settings.drive = Box::new(drive::BoardDrive::new().with_insights(drive::Insights::Loading));
+        open_on(s, "DW-0783");
+    }),
+    ("DW-0783c", |s| {
+        s.settings.drive = Box::new(
+            drive::BoardDrive::new().with_insights(drive::Insights::Failed("Can't reach Beebeeb right now.".into())),
+        );
+        open_on(s, "DW-0783");
+    }),
+    ("DW-0783d", |s| {
+        s.settings.drive = Box::new(drive::BoardDrive::new().with_insights(drive::Insights::Empty));
+        open_on(s, "DW-0783");
+    }),
 ];
 
 fn open_on(s: &mut State, frame: &'static str) {
@@ -319,6 +388,8 @@ fn routed(s: &State) -> Option<Pane> {
     match s.shell.app.screen() {
         Screen::Settings(SettingsPane::General) => Some(Pane::General),
         Screen::Settings(SettingsPane::Notifications) => Some(Pane::Notifications),
+        Screen::Settings(SettingsPane::Storage) => Some(Pane::Storage),
+        Screen::Settings(SettingsPane::SyncAndFileExplorer) => Some(Pane::Sync),
         _ => None,
     }
 }
@@ -335,6 +406,14 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>, Option<MenuKind>)> {
         "DW-0750" | "DW-0750b" => (Pane::Notifications, None, None),
         "DW-0791" | "DW-0791b" => (Pane::Recent, None, None),
         "DW-0788" | "DW-0788b" | "DW-0788c" | "DW-0788d" => (Pane::StorageLocation, None, None),
+        "DW-0746" | "DW-0746d" | "DW-0746e" => (Pane::Sync, None, None),
+        "DW-0746b" => (Pane::Sync, Some(Dialog::TurnOffExplorer), None),
+        "DW-0746c" => (Pane::Sync, Some(Dialog::Repair), None),
+        "DW-0780" => (Pane::Sync, Some(Dialog::FreeUp), None),
+        "DW-0712" => (Pane::Storage, None, None),
+        "DW-0713" => (Pane::Storage, Some(Dialog::Limit(Kept::Previews)), None),
+        "DW-0714" => (Pane::Storage, Some(Dialog::Limit(Kept::Downloaded)), None),
+        "DW-0783" | "DW-0783b" | "DW-0783c" | "DW-0783d" => (Pane::Insights, None, None),
         _ => return None,
     })
 }
@@ -365,6 +444,8 @@ pub fn frame_of(target: AlertTarget) -> &'static str {
 fn shell_pane(section: Pane) -> SettingsPane {
     match section {
         Pane::Notifications | Pane::Recent => SettingsPane::Notifications,
+        Pane::Storage | Pane::Insights => SettingsPane::Storage,
+        Pane::Sync => SettingsPane::SyncAndFileExplorer,
         _ => SettingsPane::General,
     }
 }
@@ -378,9 +459,7 @@ pub fn go(s: &mut State, frame: &'static str) {
         "DW-A51" => Some(SettingsPane::Account),
         "DW-A52" => Some(SettingsPane::Security),
         "DW-A55" => Some(SettingsPane::DevicesAndSessions),
-        "DW-0712" => Some(SettingsPane::Storage),
         "DW-0737" => Some(SettingsPane::Backups),
-        "DW-0746" => Some(SettingsPane::SyncAndFileExplorer),
         "DW-0744" => Some(SettingsPane::ThumbnailsAndPreviews),
         _ => None,
     };
@@ -411,7 +490,10 @@ pub fn go(s: &mut State, frame: &'static str) {
     }
     let ui = &mut s.settings;
     ui.show(pane);
-    ui.dialog = dialog;
+    match dialog {
+        Some(Dialog::Limit(which)) => ui.open_limit(which),
+        other => ui.dialog = other,
+    }
     if let Some(kind) = menu {
         ui.toggle_menu(kind);
     }
@@ -435,6 +517,8 @@ impl Pane {
         match self {
             Pane::General | Pane::About | Pane::StorageLocation => Pane::General,
             Pane::Notifications | Pane::Recent => Pane::Notifications,
+            Pane::Storage | Pane::Insights => Pane::Storage,
+            Pane::Sync => Pane::Sync,
         }
     }
 }
@@ -486,7 +570,7 @@ const DRIVE_SECTIONS: &[Section] = &[
         label: "Storage",
         icon: &ic::CHEV_RIGHT,
         frame: "DW-0712",
-        pane: None,
+        pane: Some(Pane::Storage),
     },
     Section {
         label: "Backups",
@@ -498,6 +582,8 @@ const DRIVE_SECTIONS: &[Section] = &[
         label: "Sync and File Explorer",
         icon: &ic::CHEV_RIGHT,
         frame: "DW-0746",
+        // The board draws no sidebar item selected on its Sync and File Explorer frames
+        // (DW-0746 and the nine over it), unlike every other section: followed, and flagged.
         pane: None,
     },
     Section {
@@ -559,6 +645,11 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         Pane::StorageLocation => storage_location::pane(ui, &t),
         Pane::Notifications => notifications::pane(ui, &t),
         Pane::Recent => recent::pane(ui, &t),
+        // Drive's own panes: never sample values in a build nothing answers for yet.
+        _ if !ui.drive.wired() => return placeholder::window(s, cx, registry::group_for(&s.shell.app)),
+        Pane::Storage => storage::pane(ui, &t),
+        Pane::Insights => insights::pane(ui, &t),
+        Pane::Sync => sync::pane(ui, &t),
     };
     let overlay = overlay.filter(|_| inside);
     let mut body = row()

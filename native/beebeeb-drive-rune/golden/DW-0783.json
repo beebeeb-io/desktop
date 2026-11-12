@@ -898,6 +898,945 @@
     255
    ],
    "tracking": -0.08
+  },
+  "meter-0": {
+   "kind": "box",
+   "x": 270,
+   "y": 232,
+   "w": 508,
+   "h": 9,
+   "bg": [
+    22,
+    22,
+    11,
+    23
+   ]
+  },
+  "meter-0-part-0": {
+   "kind": "box",
+   "x": 270,
+   "y": 232,
+   "w": 121.91,
+   "h": 9,
+   "bg": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "insbar-0": {
+   "kind": "box",
+   "x": 270,
+   "y": 363,
+   "w": 508,
+   "h": 9,
+   "bg": [
+    26,
+    13,
+    13,
+    20
+   ]
+  },
+  "insbar-0-fill": {
+   "kind": "box",
+   "x": 270,
+   "y": 363,
+   "w": 508,
+   "h": 9,
+   "bg": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "insbar-0-name": {
+   "kind": "text",
+   "x": 270,
+   "y": 342,
+   "w": 35.26,
+   "h": 15,
+   "text": "Media",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "insbar-1": {
+   "kind": "box",
+   "x": 270,
+   "y": 407,
+   "w": 508,
+   "h": 9,
+   "bg": [
+    26,
+    13,
+    13,
+    20
+   ]
+  },
+  "insbar-1-fill": {
+   "kind": "box",
+   "x": 270,
+   "y": 407,
+   "w": 32,
+   "h": 9,
+   "bg": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "insbar-1-name": {
+   "kind": "text",
+   "x": 270,
+   "y": 386,
+   "w": 65.42,
+   "h": 15,
+   "text": "Documents",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "insbar-2": {
+   "kind": "box",
+   "x": 270,
+   "y": 451,
+   "w": 508,
+   "h": 9,
+   "bg": [
+    26,
+    13,
+    13,
+    20
+   ]
+  },
+  "insbar-2-fill": {
+   "kind": "box",
+   "x": 270,
+   "y": 451,
+   "w": 10.16,
+   "h": 9,
+   "bg": [
+    155,
+    152,
+    147,
+    255
+   ]
+  },
+  "insbar-2-name": {
+   "kind": "text",
+   "x": 270,
+   "y": 430,
+   "w": 32.2,
+   "h": 15,
+   "text": "Other",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "chip-0": {
+   "kind": "box",
+   "x": 647.75,
+   "y": 174,
+   "w": 130.25,
+   "h": 26,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ]
+  },
+  "chip-0-icon": {
+   "kind": "icon",
+   "x": 657.75,
+   "y": 180.5,
+   "w": 13,
+   "h": 13,
+   "icon": [
+    "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "chip-0-label": {
+   "kind": "text",
+   "x": 675.75,
+   "y": 179.5,
+   "w": 92.25,
+   "h": 14.5,
+   "text": "Drive plan · 1 TB",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 600,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "chip-1": {
+   "kind": "box",
+   "x": 638.31,
+   "y": 532,
+   "w": 55.69,
+   "h": 26,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ]
+  },
+  "chip-1-label": {
+   "kind": "text",
+   "x": 648.31,
+   "y": 537.5,
+   "w": 35.69,
+   "h": 14.5,
+   "text": "Media",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 600,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "chip-2": {
+   "kind": "box",
+   "x": 638.31,
+   "y": 568,
+   "w": 55.69,
+   "h": 26,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ]
+  },
+  "chip-2-label": {
+   "kind": "text",
+   "x": 648.31,
+   "y": 573.5,
+   "w": 35.69,
+   "h": 14.5,
+   "text": "Media",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 600,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "chip-3": {
+   "kind": "box",
+   "x": 641.31,
+   "y": 604,
+   "w": 52.69,
+   "h": 26,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ]
+  },
+  "chip-3-label": {
+   "kind": "text",
+   "x": 651.31,
+   "y": 609.5,
+   "w": 32.69,
+   "h": 14.5,
+   "text": "Other",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 600,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "chip-4": {
+   "kind": "box",
+   "x": 638.31,
+   "y": 640,
+   "w": 55.69,
+   "h": 26,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ]
+  },
+  "chip-4-label": {
+   "kind": "text",
+   "x": 648.31,
+   "y": 645.5,
+   "w": 35.69,
+   "h": 14.5,
+   "text": "Media",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 600,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "chip-5": {
+   "kind": "box",
+   "x": 638.31,
+   "y": 676,
+   "w": 55.69,
+   "h": 26,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ]
+  },
+  "chip-5-label": {
+   "kind": "text",
+   "x": 648.31,
+   "y": 681.5,
+   "w": 35.69,
+   "h": 14.5,
+   "text": "Media",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 600,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "chip-6": {
+   "kind": "box",
+   "x": 638.31,
+   "y": 712,
+   "w": 55.69,
+   "h": 26,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ]
+  },
+  "chip-6-label": {
+   "kind": "text",
+   "x": 648.31,
+   "y": 717.5,
+   "w": 35.69,
+   "h": 14.5,
+   "text": "Media",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 600,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "chip-7": {
+   "kind": "box",
+   "x": 607.71,
+   "y": 748,
+   "w": 86.29,
+   "h": 26,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ]
+  },
+  "chip-7-label": {
+   "kind": "text",
+   "x": 617.71,
+   "y": 753.5,
+   "w": 66.29,
+   "h": 14.5,
+   "text": "Documents",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 600,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "fig-0": {
+   "kind": "text",
+   "x": 270,
+   "y": 192,
+   "w": 83.52,
+   "h": 30,
+   "text": "240 GB",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 24,
+   "weight": 650,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.48
+  },
+  "card-0-cap-0": {
+   "kind": "text",
+   "x": 270,
+   "y": 174,
+   "w": 135.34,
+   "h": 14,
+   "text": "Encrypted storage",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "card-0-cap-1": {
+   "kind": "text",
+   "x": 270,
+   "y": 251,
+   "w": 52.8,
+   "h": 14,
+   "text": "24% used",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "card-0-cap-2": {
+   "kind": "text",
+   "x": 705.4,
+   "y": 251,
+   "w": 72.6,
+   "h": 14,
+   "text": "784 GB free",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "card-1-cap-0": {
+   "kind": "text",
+   "x": 645.99,
+   "y": 313,
+   "w": 132.01,
+   "h": 14.5,
+   "text": "4,424 files · 240 GB",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "card-1-cap-1": {
+   "kind": "text",
+   "x": 632.79,
+   "y": 342.5,
+   "w": 145.21,
+   "h": 14.5,
+   "text": "221.6 GB · 3,140 files",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "card-1-cap-2": {
+   "kind": "text",
+   "x": 639.39,
+   "y": 386.5,
+   "w": 138.61,
+   "h": 14.5,
+   "text": "13.9 GB · 1,032 files",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "card-1-cap-3": {
+   "kind": "text",
+   "x": 659.19,
+   "y": 430.5,
+   "w": 118.81,
+   "h": 14.5,
+   "text": "4.5 GB · 252 files",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "card-2-cap-0": {
+   "kind": "text",
+   "x": 738.4,
+   "y": 504,
+   "w": 39.6,
+   "h": 14.5,
+   "text": "top 50",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "lrow-0": {
+   "kind": "box",
+   "x": 254,
+   "y": 527,
+   "w": 540,
+   "h": 36
+  },
+  "lrow-0-path": {
+   "kind": "text",
+   "x": 270,
+   "y": 537.25,
+   "w": 356.31,
+   "h": 15.5,
+   "text": "Backups/Anna's iPhone/Photos/2026/IMG_4410.MOV",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "lrow-0-size": {
+   "kind": "text",
+   "x": 706,
+   "y": 537.25,
+   "w": 72,
+   "h": 15.5,
+   "text": "4.2 GB",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 12,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "lrow-1": {
+   "kind": "box",
+   "x": 254,
+   "y": 563,
+   "w": 540,
+   "h": 36
+  },
+  "lrow-1-path": {
+   "kind": "text",
+   "x": 270,
+   "y": 573.25,
+   "w": 356.31,
+   "h": 15.5,
+   "text": "Shoot selects/Harbourlight/MVI_0087.mov",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "lrow-1-size": {
+   "kind": "text",
+   "x": 706,
+   "y": 573.25,
+   "w": 72,
+   "h": 15.5,
+   "text": "3.8 GB",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 12,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "lrow-2": {
+   "kind": "box",
+   "x": 254,
+   "y": 599,
+   "w": 540,
+   "h": 36
+  },
+  "lrow-2-path": {
+   "kind": "text",
+   "x": 270,
+   "y": 609.25,
+   "w": 359.31,
+   "h": 15.5,
+   "text": "Backups/Anna's…ook Pro/Documents/Archive 2024.zip",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "lrow-2-size": {
+   "kind": "text",
+   "x": 706,
+   "y": 609.25,
+   "w": 72,
+   "h": 15.5,
+   "text": "2.6 GB",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 12,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "lrow-3": {
+   "kind": "box",
+   "x": 254,
+   "y": 635,
+   "w": 540,
+   "h": 36
+  },
+  "lrow-3-path": {
+   "kind": "text",
+   "x": 270,
+   "y": 645.25,
+   "w": 356.31,
+   "h": 15.5,
+   "text": "Lisbon trip/Day 2/DJI_0412.mp4",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "lrow-3-size": {
+   "kind": "text",
+   "x": 706,
+   "y": 645.25,
+   "w": 72,
+   "h": 15.5,
+   "text": "1.9 GB",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 12,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "lrow-4": {
+   "kind": "box",
+   "x": 254,
+   "y": 671,
+   "w": 540,
+   "h": 36
+  },
+  "lrow-4-path": {
+   "kind": "text",
+   "x": 270,
+   "y": 681.25,
+   "w": 356.31,
+   "h": 15.5,
+   "text": "Shoot selects/Raw/A001_C014.braw",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "lrow-4-size": {
+   "kind": "text",
+   "x": 706,
+   "y": 681.25,
+   "w": 72,
+   "h": 15.5,
+   "text": "1.2 GB",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 12,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "lrow-5": {
+   "kind": "box",
+   "x": 254,
+   "y": 707,
+   "w": 540,
+   "h": 36
+  },
+  "lrow-5-path": {
+   "kind": "text",
+   "x": 270,
+   "y": 717.25,
+   "w": 356.31,
+   "h": 15.5,
+   "text": "Backups/Anna's…esktop/Screen recording 14 Oct.mov",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "lrow-5-size": {
+   "kind": "text",
+   "x": 706,
+   "y": 717.25,
+   "w": 72,
+   "h": 15.5,
+   "text": "940 MB",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 12,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "lrow-6": {
+   "kind": "box",
+   "x": 254,
+   "y": 743,
+   "w": 540,
+   "h": 36
+  },
+  "lrow-6-path": {
+   "kind": "text",
+   "x": 270,
+   "y": 753.25,
+   "w": 325.71,
+   "h": 15.5,
+   "text": "Documents/Taxes/2025 receipts.pdf",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "lrow-6-size": {
+   "kind": "text",
+   "x": 706,
+   "y": 753.25,
+   "w": 72,
+   "h": 15.5,
+   "text": "212 MB",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 12,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "lrow-more": {
+   "kind": "text",
+   "x": 270,
+   "y": 786.75,
+   "w": 412,
+   "h": 14.5,
+   "text": "And 43 more, down to 48 MB",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
   }
  },
  "theme": "light"

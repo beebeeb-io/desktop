@@ -102,3 +102,102 @@ pub fn dialog(name: &str, width: f32, title: &str, sub: Option<&str>, body: Vec<
     let card = dialog::card(name, width, title, sub.map(dialog::Sub::Wrap), body, f, t);
     dialog::scrim(0.0, card, t)
 }
+
+/// A dialog's foot (`.wn-dlg-foot`): the buttons at its trailing edge, or `even` (`.is-even`):
+/// each button that many points wide, side by side across the whole foot.
+pub fn foot_row(buttons: Vec<El>, even: Option<f32>, t: &Theme) -> El {
+    let mut f = row()
+        .key("dlg-foot")
+        .center_y()
+        .justify_end()
+        .gap(8.0)
+        .py(16.0)
+        .px(24.0)
+        .fill(t.surface)
+        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
+        .border_layout();
+    for child in buttons {
+        f = f.child(match even {
+            Some(each) => child.w(each),
+            None => child,
+        });
+    }
+    f
+}
+
+fn scrimmed(role: &'static str, name: &str, width: f32, parts: Vec<El>, t: &Theme) -> El {
+    let mut inner = col().key("dlg-clip").w_full().clip_rounded(8.0);
+    for part in parts {
+        inner = inner.child(part);
+    }
+    // The shadow and the hairline ring are outside the card; the clip that rounds the foot's
+    // corners would cut them, so it sits one level in.
+    let dlg = col()
+        .key("dlg")
+        .role(role)
+        .label(name)
+        // The foot's hairline makes a dialog's height end in a half point, so centring puts
+        // its top on a quarter point. The board draws it there, edges half covered; so does this.
+        .pixel_snap(false)
+        .w(width)
+        .radius(8.0)
+        .fill(t.card)
+        .box_shadow(kit::drop(24.0, 60.0, Color::BLACK.alpha(0.28)))
+        .box_shadow(kit::ring(kit::HAIR, t.separator))
+        .child(inner);
+    col()
+        .key("scrim")
+        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+        .center()
+        .fill(scrim_color(t))
+        .child(dlg)
+}
+
+/// A dialog that asks before something happens (`.wn-dlg-alert`, `role="alertdialog"`): a
+/// toned tile, the question, what it means; the two answers side by side, the same width.
+/// Keys: `dlg-title`, `dlg-sub`, the tile's own.
+pub fn alert(name: &str, width: f32, tile: El, title: &str, sub: &str, foot: Vec<El>, t: &Theme) -> El {
+    let words = col()
+        .key("dlg-alert-words")
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(6.0)
+        .child(
+            kit::label("dlg-title", title, DIALOG_TITLE, t.text)
+                .role("heading")
+                .level(2)
+                .w_full(),
+        )
+        .child(kit::label("dlg-sub", sub, SUB, t.text_tertiary).wrap());
+    let head = row()
+        .key("dlg-head")
+        .pt(20.0)
+        .px(24.0)
+        .pb(16.0)
+        .gap(14.0)
+        .items_start()
+        .child(tile)
+        .child(words);
+    let each = (width - 48.0 - 8.0 * (foot.len().max(1) - 1) as f32) / foot.len().max(1) as f32;
+    scrimmed("alertdialog", name, width, vec![head, foot_row(foot, Some(each), t)], t)
+}
+
+/// A dialog-size button for a destructive answer (`.kit-btn-md` on red): white on red, the
+/// same in both themes. Keys: `btn-<N>`, `btn-<N>-label`.
+pub fn button_danger(index: usize, label: &str, t: &Theme) -> El {
+    let key = format!("btn-{index}");
+    let fill = crate::theme::tokens::red_fill();
+    row()
+        .key(key.clone())
+        .role("button")
+        .label(label)
+        .h(28.0)
+        .px(12.0)
+        .center()
+        .radius(radius::MD)
+        .fill(fill)
+        .hover(fill.mix(Color::BLACK, 0.05))
+        .press(fill.mix(Color::BLACK, 0.10))
+        .focusable(true)
+        .child(kit::label(format!("{key}-label"), label, BUTTON_MD, t.white))
+}
