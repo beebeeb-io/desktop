@@ -263,9 +263,16 @@ pub fn show_backups(s: &mut State) -> bool {
 /// sidebar's Backups (Ctrl+4) shows the Backups folder, opening the Backups row in Files moves
 /// the sidebar to Backups, and Back out of it moves it to Files again.
 pub fn poll(s: &mut State) -> bool {
+    if super::session::poll(s) {
+        return true;
+    }
     let Some(root) = s.actions.source.backups_root() else {
         return false;
     };
+    // No folder is read while the session ended (`session.rs`).
+    if s.session_ended() {
+        return false;
+    }
     let Screen::Drive(route) = s.shell.app.screen() else {
         return false;
     };

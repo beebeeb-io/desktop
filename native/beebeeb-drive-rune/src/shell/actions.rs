@@ -58,6 +58,10 @@ pub trait EngineActions: Send + Sync {
     /// A scene function sets the gate on the engine so that `refresh()` reads it back. Only the
     /// fixture engine acts on this; the real engine is the authority and ignores it (the default).
     fn set_gate_for_scene(&self, _gate: GateState) {}
+    /// The session ended (the list and the key are still on this PC) and the person pressed
+    /// Sign in (DW-1109): the engine asks for the password, by closing its gate to the sign-in
+    /// screen. The default does nothing: an engine that does not know the state keeps its gate.
+    fn sign_in_again(&self) {}
 }
 
 /// Everything a frame, the tray menu or the flyout may ask the shell to do beyond navigation.
@@ -78,6 +82,8 @@ pub trait ShellActions: Send + Sync {
     fn set_autostart(&self, enabled: bool) -> Result<(), ActionError>;
     /// A scene function sets the gate on the engine; see [`EngineActions::set_gate_for_scene`].
     fn set_gate_for_scene(&self, gate: GateState);
+    /// See [`EngineActions::sign_in_again`].
+    fn sign_in_again(&self) {}
 }
 
 /// The real [`ShellActions`]: the engine for what is the engine's, the OS for the rest.
@@ -131,6 +137,9 @@ impl ShellActions for HostActions {
     }
     fn set_gate_for_scene(&self, gate: GateState) {
         self.engine.set_gate_for_scene(gate);
+    }
+    fn sign_in_again(&self) {
+        self.engine.sign_in_again();
     }
 }
 
@@ -285,6 +294,9 @@ impl EngineActions for FixtureEngine {
             drop(state);
             self.set_gate(gate);
         }
+    }
+    fn sign_in_again(&self) {
+        self.set_gate(GateState::SignedOut);
     }
 }
 

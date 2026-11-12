@@ -188,7 +188,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     // (Backups, a service folder) shows its headers over no rows.
     let empty = s.listing.items.is_empty() && s.can_add();
     let mut body = row().key("list-body").grow(1.0).min_h(0.0).w_full();
-    if empty {
+    if super::session::blanks(s) {
+        // The session ended and the rows are not to be shown (`session::KEEP_THE_LIST`): only the banner's ask.
+        body = body.child(el().key("list-blank").grow(1.0).h_full());
+    } else if empty {
         // Nothing in the folder: no headers, no panel, one way forward (DW-1106).
         body = body.child(empty_folder(s.listing.folder.id.is_none(), &t));
     } else {
@@ -238,7 +241,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 None => details.clone(),
             };
             // Without a connection the line says so (`frames::global`, DW-0121).
-            crate::frames::global::status_line(state.as_deref(), &details, &t)
+            super::session::status_line(s, &t)
+                .or_else(|| crate::frames::global::status_line(state.as_deref(), &details, &t))
                 .unwrap_or_else(|| status_line::status_line(state.as_deref(), &details, &t))
                 .role("button")
                 .label(name)

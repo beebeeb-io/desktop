@@ -29,6 +29,9 @@ impl State {
     /// Rename (F2): the selected row's name becomes a field. One row only; Backups, a service
     /// folder and what is inside them cannot be renamed (DW-0425 says why).
     pub fn begin_rename(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let rows = self.selected_rows();
         let [row] = rows[..] else { return false };
         if self.protects(std::slice::from_ref(&self.listing.items[row])) {

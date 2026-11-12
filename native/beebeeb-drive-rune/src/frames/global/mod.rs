@@ -291,6 +291,11 @@ impl State {
             return false;
         };
         self.global.ask(Intent::Frame(frame));
+        // The session ended: Sign in asks for the password (`frames::files::session`, DW-1109).
+        if frame == "DW-1109" {
+            self.sign_in_again();
+            return true;
+        }
         let event = match frame {
             "DW-0712" => Some(Event::OpenSettings(SettingsPane::Storage)),
             "DW-0741" => Some(Event::OpenSettings(SettingsPane::Backups)),

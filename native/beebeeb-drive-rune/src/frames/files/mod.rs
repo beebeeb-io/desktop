@@ -15,6 +15,7 @@ pub mod names;
 pub mod protected;
 pub mod protected_fixture;
 pub mod rename;
+pub mod session;
 pub mod sidebar;
 pub mod source;
 pub mod toolbar;
@@ -28,6 +29,8 @@ mod protected_tests;
 mod rest_tests;
 #[cfg(test)]
 mod review_tests;
+#[cfg(test)]
+mod session_tests;
 #[cfg(test)]
 mod tests;
 
@@ -179,6 +182,8 @@ pub struct Actions {
     pub protected: protected::Ui,
     /// The letters typed in the list, which jump to a name (`long_list.rs`).
     pub typed: long_list::Typed,
+    /// The session ended: what was refused (`session.rs`).
+    pub session: session::Ui,
     /// A board frame that draws a long list from this row on (DW-0420b: the gate draws one frame
     /// and cannot scroll). 0 in the app.
     pub board_first_row: usize,
@@ -210,6 +215,7 @@ impl Actions {
             host: names::Host::this(),
             protected: protected::Ui::default(),
             typed: long_list::Typed::default(),
+            session: session::Ui::default(),
             board_first_row: 0,
         }
     }
@@ -379,6 +385,9 @@ impl State {
     pub(super) fn intent(&mut self, intent: Intent) {
         use crate::shell::app::{Event, Route, Section, SettingsPane};
         let Intent::Frame(frame) = &intent;
+        if self.refuses_frame(frame) {
+            return;
+        }
         // The status line shows the b's flyout (DW-0401 to DW-1201): a second surface, no route.
         let flyout = *frame == "DW-1201";
         let event = match *frame {
@@ -513,6 +522,10 @@ impl State {
 
     /// Show the folder with this id (`None`: the root), leaving the one shown to Back.
     pub fn open_folder(&mut self, id: Option<String>) {
+        // A folder is read from the source: not while the session ended (`session.rs`).
+        if self.refused_without_session() {
+            return;
+        }
         self.files.back.push(self.listing.folder.id.clone());
         self.actions.forward.clear();
         (self.listing, self.list_error) = crate::load(self.source.as_ref(), id.as_deref());
@@ -521,6 +534,9 @@ impl State {
 
     /// Back, leaving the folder shown to Forward.
     pub fn back(&mut self) -> bool {
+        if self.refused_without_session() {
+            return false;
+        }
         let here = self.listing.folder.id.clone();
         if !self.go_back() {
             return false;
@@ -536,6 +552,9 @@ impl State {
 
     /// Forward: the folder Back left.
     pub fn forward(&mut self) -> bool {
+        if self.refused_without_session() {
+            return false;
+        }
         let Some(id) = self.actions.forward.pop() else {
             return false;
         };
@@ -558,6 +577,9 @@ impl State {
     /// Open the selection: one folder opens in place; files go to their apps, all of them.
     /// Returns whether the folder shown changed.
     pub fn open_selection(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return false;
+        }
         let items = self.selected_items();
         let lead = self.selected.and_then(|i| self.listing.items.get(i)).cloned();
         let files: Vec<DriveItem> = items.iter().filter(|i| !i.is_folder).cloned().collect();
@@ -601,6 +623,9 @@ impl State {
         if !self.can_preview() {
             return false;
         }
+        if self.refused_without_session() {
+            return true;
+        }
         // Without a connection a file that is not on this PC says so (`frames::global`, DW-0121).
         if crate::frames::global::preview_needs_connection(self) {
             return true;
@@ -612,6 +637,9 @@ impl State {
     /// Move the selection to Trash, without a question: Undo and Trash both bring it back.
     /// Like the other actions it answers whether anything is to be drawn: a change, or the message of a failure.
     pub fn trash_selection(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let rows = self.selected_rows();
         let items = self.selected_items();
         if items.is_empty() {
@@ -638,6 +666,9 @@ impl State {
 
     /// Undo the last Move to Trash: every row back where it was (in the order the folder has now).
     pub fn undo(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let rows = std::mem::take(&mut self.actions.undo);
         if rows.is_empty() {
             return false;
@@ -663,6 +694,9 @@ impl State {
 
     /// Duplicate the selection: each copy stands next to its original, selected (DW-0406).
     pub fn duplicate_selected(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let items = self.selected_items();
         if items.is_empty() {
             return false;
@@ -693,6 +727,9 @@ impl State {
 
     /// Make the selection available offline, or Remove from this PC when all of it already is.
     pub fn toggle_keep_offline(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let rows = self.selected_rows();
         let items = self.selected_items();
         if items.is_empty() {
@@ -720,6 +757,9 @@ impl State {
 
     /// Copy the selection's share link. "Link copied" is said once it is on the clipboard, not before.
     pub fn copy_link(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let items = self.selected_items();
         if items.is_empty() {
             return false;
@@ -737,6 +777,9 @@ impl State {
     }
 
     pub fn show_in_file_explorer(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let items = self.selected_items();
         if items.is_empty() {
             return false;
@@ -758,6 +801,9 @@ impl State {
     /// Free up space: the copies of the selection on this PC go; the items stay in Beebeeb and
     /// download again when opened. What was kept on this PC is no longer kept.
     pub fn free_up_space(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let rows = self.selected_rows();
         let items: Vec<DriveItem> = self
             .selected_items()
@@ -783,6 +829,9 @@ impl State {
 
     /// The toolbar's Open in File Explorer: the folder shown, in Explorer.
     pub fn open_in_file_explorer(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let folder = self.listing.folder.id.clone();
         if let Err(why) = self.actions.source.open_in_file_explorer(folder.as_deref()) {
             self.failed(Action::OpenInFileExplorer, why, tx);
@@ -798,6 +847,9 @@ impl State {
     /// Files dropped from File Explorer: into `folder` (`None`: the root). A folder that takes
     /// nothing refuses the drop, silently (DW-0481: "the row does not light up").
     pub fn upload(&mut self, folder: Option<String>, files: &[std::path::PathBuf], tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return false;
+        }
         if files.is_empty() || self.list_error.is_some() || !self.actions.source.can_add(folder.as_deref()) {
             return false;
         }
@@ -812,6 +864,9 @@ impl State {
 
     /// Try again, on the message of a failure: the same action, on what is selected now.
     pub fn retry(&mut self, tx: &mut Tx) {
+        if self.needs_session(tx) {
+            return;
+        }
         let Some(Toast::Failed(action, _)) = self.actions.toast.take() else {
             return;
         };
@@ -863,7 +918,10 @@ impl State {
     /// Change this folder's sort and put the rows in that order.
     pub fn set_sort(&mut self, sort: Sort) {
         self.actions.sort = sort;
-        self.actions.source.set_sort(self.listing.folder.id.as_deref(), sort);
+        // The order of the rows is the window's; the source hears of it only with a session.
+        if !self.session_ended() {
+            self.actions.source.set_sort(self.listing.folder.id.as_deref(), sort);
+        }
         self.forget_undo();
         self.apply_sort();
     }
