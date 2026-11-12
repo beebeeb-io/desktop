@@ -618,6 +618,15 @@ pub fn go(s: &mut State, frame: &'static str) {
         host::dispatch(s, Event::OpenSettings(pane));
         return;
     }
+    // "Show the guide again": settings closes and the guide runs on Files (DW-0701's action).
+    if frame == "DW-0380" {
+        s.settings.reset();
+        if matches!(s.shell.app.screen(), Screen::Settings(_)) {
+            host::dispatch(s, Event::Escape);
+        }
+        crate::frames::signin::setup::guide::start(s);
+        return;
+    }
     if frame == "DW-0401" {
         s.settings.reset();
         // Only settings is this lane's to close: in Drive, Esc belongs to what is open there.

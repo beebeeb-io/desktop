@@ -151,6 +151,13 @@ pub trait SetupSource {
     fn finish(&mut self);
     /// `true`: something a read returns has changed since the last call.
     fn poll(&mut self) -> bool;
+    /// Whether this PC has shown the first-time guide (DW-0380: "Shown once per PC"). Not wired:
+    /// `false`, so the guide follows each first run. The engine binds it to a flag kept per PC.
+    fn guide_shown(&self) -> bool {
+        false
+    }
+    /// The guide starts now: remember it for this PC. Not wired: nothing is kept.
+    fn mark_guide_shown(&mut self) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +172,8 @@ pub struct Script {
     pub explorer_after_retry: Explorer,
     /// `false`: Windows' passkey dialog was cancelled.
     pub passkey_added: bool,
+    /// This PC has shown the first-time guide.
+    pub guide_shown: bool,
 }
 
 impl Default for Script {
@@ -173,6 +182,7 @@ impl Default for Script {
             explorer: Explorer::Adding,
             explorer_after_retry: Explorer::Added,
             passkey_added: true,
+            guide_shown: false,
         }
     }
 }
@@ -307,5 +317,14 @@ impl SetupSource for FixtureSetupSource {
 
     fn poll(&mut self) -> bool {
         std::mem::take(&mut self.changed)
+    }
+
+    fn guide_shown(&self) -> bool {
+        self.script.guide_shown
+    }
+
+    fn mark_guide_shown(&mut self) {
+        self.script.guide_shown = true;
+        self.note("mark_guide_shown".into());
     }
 }

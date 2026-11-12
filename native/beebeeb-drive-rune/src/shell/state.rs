@@ -53,6 +53,8 @@ pub struct State {
     pub(crate) tray: Option<crate::frames::tray::Ui>,
     pub(crate) shortcuts: crate::frames::tray::shortcuts::Shortcuts,
     pub(crate) setup: Option<crate::frames::signin::setup::Ui>,
+    /// The first-time guide over the main window (DW-0380, DW-0301 to DW-0305).
+    pub(crate) guide: crate::frames::signin::setup::guide::Guide,
     /// Sync history and Available offline (`frames::this_pc`).
     pub(crate) this_pc: crate::frames::this_pc::Ui,
     /// Backups, a section of settings (`frames::backups`).
@@ -127,6 +129,7 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         tray: None,
         shortcuts: Default::default(),
         setup: None,
+        guide: Default::default(),
         this_pc: crate::frames::this_pc::Ui::fixture(),
         backups: crate::frames::backups::BackupsUi::first(crate::shell::instance::DEV_BUILD),
     }

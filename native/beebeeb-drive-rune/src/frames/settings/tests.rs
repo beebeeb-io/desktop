@@ -209,8 +209,9 @@ fn the_sidebar_is_navigation_of_links_with_the_current_one_selected() {
 #[test]
 fn every_row_of_general_acts() {
     // (Diagnostics, item-1-2, opens its own page: `tests_more.rs`.)
-    let asks: [(&str, Intent); 4] = [
-        ("item-1-0", Intent::Show("DW-0380")),
+    // "Show the guide again" (item-1-0) asks nothing of the shell: it runs the guide
+    // (`signin::setup::guide_tests::show_the_guide_again_in_settings_runs_it_on_files`).
+    let asks: [(&str, Intent); 3] = [
         ("item-2-0", Intent::Open("privacy")),
         ("item-2-1", Intent::Open("export-my-data")),
         ("item-3-0", Intent::Web("terms-and-privacy-policy")),

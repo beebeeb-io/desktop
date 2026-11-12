@@ -427,6 +427,8 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= crate::frames::settings::bandwidth::poll(s, _seconds, tx);
     // What the sign-in screens asked the shell for.
     changed |= drain_signin_intents(s);
+    // "Open my Beebeeb" at the end of the first run starts the first-time guide (DW-0380).
+    changed |= crate::frames::signin::setup::guide::poll(s, tx);
     // The session and the tray: the engine may have changed since the last frame.
     let gate_before = s.shell.app.gate();
     changed |= s.shell.refresh();
@@ -606,6 +608,10 @@ fn shell_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let slash_cmd = !ev.mods.alt;
     // Search shows no place of its own: Back and Forward are off until Esc ends it (DW-0802).
     let searching = crate::frames::search::holds_back(s);
+    // While a tip of the first-time guide shows, Esc (Skip), Tab and Enter are its card's (DW-0301).
+    if crate::frames::signin::setup::guide::on_key(s, ev, tx) {
+        return true;
+    }
     let event = match ev.key {
         Key::Left if plain_alt && !searching => Some(Event::Back),
         Key::Right if plain_alt && !searching => Some(Event::Forward),
