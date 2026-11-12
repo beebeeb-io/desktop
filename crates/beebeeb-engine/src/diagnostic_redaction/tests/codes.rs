@@ -9,15 +9,15 @@ fn error_code_is_a_closed_value_that_cannot_carry_a_name() {
     let json = serde_json::to_string(&classify_error_code(ISSUE_ERROR)).unwrap();
     assert_eq!(json, "\"other\"");
     assert_eq!(
-        classify_error_code("write /Users/guus/Tax 2025/aangifte.pdf: Permission denied (os error 13)"),
+        classify_error_code("write /Users/alice/Tax 2025/aangifte.pdf: Permission denied (os error 13)"),
         DiagnosticErrorCode::Permission
     );
     assert_eq!(
-        classify_error_code("staged upload payload is missing: /Users/guus/x.pdf"),
+        classify_error_code("staged upload payload is missing: /Users/alice/x.pdf"),
         DiagnosticErrorCode::PayloadMissing
     );
     assert_eq!(
-        classify_error_code("create dest dir /Users/guus/Tax 2025: No such file or directory (os error 2)"),
+        classify_error_code("create dest dir /Users/alice/Tax 2025: No such file or directory (os error 2)"),
         DiagnosticErrorCode::LocalWriteFailed
     );
     assert_eq!(
@@ -25,7 +25,7 @@ fn error_code_is_a_closed_value_that_cannot_carry_a_name() {
         DiagnosticErrorCode::PathRejected
     );
     assert_eq!(
-        classify_error_code("ffmpeg video thumbnail failed: /Users/guus/movie.mov: Invalid data"),
+        classify_error_code("ffmpeg video thumbnail failed: /Users/alice/movie.mov: Invalid data"),
         DiagnosticErrorCode::Thumbnail
     );
     assert_eq!(
@@ -82,5 +82,5 @@ fn group_labels_outside_the_allow_list_fold_into_other() {
         allowed_label("waiting_for_folder", PAUSE_REASON_LABELS),
         "waiting_for_folder"
     );
-    assert_eq!(allowed_label("/Users/guus", PAUSE_REASON_LABELS), "other");
+    assert_eq!(allowed_label("/Users/alice", PAUSE_REASON_LABELS), "other");
 }

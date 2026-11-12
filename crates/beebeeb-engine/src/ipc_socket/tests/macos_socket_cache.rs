@@ -12,7 +12,7 @@ fn test_macos_ipc_socket_path_is_inside_group_container_not_tmp() {
     // never under /tmp or $XDG_RUNTIME_DIR (which the sandbox blocks
     // entirely, causing the original "Timed out waiting for the local
     // Beebeeb sync daemon" report).
-    let home = std::path::Path::new("/Users/guuslangelaar");
+    let home = std::path::Path::new("/Users/alice");
     let path = macos_ipc_socket_path_in(&crate::identity::REAL, home);
 
     assert!(
@@ -64,7 +64,7 @@ fn test_macos_hydrate_cache_dir_is_inside_group_container_not_tmp() {
     // sandboxed temp dir — see `macos_hydrate_cache_dir`'s doc comment.
     // The shared App Group container is the one directory both sides can
     // actually agree on.
-    let home = std::path::Path::new("/Users/guuslangelaar");
+    let home = std::path::Path::new("/Users/alice");
     let path = macos_hydrate_cache_dir_in(&crate::identity::REAL, home);
 
     assert!(
@@ -130,7 +130,7 @@ fn test_macos_hydrate_cache_dir_does_not_collide_with_ipc_socket_path() {
     // Both live under the same App Group container by design (task
     // 1670's doc comment); they must still be distinct paths, or a
     // hydrated file could shadow (or be shadowed by) the IPC socket.
-    let home = std::path::Path::new("/Users/guuslangelaar");
+    let home = std::path::Path::new("/Users/alice");
     let socket = macos_ipc_socket_path_in(&crate::identity::REAL, home);
     let hydrate_dir = macos_hydrate_cache_dir_in(&crate::identity::REAL, home);
 
@@ -380,7 +380,7 @@ fn test_macos_ipc_socket_path_ignores_sandboxed_home_env_var() {
 
     let original_home = std::env::var_os("HOME");
     // A realistic sandboxed $HOME, per the task 1524 root-cause report:
-    // "/Users/guuslangelaar/Library/Containers/io.beebeeb.app/Data".
+    // "/Users/alice/Library/Containers/io.beebeeb.app/Data".
     let sandbox_home = "/Users/x/Library/Containers/io.beebeeb.app/Data";
     // SAFETY: mutation is serialized by HOME_ENV_LOCK above, and every
     // path out of this test (including panics, via catch_unwind below)

@@ -69,7 +69,7 @@ restore or save the GitHub dependency cache, keeps incremental compilation on, a
 The runner's `.env` file (next to `run.sh`; read at start) sets, for every job:
 
 ```
-CARGO_TARGET_DIR=~ghrunner/cache/target-desktop
+CARGO_TARGET_DIR=/home/ghrunner/cache/target-desktop
 CARGO_INCREMENTAL=1
 ```
 

@@ -178,8 +178,8 @@ Paths are relative to the desktop repo root.
 
 ```bash
 WT=~/code/bb-worktrees/desktop-1887
-LOCK=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/scripts/coord/with-lock.sh
-EVID=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/.claude/tasks/_qa-evidence/1887
+LOCK=~/Development/Beebeeb/beebeeb.io/scripts/coord/with-lock.sh
+EVID=~/Development/Beebeeb/beebeeb.io/.claude/tasks/_qa-evidence/1887
 mkdir -p $EVID
 ```
 
@@ -8439,8 +8439,8 @@ codesign -d --entitlements - "$APPQA" 2>&1 | grep -c app-sandbox          # 1
 - [ ] **Step 1: A tree of its own on `main` at the merge commit, then read the file.**
 
 ```bash
-git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop fetch origin
-git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop worktree add ~/code/bb-worktrees/desktop-1887-blocker -b chore/1887-release-blocker-resolved origin/main
+git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop fetch origin
+git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop worktree add ~/code/bb-worktrees/desktop-1887-blocker -b chore/1887-release-blocker-resolved origin/main
 cd ~/code/bb-worktrees/desktop-1887-blocker
 git log --oneline -1                                             # the merge commit the task file names
 cat RELEASE_BLOCKERS.md

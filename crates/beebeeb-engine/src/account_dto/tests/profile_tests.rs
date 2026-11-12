@@ -9,7 +9,7 @@ use super::*;
 fn account_profile_parses_full_shape() {
     let json = r#"{
             "user_id": "11111111-1111-1111-1111-111111111111",
-            "email": "guus@example.com",
+            "email": "alice@example.com",
             "email_verified": true,
             "created_at": "2026-01-02T03:04:05Z",
             "frozen_at": null,
@@ -19,7 +19,7 @@ fn account_profile_parses_full_shape() {
             "admin_user_id": null
         }"#;
     let p: AccountProfile = serde_json::from_str(json).unwrap();
-    assert_eq!(p.email, "guus@example.com");
+    assert_eq!(p.email, "alice@example.com");
     assert!(p.email_verified);
     assert_eq!(p.created_at, "2026-01-02T03:04:05Z");
     assert_eq!(p.frozen_at, None);

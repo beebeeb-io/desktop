@@ -87,7 +87,7 @@ Each item has file:line evidence from this worktree (`c351f98`) or from Guus's M
 - Brand: no emoji, the amber accent only for primary actions and encryption state, Inter/JetBrains Mono as already used. "Europe"/"the EU" wording is untouched.
 - Design before code: the artefact changes (Task 13) land on the UI branch **before** any frontend commit (spec §12).
 - Evidence: every new test is seen failing first, and the failure is pasted into the task file's Notes. The tests the spec names are mutation-checked. Each task reports counts (`test result: ok. N passed; 0 failed`, `N pass / 0 fail`), never adjectives.
-- Process: one worktree per lane. `CARGO_TARGET_DIR` is never shared between worktrees. Heavy cargo runs go through `/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/scripts/coord/with-lock.sh cargo-build -- …` (rc 75 = busy, retry). No `git stash`, no `pkill`, foreground commands only. Lanes do not commit `graphify-out/`. Commits use an explicit pathspec and end with the trailer of the model that wrote them (for example `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>`).
+- Process: one worktree per lane. `CARGO_TARGET_DIR` is never shared between worktrees. Heavy cargo runs go through `~/Development/Beebeeb/beebeeb.io/scripts/coord/with-lock.sh cargo-build -- …` (rc 75 = busy, retry). No `git stash`, no `pkill`, foreground commands only. Lanes do not commit `graphify-out/`. Commits use an explicit pathspec and end with the trailer of the model that wrote them (for example `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>`).
 - **R8, re-sign-in in place.** A same-account sign-in replaces only the session token (Keychain and memory). It never purges the queue, never clears or rewrites keys, never removes the Finder domain, and never signs out. A different account, or one whose identity cannot be established, is an account switch: the warning with the pending-change count, then the full sign-out, then a fresh sign-in. On a mismatch nothing local changes. Windows keeps today's sign-in refusal and today's "Sign in again" flow.
 - **R8/R9/R10, security.** The `crypto-security-reviewer` agent reviews Tasks 10–12 before Lane R's PR merges (Task 11 step 9). Its findings are recorded verbatim in the task Notes, and the R10 findings also in the private workspace task's Notes.
 - **R10, local data belongs to one account.** Every engine start binds first (`spawn_bound_engine`, the only `EngineRunner::spawn(` in production). Another account's or an unrecorded owner's data is reset before anything starts (Windows refuses instead). An owner that cannot be compared stops the start and deletes nothing. A failed reset or sign-out purge stops. Public wording stays neutral ("local data is bound to the account that created it; a different account never reuses it"); background lives only in the private task.
@@ -161,12 +161,12 @@ Paths are relative to the desktop repo root (the worktree).
 
 ```bash
 export TASK=<allocated id>
-git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop fetch origin
-git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop worktree add ~/code/bb-worktrees/desktop-$TASK-r -b feat/$TASK-finder-reconciler origin/main
-git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop worktree add ~/code/bb-worktrees/desktop-$TASK-t -b feat/$TASK-finder-reconciler-ui origin/main
+git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop fetch origin
+git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop worktree add ~/code/bb-worktrees/desktop-$TASK-r -b feat/$TASK-finder-reconciler origin/main
+git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop worktree add ~/code/bb-worktrees/desktop-$TASK-t -b feat/$TASK-finder-reconciler-ui origin/main
 ```
 
-Each lane sets `WT` to its own worktree and never builds in the other one. Cargo uses the worktree's own `src-tauri/target`, so `CARGO_TARGET_DIR` stays **unset**. `LOCK=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/scripts/coord/with-lock.sh`. The evidence directory is `EVID=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/.claude/tasks/_qa-evidence/$TASK`. Lanes write evidence and Notes there, and the lead commits them (the workspace `.git` is lead-only).
+Each lane sets `WT` to its own worktree and never builds in the other one. Cargo uses the worktree's own `src-tauri/target`, so `CARGO_TARGET_DIR` stays **unset**. `LOCK=~/Development/Beebeeb/beebeeb.io/scripts/coord/with-lock.sh`. The evidence directory is `EVID=~/Development/Beebeeb/beebeeb.io/.claude/tasks/_qa-evidence/$TASK`. Lanes write evidence and Notes there, and the lead commits them (the workspace `.git` is lead-only).
 
 The lane's loop command, used in every Rust task (from `$WT/src-tauri`):
 
@@ -9515,8 +9515,8 @@ Background on R10 stays in the private task. Its Notes get the security review's
 Rust (Lane R head, then again after Lane T's rebase onto merged main). Create the fresh tree with the same command each time, and remove it when done:
 
 ```bash
-git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop fetch origin
-git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop worktree add --detach ~/code/bb-worktrees/desktop-$TASK-gate origin/feat/$TASK-finder-reconciler
+git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop fetch origin
+git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop worktree add --detach ~/code/bb-worktrees/desktop-$TASK-gate origin/feat/$TASK-finder-reconciler
 cd ~/code/bb-worktrees/desktop-$TASK-gate/src-tauri
 $LOCK cargo-build -- cargo test --locked --no-run > $EVID/final-no-run.log 2>&1; echo "rc=$?"
 $LOCK cargo-build -- cargo test --locked > $EVID/final-cargo-test.log 2>&1; echo $? > $EVID/final-cargo-test.exit
@@ -9544,7 +9544,7 @@ bun run lint > $EVID/final-eslint.log 2>&1; echo "eslint rc=$?"
 - [ ] **Step 3: Build the QA app (local integration tree, never pushed)**
 
 ```bash
-git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop worktree add ~/code/bb-worktrees/desktop-$TASK-qa feat/$TASK-finder-reconciler-ui
+git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop worktree add ~/code/bb-worktrees/desktop-$TASK-qa feat/$TASK-finder-reconciler-ui
 QA=~/code/bb-worktrees/desktop-$TASK-qa
 git -C $QA merge --no-edit feat/$TASK-finder-reconciler     # local only
 security find-identity -v -p codesigning | grep "Apple Development"
@@ -9568,12 +9568,12 @@ The three angle-bracket values are read from the two listing commands directly a
 **Precondition since R8: Guus's Mac has no changes waiting to upload.** The QA build shares the installed app's container and state (same bundle id), and its Keychain items when the signing team matches. After the startup 401 his keys stay (Task 12), so the first test-account sign-in in D0 is an **account switch** away from his account. Its warning shows his pending-change count, and "Sign out and switch" removes those changes. Before running the commands below, open his installed app, confirm it reports nothing waiting to upload, and screenshot that (`$EVID/precondition-nothing-pending.png`). If anything is waiting, let it upload first, or stop and ask Guus.
 
 ```bash
-cd /Users/guuslangelaar/Development/Beebeeb/beebeeb.io && make dev-native     # API :3001, web :5173 (in its own terminal)
+cd ~/Development/Beebeeb/beebeeb.io && make dev-native     # API :3001, web :5173 (in its own terminal)
 curl -sf localhost:3001/health
 osascript -e 'quit app "Beebeeb"'; mkdir -p ~/bb-qa/$TASK && mv /Applications/Beebeeb.app ~/bb-qa/$TASK/Beebeeb-installed.app
 ditto "$APPQA" /Applications/Beebeeb.app
 launchctl setenv BB_API_BASE http://localhost:3001
-EVID=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/.claude/tasks/_qa-evidence/$TASK
+EVID=~/Development/Beebeeb/beebeeb.io/.claude/tasks/_qa-evidence/$TASK
 LOG="$HOME/Library/Containers/io.beebeeb.app/Data/Library/Logs/Beebeeb/lifecycle.log"
 mark() { date '+%Y-%m-%d %H:%M:%S' > "$EVID/$1.start"; (wc -l < "$LOG" 2>/dev/null || echo 0) | tr -d ' ' > "$EVID/$1.loglines"; }
 collect() {
@@ -9612,7 +9612,7 @@ The phrase `adding domain` is a guess at fileproviderd's wording. In D0, read `$
 **Optional D-S (capture a `signing` code; Spec issue 6).** Quit Beebeeb. Re-sign a copy of the QA app without its provisioning profile: `ditto "$APPQA" ~/bb-qa/$TASK/Beebeeb-adhoc.app; codesign --force --deep --sign - --entitlements src-tauri/entitlements.plist ~/bb-qa/$TASK/Beebeeb-adhoc.app`. Launch it, sign in, and read the failure's `domain=`/`code=` in the lifecycle log. If macOS refuses to launch it, write that down and skip the rung. If a new pair appears, add it to `SIGNING_CODES` with its row in `classify_covers_every_row_of_the_table` (Task 1, mutation-checked) before Lane R merges. Delete the ad-hoc copy afterwards.
 
 **D9: account binding (R10), before and after.** Follow the device check written in the private workspace task: its steps, its two local test accounts and its expected results stay in that private file. Run it twice:
-1. **Before**, on a debug build of `origin/main`. Build it with step 3's recipe in its own detached tree (`git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop worktree add --detach ~/code/bb-worktrees/desktop-$TASK-before origin/main`), and install it in place of the QA build for this run only.
+1. **Before**, on a debug build of `origin/main`. Build it with step 3's recipe in its own detached tree (`git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop worktree add --detach ~/code/bb-worktrees/desktop-$TASK-before origin/main`), and install it in place of the QA build for this run only.
 2. **After**, on the QA build, reinstalled with `ditto "$APPQA" /Applications/Beebeeb.app`.
 
 Both runs use the local API (`BB_API_BASE` as set in step 4), and the step-4 precondition holds (nothing of Guus's waiting to upload). Evidence goes to the private task's folder under `.claude/tasks/_qa-evidence/` and to `$EVID` (lifecycle lines and screenshots only). Record the outcome in the private task's Notes. Here, write one line: `D9: pass — see the private task` (or the failure). Remove the before-tree afterwards with `git -C … worktree remove ~/code/bb-worktrees/desktop-$TASK-before`.
