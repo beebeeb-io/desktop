@@ -121,8 +121,32 @@ pub fn kbd(key: &'static str, keys: &str, t: &Theme) -> El {
         .child(kit::label(key, keys, type_::KBD, t.text_tertiary))
 }
 
+/// A control while the gate is closed: drawn, and neither focusable nor pressable.
+fn out_of_reach(control: El, off: bool) -> El {
+    if off {
+        control.disabled(true).focusable(false)
+    } else {
+        control
+    }
+}
+
+/// What the toolbar says while the session's gate is closed (DW-0009 locked, DW-0014 no plan
+/// yet): its own heading, and every control drawn but out of reach (the board dims them).
+pub struct Closed<'a> {
+    pub title: &'a str,
+    /// The line under the title ("No plan yet"); none while locked.
+    pub sub: Option<&'a str>,
+}
+
 pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
+    toolbar_in(s, t, trailing_inset, None)
+}
+
+/// The toolbar; with `closed`, as it stands while the gate is closed.
+pub fn toolbar_in(s: &State, t: &Theme, trailing_inset: f32, closed: Option<&Closed<'_>>) -> El {
     let item_count = s.listing.items.len();
+    let off = closed.is_some();
+    let idle = if off { ToolState::Off } else { ToolState::Idle };
 
     let nav = row()
         .key("nav")
@@ -132,7 +156,7 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
                 "Back",
                 &icons::CHEVRON_LEFT,
                 16.0,
-                if s.can_go_back() {
+                if s.can_go_back() && !off {
                     ToolState::Idle
                 } else {
                     ToolState::Off
@@ -149,37 +173,47 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
                 .shortcut_hint("Alt+Right"),
         );
 
-    let title = col()
-        .key("folder-info")
-        .px(4.0)
-        .min_w(0.0)
-        .child(kit::label("folder-title", s.listing.folder.name.clone(), type_::TITLE, t.text).truncate())
-        .child(kit::label(
-            "item-count",
-            if item_count == 1 {
-                "1 item".to_string()
-            } else {
-                format!("{item_count} items")
-            },
-            type_::TITLE_SUB,
-            t.text_tertiary,
-        ));
+    let mut title = col().key("folder-info").px(4.0).min_w(0.0).child(
+        kit::label(
+            "folder-title",
+            closed.map_or_else(|| s.listing.folder.name.clone(), |c| c.title.to_string()),
+            type_::TITLE,
+            t.text,
+        )
+        .truncate(),
+    );
+    let count = match closed {
+        Some(c) => c.sub.map(str::to_string),
+        None if item_count == 1 => Some("1 item".to_string()),
+        None => Some(format!("{item_count} items")),
+    };
+    if let Some(count) = count {
+        title = title.child(kit::label("item-count", count, type_::TITLE_SUB, t.text_tertiary));
+    }
 
     let view_toggle = segmented(
         "view-toggle",
         "View",
         vec![
-            segment("view-list", "as List", &icons::VIEW_LIST, true, t),
-            segment("view-grid", "as Grid", &icons::VIEW_GRID, false, t),
+            // Closed: neither view is the chosen one, and neither can be chosen.
+            out_of_reach(segment("view-list", "as List", &icons::VIEW_LIST, !off, t), off),
+            out_of_reach(segment("view-grid", "as Grid", &icons::VIEW_GRID, false, t), off),
         ],
         t,
     );
 
-    let sort_btn = tool_button("sort-btn", "Sort", &icons::SORT, 15.0, ToolState::Idle, t).child(kit::glyph(
+    // `.mk-tgroup` at 45 % while the gate is closed.
+    let view_toggle = if off {
+        view_toggle.opacity(0.45).disabled(true)
+    } else {
+        view_toggle
+    };
+
+    let sort_btn = tool_button("sort-btn", "Sort", &icons::SORT, 15.0, idle, t).child(kit::glyph(
         "sort-caret",
         &icons::CHEVRON_DOWN,
         11.0,
-        t.text_secondary,
+        if off { t.text_quaternary } else { t.text_secondary },
     ));
 
     let panel_btn = tool_button(
@@ -187,7 +221,9 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
         "Details panel",
         &icons::PANEL_TOGGLE,
         16.0,
-        if s.show_detail_pane {
+        if off {
+            ToolState::Off
+        } else if s.show_detail_pane {
             ToolState::On
         } else {
             ToolState::Idle
@@ -217,6 +253,12 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
         .child(kit::glyph("plus-icon", &icons::PLUS, 14.0, t.accent_text_on))
         .child(kit::label("new-label", "New", type_::LABEL, t.accent_text_on))
         .child(kit::glyph("new-caret", &icons::CHEVRON_DOWN, 11.0, t.accent_text_on));
+    // `.mk-new.is-off`: 40 %.
+    let new_btn = if off {
+        new_btn.opacity(0.4).disabled(true).focusable(false)
+    } else {
+        new_btn
+    };
 
     kit::note_text(
         "search-placeholder",
@@ -238,7 +280,14 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
         .box_shadow(kit::ring_inset(t.separator))
         .center_y()
         .child(kit::glyph("search-icon", &icons::SEARCH, 13.0, t.text_tertiary))
-        .child(
+        .child(if off {
+            // Nothing is searched while the gate is closed: the field's words, and no input.
+            row().key("search-input").a11y_hidden().grow(1.0).center_y().child(
+                rune::text(SEARCH_PLACEHOLDER)
+                    .font(type_::SEARCH)
+                    .color(t.text_tertiary),
+            )
+        } else {
             text_input(&s.search, type_::SEARCH)
                 .key("search-input")
                 .label("Search names")
@@ -247,11 +296,11 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
                 .color(t.text)
                 .placeholder(SEARCH_PLACEHOLDER, t.text_tertiary)
                 .on_edit(|s: &mut State| &mut s.search)
-                .grow(1.0),
-        )
+                .grow(1.0)
+        })
         .child(kbd("kbd-hint", "Ctrl+F", t));
 
-    row()
+    let bar = row()
         .key("toolbar")
         .role("toolbar")
         .label("Files")
@@ -269,8 +318,19 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
         .child(el().key("toolbar-spacer").grow(1.0))
         .child(view_toggle)
         .child(sort_btn)
-        .child(panel_btn)
-        .child(sep)
-        .child(new_btn)
-        .child(search_field)
+        .child(panel_btn);
+    // The board's toolbar has "Open in File Explorer" as its last icon button since b4ffef881. The
+    // Files frame draws its own (`frames/files/toolbar.rs`); closed, it is here and off like the rest.
+    let bar = match closed {
+        Some(_) => bar.child(tool_button(
+            "open-explorer",
+            "Open in File Explorer",
+            &crate::theme::icons_settings::FOLDER,
+            16.0,
+            ToolState::Off,
+            t,
+        )),
+        None => bar,
+    };
+    bar.child(sep).child(new_btn).child(search_field)
 }

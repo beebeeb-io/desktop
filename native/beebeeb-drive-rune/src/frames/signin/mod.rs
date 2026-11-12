@@ -15,6 +15,9 @@
 //! Two hooks wait for a caller in `shell/host.rs`: [`poll`] (the engine's answers that arrive
 //! between presses) and [`on_window_focus`] (a shown password is hidden when the window is left).
 
+pub mod before_files;
+#[cfg(test)]
+mod before_files_tests;
 pub mod icons;
 pub mod qr;
 pub mod setup;

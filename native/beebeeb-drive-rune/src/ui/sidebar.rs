@@ -192,28 +192,75 @@ pub(crate) fn badge_for(s: &State, section: SidebarSection) -> Option<Count> {
     }
 }
 
+/// An item while the gate is closed: drawn, and neither focusable nor pressable.
+fn closed(item: El, open: bool) -> El {
+    if open {
+        item
+    } else {
+        item.disabled(true).focusable(false)
+    }
+}
+
+/// How the sidebar stands while the session's gate is closed (the board's DW-0009 and DW-0014).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Standing {
+    /// The window is open: a section is selected, every item can be pressed.
+    Open,
+    /// App lock is on (DW-0009): the same sidebar, dimmed, nothing selected, nothing pressable.
+    Locked,
+    /// The account has no plan (DW-0014): dimmed, no counts, "No plan" over an empty meter and
+    /// where to get one.
+    NoPlan,
+}
+
+impl Standing {
+    /// Whether the account's email, its storage block and the items' counts are drawn in this
+    /// standing. The ONE switch for them: today every standing draws them, as the board does
+    /// (DW-0009 shows all three while locked). A ruling that a locked window shows less is this
+    /// line, the board's frame first.
+    pub fn shows_account_details(self) -> bool {
+        match self {
+            Standing::Open | Standing::Locked | Standing::NoPlan => true,
+        }
+    }
+}
+
 pub fn sidebar(s: &State, t: &Theme) -> El {
+    sidebar_in(s, t, Standing::Open)
+}
+
+/// The sidebar in `standing`. [`sidebar`] is `Standing::Open`.
+pub fn sidebar_in(s: &State, t: &Theme, standing: Standing) -> El {
+    let open = standing == Standing::Open;
+    let no_plan = standing == Standing::NoPlan;
+    let details = standing.shows_account_details();
     let storage = s.storage;
     let active = s.sidebar_section;
 
     let mut sections = col().key("sidebar-sections").gap(1.0);
     for &section in SidebarSection::all() {
-        let count = badge_for(s, section);
-        sections = sections.child(
-            side_item(
-                section.label(),
-                section.icon(),
-                count,
-                active == section,
-                section.shortcut(),
-                t,
-            )
-            .on_press(move |s: &mut State| s.sidebar_section = section),
+        let count = if no_plan || !details {
+            None
+        } else {
+            badge_for(s, section)
+        };
+        let item = side_item(
+            section.label(),
+            section.icon(),
+            count,
+            open && active == section,
+            section.shortcut(),
+            t,
         );
+        sections = sections.child(if open {
+            item.on_press(move |s: &mut State| s.sidebar_section = section)
+        } else {
+            closed(item, open)
+        });
     }
 
     let kept = s.this_pc.kept_count() as u32;
-    let offline_count = (kept > 0).then_some(Count::Plain(kept));
+    let offline_count = (kept > 0 && !no_plan && details).then_some(Count::Plain(kept));
     let this_pc = col()
         .key("this-pc")
         .gap(1.0)
@@ -223,21 +270,20 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
             type_::SECTION_LABEL,
             t.text_tertiary,
         )))
-        .child(side_item(
-            "Sync history",
-            &icons::SYNC_HISTORY,
-            None,
-            false,
-            "Ctrl+6",
-            t,
+        .child(closed(
+            side_item("Sync history", &icons::SYNC_HISTORY, None, false, "Ctrl+6", t),
+            open,
         ))
-        .child(side_item(
-            "Available offline",
-            &icons::AVAILABLE_OFFLINE,
-            offline_count,
-            false,
-            "Ctrl+7",
-            t,
+        .child(closed(
+            side_item(
+                "Available offline",
+                &icons::AVAILABLE_OFFLINE,
+                offline_count,
+                false,
+                "Ctrl+7",
+                t,
+            ),
+            open,
         ));
 
     let nav = col()
@@ -254,7 +300,9 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
     // the engine provides it; the board's snapshot path passes `Some((files, photos))` from
     // the fixture; a live window without a wired split shows one plain segment.
     let track_w = SIDEBAR_W - 2.0 * (10.0 + 6.0 + 4.0) - kit::HAIR;
-    let storage_value = if s.storage_known {
+    let storage_value = if no_plan {
+        "No plan".to_string()
+    } else if s.storage_known {
         format!(
             "{} of {}",
             format_storage(storage.used_bytes),
@@ -268,6 +316,7 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
     // The split: the board's snapshot path holds a fixture split in `storage_split`; a live
     // window shows one segment (total used) until the engine wires the category breakdown.
     let (seg_0, seg_1) = match s.storage_split {
+        _ if no_plan => (0.0, 0.0),
         Some((files, _photos)) => {
             let files_frac = (files.min(storage.used_bytes) as f64 / quota) as f32;
             let photos_frac = ((storage.used_bytes - files).max(0) as f64 / quota) as f32;
@@ -292,7 +341,8 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
                 .child(kit::label(
                     "storage-value",
                     storage_value.clone(),
-                    type_::KBD,
+                    // A figure is set in mono; "No plan" is words.
+                    if no_plan { type_::CAPTION } else { type_::KBD },
                     t.text_tertiary,
                 )),
         )
@@ -305,7 +355,13 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
                 .clip_rounded(2.5)
                 .fill(t.separator)
                 // Neutral fills: Amber is only encryption state and the primary action.
-                .child(el().key("meter-fill-0").h_full().w(track_w * seg_0).fill(t.text))
+                .child(
+                    el().key("meter-fill-0")
+                        .h_full()
+                        .w(track_w * seg_0)
+                        // `.tone-neutral` on the empty meter of an account with no plan.
+                        .fill(if no_plan { t.text_quaternary } else { t.text }),
+                )
                 .child(
                     el().key("meter-fill-1")
                         .h_full()
@@ -315,7 +371,14 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
         );
     // The category breakdown: only when the source provides one (never a board sample
     // beside a real account's total).
-    if let Some((files, _)) = s.storage_split {
+    if no_plan {
+        meter = meter.child(kit::label(
+            "storage-hint",
+            "Choose a plan on beebeeb.io",
+            type_::CAPTION,
+            t.text_tertiary,
+        ));
+    } else if let Some((files, _)) = s.storage_split {
         if s.storage_known {
             meter = meter.child(
                 row()
@@ -357,15 +420,17 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
                 .grow(1.0)
                 .min_w(0.0)
                 .child(kit::label("account-name", "Anna Visser", type_::BODY_SEMI, t.text).truncate())
-                .child(
+                .child(if details {
                     kit::label(
                         "account-email",
                         "anna@northwind.studio",
                         type_::BODY_SM,
                         t.text_tertiary,
                     )
-                    .truncate(),
-                ),
+                    .truncate()
+                } else {
+                    el().key("account-email-off")
+                }),
         )
         .child(
             el().key("settings-btn")
@@ -378,7 +443,8 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
                 .center()
                 .hover(t.selection)
                 .press(t.press)
-                .focusable(true)
+                .focusable(open)
+                .disabled(!open)
                 .child(kit::glyph("settings-icon", &icons::SETTINGS, 15.0, t.text_secondary)),
         );
 
@@ -388,11 +454,11 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
         .pt(10.0)
         .px(6.0)
         .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .child(meter)
-        .child(account);
+        .border_layout();
+    let foot = if details { foot.child(meter) } else { foot };
+    let foot = foot.child(account);
 
-    col()
+    let side = col()
         .key("sidebar")
         .w(SIDEBAR_W)
         .h_full()
@@ -405,7 +471,9 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
         .pb(10.0)
         .child(brand("Drive", t))
         .child(nav)
-        .child(foot)
+        .child(foot);
+    // `.mk-side` at 55 % while the gate is closed (the board).
+    if open { side } else { side.opacity(0.55) }
 }
 
 /// Format bytes as "240 GB", "1 TB" (base 10, as the board shows storage).
