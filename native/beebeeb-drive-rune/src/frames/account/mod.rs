@@ -273,6 +273,17 @@ pub fn sync(s: &mut State) {
     }
 }
 
+/// The session ended under what was open (the app locked, the account signed out, another
+/// account signed in): every flow of this lane ends. What was typed is wiped, a Windows Hello
+/// that is up is cancelled (its late answer finds no wait), the request under review is
+/// forgotten, and the section is back on its list, so the person starts again from there.
+pub fn end_flows(s: &mut State) {
+    let ui = &mut s.account;
+    approve::leave(ui);
+    ui.form = form::Form::default();
+    ui.show(Pane::root(ui.pane.section()).unwrap_or(Pane::Account));
+}
+
 /// A board frame of this lane's as a state of it: the pane, and the confirm over it.
 fn local(frame: &str) -> Option<(Pane, Option<Dialog>)> {
     Some(match frame {

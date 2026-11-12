@@ -317,6 +317,16 @@ pub(super) fn approve(s: &mut State) {
     ui.dialog = Some(Dialog::ApproveHello);
 }
 
+/// Tests outside this lane press Approve through these.
+#[cfg(test)]
+pub fn press_approve(s: &mut State) {
+    approve(s);
+}
+#[cfg(test)]
+pub fn press_approve_tx(s: &mut State, _tx: &mut Tx) {
+    approve(s);
+}
+
 /// Deny (the button, and Esc): the request ends with nothing shared. A prompt that is up goes first.
 fn deny(s: &mut State) {
     let ui = &mut s.account;
