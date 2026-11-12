@@ -248,8 +248,9 @@ try {
     }
     # reqwest honours these: every HTTP(S) request of the app goes to a closed local port.
     $env:HTTPS_PROXY = 'http://127.0.0.1:9'; $env:HTTP_PROXY = 'http://127.0.0.1:9'; $env:ALL_PROXY = 'http://127.0.0.1:9'; $env:NO_PROXY = ''
-    # A console-subsystem exe: -NoNewWindow keeps it in this console, so no console window of its own appears.
-    # --api-base: the TEST build's own server is the same closed local port (it says so on stdout: "api base: ...").
+    # A GUI-subsystem release binary: Windows does not open a console window beside it.
+    # -NoNewWindow is kept for in-console invocation (debug builds, manual runs) and is harmless here.
+    # --api-base: the TEST build's own server is the same closed local port.
     $proc = Start-Process -FilePath $Binary -ArgumentList '--api-base', 'http://127.0.0.1:9' -NoNewWindow -PassThru
     Restore-Proxy
     Write-Host "  started PID $($proc.Id)"

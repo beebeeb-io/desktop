@@ -308,8 +308,8 @@ mod tests {
 
     #[test]
     fn thumbnail_cache_path_hashes_canonical_file_uri_with_md5() {
-        let cache_home = Path::new("/home/jens/.cache");
-        let source = Path::new("/home/jens/photos/me.png");
+        let cache_home = Path::new("/data/jens/.cache");
+        let source = Path::new("/data/jens/photos/me.png");
 
         let path = thumbnail_cache_path(cache_home, source, FreedesktopThumbnailSize::Normal);
 
@@ -318,7 +318,7 @@ mod tests {
             cache_home
                 .join("thumbnails")
                 .join("normal")
-                .join("c6ee772d9e49320e97ec29a7eb5b1697.png")
+                .join("b5e48ba26cbc0f536d9e0809cbb0a7b7.png")
         );
     }
 
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn png_output_is_rgba_resized_and_embeds_uri_and_mtime_text_chunks() {
-        let source = Path::new("/home/jens/photos/me.png");
+        let source = Path::new("/data/jens/photos/me.png");
         let input = fixture_png(320, 160);
 
         let output = encode_freedesktop_png(&input, source, 1_700_000_123, FreedesktopThumbnailSize::Normal)
@@ -367,6 +367,6 @@ mod tests {
             .iter()
             .find(|chunk| chunk.keyword == "Thumb::URI")
             .map(|chunk| chunk.text.clone());
-        assert_eq!(uri.as_deref(), Some("file:///home/jens/photos/me.png"));
+        assert_eq!(uri.as_deref(), Some("file:///data/jens/photos/me.png"));
     }
 }

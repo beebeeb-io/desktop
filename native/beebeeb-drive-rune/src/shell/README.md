@@ -193,8 +193,9 @@ by the real app in a build that ships (`engine_host::open::reads_api_base_flag`,
 `[::1]` or `localhost`, with no user name, path, query or fragment; any other value, and the
 `--api-base=<url>` spelling, ends the start with exit 2 before the control channel or a window
 exists, never the default in its place. The instance that opens the engine prints
-`api base: <origin> (default)` or `(--api-base)` on stdout, and nothing else about the server. It
-keeps that server while it runs: a later launch that names one is refused
+`api base: <origin> (default)` or `(--api-base)` on stdout, and nothing else about the server (a
+release build on Windows is GUI-subsystem, so that line and stderr reach only a redirected handle;
+the box is what a person sees). It keeps that server while it runs: a later launch that names one is refused
 (`Refusal::ServerAlreadyChosen`, exit 1), never handed over. The test build's data on a computer
 stays with the server it was made for (`engine_host::open::bind_to_server`): the first open writes
 `server-origin` (`default`, or the origin) in its state folder, before the engine makes anything

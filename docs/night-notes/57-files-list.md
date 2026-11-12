@@ -29,9 +29,9 @@ test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 2645 filtered out; 
 ```
 
 Evidence (absolute paths, outside the repo):
-`/home/guus/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/files-in-list/green-first-run.txt`
+`~/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/files-in-list/green-first-run.txt`
 and
-`/home/guus/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/files-in-list/green-final-tree.txt`.
+`~/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/files-in-list/green-final-tree.txt`.
 
 ## Where the loss is
 

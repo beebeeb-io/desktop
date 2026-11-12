@@ -3,7 +3,7 @@
 **Current outcome after workspace #225 correction:** Tasks 3–6 are complete in this PR. Final corrected macOS Rust gate: **2,279 passed / 0 failed / 9 existing ignored**, including all 31 lane tests. Testrig frontend: **1,833 / 0**, TypeScript and ESLint exit 0. The earlier Task 5 stop and previous gate below are retained historical receipts and superseded by the corrected-ruling sections and final receipt at the end. Native Task 13/Windows release proof remains outstanding.
 
 Owner: Codex, sequential run, no child agents.
-Worktree: `/Users/guuslangelaar/code/bb-worktrees/d2-2237-desktop`
+Worktree: `~/code/bb-worktrees/d2-2237-desktop`
 Branch: `feat/2237d-desktop-shared-folders`
 Desktop base: `f2d42d4` (includes #169 / 2190 and #171 / 2240 slice 2).
 Core pin: `a245a549c12415af6311bf4488deca5def65e983` in `src-tauri/Cargo.toml` (core, sync and types), plus the lockfile.
@@ -12,7 +12,7 @@ Contract: workspace origin/main plan `2026-10-28-shared-folders-p1d-desktop-cli.
 
 Verification planned before code: task filters `sf2237d_t3` (6), `sf2237d_t4` (8), ~~`sf2237d_t5` (7), `sf2237d_t6` (8)~~, behavioral red then identical green on testrig desktop image; relevant regressions; final macOS `cargo test --locked` under cargo-build lock with owned target/scratch HOME and loopback-only API; frontend Bun, tsc and eslint. Amendment — Codex, 2026-10-28: Task 5 verification is replaced in this run by the source-premise audit below, under the explicit stop rule; Task 6 is blocked by Task 5. Neither is implemented or counted as complete. Windows native gate belongs to the lead. No installed app, real user config, production, or merge.
 
-Evidence directory: `/Users/guuslangelaar/code/bb-gate-logs/fullspeed/d2-2237/`.
+Evidence directory: `~/code/bb-gate-logs/fullspeed/d2-2237/`.
 
 ## Decisions
 

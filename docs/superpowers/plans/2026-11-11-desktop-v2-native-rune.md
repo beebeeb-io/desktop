@@ -22,7 +22,7 @@ native/beebeeb-drive-rune/scripts/snap.sh DW-0401
 ```
 
 The script sources `~/code/bb-legion-native/lavapipe/env.sh` and writes PNGs + tree to
-`/home/guus/code/beebeeb.io/.claude/tasks/verification-evidence/2445/rune/`.
+`~/code/beebeeb.io/.claude/tasks/verification-evidence/2445/rune/`.
 
 ## Phase 0: Foundation (slices 1-5, sequential then parallel)
 

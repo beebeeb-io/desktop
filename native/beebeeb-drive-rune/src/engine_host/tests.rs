@@ -229,18 +229,18 @@ fn the_sync_folder_is_not_a_backup_folder_for_the_identity_that_owns_it() {
     let p = |text: &str| PathBuf::from(text);
     for (identity, own, others) in [(&TEST, "Beebeeb Test", "Beebeeb"), (&REAL, "Beebeeb", "Beebeeb Test")] {
         assert_eq!(identity.sync_folder_name(), own);
-        assert!(!may_back_up(identity, None, &p(&format!("/home/a/{own}"))), "{own}");
-        assert!(!may_back_up(identity, None, &p(&format!("/home/a/{own}/Photos"))));
+        assert!(!may_back_up(identity, None, &p(&format!("/data/a/{own}"))), "{own}");
+        assert!(!may_back_up(identity, None, &p(&format!("/data/a/{own}/Photos"))));
         assert!(!may_back_up(
             identity,
             None,
-            &p(&format!("/home/a/{}", own.to_uppercase()))
+            &p(&format!("/data/a/{}", own.to_uppercase()))
         ));
         assert!(
-            may_back_up(identity, None, &p(&format!("/home/a/{others}/Photos"))),
+            may_back_up(identity, None, &p(&format!("/data/a/{others}/Photos"))),
             "{others}"
         );
-        assert!(may_back_up(identity, None, &p("/home/a/Documents")));
+        assert!(may_back_up(identity, None, &p("/data/a/Documents")));
         // A sync folder the person chose elsewhere, under any name.
         let chosen = p("/data/Cloud");
         assert!(!may_back_up(identity, Some(&chosen), &p("/data/Cloud")));

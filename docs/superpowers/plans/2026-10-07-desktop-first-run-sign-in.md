@@ -43,7 +43,7 @@ Each item is a place where the spec, read literally against the code on spec A's
 
 - **Environment (every task; a task's steps use these names).**
   ```bash
-  WS=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io
+  WS=~/Development/Beebeeb/beebeeb.io
   LOCK=$WS/scripts/coord/with-lock.sh                 # every cargo build or test: $LOCK cargo-build -- <cmd>
   EVID=$WS/.claude/tasks/_qa-evidence/1747
   EVID1748=$WS/.claude/tasks/_qa-evidence/1748        # the Windows rungs (Task 24)
@@ -148,7 +148,7 @@ The five conditions a real person is most likely to meet that the spec implies b
 
 ## File map
 
-Paths are relative to the desktop repo root unless they start with `$WS` (the workspace root, `/Users/guuslangelaar/Development/Beebeeb/beebeeb.io`).
+Paths are relative to the desktop repo root unless they start with `$WS` (the workspace root, `~/Development/Beebeeb/beebeeb.io`).
 
 | File | Status | Responsibility | Task |
 |---|---|---|---|
@@ -202,7 +202,7 @@ Paths are relative to the desktop repo root unless they start with `$WS` (the wo
 - **Worktree creation** (lead, from the workspace root):
 
 ```bash
-WS=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io
+WS=~/Development/Beebeeb/beebeeb.io
 git -C $WS/repos/desktop fetch origin
 git -C $WS/repos/desktop worktree add ~/code/bb-worktrees/desktop-1747-r -b feat/1747-first-run-sign-in origin/main
 git -C $WS/repos/desktop worktree add ~/code/bb-worktrees/desktop-1747-t -b feat/1747-first-run-sign-in-ui origin/main
@@ -247,7 +247,7 @@ Create `$EVID/t0-interfaces.sh`:
 # Spec C Task 0: every spec A interface this plan consumes, grepped at origin/main.
 # Output: one TSV row per interface: status, file, name. Exit 1 when any is missing.
 set -uo pipefail
-D=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop
+D=~/Development/Beebeeb/beebeeb.io/repos/desktop
 REV=origin/main
 GREP=/usr/bin/grep
 missing=0
@@ -786,7 +786,7 @@ The lead reviews the 8 renders, the icon checks and the HTML (every string word 
 - [ ] **Step 1: Vendor the contract from the server's `main`**
 
 ```bash
-WS=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io; WT=~/code/bb-worktrees/desktop-1747-r; EVID=$WS/.claude/tasks/_qa-evidence/1747
+WS=~/Development/Beebeeb/beebeeb.io; WT=~/code/bb-worktrees/desktop-1747-r; EVID=$WS/.claude/tasks/_qa-evidence/1747
 git -C $WS/repos/server fetch origin
 git -C $WS/repos/server rev-parse origin/main > $EVID/t2-server-sha.txt
 git -C $WS/repos/server archive origin/main contracts/onboarding | tar -x -C $WT

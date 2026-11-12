@@ -612,7 +612,7 @@ mod tests {
                 "--open-link",
                 "beebeeb://open/photos",
                 "--snap",
-                "C:\\Users\\x\\Startup\\a.png",
+                "C:\\home\\x\\Startup\\a.png",
             ][..],
             &["--snap", "C:\\a.png", "--open-link", "beebeeb://open/photos"],
             &[

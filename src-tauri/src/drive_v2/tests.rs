@@ -617,7 +617,7 @@ fn drive_v2_errors_carry_a_code_and_no_detail_from_outside() {
     );
     assert_eq!(DriveError::from_text("413 Payload Too Large"), DriveError::Quota);
     assert_eq!(
-        String::from(DriveError::from_text("C:\\Users\\guus\\secret.txt broke")),
+        String::from(DriveError::from_text("C:\\home\\guus\\secret.txt broke")),
         "failed: request"
     );
 }

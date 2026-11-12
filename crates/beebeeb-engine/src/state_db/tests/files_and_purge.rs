@@ -632,13 +632,13 @@ fn diagnostics_export_never_contains_paths_or_known_names() {
         "op-1",
         1,
         130,
-        Some("/Users/guus/Library/CloudStorage/Beebeeb-Drive/Tax 2025/aangifte.pdf failed"),
+        Some("/Users/alice/Library/CloudStorage/Beebeeb-Drive/Tax 2025/aangifte.pdf failed"),
     )
     .unwrap();
 
     let diagnostics = db.queue_diagnostics(200).unwrap();
     let exported = serde_json::to_string(&diagnostics).unwrap();
-    assert!(!exported.contains("/Users/guus"), "path leaked: {exported}");
+    assert!(!exported.contains("/Users/alice"), "path leaked: {exported}");
     assert!(!exported.contains("CloudStorage"), "path leaked: {exported}");
     assert!(!exported.contains("Tax 2025"), "known folder name leaked: {exported}");
     assert!(!exported.contains("aangifte"), "known file name leaked: {exported}");
@@ -721,7 +721,7 @@ fn diagnostics_group_labels_outside_the_allow_list_become_other() {
         conn.execute("UPDATE operation_queue SET kind = 'Tax 2025' WHERE op_id = 'op-a'", [])
             .unwrap();
         conn.execute(
-                "UPDATE operation_queue SET paused_reason = '/Users/guus/Tax 2025', last_error_class = 'aangifte.pdf' WHERE op_id = 'op-b'",
+                "UPDATE operation_queue SET paused_reason = '/Users/alice/Tax 2025', last_error_class = 'aangifte.pdf' WHERE op_id = 'op-b'",
                 [],
             )
             .unwrap();

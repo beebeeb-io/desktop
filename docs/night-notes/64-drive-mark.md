@@ -85,7 +85,7 @@ Dev server on `:5251`, headless Chromium at 1280×800, board frames:
 Screenshots: `01-files.png`, `02-settings.png`.
 
 Evidence (absolute paths, outside the repo):
-`/home/guus/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/drive-mark/`
+`~/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/drive-mark/`
 (`red.log`, `green.log`, `storageMeter.log`, `sidebarAccountName.log`, `tsc.log`,
 `walkthrough.log`, `walkthrough.mjs`, `01-files.png`, `02-settings.png`), each log
 starting with its `date -u` line.

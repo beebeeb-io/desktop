@@ -959,7 +959,7 @@ mod tests {
     #[test]
     fn a_name_and_a_folder_come_out_of_either_separator() {
         assert_eq!(display_name("Reports/2026/q3.xlsx"), "q3.xlsx");
-        assert_eq!(display_name("C:\\Users\\sam\\q3.xlsx"), "q3.xlsx");
+        assert_eq!(display_name("C:\\home\\sam\\q3.xlsx"), "q3.xlsx");
         assert_eq!(display_name("q3.xlsx"), "q3.xlsx");
         assert_eq!(display_name("Folder/"), "Folder");
         assert_eq!(parent_folder("Reports/2026/q3.xlsx"), "Reports/2026");

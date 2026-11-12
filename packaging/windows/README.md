@@ -66,7 +66,9 @@ Set-Location C:\bb-win\native\desktop\packaging\windows
 $installer = Join-Path $PWD 'out\Beebeeb Test_0.9.0_x64-setup.exe'
 
 # 3. Install silently (per user, no prompt) and wait for it.
-Start-Process -FilePath $installer -ArgumentList '/S' -Wait
+#    Exit 3 = refused: an existing install is older than 0.8.25 (update through the app first).
+$proc = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru
+if ($proc.ExitCode -ne 0) { throw "Installer exited $($proc.ExitCode)" }
 # 4. Verify: must end with "VERIFY installed: 14 passed, 0 failed".
 .\verify-install.ps1 -Mode test -Version 0.9.0 -Phase installed
 
