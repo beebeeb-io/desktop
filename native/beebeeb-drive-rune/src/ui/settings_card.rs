@@ -5,6 +5,8 @@
 //! | Card | `card(index, t)` | `card-<N>` |
 //! | Its two lines | `head(index, text, t)`, `sub(index, text, t)` | `card-<N>-head`, `card-<N>-sub` |
 //!
+//! | The same as a column | `column(index, pad, gap, t)` | `card-<N>` |
+//!
 //! `card` is an empty row with the card's padding (16 pt) and gap (12 pt): add children.
 
 use crate::theme::tokens::{Theme, radius, type_};
@@ -35,4 +37,18 @@ pub fn head(index: usize, words: &str, t: &Theme) -> El {
 /// A card's second line (`.t-sub`). Key: `card-<N>-sub`.
 pub fn sub(index: usize, words: &str, t: &Theme) -> El {
     kit::label(format!("card-{index}-sub"), words, SUB, t.text_tertiary).w_full()
+}
+
+/// The panel as a column (`.kit-card.flex.flex-col`): `pad` points inside, its children `gap`
+/// apart. Key: `card-<N>`.
+pub fn column(index: usize, pad: f32, gap: f32, t: &Theme) -> El {
+    rune::col()
+        .key(format!("card-{index}"))
+        .w_full()
+        .padding(pad)
+        .gap(gap)
+        .radius(radius::LG)
+        .fill(t.card)
+        .box_shadow(kit::ring(kit::HAIR, t.separator))
+        .box_shadow(kit::drop(1.0, 2.0, Color::BLACK.alpha(0.04)))
 }

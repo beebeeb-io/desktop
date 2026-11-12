@@ -180,6 +180,20 @@ pub fn pill(index: usize, words: &str, t: &Theme) -> El {
 /// The card for a pane with nothing to show (an empty state): a tile, what is empty, and
 /// what will show up here. Centred.
 pub fn empty(card: usize, tile_index: usize, icon: &'static Icon, head: &str, words: &str, t: &Theme) -> El {
+    // `max-width: 46ch`.
+    empty_sized(card, tile_index, icon, head, words, 348.23, t)
+}
+
+/// `empty` with the words wrapped in `max_w` points (the board sets it per frame, in `ch`).
+pub fn empty_sized(
+    card: usize,
+    tile_index: usize,
+    icon: &'static Icon,
+    head: &str,
+    words: &str,
+    max_w: f32,
+    t: &Theme,
+) -> El {
     col()
         .key(format!("card-{card}"))
         .role("status")
@@ -201,7 +215,6 @@ pub fn empty(card: usize, tile_index: usize, icon: &'static Icon, head: &str, wo
             t.text,
         ))
         .child(
-            // `max-width: 46ch`.
             kit::label(
                 format!("card-{card}-sub"),
                 words,
@@ -210,7 +223,7 @@ pub fn empty(card: usize, tile_index: usize, icon: &'static Icon, head: &str, wo
             )
             .wrap()
             .align(rune::Align::Center)
-            .w(348.23),
+            .w(max_w),
         )
 }
 

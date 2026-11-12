@@ -106,6 +106,12 @@ pub fn dialog(name: &str, width: f32, title: &str, sub: Option<&str>, body: Vec<
     for child in body {
         b = b.child(child);
     }
+    on_scrim(name, width, vec![head, b, foot_row(foot, None, t)], t)
+}
+
+/// A dialog's foot (`.wn-dlg-foot`): the buttons at its trailing edge, or `even` (`.is-even`):
+/// each button that many points wide, side by side across the whole foot.
+pub fn foot_row(buttons: Vec<El>, even: Option<f32>, t: &Theme) -> El {
     let mut f = row()
         .key("dlg-foot")
         .center_y()
@@ -116,14 +122,35 @@ pub fn dialog(name: &str, width: f32, title: &str, sub: Option<&str>, body: Vec<
         .fill(t.surface)
         .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
         .border_layout();
-    for child in foot {
-        f = f.child(child);
+    for child in buttons {
+        f = f.child(match even {
+            Some(each) => child.w(each),
+            None => child,
+        });
+    }
+    f
+}
+
+/// What pushes the buttons after it to a foot's trailing edge (`.mr-auto` on the one before).
+pub fn foot_gap() -> El {
+    rune::el().key("dlg-foot-gap").grow(1.0)
+}
+
+/// A dialog card of `parts` (head, body, foot) in the middle of the body, on its scrim.
+pub fn on_scrim(name: &str, width: f32, parts: Vec<El>, t: &Theme) -> El {
+    scrimmed("dialog", name, width, parts, t)
+}
+
+fn scrimmed(role: &'static str, name: &str, width: f32, parts: Vec<El>, t: &Theme) -> El {
+    let mut inner = col().key("dlg-clip").w_full().clip_rounded(8.0);
+    for part in parts {
+        inner = inner.child(part);
     }
     // The shadow and the hairline ring are outside the card; the clip that rounds the foot's
     // corners would cut them, so it sits one level in.
     let dlg = col()
         .key("dlg")
-        .role("dialog")
+        .role(role)
         .label(name)
         // The foot's hairline makes a dialog's height end in a half point, so centring puts
         // its top on a quarter point. The board draws it there, edges half covered; so does this.
@@ -133,19 +160,61 @@ pub fn dialog(name: &str, width: f32, title: &str, sub: Option<&str>, body: Vec<
         .fill(t.card)
         .box_shadow(kit::drop(24.0, 60.0, Color::BLACK.alpha(0.28)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .child(
-            col()
-                .key("dlg-clip")
-                .w_full()
-                .clip_rounded(8.0)
-                .child(head)
-                .child(b)
-                .child(f),
-        );
+        .child(inner);
     col()
         .key("scrim")
         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .center()
         .fill(scrim_color(t))
         .child(dlg)
+}
+
+/// A dialog that asks before something happens (`.wn-dlg-alert`, `role="alertdialog"`): a
+/// toned tile, the question, what it means; the two answers side by side, the same width.
+/// Keys: `dlg-title`, `dlg-sub`, the tile's own.
+pub fn alert(name: &str, width: f32, tile: El, title: &str, sub: &str, foot: Vec<El>, t: &Theme) -> El {
+    let words = col()
+        .key("dlg-alert-words")
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(6.0)
+        .child(
+            kit::label("dlg-title", title, DIALOG_TITLE, t.text)
+                .role("heading")
+                .level(2)
+                .w_full(),
+        )
+        .child(kit::label("dlg-sub", sub, SUB, t.text_tertiary).wrap());
+    let head = row()
+        .key("dlg-head")
+        .pt(20.0)
+        .px(24.0)
+        .pb(16.0)
+        .gap(14.0)
+        .items_start()
+        .child(tile)
+        .child(words);
+    let each = (width - 48.0 - 8.0 * (foot.len().max(1) - 1) as f32) / foot.len().max(1) as f32;
+    scrimmed("alertdialog", name, width, vec![head, foot_row(foot, Some(each), t)], t)
+}
+
+/// A dialog-size button with a drawn border (`.kit-btn-md` on paper): an action that is
+/// neither the primary one nor the way out. Keys: `btn-<N>`, `btn-<N>-label`.
+pub fn button_outline(index: usize, label: &str, t: &Theme) -> El {
+    let key = format!("btn-{index}");
+    row()
+        .key(key.clone())
+        .role("button")
+        .label(label)
+        .h(28.0)
+        .px(12.0)
+        .center()
+        .radius(radius::MD)
+        .fill(t.paper)
+        .border(1.0, t.card_border)
+        .border_layout()
+        .hover(t.hover)
+        .press(t.press)
+        .focusable(true)
+        .child(kit::label(format!("{key}-label"), label, BUTTON_MD, t.text))
 }
