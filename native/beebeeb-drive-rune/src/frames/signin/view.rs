@@ -4,7 +4,10 @@
 use rune::{Color, Cx, El, col, el, row};
 
 use super::source::{SharedSession, SignInProblem};
-use super::{EMAIL_KEY, HelloFailure, Intent, PASSWORD_KEY, REQUEST_SECONDS, Screen, Ui, act, icons, qr};
+use super::{
+    EMAIL_KEY, HelloFailure, Intent, PASSWORD_KEY, REQUEST_SECONDS, Screen, Ui, act, icons, qr, view_recover,
+    view_recovery, view_steps,
+};
 use crate::State;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, FieldSpec, FieldState, Keys, Tone, type_au};
@@ -12,7 +15,11 @@ use crate::ui::kit;
 
 const PRODUCT: &str = "Drive";
 const ONE_ACCOUNT: &str = "One Beebeeb account for Drive, Pass, VPN, Chat and Mail.";
-const GENERIC_FAILURE: &str = "We couldn't sign you in. Nothing was unlocked.";
+pub(super) const GENERIC_FAILURE: &str = "We couldn't sign you in. Nothing was unlocked.";
+/// DW-A63, Drive's own words. Shown only after the password was proven right.
+const DELETED: &str = "This account has been deleted. We can't recover it.";
+const LOCK_NOTE: &str =
+    "Five wrong tries lock an account for 30\u{a0}s to 15\u{a0}min. We email its owner an unlock link.";
 
 pub fn view(ui: &Ui, cx: &mut Cx<State>) -> El {
     let t = tokens::theme(cx.system_dark());
@@ -27,6 +34,15 @@ pub fn view(ui: &Ui, cx: &mut Cx<State>) -> El {
         Screen::Approved { by } => approved(by, &mut k, &t),
         Screen::KeysNotReceived => keys_not_received(&mut k, &t),
         Screen::Denied { by } => denied(by, &mut k, &t),
+        Screen::TwoFactor { backup } => view_steps::two_factor(ui, *backup, &mut k, &t),
+        Screen::Phrase => view_steps::phrase(ui, &mut k, &t),
+        Screen::UnlockVault => view_steps::unlock(ui, &mut k, &t),
+        Screen::NoPhrase => view_recovery::no_phrase(&mut k, &t),
+        Screen::Forgot => view_recovery::forgot(&mut k, &t),
+        Screen::CannotRecover => view_recovery::cannot_recover(&mut k, &t),
+        Screen::Recover => view_recover::recover(ui, &mut k, &t),
+        Screen::NewPassword => view_recover::new_password(ui, &mut k, &t),
+        Screen::PasswordUpdated => view_recover::password_updated(&mut k, &t),
     };
     au::page(PRODUCT, [&icons::LOCK, &icons::PEOPLE, &icons::GLOBE], column, &t, cx).on_key(super::on_key)
 }
@@ -46,7 +62,7 @@ pub fn closed(cx: &mut Cx<State>) -> El {
 
 /// A link out of the screen. While a sign-in runs it takes no press and no focus (DW-A18).
 fn way_out(link: El, ui: &Ui, to: fn(&mut Ui)) -> El {
-    if ui.busy {
+    if ui.busy || ui.passkey_waiting() {
         link.disabled(true)
     } else {
         link.on_press_tx(act(to))
@@ -54,11 +70,11 @@ fn way_out(link: El, ui: &Ui, to: fn(&mut Ui)) -> El {
 }
 
 /// `.au-actions`: the buttons at the foot of a column, 6 apart, `top` below the column's gap.
-fn actions(top: f32) -> El {
+pub(super) fn actions(top: f32) -> El {
     col().key("au-actions").w_full().gap(6.0).mt(top)
 }
 
-fn back(t: &Theme) -> El {
+pub(super) fn back(t: &Theme) -> El {
     au::back_link("Sign in", &icons::BACK, t).on_press_tx(act(Ui::open_sign_in))
 }
 
@@ -171,7 +187,7 @@ fn continue_card(session: &SharedSession, ui: &Ui, k: &mut Keys, t: &Theme) -> E
                     t.text_tertiary,
                 )),
         );
-    let state = if ui.busy {
+    let state = if ui.busy || ui.passkey_waiting() {
         ButtonState::Busy
     } else {
         ButtonState::Enabled
@@ -185,7 +201,7 @@ fn continue_card(session: &SharedSession, ui: &Ui, k: &mut Keys, t: &Theme) -> E
         state,
         t,
     );
-    if !ui.busy {
+    if state == ButtonState::Enabled {
         hello = hello.on_press_tx(act(Ui::continue_as));
     }
     card.role("group")
@@ -195,7 +211,7 @@ fn continue_card(session: &SharedSession, ui: &Ui, k: &mut Keys, t: &Theme) -> E
 }
 
 fn other_device_button(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
-    let state = if ui.busy {
+    let state = if ui.busy || ui.passkey_waiting() {
         ButtonState::Busy
     } else {
         ButtonState::Enabled
@@ -209,7 +225,7 @@ fn other_device_button(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         state,
         t,
     );
-    if ui.busy {
+    if state == ButtonState::Busy {
         b
     } else {
         b.on_press_tx(act(Ui::ask_other_device))
@@ -218,7 +234,11 @@ fn other_device_button(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
 
 fn sign_in(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let offline = ui.problem == Some(SignInProblem::Offline);
-    let message = ui.problem.and_then(problem_message);
+    let message = if ui.deleted() {
+        Some(DELETED.to_string())
+    } else {
+        ui.problem.and_then(problem_message)
+    };
     let mut c = au::column()
         .child(au::lockup("col", 28.0, PRODUCT, t))
         .child(au::heading("Sign in to Drive", Some(ONE_ACCOUNT), false, t));
@@ -290,10 +310,19 @@ fn sign_in(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             Tone::Neutral,
             &icons::INFO,
             None,
-            Some("Five wrong tries lock an account for 30 s to 15 min. We email its owner an unlock link."),
+            // The board keeps "30 s" and "15 min" together (no-break spaces), so the line turns after "to".
+            Some(LOCK_NOTE),
             false,
             t,
         ));
+        // The gate compares strings with their spaces normalised, as the board's export does.
+        kit::note_text(
+            "banner-0-text",
+            "banner-0-text",
+            &LOCK_NOTE.replace('\u{a0}', " "),
+            type_au::BANNER_TEXT,
+            t.text_secondary,
+        );
     }
     c = c.child(
         row()
@@ -302,20 +331,19 @@ fn sign_in(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             .h(15.0)
             .center_y()
             .justify_between()
-            .child(way_out(au::link(k, "Forgot password?", None, t), ui, |ui| {
-                ui.leave(Intent::ForgotPassword)
-            }))
+            .child(way_out(au::link(k, "Forgot password?", None, t), ui, Ui::forgot))
             .child(way_out(
                 au::link(k, "Use a passkey", Some(&icons::PASSKEY), t),
                 ui,
-                |ui| ui.leave(Intent::UsePasskey),
+                Ui::use_passkey,
             )),
     );
 
     let with_card = ui.shared().is_some();
     let (label, state) = if ui.busy {
         ("Unlocking vault\u{2026}", ButtonState::Busy)
-    } else if ui.retry_wait().is_some() {
+    } else if ui.retry_wait().is_some() || ui.passkey_waiting() {
+        // Windows' passkey dialog is up (DW-A29): the form waits behind it, as it stands.
         // The per-network wait runs (DW-A21): drawn as the board draws it, and it takes no press
         // until the wait is over. The message above counts the seconds.
         ("Sign in", ButtonState::Busy)
@@ -509,10 +537,13 @@ fn device(ui: &Ui, expired: bool, k: &mut Keys, t: &Theme) -> El {
                             type_au::SUB,
                             t.text_tertiary,
                         );
+                        // As wide as its words, not a device pixel more: the row is centred, and a
+                        // wider text moves the ring beside it off the board's place.
                         rune::text("Expires in ")
                             .key("status-expires-box")
                             .font(type_au::SUB)
                             .color(t.text_tertiary)
+                            .w(rune::text::advance("Expires in ", type_au::SUB))
                             .a11y_hidden()
                     })
                     .child(
@@ -522,21 +553,21 @@ fn device(ui: &Ui, expired: bool, k: &mut Keys, t: &Theme) -> El {
                             type_au::SUB_MONO,
                             t.text_tertiary,
                         )
+                        .w(rune::text::advance(&clock(ui.seconds_left()), type_au::SUB_MONO))
                         .a11y_hidden(),
                     ),
             )
-            .child(au::pill(
-                "status-pill",
+            .child({
                 // The countdown goes on while the connection is down (DW-A07).
-                if ui.reconnecting() {
+                let words = if ui.reconnecting() {
                     "Reconnecting\u{2026}"
                 } else {
                     "Waiting for approval"
-                },
-                Tone::Neutral,
-                true,
-                t,
-            ))
+                };
+                // 8 + the dot's 6 + 5 + the words + 8 (`.kit-pill`), to the fraction of a point.
+                au::pill("status-pill", words, Tone::Neutral, true, t)
+                    .w(27.0 + rune::text::advance(words, type_au::PILL))
+            })
     };
     c = c.child(stack.child(status.key("status")));
     if let Some(request) = ui.request() {

@@ -3,6 +3,7 @@
 pub mod account_form;
 pub mod account_set;
 pub mod au;
+pub mod au_entry;
 pub mod backups_kit;
 pub mod button;
 pub mod caption;
@@ -19,6 +20,7 @@ pub mod settings_dialog;
 pub mod settings_list;
 pub mod settings_notice;
 pub mod settings_shell;
+pub mod setup;
 pub mod sidebar;
 pub mod status_bar;
 pub mod status_line;

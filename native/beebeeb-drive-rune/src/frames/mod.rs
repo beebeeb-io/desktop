@@ -36,6 +36,8 @@ pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
             files::SCENES,
             settings::FRAMES,
             account::FRAMES,
+            signin::FRAMES,
+            signin::setup::FRAMES,
             this_pc::scenes::FRAMES,
             backups::FRAMES,
         ]

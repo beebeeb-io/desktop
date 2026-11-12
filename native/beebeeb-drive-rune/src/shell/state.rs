@@ -37,6 +37,7 @@ pub struct State {
     pub settings: crate::frames::settings::SettingsUi,
     pub account: crate::frames::account::AccountUi,
     pub(crate) signin: Option<crate::frames::signin::Ui>,
+    pub(crate) setup: Option<crate::frames::signin::setup::Ui>,
     /// Sync history and Available offline (`frames::this_pc`).
     pub(crate) this_pc: crate::frames::this_pc::Ui,
     /// Backups, a section of settings (`frames::backups`).
@@ -98,6 +99,7 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         settings: Default::default(),
         account: Default::default(),
         signin: crate::frames::signin::start(),
+        setup: None,
         this_pc: crate::frames::this_pc::Ui::fixture(),
         backups: crate::frames::backups::BackupsUi::first(crate::shell::instance::DEV_BUILD),
     }
