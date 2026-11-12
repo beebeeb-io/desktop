@@ -24,21 +24,27 @@ permissions:
 
 concurrency:
   group: desktop-ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # PRs: a new push cancels the older run on the same PR.
+  # Pushes to v2-native / v2-next: a newer merge commit's run replaces an older queued one (the
+  # old run tested a commit that is already behind HEAD, so only the latest matters).
+  # Pushes to main: cancel-in-progress stays false (every merge there is verified independently).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref != 'refs/heads/main') }}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   # Which areas the change touches (scripts/ci-changed-areas.py; it fails open). A pull request that changes only
-  # docs, design files or the native UI crates does not run the Tauri engine suite: the three Rust jobs are then
-  # SKIPPED, and a skipped job satisfies a required check, so the job names below still report. A push runs everything.
+  # docs, design files or the native UI crates does not run the Tauri engine suite or the macOS-specific jobs: the
+  # three Rust jobs and the two extra macOS jobs are then SKIPPED, and a skipped job satisfies a required check, so
+  # the job names below still report. A push runs everything.
   changes:
     name: Changed areas
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       rust: ${{ steps.areas.outputs.rust }}
+      macos: ${{ steps.areas.outputs.macos }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
@@ -200,7 +206,7 @@ jobs:
   rust-macos:
     name: Rust check (macOS)
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' && needs.changes.outputs.macos != 'false' }}
     runs-on: ${{ (github.event.pull_request.head.repo.fork && 'macos-latest') || vars.RUST_MACOS_RUNNER || 'macos-latest' }}
     timeout-minutes: 45
     steps:
@@ -222,6 +228,8 @@ jobs:
     # compiles on every PR, unsigned and without secrets, and runs the pure
     # Foundation framing tests with a COUNTED truth line.
     name: File Provider Swift (macOS)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.macos != 'false' }}
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -434,6 +442,9 @@ jobs:
   # above, and these three share no step with them. `crates/beebeeb-engine` holds tests that left `src-tauri`
   # (331 on Linux when it moved), so without these jobs they would run nowhere.
 
+  # macOS is a separate job (engine-crate-macos below): a skipped matrix job reports under its
+  # unexpanded name, leaving the required "Engine crate test (macOS)" check waiting for ever;
+  # a standalone job reports SKIPPED under its literal name, which satisfies the required check.
   engine-crate:
     name: Engine crate test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
@@ -446,8 +457,6 @@ jobs:
             os: ubuntu-latest
           - name: Windows
             os: windows-latest
-          - name: macOS
-            os: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
@@ -518,6 +527,50 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: engine-test-${{ matrix.name }}
+          path: |
+            ${{ runner.temp }}/engine-test.log
+            ${{ runner.temp }}/engine-test.exit
+
+  engine-crate-macos:
+    name: Engine crate test (macOS)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.macos != 'false' }}
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        with:
+          workspaces: crates/beebeeb-engine
+
+      - name: Test count guard self-test
+        run: python3 scripts/assert-cargo-test-counts.py --self-test
+
+      - name: Run the engine crate's tests
+        working-directory: crates/beebeeb-engine
+        env:
+          TMPDIR: ${{ runner.temp }}/beebeeb-tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          cargo_exit=0
+          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/engine-test.log" 2>&1 || cargo_exit=$?
+          cat "$RUNNER_TEMP/engine-test.log"
+          echo "$cargo_exit" > "$RUNNER_TEMP/engine-test.exit"
+          python3 ../../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/engine-test.log" --cargo-exit-code "$cargo_exit" --expect deps/beebeeb_engine-
+
+      - name: Upload engine test evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: engine-test-macOS
           path: |
             ${{ runner.temp }}/engine-test.log
             ${{ runner.temp }}/engine-test.exit

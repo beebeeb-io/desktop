@@ -81,6 +81,8 @@ fn files_is_the_registered_frame_and_draws_dw_0401() {
 #[test]
 fn an_unbuilt_route_draws_the_placeholder_that_names_its_group() {
     let (_, _, mut rt) = fixture();
+    // A window whose source knows no Backups folder (`FilesSource::backups_root` is `None`).
+    rt.update(|s, _| s.actions = crate::frames::files::Actions::default());
     go(&mut rt, Section::Backups);
     assert!(rt.find("not-built").is_some());
     assert!(
@@ -110,8 +112,8 @@ fn every_state_without_a_frame_has_a_placeholder_and_only_files_is_built() {
         unbuilt += usize::from(!built);
     }
     assert_eq!(
-        unbuilt, 1,
-        "one section waits for its lane: Backups (Photos, Shared, Trash, Sync history and Available offline are built; the Backups that landed is the settings pane)"
+        unbuilt, 0,
+        "every section has its frame (Backups is the Files window on the Backups folder: `frames::files::protected`)"
     );
     for gate in [
         GateState::SignedOut,
@@ -140,8 +142,13 @@ fn every_state_without_a_frame_has_a_placeholder_and_only_files_is_built() {
 #[test]
 fn the_placeholder_never_shows_fixture_rows() {
     let (_, _, mut rt) = fixture();
+    // A window whose source knows no Backups folder (`FilesSource::backups_root` is `None`).
+    rt.update(|s, _| s.actions = crate::frames::files::Actions::default());
     go(&mut rt, Section::Backups);
-    assert!(rt.find("not-built").is_some(), "Backups is the section without a frame");
+    assert!(
+        rt.find("not-built").is_some(),
+        "Backups without a source that knows its folder"
+    );
     let texts = texts(&rt);
     for name in ["Contract draft.pdf", "Lisbon trip", "Budget 2026.xlsx"] {
         assert!(
@@ -316,6 +323,8 @@ fn signed_out_takes_no_shortcut_to_the_account() {
 #[test]
 fn a_sidebar_selection_becomes_a_navigation() {
     let (_, _, mut rt) = fixture();
+    // A window whose source knows no Backups folder (`FilesSource::backups_root` is `None`).
+    rt.update(|s, _| s.actions = crate::frames::files::Actions::default());
     // What `ui::sidebar` does on a click.
     rt.update(|s, _| s.sidebar_section = SidebarSection::Backups);
     rt.frame(0.016);

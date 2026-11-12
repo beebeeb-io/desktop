@@ -31,7 +31,7 @@ impl State {
     pub fn begin_rename(&mut self, tx: &mut Tx) -> bool {
         let rows = self.selected_rows();
         let [row] = rows[..] else { return false };
-        if self.listing.items[row].is_protected {
+        if self.protects(std::slice::from_ref(&self.listing.items[row])) {
             self.failed(Action::Rename, ActionError::Protected, tx);
             return true;
         }

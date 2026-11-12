@@ -484,6 +484,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         sync_sidebar(s);
         changed |= outcome == Outcome::Changed;
     }
+    // Backups shows its own folder in the Files window (`frames::files::protected`, DW-0422).
+    changed |= crate::frames::files::protected::poll(s);
     changed
 }
 

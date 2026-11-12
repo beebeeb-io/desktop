@@ -1,0 +1,25 @@
+[remote-build] branch head = f2e564ada7b76b9de1cc2ec9c25d8181ef439b15
+leftovers[before]: files_under_root=0 uninstall_entries=0 vendor_registry_keys=0 firewall_rules=0 profile_or_program_dirs=0 processes_started_from_root=0
+msi: LibreOffice_26.2.7_Win_x86-64.msi sha256 MATCHES the pinned official checksum (480fecf759fc6393bd614fbf43753eb95a8198fc1a065d41b727e3b664cd1e59)
+LibreOffice 26.2.7 re-saved feat-cfdv.xlsx: 5828 -> 13382 bytes
+LibreOffice 26.2.7 re-saved feat-chart.pptx: 7535 -> 13055 bytes
+LibreOffice 26.2.7 re-saved feat-comments.docx: 1975 -> 5917 bytes
+LibreOffice 26.2.7 re-saved feat-comments.pptx: 7558 -> 11005 bytes
+LibreOffice 26.2.7 re-saved feat-comments.xlsx: 3288 -> 9256 bytes
+LibreOffice 26.2.7 re-saved feat-macro.docm: 1741 -> 5213 bytes
+LibreOffice 26.2.7 re-saved feat-macro.pptm: 7014 -> 10255 bytes
+LibreOffice 26.2.7 re-saved feat-macro.xlsm: 2848 -> 7416 bytes
+LibreOffice 26.2.7 re-saved feat-media.pptx: 54674 -> 58921 bytes
+LibreOffice 26.2.7 re-saved feat-notes.pptx: 8787 -> 13854 bytes
+LibreOffice 26.2.7 re-saved feat-pivot.xlsx: 8288 -> 16248 bytes
+LibreOffice 26.2.7 re-saved feat-tracked.docx: 1387 -> 5364 bytes
+LibreOffice 26.2.7 re-saved hard.docx: 48646 -> 54785 bytes
+LibreOffice 26.2.7 re-saved hard.pptx: 54218 -> 58481 bytes
+LibreOffice 26.2.7 re-saved hard.xlsx: 5606 -> 13062 bytes
+LibreOffice 26.2.7 re-saved spike.docx: 1250 -> 5222 bytes
+LibreOffice 26.2.7 re-saved spike.pptx: 6785 -> 10239 bytes
+LibreOffice 26.2.7 re-saved spike.xlsx: 2622 -> 7390 bytes
+produced by LibreOffice 26.2.7: 18 files, failed: 0
+leftovers[after]: files_under_root=0 uninstall_entries=0 vendor_registry_keys=0 firewall_rules=0 profile_or_program_dirs=0 processes_started_from_root=0
+[remote-build] exit 0
+exit=0

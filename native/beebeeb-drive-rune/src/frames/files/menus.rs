@@ -24,7 +24,7 @@ pub fn file_menu(s: &State) -> Vec<Entry> {
     let preview = Entry::keyed("preview", "Preview", "Space").dimmed(!s.can_preview());
     let explorer = Entry::item("show-in-explorer", "Show in File Explorer");
     let details = Entry::keyed("details", "Details", "Alt+Enter");
-    if items.iter().any(|i| i.is_protected) {
+    if items.iter().any(|i| i.is_protected) || s.protects_selection() {
         return vec![open, preview, Entry::Sep, explorer, details];
     }
     let keep = if s.selection_is_kept() {

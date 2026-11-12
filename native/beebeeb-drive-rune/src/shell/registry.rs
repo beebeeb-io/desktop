@@ -182,6 +182,7 @@ pub const FRAMES: &[Frame] = &[
     crate::frames::this_pc::SYNC_HISTORY,
     crate::frames::this_pc::AVAILABLE_OFFLINE,
     crate::frames::backups::FRAME,
+    crate::frames::files::protected::SECTION,
     crate::frames::SHARED,
     crate::frames::shared::dialogs::TRASH,
     crate::frames::signin::before_files::LOCKED,
@@ -478,7 +479,7 @@ mod tests {
     fn the_frame_count_is_pinned() {
         assert_eq!(
             FRAMES.len(),
-            21,
+            22,
             "a frame was added to FRAMES without updating this test"
         );
         assert_eq!(

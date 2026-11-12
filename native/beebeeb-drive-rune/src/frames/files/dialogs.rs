@@ -118,7 +118,7 @@ impl State {
         if items.is_empty() {
             return false;
         }
-        if items.iter().any(|i| i.is_protected) {
+        if self.protects(&items) {
             self.failed(Action::Move, ActionError::Protected, tx);
             return true;
         }
