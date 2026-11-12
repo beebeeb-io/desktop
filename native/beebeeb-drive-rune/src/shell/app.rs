@@ -80,10 +80,11 @@ pub enum SettingsPane {
     Backups,
     SyncAndFileExplorer,
     ThumbnailsAndPreviews,
+    Bandwidth,
 }
 
 impl SettingsPane {
-    pub const ALL: [SettingsPane; 9] = [
+    pub const ALL: [SettingsPane; 10] = [
         SettingsPane::General,
         SettingsPane::Account,
         SettingsPane::Security,
@@ -93,6 +94,7 @@ impl SettingsPane {
         SettingsPane::Backups,
         SettingsPane::SyncAndFileExplorer,
         SettingsPane::ThumbnailsAndPreviews,
+        SettingsPane::Bandwidth,
     ];
 
     pub fn label(self) -> &'static str {
@@ -106,6 +108,7 @@ impl SettingsPane {
             SettingsPane::Backups => "Backups",
             SettingsPane::SyncAndFileExplorer => "Sync and File Explorer",
             SettingsPane::ThumbnailsAndPreviews => "Thumbnails and previews",
+            SettingsPane::Bandwidth => "Bandwidth",
         }
     }
 
@@ -120,6 +123,7 @@ impl SettingsPane {
             SettingsPane::Backups => "backups",
             SettingsPane::SyncAndFileExplorer => "sync",
             SettingsPane::ThumbnailsAndPreviews => "previews",
+            SettingsPane::Bandwidth => "bandwidth",
         }
     }
 

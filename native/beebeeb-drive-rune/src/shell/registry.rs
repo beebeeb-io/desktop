@@ -203,6 +203,12 @@ pub const FRAMES: &[Frame] = &[
         feedback: FeedbackPolicy::Denied("its lane has not opted in yet"),
     },
     Frame {
+        group: FrameGroup::Settings(SettingsPane::Bandwidth),
+        view: crate::frames::settings::view,
+        on_key: Some(crate::frames::settings::on_key),
+        feedback: FeedbackPolicy::Denied("its lane has not opted in yet"),
+    },
+    Frame {
         group: FrameGroup::Settings(SettingsPane::Account),
         view: crate::frames::account::view,
         on_key: Some(crate::frames::account::on_key),

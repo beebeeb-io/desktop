@@ -208,13 +208,12 @@ fn the_sidebar_is_navigation_of_links_with_the_current_one_selected() {
 /// request to the shell. By pointer and by keyboard.
 #[test]
 fn every_row_of_general_acts() {
-    let asks: [(&str, Intent); 6] = [
+    let asks: [(&str, Intent); 5] = [
         ("item-1-0", Intent::Show("DW-0380")),
         ("item-1-2", Intent::Show("DW-0790")),
         ("item-2-0", Intent::Open("privacy")),
         ("item-2-1", Intent::Open("export-my-data")),
         ("item-3-0", Intent::Web("terms-and-privacy-policy")),
-        ("Bandwidth-row", Intent::Show("DW-0785")),
     ];
     for (row, intent) in asks {
         let mut rt = runtime("DW-0701");
@@ -227,11 +226,12 @@ fn every_row_of_general_acts() {
         key(&mut rt, Key::Enter);
         assert_eq!(rt.state.settings.intents, vec![intent], "{row} by keyboard");
     }
-    let shows: [(&str, Pane, Option<Dialog>, &str); 4] = [
+    let shows: [(&str, Pane, Option<Dialog>, &str); 5] = [
         ("item-1-1", Pane::General, Some(Dialog::ReportProblem), "General"),
         ("item-2-2", Pane::StorageLocation, None, "Storage location"),
         ("item-3-1", Pane::About, None, "About Beebeeb"),
         ("Notifications-row", Pane::Notifications, None, "Notifications"),
+        ("Bandwidth-row", Pane::Bandwidth, None, "Bandwidth"),
     ];
     for (row, pane, dialog, title) in shows {
         let mut rt = runtime("DW-0701");
@@ -371,12 +371,19 @@ fn an_available_update_is_said_once_with_one_primary_action() {
 /// it must not: no city, no provider.
 #[test]
 fn every_built_frame_renders_and_names_no_city_and_no_provider() {
-    assert_eq!(super::FRAMES.len(), 28, "the frames the two settings lanes built");
+    assert_eq!(
+        super::FRAMES.len(),
+        38,
+        "the frames the settings lanes built (28, and Bandwidth's 10)"
+    );
     for (frame, _) in super::FRAMES {
         let rt = runtime(frame);
         assert!(find(&rt, "set-main").is_some(), "{frame}");
         assert!(find(&rt, "caption-bar").is_some(), "{frame}: the same window");
-        assert_eq!(info(&rt, "set-title").role, "heading", "{frame}");
+        // Five board frames of Bandwidth draw the pane from its devices down, without its heading.
+        if rt.state.settings.bandwidth.crop != super::bandwidth::Crop::FromDevices {
+            assert_eq!(info(&rt, "set-title").role, "heading", "{frame}");
+        }
         for e in rt.elements() {
             let words = format!("{} {}", e.text.unwrap_or_default(), e.label.unwrap_or_default()).to_lowercase();
             for banned in [
