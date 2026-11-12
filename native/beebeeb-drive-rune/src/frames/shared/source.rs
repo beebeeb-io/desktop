@@ -33,6 +33,106 @@ pub struct PeopleShare {
     pub people: Vec<Person>,
     /// Not accepted yet.
     pub pending: bool,
+    /// How much it holds, in words ("212 items"), when the source knows: People with access
+    /// says it under the name (DW-0511).
+    pub contents: Option<String>,
+}
+
+/// What a person may do with a share (DW-0512's switch, DW-0514's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    View,
+    Edit,
+}
+
+impl Access {
+    /// The board's words: "Can view", "Can edit".
+    pub fn words(self) -> &'static str {
+        match self {
+            Access::View => "Can view",
+            Access::Edit => "Can edit",
+        }
+    }
+}
+
+/// The pronoun a sentence about a person uses (DW-0512b: "goes from his list"). Beebeeb does
+/// not ask anyone for one: a person the engine lists is `They`; only the board's sample people
+/// carry the board's own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Pronoun {
+    He,
+    She,
+    #[default]
+    They,
+}
+
+impl Pronoun {
+    /// "his", "her", "their".
+    pub fn possessive(self) -> &'static str {
+        match self {
+            Pronoun::He => "his",
+            Pronoun::She => "her",
+            Pronoun::They => "their",
+        }
+    }
+    /// "he", "she", "they".
+    pub fn subject(self) -> &'static str {
+        match self {
+            Pronoun::He => "he",
+            Pronoun::She => "she",
+            Pronoun::They => "they",
+        }
+    }
+    /// "him", "her", "them".
+    pub fn object(self) -> &'static str {
+        match self {
+            Pronoun::He => "him",
+            Pronoun::She => "her",
+            Pronoun::They => "them",
+        }
+    }
+}
+
+/// One person on a share with people (DW-0511's rows, DW-0512's dialog).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Member {
+    pub id: String,
+    pub name: String,
+    pub initials: String,
+    /// The board's avatar hue (`.kit-avatar.hue-*`).
+    pub hue: char,
+    pub email: String,
+    /// `None`: the owner, who can do everything.
+    pub access: Option<Access>,
+    /// The person using this app.
+    pub you: bool,
+    /// Invited and not signed up or accepted yet ("Invited, waiting").
+    pub invited: bool,
+    /// The person compared safety numbers with them. Only ever read here: nothing in this
+    /// window computes or compares a safety number.
+    pub compared: bool,
+    pub pronoun: Pronoun,
+}
+
+impl Member {
+    /// The name a sentence uses: the first word of the name ("Jonas").
+    pub fn first_name(&self) -> &str {
+        self.name.split_whitespace().next().unwrap_or(&self.name)
+    }
+
+    /// The row's second line (DW-0511): "You · Owner", "Can edit", "Can view · Invited, waiting".
+    pub fn line(&self) -> String {
+        let role = match (self.access, self.you) {
+            (None, true) => "You \u{00B7} Owner".to_string(),
+            (None, false) => "Owner".to_string(),
+            (Some(access), _) => access.words().to_string(),
+        };
+        if self.invited {
+            format!("{role} \u{00B7} Invited, waiting")
+        } else {
+            role
+        }
+    }
 }
 
 /// A link the person made (DW-0502, "Links").
@@ -86,6 +186,17 @@ pub trait SharedSource {
     fn close_request(&mut self, id: &str) -> bool;
     /// Take a closed or expired request out of the list.
     fn remove_request(&mut self, id: &str) -> bool;
+    /// The people of a share with people, the owner first (DW-0511). Empty: no such share.
+    fn members(&self, share: &str) -> Vec<Member>;
+    /// What one person may do with a share, changed at once (DW-0512). `false`: no such
+    /// person on that share, or the owner.
+    fn set_access(&mut self, share: &str, person: &str, access: Access) -> bool;
+    /// Take one person off a share (DW-0512b): nothing new opens for them and the share goes
+    /// from their list; copies they saved stay with them. `false`: no such person, or the owner.
+    fn remove_access(&mut self, share: &str, person: &str) -> bool;
+    /// Share with someone by their email address (DW-0514); they show as invited until they
+    /// accept. `false`: no such share, or they are on it already.
+    fn invite(&mut self, share: &str, email: &str, access: Access) -> bool;
 }
 
 /// The board's sample (DW-0501, DW-0502, DW-0503), or nothing at all (DW-0508, DW-0509, DW-0510).
@@ -94,6 +205,8 @@ pub struct BoardShared {
     invitations: Vec<Invitation>,
     with_me: Vec<Row>,
     people: Vec<PeopleShare>,
+    /// The people of each share with people, by the share's id (DW-0511).
+    members: Vec<(String, Vec<Member>)>,
     links: Vec<LinkShare>,
     requests: Vec<Request>,
 }
@@ -120,14 +233,30 @@ impl BoardShared {
             initials: initials.into(),
             hue,
         };
-        let share = |id: &str, name: &str, kind, names: &str, people, pending| PeopleShare {
+        let share = |id: &str, name: &str, kind, names: &str, people, pending, contents: Option<&str>| PeopleShare {
             id: id.into(),
             name: name.into(),
             kind,
             names: names.into(),
             people,
             pending,
+            contents: contents.map(Into::into),
         };
+        // DW-0511 draws the people of Lisbon trip; the other shares' people are the ones their
+        // rows name (DW-0502), with the access an invitation starts with (DW-0514: Can view).
+        let member = |id: &str, name: &str, initials: &str, hue: char, email: &str, access: Option<Access>| Member {
+            id: id.into(),
+            name: name.into(),
+            initials: initials.into(),
+            hue,
+            email: email.into(),
+            access,
+            you: access.is_none(),
+            invited: false,
+            compared: false,
+            pronoun: Pronoun::They,
+        };
+        let anna = || member("m-anna", "Anna Visser", "AV", 'a', "anna@northwind.studio", None);
         let link = |id: &str, name: &str, kind, line: &str, expired| LinkShare {
             id: id.into(),
             name: name.into(),
@@ -209,6 +338,7 @@ impl BoardShared {
                     "Jonas Meier, Mia de Vries",
                     vec![person("JM", 'c'), person("MD", 'a')],
                     false,
+                    Some("212 items"),
                 ),
                 share(
                     "p-invoices",
@@ -217,6 +347,7 @@ impl BoardShared {
                     "Priya Shah",
                     vec![person("PS", 'c')],
                     false,
+                    None,
                 ),
                 share(
                     "p-contract",
@@ -225,6 +356,69 @@ impl BoardShared {
                     "Sam Okafor",
                     vec![person("SO", 'b')],
                     true,
+                    None,
+                ),
+            ],
+            members: vec![
+                (
+                    "p-lisbon".into(),
+                    vec![
+                        anna(),
+                        // The board's sentences about Jonas say "his" (DW-0512b).
+                        Member {
+                            pronoun: Pronoun::He,
+                            ..member(
+                                "m-jonas",
+                                "Jonas Meier",
+                                "JM",
+                                'c',
+                                "jonas@northwind.studio",
+                                Some(Access::Edit),
+                            )
+                        },
+                        Member {
+                            invited: true,
+                            ..member(
+                                "m-mia",
+                                "Mia de Vries",
+                                "MD",
+                                'a',
+                                "mia@northwind.studio",
+                                Some(Access::View),
+                            )
+                        },
+                    ],
+                ),
+                (
+                    "p-invoices".into(),
+                    vec![
+                        anna(),
+                        member(
+                            "m-priya",
+                            "Priya Shah",
+                            "PS",
+                            'c',
+                            "priya@northwind.studio",
+                            Some(Access::View),
+                        ),
+                    ],
+                ),
+                (
+                    "p-contract".into(),
+                    vec![
+                        anna(),
+                        Member {
+                            invited: true,
+                            ..member(
+                                "m-sam",
+                                "Sam Okafor",
+                                "SO",
+                                'b',
+                                "sam@northwind.studio",
+                                Some(Access::View),
+                            )
+                        },
+                    ],
                 ),
             ],
             links: vec![
@@ -271,6 +465,37 @@ impl BoardShared {
     pub fn empty() -> Self {
         BoardShared::default()
     }
+
+    fn people_of(&mut self, share: &str) -> Option<&mut Vec<Member>> {
+        self.members
+            .iter_mut()
+            .find(|(id, _)| id == share)
+            .map(|(_, people)| people)
+    }
+
+    /// The share's row in By me names its people as People with access lists them.
+    fn sync_row(&mut self, share: &str) {
+        let others: Vec<Member> = self.members(share).into_iter().filter(|m| m.access.is_some()).collect();
+        if let Some(row) = self.people.iter_mut().find(|p| p.id == share) {
+            row.names = others.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ");
+            row.people = others
+                .iter()
+                .map(|m| Person {
+                    initials: m.initials.clone(),
+                    hue: m.hue,
+                })
+                .collect();
+        }
+    }
+}
+
+/// The initial an invited address shows until its person has a name: its first letter.
+fn initial_of(email: &str) -> String {
+    email
+        .chars()
+        .find(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_uppercase().to_string())
+        .unwrap_or_default()
 }
 
 impl SharedSource for BoardShared {
@@ -335,6 +560,62 @@ impl SharedSource for BoardShared {
         self.requests.retain(|r| r.id != id || r.state == RequestState::Open);
         self.requests.len() != before
     }
+    fn members(&self, share: &str) -> Vec<Member> {
+        self.members
+            .iter()
+            .find(|(id, _)| id == share)
+            .map(|(_, people)| people.clone())
+            .unwrap_or_default()
+    }
+    fn set_access(&mut self, share: &str, person: &str, access: Access) -> bool {
+        let Some(people) = self.people_of(share) else {
+            return false;
+        };
+        match people.iter_mut().find(|m| m.id == person && m.access.is_some()) {
+            Some(m) => {
+                m.access = Some(access);
+                true
+            }
+            None => false,
+        }
+    }
+    fn remove_access(&mut self, share: &str, person: &str) -> bool {
+        let Some(people) = self.people_of(share) else {
+            return false;
+        };
+        let before = people.len();
+        // The owner is never removed.
+        people.retain(|m| m.id != person || m.access.is_none());
+        let gone = people.len() != before;
+        if gone {
+            self.sync_row(share);
+        }
+        gone
+    }
+    fn invite(&mut self, share: &str, email: &str, access: Access) -> bool {
+        let email = email.trim();
+        let Some(people) = self.people_of(share) else {
+            return false;
+        };
+        if email.is_empty() || people.iter().any(|m| m.email.eq_ignore_ascii_case(email)) {
+            return false;
+        }
+        people.push(Member {
+            // Its own kind of id: never one of a member's (`m-…`), and one address is invited once.
+            id: format!("invite-{}", email.to_ascii_lowercase()),
+            name: email.to_string(),
+            initials: initial_of(email),
+            hue: 'e',
+            email: email.to_string(),
+            access: Some(access),
+            you: false,
+            invited: true,
+            compared: false,
+            pronoun: Pronoun::They,
+        });
+        self.sync_row(share);
+        true
+    }
 }
 
 /// The source of a build that ships before the engine lane has wired Shared: it answers
@@ -377,6 +658,18 @@ impl SharedSource for Unwired {
         false
     }
     fn remove_request(&mut self, _id: &str) -> bool {
+        false
+    }
+    fn members(&self, _share: &str) -> Vec<Member> {
+        Vec::new()
+    }
+    fn set_access(&mut self, _share: &str, _person: &str, _access: Access) -> bool {
+        false
+    }
+    fn remove_access(&mut self, _share: &str, _person: &str) -> bool {
+        false
+    }
+    fn invite(&mut self, _share: &str, _email: &str, _access: Access) -> bool {
         false
     }
 }
