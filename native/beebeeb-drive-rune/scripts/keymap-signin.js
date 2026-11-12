@@ -140,4 +140,36 @@ if (auMac) {
   });
   // The support address row of DW-A46 (an icon beside a link).
   icon('mail-icon', q('.au-stack > .t-sub.au-row > svg', col));
+
+  // ---- Create an account (DW-A31 to DW-A44) ----
+  // The progress line: six bars, "2 of 6" and the step's name.
+  const steps = q('.au-steps', col);
+  if (steps) {
+    each(':scope > b > i', steps, (bar, i) => box(`step-${i}`, bar));
+    text('steps-count', q(':scope > .au-mono', steps));
+    text('steps-name', q(':scope > .au-dim', steps));
+  }
+  // A checkbox with its sentence (the terms, "I have saved my recovery phrase offline.").
+  each('label > button[role="checkbox"]', col, (b, i) => {
+    box(`check-${i}`, b);
+    icon(`check-${i}-icon`, q('svg', b));
+    text(`check-${i}-label`, b.nextElementSibling);
+  });
+  // "You can ask for a new code in 0:42".
+  const resend = q('.au-stack.is-tight > span:not(.kit-go)', col);
+  if (resend && q(':scope > .au-mono', resend)) { api.textNode('resend', resend); text('resend-time', q(':scope > .au-mono', resend)); }
+  // The suggestions under the word being typed (DW-A40, DW-A41).
+  const suggest = q('.au-row.is-between > .au-row', col);
+  if (suggest && q('.kit-chip', suggest)) {
+    text('suggest-label', q(':scope > span:not(.kit-chip)', suggest));
+    each(':scope > .kit-chip', suggest, (c, i) => { box(`chip-${i}`, c); api.textNode(`chip-${i}-text`, c); });
+  }
+  // The "Next" card of DW-A44: a tile, a caption and the product's step.
+  each(':scope > .kit-card', col, (c, i) => {
+    box(`next-${i}`, c);
+    const tile = q('.kit-tile', c);
+    if (tile) { box(`next-${i}-tile`, tile); icon(`next-${i}-icon`, q('svg', tile)); }
+    text(`next-${i}-cap`, q('.t-cap', c));
+    text(`next-${i}-title`, q('.t-head', c));
+  });
 }
