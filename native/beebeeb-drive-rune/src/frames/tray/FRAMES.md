@@ -82,7 +82,7 @@ main window is closed.
 | Signed out because Beebeeb refused the session again and again (DW-1219) | `Accounts::active_account` → `auth_health.is_expired` |
 | Paused (DW-1204) | `Engine::is_paused` |
 | Sync runs on this PC | `Engine::is_syncing` |
-| Checking (DW-1212), up to date (DW-1202), syncing with files left, bytes left and the batch bar (DW-1203), can't reach Beebeeb (DW-1206), stopped by an error on this PC | the engine's last `engine-status` report (`EngineEvent::Status` through `EngineStatusView::apply`; `PauseChanged`) |
+| Checking (DW-1212), up to date (DW-1202: an `idle` that carries the time of a finished check, `last_tick_ok_at`), syncing with files left, bytes left and the batch bar (DW-1203), can't reach Beebeeb (DW-1206), stopped by an error on this PC | the engine's last `engine-status` report (`EngineEvent::Status` through `EngineStatusView::apply`; `PauseChanged`) |
 | Changes waiting while paused, files given up (DW-1207), changes held for the quota (DW-1209) | `StateDb::queue_hold_summary` |
 | Files that need a decision (DW-1205), files on their way | `drive_v2::model::sync_counts` |
 | Storage almost full (DW-1208) | #322's `EngineDriveSource::storage` (`Engine::storage_info`): on a thread of its own, at most once a minute, shown only for the account it was read for |
@@ -94,7 +94,13 @@ main window is closed.
 | A row's click | #322's `EngineFilesSource::show_in_file_explorer`, with its guard: refused while sync does not run |
 
 The database is read only while the account's keys are in memory; signed out, locked or without the keys the
-list says why it is empty, and nothing is read.
+list says why it is empty, and nothing is read. A hidden flyout is not read at all (`Shell::refresh`): the click
+that opens it reads it first, and a change that came while it opened is read once it shows.
+
+The b reads the same report (`LiveEngine::tray_inputs`, `shell::tray`): checking while the engine runs and has
+not finished a check (no report yet, its first check, after a resume, Beebeeb answering 401), not syncing while
+sync does not run on this PC (also without the account's keys), and up to date only after an `idle` that
+carries a finished check.
 
 ## States the board does not draw
 
@@ -109,7 +115,7 @@ list says why it is empty, and nothing is read.
 | A photo's tile | the design system's image glyph | the flyout has no thumbnail from the engine |
 
 Checking comes after signed out, paused and "sync isn't running" here: those three are known at once; checking
-waits only for what the engine checks.
+waits only for what the engine checks. The b keeps the same order, with "not syncing" for "Sync isn't running".
 
 ## Not wired in the running app
 
@@ -133,6 +139,6 @@ waits only for what the engine checks.
   flyout says Checking, without the numbers.
 - The open flyout reads the engine again when the b's inputs change (`Shell::refresh`); between two such changes
   (one large file, the same count) its byte numbers are those of the last one.
-- The b has no "checking": before the engine's first report, and while sync does not run, it says up to date
-  (`shell::tray`). It does not show conflicts or a full storage: those need the database, and its inputs are
-  read on every frame.
+- The b shows no conflicts, no full storage and nothing given up: those need the database, and its inputs are
+  read on every frame. On an `idle` after a finished check it says up to date over them, while the flyout
+  names them.
