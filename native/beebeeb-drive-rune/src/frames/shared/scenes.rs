@@ -3,7 +3,7 @@
 
 use super::dialogs::{Dialog, SafetyNumber};
 use super::parts::menu::Open;
-use super::source::{Access, BoardShared};
+use super::source::BoardShared;
 use super::{SharedUi, Tab};
 use crate::State;
 use crate::shell::app::Section;
@@ -127,18 +127,13 @@ pub fn dw_0513b(s: &mut State) {
     });
 }
 
-/// Invite someone to Lisbon trip: an address typed, the field in focus, Can view.
+/// Invite someone to Lisbon trip: an address typed, the field in focus, Can view (where an
+/// invitation starts).
 pub fn dw_0514(s: &mut State) {
     dw_0511(s);
     s.frames.shared.start_invite(LISBON);
-    s.frames
-        .shared
-        .fields
-        .email
-        .replace_text("jonas@northwind.studio".to_string());
-    if let Some(Dialog::Invite { access, .. }) = s.frames.shared.dialog.as_mut() {
-        *access = Access::View;
-    }
+    let typed = "jonas@northwind.studio".to_string();
+    s.frames.shared.fields.email.replace_text(typed);
 }
 
 /// Jonas's key changed: the alert over People.

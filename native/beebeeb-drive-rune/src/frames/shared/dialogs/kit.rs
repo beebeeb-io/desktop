@@ -20,6 +20,7 @@
 //! section); the rest are named here for the tests.
 
 use crate::State;
+use crate::frames::shared::parts::controls::slug;
 use crate::frames::shared::parts::{self, style};
 use crate::frames::shared::source::Member;
 use crate::theme::icons_settings as ic;
@@ -212,18 +213,6 @@ pub fn alert(
         .modal_tx(false, dismiss)
 }
 
-fn slug(words: &str) -> String {
-    let mut out = String::new();
-    for c in words.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
-        } else if !out.ends_with('-') && !out.is_empty() {
-            out.push('-');
-        }
-    }
-    out.trim_end_matches('-').to_string()
-}
-
 /// A field: its label above it, the well, the placeholder while it is empty.
 pub struct Field<'a> {
     /// The key of the well (`field-<n>`).
@@ -234,6 +223,9 @@ pub struct Field<'a> {
     pub placeholder: &'a str,
     /// The text input's own key (tests, `Tx::focus`).
     pub input_key: &'static str,
+    /// The width the text has inside the well (the dialog's width less its padding, the well's
+    /// padding and its line). Text wider than this scrolls in the input.
+    pub inner_w: f32,
 }
 
 /// A labelled one-line field (`.kit-fieldwrap` > `.kit-field.kit-field-md`), with the board's
@@ -241,7 +233,9 @@ pub struct Field<'a> {
 /// Amber line and the Amber ring). Focus is the model's (`TextEdit::focused`, which Rune keeps):
 /// a dialog opens with its field in focus by setting it. The caret is drawn as the board draws
 /// it (1.5 by 17, 1 pt after the character it follows, before the placeholder of an empty field);
-/// Rune's own is left unseen, as `ui::account_form::field` does.
+/// Rune's own is left unseen, as `ui::account_form::field` does, while the text fits the well.
+/// Text wider than the well scrolls in the input, where only Rune knows the caret's place: then
+/// Rune's own caret shows, in the same deep Amber, and the drawn one goes.
 pub fn field(
     spec: &Field<'_>,
     edit: &TextEdit,
@@ -251,12 +245,15 @@ pub fn field(
 ) -> El {
     let key = spec.key;
     let focused = edit.focused;
+    // The drawn caret's room after the last character: 1 pt, and its own 1.5.
+    let scrolls = ui_field::advance(&edit.text, FIELD_VALUE) + 2.5 > spec.inner_w;
+    let rune_caret = if scrolls { t.accent_deep } else { Color::TRANSPARENT };
     let mut field = text_input(edit, FIELD_VALUE)
         .key(spec.input_key)
         .label(spec.label)
         .single_line()
         .color(t.text)
-        .caret(Color::TRANSPARENT, ui_field::selection(t))
+        .caret(rune_caret, ui_field::selection(t))
         .on_edit(on_edit)
         .grow(1.0)
         .min_w(0.0);
@@ -270,6 +267,7 @@ pub fn field(
         .min_w(0.0)
         .h_full()
         .center_y()
+        .clip_rounded(0.0)
         .child(input(field));
     // `.kit-caret` stands in front of the placeholder: an empty field's words move over by it.
     let caret_room = if focused { 3.5 } else { 0.0 };
@@ -288,7 +286,7 @@ pub fn field(
                 )),
         );
     }
-    if focused {
+    if focused && !scrolls {
         let before = &edit.text[..edit.focus.min(edit.text.len())];
         let x = ui_field::advance(before, FIELD_VALUE);
         inner = inner.child(
@@ -570,15 +568,17 @@ fn inset(width: f32, color: Color) -> Shadow {
 /// The caller adds `.on_key(..)` through `control`.
 /// Keys: `code-field`, `code-label`, `secure-code`, `code-<i>`, `code-caret`.
 pub fn code_boxes(label: &str, digits: &str, control: impl FnOnce(El) -> El, t: &Theme) -> El {
-    let typed: Vec<char> = digits.chars().take(CODE_LEN).collect();
+    // Counted and read where they are: no copy of the code is made to draw it.
+    let typed = digits.chars().count().min(CODE_LEN);
     let mut boxes = row()
         .key("secure-code")
         .role("textbox")
-        .label(format!("{label}, {CODE_LEN} digits, {} entered", typed.len()))
+        .label(format!("{label}, {CODE_LEN} digits, {typed} entered"))
         .gap(6.0)
         .focusable(true)
         .no_focus_ring()
         .autofocus();
+    let mut chars = digits.chars();
     for i in 0..CODE_LEN {
         let mut b = el()
             .key(format!("code-{i}"))
@@ -587,7 +587,7 @@ pub fn code_boxes(label: &str, digits: &str, control: impl FnOnce(El) -> El, t: 
             .radius(8.0)
             .fill(t.field)
             .center();
-        b = if i == typed.len() {
+        b = if i == typed {
             b.box_shadow(kit::ring(3.0, t.accent.alpha(0.3)))
                 .box_shadow(inset(1.0, t.accent_deep))
                 .child(
@@ -602,7 +602,8 @@ pub fn code_boxes(label: &str, digits: &str, control: impl FnOnce(El) -> El, t: 
         } else {
             b.box_shadow(kit::ring_inset(t.separator))
         };
-        if let Some(d) = typed.get(i) {
+        if let Some(d) = chars.next().filter(|_| i < typed) {
+            // Each digit's own secure text: Rune wipes it when the frame lets it go.
             b = b.child(
                 text(d.to_string())
                     .key(format!("code-{i}-digit"))

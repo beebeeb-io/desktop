@@ -49,6 +49,14 @@ fn text(rt: &Runtime<State>, key: &str) -> Option<String> {
     info(rt, key).text
 }
 
+/// A key with no modifier.
+fn plain(key: Key) -> KeyEvent {
+    KeyEvent {
+        key,
+        mods: Mods::default(),
+    }
+}
+
 #[test]
 fn each_dialog_and_its_controls_are_named_as_the_board_names_them() {
     let frames: [(fn(&mut State), &str, &str, &str); 9] = [
@@ -226,7 +234,14 @@ fn an_invite_adds_the_address_as_invited_and_refuses_someone_already_there() {
         })
     );
     assert_eq!(focused(&rt).as_deref(), Some(super::EMAIL_INPUT));
-    press(&mut rt, Key::Text("lea@northwind.studio".into()));
+    // Not an address yet: nothing is sent, the field keeps the keyboard.
+    for part in ["lea", "@northwind"] {
+        press(&mut rt, Key::Text(part.into()));
+        press(&mut rt, Key::Enter);
+        assert!(matches!(dialog(&rt), Some(Dialog::Invite { .. })), "sent at {part}");
+        assert_eq!(focused(&rt).as_deref(), Some(super::EMAIL_INPUT));
+    }
+    press(&mut rt, Key::Text(".studio".into()));
     click(&mut rt, "seg-1-can-edit");
     assert!(matches!(
         dialog(&rt),
@@ -248,6 +263,21 @@ fn an_invite_adds_the_address_as_invited_and_refuses_someone_already_there() {
         rt.state.frames.shared.source.people_shares()[0].names,
         "Jonas Meier, Mia de Vries, lea@northwind.studio"
     );
+    // The invited person is someone of their own: no id is shared, so taking one off a share
+    // takes no one else.
+    let ids: Vec<String> = rt
+        .state
+        .frames
+        .shared
+        .source
+        .members(LISBON)
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+    let mut unique = ids.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), ids.len(), "{ids:?}");
 
     // Someone already on the share: nothing is sent, the dialog stays with what was typed.
     let mut rt = runtime(scenes::dw_0514);
@@ -264,6 +294,51 @@ fn an_invite_adds_the_address_as_invited_and_refuses_someone_already_there() {
     click(&mut rt, "btn-cancel");
     assert_eq!(dialog(&rt), Some(people()));
     assert_eq!(rt.state.frames.shared.fields.email.text, "");
+}
+
+#[test]
+fn an_address_needs_a_name_an_at_and_a_domain_with_a_dot() {
+    for good in ["lea@northwind.studio", "a.b@c.example.org"] {
+        assert!(super::is_address(good), "{good}");
+    }
+    for bad in [
+        "",
+        "lea",
+        "@northwind.studio",
+        "lea@northwind",
+        "lea@@northwind.studio",
+        "lea@northwind..studio",
+        "lea@.studio",
+        "lea @northwind.studio",
+    ] {
+        assert!(!super::is_address(bad), "{bad}");
+    }
+}
+
+#[test]
+fn a_long_title_scrolls_and_the_caret_is_runes_where_only_rune_knows_its_place() {
+    let mut rt = runtime(scenes::dw_0504);
+    press(&mut rt, Key::Text("Signed".into()));
+    assert!(
+        rt.find("field-0-caret").is_some(),
+        "the board's caret while the title fits"
+    );
+    press(
+        &mut rt,
+        Key::Text(" contracts, invoices and receipts for the whole of the year 2026, please".into()),
+    );
+    assert!(rt.find("field-0-caret").is_none(), "no drawn caret past the well");
+    // Rune's caret stands at the end of what shows, inside the well.
+    let well = info(&rt, "field-0").rect;
+    let caret = info(&rt, super::TITLE_INPUT).caret.expect("the focused field's caret");
+    assert!(
+        caret[0] > well[0] + well[2] / 2.0,
+        "at the end of the text: {caret:?} in {well:?}"
+    );
+    assert!(
+        caret[0] + caret[2] <= well[0] + well[2],
+        "inside the well: {caret:?} in {well:?}"
+    );
 }
 
 #[test]
@@ -383,10 +458,6 @@ fn keys_stop_at_the_dialog_and_never_move_the_list_behind() {
     let mut s = init();
     scenes::dw_0511(&mut s);
     let mut tx = Tx::default();
-    let plain = |key: Key| KeyEvent {
-        key,
-        mods: Mods::default(),
-    };
     for key in [Key::Down, Key::End, Key::Enter, Key::ContextMenu] {
         assert!(crate::frames::shared::on_key(&mut s, &plain(key), &mut tx));
     }
@@ -399,7 +470,7 @@ fn keys_stop_at_the_dialog_and_never_move_the_list_behind() {
 }
 
 #[test]
-fn a_dialog_shows_only_over_its_own_section() {
+fn a_dialog_shows_only_over_its_own_section_and_closes_once_left_behind() {
     let mut rt = runtime(scenes::dw_0749);
     assert!(rt.find("dialog-empty-trash").is_some());
     // Both sections answer (the scenes start the other one on the shell's "not built yet" frame).
@@ -407,9 +478,13 @@ fn a_dialog_shows_only_over_its_own_section() {
     crate::frames::go(&mut rt.state, Section::Shared);
     settle(&mut rt);
     assert!(rt.find("dialog-empty-trash").is_none(), "Trash's dialog over Shared");
+    // Left behind: the first key in Shared closes it, and the code goes with it.
+    press(&mut rt, Key::Down);
+    assert_eq!(dialog(&rt), None);
+    assert_eq!(rt.state.frames.shared.fields.code.text, "");
     crate::frames::go(&mut rt.state, Section::Trash);
     settle(&mut rt);
-    assert!(rt.find("dialog-empty-trash").is_some());
+    assert!(rt.find("dialog-empty-trash").is_none(), "nothing waits in Trash");
 
     let mut rt = runtime(scenes::dw_0511);
     rt.state.frames.trash = crate::frames::trash::TrashUi::default();
@@ -417,6 +492,34 @@ fn a_dialog_shows_only_over_its_own_section() {
     settle(&mut rt);
     assert!(rt.find("row-0").is_some(), "Trash shows its items");
     assert!(rt.find("dialog-people").is_none(), "Shared's dialog over Trash");
+}
+
+#[test]
+fn trashs_keys_stop_at_empty_trash_and_nothing_is_deleted_behind_it() {
+    // Focus nowhere: the keys reach Trash's line in the shell's registry first.
+    let mut s = init();
+    scenes::dw_0749(&mut s);
+    s.frames.trash.selected = Some(0);
+    let group = crate::shell::registry::FrameGroup::Section(Section::Trash);
+    let keys = crate::shell::registry::frame(group)
+        .and_then(|f| f.on_key)
+        .expect("Trash's keys");
+    let mut tx = Tx::default();
+    for key in [Key::Delete, Key::Down, Key::ContextMenu, Key::Enter] {
+        assert!(keys(&mut s, &plain(key), &mut tx));
+    }
+    assert!(
+        s.frames.intents.is_empty(),
+        "nothing deleted behind the dialog: {:?}",
+        s.frames.intents
+    );
+    assert_eq!(s.frames.trash.selected, Some(0));
+    assert!(s.frames.trash.menu.is_none());
+    // Esc closes it; then Trash has its keys again.
+    assert!(keys(&mut s, &plain(Key::Escape), &mut tx));
+    assert_eq!(s.frames.shared.dialog, None);
+    assert!(keys(&mut s, &plain(Key::Down), &mut tx));
+    assert_eq!(s.frames.trash.selected, Some(1));
 }
 
 #[test]

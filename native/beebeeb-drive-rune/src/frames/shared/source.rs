@@ -601,7 +601,8 @@ impl SharedSource for BoardShared {
             return false;
         }
         people.push(Member {
-            id: format!("m-{email}"),
+            // Its own kind of id: never one of a member's (`m-…`), and one address is invited once.
+            id: format!("invite-{}", email.to_ascii_lowercase()),
             name: email.to_string(),
             initials: initial_of(email),
             hue: 'e',

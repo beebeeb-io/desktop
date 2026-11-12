@@ -5,7 +5,9 @@ use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::kit;
 use rune::{Color, El, Icon, el, row};
 
-fn slug(words: &str) -> String {
+/// A key's words part: lower case letters and digits, one `-` for every run of anything else
+/// ("Invite someone…" is `invite-someone`). The one copy the group's controls and dialogs key by.
+pub(crate) fn slug(words: &str) -> String {
     let mut out = String::new();
     for c in words.chars() {
         if c.is_ascii_alphanumeric() {

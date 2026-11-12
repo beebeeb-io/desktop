@@ -143,6 +143,11 @@ impl super::SharedUi {
         self.source.members(share).into_iter().find(|m| m.id == person)
     }
 
+    /// Whether the lane's open dialog is one of `section`'s.
+    pub fn dialog_over(&self, section: Section) -> bool {
+        self.dialog.as_ref().is_some_and(|d| d.section() == section)
+    }
+
     /// Whether the open dialog has what it draws: its share, and its person. One about a share
     /// or a person that went is not drawn (`view::layers`).
     pub fn dialog_drawn(&self) -> bool {
@@ -242,14 +247,15 @@ impl super::SharedUi {
         self.fields.email.focused = true;
     }
 
-    /// Send invite: shares with the address typed; People then shows them as invited. Nothing
-    /// typed, or the source refuses (they are on the share already): the dialog stays.
+    /// Send invite: shares with the address typed; People then shows them as invited. Not an
+    /// address (`is_address`), or the source refuses (they are on the share already): nothing
+    /// is sent and the dialog stays.
     pub fn send_invite(&mut self) -> bool {
         let Some(Dialog::Invite { share, access }) = self.dialog.clone() else {
             return false;
         };
         let email = self.fields.email.text.trim().to_string();
-        if email.is_empty() || !self.source.invite(&share, &email, access) {
+        if !is_address(&email) || !self.source.invite(&share, &email, access) {
             return false;
         }
         self.show_people(&share);
@@ -282,6 +288,20 @@ impl super::SharedUi {
             self.fields.code.replace_text(next);
         }
     }
+}
+
+/// An address someone can be invited at, as far as the window can tell: one `@`, something
+/// before it, a dot inside what follows it, no spaces. Whether it reaches anyone is the
+/// engine's to find out.
+pub fn is_address(email: &str) -> bool {
+    let Some((name, domain)) = email.split_once('@') else {
+        return false;
+    };
+    !name.is_empty()
+        && !domain.contains('@')
+        && domain.split('.').count() >= 2
+        && domain.split('.').all(|part| !part.is_empty())
+        && !email.chars().any(char::is_whitespace)
 }
 
 /// The section the window shows, when it is one of this lane's.
@@ -332,6 +352,49 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         _ => {}
     }
     true
+}
+
+/// Brings the lane's dialog in line with the route: one whose section the window no longer
+/// shows is closed, its fields emptied (the code is wiped), so nothing of it waits while the
+/// person is elsewhere. Run on every key of Shared and Trash (`section_keys`); the shell's
+/// route change is the place that catches every way out (a request to the shell lane, as
+/// `settings::sync`).
+pub fn sync(s: &mut State) {
+    let routed = section_shown(s);
+    let ui = &mut s.frames.shared;
+    if ui.dialog.as_ref().is_some_and(|d| Some(d.section()) != routed) {
+        ui.close_dialog();
+    }
+}
+
+/// The keys `section` gets while the lane may have a dialog open (`shared::on_key`, and
+/// Trash's registry line [`TRASH`]). A dialog of another section closes first (`sync`). A dialog
+/// of this section that is drawn takes the key (`on_section_key`); one whose share or person
+/// went closes, and the section has its keys again. `None`: the section's own keys go on.
+pub fn section_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx, section: Section) -> Option<bool> {
+    sync(s);
+    if !s.frames.shared.dialog_over(section) {
+        return None;
+    }
+    if s.frames.shared.dialog_drawn() {
+        return Some(on_section_key(s, ev, tx));
+    }
+    s.frames.shared.close_dialog();
+    None
+}
+
+/// Trash's line in the shell's registry: `frames::TRASH`, its keys behind the lane's dialog
+/// (Empty Trash? stands over Trash, and `trash::on_key` knows nothing of it).
+pub const TRASH: crate::shell::registry::Frame = crate::shell::registry::Frame {
+    on_key: Some(trash_keys),
+    ..crate::frames::TRASH
+};
+
+fn trash_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    match section_keys(s, ev, tx, Section::Trash) {
+        Some(took) => took,
+        None => crate::frames::trash::on_key(s, ev, tx),
+    }
 }
 
 /// The section's keys while a dialog of it shows: what the dialog and Rune left (a key a text

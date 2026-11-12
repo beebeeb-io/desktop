@@ -19,10 +19,19 @@ use rune::{El, Icon, Span, Tx, col, el, rich, row};
 /// The two accesses, as the switches show them.
 const ACCESS: [Access; 2] = [Access::View, Access::Edit];
 
-/// A dialog-size button (`.kit-btn-md`), keyed by its words as the board's keymap keys it
-/// (`btn-<words>`).
-fn button(words: &str, kind: ButtonKind, icon: Option<&'static Icon>, t: &Theme) -> El {
-    button_md(words, kind, icon, t)
+/// The widths of the two dialogs with fields (`.wn-dlg`, the board's `width`).
+const NEW_REQUEST_W: f32 = 460.0;
+const INVITE_W: f32 = 440.0;
+
+/// The room a field's text has in a dialog `card` wide: less the body's padding (24 a side),
+/// the well's (8 a side) and its line (1 a side).
+fn text_w(card: f32) -> f32 {
+    card - 2.0 * (24.0 + 8.0 + 1.0)
+}
+
+/// The switch's tabs, `access` chosen.
+fn access_tabs(access: Access) -> Vec<(&'static str, bool)> {
+    ACCESS.iter().map(|a| (a.words(), *a == access)).collect()
 }
 
 /// Buttons at the foot's trailing edge (`.wn-dlg-foot`: `justify-content: flex-end`).
@@ -33,12 +42,10 @@ fn trailing(buttons: Vec<El>) -> El {
 /// Buttons from the foot's leading edge (the board's `.flex-1` after them, or a `mr-auto`
 /// before the last).
 fn leading(buttons: Vec<El>) -> El {
-    row()
-        .center_y()
-        .children(buttons)
-        .child(el().key("dlg-foot-gap").grow(1.0))
+    row().center_y().children(buttons).child(spacer())
 }
 
+/// The room that pushes what follows it to the foot's far end.
 fn spacer() -> El {
     el().key("dlg-foot-gap").grow(1.0)
 }
@@ -84,6 +91,7 @@ fn new_request(s: &State, t: &Theme) -> El {
             label: "Title",
             placeholder: "e.g. Send me your signed contract",
             input_key: TITLE_INPUT,
+            inner_w: text_w(NEW_REQUEST_W),
         },
         &ui.fields.title,
         |s: &mut State| &mut s.frames.shared.fields.title,
@@ -96,6 +104,7 @@ fn new_request(s: &State, t: &Theme) -> El {
             label: "Note (optional)",
             placeholder: "Shown on the upload page",
             input_key: NOTE_INPUT,
+            inner_w: text_w(NEW_REQUEST_W),
         },
         &ui.fields.note,
         |s: &mut State| &mut s.frames.shared.fields.note,
@@ -135,11 +144,11 @@ fn new_request(s: &State, t: &Theme) -> El {
         ),
     ];
     let foot = trailing(vec![
-        button("Create link", ButtonKind::Amber, Some(&icons::LINK), t)
+        button_md("Create link", ButtonKind::Amber, Some(&icons::LINK), t)
             .on_press_tx(|s: &mut State, tx: &mut Tx| create_link(s, tx)),
-        button("Cancel", ButtonKind::Ghost, None, t).on_press(close),
+        button_md("Cancel", ButtonKind::Ghost, None, t).on_press(close),
     ]);
-    standard("New request", 460.0, "New request", None, body, foot, t)
+    standard("New request", NEW_REQUEST_W, "New request", None, body, foot, t)
 }
 
 /// Create link: a request needs a title (the field takes the keyboard while it has none).
@@ -178,10 +187,10 @@ fn people(s: &State, share: &PeopleShare, t: &Theme) -> El {
     ];
     let invite = share.id.clone();
     let foot = leading(vec![
-        button("Done", ButtonKind::Outline, None, t)
+        button_md("Done", ButtonKind::Outline, None, t)
             .default_button()
             .on_press(close),
-        button("Invite someone\u{2026}", ButtonKind::Outline, Some(&icons::PLUS), t)
+        button_md("Invite someone\u{2026}", ButtonKind::Outline, Some(&icons::PLUS), t)
             .on_press(move |s: &mut State| s.frames.shared.start_invite(&invite)),
     ]);
     standard("People", 440.0, "People", Some(&share_line(share)), body, foot, t)
@@ -222,7 +231,7 @@ fn person(s: &State, share: &PeopleShare, member: &Member, t: &Theme) -> El {
         t,
     );
     let access = member.access.unwrap_or(Access::View);
-    let tabs: Vec<(&'static str, bool)> = ACCESS.iter().map(|a| (a.words(), *a == access)).collect();
+    let tabs = access_tabs(access);
     let switch = kit::seg(1, "Access", &tabs, t, |i, tab| {
         let (share, person) = (share_id.clone(), person_id.clone());
         tab.on_press(move |s: &mut State| {
@@ -270,7 +279,7 @@ fn person(s: &State, share: &PeopleShare, member: &Member, t: &Theme) -> El {
         row()
             .center_y()
             .child(
-                button("Remove access", ButtonKind::GhostDanger, None, t).on_press(move |s: &mut State| {
+                button_md("Remove access", ButtonKind::GhostDanger, None, t).on_press(move |s: &mut State| {
                     s.frames.shared.open_dialog(Dialog::RemoveAccess {
                         share: share.clone(),
                         person: person.clone(),
@@ -279,7 +288,7 @@ fn person(s: &State, share: &PeopleShare, member: &Member, t: &Theme) -> El {
             )
             .child(spacer())
             .child(
-                button("Done", ButtonKind::Outline, None, t)
+                button_md("Done", ButtonKind::Outline, None, t)
                     .default_button()
                     .on_press(close),
             )
@@ -310,11 +319,11 @@ fn remove_access(share: &PeopleShare, member: &Member, t: &Theme) -> El {
     );
     let (share_id, person_id) = (share.id.clone(), member.id.clone());
     let buttons = vec![
-        button("Remove access", ButtonKind::Danger, None, t).on_press(move |s: &mut State| {
+        button_md("Remove access", ButtonKind::Danger, None, t).on_press(move |s: &mut State| {
             s.frames.shared.remove_access(&share_id, &person_id);
         }),
         // The way out takes the keyboard first: Enter never removes anyone by accident.
-        button("Cancel", ButtonKind::Ghost, None, t)
+        button_md("Cancel", ButtonKind::Ghost, None, t)
             .autofocus()
             .on_press_tx(dismiss),
     ];
@@ -350,12 +359,12 @@ fn safety_number(member: &Member, number: &SafetyNumber, t: &Theme) -> El {
     let foot = row()
         .center_y()
         .child(
-            button("They don't match", ButtonKind::Outline, None, t)
+            button_md("They don't match", ButtonKind::Outline, None, t)
                 .on_press(move |s: &mut State| ask(s, Intent::Do("safety-number-differs", differ.clone()))),
         )
         .child(spacer())
         .child(
-            button("They match", ButtonKind::Amber, None, t)
+            button_md("They match", ButtonKind::Amber, None, t)
                 .on_press(move |s: &mut State| ask(s, Intent::Do("safety-number-matches", matched.clone()))),
         );
     standard("Safety number", 440.0, "Safety number", None, body, foot, t)
@@ -417,7 +426,7 @@ fn stopped(s: &State, share: &PeopleShare, member: &Member, number: &SafetyNumbe
         kit::groups(&kit::GROUPS_SMALL, &number.0, t),
     ];
     let foot = leading(vec![
-        button("Compare again", ButtonKind::Amber, None, t)
+        button_md("Compare again", ButtonKind::Amber, None, t)
             .default_button()
             .on_press(move |s: &mut State| {
                 let (share, person, number) = again.clone();
@@ -425,10 +434,12 @@ fn stopped(s: &State, share: &PeopleShare, member: &Member, number: &SafetyNumbe
                     .shared
                     .open_dialog(Dialog::SafetyNumber { share, person, number });
             }),
-        button(&format!("Remove {first}'s access"), ButtonKind::GhostDanger, None, t).on_press(move |s: &mut State| {
-            let (share, person) = remove.clone();
-            s.frames.shared.open_dialog(Dialog::RemoveAccess { share, person });
-        }),
+        button_md(&format!("Remove {first}'s access"), ButtonKind::GhostDanger, None, t).on_press(
+            move |s: &mut State| {
+                let (share, person) = remove.clone();
+                s.frames.shared.open_dialog(Dialog::RemoveAccess { share, person });
+            },
+        ),
     ]);
     kit::card(&format!("Sharing with {first} is stopped"), 440.0, None, body, foot, t)
 }
@@ -442,13 +453,14 @@ fn invite(s: &State, share: &PeopleShare, access: Access, t: &Theme) -> El {
             label: "Email",
             placeholder: "",
             input_key: EMAIL_INPUT,
+            inner_w: text_w(INVITE_W),
         },
         &ui.fields.email,
         |s: &mut State| &mut s.frames.shared.fields.email,
         |input| input.on_submit(send_invite),
         t,
     );
-    let tabs: Vec<(&'static str, bool)> = ACCESS.iter().map(|a| (a.words(), *a == access)).collect();
+    let tabs = access_tabs(access);
     let switch = kit::seg(1, "Access", &tabs, t, |i, tab| {
         tab.on_press(move |s: &mut State| set_invite_access(s, ACCESS[i]))
     });
@@ -469,14 +481,14 @@ fn invite(s: &State, share: &PeopleShare, access: Access, t: &Theme) -> El {
     ];
     let back = share.id.clone();
     let foot = trailing(vec![
-        button("Send invite", ButtonKind::Amber, None, t).on_press_tx(send_invite),
-        button("Cancel", ButtonKind::Ghost, None, t).on_press(move |s: &mut State| {
+        button_md("Send invite", ButtonKind::Amber, None, t).on_press_tx(send_invite),
+        button_md("Cancel", ButtonKind::Ghost, None, t).on_press(move |s: &mut State| {
             s.frames.shared.show_people(&back);
         }),
     ]);
     standard(
         "Invite someone",
-        440.0,
+        INVITE_W,
         "Invite someone",
         Some(&share.name),
         body,
@@ -522,12 +534,12 @@ fn key_changed(member: &Member, t: &Theme) -> El {
     );
     let (compare, anyway) = (member.id.clone(), member.id.clone());
     let buttons = vec![
-        button("Compare safety numbers", ButtonKind::Amber, None, t)
+        button_md("Compare safety numbers", ButtonKind::Amber, None, t)
             .default_button()
             .on_press(move |s: &mut State| ask(s, Intent::About("DW-0513", compare.clone()))),
-        button("Share anyway", ButtonKind::Outline, None, t)
+        button_md("Share anyway", ButtonKind::Outline, None, t)
             .on_press(move |s: &mut State| ask(s, Intent::Do("share-anyway", anyway.clone()))),
-        button("Cancel", ButtonKind::Ghost, None, t).on_press_tx(dismiss),
+        button_md("Cancel", ButtonKind::Ghost, None, t).on_press_tx(dismiss),
     ];
     kit::alert(
         &title,
@@ -582,7 +594,7 @@ fn empty_trash(s: &State, t: &Theme) -> El {
             None,
             t,
         ),
-        button("Cancel", ButtonKind::Outline, None, t).on_press(close),
+        button_md("Cancel", ButtonKind::Outline, None, t).on_press(close),
     ]);
     standard(
         "Empty Trash?",

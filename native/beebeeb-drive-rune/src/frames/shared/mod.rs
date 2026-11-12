@@ -257,7 +257,7 @@ fn pick(s: &mut State, n: usize, tx: &mut Tx) {
     if let Some(intent) = s.frames.shared.pick(n) {
         s.frames.intents.push(intent);
     }
-    if s.frames.shared.dialog.is_none() {
+    if !s.frames.shared.dialog_over(Section::Shared) {
         return_focus(s, tx);
     }
 }
@@ -676,14 +676,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 /// menu of the SELECTED item under it. In the search field, Enter asks for the search.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     // A dialog in front takes every key that reaches the section: the list never moves under it.
-    // One whose share or person went is not drawn: it closes, and the list has the keys again.
-    let ui = &s.frames.shared;
-    let in_front = ui.dialog.as_ref().is_some_and(|d| d.section() == Section::Shared);
-    if in_front {
-        if s.frames.shared.dialog_drawn() {
-            return dialogs::on_section_key(s, ev, tx);
-        }
-        s.frames.shared.close_dialog();
+    if let Some(took) = dialogs::section_keys(s, ev, tx, Section::Shared) {
+        return took;
     }
     if let Some(mut open) = s.frames.shared.menu.take() {
         let entries = s.frames.shared.menu_entries().1;
@@ -742,7 +736,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Enter => match ui.open_selected() {
             Some(intent) => s.frames.intents.push(intent),
             // People with access opened here: the key is taken.
-            None if ui.dialog.is_some() => {}
+            None if ui.dialog_over(Section::Shared) => {}
             None => return false,
         },
         _ => return false,
