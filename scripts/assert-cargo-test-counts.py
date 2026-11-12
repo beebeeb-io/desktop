@@ -38,9 +38,23 @@ def read_floors(path, os_name):
     return floors
 
 
+def normalize_binary_header(header):
+    """Normalize the binary path in a cargo test header for matching.
+
+    Rust 1.100.0 changed the test binary layout from
+    ``target/debug/deps/<name>-<hash>`` to
+    ``target/debug/build/<pkg>/<hash>/out/<name>-<hash>``.
+    This rewrites the latter to the former so that floor keys and ``--expect``
+    values written as ``deps/<name>-`` keep working under both layouts.
+    """
+    return re.sub(r"build/[^/]+/[0-9a-f]+/out/", "deps/", header)
+
+
 def check(log, cargo_exit_code, floors=(), expected=(), retried_ok=False):
     seen_expected = set()
+    all_headers = []
     current = None
+    current_normalized = None
     announced = None
     binaries = 0
     total = 0
@@ -51,6 +65,7 @@ def check(log, cargo_exit_code, floors=(), expected=(), retried_ok=False):
             if current is not None:
                 raise ValueError(f"missing result for {current}")
             current = line.replace("\\", "/")
+            current_normalized = normalize_binary_header(current)
             announced = None
         elif re.fullmatch(r"running \d+ tests?", line):
             if current is None or announced is not None:
@@ -71,32 +86,48 @@ def check(log, cargo_exit_code, floors=(), expected=(), retried_ok=False):
             executed = passed + failed
             print(f"{current}: {passed} passed; {failed} failed; {ignored} ignored; "
                   f"{filtered} filtered; {executed} executed")
+            all_headers.append(current)
             if result != "ok" or failed:
                 if not retried_ok:
                     raise ValueError(f"failed tests in {current}")
                 print(f"  (retried-ok: {failed} failure(s) accepted — retried and passed)")
             if announced != executed + ignored + measured or filtered:
                 raise ValueError(f"inconsistent or filtered count in {current}")
-            named = [part for part in expected if part in current]
+            named = [part for part in expected if part in current_normalized]
             seen_expected.update(named)
             empty_allowed = current.startswith(("Running unittests src/main.rs (", "Doc-tests ")) and not named
             if executed == 0 and not empty_allowed:
                 raise ValueError(f"zero executed tests in {current}")
             for part, floor in floors:
-                if part in current and executed < floor:
+                if part in current_normalized and executed < floor:
                     raise ValueError(f"{executed} executed tests in {current}: below the floor of {floor} for '{part}'")
             library_seen |= current.startswith("Running unittests src/lib.rs (")
             binaries += 1
             total += executed
             current = None
+            current_normalized = None
     if current is not None:
         raise ValueError(f"missing result for {current}")
     missing = [part for part in expected if part not in seen_expected]
     if missing:
-        raise ValueError(f"expected test binary not in the log: {', '.join(missing)}")
+        found = "; ".join(all_headers) if all_headers else "(none)"
+        raise ValueError(f"expected test binary not in the log: {', '.join(missing)}\n"
+                         f"  headers found: {found}")
     # A crate with no library names its binaries with --expect instead.
     if (not library_seen and not expected) or total == 0:
         raise ValueError("missing library results or zero total executed tests")
+    # A floor that matched no binary in this log is silently useless when the crate's binaries
+    # are a subset of the floors file.  But if the binary NAME appeared in a header and only the
+    # PATH prefix kept the floor from matching, the normalization missed a new layout: fail loud.
+    for part, floor in floors:
+        stem = part.rsplit("/", 1)[-1] if "/" in part else part
+        matched = any(part in normalize_binary_header(h) for h in all_headers)
+        stem_seen = any(stem in h for h in all_headers)
+        if not matched and stem_seen:
+            raise ValueError(
+                f"floor '{part}' did not match any binary, but '{stem}' appeared in a header "
+                f"(a cargo test-binary layout change?); headers: "
+                + "; ".join(h for h in all_headers if stem in h))
     if cargo_exit_code != 0:
         if not retried_ok:
             raise ValueError(f"cargo exited {cargo_exit_code}")
@@ -117,6 +148,18 @@ def self_test():
     main = "Running unittests src/main.rs (target/debug/deps/beebeeb_desktop-123.exe)"
     integration = "Running tests/keychain.rs (target/debug/deps/keychain-123.exe)"
     good = fixture(lib, 3) + fixture(main, 0) + fixture(integration, 2) + fixture("Doc-tests beebeeb_desktop_lib", 0)
+
+    # Rust 1.100.0 build-dir layout (target/debug/build/<pkg>/<hash>/out/<name>-<hash>).
+    lib_new = "Running unittests src/lib.rs (target/debug/build/beebeeb-desktop/3022ce26a550e19b/out/beebeeb_desktop_lib-3022ce26a550e19b.exe)"
+    main_new = "Running unittests src/main.rs (target/debug/build/beebeeb-desktop/637571ebd75c1d7e/out/beebeeb_desktop-637571ebd75c1d7e.exe)"
+    integration_new = "Running tests/keychain.rs (target/debug/build/beebeeb-desktop/e67133c14ef54448/out/keychain-e67133c14ef54448.exe)"
+    good_new = fixture(lib_new, 3) + fixture(main_new, 0) + fixture(integration_new, 2) + fixture("Doc-tests beebeeb_desktop_lib", 0)
+
+    # Engine crate headers in the new layout (the actual failure).
+    engine_lib_new = "Running unittests src/lib.rs (target/debug/build/beebeeb-engine/7a5ce8432d6e66ba/out/beebeeb_engine-7a5ce8432d6e66ba)"
+    engine_integration_new = "Running tests/fake_api_account.rs (target/debug/build/beebeeb-engine/30f73210a9ab05d8/out/fake_api_account-30f73210a9ab05d8)"
+    engine_good_new = fixture(engine_lib_new, 1939) + fixture(engine_integration_new, 8) + fixture("Doc-tests beebeeb_engine", 0)
+
     floor_cases = [
         # (name, log, floors file text, --expect values, expected error)
         ("library at its floor", good, "linux 3 deps/beebeeb_desktop_lib-\n", [], None),
@@ -129,10 +172,25 @@ def self_test():
         ("binary-only crate, expected and run", fixture(main, 9), "", ["src/main.rs"], None),
         ("binary-only crate that ran nothing", fixture(main, 0), "", ["src/main.rs"], "zero executed tests"),
         ("binary-only crate without --expect", fixture(main, 9), "", [], "missing library results"),
+        # ── Rust 1.100.0 build-dir layout ────────────────────────────────────────────────
+        ("new layout: library at its floor", good_new, "linux 3 deps/beebeeb_desktop_lib-\n", [], None),
+        ("new layout: library one below its floor", good_new, "linux 4 deps/beebeeb_desktop_lib-\n", [], "below the floor of 4"),
+        ("new layout: --expect matches via normalization", engine_good_new,
+         "linux 1760 deps/beebeeb_engine-\n", ["deps/beebeeb_engine-"], None),
+        ("new layout: --expect still fails for absent binary", good_new,
+         "", ["deps/beebeeb_engine-"], "expected test binary not in the log"),
+        ("new layout: missing binary message lists headers", good_new,
+         "", ["deps/beebeeb_engine-"], "headers found"),
+        ("new layout: engine floor applies", engine_good_new,
+         "linux 1760 deps/beebeeb_engine-\n", ["deps/beebeeb_engine-"], None),
+        ("new layout: engine floor catches a drop", engine_good_new,
+         "linux 2000 deps/beebeeb_engine-\n", ["deps/beebeeb_engine-"], "below the floor of 2000"),
     ]
     cases = [
         ("positive per-binary counts", good, 0, None),
         ("Windows CRLF, paths and ANSI", good.replace("/", "\\").replace("\n", "\r\n").replace("Running", "\x1b[32mRunning\x1b[0m"), 0, None),
+        ("new layout: positive per-binary counts", good_new, 0, None),
+        ("new layout: Windows CRLF and ANSI", good_new.replace("/", "\\").replace("\n", "\r\n").replace("Running", "\x1b[32mRunning\x1b[0m"), 0, None),
         ("zero-test log", fixture(lib, 0), 0, "zero executed tests"),
         ("ignored-only library", fixture(lib, 0, ignored=3), 0, "zero executed tests"),
         ("empty integration after passing library", fixture(lib, 3) + fixture(integration, 0), 0, "zero executed tests"),
