@@ -60,6 +60,8 @@ pub enum BackupKind {
     Mail,
     Contacts,
     Calendar,
+    /// A plain folder that has something to say beside its name.
+    Folder,
 }
 
 /// What a row of the protected tree is, beyond a folder.
@@ -70,6 +72,8 @@ pub struct BackupEntry {
     pub status: Option<String>,
     /// A service's folder: it shows the lock.
     pub managed: bool,
+    /// Words beside the name: "Chosen folder" for a folder the person added to the backup (DW-0423).
+    pub note: Option<String>,
 }
 
 /// The note over a folder a service manages (DW-0424).
@@ -119,6 +123,7 @@ impl BackupKind {
             BackupKind::Mail => &icons_settings::MAIL,
             BackupKind::Contacts => &CONTACTS,
             BackupKind::Calendar => &CALENDAR,
+            BackupKind::Folder => &icons::FILES,
         }
     }
 }
@@ -413,9 +418,10 @@ pub fn row_of(s: &State, i: usize, item: &DriveItem, t: &Theme) -> Option<El> {
     let date = format_date(&item.modified_at);
     let meta = if selected { t.text_secondary } else { t.text_tertiary };
 
-    let icon = entry
-        .as_ref()
-        .map_or_else(|| crate::ui::file_list::file_type_icon(item), |e| e.kind.icon());
+    let icon = match entry.as_ref().map(|e| e.kind) {
+        None | Some(BackupKind::Folder) => crate::ui::file_list::file_type_icon(item),
+        Some(kind) => kind.icon(),
+    };
     let tile = el()
         .key(format!("{k}-tile"))
         .size(22.0, 22.0)
@@ -453,6 +459,10 @@ pub fn row_of(s: &State, i: usize, item: &DriveItem, t: &Theme) -> Option<El> {
         (Some(bytes), None) => crate::source::format_size(bytes),
         (None, None) => String::new(),
     };
+    let note = entry.as_ref().and_then(|e| e.note.clone());
+    if let Some(note) = &note {
+        name = name.child(kit::label(format!("{k}-note"), note.clone(), STATUS, t.text_tertiary));
+    }
     let status = entry.as_ref().and_then(|e| e.status.clone());
     let pc_state = PcState::of(item.pc_status.as_deref());
 
@@ -461,6 +471,7 @@ pub fn row_of(s: &State, i: usize, item: &DriveItem, t: &Theme) -> Option<El> {
     if !size.is_empty() {
         said.push(size.clone());
     }
+    said.extend(note);
     said.extend(status.clone());
     said.extend(pc_state.map(|state| {
         match state {

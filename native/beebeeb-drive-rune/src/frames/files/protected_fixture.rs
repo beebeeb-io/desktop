@@ -107,6 +107,15 @@ fn top_of(id: &str) -> Option<String> {
 
 /// What a row of the tree is, beyond a folder (DW-0422's icons and its Status column).
 pub fn entry(item: &DriveItem) -> Option<BackupEntry> {
+    if item.id == "b-laptop-projects" {
+        // A folder Anna chose, beside the PC's known folders.
+        return Some(BackupEntry {
+            kind: BackupKind::Folder,
+            status: None,
+            managed: false,
+            note: Some("Chosen folder".into()),
+        });
+    }
     let (kind, status, managed) = match item.id.as_str() {
         "b-iphone" => (BackupKind::Phone, Some("12,418 photos"), false),
         "b-ipad" => (BackupKind::Tablet, Some("4,120 photos"), false),
@@ -121,6 +130,7 @@ pub fn entry(item: &DriveItem) -> Option<BackupEntry> {
         kind,
         status: status.map(str::to_string),
         managed,
+        note: None,
     })
 }
 

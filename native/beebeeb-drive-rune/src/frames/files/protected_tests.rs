@@ -192,6 +192,11 @@ fn a_device_opens_what_it_backed_up_read_only() {
     assert_eq!(names(&rt), ["Desktop", "Documents", "Projects", "Contacts", "Calendar"]);
     let sizes: Vec<String> = (0..5).map(|i| text(&rt, &format!("row-{i}-size"))).collect();
     assert_eq!(sizes, ["214 items", "1,820 items", "46 items", "1 item", "1 item"]);
+    assert_eq!(text(&rt, "row-2-note"), "Chosen folder");
+    assert_eq!(
+        info(&rt, "row-2").label.as_deref(),
+        Some("Projects, changed Today, 09:28, 46 items, Chosen folder, online only")
+    );
     assert_eq!(
         [text(&rt, "col-date"), text(&rt, "col-shared")],
         ["Date changed", "Shared"]
