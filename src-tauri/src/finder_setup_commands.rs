@@ -108,7 +108,8 @@ pub(super) fn finder_setup_state_impl(state: &AppState) -> Result<finder_setup::
 
 /// What "Try again" says while the reconciler is held (after a sign-out or a Lock, until keys arrive): no check can add
 /// Beebeeb to Finder before then. The quiet `Missing` row's own sentence (spec §5.2).
-pub(super) const FINDER_SETUP_HELD: &str = "Beebeeb adds itself to Finder when you’re signed in and the vault is unlocked.";
+pub(super) const FINDER_SETUP_HELD: &str =
+    "Beebeeb adds itself to Finder when you’re signed in and the vault is unlocked.";
 
 /// "Try again" (§5.3 (4)). `Err` when there is no reconciler or it has stopped, which the frontend
 /// shows as its existing "couldn't retry" toast (lead ruling 3), and while the reconciler is held, when the retry
@@ -485,7 +486,8 @@ pub(super) async fn finder_domain_user_enabled() -> Result<Option<bool>, String>
 /// `x-apple.systempreferences:com.apple.LoginItems-Settings.extension` as this pane's
 /// stable bundle id since System Settings replaced System Preferences (macOS 13
 /// Ventura); still current as of macOS 15 Sequoia per the same sources.
-pub(super) const MACOS_LOGIN_ITEMS_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.LoginItems-Settings.extension";
+pub(super) const MACOS_LOGIN_ITEMS_SETTINGS_URL: &str =
+    "x-apple.systempreferences:com.apple.LoginItems-Settings.extension";
 /// Fallback used only if the deep link above fails to launch (e.g. a future macOS
 /// renames or removes that pane id) -- opens System Settings at its default pane.
 pub(super) const MACOS_SYSTEM_SETTINGS_FALLBACK_URL: &str = "x-apple.systempreferences:";

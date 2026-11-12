@@ -198,9 +198,12 @@ pub(super) struct SpeedtestSamples {
     pub(super) down_bps: Vec<f64>,
 }
 
-pub(super) const SPEEDTEST_NO_PING: &str = "Beebeeb didn’t answer any of the 5 pings. Check your internet connection and try again.";
-pub(super) const SPEEDTEST_NO_UPLOAD: &str = "None of the 3 uploads finished. Check your internet connection and try again.";
-pub(super) const SPEEDTEST_NO_DOWNLOAD: &str = "None of the 3 downloads finished. Check your internet connection and try again.";
+pub(super) const SPEEDTEST_NO_PING: &str =
+    "Beebeeb didn’t answer any of the 5 pings. Check your internet connection and try again.";
+pub(super) const SPEEDTEST_NO_UPLOAD: &str =
+    "None of the 3 uploads finished. Check your internet connection and try again.";
+pub(super) const SPEEDTEST_NO_DOWNLOAD: &str =
+    "None of the 3 downloads finished. Check your internet connection and try again.";
 pub(super) const SPEEDTEST_ALREADY_RUNNING: &str = "A speed test is already running.";
 
 /// A run's figures, or the plain reason there are none. A direction that never finished is not "0 Mbps" and an
@@ -233,9 +236,14 @@ pub(super) struct SpeedtestSlot<'a>(&'a std::sync::atomic::AtomicBool);
 
 impl<'a> SpeedtestSlot<'a> {
     pub(super) fn take(flag: &'a std::sync::atomic::AtomicBool) -> Result<Self, String> {
-        flag.compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
-            .map(|_| Self(flag))
-            .map_err(|_| SPEEDTEST_ALREADY_RUNNING.to_string())
+        flag.compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .map(|_| Self(flag))
+        .map_err(|_| SPEEDTEST_ALREADY_RUNNING.to_string())
     }
 }
 
@@ -364,7 +372,9 @@ pub(crate) fn open_conflict_window_impl(
     }
 
     // Task 2190: a parked conflict carries its queued write, which the window decides.
-    let op_param = op_id.map(|op| format!("&opId={}", urlencoding::encode(op))).unwrap_or_default();
+    let op_param = op_id
+        .map(|op| format!("&opId={}", urlencoding::encode(op)))
+        .unwrap_or_default();
     let url = format!(
         "index.html?window=conflict&fileId={file_id}&fileName={enc_name}&isText={is_text}{op_param}",
         enc_name = urlencoding::encode(file_name),
@@ -636,7 +646,11 @@ pub(super) fn parked_conflict_bridge(state: &State<'_, AppState>) -> Result<engi
 /// unfinished list), so Settings › Sync lists every copy until the person dismisses it. Any failure
 /// removes what it made, and the decision changes nothing.
 #[cfg(target_os = "macos")]
-pub(super) fn keep_parked_copy(op_id: &str, source: &std::path::Path, rel_path: &str) -> anyhow::Result<std::path::PathBuf> {
+pub(super) fn keep_parked_copy(
+    op_id: &str,
+    source: &std::path::Path,
+    rel_path: &str,
+) -> anyhow::Result<std::path::PathBuf> {
     keep_parked_copy_at(
         op_id,
         source,
@@ -743,7 +757,12 @@ pub(super) async fn resolve_parked_conflict(
 ) -> Result<engine_bridge::ParkedResolution, String> {
     session_command!(async {
         let bridge = parked_conflict_bridge(&state)?;
-        let file_id = bridge.db().get_operation(&op_id).ok().flatten().and_then(|op| op.file_id);
+        let file_id = bridge
+            .db()
+            .get_operation(&op_id)
+            .ok()
+            .flatten()
+            .and_then(|op| op.file_id);
         let device = hostname::get()
             .map(|name| name.to_string_lossy().trim_end_matches(".local").to_string())
             .unwrap_or_else(|_| "this Mac".to_string());

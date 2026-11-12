@@ -6,7 +6,10 @@
 /// (`default`). Kept in the folder's backup setting; the question is settled, and the next pass backs the folder up
 /// from there.
 #[tauri::command]
-pub(crate) async fn set_known_folder_source(key: String, choice: crate::config::KnownFolderSource) -> Result<(), String> {
+pub(crate) async fn set_known_folder_source(
+    key: String,
+    choice: crate::config::KnownFolderSource,
+) -> Result<(), String> {
     if crate::known_folder::known_folder_by_key(&key).is_none() {
         return Err(format!("unknown known-folder key: {key}"));
     }

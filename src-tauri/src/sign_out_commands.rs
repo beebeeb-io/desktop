@@ -213,14 +213,22 @@ pub(super) async fn clear_session_impl(
                     dir: kept_folder
                         .filter(|dir| {
                             !dir.starts_with(root)
-                                && dir.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("Beebeeb kept files "))
+                                && dir
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .is_some_and(|name| name.starts_with("Beebeeb kept files "))
                         })
                         .or_else(|| kept_unknown_files_dir(root))
-                        .ok_or_else(|| "Sign-out paused: there is no folder outside the sync folder to keep copies in.".to_string())?,
+                        .ok_or_else(|| {
+                            "Sign-out paused: there is no folder outside the sync folder to keep copies in.".to_string()
+                        })?,
                 },
-                (UnknownFilesArg::Keep, None) | (UnknownFilesArg::Delete, _) => windows_cf::signout::UnknownFiles::Delete,
+                (UnknownFilesArg::Keep, None) | (UnknownFilesArg::Delete, _) => {
+                    windows_cf::signout::UnknownFiles::Delete
+                }
             };
-            let kept = windows_cf::signout::purge(&db, root.as_deref(), &choice).map_err(|e| format!("Sign-out paused: {e}"))?;
+            let kept = windows_cf::signout::purge(&db, root.as_deref(), &choice)
+                .map_err(|e| format!("Sign-out paused: {e}"))?;
             windows_kept = kept.dir.map(|dir| KeptUnsent {
                 folder: dir.to_string_lossy().into_owned(),
                 files: kept.files,
@@ -251,7 +259,8 @@ pub(super) async fn clear_session_impl(
     // Task 2191 (review thread on #157): every later failure carries the folder the purge kept
     // copies in, as the success does.
     #[cfg(target_os = "windows")]
-    let kept_with = |message: String| sign_out_failure_after_purge(message, &preserved_location, &kept_unsent, &windows_kept);
+    let kept_with =
+        |message: String| sign_out_failure_after_purge(message, &preserved_location, &kept_unsent, &windows_kept);
 
     // Task 1538 findings 1+2: purge every queued operation (so a later
     // account's engine can never drain THIS account's still-queued uploads —
@@ -521,7 +530,6 @@ pub(super) async fn stop_engine_for_sign_out(
 #[cfg(all(test, not(target_os = "windows")))]
 pub(super) static SIGN_OUT_TEST_PURGE_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-
 /// Run `body` holding the gate the sign-out purge takes. For a test that works in the shared scratch state directory
 /// itself (it seeds the database before it signs out, and checks it after): from its first write to its last check, no
 /// other test's purge runs. Its own sign-out sees the marker and does not wait for the gate it holds.
@@ -643,7 +651,9 @@ pub(super) struct SignOutCount {
 
 /// §6.1 conditions 1-4 for the active account, and the running engine's phase link.
 #[cfg(target_os = "macos")]
-pub(super) async fn send_conditions(state: &AppState) -> (sign_out::waiting::SendConditions, Option<Arc<runner::SendPhaseLink>>) {
+pub(super) async fn send_conditions(
+    state: &AppState,
+) -> (sign_out::waiting::SendConditions, Option<Arc<runner::SendPhaseLink>>) {
     let Ok(acct) = state.active_account() else {
         return (
             sign_out::waiting::SendConditions {
@@ -678,7 +688,10 @@ pub(super) async fn send_conditions(state: &AppState) -> (sign_out::waiting::Sen
 /// §5.1 step 1: one read, a snapshot owned by the calling window, and one `info` line with counts only (review I8).
 #[cfg(target_os = "macos")]
 #[tauri::command]
-pub(super) async fn sign_out_count(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<SignOutCount, String> {
+pub(super) async fn sign_out_count(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<SignOutCount, String> {
     let snapshot = count_ask(window.label())?;
     let (conditions, _) = send_conditions(&state).await;
     let not_sending = sign_out::waiting::readiness(conditions, snapshot.is_empty(), snapshot.any_live);
@@ -706,7 +719,10 @@ pub(super) async fn sign_out_count(window: tauri::WebviewWindow, state: State<'_
 /// because `generate_handler!` takes no `cfg`, and say so off a Mac.
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-pub(super) async fn sign_out_count(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<SignOutCount, String> {
+pub(super) async fn sign_out_count(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<SignOutCount, String> {
     let _ = (window, state);
     Err("This works on a Mac only.".into())
 }
@@ -718,7 +734,9 @@ pub(super) async fn sign_out_count(window: tauri::WebviewWindow, state: State<'_
 pub(super) fn switch_snapshot(state: &AppState) -> Result<Option<sign_out::snapshot::AskCounts>, String> {
     #[cfg(target_os = "macos")]
     {
-        let snapshot = count_ask(surfaces::policy::main_window_label(surfaces::policy::Platform::current()))?;
+        let snapshot = count_ask(surfaces::policy::main_window_label(
+            surfaces::policy::Platform::current(),
+        ))?;
         // §6.4 (review I8): the switch's snapshot logs the same line as `sign_out_count`; it never sends (W11).
         tracing::info!(
             files = snapshot.counts.files,
@@ -1110,7 +1128,6 @@ impl Drop for AcceptsReopenOnAbort {
 /// `Err` stops the sign-out at that point with that message.
 #[cfg(test)]
 pub(super) type SignOutSeam = Arc<dyn Fn(&'static str) -> Result<(), String> + Send + Sync>;
-
 
 #[cfg(test)]
 pub(super) fn sign_out_seam(point: &'static str) -> Result<(), String> {
