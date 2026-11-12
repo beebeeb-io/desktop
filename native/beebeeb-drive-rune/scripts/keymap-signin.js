@@ -38,7 +38,7 @@ if (auMac) {
   box('au-side', side);
   lockup('side', side);
   text('side-tagline', q(':scope > p', side));
-  each('li', side, (li, i) => { icon(`fact-${i}-icon`, q('svg', li)); text(`fact-${i}`, q('span', li)); });
+  each('ul li', side, (li, i) => { icon(`fact-${i}-icon`, q('svg', li)); text(`fact-${i}`, q('span', li)); });
 
   // ---- The column ----
   const main = q('.au-mac-main', auMac);
