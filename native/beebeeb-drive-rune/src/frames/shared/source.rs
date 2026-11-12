@@ -380,14 +380,3 @@ impl SharedSource for Unwired {
         false
     }
 }
-
-/// The source Shared starts on. A development build (and every test and headless render)
-/// starts on the board's sample content; a build that ships starts on `Unwired`, so sample
-/// values are never shown as a person's own. The engine lane replaces this.
-pub fn first(dev_build: bool) -> Box<dyn SharedSource> {
-    if dev_build {
-        Box::new(BoardShared::new())
-    } else {
-        Box::new(Unwired)
-    }
-}
