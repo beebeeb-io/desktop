@@ -26,6 +26,7 @@ import { chromium } from 'playwright'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { dialogLayer, isOverlaySection } from './compare.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const args = Object.fromEntries(
@@ -123,6 +124,15 @@ async function signature(page) {
         if (n && (!short || n.length <= (short === true ? 40 : short))) out.add(`${kind}:${n}`)
       }
     }
+    // Every label and control inside an open dialog is also its dialog-layer token (M4 overlay rule). The plain tokens
+    // above stay too, so same-section scoring does not change.
+    const addIn = (dialog, kind, sel, short) => {
+      for (const e of dialog.querySelectorAll(sel)) {
+        if (!vis(e)) continue
+        const n = labelOf(e)
+        if (n && (!short || n.length <= (short === true ? 40 : short))) out.add(`dlg:${kind}:${n}`)
+      }
+    }
     add('h', 'h1,h2,h3,h4,[role=heading]')
     add('d', '[role=dialog],[role=alertdialog],dialog[open]')
     add('m', '[role=menuitem],[role=menuitemradio],[role=menuitemcheckbox]')
@@ -130,6 +140,16 @@ async function signature(page) {
     add('sel', '[aria-selected=true],[aria-current]:not([aria-current=false]),[aria-pressed=true],[aria-checked=true],[aria-expanded=true]', true)
     add('st', '[role=status],[role=alert]')
     add('in', 'input[placeholder],textarea[placeholder]')
+    for (const dialog of document.querySelectorAll('[role=dialog],[role=alertdialog],dialog[open]')) {
+      if (!vis(dialog)) continue
+      const name = labelOf(dialog)
+      if (name) out.add(`dlg:d:${name}`)
+      addIn(dialog, 'st', '[role=status],[role=alert]')
+      addIn(dialog, 'm', '[role=menuitem],[role=menuitemradio],[role=menuitemcheckbox]')
+      addIn(dialog, 'b', 'button,a[href],[role=button],[role=link],[role=tab]', 24)
+      addIn(dialog, 'in', 'input[placeholder],textarea[placeholder]')
+      addIn(dialog, 'sel', '[aria-selected=true],[aria-current]:not([aria-current=false]),[aria-pressed=true],[aria-checked=true],[aria-expanded=true]', true)
+    }
     for (const e of document.querySelectorAll('[data-screen],[data-frame]')) {
       if (vis(e)) out.add(`s:${e.getAttribute('data-screen') ?? e.getAttribute('data-frame')}`)
     }
@@ -509,7 +529,7 @@ async function audit(page, a) {
   // action started from; a sibling variant of the target (DW-0408 / DW-0408b: the same screen, other data) counts.
   const family = (id) => id.replace(/[a-z]$/, '')
   const score = (id) => {
-    const sig = sigs[id]
+    const sig = isOverlaySection(SECTION_OF[a.source], SECTION_OF[id]) ? dialogLayer(sigs[id]) : sigs[id]
     const distinct = sig.filter((x) => !pre.has(x))
     // A frame that adds nothing to the starting screen is the starting screen: a weak answer once the screen changed.
     return 0.5 * cover(sig, post) + 0.5 * (distinct.length ? cover(distinct, post) : changed ? 0.3 : 1)
@@ -521,7 +541,14 @@ async function audit(page, a) {
   const bestTarget = ranked.find((r) => targets.has(r.id))
   const bestOther = ranked.find((r) => !targets.has(r.id))
   if (bestTarget && bestTarget.s >= 0.6 && bestTarget.s >= bestOther.s - 0.05 && (changed || bestTarget.s >= 0.95)) {
-    return { ...row, outcome: 'ok', reached: bestTarget.id, score: Number(bestTarget.s.toFixed(2)) }
+    const overlay = isOverlaySection(SECTION_OF[a.source], SECTION_OF[bestTarget.id])
+    return {
+      ...row,
+      outcome: 'ok',
+      reached: bestTarget.id,
+      score: Number(bestTarget.s.toFixed(2)),
+      ...(overlay ? { detail: `compared the dialog layer (${bestTarget.id} over ${SECTION_OF[a.source]})` } : {}),
+    }
   }
   row.score = bestTarget ? Number(bestTarget.s.toFixed(2)) : 0
   if (cmds.length) return { ...row, outcome: 'command-unsupported', detail: cmds.join(', '), owner: ownerOf(cmds[0]) }
