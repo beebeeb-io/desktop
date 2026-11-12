@@ -337,7 +337,10 @@ fn a_blank_name_is_refused_and_no_hidden_file_is_asked_for() {
 #[test]
 fn closing_gives_the_keyboard_back_to_the_list() {
     let (mut rt, _) = runtime();
-    open_dialog(&mut rt);
+    // Opened from New's menu: the menu had the keyboard and is gone, so nothing else gives it back.
+    rt.state.actions.intents.push(FilesIntent::Frame("DW-1521"));
+    rt.frame(0.0);
+    assert_eq!(dialog_step(&rt), Some(Step::Pick));
     operate(&mut rt, "btn-1");
     assert_eq!(dialog_step(&rt), None);
     rt.frame(0.0);
@@ -346,7 +349,8 @@ fn closing_gives_the_keyboard_back_to_the_list() {
         Some("rows"),
         "Cancel: the list has the keyboard again"
     );
-    open_dialog(&mut rt);
+    rt.state.actions.intents.push(FilesIntent::Frame("DW-1521"));
+    rt.frame(0.0);
     press(&mut rt, Key::Escape);
     rt.frame(0.0);
     assert_eq!(
