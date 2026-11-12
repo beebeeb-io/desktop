@@ -485,9 +485,11 @@ fn shell_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let plain_cmd = !ev.mods.alt && !ev.mods.shift;
     // "/" is a shifted key on many layouts (Shift+7 on German): Shift is part of typing it.
     let slash_cmd = !ev.mods.alt;
+    // Search shows no place of its own: Back and Forward are off until Esc ends it (DW-0802).
+    let searching = crate::frames::search::holds_back(s);
     let event = match ev.key {
-        Key::Left if plain_alt => Some(Event::Back),
-        Key::Right if plain_alt => Some(Event::Forward),
+        Key::Left if plain_alt && !searching => Some(Event::Back),
+        Key::Right if plain_alt && !searching => Some(Event::Forward),
         Key::Command(',') if plain_cmd => Some(Event::OpenSettings(SettingsPane::General)),
         Key::Command('/') if slash_cmd => Some(Event::OpenDialog(Dialog::Shortcuts)),
         Key::Escape => Some(Event::Escape),

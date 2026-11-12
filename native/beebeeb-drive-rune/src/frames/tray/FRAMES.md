@@ -34,9 +34,9 @@ board are Windows' (`scripts/capture-golden.mjs`, `OWN_WINDOW`).
 | DW-1220 | The end of the list: the last 50, View full history, the scroll thumb | built, 0 |
 | DW-1221 | The longest copy and names | built, 0 |
 | DW-1222 | Waiting on a metered connection | built, 0 |
-| DW-1230 | The b's six icons | OS-drawn, verified by a real-window capture (shell lane's icon code merged: `shell/tray_icon.rs`, `shell/tray.rs`; Windows draws the taskbar and notification area around them) |
-| DW-1231 | The b's menu | OS-drawn, verified by a real-window capture (shell lane's menu code merged: `shell/tray.rs`; Windows draws the context menu) |
-| DW-1231b | The b's menu while paused | OS-drawn, verified by a real-window capture (same) |
+| DW-1230 | The b's six icons | the shell lane's, merged (`shell/tray_icon.rs`, `shell/tray.rs`); Windows draws the taskbar around them. Not gated here: the board draws them inside Windows' own notification area |
+| DW-1231 | The b's menu | the shell lane's, merged (`shell/tray.rs`: the items; Windows draws the menu) |
+| DW-1231b | The b's menu while paused | the same |
 | DW-1232 | Commands and keyboard shortcuts: Beebeeb, File, Edit | built (`shortcuts.rs`, `registry::DIALOGS`); gate NOT at 0: light geometry 2, pixels 8, frame tiles 4; dark 2, 10, 1 (text, icons, fills 0). Every failing key is, or lies under, "New ▾" (2 rows): the board's ▾ is the capture machine's fallback font (see the PR, "Gate not at 0") |
 | DW-1233 | Commands and keyboard shortcuts: View, Go, Window, Help | built (the dialog's second page: Page Down); gate NOT at 0: light geometry 1, pixels 7, frame tiles 8; dark 1, 10, 4. Every failing key is, or lies under, "Alt+←", "Alt+→" or "the □ caption button": the same fallback fonts |
 | DW-1234 | Commands and keyboard shortcuts while a document is open | the lists are built and tested (`commands::EDITOR`, shown while the window is on a viewer); NOT gated and no golden: the frame behind it is the document editor, which no lane has built |

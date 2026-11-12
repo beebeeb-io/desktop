@@ -157,6 +157,7 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     s.storage_split = None;
     s.frames.shared.source = Box::new(crate::frames::shared::source::Unwired);
     s.frames.trash.source = Box::new(crate::frames::trash::source::Unwired);
+    s.frames.find = crate::frames::search::SearchUi::default();
     s.frames.pc = Box::new(crate::frames::UnwiredPc);
     s.photos = crate::frames::photos::Ui::new(Box::new(crate::frames::photos::source::Unwired));
     s.this_pc = crate::frames::this_pc::Ui::new(Box::new(crate::frames::this_pc::source::Unwired));
