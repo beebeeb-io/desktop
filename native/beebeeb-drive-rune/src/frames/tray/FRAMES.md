@@ -127,6 +127,10 @@ waits only for what the engine checks.
   session ended (no re-sign-in prompt). Pause, Resume, Review…, Show and Sign in (signed out) are drawn.
 - Rows from other devices and from people, restored files, kept local copies: the database records this PC's
   transfers and moves to Trash only.
+- A row's click while sync does not run on this PC: #322's guard refuses it (logged, no name), and the flyout
+  closes without showing the file.
+- The engine's startup check of the files on this PC (`EngineStatusView::startup_check`, done of total): the
+  flyout says Checking, without the numbers.
 - The open flyout reads the engine again when the b's inputs change (`Shell::refresh`); between two such changes
   (one large file, the same count) its byte numbers are those of the last one.
 - The b has no "checking": before the engine's first report, and while sync does not run, it says up to date
