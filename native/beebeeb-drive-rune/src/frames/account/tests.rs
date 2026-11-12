@@ -119,7 +119,7 @@ fn asked(rt: &Runtime<State>) -> Vec<Intent> {
 
 #[test]
 fn every_built_frame_renders_and_names_no_city_and_no_provider() {
-    assert_eq!(super::FRAMES.len(), 29, "the frames this lane built");
+    assert_eq!(super::FRAMES.len(), 35, "the frames this lane built");
     for (frame, _) in super::FRAMES {
         let rt = runtime(frame);
         assert!(find(&rt, "caption-bar").is_some(), "{frame}: the same window");
@@ -227,7 +227,8 @@ fn every_row_of_sign_in_and_security_goes_where_it_points() {
             assert_eq!(rt.state.account.pane, Pane::Security, "{row}: Esc goes back");
         }
     }
-    for (row, frame) in [("item-2-1", "DW-A12"), ("item-0-0-pop-button", "DW-0716")] {
+    // "Approve a sign-in" (item-2-1) opens this lane's own page now: `approve_tests.rs`.
+    for (row, frame) in [("item-0-0-pop-button", "DW-0716")] {
         let mut rt = runtime("DW-A52");
         tab_to(&mut rt, row);
         key(&mut rt, Key::Enter);

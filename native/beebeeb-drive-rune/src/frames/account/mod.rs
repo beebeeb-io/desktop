@@ -14,6 +14,9 @@
 //! queue of requests to drain (`SettingsUi::take_intents`).
 
 mod activity;
+pub mod approve;
+#[cfg(test)]
+mod approve_tests;
 mod delete;
 mod form;
 mod forms;
@@ -70,6 +73,10 @@ pub enum Pane {
     DeleteLink,
     DeleteScheduled,
     DeleteUndone,
+    /// Security › Approve a sign-in: the code (DW-A12).
+    ApproveCode,
+    /// The request under review and how it ended (DW-A13 to DW-A17), over Sign-in and security.
+    ApproveReview,
 }
 
 impl Pane {
@@ -107,6 +114,10 @@ impl Pane {
             Pane::Delete => true,
             // DW-A80: delete step 2 asks for the 2FA code.
             Pane::DeleteFactor => true,
+            // DW-A12: the code that lets another device receive the account's keys.
+            Pane::ApproveCode => true,
+            // What is over it decides (`Dialog::shows_secret`: DW-A13 and DW-A14 hold the code).
+            Pane::ApproveReview => false,
             // The rest: overviews, lists, confirmations without key material.
             Pane::Account
             | Pane::Security
@@ -156,6 +167,15 @@ pub enum Dialog {
     RemovePasskey(String),
     /// Leaving the backup codes without "I've saved them" (DW-A70's rule).
     LeaveCodes,
+    /// Approving a sign-in: the review with its code field (DW-A13), Windows Hello asking
+    /// (DW-A14), and the three ends (DW-A15, DW-A16, DW-A17; `handled`: "Already handled").
+    ApproveReview,
+    ApproveHello,
+    ApproveApproved,
+    ApproveDenied,
+    ApproveExpired {
+        handled: bool,
+    },
 }
 
 impl Dialog {
@@ -165,6 +185,10 @@ impl Dialog {
         match self {
             // DW-A72, DW-A78: takes a current 2FA code.
             Dialog::Code(_) => true,
+            // DW-A13, DW-A14: the approval code is typed and shown.
+            Dialog::ApproveReview | Dialog::ApproveHello => true,
+            // DW-A15 to DW-A17: results; the code is wiped before they show.
+            Dialog::ApproveApproved | Dialog::ApproveDenied | Dialog::ApproveExpired { .. } => false,
             // Confirmations without key material.
             Dialog::SignOutDevice(_)
             | Dialog::SignOutElsewhere
@@ -196,6 +220,8 @@ pub struct AccountUi {
     pub dialog: Option<Dialog>,
     /// What is typed and shown on the pages with a field, a code or a secret.
     pub form: form::Form,
+    /// Approving a sign-in (DW-A12 to DW-A17): the code, the request, the wait on Windows Hello.
+    pub approve: approve::Approve,
     /// `None`: nothing answers yet (a build that ships before the engine lane wires it); the
     /// view then draws the shell's "not built yet" frame, never sample values.
     pub source: Option<Box<dyn AccountSource>>,
@@ -207,6 +233,7 @@ impl Default for AccountUi {
             pane: Pane::Account,
             dialog: None,
             form: form::Form::default(),
+            approve: approve::Approve::default(),
             source: source::first(instance::DEV_BUILD),
         }
     }
@@ -242,6 +269,7 @@ pub fn sync(s: &mut State) {
         s.account.show(section.and_then(Pane::root).unwrap_or(Pane::Account));
         // What was typed, and every secret a page held, goes with the page.
         s.account.form = form::Form::default();
+        approve::leave(&mut s.account);
     }
 }
 
@@ -270,6 +298,8 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>)> {
         "DW-A81" => (Pane::DeleteLink, None),
         "DW-A82" => (Pane::DeleteScheduled, None),
         "DW-A83" => (Pane::DeleteUndone, None),
+        "DW-A12" => (Pane::ApproveCode, None),
+        "DW-A13" => (Pane::ApproveReview, Some(Dialog::ApproveReview)),
         _ => return None,
     })
 }
@@ -290,6 +320,7 @@ pub fn go(s: &mut State, frame: &'static str) {
     s.account.show(pane);
     s.account.dialog = dialog;
     form::arrive(&mut s.account);
+    approve::arrive(&mut s.account);
 }
 
 /// A handler of a page: it works on what this lane holds, and names the frame to show next
@@ -428,6 +459,12 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         go(s, "DW-A82");
     }),
     ("DW-A83", |s| open_on(s, "DW-A83")),
+    ("DW-A12", |s| approve::scene(s, "DW-A12")),
+    ("DW-A13", |s| approve::scene(s, "DW-A13")),
+    ("DW-A14", |s| approve::scene(s, "DW-A14")),
+    ("DW-A15", |s| approve::scene(s, "DW-A15")),
+    ("DW-A16", |s| approve::scene(s, "DW-A16")),
+    ("DW-A17", |s| approve::scene(s, "DW-A17")),
 ];
 
 /// Show the frame `id` on `s` (a scene). `false`: this group has not built it.
@@ -549,6 +586,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         Pane::Delete | Pane::DeleteFactor | Pane::DeleteLink | Pane::DeleteScheduled | Pane::DeleteUndone => {
             (delete::pane(pane, source, form, &t), None)
         }
+        Pane::ApproveCode => (approve::code_pane(&ui.approve, &t), None),
+        Pane::ApproveReview => approve::review_pane(source, &ui.approve, dialog, &t),
     };
     let mut body = row()
         .key("body")
@@ -579,6 +618,9 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     sync(s);
     if ev.key != Key::Escape {
         return false;
+    }
+    if approve::on_escape(s) {
+        return true;
     }
     if s.account.dialog.take().is_some() {
         form::arrive(&mut s.account);

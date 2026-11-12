@@ -21,6 +21,8 @@
 
 use std::fmt;
 
+use super::approve::{Approval, Denial, Lookup, SignInRequest};
+
 /// Who is signed in (DW-A51).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Identity {
@@ -512,6 +514,41 @@ pub trait AccountSource {
     fn deletion_link_used(&mut self) -> bool;
     /// Engine: `POST /api/v1/account/deletion/undo` during the 72 hours.
     fn undo_deletion(&mut self) -> bool;
+
+    // ---- Approving a sign-in from another device (DW-A11 to DW-A17). Every method has a body
+    // that answers "nothing waits", so a source that does not know them yet keeps compiling.
+    /// Engine: the request that waits for this code (cli_auth's lookup). The code is borrowed
+    /// for the call; it is never logged and never kept.
+    fn find_sign_in_request(&mut self, _code: &str) -> Lookup {
+        Lookup::NotFound
+    }
+    /// Engine: the request a notification announced (DW-A11), if one still waits. No code.
+    fn waiting_sign_in_request(&self) -> Option<SignInRequest> {
+        None
+    }
+    /// Engine: ask Windows Hello (a confirmation minted for this approval, this code and this
+    /// session only), then claim the code and relay the keys, encrypted to the other device.
+    /// The answer comes through `approval_answer`.
+    fn begin_approval(&mut self, _request: &str, _code: &str) {}
+    /// Engine: how the approval that was begun ended, once; `None` while Windows Hello is up.
+    fn approval_answer(&mut self) -> Option<Approval> {
+        None
+    }
+    /// The person left while Windows Hello was up: dismiss it. Nothing is claimed or relayed.
+    fn cancel_approval(&mut self) {}
+    /// Engine: end the request with nothing shared.
+    fn deny_sign_in(&mut self, _request: &str) -> Denial {
+        Denial::Expired
+    }
+    /// Engine: the request under review ran out (`Expired`) or was answered elsewhere.
+    fn sign_in_request_gone(&mut self, _request: &str) -> Option<Denial> {
+        None
+    }
+    /// Tests: what a fixture "sent" (`BoardAccount::wire`), read through the trait object.
+    #[cfg(test)]
+    fn sent(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Counts what is done: "7 of 7".
@@ -544,6 +581,10 @@ pub struct BoardAccount {
     activity: bool,
     deletion: Deletion,
     wait: u32,
+    /// Approving a sign-in: the answer Windows Hello will give, and whether its prompt stays up
+    /// (the scene of DW-A14).
+    approval: Option<Approval>,
+    hold_hello: bool,
 }
 
 /// The password the fixture's account has.
@@ -563,6 +604,11 @@ fn board_codes() -> Vec<Secret> {
 }
 
 impl BoardAccount {
+    /// Windows Hello's prompt stays up: no answer comes (the scene of DW-A14).
+    pub fn holding_hello(mut self) -> Self {
+        self.hold_hello = true;
+        self
+    }
     pub fn new() -> Self {
         let session = |id: &str, kind, name: &str, apps: &str, sentence: &str, last: &str, this| Session {
             id: id.into(),
@@ -669,6 +715,8 @@ impl BoardAccount {
             activity: true,
             deletion: Deletion::None,
             wait: 42,
+            approval: None,
+            hold_hello: false,
         }
     }
 
@@ -1064,6 +1112,42 @@ impl AccountSource for BoardAccount {
             };
         }
         matches!(self.deletion, Deletion::Scheduled { .. })
+    }
+    #[cfg(test)]
+    fn sent(&self) -> Vec<String> {
+        self.wire.clone()
+    }
+    fn find_sign_in_request(&mut self, code: &str) -> Lookup {
+        // What reaches the server is the request for a lookup, never the code in a log line.
+        self.wire.push("POST /cli-auth/lookup".into());
+        super::approve::board_lookup(code)
+    }
+    fn waiting_sign_in_request(&self) -> Option<SignInRequest> {
+        Some(super::approve::board_request("req-iphone", "Germany", false))
+    }
+    fn begin_approval(&mut self, request: &str, _code: &str) {
+        self.wire.push(format!("POST /cli-auth/approve {request}"));
+        self.approval = Some(match request {
+            "req-expired" => Approval::Expired,
+            "req-handled" => Approval::AlreadyHandled,
+            "req-cancelled" => Approval::Cancelled,
+            _ => Approval::Approved,
+        });
+    }
+    fn approval_answer(&mut self) -> Option<Approval> {
+        if self.hold_hello { None } else { self.approval.take() }
+    }
+    fn cancel_approval(&mut self) {
+        self.wire.push("cancel approval".into());
+        self.approval = None;
+    }
+    fn deny_sign_in(&mut self, request: &str) -> Denial {
+        self.wire.push(format!("POST /cli-auth/deny {request}"));
+        match request {
+            "req-expired" => Denial::Expired,
+            "req-handled" => Denial::AlreadyHandled,
+            _ => Denial::Denied,
+        }
     }
     fn undo_deletion(&mut self) -> bool {
         let scheduled = matches!(self.deletion, Deletion::Scheduled { .. });

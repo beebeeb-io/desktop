@@ -878,3 +878,39 @@ fn the_account_panes_change_password_and_2fa_setup_are_secret() {
     assert!(!AccountDialog::SignOutApp.shows_secret(), "DW-A57");
     assert!(!AccountDialog::LeaveCodes.shows_secret());
 }
+
+/// Approving a sign-in: the screens that hold the approval code are secret (DW-A12, DW-A13,
+/// DW-A14); the results, which show after the code is wiped, are not.
+#[test]
+fn the_approval_code_screens_are_secret_and_the_window_is_excluded_while_they_show() {
+    use crate::frames::account::{Dialog as AccountDialog, Pane};
+    assert!(Pane::ApproveCode.shows_secret(), "DW-A12");
+    assert!(AccountDialog::ApproveReview.shows_secret(), "DW-A13");
+    assert!(AccountDialog::ApproveHello.shows_secret(), "DW-A14");
+    assert!(!AccountDialog::ApproveApproved.shows_secret(), "DW-A15");
+    assert!(!AccountDialog::ApproveDenied.shows_secret(), "DW-A16");
+    assert!(
+        !AccountDialog::ApproveExpired { handled: false }.shows_secret(),
+        "DW-A17"
+    );
+    assert!(
+        !Pane::ApproveReview.shows_secret(),
+        "the pane under the dialogs has no secret of its own"
+    );
+
+    // End to end: the platform is told when the code page opens, and told again when it closes.
+    let engine = Arc::new(FixtureEngine::ready());
+    let platform = Arc::new(FakePlatform::default());
+    let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform.clone())));
+    assert!(platform.capture_exclusions.lock().unwrap().is_empty());
+    rt.update(|s, _| crate::frames::account::go(s, "DW-A12"));
+    rt.frame(1.0);
+    assert_eq!(
+        platform.capture_exclusions.lock().unwrap().clone(),
+        vec![true],
+        "DW-A12 excludes the window"
+    );
+    rt.update(|s, _| crate::frames::account::go(s, "DW-A52"));
+    rt.frame(2.0);
+    assert_eq!(platform.capture_exclusions.lock().unwrap().clone(), vec![true, false]);
+}
