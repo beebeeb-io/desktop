@@ -233,7 +233,7 @@ pub fn mount(sync_root: &Path, db: Arc<StateDb>, bridge: Arc<EngineBridge>) {
     let fs = BeebeebFS::new(db, bridge, rt);
     let options = vec![
         fuser::MountOption::RO,
-        fuser::MountOption::FSName("beebeeb".to_string()),
+        fuser::MountOption::FSName(crate::identity::config_dir_name().to_string()),
         fuser::MountOption::AutoUnmount,
     ];
     fuser::mount2(fs, sync_root, &options).expect("FUSE mount failed");

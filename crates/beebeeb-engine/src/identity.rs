@@ -128,4 +128,81 @@ mod tests {
             "unexpected: {value}"
         );
     }
+
+    // --- rule (a): source pin that fails on a literal ---
+
+    /// Nothing in the engine's own code reads a credential service name or a config folder name
+    /// from a literal that is not in this module. The search covers every `.rs` file under
+    /// `crates/beebeeb-engine/src/` and fails on a new `"io.beebeeb.app"` (the credential
+    /// service) or a bare `"beebeeb"` (the config dir) outside of:
+    /// - this file (`identity.rs`),
+    /// - a `Deprecated` constant kept for the Tauri shell (`APP_BUNDLE_ID`, `APP_DOMAIN`),
+    /// - test files whose name ends in `_tests.rs` or `/tests.rs` or `/tests/`.
+    ///
+    /// Mutant: add `const LEAKED: &str = "io.beebeeb.app";` to `keychain.rs`. Red: this test
+    /// fails naming `keychain.rs`.
+    #[test]
+    fn source_pin_no_credential_or_config_literal_outside_identity() {
+        let engine_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut violations = Vec::new();
+        visit_rs_files(&engine_src, &mut |path, contents| {
+            let rel = path.strip_prefix(&engine_src).unwrap_or(path);
+            let rel_str = rel.to_string_lossy();
+            // Skip this module, test files, and the two deprecated-const files.
+            if rel_str.contains("identity.rs") {
+                return;
+            }
+            let is_test = rel_str.ends_with("_tests.rs")
+                || rel_str.ends_with("/tests.rs")
+                || rel_str.contains("/tests/")
+                || rel_str.contains("_tests/")
+                || rel_str.contains("test_sandbox");
+            if is_test {
+                return;
+            }
+            for (line_no, line) in contents.lines().enumerate() {
+                let trimmed = line.trim();
+                // Skip doc comments, regular comments and the deprecated const definitions.
+                if trimmed.starts_with("//") || trimmed.starts_with("///") || trimmed.starts_with("#") {
+                    continue;
+                }
+                // The two deprecated consts the Tauri shell imports: allow their `= "…"` line.
+                if trimmed.contains("pub const APP_BUNDLE_ID") || trimmed.contains("pub const APP_DOMAIN") {
+                    continue;
+                }
+                // Check for the credential service literal.
+                if line.contains("\"io.beebeeb.app\"") {
+                    violations.push(format!("{}:{}: credential service literal", rel_str, line_no + 1));
+                }
+                // Check for the config dir literal (bare "beebeeb" as a path segment,
+                // not part of a longer word like "beebeeb-engine").
+                // Match: .join("beebeeb"), "beebeeb/" or /beebeeb" but not "beebeeb-".
+                if (line.contains("\"beebeeb\"") || line.contains("\"beebeeb/"))
+                    && !line.contains("\"beebeeb-")
+                    && !line.contains("beebeeb_")
+                {
+                    violations.push(format!("{}:{}: config dir literal", rel_str, line_no + 1));
+                }
+            }
+        });
+        assert!(
+            violations.is_empty(),
+            "literals outside identity.rs:\n{}",
+            violations.join("\n")
+        );
+    }
+
+    fn visit_rs_files(dir: &std::path::Path, cb: &mut dyn FnMut(&std::path::Path, &str)) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                visit_rs_files(&path, cb);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                if let Ok(contents) = std::fs::read_to_string(&path) {
+                    cb(&path, &contents);
+                }
+            }
+        }
+    }
 }

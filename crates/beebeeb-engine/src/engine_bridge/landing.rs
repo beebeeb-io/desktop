@@ -408,7 +408,7 @@ impl FinderStagingBases {
     pub fn durable_root(&self) -> Option<PathBuf> {
         self.data
             .as_ref()
-            .map(|data| data.join("beebeeb").join("finder-writes"))
+            .map(|data| data.join(crate::identity::config_dir_name()).join("finder-writes"))
     }
 
     /// `<cache dir>/beebeeb/finder-writes` (the temp dir when the OS gives no cache dir): where
@@ -417,14 +417,14 @@ impl FinderStagingBases {
         self.cache
             .as_ref()
             .unwrap_or(&self.temp)
-            .join("beebeeb")
+            .join(crate::identity::config_dir_name())
             .join("finder-writes")
     }
 
     /// `<temp dir>/beebeeb/finder-writes`: the fallback when the cache root is not writable
     /// (Windows and Linux; macOS used it before as well).
     pub fn temp_root(&self) -> PathBuf {
-        self.temp.join("beebeeb").join("finder-writes")
+        self.temp.join(crate::identity::config_dir_name()).join("finder-writes")
     }
 
     /// Every folder a staged copy can be in. On macOS: the data root, then the cache root and the

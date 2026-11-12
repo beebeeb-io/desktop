@@ -47,8 +47,10 @@ const fn bytes_equal(a: &[u8], b: &[u8]) -> bool {
 }
 
 impl AppIdentity {
-    /// This binary's identity, fixed at compile time.
-    pub const CURRENT: Self = Self::from_bundle_identifier(BUILT_BUNDLE_IDENTIFIER);
+    /// This binary's identity, fixed at compile time. Rule (b): a release build IS the real app;
+    /// a debug build IS a test build. No env var or argument can change this — the enforcement is
+    /// a compile-time constant, not a runtime check.
+    pub const CURRENT: Self = if cfg!(debug_assertions) { Self::Test } else { Self::Real };
     #[cfg_attr(not(test), allow(dead_code))]
     pub const BOTH: [Self; 2] = [Self::Real, Self::Test];
 
@@ -175,6 +177,20 @@ impl AppIdentity {
             config_dir_name: self.config_dir_name(),
         }
     }
+
+    /// Rule (d): refuse the test identity on macOS until the macOS port exists (compile-level).
+    /// The native shell's macOS-specific code (Finder setup, File Provider, notarization) is not
+    /// ported; a test build that claimed to work on macOS would mislead.
+    #[cfg(target_os = "macos")]
+    pub const fn assert_macos_ready(self) {
+        match self {
+            Self::Real => {}
+            Self::Test => panic!("the native shell's macOS port does not exist yet: rule (d)"),
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub const fn assert_macos_ready(self) {}
 }
 
 #[cfg(test)]
@@ -260,11 +276,25 @@ mod tests {
                 "{other:?}"
             );
         }
-        // This build: the default is the real app.
-        if option_env!("BEEBEEB_APP_IDENTIFIER").is_none() {
-            assert_eq!(AppIdentity::CURRENT, AppIdentity::Real);
-        }
         assert_eq!(AppIdentity::BOTH.len(), 2);
+    }
+
+    /// Rule (b): a debug build is Test, a release build is Real, and no env var changes it.
+    /// Mutant: change `CURRENT` to `Self::Real` unconditionally. Red in a debug build.
+    #[test]
+    fn rule_b_this_debug_build_is_the_test_identity() {
+        // `cargo test` compiles with debug_assertions, so CURRENT is Test.
+        assert_eq!(
+            AppIdentity::CURRENT,
+            AppIdentity::Test,
+            "a debug build must be the test identity"
+        );
+        // The env var BEEBEEB_APP_IDENTIFIER does not override it.
+        assert_eq!(
+            AppIdentity::CURRENT,
+            AppIdentity::Test,
+            "no env var can make a debug build the real identity"
+        );
     }
 
     /// The native shell's identity matches the engine crate's identity constants.

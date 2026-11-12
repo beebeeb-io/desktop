@@ -287,7 +287,7 @@ fn default_sync_root_uses_private_file_provider_state_folder() {
         path.file_name().and_then(|name| name.to_str()),
         Some("file-provider-state")
     );
-    assert!(path.to_string_lossy().contains("beebeeb"));
+    assert!(path.to_string_lossy().contains(crate::identity::config_dir_name()));
 }
 
 #[test]

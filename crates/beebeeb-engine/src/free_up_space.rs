@@ -22,7 +22,7 @@ pub fn free_up_space_allowed_roots(sync_root: &std::path::Path) -> Vec<PathBuf> 
         roots.push(sync_root.to_path_buf());
     }
     if let Some(cache_dir) = dirs::cache_dir() {
-        let beebeeb_cache = cache_dir.join("beebeeb");
+        let beebeeb_cache = cache_dir.join(crate::identity::config_dir_name());
         match beebeeb_cache.canonicalize() {
             Ok(canon) => roots.push(canon),
             Err(_) => roots.push(beebeeb_cache),
