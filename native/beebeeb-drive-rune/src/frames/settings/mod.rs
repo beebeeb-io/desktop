@@ -731,11 +731,6 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         return true;
     }
     match ev.key {
-        // Esc in the compare view is Done: back, with the choice set (DW-0745).
-        Key::Escape if ui.dialog == Some(Dialog::Compare) => {
-            ui.close_compare();
-            true
-        }
         Key::Escape if ui.dialog.is_some() => {
             ui.dialog = None;
             true
