@@ -16,7 +16,6 @@ Modules 1–62, sorted by path.
 | `bound_engine.rs` | `bound_engine` items split out of `lib.rs`. | — |
 | `browser_login.rs` | Browser-based device-code login handoff for the desktop client. | — |
 | `config_write_pin_tests.rs` | (no //! header) | — |
-| `desktop_main_window.rs` | The main window's size and kept frame on Windows and Linux (v2 W1): the board's 1280 x 800 with a 960 x 640 minimum, fitted to the work area | — |
 | `diagnostics_export_tests.rs` | (no //! header) | — |
 | `engine_host.rs` | The Tauri shell as the engine's host (`beebeeb_engine::host::EngineHost`): each engine event goes out under its Tauri event name with the JS | — |
 | `engine_shell_tests.rs` | Engine tests whose last step is the shell's sign-out purge or its account reset (`local_state_purge`, `session_reauth`), which the engine cr | — |
@@ -32,6 +31,7 @@ Modules 1–62, sorted by path.
 | `finder_setup_command_tests.rs` | (no //! header) | — |
 | `finder_setup_commands.rs` | `finder_setup_commands` items split out of `lib.rs`. | — |
 | `finder_setup_wiring_tests.rs` | (no //! header) | — |
+| `flyout_geometry_tests.rs` | Tests relocated from the deleted `desktop_main_window.rs`: tray flyout geometry, settings navigation, status-line flyout position and the wi | — |
 | `install_guard_tests.rs` | P1c: one in-place install at a time, across every Beebeeb window. | — |
 | `keychain_isolation_tests.rs` | (no //! header) | — |
 | `launch_wiring_tests.rs` | (no //! header) | — |
@@ -42,7 +42,6 @@ Modules 1–62, sorted by path.
 | `loopback_api_for_tests.rs` | (no //! header) | — |
 | `mac_update_tests.rs` | (no //! header) | — |
 | `macos_file_provider.rs` | The Rust side of the macOS File Provider bridge: decode `BeebeebFpErrorC` from the Objective-C shim into `FpError` and name the domain and i | WorkingSetSignalOutcome (1), should_signal_working_set |
-| `macos_popover.rs` | Task 1683 slice 3: the status-item popover. | — |
 | `macos_workspace.rs` | Opening a URL that is not a Finder item, through `NSWorkspace` and not through a child `open` (task 1885). | — |
 | `main.rs` | The thin binary: `main` hands straight to `beebeeb_desktop_lib::run` so the app is one library plus an entry point. | — |
 | `main_window_tests.rs` | (no //! header) | — |
@@ -51,7 +50,7 @@ Modules 1–62, sorted by path.
 | `open_folder_tests.rs` | (no //! header) | — |
 | `owner_backfill_tests.rs` | (no //! header) | — |
 | `passkey_commands.rs` | v2 B15: the four passkey commands (crypto review 2026-11-08, rule 6), thin wrappers over core's passkey flows (`beebeeb_core::passkey`). | — |
-| `popover_data.rs` | The data the menu-bar popover reads (task 1683 slice 2; spec `docs/specs/2026-09-30-macos-menubar-popover.md` section 9). | POPOVER_HIDDEN_EVENT, STORAGE_TTL_SECS, STORAGE_WAIT, STORAGE_FAILURE_BACKOFF_SECS, DEFAULT_ACTIVITY_LIMIT, CONFLICT_FILES_LIMIT, POPOVER_SHOWN_EVENT, PopoverRuntime (2), StorageUsage (2), StorageCache, clear_storage, StorageDto (4), … (+16 more) |
+| `popover_data.rs` | The data the menu-bar popover reads (task 1683 slice 2; spec `docs/specs/2026-09-30-macos-menubar-popover.md` section 9). | CONFLICT_FILES_LIMIT, DEFAULT_ACTIVITY_LIMIT, POPOVER_HIDDEN_EVENT, STORAGE_FAILURE_BACKOFF_SECS, STORAGE_TTL_SECS, STORAGE_WAIT, POPOVER_SHOWN_EVENT, PopoverRuntime (2), StorageCache, StorageDto (4), StorageUsage (2), cached_storage, … (+16 more) |
 | `popover_snapshot_command_tests.rs` | (no //! header) | — |
 | `popover_wiring_tests.rs` | (no //! header) | — |
 | `reauth_tests.rs` | (no //! header) | — |
@@ -68,3 +67,4 @@ Modules 1–62, sorted by path.
 | `sign_out_commands.rs` | `sign_out_commands` items split out of `lib.rs`. | — |
 | `sign_out_keep_tests.rs` | (no //! header) | — |
 | `sign_out_revoke_tests.rs` | (no //! header) | — |
+| `sign_out_unchanged_elsewhere_tests.rs` | (no //! header) | — |

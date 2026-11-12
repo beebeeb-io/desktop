@@ -471,8 +471,8 @@ mod wiring_tests {
             handler.contains("ClosePolicy::Hide"),
             "the hide branch must be keyed on the policy:\n{handler}"
         );
-        // `prevent_close` and the hide only inside the policy check. The hide is `hide_on_close`, which sends the
-        // popover through `macos_popover::hide` (self-review of #202); no plain `window.hide()` is left here.
+        // `prevent_close` and the hide only inside the policy check. The hide is `hide_on_close` (the macOS popover's
+        // special path via `macos_popover::hide` was deleted with the web-view popover); no plain `window.hide()` is left.
         let check = handler.find("close_policy(").unwrap();
         assert_eq!(
             handler.matches("window.hide()").count(),
