@@ -19,7 +19,7 @@ use beebeeb_core::kdf::MasterKey;
 use beebeeb_core::onboarding::{BreachCheck, BreachResponse};
 use beebeeb_core::signup_flow::SignupPolicy;
 use serde::Serialize;
-use tauri::State;
+use tauri::{Manager, State};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::*;
@@ -199,8 +199,59 @@ fn session_parts(
     Ok((acct, token, binding))
 }
 
+/// What a driven flow ended with: an ordinary outcome, or the password change's detached session commit.
+enum Driven {
+    Outcome(AccountOutcome),
+    Rotated(PasswordChangedDto),
+}
+
+/// A password change's session turn and what the detached commit needs: the app for the engine restart and the
+/// credential store, the account, and the generation the turn was captured at.
+struct SessionCommit {
+    app: tauri::AppHandle,
+    acct: Arc<account::AccountRuntime>,
+    turn: account::SessionGeneration,
+}
+
+/// Run `work` as a task of its own and await its handle. A Lock or a sign-out drops a Windows session command at an
+/// await (`SessionCommands::within`); the response body read and the token store must not be in that future, so they
+/// run here instead and the command only awaits their handle. This task deliberately takes no `SessionCommands` lease
+/// (`SessionCommands::bind`): a lease cancels the work at an await, which is exactly the loss this prevents once the
+/// server has rotated the token. The turn claim before the store is the guard instead.
+async fn detached<T>(work: impl std::future::Future<Output = Result<T, String>> + Send + 'static) -> Result<T, String>
+where
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn(work)
+        .await
+        .map_err(|_| "internal".to_string())?
+}
+
+/// The one body read. A commit reaches it only inside [`detached`], so the read outlives a dropped command; no body is
+/// read inline by the command's own future.
+async fn read_body(resp: reqwest::Response) -> String {
+    resp.text().await.unwrap_or_default()
+}
+
 /// Perform each step of `flow` against the API with `token` (none for the public delete-link routes), to the end.
-async fn drive(mut flow: AccountFlow, token: Option<&str>) -> Result<AccountOutcome, String> {
+///
+/// A `commit` (a password change) drives every step inside [`detached`]: the server has ended the old token by the time
+/// it answers, so the body read and the store of the token it issued in its place must survive a Lock or a sign-out
+/// that drops the command.
+async fn drive(flow: AccountFlow, token: Option<&str>, commit: Option<SessionCommit>) -> Result<Driven, String> {
+    let Some(commit) = commit else {
+        return drive_steps(flow, token, None).await;
+    };
+    // A zeroizing copy travels into the task; the caller's token never leaves this frame.
+    let token = token.map(|t| Zeroizing::new(t.to_string()));
+    detached(async move { drive_steps(flow, token.as_ref().map(|t| t.as_str()), Some(commit)).await }).await
+}
+
+async fn drive_steps(
+    mut flow: AccountFlow,
+    token: Option<&str>,
+    mut commit: Option<SessionCommit>,
+) -> Result<Driven, String> {
     let base = runner::api_base_url();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(crate::link_health::API_REQUEST_TIMEOUT_SECS))
@@ -209,7 +260,7 @@ async fn drive(mut flow: AccountFlow, token: Option<&str>) -> Result<AccountOutc
     let mut step = flow.start().map_err(code)?;
     loop {
         match step {
-            Step::Done(outcome) => return Ok(outcome),
+            Step::Done(outcome) => return Ok(Driven::Outcome(outcome)),
             Step::Send(req) => {
                 let method = match req.method {
                     Method::Get => reqwest::Method::GET,
@@ -234,10 +285,22 @@ async fn drive(mut flow: AccountFlow, token: Option<&str>) -> Result<AccountOutc
                 drop(req);
                 let resp = rb.send().await.map_err(|_| "network".to_string())?;
                 let status = resp.status().as_u16();
-                let mut text = resp.text().await.unwrap_or_default();
+                let mut text = read_body(resp).await;
                 let parsed = ApiResponse::from_text(status, &text);
                 text.zeroize();
-                step = flow.resume(parsed).map_err(code)?;
+                let next = flow.resume(parsed).map_err(code)?;
+                if let Step::Done(AccountOutcome::PasswordChanged { session_token }) = &next
+                    && let Some(commit) = commit.take()
+                {
+                    // The server has rotated the token; this task (not the command's future) stores it.
+                    let SessionCommit { app, acct, turn } = commit;
+                    let state = app.state::<AppState>();
+                    let mut turn = turn;
+                    let dto =
+                        install_rotated_session(app.clone(), &state, &acct, &mut turn, session_token.as_str()).await;
+                    return Ok(Driven::Rotated(dto));
+                }
+                step = next;
             }
         }
     }
@@ -249,7 +312,10 @@ async fn run_simple(
 ) -> Result<AccountOutcome, String> {
     let flow = flow.map_err(code)?;
     let (_acct, token, _binding) = session_parts(state)?;
-    drive(flow, Some(&token)).await
+    match drive(flow, Some(&token), None).await? {
+        Driven::Outcome(outcome) => Ok(outcome),
+        Driven::Rotated(_) => Err("protocol".to_string()),
+    }
 }
 
 /// The server's password policy (`GET /api/v1/onboarding`), the one sign-up reads. No fallback policy: an answer
@@ -294,11 +360,13 @@ pub struct PasswordChangedDto {
     pub restart: &'static str,
 }
 
-/// The server ends every other session and mints a new one for this device: it is
-/// stored in the credential store and swapped into memory in one session turn, and the
-/// engine restarts with it. No master-key wrap (the key stays in the credential store).
-/// Once the server has committed, a failure to store or restart is reported in the DTO,
-/// never as a failed change: the password did change.
+/// The server ends every other session and mints a new one for this device. Once its answer arrives, the body read
+/// and the store of that token run in a task of their own that the command awaits: a Lock or a sign-out may drop the
+/// command's future at an await after the server already rotated the token, and that task must not go with it. The
+/// task takes no callback lease (`SessionCommands::bind`), only the turn the change captured; it claims that turn
+/// before it stores, so a turn a Lock or another sign-in spent writes nothing and the person signs in again. The engine
+/// then restarts with the new token. No master-key wrap (the key stays in the credential store). Once the server has
+/// committed, a failure to store or restart is reported in the DTO, never as a failed change: the password did change.
 #[tauri::command]
 pub(super) async fn account_change_password(
     app: tauri::AppHandle,
@@ -310,36 +378,129 @@ pub(super) async fn account_change_password(
     let new_password = Zeroizing::new(new_password);
     session_command!(async {
         let (acct, token, binding) = session_parts(&state)?;
-        let mut turn = acct.session_generation();
+        let turn = acct.session_generation();
         let policy = password_policy().await?;
         let breach = breach_check(&policy, &new_password).await;
         let flow =
             AccountFlow::change_password(&current, &new_password, binding, &policy, breach.as_ref()).map_err(code)?;
-        let outcome = drive(flow, Some(&token)).await?;
-        let AccountOutcome::PasswordChanged { session_token } = outcome else {
-            return Err("protocol".to_string());
+        let commit = SessionCommit {
+            app,
+            acct: acct.clone(),
+            turn,
         };
-        Ok(install_rotated_session(app, &state, &acct, &mut turn, &session_token).await)
+        match drive(flow, Some(&token), Some(commit)).await? {
+            Driven::Rotated(dto) => Ok(dto),
+            Driven::Outcome(_) => Err("protocol".to_string()),
+        }
     })
 }
 
-/// Store and swap the new token in one session turn, then start the engine again with it,
-/// on every platform; the engine holds the ended token. macOS and Linux stop the engine
-/// first and start it as after a naming (`start_engine_unless_running`).
+/// Why a rotated session was not stored.
+#[derive(Debug, PartialEq, Eq)]
+enum RotatedStoreError {
+    /// A Lock, a sign-out or another sign-in moved the account's generation before the body arrived: nothing may be
+    /// written, and the person signs in again.
+    TurnSpent,
+    /// The credential store, or the swap into the session in memory, failed.
+    Store(String),
+}
+
+/// The credential-store side of a rotated session, behind one trait so the commit can be exercised without an OS
+/// vault (Linux has none; a test must never write the developer's real one).
+trait RotatedSessionStore {
+    /// Store `token` for `account_id`, with the session's own email.
+    fn store_token(
+        &self,
+        write: &SessionWrite,
+        account_id: &str,
+        token: &str,
+        email: Option<&str>,
+    ) -> Result<(), String>;
+    /// Carry the previous session's owner tag over to the token just stored (task 2447).
+    fn carry_owner(&self, write: &SessionWrite, account_id: &str, owner: &str);
+}
+
+struct PlatformRotatedSessionStore;
+
+impl RotatedSessionStore for PlatformRotatedSessionStore {
+    fn store_token(
+        &self,
+        write: &SessionWrite,
+        account_id: &str,
+        token: &str,
+        email: Option<&str>,
+    ) -> Result<(), String> {
+        persist_session_token_to_keychain(write, account_id, token, email)
+    }
+
+    fn carry_owner(&self, write: &SessionWrite, account_id: &str, owner: &str) {
+        crate::bind_session_owner_in_keychain(write, account_id, owner);
+    }
+}
+
+/// Claim the turn the password change captured and store the token the server issued in its place, then swap it into
+/// the session in memory. A spent turn writes nothing and never resurrects an ended session. Only inside the claimed
+/// turn (`write`).
+fn store_rotated_session(
+    acct: &Arc<account::AccountRuntime>,
+    turn: &mut account::SessionGeneration,
+    new_token: &str,
+) -> Result<(), RotatedStoreError> {
+    store_rotated_session_with(acct, turn, new_token, &PlatformRotatedSessionStore)
+}
+
+fn store_rotated_session_with<S: RotatedSessionStore>(
+    acct: &Arc<account::AccountRuntime>,
+    turn: &mut account::SessionGeneration,
+    new_token: &str,
+    store: &S,
+) -> Result<(), RotatedStoreError> {
+    let write = claim_session_write_for_commit(acct, turn).map_err(|_| RotatedStoreError::TurnSpent)?;
+    let email = acct
+        .session
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|s| s.email.clone()));
+    // Task 2447: the same session with the token the server issued in its place, so its owner tag is carried over
+    // (read only when the stored token is the one being replaced; the store removes the tag on the write).
+    let owner = acct.session.lock().ok().and_then(|g| {
+        g.as_ref()
+            .and_then(|s| crate::session_owner_for_rotation(acct.id.as_str(), &s.token))
+    });
+    store
+        .store_token(&write, acct.id.as_str(), new_token, email.as_deref())
+        .map_err(RotatedStoreError::Store)?;
+    if let Some(owner) = owner {
+        store.carry_owner(&write, acct.id.as_str(), &owner);
+    }
+    let mut guard = acct
+        .session
+        .lock()
+        .map_err(|_| RotatedStoreError::Store("internal".to_string()))?;
+    if let Some(session) = guard.as_mut() {
+        let mut old = std::mem::replace(&mut session.token, new_token.to_string());
+        old.zeroize();
+    }
+    drop(guard);
+    drop(write);
+    Ok(())
+}
+
+/// Store and swap the new token in the session turn the change captured, then start the engine again with it, on
+/// every platform; the engine holds the ended token. macOS and Linux stop the engine first and start it as after a
+/// naming (`start_engine_unless_running`).
 ///
-/// Windows stores the token before its first await: a Lock or a sign-out cancels a Windows
-/// session command at an await (`SessionCommands::within`), and the server has already ended
-/// the old token, so nothing may come between its answer and the store. The engine then comes
-/// back under the session-transition lock through `start_engine_if_possible`, which starts
-/// with the session gate, its generation and the binding's Windows rules, like every other
-/// Windows start. The old engine is stopped under that lock first (task 2439 item 1): the
-/// start begins with `if let Ok(cfg) = DesktopConfig::load()`, so a config read failure would
-/// otherwise return before it takes the slot and leave the old engine on the ended token. A
-/// running R10 ownership proof holds the ended token too: it is stopped under the lock first,
-/// as a Lock and a sign-out stop it.
+/// The store and swap happen before any await on Windows: the server has already ended the old token, so nothing may
+/// come between its answer and [`store_rotated_session`]. (The body read and this store also run in [`detached`], so a
+/// Lock or a sign-out that drops the command cannot drop them.) The engine then comes back under the
+/// session-transition lock through `start_engine_if_possible`, which starts with the session gate, its generation and
+/// the binding's Windows rules, like every other Windows start. The old engine is stopped under that lock first (task
+/// 2439 item 1): the start begins with `if let Ok(cfg) = DesktopConfig::load()`, so a config read failure would
+/// otherwise return before it takes the slot and leave the old engine on the ended token. A running R10 ownership
+/// proof holds the ended token too: it is stopped under the lock first, as a Lock and a sign-out stop it.
 ///
-/// A store or restart failure after the server committed is not an error: the DTO says what
-/// followed, so the pane never claims the password did not change.
+/// A store or restart failure after the server committed is not an error: the DTO says what followed, so the pane
+/// never claims the password did not change.
 async fn install_rotated_session(
     app: tauri::AppHandle,
     state: &State<'_, AppState>,
@@ -354,32 +515,7 @@ async fn install_rotated_session(
             let _ = stop_engine_in_slot(acct, engine).await;
         }
     }
-    let stored = (|| -> Result<(), String> {
-        let write = claim_session_write(acct, turn).map_err(String::from)?;
-        let email = acct
-            .session
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().and_then(|s| s.email.clone()));
-        // Task 2447: the same session with the token the server issued in its place, so its owner tag is carried
-        // over (read only when the stored token is the one being replaced; the store removes the tag on the write).
-        let owner = acct.session.lock().ok().and_then(|g| {
-            g.as_ref()
-                .and_then(|s| crate::session_owner_for_rotation(acct.id.as_str(), &s.token))
-        });
-        persist_session_token_to_keychain(&write, acct.id.as_str(), new_token, email.as_deref())?;
-        if let Some(owner) = owner {
-            crate::bind_session_owner_in_keychain(&write, acct.id.as_str(), &owner);
-        }
-        let mut guard = acct.session.lock().map_err(|_| "internal".to_string())?;
-        if let Some(session) = guard.as_mut() {
-            let mut old = std::mem::replace(&mut session.token, new_token.to_string());
-            old.zeroize();
-        }
-        drop(guard);
-        drop(write);
-        Ok(())
-    })();
+    let stored = store_rotated_session(acct, turn, new_token);
     if stored.is_err() {
         // The old token is dead and the new one is not on disk: the person signs in again.
         return PasswordChangedDto {
@@ -421,8 +557,8 @@ pub(super) async fn account_change_email(
     session_command!(async {
         let (_acct, token, binding) = session_parts(&state)?;
         let flow = AccountFlow::change_email(&new_email, &password, binding).map_err(code)?;
-        match drive(flow, Some(&token)).await? {
-            AccountOutcome::EmailChanged { email } => Ok(EmailChangedDto { email }),
+        match drive(flow, Some(&token), None).await? {
+            Driven::Outcome(AccountOutcome::EmailChanged { email }) => Ok(EmailChangedDto { email }),
             _ => Err("protocol".to_string()),
         }
     })
@@ -579,11 +715,11 @@ pub(super) async fn account_delete_confirm(
 #[tauri::command]
 pub(super) async fn account_delete_confirm_link(link: String) -> Result<DeletionScheduledDto, String> {
     let link = Zeroizing::new(link);
-    match drive(AccountFlow::delete_confirm(&link).map_err(code)?, None).await? {
-        AccountOutcome::DeletionScheduled {
+    match drive(AccountFlow::delete_confirm(&link).map_err(code)?, None, None).await? {
+        Driven::Outcome(AccountOutcome::DeletionScheduled {
             shred_after,
             cancel_until,
-        } => {
+        }) => {
             pending()?.delete_link = Some(link);
             Ok(DeletionScheduledDto {
                 shred_after,
@@ -613,8 +749,8 @@ pub(super) async fn account_delete_undo(link: Option<String>) -> Result<Deletion
             .clone()
             .ok_or_else(|| "link_needed".to_string())?,
     };
-    match drive(AccountFlow::delete_cancel(&link).map_err(code)?, None).await? {
-        AccountOutcome::DeletionCancelled { not_restored } => {
+    match drive(AccountFlow::delete_cancel(&link).map_err(code)?, None, None).await? {
+        Driven::Outcome(AccountOutcome::DeletionCancelled { not_restored }) => {
             pending()?.delete_link = None;
             Ok(DeletionCancelledDto { not_restored })
         }

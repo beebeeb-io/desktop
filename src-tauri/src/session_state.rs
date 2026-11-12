@@ -432,6 +432,25 @@ pub(super) fn claim_session_write(
     Ok(write)
 }
 
+/// [`claim_session_write`] for a task that has no `SessionCommands` lease: the write belongs to the turn that captured
+/// it on EVERY platform. Windows' ordinary writers never refuse a stale turn (its transitions are ordered by
+/// `SESSION_TRANSITION` and its attempt fences, and a Lock cancels their lease at an await); the detached commit that
+/// stores a rotated session has no lease there, so this check is its only guard against resurrecting an ended session.
+/// The generation is checked under the session-write lock, exactly as [`claim_session_write`] does off Windows, so a
+/// transition cannot slip in between the check and the write.
+pub(super) fn claim_session_write_for_commit(
+    acct: &AccountRuntime,
+    turn: &mut account::SessionGeneration,
+) -> Result<SessionWrite, SessionChanged> {
+    let writes = lock_session_keychain_writes();
+    if !acct.session_unchanged_since(*turn) {
+        tracing::info!("a detached session commit wrote nothing: another transition happened since it began");
+        return Err(SessionChanged::of(acct));
+    }
+    *turn = acct.advance_session_generation_holding_session_write_lock(account::SessionTransition::Write);
+    Ok(SessionWrite { _writes: writes })
+}
+
 /// The same check as [`claim_session_write`] without moving the generation on: for a write that changes nothing a
 /// sign-in decides on (a cached profile), or that moves it only when it turns out to change something (the naming of a
 /// session, Task 12 fix round 1 item 5). The caller moves it on, holding the returned turn, when it does.
