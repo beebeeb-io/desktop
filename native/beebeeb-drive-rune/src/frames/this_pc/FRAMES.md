@@ -18,7 +18,7 @@ light and dark. The gate lines per frame are in the PR body.
 | DW-1304 | Sync history, "contract" in Search history | built; the caret is open (`search-caret` and the 3 boxes around it): a headless render has no focus |
 | DW-1305 | Sync history on a PC that just signed in: No changes yet | built, 0 |
 | DW-0715 | Available offline: what stays on this PC, sizes, Remove all from this PC | built, 0 |
-| DW-1306 | Available offline: the row menu (Open, Show in File Explorer, Remove from this PC) | built; `status-details` open: the board's status line here is Files' ("4 on this PC …"), DW-0715's is the section's |
+| DW-1306 | Available offline: the row menu (Open, Show in File Explorer, Remove from this PC) | built, 0; under the open menu the status line reads Files' counts as this frame draws it ("4 on this PC …"), DW-0715's is the section's (PR body, Decision) |
 | DW-0120 | Available offline, nothing kept yet | built, 0 |
 
 ## Backups on Windows (`frames/backups/`, a section of the settings view)
@@ -34,7 +34,7 @@ light and dark. The gate lines per frame are in the PR body.
 | DW-0741 | Couldn't back up: three failures with Try again, one exclusion without | built, 0 |
 
 Built: 15 of 16. Not built: DW-0738 (system UI). Gate, 30 runs (15 frames, light and dark):
-19 with every line at 0, 11 with open lines, all named above.
+21 with every line at 0, 9 with open lines, all named above.
 
 States the board gives a rule and no drawing, built from the rule's words (tests only): a filter or
 a search that matches nothing draws an empty list (no invented copy); "Remove all from this PC"
