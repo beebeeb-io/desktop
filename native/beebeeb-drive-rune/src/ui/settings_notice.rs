@@ -55,9 +55,24 @@ fn tone_ink(tone: Tone, t: &Theme) -> Color {
 /// A notice in a pane's column (`.mk-banner`): a glyph, a strong first sentence, the rest.
 /// It is 14 pt in from the column's sides and 10 pt lower than the column's gap puts it.
 pub fn note(index: usize, tone: Tone, icon: &'static Icon, strong: &str, words: &str, t: &Theme) -> El {
+    note_with(index, tone, icon, strong, words, None, t)
+}
+
+/// `note` with one action at its trailing edge (a small button of the caller's).
+pub fn note_with(
+    index: usize,
+    tone: Tone,
+    icon: &'static Icon,
+    strong: &str,
+    words: &str,
+    action: Option<El>,
+    t: &Theme,
+) -> El {
     let key = format!("note-{index}");
     let fill = match tone {
         Tone::Neutral => t.text.alpha(0.06),
+        // `.mk-banner.tone-red` is the red at 10 %, `.tone-warn` the warning ink at 12 %.
+        Tone::Red => t.red.alpha(0.10),
         tone => tone_ink(tone, t).alpha(0.12),
     };
     let all = if words.is_empty() {
@@ -68,29 +83,31 @@ pub fn note(index: usize, tone: Tone, icon: &'static Icon, strong: &str, words: 
     let text_key = format!("{key}-text");
     kit::note_text(&text_key, &text_key, &all, NOTE, t.text_secondary);
     let spans = vec![Span::new(0, strong.len()).weight(600.0).color(t.text)];
-    el().key(format!("{key}-margin")).w_full().pt(10.0).px(14.0).child(
-        row()
-            .key(key.clone())
-            .role("status")
-            .label(all.clone())
-            .w_full()
-            .center_y()
-            .gap(10.0)
-            .py(9.0)
-            .pl(12.0)
-            .pr(10.0)
-            .radius(10.0)
-            .fill(fill)
-            .child(kit::glyph(format!("{key}-icon"), icon, 16.0, tone_ink(tone, t)))
-            .child(
-                rich(all, spans)
-                    .key(text_key)
-                    .font(NOTE)
-                    .color(t.text_secondary)
-                    .grow(1.0)
-                    .min_w(0.0),
-            ),
-    )
+    let mut line = row()
+        .key(key.clone())
+        .role("status")
+        .label(all.clone())
+        .w_full()
+        .center_y()
+        .gap(10.0)
+        .py(9.0)
+        .pl(12.0)
+        .pr(10.0)
+        .radius(10.0)
+        .fill(fill)
+        .child(kit::glyph(format!("{key}-icon"), icon, 16.0, tone_ink(tone, t)))
+        .child(
+            rich(all, spans)
+                .key(text_key)
+                .font(NOTE)
+                .color(t.text_secondary)
+                .grow(1.0)
+                .min_w(0.0),
+        );
+    if let Some(action) = action {
+        line = line.child(action);
+    }
+    el().key(format!("{key}-margin")).w_full().pt(10.0).px(14.0).child(line)
 }
 
 /// A toast over the pane (`.mk-toast`): a pill, centred, 42 pt above the pane's foot. It

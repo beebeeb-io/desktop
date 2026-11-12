@@ -133,6 +133,46 @@ pub enum Insights {
     Ready(Box<InsightsData>),
 }
 
+/// Where sync stands, as the Status row says it (DW-0746, DW-0746e).
+#[derive(Clone, PartialEq, Debug)]
+pub enum SyncStatus {
+    /// Running: the row's words ("Up to date · last change 2 min ago").
+    Running(String),
+    /// Paused by the person.
+    Paused,
+    /// Waiting because this PC is on a metered connection and sync on metered connections
+    /// is off: the row's words.
+    WaitingMetered(String),
+}
+
+/// Where a repair of Beebeeb in File Explorer stands (DW-0746c, DW-0746d).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Repair {
+    Idle,
+    Running,
+    /// The last repair did not finish; nothing needs undoing.
+    Failed,
+}
+
+/// Sync and File Explorer (DW-0746).
+#[derive(Clone, PartialEq, Debug)]
+pub struct SyncPane {
+    /// Beebeeb has its location in File Explorer's navigation pane.
+    pub in_explorer: bool,
+    pub status_on_files: bool,
+    pub repair: Repair,
+    pub status: SyncStatus,
+    pub open_at_login: bool,
+    /// "18.4 GB" downloaded, against a limit of so many GB.
+    pub downloaded: String,
+    pub limit_gb: u32,
+    /// "3 items · 1.4 GB".
+    pub offline: String,
+    /// Files made in File Explorer that have not uploaded yet: how many, and their size
+    /// (DW-0746b counts them before the location is turned off).
+    pub not_uploaded: Option<(u32, String)>,
+}
+
 /// What Drive's settings panes read and change.
 pub trait DriveSettings {
     /// `false`: nothing answers for these panes yet; they draw the shell's "not built yet"
@@ -149,6 +189,21 @@ pub trait DriveSettings {
     /// Remove every copy of `which` from this PC (never an Available offline file, never an
     /// open one). Engine: clear the cache; File Explorer then shows the files as online only.
     fn clear(&mut self, which: Kept);
+    /// Sync and File Explorer. Engine: the cloud-files registration, the shell status
+    /// setting, the sync state, the login item, the cache size and limit, the pinned set.
+    fn sync(&self) -> SyncPane;
+    /// Put the PC column's states on files in File Explorer, or not.
+    fn set_status_on_files(&mut self, on: bool);
+    /// Open Beebeeb when the person logs in (a login item), or not.
+    fn set_open_at_login(&mut self, on: bool);
+    /// Pause or resume syncing.
+    fn set_paused(&mut self, paused: bool);
+    /// Sync on this metered connection until the PC leaves it; the setting stays off (DW-0746e).
+    fn sync_anyway(&mut self);
+    /// Repair Beebeeb in File Explorer (DW-0746c): the row says Repairing… while it runs.
+    fn repair(&mut self);
+    /// Remove Beebeeb from File Explorer (DW-0746b): Windows unregisters its folder.
+    fn turn_off_explorer(&mut self);
     /// Storage insights. Engine: usage plus the breakdown by kind and the 50 largest files,
     /// worked out on this PC from the decrypted file list.
     fn insights(&self) -> Insights;
@@ -160,6 +215,7 @@ pub trait DriveSettings {
 pub struct BoardDrive {
     storage: Storage,
     insights: Insights,
+    sync: SyncPane,
 }
 
 impl Default for BoardDrive {
@@ -211,6 +267,17 @@ impl BoardDrive {
                 },
                 offline: "1.4 GB".into(),
             },
+            sync: SyncPane {
+                in_explorer: true,
+                status_on_files: true,
+                repair: Repair::Idle,
+                status: SyncStatus::Running("Up to date · last change 2 min ago".into()),
+                open_at_login: true,
+                downloaded: "18.4 GB".into(),
+                limit_gb: 50,
+                offline: "3 items · 1.4 GB".into(),
+                not_uploaded: Some((4, "12 MB".into())),
+            },
             insights: Insights::Ready(Box::new(InsightsData {
                 used: "240 GB".into(),
                 total: "1 TB".into(),
@@ -261,6 +328,19 @@ impl BoardDrive {
         }
     }
 
+    /// The last repair did not finish (DW-0746d).
+    pub fn with_repair_failed(mut self) -> Self {
+        self.sync.repair = Repair::Failed;
+        self
+    }
+
+    /// Sync waits on a metered connection (DW-0746e).
+    pub fn with_metered_wait(mut self) -> Self {
+        self.sync.status =
+            SyncStatus::WaitingMetered("Waiting · this PC is on a metered connection · 7 changes wait".into());
+        self
+    }
+
     /// Storage insights in another state (DW-0783b, c, d).
     pub fn with_insights(mut self, insights: Insights) -> Self {
         self.insights = insights;
@@ -286,6 +366,36 @@ impl DriveSettings for BoardDrive {
             Kept::Previews => self.storage.previews.used = "0 GB".into(),
         }
     }
+    fn sync(&self) -> SyncPane {
+        SyncPane {
+            downloaded: self.storage.downloaded.used.clone(),
+            limit_gb: self.storage.downloaded.limit.gb,
+            ..self.sync.clone()
+        }
+    }
+    fn set_status_on_files(&mut self, on: bool) {
+        self.sync.status_on_files = on;
+    }
+    fn set_open_at_login(&mut self, on: bool) {
+        self.sync.open_at_login = on;
+    }
+    fn set_paused(&mut self, paused: bool) {
+        self.sync.status = if paused {
+            SyncStatus::Paused
+        } else {
+            SyncStatus::Running("Up to date · last change 2 min ago".into())
+        };
+    }
+    fn sync_anyway(&mut self) {
+        self.sync.status = SyncStatus::Running("Syncing on this connection".into());
+    }
+    fn repair(&mut self) {
+        self.sync.repair = Repair::Running;
+    }
+    fn turn_off_explorer(&mut self) {
+        self.sync.in_explorer = false;
+        self.sync.not_uploaded = None;
+    }
     fn insights(&self) -> Insights {
         self.insights.clone()
     }
@@ -307,6 +417,15 @@ impl DriveSettings for UnwiredDrive {
     }
     fn set_limit(&mut self, _: Kept, _: u32) {}
     fn clear(&mut self, _: Kept) {}
+    fn sync(&self) -> SyncPane {
+        self.0.sync()
+    }
+    fn set_status_on_files(&mut self, _: bool) {}
+    fn set_open_at_login(&mut self, _: bool) {}
+    fn set_paused(&mut self, _: bool) {}
+    fn sync_anyway(&mut self) {}
+    fn repair(&mut self) {}
+    fn turn_off_explorer(&mut self) {}
     fn insights(&self) -> Insights {
         Insights::Loading
     }

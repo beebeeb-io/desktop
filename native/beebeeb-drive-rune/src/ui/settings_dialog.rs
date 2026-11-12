@@ -218,3 +218,23 @@ pub fn button_outline(index: usize, label: &str, t: &Theme) -> El {
         .focusable(true)
         .child(kit::label(format!("{key}-label"), label, BUTTON_MD, t.text))
 }
+
+/// A dialog-size button for a destructive answer (`.kit-btn-md` on red): white on red, the
+/// same in both themes. Keys: `btn-<N>`, `btn-<N>-label`.
+pub fn button_danger(index: usize, label: &str, t: &Theme) -> El {
+    let key = format!("btn-{index}");
+    let fill = rune::oklch(0.55, 0.2, 25.0);
+    row()
+        .key(key.clone())
+        .role("button")
+        .label(label)
+        .h(28.0)
+        .px(12.0)
+        .center()
+        .radius(radius::MD)
+        .fill(fill)
+        .hover(fill.mix(Color::BLACK, 0.05))
+        .press(fill.mix(Color::BLACK, 0.10))
+        .focusable(true)
+        .child(kit::label(format!("{key}-label"), label, BUTTON_MD, t.white))
+}

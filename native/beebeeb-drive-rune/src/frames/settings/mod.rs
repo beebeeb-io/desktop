@@ -23,6 +23,7 @@ pub mod recent;
 pub mod source;
 pub mod storage;
 pub mod storage_location;
+pub mod sync;
 #[cfg(test)]
 mod tests;
 
@@ -53,6 +54,8 @@ pub enum Pane {
     Storage,
     /// Storage › Storage insights (DW-0783).
     Insights,
+    /// Sync and File Explorer (DW-0746).
+    Sync,
 }
 
 /// Which menu a pop-up button drops.
@@ -106,6 +109,10 @@ pub enum Dialog {
     Limit(Kept),
     /// Clear… downloaded files (DW-0780).
     FreeUp,
+    /// Turn off Beebeeb in File Explorer… (DW-0746b).
+    TurnOffExplorer,
+    /// Repair… (DW-0746c).
+    Repair,
 }
 
 /// What settings asks of the app around it. The shell lane drains `SettingsUi::intents`.
@@ -337,6 +344,18 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         s.settings.source = Box::new(BoardSettings::new().with_locations_failed());
         open_on(s, "DW-0788");
     }),
+    ("DW-0746", |s| open_on(s, "DW-0746")),
+    ("DW-0746b", |s| open_on(s, "DW-0746b")),
+    ("DW-0746c", |s| open_on(s, "DW-0746c")),
+    ("DW-0746d", |s| {
+        s.settings.drive = Box::new(drive::BoardDrive::new().with_repair_failed());
+        open_on(s, "DW-0746");
+    }),
+    ("DW-0746e", |s| {
+        s.settings.drive = Box::new(drive::BoardDrive::new().with_metered_wait());
+        open_on(s, "DW-0746");
+    }),
+    ("DW-0780", |s| open_on(s, "DW-0780")),
     ("DW-0712", |s| open_on(s, "DW-0712")),
     ("DW-0713", |s| open_on(s, "DW-0713")),
     ("DW-0714", |s| open_on(s, "DW-0714")),
@@ -368,6 +387,7 @@ fn routed(s: &State) -> Option<Pane> {
         Screen::Settings(SettingsPane::General) => Some(Pane::General),
         Screen::Settings(SettingsPane::Notifications) => Some(Pane::Notifications),
         Screen::Settings(SettingsPane::Storage) => Some(Pane::Storage),
+        Screen::Settings(SettingsPane::SyncAndFileExplorer) => Some(Pane::Sync),
         _ => None,
     }
 }
@@ -384,6 +404,10 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>, Option<MenuKind>)> {
         "DW-0750" | "DW-0750b" => (Pane::Notifications, None, None),
         "DW-0791" | "DW-0791b" => (Pane::Recent, None, None),
         "DW-0788" | "DW-0788b" | "DW-0788c" | "DW-0788d" => (Pane::StorageLocation, None, None),
+        "DW-0746" | "DW-0746d" | "DW-0746e" => (Pane::Sync, None, None),
+        "DW-0746b" => (Pane::Sync, Some(Dialog::TurnOffExplorer), None),
+        "DW-0746c" => (Pane::Sync, Some(Dialog::Repair), None),
+        "DW-0780" => (Pane::Sync, Some(Dialog::FreeUp), None),
         "DW-0712" => (Pane::Storage, None, None),
         "DW-0713" => (Pane::Storage, Some(Dialog::Limit(Kept::Previews)), None),
         "DW-0714" => (Pane::Storage, Some(Dialog::Limit(Kept::Downloaded)), None),
@@ -419,6 +443,7 @@ fn shell_pane(section: Pane) -> SettingsPane {
     match section {
         Pane::Notifications | Pane::Recent => SettingsPane::Notifications,
         Pane::Storage | Pane::Insights => SettingsPane::Storage,
+        Pane::Sync => SettingsPane::SyncAndFileExplorer,
         _ => SettingsPane::General,
     }
 }
@@ -433,7 +458,6 @@ pub fn go(s: &mut State, frame: &'static str) {
         "DW-A52" => Some(SettingsPane::Security),
         "DW-A55" => Some(SettingsPane::DevicesAndSessions),
         "DW-0737" => Some(SettingsPane::Backups),
-        "DW-0746" => Some(SettingsPane::SyncAndFileExplorer),
         "DW-0744" => Some(SettingsPane::ThumbnailsAndPreviews),
         _ => None,
     };
@@ -492,6 +516,7 @@ impl Pane {
             Pane::General | Pane::About | Pane::StorageLocation => Pane::General,
             Pane::Notifications | Pane::Recent => Pane::Notifications,
             Pane::Storage | Pane::Insights => Pane::Storage,
+            Pane::Sync => Pane::Sync,
         }
     }
 }
@@ -555,6 +580,8 @@ const DRIVE_SECTIONS: &[Section] = &[
         label: "Sync and File Explorer",
         icon: &ic::CHEV_RIGHT,
         frame: "DW-0746",
+        // The board draws no sidebar item selected on its Sync and File Explorer frames
+        // (DW-0746 and the nine over it), unlike every other section: followed, and flagged.
         pane: None,
     },
     Section {
@@ -620,6 +647,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         _ if !ui.drive.wired() => return placeholder::window(s, cx, registry::group_for(&s.shell.app)),
         Pane::Storage => storage::pane(ui, &t),
         Pane::Insights => insights::pane(ui, &t),
+        Pane::Sync => sync::pane(ui, &t),
     };
     let overlay = overlay.filter(|_| inside);
     let mut body = row()
