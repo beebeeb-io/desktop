@@ -162,7 +162,11 @@ fn a_section_of_another_lane_is_routed_by_the_shell() {
     let mut rt = runtime("DW-0701");
     click(&mut rt, "Backups-row");
     assert_eq!(on_settings(&rt), Some(SettingsPane::Backups));
-    assert!(find(&rt, "set-main").is_none(), "this lane does not draw Backups");
+    assert_eq!(
+        info(&rt, "set-title").text.as_deref(),
+        Some("Backups"),
+        "the Backups lane's pane, shown by the shell"
+    );
 }
 
 #[test]
