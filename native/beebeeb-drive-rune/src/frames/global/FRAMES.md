@@ -6,7 +6,7 @@ same numbers as `DW-`) and "Windows-only frames" (3). "The Share menu: Save to B
 DW-1183 is in "Windows-only frames").
 
 Built = drawn from the group's source, its controls work, a scene by frame id, gated in light and dark with all six
-gate lines at 0 failing. 9 built here, 3 built by the Files frames (PR 294), 4 not built.
+gate lines at 0 failing. 10 built here, 3 built by the Files frames (PR 294), 3 not built.
 
 | Frame | What | State |
 | --- | --- | --- |
@@ -21,7 +21,7 @@ gate lines at 0 failing. 9 built here, 3 built by the Files frames (PR 294), 4 n
 | DW-0109 | "Couldn't rename. Check your connection." with Try again | built by the Files frames (PR 294), 0 |
 | DW-0114 | A new account has no files yet | built, 0 |
 | DW-0118 | The first list loads in the background: the slim strip | built, 0 |
-| DW-0119 | Thumbnails arrive one by one: plain tiles in the grid | not built: it is the grid view (`.mk-gridview`), which no lane has built yet (the Files frames list DW-0421 as not built). Golden and keys (`grid`, `grid-<i>-thumb/icon/name/sub/badge`) are captured |
+| DW-0119 | Thumbnails arrive one by one: plain tiles in the grid (`ui::grid_tiles`, `grid.rs`); the view switch works, each folder keeps its view | built, 0 |
 | DW-0121 | Offline, and the file isn't on this PC: the preview says so | built, 0 |
 | DW-1901 | Install Beebeeb on Windows: the installer's progress page | not built: "Windows draws it" (the NSIS installer's own pages); Beebeeb supplies its name and icon (the packaging lane, PR 283) |
 | DW-1902 | The installer's last page | not built: "Windows draws it", as DW-1901 |

@@ -133,6 +133,12 @@ pub fn status_line(state: Option<&str>, details: &str, t: &Theme) -> Option<El> 
     (state == Some(super::samples::OFFLINE)).then(|| status_offline::status_offline(details, t))
 }
 
+/// The words of the status line where a board frame gives its own (`Ui::board_status_words`).
+/// `None`: the Files window counts the folder shown.
+pub fn status_words(s: &State) -> Option<String> {
+    s.global.board_status_words.clone()
+}
+
 /// Is this row the one that could not open (drawn at 45 %, `.mk-row.is-dim`)?
 pub fn dims(s: &State, id: &str) -> bool {
     s.global

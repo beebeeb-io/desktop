@@ -8,6 +8,9 @@
 //! The toasts of this board group (DW-0107 to DW-0109) are the Files frames' (`ui::toast`,
 //! `frames::files`): an action there shows them.
 
+pub mod grid;
+#[cfg(test)]
+mod grid_tests;
 pub mod samples;
 pub mod source;
 #[cfg(test)]
@@ -19,8 +22,9 @@ use rune::Tx;
 use crate::State;
 use crate::ui::banner::Run;
 use crate::ui::gate::Scene;
+pub use grid::grid_body;
 pub use source::{GlobalFixture, GlobalSource, GlobalStatus, Quiet, StorageLevel};
-pub use view::{dims, fit, over_body, status_line, under_toolbar};
+pub use view::{dims, fit, over_body, status_line, status_words, under_toolbar};
 
 /// The banners, in the order the board gives them the window: "One banner at a time, in this
 /// order: signed out, storage full, sync problem, backup problem, storage almost full, offline."
@@ -160,6 +164,11 @@ pub struct Ui {
     /// A board frame that draws only the upper part of the window (`.mk-cropfade.at-bottom`):
     /// the body keeps its full height and its lower edge fades. `false` in the app.
     pub board_crop_bottom: bool,
+    /// A board frame whose status line (under its crop, not drawn) carries another frame's words:
+    /// the words, so the frame's text is the board's. `None` in the app: the window counts.
+    pub board_status_words: Option<String>,
+    /// The folders shown as a grid, and what is known of their thumbnails (DW-0119).
+    pub grid: grid::GridUi,
 }
 
 impl Default for Ui {
@@ -176,6 +185,8 @@ impl Ui {
             blocked_preview: None,
             intents: Vec::new(),
             board_crop_bottom: false,
+            board_status_words: None,
+            grid: grid::GridUi::default(),
         }
     }
 
@@ -353,6 +364,8 @@ pub const FRAMES: &[Scene<State>] = &[
     ("DW-0105", |s| scene(s, source::board::signed_out())),
     ("DW-0106", |s| scene(s, source::board::backup_problem())),
     ("DW-0118", |s| scene(s, source::board::loading())),
+    // DW-0119: Lisbon trip as a grid, its thumbnails still to arrive.
+    ("DW-0119", grid::scene),
     // DW-0121: offline, and Contract draft.pdf (online only) was opened.
     ("DW-0121", |s| {
         s.actions = crate::frames::files::Actions::new(Box::new(samples::SampleFiles::offline()));

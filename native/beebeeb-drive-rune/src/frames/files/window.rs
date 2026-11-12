@@ -184,7 +184,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         // Nothing in the folder: no headers, no panel, one way forward (DW-1106).
         body = body.child(empty_folder(s.listing.folder.id.is_none(), &t));
     } else {
-        body = body.child(
+        // The folder as a grid, where the person chose that view (`frames::global::grid`, DW-0119).
+        body = body.child(crate::frames::global::grid_body(s, &t).unwrap_or_else(|| {
             col()
                 .key("file-list-col")
                 .grow(1.0)
@@ -196,8 +197,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                     // It holds the keyboard while it shows, so Back still works from the keys.
                     Some(error) => file_list::list_error(error, &t).focusable(true).no_focus_ring(),
                     None => list::rows(s, cx, &t),
-                }),
-        );
+                })
+        }));
         if s.show_detail_pane {
             let selected = s.selected.and_then(|i| s.listing.items.get(i));
             let facts = selected.map(|item| (item, s.actions.source.details(item, &s.listing.folder.name)));
@@ -219,7 +220,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .child({
             // The sync state is the source's; a click shows the b's flyout (DW-0401 to DW-1201).
             let state = s.actions.source.sync_state();
-            let details = pc_summary(s);
+            let details = crate::frames::global::status_words(s).unwrap_or_else(|| pc_summary(s));
             let name = match &state {
                 Some(state) => format!("{state}. {details}"),
                 None => details.clone(),

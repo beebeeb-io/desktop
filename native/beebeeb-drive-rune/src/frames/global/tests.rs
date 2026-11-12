@@ -12,7 +12,7 @@ use crate::shell::app::{Screen, SettingsPane};
 use crate::ui::banner::sentence;
 use crate::{State, init, view};
 
-const NONE: Mods = Mods {
+pub(super) const NONE: Mods = Mods {
     shift: false,
     cmd: false,
     alt: false,
@@ -20,13 +20,13 @@ const NONE: Mods = Mods {
     logo: false,
 };
 
-fn settle(rt: &mut Runtime<State>, from: f64) {
+pub(super) fn settle(rt: &mut Runtime<State>, from: f64) {
     for i in 1..=3 {
         rt.frame(from + 0.4 * f64::from(i));
     }
 }
 
-fn runtime_of(state: State) -> Runtime<State> {
+pub(super) fn runtime_of(state: State) -> Runtime<State> {
     let env = Env {
         system_dark: false,
         scale: 2.0,
@@ -46,7 +46,7 @@ fn window(status: GlobalStatus) -> Runtime<State> {
     runtime_of(state)
 }
 
-fn scene(frame: &str) -> Runtime<State> {
+pub(super) fn scene(frame: &str) -> Runtime<State> {
     let mut state = init();
     let (_, apply) = FRAMES
         .iter()
@@ -58,17 +58,17 @@ fn scene(frame: &str) -> Runtime<State> {
     runtime_of(state)
 }
 
-fn find(rt: &Runtime<State>, key: &str) -> Option<rune::ElementInfo> {
+pub(super) fn find(rt: &Runtime<State>, key: &str) -> Option<rune::ElementInfo> {
     rt.elements()
         .into_iter()
         .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
 }
 
-fn info(rt: &Runtime<State>, key: &str) -> rune::ElementInfo {
+pub(super) fn info(rt: &Runtime<State>, key: &str) -> rune::ElementInfo {
     find(rt, key).unwrap_or_else(|| panic!("no element keyed {key}"))
 }
 
-fn focused(rt: &Runtime<State>) -> Option<String> {
+pub(super) fn focused(rt: &Runtime<State>) -> Option<String> {
     rt.elements()
         .into_iter()
         .find(|e| e.focused && !e.exiting)
@@ -79,7 +79,7 @@ thread_local! {
     static CLOCK: std::cell::Cell<f64> = const { std::cell::Cell::new(10.0) };
 }
 
-fn press(rt: &mut Runtime<State>, key: Key) {
+pub(super) fn press(rt: &mut Runtime<State>, key: Key) {
     rt.key(KeyEvent { key, mods: NONE });
     let now = CLOCK.with(|c| {
         c.set(c.get() + 2.0);
@@ -89,7 +89,7 @@ fn press(rt: &mut Runtime<State>, key: Key) {
 }
 
 /// Tab until `key` has the keyboard (at most 40 stops).
-fn tab_to(rt: &mut Runtime<State>, key: &str) {
+pub(super) fn tab_to(rt: &mut Runtime<State>, key: &str) {
     for _ in 0..40 {
         if focused(rt).as_deref() == Some(key) {
             return;
@@ -495,5 +495,5 @@ fn every_built_frame_draws_in_both_themes() {
             assert!(find(&rt, "window").is_some(), "{frame}");
         }
     }
-    assert_eq!(FRAMES.len(), 9);
+    assert_eq!(FRAMES.len(), 10);
 }

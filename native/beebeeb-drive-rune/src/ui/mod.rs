@@ -10,6 +10,7 @@ pub mod empty;
 pub mod file_list;
 pub mod gate;
 pub mod global_icons;
+pub mod grid_tiles;
 pub mod keys;
 pub mod kit;
 pub mod load_strip;

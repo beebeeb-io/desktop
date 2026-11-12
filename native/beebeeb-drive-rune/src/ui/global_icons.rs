@@ -37,3 +37,5 @@ pub static KEY: Icon = line24!(
 );
 /// Dismiss a banner, close a panel.
 pub static CLOSE: Icon = line24!("close", r#"<path d="M18 6L6 18M6 6l12 12"></path>"#);
+/// A video's length mark in the grid (DW-0119): play.
+pub static PLAY: Icon = line24!("play", r#"<path d="M5 3l14 9-14 9V3z"></path>"#);

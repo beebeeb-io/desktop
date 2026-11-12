@@ -133,3 +133,44 @@ impl FilesSource for SampleFiles {
         self.files.changes()
     }
 }
+
+/// The board's drive with Lisbon trip in the order DW-0119 draws it: by date, oldest first. The
+/// board writes days, not times ("10 Oct 2026" for both the tram ride and the sunset) and draws
+/// the tram first; the Files fixture gives every item 10:00, so here the tram ride is at 09:00.
+pub struct TripByDate(crate::frames::files::source::BoardDrive);
+
+impl TripByDate {
+    pub fn new() -> Self {
+        TripByDate(crate::frames::files::source::BoardDrive::new())
+    }
+
+    /// Lisbon trip, sorted as the board draws it ("Each folder remembers its own sort").
+    pub fn files() -> SampleFiles {
+        let mut files = SampleFiles::default();
+        files.files.set_sort(
+            Some(Self::FOLDER),
+            Sort {
+                by: crate::frames::files::SortBy::DateChanged,
+                reversed: true,
+                folders_first: true,
+            },
+        );
+        files
+    }
+
+    pub const FOLDER: &'static str = "f-lisbon";
+}
+
+impl DriveSource for TripByDate {
+    fn list(&self, folder_id: Option<&str>) -> Result<Listing, SourceError> {
+        let mut listing = self.0.list(folder_id)?;
+        if let Some(tram) = listing.items.iter_mut().find(|i| i.id == "tram28") {
+            tram.modified_at = "2026-10-10T09:00:00Z".into();
+        }
+        Ok(listing)
+    }
+
+    fn storage(&self) -> Option<StorageSummary> {
+        self.0.storage()
+    }
+}

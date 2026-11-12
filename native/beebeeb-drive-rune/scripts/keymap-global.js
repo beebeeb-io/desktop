@@ -85,6 +85,7 @@
       api.text(`${k}-sub`, q('.mk-gsub', cell));
     });
   }
-  const fade = q(':scope > .mk-cropfade, .mk-cropfade');
+  // Only the fade of a frame cropped at the bottom: the one cropped at the top (DW-0107 to DW-0109) is the Files frames'.
+  const fade = q('.mk-cropfade.at-bottom');
   if (fade) api.box('crop-fade', fade, gcss(fade));
 }
