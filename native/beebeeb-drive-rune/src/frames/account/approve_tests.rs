@@ -217,6 +217,30 @@ fn approve_is_inert_until_the_typed_code_is_the_requests_code() {
     );
 }
 
+/// The rule holds in the handler too, not only in which button is live: without the request's
+/// code nothing is asked, and a second call while Windows Hello is up asks nothing again.
+#[test]
+fn the_approve_handler_itself_refuses_without_the_code_and_while_it_waits() {
+    let mut state = init();
+    state.account.source = Some(Box::new(BoardAccount::new().holding_hello()));
+    let mut rt = window(state);
+    rt.update(|s, _| assert!(approve::notification_clicked(s)));
+    rt.update(|s, _| approve::approve(s));
+    assert_eq!(dialog(&rt), Some(Dialog::ApproveReview), "no code, no approval");
+    assert!(!wire(&rt).iter().any(|l| l.contains("/approve")));
+    settle(&mut rt);
+    click(&mut rt, CODE_KEY);
+    type_(&mut rt, &BOARD_REQUEST_CODE.replace('-', ""));
+    rt.update(|s, _| approve::approve(s));
+    rt.update(|s, _| approve::approve(s));
+    assert_eq!(dialog(&rt), Some(Dialog::ApproveHello));
+    assert_eq!(
+        wire(&rt).iter().filter(|l| l.contains("/approve")).count(),
+        1,
+        "asked once"
+    );
+}
+
 #[test]
 fn approving_waits_on_windows_hello_and_shares_nothing_until_it_answers() {
     let mut state = init();

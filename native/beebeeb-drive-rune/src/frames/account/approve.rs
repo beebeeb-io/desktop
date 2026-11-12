@@ -297,7 +297,7 @@ pub fn notification_clicked(s: &mut State) -> bool {
 }
 
 /// Approve on DW-A13: Windows Hello is asked (DW-A14). The keys leave only after it succeeds.
-fn approve(s: &mut State) {
+pub(super) fn approve(s: &mut State) {
     let ui = &mut s.account;
     if !ui.approve.matches || ui.approve.waiting {
         return;
