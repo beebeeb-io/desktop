@@ -1,6 +1,8 @@
 /* THROWAWAY (task 2477 spike). The thinnest possible C layer over LibreOfficeKit: the official init
  * header does the DLL loading, and every call goes through the version-matched vtable structs, so
  * Rust never guesses a struct offset. */
+#include <stdbool.h>
+#include <stddef.h>
 #define LOK_USE_UNSTABLE_API
 #include <LibreOfficeKit/LibreOfficeKitInit.h>
 #include <LibreOfficeKit/LibreOfficeKit.h>
