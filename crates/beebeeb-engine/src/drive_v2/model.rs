@@ -171,6 +171,7 @@ pub fn item_from(entry: &FileEntry, contract: Option<&FileContractState>, child_
         local: local_state(&entry.status, is_folder, is_pinned(contract)),
         read_only,
         has_thumbnail: !is_folder && has_thumbnail(&name),
+        backup: crate::backup_actions::BackupMark::default(),
         name,
     }
 }
@@ -266,6 +267,13 @@ pub fn sort_items(items: &mut [DriveItem], sort: Sort) {
             ordered
         }
     });
+}
+
+/// The web's `backupsRootFirst`: the protected Backups root is the first row in every sort and both directions.
+/// Stable, so the rows keep the order [`sort_items`] gave them. For the native window's listing
+/// ([`children_of`]); the web view's `list` is as it was.
+pub fn backups_root_first(items: &mut [DriveItem]) {
+    items.sort_by_key(|item| !item.backup.is_protected);
 }
 
 /// Every live row (a row being trashed is gone), with one row per path and kind: a row the server
@@ -448,16 +456,25 @@ pub fn children_of(
     let want_parent = folder.as_ref().map(|f| f.file_id.as_str());
     // Fetch all children with contract joined (no per-row query), then filter, sort, page in Rust.
     let (rows, _sql_total) = db.children_paged(want_parent, 0, i64::MAX).map_err(DriveError::db)?;
+    // LD-0113, as the web lists it: a device's manifest is never listed, each row carries its place in the
+    // Backups tree, and the Backups root is the first row.
+    let backups = crate::backup_protect::BackupsTree::read(db);
     let mut items: Vec<DriveItem> = Vec::with_capacity(rows.len());
     for (entry, contract, child_count) in &rows {
         // Shared-with-me roots at the top level go in Shared, not Files.
         if want_parent.is_none() && contract.namespace == Namespace::SharedWithMe {
             continue;
         }
+        if backups.is_hidden(&entry.path) {
+            continue;
+        }
         let count = if entry.is_dir() { Some(*child_count) } else { None };
-        items.push(item_from(entry, Some(contract), count));
+        let mut item = item_from(entry, Some(contract), count);
+        item.backup = crate::backup_actions::BackupMark::at(backups.position(&entry.path));
+        items.push(item);
     }
     sort_items(&mut items, sort);
+    backups_root_first(&mut items);
     let total = items.len();
     let page: Vec<DriveItem> = items.into_iter().skip(offset).take(limit).collect();
     Ok((page, total))

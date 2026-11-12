@@ -1,0 +1,1804 @@
+{
+ "frame": "DW-A51",
+ "width": 958,
+ "height": 638,
+ "elements": {
+  "caption-bar": {
+   "kind": "box",
+   "x": 0,
+   "y": 0,
+   "w": 958,
+   "h": 32,
+   "bg": [
+    246,
+    244,
+    240,
+    255
+   ]
+  },
+  "cap-mark": {
+   "kind": "icon",
+   "x": 12,
+   "y": 7.5,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": true,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "mark": true
+  },
+  "cap-title": {
+   "kind": "text",
+   "x": 37,
+   "y": 7.5,
+   "w": 774,
+   "h": 16,
+   "text": "Beebeeb Drive",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "cap-min": {
+   "kind": "box",
+   "x": 820,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-min-icon": {
+   "kind": "icon",
+   "x": 838,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M0 5.5h10"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "cap-max": {
+   "kind": "box",
+   "x": 866,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-max-icon": {
+   "kind": "icon",
+   "x": 884,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "rect:x=.5,y=.5,width=9,height=9,rx=1.5"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "cap-close": {
+   "kind": "box",
+   "x": 912,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-close-icon": {
+   "kind": "icon",
+   "x": 930,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M.5.5l9 9M9.5.5l-9 9"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "sidebar": {
+   "kind": "box",
+   "x": 0,
+   "y": 32,
+   "w": 224,
+   "h": 606,
+   "bg": [
+    246,
+    244,
+    240,
+    255
+   ],
+   "css": {
+    "border": "0px 0.5px 0px 0px oklch(0.18 0.01 70)",
+    "pad": "14px 10px",
+    "gap": "14px"
+   }
+  },
+  "Back to Drive-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 46,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Back to Drive-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 53.5,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M15 5l-7 7 7 7"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Back to Drive": {
+   "kind": "text",
+   "x": 41,
+   "y": 52.5,
+   "w": 82.43,
+   "h": 17,
+   "text": "Back to Drive",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "General-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 112,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "General-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 119,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "General": {
+   "kind": "text",
+   "x": 46,
+   "y": 118.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "General",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Account-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 143,
+   "w": 203.5,
+   "h": 30,
+   "bg": [
+    17,
+    17,
+    17,
+    15
+   ],
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": true
+  },
+  "Account-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 150,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "Account": {
+   "kind": "text",
+   "x": 46,
+   "y": 149.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Account",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Security-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 174,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Security-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 181,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Security": {
+   "kind": "text",
+   "x": 46,
+   "y": 180.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Security",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Devices and sessions-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 205,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Devices and sessions-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 212,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M8 3h8a1.5 1.5 0 0 1 1.5 1.5v15A1.5 1.5 0 0 1 16 21H8a1.5 1.5 0 0 1-1.5-1.5v-15A1.5 1.5 0 0 1 8 3z",
+    "M11 18h2"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Devices and sessions": {
+   "kind": "text",
+   "x": 46,
+   "y": 211.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Devices and sessions",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Notifications-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 236,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Notifications-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 243,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Notifications": {
+   "kind": "text",
+   "x": 46,
+   "y": 242.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Notifications",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Storage-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 302,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Storage-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 309,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Storage": {
+   "kind": "text",
+   "x": 46,
+   "y": 308.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Storage",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Backups-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 333,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Backups-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 340,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Backups": {
+   "kind": "text",
+   "x": 46,
+   "y": 339.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Backups",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Sync and File Explorer-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 364,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Sync and File Explorer-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 371,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Sync and File Explorer": {
+   "kind": "text",
+   "x": 46,
+   "y": 370.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Sync and File Explorer",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Thumbnails and previews-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 395,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Thumbnails and previews-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 402,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Thumbnails and previews": {
+   "kind": "text",
+   "x": 46,
+   "y": 401.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Thumbnails and previews",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "Bandwidth-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 426,
+   "w": 203.5,
+   "h": 30,
+   "css": {
+    "radius": "8px",
+    "pad": "0px 10px",
+    "gap": "10px"
+   },
+   "on": false
+  },
+  "Bandwidth-icon": {
+   "kind": "icon",
+   "x": 20,
+   "y": 433,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ]
+  },
+  "Bandwidth": {
+   "kind": "text",
+   "x": 46,
+   "y": 432.5,
+   "w": 157.5,
+   "h": 17,
+   "text": "Bandwidth",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "side-title-settings": {
+   "kind": "text",
+   "x": 20,
+   "y": 92,
+   "w": 58.51,
+   "h": 12.5,
+   "text": "SETTINGS",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10.5,
+   "weight": 600,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0.74
+  },
+  "side-title-drive": {
+   "kind": "text",
+   "x": 20,
+   "y": 282,
+   "w": 35.02,
+   "h": 12.5,
+   "text": "DRIVE",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10.5,
+   "weight": 600,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0.74
+  },
+  "side-foot-box": {
+   "kind": "box",
+   "x": 10,
+   "y": 585.5,
+   "w": 203.5,
+   "h": 38.5,
+   "css": {
+    "border": "0.5px 0px 0px 0px oklch(0.18 0.01 70 / 0.09)",
+    "pad": "10px 6px 0px"
+   }
+  },
+  "side-foot": {
+   "kind": "text",
+   "x": 16,
+   "y": 596.5,
+   "w": 174.48,
+   "h": 27,
+   "text": "Settings open inside the app. Esc goes back.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "set-main": {
+   "kind": "box",
+   "x": 224,
+   "y": 32,
+   "w": 734,
+   "h": 606,
+   "bg": [
+    246,
+    244,
+    240,
+    255
+   ],
+   "css": {
+    "pad": "22px 30px",
+    "gap": "14px"
+   }
+  },
+  "set-title": {
+   "kind": "text",
+   "x": 254,
+   "y": 54,
+   "w": 520,
+   "h": 28,
+   "text": "Account",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22,
+   "weight": 650,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.48,
+   "lh": "28px"
+  },
+  "list-0-body": {
+   "kind": "box",
+   "x": 254,
+   "y": 96,
+   "w": 520,
+   "h": 60,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ],
+   "css": {
+    "radius": "10px",
+    "shadow": "oklch(0.18 0.01 70 / 0.09) 0px 0px 0px 0.5px"
+   }
+  },
+  "item-0-0": {
+   "kind": "box",
+   "x": 254,
+   "y": 96,
+   "w": 520,
+   "h": 32,
+   "css": {
+    "pad": "0px 10px",
+    "gap": "8px"
+   },
+   "danger": false
+  },
+  "item-0-0-avatar": {
+   "kind": "box",
+   "x": 264,
+   "y": 96,
+   "w": 32,
+   "h": 32,
+   "bg": [
+    191,
+    219,
+    248,
+    255
+   ],
+   "css": {
+    "radius": "50%",
+    "shadow": "oklch(0.994746 0.00143237 85) 0px 0px 0px 2px"
+   }
+  },
+  "item-0-0-initials": {
+   "kind": "text",
+   "x": 271.61,
+   "y": 104.5,
+   "w": 16.77,
+   "h": 14.5,
+   "text": "AV",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 650,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "item-0-0-title": {
+   "kind": "text",
+   "x": 304,
+   "y": 103.5,
+   "w": 438,
+   "h": 17,
+   "text": "Anna Visser",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "17px"
+  },
+  "item-0-0-chev": {
+   "kind": "icon",
+   "x": 750,
+   "y": 105,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    155,
+    152,
+    147,
+    255
+   ]
+  },
+  "item-0-1": {
+   "kind": "box",
+   "x": 254,
+   "y": 128,
+   "w": 520,
+   "h": 28,
+   "css": {
+    "pad": "0px 10px",
+    "gap": "8px"
+   },
+   "danger": false
+  },
+  "item-0-1-icon": {
+   "kind": "icon",
+   "x": 270,
+   "y": 133,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2zM22 6l-10 7L2 6"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "item-0-1-title": {
+   "kind": "text",
+   "x": 302,
+   "y": 133.5,
+   "w": 440,
+   "h": 17,
+   "text": "anna@northwind.studio",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "17px"
+  },
+  "item-0-1-chev": {
+   "kind": "icon",
+   "x": 750,
+   "y": 135,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    155,
+    152,
+    147,
+    255
+   ]
+  },
+  "list-1-title": {
+   "kind": "text",
+   "x": 268,
+   "y": 170.5,
+   "w": 46.45,
+   "h": 12,
+   "text": "Recovery",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0.1
+  },
+  "list-1-body": {
+   "kind": "box",
+   "x": 254,
+   "y": 189,
+   "w": 520,
+   "h": 40,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ],
+   "css": {
+    "radius": "10px",
+    "shadow": "oklch(0.18 0.01 70 / 0.09) 0px 0px 0px 0.5px"
+   }
+  },
+  "list-1-foot": {
+   "kind": "text",
+   "x": 270,
+   "y": 235.5,
+   "w": 453.55,
+   "h": 14.5,
+   "text": "We can't show it again. Keep your 12 words on paper or in a password manager.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "item-1-0": {
+   "kind": "box",
+   "x": 254,
+   "y": 189,
+   "w": 520,
+   "h": 40,
+   "css": {
+    "pad": "0px 10px",
+    "gap": "8px"
+   },
+   "danger": false
+  },
+  "item-1-0-tile": {
+   "kind": "box",
+   "x": 264,
+   "y": 195,
+   "w": 28,
+   "h": 28,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ],
+   "css": {
+    "radius": "8px"
+   }
+  },
+  "item-1-0-tile-icon": {
+   "kind": "icon",
+   "x": 271,
+   "y": 202,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "item-1-0-title": {
+   "kind": "text",
+   "x": 300,
+   "y": 192.5,
+   "w": 464,
+   "h": 17,
+   "text": "Recovery phrase",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "17px"
+  },
+  "item-1-0-sub": {
+   "kind": "text",
+   "x": 300,
+   "y": 210.5,
+   "w": 464,
+   "h": 15,
+   "text": "Shown once at sign-up",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px"
+  },
+  "list-2-title": {
+   "kind": "text",
+   "x": 268,
+   "y": 265.5,
+   "w": 89.85,
+   "h": 12,
+   "text": "This account uses",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0.1
+  },
+  "list-2-body": {
+   "kind": "box",
+   "x": 254,
+   "y": 284,
+   "w": 520,
+   "h": 140,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ],
+   "css": {
+    "radius": "10px",
+    "shadow": "oklch(0.18 0.01 70 / 0.09) 0px 0px 0px 0.5px"
+   }
+  },
+  "list-2-foot": {
+   "kind": "text",
+   "x": 270,
+   "y": 430.5,
+   "w": 457.47,
+   "h": 14.5,
+   "text": "State on this PC. One account and one phrase; each product keeps its own keys.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "item-2-0": {
+   "kind": "box",
+   "x": 254,
+   "y": 284,
+   "w": 520,
+   "h": 28,
+   "css": {
+    "pad": "0px 10px",
+    "gap": "8px"
+   },
+   "danger": false
+  },
+  "item-2-0-tile": {
+   "kind": "box",
+   "x": 264,
+   "y": 284,
+   "w": 28,
+   "h": 28,
+   "bg": [
+    22,
+    22,
+    11,
+    23
+   ],
+   "css": {
+    "radius": "8px"
+   }
+  },
+  "item-2-0-tile-icon": {
+   "kind": "icon",
+   "x": 271,
+   "y": 291,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "item-2-0-title": {
+   "kind": "text",
+   "x": 300,
+   "y": 289.5,
+   "w": 393.38,
+   "h": 17,
+   "text": "Drive",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "17px"
+  },
+  "item-2-0-pill": {
+   "kind": "box",
+   "x": 701.38,
+   "y": 288,
+   "w": 62.62,
+   "h": 20,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ],
+   "css": {
+    "radius": "999px",
+    "pad": "0px 8px",
+    "gap": "5px"
+   }
+  },
+  "item-2-0-pill-label": {
+   "kind": "text",
+   "x": 709.38,
+   "y": 291.5,
+   "w": 46.62,
+   "h": 13,
+   "text": "This app",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 600,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0.11
+  },
+  "item-2-1": {
+   "kind": "box",
+   "x": 254,
+   "y": 312,
+   "w": 520,
+   "h": 28,
+   "css": {
+    "pad": "0px 10px",
+    "gap": "8px"
+   },
+   "danger": false
+  },
+  "item-2-1-tile": {
+   "kind": "box",
+   "x": 264,
+   "y": 312,
+   "w": 28,
+   "h": 28,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ],
+   "css": {
+    "radius": "8px"
+   }
+  },
+  "item-2-1-tile-icon": {
+   "kind": "icon",
+   "x": 271,
+   "y": 319,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "item-2-1-title": {
+   "kind": "text",
+   "x": 300,
+   "y": 317.5,
+   "w": 374.81,
+   "h": 17,
+   "text": "Pass",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "17px"
+  },
+  "item-2-1-value": {
+   "kind": "text",
+   "x": 682.81,
+   "y": 317.5,
+   "w": 81.19,
+   "h": 17,
+   "text": "Not signed in",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "item-2-2": {
+   "kind": "box",
+   "x": 254,
+   "y": 340,
+   "w": 520,
+   "h": 28,
+   "css": {
+    "pad": "0px 10px",
+    "gap": "8px"
+   },
+   "danger": false
+  },
+  "item-2-2-tile": {
+   "kind": "box",
+   "x": 264,
+   "y": 340,
+   "w": 28,
+   "h": 28,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ],
+   "css": {
+    "radius": "8px"
+   }
+  },
+  "item-2-2-tile-icon": {
+   "kind": "icon",
+   "x": 271,
+   "y": 347,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18zM3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9M12 3c-2.5 2.6-3.8 5.6-3.8 9s1.3 6.4 3.8 9"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "item-2-2-title": {
+   "kind": "text",
+   "x": 300,
+   "y": 345.5,
+   "w": 378.62,
+   "h": 17,
+   "text": "VPN",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "17px"
+  },
+  "item-2-2-pill": {
+   "kind": "box",
+   "x": 686.62,
+   "y": 344,
+   "w": 77.38,
+   "h": 20,
+   "bg": [
+    50,
+    191,
+    120,
+    36
+   ],
+   "css": {
+    "radius": "999px",
+    "pad": "0px 8px",
+    "gap": "5px"
+   }
+  },
+  "item-2-2-pill-dot": {
+   "kind": "box",
+   "x": 694.62,
+   "y": 351,
+   "w": 6,
+   "h": 6,
+   "bg": [
+    53,
+    193,
+    119,
+    255
+   ],
+   "css": {
+    "radius": "50%"
+   }
+  },
+  "item-2-2-pill-label": {
+   "kind": "text",
+   "x": 705.62,
+   "y": 347.5,
+   "w": 50.38,
+   "h": 13,
+   "text": "Signed in",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 600,
+   "color": [
+    0,
+    108,
+    53,
+    255
+   ],
+   "tracking": 0.11
+  },
+  "item-2-3": {
+   "kind": "box",
+   "x": 254,
+   "y": 368,
+   "w": 520,
+   "h": 28,
+   "css": {
+    "pad": "0px 10px",
+    "gap": "8px"
+   },
+   "danger": false
+  },
+  "item-2-3-tile": {
+   "kind": "box",
+   "x": 264,
+   "y": 368,
+   "w": 28,
+   "h": 28,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ],
+   "css": {
+    "radius": "8px"
+   }
+  },
+  "item-2-3-tile-icon": {
+   "kind": "icon",
+   "x": 271,
+   "y": 375,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M21 11.5a8.4 8.4 0 0 1-12.3 7.4L3 21l2.1-5.6A8.4 8.4 0 1 1 21 11.5z"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "item-2-3-title": {
+   "kind": "text",
+   "x": 300,
+   "y": 373.5,
+   "w": 374.81,
+   "h": 17,
+   "text": "Chat",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "17px"
+  },
+  "item-2-3-value": {
+   "kind": "text",
+   "x": 682.81,
+   "y": 373.5,
+   "w": 81.19,
+   "h": 17,
+   "text": "Not signed in",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "item-2-4": {
+   "kind": "box",
+   "x": 254,
+   "y": 396,
+   "w": 520,
+   "h": 28,
+   "css": {
+    "pad": "0px 10px",
+    "gap": "8px"
+   },
+   "danger": false
+  },
+  "item-2-4-tile": {
+   "kind": "box",
+   "x": 264,
+   "y": 396,
+   "w": 28,
+   "h": 28,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ],
+   "css": {
+    "radius": "8px"
+   }
+  },
+  "item-2-4-tile-icon": {
+   "kind": "icon",
+   "x": 271,
+   "y": 403,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2zM22 6l-10 7L2 6"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "item-2-4-title": {
+   "kind": "text",
+   "x": 300,
+   "y": 401.5,
+   "w": 374.81,
+   "h": 17,
+   "text": "Mail",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "17px"
+  },
+  "item-2-4-value": {
+   "kind": "text",
+   "x": 682.81,
+   "y": 401.5,
+   "w": 81.19,
+   "h": 17,
+   "text": "Not signed in",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px"
+  },
+  "card-0": {
+   "kind": "box",
+   "x": 254,
+   "y": 460,
+   "w": 520,
+   "h": 58,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ],
+   "css": {
+    "radius": "10px",
+    "shadow": "oklch(0.18 0.01 70 / 0.09) 0px 0px 0px 0.5px, oklch(0 0 none / 0.04) 0px 1px 2px 0px",
+    "pad": "12px",
+    "gap": "12px"
+   }
+  },
+  "card-0-tile": {
+   "kind": "box",
+   "x": 266,
+   "y": 472,
+   "w": 34,
+   "h": 34,
+   "bg": [
+    14,
+    14,
+    14,
+    18
+   ],
+   "css": {
+    "radius": "10px"
+   }
+  },
+  "card-0-tile-icon": {
+   "kind": "icon",
+   "x": 274.5,
+   "y": 480.5,
+   "w": 17,
+   "h": 17,
+   "icon": [
+    "M4 6c0-1.66 3.58-3 8-3s8 1.34 8 3-3.58 3-8 3-8-1.34-8-3z",
+    "M4 6v12c0 1.66 3.58 3 8 3s8-1.34 8-3V6",
+    "M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"
+   ],
+   "filled": false,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ]
+  },
+  "card-0-head": {
+   "kind": "text",
+   "x": 312,
+   "y": 473,
+   "w": 282.62,
+   "h": 17,
+   "text": "Drive plan · 1 TB",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 600,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.08,
+   "lh": "17px"
+  },
+  "card-0-mono": {
+   "kind": "text",
+   "x": 312,
+   "y": 489.5,
+   "w": 43.2,
+   "h": 15.5,
+   "text": "240 GB",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px"
+  },
+  "card-0-sub": {
+   "kind": "text",
+   "x": 358.58,
+   "y": 490,
+   "w": 153.17,
+   "h": 14.5,
+   "text": "used · renews 14 Mar 2027",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0
+  },
+  "card-0-link": {
+   "kind": "text",
+   "x": 606.62,
+   "y": 481.5,
+   "w": 130.38,
+   "h": 15,
+   "text": "Manage on beebeeb.io",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px"
+  },
+  "card-0-link-icon": {
+   "kind": "icon",
+   "x": 749,
+   "y": 482.5,
+   "w": 13,
+   "h": 13,
+   "icon": [
+    "M14 4h6v6",
+    "M20 4l-9 9",
+    "M18 14v4.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  }
+ },
+ "theme": "light"
+}

@@ -106,14 +106,21 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
     }
     .child(kit::label("item-count", count, type_::TITLE_SUB, t.text_tertiary));
 
+    let grid = crate::frames::global::grid::on(s);
     let view_toggle = segmented(
         "view-toggle",
         "View",
         vec![
-            segment("view-list", "as List", &icons::VIEW_LIST, true, t),
-            // The grid is another frame of this window (DW-1102), not built here.
-            segment("view-grid", "as Grid", &icons::VIEW_GRID, false, t)
-                .on_press(|s: &mut State| s.intent(Intent::Frame("DW-1102"))),
+            // Each folder remembers its own view (`frames::global::grid`, DW-0119).
+            segment("view-list", "as List", &icons::VIEW_LIST, !grid, t)
+                .on_press_tx(|s: &mut State, tx: &mut rune::Tx| crate::frames::global::grid::switch(s, false, tx)),
+            // The grid with the details panel on a photo is another frame (DW-1102), not built here.
+            segment("view-grid", "as Grid", &icons::VIEW_GRID, grid, t).on_press_tx(
+                |s: &mut State, tx: &mut rune::Tx| {
+                    s.intent(Intent::Frame("DW-1102"));
+                    crate::frames::global::grid::switch(s, true, tx);
+                },
+            ),
         ],
         t,
     );

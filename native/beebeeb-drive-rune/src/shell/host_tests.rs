@@ -110,8 +110,8 @@ fn every_state_without_a_frame_has_a_placeholder_and_only_files_is_built() {
         unbuilt += usize::from(!built);
     }
     assert_eq!(
-        unbuilt, 3,
-        "three sections wait for their lanes (Photos, Shared and Trash are built)"
+        unbuilt, 1,
+        "one section waits for its lane: Backups (Photos, Shared, Trash, Sync history and Available offline are built; the Backups that landed is the settings pane)"
     );
     for gate in [
         GateState::SignedOut,
@@ -137,7 +137,8 @@ fn every_state_without_a_frame_has_a_placeholder_and_only_files_is_built() {
 #[test]
 fn the_placeholder_never_shows_fixture_rows() {
     let (_, _, mut rt) = fixture();
-    go(&mut rt, Section::Photos);
+    go(&mut rt, Section::Backups);
+    assert!(rt.find("not-built").is_some(), "Backups is the section without a frame");
     let texts = texts(&rt);
     for name in ["Contract draft.pdf", "Lisbon trip", "Budget 2026.xlsx"] {
         assert!(
