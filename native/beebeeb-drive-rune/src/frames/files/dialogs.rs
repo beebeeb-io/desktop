@@ -217,10 +217,16 @@ impl State {
     /// "Move to Documents": move the items and close the dialog. A name already used in the
     /// target keeps the dialog open and says so (DW-0410b's rule).
     pub fn commit_move(&mut self, tx: &mut Tx) {
-        let Some(Dialog::Move(m)) = self.actions.dialog.clone() else {
+        if !matches!(self.actions.dialog, Some(Dialog::Move(_))) {
+            return;
+        }
+        // The dialog is taken out while the source is asked (no copy of its folders and items),
+        // and put back wherever it stays open.
+        let Some(Dialog::Move(mut m)) = self.actions.dialog.take() else {
             return;
         };
         if m.is_where_they_are() {
+            self.actions.dialog = Some(Dialog::Move(m));
             return;
         }
         let target = m.target();
@@ -229,16 +235,14 @@ impl State {
             for item in &m.items {
                 let others = there.items.iter().map(|o| (o.name.as_str(), o.is_folder));
                 if let Some(taken) = names::taken(&item.name, others) {
-                    if let Some(open) = self.move_dialog() {
-                        open.error = Some(taken.message());
-                    }
+                    m.error = Some(taken.message());
+                    self.actions.dialog = Some(Dialog::Move(m));
                     return;
                 }
             }
         }
         match self.actions.source.move_to(&m.items, target.id.as_deref()) {
             Ok(()) => {
-                self.actions.dialog = None;
                 self.forget_undo();
                 if self.listing.folder.id != target.id {
                     self.listing.items.retain(|row| !m.items.iter().any(|i| i.id == row.id));
@@ -247,18 +251,14 @@ impl State {
                 self.focus_list(tx);
             }
             Err(ActionError::NameTaken) => {
-                if let Some(open) = self.move_dialog() {
-                    let taken = NameError::Taken {
-                        name: m.items[0].name.clone(),
-                        folder: m.items[0].is_folder,
-                    };
-                    open.error = Some(taken.message());
-                }
+                let taken = NameError::Taken {
+                    name: m.items[0].name.clone(),
+                    folder: m.items[0].is_folder,
+                };
+                m.error = Some(taken.message());
+                self.actions.dialog = Some(Dialog::Move(m));
             }
-            Err(why) => {
-                self.actions.dialog = None;
-                self.failed(Action::Move, why, tx);
-            }
+            Err(why) => self.failed(Action::Move, why, tx),
         }
     }
 
