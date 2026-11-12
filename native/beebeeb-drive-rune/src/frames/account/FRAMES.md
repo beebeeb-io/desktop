@@ -61,3 +61,20 @@ elements in all; no geometry, text, icon or fill line is red). The built frames 
 | `DW-A81` | Step 3 of 4: confirm by an email link. | built (light and dark: 0 failing on all six lines) |
 | `DW-A82` | Step 4 of 4: the deletion is scheduled, when, and how to undo it. | built (light and dark: 0 failing on all six lines) |
 | `DW-A83` | The undo worked: nothing was deleted. | built (light and dark: 0 failing on all six lines) |
+
+## Drive's own on these panes (3, lane settings-rest, 2026-11-12)
+
+The board files these three under "Settings, inside the window"; they are states of this group's panes, so they are
+built here (`plan.rs`, `app_lock.rs`) and are scenes of `frames::account::FRAMES`.
+
+| Frame | What it is | Status |
+| --- | --- | --- |
+| `DW-0708` | The plan, read only: a dialog over Account, from the plan card. | built; gate red, light and dark: the board draws an older Account pane behind the dialog (the plan card on top, no identity rows, a 540 pt column in Drive's settings kit), the app has one Account pane (DW-A51). The dialog's own 16 keys (`dlg*`, `scrim`, `btn-0/1`, its list) are on the board's boxes within 1 px, 0 off |
+| `DW-0716` | App lock's delay: the pop-up open on Immediately, 5 min, 30 min, 60 min. | built; gate red, light and dark: the board draws this frame in Drive's settings kit (28 pt sidebar rows, a 540 pt column) and DW-A52, "the same pane", in the account kit (30 pt, 520 pt). The app has ONE Security pane, DW-A52's, which gates at 0. Against DW-A52's golden the pane is unchanged; the menu's 10 keys sit where the board puts them from the pop-up button, 0 off |
+| `DW-0716b` | App lock off: no time choice. | built: DW-A52 with the switch off; gate red for the same reason as DW-0716 |
+
+Decision (lane, 2026-11-12): one Security pane and one Account pane, in the account kit, because DW-0716's own rule
+says "Security is one pane (final review C3): DW-A52" and DW-0708's says it is "reached from the plan card Drive adds
+to the shared Account page (DW-A51)". The three goldens were captured from drawings in the other kit; no tolerance
+was loosened and no key dropped. To turn them green the BOARD has to draw these three in the account kit, and the
+goldens be captured again: a board change, not this lane's.
