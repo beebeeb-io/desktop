@@ -15,6 +15,10 @@ Every number below points to a committed file under `spikes/2477-office-editor-t
 | `timing-windows.log` | Our own Windows build of the two WordCraft spike binaries: keystroke and pipe round trip, then removal |
 | `libreoffice-producer-windows.log` | LibreOffice 26.2.7 re-saving 18 fixtures on the Windows build VM, then removal |
 | `package-diff-hand-made.md`, `package-diff-libreoffice.md` | Per saved file: package parts lost, added, changed; per feature preserved, reduced, dropped |
+| `content-compare.txt` | Every cell of every workbook, every slide's text and every Word body, original against the unedited save (`celldiff.py`), and the same comparison failing on a removed cell |
+| `bold-check.txt` | Whether the bold edit is in the saved files, for the final run and the earlier one (`boldcheck.py`) |
+| `closure-check-local.txt` | The patch branch's closure check passing without default features and failing with them (a dependency listing on a developer machine, no build) |
+| `linux-vm-earlier-directory-removed.log` | The viewer phase's audit directory on the Linux build VM, counted and removed |
 
 ## 1. Result in one table
 
@@ -22,11 +26,11 @@ Every number below points to a committed file under `spikes/2477-office-editor-t
 |---|---|---|
 | Does editing link without a network crate? | GridCraft and DeckCraft: yes, as they are. WordCraft: only below its engine crate, or with a 13-line patch of ours | §2 |
 | Does an edit survive save and reopen? | Yes: 40 of 40 documents, both producers | §3.1 |
-| Does saving lose anything else? | Yes, in four places: macros (2 of 3 engines), slide transitions (7 of 7 LibreOffice decks), linked external images, chart style parts | §3.2 |
-| Is one keystroke fast enough across a process boundary? | 4.2 ms at the median, 4.6 ms at p95 on Windows (60-page document, 508 KB of pixels back). One run on a loaded shared VM: 19 ms and 32 ms | §4.3 |
+| Does saving lose anything else? | Cell values, slide text and body text: no (40 of 40 files equal). Other content: yes, in four places: macros (2 of 3 engines), slide transitions (7 of 7 LibreOffice decks), linked external images (Word, Excel), chart style parts | §3.2 |
+| Is one keystroke fast enough across a process boundary? | 4.2 ms at the median, 4.6 ms at p95 on Windows (60-page document, 508 KB of pixels back). 1 of 3 runs (Linux, the second) took 19 ms and 32 ms: above the budget, cause not established | §5.3 |
 | Do the layout crates give caret, selection and hit-testing? | WordCraft and DeckCraft: yes. GridCraft: geometry only; the grid is ours to draw and hit-test | §4.1 |
 | What do we have to write? | The whole interaction layer in Rune, for three document kinds. The upstream equivalents are about 12,000 lines of egui code we cannot embed | §4.2 |
-| The 8 editor frames | 6 have their engine capability shown working; 2 depend on our own engine and server, not spiked; 1 feature the engines lack (the four named templates) | §6 |
+| The 8 editor frames | 5 have their engine capability shown working (2 of them in part: no image insert, no named templates); 3 depend on our own engine and server and were not spiked | §6 |
 | Honest size, viewer and editor together | About 30 lane-days (range 27 to 40), about 22 of them editor | §7 |
 
 **Plainly, for "we got that now":** the document engines are there and they work: open, edit, undo, redo, recalculate,
@@ -82,9 +86,10 @@ digit changed says DIFFERS (3 of 3).
 
 **Network block, proven able to fail.** Every measured command ran in its own empty network namespace. Per binary, a
 probe to a local listener and to a public host: 4 of 4 binaries CONNECTED twice without the block and NO CONNECTION
-twice with it (`network proof` lines). Two other ways to block were tried first and are not used: unprivileged
-namespaces are refused on the VM, and `systemd-run --user -p PrivateNetwork=yes` ran without blocking (the probe
-connected). This proves the round trips need no network; it does not replace the Windows sandbox test the viewer
+twice with it (`network proof` lines). The namespace is made with `sudo unshare -n` (the build user has passwordless `sudo`
+on that VM) and the program then runs as the build user again (`setpriv`), not as root; nothing on the machine is
+changed by it. Two unprivileged ways were tried first and are not used: user namespaces are refused on the VM, and
+`systemd-run --user -p PrivateNetwork=yes` ran without blocking (the probe connected). This proves the round trips need no network; it does not replace the Windows sandbox test the viewer
 contract demands for the shipped helper.
 
 **Files.** 22 hand-made (Python `zipfile`, this spike: `make-fixtures.py`, `make-hard-fixtures.py`,
@@ -105,8 +110,8 @@ Three scripted edits per document through the public API, save, reopen with a fr
 | DeckCraft engine | `text.replace`, `slide.new`, `slide.duplicate` | 8 of 8 | 7 of 7 | 15 of 15 | 15 of 15 |
 
 - **Recalculation:** `=1+2` and `=J2*2` read 3 and 6; after J2 becomes 5 they read 5 and 10: 13 of 13.
-- **Bold is in the saved file:** Word 12 of 12 and 12 of 12 (checked in `word/document.xml`); Excel 13 of 13 after
-  reopen. In an earlier run the Excel bold was stored in 7 of 13 only: `home.bold` toggles against the active cell
+- **Bold is in the saved file** (`bold-check.txt`): Word 12 of 12 and 12 of 12 (checked in `word/document.xml`);
+  Excel 13 of 13. In an earlier run the Excel bold was stored in 7 of 13 only: `home.bold` toggles against the active cell
   unless `on: true` is passed, and the spike did not pass it. The instrument was wrong, not the engine; the final run
   passes it.
 - **A finding:** `slide.new {title}` put the title on the new slide in 4 of 15 decks. In the other 11 the deck's
@@ -132,7 +137,15 @@ and "dropped".
 of 550 original parts come back with different bytes. A save is never a small patch of the original file. The "added"
 parts are defaults the hand-made files do not have (styles, theme, document properties).
 
-**Content the engines do not carry through** (a feature counts for a file only when the original has it):
+**The content itself** (`content-compare.txt`, original against the unedited save): workbooks: 13 of 13 have every
+cell, 0 cells lost, 0 values or formulas changed (866 cells; in the 7 hand-made workbooks 65 formulas that the
+fixture stores without a cached result come back with the computed one, which is the engine calculating, not a
+loss). Decks: slide text equal in 15 of 15. Word: body text equal in 12 of 12. The same comparison reports
+DIFFERENT for 7 of 7 workbooks when one cell is removed from the saved side.
+
+**Content the engines do not carry through.** A feature counts for a file only when the original has it.
+**"Preserved" here means: the count of that element or part did not go down and its marker text is still in the
+package. It does not mean the feature's content is equal or that it still works in Office.**
 
 | Feature | Files that have it | Preserved | Dropped | Note |
 |---|---|---|---|---|
@@ -142,6 +155,7 @@ parts are defaults the hand-made files do not have (styles, theme, document prop
 | Slide transitions | 7 (all LibreOffice decks) | 0 | **7** | LibreOffice writes them inside `mc:AlternateContent`; they are gone after a save |
 | Linked external image, Word | 1 | 0 | **1** | the drawing is removed on save |
 | Linked external image, Excel | 1 | 0 | **1** | the drawing part and its relationships are removed |
+| Linked external image, PowerPoint | 1 | 1 | 0 | the external relationship is still in the saved deck (and in the duplicated slide) |
 | Chart style and colour parts (`style1.xml`, `colors1.xml`) | 4 (LibreOffice) | 0 | **4** | the chart parts themselves are kept: 8 of 8 |
 | Comments, Word | 2 | 2 | 0 | both markers and both anchors |
 | Tracked insertions and deletions | 2 | 2 | 0 | |
@@ -160,10 +174,11 @@ parts are defaults the hand-made files do not have (styles, theme, document prop
   dropped them when it re-saved those three files (so the LibreOffice rows have no macro to lose). The Word result
   disagrees with a reading of the WordCraft writer, which has a pass-through for the macro part; the fixture may not
   reference the part the way Word does. It needs one real macro file per type before it is called a defect.
-- **Text.** In 6 hand-made Excel files the unedited save has 11 or 17 fewer text characters than the original. In
-  the one that was traced (`spike.xlsx`) they are 4 strings (`Item`, `Price`, `Qty`, `Total`) the original stores
-  twice and the save once; the other 5 were not traced. One LibreOffice deck has 5 fewer characters after a save;
-  which ones was not traced.
+- **Text counts.** In 6 hand-made Excel files the package holds 11 or 17 fewer text characters after the save. The
+  cell comparison above shows no cell lost or changed in any of them, so the difference is in how strings are stored
+  (in `spike.xlsx`: 4 strings held twice in the original, once in the save), not in what the cells say. One
+  LibreOffice deck (`lo-feat-notes.pptx`) has 5 fewer characters in the package; its slide text is equal and its notes
+  marker is there; where the 5 characters were was not traced.
 - **Not tested:** embedded OLE objects, SmartArt, equations, form controls, digital signatures, password-protected
   files, right-to-left text, files above 60 pages or 20,000 formulas, `.doc` / `.xls` / `.ppt` (GridCraft imports
   `.xls` but saves only `.xlsx`; a legacy file can be edited only as "save as a new `.xlsx`").
@@ -191,7 +206,7 @@ are ours in Rune, on top of their layout.
 Measured in the spike (WordCraft, 200 keystrokes in the middle of the 60-page document; the fixture is called
 "30 pages" and lays out as 60 with the fonts on the build VMs):
 
-| Step | Windows build VM | Linux, quiet run | Linux, loaded run |
+| Step | Windows build VM | Linux, first run | Linux, second run |
 |---|---|---|---|
 | The edit itself (median) | 0.006 ms | 0.003 ms | 0.007 ms |
 | Incremental re-layout, median / p95 / max | 2.98 / 3.49 / 4.18 ms | 0.85 / 0.89 / 1.64 ms | 1.78 / 2.47 / 10.86 ms |
@@ -202,10 +217,11 @@ Measured in the spike (WordCraft, 200 keystrokes in the middle of the 60-page do
 | `selection_rects` non-empty | 200 of 200 | 200 of 200 | 200 of 200 |
 | One character through the engine's `text.insert` (no layout), median / max | 0.019 / 0.214 ms | 0.009 / 0.165 ms | 0.008 / 3.027 ms |
 
-GridCraft: one cell edit with 1,000 dependent formulas recalculates in 0.86 ms at the median (1.24 ms in the loaded
-run); with 20,000 dependents 33 ms (73 ms loaded, 143 ms at worst). DeckCraft: a slide render at 960 x 540 took 4 to
-5 ms. The Linux VM is shared with up to ten builds; the loaded run is kept because a user's machine is not idle
-either.
+GridCraft: one cell edit with 1,000 dependent formulas recalculates in 0.86 ms at the median (1.24 ms in the second
+run); with 20,000 dependents 33 ms (73 ms in the second run, 143 ms at worst). DeckCraft: a slide render at 960 x 540
+took 4 to 5 ms. **The two Linux runs are the same binaries on the same VM and differ by up to 50 times in render
+and 2 times in layout. The cause is not established.** The VM is shared with up to ten builds, which may be it; it
+was not measured. Both runs are kept.
 
 ### 4.2 Functions we must write
 
@@ -279,12 +295,13 @@ strip and sends 508,160 bytes of pixels back **through a pipe**, which is slower
 | Round trip, 200 keystrokes, 60-page document | Median | p95 | Max |
 |---|---|---|---|
 | Windows build VM | 4.16 ms | 4.64 ms | 4.99 ms |
-| Linux, quiet run | 1.54 ms | 1.70 ms | 2.98 ms |
-| Linux, loaded run | 19.10 ms | 32.00 ms | 62.04 ms |
+| Linux, first run | 1.54 ms | 1.70 ms | 2.98 ms |
+| Linux, second run | 19.10 ms | 32.00 ms | 62.04 ms |
 
 **Budget for the contract:** key press to pixels in the app's hands within 16 ms at p95 on the Windows build VM,
-measured by a test that types 200 characters into the 60-page fixture; the test fails above the budget. The loaded
-run shows the budget is not free under load; the gate runs on an otherwise idle VM and says so. Not measured: the
+measured by a test that types 200 characters into the 60-page fixture; the test fails above the budget. **1 of the
+3 runs here is above that budget** (the second Linux run, p95 32 ms), cause not established; the first PR that
+builds the helper has to find out whether it is the machine or the code before the budget is trusted. Not measured: the
 time Rune needs to put the strip on screen, the sandboxed helper (AppContainer adds no work per message, but that is
 a claim until measured), a document above 60 pages.
 
@@ -318,14 +335,16 @@ a claim until measured), a document above 60 pages.
    compares the package with the original the way `pkgdiff.py` does (parts lost, watched features reduced). If
    anything is lost, the document opens with a banner: "Saving here would drop: macros, slide transitions. Save a
    copy / Open read-only". The original is never overwritten by a lossy save without that choice. This is the answer
-   to §3.2 and it is cheap: the saves measured 0.6 to 2.8 ms in the quiet run.
+   to §3.2 and it is cheap: the saves measured 0.6 to 2.8 ms in the first Linux run.
 3. The bytes go to `beebeeb-engine`: encrypt, upload as a **new version** of the same file. The old version stays in
    version history; a save never destroys the previous content.
 4. **Conflict.** The upload carries the version the document was opened from. If the server has a newer one, the
    upload is refused and DW-1554 opens: Save as new version anyway / Keep both (upload as a second file next to it) /
-   Discard and reopen / Cancel. **Not verified: that the server refuses a version upload against a stale base.** A
-   search of the server and core sources for seven likely names of such a precondition found 0. If it is missing it
-   is a server change (wire shape: provider first) and it goes before the save PR.
+   Discard and reopen / Cancel. The server has a field for this: `base_version_number` in the upload-init request
+   (`beebeeb-api/src/routes/uploads/init.rs`, compared with the file's current version number). **Read, not
+   exercised:** what the server answers on a mismatch, and whether the desktop engine sends the field, were not
+   checked. (An earlier draft of this section said a search found 0 such names; that search ran against paths
+   that do not exist. Searched again over 1,017 source files with a control string that does match.)
 5. Synced-folder case: when the file also exists in a synced folder on this machine, the sync engine sees the new
    version like any other remote change. Not spiked.
 
@@ -341,21 +360,22 @@ a claim until measured), a document above 60 pages.
 | 6 | Insert image, insert link | The app reads the picked file and passes bytes; the helper has no file access. A link is text in the document; opening one goes through the app's existing "open" rule, never from the helper |
 | 7 | Recovery blobs at rest | Encrypted as §5.4; deleted on save, discard and sign-out |
 | 8 | Code of ours inside a subtree (the patch) | Patch file plus a check that fails when `ureq` or `rustls` is in the editor's closure (§10, Q1) |
-| 9 | Linked external images | The viewer contract already forbids fetching them; on save they are dropped (§3.2), and the loss check reports it |
+| 9 | Linked external images | The viewer contract already forbids fetching them. On save Word and Excel drop the picture (§3.2) and the loss check reports it; PowerPoint keeps the link in the file, so a saved deck still names the external address: the app shows that such a link exists and never follows it |
 
 Unchanged: no network (three ways, as in the viewer contract), AppContainer, job object, the plaintext rules.
 
 ## 6. The 8 editor frames
 
 Windows entries of `design/desktop-v2/frames.json`. "Shown" means the spike ran the engine command and the result was
-checked; it never means a frame was built.
+checked; it never means a frame was built. Count: shown 5 (DW-1550 and DW-1558 in part), not spiked 3 (DW-1552,
+DW-1553, DW-1554).
 
 | Frame | What it shows | Engine capability | Spike |
 |---|---|---|---|
 | DW-1550 Insert tab | Table…, Image…, Link…, Page break | `insert.table`, `insert.link`, `insert.pageBreak`, `insert.picture` | **Shown** for 3 of 4: table, link and page break returned ok, the file saved and reopened with the link text and the page break. Image **not tried** (the engine command takes a path; the helper has no file access, so it needs a bytes variant: not looked for) |
 | DW-1551 Command palette | Commands, styles (Heading 1 to 3), Bold, file names; "Runs entirely on this device" | `para.heading1..3`, `format.bold`; the command registry for the list | **Shown**: 4 of 4 commands ok. The palette is our UI over our operation list; file names come from our engine |
 | DW-1552 Unsaved | Dot, Save enabled, "Encrypted · unsaved changes" | A dirty state: revision counters (GridCraft, DeckCraft), history marks (WordCraft) | **Not spiked** beyond reading that the counters exist. The frame's rule text still names LibreOffice: the text changes with this contract (§10, Q6) |
-| DW-1553 Saved | "Saved · encrypted · version 8" | Save to bytes (shown: 40 of 40), then our engine | Save bytes **shown**; the version number is our upload path, **not spiked** |
+| DW-1553 Saved | "Saved · encrypted · version 8" | Save to bytes (shown: 40 of 40), then our engine | **Not spiked** as a frame: the bytes exist, the version number is our upload path |
 | DW-1554 Conflict | "Someone else saved first" and four choices | None in the office engines; server precondition | **Not spiked**; see §5.5 step 4 |
 | DW-1558 New document | Docs · Sheets · Slides; Blank, Letter, Invoice, Meeting notes, Report; name | `file.new` | Blank **shown** in 3 of 3 engines. **The engines lack the four named templates**: DeckCraft ships other ones (Briefing, Lesson, Pitch and more), WordCraft opens a template from a file. Letter, Invoice, Meeting notes and Report are files we author, per document kind where they make sense |
 | DW-1559 Data tab | Sort A to Z, Filter, Table, cell box, "Not a valid cell or range" | `data.sortAscending`, `data.filter`, `insert.table`, `edit.goTo` | **Shown**: sort gave apple, fig, pear; filter and table ok; go-to B5 ok; an invalid reference is refused with the engine's text "Reference isn't valid.", which we replace with the frame's |
@@ -379,7 +399,7 @@ Sizes: S about half a lane-day, M about 1.5, L about 3. These are estimates, not
 | 9 | Editor, Sheets: selection, cell editor, formula bar, recalculation on screen, Data tab (DW-1559) | L | |
 | 10 | Editor, Slides: select a shape, edit its text, new slide, layouts (DW-1560) | L | |
 | 11 | Save: bytes to a new encrypted version, unsaved and saved states (DW-1552, DW-1553), the loss check and its banner | M | A save never drops content silently: the §3.2 files as tests |
-| 12 | Conflict (DW-1554), with the server precondition first if it is missing | M (+ S server) | Two writers, one refused |
+| 12 | Conflict (DW-1554): the desktop engine sends the base version; the server's answer to a stale one exercised first | M (+ S server, if the answer is not a refusal) | Two writers, one refused |
 | 13 | Recovery: encrypted snapshots, crash restart, restore at start | M | Kill the helper mid-edit, text is back; no plaintext file exists (a search of the disk in the test) |
 | 14 | Insert tab, command palette, New document and the four templates (DW-1550, DW-1551, DW-1558) | M | |
 | 15 | Corpus: real files from Microsoft Office per type, run through open, loss check, save, reopen | M | The first numbers on real files |
@@ -396,7 +416,8 @@ side; (g) `desktop-office` and the corpus, PRs 1, 15. PR 0 and PR 8 touch the sh
 
 1. **The interaction layer.** Nothing of it exists, three document kinds need it, and Rune's support for a custom
    editing surface with an input method is unverified. It is most of the 22 editor days and the part an estimate is
-   worst at.
+   worst at. Rune at the revision the app pins has 56 source files that mention input-method events, among them tests
+   named `canvas_input`, `caret` and `caret_follow`: the plumbing exists; none of it was run for an editing canvas.
 2. **Losing content on save.** Found on our own small set: macros (2 of 3 engines), transitions (7 of 7), linked
    images, chart styles; 0 real Microsoft Office files tested. The loss check turns silent loss into "read-only for
    this file", which is safe, but it may turn out that many real files open read-only.
@@ -409,11 +430,11 @@ side; (g) `desktop-office` and the corpus, PRs 1, 15. PR 0 and PR 8 touch the sh
 **Proven (counts above):** our own build of the engines edits, undoes, redoes, recalculates, saves and reopens 40 of
 40 documents from two producers with no network; the network client can be compiled out of WordCraft's engine with
 13 lines; caret, hit-test and selection geometry exist for Word and slide text; one keystroke costs 3 to 5 ms across
-a process boundary on the Windows build VM; a dead helper is noticed; six frames' engine commands work.
+a process boundary on the Windows build VM; a dead helper is noticed; five frames' engine commands work; the server has a base-version field for the conflict case.
 
 **Not proven:** any pixel of an editor in Rune; input method; clipboard; the grid; shape editing on slides; the
-sandbox with a long-lived editing helper; saves of real Microsoft Office files; large files; the server's conflict
-refusal; recovery; macOS; accessibility.
+sandbox with a long-lived editing helper; saves of real Microsoft Office files; large files; the server's answer to a
+stale base version; recovery; macOS; accessibility.
 
 **Viewer only, if any of these happens:**
 
@@ -450,8 +471,9 @@ refusal; recovery; macOS; accessibility.
   It would be the first commit of ours inside a subtree, and the repository is public now. It is **not pushed**: it
   sits on a local branch `patch/font-store-optional` of `desktop-office` (2 commits: the change, and `patches/` with
   the same diff as a file plus `check-editor-closure.sh`). The check was run both ways (a dependency listing on a developer
-  machine, no build): without default features 4 targets pass (162 packages for the Linux target), with default
-  features it fails with 8 lines (2 crates on 4 targets).
+  machine, no build; `closure-check-local.txt`): without default features 4 of 4 targets pass (161 to 165 package
+  names), with default features it fails with 8 lines (2 crates on 4 targets). The script is also in this pull
+  request's spike folder (`patches/check-editor-closure.sh`); the branch head is `3b847ea6`.
   **At each upstream bump:** `git subtree pull` the new tag, `git apply --directory=wordcraft
   patches/wordcraft-engine-font-store-optional.patch`, run the check; if the patch no longer applies, the eight
   `cfg` lines in `packs.rs` and the two dependency lines are re-done by hand and the patch file regenerated. The
@@ -484,14 +506,19 @@ refusal; recovery; macOS; accessibility.
   `desktop-office` was private then. It became public the same evening and the final run builds from it; the tree
   comparison with upstream stayed as a check.
 - **Clean-up, counted:** Linux build VM: 8,113 files under the spike's work directory before removal, 0 after; 0
-  processes; 0 firewall rules (the block was a namespace per command). Windows build VM, twice (LibreOffice run and
-  timing run): files under the spike root 0 after removal (4,459 before, in the timing run); uninstall entries 0;
+  processes; 0 firewall rules (the block was a namespace per command). **A first version of this line was not the
+  whole truth:** the audit tools and upstream clones of the viewer phase (7,047 files, in the viewer branch's
+  target directory) were still on that VM and this spike used the `cargo-audit` from there. They were counted and
+  removed afterwards (`linux-vm-earlier-directory-removed.log`): 0 spike directories left. Windows build VM, three
+  runs (LibreOffice twice, timing once), each ending in a removal: files under the spike root 0 after removal (4,459
+  before, in the timing run); uninstall entries 0;
   vendor registry keys 0; firewall rules 0; profile or program folders 0; processes started from the root 0. The
   build wrapper's own checkout and target folders on both VMs are the wrapper's, not the spike's, and were left.
+- **Used on the build VM:** passwordless `sudo`, only for `unshare -n` (§3). Nothing was installed system-wide.
 - **Not done:** no real Microsoft Office file; no UI; no sandbox run of the editing helper; no input method; no
   macOS; `cargo deny` not re-run; the pivot table not opened in Excel; the Word macro result not explained; the
-  5-character text difference in one deck not traced; the Rune input check (PR 0) not started; the server
-  precondition only searched for by name; frames DW-1552 to DW-1554 not exercised.
+  5-character difference in one deck's package not traced; the cause of the slow second Linux run not found; the
+  Rune input check (PR 0) not started; the server's base-version field read, not exercised; frames DW-1552 to DW-1554 not exercised.
 - **Wrong during the spike, corrected:** package counts in the first build log were too high (duplicate lines from
   `cargo tree`'s repeat marker; fixed before the numbers above); 3 LibreOffice outputs of the first producer run
   were copies of the wrong file (one output folder shared by three fixtures; re-run, 18 of 18 distinct); the Excel

@@ -1,0 +1,22 @@
+# check-editor-closure.sh on the unpushed desktop-office branch patch/font-store-optional (3b847ea6c); a dependency listing on a developer machine, no build
+## without default features (must pass)
+[x86_64-pc-windows-msvc] wordcraft-engine --no-default-features: 161 packages checked
+[x86_64-apple-darwin] wordcraft-engine --no-default-features: 165 packages checked
+[aarch64-apple-darwin] wordcraft-engine --no-default-features: 164 packages checked
+[x86_64-unknown-linux-gnu] wordcraft-engine --no-default-features: 162 packages checked
+editor closure: no network crate
+exit=0
+## with default features (must fail)
+FAIL [x86_64-pc-windows-msvc]: ureq is in the editor's closure
+FAIL [x86_64-pc-windows-msvc]: rustls is in the editor's closure
+[x86_64-pc-windows-msvc] wordcraft-engine : 195 packages checked
+FAIL [x86_64-apple-darwin]: ureq is in the editor's closure
+FAIL [x86_64-apple-darwin]: rustls is in the editor's closure
+[x86_64-apple-darwin] wordcraft-engine : 193 packages checked
+FAIL [aarch64-apple-darwin]: ureq is in the editor's closure
+FAIL [aarch64-apple-darwin]: rustls is in the editor's closure
+[aarch64-apple-darwin] wordcraft-engine : 192 packages checked
+FAIL [x86_64-unknown-linux-gnu]: ureq is in the editor's closure
+FAIL [x86_64-unknown-linux-gnu]: rustls is in the editor's closure
+[x86_64-unknown-linux-gnu] wordcraft-engine : 188 packages checked
+exit=1
