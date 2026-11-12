@@ -209,7 +209,7 @@ fn the_sidebar_is_navigation_of_links_with_the_current_one_selected() {
 #[test]
 fn every_row_of_general_acts() {
     // (Diagnostics, item-1-2, opens its own page: `tests_more.rs`.)
-    let asks: [(&str, Intent); 5] = [
+    let asks: [(&str, Intent); 4] = [
         ("item-1-0", Intent::Show("DW-0380")),
         ("item-2-0", Intent::Open("privacy")),
         ("item-2-1", Intent::Open("export-my-data")),
