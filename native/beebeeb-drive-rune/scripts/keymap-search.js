@@ -10,7 +10,9 @@
 // `groupOf` was introduced on 2026-11-12; the view code uses these names. Checked against the goldens
 // with `check-keymap-scope.sh DW-0401 DW-0801 DW-0802 DW-0802b DW-0803` (the same key sets) and record
 // by record: the only values that differ are the toolbar's, which the board changed since the capture.
-const searchActive = !!q('.mk-search.is-focus');
+// Only in a Files frame (`groupOf`, keymap.js): Sync history (DW-1304) and a viewer's find bar have a
+// focused field too, and their groups key their own lists and buttons.
+const searchActive = groupOf === 'files' && !!q('.mk-search.is-focus');
 if (searchActive) {
 
 // ---- Pills (`.kit-seg`): All · Folders · Photos · Documents ----
