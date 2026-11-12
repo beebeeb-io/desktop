@@ -521,14 +521,3 @@ impl ThisPcSource for Unwired {
     fn remove_from_pc(&mut self, _id: &str) {}
     fn remove_all_from_pc(&mut self) {}
 }
-
-/// The source This PC starts on. A development build (and every test and headless render)
-/// starts on the board's sample content; a build that ships starts on `Unwired`, so sample
-/// history is never shown as a person's own. The engine lane replaces this.
-pub fn first(dev_build: bool) -> Box<dyn ThisPcSource> {
-    if dev_build {
-        Box::new(FixtureSource::board())
-    } else {
-        Box::new(Unwired)
-    }
-}

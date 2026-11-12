@@ -14,7 +14,7 @@ use crate::shell::host;
 use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::kit;
-use crate::ui::sidebar::{Count, SidebarSection, brand, side_item};
+use crate::ui::sidebar::{SidebarSection, brand, side_item};
 
 /// Whether the search field has the keyboard (Rune reports a focused field's caret).
 pub fn search_focused(cx: &rune::Cx<State>) -> bool {
@@ -66,13 +66,7 @@ fn red_pill(label: &str, n: usize, t: &Theme) -> El {
 pub fn sidebar(s: &State, ui: &Ui, here: Section, t: &Theme) -> El {
     let mut sections = col().key("sidebar-sections").gap(1.0);
     for &section in SidebarSection::all() {
-        let count = section.badge().map(|n| {
-            if section == SidebarSection::Shared {
-                Count::Pill(n)
-            } else {
-                Count::Plain(n)
-            }
-        });
+        let count = crate::ui::sidebar::badge_for(s, section);
         sections = sections.child(
             side_item(section.label(), section.icon(), count, false, section.shortcut(), t)
                 .on_press(go(drive_section(section))),

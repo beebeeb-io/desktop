@@ -179,14 +179,3 @@ impl TrashSource for Unwired {
         false
     }
 }
-
-/// The source Trash starts on. A development build (and every test and headless render)
-/// starts on the board's sample content; a build that ships starts on `Unwired`, so sample
-/// values are never shown as a person's own. The engine lane replaces this.
-pub fn first(dev_build: bool) -> Box<dyn TrashSource> {
-    if dev_build {
-        Box::new(BoardTrash::new())
-    } else {
-        Box::new(Unwired)
-    }
-}

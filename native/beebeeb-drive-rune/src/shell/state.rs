@@ -19,6 +19,9 @@ pub struct State {
     pub(crate) storage: source::StorageSummary,
     /// `false`: the source cannot know the account's storage (a `--db` source never asks the server).
     pub(crate) storage_known: bool,
+    /// The storage split by category: `Some((files_bytes, photos_bytes))` from the board fixture
+    /// or the engine; `None` when the split is not known (a live window before the engine wires it).
+    pub(crate) storage_split: Option<(i64, i64)>,
     pub(crate) selected: Option<usize>,
     pub(crate) search: TextEdit,
     pub(crate) sidebar_section: SidebarSection,
@@ -85,6 +88,10 @@ pub fn load(source: &dyn DriveSource, folder_id: Option<&str>) -> (Listing, Opti
 pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<usize>) -> State {
     let (listing, list_error) = load(source.as_ref(), None);
     let storage = source.storage();
+    // The board's storage split: Files 24 GB, Photos the rest. Only when storage is known
+    // (the board fixture path); a live window overrides this to `None` in `init_on_engine`.
+    const BOARD_FILES_BYTES: i64 = 24_000_000_000;
+    let storage_split = storage.map(|s| (BOARD_FILES_BYTES, (s.used_bytes - BOARD_FILES_BYTES).max(0)));
     State {
         source,
         listing,
@@ -94,6 +101,7 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
             used_bytes: 0,
             quota_bytes: 0,
         }),
+        storage_split,
         selected,
         search: TextEdit::new(""),
         sidebar_section: SidebarSection::Files,
@@ -133,10 +141,16 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
         crate::engine_host::EngineSignInSource::new(engine),
     )));
     s.backups = crate::frames::backups::BackupsUi::new(None);
-    // Shared, Trash, Photos and This PC: the engine lane has not wired them yet. Each shows
-    // the shell's "not built yet" frame, never sample rows beside a real account.
+    // Every area not yet backed by the engine: the shell's "not built yet" frame, never sample
+    // data beside a real account. This depends ONLY on "is this the live engine path", never on
+    // the identity or a dev flag.
+    s.settings.source = Box::new(crate::frames::settings::source::Unwired);
+    s.settings.drive = Box::new(crate::frames::settings::drive::UnwiredDrive::new());
+    s.account.source = None;
+    s.storage_split = None;
     s.frames.shared.source = Box::new(crate::frames::shared::source::Unwired);
     s.frames.trash.source = Box::new(crate::frames::trash::source::Unwired);
+    s.frames.pc = Box::new(crate::frames::UnwiredPc);
     s.photos = crate::frames::photos::Ui::new(Box::new(crate::frames::photos::source::Unwired));
     s.this_pc = crate::frames::this_pc::Ui::new(Box::new(crate::frames::this_pc::source::Unwired));
     s
