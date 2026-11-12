@@ -14,8 +14,11 @@
 //! opens a file with [`open`].
 
 mod chrome;
+mod details;
 mod fixture_text;
 pub mod icons;
+mod markdown;
+mod md_source;
 pub mod source;
 mod states;
 mod style;
@@ -31,10 +34,10 @@ use crate::shell::app::{Event, Screen};
 use crate::shell::host;
 use crate::shell::registry::FrameGroup;
 use crate::theme::tokens;
-use source::{Body, FixtureViewerSource, OpenError, OpenFile, ViewerSource, board};
+use source::{Body, FixtureViewerSource, OpenError, OpenFile, TextDoc, ViewerSource, board};
 
 /// Where the person goes when an action leaves this group. The shell opens it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Intent {
     /// DW-0780: remove downloaded copies; files stay in Beebeeb.
     FreeUpSpace,
@@ -48,6 +51,14 @@ pub enum Intent {
     Edit,
     /// The system's "Open with" for this file, decrypted for the app the person picks.
     OpenInAnotherApp,
+    /// DW-0407: share this file.
+    Share,
+    /// DW-0413: this file's versions.
+    VersionHistory,
+    /// A link in a note to a file in Drive: open it (the path as the note wrote it).
+    OpenInDrive(String),
+    /// A link in a note to the web: the browser opens it, never this window.
+    OpenInBrowser(String),
 }
 
 pub struct Ui {
@@ -57,6 +68,8 @@ pub struct Ui {
     pub show_details: bool,
     /// Long lines wrap (DW-1512's Wrap / No wrap).
     pub wrap: bool,
+    /// A Markdown note shows its text, not the rendered note (DW-1513's Source).
+    pub md_source: bool,
     /// The element that takes keyboard focus once this change is on screen.
     focus: Option<&'static str>,
     intents: Vec<Intent>,
@@ -71,6 +84,7 @@ impl Ui {
             file,
             show_details: false,
             wrap: false,
+            md_source: false,
             focus: None,
             intents: Vec::new(),
         })
@@ -78,6 +92,23 @@ impl Ui {
 
     pub fn toggle_details(&mut self) {
         self.show_details = !self.show_details;
+    }
+
+    /// Available offline, on or off: the engine keeps or releases the copy on this PC.
+    pub fn toggle_offline(&mut self) {
+        let on = !self.file.details.offline;
+        if self.source.set_offline(&self.file.id, on) {
+            self.file.details.offline = on;
+        }
+    }
+
+    /// A link in a note: to the web in the browser, else a file in Drive.
+    pub fn follow_link(&mut self, dest: &str) {
+        self.intent(if markdown::is_web(dest) {
+            Intent::OpenInBrowser(dest.to_string())
+        } else {
+            Intent::OpenInDrive(dest.to_string())
+        });
     }
 
     pub fn intent(&mut self, intent: Intent) {
@@ -111,7 +142,12 @@ impl Ui {
     /// Edit (Ctrl+E): the editor, DW-1523 (the shell opens it). A file over the editor's limit
     /// stays read-only (DW-1527), so there it does nothing.
     pub fn edit(&mut self) {
-        if matches!(&self.file.body, Body::Text(doc) if doc.truncated.is_none()) {
+        let editable = match &self.file.body {
+            Body::Text(doc) => doc.truncated.is_none(),
+            Body::Markdown(_) => true,
+            _ => false,
+        };
+        if editable {
             self.intent(Intent::Edit);
         }
     }
@@ -192,8 +228,10 @@ fn close_stale(s: &mut State) {
 
 /// Copy: the open text file's text goes on the clipboard, at the person's own press.
 pub fn copy_text(s: &mut State, tx: &mut Tx) {
-    if let Some(Body::Text(doc)) = s.viewer.as_ref().map(|ui| &ui.file.body) {
-        tx.copy(doc.plain());
+    match s.viewer.as_ref().map(|ui| &ui.file.body) {
+        Some(Body::Text(doc)) => tx.copy(doc.plain()),
+        Some(Body::Markdown(doc)) => tx.copy(doc.source.clone()),
+        _ => {}
     }
 }
 
@@ -234,6 +272,25 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
             &text::status(doc),
             &t,
         );
+    }
+    if let Body::Markdown(doc) = &ui.file.body {
+        let plain = text::status(&TextDoc {
+            lines: Vec::new(),
+            truncated: None,
+        });
+        let body = if ui.md_source {
+            text::body(
+                &TextDoc {
+                    lines: md_source::lines(&doc.source),
+                    truncated: None,
+                },
+                true,
+                &t,
+            )
+        } else {
+            markdown::body(&markdown::parse(&doc.source), &t)
+        };
+        return chrome::window(s, cx, ui, text::md_tools(ui.md_source, &t), None, body, &plain, &t);
     }
     let (body, status) = match (states::body(&ui.file, &t), states::status(&ui.file.body)) {
         (Some(body), Some(status)) => (body, status),
@@ -278,6 +335,7 @@ pub fn scene_file(frame: &str) -> Option<&'static str> {
         "DW-1518" => board::FAILED,
         "DW-1512" => board::CODE,
         "DW-1527" => board::LOG,
+        "DW-1513" => board::NOTES,
         _ => return None,
     })
 }
@@ -286,6 +344,10 @@ pub fn scene_file(frame: &str) -> Option<&'static str> {
 pub fn set_scene(s: &mut State, frame: &str) {
     if let Some(file) = scene_file(frame) {
         open(s, file);
+    }
+    if let Some(ui) = ui(s) {
+        // The board draws the note with its details panel open.
+        ui.show_details = frame == "DW-1513";
     }
 }
 
@@ -296,4 +358,5 @@ pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1518", |s| set_scene(s, "DW-1518")),
     ("DW-1512", |s| set_scene(s, "DW-1512")),
     ("DW-1527", |s| set_scene(s, "DW-1527")),
+    ("DW-1513", |s| set_scene(s, "DW-1513")),
 ];

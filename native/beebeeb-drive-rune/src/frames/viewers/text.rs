@@ -68,28 +68,22 @@ pub fn line(i: usize, runs: &[Run], current: bool, t: &Theme) -> El {
     line
 }
 
-/// One line that wraps at the window's width (Wrap): one text in which each run keeps its ink.
+/// One line that wraps at the window's width (Wrap): a wrapping row of words, each in its
+/// run's ink, so the row is as tall as the rows its words take. A word longer than the room
+/// (no space in it) runs past the edge and is clipped, as `white-space: pre-wrap` does.
 fn wrapped_line(i: usize, runs: &[Run], t: &Theme) -> El {
-    let mut content = String::new();
-    let mut spans = Vec::new();
+    let mut words = row().key(format!("line-{i}-text")).w_full().flex_wrap().items_start();
+    let mut n = 0;
     for run in runs {
-        let mut span = Span::new(content.len(), content.len() + run.text.len()).color(ink(run.ink, t));
-        if run.bold {
-            span = span.weight(650.0);
+        for word in run.text.split_inclusive(' ') {
+            let part = Run {
+                text: word.to_string(),
+                ..run.clone()
+            };
+            words = words.child(run_el(format!("run-{i}-w{n}"), &part, t).h(LINE_H));
+            n += 1;
         }
-        if run.italic {
-            span = span.italic();
-        }
-        if run.underline {
-            span = span.underline(t.separator_strong);
-        }
-        spans.push(span);
-        content.push_str(&run.text);
     }
-    // KNOWN DEFECT (PR body, "Not done"): the text wraps at the room's width (measured 986 x 63
-    // for a 400-character line), but this row keeps one row's height, so the lines after a
-    // wrapped line draw over its second row. Five constructions were tried (the group's wrap
-    // test names what each measured); the row's height must follow the text before Wrap is done.
     row()
         .key(format!("line-{i}"))
         .w_full()
@@ -102,14 +96,13 @@ fn wrapped_line(i: usize, runs: &[Run], t: &Theme) -> El {
                 .align(Align::End),
         )
         .child(
-            col().key(format!("line-{i}-room")).grow(1.0).shrink().pr(16.0).child(
-                rune::rich(content, spans)
-                    .key(format!("line-{i}-text"))
-                    .font(style::CODE)
-                    .color(t.text_secondary)
-                    .wrap()
-                    .w_full(),
-            ),
+            col()
+                .key(format!("line-{i}-room"))
+                .grow(1.0)
+                .shrink()
+                .min_w(0.0)
+                .pr(16.0)
+                .child(words),
         )
 }
 
@@ -246,6 +239,27 @@ pub fn tools(doc: &TextDoc, wrap: bool, t: &Theme) -> Vec<El> {
         tool_button("tool-0", "Copy", &icons::COPY, 14.0, ToolState::Idle, t)
             .shortcut_hint("Ctrl+C")
             .on_press_tx(super::copy_text),
+        tool_action("tb-btn-0", "Edit", Some(&icons::EDIT), Some("Ctrl+E"), t).on_press(|s: &mut State| {
+            if let Some(ui) = ui(s) {
+                ui.edit();
+            }
+        }),
+    ]
+}
+
+/// The toolbar's controls of a Markdown note: Rendered / Source, Edit.
+pub fn md_tools(source: bool, t: &Theme) -> Vec<El> {
+    let (well, [rendered, as_source]) = seg("View", [("Rendered", !source), ("Source", source)], t);
+    let set = |on: bool| {
+        move |s: &mut State| {
+            if let Some(ui) = ui(s) {
+                ui.md_source = on;
+            }
+        }
+    };
+    vec![
+        well.child(rendered.on_press(set(false)))
+            .child(as_source.on_press(set(true))),
         tool_action("tb-btn-0", "Edit", Some(&icons::EDIT), Some("Ctrl+E"), t).on_press(|s: &mut State| {
             if let Some(ui) = ui(s) {
                 ui.edit();

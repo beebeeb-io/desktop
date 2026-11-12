@@ -291,7 +291,13 @@ pub fn window(
         main = main.child(banner);
     }
     let main = main
-        .child(row().key("viewer-row").grow(1.0).min_h(0.0).w_full().child(body))
+        .child({
+            let mut content = row().key("viewer-row").grow(1.0).min_h(0.0).w_full().child(body);
+            if ui.show_details {
+                content = content.child(super::details::panel(&ui.file, t));
+            }
+            content
+        })
         .child(status_bar(status, t));
 
     col()

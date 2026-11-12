@@ -17,6 +17,32 @@ pub struct OpenFile {
     /// The line under the path: "Video · 120 MB".
     pub facts: String,
     pub body: Body,
+    /// What the details panel says about the file.
+    pub details: Details,
+    /// Another device saved a newer version while this one is open (DW-1519).
+    pub newer: Option<Newer>,
+}
+
+/// The details panel's facts (`.mk-det`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Details {
+    /// "Markdown" of "Markdown · 1.4 KB".
+    pub kind: String,
+    /// "1.4 KB": a figure, drawn mono.
+    pub size: String,
+    /// Label, value, and whether the value is a figure (mono).
+    pub facts: Vec<(&'static str, String, bool)>,
+    /// The file is kept on this PC.
+    pub offline: bool,
+}
+
+/// A newer version saved elsewhere.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Newer {
+    /// "Anna's iPhone".
+    pub from: String,
+    /// "09:14".
+    pub at: String,
 }
 
 /// What the content area shows.
@@ -30,6 +56,15 @@ pub enum Body {
     Failed,
     /// DW-1512, DW-1527: text or code, decrypted in memory.
     Text(TextDoc),
+    /// DW-1513: a Markdown note, decrypted in memory.
+    Markdown(MdDoc),
+}
+
+/// A Markdown note: its text, and which version of the file that text is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MdDoc {
+    pub source: String,
+    pub version: u32,
 }
 
 /// Which of the theme's inks a run of text is drawn in.
@@ -122,6 +157,10 @@ pub trait ViewerSource {
     fn poll(&mut self, file_id: &str) -> Option<Body>;
     /// Stop decrypting. Nothing is kept half-decrypted.
     fn cancel(&mut self, file_id: &str);
+    /// Keep the file on this PC (Available offline) or release the copy. `false`: not done.
+    fn set_offline(&mut self, _file_id: &str, _on: bool) -> bool {
+        false
+    }
     /// Download and decrypt again after a failure.
     fn retry(&mut self, file_id: &str) -> Result<OpenFile, OpenError>;
 }
@@ -141,6 +180,10 @@ pub mod board {
     pub const CODE: &str = "export_invoices.py";
     /// DW-1527.
     pub const LOG: &str = "server.log";
+    /// DW-1513.
+    pub const NOTES: &str = "meeting-notes-4-nov.md";
+    /// DW-1513's text, as the note's source (DW-1523 shows it with one more line being typed).
+    pub const NOTES_TEXT: &str = "# Meeting notes, 4 Nov\n\nPresent: Anna, Lotte, Jonas\n\n## Harbourlight shoot\n- Final selects due **Friday**\n- Colour grade in `Shoot selects/graded`\n- Send the agreement: [Service agreement](Service agreement.docx)\n\n## Studio\n- Rent goes up in January (see Studio rent 2026.pdf)\n- Book the Lisbon follow-up\n";
 }
 
 /// The board's samples. `calls` records what the viewer asked, for tests.
@@ -161,6 +204,8 @@ impl FixtureViewerSource {
             name: name.to_string(),
             facts: facts.to_string(),
             body,
+            details: Details::default(),
+            newer: None,
         };
         Some(match id {
             board::DECRYPTING => f(
@@ -208,6 +253,31 @@ impl FixtureViewerSource {
                     }),
                 }),
             ),
+            board::NOTES => {
+                let mut file = f(
+                    &["Files", "Documents"],
+                    "Meeting notes 4 Nov.md",
+                    "Markdown \u{00B7} 1.4 KB",
+                    Body::Markdown(MdDoc {
+                        source: board::NOTES_TEXT.to_string(),
+                        version: 3,
+                    }),
+                );
+                file.details = Details {
+                    kind: "Markdown".into(),
+                    size: "1.4 KB".into(),
+                    facts: vec![
+                        ("Changed", "Today, 09:20".into(), true),
+                        ("Changed on", "This PC".into(), false),
+                        ("Where", "Files \u{203A} Documents".into(), false),
+                        ("Version history", "3 versions".into(), true),
+                        ("Encryption", "AES-256-GCM".into(), true),
+                        ("Key", "256-bit, this file only".into(), false),
+                    ],
+                    offline: true,
+                };
+                file
+            }
             _ => return None,
         })
     }
@@ -225,6 +295,11 @@ impl ViewerSource for FixtureViewerSource {
 
     fn cancel(&mut self, file_id: &str) {
         self.calls.push(format!("cancel {file_id}"));
+    }
+
+    fn set_offline(&mut self, file_id: &str, on: bool) -> bool {
+        self.calls.push(format!("offline {file_id} {on}"));
+        true
     }
 
     /// The fixture's second try gets as far as the board's DW-1516 draws.

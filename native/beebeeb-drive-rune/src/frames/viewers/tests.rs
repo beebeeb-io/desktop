@@ -487,9 +487,11 @@ fn wrap_breaks_a_long_lines_text_at_the_windows_width_and_no_wrap_keeps_it_on_on
     );
     assert!(text[3] >= 42.0, "Wrap: the text takes more rows ({text:?})");
     assert_eq!(info(&rt, "line-1-text").rect[3], 21.0, "a short line stays one row");
-    assert_eq!(info(&rt, "line-1-text").text.as_deref(), Some("import csv"));
-    // NOT asserted, because it is not true yet (the PR body's "Not done"): the ROW of a wrapped
-    // line is as high as its text. It measures 21 against a text of 63, so the next line overlaps.
+    assert_eq!(info(&rt, "run-1-w0").text.as_deref(), Some("import"));
+    // The row is as high as its words' rows, so the next line starts under it.
+    let (row, next) = (info(&rt, "line-0").rect, info(&rt, "line-1").rect);
+    assert_eq!(row[3], text[3], "the row is as high as its text");
+    assert_eq!(next[1], row[1] + row[3], "the next line starts under the wrapped one");
     operate(&mut rt, "seg-1");
     assert_eq!(info(&rt, "run-0-0").rect[3], 21.0, "No wrap again");
 }

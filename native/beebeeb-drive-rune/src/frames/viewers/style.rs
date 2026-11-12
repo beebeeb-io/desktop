@@ -99,3 +99,20 @@ pub fn current_line(t: &Theme) -> Color {
 pub fn fitted(key: impl Into<String>, words: &str, text_style: TextStyle, color: Color) -> rune::El {
     crate::ui::kit::label(key, words, text_style, color).w(rune::text::advance(words, text_style))
 }
+
+/// `.t-large`: a note's first heading, 22px/650 on 28px, tracked -0.022em.
+pub const MD_H1: TextStyle = TextStyle::new(22.0, 650.0).lh(28.0).tracking(-0.484);
+/// `.t-body`: a note's words, 13px/400 on 17px.
+pub const MD_BODY: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
+/// `<b>` in a note: 700.
+pub const MD_BOLD: TextStyle = TextStyle::new(13.0, 700.0).lh(17.0);
+/// Inline code in a note: mono 12px.
+pub const MD_CODE: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(15.5);
+
+/// `shadow-1`'s ink (`oklch(0.18 0.01 70)`) at `alpha`.
+pub fn knob_shadow(alpha: f32) -> Color {
+    Color {
+        a: alpha,
+        ..rune::color::hex("#14110D").unwrap_or(Color::BLACK)
+    }
+}
