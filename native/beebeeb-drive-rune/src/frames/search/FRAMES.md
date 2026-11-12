@@ -10,10 +10,10 @@ move would also have to change its header and the statuses).
 
 | Frame | What it is | Status |
 | --- | --- | --- |
-| DW-0801 | Search opened: Recent (contract, lisbon, invoice 2026), Clear, what search covers | built (light and dark: geometry 93, pixels 93, text 32, icons 26, fills 17, frame tiles 63481 checked, 0 failing) |
-| DW-0802 | Results for "Contr": pills All / Folders / Photos / Documents, three rows with Where, the first one's details | built (light and dark: geometry 169, pixels 169, text 71, icons 34, fills 41, frame tiles 63481 checked, 0 failing) |
-| DW-0802b | Results during a first sign-in: the "Still getting your files ready" note with the live count | built (light and dark: geometry 120, pixels 120, text 48, icons 29, fills 21, frame tiles 63481 checked, 0 failing) |
-| DW-0803 | No results for "harbr" | built (light and dark: geometry 93, pixels 93, text 33, icons 24, fills 18, frame tiles 63481 checked, 0 failing) |
+| DW-0801 | Search opened: Recent (contract, lisbon, invoice 2026), Clear, what search covers | built (light and dark: geometry 95, pixels 95, text 32, icons 27, fills 17, frame tiles 63481 checked, 0 failing) |
+| DW-0802 | Results for "Contr": pills All / Folders / Photos / Documents, three rows with Where, the first one's details | built (light and dark: geometry 171, pixels 171, text 71, icons 35, fills 41, frame tiles 63481 checked, 0 failing) |
+| DW-0802b | Results during a first sign-in: the "Still getting your files ready" note with the live count | built (light and dark: geometry 122, pixels 122, text 48, icons 30, fills 21, frame tiles 63481 checked, 0 failing) |
+| DW-0803 | No results for "harbr" | built (light and dark: geometry 96, pixels 96, text 33, icons 25, fills 18, frame tiles 63481 checked, 0 failing) |
 
 ## How it works
 
@@ -63,9 +63,14 @@ flowchart LR
 - The engine behind `SearchSource` (the wiring package), and a cap or a virtual list for a long
   answer: the results list builds every row it is given.
 - The file menu of a result with Show in enclosing folder (DW-0402's menu, asked for by intent).
-- The keys of these frames are `scripts/keymap-search.js` (the Shared and Trash scheme the goldens
-  of 2026-11-11 were captured in: `seg-0`, `label-recent`, `list-0`, `item-0-*`, `btn-share`, ...),
-  only in a Files frame with the field focused. `scripts/check-keymap-scope.sh DW-0401 DW-0801
-  DW-0802 DW-0802b DW-0803` holds it: 10 frames checked, 0 differing.
+- The keys: the Files window's own (`keymap.js`, `keymap-files.js`, the empty state of DW-0803
+  among them: `empty`, `-tile`, `-icon`, `-title`, `-text`, drawn with `ui::empty`), plus what
+  `scripts/keymap-search.js` adds in a Files frame with the field focused, in the Shared and Trash
+  scheme (`seg-0`, `label-recent`, `list-0`, `item-0-*`, `btn-share`, ...). The goldens are the
+  board lane's of 2026-11-12 with those keys' records added (nothing removed, nothing changed).
+  `scripts/check-keymap-scope.sh DW-0401 DW-0801 DW-0802 DW-0802b DW-0803`: 10 frames checked, 0
+  differing.
+- The toolbar is Search's own (`view.rs`): the Files toolbar with "Search" and the count for a
+  title, Back and Forward off, and the field focused; Open in File Explorer asks the shell.
 - After Esc the field keeps the keyboard (as before): Alt+Left is then the field's own key until
   focus leaves it.
