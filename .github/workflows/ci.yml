@@ -6,6 +6,11 @@ name: Desktop CI
 # Windows Credential Manager store) were first compiled at release time.
 #
 # Job names are stable on purpose: branch protection requires them by name.
+#
+# The job "Frontend (bun test + tsc + eslint)" was removed from this line for 0.9.0 by owner ruling 2026-11-12:
+# the app has no web view. The React suite still runs on `main` for the 0.8.x line. The React sources and package
+# files stay (the Tauri shell builds from them until the Mac port exists). The two core pin steps that job also
+# ran are Rust checks, not React ones: they now run in "Changed areas".
 
 on:
   pull_request:
@@ -25,37 +30,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  frontend:
-    name: Frontend (bun test + tsc + eslint)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-        with:
-          persist-credentials: false
-
-      - name: Core pin check self-test
-        run: sh scripts/check-core-pin.sh --self-test
-
-      - name: Core pin check (src-tauri and windows pin the same core rev)
-        run: sh scripts/check-core-pin.sh
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Run frontend tests
-        run: bun test
-
-      - name: Typecheck
-        run: bunx tsc --noEmit -p .
-
-      - name: Lint
-        run: bun run lint
-
   # Which areas the change touches (scripts/ci-changed-areas.py; it fails open). A pull request that changes only
   # docs, design files or the native UI crates does not run the Tauri engine suite: the three Rust jobs are then
   # SKIPPED, and a skipped job satisfies a required check, so the job names below still report. A push runs everything.
@@ -91,6 +65,14 @@ jobs:
           fi
           echo "changed paths: $(wc -l < "$list")"
           python3 scripts/ci-changed-areas.py "$list" | tee -a "$GITHUB_OUTPUT"
+
+      # Moved here from the removed Frontend job (see the top of this file): this job runs on every event and
+      # needs no toolchain. After the classifier, so a failing pin never leaves `rust` unset.
+      - name: Core pin check self-test
+        run: sh scripts/check-core-pin.sh --self-test
+
+      - name: Core pin check (src-tauri and windows pin the same core rev)
+        run: sh scripts/check-core-pin.sh
 
   # The three Rust jobs share .github/actions/rust-suite: compile every target ONCE, run the tests, assert the
   # counted truth line, upload the evidence. `runs-on` reads a repository variable, so a job moves to a self-hosted
