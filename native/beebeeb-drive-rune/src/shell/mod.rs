@@ -201,8 +201,30 @@ pub fn run() {
     #[cfg(feature = "feedback")]
     crate::feedback::paths::set_flag_dir(launch.feedback_dir.clone());
     let platform = platform::current();
-    // The engine lane replaces this with the real engine; nothing else in `run` changes.
-    let engine: Arc<dyn EngineActions> = Arc::new(FixtureEngine::ready());
+
+    // --- engine wiring (E6): identity, state paths, and the engine handle ---
+    // Before any engine work: initialise the process-wide identity and state paths.
+    identity.assert_macos_ready();
+    beebeeb_engine::identity::init(&identity.engine_identity());
+
+    // The real engine, for the running app (not tooling runs).
+    let real_engine: Option<Arc<beebeeb_engine::app::Engine<beebeeb_engine::app::PlatformCredentials>>> =
+        if launch.tooling {
+            None
+        } else {
+            match setup_engine(identity, &launch) {
+                Ok(engine) => Some(engine),
+                Err(error) => {
+                    host::log(format!("engine could not be opened: {error}"));
+                    None
+                }
+            }
+        };
+
+    let engine: Arc<dyn EngineActions> = match &real_engine {
+        Some(e) => Arc::new(crate::engine_host::LiveEngine::new(e.clone())),
+        None => Arc::new(FixtureEngine::ready()),
+    };
 
     let control_target = Arc::new(Mutex::new(None));
     let (claim, _control_server) = if launch.tooling {
@@ -327,6 +349,7 @@ pub fn run() {
         .titlebar(Titlebar::new(TITLEBAR_H))
         .on_open_url(host::on_open_url)
         .on_reopen(host::on_reopen)
+        .on_focus(|s: &mut State, focused, _| crate::frames::signin::on_window_focus(s, focused))
         .on_window(move |native| {
             *window_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(native.clone())
         });
@@ -359,11 +382,23 @@ pub fn run() {
         state_file,
     };
     let (shell_actions, shell_platform) = (actions.clone(), platform.clone());
+    let init_engine = real_engine.clone();
     let main_app = main_app.init(move || {
         let shell = Shell::new(shell_actions, shell_platform, wiring);
-        match source {
-            Some(source) => state::init_from(shell, source, None),
-            None => state::init_with(shell),
+        match (source, init_engine) {
+            (Some(source), _) => state::init_from(shell, source, None),
+            (None, Some(engine)) => {
+                let drive: Box<dyn DriveSource> = Box::new(crate::engine_host::EngineDriveSource::new(engine.clone()));
+                let mut s = state::init_from(shell, drive, None);
+                s.actions = crate::frames::files::Actions::new(Box::new(crate::engine_host::EngineFilesSource::new(
+                    engine.clone(),
+                )));
+                s.signin = Some(crate::frames::signin::Ui::new(Box::new(
+                    crate::engine_host::EngineSignInSource::new(engine),
+                )));
+                s
+            }
+            (None, None) => state::init_with(shell),
         }
     });
     let flyout_main = main.clone();
@@ -409,4 +444,51 @@ pub fn run() {
                 .boxed(),
         ]
     });
+}
+
+/// Build the engine handle: identity must be initialised before this is called. Runs BEFORE any
+/// engine thread (no race on `BB_API_BASE` or state paths). The `api_base` comes from
+/// `--api-base` (dev builds only) or from `runner::api_base_url()` (which reads `BB_API_BASE`).
+fn setup_engine(
+    identity: AppIdentity,
+    launch: &instance::Launch,
+) -> Result<Arc<beebeeb_engine::app::Engine<beebeeb_engine::app::PlatformCredentials>>, String> {
+    use beebeeb_engine::app::{Engine, EngineConfig, PlatformCredentials};
+    use beebeeb_engine::host::ChannelHost;
+
+    // State paths: the app-local data dir from Rune's dirs, under the identity.
+    let dirs = rune::dirs::AppDirs::new(identity.state_dir_id())
+        .ok_or_else(|| "could not resolve the app-local data directory".to_string())?;
+    beebeeb_engine::state_paths::init_from_app_local_data_dir(&dirs.data())?;
+
+    // The account id from desktop.toml (created on first run).
+    let account_id = beebeeb_engine::config::DesktopConfig::ensure_account_id()?;
+
+    // API base: from --api-base (non-release only), else the engine's own default.
+    let api_base = match &launch.api_base {
+        Some(url) if instance::DEV_BUILD => url.clone(),
+        _ => beebeeb_engine::runner::api_base_url(),
+    };
+
+    let (host, _messages) = ChannelHost::new(|| {
+        // The wake hook: nothing yet. The UI refreshes on every poll, which runs at the frame
+        // rate. A more precise wake (calling `main.update`) needs the AppHandle, which is not
+        // available here: the engine is created before the App. A future commit can fill this
+        // with an `Arc<Mutex<Option<AppHandle>>>` as `control_target` does.
+    });
+
+    let config = EngineConfig {
+        account_id,
+        state_dir: dirs.data().to_path_buf(),
+        api_base,
+    };
+
+    let engine = Engine::open(config, host, PlatformCredentials)?;
+    let engine = Arc::new(engine);
+
+    // Restore the session (reads credential store, no network).
+    let gate = engine.restore();
+    host::log(format!("engine restore: {gate:?}"));
+
+    Ok(engine)
 }

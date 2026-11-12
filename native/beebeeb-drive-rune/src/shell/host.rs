@@ -302,6 +302,11 @@ pub fn request(s: &mut State, intent: Intent) -> Outcome {
 /// section by writing `State::sidebar_section`; this turns that write into a navigation, so
 /// the sidebar already routes. A ui lane that calls [`dispatch`] itself makes this a no-op.
 pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
+    let mut changed = false;
+    // The engine's answers that arrive between presses (wave-1-open.md, item 2).
+    changed |= crate::frames::signin::poll(s, tx);
+    // The session and the tray: the engine may have changed since the last frame.
+    changed |= s.shell.refresh();
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {
@@ -310,16 +315,17 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
             tx.resize_window_instant(size);
         }
         s.shell.window_kind = kind;
+        changed = true;
     }
-    if s.sidebar_section == s.shell.sidebar_seen {
-        return false;
+    if s.sidebar_section != s.shell.sidebar_seen {
+        let outcome = s
+            .shell
+            .app
+            .apply(Event::Navigate(Route::section(section_for(s.sidebar_section))));
+        sync_sidebar(s);
+        changed |= outcome == Outcome::Changed;
     }
-    let outcome = s
-        .shell
-        .app
-        .apply(Event::Navigate(Route::section(section_for(s.sidebar_section))));
-    sync_sidebar(s);
-    outcome == Outcome::Changed
+    changed
 }
 
 /// The shell's own keys, then the current frame's (DW-1232, DW-1233: Windows' words).
