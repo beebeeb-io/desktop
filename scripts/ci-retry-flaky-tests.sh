@@ -78,7 +78,10 @@ extract_failures() {
     fi
     if $in_summary; then
       if [[ "$line" =~ ^test\ result: ]]; then
-        break
+        # Reset for the next binary in the same log; do not stop here.
+        in_summary=false
+        saw_first_failures=false
+        continue
       fi
       [[ -z "$line" ]] && continue
       echo "$line"
@@ -350,6 +353,92 @@ LOGEOF
     pass=$((pass + 1))
   else
     echo "FAIL case (g): expected no failures, got: [$failures]"
+    fail=$((fail + 1))
+  fi
+
+  # ── Case (h): two binaries — binary 1 on listed, binary 2 on unlisted → both visible ──
+  cat > "$tmp/log-two-bin-real.txt" <<'LOGEOF'
+Running unittests src/lib.rs (target/debug/deps/beebeeb_engine-abc.exe)
+running 1810 tests
+test windows_cf::ld0105_native_tests::f2b::ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces ... FAILED
+
+failures:
+
+---- windows_cf::ld0105_native_tests::f2b::ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces stdout ----
+thread 'windows_cf::...' panicked at src/windows_cf/ld0105_f2b_native_tests.rs:385:9
+
+failures:
+    windows_cf::ld0105_native_tests::f2b::ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces
+
+test result: FAILED. 1809 passed; 1 failed; 5 ignored; 0 measured; 0 filtered out; finished in 240.11s
+
+Running tests/native_drive.rs (target/debug/deps/beebeeb_drive-def.exe)
+running 500 tests
+test drive::some_real_bug ... FAILED
+
+failures:
+
+---- drive::some_real_bug stdout ----
+thread 'drive::some_real_bug' panicked at tests/native_drive.rs:42:5
+
+failures:
+    drive::some_real_bug
+
+test result: FAILED. 499 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 100.00s
+LOGEOF
+
+  load_allowlist "$tmp/allow.txt"
+  failures="$(extract_failures "$tmp/log-two-bin-real.txt")"
+  classify_failures "$failures"
+  if [[ ${#unlisted[@]} -eq 1 && ${#to_retry[@]} -eq 1 ]]; then
+    echo "PASS case (h): two binaries — binary 2's unlisted failure is not hidden"
+    pass=$((pass + 1))
+  else
+    echo "FAIL case (h): expected 1 retryable / 1 unlisted, got ${#to_retry[@]} / ${#unlisted[@]}"
+    fail=$((fail + 1))
+  fi
+
+  # ── Case (i): two binaries both on listed tests → retried, both pass ──────────────
+  cat > "$tmp/log-two-bin-listed.txt" <<'LOGEOF'
+Running unittests src/lib.rs (target/debug/deps/beebeeb_engine-abc.exe)
+running 1810 tests
+test windows_cf::ld0105_native_tests::f2b::ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces ... FAILED
+
+failures:
+
+---- windows_cf::ld0105_native_tests::f2b::ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces stdout ----
+
+failures:
+    windows_cf::ld0105_native_tests::f2b::ld0105_f2b_native_a_buffered_robocopy_copies_a_file_served_in_session_pieces
+
+test result: FAILED. 1809 passed; 1 failed; 5 ignored; 0 measured; 0 filtered out; finished in 240.11s
+
+Running tests/native_drive.rs (target/debug/deps/beebeeb_drive-def.exe)
+running 500 tests
+test windows_cf::ld0105_native_tests::ld0105_p1_native_a_write_into_a_partly_downloaded_file_is_kept ... FAILED
+
+failures:
+
+---- windows_cf::ld0105_native_tests::ld0105_p1_native_a_write_into_a_partly_downloaded_file_is_kept stdout ----
+
+failures:
+    windows_cf::ld0105_native_tests::ld0105_p1_native_a_write_into_a_partly_downloaded_file_is_kept
+
+test result: FAILED. 499 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 100.00s
+LOGEOF
+
+  retry_one_test() { return 0; }  # always passes on first retry
+
+  load_allowlist "$tmp/allow.txt"
+  failures="$(extract_failures "$tmp/log-two-bin-listed.txt")"
+  classify_failures "$failures"
+  local iloop_exit=0
+  run_retry_loop "$tmp" || iloop_exit=$?
+  if [[ $iloop_exit -eq 0 && "$summary_line" == *"2 test(s) retried"* ]]; then
+    echo "PASS case (i): two binaries both on listed tests → retried, both pass"
+    pass=$((pass + 1))
+  else
+    echo "FAIL case (i): expected 2 retried / 2 passed, got: $summary_line unlisted=${#unlisted[@]}"
     fail=$((fail + 1))
   fi
 
