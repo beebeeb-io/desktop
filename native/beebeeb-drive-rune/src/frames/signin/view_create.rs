@@ -14,7 +14,7 @@ use super::view_steps::{escape_first, open};
 use super::{EMAIL_KEY, Intent, PASSWORD_KEY, Ui, icons, view_create_phrase as later};
 use crate::State;
 use crate::theme::tokens::{Theme, type_};
-use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, FieldSpec, FieldState, Keys};
+use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys};
 use crate::ui::kit;
 
 const NOT_SENT: &str = "We could not send the email. Check your connection and try again.";
@@ -334,18 +334,25 @@ fn password(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         meter,
         t,
     );
-    let again = au::field(
+    // The kit's own field, so Escape in it is the screen's Back as in the field above.
+    let differ = ui.passwords_differ().then_some("Does not match yet.");
+    let again = ck::field(
         k,
-        FieldSpec {
+        Field {
             label: "Confirm password",
+            name: None,
             icon: Some(&icons::LOCK),
-            state: FieldState::Rest,
-            message: ui.passwords_differ().then_some("Does not match yet."),
+            message: differ,
+            error: false,
             mono: false,
+            pictured: false,
         },
         &ui.confirm,
         CONFIRM_KEY,
         |s: &mut State| &mut open(s).confirm,
+        changed(|ui| ui.create.pictured = None),
+        escape_first,
+        None,
         None,
         t,
     );

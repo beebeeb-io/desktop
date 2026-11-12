@@ -34,6 +34,12 @@ const HEADINGS: [&str; 14] = [
 
 type Calls = std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>;
 
+/// The words an element shows (a text) or is named by (a control).
+fn said(rt: &Runtime<State>, key: &str) -> Option<String> {
+    let element = info(rt, key);
+    element.text.or(element.label)
+}
+
 fn type_(rt: &mut Runtime<State>, text: &str) {
     press(rt, Key::Text(text.into()));
 }
@@ -104,6 +110,7 @@ fn walked_to(step: Step, sign_up: SignUpScript) -> (Runtime<State>, Calls) {
                 space(&mut rt);
                 tab_to(&mut rt, "check-1-row");
                 space(&mut rt);
+                tab_to(&mut rt, "btn-0");
                 press(&mut rt, Key::Enter);
             }
             Step::Password => {
@@ -115,6 +122,7 @@ fn walked_to(step: Step, sign_up: SignUpScript) -> (Runtime<State>, Calls) {
             Step::Phrase => {
                 tab_to(&mut rt, "check-0-row");
                 space(&mut rt);
+                tab_to(&mut rt, "btn-3");
                 press(&mut rt, Key::Enter);
             }
             Step::Confirm => {
@@ -137,8 +145,7 @@ fn every_frame_has_a_scene_its_heading_and_fits_the_window_in_both_themes() {
     for (frame, heading) in FRAME_IDS.iter().zip(HEADINGS) {
         for dark in [false, true] {
             let rt = runtime_of(scene(frame).unwrap_or_else(|| panic!("no scene {frame}")), dark);
-            let title = info(&rt, TITLE_KEY);
-            assert_eq!(title.label.as_deref(), Some(heading), "{frame}");
+            assert_eq!(said(&rt, TITLE_KEY).as_deref(), Some(heading), "{frame}");
             let column = info(&rt, "au-col").rect;
             assert!(
                 column[1] >= 0.0 && column[1] + column[3] <= 638.0,
@@ -174,7 +181,7 @@ fn create_an_account_opens_sign_up_from_both_first_screens_and_back_returns_ther
         ui(&mut rt).password.text.is_empty(),
         "the sign-in form's password is not the new account's"
     );
-    assert_eq!(info(&rt, "back").label.as_deref(), Some("Sign in"));
+    assert_eq!(said(&rt, "back").as_deref(), Some("Sign in"));
     click(&mut rt, "back-link");
     assert_eq!(ui(&mut rt).screen, Screen::SignIn);
 }
@@ -202,7 +209,7 @@ fn the_whole_flow_runs_from_the_keyboard_and_ends_at_the_products_first_step() {
     press(&mut rt, Key::Enter);
     assert_eq!(at(&mut rt), Step::Ready);
     assert_eq!(focused(&rt).as_deref(), Some(TITLE_KEY), "the result is announced");
-    let line = info(&rt, "subtitle").label.unwrap_or_default();
+    let line = said(&rt, "subtitle").unwrap_or_default();
     assert!(
         line.starts_with(board::EMAIL) && line.ends_with("continue as Anna."),
         "{line}"
@@ -263,13 +270,13 @@ fn the_email_is_checked_when_it_is_sent_and_each_problem_has_the_boards_words() 
     press(&mut rt, Key::Enter);
     assert_eq!(at(&mut rt), Step::Email);
     assert_eq!(
-        info(&rt, "field-0-msg").label.as_deref(),
+        said(&rt, "field-0-msg").as_deref(),
         Some("Enter a valid email address.")
     );
     assert!(calls.borrow().is_empty(), "nothing was sent");
     type_(&mut rt, "@northwind.studio");
     assert_eq!(
-        info(&rt, "field-0-msg").label.as_deref(),
+        said(&rt, "field-0-msg").as_deref(),
         Some("We'll send an 8-digit code to this address."),
         "typing clears the message"
     );
@@ -290,7 +297,7 @@ fn the_email_is_checked_when_it_is_sent_and_each_problem_has_the_boards_words() 
         type_(&mut rt, board::EMAIL);
         press(&mut rt, Key::Enter);
         assert_eq!(at(&mut rt), Step::Email);
-        assert_eq!(info(&rt, "field-0-msg").label.as_deref(), Some(words));
+        assert_eq!(said(&rt, "field-0-msg").as_deref(), Some(words));
     }
 }
 
@@ -298,7 +305,7 @@ fn the_email_is_checked_when_it_is_sent_and_each_problem_has_the_boards_words() 
 fn the_code_takes_eight_digits_and_a_wrong_one_is_said_without_saying_which() {
     let (mut rt, calls) = walked_to(Step::Verify, SignUpScript::default());
     assert_eq!(focused(&rt).as_deref(), Some(CODE_KEY));
-    assert_eq!(info(&rt, "field-0-label").label.as_deref(), Some("8-digit code"));
+    assert_eq!(said(&rt, "field-0-label").as_deref(), Some("8-digit code"));
     type_(&mut rt, "48 29-16x51999");
     assert_eq!(
         ui(&mut rt).create.code.text,
@@ -308,7 +315,7 @@ fn the_code_takes_eight_digits_and_a_wrong_one_is_said_without_saying_which() {
     press(&mut rt, Key::Enter);
     assert_eq!(at(&mut rt), Step::Verify);
     assert_eq!(
-        info(&rt, "field-0-msg").label.as_deref(),
+        said(&rt, "field-0-msg").as_deref(),
         Some("That code is not right, or it has expired.")
     );
     press(&mut rt, Key::Backspace);
@@ -327,7 +334,7 @@ fn the_code_takes_eight_digits_and_a_wrong_one_is_said_without_saying_which() {
 #[test]
 fn a_new_code_can_be_asked_for_when_the_countdown_ends_or_the_guesses_are_spent() {
     let (mut rt, calls) = walked_to(Step::Verify, SignUpScript::default());
-    assert_eq!(info(&rt, "resend-time").label.as_deref(), Some("0:42"));
+    assert_eq!(said(&rt, "resend-time").as_deref(), Some("0:42"));
     type_(&mut rt, "4829");
     ui(&mut rt).resend_code();
     assert_eq!(
@@ -340,18 +347,18 @@ fn a_new_code_can_be_asked_for_when_the_countdown_ends_or_the_guesses_are_spent(
     rt.frame(0.0);
     assert!(!has(&rt, "resend-time"));
     tab_to(&mut rt, "link-0-box");
-    assert_eq!(info(&rt, "link-0-box").label.as_deref(), Some("Send a new code"));
+    assert_eq!(said(&rt, "link-0-box").as_deref(), Some("Send a new code"));
     press(&mut rt, Key::Enter);
     assert!(
         ui(&mut rt).create.code.text.is_empty(),
         "the field is cleared when a new code is sent"
     );
     assert_eq!(
-        info(&rt, "note-0").label.as_deref(),
+        said(&rt, "note-0").as_deref(),
         Some("If this address can be used, a new email is on its way.")
     );
     assert_eq!(
-        info(&rt, "resend-time").label.as_deref(),
+        said(&rt, "resend-time").as_deref(),
         Some("0:42"),
         "the countdown restarted"
     );
@@ -362,7 +369,7 @@ fn a_new_code_can_be_asked_for_when_the_countdown_ends_or_the_guesses_are_spent(
     rt.invalidate();
     rt.frame(0.0);
     assert_eq!(
-        info(&rt, "field-0-msg").label.as_deref(),
+        said(&rt, "field-0-msg").as_deref(),
         Some("Too many wrong codes. Ask for a new one.")
     );
     assert!(
@@ -382,7 +389,6 @@ fn both_boxes_must_be_ticked_and_the_pages_open_outside_the_app() {
     );
     tab_to(&mut rt, "check-0-row");
     space(&mut rt);
-    press(&mut rt, Key::Enter);
     ui(&mut rt).accept_terms();
     assert_eq!(at(&mut rt), Step::Terms, "one box is not enough");
     tab_to(&mut rt, "item-0");
@@ -392,6 +398,7 @@ fn both_boxes_must_be_ticked_and_the_pages_open_outside_the_app() {
     assert_eq!(ui(&mut rt).take_intents(), vec![Intent::OpenTerms, Intent::OpenPrivacy]);
     tab_to(&mut rt, "check-1-row");
     space(&mut rt);
+    tab_to(&mut rt, "btn-0");
     press(&mut rt, Key::Enter);
     assert_eq!(at(&mut rt), Step::Password);
     assert_eq!(focused(&rt).as_deref(), Some(PASSWORD_KEY));
@@ -409,7 +416,7 @@ fn the_password_needs_its_length_its_twin_and_the_breach_check() {
     assert!(!has(&rt, "field-0-meter"), "no verdict on an empty field");
     type_(&mut rt, &"x".repeat(sample::SHORT_PASSWORD_LEN));
     assert_eq!(
-        info(&rt, "field-0-meter").label.as_deref(),
+        said(&rt, "field-0-meter").as_deref(),
         Some("Password strength: Needs at least 12 characters, 2 more.")
     );
     click(&mut rt, CONFIRM_KEY);
@@ -420,18 +427,18 @@ fn the_password_needs_its_length_its_twin_and_the_breach_check() {
     assert!(!ui(&mut rt).can_set_new_password(), "long enough, and the two differ");
     click(&mut rt, CONFIRM_KEY);
     type_(&mut rt, "xxxy");
-    assert_eq!(info(&rt, "field-1-msg").label.as_deref(), Some("Does not match yet."));
+    assert_eq!(said(&rt, "field-1-msg").as_deref(), Some("Does not match yet."));
     press(&mut rt, Key::Backspace);
     type_(&mut rt, "x");
     assert!(ui(&mut rt).can_set_new_password());
     press(&mut rt, Key::Enter);
     assert_eq!(at(&mut rt), Step::Password, "a known password is refused");
     assert_eq!(
-        info(&rt, "field-0-msg").label.as_deref(),
+        said(&rt, "field-0-msg").as_deref(),
         Some("This password appears in known data breaches. Choose a different one.")
     );
     assert_eq!(
-        info(&rt, "field-0-meter").label.as_deref(),
+        said(&rt, "field-0-meter").as_deref(),
         Some("Password strength: Strong in length, but it's known.")
     );
     assert!(
@@ -451,8 +458,7 @@ fn the_password_needs_its_length_its_twin_and_the_breach_check() {
     rt.frame(0.0);
     assert_eq!(at(&mut rt), Step::Password);
     assert!(
-        info(&rt, "field-0-msg")
-            .label
+        said(&rt, "field-0-msg")
             .unwrap_or_default()
             .starts_with("We could not check this password")
     );
@@ -558,7 +564,7 @@ fn three_words_are_typed_back_into_named_secure_fields_and_a_suggestion_fills_on
     const WORD: &str = "xylophone";
     let (mut rt, _) = walked_to(Step::Confirm, SignUpScript::default());
     assert_eq!(focused(&rt).as_deref(), Some(WORD_KEYS[0]));
-    assert_eq!(info(&rt, "field-2-label").label.as_deref(), Some("Word 11"));
+    assert_eq!(said(&rt, "field-2-label").as_deref(), Some("Word 11"));
     type_(&mut rt, "Xylo phone9");
     assert_eq!(ui(&mut rt).create.words[0].text, WORD, "lowercase letters only");
     let mut dumps = readable(&rt).to_vec();
@@ -599,10 +605,9 @@ fn words_that_do_not_match_are_said_without_saying_which_and_the_words_can_be_sh
     }
     press(&mut rt, Key::Enter);
     assert_eq!(at(&mut rt), Step::Confirm);
-    let alert = info(&rt, "field-1-msg");
-    assert_eq!(alert.role, "alert");
+    assert_eq!(info(&rt, "field-1-msg").role, "alert");
     assert_eq!(
-        alert.label.as_deref(),
+        said(&rt, "field-1-msg").as_deref(),
         Some("Those words do not match your recovery phrase.")
     );
     assert!(!has(&rt, "field-0-msg") && !has(&rt, "field-2-msg"));
@@ -648,10 +653,9 @@ fn creating_has_no_way_back_and_each_failure_has_its_one_way_on() {
         rt.frame(0.0);
     };
     answer(&mut rt, CreateProblem::NothingStored);
-    assert_eq!(info(&rt, "btn-0").label.as_deref(), Some("Try again"));
+    assert_eq!(said(&rt, "btn-0").as_deref(), Some("Try again"));
     assert!(
-        info(&rt, "banner-0-text")
-            .label
+        said(&rt, "banner-0-text")
             .unwrap_or_default()
             .contains("Nothing was stored.")
     );
@@ -660,7 +664,7 @@ fn creating_has_no_way_back_and_each_failure_has_its_one_way_on() {
     assert!(!has(&rt, "btn-0"), "running again");
 
     answer(&mut rt, CreateProblem::NotFinishedHere);
-    assert_eq!(info(&rt, "btn-0").label.as_deref(), Some("Sign in"));
+    assert_eq!(said(&rt, "btn-0").as_deref(), Some("Sign in"));
     assert!(
         !has(&rt, "btn-1"),
         "the only way forward is Sign in, never register again"
@@ -676,8 +680,7 @@ fn creating_has_no_way_back_and_each_failure_has_its_one_way_on() {
     answer(&mut rt, CreateProblem::CodeExpired);
     assert_eq!(at(&mut rt), Step::Verify);
     assert!(
-        info(&rt, "field-0-msg")
-            .label
+        said(&rt, "field-0-msg")
             .unwrap_or_default()
             .ends_with("Your password and recovery phrase are kept.")
     );

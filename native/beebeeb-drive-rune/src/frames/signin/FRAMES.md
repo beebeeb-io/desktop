@@ -26,7 +26,20 @@ Gate state per frame is in the PR body; `0` = all six counts at 0 failing in bot
 | DW-A20 | Sign in: offline | built; light 0, dark 1 pixel line open (`card-0-avatar`) |
 | DW-A21 | Sign in: too many tries from this network | built; light 0, dark 1 pixel line open (`card-0-avatar`) |
 | DW-A22 | Sign in: the lock explained | built; the note wraps one word later than the board (3 pixel lines), dark also `card-0-avatar` |
-| DW-A31 to DW-A44 | Create an account: email, verify, terms, password, phrase, this device (14 frames) | not built; no goldens yet; "Create a Beebeeb account" and "Create an account" emit `Intent::CreateAccount` for DW-A31. Which lane builds them is the lead's call |
+| DW-A31 | Create an account, step 1: the email | built; gate in the PR body |
+| DW-A32 | Step 2: the 8-digit code from the email, four digits typed | built; gate in the PR body |
+| DW-A33 | Step 2: that code is not right, or it has expired | built; gate in the PR body |
+| DW-A34 | Step 2: a new code was sent | built; gate in the PR body |
+| DW-A35 | Step 3: the terms, both boxes ticked | built; gate in the PR body |
+| DW-A36 | Step 4: the password, strong | built; gate in the PR body |
+| DW-A37 | Step 4: the password is two characters short | built; gate in the PR body |
+| DW-A38 | Step 4: the password is known from a breach | built; gate in the PR body |
+| DW-A39 | Step 5: the recovery phrase, shown once | built; gate in the PR body |
+| DW-A40 | Step 5: three words typed back, with suggestions | built; gate in the PR body |
+| DW-A41 | Step 5: the words do not match | built; gate in the PR body |
+| DW-A42 | Step 6: this device's name | built; gate in the PR body |
+| DW-A43 | Creating your account | built; gate in the PR body |
+| DW-A44 | Your account is ready | built; gate in the PR body |
 | DW-A63 | The account was deleted: the sign-in form says so under the password | built; light 0, dark 1 pixel line open (`card-0-avatar`, as DW-A19) |
 | DW-A23 | The 12 words on a new device (five typed, the sixth box holding the keyboard) | built, 0 |
 | DW-A24 | The words did not open this account (the third box marked) | built, 0 |
@@ -45,8 +58,8 @@ Gate state per frame is in the PR body; `0` = all six counts at 0 failing in bot
 | DW-0009, DW-0014 | Locked, no plan yet | not built; no goldens yet |
 | DW-0380, DW-0301 to DW-0305 | The first-time guide | not built; no goldens yet |
 
-Built: 30 of 59 here, and the 11 frames of the first run below: 41 of 70. Not built: 29, none with a golden yet
-(DW-A11 to A17, DW-A31 to A44, DW-0009, DW-0014, DW-0380, DW-0301 to 0305).
+Built: 44 of 59 here, and the 11 frames of the first run below: 55 of 70. Not built: 15
+(DW-A11 to A17, DW-0009, DW-0014, DW-0380, DW-0301 to 0305).
 
 ## First run on Windows (lane f-signin-rest): `setup/`
 
@@ -86,6 +99,8 @@ security, wait an hour and try again."); a vault password or a new password the 
 | DW-A23, A24, A26 to A28, A30 | `steps.rs` | `view_steps.rs` |
 | DW-A25, A45, A46 | `steps.rs` | `view_recovery.rs` |
 | DW-A47 to A50 | `steps.rs` | `view_recover.rs` |
+| DW-A31 to A38 | `create.rs`, `create_source.rs` | `view_create.rs`, `create_kit.rs` |
+| DW-A39 to A44 | `create.rs`, `create_source.rs` | `view_create_phrase.rs`, `create_kit.rs` |
 
 `ui/au_entry.rs` has the digit boxes, the word boxes, a field drawn holding the keyboard, and links `au::link` does
 not draw. Scenes of DW-A23 and later are `signin::FRAMES` (`frames/mod.rs`), not lines in `shell/mod.rs`.
@@ -93,8 +108,8 @@ not draw. Scenes of DW-A23 and later are `signin::FRAMES` (`frames/mod.rs`), not
 ## For whoever builds the rest
 
 - Keys for every `.au-mac` frame are already in `scripts/keymap-signin.js` (digits, words, cards, lists, strength bars).
-- Still missing for sign-up (DW-A31 to A44): the terms checkboxes, the phrase shown for writing down (the word
-  boxes read-only, a copy and a print action), the device-name step. The strength meter is `view_recover.rs::strength`.
+- Sign-up's pieces (the progress line, a checkbox, a chip, the meter with sign-up's states, a field that is focused
+  and in error at once) are in `create_kit.rs`. The strength meter of recovery is `view_recover.rs::strength`.
 - A secret that the screen shows as typed (a code, a recovery word, a backup code) is a secure `TextEdit` made ONCE
   in `Ui::new`, revealed, or a secure text node (`au_entry::shown_secret`); it is never an element label, never
   measured with `rune::text::advance`, never copied into a `String`. `steps_tests.rs`:
@@ -103,3 +118,39 @@ not draw. Scenes of DW-A23 and later are `signin::FRAMES` (`frames/mod.rs`), not
   `steps::Pictured` (scenes only; the first key or press clears it).
 - An engine answer is applied only by the wait it answers (`Ui::apply`, `Ui::apply_step`: every arm has a guard); a
   new wait gets a guard and a line in `back_from_the_code_discards_the_partial_sign_in_and_a_late_answer_changes_nothing`.
+
+## Create an account (lane signin-create): DW-A31 to DW-A44
+
+Sign-up is a set of screens of this window (`Screen::Create(Step)`). "Create a Beebeeb account" (DW-A01) and
+"Create an account" (DW-A02, DW-A03) still emit `Intent::CreateAccount`; the shell's poll answers it with
+`Ui::start_create`, which opens DW-A31 when the source has sign-up (`SignInSource::sign_up_available`) and
+changes nothing when it has not (the engine-backed source, until phase 2). A build that ships opens it on
+no fixture: `start()` sets the fixture's `available` to `DEV_BUILD`.
+
+Secret-bearing screens: DW-A36, DW-A37, DW-A38 (the password, typed twice), DW-A39 (the recovery phrase,
+shown), DW-A40, DW-A41 (three of its words, typed, and the suggestions that complete them). All are screens
+of `FrameGroup::SignIn`, which is excluded from capture as a whole (`shell/host_tests.rs`:
+`sign_up_opens_in_the_sign_in_window_and_every_screen_of_it_stays_excluded_from_capture`).
+
+- The password is in `Ui::password` and `Ui::confirm` (the group's secure fields) and is cleared when the
+  breach check passes: the engine keeps it. The phrase is never in this window's state: the view borrows it
+  for one draw (`with_sign_up_phrase`) and draws each word as a secure text node.
+- Decision (lane, 2026-11-12): the twelve shown words and the suggestion chips are secure text nodes with no
+  accessibility text, because the group's rule is that a secret is never an element label. The board asks
+  that "words are read in order with their numbers" (DW-A39, Accessibility): the two rules contradict, and
+  a screen reader reads "Word 1" to "Word 12" without the words until the owner rules on it.
+- Decision (lane, 2026-11-12): Copy builds the one `String` of the phrase at its final size and moves it to
+  Rune's secret clipboard (zeroizing, kept out of clipboard histories), cleared after 60 seconds or when
+  sign-up ends. Save as file and Print are `Intent`s that carry no word; the shell does not act on them yet.
+- Decision (lane, 2026-11-12): Back from the terms goes to the email step, as "Use a different email" does,
+  because the board names no target and a verified code is spent.
+- Decision (lane, 2026-11-12): "the other apps can continue as Anna" takes the name from the part of the
+  address before the at sign, because a new account has no name of its own yet.
+- The breach check runs on Continue only; the board also asks for it when the field loses focus.
+
+States with a rule and no drawing, built from the rule's words (tests only): the email's three messages
+(not an address, too many requests, could not send); "Too many wrong codes. Ask for a new one."; "Send a
+new code" in place of the countdown; a breach check that cannot be reached; "Does not match yet."; DW-A43's
+three failures (nothing stored with Try again, created but not finished with Sign in only, the code expired
+with the way back to Verify). Words that are NOT the board's: "We could not check the code. Check your
+connection and try again." (a code checked while offline), and the two headings of DW-A43's failures.

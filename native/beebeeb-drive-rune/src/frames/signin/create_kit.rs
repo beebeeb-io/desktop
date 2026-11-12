@@ -344,8 +344,8 @@ pub fn field(
             kit::note_text(&value_key, &box_key, &shown, style, t.text);
             rune::text::advance(&shown, style)
         }
-        None if chars > 0 => {
-            debug_assert!(spec.mono, "a shown secret is set in mono");
+        // A password that is shown is drawn by Rune's secure input alone: not noted, not measured.
+        None if chars > 0 && spec.mono => {
             kit::note_text(&value_key, &box_key, &edit.text, style, t.text);
             mono_width(chars, style)
         }
