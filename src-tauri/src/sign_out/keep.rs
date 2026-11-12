@@ -626,6 +626,7 @@ mod tests {
         f.write("w1", "report", "minted", Some(b"kept"));
         let kept = f.keep(Acknowledge::Nothing).unwrap();
         let staging = crate::engine_bridge::FinderStagingBases {
+            folder: "beebeeb",
             data: Some(f.base.join("Library/Application Support")),
             cache: Some(f.base.join("Library/Caches")),
             temp: f.base.join("tmp"),

@@ -904,7 +904,7 @@ fn scan(pc: &Pc) {
         "token".into(),
         [17u8; 32],
     ));
-    let bridge = crate::engine_bridge::EngineBridge::new(pc.db.clone(), api);
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, pc.db.clone(), api);
     crate::watcher::run_one_scan(&bridge, &pc.root);
 }
 

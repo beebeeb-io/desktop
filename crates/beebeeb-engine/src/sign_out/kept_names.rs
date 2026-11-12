@@ -5,13 +5,6 @@ use std::path::{Path, PathBuf};
 
 /// The folder's name under the container's `Documents` (§7.1).
 pub const KEPT_FOLDER_NAME: &str = "Changes not sent";
-/// `tauri.conf.json`'s `identifier`. **Deprecated:** the Tauri shell still imports this const.
-/// New code uses [`app_bundle_id`] which reads from the process-wide identity.
-pub const APP_BUNDLE_ID: &str = "io.beebeeb.app";
-/// The app's bundle identifier, from the process-wide identity. Prefer this over `APP_BUNDLE_ID`.
-pub fn app_bundle_id() -> &'static str {
-    crate::identity::credential_service()
-}
 /// The longest file name APFS takes, in UTF-8 bytes.
 pub const MAX_NAME_BYTES: usize = 255;
 
@@ -26,28 +19,29 @@ pub enum KeptRole {
 /// §7.1: `<document_dir>/Changes not sent` only inside this app's sandbox container, where
 /// `document_dir` is `<home>/Library/Containers/<bundle_id>/Data/Documents`; otherwise
 /// `<data_dir>/beebeeb/Changes not sent`, so an unsandboxed build never writes plaintext into the person's real
-/// Documents folder.
-pub fn kept_root(document_dir: Option<&Path>, data_dir: Option<&Path>, bundle_id: &str) -> Option<PathBuf> {
+/// Documents folder. The bundle id and the data folder's name are the app identity's (`io.beebeeb.app` and
+/// `beebeeb` for the real app; `tauri.conf.json`'s `identifier`, a test pins the two equal).
+pub fn kept_root(
+    document_dir: Option<&Path>,
+    data_dir: Option<&Path>,
+    identity: &crate::identity::EngineIdentity,
+) -> Option<PathBuf> {
     let container_documents = Path::new("Library")
         .join("Containers")
-        .join(bundle_id)
+        .join(identity.bundle_identifier())
         .join("Data")
         .join("Documents");
     match document_dir {
         Some(dir) if dir.is_absolute() && dir.ends_with(&container_documents) => Some(dir.join(KEPT_FOLDER_NAME)),
-        _ => data_dir.map(|data| data.join(crate::identity::config_dir_name()).join(KEPT_FOLDER_NAME)),
+        _ => data_dir.map(|data| data.join(identity.config_dir_name()).join(KEPT_FOLDER_NAME)),
     }
 }
 
 /// [`kept_root`] for this process.
 // A test build keeps under its sandbox (`sign_out_kept_root` in `lib.rs`), so only a release build calls this.
 #[cfg_attr(test, allow(dead_code))]
-pub fn kept_root_for_this_app() -> Option<PathBuf> {
-    kept_root(
-        dirs::document_dir().as_deref(),
-        dirs::data_dir().as_deref(),
-        app_bundle_id(),
-    )
+pub fn kept_root_for_this_app(identity: &crate::identity::EngineIdentity) -> Option<PathBuf> {
+    kept_root(dirs::document_dir().as_deref(), dirs::data_dir().as_deref(), identity)
 }
 
 /// §7.1: local time at the start of the keep step, as macOS names screenshots (dots, never colons).
@@ -146,22 +140,24 @@ mod tests {
         let data = data.as_path();
         let sandboxed = under_home("Library/Containers/io.beebeeb.app/Data/Documents");
         let sandboxed = sandboxed.as_path();
-        let bundle_id = app_bundle_id();
         assert_eq!(
-            kept_root(Some(sandboxed), Some(data), bundle_id),
+            kept_root(Some(sandboxed), Some(data), &crate::identity::REAL),
             Some(sandboxed.join("Changes not sent"))
         );
-        let config_dir = crate::identity::config_dir_name();
-        let fallback = Some(data.join(config_dir).join("Changes not sent"));
+        let fallback = Some(data.join("beebeeb").join("Changes not sent"));
         assert_eq!(
-            kept_root(Some(under_home("Documents").as_path()), Some(data), bundle_id),
+            kept_root(
+                Some(under_home("Documents").as_path()),
+                Some(data),
+                &crate::identity::REAL
+            ),
             fallback,
             "unsandboxed"
         );
         let other = under_home("Library/Containers/com.example.other/Data/Documents");
         let other = other.as_path();
         assert_eq!(
-            kept_root(Some(other), Some(data), bundle_id),
+            kept_root(Some(other), Some(data), &crate::identity::REAL),
             fallback,
             "another bundle's container"
         );
@@ -169,13 +165,13 @@ mod tests {
             kept_root(
                 Some(Path::new("Library/Containers/io.beebeeb.app/Data/Documents")),
                 Some(data),
-                bundle_id
+                &crate::identity::REAL
             ),
             fallback,
             "a relative path is not the container"
         );
-        assert_eq!(kept_root(None, Some(data), bundle_id), fallback);
-        assert_eq!(kept_root(None, None, bundle_id), None);
+        assert_eq!(kept_root(None, Some(data), &crate::identity::REAL), fallback);
+        assert_eq!(kept_root(None, None, &crate::identity::REAL), None);
     }
 
     /// The bundle id the root is checked against is the app's own (`tauri.conf.json`).
@@ -185,7 +181,7 @@ mod tests {
             serde_json::from_str(include_str!("../../../../src-tauri/tauri.conf.json")).unwrap();
         assert_eq!(
             conf["identifier"].as_str(),
-            Some(crate::identity::REAL.credential_service)
+            Some(crate::identity::REAL.bundle_identifier())
         );
     }
 

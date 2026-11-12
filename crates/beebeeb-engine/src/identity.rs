@@ -1,208 +1,343 @@
-//! Which app this binary is: the real Beebeeb or a test build. The ONE place the credential
-//! service name and the config folder name are defined.
+//! Which app this process is: the real Beebeeb, or the test build that is installed beside it.
 //!
-//! The host initialises the identity once before opening an engine or reading the config. The
-//! Tauri shell defaults to `REAL` (backward compat); the native shell sets it from its own
-//! `AppIdentity`, which enforces release = Real, debug = Test.
+//! Everything a second install on the same Windows or macOS user account must not share with the first is a
+//! field of [`EngineIdentity`]: the config folder, the state folder, the credential service, the suggested sync
+//! folder, the Cloud Files provider (name, sync-root id prefix, GUID, the two COM classes), the backup device,
+//! the daemon socket, the macOS app group and the log folder. There are exactly two values, [`REAL`] and
+//! [`TEST`]; the fields are private, so no third one can be made outside this file.
 //!
-//! A test build that forgets to initialise gets `REAL` as the fallback so existing Tauri-shell
-//! tests (which never call `init`) keep working. The native shell calls `init` before any engine
-//! work, and its own tests call `init_for_test`.
+//! There is no default and nothing to initialise. Every engine entry that reaches credentials, the config, local
+//! state or Cloud Files takes a `&'static EngineIdentity`; code that has none does not compile. The host decides
+//! which one it is, once, at build time (the Tauri shell is always [`REAL`]).
+//!
+//! This file names nothing else of the crate: `src-tauri/tests/keychain.rs` includes it by path, next to
+//! `keychain.rs`.
+//!
+//! Must not: gain a public constructor, a `Default`, a process-wide "current" value, or a field that both
+//! identities share when the thing it names is per-install.
 
-use std::sync::OnceLock;
-
-/// What the engine needs from the host to name its credential entries and its config folder.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One install's names. See the module doc; get one from [`REAL`] or [`TEST`].
+#[derive(Debug, PartialEq, Eq)]
 pub struct EngineIdentity {
-    /// The service name in the platform credential store (Windows Credential Manager target prefix,
-    /// macOS Keychain service name): `io.beebeeb.app` for the real app.
-    pub credential_service: &'static str,
-    /// The folder inside the user's config dir (`~/.config/<this>/desktop.toml`): `beebeeb` for
-    /// the real app.
-    pub config_dir_name: &'static str,
+    bundle_identifier: &'static str,
+    config_dir_name: &'static str,
+    state_dir_name: &'static str,
+    credential_service: &'static str,
+    sync_folder_name: &'static str,
+    cloud_files_provider_name: &'static str,
+    cloud_files_provider_guid: u128,
+    status_ui_class_id: u128,
+    thumbnail_provider_class_id: u128,
+    backup_device_salt: &'static str,
+    backup_device_name_suffix: &'static str,
+    daemon_socket_name: &'static str,
+    macos_app_group: &'static str,
+    logs_dir_name: &'static str,
 }
 
-/// The released app. Its values never change: an install in the field finds its data by them.
-pub const REAL: EngineIdentity = EngineIdentity {
-    credential_service: "io.beebeeb.app",
+/// The released app. Every value is the literal the app has always used (`the_real_identity_is_todays_bytes`).
+pub static REAL: EngineIdentity = EngineIdentity {
+    bundle_identifier: "io.beebeeb.app",
     config_dir_name: "beebeeb",
+    state_dir_name: "",
+    credential_service: "io.beebeeb.app",
+    sync_folder_name: "Beebeeb",
+    cloud_files_provider_name: "Beebeeb",
+    cloud_files_provider_guid: 0xb33b33b0_5217_4c0a_9e3f_1f2a7c4d8e90,
+    status_ui_class_id: 0xc0b33b33_5217_4c0a_9e3f_2f3b8d5e9fa1,
+    thumbnail_provider_class_id: 0xb2e0a7d4_9c61_4f3a_8d2e_7a1c5e9b0f44,
+    backup_device_salt: "",
+    backup_device_name_suffix: "",
+    daemon_socket_name: "beebeeb-daemon.sock",
+    macos_app_group: "R8352WDJJR.io.beebeeb.app.fileprovider",
+    logs_dir_name: "Beebeeb",
 };
 
-/// A test build. It shares no name with [`REAL`].
-pub const TEST: EngineIdentity = EngineIdentity {
-    credential_service: "io.beebeeb.app.test",
+/// The test build, installed beside the real app on the same user account. Shares nothing with [`REAL`]
+/// (`the_two_identities_share_no_value`).
+pub static TEST: EngineIdentity = EngineIdentity {
+    bundle_identifier: "io.beebeeb.app.test",
     config_dir_name: "beebeeb-test",
+    state_dir_name: "beebeeb-test",
+    credential_service: "io.beebeeb.app.test",
+    sync_folder_name: "Beebeeb Test",
+    cloud_files_provider_name: "BeebeebTest",
+    cloud_files_provider_guid: 0x1876bd5b_c73c_452a_a40c_e2501f3de243,
+    status_ui_class_id: 0xecbe203e_9c20_4ba7_babf_bfc6dad89f0e,
+    thumbnail_provider_class_id: 0x691049a8_86db_450a_885a_fde5b4dc1431,
+    backup_device_salt: "io.beebeeb.app.test",
+    backup_device_name_suffix: " (test)",
+    daemon_socket_name: "beebeeb-test-daemon.sock",
+    macos_app_group: "R8352WDJJR.io.beebeeb.app.test.fileprovider",
+    logs_dir_name: "Beebeeb Test",
 };
 
-static CREDENTIAL_SERVICE: OnceLock<&'static str> = OnceLock::new();
-static CONFIG_DIR_NAME: OnceLock<&'static str> = OnceLock::new();
+impl EngineIdentity {
+    /// The identity a bundle identifier names: exactly the two known ones, anything else is `None`.
+    pub const fn from_bundle_identifier(identifier: &str) -> Option<&'static EngineIdentity> {
+        if bytes_equal(identifier.as_bytes(), REAL.bundle_identifier.as_bytes()) {
+            Some(&REAL)
+        } else if bytes_equal(identifier.as_bytes(), TEST.bundle_identifier.as_bytes()) {
+            Some(&TEST)
+        } else {
+            None
+        }
+    }
 
-/// Set the process-wide identity. First writer wins (same semantics as `state_paths::init_*`).
-pub fn init(identity: &EngineIdentity) {
-    let _ = CREDENTIAL_SERVICE.set(identity.credential_service);
-    let _ = CONFIG_DIR_NAME.set(identity.config_dir_name);
+    /// Whether this is the released app.
+    pub const fn is_real(&self) -> bool {
+        bytes_equal(self.bundle_identifier.as_bytes(), REAL.bundle_identifier.as_bytes())
+    }
+
+    /// `io.beebeeb.app` or `io.beebeeb.app.test`.
+    pub const fn bundle_identifier(&self) -> &'static str {
+        self.bundle_identifier
+    }
+
+    /// The folder under the user's config dir that holds `desktop.toml`; also the folder under the data, cache
+    /// and temp dirs for staged and kept copies, and the Linux FUSE filesystem name.
+    pub const fn config_dir_name(&self) -> &'static str {
+        self.config_dir_name
+    }
+
+    /// The local state folder (`state.db`, the sync lock) for a host that names a BASE dir: the base itself for
+    /// the real app (its host has always passed the app's own data dir), a sub-folder of it for the test build.
+    pub fn state_dir_in(&self, base: &std::path::Path) -> std::path::PathBuf {
+        if self.state_dir_name.is_empty() {
+            base.to_path_buf()
+        } else {
+            base.join(self.state_dir_name)
+        }
+    }
+
+    /// Why this app must not run on `os` (`std::env::consts::OS`), or `None` when it may. The test build has no
+    /// macOS App Group and no File Provider extension signed for it, so on a Mac it could only use the real
+    /// app's group container: it does not start there. `Engine::open` refuses with this, and a host asks
+    /// before it makes anything.
+    pub fn refusal_on(&self, os: &str) -> Option<&'static str> {
+        (!self.is_real() && os == "macos").then_some(
+            "This is a test build of Beebeeb. Test builds do not run on macOS: they would share the real app's data there.",
+        )
+    }
+
+    /// Where this app's throw-away files go under an OS temp or cache dir, and so the only part of that dir a
+    /// purge may delete from: the dir itself for the real app (its cache paths have always been recorded
+    /// anywhere under it, and a narrower root would leave an earlier build's decrypted copies behind at
+    /// sign-out), a sub-folder for the test build, which therefore never deletes outside its own folder.
+    pub fn scratch_dir_in(&self, base: &std::path::Path) -> std::path::PathBuf {
+        self.state_dir_in(base)
+    }
+
+    /// The service every stored credential is named under (Windows: `<service>/<leaf>`; macOS: the Keychain
+    /// service).
+    pub const fn credential_service(&self) -> &'static str {
+        self.credential_service
+    }
+
+    /// The folder suggested in the person's home dir for synced files.
+    pub const fn sync_folder_name(&self) -> &'static str {
+        self.sync_folder_name
+    }
+
+    /// The Cloud Files provider name: what Explorer shows, and the prefix of every sync-root id.
+    pub const fn cloud_files_provider_name(&self) -> &'static str {
+        self.cloud_files_provider_name
+    }
+
+    /// The Cloud Files provider GUID.
+    pub const fn cloud_files_provider_guid(&self) -> u128 {
+        self.cloud_files_provider_guid
+    }
+
+    /// The COM class of the Explorer status flyout.
+    pub const fn status_ui_class_id(&self) -> u128 {
+        self.status_ui_class_id
+    }
+
+    /// The COM class of the thumbnail provider.
+    pub const fn thumbnail_provider_class_id(&self) -> u128 {
+        self.thumbnail_provider_class_id
+    }
+
+    /// Mixed into the backup device id, so the test build is never the same backup device as the real app on
+    /// the same machine. Empty for the real app: its device id is the machine's, as always.
+    pub const fn backup_device_salt(&self) -> &'static str {
+        self.backup_device_salt
+    }
+
+    /// Appended to the backup device's name (`" (test)"` for the test build).
+    pub const fn backup_device_name_suffix(&self) -> &'static str {
+        self.backup_device_name_suffix
+    }
+
+    /// The Linux daemon socket's file name in the runtime dir.
+    pub const fn daemon_socket_name(&self) -> &'static str {
+        self.daemon_socket_name
+    }
+
+    /// The macOS app group container the app shares with its File Provider extension.
+    pub const fn macos_app_group(&self) -> &'static str {
+        self.macos_app_group
+    }
+
+    /// The folder under `~/Library/Logs` (macOS).
+    pub const fn logs_dir_name(&self) -> &'static str {
+        self.logs_dir_name
+    }
 }
 
-/// The credential service name for the platform store. Falls back to `REAL` when not initialised
-/// (Tauri-shell backward compat).
-pub fn credential_service() -> &'static str {
-    CREDENTIAL_SERVICE.get().copied().unwrap_or(REAL.credential_service)
-}
-
-/// The config folder name. Falls back to `REAL` when not initialised.
-pub fn config_dir_name() -> &'static str {
-    CONFIG_DIR_NAME.get().copied().unwrap_or(REAL.config_dir_name)
-}
-
-/// Test helper: initialise with `TEST`.
-#[cfg(any(test, feature = "test-support"))]
-pub fn init_for_test() {
-    init(&TEST);
+const fn bytes_equal(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The real identity's values are the constants the engine has always used: an install in the
-    /// field depends on each byte.
+    /// The released app's names, as literals: a change here moves every person's config, credentials and sync
+    /// root registration.
     #[test]
-    fn the_real_identity_is_pinned() {
-        assert_eq!(REAL.credential_service, "io.beebeeb.app");
-        assert_eq!(REAL.config_dir_name, "beebeeb");
+    fn the_real_identity_is_todays_bytes() {
+        assert_eq!(REAL.bundle_identifier(), "io.beebeeb.app");
+        assert_eq!(REAL.config_dir_name(), "beebeeb");
+        assert_eq!(REAL.credential_service(), "io.beebeeb.app");
+        assert_eq!(REAL.sync_folder_name(), "Beebeeb");
+        assert_eq!(REAL.cloud_files_provider_name(), "Beebeeb");
+        assert_eq!(REAL.cloud_files_provider_guid(), 0xb33b33b0_5217_4c0a_9e3f_1f2a7c4d8e90);
+        assert_eq!(REAL.status_ui_class_id(), 0xc0b3_3b33_5217_4c0a_9e3f_2f3b8d5e9fa1);
+        assert_eq!(
+            REAL.thumbnail_provider_class_id(),
+            0xb2e0a7d4_9c61_4f3a_8d2e_7a1c5e9b0f44
+        );
+        assert_eq!(REAL.backup_device_salt(), "");
+        assert_eq!(REAL.backup_device_name_suffix(), "");
+        assert_eq!(REAL.daemon_socket_name(), "beebeeb-daemon.sock");
+        assert_eq!(REAL.macos_app_group(), "R8352WDJJR.io.beebeeb.app.fileprovider");
+        assert_eq!(REAL.logs_dir_name(), "Beebeeb");
+        let base = std::path::Path::new("/data/io.beebeeb.app");
+        assert_eq!(
+            REAL.state_dir_in(base),
+            base,
+            "the real app's state folder is the dir its host names"
+        );
+        assert!(REAL.is_real() && !TEST.is_real());
     }
 
     #[test]
-    fn the_test_identity_is_pinned() {
-        assert_eq!(TEST.credential_service, "io.beebeeb.app.test");
-        assert_eq!(TEST.config_dir_name, "beebeeb-test");
+    fn the_test_identity_is_the_documented_one() {
+        assert_eq!(TEST.bundle_identifier(), "io.beebeeb.app.test");
+        assert_eq!(TEST.config_dir_name(), "beebeeb-test");
+        assert_eq!(TEST.credential_service(), "io.beebeeb.app.test");
+        assert_eq!(TEST.sync_folder_name(), "Beebeeb Test");
+        assert_eq!(TEST.cloud_files_provider_name(), "BeebeebTest");
+        assert_eq!(TEST.backup_device_name_suffix(), " (test)");
+        assert_eq!(TEST.daemon_socket_name(), "beebeeb-test-daemon.sock");
+        assert_eq!(TEST.cloud_files_provider_guid(), 0x1876bd5b_c73c_452a_a40c_e2501f3de243);
+        assert_eq!(TEST.status_ui_class_id(), 0xecbe203e_9c20_4ba7_babf_bfc6dad89f0e);
+        assert_eq!(
+            TEST.thumbnail_provider_class_id(),
+            0x691049a8_86db_450a_885a_fde5b4dc1431
+        );
+        assert_eq!(TEST.backup_device_salt(), "io.beebeeb.app.test");
+        assert_eq!(TEST.macos_app_group(), "R8352WDJJR.io.beebeeb.app.test.fileprovider");
+        assert_eq!(TEST.logs_dir_name(), "Beebeeb Test");
+        let base = std::path::Path::new("/data/base");
+        assert_eq!(TEST.state_dir_in(base), base.join("beebeeb-test"));
     }
 
+    /// The real app's throw-away files are anywhere under the OS dir (as its recorded cache paths have always
+    /// been); the test build's only under its own folder, so its purge cannot reach anything else.
     #[test]
-    fn every_field_differs_between_the_two_identities() {
-        let pairs = [
-            ("credential_service", REAL.credential_service, TEST.credential_service),
-            ("config_dir_name", REAL.config_dir_name, TEST.config_dir_name),
-        ];
-        assert_eq!(pairs.len(), 2, "one line per field");
-        for (name, real, test) in pairs {
-            assert_ne!(real, test, "{name}");
-            assert!(!real.is_empty() && !test.is_empty(), "{name}");
+    fn the_test_build_keeps_its_scratch_files_in_its_own_folder() {
+        let temp = std::path::Path::new("/tmp");
+        assert_eq!(REAL.scratch_dir_in(temp), temp);
+        assert_eq!(TEST.scratch_dir_in(temp), temp.join("beebeeb-test"));
+        assert!(!temp.join("bb_real-file").starts_with(TEST.scratch_dir_in(temp)));
+    }
+
+    /// The test build does not run on macOS; nothing else is refused.
+    #[test]
+    fn only_the_test_build_on_macos_is_refused() {
+        assert!(TEST.refusal_on("macos").is_some_and(|words| words.contains("macOS")));
+        for os in ["windows", "linux", "freebsd", ""] {
+            assert_eq!(TEST.refusal_on(os), None, "{os:?}");
+        }
+        for os in ["macos", "windows", "linux"] {
+            assert_eq!(REAL.refusal_on(os), None, "{os}");
         }
     }
 
+    /// Field by field: nothing per-install is the same for both. A field added to the struct must be added here
+    /// (the destructuring below does not compile otherwise).
     #[test]
-    fn only_the_exact_real_values_are_the_real_identity() {
-        assert_eq!(
-            REAL,
-            EngineIdentity {
-                credential_service: "io.beebeeb.app",
-                config_dir_name: "beebeeb"
-            }
-        );
-        // Anything else is not REAL.
-        assert_ne!(TEST, REAL);
-        let forged = EngineIdentity {
-            credential_service: "io.beebeeb.App",
-            config_dir_name: "beebeeb",
-        };
-        assert_ne!(forged, REAL);
-    }
-
-    #[test]
-    fn credential_service_defaults_to_the_real_value() {
-        // OnceLock is per-process; if another test set it first, this test sees that value.
-        // The point is: an un-initialised engine reads the real name (Tauri compat).
-        let value = credential_service();
+    fn the_two_identities_share_no_value() {
+        let EngineIdentity {
+            bundle_identifier,
+            config_dir_name,
+            state_dir_name,
+            credential_service,
+            sync_folder_name,
+            cloud_files_provider_name,
+            cloud_files_provider_guid,
+            status_ui_class_id,
+            thumbnail_provider_class_id,
+            backup_device_salt,
+            backup_device_name_suffix,
+            daemon_socket_name,
+            macos_app_group,
+            logs_dir_name,
+        } = &REAL;
+        assert_ne!(*bundle_identifier, TEST.bundle_identifier);
+        assert_ne!(*config_dir_name, TEST.config_dir_name);
+        assert_ne!(*state_dir_name, TEST.state_dir_name);
+        assert_ne!(*credential_service, TEST.credential_service);
+        assert_ne!(*sync_folder_name, TEST.sync_folder_name);
+        assert_ne!(*cloud_files_provider_name, TEST.cloud_files_provider_name);
+        assert_ne!(*cloud_files_provider_guid, TEST.cloud_files_provider_guid);
+        assert_ne!(*status_ui_class_id, TEST.status_ui_class_id);
+        assert_ne!(*thumbnail_provider_class_id, TEST.thumbnail_provider_class_id);
+        assert_ne!(*backup_device_salt, TEST.backup_device_salt);
+        assert_ne!(*backup_device_name_suffix, TEST.backup_device_name_suffix);
+        assert_ne!(*daemon_socket_name, TEST.daemon_socket_name);
+        assert_ne!(*macos_app_group, TEST.macos_app_group);
+        assert_ne!(*logs_dir_name, TEST.logs_dir_name);
+        // No test name is a prefix-free accident: none equals the real one case-insensitively either.
+        assert!(!TEST.sync_folder_name.eq_ignore_ascii_case(REAL.sync_folder_name));
         assert!(
-            value == REAL.credential_service || value == TEST.credential_service,
-            "unexpected: {value}"
+            !TEST
+                .cloud_files_provider_name
+                .eq_ignore_ascii_case(REAL.cloud_files_provider_name)
         );
     }
 
     #[test]
-    fn config_dir_name_defaults_to_the_real_value() {
-        let value = config_dir_name();
-        assert!(
-            value == REAL.config_dir_name || value == TEST.config_dir_name,
-            "unexpected: {value}"
-        );
-    }
-
-    // --- rule (a): source pin that fails on a literal ---
-
-    /// Nothing in the engine's own code reads a credential service name or a config folder name
-    /// from a literal that is not in this module. The search covers every `.rs` file under
-    /// `crates/beebeeb-engine/src/` and fails on a new `"io.beebeeb.app"` (the credential
-    /// service) or a bare `"beebeeb"` (the config dir) outside of:
-    /// - this file (`identity.rs`),
-    /// - a `Deprecated` constant kept for the Tauri shell (`APP_BUNDLE_ID`, `APP_DOMAIN`),
-    /// - test files whose name ends in `_tests.rs` or `/tests.rs` or `/tests/`.
-    ///
-    /// Mutant: add `const LEAKED: &str = "io.beebeeb.app";` to `keychain.rs`. Red: this test
-    /// fails naming `keychain.rs`.
-    #[test]
-    fn source_pin_no_credential_or_config_literal_outside_identity() {
-        let engine_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut violations = Vec::new();
-        visit_rs_files(&engine_src, &mut |path, contents| {
-            let rel = path.strip_prefix(&engine_src).unwrap_or(path);
-            let rel_str = rel.to_string_lossy();
-            // Skip this module, test files, and the two deprecated-const files.
-            if rel_str.contains("identity.rs") {
-                return;
-            }
-            let is_test = rel_str.ends_with("_tests.rs")
-                || rel_str.ends_with("/tests.rs")
-                || rel_str.contains("/tests/")
-                || rel_str.contains("_tests/")
-                || rel_str.contains("test_sandbox");
-            if is_test {
-                return;
-            }
-            for (line_no, line) in contents.lines().enumerate() {
-                let trimmed = line.trim();
-                // Skip doc comments, regular comments and the deprecated const definitions.
-                if trimmed.starts_with("//") || trimmed.starts_with("///") || trimmed.starts_with("#") {
-                    continue;
-                }
-                // The two deprecated consts the Tauri shell imports: allow their `= "…"` line.
-                if trimmed.contains("pub const APP_BUNDLE_ID") || trimmed.contains("pub const APP_DOMAIN") {
-                    continue;
-                }
-                // Check for the credential service literal.
-                if line.contains("\"io.beebeeb.app\"") {
-                    violations.push(format!("{}:{}: credential service literal", rel_str, line_no + 1));
-                }
-                // Check for the config dir literal (bare "beebeeb" as a path segment,
-                // not part of a longer word like "beebeeb-engine").
-                // Match: .join("beebeeb"), "beebeeb/" or /beebeeb" but not "beebeeb-".
-                if (line.contains("\"beebeeb\"") || line.contains("\"beebeeb/"))
-                    && !line.contains("\"beebeeb-")
-                    && !line.contains("beebeeb_")
-                {
-                    violations.push(format!("{}:{}: config dir literal", rel_str, line_no + 1));
-                }
-            }
-        });
-        assert!(
-            violations.is_empty(),
-            "literals outside identity.rs:\n{}",
-            violations.join("\n")
-        );
-    }
-
-    fn visit_rs_files(dir: &std::path::Path, cb: &mut dyn FnMut(&std::path::Path, &str)) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                visit_rs_files(&path, cb);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                if let Ok(contents) = std::fs::read_to_string(&path) {
-                    cb(&path, &contents);
-                }
-            }
+    fn only_the_two_bundle_identifiers_name_an_identity() {
+        assert!(std::ptr::eq(
+            EngineIdentity::from_bundle_identifier("io.beebeeb.app").unwrap(),
+            &REAL
+        ));
+        assert!(std::ptr::eq(
+            EngineIdentity::from_bundle_identifier("io.beebeeb.app.test").unwrap(),
+            &TEST
+        ));
+        for other in [
+            "",
+            "io.beebeeb.app ",
+            "IO.BEEBEEB.APP",
+            "io.beebeeb.app.dev",
+            "io.beebeeb",
+        ] {
+            assert!(EngineIdentity::from_bundle_identifier(other).is_none(), "{other:?}");
         }
     }
 }

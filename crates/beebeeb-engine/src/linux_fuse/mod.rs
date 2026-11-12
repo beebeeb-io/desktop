@@ -107,7 +107,15 @@ impl Filesystem for BeebeebFS {
             return;
         };
 
-        let cache_path = std::env::temp_dir().join(format!("bb_{}", entry.file_id));
+        // The identity's own part of the temp dir: the dir itself for the real app (`<temp>/bb_<id>`, as always),
+        // a sub-folder for the test build, made here because nothing else creates it.
+        let temp_root = self.bridge.identity.scratch_dir_in(&std::env::temp_dir());
+        if let Err(error) = std::fs::create_dir_all(&temp_root) {
+            tracing::warn!(%error, "could not create the FUSE cache folder");
+            reply.error(libc::EIO);
+            return;
+        }
+        let cache_path = temp_root.join(format!("bb_{}", entry.file_id));
         if entry.status == FileStatus::CloudOnly {
             let bridge = self.bridge.clone();
             let file_id = entry.file_id.clone();
@@ -119,7 +127,6 @@ impl Filesystem for BeebeebFS {
                 // entry (`<temp_dir>/bb_<file_id>`), never under the sync root —
                 // so the temp dir is this call's only allowed hydrate root
                 // (task 1247).
-                let temp_root = std::env::temp_dir();
                 bridge
                     .hydrate_file(&file_id, &hydrate_path, &[temp_root.as_path()])
                     .await
@@ -230,10 +237,11 @@ fn file_attr(ino: u64, entry: &FileEntry) -> fuser::FileAttr {
 
 pub fn mount(sync_root: &Path, db: Arc<StateDb>, bridge: Arc<EngineBridge>) {
     let rt = tokio::runtime::Handle::current();
+    let fs_name = bridge.identity.config_dir_name().to_string();
     let fs = BeebeebFS::new(db, bridge, rt);
     let options = vec![
         fuser::MountOption::RO,
-        fuser::MountOption::FSName(crate::identity::config_dir_name().to_string()),
+        fuser::MountOption::FSName(fs_name),
         fuser::MountOption::AutoUnmount,
     ];
     fuser::mount2(fs, sync_root, &options).expect("FUSE mount failed");

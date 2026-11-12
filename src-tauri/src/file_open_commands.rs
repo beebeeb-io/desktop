@@ -602,7 +602,7 @@ pub(super) async fn popover_snapshot(
             board,
             activity_limit: limit,
         });
-        snapshot.update = macos_popover::update_offer();
+        snapshot.update = popover_data::update_offer();
         #[cfg(target_os = "macos")]
         {
             let sending = state
@@ -616,8 +616,8 @@ pub(super) async fn popover_snapshot(
                     .await
                     .map_err(|e| e.to_string())
                     .and_then(|read| read);
-                snapshot.sign_out_sending = Some(macos_popover::Sending {
-                    changes_left: macos_popover::changes_left(read),
+                snapshot.sign_out_sending = Some(popover_data::Sending {
+                    changes_left: popover_data::changes_left(read),
                 });
             }
         }
@@ -649,7 +649,7 @@ pub(super) async fn popover_snapshot(
 /// IPC command thread isn't held by SQLite + `remove_file` syscalls.
 #[tauri::command]
 pub(super) async fn free_up_space() -> Result<FreeUpSpaceResult, String> {
-    tokio::task::spawn_blocking(free_up_space_blocking)
+    tokio::task::spawn_blocking(|| free_up_space_blocking(crate::APP))
         .await
         .map_err(|e| format!("free_up_space task join: {e}"))?
 }

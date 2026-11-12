@@ -106,14 +106,21 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
     }
     .child(kit::label("item-count", count, type_::TITLE_SUB, t.text_tertiary));
 
+    let grid = crate::frames::global::grid::on(s);
     let view_toggle = segmented(
         "view-toggle",
         "View",
         vec![
-            segment("view-list", "as List", &icons::VIEW_LIST, true, t),
-            // The grid is another frame of this window (DW-1102), not built here.
-            segment("view-grid", "as Grid", &icons::VIEW_GRID, false, t)
-                .on_press(|s: &mut State| s.intent(Intent::Frame("DW-1102"))),
+            // Each folder remembers its own view (`frames::global::grid`, DW-0119).
+            segment("view-list", "as List", &icons::VIEW_LIST, !grid, t)
+                .on_press_tx(|s: &mut State, tx: &mut rune::Tx| crate::frames::global::grid::switch(s, false, tx)),
+            // The grid with the details panel on a photo is another frame (DW-1102), not built here.
+            segment("view-grid", "as Grid", &icons::VIEW_GRID, grid, t).on_press_tx(
+                |s: &mut State, tx: &mut rune::Tx| {
+                    s.intent(Intent::Frame("DW-1102"));
+                    crate::frames::global::grid::switch(s, true, tx);
+                },
+            ),
         ],
         t,
     );
@@ -152,6 +159,21 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
     .shortcut_hint("Alt+Shift+P")
     .checked(s.show_detail_pane)
     .on_press(|s: &mut State| s.show_detail_pane = !s.show_detail_pane);
+
+    // Open in File Explorer: the folder shown, in Explorer. The last icon button of the toolbar;
+    // not on the board yet (PR 305, Decision: owner request 2026-11-12).
+    let explorer_btn = tool_button(
+        "open-explorer",
+        "Open in File Explorer",
+        &crate::theme::icons_settings::FOLDER,
+        16.0,
+        ToolState::Idle,
+        t,
+    )
+    .help("Open in File Explorer")
+    .on_press_tx(|s: &mut State, tx: &mut rune::Tx| {
+        s.open_in_file_explorer(tx);
+    });
 
     let sep = el().key("toolbar-sep").w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
 
@@ -237,6 +259,7 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
         .child(view_toggle)
         .child(sort_btn)
         .child(panel_btn)
+        .child(explorer_btn)
         .child(sep)
         .child(new_btn)
         .child(search_field)

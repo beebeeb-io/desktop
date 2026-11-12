@@ -144,6 +144,15 @@ pub enum PasskeyOutcome {
     Unavailable,
 }
 
+/// What the strength meter under a new password shows (`.kit-strength`): how many of its four
+/// bars are lit and the engine's words for it ("Strong."). The rules are the engine's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasswordStrength {
+    /// 1 to 4.
+    pub bars: u8,
+    pub words: String,
+}
+
 /// What a `begin_*` call answers with, later.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignInEvent {
@@ -206,6 +215,20 @@ pub trait SignInSource {
     fn begin_set_password(&mut self, password: &str);
     /// The next finished answer, if any.
     fn poll(&mut self) -> Option<SignInEvent>;
+    /// Added by lane f-signin-rest (a default, so an implementation written before it compiles):
+    /// the person went back from a step after the password (the code, the twelve words, the
+    /// vault password). The partial session is discarded (`auth_v2`: drop the partial token) and
+    /// no `TwoFactor`, `PhraseRestored` or `VaultUnlocked` event of it may arrive after this call.
+    fn discard_partial_sign_in(&mut self) {}
+    /// Added by lane f-signin-rest (a default): how strong a password being chosen is, by the
+    /// same rules as sign-up (DW-A49). Local and at once (it runs on every keystroke); `None`:
+    /// no verdict, the meter stays empty.
+    fn password_strength(&self, _password: &str) -> Option<PasswordStrength> {
+        None
+    }
+    /// Added by lane f-signin-rest (a default): the person left while Windows' passkey dialog
+    /// was up: dismiss it. No `Passkey` event of that attempt may arrive after this call.
+    fn cancel_passkey(&mut self) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +266,9 @@ pub struct Script {
     pub hello: HelloOutcome,
     pub device: Option<DeviceStatus>,
     pub passkey: PasskeyOutcome,
+    /// What a two-factor code gets instead of the check against the board's code (DW-A27 draws
+    /// the board's own six digits as the wrong ones).
+    pub two_factor_problem: Option<TwoFactorProblem>,
     /// `true`: answers wait until [`FixtureSignInSource::release`] (the board's in-flight frames).
     pub hold: bool,
 }
@@ -263,6 +289,7 @@ impl Default for Script {
             hello: HelloOutcome::Succeeded(NextAfterSignIn::Drive),
             device: None,
             passkey: PasskeyOutcome::NeedsPassword,
+            two_factor_problem: None,
             hold: false,
         }
     }
@@ -381,11 +408,12 @@ impl SignInSource for FixtureSignInSource {
             CodeKind::Authenticator => board::TOTP,
             CodeKind::Backup => board::BACKUP_CODE,
         };
-        self.queue.push_back(SignInEvent::TwoFactor(if code == right {
-            Ok(self.after_proof())
-        } else {
-            Err(TwoFactorProblem::WrongCode)
-        }));
+        self.queue
+            .push_back(SignInEvent::TwoFactor(match self.script.two_factor_problem {
+                Some(problem) => Err(problem),
+                None if code == right => Ok(self.after_proof()),
+                None => Err(TwoFactorProblem::WrongCode),
+            }));
     }
 
     fn begin_restore(&mut self, words: &[&str]) {
@@ -427,6 +455,29 @@ impl SignInSource for FixtureSignInSource {
             return None;
         }
         self.queue.pop_front()
+    }
+
+    fn discard_partial_sign_in(&mut self) {
+        self.called("discard_partial_sign_in");
+        self.queue.retain(|e| {
+            !matches!(
+                e,
+                SignInEvent::TwoFactor(_) | SignInEvent::PhraseRestored(_) | SignInEvent::VaultUnlocked(_)
+            )
+        });
+    }
+
+    fn password_strength(&self, password: &str) -> Option<PasswordStrength> {
+        // The board draws one verdict, for its own password: the fixture has no other.
+        (password.chars().count() == board::PASSWORD_LEN).then(|| PasswordStrength {
+            bars: 4,
+            words: "Strong.".into(),
+        })
+    }
+
+    fn cancel_passkey(&mut self) {
+        self.called("cancel_passkey");
+        self.queue.retain(|e| !matches!(e, SignInEvent::Passkey(_)));
     }
 }
 

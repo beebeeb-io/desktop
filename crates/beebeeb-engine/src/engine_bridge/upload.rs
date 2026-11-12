@@ -659,7 +659,7 @@ impl EngineBridge {
         ));
         // Rate-limit ceiling: read once per file, not per chunk (config is on
         // disk but the file is fast to parse; at most one read per upload op).
-        let upload_kbps_limit = crate::config::DesktopConfig::load()
+        let upload_kbps_limit = crate::config::DesktopConfig::load_for(self.identity)
             .map(|c| c.upload_kbps_limit)
             .unwrap_or(0);
 

@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::finder_setup::error::{FpError, app_code, app_domain};
+use crate::finder_setup::error::{APP_DOMAIN, FpError, app_code};
 use crate::host::EngineHost;
 
 /// Result of a best-effort working-set signal (task 1697).
@@ -35,7 +35,7 @@ pub fn should_signal_working_set(changed_item_ids: &[String]) -> bool {
 /// Whether `error` is the gate answering "busy" (an earlier bridge call has not returned), as opposed to
 /// the OS failing. The engine's working-set signal owes its ids to the next tick in that case.
 pub fn is_gate_busy(error: &FpError) -> bool {
-    error.domain == app_domain() && error.code == app_code::OP_TIMEOUT
+    error.domain == APP_DOMAIN && error.code == app_code::OP_TIMEOUT
 }
 
 /// The bridge is one per process (like its gate), so the port is too. The last runner start wins.

@@ -131,7 +131,9 @@ fn the_tick_loop_reports_through_the_tracker() {
     // normalised: a Windows checkout has CRLF, slice 5's lesson).
     let source = include_str!("../../runner.rs").replace("\r\n", "\n");
     // The signature is wrapped over lines by rustfmt. (A single-line needle would also find this very line.)
-    let start = source.find("async fn run(\n    app: Host").expect("run exists");
+    let start = source
+        .find("async fn run(\n    identity: &'static crate::identity::EngineIdentity,\n    app: Host")
+        .expect("run exists");
     let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
     for needle in [
         "emit_payload(&app, tracker.running());",
@@ -173,7 +175,9 @@ fn the_tick_loop_reports_through_the_tracker() {
 #[test]
 fn engine_start_marks_earlier_build_uploads_on_macos_only_after_the_repair() {
     let source = include_str!("../../runner.rs").replace("\r\n", "\n");
-    let start = source.find("async fn run(\n    app: Host").expect("run exists");
+    let start = source
+        .find("async fn run(\n    identity: &'static crate::identity::EngineIdentity,\n    app: Host")
+        .expect("run exists");
     let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
     let call = "db.mark_earlier_build_uploads()";
     assert_eq!(body.matches(call).count(), 1, "`run` marks once");
@@ -194,9 +198,12 @@ fn engine_start_marks_earlier_build_uploads_on_macos_only_after_the_repair() {
 #[test]
 fn engine_start_sweeps_unreferenced_staged_copies_on_macos_after_the_repair_before_ipc() {
     let source = include_str!("../../runner.rs").replace("\r\n", "\n");
-    let start = source.find("async fn run(\n    app: Host").expect("run exists");
+    let start = source
+        .find("async fn run(\n    identity: &'static crate::identity::EngineIdentity,\n    app: Host")
+        .expect("run exists");
     let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
-    let call = "crate::staged_payload::sweep_unreferenced(&db, &crate::engine_bridge::finder_staging_candidates())";
+    let call =
+        "crate::staged_payload::sweep_unreferenced(&db, &crate::engine_bridge::finder_staging_candidates(identity))";
     assert_eq!(body.matches(call).count(), 1, "`run` sweeps once");
     assert!(
         body.contains(&format!("#[cfg(target_os = \"macos\")]\n    match {call}")),
@@ -217,7 +224,9 @@ fn engine_start_sweeps_unreferenced_staged_copies_on_macos_after_the_repair_befo
 #[test]
 fn engine_start_lines_log_counts_and_error_categories_only() {
     let source = include_str!("../../runner.rs").replace("\r\n", "\n");
-    let start = source.find("async fn run(\n    app: Host").expect("run exists");
+    let start = source
+        .find("async fn run(\n    identity: &'static crate::identity::EngineIdentity,\n    app: Host")
+        .expect("run exists");
     let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
     let from = body.find("match db.engine_start_repair()").expect("the start repair");
     let to = from

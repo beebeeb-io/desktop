@@ -10,12 +10,7 @@ pub const POSIX_DOMAIN: &str = "NSPOSIXErrorDomain";
 pub const BRIDGE_DOMAIN: &str = "io.beebeeb.bridge";
 /// Errors the Rust side synthesizes (engine start, saving the sync folder, a bridge
 /// return code the bridge does not document, a refused launch location).
-/// **Deprecated:** the Tauri shell still imports this. New code uses [`app_domain`].
-pub const APP_DOMAIN: &'static str = "io.beebeeb.app";
-/// The app's error domain, from the process-wide identity. Prefer this over `APP_DOMAIN`.
-pub fn app_domain() -> &'static str {
-    crate::identity::credential_service()
-}
+pub const APP_DOMAIN: &str = "io.beebeeb.app";
 
 // The codes the bridge synthesizes. Only `STABILIZATION_TIMEOUT` is classified; the rest mirror the
 // ObjC enum so a test pins the two sets against each other (`the_bridge_error_codes_are_the_rust_constants`).
@@ -88,7 +83,7 @@ impl FpError {
     }
 
     pub fn app(code: i64, message: impl Into<String>) -> Self {
-        Self::new(app_domain(), code, message)
+        Self::new(APP_DOMAIN, code, message)
     }
 }
 

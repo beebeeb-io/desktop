@@ -9,8 +9,8 @@ impl EngineBridge {
     /// each a fresh, independent unit of work, not the long-running engine
     /// loop `EngineRunner` owns, so there is nothing external that should
     /// ever ask THIS instance to stop mid-call.
-    pub fn new(db: Arc<StateDb>, api: Arc<ApiClient>) -> Self {
-        Self::new_with_stop_flag(db, api, Arc::new(AtomicBool::new(false)))
+    pub fn new(identity: &'static crate::identity::EngineIdentity, db: Arc<StateDb>, api: Arc<ApiClient>) -> Self {
+        Self::new_with_stop_flag(identity, db, api, Arc::new(AtomicBool::new(false)))
     }
 
     /// Like [`Self::new`], but shares an externally-owned stop flag —
@@ -19,8 +19,14 @@ impl EngineBridge {
     /// it handed to the IPC socket server / Windows upload watcher) observes
     /// the stop request the instant it's set, not just at the next tick
     /// boundary (task 1538 Codex P1).
-    pub fn new_with_stop_flag(db: Arc<StateDb>, api: Arc<ApiClient>, stopping: Arc<AtomicBool>) -> Self {
+    pub fn new_with_stop_flag(
+        identity: &'static crate::identity::EngineIdentity,
+        db: Arc<StateDb>,
+        api: Arc<ApiClient>,
+        stopping: Arc<AtomicBool>,
+    ) -> Self {
         Self {
+            identity,
             db,
             api,
             wire: WireCounters::new(),
@@ -108,7 +114,7 @@ impl EngineBridge {
         if let Some(bases) = self.seams.staging_bases() {
             return finder_staging_root_from(&bases);
         }
-        default_finder_staging_root()
+        default_finder_staging_root(self.identity)
     }
 
     /// Report transfer progress to `board` (task 1683 slice 2).

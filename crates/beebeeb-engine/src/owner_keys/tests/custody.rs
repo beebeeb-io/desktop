@@ -43,6 +43,7 @@ fn sf2258_upgrade_required_is_its_own_state_with_no_retry() {
     });
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
+        &crate::identity::REAL,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );

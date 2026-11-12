@@ -78,8 +78,8 @@ pub fn with_own_backups<T>(f: impl FnOnce(&OwnBackups) -> T) -> T {
 /// original is read from, under the device folder the backup layout resolved (core's `find_device_folder`, so
 /// `GLegion (a3f2)` after a name collision; never re-derived from the hostname). No network. A config that cannot
 /// be read keeps the last answer: a read error never lifts a protection. See [`crate::backup::own_backups`].
-pub fn refresh_own_backups(db: &StateDb) {
-    match crate::backup::own_backups(db) {
+pub fn refresh_own_backups(identity: &'static crate::identity::EngineIdentity, db: &StateDb) {
+    match crate::backup::own_backups(identity, db) {
         Some(own) => set_own_backups(own),
         None => tracing::debug!("backup protection: config unreadable; keeping the last answer"),
     }

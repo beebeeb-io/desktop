@@ -1,0 +1,1244 @@
+{
+ "frame": "DW-A47",
+ "width": 958,
+ "height": 638,
+ "elements": {
+  "caption-bar": {
+   "kind": "box",
+   "x": 0,
+   "y": 0,
+   "w": 958,
+   "h": 32,
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ]
+  },
+  "cap-mark": {
+   "kind": "icon",
+   "x": 12,
+   "y": 7.5,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": true,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "mark": true
+  },
+  "cap-title": {
+   "kind": "text",
+   "x": 37,
+   "y": 7.5,
+   "w": 774,
+   "h": 16,
+   "text": "Beebeeb Drive",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "cap-min": {
+   "kind": "box",
+   "x": 820,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-min-icon": {
+   "kind": "icon",
+   "x": 838,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M0 5.5h10"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "cap-max": {
+   "kind": "box",
+   "x": 866,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-max-icon": {
+   "kind": "icon",
+   "x": 884,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "rect:x=.5,y=.5,width=9,height=9,rx=1.5"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "cap-close": {
+   "kind": "box",
+   "x": 912,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-close-icon": {
+   "kind": "icon",
+   "x": 930,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M.5.5l9 9M9.5.5l-9 9"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "au-side": {
+   "kind": "box",
+   "x": 0,
+   "y": 32,
+   "w": 320,
+   "h": 606,
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ],
+   "css": {
+    "border": "0px 0.5px 0px 0px oklch(0.92 0.006 85)",
+    "pad": "28px 26px",
+    "gap": "14px"
+   }
+  },
+  "side-mark": {
+   "kind": "icon",
+   "x": 26,
+   "y": 61.17,
+   "w": 34,
+   "h": 34,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": true,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "mark": true
+  },
+  "side-word": {
+   "kind": "text",
+   "x": 69.15,
+   "y": 60,
+   "w": 112,
+   "h": 22.23,
+   "text": "beebeeb.io",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22.2308,
+   "weight": 700,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.62,
+   "lh": "22.2308px",
+   "align": "start"
+  },
+  "side-product": {
+   "kind": "text",
+   "x": 69.15,
+   "y": 84.84,
+   "w": 112,
+   "h": 11.5,
+   "text": "DRIVE",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 9,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 1.62,
+   "lh": "normal",
+   "align": "start"
+  },
+  "side-tagline": {
+   "kind": "text",
+   "x": 26,
+   "y": 110.34,
+   "w": 267.5,
+   "h": 15,
+   "text": "Your files, encrypted on your devices.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "fact-0-icon": {
+   "kind": "icon",
+   "x": 26,
+   "y": 511,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M19 11H5a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2zM7 11V7a5 5 0 0 1 10 0v4"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "fact-0": {
+   "kind": "text",
+   "x": 51,
+   "y": 510,
+   "w": 242.5,
+   "h": 30,
+   "text": "Encrypted on this PC before anything syncs. Beebeeb can't read it.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "fact-1-icon": {
+   "kind": "icon",
+   "x": 26,
+   "y": 553,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "fact-1": {
+   "kind": "text",
+   "x": 51,
+   "y": 552,
+   "w": 242.5,
+   "h": 30,
+   "text": "One Beebeeb account for Drive, Pass, VPN, Chat and Mail.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "fact-2-icon": {
+   "kind": "icon",
+   "x": 26,
+   "y": 595,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18zM3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9M12 3c-2.5 2.6-3.8 5.6-3.8 9s1.3 6.4 3.8 9"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "fact-2": {
+   "kind": "text",
+   "x": 51,
+   "y": 594,
+   "w": 97.73,
+   "h": 15,
+   "text": "Stored in Europe.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "au-main": {
+   "kind": "box",
+   "x": 320,
+   "y": 32,
+   "w": 638,
+   "h": 606,
+   "bg": [
+    16,
+    13,
+    9,
+    255
+   ],
+   "css": {
+    "pad": "20px"
+   }
+  },
+  "back-icon": {
+   "kind": "icon",
+   "x": 467,
+   "y": 153.5,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M15 5l-7 7 7 7"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "back": {
+   "kind": "text",
+   "x": 485,
+   "y": 153,
+   "w": 98.69,
+   "h": 14.5,
+   "text": "Recovery options",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0
+  },
+  "title": {
+   "kind": "text",
+   "x": 467,
+   "y": 179,
+   "w": 344,
+   "h": 28,
+   "text": "Recover with your phrase",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 22,
+   "weight": 650,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.48,
+   "lh": "28px",
+   "align": "start"
+  },
+  "subtitle": {
+   "kind": "text",
+   "x": 467,
+   "y": 213,
+   "w": 344,
+   "h": 30,
+   "text": "Enter your email and the 12-word recovery phrase from your account setup.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "btn-0": {
+   "kind": "box",
+   "x": 467,
+   "y": 485,
+   "w": 344,
+   "h": 32,
+   "bg": [
+    247,
+    185,
+    0,
+    255
+   ],
+   "css": {
+    "radius": "6px",
+    "pad": "0px 12px",
+    "gap": "7px",
+    "opacity": "0.5"
+   }
+  },
+  "btn-0-icon": {
+   "kind": "icon",
+   "x": 586.28,
+   "y": 493,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"
+   ],
+   "filled": false,
+   "color": [
+    30,
+    26,
+    22,
+    255
+   ]
+  },
+  "btn-0-label": {
+   "kind": "text",
+   "x": 609.28,
+   "y": 491.25,
+   "w": 82.44,
+   "h": 19.5,
+   "text": "Verify phrase",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    30,
+    26,
+    22,
+    255
+   ],
+   "tracking": -0.06,
+   "lh": "19.5px",
+   "align": "center"
+  },
+  "field-0-label": {
+   "kind": "text",
+   "x": 469,
+   "y": 254,
+   "w": 340,
+   "h": 15,
+   "text": "Email",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0,
+   "lh": "15px",
+   "align": "start"
+  },
+  "field-0": {
+   "kind": "box",
+   "x": 467,
+   "y": 275,
+   "w": 344,
+   "h": 28,
+   "bg": [
+    35,
+    30,
+    24,
+    255
+   ],
+   "css": {
+    "radius": "6px",
+    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset",
+    "border": "1px 1px 1px 1px rgba(0, 0, 0, 0)",
+    "pad": "0px 8px",
+    "gap": "6px"
+   }
+  },
+  "field-0-icon": {
+   "kind": "icon",
+   "x": 476,
+   "y": 281,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2zM22 6l-10 7L2 6"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "field-0-value": {
+   "kind": "text",
+   "x": 498,
+   "y": 281,
+   "w": 145.91,
+   "h": 15.5,
+   "text": "anna@northwind.studio",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "secure": false
+  },
+  "word-0": {
+   "kind": "box",
+   "x": 467,
+   "y": 314,
+   "w": 110.66,
+   "h": 34,
+   "bg": [
+    35,
+    30,
+    24,
+    255
+   ],
+   "css": {
+    "radius": "11px",
+    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset",
+    "pad": "8px 10px",
+    "gap": "6px"
+   }
+  },
+  "word-0-n": {
+   "kind": "text",
+   "x": 477,
+   "y": 323,
+   "w": 16,
+   "h": 17,
+   "text": "1",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-0-text": {
+   "kind": "text",
+   "x": 499,
+   "y": 322,
+   "w": 46.8,
+   "h": 17,
+   "text": "harbor",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-1": {
+   "kind": "box",
+   "x": 583.66,
+   "y": 314,
+   "w": 110.66,
+   "h": 34,
+   "bg": [
+    35,
+    30,
+    24,
+    255
+   ],
+   "css": {
+    "radius": "11px",
+    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset",
+    "pad": "8px 10px",
+    "gap": "6px"
+   }
+  },
+  "word-1-n": {
+   "kind": "text",
+   "x": 593.66,
+   "y": 323,
+   "w": 16,
+   "h": 17,
+   "text": "2",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-1-text": {
+   "kind": "text",
+   "x": 615.66,
+   "y": 322,
+   "w": 39.01,
+   "h": 17,
+   "text": "maple",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-2": {
+   "kind": "box",
+   "x": 700.33,
+   "y": 314,
+   "w": 110.66,
+   "h": 34,
+   "bg": [
+    35,
+    30,
+    24,
+    255
+   ],
+   "css": {
+    "radius": "11px",
+    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset",
+    "pad": "8px 10px",
+    "gap": "6px"
+   }
+  },
+  "word-2-n": {
+   "kind": "text",
+   "x": 710.33,
+   "y": 323,
+   "w": 16,
+   "h": 17,
+   "text": "3",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-2-text": {
+   "kind": "text",
+   "x": 732.33,
+   "y": 322,
+   "w": 39.01,
+   "h": 17,
+   "text": "quiet",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-3": {
+   "kind": "box",
+   "x": 467,
+   "y": 354,
+   "w": 110.66,
+   "h": 34,
+   "bg": [
+    35,
+    30,
+    24,
+    255
+   ],
+   "css": {
+    "radius": "11px",
+    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset",
+    "pad": "8px 10px",
+    "gap": "6px"
+   }
+  },
+  "word-3-n": {
+   "kind": "text",
+   "x": 477,
+   "y": 363,
+   "w": 16,
+   "h": 17,
+   "text": "4",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-3-text": {
+   "kind": "text",
+   "x": 499,
+   "y": 362,
+   "w": 54.6,
+   "h": 17,
+   "text": "lantern",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-4": {
+   "kind": "box",
+   "x": 583.66,
+   "y": 354,
+   "w": 110.66,
+   "h": 34,
+   "bg": [
+    35,
+    30,
+    24,
+    255
+   ],
+   "css": {
+    "radius": "11px",
+    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset",
+    "pad": "8px 10px",
+    "gap": "6px"
+   }
+  },
+  "word-4-n": {
+   "kind": "text",
+   "x": 593.66,
+   "y": 363,
+   "w": 16,
+   "h": 17,
+   "text": "5",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-4-text": {
+   "kind": "text",
+   "x": 615.66,
+   "y": 362,
+   "w": 39.01,
+   "h": 17,
+   "text": "orbit",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-5": {
+   "kind": "box",
+   "x": 700.33,
+   "y": 354,
+   "w": 110.66,
+   "h": 34,
+   "bg": [
+    35,
+    30,
+    24,
+    255
+   ],
+   "css": {
+    "radius": "11px",
+    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset",
+    "pad": "8px 10px",
+    "gap": "6px"
+   }
+  },
+  "word-5-n": {
+   "kind": "text",
+   "x": 710.33,
+   "y": 363,
+   "w": 16,
+   "h": 17,
+   "text": "6",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-5-text": {
+   "kind": "text",
+   "x": 732.33,
+   "y": 362,
+   "w": 46.8,
+   "h": 17,
+   "text": "copper",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-6": {
+   "kind": "box",
+   "x": 467,
+   "y": 394,
+   "w": 110.66,
+   "h": 35,
+   "bg": [
+    35,
+    30,
+    24,
+    255
+   ],
+   "css": {
+    "radius": "11px",
+    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset",
+    "pad": "8px 10px",
+    "gap": "6px"
+   }
+  },
+  "word-6-n": {
+   "kind": "text",
+   "x": 477,
+   "y": 403,
+   "w": 16,
+   "h": 17,
+   "text": "7",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-6-text": {
+   "kind": "text",
+   "x": 499,
+   "y": 402,
+   "w": 46.8,
+   "h": 17,
+   "text": "meadow",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-7": {
+   "kind": "box",
+   "x": 583.66,
+   "y": 394,
+   "w": 110.66,
+   "h": 35,
+   "bg": [
+    35,
+    30,
+    24,
+    255
+   ],
+   "css": {
+    "radius": "11px",
+    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset",
+    "pad": "8px 10px",
+    "gap": "6px"
+   }
+  },
+  "word-7-n": {
+   "kind": "text",
+   "x": 593.66,
+   "y": 403,
+   "w": 16,
+   "h": 17,
+   "text": "8",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-7-text": {
+   "kind": "text",
+   "x": 615.66,
+   "y": 402,
+   "w": 46.8,
+   "h": 17,
+   "text": "ribbon",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-8": {
+   "kind": "box",
+   "x": 700.33,
+   "y": 394,
+   "w": 110.66,
+   "h": 35,
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ],
+   "css": {
+    "radius": "11px",
+    "shadow": "oklch(0.76 0.15 72) 0px 0px 0px 2px",
+    "pad": "8px 10px",
+    "gap": "6px"
+   }
+  },
+  "word-8-n": {
+   "kind": "text",
+   "x": 710.33,
+   "y": 404,
+   "w": 16,
+   "h": 17,
+   "text": "9",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-8-caret": {
+   "kind": "box",
+   "x": 733.33,
+   "y": 402,
+   "w": 1.5,
+   "h": 17,
+   "bg": [
+    235,
+    159,
+    44,
+    255
+   ],
+   "css": {
+    "radius": "1px"
+   }
+  },
+  "word-9": {
+   "kind": "box",
+   "x": 467,
+   "y": 435,
+   "w": 110.66,
+   "h": 33,
+   "bg": [
+    35,
+    30,
+    24,
+    255
+   ],
+   "css": {
+    "radius": "11px",
+    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset",
+    "pad": "8px 10px",
+    "gap": "6px"
+   }
+  },
+  "word-9-n": {
+   "kind": "text",
+   "x": 477,
+   "y": 443,
+   "w": 16,
+   "h": 17,
+   "text": "10",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-10": {
+   "kind": "box",
+   "x": 583.66,
+   "y": 435,
+   "w": 110.66,
+   "h": 33,
+   "bg": [
+    35,
+    30,
+    24,
+    255
+   ],
+   "css": {
+    "radius": "11px",
+    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset",
+    "pad": "8px 10px",
+    "gap": "6px"
+   }
+  },
+  "word-10-n": {
+   "kind": "text",
+   "x": 593.66,
+   "y": 443,
+   "w": 16,
+   "h": 17,
+   "text": "11",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  },
+  "word-11": {
+   "kind": "box",
+   "x": 700.33,
+   "y": 435,
+   "w": 110.66,
+   "h": 33,
+   "bg": [
+    35,
+    30,
+    24,
+    255
+   ],
+   "css": {
+    "radius": "11px",
+    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset",
+    "pad": "8px 10px",
+    "gap": "6px"
+   }
+  },
+  "word-11-n": {
+   "kind": "text",
+   "x": 710.33,
+   "y": 443,
+   "w": 16,
+   "h": 17,
+   "text": "12",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 11,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0,
+   "lh": "17px",
+   "align": "start"
+  }
+ },
+ "theme": "dark"
+}

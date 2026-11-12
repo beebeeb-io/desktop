@@ -6,12 +6,10 @@
 
 use std::fmt;
 
-/// The service every platform store (and the test store) names its items with. Reads from the
-/// process-wide identity (`crate::identity::credential_service`); the Linux stub has no item to name.
-#[cfg(any(any(test, feature = "test-support"), target_os = "macos", target_os = "windows"))]
-fn keychain_service() -> &'static str {
-    crate::identity::credential_service()
-}
+// The service every platform store (and the test store) names its items with comes from the identity the store
+// was made for (`EngineIdentity::credential_service`): no store has a constructor without one, and none has a
+// `Default`. `super`, not `crate`: `src-tauri/tests/keychain.rs` includes this file and `identity.rs` by path.
+use super::identity::EngineIdentity;
 const MASTER_KEY_BYTES: usize = 32;
 
 #[derive(PartialEq, Eq)]
@@ -80,31 +78,37 @@ impl fmt::Debug for SecretBytes {
 #[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
 pub struct MacOsKeychainStore {
     account_prefix: Option<AccountId>,
+    /// `EngineIdentity::credential_service` of the identity this store was made for.
+    service: &'static str,
 }
 
 #[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
 impl MacOsKeychainStore {
     /// Legacy flat store (no account segmentation). Prefer `with_account`.
-    pub fn new() -> Self {
-        Self { account_prefix: None }
+    pub fn new(identity: &'static EngineIdentity) -> Self {
+        Self {
+            account_prefix: None,
+            service: identity.credential_service(),
+        }
     }
 
     /// Store segmented under `account_id` (Phase 1).
-    pub fn with_account(account_id: impl Into<AccountId>) -> Self {
+    pub fn with_account(identity: &'static EngineIdentity, account_id: impl Into<AccountId>) -> Self {
         Self {
             account_prefix: Some(account_id.into()),
+            service: identity.credential_service(),
         }
     }
 
     fn account_path(&self, account: KeychainAccount) -> String {
         account_path(self.account_prefix.as_ref(), account)
     }
-}
 
-#[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
-impl Default for MacOsKeychainStore {
-    fn default() -> Self {
-        Self::new()
+    /// The whole name this store keeps `account` under ([`item_name`]): what a test pins per identity.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub fn item_name_of(&self, account: KeychainAccount) -> String {
+        item_name(self.service, &self.account_path(account))
     }
 }
 
@@ -112,13 +116,14 @@ impl Default for MacOsKeychainStore {
 impl AuthSecretStore for MacOsKeychainStore {
     fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
         macos_keychain::save(
+            self.service,
             &self.account_path(KeychainAccount::SessionToken),
             token.expose_for_request().as_bytes(),
         )
     }
 
     fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
-        macos_keychain::load(&self.account_path(KeychainAccount::SessionToken))?
+        macos_keychain::load(self.service, &self.account_path(KeychainAccount::SessionToken))?
             .map(|bytes| {
                 String::from_utf8(bytes)
                     .map_err(|_| AuthStoreError::InvalidSecret("session token is not UTF-8"))
@@ -128,32 +133,37 @@ impl AuthSecretStore for MacOsKeychainStore {
     }
 
     fn delete_session_token(&self) -> AuthResult<()> {
-        macos_keychain::delete(&self.account_path(KeychainAccount::SessionToken))
+        macos_keychain::delete(self.service, &self.account_path(KeychainAccount::SessionToken))
     }
 
     fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
         macos_keychain::save(
+            self.service,
             &self.account_path(KeychainAccount::WrappedMasterKey),
             wrapped.expose_for_crypto(),
         )
     }
 
     fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
-        macos_keychain::load(&self.account_path(KeychainAccount::WrappedMasterKey))?
+        macos_keychain::load(self.service, &self.account_path(KeychainAccount::WrappedMasterKey))?
             .map(SecretBytes::new)
             .transpose()
     }
 
     fn delete_wrapped_master_key(&self) -> AuthResult<()> {
-        macos_keychain::delete(&self.account_path(KeychainAccount::WrappedMasterKey))
+        macos_keychain::delete(self.service, &self.account_path(KeychainAccount::WrappedMasterKey))
     }
 
     fn save_account_email(&self, email: &str) -> AuthResult<()> {
-        macos_keychain::save(&self.account_path(KeychainAccount::AccountEmail), email.as_bytes())
+        macos_keychain::save(
+            self.service,
+            &self.account_path(KeychainAccount::AccountEmail),
+            email.as_bytes(),
+        )
     }
 
     fn load_account_email(&self) -> AuthResult<Option<String>> {
-        macos_keychain::load(&self.account_path(KeychainAccount::AccountEmail))?
+        macos_keychain::load(self.service, &self.account_path(KeychainAccount::AccountEmail))?
             .map(|bytes| {
                 String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("account email is not UTF-8"))
             })
@@ -161,27 +171,31 @@ impl AuthSecretStore for MacOsKeychainStore {
     }
 
     fn delete_account_email(&self) -> AuthResult<()> {
-        macos_keychain::delete(&self.account_path(KeychainAccount::AccountEmail))
+        macos_keychain::delete(self.service, &self.account_path(KeychainAccount::AccountEmail))
     }
 
     fn holds_session_token(&self) -> AuthResult<bool> {
-        macos_keychain::exists(&self.account_path(KeychainAccount::SessionToken))
+        macos_keychain::exists(self.service, &self.account_path(KeychainAccount::SessionToken))
     }
 
     fn holds_wrapped_master_key(&self) -> AuthResult<bool> {
-        macos_keychain::exists(&self.account_path(KeychainAccount::WrappedMasterKey))
+        macos_keychain::exists(self.service, &self.account_path(KeychainAccount::WrappedMasterKey))
     }
 
     fn holds_account_email(&self) -> AuthResult<bool> {
-        macos_keychain::exists(&self.account_path(KeychainAccount::AccountEmail))
+        macos_keychain::exists(self.service, &self.account_path(KeychainAccount::AccountEmail))
     }
 
     fn save_vault_key_owner(&self, user_id: &str) -> AuthResult<()> {
-        macos_keychain::save(&self.account_path(KeychainAccount::VaultKeyOwner), user_id.as_bytes())
+        macos_keychain::save(
+            self.service,
+            &self.account_path(KeychainAccount::VaultKeyOwner),
+            user_id.as_bytes(),
+        )
     }
 
     fn load_vault_key_owner(&self) -> AuthResult<Option<String>> {
-        macos_keychain::load(&self.account_path(KeychainAccount::VaultKeyOwner))?
+        macos_keychain::load(self.service, &self.account_path(KeychainAccount::VaultKeyOwner))?
             .map(|bytes| {
                 String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("vault key owner is not UTF-8"))
             })
@@ -189,15 +203,19 @@ impl AuthSecretStore for MacOsKeychainStore {
     }
 
     fn delete_vault_key_owner(&self) -> AuthResult<()> {
-        macos_keychain::delete(&self.account_path(KeychainAccount::VaultKeyOwner))
+        macos_keychain::delete(self.service, &self.account_path(KeychainAccount::VaultKeyOwner))
     }
 
     fn save_session_owner(&self, user_id: &str) -> AuthResult<()> {
-        macos_keychain::save(&self.account_path(KeychainAccount::SessionOwner), user_id.as_bytes())
+        macos_keychain::save(
+            self.service,
+            &self.account_path(KeychainAccount::SessionOwner),
+            user_id.as_bytes(),
+        )
     }
 
     fn load_session_owner(&self) -> AuthResult<Option<String>> {
-        macos_keychain::load(&self.account_path(KeychainAccount::SessionOwner))?
+        macos_keychain::load(self.service, &self.account_path(KeychainAccount::SessionOwner))?
             .map(|bytes| {
                 String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("session owner is not UTF-8"))
             })
@@ -205,7 +223,7 @@ impl AuthSecretStore for MacOsKeychainStore {
     }
 
     fn delete_session_owner(&self) -> AuthResult<()> {
-        macos_keychain::delete(&self.account_path(KeychainAccount::SessionOwner))
+        macos_keychain::delete(self.service, &self.account_path(KeychainAccount::SessionOwner))
     }
 }
 
@@ -216,25 +234,32 @@ pub struct MacOsKeychainStore {
     // target. Unused on the stub path (every method returns Unsupported).
     #[allow(dead_code)]
     account_prefix: Option<AccountId>,
+    /// `EngineIdentity::credential_service` of the identity this store was made for.
+    #[allow(dead_code)] // the stub stores nothing, so it names nothing
+    service: &'static str,
 }
 
 #[cfg(not(target_os = "macos"))]
 impl MacOsKeychainStore {
-    pub fn new() -> Self {
-        Self { account_prefix: None }
-    }
-
-    pub fn with_account(account_id: impl Into<AccountId>) -> Self {
+    pub fn new(identity: &'static EngineIdentity) -> Self {
         Self {
-            account_prefix: Some(account_id.into()),
+            account_prefix: None,
+            service: identity.credential_service(),
         }
     }
-}
 
-#[cfg(not(target_os = "macos"))]
-impl Default for MacOsKeychainStore {
-    fn default() -> Self {
-        Self::new()
+    pub fn with_account(identity: &'static EngineIdentity, account_id: impl Into<AccountId>) -> Self {
+        Self {
+            account_prefix: Some(account_id.into()),
+            service: identity.credential_service(),
+        }
+    }
+
+    /// The whole name this store would keep `account` under ([`item_name`]): what a test pins per identity.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub fn item_name_of(&self, account: KeychainAccount) -> String {
+        item_name(self.service, &account_path(self.account_prefix.as_ref(), account))
     }
 }
 
@@ -293,31 +318,37 @@ impl AuthSecretStore for MacOsKeychainStore {
 #[cfg(target_os = "windows")]
 pub struct WindowsCredentialStore {
     account_prefix: Option<AccountId>,
+    /// `EngineIdentity::credential_service` of the identity this store was made for.
+    service: &'static str,
 }
 
 #[cfg(target_os = "windows")]
 impl WindowsCredentialStore {
     /// Legacy flat store (no account segmentation). Prefer `with_account`.
-    pub fn new() -> Self {
-        Self { account_prefix: None }
+    pub fn new(identity: &'static EngineIdentity) -> Self {
+        Self {
+            account_prefix: None,
+            service: identity.credential_service(),
+        }
     }
 
     /// Store segmented under `account_id` (Phase 1).
-    pub fn with_account(account_id: impl Into<AccountId>) -> Self {
+    pub fn with_account(identity: &'static EngineIdentity, account_id: impl Into<AccountId>) -> Self {
         Self {
             account_prefix: Some(account_id.into()),
+            service: identity.credential_service(),
         }
     }
 
     fn account_path(&self, account: KeychainAccount) -> String {
         account_path(self.account_prefix.as_ref(), account)
     }
-}
 
-#[cfg(target_os = "windows")]
-impl Default for WindowsCredentialStore {
-    fn default() -> Self {
-        Self::new()
+    /// The whole name this store keeps `account` under ([`item_name`]): what a test pins per identity.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub fn item_name_of(&self, account: KeychainAccount) -> String {
+        item_name(self.service, &self.account_path(account))
     }
 }
 
@@ -325,13 +356,14 @@ impl Default for WindowsCredentialStore {
 impl AuthSecretStore for WindowsCredentialStore {
     fn save_session_token(&self, token: &SessionToken) -> AuthResult<()> {
         windows_credentials::save(
+            self.service,
             &self.account_path(KeychainAccount::SessionToken),
             token.expose_for_request().as_bytes(),
         )
     }
 
     fn load_session_token(&self) -> AuthResult<Option<SessionToken>> {
-        windows_credentials::load(&self.account_path(KeychainAccount::SessionToken))?
+        windows_credentials::load(self.service, &self.account_path(KeychainAccount::SessionToken))?
             .map(|bytes| {
                 String::from_utf8(bytes)
                     .map_err(|e| {
@@ -350,32 +382,37 @@ impl AuthSecretStore for WindowsCredentialStore {
     }
 
     fn delete_session_token(&self) -> AuthResult<()> {
-        windows_credentials::delete(&self.account_path(KeychainAccount::SessionToken))
+        windows_credentials::delete(self.service, &self.account_path(KeychainAccount::SessionToken))
     }
 
     fn save_wrapped_master_key(&self, wrapped: SecretBytes) -> AuthResult<()> {
         windows_credentials::save(
+            self.service,
             &self.account_path(KeychainAccount::WrappedMasterKey),
             wrapped.expose_for_crypto(),
         )
     }
 
     fn load_wrapped_master_key(&self) -> AuthResult<Option<SecretBytes>> {
-        windows_credentials::load(&self.account_path(KeychainAccount::WrappedMasterKey))?
+        windows_credentials::load(self.service, &self.account_path(KeychainAccount::WrappedMasterKey))?
             .map(SecretBytes::new)
             .transpose()
     }
 
     fn delete_wrapped_master_key(&self) -> AuthResult<()> {
-        windows_credentials::delete(&self.account_path(KeychainAccount::WrappedMasterKey))
+        windows_credentials::delete(self.service, &self.account_path(KeychainAccount::WrappedMasterKey))
     }
 
     fn save_account_email(&self, email: &str) -> AuthResult<()> {
-        windows_credentials::save(&self.account_path(KeychainAccount::AccountEmail), email.as_bytes())
+        windows_credentials::save(
+            self.service,
+            &self.account_path(KeychainAccount::AccountEmail),
+            email.as_bytes(),
+        )
     }
 
     fn load_account_email(&self) -> AuthResult<Option<String>> {
-        windows_credentials::load(&self.account_path(KeychainAccount::AccountEmail))?
+        windows_credentials::load(self.service, &self.account_path(KeychainAccount::AccountEmail))?
             .map(|bytes| {
                 String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("account email is not UTF-8"))
             })
@@ -383,15 +420,19 @@ impl AuthSecretStore for WindowsCredentialStore {
     }
 
     fn delete_account_email(&self) -> AuthResult<()> {
-        windows_credentials::delete(&self.account_path(KeychainAccount::AccountEmail))
+        windows_credentials::delete(self.service, &self.account_path(KeychainAccount::AccountEmail))
     }
 
     fn save_vault_key_owner(&self, user_id: &str) -> AuthResult<()> {
-        windows_credentials::save(&self.account_path(KeychainAccount::VaultKeyOwner), user_id.as_bytes())
+        windows_credentials::save(
+            self.service,
+            &self.account_path(KeychainAccount::VaultKeyOwner),
+            user_id.as_bytes(),
+        )
     }
 
     fn load_vault_key_owner(&self) -> AuthResult<Option<String>> {
-        windows_credentials::load(&self.account_path(KeychainAccount::VaultKeyOwner))?
+        windows_credentials::load(self.service, &self.account_path(KeychainAccount::VaultKeyOwner))?
             .map(|bytes| {
                 String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("vault key owner is not UTF-8"))
             })
@@ -399,15 +440,19 @@ impl AuthSecretStore for WindowsCredentialStore {
     }
 
     fn delete_vault_key_owner(&self) -> AuthResult<()> {
-        windows_credentials::delete(&self.account_path(KeychainAccount::VaultKeyOwner))
+        windows_credentials::delete(self.service, &self.account_path(KeychainAccount::VaultKeyOwner))
     }
 
     fn save_session_owner(&self, user_id: &str) -> AuthResult<()> {
-        windows_credentials::save(&self.account_path(KeychainAccount::SessionOwner), user_id.as_bytes())
+        windows_credentials::save(
+            self.service,
+            &self.account_path(KeychainAccount::SessionOwner),
+            user_id.as_bytes(),
+        )
     }
 
     fn load_session_owner(&self) -> AuthResult<Option<String>> {
-        windows_credentials::load(&self.account_path(KeychainAccount::SessionOwner))?
+        windows_credentials::load(self.service, &self.account_path(KeychainAccount::SessionOwner))?
             .map(|bytes| {
                 String::from_utf8(bytes).map_err(|_| AuthStoreError::InvalidSecret("session owner is not UTF-8"))
             })
@@ -415,7 +460,7 @@ impl AuthSecretStore for WindowsCredentialStore {
     }
 
     fn delete_session_owner(&self) -> AuthResult<()> {
-        windows_credentials::delete(&self.account_path(KeychainAccount::SessionOwner))
+        windows_credentials::delete(self.service, &self.account_path(KeychainAccount::SessionOwner))
     }
 }
 
@@ -486,19 +531,30 @@ pub fn test_store_touched(account_prefix: Option<&str>) -> bool {
 #[allow(dead_code)] // `tests/keychain.rs` includes this file and never uses it
 pub struct TestKeychainStore {
     account_prefix: Option<AccountId>,
+    /// `EngineIdentity::credential_service` of the identity this store was made for.
+    service: &'static str,
 }
 
 #[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
 #[allow(dead_code)]
 impl TestKeychainStore {
-    pub fn new() -> Self {
-        Self { account_prefix: None }
+    pub fn new(identity: &'static EngineIdentity) -> Self {
+        Self {
+            account_prefix: None,
+            service: identity.credential_service(),
+        }
     }
 
-    pub fn with_account(account_id: impl Into<AccountId>) -> Self {
+    pub fn with_account(identity: &'static EngineIdentity, account_id: impl Into<AccountId>) -> Self {
         Self {
             account_prefix: Some(account_id.into()),
+            service: identity.credential_service(),
         }
+    }
+
+    /// The whole name this store keeps `account` under ([`item_name`]): what a test pins per identity.
+    pub fn item_name_of(&self, account: KeychainAccount) -> String {
+        item_name(self.service, &account_path(self.account_prefix.as_ref(), account))
     }
 
     fn key(&self, account: KeychainAccount) -> String {
@@ -506,11 +562,7 @@ impl TestKeychainStore {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(self.account_prefix.as_deref().map(str::to_string));
-        format!(
-            "{}/{}",
-            keychain_service(),
-            account_path(self.account_prefix.as_ref(), account)
-        )
+        item_name(self.service, &account_path(self.account_prefix.as_ref(), account))
     }
 
     fn save(&self, account: KeychainAccount, bytes: &[u8]) -> AuthResult<()> {
@@ -688,7 +740,7 @@ mod windows_credentials {
     //! `CredDeleteW`. `CredReadW` allocates a `CREDENTIALW`; we copy the blob
     //! out and free it with `CredFree` before returning.
 
-    use super::{AuthResult, AuthStoreError, keychain_service};
+    use super::{AuthResult, AuthStoreError};
     use windows::Win32::Security::Credentials::{
         CRED_PERSIST_ENTERPRISE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW, CredWriteW,
     };
@@ -702,17 +754,18 @@ mod windows_credentials {
     /// `HRESULT` bit pattern (the literal exceeds `i32::MAX`).
     const HRESULT_ERROR_NOT_FOUND: HRESULT = HRESULT(0x80070490u32 as i32);
 
-    /// Build the UTF-16, NUL-terminated target name `<credential_service>/<account>`.
+    /// Build the UTF-16, NUL-terminated target name `<service>/<account>` (`io.beebeeb.app/<account>` for the
+    /// real app).
     /// Returned `Vec<u16>` must outlive every pointer derived from it.
-    fn target_name(account: &str) -> Vec<u16> {
-        let combined = format!("{}/{account}", keychain_service());
+    fn target_name(service: &str, account: &str) -> Vec<u16> {
+        let combined = super::item_name(service, account);
         combined.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    pub fn save(account: &str, secret: &[u8]) -> AuthResult<()> {
+    pub fn save(service: &str, account: &str, secret: &[u8]) -> AuthResult<()> {
         // `target` and `secret` must stay alive for the whole `CredWriteW` call
         // because the struct holds raw pointers into them.
-        let mut target = target_name(account);
+        let mut target = target_name(service, account);
         if secret.len() > u32::MAX as usize {
             return Err(AuthStoreError::InvalidSecret("secret too large for credential blob"));
         }
@@ -738,8 +791,8 @@ mod windows_credentials {
         result.map_err(|e| status_error("CredWriteW", e.code().0))
     }
 
-    pub fn load(account: &str) -> AuthResult<Option<Vec<u8>>> {
-        let target = target_name(account);
+    pub fn load(service: &str, account: &str) -> AuthResult<Option<Vec<u8>>> {
+        let target = target_name(service, account);
         let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
 
         // SAFETY: `target` is a valid NUL-terminated UTF-16 string that outlives
@@ -790,8 +843,8 @@ mod windows_credentials {
         Ok(Some(bytes))
     }
 
-    pub fn delete(account: &str) -> AuthResult<()> {
-        let target = target_name(account);
+    pub fn delete(service: &str, account: &str) -> AuthResult<()> {
+        let target = target_name(service, account);
 
         // SAFETY: `target` is a valid NUL-terminated UTF-16 string for the call.
         let result = unsafe { CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, 0) };
@@ -825,7 +878,7 @@ mod tests;
 
 #[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
 mod macos_keychain {
-    use super::{AuthResult, AuthStoreError, keychain_service};
+    use super::{AuthResult, AuthStoreError};
     use std::ffi::c_void;
     use std::ptr;
 
@@ -875,8 +928,8 @@ mod macos_keychain {
         fn CFRelease(cf: *const c_void);
     }
 
-    pub fn save(account: &str, secret: &[u8]) -> AuthResult<()> {
-        let service = keychain_service().as_bytes();
+    pub fn save(service: &str, account: &str, secret: &[u8]) -> AuthResult<()> {
+        let service = service.as_bytes();
         let account = account.as_bytes();
         let status = unsafe {
             SecKeychainAddGenericPassword(
@@ -897,7 +950,7 @@ mod macos_keychain {
             return Err(status_error("add generic password", status));
         }
 
-        let Some(item) = find_item(account)? else {
+        let Some(item) = find_item(service, account)? else {
             return Err(AuthStoreError::NotFound);
         };
         let update_status = unsafe {
@@ -909,8 +962,8 @@ mod macos_keychain {
 
     /// Is there an item for `account`? Asks the item's attributes only: no password out-parameter, so no secret is
     /// read (the same lookup `delete` and `save` use to find the item).
-    pub fn exists(account: &str) -> AuthResult<bool> {
-        match find_item(account.as_bytes())? {
+    pub fn exists(service: &str, account: &str) -> AuthResult<bool> {
+        match find_item(service.as_bytes(), account.as_bytes())? {
             Some(item) => {
                 unsafe { CFRelease(item.cast()) };
                 Ok(true)
@@ -919,8 +972,8 @@ mod macos_keychain {
         }
     }
 
-    pub fn load(account: &str) -> AuthResult<Option<Vec<u8>>> {
-        let service = keychain_service().as_bytes();
+    pub fn load(service: &str, account: &str) -> AuthResult<Option<Vec<u8>>> {
+        let service = service.as_bytes();
         let account = account.as_bytes();
         let mut password_len: UInt32 = 0;
         let mut password_data: *mut c_void = ptr::null_mut();
@@ -952,9 +1005,9 @@ mod macos_keychain {
         Ok(Some(bytes))
     }
 
-    pub fn delete(account: &str) -> AuthResult<()> {
+    pub fn delete(service: &str, account: &str) -> AuthResult<()> {
         let account = account.as_bytes();
-        let Some(item) = find_item(account)? else {
+        let Some(item) = find_item(service.as_bytes(), account)? else {
             return Ok(());
         };
         let status = unsafe { SecKeychainItemDelete(item) };
@@ -962,8 +1015,7 @@ mod macos_keychain {
         status_ok("delete generic password", status)
     }
 
-    fn find_item(account: &[u8]) -> AuthResult<Option<SecKeychainItemRef>> {
-        let service = keychain_service().as_bytes();
+    fn find_item(service: &[u8], account: &[u8]) -> AuthResult<Option<SecKeychainItemRef>> {
         let mut item: SecKeychainItemRef = ptr::null_mut();
         let status = unsafe {
             SecKeychainFindGenericPassword(

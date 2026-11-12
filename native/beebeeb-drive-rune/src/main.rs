@@ -31,5 +31,13 @@ pub use shell::state::{State, init, load};
 pub use shell::{FAMILIES, FONTS, TITLEBAR_H};
 
 fn main() {
+    // The packager reads this build's identity out of the binary (`shell/identity.rs`, `BUILD_MARK`).
+    std::hint::black_box(shell::identity::BUILD_MARK);
+    // The test build does not run on macOS (`shell/identity.rs`, `start_refusal`). Asked before any state,
+    // window or control channel exists.
+    if let Some(refusal) = shell::identity::AppIdentity::CURRENT.start_refusal(std::env::consts::OS) {
+        eprintln!("{refusal}");
+        std::process::exit(2);
+    }
     shell::run();
 }

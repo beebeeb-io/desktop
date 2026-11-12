@@ -169,7 +169,7 @@ fn a_revoked_shares_queued_copy_is_released_and_removed_at_the_next_start() {
 fn engine_start_unlinks_released_copies_in_the_new_and_the_old_root_and_keeps_live_ones() {
     let dir = tempdir().unwrap();
     let db = StateDb::open(dir.path().join("state.db")).unwrap();
-    let bases = crate::engine_bridge::FinderStagingBases::current();
+    let bases = crate::engine_bridge::FinderStagingBases::current(crate::APP);
     let mut released = Vec::new();
     let mut live = Vec::new();
     for (label, root) in [
