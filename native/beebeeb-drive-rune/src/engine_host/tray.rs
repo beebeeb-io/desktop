@@ -4,7 +4,8 @@
 //! [`EngineTraySource`] gathers what the flyout is drawn from ([`Facts`]): the session gate and the two
 //! switches from the handle; the engine's last report of itself from the host's fold (`LiveEngine::drain`,
 //! taken first on every read, so the flyout is current also while the main window is closed); the counts
-//! and the history from the state database on this PC, only while the account's keys are in memory; the
+//! and the history from the state database on this PC, read-only and only while the account's keys are in
+//! memory; the
 //! account's storage from Beebeeb, through #322's `EngineDriveSource::storage` on a thread of its own, at
 //! most once a minute. The words are `frames::tray::live`'s.
 //!
@@ -20,6 +21,7 @@ use beebeeb_engine::drive_v2::model as drive_model;
 use beebeeb_engine::engine_status::{EngineStatusView, REASON_AUTH, REASON_ENGINE_ERROR};
 use beebeeb_engine::signin::gate::GateState as EngineGate;
 use beebeeb_engine::state_db::{FileStatus, LocalActivityKind, StateDb};
+use beebeeb_engine::state_paths;
 
 use super::{EngineDriveSource, EngineFilesSource, LiveEngine, log};
 use crate::frames::files::source::FilesSource;
@@ -81,7 +83,7 @@ impl<C: CredentialStores> EngineTraySource<C> {
         // A file's "uploading" or "downloading" is a file on its way only while sync runs and reaches Beebeeb.
         let moving = running && !paused && matches!(report, Report::Syncing | Report::Idle);
         let local = if ready {
-            engine.state_db().ok().map(|db| local_of(&db, now(), moving))
+            self.database().map(|db| local_of(&db, now(), moving))
         } else {
             None
         };
@@ -96,6 +98,15 @@ impl<C: CredentialStores> EngineTraySource<C> {
             local,
             storage: if ready { self.storage() } else { None },
         }
+    }
+
+    /// This PC's state database, read-only: the handle's own `Engine::state_db` checks the schema under a
+    /// write lock on every open, which the flyout (read up to once a second during a sync, hidden or not)
+    /// would make the engine's writers wait for. The folder is the handle's: the engine opens a handle on
+    /// the process's state folder only. `None` before the first sync.
+    fn database(&self) -> Option<StateDb> {
+        let folder = state_paths::beebeeb_state_dir_for(self.live.identity).ok()?;
+        StateDb::open_read_only(state_paths::state_db_path_from_state_dir(&folder)).ok()
     }
 
     /// The account's storage as last read, while it is the account signed in now. Starts a read on a thread

@@ -41,13 +41,19 @@ board are Windows' (`scripts/capture-golden.mjs`, `OWN_WINDOW`).
 | DW-1233 | Commands and keyboard shortcuts: View, Go, Window, Help | built (the dialog's second page: Page Down); gate NOT at 0: light geometry 1, pixels 7, frame tiles 8; dark 1, 10, 4. Every failing key is, or lies under, "Alt+←", "Alt+→" or "the □ caption button": the same fallback fonts |
 | DW-1234 | Commands and keyboard shortcuts while a document is open | the lists are built and tested (`commands::EDITOR`, shown while the window is on a viewer); NOT gated and no golden: the frame behind it is the document editor, which no lane has built |
 
+Measured on 2026-11-12 at `b6df6207` (the base of the tray's engine wiring) and at its head, the same both times:
+DW-1232 light geometry 12, pixels 19, frame tiles 44, dark 12, 20, 12; DW-1233 light 11, 18, 50, dark 11, 20, 13
+(text, icons, fills 0). That is more than the two rows above say; the dialog is over the window, which other
+lanes have changed since. The 19 flyout frames are at 0 in both themes, both times.
+
 ## The engine calls each action needs
 
-`TraySource` (`source.rs`) is the seam; `BoardFixture` stands in. What the engine lane implements:
+`TraySource` (`source.rs`) is the seam; `BoardFixture` stands in for the frame gate and for a run without an
+engine. In the running app the source is the engine's (next section). What the engine lane implements:
 
 | Control | Today | Needs |
 | --- | --- | --- |
-| The status block, the rows | `TraySource::snapshot()` on the fixture, following the shell's `TrayInputs` (`frame_for`) | the sync engine's state and counts (files on this PC, bytes left, speed), the last 50 rows of its history (`sync_history`), storage use, the update check, the Cloud Files registration state and its error code |
+| The status block, the rows | the running app: `engine_host::EngineTraySource` (next section); the frame gate and a run without an engine: `TraySource::snapshot()` on the fixture, following the shell's `TrayInputs` (`frame_for`) | what "Not wired" below lists |
 | Pause / Resume | `ShellActions::pause_sync` / `resume_sync` (the shell's, wired) | nothing more |
 | Sync anyway | `TraySource::act(SyncAnyway)` | "sync on this metered connection until the PC leaves it" |
 | Review… | `host::request(Intent::ReviewConflict { file: None })` (wired) | the conflict dialog's lane (DW-0429) |
@@ -62,3 +68,67 @@ board are Windows' (`scripts/capture-golden.mjs`, `OWN_WINDOW`).
 | Commands and keyboard shortcuts: Close, Esc, Page Down / Page Up | `shortcuts::close`, the shell's Esc, `State::shortcuts.page` (wired) | nothing: the list is static; which lists show while a document is open follows the route (`FrameGroup::Viewer`) |
 | Open Beebeeb, Settings, View full history | `host::request` (wired) | nothing more |
 | Open in File Explorer | `ShellActions::open_in_file_explorer` (the shell's, wired) | nothing more |
+
+## The running app: what the flyout reads from the engine
+
+`on_engine` puts `engine_host::EngineTraySource` in place of the fixture; `live.rs` holds the words. Every read
+first takes what the engine queued (`LiveEngine::drain`): its reports of itself fold into one
+`EngineStatusView`, which the b reads too, so whichever of the two reads first moves it for both, also while the
+main window is closed.
+
+| What | Engine call |
+| --- | --- |
+| Signed out, locked, the recovery phrase needed, the keys unreadable, ready | `Engine::gate` |
+| Signed out because Beebeeb refused the session again and again (DW-1219) | `Accounts::active_account` → `auth_health.is_expired` |
+| Paused (DW-1204) | `Engine::is_paused` |
+| Sync runs on this PC | `Engine::is_syncing` |
+| Checking (DW-1212), up to date (DW-1202), syncing with files left, bytes left and the batch bar (DW-1203), can't reach Beebeeb (DW-1206), stopped by an error on this PC | the engine's last `engine-status` report (`EngineEvent::Status` through `EngineStatusView::apply`; `PauseChanged`) |
+| Changes waiting while paused, files given up (DW-1207), changes held for the quota (DW-1209) | `StateDb::queue_hold_summary` |
+| Files that need a decision (DW-1205), files on their way | `drive_v2::model::sync_counts` |
+| Storage almost full (DW-1208) | #322's `EngineDriveSource::storage` (`Engine::storage_info`): on a thread of its own, at most once a minute, shown only for the account it was read for |
+| Rows on their way | `StateDb::newest_file_rows`, its uploading and downloading files, only while sync runs and reaches Beebeeb |
+| Rows given up | `StateDb::unsent_changes`, group `gave_up` (a backup's file is counted, not listed) |
+| Rows uploaded from and downloaded to this PC | `StateDb::list_recent_transfer_activity` |
+| Rows moved to Trash on this PC | `StateDb::list_recent_local_activity` |
+| No device's manifest in any list (LD-0113) | `backup_protect::BackupsTree::is_hidden` |
+| A row's click | #322's `EngineFilesSource::show_in_file_explorer`, with its guard: refused while sync does not run |
+
+The database is read only while the account's keys are in memory; signed out, locked or without the keys the
+list says why it is empty, and nothing is read.
+
+## States the board does not draw
+
+| State | Title, line | When |
+| --- | --- | --- |
+| Sync isn't running | "Sync isn't running", "Files on this PC are unchanged." | signed in and unlocked, and the engine does not run on this PC (before its first start, after a start that failed): "Up to date" would be a guess (DW-1212) |
+| Locked, sync off | "{name} is locked", "Nothing syncs while it's locked." | DW-1211 says "Sync keeps running while it's locked"; this engine stops while the keys are not in memory |
+| The recovery phrase needed | "Recovery phrase needed", "Enter it in {name} to sync this PC." | signed in, and this PC holds no key of the account (the window's DW-A23) |
+| The keys unreadable | "Can't read your keys", "Windows didn't answer. Nothing syncs until it does." | the credential store did not answer |
+| Stopped by an error on this PC | "Sync stopped", no line | the engine's `engine_error` with nothing given up: DW-1207's count would be a guess |
+| Recent changes hidden | "Recent changes are hidden", "Sign in to see file names." / "File names show once your keys are on this PC." | DW-1211's rule (no names), for the other states without the keys in memory |
+| A photo's tile | the design system's image glyph | the flyout has no thumbnail from the engine |
+
+Checking comes after signed out, paused and "sync isn't running" here: those three are known at once; checking
+waits only for what the engine checks.
+
+## Not wired in the running app
+
+- The upload speed, the time left and per-file bars: the engine reports no rate, and the start path
+  (`engine_host::open`) does not keep the engine's transfer board (`ChannelHost::transfers`).
+- The file count of "Up to date": the engine counts files and folders together (`sync_counts`); the files alone
+  would read every row on each refresh.
+- A new version (DW-1210) and too old to connect (DW-1214): no update check in the native app.
+- Adding to and couldn't add to File Explorer (DW-1215, DW-1216): Cloud Files registration is not wired, so the
+  running app never shows them and Open in File Explorer stays disabled.
+- No plan yet (DW-1213): `Engine::gate` makes no plan check.
+- Waiting on a metered connection (DW-1222).
+- Buttons that would do nothing are not drawn: Sync anyway, Try again (offline and File Explorer), Add storage,
+  Choose a plan (no `Platform::open_url`), Restart to update, Unlock with Windows Hello, Sign in after the
+  session ended (no re-sign-in prompt). Pause, Resume, Review…, Show and Sign in (signed out) are drawn.
+- Rows from other devices and from people, restored files, kept local copies: the database records this PC's
+  transfers and moves to Trash only.
+- The open flyout reads the engine again when the b's inputs change (`Shell::refresh`); between two such changes
+  (one large file, the same count) its byte numbers are those of the last one.
+- The b has no "checking": before the engine's first report, and while sync does not run, it says up to date
+  (`shell::tray`). It does not show conflicts or a full storage: those need the database, and its inputs are
+  read on every frame.

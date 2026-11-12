@@ -432,6 +432,10 @@ fn the_database_on_this_pc_gives_the_flyout_its_counts_and_its_history() {
         "{:?}",
         names(&still)
     );
+
+    // The flyout's handle on the database is read-only (`EngineTraySource::database`): it reads the same.
+    let read_only = StateDb::open_read_only(dir.path().join("state.db")).expect("a read-only handle");
+    assert_eq!(local_of(&read_only, now, true), local);
 }
 
 /// A real account on the fake API, from signed out to locked: each state the engine is in, the storage
@@ -497,9 +501,16 @@ fn a_real_account_from_signed_out_to_locked_shows_what_the_engine_knows() {
             .filter(|route| route.as_str() == "GET /api/v1/billing/usage")
             .count()
     };
-    assert_eq!(reads(&fake), 1, "one read of the storage");
     let _ = tray.snapshot();
-    assert_eq!(reads(&fake), 1, "and no second one within the minute");
+    let settled = Instant::now();
+    while tray.storage.lock().unwrap().reading {
+        assert!(
+            settled.elapsed() < Duration::from_secs(20),
+            "a storage read did not come back"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(reads(&fake), 1, "one read of the storage, none again within the minute");
 
     // Locked: the keys leave memory, and nothing names a file.
     let _ = engine.lock();
