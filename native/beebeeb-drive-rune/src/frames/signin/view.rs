@@ -43,6 +43,7 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
         Screen::Recover => view_recover::recover(ui, &mut k, &t),
         Screen::NewPassword => view_recover::new_password(ui, &mut k, &t),
         Screen::PasswordUpdated => view_recover::password_updated(&mut k, &t),
+        Screen::Create(step) => super::view_create::view(ui, *step, &mut k, &t),
     };
     au::page(
         name,

@@ -501,7 +501,14 @@ pub fn drain_signin_intents(s: &mut State) -> bool {
         match intent {
             // The session is read on this same poll; the gate decides (Ready opens the window on Files).
             SignIn::Next(_) => {}
-            SignIn::CreateAccount => log("NotWired(sign-in: create an account)"),
+            // Sign-up is a set of screens of the same window (DW-A31 to DW-A44), where the source has it.
+            SignIn::CreateAccount => {
+                if !s.signin.as_mut().is_some_and(crate::frames::signin::Ui::start_create) {
+                    log("NotWired(sign-in: create an account)");
+                }
+            }
+            SignIn::OpenTerms | SignIn::OpenPrivacy => log("NotWired(sign-up: open a page in the browser)"),
+            SignIn::SavePhraseAsFile | SignIn::PrintPhrase => log("NotWired(sign-up: save or print the phrase)"),
             SignIn::WriteToSupport => log("NotWired(sign-in: write to support)"),
             SignIn::CancelBilling | SignIn::EraseAllFiles | SignIn::DeleteAccount => {
                 log("NotWired(sign-in: an account dialog)")

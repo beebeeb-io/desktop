@@ -18,16 +18,23 @@
 pub mod before_files;
 #[cfg(test)]
 mod before_files_tests;
+pub mod create;
+mod create_kit;
+pub mod create_source;
 pub mod icons;
 pub mod qr;
 pub mod setup;
 pub mod source;
 pub mod steps;
 mod view;
+mod view_create;
+mod view_create_phrase;
 mod view_recover;
 mod view_recovery;
 mod view_steps;
 
+#[cfg(test)]
+mod create_tests;
 #[cfg(test)]
 mod steps_tests;
 #[cfg(test)]
@@ -97,6 +104,8 @@ pub enum Screen {
     NewPassword,
     /// DW-A50.
     PasswordUpdated,
+    /// DW-A31 to DW-A44: create an account, at one of its steps (`create.rs`).
+    Create(create::Step),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +130,13 @@ pub enum Intent {
     DeleteAccount,
     /// The support address (DW-A46): a message to it in the person's mail app.
     WriteToSupport,
+    /// DW-A35's rows: the page opens in the browser, not in the app.
+    OpenTerms,
+    OpenPrivacy,
+    /// DW-A39: a save dialog for a text file of the phrase, and a print-ready page. No word
+    /// travels in the intent: whoever acts on it asks the engine.
+    SavePhraseAsFile,
+    PrintPhrase,
 }
 
 pub struct Ui {
@@ -169,6 +185,8 @@ pub struct Ui {
     pub confirm: TextEdit,
     setting: bool,
     set_problem: Option<SignInProblem>,
+    /// Sign-up's own state (DW-A31 to DW-A44), made ONCE here with its secure fields.
+    pub(super) create: create::Create,
 }
 
 impl Ui {
@@ -213,6 +231,7 @@ impl Ui {
             confirm: TextEdit::new("").secure(),
             setting: false,
             set_problem: None,
+            create: create::Create::new(),
         }
     }
 
@@ -483,6 +502,7 @@ impl Ui {
                     copy.clear_now();
                 }
             }
+            SignInEvent::SignUp(event) => self.apply_sign_up(event),
             // The steps after the password (`steps.rs`), or an answer of a screen already left.
             other => self.apply_step(other),
         }
@@ -511,6 +531,11 @@ pub fn act(f: fn(&mut Ui)) -> impl Fn(&mut State, &mut Tx) + 'static {
 pub fn start() -> Option<Ui> {
     Some(Ui::new(Box::new(FixtureSignInSource::new(Script {
         shared_session: false,
+        // A build that ships shows no sample account: sign-up opens on the fixture in a development build only.
+        sign_up: create_source::SignUpScript {
+            available: crate::shell::instance::DEV_BUILD,
+            ..Default::default()
+        },
         ..Script::default()
     }))))
 }
@@ -559,6 +584,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             Screen::NewPassword => ui.recover_with_phrase(),
             Screen::NoPhrase => ui.lost_phrase(false),
             Screen::CannotRecover => ui.cannot_recover(false),
+            Screen::Create(_) => ui.create_back(),
             _ => ui.open_sign_in(),
         }
         ui.settle(tx);
@@ -739,6 +765,7 @@ pub fn scene(frame: &str) -> Option<Ui> {
             ui.set_password();
             ui
         }
+        id if create::FRAME_IDS.contains(&id) => create::scene(id)?,
         _ => return None,
     })
 }

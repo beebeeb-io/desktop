@@ -1301,3 +1301,38 @@ fn a_lock_wipes_what_was_typed_in_an_account_form() {
         "and the section is back on its list"
     );
 }
+
+/// Sign-up (DW-A31 to DW-A44) is a set of screens of the sign-in window: "Create a Beebeeb account" opens
+/// it on the shell's next poll, and the window stays excluded from capture on every one of its screens:
+/// the password (DW-A36 to DW-A38), the recovery phrase shown (DW-A39) and typed back (DW-A40, DW-A41).
+#[test]
+fn sign_up_opens_in_the_sign_in_window_and_every_screen_of_it_stays_excluded_from_capture() {
+    use crate::frames::signin::create::{FRAME_IDS, Step};
+    use crate::frames::signin::{Intent as SignIn, Screen};
+    let engine = Arc::new(FixtureEngine::signed_out());
+    let platform = Arc::new(FakePlatform::default());
+    let mut rt = runtime(state::init_with(Shell::fixture_on(engine, platform.clone())));
+    rt.update(|s, _| {
+        s.signin = crate::frames::signin::scene("DW-A01");
+        s.signin.as_mut().unwrap().leave(SignIn::CreateAccount);
+    });
+    rt.frame(1.0);
+    rt.update(|s, _| assert_eq!(s.signin.as_ref().unwrap().screen, Screen::Create(Step::Email)));
+
+    let mut secret_screens = 0;
+    for (i, frame) in FRAME_IDS.iter().enumerate() {
+        rt.update(|s, _| s.signin = crate::frames::signin::scene(frame));
+        rt.frame(2.0 + i as f64);
+        assert!(registry::route_shows_secret(&rt.state.shell.app), "{frame}");
+        assert!(rt.state.shell.capture_excluded, "{frame} can be captured");
+        if let Screen::Create(step) = rt.state.signin.as_ref().unwrap().screen {
+            secret_screens += usize::from(step.shows_secret());
+        }
+    }
+    assert_eq!(secret_screens, 3, "DW-A36 to DW-A38");
+    assert_eq!(
+        platform.capture_exclusions.lock().unwrap().clone(),
+        vec![true],
+        "excluded once, at the start, and never lifted between the screens"
+    );
+}
