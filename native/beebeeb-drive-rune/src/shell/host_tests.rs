@@ -935,14 +935,14 @@ fn the_approval_code_screens_are_secret_and_the_window_is_excluded_while_they_sh
 }
 
 /// A window on the review of another device's sign-in (DW-A13), its code typed on DW-A12, with the
-/// shell's engine in hand. `hold`: Windows Hello's prompt stays up once Approve is pressed.
-fn on_the_review(hold: bool) -> (Arc<FixtureEngine>, Runtime<State>) {
+/// shell's engine in hand. `late`: a cancel cannot stop an answer of Windows Hello that is on its way.
+fn on_the_review(late: bool) -> (Arc<FixtureEngine>, Runtime<State>) {
     use crate::frames::account::source::BoardAccount;
     use crate::frames::account::{self, Dialog as AccountDialog, approve};
     let (engine, _, mut rt) = fixture();
     rt.update(move |s, _| {
         let board = BoardAccount::new();
-        s.account.source = Some(Box::new(if hold { board.holding_hello() } else { board }));
+        s.account.source = Some(Box::new(if late { board.late_answers() } else { board }));
         account::go(s, "DW-A12");
     });
     settle(&mut rt);
@@ -1000,7 +1000,7 @@ fn a_lock_in_the_middle_of_a_review_ends_it_and_the_unlock_shows_no_code_and_no_
 #[test]
 fn a_windows_hello_answer_that_arrives_while_locked_changes_nothing() {
     use crate::frames::account::Dialog as AccountDialog;
-    let (engine, mut rt) = on_the_review(false);
+    let (engine, mut rt) = on_the_review(true);
     // Approve, with the answer not read yet: the wait is open when the lock comes.
     rt.update(|s, _| {
         crate::frames::account::approve::press_approve(s);
@@ -1018,6 +1018,14 @@ fn a_windows_hello_answer_that_arrives_while_locked_changes_nothing() {
         1,
         "the prompt was cancelled once: {sent:?}"
     );
+    // The answer ("approved") was on its way and the cancel could not stop it: it is taken
+    // and dropped while the lock screen shows.
+    let waiting = |rt: &mut Runtime<State>| {
+        let mut left = None;
+        rt.update(|s, _| left = s.account.source.as_mut().expect("the fixture").approval_answer());
+        left
+    };
+    assert_eq!(waiting(&mut rt), None, "the late answer was taken while locked");
     engine.set_gate(GateState::Ready);
     settle(&mut rt);
     settle(&mut rt);

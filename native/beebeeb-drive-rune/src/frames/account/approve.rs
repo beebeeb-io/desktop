@@ -368,15 +368,15 @@ fn finish(ui: &mut AccountUi, end: Dialog) {
 /// by the wait it answers. `true`: something changed.
 pub fn poll(s: &mut State) -> bool {
     let ui = &mut s.account;
-    if !ours(ui.pane) {
-        return false;
-    }
     let Some(source) = ui.source.as_mut() else {
         return false;
     };
     // An answer names its request. One that is not for the wait that is open (a prompt that was
-    // left, a request that is not the one on screen) is taken and dropped.
+    // left, a lock, a request that is not the one on screen) is taken and dropped, whatever shows.
     let answer = source.approval_answer();
+    if !ours(ui.pane) {
+        return false;
+    }
     if ui.dialog == Some(Dialog::ApproveUnsure { denying: false }) {
         // The result was not known. Only "approved", for this request, settles it: any other
         // late word cannot say whether this PC's claim went through.

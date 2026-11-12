@@ -148,7 +148,8 @@ impl SignInRequest {
             if whole { text.to_owned() } else { "not known".to_owned() }
         };
         Self {
-            id: only(raw.id, 64, |c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            // Never drawn: it is only compared and handed back to the source, so it stays as given.
+            id: raw.id.to_owned(),
             product: PRODUCTS.into_iter().find(|p| *p == raw.product).unwrap_or("Beebeeb"),
             device: or(one_line(raw.device, DEVICE_CHARS), "a device with no name"),
             app: or(one_line(raw.app, APP_CHARS), "not reported"),
@@ -261,6 +262,27 @@ mod tests {
         assert_eq!(one_line("\u{202E}\u{200B}\n", 40), "");
     }
 
+    /// The id is what a code, an answer and a denial are matched on: two requests never become
+    /// the same one by being bounded.
+    #[test]
+    fn two_requests_with_odd_ids_stay_two_requests() {
+        let with = |id| {
+            SignInRequest::bounded(Reported {
+                id,
+                product: "Drive",
+                device: "d",
+                app: "a",
+                country: "c",
+                address: "x",
+                asked_at: "y",
+                unusual_place: false,
+            })
+        };
+        assert_ne!(with("req 1\n").id(), with("req 2\n").id());
+        assert_ne!(with("req 1\n"), with("req 2\n"));
+        assert_eq!(with("").id(), "");
+    }
+
     /// The cap counts characters: a name of multi-byte characters is cut on a character.
     #[test]
     fn the_cap_counts_characters_not_bytes() {
@@ -287,7 +309,7 @@ mod tests {
             unusual_place: true,
         });
         assert_eq!(request.product(), "Beebeeb");
-        assert_eq!(request.id(), "not known");
+        assert_eq!(request.id(), "req 1\n<b>", "the id is not drawn and stays as given");
         assert_eq!(request.device(), "a device with no name");
         assert_eq!(request.app(), "not reported");
         assert_eq!(request.country(), "Ger many");
