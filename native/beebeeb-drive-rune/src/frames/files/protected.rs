@@ -328,6 +328,8 @@ const COL_PC_W: f32 = 34.0;
 const COL_GAP: f32 = 12.0;
 /// The Status column's words (`.mk-row .t-cap`).
 const STATUS: TextStyle = TextStyle::new(12.0, 400.0).lh(14.5);
+/// The words beside a name (`.mk-row .t-cap` in the name cell).
+const NOTE: TextStyle = TextStyle::new(11.0, 400.0).lh(13.0);
 
 fn is_root(s: &State) -> bool {
     s.selects_one_at_a_time()
@@ -461,7 +463,7 @@ pub fn row_of(s: &State, i: usize, item: &DriveItem, t: &Theme) -> Option<El> {
     };
     let note = entry.as_ref().and_then(|e| e.note.clone());
     if let Some(note) = &note {
-        name = name.child(kit::label(format!("{k}-note"), note.clone(), STATUS, t.text_tertiary));
+        name = name.child(kit::label(format!("{k}-note"), note.clone(), NOTE, t.text_tertiary));
     }
     let status = entry.as_ref().and_then(|e| e.status.clone());
     let pc_state = PcState::of(item.pc_status.as_deref());
