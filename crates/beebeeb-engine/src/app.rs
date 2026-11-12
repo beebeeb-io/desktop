@@ -41,26 +41,29 @@ use crate::state_db::StateDb;
 use crate::state_paths;
 use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
 
-/// Where the handle keeps an account's session token and vault key.
+/// Where the handle keeps an account's session token and vault key. The handle names the app on every call
+/// (`identity` is the one [`Engine::open`] was given): a store has no identity of its own to disagree with it.
 pub trait CredentialStores: Send + Sync + 'static {
     type Store: AuthSecretStore;
-    fn for_account(&self, account_id: &str) -> Self::Store;
+    fn for_account(&self, identity: &'static EngineIdentity, account_id: &str) -> Self::Store;
 }
 
-/// The platform's credential store (Windows Credential Manager, the macOS Keychain), per account id.
-pub struct PlatformCredentials(pub &'static EngineIdentity);
+/// The platform's credential store (Windows Credential Manager, the macOS Keychain), per app and account id.
+/// It carries no identity: which app's items it reads is the handle's identity, nothing else (review of #309,
+/// P2-1: a test handle given the real app's stores was accepted).
+pub struct PlatformCredentials;
 
 impl CredentialStores for PlatformCredentials {
     type Store = crate::keychain::PlatformKeychainStore;
-    fn for_account(&self, account_id: &str) -> Self::Store {
-        crate::keychain::platform_keychain_store_for(self.0, account_id)
+    fn for_account(&self, identity: &'static EngineIdentity, account_id: &str) -> Self::Store {
+        crate::keychain::platform_keychain_store_for(identity, account_id)
     }
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl CredentialStores for crate::signin::memory_store::MemoryCredentials {
     type Store = crate::signin::memory_store::MemoryStore;
-    fn for_account(&self, account_id: &str) -> Self::Store {
+    fn for_account(&self, _identity: &'static EngineIdentity, account_id: &str) -> Self::Store {
         self.store_for(account_id)
     }
 }
@@ -71,8 +74,8 @@ pub struct EngineConfig {
     pub account_id: String,
     /// The app-local state dir (`state.db` lives here).
     pub state_dir: PathBuf,
-    /// The API base, no trailing slash. The running engine reads the process's own
-    /// ([`crate::runner::api_base_url`]): pass that value, so the sign-in and the sync talk to one server.
+    /// The API base, no trailing slash. The sign-in steps AND the running engine talk to this one (the handle
+    /// passes it to the runner; nothing started from this handle reads `BB_API_BASE`).
     pub api_base: String,
 }
 
@@ -161,7 +164,7 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     fn vault(&self) -> AuthVault<C::Store> {
-        AuthVault::new(self.stores.for_account(&self.config.account_id))
+        AuthVault::new(self.stores.for_account(self.identity, &self.config.account_id))
     }
 
     fn unlocked(&self) -> bool {
@@ -506,6 +509,7 @@ impl<C: CredentialStores> Engine<C> {
             *slot = Some(EngineRunner::spawn(
                 self.identity,
                 self.host.clone(),
+                self.config.api_base.clone(),
                 sync_root,
                 token,
                 key,

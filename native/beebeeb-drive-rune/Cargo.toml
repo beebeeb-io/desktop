@@ -16,6 +16,8 @@ rune-notify = { git = "https://github.com/anomalyco/rune", rev = "c92e462e" }
 # The engine without Tauri: the real `DriveSource` (`src/source_engine.rs`) reads a state.db through it.
 beebeeb-engine = { path = "../../crates/beebeeb-engine" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# The sign-in source hands secrets to the engine as Zeroizing<String> (wiped on drop).
+zeroize = "1"
 
 serde_json = "1"
 # Parses Markdown for the viewer (`frames/viewers/markdown.rs`): MIT, pure Rust, no network, no HTML output.
@@ -42,6 +44,10 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphic
 raw-window-handle = "0.6"
 
 [dev-dependencies]
+# `engine_host` tests open the engine on credential stores in memory, with the settings file in the engine's test
+# sandbox and a closed loopback port as the default API: no test of this crate reaches the OS credential store,
+# the person's settings or the production API. Dev-only (`scripts/check-engine-boundary.sh` refuses it elsewhere).
+beebeeb-engine = { path = "../../crates/beebeeb-engine", features = ["test-support"] }
 # `source_engine` tests build a state.db with the engine's own writers.
 tempfile = "3"
 # The timing test asks SQLite for its query plan; same version the engine links.

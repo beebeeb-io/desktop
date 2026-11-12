@@ -35,6 +35,13 @@ pub const BUILT_BUNDLE_IDENTIFIER: &str = env!("BEEBEEB_APP_IDENTIFIER");
 /// meant to be built in. Exactly one mark is in a binary; the bare identifiers of both apps are in every binary.
 pub static BUILD_MARK: &str = env!("BEEBEEB_APP_IDENTITY_MARK");
 
+/// The engine's identity for THIS binary: what the one engine handle is opened with (`engine_host::open`).
+/// Production code outside this file asks here and nowhere else; it names neither app and calls no bridge
+/// itself (the engine's `identity_pin_tests` fail on `AppIdentity::Real`, `::Test` or `.engine()` elsewhere).
+pub fn engine_identity() -> &'static beebeeb_engine::identity::EngineIdentity {
+    AppIdentity::CURRENT.engine()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppIdentity {
     /// The released app. Its values never change: an install in the field finds its data by them.
@@ -81,7 +88,6 @@ impl AppIdentity {
 
     /// The engine's identity for this app: what `Engine::open` and every engine entry take. The one bridge
     /// between the two types (a test pins that they name the same bundle identifier).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub const fn engine(self) -> &'static beebeeb_engine::identity::EngineIdentity {
         match self {
             Self::Real => &beebeeb_engine::identity::REAL,

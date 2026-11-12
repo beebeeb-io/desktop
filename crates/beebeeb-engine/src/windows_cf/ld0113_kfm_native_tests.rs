@@ -99,7 +99,7 @@ async fn kfm_onedrive_choice_backs_up_local_files_only() {
                 // SAFETY: the key of the connection made below, disconnected once.
                 let _ = unsafe { CfDisconnectSyncRoot(key) };
             }
-            let _ = crate::windows_cf::unregister_sync_root(&self.0);
+            let _ = crate::windows_cf::unregister_any_sync_root(&self.0);
         }
     }
     let mut guard = Unregister(onedrive.clone(), None);

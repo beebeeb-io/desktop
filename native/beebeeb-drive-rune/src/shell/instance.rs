@@ -29,6 +29,9 @@ pub const QUIT_FOR_UPDATE_FLAG: &str = "--quit-for-update";
 pub const OPEN_LINK_FLAG: &str = "--open-link";
 /// Development only: show the files of that `state.db` (read-only) instead of the fixture.
 pub const DB_FLAG: &str = "--db";
+/// Development only: the API base URL (`engine_host`). Non-release builds only; never in a
+/// shipped build, and set BEFORE any engine thread exists (it goes into `EngineConfig.api_base`).
+pub const API_BASE_FLAG: &str = "--api-base";
 /// Development only: the frame gate's element export (`ui::gate::run_from_args`).
 pub const GATE_EXPORT_FLAG: &str = "--gate-export";
 
@@ -57,6 +60,8 @@ pub struct Launch {
     pub tooling: bool,
     /// `--db <path>` (dev builds only). `Err`: the flag was given without a path.
     pub db: Option<Result<PathBuf, &'static str>>,
+    /// `--api-base <url>` (dev builds only). The engine's API base URL.
+    pub api_base: Option<String>,
     /// `--feedback-dir <path>` (dev builds with the `feedback` feature only).
     #[cfg(feature = "feedback")]
     pub feedback_dir: Option<PathBuf>,
@@ -140,6 +145,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I, dev: bool) -> Launch 
                 Some(path) if !path.is_empty() && !path.starts_with("--") => Ok(PathBuf::from(path)),
                 _ => Err("--db needs the path of a state.db"),
             });
+        } else if arg == API_BASE_FLAG {
+            launch.api_base = args.next().filter(|url| !url.is_empty() && !url.starts_with("--"));
         } else {
             launch.tooling |= TOOLING_FLAGS.contains(&arg.as_str());
             launch.rune_args.push(arg);
@@ -149,6 +156,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I, dev: bool) -> Launch 
         // The installer's call is never a renderer and never opens a database.
         launch.tooling = false;
         launch.db = None;
+        launch.api_base = None;
         launch.rune_args.clear();
         #[cfg(feature = "feedback")]
         {

@@ -147,9 +147,13 @@ impl EngineRunner {
     /// its own on drop) keeps a plain one.
     ///
     /// `resume` is the account's resume requests (spec D11): off macOS the engine serves them after its reconcile pass.
+    ///
+    /// `api_base` is the one server this engine talks to, named by the host (the engine handle passes its
+    /// `EngineConfig::api_base`; the Tauri shell passes `runner::api_base_url()`). The run reads no environment.
     pub fn spawn(
         identity: &'static crate::identity::EngineIdentity,
         app: Host,
+        api_base: String,
         sync_root: PathBuf,
         session_token: zeroize::Zeroizing<String>,
         master_key: zeroize::Zeroizing<[u8; 32]>,
@@ -169,6 +173,7 @@ impl EngineRunner {
             run(
                 identity,
                 app,
+                api_base,
                 sync_root,
                 session_token,
                 master_key,

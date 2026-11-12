@@ -611,6 +611,49 @@ fn the_flyout_draws_the_tray_lanes_frame_in_the_state_the_b_shows() {
     assert!(!texts.iter().any(|t| t == "Flyout"), "{texts:?}");
 }
 
+/// The real engine's wiring in the poll: what the sign-in screens queued is taken on the next frame (not
+/// left to grow), and a gate that opens reads the folder again from the root and asks for sync, once.
+#[test]
+fn the_poll_drains_the_sign_in_queue_and_a_gate_that_opens_reloads_and_starts_sync() {
+    use crate::frames::signin::Intent as SignIn;
+    let engine = Arc::new(FixtureEngine::signed_out());
+    let platform = Arc::new(FakePlatform::default());
+    let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform)));
+    let starts = |engine: &FixtureEngine| engine.calls().iter().filter(|c| **c == FixtureCall::StartSync).count();
+    rt.update(|s, _| {
+        s.selected = Some(2);
+        s.signin
+            .as_mut()
+            .expect("the sign-in screens")
+            .leave(SignIn::CreateAccount);
+    });
+    rt.frame(1.0);
+    rt.update(|s, _| {
+        assert!(
+            s.signin.as_mut().unwrap().take_intents().is_empty(),
+            "the poll took the intent"
+        );
+        assert!(!drain_signin_intents(s), "nothing left to take");
+        assert_eq!(s.selected, Some(2), "no gate change, nothing reloaded");
+    });
+    assert_eq!(starts(&engine), 0, "signed out: sync is not asked for");
+
+    engine.set_gate(GateState::Ready);
+    rt.frame(2.0);
+    rt.update(|s, _| {
+        assert_eq!(s.shell.app.gate(), GateState::Ready);
+        assert_eq!(s.selected, None, "the folder was read again under the new gate");
+        assert!(s.list_error.is_none());
+    });
+    assert_eq!(starts(&engine), 1);
+    rt.frame(3.0);
+    assert_eq!(starts(&engine), 1, "once per change of the gate, not once per frame");
+
+    engine.set_gate(GateState::SignedOut);
+    rt.frame(4.0);
+    assert_eq!(starts(&engine), 1, "a gate that closes starts nothing");
+}
+
 // ---------------------------------------------------------------------------
 // Capture exclusion (task 2460): the window is excluded from screen capture
 // while a secret route is on screen. The headless runtime has no native
@@ -621,7 +664,8 @@ fn the_flyout_draws_the_tray_lanes_frame_in_the_state_the_b_shows() {
 // ---------------------------------------------------------------------------
 
 /// Entering a secret route (sign-in: password entry) from a non-secret route (Files) sets
-/// `capture_excluded`; leaving it clears it.
+/// `capture_excluded`; leaving it clears it. Uses `engine.set_gate` + `rt.frame` (the real
+/// path: the engine reports, `poll` picks it up via `refresh` → gate change).
 #[test]
 fn entering_a_secret_route_sets_capture_exclusion_and_leaving_clears_it() {
     let engine = Arc::new(FixtureEngine::ready());
@@ -630,18 +674,14 @@ fn entering_a_secret_route_sets_capture_exclusion_and_leaving_clears_it() {
     // Starts on Files (non-secret).
     assert!(!rt.state.shell.capture_excluded, "Files is not secret");
 
-    // Gate → SignedOut → sign-in (secret).
-    rt.update(|s, _| {
-        dispatch(s, Event::Session(super::super::app::Session::signed_out()));
-    });
-    settle(&mut rt);
+    // Gate → SignedOut → sign-in (secret). The engine reports; the next frame's poll picks it up.
+    engine.set_gate(GateState::SignedOut);
+    rt.frame(1.0);
     assert!(rt.state.shell.capture_excluded, "entering sign-in sets exclude");
 
     // Gate → Ready → Files (non-secret).
-    rt.update(|s, _| {
-        dispatch(s, Event::Session(super::super::app::Session::of(GateState::Ready, "a")));
-    });
-    settle(&mut rt);
+    engine.set_gate(GateState::Ready);
+    rt.frame(2.0);
     assert!(!rt.state.shell.capture_excluded, "leaving sign-in clears exclude");
 }
 
@@ -655,14 +695,9 @@ fn secret_to_secret_keeps_exclusion_without_a_gap() {
     // Starts signed out → sign-in (secret): the Shell constructor detects the secret state.
     assert!(rt.state.shell.capture_excluded, "sign-in is secret");
 
-    // Sign-in → locked (both secret): session changes gate.
-    rt.update(|s, _| {
-        dispatch(
-            s,
-            Event::Session(super::super::app::Session::of(GateState::Locked, "a")),
-        );
-    });
-    settle(&mut rt);
+    // Sign-in → locked (both secret): the engine changes the gate.
+    engine.set_gate(GateState::Locked);
+    rt.frame(1.0);
     assert!(rt.state.shell.capture_excluded, "still secret after locked");
     // No platform call was made (no window handle in headless tests), but importantly, the
     // shell did NOT flip false→true in between: the flag stayed true the whole time.
@@ -684,10 +719,8 @@ fn a_failed_platform_call_does_not_blank_the_content() {
     assert!(!rt.state.shell.capture_excluded);
 
     // Enter sign-in (secret): the platform would fail if called.
-    rt.update(|s, _| {
-        dispatch(s, Event::Session(super::super::app::Session::signed_out()));
-    });
-    settle(&mut rt);
+    engine.set_gate(GateState::SignedOut);
+    rt.frame(1.0);
     // The state flipped (the shell tracked the transition). Content stays drawn.
     assert!(rt.state.shell.capture_excluded);
     let screen = rt.state.shell.app.screen();
@@ -707,4 +740,40 @@ fn route_shows_secret_checks_the_dialog_layer_too() {
     assert!(FrameGroup::Locked.shows_secret());
     assert!(FrameGroup::RecoveryPhrase.shows_secret());
     assert!(FrameGroup::FirstRun.shows_secret());
+}
+
+/// The account pane's per-screen secret check: navigating to a change-password pane inside
+/// Settings sets capture exclusion; leaving it clears it. This exercises the account-pane
+/// path in the ONE choke point (the second half of the `||`).
+#[test]
+fn the_account_panes_change_password_and_2fa_setup_are_secret() {
+    use crate::frames::account::{CodeFor, Dialog as AccountDialog, Pane};
+    // Panes that show secrets:
+    assert!(Pane::Email.shows_secret(), "DW-A65: asks for the password");
+    assert!(Pane::Password.shows_secret(), "DW-A67: change password");
+    assert!(Pane::TwoFactorSetup.shows_secret(), "DW-A69: 2FA QR + secret");
+    assert!(Pane::BackupCodes.shows_secret(), "DW-A70: 8 backup codes");
+    assert!(Pane::Delete.shows_secret(), "DW-A58: asks for the password");
+    assert!(Pane::DeleteFactor.shows_secret(), "DW-A80: asks for a 2FA code");
+    // Dialogs that show secrets:
+    assert!(
+        AccountDialog::Code(CodeFor::TurnOffTwoFactor).shows_secret(),
+        "DW-A72: takes a 2FA code"
+    );
+    // Panes that do NOT show secrets:
+    assert!(!Pane::Account.shows_secret(), "DW-A51: overview");
+    assert!(!Pane::Security.shows_secret(), "DW-A52: overview");
+    assert!(!Pane::Checkup.shows_secret(), "DW-A84: score");
+    assert!(!Pane::Sessions.shows_secret(), "DW-A55: devices");
+    assert!(!Pane::Name.shows_secret(), "DW-A64: display name");
+    assert!(!Pane::EmailCode.shows_secret(), "DW-A66: email code");
+    assert!(!Pane::TwoFactor.shows_secret(), "DW-A71: status");
+    assert!(!Pane::Passkeys.shows_secret(), "DW-A73: list");
+    assert!(!Pane::Activity.shows_secret(), "DW-A77: log");
+    assert!(!Pane::DeleteLink.shows_secret(), "DW-A81: email link");
+    assert!(!Pane::DeleteScheduled.shows_secret(), "DW-A82: scheduled");
+    assert!(!Pane::DeleteUndone.shows_secret(), "DW-A83: undone");
+    // Dialogs that do NOT show secrets:
+    assert!(!AccountDialog::SignOutApp.shows_secret(), "DW-A57: no password");
+    assert!(!AccountDialog::LeaveCodes.shows_secret());
 }

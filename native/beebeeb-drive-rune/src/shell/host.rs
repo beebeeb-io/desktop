@@ -151,12 +151,12 @@ impl Shell {
         changed
     }
 
-    /// Compares the current route's secret state with the stored capture-exclusion flag and
-    /// calls the platform when they differ. Failure is logged (no content); the secret content
-    /// stays drawn (no blackout: a failure to exclude is a privacy leak, but not drawing would
-    /// be a denial of access to data the person is entitled to see).
-    pub fn update_capture_exclusion(&mut self) {
-        let secret = registry::route_shows_secret(&self.app);
+    /// Sets the capture-exclusion flag and calls the platform when it changes. Called from the
+    /// ONE choke point at the end of `poll` with the combined secret decision (the route machine
+    /// + the account pane's internal state). Failure is logged (no content); the secret content
+    /// stays drawn (a failure to exclude is a privacy leak, but not drawing would deny the
+    /// person access to their own data).
+    pub fn set_capture_exclusion(&mut self, secret: bool) {
         if secret == self.capture_excluded {
             return;
         }
@@ -313,7 +313,6 @@ pub fn dispatch(s: &mut State, event: Event) -> Outcome {
     crate::frames::backups::sync(s); // the same for Backups, and its one-time code is wiped
     crate::frames::account::sync(s); // and what was open inside the account sections
     crate::frames::tray::shortcuts::sync(s); // a closed shortcuts list forgets its page
-    s.shell.update_capture_exclusion(); // secret route → capture excluded (task 2460)
     outcome
 }
 
@@ -330,7 +329,18 @@ pub fn request(s: &mut State, intent: Intent) -> Outcome {
 /// the sidebar already routes. A ui lane that calls [`dispatch`] itself makes this a no-op.
 pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // The open file: the engine's answers, and a route that left it (lane f-viewers).
-    let viewer = crate::frames::viewers::poll(s, tx);
+    let mut changed = crate::frames::viewers::poll(s, tx);
+    // The engine's answers that arrive between presses (a sign-in that took a second, the other device).
+    changed |= crate::frames::signin::poll(s, tx);
+    // What the sign-in screens asked the shell for.
+    changed |= drain_signin_intents(s);
+    // The session and the tray: the engine may have changed since the last frame.
+    let gate_before = s.shell.app.gate();
+    changed |= s.shell.refresh();
+    if s.shell.app.gate() != gate_before {
+        on_gate_change(s);
+        changed = true;
+    }
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {
@@ -339,17 +349,67 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
             tx.resize_window_instant(size);
         }
         s.shell.window_kind = kind;
+        changed = true;
     }
-    if s.sidebar_section == s.shell.sidebar_seen {
-        return viewer;
+    if s.sidebar_section != s.shell.sidebar_seen {
+        let outcome = s
+            .shell
+            .app
+            .apply(Event::Navigate(Route::section(section_for(s.sidebar_section))));
+        sync_sidebar(s);
+        changed |= outcome == Outcome::Changed;
     }
-    let outcome = s
-        .shell
-        .app
-        .apply(Event::Navigate(Route::section(section_for(s.sidebar_section))));
-    sync_sidebar(s);
-    s.shell.update_capture_exclusion(); // sidebar navigation may change the secret state (task 2460)
-    outcome == Outcome::Changed || viewer
+    // The ONE place capture-exclusion is checked: every path above (gate change, signin
+    // intents, sidebar navigation, viewer) that may change what is on screen has run.
+    // A new path cannot forget this: it runs unconditionally at the end of every frame.
+    // The decision combines the route-level check (SignIn, Locked, RecoveryPhrase, FirstRun)
+    // with the account pane's per-screen check (change password, 2FA setup, backup codes).
+    let secret = registry::route_shows_secret(&s.shell.app) || {
+        let group = registry::group_for(&s.shell.app);
+        matches!(
+            group,
+            registry::FrameGroup::Settings(pane) if crate::frames::account::Pane::root(pane).is_some()
+        ) && s.account.shows_secret()
+    };
+    s.shell.set_capture_exclusion(secret);
+    changed
+}
+
+/// Takes every intent the sign-in screens queued (`signin::Ui::take_intents`) and acts on it. A finished
+/// sign-in is not routed from here: the session's gate is the one authority on which screen shows, and
+/// [`on_gate_change`] runs when it opens. What the shell cannot do yet is logged, never dropped silently.
+/// `true`: something was taken.
+pub fn drain_signin_intents(s: &mut State) -> bool {
+    use crate::frames::signin::Intent as SignIn;
+    let Some(intents) = s.signin.as_mut().map(crate::frames::signin::Ui::take_intents) else {
+        return false;
+    };
+    for intent in &intents {
+        match intent {
+            // The session is read on this same poll; the gate decides (Ready opens the window on Files).
+            SignIn::Next(_) => {}
+            SignIn::CreateAccount => log("NotWired(sign-in: create an account)"),
+            SignIn::WriteToSupport => log("NotWired(sign-in: write to support)"),
+            SignIn::CancelBilling | SignIn::EraseAllFiles | SignIn::DeleteAccount => {
+                log("NotWired(sign-in: an account dialog)")
+            }
+        }
+    }
+    !intents.is_empty()
+}
+
+/// The session's gate changed (a sign-in finished, the vault was locked, the account signed out). The
+/// folder the window holds was read under the old gate: read it again from the root, so a sign-in shows the
+/// account's files and a sign-out shows none of them. A gate that opened also starts sync (refused, and
+/// logged, while another agent holds the profile).
+fn on_gate_change(s: &mut State) {
+    let (listing, list_error) = super::state::load(s.source.as_ref(), None);
+    s.listing = listing;
+    s.list_error = list_error;
+    s.selected = None;
+    if s.shell.app.gate() == super::app::GateState::Ready {
+        s.shell.start_sync();
+    }
 }
 
 /// The shell's own keys, then the current frame's (DW-1232, DW-1233: Windows' words).

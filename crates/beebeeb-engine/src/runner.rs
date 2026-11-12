@@ -84,6 +84,13 @@ const PRODUCTION_API_BASE: &str = "https://api.beebeeb.io";
 #[cfg(any(test, feature = "test-support"))]
 pub const TEST_API_BASE: &str = "http://127.0.0.1:9";
 
+/// The API base of a build whose host names none: production, except in a unit-test build (the closed loopback
+/// port of [`TEST_API_BASE`]). Reads no environment: the native shell uses this, so `BB_API_BASE` cannot move it
+/// to another server.
+pub fn default_api_base() -> String {
+    api_base_url_from(None)
+}
+
 /// [`api_base_url`] for a given `BB_API_BASE` value.
 fn api_base_url_from(env: Option<&str>) -> String {
     let trimmed = env.unwrap_or_default().trim();
@@ -132,6 +139,7 @@ async fn next_wake(
 async fn run(
     identity: &'static crate::identity::EngineIdentity,
     app: Host,
+    api_base: String,
     sync_root: PathBuf,
     session_token: zeroize::Zeroizing<String>,
     master_key: zeroize::Zeroizing<[u8; 32]>,
@@ -313,7 +321,7 @@ async fn run(
     // wrappers are dropped right here, so the wiped originals do not live as long as this task.
     let mut session_token = session_token;
     let api = Arc::new(ApiClient::new(
-        api_base_url(),
+        api_base,
         std::mem::take(&mut *session_token),
         *master_key,
     ));

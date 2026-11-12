@@ -19,7 +19,7 @@ let engine = std::sync::Arc::new(Engine::open(
     identity,                                    // &'static EngineIdentity: REAL or TEST, fixed when the host is built
     EngineConfig { account_id, state_dir, api_base: beebeeb_engine::runner::api_base_url() },
     host,
-    PlatformCredentials(identity),
+    PlatformCredentials,
 )?);
 match engine.restore() { /* GateState: SignedOut, NeedsRecoveryPhrase, Locked, Ready, KeyStoreUnavailable */ }
 engine.sign_in_password(email, password)?;   // -> NextAfterSignIn::{TwoFactor, RecoveryPhrase, Drive}

@@ -301,7 +301,7 @@ impl RegisteredRoot {
 }
 impl Drop for RegisteredRoot {
     fn drop(&mut self) {
-        crate::windows_cf::unregister_sync_root(&self.0.root).unwrap();
+        crate::windows_cf::unregister_any_sync_root(&self.0.root).unwrap();
     }
 }
 

@@ -90,6 +90,39 @@ impl Pane {
             _ => None,
         }
     }
+    /// Whether this pane shows key material: a password field, a 2FA secret/QR, backup codes,
+    /// or a recovery phrase. Used for screen-capture exclusion (task 2460). A new variant is a
+    /// compile error (exhaustive match).
+    pub fn shows_secret(self) -> bool {
+        match self {
+            // DW-A65: change email asks for the password.
+            Pane::Email => true,
+            // DW-A67, DW-A68: change password (current + new).
+            Pane::Password => true,
+            // DW-A69: 2FA setup shows the secret key and QR code.
+            Pane::TwoFactorSetup => true,
+            // DW-A70: the 8 single-use backup codes, shown once.
+            Pane::BackupCodes => true,
+            // DW-A58: delete step 1 asks for the password.
+            Pane::Delete => true,
+            // DW-A80: delete step 2 asks for the 2FA code.
+            Pane::DeleteFactor => true,
+            // The rest: overviews, lists, confirmations without key material.
+            Pane::Account
+            | Pane::Security
+            | Pane::Checkup
+            | Pane::Sessions
+            | Pane::Name
+            | Pane::EmailCode
+            | Pane::TwoFactor
+            | Pane::Passkeys
+            | Pane::Activity
+            | Pane::DeleteLink
+            | Pane::DeleteScheduled
+            | Pane::DeleteUndone => false,
+        }
+    }
+
     /// The frame Esc goes back to from a page under a section; `None` for a section itself.
     pub fn parent(self) -> Option<&'static str> {
         match self {
@@ -123,6 +156,25 @@ pub enum Dialog {
     RemovePasskey(String),
     /// Leaving the backup codes without "I've saved them" (DW-A70's rule).
     LeaveCodes,
+}
+
+impl Dialog {
+    /// Whether this dialog shows or takes key material (a 2FA code). Used for screen-capture
+    /// exclusion (task 2460): a secret dialog over a non-secret pane sets the exclusion.
+    pub fn shows_secret(&self) -> bool {
+        match self {
+            // DW-A72, DW-A78: takes a current 2FA code.
+            Dialog::Code(_) => true,
+            // Confirmations without key material.
+            Dialog::SignOutDevice(_)
+            | Dialog::SignOutElsewhere
+            | Dialog::SignOutApp
+            | Dialog::SignOutAllApps
+            | Dialog::PasskeyMenu(_)
+            | Dialog::RemovePasskey(_)
+            | Dialog::LeaveCodes => false,
+        }
+    }
 }
 
 /// What a code in a confirm is for.
@@ -162,6 +214,11 @@ impl Default for AccountUi {
 
 impl AccountUi {
     /// Show `pane` with nothing over it.
+    /// Whether the current pane or dialog shows key material (task 2460).
+    pub fn shows_secret(&self) -> bool {
+        self.pane.shows_secret() || self.dialog.as_ref().is_some_and(|d| d.shows_secret())
+    }
+
     pub fn show(&mut self, pane: Pane) {
         self.pane = pane;
         self.dialog = None;
