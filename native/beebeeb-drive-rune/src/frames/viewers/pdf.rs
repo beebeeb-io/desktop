@@ -302,7 +302,7 @@ fn thumbs(ui: &Ui, doc: &PdfDoc, t: &Theme) -> El {
     column
 }
 
-fn page(ui: &Ui, t: &Theme) -> El {
+fn page(ui: &Ui) -> El {
     let scale = ui.media.zoom as f32 / 100.0;
     let width = PAGE_W * scale;
     let sheet = el()
@@ -337,7 +337,6 @@ fn page(ui: &Ui, t: &Theme) -> El {
             );
         }
     }
-    let _ = t;
     sheet
 }
 
@@ -359,6 +358,6 @@ pub fn body(ui: &Ui, doc: &PdfDoc, t: &Theme) -> El {
                 .items_start()
                 .fill(style::stage(t))
                 .clip_rounded(0.0)
-                .child(page(ui, t)),
+                .child(page(ui)),
         )
 }
