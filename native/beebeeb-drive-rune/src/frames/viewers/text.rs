@@ -69,10 +69,24 @@ pub fn line(i: usize, runs: &[Run], current: bool, t: &Theme) -> El {
 }
 
 /// One line that wraps at the window's width (Wrap): a wrapping row of words, each in its
-/// run's ink, so the row is as tall as the rows its words take. A word longer than the room
+/// run's ink, so the row is as tall as the rows its words take (at rest: Rune moves a keyed row to its new height over a few frames). A word longer than the room
 /// (no space in it) runs past the edge and is clipped, as `white-space: pre-wrap` does.
 fn wrapped_line(i: usize, runs: &[Run], t: &Theme) -> El {
-    let mut words = row().key(format!("line-{i}-text")).w_full().flex_wrap().items_start();
+    // The row itself wraps, and the number sits over the row's own left padding.
+    let mut line = row()
+        .key(format!("line-{i}"))
+        .w_full()
+        .pl(GUTTER_W)
+        .pr(16.0)
+        .flex_wrap()
+        .items_start()
+        .child(
+            kit::label(format!("ln-{i}"), (i + 1).to_string(), style::CODE, t.text_tertiary)
+                .w(GUTTER_W)
+                .px(16.0)
+                .align(Align::End)
+                .absolute(0.0, 0.0),
+        );
     let mut n = 0;
     for run in runs {
         for word in run.text.split_inclusive(' ') {
@@ -80,30 +94,11 @@ fn wrapped_line(i: usize, runs: &[Run], t: &Theme) -> El {
                 text: word.to_string(),
                 ..run.clone()
             };
-            words = words.child(run_el(format!("run-{i}-w{n}"), &part, t).h(LINE_H));
+            line = line.child(run_el(format!("run-{i}-w{n}"), &part, t).h(LINE_H));
             n += 1;
         }
     }
-    row()
-        .key(format!("line-{i}"))
-        .w_full()
-        .min_h(LINE_H)
-        .items_start()
-        .child(
-            kit::label(format!("ln-{i}"), (i + 1).to_string(), style::CODE, t.text_tertiary)
-                .w(GUTTER_W)
-                .px(16.0)
-                .align(Align::End),
-        )
-        .child(
-            col()
-                .key(format!("line-{i}-room"))
-                .grow(1.0)
-                .shrink()
-                .min_w(0.0)
-                .pr(16.0)
-                .child(words),
-        )
+    line
 }
 
 /// The text of a file, read-only. `wrap`: long lines wrap instead of running past the edge.

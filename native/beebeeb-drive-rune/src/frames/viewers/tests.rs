@@ -480,18 +480,30 @@ fn wrap_breaks_a_long_lines_text_at_the_windows_width_and_no_wrap_keeps_it_on_on
     assert!(text[0] + text[2] > window_right, "No wrap: the line runs past the edge");
     assert_eq!(text[3], 21.0, "No wrap: one row");
     operate(&mut rt, "seg-0");
-    let text = info(&rt, "line-0-text").rect;
+    // Rune moves a keyed element to its new place over a few frames: read it at rest.
+    rt.settle_all();
+    rt.frame(0.0);
+    let (row, last) = (info(&rt, "line-0").rect, info(&rt, "run-0-w79").rect);
     assert!(
-        text[0] + text[2] <= window_right,
-        "Wrap: the text stays inside the window ({text:?})"
+        last[0] + last[2] <= window_right,
+        "Wrap: the last word is inside the window ({last:?})"
     );
-    assert!(text[3] >= 42.0, "Wrap: the text takes more rows ({text:?})");
-    assert_eq!(info(&rt, "line-1-text").rect[3], 21.0, "a short line stays one row");
-    assert_eq!(info(&rt, "run-1-w0").text.as_deref(), Some("import"));
-    // The row is as high as its words' rows, so the next line starts under it.
-    let (row, next) = (info(&rt, "line-0").rect, info(&rt, "line-1").rect);
-    assert_eq!(row[3], text[3], "the row is as high as its text");
+    assert!(row[3] >= 42.0, "Wrap: the line takes more rows ({row:?})");
+    assert_eq!(
+        last[1] + last[3],
+        row[1] + row[3],
+        "the row ends with its last word's row"
+    );
+    assert_eq!(info(&rt, "ln-0").rect[0], row[0], "the number stays in the gutter");
+    assert_eq!(
+        info(&rt, "run-0-w0").rect[0],
+        row[0] + 56.0,
+        "the text starts after the gutter"
+    );
+    let next = info(&rt, "line-1").rect;
+    assert_eq!(next[3], 21.0, "a short line stays one row");
     assert_eq!(next[1], row[1] + row[3], "the next line starts under the wrapped one");
+    assert_eq!(info(&rt, "run-1-w0").text.as_deref(), Some("import"));
     operate(&mut rt, "seg-1");
     assert_eq!(info(&rt, "run-0-0").rect[3], 21.0, "No wrap again");
 }
