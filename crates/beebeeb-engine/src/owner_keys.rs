@@ -1,10 +1,9 @@
 //! Opaque owner-key state and account-scoped transport. Crypto belongs to core.
 
-use crate::{api_client::ApiClient, state_db::StateDb};
+use crate::state_db::StateDb;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::Value;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use beebeeb_core::{
     encrypt::NameMetadata,
