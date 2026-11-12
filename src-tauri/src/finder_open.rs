@@ -231,15 +231,8 @@ mod tests {
             )),
             "and goes into the query, where it is applied before the limit: {command}"
         );
-        let quick = read("../src/DesktopQuickSearch.tsx");
-        let history = read("../src/DesktopVersionHistory.tsx");
-        assert!(
-            squeeze(&quick).contains(&squeeze(
-                "desktopSearchFiles(trimmedQuery, SEARCH_LIMIT, { forFinder: true })"
-            )),
-            "quick search asks for rows it will show in Finder"
-        );
-        assert!(!history.contains("forFinder"), "version history does not");
+        // The DesktopQuickSearch.tsx / DesktopVersionHistory.tsx pins were removed:
+        // the React frontend is gone on the native line (0.9.0).
     }
 
     /// Fix round 1 (m4): the two fallbacks that open the Finder location after an upload or a new folder run on the
@@ -316,17 +309,9 @@ mod tests {
         );
     }
 
-    /// Fix round 1 (I2): the Rust sentence is the frontend's `FINDER_OPEN_FAILED`, character for character.
-    #[test]
-    fn test_1885_the_menu_alert_says_what_the_buttons_toast_says() {
-        let copy = read("../src/finderSetupCopy.ts");
-        let line = copy
-            .lines()
-            .find(|line| line.starts_with("export const FINDER_OPEN_FAILED"))
-            .expect("the frontend's constant");
-        let sentence = line.split('\'').nth(1).expect("a quoted sentence");
-        assert_eq!(sentence, OPEN_FAILED_SENTENCE);
-    }
+    // test_1885_the_menu_alert_says_what_the_buttons_toast_says was removed:
+    // it pinned the Rust constant against finderSetupCopy.ts; the React frontend
+    // is gone on the native line (0.9.0). The Rust constant is the source of truth.
 
     /// Fix round 1 (I2), in the menu: the OpenFolder arm runs the open on the blocking pool, then hands the result to
     /// `show_menu_open_failure` before returning it to the logger, and that function raises the native alert for the
