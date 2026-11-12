@@ -164,12 +164,12 @@ fn every_action_at_every_place_in_the_tree() {
 
 #[test]
 fn this_devices_own_active_backup_says_where_the_original_is() {
-    let own = || no(&own_backup_refusal("C:\\Users\\a\\Pictures"));
+    let own = || no(&own_backup_refusal("C:\\home\\a\\Pictures"));
     for (position, is_folder) in [(CategoryFolder, true), (Inside, true), (Inside, false)] {
         let subject = Subject {
             position,
             is_folder,
-            own_active_source: Some("C:\\Users\\a\\Pictures"),
+            own_active_source: Some("C:\\home\\a\\Pictures"),
         };
         let share = if is_folder {
             no(MSG_NO_FOLDER_SHARE)
@@ -285,7 +285,7 @@ fn fixture() -> (tempfile::TempDir, StateDb, OwnBackups) {
         device_folder: Some("GLegion".into()),
         folders: vec![OwnBackupFolder {
             display_name: "Pictures".into(),
-            source_path: PathBuf::from("/home/a/Pictures"),
+            source_path: PathBuf::from("/data/a/Pictures"),
         }],
     };
     (dir, db, own)
@@ -296,7 +296,7 @@ fn check_reads_the_rows_place_and_this_devices_own_backups() {
     let (_dir, db, own) = fixture();
     let ask = |id: &str, action: Action| check(&db, &own, id, action).unwrap().expect("the row exists");
     let own_words = no(&own_backup_refusal(
-        &PathBuf::from("/home/a/Pictures").display().to_string(),
+        &PathBuf::from("/data/a/Pictures").display().to_string(),
     ));
     assert_eq!(ask(ROOT_ID, Trash), no(MSG_DELETE));
     assert_eq!(ask(ROOT_ID, NewFolderIn), no(MSG_READ_ONLY));
@@ -311,7 +311,7 @@ fn check_reads_the_rows_place_and_this_devices_own_backups() {
     assert_eq!(ask("pictures", Trash), own_words);
     assert_eq!(ask("music", DeleteBackup), Verdict::NeedsPassword);
     let photo = no(&own_backup_refusal(
-        &PathBuf::from("/home/a/Pictures").join("a.jpg").display().to_string(),
+        &PathBuf::from("/data/a/Pictures").join("a.jpg").display().to_string(),
     ));
     assert_eq!(ask("photo", Edit), photo);
     assert_eq!(ask("photo", Share), Verdict::Allowed);

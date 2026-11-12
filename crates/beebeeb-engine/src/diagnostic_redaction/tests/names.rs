@@ -84,7 +84,7 @@ fn path_shapes_are_all_redacted() {
     for p in [
         "/Users/guus/Documents/x.txt",
         "~/Documents/x.txt",
-        "C:\\Users\\guus\\Documents\\x.txt",
+        "C:\\home\\guus\\Documents\\x.txt",
         "D:\\x.txt",
         "\\\\server\\share\\x.txt",
         "Library/CloudStorage/Beebeeb-Drive",

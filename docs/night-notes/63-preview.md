@@ -65,6 +65,6 @@ around line 729, `stored_name` around line 263) — slice 65, not this one. Unti
 is fixed there is no file row to select, so the walkthrough waits on slice 65.
 
 Evidence (absolute paths, outside the repo):
-`/home/guus/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/preview-file/`
+`~/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/preview-file/`
 (`green-first-run.txt`, `mutant-red.txt`, `restored-green.txt`, `pdf-green.txt`, `tsc.txt`),
 each file starting with its `date -Iseconds` line.

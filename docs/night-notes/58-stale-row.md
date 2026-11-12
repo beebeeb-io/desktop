@@ -45,7 +45,7 @@ test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 2659 filtered out
 ```
 
 Evidence (absolute paths, outside the repo):
-`/home/guus/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/stale-row/red.txt`
+`~/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/stale-row/red.txt`
 and `green.txt`.
 
 ## Where the stale row was kept

@@ -22,15 +22,15 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const flag = (name) => { const i = args.indexOf(name); return i >= 0 ? args.splice(i, 2)[1] : undefined; };
 const outDir = resolve(flag('--out') || join(HERE, '..', 'golden'));
-const boardDir = resolve(flag('--board') || process.env.BB_BOARD_DIR || '/home/guus/code/beebeeb.io/design/desktop-v2');
+const boardDir = resolve(flag('--board') || process.env.BB_BOARD_DIR || `${process.env.HOME}/code/beebeeb.io/design/desktop-v2`);
 const dark = args.includes('--dark');
 const frameId = args.find((a) => !a.startsWith('--'));
 if (!frameId) { console.error('usage: capture-golden.mjs <frame-id> [--dark] [--out dir] [--board dir]'); process.exit(64); }
 
 // Playwright is not a dependency of this crate: take it from PLAYWRIGHT_DIR, or the first known install.
 function loadPlaywright() {
-  const roots = [process.env.PLAYWRIGHT_DIR, '/home/guus/code/beebeeb.io/repos/web/node_modules',
-    '/home/guus/code/beebeeb.io/node_modules', '/tmp/bunx-1000-playwright@latest/node_modules'].filter(Boolean);
+  const roots = [process.env.PLAYWRIGHT_DIR, `${process.env.HOME}/code/beebeeb.io/repos/web/node_modules`,
+    `${process.env.HOME}/code/beebeeb.io/node_modules`, '/tmp/bunx-1000-playwright@latest/node_modules'].filter(Boolean);
   for (const root of roots) {
     for (const name of ['playwright', '@playwright/test', 'playwright-core']) {
       if (existsSync(join(root, name))) { try { return createRequire(join(root, 'x.js'))(name); } catch { /* next */ } }

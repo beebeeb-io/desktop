@@ -433,8 +433,8 @@ fn without_a_flagged_root_nothing_is_protected() {
 fn one_refused_delete_is_one_notice() {
     let mut gate = NoticeGate::default();
     let t0 = std::time::Instant::now();
-    let a = own_backup_refusal("C:\\Users\\qa\\Pictures\\a.jpg");
-    let b = own_backup_refusal("C:\\Users\\qa\\Pictures\\b.jpg");
+    let a = own_backup_refusal("C:\\home\\qa\\Pictures\\a.jpg");
+    let b = own_backup_refusal("C:\\home\\qa\\Pictures\\b.jpg");
     let shown: Vec<bool> = (0..4)
         .map(|i| gate.due(&a, t0 + std::time::Duration::from_millis(i * 30)))
         .collect();

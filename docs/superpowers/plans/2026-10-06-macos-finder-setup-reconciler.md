@@ -7708,7 +7708,7 @@ describe('Onboarding Finder step on Windows/Linux is unchanged', () => {
   test('Install Finder location sends the chosen path; a failure offers Continue without install', async () => {
     const m = mount('Onboarding.tsx', 'FinderInstallStep', {
       backend: {
-        default_sync_root: () => '/home/sam/Beebeeb',
+        default_sync_root: () => '~/Beebeeb',
         finder_location_state: () => ({ installed: false, status: 'missing' }),
         install_finder_location: () => { throw new Error('File Provider is only available on macOS.') },
       },
@@ -7718,7 +7718,7 @@ describe('Onboarding Finder step on Windows/Linux is unchanged', () => {
     mounted.push(m)
     await m.flush()
     await m.click('Install Finder location')
-    expect(m.calls.find((c) => c.name === 'install_finder_location')?.args).toEqual({ path: '/home/sam/Beebeeb' })
+    expect(m.calls.find((c) => c.name === 'install_finder_location')?.args).toEqual({ path: '~/Beebeeb' })
     expect(buttons(m)).toContain('Continue without install')
   })
 })
