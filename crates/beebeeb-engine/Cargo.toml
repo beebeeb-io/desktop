@@ -192,7 +192,7 @@ fake-server = ["test-support"]
 # cargo build --features fake-server --bin bb-fake-server    (a debug build; `--release` is refused)
 [[bin]]
 name = "bb-fake-server"
-path = "src/bin/bb-fake-server.rs"
+path = "src/test_api/bin_main.rs"
 required-features = ["fake-server"]
 test = false
 bench = false
