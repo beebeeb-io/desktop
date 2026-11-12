@@ -61,3 +61,23 @@ elements in all; no geometry, text, icon or fill line is red). The built frames 
 | `DW-A81` | Step 3 of 4: confirm by an email link. | built (light and dark: 0 failing on all six lines) |
 | `DW-A82` | Step 4 of 4: the deletion is scheduled, when, and how to undo it. | built (light and dark: 0 failing on all six lines) |
 | `DW-A83` | The undo worked: nothing was deleted. | built (light and dark: 0 failing on all six lines) |
+
+## Drive's own on these panes (3, lane settings-rest, 2026-11-12)
+
+The board files these three under "Settings, inside the window"; they are states of this group's panes, so they are
+built here (`plan.rs`, `app_lock.rs`) and are scenes of `frames::account::FRAMES`.
+
+| Frame | What it is | Status |
+| --- | --- | --- |
+| `DW-0708` | The plan, read only: a dialog over Account, from the plan card. | built; gate red, light and dark: the board draws an older Account pane behind the dialog (the plan card on top, no identity rows, a 540 pt column in Drive's settings kit), the app has one Account pane (DW-A51). In the gate, 9 of the dialog's 16 keys are at 0 (`scrim`, `dlg`, `dlg-title`, `dlg-text-0`, `dlg-foot`, `btn-0`, `btn-1` and the two labels) and 7 are RED: its list (`list-1-body`, `item-1-0`, `item-1-1` and their titles and values), which the board numbers `list-1` and the app `list-3` (the real pane has lists 0 to 2). Mapped by hand, `list-1` to `list-3`, those 7 are within 1 px; the gate does not measure that |
+| `DW-0716` | App lock's delay: the pop-up open on Immediately, 5 min, 30 min, 60 min. | built; gate red, light and dark: the board draws this frame in Drive's settings kit (28 pt sidebar rows, a 540 pt column) and DW-A52, "the same pane", in the account kit (30 pt, 520 pt). The app has ONE Security pane, DW-A52's, which gates at 0. DW-A52 itself still gates at 0 with the menu's anchor in its row. In the gate the menu's 10 keys are RED on geometry: the menu hangs 4 pt inside the card's trailing edge, the card is 520 pt here and 540 pt on this drawing, so the menu is 20 px to the left of the board's. Measured by hand as an offset from the pop-up button they are within 1 px; the gate does not measure that |
+| `DW-0716b` | App lock off: no time choice. | built: DW-A52 with the switch off; gate red for the same reason as DW-0716 |
+
+Decision (lane, 2026-11-12): one Security pane and one Account pane, in the account kit, because DW-0716's own rule
+says "Security is one pane (final review C3): DW-A52" and DW-0708's says it is "reached from the plan card Drive adds
+to the shared Account page (DW-A51)". The three goldens were captured from drawings in the other kit; no tolerance
+was loosened and no key dropped. To turn them green the BOARD has to draw these three in the account kit, and the
+goldens be captured again: a board change, not this lane's (board follow-up task 2480).
+Gate, light / dark, geometry failing: DW-0716 96 / 96, DW-0716b 83 / 83, DW-0708 59 / 59.
+Of those: DW-0716 86 pane keys + 10 menu keys; DW-0716b 83 pane keys; DW-0708 52 keys of the pane behind + 7 keys of the dialog's list.
+What task 2480 is expected to remove: all of them (a redraw in the account kit moves the card to 520 pt, so the menu follows, and gives the pane three lists, so the dialog's list becomes `list-3`). Expected, not measured: after the recapture, run the gate and correct these rows.

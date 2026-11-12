@@ -863,25 +863,25 @@
   "item-count": {
    "kind": "text",
    "x": 298,
-   "y": 41.75,
+   "y": 54.75,
    "w": 99.29,
    "h": 13,
-   "text": "FilesLisbon trip",
+   "text": "7 items",
    "family": "sans",
    "fontFamily": "Inter",
    "size": 11,
-   "weight": 650,
+   "weight": 400,
    "color": [
     137,
     134,
     129,
     255
    ],
-   "tracking": -0.11
+   "tracking": 0
   },
   "view-toggle": {
    "kind": "box",
-   "x": 800.23,
+   "x": 764.23,
    "y": 40.75,
    "w": 61,
    "h": 28,
@@ -894,7 +894,7 @@
   },
   "view-list": {
    "kind": "box",
-   "x": 802.23,
+   "x": 766.23,
    "y": 42.75,
    "w": 28,
    "h": 24,
@@ -908,7 +908,7 @@
   },
   "view-list-icon": {
    "kind": "icon",
-   "x": 808.73,
+   "x": 772.73,
    "y": 47.25,
    "w": 15,
    "h": 15,
@@ -930,7 +930,7 @@
   },
   "view-grid": {
    "kind": "box",
-   "x": 831.23,
+   "x": 795.23,
    "y": 42.75,
    "w": 28,
    "h": 24,
@@ -938,7 +938,7 @@
   },
   "view-grid-icon": {
    "kind": "icon",
-   "x": 837.73,
+   "x": 801.73,
    "y": 47.25,
    "w": 15,
    "h": 15,
@@ -958,7 +958,7 @@
   },
   "sort-btn": {
    "kind": "box",
-   "x": 869.23,
+   "x": 833.23,
    "y": 40.75,
    "w": 42,
    "h": 28,
@@ -966,7 +966,7 @@
   },
   "sort-icon": {
    "kind": "icon",
-   "x": 875.23,
+   "x": 839.23,
    "y": 47.25,
    "w": 15,
    "h": 15,
@@ -986,7 +986,7 @@
   },
   "sort-caret": {
    "kind": "icon",
-   "x": 894.23,
+   "x": 858.23,
    "y": 49.25,
    "w": 11,
    "h": 11,
@@ -1003,7 +1003,7 @@
   },
   "panel-toggle-btn": {
    "kind": "box",
-   "x": 919.23,
+   "x": 883.23,
    "y": 40.75,
    "w": 28,
    "h": 28,
@@ -1017,7 +1017,7 @@
   },
   "panel-icon": {
    "kind": "icon",
-   "x": 925.23,
+   "x": 889.23,
    "y": 46.75,
    "w": 16,
    "h": 16,
@@ -2239,6 +2239,85 @@
     255
    ],
    "tracking": 0
+  },
+  "open-explorer": {
+   "kind": "box",
+   "x": 919.23,
+   "y": 40.75,
+   "w": 28,
+   "h": 28
+  },
+  "open-explorer-icon": {
+   "kind": "icon",
+   "x": 925.23,
+   "y": 46.75,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "crumb-0": {
+   "kind": "text",
+   "x": 298,
+   "y": 41.75,
+   "w": 23.87,
+   "h": 13,
+   "text": "Files",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": -0.11
+  },
+  "crumb-sep-0": {
+   "kind": "icon",
+   "x": 325.87,
+   "y": 42.25,
+   "w": 12,
+   "h": 12,
+   "icon": [
+    "M9 5l7 7-7 7"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "crumb-here": {
+   "kind": "text",
+   "x": 341.87,
+   "y": 41.75,
+   "w": 55.42,
+   "h": 13,
+   "text": "Lisbon trip",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 650,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": -0.11
   }
  },
  "theme": "dark"

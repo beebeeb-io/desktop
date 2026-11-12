@@ -900,7 +900,7 @@
   },
   "view-toggle": {
    "kind": "box",
-   "x": 800.23,
+   "x": 764.23,
    "y": 40.75,
    "w": 61,
    "h": 28,
@@ -913,7 +913,7 @@
   },
   "view-list": {
    "kind": "box",
-   "x": 802.23,
+   "x": 766.23,
    "y": 42.75,
    "w": 28,
    "h": 24,
@@ -927,7 +927,7 @@
   },
   "view-list-icon": {
    "kind": "icon",
-   "x": 808.73,
+   "x": 772.73,
    "y": 47.25,
    "w": 15,
    "h": 15,
@@ -949,7 +949,7 @@
   },
   "view-grid": {
    "kind": "box",
-   "x": 831.23,
+   "x": 795.23,
    "y": 42.75,
    "w": 28,
    "h": 24,
@@ -957,7 +957,7 @@
   },
   "view-grid-icon": {
    "kind": "icon",
-   "x": 837.73,
+   "x": 801.73,
    "y": 47.25,
    "w": 15,
    "h": 15,
@@ -977,7 +977,7 @@
   },
   "sort-btn": {
    "kind": "box",
-   "x": 869.23,
+   "x": 833.23,
    "y": 40.75,
    "w": 42,
    "h": 28,
@@ -985,7 +985,7 @@
   },
   "sort-icon": {
    "kind": "icon",
-   "x": 875.23,
+   "x": 839.23,
    "y": 47.25,
    "w": 15,
    "h": 15,
@@ -1005,7 +1005,7 @@
   },
   "sort-caret": {
    "kind": "icon",
-   "x": 894.23,
+   "x": 858.23,
    "y": 49.25,
    "w": 11,
    "h": 11,
@@ -1022,7 +1022,7 @@
   },
   "panel-toggle-btn": {
    "kind": "box",
-   "x": 919.23,
+   "x": 883.23,
    "y": 40.75,
    "w": 28,
    "h": 28,
@@ -1036,7 +1036,7 @@
   },
   "panel-icon": {
    "kind": "icon",
-   "x": 925.23,
+   "x": 889.23,
    "y": 46.75,
    "w": 16,
    "h": 16,
@@ -1276,54 +1276,21 @@
    ],
    "tracking": 0
   },
-  "label-recent": {
-   "kind": "text",
-   "x": 244,
-   "y": 103,
-   "w": 44.4,
-   "h": 12,
-   "text": "RECENT",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 10,
-   "weight": 600,
-   "color": [
-    108,
-    104,
-    99,
-    255
-   ],
-   "tracking": 0.7
-  },
-  "list-0": {
+  "open-explorer": {
    "kind": "box",
-   "x": 244,
-   "y": 128,
-   "w": 512,
-   "h": 84,
-   "bg": [
-    254,
-    253,
-    252,
-    255
-   ]
+   "x": 919.23,
+   "y": 40.75,
+   "w": 28,
+   "h": 28
   },
-  "item-0-0": {
-   "kind": "box",
-   "x": 244,
-   "y": 128,
-   "w": 512,
-   "h": 28,
-   "selected": false
-  },
-  "item-0-0-icon": {
+  "open-explorer-icon": {
    "kind": "icon",
-   "x": 260,
-   "y": 133,
-   "w": 18,
-   "h": 18,
+   "x": 925.23,
+   "y": 46.75,
+   "w": 16,
+   "h": 16,
    "icon": [
-    "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2"
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
    ],
    "filled": false,
    "color": [
@@ -1332,113 +1299,6 @@
     61,
     255
    ]
-  },
-  "item-0-0-title": {
-   "kind": "text",
-   "x": 292,
-   "y": 133.5,
-   "w": 454,
-   "h": 17,
-   "text": "contract",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 13,
-   "weight": 500,
-   "color": [
-    20,
-    17,
-    13,
-    255
-   ],
-   "tracking": -0.06
-  },
-  "item-0-1": {
-   "kind": "box",
-   "x": 244,
-   "y": 156,
-   "w": 512,
-   "h": 28,
-   "selected": false
-  },
-  "item-0-1-icon": {
-   "kind": "icon",
-   "x": 260,
-   "y": 161,
-   "w": 18,
-   "h": 18,
-   "icon": [
-    "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2"
-   ],
-   "filled": false,
-   "color": [
-    70,
-    66,
-    61,
-    255
-   ]
-  },
-  "item-0-1-title": {
-   "kind": "text",
-   "x": 292,
-   "y": 161.5,
-   "w": 454,
-   "h": 17,
-   "text": "lisbon",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 13,
-   "weight": 500,
-   "color": [
-    20,
-    17,
-    13,
-    255
-   ],
-   "tracking": -0.06
-  },
-  "item-0-2": {
-   "kind": "box",
-   "x": 244,
-   "y": 184,
-   "w": 512,
-   "h": 28,
-   "selected": false
-  },
-  "item-0-2-icon": {
-   "kind": "icon",
-   "x": 260,
-   "y": 189,
-   "w": 18,
-   "h": 18,
-   "icon": [
-    "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2"
-   ],
-   "filled": false,
-   "color": [
-    70,
-    66,
-    61,
-    255
-   ]
-  },
-  "item-0-2-title": {
-   "kind": "text",
-   "x": 292,
-   "y": 189.5,
-   "w": 454,
-   "h": 17,
-   "text": "invoice 2026",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 13,
-   "weight": 500,
-   "color": [
-    20,
-    17,
-    13,
-    255
-   ],
-   "tracking": -0.06
   }
  },
  "theme": "light"
