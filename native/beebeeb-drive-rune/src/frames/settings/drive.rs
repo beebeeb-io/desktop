@@ -210,10 +210,31 @@ pub trait DriveSettings {
     fn insights(&self) -> &Insights;
     /// Ask for the insights again (DW-0783c, Try again): the page loads (DW-0783b).
     fn reload_insights(&mut self);
+    /// Diagnostics (DW-0790). Engine: the app's own CPU, memory and transfer rates, sampled
+    /// every 2 seconds only while the page is open, and where the last export ended.
+    fn diagnostics(&self) -> super::diagnostics::Diagnostics {
+        super::diagnostics::Diagnostics::default()
+    }
+    /// Save a support bundle, show it in File Explorer and open a draft to support (DW-0790b):
+    /// `diagnostics().bundle` then says where the file is, or why there is none.
+    fn export_bundle(&mut self) {}
+    /// Keep on this PC (DW-0784). Engine: the folder tree with sizes and the kept set
+    /// (the same thing as Available offline for folders). Until a source answers: not loaded.
+    fn keep(&self) -> super::keep::Keep {
+        super::keep::Keep::Failed
+    }
+    /// Load the folder list again (DW-0784c, Try again).
+    fn reload_keep(&mut self) {}
+    /// Keep exactly these folders (each with everything in it) on this PC; every other
+    /// folder's downloaded copies leave it. Nothing is deleted from Beebeeb; a change that
+    /// has not uploaded yet stays until it has.
+    fn apply_keep(&mut self, _ids: &[String]) {}
 }
 
 /// The board's sample content for Drive's settings panes.
 pub struct BoardDrive {
+    /// Diagnostics and Keep on this PC (lane settings-rest).
+    more: super::more::BoardMore,
     storage: Storage,
     insights: Insights,
     sync: SyncPane,
@@ -235,6 +256,7 @@ impl BoardDrive {
         };
         let same = |path: &str, kind: &str, size: &str| large(path, path, kind, size);
         Self {
+            more: super::more::BoardMore::new(),
             storage: Storage {
                 used: "240 GB".into(),
                 total: "1 TB".into(),
@@ -342,6 +364,25 @@ impl BoardDrive {
         self
     }
 
+    /// A support bundle was just saved (DW-0790b).
+    pub fn with_bundle_saved(mut self) -> Self {
+        self.more.diagnostics.bundle = super::more::BoardMore::board_bundle();
+        self
+    }
+
+    /// Where an export ended, for the states the board gives as rules (DW-0790b).
+    #[cfg(test)]
+    pub fn with_bundle(mut self, bundle: super::diagnostics::Bundle) -> Self {
+        self.more.diagnostics.bundle = bundle;
+        self
+    }
+
+    /// Keep on this PC in another state (DW-0784c: `Keep::Failed`; DW-0784d: no folders).
+    pub fn with_keep(mut self, keep: super::keep::Keep) -> Self {
+        self.more.keep = keep;
+        self
+    }
+
     /// Storage insights in another state (DW-0783b, c, d).
     pub fn with_insights(mut self, insights: Insights) -> Self {
         self.insights = insights;
@@ -402,6 +443,24 @@ impl DriveSettings for BoardDrive {
     }
     fn reload_insights(&mut self) {
         self.insights = Insights::Loading;
+    }
+    fn diagnostics(&self) -> super::diagnostics::Diagnostics {
+        self.more.diagnostics.clone()
+    }
+    fn export_bundle(&mut self) {
+        self.more.diagnostics.bundle = super::more::BoardMore::board_bundle();
+    }
+    fn keep(&self) -> super::keep::Keep {
+        self.more.keep.clone()
+    }
+    fn reload_keep(&mut self) {
+        self.more.keep = super::keep::Keep::Ready {
+            folders: super::more::board_folders(),
+            total_mb: super::more::BOARD_TOTAL_MB,
+        };
+    }
+    fn apply_keep(&mut self, ids: &[String]) {
+        self.more.apply_keep(ids);
     }
 }
 

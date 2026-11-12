@@ -15,9 +15,12 @@
 //! do (show a frame another lane owns, open a web page, start a download).
 
 pub mod about;
+pub mod diagnostics;
 pub mod drive;
 pub mod general;
 pub mod insights;
+pub mod keep;
+pub mod more;
 pub mod notifications;
 pub mod recent;
 pub mod source;
@@ -58,6 +61,8 @@ pub enum Pane {
     Insights,
     /// Sync and File Explorer (DW-0746).
     Sync,
+    /// General › Diagnostics (DW-0790).
+    Diagnostics,
 }
 
 /// Which menu a pop-up button drops.
@@ -115,6 +120,10 @@ pub enum Dialog {
     TurnOffExplorer,
     /// Repair… (DW-0746c).
     Repair,
+    /// Sync and File Explorer › Choose folders… (DW-0784, DW-0784c, DW-0784d).
+    Keep,
+    /// Before downloaded copies leave this PC (DW-0784b), over Keep's choices.
+    KeepConfirm,
 }
 
 /// What settings asks of the app around it. The shell lane drains `SettingsUi::intents`.
@@ -156,6 +165,8 @@ pub struct SettingsUi {
     pub drive: Box<dyn DriveSettings>,
     /// The limit a limit dialog's slider stands on, until Save (DW-0713, DW-0714).
     pub draft_gb: u32,
+    /// What Diagnostics and Keep on this PC hold open (lane settings-rest).
+    pub more: more::MoreUi,
 }
 
 impl Default for SettingsUi {
@@ -170,6 +181,7 @@ impl Default for SettingsUi {
             intents: Vec::new(),
             drive: drive::first(instance::DEV_BUILD),
             draft_gb: 0,
+            more: more::MoreUi::default(),
         }
     }
 }
@@ -376,6 +388,35 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         s.settings.drive = Box::new(drive::BoardDrive::new().with_insights(drive::Insights::Empty));
         open_on(s, "DW-0783");
     }),
+    ("DW-0790", |s| open_on(s, "DW-0790")),
+    ("DW-0790b", |s| open_on(s, "DW-0790b")),
+    ("DW-0784", |s| {
+        open_on(s, "DW-0784");
+        // The board draws the dialog two choices in: Lisbon trip open, Documents unchecked,
+        // Day 1 checked.
+        let draft = &mut s.settings.more.keep;
+        draft.toggle_open("lisbon");
+        draft.toggle("documents");
+        draft.toggle("lisbon/day-1");
+    }),
+    ("DW-0784b", |s| {
+        open_on(s, "DW-0784");
+        let draft = &mut s.settings.more.keep;
+        draft.toggle("documents");
+        draft.toggle("lisbon/day-1");
+        s.settings.dialog = Some(Dialog::KeepConfirm);
+    }),
+    ("DW-0784c", |s| {
+        s.settings.drive = Box::new(drive::BoardDrive::new().with_keep(keep::Keep::Failed));
+        open_on(s, "DW-0784");
+    }),
+    ("DW-0784d", |s| {
+        s.settings.drive = Box::new(drive::BoardDrive::new().with_keep(keep::Keep::Ready {
+            folders: Vec::new(),
+            total_mb: 0.0,
+        }));
+        open_on(s, "DW-0784");
+    }),
 ];
 
 fn open_on(s: &mut State, frame: &'static str) {
@@ -414,6 +455,9 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>, Option<MenuKind>)> {
         "DW-0713" => (Pane::Storage, Some(Dialog::Limit(Kept::Previews)), None),
         "DW-0714" => (Pane::Storage, Some(Dialog::Limit(Kept::Downloaded)), None),
         "DW-0783" | "DW-0783b" | "DW-0783c" | "DW-0783d" => (Pane::Insights, None, None),
+        "DW-0790" | "DW-0790b" => (Pane::Diagnostics, None, None),
+        "DW-0784" | "DW-0784c" | "DW-0784d" => (Pane::Sync, Some(Dialog::Keep), None),
+        "DW-0784b" => (Pane::Sync, Some(Dialog::KeepConfirm), None),
         _ => return None,
     })
 }
@@ -492,7 +536,12 @@ pub fn go(s: &mut State, frame: &'static str) {
     ui.show(pane);
     match dialog {
         Some(Dialog::Limit(which)) => ui.open_limit(which),
+        Some(Dialog::Keep) => keep::open(ui),
         other => ui.dialog = other,
+    }
+    if frame == "DW-0790b" {
+        // The export ended: the page says where the file is (the source's answer).
+        ui.drive.export_bundle();
     }
     if let Some(kind) = menu {
         ui.toggle_menu(kind);
@@ -515,7 +564,7 @@ impl Pane {
     /// The sidebar section a pane belongs to (a pane opened from General stays under General).
     pub fn section(self) -> Pane {
         match self {
-            Pane::General | Pane::About | Pane::StorageLocation => Pane::General,
+            Pane::General | Pane::About | Pane::StorageLocation | Pane::Diagnostics => Pane::General,
             Pane::Notifications | Pane::Recent => Pane::Notifications,
             Pane::Storage | Pane::Insights => Pane::Storage,
             Pane::Sync => Pane::Sync,
@@ -650,6 +699,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         Pane::Storage => storage::pane(ui, &t),
         Pane::Insights => insights::pane(ui, &t),
         Pane::Sync => sync::pane(ui, &t),
+        Pane::Diagnostics => diagnostics::pane(ui, &t),
     };
     let overlay = overlay.filter(|_| inside);
     let mut body = row()
