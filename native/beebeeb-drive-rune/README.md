@@ -89,6 +89,9 @@ one JSON record per key. The board loads Inter and JetBrains Mono from Google Fo
    Read the side-by-side and the tiles map at full size before you call a region done.
 7. **Tests**: keyboard, roles and names for what the frame adds (`src/ui/tests.rs` shows how).
 8. **PR body**: the two truth lines, before and after.
+9. **`MAP.md`**: a `native/*` branch carries NO `MAP.md` change (the map guard is skipped there). Merging `v2-native`
+   in, take its maps: `git diff --stat origin/v2-native...HEAD | grep -c MAP.md` prints 0. The maps are regenerated in
+   ONE pull request from a `maps/regen-<date>` branch on the tip (`bun scripts/outline/map.ts <worktree> --write`).
 
 ### The components (`src/ui/`)
 

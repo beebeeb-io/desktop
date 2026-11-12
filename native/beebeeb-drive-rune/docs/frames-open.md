@@ -240,10 +240,21 @@ word, most of them are sentences of the board's copy, and I read only the ones i
 | `src/frames/settings/source.rs:324` | `product: "Beebeeb Drive"` | the product name in the version facts (About, the support bundle) |
 | `src/frames/tray/commands.rs:10`, `:98` | `"Beebeeb"`, `"Beebeeb Drive"` | the board's command table: the app's own menu and its window, as headings |
 
-Two things to decide with it. A drawn name that follows the identity makes a test build's frame differ from the
-board in that text (the gate runs a test build: `BEEBEEB_APP_IDENTIFIER` unset is the TEST app), so the gate needs
-the real name for its render or the key an exemption the lead rules. And the identity pin sees only a literal that
-IS a name (`"Beebeeb"`, `"Beebeeb Test"`, ...), not `"Beebeeb Drive"`: all but two rows above pass it today.
+Two questions came with this list: a drawn name that follows the identity makes a test build's frame differ from
+the board in that text (`BEEBEEB_APP_IDENTIFIER` unset is the TEST app), and the identity pin sees only a literal
+that IS a name (`"Beebeeb"`, `"Beebeeb Test"`, ...), not `"Beebeeb Drive"`: all but two rows above pass it today.
+
+**Rulings (lead, 2026-11-12):**
+1. **Drawn names come from the identity, and the gate keeps comparing against the board.** The headless snapshot
+   path (`--snap`, which opens no engine and no credential store) draws with the REAL display name; a live TEST
+   build draws "Beebeeb Test". One test pins each half: the snapshot shows the board's name; a live TEST build's
+   window title is "Beebeeb Test". Display name only: the snapshot never takes REAL's folders, service names or
+   identifiers.
+2. **The pin seeing only exact names** goes to the engine lane with review P2-5; it is not the integrator's.
+3. **The conversion of the rows above is ONE follow-up pull request**, after the maps pull request and not part of
+   it. Not started.
+4. **The ten Files-window frames with more red keys than the toolbar's (2a)** stay as listed; they are separated
+   when the board is updated.
 
 ## 3. Requests to the design-system lane (`src/theme/**`, `src/ui/**`)
 
