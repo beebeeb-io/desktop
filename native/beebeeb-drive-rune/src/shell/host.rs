@@ -61,6 +61,8 @@ pub struct Shell {
     window_kind: WindowKind,
     /// The quit hook stopped the engine; a cancelled Windows shutdown starts it again.
     stopped_for_quit: bool,
+    /// Whether the window currently has screen-capture exclusion set (secret route on screen).
+    capture_excluded: bool,
 }
 
 impl Shell {
@@ -69,6 +71,7 @@ impl Shell {
         let window_kind = surfaces::kind_for(&app.screen());
         let tray_inputs = actions.tray_inputs();
         let tray_model = tray_model(&tray_inputs);
+        let capture_excluded = registry::route_shows_secret(&app);
         Shell {
             app,
             actions,
@@ -80,6 +83,7 @@ impl Shell {
             sidebar_seen: SidebarSection::Files,
             window_kind,
             stopped_for_quit: false,
+            capture_excluded,
         }
     }
 
@@ -145,6 +149,25 @@ impl Shell {
             }
         }
         changed
+    }
+
+    /// Compares the current route's secret state with the stored capture-exclusion flag and
+    /// calls the platform when they differ. Failure is logged (no content); the secret content
+    /// stays drawn (no blackout: a failure to exclude is a privacy leak, but not drawing would
+    /// be a denial of access to data the person is entitled to see).
+    pub fn update_capture_exclusion(&mut self) {
+        let secret = registry::route_shows_secret(&self.app);
+        if secret == self.capture_excluded {
+            return;
+        }
+        self.capture_excluded = secret;
+        let window = unpoisoned(&self.wiring.window);
+        let Some(handle) = window.as_ref() else {
+            return;
+        };
+        if let Err(error) = self.platform.set_capture_exclusion(handle, secret) {
+            log(format!("capture exclusion could not be set ({error})"));
+        }
     }
 
     /// Adds the b. Runs on the UI thread once the event loop is up, so the process is
@@ -290,6 +313,7 @@ pub fn dispatch(s: &mut State, event: Event) -> Outcome {
     crate::frames::backups::sync(s); // the same for Backups, and its one-time code is wiped
     crate::frames::account::sync(s); // and what was open inside the account sections
     crate::frames::tray::shortcuts::sync(s); // a closed shortcuts list forgets its page
+    s.shell.update_capture_exclusion(); // secret route → capture excluded (task 2460)
     outcome
 }
 
@@ -324,6 +348,7 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         .app
         .apply(Event::Navigate(Route::section(section_for(s.sidebar_section))));
     sync_sidebar(s);
+    s.shell.update_capture_exclusion(); // sidebar navigation may change the secret state (task 2460)
     outcome == Outcome::Changed || viewer
 }
 
