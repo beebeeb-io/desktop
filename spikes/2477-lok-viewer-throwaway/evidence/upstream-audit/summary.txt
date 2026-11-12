@@ -1,0 +1,131 @@
+tools: cargo-audit-audit 0.23.0 / cargo-deny 0.20.2
+== wordcraft v0.18.1 commit=079f478bd85df7bcc567e3bafa7d7219096f9c3c MATCHES-the-pin
+wordcraft audit exit=1
+wordcraft audit: lockfile_packages=704 vulnerabilities=4 unmaintained=4 unsound=2 yanked=1
+  VULN RUSTSEC-2026-0429 zip 3.0.0: zip: `ZipArchive::extract` aborts the process on a symlink entry with a large declared size
+  VULN RUSTSEC-2026-0368 zip 3.0.0: zip: `ZipArchive::extract` creates symbolic links whose attacker-controlled targets are outside the destination directory
+  VULN RUSTSEC-2026-0369 zip 3.0.0: ZipStreamReader::extract() and ZipArchive::extract() apply Unix permissions through symlinks without confining the target
+  VULN RUSTSEC-2026-0367 zip 3.0.0:  Insecure Preservation of SUID/SGID Bits during ZIP Extraction Leading to Potential Privilege Escalation
+  unmaintained RUSTSEC-2024-0370 proc-macro-error 1.0.4: proc-macro-error is unmaintained
+  unmaintained RUSTSEC-2026-0371 zbus_names 4.3.4: `zbus_names` is unmaintained
+  unmaintained RUSTSEC-2026-0370 zvariant 5.15.0: `zvariant` is unmaintained
+  unmaintained RUSTSEC-2026-0372 zvariant_derive 5.15.0: `zvariant_derive` is unmaintained
+  unsound RUSTSEC-2026-0486 rustix 1.1.5: xattr functions mark unwritten bytes as initialized when given a zero-length buffer
+  unsound RUSTSEC-2026-0386 tokio 1.53.2: `AsyncFd::new` and related constructors violate I/O safety
+  yanked - async-executor 1.14.0: 
+wordcraft deny advisories: exit=1 errors=9 warnings=1
+wordcraft deny bans: exit=2 errors=9 warnings=0
+wordcraft deny licenses: exit=4 errors=3 warnings=1
+wordcraft deny sources: exit=8 errors=27 warnings=0
+  wordcraft banned       1 crate 'async-io = 2.6.0'
+  wordcraft banned       1 crate 'h2 = 0.4.20'
+  wordcraft banned       1 crate 'hyper = 1.12.0'
+  wordcraft banned       1 crate 'mio = 1.2.4'
+  wordcraft banned       1 crate 'reqwest = 0.13.5'
+  wordcraft banned       1 crate 'rustls = 0.23.46'
+  wordcraft banned       1 crate 'socket2 = 0.6.5'
+  wordcraft banned       1 crate 'tokio = 1.53.2'
+  wordcraft banned       1 crate 'ureq = 3.5.0'
+  wordcraft       3 error[rejected]: failed to satisfy license requirements
+  wordcraft      27 error[source-not-allowed]: detected 'git' source not explicitly allowed
+  wordcraft git-source       1 git+https://github.com/storytold/craft-libs?rev=01315d9c92b5b0e69082d35ca56099461a1efd45
+  wordcraft git-source       3 git+https://github.com/storytold/craft-libs?rev=6e03f65bf45181db77ba6229716e6624db9eb25b
+  wordcraft git-source       3 git+https://github.com/storytold/craft-libs?rev=762a06a4c6b48b522b7d4de84a87917ef90265e6
+  wordcraft git-source       4 git+https://github.com/storytold/craft-libs?rev=92d392cff132eaf53e13afff77f38b5c11b73aa0
+  wordcraft git-source       1 git+https://github.com/storytold/craft-libs?rev=a3e0b5a9440d18f19422a9dca13516747b7d3181
+  wordcraft git-source       2 git+https://github.com/storytold/craft-libs?rev=fd5e2feff6ea25bed371a99cc732b3968d621505
+  wordcraft git-source      10 git+https://github.com/storytold/egui.git?rev=6d518fc799681571963842f95b55a6b68431b15a
+  wordcraft git-source       1 git+https://github.com/storytold/winit.git?rev=a517b3846ee8457d84ee4975110bfda6797c44dc
+  wordcraft git-source       1 git+https://github.com/storytold/winprint.rs?rev=417ac3c4d14d3da5485a99c7d5ce8f05664ec312
+  wordcraft git-source       1 git+https://github.com/storytold/winprint.rs?rev=5f80b9baf6b58937c401656634e42d33f00ddf49
+wordcraft map: workspace_members=19 packages_resolved=704
+  wordcraft REACHES wordcraft: async-io via eframe,wordcraft-ui-egui,zbus; mio via eframe,rfd,winit,wordcraft-ui-egui; rustls via craft-update,wordcraft-engine,wordcraft-ui-egui; socket2 via eframe,rfd,winit,wordcraft-ui-egui; tokio via eframe,rfd,winit,wordcraft-ui-egui; ureq via craft-update,wordcraft-engine,wordcraft-ui-egui
+  wordcraft REACHES wordcraft-cli: rustls via wordcraft-engine,wordcraft-mcp,wordcraft-zotero; ureq via wordcraft-engine,wordcraft-mcp,wordcraft-zotero
+  wordcraft REACHES wordcraft-engine: rustls via craft-font-store; ureq via craft-font-store
+  wordcraft REACHES wordcraft-mcp: rustls via wordcraft-engine; ureq via wordcraft-engine
+  wordcraft REACHES wordcraft-ui-egui: async-io via zbus; mio via craft-ui; rustls via craft-update,wordcraft-engine,wordcraft-zotero; socket2 via craft-ui; tokio via craft-ui; ureq via craft-update,wordcraft-engine,wordcraft-zotero
+  wordcraft REACHES wordcraft-web: async-io via eframe,wordcraft-ui-egui; mio via craft-web-api,eframe,rfd,wasm-bindgen-futures,wordcraft-ui-egui; rustls via wordcraft-engine,wordcraft-ui-egui; socket2 via craft-web-api,eframe,rfd,wasm-bindgen-futures,wordcraft-ui-egui; tokio via craft-web-api,eframe,rfd,wasm-bindgen-futures,wordcraft-ui-egui; ureq via wordcraft-engine,wordcraft-ui-egui
+  wordcraft REACHES wordcraft-zotero: rustls via wordcraft-engine; ureq via wordcraft-engine
+  wordcraft CLEAN (12 of 19): wordcraft-control-key wordcraft-doc wordcraft-docbin wordcraft-docx wordcraft-fonts wordcraft-formats wordcraft-geom wordcraft-layout wordcraft-metafile wordcraft-pdf wordcraft-render xtask
+  wordcraft REACHING (7 of 19): wordcraft wordcraft-cli wordcraft-engine wordcraft-mcp wordcraft-ui-egui wordcraft-web wordcraft-zotero
+== gridcraft v0.19.1 commit=476448d7d9f3a5f8e93fcf7d98b47fd52293fe7f MATCHES-the-pin
+gridcraft audit exit=1
+gridcraft audit: lockfile_packages=656 vulnerabilities=5 unmaintained=4 unsound=2 yanked=2
+  VULN RUSTSEC-2026-0383 webpki-root-certs 1.0.9: Bundled root certificates allow trust in distrusted emSign intermediates
+  VULN RUSTSEC-2026-0429 zip 3.0.0: zip: `ZipArchive::extract` aborts the process on a symlink entry with a large declared size
+  VULN RUSTSEC-2026-0368 zip 3.0.0: zip: `ZipArchive::extract` creates symbolic links whose attacker-controlled targets are outside the destination directory
+  VULN RUSTSEC-2026-0369 zip 3.0.0: ZipStreamReader::extract() and ZipArchive::extract() apply Unix permissions through symlinks without confining the target
+  VULN RUSTSEC-2026-0367 zip 3.0.0:  Insecure Preservation of SUID/SGID Bits during ZIP Extraction Leading to Potential Privilege Escalation
+  unmaintained RUSTSEC-2024-0370 proc-macro-error 1.0.4: proc-macro-error is unmaintained
+  unmaintained RUSTSEC-2026-0371 zbus_names 4.3.4: `zbus_names` is unmaintained
+  unmaintained RUSTSEC-2026-0370 zvariant 5.15.0: `zvariant` is unmaintained
+  unmaintained RUSTSEC-2026-0372 zvariant_derive 5.15.0: `zvariant_derive` is unmaintained
+  unsound RUSTSEC-2026-0486 rustix 1.1.5: xattr functions mark unwritten bytes as initialized when given a zero-length buffer
+  unsound RUSTSEC-2026-0386 tokio 1.53.2: `AsyncFd::new` and related constructors violate I/O safety
+  yanked - async-executor 1.14.0: 
+  yanked - clipboard-win 5.4.1: 
+gridcraft deny advisories: exit=1 errors=9 warnings=2
+gridcraft deny bans: exit=2 errors=9 warnings=0
+gridcraft deny licenses: exit=4 errors=2 warnings=1
+gridcraft deny sources: exit=8 errors=21 warnings=0
+  gridcraft banned       1 crate 'async-io = 2.6.0'
+  gridcraft banned       1 crate 'h2 = 0.4.20'
+  gridcraft banned       1 crate 'hyper = 1.12.0'
+  gridcraft banned       1 crate 'mio = 1.2.4'
+  gridcraft banned       1 crate 'reqwest = 0.13.5'
+  gridcraft banned       1 crate 'rustls = 0.23.46'
+  gridcraft banned       1 crate 'socket2 = 0.6.5'
+  gridcraft banned       1 crate 'tokio = 1.53.2'
+  gridcraft banned       1 crate 'ureq = 3.5.0'
+  gridcraft       2 error[rejected]: failed to satisfy license requirements
+  gridcraft      21 error[source-not-allowed]: detected 'git' source not explicitly allowed
+  gridcraft git-source       6 git+https://github.com/storytold/craft-libs?rev=6e03f65bf45181db77ba6229716e6624db9eb25b
+  gridcraft git-source       2 git+https://github.com/storytold/craft-libs?rev=fd5e2feff6ea25bed371a99cc732b3968d621505
+  gridcraft git-source      10 git+https://github.com/storytold/egui.git?rev=6d518fc799681571963842f95b55a6b68431b15a
+  gridcraft git-source       1 git+https://github.com/storytold/winit.git?rev=a517b3846ee8457d84ee4975110bfda6797c44dc
+  gridcraft git-source       1 git+https://github.com/storytold/winprint.rs?rev=64e7afd4d1483512385012c340ecaaaf0f3beb7f
+  gridcraft git-source       1 git+https://github.com/storytold/winprint.rs?rev=bc06a7c48b768eb27a828c7986f6d2868b245ee0
+gridcraft map: workspace_members=18 packages_resolved=656
+  gridcraft REACHES gridcraft: async-io via eframe,gridcraft-ui-egui; mio via eframe,gridcraft-ui-egui,rfd,winit; rustls via craft-update,gridcraft-ui-egui; socket2 via eframe,gridcraft-ui-egui,rfd,winit; tokio via eframe,gridcraft-ui-egui,rfd,winit; ureq via craft-update,gridcraft-ui-egui
+  gridcraft REACHES gridcraft-ui-egui: async-io via zbus; mio via craft-ui; rustls via craft-update; socket2 via craft-ui; tokio via craft-ui; ureq via craft-update
+  gridcraft REACHES gridcraft-web: async-io via eframe,gridcraft-ui-egui; mio via craft-web-api,eframe,gridcraft-ui-egui,rfd,wasm-bindgen-futures; rustls via gridcraft-ui-egui; socket2 via craft-web-api,eframe,gridcraft-ui-egui,rfd,wasm-bindgen-futures; tokio via craft-web-api,eframe,gridcraft-ui-egui,rfd,wasm-bindgen-futures; ureq via gridcraft-ui-egui
+  gridcraft CLEAN (15 of 18): gridcraft-calc gridcraft-chart gridcraft-cli gridcraft-core gridcraft-engine gridcraft-formula gridcraft-functions gridcraft-math gridcraft-mcp gridcraft-model gridcraft-numfmt gridcraft-pdf gridcraft-sandbox gridcraft-xlsx xtask
+  gridcraft REACHING (3 of 18): gridcraft gridcraft-ui-egui gridcraft-web
+== deckcraft v0.18.1 commit=7cc73ab1895ed2e30c8afbcada20c70b9ea0a440 MATCHES-the-pin
+deckcraft audit exit=1
+deckcraft audit: lockfile_packages=629 vulnerabilities=4 unmaintained=5 unsound=2 yanked=2
+  VULN RUSTSEC-2026-0429 zip 3.0.0: zip: `ZipArchive::extract` aborts the process on a symlink entry with a large declared size
+  VULN RUSTSEC-2026-0368 zip 3.0.0: zip: `ZipArchive::extract` creates symbolic links whose attacker-controlled targets are outside the destination directory
+  VULN RUSTSEC-2026-0369 zip 3.0.0: ZipStreamReader::extract() and ZipArchive::extract() apply Unix permissions through symlinks without confining the target
+  VULN RUSTSEC-2026-0367 zip 3.0.0:  Insecure Preservation of SUID/SGID Bits during ZIP Extraction Leading to Potential Privilege Escalation
+  unmaintained RUSTSEC-2026-0206 rustybuzz 0.20.1: `rustybuzz` is unmaintained
+  unmaintained RUSTSEC-2026-0192 ttf-parser 0.25.1: `ttf-parser` is unmaintained
+  unmaintained RUSTSEC-2026-0371 zbus_names 4.3.4: `zbus_names` is unmaintained
+  unmaintained RUSTSEC-2026-0370 zvariant 5.15.0: `zvariant` is unmaintained
+  unmaintained RUSTSEC-2026-0372 zvariant_derive 5.15.0: `zvariant_derive` is unmaintained
+  unsound RUSTSEC-2026-0486 rustix 1.1.5: xattr functions mark unwritten bytes as initialized when given a zero-length buffer
+  unsound RUSTSEC-2026-0386 tokio 1.53.2: `AsyncFd::new` and related constructors violate I/O safety
+  yanked - async-executor 1.14.0: 
+  yanked - clipboard-win 5.4.1: 
+deckcraft deny advisories: exit=1 errors=9 warnings=2
+deckcraft deny bans: exit=2 errors=4 warnings=0
+deckcraft deny licenses: exit=4 errors=18 warnings=1
+deckcraft deny sources: exit=8 errors=21 warnings=0
+  deckcraft banned       1 crate 'async-io = 2.6.0'
+  deckcraft banned       1 crate 'rustls = 0.23.46'
+  deckcraft banned       1 crate 'tokio = 1.53.2'
+  deckcraft banned       1 crate 'ureq = 3.5.0'
+  deckcraft      18 error[rejected]: failed to satisfy license requirements
+  deckcraft      21 error[source-not-allowed]: detected 'git' source not explicitly allowed
+  deckcraft git-source       6 git+https://github.com/storytold/craft-libs?rev=6e03f65bf45181db77ba6229716e6624db9eb25b
+  deckcraft git-source       2 git+https://github.com/storytold/craft-libs?rev=75895c0321d8cb6e175a42466cba050352b117c5
+  deckcraft git-source       2 git+https://github.com/storytold/craft-libs?rev=fd5e2feff6ea25bed371a99cc732b3968d621505
+  deckcraft git-source      10 git+https://github.com/storytold/egui.git?rev=6d518fc799681571963842f95b55a6b68431b15a
+  deckcraft git-source       1 git+https://github.com/storytold/winit.git?rev=a517b3846ee8457d84ee4975110bfda6797c44dc
+deckcraft map: workspace_members=24 packages_resolved=629
+  deckcraft REACHES deckcraft: async-io via eframe; rustls via craft-update,deckcraft-ui-egui; tokio via cpal,deckcraft-ui-egui,eframe,rfd,winit; ureq via craft-update,deckcraft-ui-egui
+  deckcraft REACHES deckcraft-ui-egui: rustls via craft-update; tokio via craft-ui; ureq via craft-update
+  deckcraft REACHES deckcraft-web: async-io via eframe; rustls via deckcraft-ui-egui; tokio via craft-web-api,deckcraft-ui-egui,eframe,rfd,wasm-bindgen-futures; ureq via deckcraft-ui-egui
+  deckcraft CLEAN (21 of 24): deckcraft-anim deckcraft-av1 deckcraft-bitstream deckcraft-cli deckcraft-color deckcraft-engine deckcraft-fonts deckcraft-format deckcraft-geom deckcraft-h264 deckcraft-hevc deckcraft-mcp deckcraft-media deckcraft-metafile deckcraft-model deckcraft-pdf deckcraft-pptx deckcraft-render deckcraft-text deckcraft-vp9 xtask
+  deckcraft REACHING (3 of 24): deckcraft deckcraft-ui-egui deckcraft-web
+audit-upstreams: done
