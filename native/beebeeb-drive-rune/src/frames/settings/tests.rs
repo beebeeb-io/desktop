@@ -208,8 +208,9 @@ fn the_sidebar_is_navigation_of_links_with_the_current_one_selected() {
 /// request to the shell. By pointer and by keyboard.
 #[test]
 fn every_row_of_general_acts() {
-    let asks: [(&str, Intent); 6] = [
-        ("item-1-0", Intent::Show("DW-0380")),
+    // "Show the guide again" (item-1-0) asks nothing of the shell: it runs the guide
+    // (`signin::setup::guide_tests::show_the_guide_again_in_settings_runs_it_on_files`).
+    let asks: [(&str, Intent); 5] = [
         ("item-1-2", Intent::Show("DW-0790")),
         ("item-2-0", Intent::Open("privacy")),
         ("item-2-1", Intent::Open("export-my-data")),

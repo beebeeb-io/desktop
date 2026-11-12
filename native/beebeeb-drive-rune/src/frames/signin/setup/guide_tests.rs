@@ -268,14 +268,17 @@ fn open_my_beebeeb_at_the_end_of_the_first_run_starts_the_guide() {
         rt.state.setup.as_mut().unwrap().take_intents(),
         [super::Intent::OpenSetting(super::Setting::AppLock)]
     );
-    // The first-run window shows no tip; the main window on Files does.
+    // The tip shows once the window is the main window on Files (the session's gate opens it:
+    // the fixture's is open), never over the first-run window.
     rt.frame(0.0);
-    assert!(rect(&rt, COACH_KEY).is_none());
+    assert_eq!(section(&rt), Some(Section::Files));
+    assert_eq!(text(&rt, "coach-title").as_deref(), Some(TRAY_TITLE));
     rt.update(|s, _| {
-        host::dispatch(s, Event::Gate(GateState::Ready));
+        host::dispatch(s, Event::Gate(GateState::FirstRun));
     });
     rt.frame(0.0);
-    assert_eq!(text(&rt, "coach-title").as_deref(), Some(TRAY_TITLE));
+    assert_eq!(rt.state.guide.step, Some(Step::Tray));
+    assert!(rect(&rt, COACH_KEY).is_none(), "no tip over the first-run window");
 }
 
 #[test]
