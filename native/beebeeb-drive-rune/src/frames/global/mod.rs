@@ -386,7 +386,11 @@ pub const FRAMES: &[Scene<State>] = &[
     ("DW-0104", |s| scene(s, source::board::storage_full())),
     ("DW-0105", |s| scene(s, source::board::signed_out())),
     ("DW-0106", |s| scene(s, source::board::backup_problem())),
-    ("DW-0118", |s| scene(s, source::board::loading())),
+    ("DW-0118", |s| {
+        scene(s, source::board::loading());
+        // The slim strip: what the first download's card (DW-1107) gives way to.
+        s.actions.first_load_strip = true;
+    }),
     // DW-0119: Lisbon trip as a grid, its thumbnails still to arrive.
     ("DW-0119", grid::scene),
     // DW-0121: offline, and Contract draft.pdf (online only) was opened.

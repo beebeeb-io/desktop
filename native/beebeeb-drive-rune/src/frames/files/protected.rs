@@ -281,8 +281,14 @@ pub fn poll(s: &mut State) -> bool {
     let Some(root) = s.actions.source.backups_root() else {
         return false;
     };
-    // No folder is read while the session ended (`session.rs`).
+    // No folder is read while the session ended (`session.rs`): the sidebar's Backups is refused
+    // like every other ask, and the window stays on the list it has.
     if s.session_ended() {
+        let asks_backups = matches!(s.shell.app.screen(), Screen::Drive(r) if r.section == Section::Backups);
+        if asks_backups && !inside(s, &root) && s.refused_without_session() {
+            crate::shell::host::dispatch(s, Event::Navigate(Route::section(Section::Files)));
+            return true;
+        }
         return false;
     }
     let Screen::Drive(route) = s.shell.app.screen() else {

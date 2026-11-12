@@ -5,6 +5,7 @@
 //! Data: the listing comes from `crate::source::DriveSource`, everything else from `source::FilesSource`
 //! (counts, the account, the sync state; every action is a call on it, answered in a toast).
 
+pub mod browse_states;
 pub mod details;
 pub mod dialogs;
 pub mod keys;
@@ -17,10 +18,13 @@ pub mod protected_fixture;
 pub mod rename;
 pub mod session;
 pub mod sidebar;
+pub mod sorting;
 pub mod source;
 pub mod toolbar;
 pub mod window;
 
+#[cfg(test)]
+mod browse_states_tests;
 #[cfg(test)]
 mod long_list_tests;
 #[cfg(test)]
@@ -184,6 +188,8 @@ pub struct Actions {
     pub typed: long_list::Typed,
     /// The session ended: what was refused (`session.rs`).
     pub session: session::Ui,
+    /// During the first download: something was opened, so the card gave way to the strip (DW-1107).
+    pub first_load_strip: bool,
     /// A board frame that draws a long list from this row on (DW-0420b: the gate draws one frame
     /// and cannot scroll). 0 in the app.
     pub board_first_row: usize,
@@ -216,6 +222,7 @@ impl Actions {
             protected: protected::Ui::default(),
             typed: long_list::Typed::default(),
             session: session::Ui::default(),
+            first_load_strip: false,
             board_first_row: 0,
         }
     }
@@ -582,6 +589,14 @@ impl State {
             return false;
         }
         let items = self.selected_items();
+        // Opening something ends the first download's card (DW-1107: "shrinks to a strip").
+        self.actions.first_load_strip |= !items.is_empty();
+        // Without a connection a file that is not on this PC says so, and is not asked for (DW-1108).
+        if let Some(item) = items.iter().find(|item| browse_states::needs_connection(self, item)) {
+            let (id, name) = (item.id.clone(), item.name.clone());
+            self.block_preview(id, name);
+            return false;
+        }
         let lead = self.selected.and_then(|i| self.listing.items.get(i)).cloned();
         let files: Vec<DriveItem> = items.iter().filter(|i| !i.is_folder).cloned().collect();
         let folder = match (&items[..], &lead) {
@@ -914,82 +929,6 @@ impl State {
                 self.open_in_file_explorer(tx);
             }
         }
-    }
-
-    /// Change this folder's sort and put the rows in that order.
-    pub fn set_sort(&mut self, sort: Sort) {
-        // A protected folder keeps its owner's order: no choice of the Sort menu applies there.
-        if self.in_protected_folder() {
-            return;
-        }
-        self.actions.sort = sort;
-        // The order of the rows is the window's; the source hears of it only with a session.
-        if !self.session_ended() {
-            self.actions.source.set_sort(self.listing.folder.id.as_deref(), sort);
-        }
-        self.forget_undo();
-        self.apply_sort();
-    }
-
-    /// A click on a column header: sort by it; a second click reverses the order (DW-0404).
-    pub fn sort_by_column(&mut self, by: SortBy) {
-        let sort = self.actions.sort;
-        self.set_sort(if sort.by == by {
-            Sort {
-                reversed: !sort.reversed,
-                ..sort
-            }
-        } else {
-            Sort {
-                by,
-                reversed: false,
-                ..sort
-            }
-        });
-    }
-
-    /// Put the rows in the folder's order; what was selected stays selected. Backups stays the
-    /// first row whatever the sort (DW-0404).
-    pub fn apply_sort(&mut self) {
-        // A protected folder stays in the order its owner gives it (devices, then services; the
-        // years newest first: DW-0422, DW-0424).
-        if self.in_protected_folder() {
-            return;
-        }
-        let sort = self.actions.sort;
-        let id_of = |s: &State, row: usize| s.listing.items.get(row).map(|i| i.id.clone());
-        let lead = self.selected.and_then(|i| id_of(self, i));
-        let anchor = self.actions.anchor.and_then(|i| id_of(self, i));
-        let selected: Vec<String> = self.actions.selection.iter().filter_map(|&i| id_of(self, i)).collect();
-        let kind = |i: &DriveItem| {
-            i.name
-                .rsplit_once('.')
-                .map(|(_, ext)| ext.to_lowercase())
-                .unwrap_or_default()
-        };
-        self.listing.items.sort_by(|a, b| {
-            use std::cmp::Ordering;
-            let pinned = b.is_protected.cmp(&a.is_protected);
-            let folders = if sort.folders_first {
-                b.is_folder.cmp(&a.is_folder)
-            } else {
-                Ordering::Equal
-            };
-            let name = long_list::sort_key(&a.name).cmp(&long_list::sort_key(&b.name));
-            let by = match sort.by {
-                SortBy::Name => name,
-                // Newest first, largest first: the board's first Order choice for these.
-                SortBy::DateChanged => b.modified_at.cmp(&a.modified_at),
-                SortBy::Size => b.size.unwrap_or(0).cmp(&a.size.unwrap_or(0)),
-                SortBy::Type => kind(a).cmp(&kind(b)),
-            };
-            let by = if sort.reversed { by.reverse() } else { by };
-            pinned.then(folders).then(by).then(name)
-        });
-        let row_of = |s: &State, id: &String| s.listing.items.iter().position(|i| &i.id == id);
-        self.selected = lead.and_then(|id| row_of(self, &id));
-        self.actions.anchor = anchor.and_then(|id| row_of(self, &id));
-        self.actions.selection = selected.iter().filter_map(|id| row_of(self, id)).collect();
     }
 
     /// The entries of the open menu.

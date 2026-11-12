@@ -228,12 +228,17 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .fill(t.bg)
         .child(toolbar::toolbar(s, &t, 0.0))
         // The one banner of the whole window, or the loading strip (`frames::global`).
-        .children(crate::frames::global::under_toolbar(s, &t).or_else(|| super::protected::notice(s, &t)))
+        .children(
+            super::browse_states::card(s, &t)
+                .or_else(|| crate::frames::global::under_toolbar(s, &t))
+                .or_else(|| super::protected::notice(s, &t)),
+        )
         .child(body)
         .child({
             // The sync state is the source's; a click shows the b's flyout (DW-0401 to DW-1201).
             let state = s.actions.source.sync_state();
             let details = crate::frames::global::status_words(s)
+                .or_else(|| super::browse_states::status_words(s))
                 .or_else(|| super::protected::status_words(s))
                 .unwrap_or_else(|| pc_summary(s));
             let name = match &state {
@@ -242,6 +247,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             };
             // Without a connection the line says so (`frames::global`, DW-0121).
             super::session::status_line(s, &t)
+                .or_else(|| super::browse_states::status_line(s, &details, &t))
                 .or_else(|| crate::frames::global::status_line(state.as_deref(), &details, &t))
                 .unwrap_or_else(|| status_line::status_line(state.as_deref(), &details, &t))
                 .role("button")
