@@ -176,6 +176,9 @@ aes-gcm = "0.10"
 json-patch = { version = "3", default-features = false }
 tokio = { version = "1", features = ["test-util"] }
 beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "f76ccfc32429d80b6c66ba02c44e9959c9afa93d", features = ["test-support"] }
+# The crate's own integration tests (`tests/`) link the lib with its test helpers (the in-memory credential store,
+# the fake API, the sandboxed config dir): a dev edge only, as in `src-tauri`.
+beebeeb-engine = { path = ".", features = ["test-support"] }
 
 [features]
 # Test helpers (`*_for_test`, in-memory databases, injected failures) for the tests of a crate that depends on this

@@ -17,7 +17,7 @@ use crate::transfer_progress::TransferBoard;
 use crate::unknown_check::StartupGuardProgress;
 
 /// One `engine-status` event: the engine's state and the start-up guard's progress.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EngineStatus {
     pub status: StatusPayload,
     pub startup_guard: StartupGuardProgress,
@@ -35,7 +35,7 @@ impl Serialize for EngineStatus {
 }
 
 /// `engine-conflict`: the engine found a conflict on this file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct ConflictNotice {
     pub file_id: String,
     pub file_name: String,
@@ -43,7 +43,7 @@ pub struct ConflictNotice {
 }
 
 /// `conflict-auto-resolved`: a conflict older than its deadline was settled by keeping both copies.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct ConflictAutoResolved {
     pub file_id: String,
     pub file_name: String,
@@ -109,14 +109,14 @@ pub struct FilesAdded {
 }
 
 /// `menu:folder-created`: where "New folder" made it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct FolderCreated {
     pub path: String,
 }
 
 /// Everything the engine side tells the UI. One variant per event name the Tauri shell emits for the engine today;
 /// [`EngineEvent::NOT_TYPED_YET`] names the three whose payload types still live in the shell.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum EngineEvent {
     Status(EngineStatus),
     PauseChanged(PauseChanged),
@@ -193,7 +193,7 @@ impl EngineEvent {
 }
 
 /// What the engine shows the person outside a window (a toast, a banner).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Notice {
     /// A sync pass that moved files has finished.
     SyncComplete,
@@ -246,12 +246,53 @@ pub trait EngineHost: Send + Sync + 'static {
 }
 
 /// What a [`ChannelHost`] queues for the UI thread.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum HostMessage {
     Event(EngineEvent),
     Notice(Notice),
     /// The engine asks for the conflict window.
     OpenConflict(ConflictNotice),
+}
+
+// Redacting `Debug` (review of PR 290, P3-4): these values carry decrypted file names, local paths and the words of
+// a refusal. A host drains them from a queue and a log line or a failed assertion would print them, so `{:?}` says
+// which kind of value it is and nothing a person named.
+macro_rules! redacted_debug {
+    ($($type:ident),+) => {$(
+        impl std::fmt::Debug for $type {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(concat!(stringify!($type), "(<redacted>)"))
+            }
+        }
+    )+};
+}
+redacted_debug!(EngineStatus, ConflictNotice, ConflictAutoResolved, FolderCreated);
+
+impl std::fmt::Debug for EngineEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "EngineEvent({})", self.name())
+    }
+}
+
+impl std::fmt::Debug for Notice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Notice::SyncComplete => "Notice::SyncComplete",
+            Notice::QuotaWarning { .. } => "Notice::QuotaWarning",
+            Notice::Conflict { .. } => "Notice::Conflict(<redacted>)",
+            Notice::BackupRefusal { .. } => "Notice::BackupRefusal(<redacted>)",
+        })
+    }
+}
+
+impl std::fmt::Debug for HostMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HostMessage::Event(event) => write!(f, "HostMessage::Event({event:?})"),
+            HostMessage::Notice(notice) => write!(f, "HostMessage::Notice({notice:?})"),
+            HostMessage::OpenConflict(_) => f.write_str("HostMessage::OpenConflict(<redacted>)"),
+        }
+    }
 }
 
 /// A host for a UI that has its own thread: every call queues a [`HostMessage`] and calls the wake hook, and
@@ -488,6 +529,86 @@ mod tests {
         .cloned()
         .collect();
         assert_eq!(keys.len(), 10, "nine status keys and startup_guard: {keys:?}");
+    }
+
+    /// Review of PR 290, P3-4: a name, a path or a refusal's words never reach a `{:?}`.
+    #[test]
+    fn debug_never_prints_a_name_a_path_or_a_refusals_words() {
+        let conflict = ConflictNotice {
+            file_id: "id-1".into(),
+            file_name: "Payslip March.pdf".into(),
+            is_text: false,
+        };
+        let printed = [
+            format!("{:?}", HostMessage::Event(EngineEvent::Conflict(conflict.clone()))),
+            format!("{:?}", HostMessage::OpenConflict(conflict.clone())),
+            format!("{conflict:?}"),
+            format!(
+                "{:?}",
+                HostMessage::Notice(Notice::Conflict {
+                    file_name: "Payslip March.pdf".into()
+                })
+            ),
+            format!(
+                "{:?}",
+                Notice::BackupRefusal {
+                    message: "This is a backup of C:\\Users\\Payslip March. Change the original instead.".into()
+                }
+            ),
+            format!(
+                "{:?}",
+                EngineEvent::FolderCreated(FolderCreated {
+                    path: "Payslip March".into()
+                })
+            ),
+        ];
+        for line in &printed {
+            assert!(!line.contains("Payslip") && !line.contains("id-1"), "{line}");
+        }
+        assert_eq!(printed[0], "HostMessage::Event(EngineEvent(engine-conflict))");
+        assert_eq!(printed.len(), 6);
+    }
+
+    /// Review of PR 296, P3-1: a type added here with a text or path field cannot derive `Debug` unseen. Every
+    /// item of this file that derives `Debug` and holds a `String` or a `PathBuf` is on this list, and the list
+    /// holds only ids and release text, never a name, a path or a sentence shown to the person.
+    #[test]
+    fn no_type_with_text_derives_debug_unless_it_is_listed_as_carrying_no_name_or_path() {
+        const IDS_AND_RELEASE_TEXT_ONLY: [&str; 3] = ["ConflictResolved", "UpdateAvailable", "VersionReview"];
+        let source = include_str!("host.rs").replace("\r\n", "\n");
+        let production = &source[..source.find("#[cfg(test)]\nmod tests").expect("the test module")];
+        let mut derived = Vec::new();
+        for (at, _) in production.match_indices("#[derive(") {
+            let item = &production[at..];
+            let attribute = &item[..item.find(")]").expect("the derive ends")];
+            let body = &item[..item.find("\n}\n").map_or(item.len(), |end| end + 3)];
+            let name = body
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("pub struct ")
+                        .or_else(|| line.strip_prefix("pub enum "))
+                })
+                .and_then(|rest| rest.split([' ', '{', '(', ';']).next())
+                .expect("a derive sits on a pub struct or enum");
+            if attribute.contains("Debug") && (body.contains("String") || body.contains("PathBuf")) {
+                derived.push(name.to_string());
+            }
+        }
+        derived.sort();
+        assert_eq!(
+            derived, IDS_AND_RELEASE_TEXT_ONLY,
+            "give the new type a redacting Debug (redacted_debug!)"
+        );
+        // The instrument sees the types it must: the redacted ones exist and do not derive Debug.
+        for redacted in [
+            "EngineStatus",
+            "ConflictNotice",
+            "ConflictAutoResolved",
+            "FolderCreated",
+        ] {
+            assert!(production.contains(&format!("pub struct {redacted} ")), "{redacted}");
+        }
+        assert!(production.matches("#[derive(").count() >= 12);
     }
 
     #[test]
