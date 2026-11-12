@@ -8,7 +8,7 @@ Delete this folder when step 2 lands its own bridge.
 | File | What it is |
 |---|---|
 | `make-fixtures.py` | writes the four fixtures in `fixtures/` (standard library only, deterministic) |
-| `shim.c`, `build.rs`, `src/main.rs` | the spike program: official init header → C shim → Rust, PNG out |
+| `shim.cpp`, `build.rs`, `src/main.rs` | the spike program: official init header → C shim → Rust, PNG out |
 | `run.ps1` | the three phases on the Windows build VM: `install`, `run`, `remove` |
 | `evidence/` | what the run produced: PNGs, `metrics.jsonl`, logs |
 
