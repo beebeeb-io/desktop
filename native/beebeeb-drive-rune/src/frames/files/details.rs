@@ -47,6 +47,8 @@ pub fn details_pane(item: Option<(&DriveItem, Details)>, t: &Theme) -> El {
     let Some((item, d)) = item else {
         return el().key("detail-pane-empty");
     };
+    // Free up space, under the Available offline card: where the item has a copy on this PC.
+    let on_this_pc = matches!(item.pc_status.as_deref(), Some("on_this_pc" | "available_offline"));
     let kind_line = if d.size.is_empty() {
         d.kind.clone()
     } else {
@@ -85,6 +87,27 @@ pub fn details_pane(item: Option<(&DriveItem, Details)>, t: &Theme) -> El {
     }
     facts = facts.child(meta_row("detail-shared", "Shared", &d.shared, false, t));
 
+    let mut offline = col().key("offline-group").w_full().gap(8.0).child(offline_card(
+        "offline",
+        "Available offline",
+        &d.offline_note,
+        d.kept_offline,
+        t,
+    ));
+    if on_this_pc {
+        offline = offline.child(
+            row().key("free-up-row").child(
+                action_button("free-up", "Free up space", &icons::CLOUD, t)
+                    .description(
+                        "Removes the copy on this PC. It stays in Beebeeb and downloads again when you open it.",
+                    )
+                    .on_press_tx(|s: &mut State, tx: &mut Tx| {
+                        s.free_up_space(tx);
+                    }),
+            ),
+        );
+    }
+
     pane(t)
         .child(picture)
         .child(
@@ -99,13 +122,7 @@ pub fn details_pane(item: Option<(&DriveItem, Details)>, t: &Theme) -> El {
         )
         .child(encrypted_badge(t))
         .child(facts)
-        .child(offline_card(
-            "offline",
-            "Available offline",
-            &d.offline_note,
-            d.kept_offline,
-            t,
-        ))
+        .child(offline)
         .child(
             row()
                 .key("detail-actions")
