@@ -15,6 +15,8 @@
 //! do (show a frame another lane owns, open a web page, start a download).
 
 pub mod about;
+pub mod bandwidth;
+pub mod bandwidth_data;
 pub mod drive;
 pub mod general;
 pub mod insights;
@@ -26,6 +28,8 @@ pub mod storage_location;
 pub mod sync;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_bandwidth;
 #[cfg(test)]
 mod tests_drive;
 
@@ -58,6 +62,8 @@ pub enum Pane {
     Insights,
     /// Sync and File Explorer (DW-0746).
     Sync,
+    /// Bandwidth (DW-0785), with the speed test (DW-0786).
+    Bandwidth,
 }
 
 /// Which menu a pop-up button drops.
@@ -67,6 +73,8 @@ pub enum MenuKind {
     Theme,
     /// About › Updates › Release channel (DW-0789).
     Channel,
+    /// Bandwidth › Limits › Upload, Download (DW-0785d).
+    SpeedLimit(bandwidth_data::Direction),
 }
 
 impl MenuKind {
@@ -74,12 +82,15 @@ impl MenuKind {
         match self {
             Self::Theme => ThemeChoice::ALL.iter().map(|c| c.label()).collect(),
             Self::Channel => Channel::ALL.iter().map(|c| c.label()).collect(),
+            Self::SpeedLimit(_) => bandwidth_data::PRESET_LABELS.to_vec(),
         }
     }
     pub fn name(self) -> &'static str {
         match self {
             Self::Theme => "Theme",
             Self::Channel => "Release channel",
+            Self::SpeedLimit(bandwidth_data::Direction::Upload) => "Upload limit",
+            Self::SpeedLimit(bandwidth_data::Direction::Download) => "Download limit",
         }
     }
     /// The key of the point in the menu's own row where its top-left corner goes
@@ -89,6 +100,8 @@ impl MenuKind {
         match self {
             Self::Theme => "item-0-0-menu-at",
             Self::Channel => "item-1-1-menu-at",
+            Self::SpeedLimit(bandwidth_data::Direction::Upload) => bandwidth::UPLOAD_MENU_AT,
+            Self::SpeedLimit(bandwidth_data::Direction::Download) => bandwidth::DOWNLOAD_MENU_AT,
         }
     }
 }
@@ -156,6 +169,8 @@ pub struct SettingsUi {
     pub drive: Box<dyn DriveSettings>,
     /// The limit a limit dialog's slider stands on, until Save (DW-0713, DW-0714).
     pub draft_gb: u32,
+    /// What the Bandwidth pane holds between draws: the chart's hovered bucket (DW-0785).
+    pub bandwidth: bandwidth::Held,
 }
 
 impl Default for SettingsUi {
@@ -170,6 +185,7 @@ impl Default for SettingsUi {
             intents: Vec::new(),
             drive: drive::first(instance::DEV_BUILD),
             draft_gb: 0,
+            bandwidth: bandwidth::Held::default(),
         }
     }
 }
@@ -188,6 +204,7 @@ impl SettingsUi {
             self.source.mark_recent_seen();
         }
         self.pane = pane;
+        self.bandwidth.tip = None;
         self.menu = None;
         self.dialog = None;
         self.toast = None;
@@ -258,6 +275,10 @@ impl SettingsUi {
                 let now = self.source.about().channel;
                 Channel::ALL.iter().position(|c| *c == now).unwrap_or(0)
             }
+            // A saved limit that is no preset is the menu's ninth item: Enter on it changes nothing.
+            MenuKind::SpeedLimit(direction) => {
+                bandwidth::chosen(self, direction).unwrap_or(bandwidth_data::PRESETS.len())
+            }
         }
     }
 
@@ -283,6 +304,11 @@ impl SettingsUi {
             MenuKind::Channel => {
                 if let Some(channel) = Channel::ALL.get(index) {
                     self.source.set_channel(*channel);
+                }
+            }
+            MenuKind::SpeedLimit(direction) => {
+                if let Some(limit) = bandwidth_data::PRESETS.get(index) {
+                    self.drive.set_speed_limit(direction, *limit);
                 }
             }
         }
@@ -384,9 +410,19 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         s.settings.drive = Box::new(drive::BoardDrive::new().with_insights(drive::Insights::Empty));
         open_on(s, "DW-0783");
     }),
+    ("DW-0785", |s| bandwidth::scene(s, "DW-0785")),
+    ("DW-0785b", |s| bandwidth::scene(s, "DW-0785b")),
+    ("DW-0785c", |s| bandwidth::scene(s, "DW-0785c")),
+    ("DW-0785d", |s| bandwidth::scene(s, "DW-0785d")),
+    ("DW-0785e", |s| bandwidth::scene(s, "DW-0785e")),
+    ("DW-0785f", |s| bandwidth::scene(s, "DW-0785f")),
+    ("DW-0786", |s| bandwidth::scene(s, "DW-0786")),
+    ("DW-0786b", |s| bandwidth::scene(s, "DW-0786b")),
+    ("DW-0786c", |s| bandwidth::scene(s, "DW-0786c")),
+    ("DW-0786d", |s| bandwidth::scene(s, "DW-0786d")),
 ];
 
-fn open_on(s: &mut State, frame: &'static str) {
+pub(super) fn open_on(s: &mut State, frame: &'static str) {
     s.settings.reset();
     go(s, frame);
 }
@@ -398,6 +434,7 @@ fn routed(s: &State) -> Option<Pane> {
         Screen::Settings(SettingsPane::Notifications) => Some(Pane::Notifications),
         Screen::Settings(SettingsPane::Storage) => Some(Pane::Storage),
         Screen::Settings(SettingsPane::SyncAndFileExplorer) => Some(Pane::Sync),
+        Screen::Settings(SettingsPane::Bandwidth) => Some(Pane::Bandwidth),
         _ => None,
     }
 }
@@ -422,6 +459,13 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>, Option<MenuKind>)> {
         "DW-0713" => (Pane::Storage, Some(Dialog::Limit(Kept::Previews)), None),
         "DW-0714" => (Pane::Storage, Some(Dialog::Limit(Kept::Downloaded)), None),
         "DW-0783" | "DW-0783b" | "DW-0783c" | "DW-0783d" => (Pane::Insights, None, None),
+        "DW-0785" | "DW-0785b" | "DW-0785c" | "DW-0785e" | "DW-0785f" => (Pane::Bandwidth, None, None),
+        "DW-0785d" => (
+            Pane::Bandwidth,
+            None,
+            Some(MenuKind::SpeedLimit(bandwidth_data::Direction::Upload)),
+        ),
+        "DW-0786" | "DW-0786b" | "DW-0786c" | "DW-0786d" => (Pane::Bandwidth, None, None),
         _ => return None,
     })
 }
@@ -477,6 +521,7 @@ fn shell_pane(section: Pane) -> SettingsPane {
         Pane::Notifications | Pane::Recent => SettingsPane::Notifications,
         Pane::Storage | Pane::Insights => SettingsPane::Storage,
         Pane::Sync => SettingsPane::SyncAndFileExplorer,
+        Pane::Bandwidth => SettingsPane::Bandwidth,
         _ => SettingsPane::General,
     }
 }
@@ -552,6 +597,7 @@ impl Pane {
             Pane::Notifications | Pane::Recent => Pane::Notifications,
             Pane::Storage | Pane::Insights => Pane::Storage,
             Pane::Sync => Pane::Sync,
+            Pane::Bandwidth => Pane::Bandwidth,
         }
     }
 }
@@ -629,7 +675,7 @@ const DRIVE_SECTIONS: &[Section] = &[
         label: "Bandwidth",
         icon: &ic::CHEV_RIGHT,
         frame: "DW-0785",
-        pane: None,
+        pane: Some(Pane::Bandwidth),
     },
 ];
 
@@ -681,6 +727,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         Pane::Storage => storage::pane(ui, &t),
         Pane::Insights => insights::pane(ui, &t),
         Pane::Sync => sync::pane(ui, &t),
+        Pane::Bandwidth => bandwidth::pane(ui, &t),
     };
     let overlay = overlay.filter(|_| inside);
     let mut body = row()

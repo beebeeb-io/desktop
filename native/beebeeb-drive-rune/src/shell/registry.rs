@@ -209,6 +209,12 @@ pub const FRAMES: &[Frame] = &[
         feedback: FeedbackPolicy::Denied("its lane has not opted in yet"),
     },
     Frame {
+        group: FrameGroup::Settings(SettingsPane::Bandwidth),
+        view: crate::frames::settings::view,
+        on_key: Some(crate::frames::settings::on_key),
+        feedback: FeedbackPolicy::Denied("its lane has not opted in yet"),
+    },
+    Frame {
         group: FrameGroup::Settings(SettingsPane::Account),
         view: crate::frames::account::view,
         on_key: Some(crate::frames::account::on_key),
@@ -426,10 +432,10 @@ mod tests {
         for group in &all {
             let _ = group.shows_secret();
         }
-        // 11 base + 7 sections + 9 settings panes = 27.
+        // 11 base + 7 sections + 10 settings panes = 28.
         assert_eq!(
             all.len(),
-            27,
+            28,
             "a FrameGroup variant was added without updating this test"
         );
     }
@@ -463,7 +469,7 @@ mod tests {
     fn the_frame_count_is_pinned() {
         assert_eq!(
             FRAMES.len(),
-            17,
+            18,
             "a frame was added to FRAMES without updating this test"
         );
         assert_eq!(

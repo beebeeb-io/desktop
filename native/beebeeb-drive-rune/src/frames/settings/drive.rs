@@ -6,6 +6,8 @@
 //! the words the board shows. The engine lane replaces `BoardDrive` (which call each method
 //! needs is listed beside it and in the pull request).
 
+use super::bandwidth_data::{Bandwidth, BoardBandwidth, Direction, SpeedTest};
+
 /// Which of the two per-PC limits (DW-0713, DW-0714).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kept {
@@ -211,6 +213,28 @@ pub trait DriveSettings {
     fn insights(&self) -> &Insights;
     /// Ask for the insights again (DW-0783c, Try again): the page loads (DW-0783b).
     fn reload_insights(&mut self);
+    /// Bandwidth (DW-0785). Engine: the live figures (every 10 s while the pane is open), the
+    /// 20 hours of traffic kept on this PC, each device's heartbeat, the two limits, the
+    /// metered switch, and where the speed test stands. Unanswered: the empty pane.
+    fn bandwidth(&self) -> Bandwidth {
+        Bandwidth::default()
+    }
+    /// Limit a direction to so many megabits per second on this PC, or not at all. It
+    /// applies straight away and stays until changed (DW-0785c).
+    fn set_speed_limit(&mut self, _direction: Direction, _mbps: Option<u32>) {}
+    /// Sync on networks Windows marks as metered, or wait on them (DW-0785f).
+    fn set_sync_on_metered(&mut self, _on: bool) {}
+    /// Start the speed test against Beebeeb's own servers; one test at a time (DW-0786).
+    fn run_speed_test(&mut self) {}
+    /// The engine's host says where the speed test stands now: each step as it starts, the
+    /// result, or the failure (DW-0786 build note). The shell passes it on.
+    fn speed_test_reported(&mut self, _now: SpeedTest) {}
+    /// Called at the start of a frame with the window's clock, for what arrives between
+    /// presses (the speed test's steps). Answers (something changed, more is coming: draw
+    /// again soon).
+    fn pump(&mut self, _seconds: f64) -> (bool, bool) {
+        (false, false)
+    }
 }
 
 /// The board's sample content for Drive's settings panes.
@@ -218,6 +242,7 @@ pub struct BoardDrive {
     storage: Storage,
     insights: Insights,
     sync: SyncPane,
+    bandwidth: BoardBandwidth,
 }
 
 impl Default for BoardDrive {
@@ -327,6 +352,7 @@ impl BoardDrive {
                 ],
                 more: Some(("And 43 more, down to ".into(), "48 MB".into())),
             })),
+            bandwidth: BoardBandwidth::default(),
         }
     }
 
@@ -340,6 +366,31 @@ impl BoardDrive {
     pub fn with_metered_wait(mut self) -> Self {
         self.sync.status =
             SyncStatus::WaitingMetered("Waiting · this PC is on a metered connection · 7 changes wait".into());
+        self.bandwidth = self.bandwidth.metered_wait();
+        self
+    }
+
+    /// The speed test `seconds` after Run test, standing still there (DW-0786, b, c, d).
+    pub fn with_speed_test_at(mut self, seconds: f64) -> Self {
+        self.bandwidth = self.bandwidth.test_at(seconds);
+        self
+    }
+
+    /// This PC cannot reach Beebeeb: a speed test ends in the failure (DW-0786d).
+    pub fn with_beebeeb_unreachable(mut self) -> Self {
+        self.bandwidth = self.bandwidth.unreachable();
+        self
+    }
+
+    /// Bandwidth with nothing moving (DW-0785b).
+    pub fn with_bandwidth_idle(mut self) -> Self {
+        self.bandwidth = self.bandwidth.idle();
+        self
+    }
+
+    /// Bandwidth right after sign-in: nothing recorded yet (DW-0785e).
+    pub fn with_no_traffic_recorded(mut self) -> Self {
+        self.bandwidth = self.bandwidth.new_pc();
         self
     }
 
@@ -390,6 +441,7 @@ impl DriveSettings for BoardDrive {
     }
     fn sync_anyway(&mut self) {
         self.sync.status = SyncStatus::Running("Syncing on this connection".into());
+        self.bandwidth.sync_anyway();
     }
     fn repair(&mut self) {
         self.sync.repair = Repair::Running;
@@ -403,6 +455,32 @@ impl DriveSettings for BoardDrive {
     }
     fn reload_insights(&mut self) {
         self.insights = Insights::Loading;
+    }
+    fn bandwidth(&self) -> Bandwidth {
+        self.bandwidth.bandwidth()
+    }
+    fn set_speed_limit(&mut self, direction: Direction, mbps: Option<u32>) {
+        self.bandwidth.set_limit(direction, mbps);
+    }
+    fn set_sync_on_metered(&mut self, on: bool) {
+        let waited = self.bandwidth.waiting_metered();
+        self.bandwidth.set_sync_on_metered(on);
+        // Sync resumes at once (DW-0785f), and waits again when the switch goes back off.
+        if waited && !self.bandwidth.waiting_metered() {
+            self.sync.status = SyncStatus::Running("Up to date · last change 2 min ago".into());
+        } else if !waited && self.bandwidth.waiting_metered() {
+            self.sync.status =
+                SyncStatus::WaitingMetered("Waiting · this PC is on a metered connection · 7 changes wait".into());
+        }
+    }
+    fn run_speed_test(&mut self) {
+        self.bandwidth.run_test();
+    }
+    fn speed_test_reported(&mut self, now: SpeedTest) {
+        self.bandwidth.report_test(now);
+    }
+    fn pump(&mut self, seconds: f64) -> (bool, bool) {
+        self.bandwidth.pump(seconds)
     }
 }
 

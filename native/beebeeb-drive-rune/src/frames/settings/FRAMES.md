@@ -2,6 +2,7 @@
 
 Source: `design/desktop-v2/frames.json`, Windows tab, the three settings groups (50 frames). Account-related groups are a later wave.
 Status after lane f-settings-rest (2026-11-12): 28 of 50 built, 23 of them with every gate line at 0 failing in both themes, 5 with the red lines named; 22 not built (3 belong to lane f-account's panes, 19 are in the pull request's hand-over).
+Status after the Bandwidth lane (2026-11-12): Bandwidth's 6 and the speed test's 4 are built (`bandwidth.rs`, `bandwidth_data.rs`): 9 of the 10 with every gate line at 0 failing in both themes, 1 (`DW-0785d`, dark) with its red line named below. The speed test's steps are reached from Run test: the board fixture moves on with the window's clock.
 
 ## Settings, inside the window (13)
 
@@ -35,18 +36,18 @@ Status after lane f-settings-rest (2026-11-12): 28 of 50 built, 23 of them with 
 
 | Frame | What it is | Status |
 | --- | --- | --- |
-| `DW-0785` | See what Beebeeb is sending and receiving now and over the last 20 hours, each device's sync, the speed limits and a speed test, in one place. | not built (lane f-settings-rest stopped at its budget) |
-| `DW-0785b` | Nothing is moving: say so instead of showing zeros. | not built (lane f-settings-rest stopped at its budget) |
-| `DW-0785c` | A limit is on: say that the speed is held back on purpose, and by how much. | not built (lane f-settings-rest stopped at its budget) |
-| `DW-0785d` | Choose how fast Beebeeb may upload from this PC. | not built (lane f-settings-rest stopped at its budget) |
-| `DW-0785e` | Right after sign-in there is no history yet: say when it starts. | not built (lane f-settings-rest stopped at its budget) |
-| `DW-0785f` | Sync on metered connections is off and the PC is on one: say that sync waits, why, and how to change it. | not built (lane f-settings-rest stopped at its budget) |
+| `DW-0785` | See what Beebeeb is sending and receiving now and over the last 20 hours, each device's sync, the speed limits and a speed test, in one place. | built (light and dark: 0 failing on all six lines) |
+| `DW-0785b` | Nothing is moving: say so instead of showing zeros. | built (the head of the pane; the app draws the whole pane; light and dark: 0 failing on all six lines) |
+| `DW-0785c` | A limit is on: say that the speed is held back on purpose, and by how much. | built (light and dark: 0 failing on all six lines) |
+| `DW-0785d` | Choose how fast Beebeeb may upload from this PC. | built (the pane from its devices down); light: 0 failing on all six lines; dark: 1 pixel line red (`item-1-2-switch edge 13 > 9`: the switch is under the open menu) |
+| `DW-0785e` | Right after sign-in there is no history yet: say when it starts. | built (the head of the pane; light and dark: 0 failing on all six lines) |
+| `DW-0785f` | Sync on metered connections is off and the PC is on one: say that sync waits, why, and how to change it. | built (the head and the Limits; light and dark: 0 failing on all six lines) |
 | `DW-0791` | The account's recent alerts inside the app, for when a notification was missed or dismissed. | built (light and dark: 0 failing on all six lines; the pill dots are vector circles since lane f-settings-rest) |
 | `DW-0791b` | Nothing to show. | built (light and dark: 0 failing on all six lines) |
-| `DW-0786` | The test runs: show which step it is on, so a long wait reads as progress. | not built (lane f-settings-rest stopped at its budget) |
-| `DW-0786b` | The last step: downloads. | not built (lane f-settings-rest stopped at its budget) |
-| `DW-0786c` | How fast this PC reaches Beebeeb, in three numbers. | not built (lane f-settings-rest stopped at its budget) |
-| `DW-0786d` | The test couldn't reach Beebeeb: say which part failed and what to do. | not built (lane f-settings-rest stopped at its budget) |
+| `DW-0786` | The test runs: show which step it is on, so a long wait reads as progress. | built (the pane from its devices down; light and dark: 0 failing on all six lines) |
+| `DW-0786b` | The last step: downloads. | built (the pane from its devices down; light and dark: 0 failing on all six lines) |
+| `DW-0786c` | How fast this PC reaches Beebeeb, in three numbers. | built (the pane from its devices down; light and dark: 0 failing on all six lines) |
+| `DW-0786d` | The test couldn't reach Beebeeb: say which part failed and what to do. | built (the pane from its devices down; light and dark: 0 failing on all six lines) |
 | `DW-0783` | Where the storage goes: by type, and the files that take the most. | built; light 7 and dark 4 pixel lines red (the round ends of the 9 pt meter and share bars) |
 | `DW-0783b` | Loading: the page's shape in skeletons, never a spinner on a blank page. | built (light and dark: 0 failing on all six lines) |
 | `DW-0783c` | Couldn't load: say so plainly, with Try again. | built (light and dark: 0 failing on all six lines) |
