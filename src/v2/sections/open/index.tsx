@@ -13,6 +13,8 @@ import { EditConflictDialog, editMeta, NewFileNameDialog, NewFileTypeDialog, nam
 import { DecryptFailedView, DecryptingView, noRoomWords, OpenInAppNote, TooLargeView } from './States'
 import { useDriveExtras } from '../../source/extras'
 import { isTooLarge } from '../../source/desktop'
+import { command } from '../../../desktopApi'
+import { actionFailure } from '../files/model'
 import { ArchiveViewer, AudioPlayer, Centered, CodeViewer, CsvViewer, ImageViewer, MarkdownViewer, PdfZoom, RawViewer, type Track } from './Viewers'
 import { overReadCap } from './pdf/render'
 import { createKeptCopy, fmtBytes, hhmm, keyBelongsElsewhere, languageLabel, lineCount, READ_ONLY_LINES, saveNoteText, tagContent, viewerKind } from './model'
@@ -113,6 +115,15 @@ export const isProvisional = (id: string) => id.startsWith('local:')
 export const needsRoom = (item: Pick<DriveItem, 'local' | 'size'>, free: number | undefined) =>
   item.local === 'online-only' && free !== undefined && (item.size ?? 0) > free
 
+/** Copies the decrypted file out through the OS save dialog (drive_save_copy, slice 01a). Rust answers true only when
+ *  it wrote the copy; false is a cancelled dialog, which says nothing. A refusal uses actionFailure's words, never the
+ *  host's text, and never claims a copy exists. */
+async function saveCopy(id: string) {
+  const r = await command<boolean>('drive_save_copy', { id })
+  if (!r.ok) return showToast({ kind: 'failed', text: actionFailure('save a copy to this PC', r.unsupported ? 'unsupported' : 'failed').text })
+  if (r.value) showToast({ kind: 'done', text: 'Saved a copy' })
+}
+
 function OpenFile({ id, editing, nav }: { id: string; editing: boolean; nav: SectionProps['nav'] }) {
   const source = useDriveSource()
   const readTextTag = useCallback((x: string) => source.readText(x).then((d) => d.versionId), [source])
@@ -154,7 +165,7 @@ function OpenFile({ id, editing, nav }: { id: string; editing: boolean; nav: Sec
       <Frame name={item.name} onBack={() => toFolder(item)}>
         <TooLargeLive name={item.name} size={item.size ?? 0} known={phase.free} onFreeUp={() => nav.go({ section: 'settings', sub: 'free-up' })}
           onOpenElsewhere={() => void source.open(item.id).catch(() => showToast({ kind: 'failed', text: `Couldn’t open ${item.name} in another app.` }))}
-          onDownloadTo={() => showToast({ kind: 'failed', text: 'Saving a decrypted copy elsewhere isn’t available in this version of Beebeeb.' })} />
+          onDownloadTo={() => void saveCopy(item.id)} />
       </Frame>
     )
   }
