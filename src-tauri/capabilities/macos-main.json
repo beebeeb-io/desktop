@@ -18,6 +18,7 @@
     "updater:default",
     "autostart:default",
     "dialog:allow-open",
+    "dialog:allow-save",
     "notification:default"
   ]
 }

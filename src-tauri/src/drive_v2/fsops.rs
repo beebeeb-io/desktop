@@ -422,3 +422,36 @@ pub(crate) fn save_checked(
     std::fs::write(&path, bytes).map_err(DriveError::io)?;
     Ok(version_tag(current_version, bytes))
 }
+
+/// `drive_save_copy`: write `src`'s bytes to `dest`, a path the person picked outside the sync
+/// root. Never overwrites, never writes inside the sync root (the engine would upload that as a new
+/// file), and streams through a temp file next to `dest` so a failure leaves nothing behind.
+pub(crate) fn copy_out(sync_root: &Path, src: &Path, dest: &Path) -> Result<(), DriveError> {
+    if dest.exists() {
+        return Err(DriveError::Conflict);
+    }
+    if let (Some(root), Some(target)) = (dunce_canonical(sync_root), canonical_target(dest))
+        && target.starts_with(&root)
+    {
+        return Err(DriveError::Failed("inside the sync folder"));
+    }
+    let name = dest.file_name().ok_or(DriveError::Failed("path"))?;
+    let mut tmp_name = name.to_os_string();
+    tmp_name.push(".bb-tmp");
+    let tmp = dest.with_file_name(tmp_name);
+    let copied = std::fs::copy(src, &tmp).and_then(|_| std::fs::rename(&tmp, dest));
+    if let Err(error) = copied {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(DriveError::io(error));
+    }
+    Ok(())
+}
+
+/// `dest` as it will be on disk: canonical when it exists, else its canonical parent plus the name.
+fn canonical_target(path: &Path) -> Option<PathBuf> {
+    if let Some(found) = dunce_canonical(path) {
+        return Some(found);
+    }
+    let parent = dunce_canonical(path.parent()?)?;
+    Some(parent.join(path.file_name()?))
+}
