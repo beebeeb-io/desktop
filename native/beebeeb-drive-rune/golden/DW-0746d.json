@@ -727,7 +727,7 @@
    "kind": "text",
    "x": 268,
    "y": 172.5,
-   "w": 61.16,
+   "w": 61.17,
    "h": 12,
    "text": "File Explorer",
    "family": "sans",
@@ -959,7 +959,7 @@
    "kind": "text",
    "x": 268,
    "y": 313.5,
-   "w": 24.74,
+   "w": 24.73,
    "h": 12,
    "text": "Sync",
    "family": "sans",
@@ -1129,7 +1129,7 @@
    "kind": "text",
    "x": 268,
    "y": 414.5,
-   "w": 83.27,
+   "w": 83.29,
    "h": 12,
    "text": "Space on this PC",
    "family": "sans",
@@ -1813,6 +1813,57 @@
     255
    ],
    "tracking": -0.06
+  },
+  "note-0": {
+   "kind": "box",
+   "x": 268,
+   "y": 106,
+   "w": 512,
+   "h": 52,
+   "bg": [
+    235,
+    59,
+    59,
+    26
+   ]
+  },
+  "note-0-icon": {
+   "kind": "icon",
+   "x": 280,
+   "y": 124,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17z",
+    "M12 8v4.6",
+    "M12 15.9v.1"
+   ],
+   "filled": false,
+   "color": [
+    234,
+    60,
+    63,
+    255
+   ]
+  },
+  "note-0-text": {
+   "kind": "text",
+   "x": 306,
+   "y": 115,
+   "w": 381.57,
+   "h": 34,
+   "text": "Couldn't repair Beebeeb in File Explorer. Nothing was changed that you need to undo. Try again.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12.5,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
   }
  },
  "theme": "light"

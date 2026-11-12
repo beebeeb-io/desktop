@@ -26,6 +26,22 @@ pub fn amber_deep() -> Color {
     oklch(0.52, 0.14, 72.0)
 }
 
+/// `--color-red-fill`: the fill of a destructive button, the same in both themes:
+/// oklch(0.55, 0.2, 25).
+pub fn red_fill() -> Color {
+    oklch(0.55, 0.2, 25.0)
+}
+
+/// `--color-red-text`: red words (a destructive row's title, an error under a field):
+/// oklch(0.48, 0.19, 25) on light, oklch(0.70, 0.19, 25) on dark.
+pub fn red_text(dark: bool) -> Color {
+    if dark {
+        oklch(0.70, 0.19, 25.0)
+    } else {
+        oklch(0.48, 0.19, 25.0)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Spacing (from --spacing-*)
 // ---------------------------------------------------------------------------

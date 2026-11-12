@@ -515,14 +515,16 @@ fn the_list_ends_with_the_way_to_the_full_history() {
     assert!(has(&rt, "btn-0") && !has(&rt, "end-text"));
 }
 
-/// Names and roles (the board's Accessibility notes): a dialog named Beebeeb; the status
+/// Names and roles (the board's Accessibility notes): a dialog named Beebeeb (the test build's
+/// says "Beebeeb Test": two apps side by side must be tellable apart by a screen reader); the status
 /// block says its state; the list says how many items it has; a row says its name, what
 /// happened and when.
 #[test]
 fn names_and_roles() {
     let rt = runtime("DW-1203");
     let fly = info(&rt, "fly");
-    assert_eq!((fly.role, fly.label.as_deref()), ("dialog", Some("Beebeeb")));
+    let name = crate::shell::identity::AppIdentity::CURRENT.flyout_window_title();
+    assert_eq!((fly.role, fly.label.as_deref()), ("dialog", Some(name)));
     let st = info(&rt, "st");
     assert_eq!(
         (st.role, st.label.as_deref()),
