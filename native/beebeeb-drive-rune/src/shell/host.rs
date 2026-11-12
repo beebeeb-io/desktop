@@ -61,6 +61,13 @@ pub struct Shell {
     window_kind: WindowKind,
     /// The quit hook stopped the engine; a cancelled Windows shutdown starts it again.
     stopped_for_quit: bool,
+    /// What the platform was last **successfully** told about capture exclusion. `false` at
+    /// startup: the platform has not been told anything until the first `poll` calls it.
+    capture_excluded: bool,
+    /// Consecutive failures of the capture-exclusion platform call. Reset on success or when
+    /// the desired state changes. Capped at 3: after 3 failures the call is not retried until
+    /// the desired state changes (a navigation away and back resets it).
+    capture_exclusion_retries: u8,
 }
 
 impl Shell {
@@ -80,6 +87,10 @@ impl Shell {
             sidebar_seen: SidebarSection::Files,
             window_kind,
             stopped_for_quit: false,
+            // The platform has not been told anything yet. The first poll that sees a secret
+            // route (or any route, if a window handle exists) will apply it.
+            capture_excluded: false,
+            capture_exclusion_retries: 0,
         }
     }
 
@@ -145,6 +156,41 @@ impl Shell {
             }
         }
         changed
+    }
+
+    /// Applies capture exclusion to the window. `desired`: whether the current route shows a
+    /// secret. Called from the ONE choke point at the end of `poll`.
+    ///
+    /// `self.capture_excluded` tracks what the platform was last **successfully** told, not what
+    /// the route wants. When `desired != capture_excluded`, the platform is called. On failure
+    /// the flag stays at the old value and the call is retried on the next poll, up to 3 times.
+    /// A change of `desired` resets the retry counter.
+    ///
+    /// Content always stays drawn: a failure to exclude is a privacy leak, but not drawing would
+    /// deny the person access to their own data.
+    pub fn apply_capture_exclusion(&mut self, desired: bool) {
+        if desired == self.capture_excluded {
+            // Already applied. Reset retries in case a previous desired state was failing.
+            self.capture_exclusion_retries = 0;
+            return;
+        }
+        if self.capture_exclusion_retries >= 3 {
+            return; // Gave up. Resets when the user navigates away and back.
+        }
+        let window = unpoisoned(&self.wiring.window);
+        let handle = window.as_ref();
+        match self.platform.set_capture_exclusion(handle, desired) {
+            Ok(()) => {
+                self.capture_excluded = desired;
+                self.capture_exclusion_retries = 0;
+            }
+            Err(error) => {
+                self.capture_exclusion_retries += 1;
+                if self.capture_exclusion_retries == 1 {
+                    log(format!("capture exclusion could not be set ({error})"));
+                }
+            }
+        }
     }
 
     /// Adds the b. Runs on the UI thread once the event loop is up, so the process is
@@ -336,6 +382,19 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         sync_sidebar(s);
         changed |= outcome == Outcome::Changed;
     }
+    // The ONE place capture-exclusion is checked: every path above (gate change, signin
+    // intents, sidebar navigation, viewer) that may change what is on screen has run.
+    // A new path cannot forget this: it runs unconditionally at the end of every frame.
+    // The decision combines the route-level check (SignIn, Locked, RecoveryPhrase, FirstRun)
+    // with the account pane's per-screen check (change password, 2FA setup, backup codes).
+    let secret = registry::route_shows_secret(&s.shell.app) || {
+        let group = registry::group_for(&s.shell.app);
+        matches!(
+            group,
+            registry::FrameGroup::Settings(pane) if crate::frames::account::Pane::root(pane).is_some()
+        ) && s.account.shows_secret()
+    };
+    s.shell.apply_capture_exclusion(secret);
     changed
 }
 

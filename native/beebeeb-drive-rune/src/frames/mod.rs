@@ -13,6 +13,7 @@ pub mod backups;
 pub mod files;
 pub mod global;
 pub mod photos;
+pub mod search;
 pub mod settings;
 pub mod shared;
 pub mod signin;
@@ -38,6 +39,7 @@ pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
         [
             shell,
             files::SCENES,
+            search::FRAMES,
             global::FRAMES,
             settings::FRAMES,
             account::FRAMES,
@@ -109,6 +111,7 @@ impl PcStatus for UnwiredPc {
 pub struct Ui {
     pub shared: shared::SharedUi,
     pub trash: trash::TrashUi,
+    pub find: search::SearchUi,
     /// The navigation intents emitted so far, oldest first.
     pub intents: Vec<Intent>,
     /// What is typed in the toolbar's search field of these sections (not Files' field).
@@ -125,6 +128,7 @@ impl Default for Ui {
         Ui {
             shared: shared::SharedUi::default(),
             trash: trash::TrashUi::default(),
+            find: search::SearchUi::default(),
             intents: Vec::new(),
             search: rune::TextEdit::new(""),
             pc: Box::new(BoardPc),

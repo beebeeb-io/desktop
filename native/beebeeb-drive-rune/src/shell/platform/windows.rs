@@ -11,8 +11,13 @@ use windows_sys::Win32::System::Registry::{
     RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetWindowLongPtrW, MB_ICONINFORMATION, MB_OK, MessageBoxW, SetWindowLongPtrW, WS_EX_TOOLWINDOW,
+    GWL_EXSTYLE, GetWindowLongPtrW, MB_ICONINFORMATION, MB_OK, MessageBoxW, SetWindowDisplayAffinity,
+    SetWindowLongPtrW, WS_EX_TOOLWINDOW,
 };
+
+/// `SetWindowDisplayAffinity` values: normal and excluded from capture.
+const WDA_NONE: u32 = 0x00;
+const WDA_EXCLUDEFROMCAPTURE: u32 = 0x11;
 
 use super::{
     ControlHandler, ControlServer, Platform, PlatformError, ServeError, TrayHandler, TrayIcon, windows_control,
@@ -268,6 +273,28 @@ impl Platform for WindowsPlatform {
         match windows_control::pipe_name(identity) {
             Ok(name) => windows_control::send(&name, request, timeout),
             Err(_) => Delivery::Unreachable,
+        }
+    }
+
+    fn set_capture_exclusion(&self, window: Option<&rune::WindowHandle>, exclude: bool) -> Result<(), PlatformError> {
+        let Some(window) = window else {
+            return Err(PlatformError::Os("no window handle yet".into()));
+        };
+        let hwnd = window.with_raw_handle(|handle| match handle.as_raw() {
+            raw_window_handle::RawWindowHandle::Win32(win32) => Some(win32.hwnd.get()),
+            _ => None,
+        });
+        let Ok(Some(hwnd)) = hwnd else {
+            return Err(PlatformError::Os("no Win32 window handle".into()));
+        };
+        let affinity = if exclude { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+        // SAFETY: `hwnd` is this process's own live window, obtained from `WindowHandle::with_raw_handle`.
+        // `SetWindowDisplayAffinity` reads the u32 and returns; no callback, no message dispatch.
+        let ok = unsafe { SetWindowDisplayAffinity(hwnd as HWND, affinity) };
+        if ok != 0 {
+            Ok(())
+        } else {
+            Err(os_error("SetWindowDisplayAffinity"))
         }
     }
 }
