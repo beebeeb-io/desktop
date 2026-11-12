@@ -38,7 +38,7 @@ at all" below; `evidence/rust/network/rustnet.log`).
 | **.pptx** hard (4 slides: master, 2 layouts, inherited placeholders, table, picture, gradient) | **0 of 4: hangs** | 4 of 4 |
 | **.ppt** (3 slides) | **0 of 3: hangs** | **0 of 3: refused** ("not a presentation DeckCraft can read") |
 | A linked remote image, .docx | not fetched: 0 hits on the loopback listener in 2 runs (network open, and blocked); placeholder drawn | ~~not fetched (0 connections)~~ Correction: not measured in the first runs (the listener ran only inside the LibreOfficeKit program). Measured afterwards: next row |
-| **Any connection at all**, 3 Rust tools, on files that link remote content (a linked picture in .docx, .pptx and .xlsx; `WEBSERVICE()`; a workbook linked on a web server) | not measured this way | **0 permitted, 0 blocked, 0 listener hits for 3 of 3 tools**, over 13 runs with the network open and the same 13 with a block rule per tool. Instruments first seen to count: the listener showed 1 hit for 1 test request; Windows' connection events showed 2 permitted and 1 blocked for the spike's own probe, and 1 for a loopback request. The linked picture is left out; `WEBSERVICE()` shows `#VALUE!`; the linked workbook cell is empty |
+| **Any connection at all**, 3 Rust tools, on files that link remote content (a linked picture in .docx, .pptx and .xlsx; `WEBSERVICE()`; a workbook linked on a web server) | not measured this way | **0 permitted, 0 blocked, 0 listener hits for 3 of 3 tools**, over 13 runs with the network open and the same 13 with a block rule per tool. Instruments first seen to count: the listener showed 1 hit for 1 test request; Windows' connection events showed 2 permitted and 1 blocked for the spike's own probe, and 1 for a loopback request. The linked picture is left out; `WEBSERVICE()` shows `#VALUE!`; the linked workbook cell is empty. **Not covered:** a document that names a font this PC does not have. Upstream has a font and language-pack downloader (`craft-font-store`, off until the user turns it on, linked by `wordcraft-engine`); none of the 26 runs could have triggered it |
 | Time to the last page, warm | 2.6 to 3.7 s per document (init 1.7 to 2.8 s, load 0.4 to 0.6 s, 5 to 9 ms per further page at 96 DPI, 29 to 34 ms at 192 DPI): `evidence/libreofficekit/metrics.jsonl`, 9 lines | ~~WordCraft: 43 to 86 ms per page (layout alone: 43 to 49 ms). DeckCraft: 53 to 67 ms per deck~~ Correction, per log. WordCraft, one page, process start, load and layout included: 40 to 58 ms over 18 runs (`evidence/rust/artcraft.log`) and 43 to 86 ms over 8 runs (`artcraft-first-run.log`). DeckCraft, a whole deck of 3 or 4 slides: 50 to 64 ms over 4 runs and 53 to 67 ms over 4 runs (same two files). WordCraft's own layout time: 43 to 57 ms over 7 calls (`evidence/rust/wordcraft-info/*.json`, field `layoutMs`) |
 | First start ever | 8.4 s for the first document after install and 6.6 s with a new profile (`evidence/libreofficekit/run-first-stopped.log`, lines "netopen" and "cold", field `total_to_last_page_ms`: 8384 and 6583) | 1.4 s for the first call of the 95 MB tool (`evidence/rust/artcraft-first-run.log`, line `wc-info-spike-docx`: 1381 ms; its `layoutMs` was 523), then as above |
 | Peak memory | 318 to 358 MB working set | not measured (the process had exited before the counter was read) |
@@ -106,8 +106,13 @@ saved by Microsoft Office, and nothing here was compared against Microsoft Offic
   would link (`wordcraft-render` + `-docx` + `-docbin`: 165 packages; `gridcraft-engine`: 128; `deckcraft-render` +
   `-pptx`: 123) contain 0 network crates. `cargo audit` on the whole workspaces: 4, 5 and 4 vulnerabilities; the one
   in those three closures is `zip 3.0.0` (4 advisories about extracting to disk; the projects call no
-  extract-to-disk function: 0 calls against 270 uses of `ZipArchive`). The tables are in the README of
-  `beebeeb-io/desktop-office` (private), which now exists with the three subtrees at the measured tags.
+  extract-to-disk function: 0 calls against 270 uses of `ZipArchive`). Evidence in this PR:
+  `evidence/upstream-audit/summary.txt`, `viewer-closures.txt` and the three `*-deny-bans.txt`.
+  Who brings the rest (from the `cargo deny` inclusion graphs): `reqwest`, `hyper` and `h2` enter only the two app
+  crates `wordcraft` and `gridcraft`, as a **build** dependency of the printing crate (`winprint` → `sigstore-verify`
+  → `reqwest`), so those apps' builds can reach the network; no "may link" crate is in that graph. `tokio` reaches
+  `deckcraft-pptx` and `deckcraft-pdf` only as a **dev** (test) dependency. Limits of the map: normal dependencies
+  and default features only; nothing was compiled.
 - **Code execution exists upstream:** GridCraft can run a workbook's Python cells in a sandbox (Linux, macOS; on
   Windows it refuses and shows `#BLOCKED!`); WordCraft has command macros. Neither is reachable from the viewer API,
   and the viewer build leaves those crates out.
@@ -168,7 +173,10 @@ DeckCraft crate, directly or transitively; a CI check (`cargo tree -p beebeeb-en
   It has no file, network, process or clipboard access of its own.
 - **Licence duties:** each project's `LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE` and `ATTRIBUTION.md` stay in its
   folder; a build copies the notices of everything it links (the bundled fonts under OFL-1.1) into the app's
-  third-party licence list, which DW-1557 shows. The viewer does not link the spelling word lists. The ArtCraft
+  third-party licence list, which DW-1557 shows. ~~The viewer does not link the spelling word lists.~~ Correction: the
+  measured WordCraft viewer closure contains `craft-proof` (through `wordcraft-layout`, for hyphenation), which
+  embeds language data at build time when its data folder is configured. Whether a viewer build embeds any, and
+  under which licences (upstream's `NOTICE` lists them), is open; PR 1 answers it. The ArtCraft
   name, wordmark and logos (`docs/brand/`, the app icons) are trademarks outside the open licence: no build of ours
   contains or shows them, and the product never calls the viewer by their names except in the licence list.
 - **Visibility: private first** (the lead's instruction; reversible). Recommendation for later: public, because
@@ -242,7 +250,7 @@ anywhere, read any other file or take the app down.
 | Macros, scripts | The viewer links no macro, Python or automation crate; VBA parts are never interpreted. | A test: a corpus file with a `vbaProject.bin` and one with a Python cell open as plain content. |
 | Remote content (linked pictures, linked workbooks, remote templates, `WEBSERVICE()`) | The readers mark external targets as missing; nothing fetched (measured: §1). | The loopback test in CI; the OS-level block. |
 | Local and UNC targets (`file:///C:/…`, `\\host\share\…` in a link) | **Not measured.** A reader that resolved one would read a local file into the page, or make Windows authenticate to another machine and hand over the account's credential hash. No crate ban sees this: it is plain file I/O. | The viewer API has no path type and never resolves a target to a path. Two corpus cases, each first seen to fail against a deliberately resolving reader: a `file:` target pointing at a canary file (its text must not appear in any page) and a UNC target (0 connection events for the process, counted with Windows' connection events, the instrument of §1). The helper's token can open neither. |
-| Fonts | Fonts are bundled inside the engine. Whether it also reads system fonts, and whether it parses fonts embedded in a document, was **not checked**. | The helper may read the system font folder and nothing else. Fonts embedded in a document are one more parser on hostile input: off in 0.9.0 unless PR 1 shows the reader has no such path; then the state "Some content isn't shown." |
+| Fonts | `wordcraft-fonts` describes itself as "bundled OFL + system" fonts and has a `system_font_dirs` function, so it reads the system font folder. Whether it parses fonts embedded in a document was **not checked**. The downloader for missing fonts lives in `wordcraft-engine`, which the viewer does not link. | The helper may read the system font folder and nothing else. Fonts embedded in a document are one more parser on hostile input: off in 0.9.0 unless PR 1 shows the reader has no such path; then the state "Some content isn't shown." |
 | Memory corruption | No `unsafe` block found in the projects' own crates; their dependencies (image decoders, font shaping, zip, XML) do contain `unsafe`. | The helper process, so a decoder bug lands in a process with no file, network or key access. |
 | Crash, panic, endless loop, zip bomb, huge allocation | Not known; the three trackers hold 5,691 open issues and pull requests between them. | The limits below; a dead or silent helper becomes a state within the timeout. The app never blocks on it. |
 | Writing files | The viewer API has no write path. | The helper's token cannot write anywhere. |
@@ -382,10 +390,10 @@ the sheet grid or the sandbox fights back. The macOS sandbox is not in this coun
 
 | # | PR | Size | Proves |
 |---|---|---|---|
-| 1 | `desktop-office`: the `viewer` crate with documents only, `deny.toml`, CI | M | builds on Windows and macOS; **pass / fail: 0 socket, TLS or HTTP crates in `cargo tree -p beebeeb-office-viewer`**; `cargo deny` and `cargo audit` with counts; the corpus test with a count; the loopback, `file:` and UNC cases, each first seen to fail |
+| 1 | `desktop-office`: the `viewer` crate with documents only, `deny.toml`, CI | M | **first proof: a .docx and a .doc page rendered without `wordcraft-engine`** (`wordcraft_docx::read` / `wordcraft_docbin::read` → `wordcraft_layout::layout` → `wordcraft_render::render_page`; these public functions exist, the path was not built or run by us), with the same page count as the spike; builds on Windows and macOS; **pass / fail: 0 socket, TLS or HTTP crates in `cargo tree -p beebeeb-office-viewer`**; `cargo deny` and `cargo audit` with counts; the corpus test with a count; the loopback, `file:` and UNC cases, each first seen to fail |
 | 2 | desktop: `crates/beebeeb-office-sandbox` (Windows module), `native/beebeeb-office-render`, the transport, the limits; one .docx page as a texture in the Rune window | L | five sandbox claims, each with a test first seen to fail without the sandbox: no network; no read of a user file; no write anywhere; the memory cap; a hang fixture killed in time. Plus: `beebeeb-engine` and the Rune app do not link the viewer |
 | 3 | DW-1507 viewer: pages, scroll, zoom, DPI, outline, status bar | M | `compare.sh` at 0 failing against the board's read-only drawing |
-| 4 | `viewer`: slides (links `deckcraft-render` and `deckcraft-pptx`, not `deckcraft-engine`, which brings MPL-2.0 audio decoders); DW-1509 and DW-1561 | M | filmstrip, present mode, capture exclusion of the Present window |
+| 4 | `viewer`: slides, linking `deckcraft-render` and `deckcraft-pptx` (0 network crates, 0 licences outside the allow-list). Whether it may link `deckcraft-engine`, which adds 16 MPL-2.0 audio-decoder packages, is §10 question 10; DW-1509 and DW-1561 | M | filmstrip, present mode, capture exclusion of the Present window |
 | 5 | `viewer`: workbook cell data, chart and picture pixels; DW-1508 grid | L | the largest unknown: a native grid from the model |
 | 6 | DW-1511, DW-1556, DW-1557, DW-1562, "Open in another app…" as ruled (§5.4), the copy changes | S | every state of §7 reachable in a test |
 | 7 | the fidelity corpus: 20+ real files per type saved by Microsoft Office, pages counted, as a CI gate | M | the number that decides whether a type ships in 0.9.0 |
@@ -408,7 +416,12 @@ live there, and nothing with an unclear origin is ever committed.
 3. **The sheet view is the least proven part.** No pixel of a GridCraft sheet was looked at (its CLI cannot make
    one). The values and formats were right; the grid is ours to draw.
 4. **The sandbox is designed, not proven,** and for macOS not even designed (§5.3).
-5. **The 0.9.1 editor.** The Rust projects are editors already (422 commands in WordCraft alone, save to .docx /
+5. **Every counted page was rendered by a released tool that links the engine crates; the viewer must not link
+   `wordcraft-engine`.** For DeckCraft the difference is nil: `deckcraft_engine::render` is a re-export of
+   `deckcraft-render`. For WordCraft the lower path (reader → layout → render) exists as public functions but was
+   never run by us; what the engine adds on top (font fallback choices, field updates, defaults) may change a page.
+   PR 1's first proof is the same page count without the engine.
+6. **The 0.9.1 editor.** The Rust projects are editors already (422 commands in WordCraft alone, save to .docx /
    .xlsx / .pptx), but their editing UI is egui. 0.9.1 drives their engine crates from Rune chrome we build (the
    board's ribbon, palette and dialogs: large, but the same `desktop-office` and helper). `wordcraft-engine` reaches
    a network client today (§2), so the editor needs that dependency cut or feature-gated upstream first.
@@ -430,7 +443,8 @@ header only compiles as C++, and the official build ships `mergedlo.dll` (148 MB
    two missing states (the opening skeleton, "Some content isn't shown.")?
 4. The copy: followed as "viewer" / "Open"; the DW-1557 text and the DW-1511 note in §6 still need a yes.
 5. .ppt in 0.9.0: followed as "no preview, open with another app".
-6. A US-origin, US-signed dependency that runs only on the PC and made 0 connections in 26 measured runs:
+6. A US-origin, US-signed dependency that runs only on the PC and made 0 connections in 26 measured runs (none with
+   a document naming a font the PC lacks; upstream's font downloader is off by default and is not linked by the viewer):
    acceptable under the "no US systems in the data path" rule? Our reading: yes, it is code, not a system in the
    path; it is the owner's rule to read.
 7. The 90 % corpus rule: followed.
@@ -438,6 +452,9 @@ header only compiles as C++, and the official build ships `mergedlo.dll` (148 MB
    in 0.9.0 (proposed), or the board's "decrypts a copy for that app", which then needs its own contract?
 9. **New: the macOS sandbox for the helper** (§5.3): who designs it, and does the Office viewer ship on macOS in
    0.9.0 without it? Proposed: no; "no preview" there until it exists.
+10. **New: MPL-2.0 in the slide path.** `deckcraft-engine` brings 16 `symphonia` audio-decoder packages under
+    MPL-2.0. The plan links below it and needs none; if a later need pulls the engine in, MPL-2.0 (file-level
+    copyleft, source of changed files to be offered) is a licence decision for the owner.
 
 ## 11. What the spike did and did not do
 
@@ -462,7 +479,7 @@ header only compiles as C++, and the official build ships `mergedlo.dll` (148 MB
 - P3, sheet objects and formula text: added to the API in §3; not designed further.
 - P3, corpus origin, licence and metadata scrub: a rule in §8; no corpus exists.
 - P3, "6 files": corrected to 5 in §9.
-- P3, word lists: the viewer does not link them (§3); their licence is not looked up.
+- P3, word lists: ~~the viewer does not link them~~ `craft-proof` is in the WordCraft viewer closure (§3); what it embeds and under which licence is open for PR 1.
 - P3, plaintext of sheet text, outline, counts and the Present window: added to §5.4.
 - P3, CI runs every Rust suite for this PR because `scripts/ci-changed-areas.py` does not know `spikes/`: not
   changed here (outside this lane's file area); it fails open.
