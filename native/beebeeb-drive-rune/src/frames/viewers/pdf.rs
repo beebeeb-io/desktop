@@ -248,7 +248,7 @@ pub fn find_bar(ui: &Ui, t: &Theme) -> Option<El> {
 
 /// `.mk-bulk`'s ground.
 fn bar_ground(t: &Theme) -> Color {
-    rune::color::hex(if t.dark { "#1B1814" } else { "#F3F2F1" }).unwrap_or(t.bg)
+    rune::color::hex(if t.dark { "#201C17" } else { "#F3F2F1" }).unwrap_or(t.bg)
 }
 
 fn thumbs(ui: &Ui, doc: &PdfDoc, t: &Theme) -> El {
