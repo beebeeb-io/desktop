@@ -177,7 +177,7 @@ pub const FRAMES: &[Frame] = &[
     crate::frames::this_pc::AVAILABLE_OFFLINE,
     crate::frames::backups::FRAME,
     crate::frames::SHARED,
-    crate::frames::TRASH,
+    crate::frames::shared::dialogs::TRASH,
     Frame {
         group: FrameGroup::Settings(SettingsPane::General),
         view: crate::frames::settings::view,
