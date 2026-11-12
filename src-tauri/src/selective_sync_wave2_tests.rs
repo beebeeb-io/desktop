@@ -488,19 +488,8 @@ fn is_altgr_chord(accelerator: &str) -> bool {
     parts.contains(&"Alt") && (parts.contains(&"Ctrl") || parts.contains(&"CmdOrCtrl"))
 }
 
-/// 0.8.15: the switch that turns WebView2's browser shortcuts off is registered on the builder, before the `setup`
-/// hook builds the windows, so its `on_webview_ready` sees every webview.
-#[test]
-fn the_browser_keys_plugin_is_registered_before_any_window_is_built() {
-    let source = crate::root_source::lib_rs().replace("\r\n", "\n");
-    let run = &source[source.find("\npub fn run() {").expect("run()")..];
-    let plugin = run.find(".plugin(webview_browser_keys::plugin())").expect("registered");
-    let setup = run.find(".setup(|app|").expect("run() has a setup hook");
-    assert!(
-        plugin < setup,
-        "the browser-keys plugin is registered in run(), before .setup builds the windows"
-    );
-}
+// the_browser_keys_plugin_is_registered_before_any_window_is_built: deleted (webview_browser_keys removed; v2-native
+// has no web views).
 
 #[test]
 fn no_windows_or_linux_menu_shortcut_is_a_web_view_browser_key_or_an_altgr_chord() {
