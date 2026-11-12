@@ -2,7 +2,7 @@
 //!
 //! A dialog sits in the middle of the window under the caption, on a scrim; it is modal: Tab
 //! stays inside it, Esc and Cancel close it, Return presses its amber button. What it does is a
-//! call on `FilesSource` (`new_folder`, `move_to`); a name is checked by `names::check` first.
+//! call on `FilesSource` (`new_folder`, `move_to`); a name is checked by `names::check_on` first.
 //!
 //! The shell (`shell`) is `ui::settings_dialog::dialog` with the Files window's scrim and a
 //! footer that can stack its buttons (`.wn-dlg-foot.is-stack`, DW-0409).
@@ -226,7 +226,7 @@ impl State {
         if let Ok(there) = self.source.list(target.id.as_deref()) {
             for item in &m.items {
                 let others = there.items.iter().map(|o| (o.name.as_str(), o.is_folder));
-                if let Err(taken) = names::check(&item.name, others) {
+                if let Some(taken) = names::taken(&item.name, others) {
                     if let Some(open) = self.move_dialog() {
                         open.error = Some(taken.message());
                     }
@@ -324,7 +324,7 @@ impl State {
             .iter()
             .flat_map(|l| l.items.iter())
             .map(|i| (i.name.as_str(), i.is_folder));
-        let name = match names::check(&typed, others) {
+        let name = match names::check_on(self.actions.host, &typed, others) {
             Ok(name) => name,
             Err(why) => {
                 self.actions.name_error = Some((typed, why));

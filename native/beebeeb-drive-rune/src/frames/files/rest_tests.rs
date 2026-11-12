@@ -3,6 +3,7 @@
 //! asks of the source. Helpers are `tests.rs`'s.
 
 use super::dialogs::{Dialog, MOVE_LIST, NAME_INPUT};
+use super::names::Host;
 use super::rename::RENAME_INPUT;
 use super::source::{Action, ActionError, BoardDrive, Call, FilesFixture, NEW_FOLDER_ID};
 use super::tests::*;
@@ -255,6 +256,63 @@ fn a_protected_folder_is_not_renamed_and_several_rows_are_not_either() {
     press(&mut rt, Key::Function(2), NONE);
     assert!(rt.state.actions.rename.is_none());
     assert!(asked(&calls).is_empty());
+}
+
+// ---- A name this PC cannot hold (review of PR 305, P2 3) ----
+
+/// F2 on Contract draft.pdf, the whole name replaced by `name`, Enter.
+fn rename_to(rt: &mut Runtime<State>, name: &str) {
+    press(rt, Key::Function(2), NONE);
+    press(rt, Key::Command('a'), CTRL);
+    type_text(rt, name);
+    press(rt, Key::Enter, NONE);
+}
+
+#[test]
+fn on_windows_a_name_file_explorer_refuses_is_not_asked_of_the_engine() {
+    let (mut rt, calls, _) = wired();
+    rt.state.actions.host = Host::Windows;
+    rename_to(&mut rt, "budget|Q4.pdf");
+    assert!(rt.state.actions.rename.is_some(), "the field stays");
+    assert!(asked(&calls).is_empty(), "nothing was renamed in Beebeeb");
+    let tip = info(&rt, "tip");
+    assert_eq!(
+        (tip.role, tip.label.as_deref()),
+        ("alert", Some("A name can't contain |."))
+    );
+    // A device name; then a name with a dot at the end, which is dropped as Explorer drops it.
+    press(&mut rt, Key::Command('a'), CTRL);
+    type_text(&mut rt, "nul.pdf");
+    press(&mut rt, Key::Enter, NONE);
+    assert_eq!(
+        info(&rt, "tip").label.as_deref(),
+        Some("Windows keeps the name NUL for itself. Choose another name.")
+    );
+    assert!(asked(&calls).is_empty());
+    press(&mut rt, Key::Command('a'), CTRL);
+    type_text(&mut rt, "Budget Q4.pdf.");
+    press(&mut rt, Key::Enter, NONE);
+    assert_eq!(asked(&calls), [Call::Rename("contract".into(), "Budget Q4.pdf".into())]);
+    assert!(rt.state.actions.rename.is_none());
+    // The same rule for a new folder.
+    press(&mut rt, Key::Command('n'), Mods { shift: true, ..CTRL });
+    type_text(&mut rt, "Q4?");
+    press(&mut rt, Key::Enter, NONE);
+    let message = info(&rt, "field-0-msg");
+    assert_eq!(
+        (message.role, message.text.as_deref()),
+        ("alert", Some("A name can't contain ?."))
+    );
+    assert_eq!(asked(&calls).len(), 1, "no folder was asked for");
+}
+
+#[test]
+fn on_a_mac_the_same_name_is_given() {
+    let (mut rt, calls, _) = wired();
+    rt.state.actions.host = Host::Other;
+    rename_to(&mut rt, "budget|Q4.pdf");
+    assert_eq!(asked(&calls), [Call::Rename("contract".into(), "budget|Q4.pdf".into())]);
+    assert!(rt.state.actions.rename.is_none());
 }
 
 // ---- Move to (DW-0409) ----

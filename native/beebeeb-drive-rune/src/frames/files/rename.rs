@@ -3,7 +3,7 @@
 //!
 //! F2, or Rename in the file menu, turns the selected row's name into a field: the name without
 //! its extension selected, so typing keeps `.pdf`. Enter or a click elsewhere saves (a call on
-//! `FilesSource::rename`, after `names::check`), Esc cancels. A name that cannot be given keeps
+//! `FilesSource::rename`, after `names::check_on`), Esc cancels. A name that cannot be given keeps
 //! the field open in its error style and says why in a tip under it; the old name stays until
 //! another one is typed, or Esc.
 
@@ -64,7 +64,7 @@ impl State {
             .iter()
             .filter(|other| other.id != rename.id)
             .map(|other| (other.name.as_str(), other.is_folder));
-        match names::check(&typed, others) {
+        match names::check_on(self.actions.host, &typed, others) {
             Ok(name) => Some(name),
             Err(why) => {
                 self.actions.name_error = Some((typed, why));

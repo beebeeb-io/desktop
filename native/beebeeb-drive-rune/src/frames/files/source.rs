@@ -192,7 +192,7 @@ pub trait FilesSource: Send + 'static {
     /// Make a folder with this name in the folder with this id (`None`: the root). It arrives
     /// through [`FilesSource::changes`] (`Change::Made`). The name is encrypted on this PC first.
     fn new_folder(&mut self, parent: Option<&str>, name: &str) -> Result<(), ActionError>;
-    /// Give the item this name (already checked by `names::check` against the rows shown).
+    /// Give the item this name (already checked by `names::check_on` against the rows shown).
     fn rename(&mut self, item: &DriveItem, name: &str) -> Result<(), ActionError>;
     /// Move these into the folder with this id (`None`: the root). `NameTaken`: the folder has
     /// one of the names, and nothing was moved.

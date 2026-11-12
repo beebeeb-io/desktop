@@ -166,6 +166,8 @@ pub struct Actions {
     pub name_error: Option<(String, names::NameError)>,
     /// Folders the source made since the window last looked (`Change::Made`).
     pub made: Vec<DriveItem>,
+    /// Whose disk a typed name has to fit on: this computer's (a test names the other one).
+    pub host: names::Host,
 }
 
 pub const INTENTS_KEPT: usize = 32;
@@ -191,6 +193,7 @@ impl Actions {
             name_edit: rune::TextEdit::default(),
             name_error: None,
             made: Vec::new(),
+            host: names::Host::this(),
         }
     }
 }
