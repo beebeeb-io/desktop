@@ -377,16 +377,24 @@ pub fn item_path(sync_root: &Path, entry: &FileEntry) -> Result<PathBuf, DriveEr
 /// Whether the file has an extension the old shell refused to launch via "Open"
 /// (`src-tauri/src/file_open_commands.rs::is_dangerous_executable`). Such files are revealed in
 /// the folder instead of opened; the list matches the old shell exactly.
+///
+/// Windows strips trailing dots and spaces from file names before resolving them, so `x.exe.` and
+/// `x.exe ` both execute as `x.exe`. The check strips them too, matching the name Windows sees.
 pub fn is_dangerous_executable(path: &Path) -> bool {
     const DANGEROUS_EXTS: &[&str] = &[
         "exe", "bat", "cmd", "com", "scr", "lnk", "url", "hta", "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi",
         "reg", "cpl", "pif", "msc", "jar",
     ];
-    let Some(ext) = path.extension() else {
-        return false;
-    };
-    let ext_lower = ext.to_string_lossy().to_lowercase();
-    DANGEROUS_EXTS.contains(&ext_lower.as_str())
+    // Strip trailing dots and spaces (Windows ignores them) before extracting the extension.
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().trim_end_matches(['.', ' ']).to_string())
+        .unwrap_or_default();
+    let ext = Path::new(&name)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    DANGEROUS_EXTS.contains(&ext.as_str())
 }
 
 #[cfg(test)]
@@ -749,6 +757,47 @@ mod tests {
         }
         // No extension.
         assert!(!is_dangerous_executable(Path::new("README")));
+    }
+
+    /// P2-1: case-folding and Windows name tricks. Each line goes red on the mutant "drop
+    /// to_lowercase" or "drop trailing-dot/space stripping".
+    #[test]
+    fn denylist_catches_case_variants_and_windows_trailing_tricks() {
+        // Case variants: red when to_lowercase is dropped.
+        assert!(
+            is_dangerous_executable(Path::new("report.EXE")),
+            "uppercase EXE must be blocked"
+        );
+        assert!(
+            is_dangerous_executable(Path::new("a.Bat")),
+            "mixed-case Bat must be blocked"
+        );
+        // Trailing dot: Windows strips it, so x.exe. runs as x.exe.
+        // Red when the trailing-dot stripping is dropped.
+        assert!(
+            is_dangerous_executable(Path::new("x.exe.")),
+            "x.exe. (trailing dot) must be blocked: Windows strips the dot"
+        );
+        // Trailing space: Windows strips it, so x.exe<space> runs as x.exe.
+        assert!(
+            is_dangerous_executable(Path::new("x.exe ")),
+            "x.exe<space> (trailing space) must be blocked: Windows strips the space"
+        );
+        // Double extension: only the last matters.
+        assert!(
+            is_dangerous_executable(Path::new("a.txt.exe")),
+            "a.txt.exe must be blocked (last extension is exe)"
+        );
+        // Multiple trailing dots.
+        assert!(
+            is_dangerous_executable(Path::new("payload.scr...")),
+            "payload.scr... must be blocked"
+        );
+        // Trailing dots on a safe extension: safe.
+        assert!(
+            !is_dangerous_executable(Path::new("notes.txt.")),
+            "notes.txt. is safe (txt after stripping)"
+        );
     }
 
     #[test]

@@ -517,29 +517,43 @@ fn executable_denylist_matches_the_old_shell() {
 
 use crate::frames::files::source::{ActionError, FilesSource};
 
-/// Every operation that works THROUGH the sync folder is refused with `Unavailable` when sync is
-/// not running. The gate is `NeedsRecoveryPhrase` and `is_syncing()` is false (proven by the
-/// existing test at line 96). No filesystem changes happen.
+/// P2-2: the sync guard is BEHAVIOURAL, not a side-effect of missing state. The handle has a valid
+/// sync_root (exists on disk), a working state_db with seeded items, and is_syncing() == false.
+/// Without the guard, new_folder would succeed (create a directory in the existing sync root).
+/// WITH the guard, every folder-route op returns `Unavailable` and the filesystem is unchanged.
+///
+/// Mutant "remove the is_syncing guard from local()": this test turns RED (new_folder creates a
+/// directory, the assertion `sync_root_contents == 0` fails).
 #[test]
-fn folder_route_ops_are_refused_while_sync_is_not_running() {
+fn folder_route_ops_are_refused_by_the_sync_guard_not_by_missing_state() {
     let started = started();
     assert!(!started.opened.engine.is_syncing(), "precondition: sync is not running");
-    assert_eq!(
-        started.opened.gate,
-        EngineGate::NeedsRecoveryPhrase,
-        "precondition: gate is not Ready"
+
+    // Create the state dir and DB so state_db() works (tests run in any order).
+    // No rows are seeded: the guard fires before any DB query, and adding rows here would
+    // interfere with the listing test's exact root assertions.
+    let identity = engine_identity();
+    let state_dir = state_paths::beebeeb_state_dir_for(identity).unwrap();
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let db_path = state_paths::state_db_path_from_state_dir(&state_dir);
+    drop(StateDb::open(&db_path).unwrap()); // creates the schema
+
+    assert!(
+        started.opened.engine.state_db().is_ok(),
+        "precondition: state_db is available"
     );
+
+    // Create the sync root on disk so it is valid. Without the guard, new_folder would succeed.
+    let sync_root = started.opened.engine.sync_root().unwrap();
+    std::fs::create_dir_all(&sync_root).unwrap();
+    let count_before = std::fs::read_dir(&sync_root).unwrap().count();
 
     let mut source = EngineFilesSource::new(started.opened.engine.clone());
 
-    // A temp folder to prove nothing is written.
-    let proof = tempfile::tempdir().unwrap();
-    let before = std::fs::read_dir(proof.path()).unwrap().count();
-
     let item = crate::source::DriveItem {
-        id: "f-1".into(),
+        id: "f-2".into(),
         parent_id: None,
-        name: "test.txt".into(),
+        name: "notes.txt".into(),
         is_folder: false,
         size: Some(100),
         child_count: None,
@@ -552,44 +566,58 @@ fn folder_route_ops_are_refused_while_sync_is_not_running() {
         is_protected: false,
     };
 
-    // Every folder-route op returns Unavailable.
+    // Every folder-route op returns Unavailable (the guard, not a downstream error).
     assert_eq!(
-        source.new_folder(None, "Plans"),
+        source.new_folder(None, "ShouldNotExist"),
         Err(ActionError::Unavailable),
-        "new_folder"
+        "new_folder refused by sync guard"
     );
-    assert_eq!(source.rename(&item, "new.txt"), Err(ActionError::Unavailable), "rename");
+    assert_eq!(
+        source.rename(&item, "new.txt"),
+        Err(ActionError::Unavailable),
+        "rename refused by sync guard"
+    );
     assert_eq!(
         source.move_to(&[item.clone()], None),
         Err(ActionError::Unavailable),
-        "move_to"
+        "move_to refused by sync guard"
     );
     assert_eq!(
         source.duplicate(&[item.clone()], &[]),
         Err(ActionError::Unavailable),
-        "duplicate"
+        "duplicate refused by sync guard"
     );
     assert_eq!(
-        source.upload(None, &[proof.path().join("fake.txt")]),
+        source.upload(None, &[std::env::temp_dir().join("fake.txt")]),
         Err(ActionError::Unavailable),
-        "upload"
+        "upload refused by sync guard"
     );
-    assert_eq!(source.open(&[item.clone()]), Err(ActionError::Unavailable), "open");
+    assert_eq!(
+        source.open(&[item.clone()]),
+        Err(ActionError::Unavailable),
+        "open refused by sync guard"
+    );
     assert_eq!(
         source.show_in_file_explorer(&[item.clone()]),
         Err(ActionError::Unavailable),
-        "show_in_file_explorer"
+        "show_in_file_explorer refused by sync guard"
     );
     assert_eq!(
         source.open_in_file_explorer(None),
         Err(ActionError::Unavailable),
-        "open_in_file_explorer"
+        "open_in_file_explorer refused by sync guard"
     );
     assert!(!source.can_add(None), "can_add is false");
 
-    // Filesystem unchanged: no files were created, renamed or moved.
-    let after = std::fs::read_dir(proof.path()).unwrap().count();
-    assert_eq!(before, after, "filesystem unchanged: 0 changes");
+    // Filesystem unchanged: the sync root has no new entries.
+    let count_after = std::fs::read_dir(&sync_root).unwrap().count();
+    assert_eq!(
+        count_before, count_after,
+        "0 filesystem changes in the sync root (the guard blocked everything)"
+    );
+
+    // Clean up (do not leave a folder behind for the next test run).
+    let _ = std::fs::remove_dir_all(&sync_root);
 }
 
 /// The sync guard is the `is_syncing()` check in `local()`. Dropping the guard (mutant: removing
