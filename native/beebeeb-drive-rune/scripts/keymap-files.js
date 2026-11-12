@@ -1,4 +1,4 @@
-// keymap.d/files.js: the keys the Files frames add (menus, toasts). Same rules as keymap.js: by the board's class names.
+// keymap-files.js: the keys the Files frames add (menus, toasts). Same rules as keymap.js: by the board's class names.
 
 // ---- Menus (`.wn-menu`): the file menu, Sort, New, the list's background menu and its submenu ----
 qa('.wn-menu').forEach((m, mi) => {
