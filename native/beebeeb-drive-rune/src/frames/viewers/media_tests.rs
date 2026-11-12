@@ -608,3 +608,45 @@ fn an_archive_lists_steps_into_a_folder_and_out_again() {
     click(&mut rt, "tb-btn-0");
     assert_eq!(intents(&mut rt), [Intent::OpenInAnotherApp]);
 }
+
+#[test]
+fn share_says_not_built_yet_until_something_takes_it() {
+    let (mut rt, _) = recording(board::AUDIO);
+    assert!(!has(&rt, "toast-text"));
+    click(&mut rt, "tool-0");
+    assert_eq!(words(&rt, "toast-text"), "Not built yet: Share");
+    assert_eq!(
+        intents(&mut rt),
+        [Intent::Share],
+        "the intent is still recorded for the shell"
+    );
+    // The notice goes with the next key the window gets.
+    press(&mut rt, Key::Down);
+    assert_eq!(viewer(&rt).toast, None);
+}
+
+#[test]
+fn trash_says_not_built_yet_until_something_takes_it() {
+    let (mut rt, _) = recording(board::RAW);
+    click(&mut rt, "action-3");
+    assert_eq!(words(&rt, "toast-text"), "Not built yet: Move to Trash");
+    assert_eq!(viewer(&rt).file.name, "DSC04182.ARW", "nothing was trashed");
+}
+
+#[test]
+fn open_in_another_app_says_not_built_yet_until_something_takes_it() {
+    let (mut rt, _) = recording(board::ZIP);
+    click(&mut rt, "tb-btn-0");
+    assert_eq!(words(&rt, "toast-text"), "Not built yet: Open in another app");
+}
+
+#[test]
+fn edit_in_sheets_says_not_built_yet_until_something_takes_it() {
+    let (mut rt, _) = recording(board::CSV);
+    ctrl(&mut rt, Key::Command('e'));
+    assert_eq!(words(&rt, "toast-text"), "Not built yet: Edit in Sheets");
+    press(&mut rt, Key::Down);
+    assert!(!has(&rt, "toast-text"));
+    click(&mut rt, "tb-btn-0");
+    assert_eq!(words(&rt, "toast-text"), "Not built yet: Edit in Sheets");
+}

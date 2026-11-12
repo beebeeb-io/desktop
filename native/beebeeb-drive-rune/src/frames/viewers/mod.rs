@@ -77,6 +77,23 @@ pub enum Intent {
     Trash,
 }
 
+/// What a control whose target is not built yet says (the shell's words for it).
+pub const NOT_BUILT: &str = "Not built yet";
+
+impl Intent {
+    /// The name of where this intent goes, while nothing there answers it yet.
+    fn not_built(&self) -> Option<&'static str> {
+        Some(match self {
+            Intent::Share => "Share",
+            Intent::Trash => "Move to Trash",
+            Intent::OpenInAnotherApp => "Open in another app",
+            Intent::EditInSheets => "Edit in Sheets",
+            Intent::VersionHistory => "Version history",
+            _ => return None,
+        })
+    }
+}
+
 /// The file being edited (DW-1523): the text as typed, and the text it started from.
 pub struct Editor {
     pub edit: rune::TextEdit,
@@ -185,6 +202,11 @@ impl Ui {
     }
 
     pub fn intent(&mut self, intent: Intent) {
+        // Nothing takes these yet (the shell's drain of this group's intents comes with the
+        // engine's wiring): the press says so, in the shell's own words, never nothing.
+        if let Some(what) = intent.not_built() {
+            self.toast = Some(format!("{NOT_BUILT}: {what}"));
+        }
         self.intents.push(intent);
     }
 
@@ -642,6 +664,12 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
 /// left the file, and [`sync`] drops it here.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     sync(s);
+    // A "not built yet" notice goes with the next key.
+    if let Some(ui) = ui(s) {
+        if ui.toast.as_deref().is_some_and(|words| words.starts_with(NOT_BUILT)) {
+            ui.toast = None;
+        }
+    }
     if media::on_key(s, ev) {
         if let Some(key) = ui(s).and_then(|ui| ui.focus.take()) {
             tx.focus(key, true);

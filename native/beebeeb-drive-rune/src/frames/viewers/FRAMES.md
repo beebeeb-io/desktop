@@ -25,10 +25,10 @@ Lane b19-viewers built 7 more (2026-11-12): 18 of 23 are built, 5 are not (DW-15
 | DW-1520 | New's menu: New folder, New file…, New document…, Upload files…, Upload a folder… | not built |
 | DW-1521 | New file: pick a type (Markdown, Text, Word, Excel, PowerPoint) | not built |
 | DW-1522 | New text file: the name and the extension as its own field, suggestions | not built |
-| DW-1501 | A RAW photo: the camera's preview, the pill, the gallery strip, Share / Offline / Details / Trash | built (lane b19-viewers); open reds: the toolbar's (see below) |
+| DW-1501 | A RAW photo: the camera's preview, the pill, the gallery strip, Share / Offline / Details / Trash | built (lane b19-viewers); open reds: the toolbar's, and 4 pixel edges of `action-0..3` (see below) |
 | DW-1502 | The RAW's facts in the details panel | built; open reds: the toolbar's |
-| DW-1505 | A PDF: page thumbnails, the page on grey, zoom, Find | built; open reds: the toolbar's (the golden keys the zoom group as `view-toggle` too) |
-| DW-1506 | Find in a PDF: the find bar, matches highlighted (neutral) | built; open reds: the toolbar's, as DW-1505 |
+| DW-1505 | A PDF: page thumbnails, the page on grey, zoom, Find | built; open reds: the toolbar's |
+| DW-1506 | Find in a PDF: the find bar, matches highlighted (neutral) | built; open reds: the toolbar's; dark: 1 pixel edge of `find-caret`; Shift+Enter in the field (see below) |
 | DW-1514 | A CSV or TSV as a table; a selected cell; sort by a column | built; open reds: the toolbar's |
 | DW-1515 | An archive's list, without unpacking; a folder's row steps into it | built; open reds: the toolbar's |
 | DW-1503 | The audio player with the folder as the queue | built; open reds: the toolbar's |
@@ -46,5 +46,10 @@ Lane b19-viewers built 7 more (2026-11-12): 18 of 23 are built, 5 are not (DW-15
   toolbar this group draws does not have yet. Until the board lane's toolbar lands here, the toolbar keys the rules
   name fail, and the file's own controls beside them (pill, zoom, Find, Share, Edit, more) sit 36 pt to the right;
   where the board's toolbar is full its path separators are narrower (DW-1506, DW-1515).
-- **Shift+Enter in the find field** asks `Tx::mods` for Shift; the test runtime's submit carries no modifiers, so
-  the tests prove the previous-match chevron and Enter, not Shift+Enter in the field.
+- **Shift+Enter in the find field** steps to the NEXT match, as Enter does: Rune's field submit carries no modifiers
+  and the field's key hook is not asked for Enter (3 tries, in the PR body). Previous is the second chevron, and
+  Shift+Enter while the keyboard is outside the field. A toolkit limit, named; the board wants Shift+Enter = previous.
+- **This lane's own reds:** DW-1501 `action-0..3` (pixels, the bottom edge: Rune draws the white word on black 6 to 17
+  of 255 brighter per row than Chromium at the same position); DW-1506 dark `find-caret` (pixel edge 10 > 9).
+- **Controls whose target is not built yet** (Share, Move to Trash, Open in another app…, Edit in Sheets, Version
+  history) say "Not built yet: <what>" in the viewer's toast and still record their intent for the shell.

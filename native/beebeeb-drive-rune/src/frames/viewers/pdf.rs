@@ -187,11 +187,14 @@ pub fn find_bar(ui: &Ui, t: &Theme) -> Option<El> {
                         .color(t.text)
                         .caret(Color::TRANSPARENT, t.selection)
                         .on_edit(find_edit)
-                        // Enter in the field: the next match. Shift+Enter: the previous one.
-                        .on_submit(|s: &mut State, tx: &mut rune::Tx| {
-                            let back = tx.mods().shift;
+                        // Enter in the field: the next match. Shift+Enter is the previous one only while the
+                        // keyboard is outside the field (`media::on_key`): a field's submit carries no
+                        // modifiers in Rune, and its key hook is not asked for Enter, so in the field
+                        // Shift+Enter steps on like Enter. The previous-match chevron is the way back
+                        // (named in FRAMES.md and the PR body as a toolkit limit).
+                        .on_submit(|s: &mut State, _: &mut rune::Tx| {
                             if let Some(ui) = super::ui(s) {
-                                ui.find_step(if back { -1 } else { 1 });
+                                ui.find_step(1);
                             }
                         })
                         .size(245.0, 17.0),
