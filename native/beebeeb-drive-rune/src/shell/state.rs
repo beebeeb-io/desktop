@@ -30,6 +30,8 @@ pub struct State {
     // --- one line per frame group below ---
     /// What the Files frames keep: selection, menus, toasts (`frames::files`).
     pub(crate) actions: crate::frames::files::Actions,
+    /// The global elements: the banner, the loading strip (`frames::global`).
+    pub(crate) global: crate::frames::global::Ui,
     /// The live feedback mode (test builds only).
     #[cfg(feature = "feedback")]
     pub(crate) feedback: crate::feedback::Feedback,
@@ -89,6 +91,7 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         files: crate::ui::FilesUi::default(),
         shell,
         actions: crate::frames::files::Actions::default(),
+        global: crate::frames::global::Ui::default(),
         #[cfg(feature = "feedback")]
         feedback: crate::feedback::Feedback::new(),
         frames: crate::frames::Ui::default(),
