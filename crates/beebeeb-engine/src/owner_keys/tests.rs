@@ -7,8 +7,10 @@
 //! Tests: every child below.
 
 use super::*;
+use crate::api_client::ApiClient;
 use crate::state_db::{FileEntry, FileStatus, ItemKind};
 use serde_json::json;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},

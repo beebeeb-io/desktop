@@ -600,7 +600,9 @@ fn the_profile_cache_doc_says_the_profile_is_a_sign_in_input() {
 #[test]
 fn the_older_key_and_check_copies_are_wiped() {
     let production = production();
-    let load = body_of(&production, "fn load_session_from_vault<");
+    // The loader and the recovery check live in the engine (`signin/store.rs`, `signin/recovery.rs`).
+    let store = include_str!("../../crates/beebeeb-engine/src/signin/store.rs").replace("\r\n", "\n");
+    let load = body_of(&store, "fn load_session_from_vault<");
     assert!(
         load.contains("let mut master_key = zeroize::Zeroizing::new([0u8; 32]);"),
         "{load}"
@@ -609,7 +611,8 @@ fn the_older_key_and_check_copies_are_wiped() {
         load.contains("master_key: *master_key,"),
         "the session's copy is the only one that outlives it:\n{load}"
     );
-    let check = body_of(&production, "async fn recovery_check_answer(");
+    let recovery = include_str!("../../crates/beebeeb-engine/src/signin/recovery.rs").replace("\r\n", "\n");
+    let check = body_of(&recovery, "async fn recovery_check_answer(");
     assert!(
         check.contains("let recovery_check = zeroize::Zeroizing::new(encode_base64("),
         "{check}"

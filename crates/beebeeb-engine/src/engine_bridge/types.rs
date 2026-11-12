@@ -531,6 +531,8 @@ pub enum Op {
     Trash,
     RestoreVersion,
     PinTree,
+    // Queued by the macOS and Linux layouts only (`enqueue_hydrate_operation`); Windows hydrates through Cloud Files.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     HydrateFile,
 }
 
