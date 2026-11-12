@@ -9,11 +9,11 @@ if (explorerBtn) { api.box('open-explorer', explorerBtn); api.icon('open-explore
 
 // ---- Details panel: Free up space (the button under the Available offline card, when the item has a copy) ----
 const freeUp = q('.mk-det > button:has(svg)');
-// The native key is `free-up`; the button is a `.kit-btn` with the cloud icon.
+// The native key is `free-up`; action_button gives -box, -icon, -btn (not -label).
 if (freeUp && /Free up/.test(freeUp.textContent)) {
   api.box('free-up-box', freeUp);
   api.icon('free-up-icon', q('svg', freeUp));
-  api.text('free-up-label', q('span', freeUp));
+  api.text('free-up-btn', q('span', freeUp));
 }
 
 // ---- Menus (`.wn-menu`): the file menu, Sort, New, the list's background menu and its submenu ----
