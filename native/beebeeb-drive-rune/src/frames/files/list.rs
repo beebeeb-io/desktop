@@ -69,11 +69,21 @@ pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
                     },
                     move |s: &State, i| match s.listing.items.get(i) {
                         Some(item) => {
-                            let date = s.actions.source.changed_label(item);
+                            // The file that could not open without a connection says so in its
+                            // row, at 45 % (`frames::global`, DW-0121).
+                            let blocked = crate::frames::global::dims(s, &item.id);
+                            let date = if blocked {
+                                Some("Needs a connection".to_string())
+                            } else {
+                                s.actions.source.changed_label(item)
+                            };
                             // The row being renamed shows its name as a field (DW-0410).
                             let renaming = s.actions.rename.as_ref().is_some_and(|r| r.row == i && r.id == item.id);
                             let field = renaming.then(|| super::rename::name_field(s, &t));
                             let mut row = file_row(i, item, s.is_selected(i), date, field, &t);
+                            if blocked {
+                                row = row.opacity(0.45);
+                            }
                             if item.is_folder {
                                 // "Drop on a folder: uploads into that folder"; Backups refuses (`State::upload`).
                                 let id = item.id.clone();

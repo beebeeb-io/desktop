@@ -571,6 +571,10 @@ impl State {
         if !self.can_preview() {
             return false;
         }
+        // Without a connection a file that is not on this PC says so (`frames::global`, DW-0121).
+        if crate::frames::global::preview_needs_connection(self) {
+            return true;
+        }
         self.intent(Intent::Frame("DW-0408"));
         true
     }

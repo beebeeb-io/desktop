@@ -12,7 +12,12 @@ use rune::{Cx, El, Tx, col, el, row};
 /// "4 on this PC · 3 available offline · 4 online only", counted from the rows.
 pub fn pc_summary(s: &State) -> String {
     if s.listing.items.is_empty() {
-        return "Nothing in this folder yet".to_string();
+        // The whole account is empty (DW-0114), or this folder is (DW-1106).
+        return if s.listing.folder.id.is_none() {
+            "Nothing on this PC yet".to_string()
+        } else {
+            "Nothing in this folder yet".to_string()
+        };
     }
     let count = |status: &str| {
         s.listing
@@ -130,12 +135,17 @@ fn toast_of(kind: Toast, t: &Theme) -> El {
 }
 
 /// An empty folder (`.kit-empty`): what to do, and that it is encrypted before it uploads.
-fn empty_folder(t: &Theme) -> El {
+fn empty_folder(root: bool, t: &Theme) -> El {
     let body = empty::empty_state(
         "empty",
         &icons::FILES,
         "Nothing here yet",
-        "Add files or photos, and they're encrypted on this PC before they upload.",
+        // The board's two sentences: a new account's Files (DW-0114), an empty folder (DW-1106).
+        if root {
+            "Add files or photos. They're encrypted on this PC before they upload."
+        } else {
+            "Add files or photos, and they're encrypted on this PC before they upload."
+        },
         t,
     )
     .child(
@@ -180,9 +190,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let mut body = row().key("list-body").grow(1.0).min_h(0.0).w_full();
     if empty {
         // Nothing in the folder: no headers, no panel, one way forward (DW-1106).
-        body = body.child(empty_folder(&t));
+        body = body.child(empty_folder(s.listing.folder.id.is_none(), &t));
     } else {
-        body = body.child(
+        // The folder as a grid, where the person chose that view (`frames::global::grid`, DW-0119).
+        body = body.child(crate::frames::global::grid_body(s, &t).unwrap_or_else(|| {
             col()
                 .key("file-list-col")
                 .grow(1.0)
@@ -194,8 +205,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                     // It holds the keyboard while it shows, so Back still works from the keys.
                     Some(error) => file_list::list_error(error, &t).focusable(true).no_focus_ring(),
                     None => list::rows(s, cx, &t),
-                }),
-        );
+                })
+        }));
         if s.show_detail_pane {
             let selected = s.selected.and_then(|i| s.listing.items.get(i));
             let facts = selected.map(|item| (item, s.actions.source.details(item, &s.listing.folder.name)));
@@ -211,16 +222,20 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .h_full()
         .fill(t.bg)
         .child(toolbar::toolbar(s, &t, 0.0))
+        // The one banner of the whole window, or the loading strip (`frames::global`).
+        .children(crate::frames::global::under_toolbar(s, &t))
         .child(body)
         .child({
             // The sync state is the source's; a click shows the b's flyout (DW-0401 to DW-1201).
             let state = s.actions.source.sync_state();
-            let details = pc_summary(s);
+            let details = crate::frames::global::status_words(s).unwrap_or_else(|| pc_summary(s));
             let name = match &state {
                 Some(state) => format!("{state}. {details}"),
                 None => details.clone(),
             };
-            status_line::status_line(state.as_deref(), &details, &t)
+            // Without a connection the line says so (`frames::global`, DW-0121).
+            crate::frames::global::status_line(state.as_deref(), &details, &t)
+                .unwrap_or_else(|| status_line::status_line(state.as_deref(), &details, &t))
                 .role("button")
                 .label(name)
                 .description("Shows sync status")
@@ -232,7 +247,13 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     }
 
     let crop = s.actions.board_crop_top;
-    let mut body = row().key("body").w_full().child(sidebar::sidebar(s, &t)).child(main);
+    let mut body = row()
+        .key("body")
+        .w_full()
+        .child(sidebar::sidebar(s, &t))
+        .child(main)
+        // What is in front of the whole body: a preview that needs a connection (`frames::global`).
+        .children(crate::frames::global::over_body(s, s.actions.window, &t));
     body = if crop > 0.0 {
         // A board frame that draws the lower part of the window only (`.mk-cropfade.at-top`): the
         // body keeps its full height and moves up under the caption, its top fading into it.
@@ -251,7 +272,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                     .gradient(fade, fade.alpha(0.0)),
             )
     } else {
-        body.grow(1.0).min_h(0.0)
+        crate::frames::global::fit(s, body, &t)
     };
     let window = col()
         .key("window")

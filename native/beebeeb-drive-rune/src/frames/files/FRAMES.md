@@ -4,7 +4,8 @@ Windows frames of the FRAMES.md groups "Files: the full Drive in the window", "B
 "Folders, Backups and uploads", plus the list's states drawn under "Global elements on Windows".
 Status is `built` (gated light and dark, both truth lines at 0 failing) or `not built`.
 State after the review delta (2026-11-11): 11 built here (plus DW-0401, built before), 38 not built.
-State after lane f-files-rest (2026-11-12, PR 305): 16 built (2 of them with a gate not at 0), 34 not built.
+State after lane f-files-rest (2026-11-12, PR 305): 16 built (2 of them with a gate not at 0), 34 not built here.
+Of those 34, the six list states DW-0101, 0102, 0114, 0118, 0119 and 0121 are built by the global lane (PR 299): 28 are built nowhere.
 Not on the board, added on the owner's request (PR 305): Free up space (file menu, details panel) and the
 toolbar's Open in File Explorer; until the board draws them and the goldens are recaptured, NO Files frame
 gates at 0: the toolbar button moves ten keys in each of the 16 frames (`view-toggle`, `view-list`,
@@ -55,12 +56,12 @@ before those two additions (at `1b2da021`). The 32 truth lines at the PR's head 
 | `DW-1108` | Browse | Offline, everything stays visible; only what isn't on this PC is dimmed and says why. | not built |
 | `DW-1109` | Browse | The session ended after 90Â days without use: the list and the key are still here, so only the password is needed. | not built |
 | `DW-1110` | Browse | Trying to delete Mail Backup: the protected folder message. | not built |
-| `DW-0101` | List states | No connection: the list stays and says how old it is. | not built |
-| `DW-0102` | List states | Some items can't sync: say how many, and that the rest is fine. | not built |
+| `DW-0101` | List states | No connection: the list stays and says how old it is. | built by the global lane (`frames::global`, PR 299; its checklist is `../global/FRAMES.md`) |
+| `DW-0102` | List states | Some items can't sync: say how many, and that the rest is fine. | built by the global lane (`frames::global`, PR 299; its checklist is `../global/FRAMES.md`) |
 | `DW-0107` | List states | A short confirmation that needs nothing. | built (light and dark: 0 failing on all six) |
 | `DW-0108` | List states | A message with Undo stays a little longer. | built (light and dark: 0 failing on all six) |
 | `DW-0109` | List states | Something failed: say what, and how to fix it. | built (light and dark: 0 failing on all six): the message of a failed action, with Try again |
-| `DW-0114` | List states | A new account has no files yet: one way forward. | not built |
-| `DW-0118` | List states | After the first sign-in the list loads in the background; the window works at once. | not built |
-| `DW-0119` | List states | Thumbnails arrive one by one: plain tiles until then. | not built |
-| `DW-0121` | List states | Offline, and the file isn't on this PC: say so instead of opening nothing. | not built |
+| `DW-0114` | List states | A new account has no files yet: one way forward. | built by the global lane (`frames::global`, PR 299; its checklist is `../global/FRAMES.md`) |
+| `DW-0118` | List states | After the first sign-in the list loads in the background; the window works at once. | built by the global lane (`frames::global`, PR 299; its checklist is `../global/FRAMES.md`) |
+| `DW-0119` | List states | Thumbnails arrive one by one: plain tiles until then. | built by the global lane (`frames::global`, PR 299; its checklist is `../global/FRAMES.md`) |
+| `DW-0121` | List states | Offline, and the file isn't on this PC: say so instead of opening nothing. | built by the global lane (`frames::global`, PR 299; its checklist is `../global/FRAMES.md`) |

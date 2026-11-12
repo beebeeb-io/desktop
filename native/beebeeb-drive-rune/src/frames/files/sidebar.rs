@@ -236,7 +236,12 @@ fn format_storage(bytes: i64) -> String {
         } else {
             format!("{gb:.1} GB")
         }
-    } else {
+    } else if bytes >= 1_000_000 {
         format!("{} MB", bytes / 1_000_000)
+    } else if bytes >= 1_000 {
+        format!("{} KB", bytes / 1_000)
+    } else {
+        // A new account: "0 B of 1 TB" (DW-0114).
+        format!("{} B", bytes.max(0))
     }
 }
