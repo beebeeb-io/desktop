@@ -98,17 +98,17 @@ pub struct Create {
     resending: bool,
     resent: bool,
     resend_problem: Option<SendProblem>,
-    verifying: bool,
+    pub(super) verifying: bool,
     code_problem: Option<CodeProblem>,
     /// The code ran out while the account was being created (DW-A43's rule).
     code_expired: bool,
     accepted: bool,
     understood: bool,
-    checking: bool,
+    pub(super) checking: bool,
     password_problem: Option<PasswordProblem>,
     saved: bool,
     /// The phrase on the clipboard, while this window put it there.
-    phrase_copy: Option<SecretCopy>,
+    pub(super) phrase_copy: Option<SecretCopy>,
     positions: [usize; CONFIRM_WORDS],
     /// The word field that was typed in last: the suggestions are for it.
     active_word: usize,
