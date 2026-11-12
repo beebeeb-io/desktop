@@ -80,6 +80,21 @@ pub struct Plan {
     pub rest: String,
 }
 
+/// The plan, read only (DW-0708): what the dialog over Account shows.
+#[derive(Clone, PartialEq, Debug)]
+pub struct PlanDetails {
+    /// "1 TB".
+    pub size: String,
+    /// "240 GB": a machine's value, in mono.
+    pub used: String,
+    /// The meter: what is used, as a share of the plan (0 to 1).
+    pub share: f32,
+    /// "14 Mar 2027".
+    pub renews: String,
+    /// "Yearly".
+    pub billing: String,
+}
+
 /// The rows of Sign-in and security (DW-A52).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Security {
@@ -427,6 +442,14 @@ pub trait AccountSource {
 
     /// Engine: the app-lock setting of this PC (Windows Hello), `settings.app_lock`.
     fn set_app_lock(&mut self, on: bool);
+    /// Engine: the plan in full (`GET /api/v1/billing/plan`): size, use, renewal day, billing
+    /// period. `None`: not known; the plan card then opens the plan page on the website.
+    fn plan_details(&self) -> Option<PlanDetails> {
+        None
+    }
+    /// Engine: how soon the app locks again (`settings.app_lock_after`), one of
+    /// `app_lock::DELAYS`. Windows Hello is asked first, as for `set_app_lock`.
+    fn set_lock_after(&mut self, _delay: &str) {}
     /// Engine: `DELETE /api/v1/account/sessions?device=<id>`: ends all of that device's
     /// Beebeeb sessions. `false`: no such device, or it is this one.
     fn sign_out_device(&mut self, id: &str) -> bool;
@@ -521,6 +544,8 @@ pub fn score(factors: &[Factor]) -> (usize, usize) {
 
 /// The board's sample account: Anna Visser, anna@northwind.studio.
 pub struct BoardAccount {
+    /// `true`: the plan's details are not known (a test's state).
+    plan_unknown: bool,
     security: Security,
     sessions: Vec<Session>,
     products: Vec<(ProductKind, ProductState)>,
@@ -575,6 +600,7 @@ impl BoardAccount {
             this_device: this,
         };
         Self {
+            plan_unknown: false,
             security: Security {
                 app_lock: true,
                 lock_after: "5 min".into(),
@@ -697,6 +723,13 @@ impl BoardAccount {
         }
     }
 
+    /// A source that cannot say what the plan is (DW-0708 then opens the website instead).
+    #[cfg(test)]
+    pub fn without_plan_details(mut self) -> Self {
+        self.plan_unknown = true;
+        self
+    }
+
     /// DW-A84a, DW-A74: no passkey yet.
     pub fn without_passkeys(mut self) -> Self {
         self.passkeys.clear();
@@ -783,6 +816,18 @@ impl AccountSource for BoardAccount {
     }
     fn set_app_lock(&mut self, on: bool) {
         self.security.app_lock = on;
+    }
+    fn plan_details(&self) -> Option<PlanDetails> {
+        (!self.plan_unknown).then(|| PlanDetails {
+            size: "1 TB".into(),
+            used: "240 GB".into(),
+            share: 0.24,
+            renews: "14 Mar 2027".into(),
+            billing: "Yearly".into(),
+        })
+    }
+    fn set_lock_after(&mut self, delay: &str) {
+        self.security.lock_after = delay.into();
     }
     fn sign_out_device(&mut self, id: &str) -> bool {
         let before = self.sessions.len();
