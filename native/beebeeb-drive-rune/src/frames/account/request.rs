@@ -256,6 +256,8 @@ mod tests {
             "abcdef"
         );
         assert_eq!(one_line("  two\n\n  lines\t ", 40), "two lines");
+        // Control characters that are not white space: a bell, an escape sequence's start, a C1.
+        assert_eq!(one_line("a\u{0007}b\u{001B}[31mc\u{009F}d", 40), "ab[31mcd");
         assert_eq!(one_line("\u{202E}\u{200B}\n", 40), "");
     }
 
