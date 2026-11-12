@@ -561,10 +561,10 @@ fn names_and_roles() {
     assert_eq!(
         Status::Syncing {
             files: 1,
-            left: String::new(),
-            about: String::new(),
-            fraction: 0.0,
-            speed: String::new()
+            left: None,
+            about: None,
+            fraction: None,
+            speed: None
         }
         .title("Beebeeb"),
         "Syncing 1 file"
@@ -618,11 +618,13 @@ fn the_fixture_follows_the_shells_tray_state_in_the_boards_order() {
         change(&mut inputs);
         inputs
     };
-    let cases: [(TrayInputs, &str); 12] = [
+    let cases: [(TrayInputs, &str); 14] = [
         (ready.clone(), "DW-1202"),
         (with(|i| i.engine = EngineState::Syncing), "DW-1203"),
         (with(|i| i.files_remaining = Some(3)), "DW-1203"),
         (with(|i| i.paused = true), "DW-1204"),
+        (with(|i| i.engine = EngineState::Checking), "DW-1212"),
+        (with(|i| i.engine = EngineState::NotRunning), "DW-1212"),
         (with(|i| i.conflicts = 2), "DW-1205"),
         (with(|i| i.engine = EngineState::Offline), "DW-1206"),
         (with(|i| i.engine = EngineState::Error), "DW-1207"),
@@ -671,6 +673,21 @@ fn the_fixture_follows_the_shells_tray_state_in_the_boards_order() {
         [
             "DW-1211", "DW-1204", "DW-1209", "DW-1206", "DW-1205", "DW-1210", "DW-1203"
         ]
+    );
+    // Checking comes after paused and before everything quieter, as in the b (`shell::tray`).
+    let checking = with(|i| {
+        i.engine = EngineState::Checking;
+        i.storage_full = true;
+        i.conflicts = 1;
+        i.update_available = true;
+    });
+    assert_eq!(frame_for(&checking), "DW-1212");
+    assert_eq!(
+        frame_for(&TrayInputs {
+            paused: true,
+            ..checking
+        }),
+        "DW-1204"
     );
 
     // The flyout hears a change of the shell's state once, and keeps its own state between.

@@ -412,7 +412,11 @@ pub fn run() {
         }
     });
     let flyout_main = main.clone();
-    let flyout_app = flyout_app.init(move || FlyoutState::new(actions, Some(flyout_main), flyout_hidden_at));
+    let flyout_engine = real_engine.as_ref().map(|(_, live)| live.clone());
+    let flyout_app = flyout_app.init(move || {
+        let flyout = FlyoutState::new(actions, Some(flyout_main), flyout_hidden_at);
+        crate::frames::tray::on_engine(flyout, flyout_engine)
+    });
 
     if !tooling {
         match platform.adopt_autostart() {
