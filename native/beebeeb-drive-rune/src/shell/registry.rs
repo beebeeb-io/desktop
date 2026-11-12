@@ -183,6 +183,12 @@ pub const FRAMES: &[Frame] = &[
     },
     // Frame { group: FrameGroup::Section(Section::Shared), view: crate::frames::shared::view, on_key: None, feedback: FeedbackPolicy::Denied("its lane has not opted in yet") },
     Frame {
+        group: FrameGroup::Section(Section::Photos),
+        view: crate::frames::photos::view,
+        on_key: Some(crate::frames::photos::on_key),
+        feedback: FeedbackPolicy::Denied("it shows your photos"),
+    },
+    Frame {
         group: FrameGroup::SignIn,
         view: crate::frames::signin::frame,
         on_key: Some(crate::frames::signin::on_key),

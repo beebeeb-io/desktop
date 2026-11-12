@@ -81,7 +81,7 @@ fn files_is_the_registered_frame_and_draws_dw_0401() {
 #[test]
 fn an_unbuilt_route_draws_the_placeholder_that_names_its_group() {
     let (_, _, mut rt) = fixture();
-    go(&mut rt, Section::Photos);
+    go(&mut rt, Section::Backups);
     assert!(rt.find("not-built").is_some());
     assert!(
         rt.find("file-list").is_none(),
@@ -90,7 +90,10 @@ fn an_unbuilt_route_draws_the_placeholder_that_names_its_group() {
     assert!(rt.find("detail-pane").is_none());
     let texts = texts(&rt);
     assert!(texts.iter().any(|t| t == "NOT BUILT YET"), "{texts:?}");
-    assert!(texts.iter().any(|t| t == "Board: Photos (DW-0601)"), "{texts:?}");
+    assert!(
+        texts.iter().any(|t| t == "Board: Backups on Windows (DW-0737)"),
+        "{texts:?}"
+    );
     // The window's real chrome stays: caption and sidebar.
     assert!(rt.find("caption-bar").is_some());
     assert!(rt.find("sidebar").is_some());
@@ -107,8 +110,8 @@ fn every_state_without_a_frame_has_a_placeholder_and_only_files_is_built() {
         unbuilt += usize::from(!built);
     }
     assert_eq!(
-        unbuilt, 2,
-        "two sections wait for their lanes (Shared, Trash, Sync history and Available offline are built)"
+        unbuilt, 1,
+        "one section waits for its lane: Backups (Photos, Shared, Trash, Sync history and Available offline are built; the Backups that landed is the settings pane)"
     );
     for gate in [
         GateState::SignedOut,
@@ -134,7 +137,8 @@ fn every_state_without_a_frame_has_a_placeholder_and_only_files_is_built() {
 #[test]
 fn the_placeholder_never_shows_fixture_rows() {
     let (_, _, mut rt) = fixture();
-    go(&mut rt, Section::Photos);
+    go(&mut rt, Section::Backups);
+    assert!(rt.find("not-built").is_some(), "Backups is the section without a frame");
     let texts = texts(&rt);
     for name in ["Contract draft.pdf", "Lisbon trip", "Budget 2026.xlsx"] {
         assert!(

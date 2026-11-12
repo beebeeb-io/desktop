@@ -47,9 +47,11 @@ if (empty) {
   api.text('empty-title', q('.t-title', empty));
   api.text('empty-text', q('.t-sub', empty));
   const add = q('button', empty);
-  api.box('empty-add', add);
-  api.icon('empty-add-icon', q('svg', add));
-  api.text('empty-add-label', q('span', add));
+  if (add) { // an empty state may have no button
+    api.box('empty-add', add);
+    api.icon('empty-add-icon', q('svg', add));
+    api.text('empty-add-label', q('span', add));
+  }
   api.text('empty-hint', q('.t-cap', empty));
 }
 } // groupOf === 'files'

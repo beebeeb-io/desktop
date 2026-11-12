@@ -12,6 +12,7 @@ pub mod account;
 pub mod backups;
 pub mod files;
 pub mod global;
+pub mod photos;
 pub mod settings;
 pub mod shared;
 pub mod signin;
