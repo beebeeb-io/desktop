@@ -334,97 +334,120 @@ fn an_engine_refusal_becomes_the_screens_kind_and_an_unknown_one_is_other() {
     assert_eq!(phrase_problem(gate::phrase_error("failed")), PhraseProblem::Other);
 }
 
-/// A live source selection with an engine yields the unwired state for every area the engine does
-/// not yet back: Shared, Trash, Photos, This PC, Backups. Not one fixture row is shown beside a
-/// real account's files. The snapshot path (`init_with`, `--snap`) keeps the board's fixtures.
-#[test]
-fn a_live_engine_shows_no_fixture_rows_and_the_snapshot_path_keeps_fixtures() {
+// ---------------------------------------------------------------------------
+// Per-group: a live engine shows 0 fixture rows, the snapshot path keeps them
+// ---------------------------------------------------------------------------
+
+fn engine_state() -> crate::shell::state::State {
     let started = started();
-    let engine_state =
-        crate::shell::state::init_on_engine(crate::shell::host::Shell::fixture(), started.opened.engine.clone());
+    crate::shell::state::init_on_engine(crate::shell::host::Shell::fixture(), started.opened.engine.clone())
+}
 
-    // --- Shared: 0 fixture rows on the engine path ---
-    assert!(!engine_state.frames.shared.source.wired());
-    assert_eq!(
-        engine_state.frames.shared.source.with_me().len(),
-        0,
-        "Shared with-me: 0 fixture rows on the engine"
-    );
-    assert_eq!(
-        engine_state.frames.shared.source.people_shares().len(),
-        0,
-        "Shared people: 0 fixture rows on the engine"
-    );
-    assert_eq!(
-        engine_state.frames.shared.source.invitations().len(),
-        0,
-        "Shared invitations: 0 fixture rows on the engine"
-    );
+fn snap_state() -> crate::shell::state::State {
+    crate::shell::state::init_with(crate::shell::host::Shell::fixture())
+}
 
-    // --- Trash: 0 fixture rows on the engine path ---
-    assert!(!engine_state.frames.trash.source.wired());
-    assert_eq!(
-        engine_state.frames.trash.source.items().len(),
-        0,
-        "Trash: 0 fixture rows on the engine"
-    );
-    assert_eq!(engine_state.frames.trash.source.totals().items, 0);
+#[test]
+fn shared_shows_0_fixture_rows_on_a_live_engine() {
+    let s = engine_state();
+    assert!(!s.frames.shared.source.wired());
+    assert_eq!(s.frames.shared.source.with_me().len(), 0);
+    assert_eq!(s.frames.shared.source.people_shares().len(), 0);
+    assert_eq!(s.frames.shared.source.invitations().len(), 0);
+}
 
-    // --- Photos: 0 fixture days on the engine path ---
-    assert!(!engine_state.photos.source.wired());
-    assert_eq!(
-        engine_state.photos.source.days(None).len(),
-        0,
-        "Photos: 0 fixture days on the engine"
-    );
-    assert_eq!(
-        engine_state.photos.source.devices().len(),
-        0,
-        "Photos: 0 fixture devices on the engine"
-    );
+#[test]
+fn trash_shows_0_fixture_rows_on_a_live_engine() {
+    let s = engine_state();
+    assert!(!s.frames.trash.source.wired());
+    assert_eq!(s.frames.trash.source.items().len(), 0);
+    assert_eq!(s.frames.trash.source.totals().items, 0);
+}
 
-    // --- This PC: 0 fixture changes on the engine path ---
-    assert!(!engine_state.this_pc.wired());
-    assert_eq!(
-        engine_state.this_pc.changes().len(),
-        0,
-        "This PC history: 0 fixture changes on the engine"
-    );
-    assert_eq!(
-        engine_state.this_pc.kept_count(),
-        0,
-        "This PC kept: 0 fixture items on the engine"
-    );
+#[test]
+fn photos_shows_0_fixture_days_on_a_live_engine() {
+    let s = engine_state();
+    assert!(!s.photos.source.wired());
+    assert_eq!(s.photos.source.days(None).len(), 0);
+    assert_eq!(s.photos.source.devices().len(), 0);
+}
 
-    // --- Backups: no source at all on the engine path ---
-    assert!(!engine_state.backups.has_source());
+#[test]
+fn this_pc_shows_0_fixture_changes_on_a_live_engine() {
+    let s = engine_state();
+    assert!(!s.this_pc.wired());
+    assert_eq!(s.this_pc.changes().len(), 0);
+    assert_eq!(s.this_pc.kept_count(), 0);
+}
 
-    // --- The snapshot path keeps the board's fixtures (not unwired) ---
-    let snap_state = crate::shell::state::init_with(crate::shell::host::Shell::fixture());
-    assert!(snap_state.frames.shared.source.wired(), "snap: shared is wired");
+#[test]
+fn backups_has_no_source_on_a_live_engine() {
+    let s = engine_state();
+    assert!(!s.backups.has_source());
+}
+
+#[test]
+fn settings_is_unwired_on_a_live_engine() {
+    let s = engine_state();
+    assert!(!s.settings.source.wired());
+    assert!(!s.settings.drive.wired());
+}
+
+#[test]
+fn account_has_no_source_on_a_live_engine() {
+    let s = engine_state();
+    assert!(s.account.source.is_none());
+}
+
+#[test]
+fn pc_status_is_empty_on_a_live_engine() {
+    let s = engine_state();
+    assert!(s.frames.pc.sync_words().is_empty());
+    assert!(s.frames.pc.summary().is_empty());
+}
+
+#[test]
+fn sidebar_badges_are_0_on_a_live_engine() {
+    let s = engine_state();
+    use crate::ui::sidebar::{SidebarSection, badge_for};
     assert!(
-        snap_state.frames.shared.source.with_me().len() > 0,
-        "snap: shared has fixture rows"
+        badge_for(&s, SidebarSection::Shared).is_none(),
+        "shared badge on engine"
     );
-    assert!(snap_state.frames.trash.source.wired(), "snap: trash is wired");
-    assert!(
-        snap_state.frames.trash.source.items().len() > 0,
-        "snap: trash has fixture rows"
-    );
-    assert!(snap_state.photos.source.wired(), "snap: photos is wired");
-    assert!(
-        snap_state.photos.source.days(None).len() > 0,
-        "snap: photos has fixture days"
-    );
-    assert!(snap_state.this_pc.wired(), "snap: this_pc is wired");
-    assert!(
-        snap_state.this_pc.changes().len() > 0,
-        "snap: this_pc has fixture changes"
-    );
-    assert!(
-        snap_state.this_pc.kept_count() > 0,
-        "snap: this_pc has fixture kept items"
-    );
+    assert!(badge_for(&s, SidebarSection::Trash).is_none(), "trash badge on engine");
+    assert_eq!(s.this_pc.kept_count(), 0, "available offline count on engine");
+}
+
+#[test]
+fn storage_split_is_none_on_a_live_engine() {
+    let s = engine_state();
+    assert!(s.storage_split.is_none(), "no board-sample split beside a real account");
+}
+
+/// The snapshot path (`init_with`, `--snap`) keeps the board's fixtures for every group.
+#[test]
+fn the_snapshot_path_keeps_every_groups_fixtures() {
+    let s = snap_state();
+    assert!(s.frames.shared.source.wired());
+    assert!(s.frames.shared.source.with_me().len() > 0);
+    assert!(s.frames.trash.source.wired());
+    assert!(s.frames.trash.source.items().len() > 0);
+    assert!(s.photos.source.wired());
+    assert!(s.photos.source.days(None).len() > 0);
+    assert!(s.this_pc.wired());
+    assert!(s.this_pc.changes().len() > 0);
+    assert!(s.this_pc.kept_count() > 0);
+    assert!(s.settings.source.wired());
+    assert!(s.settings.drive.wired());
+    assert!(s.account.source.is_some());
+    assert!(s.backups.has_source());
+    assert!(!s.frames.pc.sync_words().is_empty());
+    assert!(!s.frames.pc.summary().is_empty());
+    assert!(s.storage_split.is_some(), "snap: the board's split is present");
+    use crate::ui::sidebar::{SidebarSection, badge_for};
+    assert!(badge_for(&s, SidebarSection::Shared).is_some(), "snap: shared badge");
+    assert!(badge_for(&s, SidebarSection::Trash).is_some(), "snap: trash badge");
+    assert!(s.this_pc.kept_count() > 0, "snap: available offline count");
 }
 
 /// Where the local state lives is where the 0.8.x app kept it: the per-user LOCAL app data on Windows.

@@ -650,14 +650,3 @@ impl PhotosSource for Unwired {
     fn trash(&mut self, _ids: &[PhotoId]) {}
     fn restore(&mut self, _ids: &[PhotoId]) {}
 }
-
-/// The source Photos starts on. A development build (and every test and headless render)
-/// starts on the board's sample content; a build that ships starts on `Unwired`, so sample
-/// photos are never shown as a person's own. The engine lane replaces this.
-pub fn first(dev_build: bool) -> Box<dyn PhotosSource> {
-    if dev_build {
-        Box::new(FixturePhotos::new())
-    } else {
-        Box::new(Unwired)
-    }
-}
