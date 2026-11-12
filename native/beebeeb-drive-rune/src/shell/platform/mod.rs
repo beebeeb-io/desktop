@@ -123,6 +123,15 @@ pub trait Platform: Send + Sync {
     ) -> Result<Box<dyn ControlServer>, ServeError>;
     /// Hands one request to the running instance and waits at most `timeout` for its answer.
     fn send_control(&self, identity: AppIdentity, request: &Request, timeout: Duration) -> Delivery;
+    /// Sets or clears the window's capture-exclusion. When set, the window region appears black
+    /// (or absent) in screenshots, screen recordings and screen-sharing; clearing restores it.
+    /// The default is a no-op (Linux, macOS without the NSWindow bridge). Failure is logged
+    /// without content; the content stays drawn.
+    /// `window` is `None` when the handle does not exist yet; the Shell retries on the next
+    /// poll. An implementation that does not need the handle (the fake, the no-ops) ignores it.
+    fn set_capture_exclusion(&self, _window: Option<&rune::WindowHandle>, _exclude: bool) -> Result<(), PlatformError> {
+        Ok(())
+    }
 }
 
 /// The platform this build runs on.
