@@ -9,12 +9,20 @@ use super::identity::AppIdentity;
 /// What the sync engine last said, as far as the b needs it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EngineState {
+    /// Its last check reached Beebeeb and left nothing to do: the one state that is "up to date".
+    /// The default is the fixture's; the running app always says which state it is in.
     #[default]
     Idle,
     Syncing,
     Offline,
     /// Stopped: an error the engine could not get past (DW-1207, "Sync stopped").
     Error,
+    /// It runs, and since it started or was resumed it has not finished a check, or what it said
+    /// last is not known (DW-1212: "never a guess such as Up to date").
+    Checking,
+    /// It does not run on this PC (before its first start, after a start that failed, or without
+    /// the account's keys): nothing is checked, so nothing is up to date.
+    NotRunning,
 }
 
 /// What the b reads. The session lane and the engine fill this; see `ShellActions::tray_inputs`.
@@ -155,10 +163,13 @@ pub fn tray_model(inputs: &TrayInputs) -> TrayModel {
 /// full, offline, stopped; then needs a decision and update available over any of the quieter
 /// states; then storage almost full, syncing, up to date." The states of that list this model
 /// has inputs for are in that order below; a plain signed-out PC (no account at all) comes
-/// first, since none of the others can hold without an account.
+/// first, since none of the others can hold without an account. Checking, and sync not running,
+/// come after paused, as in the flyout (`frames::tray::live`): the pause switch is known at once,
+/// and a paused engine checks nothing, so "checking" would hold for as long as it is paused.
 ///
-/// The words after the app's name are the board's names for the states (DW-1230's six, and
-/// the flyout titles "Signed out" DW-1219, "Your storage is full" DW-1209).
+/// The words after the app's name are the board's names for the states (DW-1230's six, DW-1201's
+/// "checking", and the flyout titles "Signed out" DW-1219, "Your storage is full" DW-1209), and
+/// "not syncing" for the flyout's "Sync isn't running", which the board does not draw.
 pub fn tray_model_for(inputs: &TrayInputs, identity: AppIdentity) -> TrayModel {
     use TrayIconState as I;
     let (icon, label, state) = if inputs.session_expired {
@@ -173,6 +184,12 @@ pub fn tray_model_for(inputs: &TrayInputs, identity: AppIdentity) -> TrayModel {
         (I::UpToDate, "Locked", "locked")
     } else if inputs.paused {
         (I::Paused, "Paused", "paused")
+    } else if inputs.engine == EngineState::NotRunning {
+        // Nothing runs, so nothing was checked: the plain b, never "up to date".
+        (I::UpToDate, "Not syncing", "not syncing")
+    } else if inputs.engine == EngineState::Checking {
+        // DW-1212: "never a guess such as Up to date". The plain b, as for the quiet states.
+        (I::UpToDate, "Checking", "checking")
     } else if inputs.storage_full {
         (I::Stopped, "Storage full", "storage full")
     } else if inputs.engine == EngineState::Offline {
@@ -186,6 +203,7 @@ pub fn tray_model_for(inputs: &TrayInputs, identity: AppIdentity) -> TrayModel {
     } else if inputs.engine == EngineState::Syncing || inputs.files_remaining.unwrap_or(0) > 0 {
         (I::Syncing, "Syncing", "syncing")
     } else {
+        // Only `Idle` is left: the engine's last check reached Beebeeb and left nothing to do.
         (I::UpToDate, "Up to date", "up to date")
     };
     let name = identity.product_name();
@@ -255,7 +273,7 @@ mod tests {
             change(&mut inputs);
             inputs
         };
-        let cases: [(TrayInputs, TrayIconState, &str, &str); 11] = [
+        let cases: [(TrayInputs, TrayIconState, &str, &str); 13] = [
             // No account on this PC: the plain b, no badge (DW-1230).
             (
                 TrayInputs::default(),
@@ -285,6 +303,19 @@ mod tests {
                 TrayIconState::Paused,
                 "Paused",
                 "Beebeeb: paused",
+            ),
+            // Sync does not run, and the engine has not finished a check: never "up to date".
+            (
+                with(|i| i.engine = EngineState::NotRunning),
+                TrayIconState::UpToDate,
+                "Not syncing",
+                "Beebeeb: not syncing",
+            ),
+            (
+                with(|i| i.engine = EngineState::Checking),
+                TrayIconState::UpToDate,
+                "Checking",
+                "Beebeeb: checking",
             ),
             (
                 with(|i| i.storage_full = true),
@@ -366,7 +397,29 @@ mod tests {
         assert_eq!(label(&inputs), "Locked");
         inputs.locked = false;
         assert_eq!(label(&inputs), "Paused");
+        // Paused over checking and over sync not running: a paused engine checks nothing.
+        for engine in [EngineState::Checking, EngineState::NotRunning] {
+            assert_eq!(
+                label(&TrayInputs {
+                    engine,
+                    ..inputs.clone()
+                }),
+                "Paused"
+            );
+        }
         inputs.paused = false;
+        // Checking, and sync not running, over everything quieter (DW-1201: checking before
+        // storage full); a decision or numbers left are no finished check.
+        let checking = TrayInputs {
+            engine: EngineState::Checking,
+            ..inputs.clone()
+        };
+        assert_eq!(label(&checking), "Checking");
+        let not_running = TrayInputs {
+            engine: EngineState::NotRunning,
+            ..inputs.clone()
+        };
+        assert_eq!(label(&not_running), "Not syncing");
         // Storage full before offline.
         assert_eq!(label(&inputs), "Storage full");
         inputs.storage_full = false;

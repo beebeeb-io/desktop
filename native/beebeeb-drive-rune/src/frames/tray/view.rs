@@ -87,7 +87,7 @@ pub fn flyout<S: 'static>(ui: &Ui, name: &str, host: Host<S>, dark: bool) -> El 
         .on_key(super::on_key(host))
         .child(status_block(snapshot, name, host, &t))
         .child(changes_label(snapshot, &t))
-        .child(changes_list(ui, host, &t))
+        .child(changes_list(ui, name, host, &t))
         .child(footer(snapshot, host, &t))
 }
 
@@ -100,14 +100,14 @@ fn status_icon(status: &Status) -> &'static Icon {
         Status::Checking | Status::UpToDate { .. } => &icons::CHECK,
         Status::Syncing { .. } => &icons::SYNC,
         Status::Paused { .. } | Status::WaitingMetered => &icons::PAUSE,
-        Status::NeedsDecision { .. } | Status::Stopped { .. } => &icons::ALERT,
+        Status::NeedsDecision { .. } | Status::Stopped { .. } | Status::KeysUnreadable => &icons::ALERT,
         Status::Offline => &icons::CLOUD_OFF,
         Status::StorageAlmostFull { .. } | Status::StorageFull { .. } => &icons::STORAGE,
         Status::UpdateAvailable { .. } | Status::UpdateRequired => &icons::DOWNLOAD,
-        Status::Locked => &icons::LOCK,
-        Status::NoPlan { .. } => &icons::INFO,
+        Status::Locked | Status::LockedSyncOff => &icons::LOCK,
+        Status::NoPlan { .. } | Status::NotSyncing => &icons::INFO,
         Status::AddingToExplorer | Status::ExplorerFailed { .. } => &icons::EXPLORER,
-        Status::SignedOut => &icons::KEY,
+        Status::SignedOut | Status::NeedsRecoveryPhrase => &icons::KEY,
     }
 }
 
@@ -197,7 +197,7 @@ fn status_block<S: 'static>(snapshot: &Snapshot, name: &str, host: Host<S>, t: &
         }
     }
 
-    let button = status.action().map(|(action, primary)| {
+    let button = snapshot.button.map(|(action, primary)| {
         (
             small_button(0, action.label(), primary, t).on_press_tx(host.act(Ui::press_action)),
             // "A button label over 12 characters moves under the text instead of beside it" (DW-1221).
@@ -238,29 +238,28 @@ fn status_block<S: 'static>(snapshot: &Snapshot, name: &str, host: Host<S>, t: &
         block = block.child(under);
     }
     match status {
-        Status::Syncing { fraction, speed, .. } => {
-            block = block.child(
-                row()
-                    .key("st-progress")
-                    .w_full()
-                    .h(17.0)
-                    .gap(8.0)
-                    .center_y()
-                    .child(
-                        bar("st-bar", 0.0, *fraction, t.accent, t)
-                            .label("Synced so far")
-                            .grow(1.0),
-                    )
-                    .child(
-                        row()
-                            .key("st-speed-row")
-                            .label(format!("Upload speed {speed}"))
-                            .gap(2.0)
-                            .center_y()
-                            .child(kit::glyph("st-speed-icon", &icons::ARROW_UP, 11.0, t.text_tertiary))
-                            .child(kit::label("st-speed", speed.clone(), type_fly::SPEED, t.text_tertiary)),
-                    ),
-            );
+        // The bar and the speed, each only when it is known: never a guessed one.
+        Status::Syncing { fraction, speed, .. } if fraction.is_some() || speed.is_some() => {
+            let mut progress = row().key("st-progress").w_full().h(17.0).gap(8.0).center_y();
+            if let Some(fraction) = fraction {
+                progress = progress.child(
+                    bar("st-bar", 0.0, *fraction, t.accent, t)
+                        .label("Synced so far")
+                        .grow(1.0),
+                );
+            }
+            if let Some(speed) = speed {
+                progress = progress.child(
+                    row()
+                        .key("st-speed-row")
+                        .label(format!("Upload speed {speed}"))
+                        .gap(2.0)
+                        .center_y()
+                        .child(kit::glyph("st-speed-icon", &icons::ARROW_UP, 11.0, t.text_tertiary))
+                        .child(kit::label("st-speed", speed.clone(), type_fly::SPEED, t.text_tertiary)),
+                );
+            }
+            block = block.child(progress);
         }
         // "An indeterminate bar, because Windows gives no progress" (DW-1215).
         Status::AddingToExplorer => {
@@ -316,6 +315,7 @@ fn tile_icon(tile: Tile) -> Option<&'static Icon> {
         Tile::Archive => &icons::FILE_ARCHIVE,
         Tile::Folder => &icons::FOLDER,
         Tile::Trashed => &icons::FILE_TRASHED,
+        Tile::Image => &icons::FILE_IMAGE,
         Tile::Photo(_) => return None,
     })
 }
@@ -396,13 +396,14 @@ fn change_row<S: 'static>(i: usize, change: &Change, selected: bool, host: Host<
         What::Moving { text, fraction, upload } => {
             // Amber for an upload (the encryption step), grey for a download (DW-1201).
             let color = if *upload { t.accent } else { t.text_tertiary };
-            words = words
-                .child(
-                    kit::label(format!("{key}-sub"), text.clone(), type_fly::WHAT, t.text_tertiary)
-                        .w_full()
-                        .truncate(),
-                )
-                .child(bar(&format!("{key}-bar"), 0.0, *fraction, color, t).w_full());
+            words = words.child(
+                kit::label(format!("{key}-sub"), text.clone(), type_fly::WHAT, t.text_tertiary)
+                    .w_full()
+                    .truncate(),
+            );
+            if let Some(fraction) = fraction {
+                words = words.child(bar(&format!("{key}-bar"), 0.0, *fraction, color, t).w_full());
+            }
             text.clone()
         }
         What::Failed { text } => {
@@ -481,17 +482,10 @@ fn empty(icon: &'static Icon, title: &str, sentence: &str, t: &Theme) -> El {
 /// The scroll thumb's length and the room it keeps from the list's ends (`.mk-scroll`).
 const THUMB: (f32, f32) = (34.0, 4.0);
 
-fn changes_list<S: 'static>(ui: &Ui, host: Host<S>, t: &Theme) -> El {
+fn changes_list<S: 'static>(ui: &Ui, name: &str, host: Host<S>, t: &Theme) -> El {
     let list = el().key("list").w_full().grow(1.0).min_h(0.0);
     let (rows, complete) = match &ui.snapshot().changes {
-        Changes::Hidden => {
-            return list.child(empty(
-                &icons::LOCK,
-                "Recent changes are hidden",
-                "Unlock Beebeeb to see file names. Nothing shows while it's locked.",
-                t,
-            ));
-        }
+        Changes::Hidden(why) => return list.child(empty(&icons::LOCK, why.title(), &why.sentence(name), t)),
         Changes::Empty { text } => return list.child(empty(&icons::CLOCK, "No changes yet", text, t)),
         Changes::Rows { rows, complete } => (rows, *complete),
     };
@@ -540,7 +534,7 @@ fn changes_list<S: 'static>(ui: &Ui, host: Host<S>, t: &Theme) -> El {
     content = content.child(
         end.child(
             small_button(
-                usize::from(ui.snapshot().status.action().is_some()),
+                usize::from(ui.snapshot().button.is_some()),
                 "View full history",
                 false,
                 t,

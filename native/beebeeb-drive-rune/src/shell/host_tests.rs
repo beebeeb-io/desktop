@@ -597,6 +597,44 @@ fn the_tray_starts_only_when_wired_and_then_follows_the_model() {
     assert_eq!(shell.tray_model().icon, TrayIconState::NeedsDecision);
 }
 
+/// Review of #334, P2-2: a hidden flyout is not read. Each read the shell asks of the flyout is
+/// one read of the engine and of this PC's state database when Rune runs it; over 20 changes of
+/// the b's inputs while the flyout is hidden the shell asks for none, and the click that opens it
+/// asks for one, before it opens. (A flyout that shows is not reached here: only Rune's window
+/// host says that a window shows.)
+#[test]
+fn a_hidden_flyout_is_not_read_and_the_click_that_opens_it_reads_it_once() {
+    let engine = Arc::new(FixtureEngine::ready());
+    let platform = Arc::new(FakePlatform::default());
+    let flyout = rune::App::new(rune::AppSpec::new(
+        "flyout",
+        WindowKind::Flyout.default_size(),
+        flyout_window::fixture_state,
+        flyout_window::view,
+    ))
+    .handle();
+    let wiring = Wiring {
+        flyout: Some(flyout.clone()),
+        ..Wiring::default()
+    };
+    let actions = Arc::new(HostActions::new(engine.clone(), platform.clone()));
+    let mut shell = Shell::new(actions, platform, wiring);
+    assert!(!flyout.is_visible(), "never shown");
+    for files in 1..=20 {
+        engine.set_inputs(TrayInputs {
+            signed_in: true,
+            explorer_ready: true,
+            files_remaining: Some(files),
+            ..TrayInputs::default()
+        });
+        shell.refresh();
+    }
+    assert_eq!(shell.tray_model().label, "Syncing", "the b followed the changes");
+    assert_eq!(shell.flyout_reads, 0, "20 changes while the flyout is hidden: no read");
+    shell.toggle_flyout(None);
+    assert_eq!(shell.flyout_reads, 1, "the click that opens it reads it, once");
+}
+
 /// The flyout draws the tray lane's frames (`registry::FLYOUT`), not the placeholder, in the
 /// state the b shows. Its own tests are `frames/tray/tests.rs`.
 #[test]

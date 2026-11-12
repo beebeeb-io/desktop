@@ -133,6 +133,10 @@ pub static FILE_ARCHIVE: Icon = icon24!(
 /// A file moved to Trash (`row-6-icon of DW-1202-dark`).
 pub use crate::theme::icons::TRASH as FILE_TRASHED;
 
+/// A photo or another image of the account, until the flyout has its thumbnail (the running
+/// app's rows, `source::Tile::Image`): the design system's image glyph. No board frame draws it.
+pub use crate::theme::icons::PHOTOS as FILE_IMAGE;
+
 /// A folder (`row-7-icon of DW-1202-dark`).
 pub use crate::theme::icons::FILES as FOLDER;
 

@@ -5,8 +5,8 @@
 //! `LiveEngine` wraps that handle and implements `EngineActions`. `EngineSignInSource` implements
 //! `SignInSource` by spawning worker threads for each blocking engine call and delivering results through a
 //! channel. `EngineDriveSource` implements `DriveSource` on the handle's local state, with the engine's own
-//! view models. Every type is generic over the credential stores, so a test runs the same code on stores in
-//! memory; the app uses the platform's.
+//! view models. `EngineTraySource` ([`tray`]) is the flyout's. Every type is generic over the credential
+//! stores, so a test runs the same code on stores in memory; the app uses the platform's.
 //!
 //! No per-app name is spelled here: the sync folder, the settings file and the state folder come from the
 //! identity the handle was opened with.
@@ -17,7 +17,7 @@
 //! capture. The engine events that cross to the UI use the redacting `Debug`.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 
 use zeroize::Zeroizing;
@@ -25,8 +25,9 @@ use zeroize::Zeroizing;
 use beebeeb_engine::app::{CredentialStores, Engine, SyncStart};
 use beebeeb_engine::drive_v2::DriveError;
 use beebeeb_engine::drive_v2::model::{self, Sort as EngineSort};
+use beebeeb_engine::engine_status::EngineStatusView;
 use beebeeb_engine::file_ops;
-use beebeeb_engine::host::HostMessage;
+use beebeeb_engine::host::{EngineEvent, HostMessage, PauseState};
 use beebeeb_engine::identity::EngineIdentity;
 use beebeeb_engine::signin::gate::{
     GateState as EngineGate, NextAfterSignIn as EngineNext, SignInProblem as EngineProblem,
@@ -49,6 +50,9 @@ pub mod backups;
 pub mod open;
 #[cfg(test)]
 mod tests;
+pub mod tray;
+
+pub use tray::EngineTraySource;
 
 // ---------------------------------------------------------------------------
 // Gate / type mapping (one place, never a name or a path)
@@ -231,6 +235,9 @@ pub struct LiveEngine<C: CredentialStores> {
     /// What the engine reported since the last look. Drained on every refresh, so the queue never grows; the
     /// shell reads the state it needs from the handle itself.
     messages: Mutex<mpsc::Receiver<HostMessage>>,
+    /// The engine's last report of itself, folded from the messages by [`LiveEngine::drain`] ([`fold`]): one
+    /// value, never a list. The b and the flyout read it; whoever drains first moves it for both.
+    status: Mutex<EngineStatusView>,
 }
 
 impl<C: CredentialStores> LiveEngine<C> {
@@ -239,13 +246,26 @@ impl<C: CredentialStores> LiveEngine<C> {
             engine: opened.engine.clone(),
             identity: opened.identity,
             messages: Mutex::new(messages),
+            status: Mutex::new(EngineStatusView::default()),
         }
     }
 
-    /// Takes everything the engine queued. Returns how many messages there were (a test reads it).
+    /// Takes everything the engine queued, folds the engine's reports of itself into the status ([`fold`]) and
+    /// drops the rest. Returns how many messages there were (a test reads it).
     pub fn drain(&self) -> usize {
-        let messages = self.messages.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        messages.try_iter().count()
+        let messages = self.messages.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut status = self.status.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut count = 0;
+        for message in messages.try_iter() {
+            fold(&mut status, &message);
+            count += 1;
+        }
+        count
+    }
+
+    /// The engine's last report of itself, as the last drain left it. Empty (`state` "") before the first.
+    pub fn status_view(&self) -> EngineStatusView {
+        self.status.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     /// Where this app syncs: the folder the settings name, else the identity's own suggestion (never another
@@ -256,6 +276,28 @@ impl<C: CredentialStores> LiveEngine<C> {
         Ok(config
             .sync_root
             .unwrap_or_else(|| beebeeb_engine::config::default_sync_root_suggestion(self.identity)))
+    }
+}
+
+/// What the tray reads of one message. The engine's report of itself (`engine-status`) goes into `view` as the
+/// engine's own listener folds it (`EngineStatusView::apply`), and so does the pause switch's `paused`. The resume
+/// switch's `idle` says nothing about a check (it is not a report of one), so it empties the state: not known
+/// until the next report, never "up to date". Every other message is dropped. Nothing of a message is logged.
+fn fold(view: &mut EngineStatusView, message: &HostMessage) {
+    match message {
+        HostMessage::Event(EngineEvent::Status(status)) => {
+            if let Ok(payload) = serde_json::to_value(status) {
+                view.apply(&payload);
+            }
+        }
+        HostMessage::Event(EngineEvent::PauseChanged(change)) => {
+            let state = match change.state {
+                PauseState::Paused => "paused",
+                PauseState::Idle => "",
+            };
+            view.apply(&serde_json::json!({ "state": state }));
+        }
+        _ => {}
     }
 }
 
@@ -285,21 +327,28 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
         Session::of(gate, account)
     }
 
+    /// The b's inputs: the session from the handle, the engine's state from its last report while it runs
+    /// ([`fold`]; the flyout reads the same report). Not running is the b's "not syncing"; running, before a
+    /// finished check, its "checking": "up to date" only after the engine reported a finished check.
     fn tray_inputs(&self) -> TrayInputs {
+        self.drain();
         let gate = self.engine.gate();
-        let signed_in = gate != EngineGate::SignedOut;
+        let session_expired = gate != EngineGate::SignedOut && tray::session_ended(&self.engine);
         let paused = self.engine.is_paused();
-        let syncing = self.engine.is_syncing();
+        let running = self.engine.is_syncing();
+        let view = self.status_view();
         TrayInputs {
-            signed_in,
+            signed_in: gate != EngineGate::SignedOut && !session_expired,
+            session_expired,
             locked: gate == EngineGate::Locked,
             paused,
             explorer_ready: false, // Cloud Files registration not wired
-            engine: if syncing && !paused {
-                EngineState::Syncing
+            engine: if running {
+                tray::engine_state(&view)
             } else {
-                EngineState::Idle
+                EngineState::NotRunning
             },
+            files_remaining: view.files_remaining.filter(|_| running && !paused && view.is_syncing()),
             ..TrayInputs::default()
         }
     }
