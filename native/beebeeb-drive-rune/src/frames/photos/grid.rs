@@ -267,7 +267,14 @@ fn tile(ui: &Ui, day: usize, index: usize, photo: Photo, t: &Theme) -> El {
         .size(side, side)
         .radius(3.0)
         .focusable(true)
-        .on_press(move |s: &mut State| s.photos.press_tile(day, index))
+        // Ctrl+click checks a photo and starts selecting (DW-0601, DW-0602).
+        .on_press_tx(move |s: &mut State, tx: &mut rune::Tx| {
+            if tx.mods().ctrl {
+                s.photos.check_tile(day, index);
+            } else {
+                s.photos.press_tile(day, index);
+            }
+        })
         .on_double_press(move |s: &mut State| s.photos.open_tile(day, index));
     if ui.selecting {
         tile = tile.checked(checked);

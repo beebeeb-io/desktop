@@ -665,3 +665,28 @@ fn twenty_thousand_photos_build_only_the_rows_in_view() {
     println!("photos: 20,000 photos, {tiles} tiles built, {per_frame:.2} ms per rebuilt frame (debug build)");
     assert!(per_frame < 50.0, "{per_frame} ms per frame");
 }
+
+#[test]
+fn ctrl_click_checks_a_photo_and_starts_selecting() {
+    let mut rt = runtime("DW-0601");
+    rt.settle_all();
+    assert!(!rt.state.photos.selecting);
+    rt.physical_input(rune::PhysicalInput::Modifiers(Mods {
+        ctrl: true,
+        ..Mods::default()
+    }));
+    click(&mut rt, "ph-tile-0-4");
+    assert!(rt.state.photos.selecting, "Ctrl+click starts selecting");
+    assert_eq!(rt.state.photos.selected.len(), 1);
+    assert!(rt.state.photos.viewer.is_none());
+    click(&mut rt, "ph-tile-0-2");
+    assert_eq!(rt.state.photos.selected.len(), 2);
+    click(&mut rt, "ph-tile-0-4");
+    assert_eq!(rt.state.photos.selected.len(), 1, "a second Ctrl+click unchecks");
+    // Without Ctrl a click on the grid (not selecting) checks nothing.
+    rt.physical_input(rune::PhysicalInput::Modifiers(Mods::default()));
+    press(&mut rt, Key::Escape);
+    assert!(!rt.state.photos.selecting);
+    click(&mut rt, "ph-tile-0-2");
+    assert!(!rt.state.photos.selecting && rt.state.photos.selected.is_empty());
+}

@@ -311,6 +311,14 @@ impl Ui {
         }
     }
 
+    /// Ctrl+click on a tile: checks or unchecks it; the first one starts selecting.
+    pub fn check_tile(&mut self, day: usize, index: usize) {
+        self.cursor = Some((day, index));
+        if let Some(photo) = self.photo_at(day, index) {
+            self.toggle(photo);
+        }
+    }
+
     /// A double press, Enter or Space on a tile: opens it. Not while selecting: there a press
     /// checks, and the second press of a double press has already unchecked.
     pub fn open_tile(&mut self, day: usize, index: usize) {

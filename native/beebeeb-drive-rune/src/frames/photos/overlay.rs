@@ -170,7 +170,9 @@ pub fn toast_layer(toast: &Toast, bottom: f32, over_photos: bool, t: &Theme) -> 
         .center_y()
         .radius(19.0)
         .fill(glass)
+        // The board's half-point border is part of the pill's width.
         .border(kit::HAIR, t.separator)
+        .border_layout()
         .box_shadow(kit::drop(6.0, 22.0, Color::BLACK.alpha(0.1)))
         // `.glass`: the half-point highlight along the top, inside.
         .box_shadow(rune::Shadow {
@@ -182,7 +184,9 @@ pub fn toast_layer(toast: &Toast, bottom: f32, over_photos: bool, t: &Theme) -> 
             inset: true,
         })
         .child(kit::glyph("ph-toast-icon", ic, 15.0, t.text_secondary))
-        .child(kit::label("ph-toast-text", words, style::TOAST, t.text));
+        // As wide as the words run: a text's own box rounds up to the device pixel, and two of
+        // them moved "Undo" half a pixel off the board's.
+        .child(kit::label("ph-toast-text", words, style::TOAST, t.text).w(chrome::advance(words, style::TOAST)));
     // Rune's backdrop blur also takes in what lies beside the element (on the stage: the strip
     // just under the message, which lit its lower edge), where the board's takes only what is
     // behind it. Over the dark stage there is nothing behind to blur; over the grid there is.
@@ -191,14 +195,16 @@ pub fn toast_layer(toast: &Toast, bottom: f32, over_photos: bool, t: &Theme) -> 
     }
     if matches!(toast, Toast::Trashed(_)) {
         pill = pill.child(
-            el().key("ph-toast-action")
+            row()
+                .key("ph-toast-action")
                 .role("button")
                 .label("Undo")
                 .shortcut_hint("Ctrl+Z")
                 // `ml-2` and the space before it in the board's sentence.
                 .ml(3.37)
                 .h(15.5)
-                .center()
+                .w(chrome::advance("Undo Ctrl+Z", style::TOAST_ACTION))
+                .center_y()
                 .focusable(true)
                 .on_press(|s: &mut State| {
                     s.photos.undo();
@@ -239,7 +245,9 @@ fn switch(key: &str, name: &str, on: bool, t: &Theme) -> El {
         .size(36.0, 20.0)
         .radius(10.0)
         .fill(if on { t.text } else { t.paper3 })
-        .border(1.0, if on { t.text } else { t.separator_strong })
+        // On, the border is the fill's own ink: drawn as one shape, or the round ends are covered
+        // twice and come out darker than the board's.
+        .border(if on { 0.0 } else { 1.0 }, t.separator_strong)
         .focusable(true)
         .child(
             el().key(format!("{key}-knob"))
@@ -595,6 +603,9 @@ fn details(ui: &Ui, t: &Theme) -> (f32, Vec<El>, Foot) {
 }
 
 /// A dialog (`.wn-dlg`), centred in the window under the caption.
+/// How far a dialog's foot ends above the card's edge (see `dialog`).
+const FOOT_INSET: f32 = 0.125;
+
 /// A dialog's foot, left to right: its buttons, each with its width on the board, and `None`
 /// for the space that pushes what follows to the right.
 type Foot = Vec<(El, Option<f32>)>;
@@ -662,13 +673,16 @@ pub fn dialog(ui: &Ui, dialog: &Dialog, scale: f32, t: &Theme) -> El {
         .fill(t.card)
         .box_shadow(kit::drop(24.0, 60.0, Color::BLACK.alpha(0.28)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))
-        // The shadow and the ring are outside the card; the clip that rounds the foot's corners
-        // (`.wn-dlg { overflow: hidden }`) would cut them, so it sits one level in.
+        // `.wn-dlg { overflow: hidden }` rounds the foot's corners. On the board the dialog's last
+        // row of pixels is half covered and the clip halves the foot there once more: a quarter.
+        // Rune's rounded clip multiplies the rectangle's edge ramp by the rounded one's
+        // (`clip.wgsl` `clip_alpha`), an eighth; so the foot rounds its own corners and ends a
+        // quarter of a device pixel (at 200 %) above the card's edge.
         .child(
             col()
                 .key("ph-dlg-clip")
                 .w_full()
-                .clip_rounded(8.0)
+                .pb(FOOT_INSET)
                 .child(
                     el().key("ph-dlg-head").w_full().px(24.0).pt(20.0).pb(4.0).child(
                         kit::label("ph-dlg-title", title, style::TITLE, t.text)
@@ -691,8 +705,10 @@ pub fn dialog(ui: &Ui, dialog: &Dialog, scale: f32, t: &Theme) -> El {
                         .key("ph-dlg-foot")
                         .w_full()
                         .px(24.0)
-                        .py(16.0)
+                        .pt(16.0)
+                        .pb(16.0 - FOOT_INSET)
                         .center_y()
+                        .corners([0.0, 0.0, 8.0, 8.0])
                         .fill(t.surface)
                         .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
                         .border_layout()
