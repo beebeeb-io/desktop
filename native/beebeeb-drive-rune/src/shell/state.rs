@@ -144,6 +144,7 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     s.identity = AppIdentity::CURRENT;
     s.actions =
         crate::frames::files::Actions::new(Box::new(crate::engine_host::EngineFilesSource::new(engine.clone())));
+    s.settings.source = Box::new(crate::engine_host::settings::EngineSettingsSource::new(engine.clone()));
     s.signin = Some(crate::frames::signin::Ui::new(Box::new(
         crate::engine_host::EngineSignInSource::new(engine),
     )));
@@ -151,7 +152,6 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     // Every area not yet backed by the engine: the shell's "not built yet" frame, never sample
     // data beside a real account. This depends ONLY on "is this the live engine path", never on
     // the identity or a dev flag.
-    s.settings.source = Box::new(crate::frames::settings::source::Unwired);
     s.settings.drive = Box::new(crate::frames::settings::drive::UnwiredDrive::new());
     s.account.source = None;
     s.storage_split = None;

@@ -384,6 +384,7 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     let mut changed = crate::frames::viewers::poll(s, tx);
     // The engine's answers that arrive between presses (a sign-in that took a second, the other device).
     changed |= crate::frames::signin::poll(s, tx);
+    changed |= crate::frames::settings::poll(s, tx);
     // What the sign-in screens asked the shell for.
     changed |= drain_signin_intents(s);
     // The session and the tray: the engine may have changed since the last frame.

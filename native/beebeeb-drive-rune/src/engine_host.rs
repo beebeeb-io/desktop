@@ -50,6 +50,7 @@ pub mod backups;
 #[cfg(test)]
 mod binding_tests;
 pub mod open;
+pub mod settings;
 #[cfg(test)]
 mod tests;
 pub mod tray;

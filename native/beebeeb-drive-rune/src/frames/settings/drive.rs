@@ -175,9 +175,10 @@ pub struct SyncPane {
 
 /// What Drive's settings panes read and change.
 pub trait DriveSettings {
-    /// `false`: nothing answers for these panes yet; they draw the shell's "not built yet"
-    /// frame instead of any value.
-    fn wired(&self) -> bool {
+    /// `false` for a pane nothing answers for yet: it draws the shell's "not built yet" frame
+    /// instead of any value.
+    fn wired(&self, pane: super::Pane) -> bool {
+        let _ = pane;
         true
     }
     /// The account's use and what this PC keeps. Engine: account usage by kind, the Trash
@@ -416,7 +417,7 @@ impl UnwiredDrive {
 }
 
 impl DriveSettings for UnwiredDrive {
-    fn wired(&self) -> bool {
+    fn wired(&self, _pane: super::Pane) -> bool {
         false
     }
     fn storage(&self) -> Storage {
