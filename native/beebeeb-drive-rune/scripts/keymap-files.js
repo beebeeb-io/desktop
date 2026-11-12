@@ -39,8 +39,7 @@ if (crumbs) {
 }
 
 // ---- An empty folder (`.kit-empty`) ----
-// Not while searching: "No results" (DW-0803) is keyed by keymap-search.js, under the names its golden has.
-const empty = !q('.mk-search.is-focus') && q('.mk-body .kit-empty');
+const empty = q('.mk-body .kit-empty');
 if (empty) {
   api.box('empty', empty);
   api.box('empty-tile', q('.kit-tile', empty));

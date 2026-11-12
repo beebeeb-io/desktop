@@ -699,16 +699,20 @@ fn nothing(s: &State, narrow: Narrow, loading: Option<Loading>, t: &Theme) -> El
         .w_full()
         .child(narrow_row(narrow, false, t))
         .children(loading.map(|l| loading_note(l, t)))
+        // The Files window's empty state (`ui::empty`), under the names the Files keymap gives
+        // it on the board: `empty`, `empty-tile`, `empty-icon`, `empty-title`, `empty-text`.
         .child(
-            empty(
-                &icons::SEARCH,
-                &format!("No results for \u{201C}{query}\u{201D}"),
-                NO_MATCH,
-                None,
-                t,
-            )
-            .grow(1.0)
-            .w_full(),
+            el().key("empty-area")
+                .center()
+                .grow(1.0)
+                .w_full()
+                .child(crate::ui::empty::empty_state(
+                    "empty",
+                    &icons::SEARCH,
+                    &format!("No results for \u{201C}{query}\u{201D}"),
+                    NO_MATCH,
+                    t,
+                )),
         )
 }
 

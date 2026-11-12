@@ -1,15 +1,13 @@
-// keymap-search.js: the keys the Search frames add (pills, recent searches, empty state, action
-// buttons). Runs after keymap.js and all other keymaps, in the same scope (`win`, `api`, `q`, `qa`,
-// `slug`).
+// keymap-search.js: the keys the Search frames add (pills, recent searches, action buttons). Runs
+// after keymap.js and all other keymaps, in the same scope (`win`, `api`, `q`, `qa`, `slug`).
 //
 // A search frame has the Files window's toolbar with the search field focused: `.mk-search.is-focus`.
 // Search draws in the content area of the Files window; the sidebar, toolbar and status bar are the
 // Files window's own (keyed by keymap.js).
 //
-// Keys match the goldens captured 2026-11-11, which used the shared-trash naming scheme before
-// `groupOf` was introduced on 2026-11-12; the view code uses these names. Checked against the goldens
-// with `check-keymap-scope.sh DW-0401 DW-0801 DW-0802 DW-0802b DW-0803` (the same key sets) and record
-// by record: the only values that differ are the toolbar's, which the board changed since the capture.
+// The names are the Shared and Trash scheme (`seg-<n>`, `label-<words>`, `list-<n>`, `item-<n>-<m>`,
+// `btn-<words>`), which the view code uses. Added to the board lane's goldens as a strict superset:
+// every key and record those had is unchanged.
 // Only in a Files frame (`groupOf`, keymap.js): Sync history (DW-1304) and a viewer's find bar have a
 // focused field too, and their groups key their own lists and buttons.
 const searchActive = groupOf === 'files' && !!q('.mk-search.is-focus');
@@ -66,16 +64,7 @@ qa('.kit-list').forEach((list, L) => {
   });
 }
 
-// ---- Empty state (`.kit-empty`): DW-0803 no results ----
-// Keys: `empty-tile`, `empty-icon`, `empty-title`, `empty-sub`.
-// The outer box (`empty`) is not in the goldens; the outer wrapper is keyed `empty-area` by the
-// native code and was not captured by the original keymap.
-const emptyState = q('.mk-body .kit-empty');
-if (emptyState) {
-  api.box('empty-tile', q('.kit-tile', emptyState));
-  api.icon('empty-icon', q('.kit-tile svg', emptyState));
-  api.text('empty-title', q('.t-title', emptyState));
-  api.text('empty-sub', q('.t-sub', emptyState));
-}
+// The empty state of DW-0803 ("No results") is keyed by keymap-files.js, as an empty folder is:
+// `empty`, `empty-tile`, `empty-icon`, `empty-title`, `empty-text`.
 
 } // searchActive

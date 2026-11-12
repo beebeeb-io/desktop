@@ -217,7 +217,7 @@ fn names_and_roles_of_dw_0803_no_results() {
     assert_eq!(text(&rt, "item-count"), "No results");
     assert_eq!(text(&rt, "empty-title"), "No results for \u{201C}harbr\u{201D}");
     assert_eq!(
-        text(&rt, "empty-sub"),
+        text(&rt, "empty-text"),
         "Check the spelling, or try fewer letters. Search only looks at names, not inside files."
     );
     assert!(has(&rt, "seg-0") && !has(&rt, "rows") && !has(&rt, "search-scope"));
