@@ -1,13 +1,15 @@
 //! A local fake of the Beebeeb API for tests: a loopback HTTP server whose routes are one closure, and a real
 //! OPAQUE server side (core's `opaque_protocol`) for the sign-in and step-up legs.
 //!
-//! Tests only (`test` or the `test-support` feature). Invented accounts and keys; it never talks to another host.
+//! Tests only (`test` or the `test-support` feature), and the dev-only `bb-fake-server` (feature `fake-server`, which
+//! implies `test-support`; `server.rs`). Invented accounts and keys; it never talks to another host.
 //! Must not: be reachable from a release build, or hold anything a test did not put there.
 
 pub mod fake_account;
+pub mod server;
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -100,6 +102,10 @@ impl Reply {
 
 pub type Handler = Arc<dyn Fn(&Request) -> Reply + Send + Sync>;
 
+/// The `Server` header of every answer, and the mark the never-ships check looks for: a binary that holds this text
+/// links the fake (task 2475: 0 times in the app's TEST and REAL builds, at least once in `bb-fake-server`).
+pub const FAKE_API_MARK: &str = "beebeeb-fake-api (tests only, not a server)";
+
 /// The running fake. Dropping it stops the listener and joins every thread it started.
 pub struct FakeApi {
     /// `http://127.0.0.1:<port>`, no trailing slash.
@@ -112,36 +118,45 @@ pub struct FakeApi {
 impl FakeApi {
     pub fn start(handler: Handler) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind the fake API");
-        listener.set_nonblocking(true).expect("nonblocking listener");
-        let base = format!("http://{}", listener.local_addr().expect("local addr"));
+        Self::listen_with(listener, handler, true).expect("start the fake API")
+    }
+
+    /// The fake on a listener the caller bound (`server::bind`: loopback only), keeping NO request: a process that
+    /// runs for an hour must not hold every token and body it was sent. [`FakeApi::requests`] stays empty.
+    pub fn start_on(listener: TcpListener, handler: Handler) -> io::Result<Self> {
+        Self::listen_with(listener, handler, false)
+    }
+
+    fn listen_with(listener: TcpListener, handler: Handler, keep: bool) -> io::Result<Self> {
+        listener.set_nonblocking(true)?;
+        let base = format!("http://{}", listener.local_addr()?);
         let log = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let (log_in, stop_in) = (log.clone(), stop.clone());
-        let accept = std::thread::Builder::new()
-            .name("fake-api".into())
-            .spawn(move || {
-                let mut workers: Vec<JoinHandle<()>> = Vec::new();
-                while !stop_in.load(Ordering::SeqCst) {
-                    match listener.accept() {
-                        Ok((stream, _)) => {
-                            let (handler, log) = (handler.clone(), log_in.clone());
-                            workers.push(std::thread::spawn(move || serve(stream, &handler, &log)));
-                        }
-                        Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+        let accept = std::thread::Builder::new().name("fake-api".into()).spawn(move || {
+            let mut workers: Vec<JoinHandle<()>> = Vec::new();
+            while !stop_in.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let (handler, log) = (handler.clone(), log_in.clone());
+                        workers.push(std::thread::spawn(move || {
+                            serve(stream, &handler, keep.then_some(&*log))
+                        }));
                     }
-                    workers.retain(|w| !w.is_finished());
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
                 }
-                for worker in workers {
-                    let _ = worker.join();
-                }
-            })
-            .expect("spawn the fake API");
-        Self {
+                workers.retain(|w| !w.is_finished());
+            }
+            for worker in workers {
+                let _ = worker.join();
+            }
+        })?;
+        Ok(Self {
             base,
             log,
             stop,
             accept: Some(accept),
-        }
+        })
     }
 
     /// Every request so far, in arrival order.
@@ -164,13 +179,16 @@ impl Drop for FakeApi {
     }
 }
 
-fn serve(mut stream: TcpStream, handler: &Handler, log: &Mutex<Vec<Request>>) {
+/// Answer one connection. `log` is the tests' record of every request; `None` keeps nothing ([`FakeApi::start_on`]).
+fn serve(mut stream: TcpStream, handler: &Handler, log: Option<&Mutex<Vec<Request>>>) {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
     let Some(request) = read_request(&mut stream) else {
         return;
     };
-    log.lock().expect("fake API log").push(request.clone());
+    if let Some(log) = log {
+        log.lock().expect("fake API log").push(request.clone());
+    }
     let reply = handler(&request);
     let reason = if (200..300).contains(&reply.status) {
         "OK"
@@ -179,7 +197,7 @@ fn serve(mut stream: TcpStream, handler: &Handler, log: &Mutex<Vec<Request>>) {
     };
     let date = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT");
     let head = format!(
-        "HTTP/1.1 {} {reason}\r\nDate: {date}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {reason}\r\nDate: {date}\r\nServer: {FAKE_API_MARK}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         reply.status,
         reply.content_type,
         reply.body.len()
@@ -189,10 +207,18 @@ fn serve(mut stream: TcpStream, handler: &Handler, log: &Mutex<Vec<Request>>) {
     let _ = stream.flush();
 }
 
+/// A single request must complete within this many seconds. A client sending one byte every 9 s (just under the
+/// per-read timeout) would otherwise keep a worker alive past `--max-seconds` indefinitely. The per-read timeout is
+/// shrunk to min(10 s, remaining) on each iteration (P2-2 of the PR #338 review).
+const REQUEST_DEADLINE_SECS: u64 = 60;
+
 fn read_request(stream: &mut TcpStream) -> Option<Request> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(REQUEST_DEADLINE_SECS);
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 8192];
     let header_end = loop {
+        let remaining = deadline.checked_duration_since(std::time::Instant::now())?;
+        let _ = stream.set_read_timeout(Some(remaining.min(std::time::Duration::from_secs(10))));
         let read = stream.read(&mut chunk).ok()?;
         if read == 0 {
             return None;
@@ -218,6 +244,8 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
         .unwrap_or(0);
     let mut body = buffer[header_end..].to_vec();
     while body.len() < length {
+        let remaining = deadline.checked_duration_since(std::time::Instant::now())?;
+        let _ = stream.set_read_timeout(Some(remaining.min(std::time::Duration::from_secs(10))));
         let read = stream.read(&mut chunk).ok()?;
         if read == 0 {
             return None;

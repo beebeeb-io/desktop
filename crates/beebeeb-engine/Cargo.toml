@@ -184,3 +184,16 @@ beebeeb-engine = { path = ".", features = ["test-support"] }
 # Test helpers (`*_for_test`, in-memory databases, injected failures) for the tests of a crate that depends on this
 # one. Never enabled by a release build: `src-tauri` turns it on under `[dev-dependencies]` only.
 test-support = []
+# Task 2475: `bb-fake-server` (below), the test helpers' fake account on loopback for native checks of a TEST build.
+# Dev-only: it implies `test-support`, so a release build of it does not compile (`lib.rs`); no app names it
+# (`tests/fake_server.rs`); the default feature set does not build it.
+fake-server = ["test-support"]
+
+# cargo build --features fake-server --bin bb-fake-server    (a debug build; `--release` is refused)
+[[bin]]
+name = "bb-fake-server"
+path = "src/test_api/bin_main.rs"
+required-features = ["fake-server"]
+test = false
+bench = false
+doc = false
