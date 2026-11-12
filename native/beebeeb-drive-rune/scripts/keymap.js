@@ -179,10 +179,11 @@ if (foot) {
 // tree knows only its own: settings frames (`.mk-set`) are keyed below, account windows (`.au-mac`) in
 // keymap-signin.js, the Shared and Trash sections here, every other section of the main window in
 // keymap-files.js. The section is the sidebar item the board draws selected (`.mk-side-item.on`).
+// The account sections inside settings (`.au-set`) are keyed in keymap-account.js.
 // Measured without it: a recapture of DW-0701 exported 4 keys more, DW-A02 8 more, DW-0402 33 more
 // (`mi-*`), DW-0505 17 more (`menu-item-*`), and DW-0508 did not capture at all.
 const sectionOn = (() => { const on = q('.mk-side-item.on .mk-side-label'); return on ? on.textContent.trim() : ''; })();
-const groupOf = q('.mk-set') ? 'settings' : q('.au-mac') ? 'account' : (sectionOn === 'Shared' || sectionOn === 'Trash') ? 'shared-trash' : 'files';
+const groupOf = q('.mk-set') ? 'settings' : q('.au-mac') ? 'account' : q('.au-set') ? 'account-settings' : (sectionOn === 'Shared' || sectionOn === 'Trash') ? 'shared-trash' : 'files';
 if (groupOf === 'shared-trash') {
 const inDet = (el) => !!el.closest('.mk-det');
 // A button (`.kit-btn`): `btn-<its words>`, `-label`, `-icon`.

@@ -35,6 +35,7 @@ pub struct State {
     pub(crate) feedback: crate::feedback::Feedback,
     pub frames: crate::frames::Ui,
     pub settings: crate::frames::settings::SettingsUi,
+    pub account: crate::frames::account::AccountUi,
     pub(crate) signin: Option<crate::frames::signin::Ui>,
 }
 
@@ -91,6 +92,7 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         feedback: crate::feedback::Feedback::new(),
         frames: crate::frames::Ui::default(),
         settings: Default::default(),
+        account: Default::default(),
         signin: crate::frames::signin::start(),
     }
 }
