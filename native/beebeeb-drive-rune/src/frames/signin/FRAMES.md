@@ -47,6 +47,7 @@ Gate state per frame is in the PR body; `0` = all six counts at 0 failing in bot
 
 Built: 30 of 59 here, and the 11 frames of the first run below: 41 of 70. Not built: 29, none with a golden yet
 (DW-A11 to A17, DW-A31 to A44, DW-0009, DW-0014, DW-0380, DW-0301 to 0305).
+Since then DW-A12 to DW-A17 are built in the account view (the row above; DW-A11 is Windows' toast).
 
 ## First run on Windows (lane f-signin-rest): `setup/`
 

@@ -4,7 +4,8 @@ Source: `design/desktop-v2/frames.json`, Windows tab, the five account groups (2
 draws each `DM-Axx` for Windows under the same number as `DW-Axx`). Every frame is the 960 x 640 window
 (a 958 x 638 client area), in the account kit's settings view (`.au-set`).
 
-Status after the review of #298 (2026-11-12, `origin/v2-native` 598ed681 merged): 29 of 29 built. 58 gate runs (29
+Status after the review of #298 (2026-11-12, `origin/v2-native` 598ed681 merged): 29 of 29 built. Since then the group
+"Approving a sign-in" was added at the end of this file: 7 more frames, 6 built and gated, 1 drawn by Windows (35 scenes in all). 58 gate runs (29
 frames, light and dark): 52 with every line at 0 failing, 6 with a red pixel line, each named in its row (8 keyed
 elements in all; no geometry, text, icon or fill line is red). The built frames are the scenes of `frames::account::FRAMES`.
 
