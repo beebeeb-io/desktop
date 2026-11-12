@@ -18,7 +18,7 @@ use super::flyout_window::FlyoutState;
 use super::instance::{self, Forwarded};
 use super::platform::{self, Platform, PlatformError, TrayEvent, TrayHandler, TrayIcon};
 use super::surfaces::WindowKind;
-use super::tray::{LeftClick, MenuAction, TrayInputs, TrayModel, tray_model};
+use super::tray::{EngineState, LeftClick, MenuAction, TrayInputs, TrayModel, tray_model};
 use super::window_state::{self, Observed, SavedWindows};
 use super::{registry, surfaces};
 use crate::State;
@@ -82,6 +82,9 @@ pub struct Shell {
     /// How often the refusal modal opened, for the tests.
     #[cfg(test)]
     sync_off_opened: u32,
+    /// The engine finished a check since [`poll`] last looked (the b's engine state turned Idle): a list that showed
+    /// an error or nothing is read again then ([`read_again_after_a_check`]).
+    check_finished: bool,
 }
 
 impl Shell {
@@ -112,6 +115,7 @@ impl Shell {
             refusal_seen: None,
             #[cfg(test)]
             sync_off_opened: 0,
+            check_finished: false,
         }
     }
 
@@ -169,6 +173,7 @@ impl Shell {
         let changed = self.app.apply(Event::Session(self.actions.session())) == Outcome::Changed;
         let inputs = self.actions.tray_inputs();
         if inputs != self.tray_inputs {
+            self.check_finished |= inputs.engine == EngineState::Idle && self.tray_inputs.engine != EngineState::Idle;
             // The flyout reads the inputs themselves (counts), not only what the b shows.
             self.tray_inputs = inputs;
             self.flyout_behind = true;
@@ -418,6 +423,8 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     }
     // A refused sync start says so, once per attempt (the refusal modal, Q3).
     changed |= open_sync_refusal(s);
+    // The first sync's files, once a check finished (R1.1).
+    changed |= read_again_after_a_check(s);
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {
@@ -514,6 +521,22 @@ fn open_sync_refusal(s: &mut State) -> bool {
         s.shell.sync_off_opened += 1;
     }
     dispatch(s, Event::OpenDialog(Dialog::SyncOff)) == Outcome::Changed
+}
+
+/// The first sync on this PC, as the window sees it (R1.1 of the sync-start contract): the gate opened before anything
+/// had synced, so the folder could not be read, or read as empty, and the window said so. Each check the running engine
+/// finishes (the b's engine state turns Idle) reads that folder again, so the account's files appear without a click.
+/// Only a list that shows an error or nothing is read: a list with rows, a selection and the folder shown are never
+/// changed from here. `true`: it was read.
+fn read_again_after_a_check(s: &mut State) -> bool {
+    let finished = std::mem::take(&mut s.shell.check_finished);
+    let shows_nothing = s.list_error.is_some() || s.listing.items.is_empty();
+    if !finished || !shows_nothing || s.shell.app.gate() != super::app::GateState::Ready {
+        return false;
+    }
+    let folder = s.listing.folder.id.clone();
+    (s.listing, s.list_error) = super::state::load(s.source.as_ref(), folder.as_deref());
+    true
 }
 
 /// The refusal modal's "Try again": it closes, and one start is asked for (the start worker runs one at a time).
