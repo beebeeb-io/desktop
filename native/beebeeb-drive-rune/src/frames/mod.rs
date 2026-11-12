@@ -11,6 +11,7 @@
 pub mod account;
 pub mod backups;
 pub mod files;
+pub mod global;
 pub mod settings;
 pub mod shared;
 pub mod signin;
@@ -34,6 +35,7 @@ pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
         [
             shell,
             files::SCENES,
+            global::FRAMES,
             settings::FRAMES,
             account::FRAMES,
             signin::FRAMES,
