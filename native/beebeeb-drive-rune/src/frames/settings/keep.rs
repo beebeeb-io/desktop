@@ -3,8 +3,12 @@
 //! leave (DW-0784b). States: the folder list could not load (DW-0784c), no folders yet
 //! (DW-0784d).
 //!
-//! Nothing changes until Apply. The choices are a draft (`KeepDraft`, a copy of the tree)
-//! that the dialog edits; the source hears of them once, in `DriveSettings::apply_keep`.
+//! Nothing changes until Apply. The choices are a draft (`KeepDraft`: the tree as it was when
+//! the dialog opened, and a copy the dialog edits); the source hears once, in
+//! `DriveSettings::apply_keep`, and ONLY of what the person changed in this dialog: the
+//! folders newly kept and the folders newly not kept. Never the whole kept set: the tree a
+//! person saw may be partial (folders not loaded yet) or stale (a folder kept on another
+//! device meanwhile), and what they did not touch is not theirs to have changed.
 
 use crate::State;
 use crate::theme::icons_settings as ic;
@@ -100,22 +104,34 @@ fn find<'a>(folders: &'a [Folder], id: &str) -> Option<&'a Folder> {
         .find_map(|f| if f.id == id { Some(f) } else { find(&f.children, id) })
 }
 
-/// Checks or unchecks folder `id` and everything in it; the folders it is in follow (all of
-/// a folder's folders kept: kept; else not). `false`: no such folder.
-fn toggle_in(folders: &mut [Folder], id: &str) -> bool {
+/// Sets folder `id` and everything in it to `kept`; the folders it is in follow (all of a
+/// folder's folders kept: kept; else not). `false`: no such folder.
+pub fn set_in(folders: &mut [Folder], id: &str, kept: bool) -> bool {
     for f in folders.iter_mut() {
         if f.id == id {
-            let keep = f.check() != Check::On;
-            f.set_all(keep);
+            f.set_all(kept);
             return true;
         }
-        if toggle_in(&mut f.children, id) {
+        if set_in(&mut f.children, id, kept) {
             // Unchecking one folder inside a kept folder keeps the others, one by one.
             f.kept = !f.children.is_empty() && f.children.iter().all(|c| c.kept);
             return true;
         }
     }
     false
+}
+
+/// The tree with "a kept folder keeps everything in it" written out: a source may mark only
+/// the top-most folder as kept, and the boxes inside it are checked all the same.
+pub fn normalised(mut folders: Vec<Folder>) -> Vec<Folder> {
+    fn under(folders: &mut [Folder], kept_above: bool) {
+        for f in folders {
+            f.kept |= kept_above;
+            under(&mut f.children, f.kept);
+        }
+    }
+    under(&mut folders, false);
+    folders
 }
 
 fn open_in(folders: &mut [Folder], id: &str) -> bool {
@@ -138,22 +154,41 @@ pub enum Change {
     Downloads,
 }
 
-/// The choices not applied yet: a copy of the source's tree, edited by the dialog.
+/// The choices not applied yet. `base` is the tree as the person saw it when the dialog
+/// opened; `folders` is the copy the dialog edits. A change is a difference between the two,
+/// never a difference from what the source says by now.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct KeepDraft {
+    pub base: Vec<Folder>,
     pub folders: Vec<Folder>,
+    /// The account's size in megabytes when the dialog opened (the foot's sum).
+    pub total_mb: f32,
 }
 
 impl KeepDraft {
+    /// A draft of `folders` with nothing changed yet.
+    pub fn of(folders: Vec<Folder>, total_mb: f32) -> Self {
+        let folders = normalised(folders);
+        Self {
+            base: folders.clone(),
+            folders,
+            total_mb,
+        }
+    }
+    /// Checks or unchecks folder `id` and everything in it.
     pub fn toggle(&mut self, id: &str) {
-        toggle_in(&mut self.folders, id);
+        if let Some(keep) = find(&self.folders, id).map(|f| f.check() != Check::On) {
+            set_in(&mut self.folders, id, keep);
+        }
     }
     pub fn toggle_open(&mut self, id: &str) {
         open_in(&mut self.folders, id);
     }
-    /// The folders whose choice differs from the stored one, top-most only: a folder inside
-    /// one that changed the same way is part of that change.
-    pub fn changes(&self, stored: &[Folder]) -> Vec<(Folder, Change)> {
+    /// The folders whose choice differs from what the dialog opened on, top-most only: a
+    /// folder inside one that changed the same way is part of that change. A folder above one
+    /// that was unchecked is NOT a change (it goes mixed; what else is in it stays as it is).
+    pub fn changes(&self) -> Vec<(Folder, Change)> {
+        let stored: &[Folder] = &self.base;
         fn walk(folders: &[Folder], stored: &[Folder], out: &mut Vec<(Folder, Change)>) {
             for f in folders {
                 let was = find(stored, &f.id).is_some_and(|s| s.kept);
@@ -169,20 +204,17 @@ impl KeepDraft {
         walk(&self.folders, stored, &mut out);
         out
     }
-    /// The ids to keep, top-most only (a kept folder keeps everything in it).
-    pub fn kept_ids(&self) -> Vec<String> {
-        fn walk(folders: &[Folder], out: &mut Vec<String>) {
-            for f in folders {
-                if f.kept {
-                    out.push(f.id.clone());
-                } else {
-                    walk(&f.children, out);
-                }
+    /// What Apply tells the source: the ids newly kept, and the ids newly not kept. Nothing
+    /// about any folder the person did not change.
+    pub fn delta(&self) -> (Vec<String>, Vec<String>) {
+        let (mut keep, mut release) = (Vec::new(), Vec::new());
+        for (folder, change) in self.changes() {
+            match change {
+                Change::Downloads => keep.push(folder.id),
+                Change::Leaves => release.push(folder.id),
             }
         }
-        let mut out = Vec::new();
-        walk(&self.folders, &mut out);
-        out
+        (keep, release)
     }
     pub fn kept_mb(&self) -> f32 {
         self.folders.iter().map(Folder::kept_mb).sum()
@@ -192,20 +224,41 @@ impl KeepDraft {
 /// Open the dialog on the stored choices (a fresh draft).
 pub fn open(ui: &mut SettingsUi) {
     ui.more.keep = match ui.drive.keep() {
-        Keep::Ready { folders, .. } => KeepDraft { folders },
+        Keep::Ready { folders, total_mb } => KeepDraft::of(folders, total_mb),
         Keep::Failed => KeepDraft::default(),
     };
     ui.dialog = Some(Dialog::Keep);
+}
+
+/// The draft to edit. A list that arrived after the dialog opened (it opened on "couldn't
+/// load", or before the source had answered) becomes the draft at the first press: what the
+/// person sees is what they change.
+fn adopted(ui: &mut SettingsUi) -> &mut KeepDraft {
+    if ui.more.keep.base.is_empty() {
+        if let Keep::Ready { folders, total_mb } = ui.drive.keep() {
+            ui.more.keep = KeepDraft::of(folders, total_mb);
+        }
+    }
+    &mut ui.more.keep
+}
+
+/// The question (DW-0784b) was asked for by its frame id. Without a choice that removes
+/// copies there is nothing to ask: the tree opens instead (on the draft, if there is one).
+pub fn open_question(ui: &mut SettingsUi) {
+    if ui.more.keep.changes().iter().any(|(_, c)| *c == Change::Leaves) {
+        ui.dialog = Some(Dialog::KeepConfirm);
+    } else if ui.more.keep.base.is_empty() {
+        open(ui);
+    } else {
+        ui.dialog = Some(Dialog::Keep);
+    }
 }
 
 /// Apply was pressed in the dialog: asked first when copies leave this PC (DW-0784b);
 /// checking folders alone applies without a question.
 fn apply(s: &mut State) {
     let ui = &mut s.settings;
-    let Keep::Ready { folders: stored, .. } = ui.drive.keep() else {
-        return;
-    };
-    let changes = ui.more.keep.changes(&stored);
+    let changes = ui.more.keep.changes();
     if changes.is_empty() {
         return;
     }
@@ -216,11 +269,14 @@ fn apply(s: &mut State) {
     }
 }
 
-/// Both kinds of change go to the source; the dialog closes on Sync and File Explorer.
+/// The person's changes go to the source, and only those; the dialog closes on Sync and File
+/// Explorer. Nothing changed (no draft, or a draft equal to what it opened on): no call.
 fn confirm(s: &mut State) {
     let ui = &mut s.settings;
-    let ids = ui.more.keep.kept_ids();
-    ui.drive.apply_keep(&ids);
+    let (keep, release) = ui.more.keep.delta();
+    if !keep.is_empty() || !release.is_empty() {
+        ui.drive.apply_keep(&keep, &release);
+    }
     ui.more.keep = KeepDraft::default();
     ui.dialog = None;
 }
@@ -271,7 +327,7 @@ fn tree_row(f: &Folder, depth: usize, change: Option<&Change>, t: &Theme) -> El 
             .radius(3.0)
             .hover(t.hover)
             .focusable(true)
-            .on_press(move |s: &mut State| s.settings.more.keep.toggle_open(&id_open))
+            .on_press(move |s: &mut State| adopted(&mut s.settings).toggle_open(&id_open))
             .child(kit::glyph(
                 format!("{key}-disc-icon"),
                 if f.open { &ic::CARET_DOWN } else { &ic::CHEV_RIGHT_TREE },
@@ -296,7 +352,7 @@ fn tree_row(f: &Folder, depth: usize, change: Option<&Change>, t: &Theme) -> El 
     let check = check
         .radius(4.0)
         .focusable(true)
-        .on_press(move |s: &mut State| s.settings.more.keep.toggle(&id_check))
+        .on_press(move |s: &mut State| adopted(&mut s.settings).toggle(&id_check))
         .child(check_mark(&format!("{key}-ck"), state, t));
     let mut name = row()
         .key(format!("{key}-name"))
@@ -457,11 +513,18 @@ pub fn dialog(ui: &SettingsUi, first: usize, t: &Theme) -> El {
             );
             (vec![b], None, false)
         }
-        Keep::Ready {
-            folders: stored,
-            total_mb,
-        } => {
-            let changes = draft.changes(&stored);
+        Keep::Ready { folders, total_mb } => {
+            // The tree and its sums are the draft's: what the person saw when it opened. (A
+            // list that arrived after that is shown as it is, and adopted at the first press.)
+            let arrived;
+            let draft = if draft.base.is_empty() {
+                arrived = KeepDraft::of(folders, total_mb);
+                &arrived
+            } else {
+                draft
+            };
+            let changes = draft.changes();
+            let total_mb = draft.total_mb;
             let head = row()
                 .key("tree-head")
                 .w_full()
@@ -541,11 +604,7 @@ pub fn dialog(ui: &SettingsUi, first: usize, t: &Theme) -> El {
 /// The question before downloaded copies leave this PC (DW-0784b): what leaves, that nothing
 /// is deleted from Beebeeb, that changes not uploaded yet stay, and what downloads.
 pub fn question(ui: &SettingsUi, first: usize, t: &Theme) -> El {
-    let stored = match ui.drive.keep() {
-        Keep::Ready { folders, .. } => folders,
-        Keep::Failed => Vec::new(),
-    };
-    let changes = ui.more.keep.changes(&stored);
+    let changes = ui.more.keep.changes();
     let of = |kind: Change| -> Vec<&Folder> { changes.iter().filter(|(_, c)| *c == kind).map(|(f, _)| f).collect() };
     let (leaves, downloads) = (of(Change::Leaves), of(Change::Downloads));
     let (title, mut says) = match leaves.as_slice() {

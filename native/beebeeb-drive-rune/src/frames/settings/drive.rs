@@ -216,7 +216,21 @@ pub trait DriveSettings {
         super::diagnostics::Diagnostics::default()
     }
     /// Save a support bundle, show it in File Explorer and open a draft to support (DW-0790b):
-    /// `diagnostics().bundle` then says where the file is, or why there is none.
+    /// `diagnostics().bundle` then says where the file is, or why there is none. Called once
+    /// per press of Export… or "Save and write email"; never by showing a page.
+    ///
+    /// **The privacy contract a source must keep** (the page promises it in words, DW-0790):
+    /// - The bundle holds three things only: queue counts, an error code, and the last error
+    ///   message.
+    /// - It never holds: a file or folder name, a path, the account's email address, a device
+    ///   name, a key or any key material, a sign-in or session token, the recovery phrase.
+    /// - Every string goes through the engine's export redaction
+    ///   (`beebeeb_engine::diagnostic_redaction`) BEFORE anything is written to disk: the file
+    ///   on disk is already the redacted one, there is no unredacted copy to clean up.
+    /// - Nothing is sent anywhere: no upload, no request. The file stays on this PC; the
+    ///   draft names the file, never its folder, and the person attaches it themselves.
+    /// - `Bundle::Failed`'s reason is shown on the page as given: it must be a fixed sentence
+    ///   or a redacted one, never an OS error with a path in it.
     fn export_bundle(&mut self) {}
     /// Keep on this PC (DW-0784). Engine: the folder tree with sizes and the kept set
     /// (the same thing as Available offline for folders). Until a source answers: not loaded.
@@ -225,10 +239,18 @@ pub trait DriveSettings {
     }
     /// Load the folder list again (DW-0784c, Try again).
     fn reload_keep(&mut self) {}
-    /// Keep exactly these folders (each with everything in it) on this PC; every other
-    /// folder's downloaded copies leave it. Nothing is deleted from Beebeeb; a change that
-    /// has not uploaded yet stays until it has.
-    fn apply_keep(&mut self, _ids: &[String]) {}
+    /// What the person changed in Keep on this PC, and nothing else: `keep` are the folders
+    /// newly kept (each with everything in it, also what is added later), `release` the
+    /// folders newly NOT kept (their downloaded copies leave this PC). Top-most ids only.
+    ///
+    /// A source must treat this as a change to those folders alone. Every folder that is in
+    /// neither list stays exactly as it is: the dialog's tree may have been partial (folders
+    /// not loaded) or stale (kept on another device meanwhile), so the lists are never "the
+    /// whole kept set". Releasing a folder inside a kept folder releases that folder only:
+    /// files directly in the folder above, and its other folders, stay on this PC.
+    /// Nothing is deleted from Beebeeb; a change that has not uploaded yet stays until it has.
+    /// Never called with both lists empty.
+    fn apply_keep(&mut self, _keep: &[String], _release: &[String]) {}
 }
 
 /// The board's sample content for Drive's settings panes.
@@ -459,8 +481,8 @@ impl DriveSettings for BoardDrive {
             total_mb: super::more::BOARD_TOTAL_MB,
         };
     }
-    fn apply_keep(&mut self, ids: &[String]) {
-        self.more.apply_keep(ids);
+    fn apply_keep(&mut self, keep: &[String], release: &[String]) {
+        self.more.apply_keep(keep, release);
     }
 }
 

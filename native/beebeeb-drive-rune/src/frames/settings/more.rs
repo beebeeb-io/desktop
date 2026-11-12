@@ -109,15 +109,17 @@ impl BoardMore {
         }
     }
 
-    pub fn apply_keep(&mut self, ids: &[String]) {
-        fn set(folders: &mut [Folder], ids: &[String], under_kept: bool) {
-            for f in folders {
-                f.kept = under_kept || ids.contains(&f.id);
-                set(&mut f.children, ids, f.kept);
-            }
-        }
+    /// The fixture's answer to a change: those folders, and nothing else.
+    pub fn apply_keep(&mut self, keep: &[String], release: &[String]) {
         if let Keep::Ready { folders, .. } = &mut self.keep {
-            set(folders, ids, false);
+            let mut tree = super::keep::normalised(std::mem::take(folders));
+            for id in release {
+                super::keep::set_in(&mut tree, id, false);
+            }
+            for id in keep {
+                super::keep::set_in(&mut tree, id, true);
+            }
+            *folders = tree;
         }
     }
 }

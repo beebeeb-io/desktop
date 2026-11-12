@@ -243,6 +243,8 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             vec![
                 controls::button(export, "Export…", None, Emphasis::Plain, t).on_press(|s: &mut State| {
                     s.settings.ask(Intent::SaveBundleAndWriteEmail);
+                    // The press exports, once; showing the page (`go`) never does.
+                    s.settings.drive.export_bundle();
                     super::go(s, "DW-0790b");
                 }),
             ],

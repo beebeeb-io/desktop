@@ -391,7 +391,11 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         open_on(s, "DW-0783");
     }),
     ("DW-0790", |s| open_on(s, "DW-0790")),
-    ("DW-0790b", |s| open_on(s, "DW-0790b")),
+    ("DW-0790b", |s| {
+        // Showing the page exports nothing: the scene starts on a source that has just saved.
+        s.settings.drive = Box::new(drive::BoardDrive::new().with_bundle_saved());
+        open_on(s, "DW-0790b");
+    }),
     ("DW-0784", |s| {
         open_on(s, "DW-0784");
         // The board draws the dialog two choices in: Lisbon trip open, Documents unchecked,
@@ -406,7 +410,7 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         let draft = &mut s.settings.more.keep;
         draft.toggle("documents");
         draft.toggle("lisbon/day-1");
-        s.settings.dialog = Some(Dialog::KeepConfirm);
+        go(s, "DW-0784b");
     }),
     ("DW-0784c", |s| {
         s.settings.drive = Box::new(drive::BoardDrive::new().with_keep(keep::Keep::Failed));
@@ -539,11 +543,8 @@ pub fn go(s: &mut State, frame: &'static str) {
     match dialog {
         Some(Dialog::Limit(which)) => ui.open_limit(which),
         Some(Dialog::Keep) => keep::open(ui),
+        Some(Dialog::KeepConfirm) => keep::open_question(ui),
         other => ui.dialog = other,
-    }
-    if frame == "DW-0790b" {
-        // The export ended: the page says where the file is (the source's answer).
-        ui.drive.export_bundle();
     }
     if let Some(kind) = menu {
         ui.toggle_menu(kind);

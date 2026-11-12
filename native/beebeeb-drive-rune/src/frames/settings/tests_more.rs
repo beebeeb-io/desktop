@@ -249,12 +249,10 @@ fn a_size_reads_as_the_tree_says_it() {
 
 #[test]
 fn checking_a_folder_keeps_everything_in_it_and_the_folder_above_goes_mixed() {
-    let stored = board_folders();
-    let mut draft = KeepDraft {
-        folders: stored.clone(),
-    };
+    let mut draft = KeepDraft::of(board_folders(), 0.0);
     assert_eq!(folder(&draft.folders, "lisbon").check(), Check::Off);
-    assert!(draft.changes(&stored).is_empty(), "nothing changed yet");
+    assert!(draft.changes().is_empty(), "nothing changed yet");
+    assert_eq!(draft.delta(), (Vec::new(), Vec::new()));
     draft.toggle("lisbon/day-1");
     assert_eq!(
         folder(&draft.folders, "lisbon").check(),
@@ -262,7 +260,7 @@ fn checking_a_folder_keeps_everything_in_it_and_the_folder_above_goes_mixed() {
         "some folders inside kept"
     );
     assert_eq!(folder(&draft.folders, "lisbon/day-1").check(), Check::On);
-    let changes = draft.changes(&stored);
+    let changes = draft.changes();
     assert_eq!(changes.len(), 1);
     assert_eq!(
         (changes[0].0.id.as_str(), &changes[0].1),
@@ -272,37 +270,36 @@ fn checking_a_folder_keeps_everything_in_it_and_the_folder_above_goes_mixed() {
     draft.toggle("lisbon/day-2");
     draft.toggle("lisbon/day-3");
     assert_eq!(folder(&draft.folders, "lisbon").check(), Check::On);
-    let changes = draft.changes(&stored);
+    let changes = draft.changes();
     assert_eq!(
         changes.iter().map(|(f, _)| f.id.as_str()).collect::<Vec<_>>(),
         vec!["lisbon"]
     );
-    assert_eq!(draft.kept_ids(), vec!["documents", "invoices-2026", "lisbon"]);
+    // The source hears of that one folder, and of no folder that was kept all along.
+    assert_eq!(draft.delta(), (vec!["lisbon".to_string()], Vec::new()));
     // Checking twice is no change.
     draft.toggle("lisbon");
-    assert!(draft.changes(&stored).is_empty());
+    assert!(draft.changes().is_empty());
 }
 
 #[test]
 fn unchecking_one_folder_inside_a_kept_folder_keeps_the_others() {
-    let stored = board_folders();
-    let mut draft = KeepDraft {
-        folders: stored.clone(),
-    };
+    let mut draft = KeepDraft::of(board_folders(), 0.0);
     draft.toggle("documents/taxes");
     assert_eq!(folder(&draft.folders, "documents").check(), Check::Mixed);
     assert_eq!(folder(&draft.folders, "documents/letters").check(), Check::On);
-    let changes = draft.changes(&stored);
+    let changes = draft.changes();
     assert_eq!(changes.len(), 1, "only Taxes leaves");
     assert_eq!(
         (changes[0].0.id.as_str(), &changes[0].1),
         ("documents/taxes", &Change::Leaves)
     );
-    assert_eq!(draft.kept_ids(), vec!["documents/letters", "invoices-2026"]);
+    // Taxes alone is released: Documents itself is not, so what else is in it stays.
+    assert_eq!(draft.delta(), (Vec::new(), vec!["documents/taxes".to_string()]));
     // The whole folder: one change, everything in it.
     draft.toggle("documents");
     draft.toggle("documents");
-    let changes = draft.changes(&stored);
+    let changes = draft.changes();
     assert_eq!(
         changes.iter().map(|(f, _)| f.id.as_str()).collect::<Vec<_>>(),
         vec!["documents"]
@@ -537,4 +534,233 @@ fn a_source_that_does_not_know_these_pages_shows_no_sample_values() {
     let rt = window(state);
     assert_eq!(says(&rt, "tree-state-head"), "Couldn't load your folders.");
     assert!(find(&rt, "tree-rows").is_none());
+}
+
+// ---- What Apply tells the source: the person's changes, never the whole kept set ----
+
+/// What a source was told, in order.
+#[derive(Default)]
+struct Told {
+    /// Each `apply_keep`: the folders newly kept, the folders newly not kept.
+    keeps: Vec<(Vec<String>, Vec<String>)>,
+    exports: usize,
+}
+
+/// A source that records what it is told, and whose folder list a test can change while the
+/// dialog is open (as another device does).
+struct Recording {
+    board: BoardDrive,
+    folders: std::rc::Rc<std::cell::RefCell<Vec<Folder>>>,
+    told: std::rc::Rc<std::cell::RefCell<Told>>,
+}
+
+impl DriveSettings for Recording {
+    fn storage(&self) -> super::drive::Storage {
+        self.board.storage()
+    }
+    fn set_limit(&mut self, _: super::drive::Kept, _: u32) {}
+    fn clear(&mut self, _: super::drive::Kept) {}
+    fn sync(&self) -> super::drive::SyncPane {
+        self.board.sync()
+    }
+    fn set_status_on_files(&mut self, _: bool) {}
+    fn set_open_at_login(&mut self, _: bool) {}
+    fn set_paused(&mut self, _: bool) {}
+    fn sync_anyway(&mut self) {}
+    fn repair(&mut self) {}
+    fn turn_off_explorer(&mut self) {}
+    fn insights(&self) -> &super::drive::Insights {
+        self.board.insights()
+    }
+    fn reload_insights(&mut self) {}
+    fn export_bundle(&mut self) {
+        self.told.borrow_mut().exports += 1;
+    }
+    fn keep(&self) -> Keep {
+        Keep::Ready {
+            folders: self.folders.borrow().clone(),
+            total_mb: 29_227.8,
+        }
+    }
+    fn apply_keep(&mut self, keep: &[String], release: &[String]) {
+        self.told.borrow_mut().keeps.push((keep.to_vec(), release.to_vec()));
+    }
+}
+
+type Shared<T> = std::rc::Rc<std::cell::RefCell<T>>;
+
+/// Sync and File Explorer on a recording source holding `folders`.
+fn recording(folders: Vec<Folder>) -> (Runtime<State>, Shared<Vec<Folder>>, Shared<Told>) {
+    let folders = std::rc::Rc::new(std::cell::RefCell::new(folders));
+    let told = std::rc::Rc::new(std::cell::RefCell::new(Told::default()));
+    let mut state = init();
+    state.settings.drive = Box::new(Recording {
+        board: BoardDrive::new(),
+        folders: folders.clone(),
+        told: told.clone(),
+    });
+    super::go(&mut state, "DW-0746");
+    (window(state), folders, told)
+}
+
+fn ids(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn apply_tells_the_source_only_the_folder_that_was_checked() {
+    // Backups is not loaded: whatever is kept inside it is not in the tree. Documents and
+    // Invoices 2026 are kept and untouched. None of them is the person's change.
+    let (mut rt, _, told) = recording(board_folders());
+    click(&mut rt, "btn-3");
+    click(&mut rt, "tree-lisbon-disc");
+    click(&mut rt, "tree-lisbon/day-1-check");
+    click(&mut rt, "btn-5");
+    assert_eq!(ui(&rt).dialog, None);
+    assert_eq!(
+        told.borrow().keeps,
+        vec![(ids(&["lisbon/day-1"]), Vec::new())],
+        "one call, one folder, nothing about the kept set"
+    );
+}
+
+#[test]
+fn a_folder_kept_elsewhere_while_the_dialog_is_open_is_not_released() {
+    let (mut rt, folders, told) = recording(board_folders());
+    click(&mut rt, "btn-3");
+    click(&mut rt, "tree-lisbon-disc");
+    // Another device keeps Shoot selects while this dialog is open.
+    folders
+        .borrow_mut()
+        .iter_mut()
+        .find(|f| f.id == "shoot-selects")
+        .unwrap()
+        .kept = true;
+    settle(&mut rt);
+    click(&mut rt, "tree-lisbon/day-1-check");
+    assert!(
+        find(&rt, "tree-shoot-selects-note-text").is_none(),
+        "not the person's change: no \"Leaves this PC\" on it"
+    );
+    click(&mut rt, "btn-5");
+    assert_eq!(ui(&rt).dialog, None, "checking alone: no question");
+    assert_eq!(told.borrow().keeps, vec![(ids(&["lisbon/day-1"]), Vec::new())]);
+}
+
+#[test]
+fn unchecking_one_folder_inside_releases_that_folder_and_not_the_one_above() {
+    let (mut rt, _, told) = recording(board_folders());
+    click(&mut rt, "btn-3");
+    click(&mut rt, "tree-documents-disc");
+    // By pointer: a box is unchecked.
+    click(&mut rt, "tree-documents/taxes-check");
+    assert_eq!(named(&rt, "tree-documents-check"), "Documents, mixed");
+    assert_eq!(says(&rt, "tree-documents/taxes-note-text"), "Leaves this PC · 600.0 MB");
+    assert!(
+        find(&rt, "tree-documents-note-text").is_none(),
+        "Documents itself does not leave"
+    );
+    click(&mut rt, "btn-5");
+    assert_eq!(ui(&rt).dialog, Some(Dialog::KeepConfirm), "copies leave: asked first");
+    assert_eq!(says(&rt, "dlg-title"), "Stop keeping Taxes on this PC?");
+    assert!(told.borrow().keeps.is_empty(), "asked, not done");
+    click(&mut rt, "btn-5");
+    assert_eq!(
+        told.borrow().keeps,
+        vec![(Vec::new(), ids(&["documents/taxes"]))],
+        "Taxes, and not Documents: files directly in Documents stay"
+    );
+}
+
+#[test]
+fn a_source_that_marks_only_the_folder_above_as_kept_draws_its_folders_checked() {
+    // The shape a source may well answer in: Lisbon trip kept, its folders not marked.
+    let mut tree = board_folders();
+    tree.iter_mut().find(|f| f.id == "lisbon").unwrap().kept = true;
+    let (mut rt, _, told) = recording(tree);
+    click(&mut rt, "btn-3");
+    click(&mut rt, "tree-lisbon-disc");
+    for day in ["day-1", "day-2", "day-3"] {
+        assert!(
+            named(&rt, &format!("tree-lisbon/{day}-check")).ends_with("kept on this PC"),
+            "{day} is inside a kept folder"
+        );
+    }
+    click(&mut rt, "tree-lisbon/day-2-check");
+    assert_eq!(named(&rt, "tree-lisbon/day-2-check"), "Day 2, online only");
+    assert_eq!(named(&rt, "tree-lisbon/day-1-check"), "Day 1, kept on this PC");
+    assert_eq!(says(&rt, "tree-lisbon/day-2-note-text"), "Leaves this PC · 1.6 GB");
+    assert!(
+        find(&rt, "tree-lisbon/day-1-note-text").is_none(),
+        "Day 1 stays, and says nothing"
+    );
+    click(&mut rt, "btn-5");
+    assert_eq!(ui(&rt).dialog, Some(Dialog::KeepConfirm));
+    click(&mut rt, "btn-5");
+    assert_eq!(told.borrow().keeps, vec![(Vec::new(), ids(&["lisbon/day-2"]))]);
+}
+
+#[test]
+fn the_question_by_its_frame_id_without_a_choice_asks_nothing_and_tells_nothing() {
+    let (mut rt, _, told) = recording(board_folders());
+    rt.update(|s, _| super::go(s, "DW-0784b"));
+    settle(&mut rt);
+    assert_eq!(ui(&rt).dialog, Some(Dialog::Keep), "nothing to ask: the tree opens");
+    assert_eq!(says(&rt, "dlg-title"), "Keep on this PC");
+    click(&mut rt, "btn-5");
+    key(&mut rt, Key::Enter);
+    assert!(told.borrow().keeps.is_empty(), "no choice, no call");
+}
+
+#[test]
+fn a_list_that_arrives_after_the_dialog_opened_is_adopted_at_the_first_press() {
+    let (mut rt, folders, told) = recording(Vec::new());
+    click(&mut rt, "btn-3");
+    assert_eq!(says(&rt, "tree-state-head"), "No folders yet");
+    *folders.borrow_mut() = board_folders();
+    settle(&mut rt);
+    assert_eq!(named(&rt, "tree-documents-check"), "Documents, kept on this PC");
+    click(&mut rt, "tree-shoot-selects-check");
+    assert_eq!(says(&rt, "tree-shoot-selects-note-text"), "Downloads · 2.4 GB");
+    click(&mut rt, "btn-5");
+    assert_eq!(told.borrow().keeps, vec![(ids(&["shoot-selects"]), Vec::new())]);
+}
+
+#[test]
+fn choose_folders_shows_the_state_the_source_is_in() {
+    // DW-0784c and DW-0784d are reached by the same button, on a source in that state.
+    let mut state = init();
+    state.settings.drive = Box::new(BoardDrive::new().with_keep(Keep::Failed));
+    super::go(&mut state, "DW-0746");
+    let mut rt = window(state);
+    tab_to(&mut rt, "btn-3");
+    key(&mut rt, Key::Enter);
+    assert_eq!(says(&rt, "tree-state-head"), "Couldn't load your folders.");
+    let (mut rt, _, _) = recording(Vec::new());
+    click(&mut rt, "btn-3");
+    assert_eq!(says(&rt, "tree-state-head"), "No folders yet");
+}
+
+// ---- Showing Diagnostics never exports; a press does, once ----
+
+#[test]
+fn showing_the_saved_page_exports_nothing_and_a_press_exports_once() {
+    let (mut rt, _, told) = recording(board_folders());
+    rt.update(|s, _| super::go(s, "DW-0790b"));
+    settle(&mut rt);
+    assert_eq!(ui(&rt).pane, Pane::Diagnostics);
+    assert_eq!(told.borrow().exports, 0, "showing a page writes no file");
+    rt.update(|s, _| super::go(s, "DW-0790"));
+    settle(&mut rt);
+    assert_eq!(told.borrow().exports, 0);
+    click(&mut rt, "btn-0");
+    assert_eq!(told.borrow().exports, 1, "Export…: once");
+    assert_eq!(ui(&rt).intents, vec![Intent::SaveBundleAndWriteEmail]);
+    // Report a problem's "Save and write email": once too.
+    let (mut rt, _, told) = recording(board_folders());
+    rt.update(|s, _| super::go(s, "DW-0782"));
+    settle(&mut rt);
+    click(&mut rt, "btn-0");
+    assert_eq!(ui(&rt).pane, Pane::Diagnostics);
+    assert_eq!(told.borrow().exports, 1);
 }
