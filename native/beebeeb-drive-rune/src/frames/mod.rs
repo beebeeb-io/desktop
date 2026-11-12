@@ -8,6 +8,7 @@
 //! `<Group>Source`; their scenes are named in `shell::SCENES`. The checklist of frames, built and
 //! not built, is `shared/FRAMES.md`.
 
+pub mod account;
 pub mod backups;
 pub mod files;
 pub mod settings;
@@ -34,6 +35,7 @@ pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
             shell,
             files::SCENES,
             settings::FRAMES,
+            account::FRAMES,
             this_pc::scenes::FRAMES,
             backups::FRAMES,
         ]
