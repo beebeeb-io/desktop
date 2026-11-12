@@ -1,6 +1,6 @@
 //! The honest exits, drawn: "Trouble signing in?" (DW-A45), "We cannot recover your account"
-//! (DW-A46) and "We can't restore your keys" (DW-A25). No screen here says "reset": Beebeeb
-//! cannot reset a password, and the copy never hints it can.
+//! (DW-A46) and "We can't restore your keys" (DW-A25). No screen here offers a reset: Beebeeb
+//! cannot reset a password, and the only time the word appears is DW-A46 saying so.
 
 use rune::{El, col, el, row};
 
