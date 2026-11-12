@@ -440,6 +440,9 @@ pub(crate) fn frame_for(shell: &TrayInputs) -> &'static str {
         "DW-1215"
     } else if shell.paused {
         "DW-1204"
+    } else if shell.engine == EngineState::Checking || shell.engine == EngineState::NotRunning {
+        // The board draws no "sync isn't running"; its checking frame says nothing (DW-1212).
+        "DW-1212"
     } else if shell.storage_full {
         "DW-1209"
     } else if shell.engine == EngineState::Offline {

@@ -4,6 +4,7 @@
 //! refuses another), which `engine_host::tests` writes: nothing here writes in it. The database tests use
 //! a database of their own. Every name is invented.
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,7 @@ use beebeeb_engine::app::{Engine, EngineConfig};
 use beebeeb_engine::engine_status::{Activity, Reason, plain_status};
 use beebeeb_engine::host::{ChannelHost, EngineEvent, EngineStatus, HostMessage, PauseChanged, PauseState};
 use beebeeb_engine::identity::TEST;
+use beebeeb_engine::runner::EngineRunner;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::state_db::{FileEntry, ItemKind, LocalActivityEventInput, TransferActivityInput};
 use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, start_fake};
@@ -21,6 +23,7 @@ use super::*;
 use crate::engine_host::open::{self, Opened};
 use crate::frames::tray::source::{BoardFixture, Changes, FRAMES, Hidden, Status, What};
 use crate::shell::actions::EngineActions;
+use crate::shell::tray::tray_model;
 
 const EMAIL: &str = "tray-lane@example.eu";
 const PASSWORD: &str = "an invented password for the tray";
@@ -85,6 +88,29 @@ fn pause(state: PauseState) -> HostMessage {
     HostMessage::Event(EngineEvent::PauseChanged(PauseChanged { state }))
 }
 
+/// `idle` at the end of a check that reached Beebeeb: the report carries the check's time
+/// (`StatusTracker::finish_tick`). A plain `idle` carries none, as the engine's own `idle` does when the
+/// files of its first check are done before the check is.
+fn idle_after_check() -> HostMessage {
+    let mut status = plain_status("idle", None, None);
+    status.last_tick_ok_at = Some(1_794_000_000);
+    report(status)
+}
+
+/// A task that never ends in the account's engine slot: `Engine::is_syncing` says true, as it does while the
+/// engine runs, and nothing syncs, so nothing is written in the process's state folder. The task never runs;
+/// the runtime that holds it is returned to outlive the reads. Nothing that holds it may stop the engine (a
+/// stop waits for the task).
+fn hold_running(engine: &Engine<MemoryCredentials>) -> tokio::runtime::Runtime {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime for the slot's task");
+    let task = runtime.spawn(std::future::pending::<()>());
+    let account = engine.accounts().active_account().expect("the account");
+    *account.engine.try_lock().expect("the engine slot is free") = Some(EngineRunner::for_test_with_task(task));
+    runtime
+}
+
 /// Every report the engine sends moves the one view the flyout and the b read; the resume switch is no
 /// report (never "idle"), and every other message leaves the view as it was.
 #[test]
@@ -97,16 +123,23 @@ fn each_report_of_the_engine_moves_the_view_the_flyout_and_the_b_read() {
         "before the first report"
     );
     let steps = [
-        (plain("running"), "running", Report::Starting, EngineState::Idle),
+        (plain("running"), "running", Report::Starting, EngineState::Checking),
         (
             syncing(3, 4_000, 1_000),
             "syncing",
             Report::Syncing,
             EngineState::Syncing,
         ),
-        (plain("idle"), "idle", Report::Idle, EngineState::Idle),
-        (pause(PauseState::Paused), "paused", Report::Quiet, EngineState::Idle),
-        (pause(PauseState::Idle), "", Report::Unknown, EngineState::Idle),
+        // The files that moved during the first check are done; the check goes on.
+        (plain("idle"), "idle", Report::Starting, EngineState::Checking),
+        (idle_after_check(), "idle", Report::Idle, EngineState::Idle),
+        (
+            pause(PauseState::Paused),
+            "paused",
+            Report::Quiet,
+            EngineState::Checking,
+        ),
+        (pause(PauseState::Idle), "", Report::Unknown, EngineState::Checking),
         (plain("offline"), "offline", Report::Offline, EngineState::Offline),
         (error("timeout"), "error", Report::ServerError, EngineState::Offline),
         (
@@ -119,7 +152,7 @@ fn each_report_of_the_engine_moves_the_view_the_flyout_and_the_b_read() {
             error(beebeeb_engine::engine_status::REASON_AUTH),
             "error",
             Report::Unknown,
-            EngineState::Idle,
+            EngineState::Checking,
         ),
     ];
     for (message, state, expected, b) in steps {
@@ -172,7 +205,7 @@ fn a_drain_from_the_flyout_moves_what_the_main_window_reads_and_back() {
         "the main window reads the same report"
     );
 
-    reports.send(plain("idle")).unwrap();
+    reports.send(idle_after_check()).unwrap();
     let _ = live.session();
     assert_eq!(live.drain(), 0, "the main window's read took it");
     assert_eq!(
@@ -277,7 +310,8 @@ fn a_signed_out_engine_shows_signed_out_and_no_file_names() {
     );
     assert_no_sample_data(&snapshot, "signed out");
     let b = live.tray_inputs();
-    assert!(!b.signed_in && !b.session_expired && b.engine == EngineState::Idle);
+    assert!(!b.signed_in && !b.session_expired && b.engine == EngineState::NotRunning);
+    assert_eq!(tray_model(&b).label, "Signed out");
 }
 
 fn entry(id: &str, path: &str, status: FileStatus, kind: ItemKind, at: i64) -> FileEntry {
@@ -468,6 +502,10 @@ fn a_real_account_from_signed_out_to_locked_shows_what_the_engine_knows() {
         (&Status::NeedsRecoveryPhrase, &Changes::Hidden(Hidden::NoKeys), None)
     );
     assert_no_sample_data(&phrase_needed, "needs the recovery phrase");
+    // Without the keys nothing syncs: the b says so, never "up to date".
+    let b = live.tray_inputs();
+    assert!(b.signed_in && !b.locked && b.engine == EngineState::NotRunning);
+    assert_eq!(tray_model(&b).label, "Not syncing");
 
     // Unlocked, sync not running: the window's state, never "up to date"; names may show.
     engine
@@ -480,7 +518,8 @@ fn a_real_account_from_signed_out_to_locked_shows_what_the_engine_knows() {
     assert!(!matches!(ready.changes, Changes::Hidden(_)), "{:?}", ready.changes);
     assert_no_sample_data(&ready, "ready, sync not running");
     let b = live.tray_inputs();
-    assert!(b.signed_in && !b.locked && !b.paused && b.engine == EngineState::Idle);
+    assert!(b.signed_in && !b.locked && !b.paused && b.engine == EngineState::NotRunning);
+    assert_eq!(tray_model(&b).label, "Not syncing");
 
     // The storage, read once from Beebeeb on its own thread; the next reads within a minute ask nothing.
     let waited = Instant::now();
@@ -527,4 +566,104 @@ fn a_real_account_from_signed_out_to_locked_shows_what_the_engine_knows() {
     );
     assert_no_sample_data(&locked, "locked");
     assert!(live.tray_inputs().locked);
+}
+
+/// The b and the flyout on a running engine, signed in and unlocked on the fake API (review of #334, P2-1):
+/// before a finished check the b says checking, never up to date; then what each report says, with the
+/// files left while it syncs; "up to date" only after an `idle` that carries a finished check; paused and
+/// resumed, checking again; once sync stops, not syncing. The flyout lists a file the database has as
+/// uploading only while the engine reaches Beebeeb. The engine's slot holds a task that never runs
+/// ([`hold_running`]): nothing syncs, and the database is one of the test's own.
+#[test]
+fn a_running_engine_gives_the_b_its_reports_and_up_to_date_only_after_a_finished_check() {
+    let (registered, phrase) = FakeAccount::register(EMAIL, PASSWORD, TEST_PHRASE);
+    let fake = start_fake(Arc::new(registered));
+    let engine = engine_at(&fake.base);
+    engine
+        .sign_in_password(EMAIL, Zeroizing::new(PASSWORD.into()))
+        .expect("the fake accepts the password");
+    engine
+        .unlock_with_phrase(Zeroizing::new(phrase))
+        .expect("the phrase unlocks");
+    assert_eq!(engine.gate(), EngineGate::Ready);
+    let (live, reports) = live_on(&engine);
+    let b = |live: &LiveEngine<MemoryCredentials>| {
+        let inputs = live.tray_inputs();
+        (inputs.engine, inputs.files_remaining, tray_model(&inputs).label)
+    };
+    assert_eq!(
+        b(&live),
+        (EngineState::NotRunning, None, "Not syncing"),
+        "signed in and unlocked, sync not running"
+    );
+
+    let _slot = hold_running(&engine);
+    assert!(engine.is_syncing(), "the slot's task is a running engine to the handle");
+    assert_eq!(
+        b(&live),
+        (EngineState::Checking, None, "Checking"),
+        "running, before the first report"
+    );
+    let steps = [
+        (plain("running"), (EngineState::Checking, None, "Checking")),
+        (syncing(3, 4_000, 1_000), (EngineState::Syncing, Some(3), "Syncing")),
+        // The files of the first check are done before the check is.
+        (plain("idle"), (EngineState::Checking, None, "Checking")),
+        (idle_after_check(), (EngineState::Idle, None, "Up to date")),
+        (plain("offline"), (EngineState::Offline, None, "Offline")),
+        (error(REASON_AUTH), (EngineState::Checking, None, "Checking")),
+        (error(REASON_ENGINE_ERROR), (EngineState::Error, None, "Stopped")),
+        (idle_after_check(), (EngineState::Idle, None, "Up to date")),
+    ];
+    for (message, expected) in steps {
+        reports.send(message).unwrap();
+        assert_eq!(b(&live), expected);
+    }
+
+    // The pause switch itself (the settings file is not written), then a resume: no finished check since.
+    let account = engine.accounts().active_account().unwrap();
+    account.sync_paused.store(true, Ordering::SeqCst);
+    reports.send(pause(PauseState::Paused)).unwrap();
+    assert_eq!(b(&live).2, "Paused");
+    account.sync_paused.store(false, Ordering::SeqCst);
+    reports.send(pause(PauseState::Idle)).unwrap();
+    assert_eq!(b(&live), (EngineState::Checking, None, "Checking"), "resumed");
+    reports.send(idle_after_check()).unwrap();
+    assert_eq!(b(&live).2, "Up to date");
+
+    // The flyout: a file the database has as uploading is on its way while the engine syncs or is up to
+    // date, and not while it cannot reach Beebeeb or has not finished a check.
+    let dir = tempfile::tempdir().unwrap();
+    drop(synced_database(&dir.path().join("state.db"), now()));
+    let tray = EngineTraySource {
+        database: Some(dir.path().join("state.db")),
+        ..EngineTraySource::new(live.clone())
+    };
+    let uploading = |tray: &EngineTraySource<MemoryCredentials>| {
+        let local = tray
+            .facts()
+            .local
+            .expect("signed in and unlocked: the database is read");
+        local
+            .rows
+            .iter()
+            .filter(|row| matches!(row.kind, RowKind::Uploading { .. }))
+            .count()
+    };
+    for (message, rows) in [
+        (syncing(1, 2_400_000, 0), 1),
+        (idle_after_check(), 1),
+        (plain("offline"), 0),
+        (plain("running"), 0),
+    ] {
+        reports.send(message).unwrap();
+        let listed = uploading(&tray);
+        assert_eq!(listed, rows, "after {:?}", live.status_view().state);
+    }
+
+    // Sync stops: not syncing, whatever the last report said.
+    reports.send(idle_after_check()).unwrap();
+    *account.engine.try_lock().unwrap() = None;
+    assert!(!engine.is_syncing());
+    assert_eq!(b(&live), (EngineState::NotRunning, None, "Not syncing"));
 }

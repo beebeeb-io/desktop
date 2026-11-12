@@ -12,6 +12,7 @@
 //! Must not: read the board's fixture; wait for the network on the window's thread; log a name, a path
 //! or anything a report carries.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -48,6 +49,9 @@ pub struct EngineTraySource<C: CredentialStores> {
     /// Beebeeb is in File Explorer, as the shell's tray state says ([`TraySource::follow`]).
     explorer_ready: bool,
     storage: Arc<Mutex<StorageRead>>,
+    /// This PC's state database: the one in the process's state folder, the only folder the engine opens a
+    /// handle on. `None` when the folder has no place on this PC.
+    database: Option<PathBuf>,
 }
 
 /// The account's storage as last read, and whose it is.
@@ -63,10 +67,14 @@ struct StorageRead {
 
 impl<C: CredentialStores> EngineTraySource<C> {
     pub fn new(live: Arc<LiveEngine<C>>) -> Self {
+        let database = state_paths::beebeeb_state_dir_for(live.identity)
+            .ok()
+            .map(|folder| state_paths::state_db_path_from_state_dir(&folder));
         Self {
             live,
             explorer_ready: false,
             storage: Arc::default(),
+            database,
         }
     }
 
@@ -101,12 +109,10 @@ impl<C: CredentialStores> EngineTraySource<C> {
     }
 
     /// This PC's state database, read-only: the handle's own `Engine::state_db` checks the schema under a
-    /// write lock on every open, which the flyout (read up to once a second during a sync, hidden or not)
-    /// would make the engine's writers wait for. The folder is the handle's: the engine opens a handle on
-    /// the process's state folder only. `None` before the first sync.
+    /// write lock on every open, which the flyout (read up to once a second while it shows during a sync)
+    /// would make the engine's writers wait for. `None` before the first sync.
     fn database(&self) -> Option<StateDb> {
-        let folder = state_paths::beebeeb_state_dir_for(self.live.identity).ok()?;
-        StateDb::open_read_only(state_paths::state_db_path_from_state_dir(&folder)).ok()
+        StateDb::open_read_only(self.database.as_ref()?).ok()
     }
 
     /// The account's storage as last read, while it is the account signed in now. Starts a read on a thread
@@ -216,10 +222,14 @@ pub(super) fn session_ended<C: CredentialStores>(engine: &Engine<C>) -> bool {
 /// The engine's last report, in the flyout's terms. An `error` with the `auth` reason is Beebeeb
 /// answering 401, not a way to Beebeeb that failed: the session decides ([`session_ended`]), and until
 /// it does the state is not known. Before the first report, and after a resume, nothing is known.
+/// `idle` is a finished check only with the time of one (`last_tick_ok_at`, which the engine empties when
+/// it starts): the engine also says `idle` when the files that moved during its first check are done
+/// (`StatusTracker::pulse`), and that check goes on.
 pub(super) fn report_of(view: &EngineStatusView) -> Report {
     match (view.state.as_str(), view.reason_code.as_deref()) {
         ("running", _) => Report::Starting,
-        ("idle", _) => Report::Idle,
+        ("idle", _) if view.last_tick_ok_at.is_some() => Report::Idle,
+        ("idle", _) => Report::Starting,
         ("syncing", _) => Report::Syncing,
         ("offline", _) => Report::Offline,
         ("error", Some(REASON_AUTH)) => Report::Unknown,
@@ -230,14 +240,16 @@ pub(super) fn report_of(view: &EngineStatusView) -> Report {
     }
 }
 
-/// The b's engine state from the same report: the flyout's "Can't reach" is the b's offline, an error on
-/// this PC its stopped.
+/// The b's engine state from the same report, while the engine runs: the flyout's "Can't reach" is the b's
+/// offline, an error on this PC its stopped, and what the flyout draws as Checking is the b's checking.
+/// Only a finished check that left nothing to do is the b's idle ("up to date").
 pub(super) fn engine_state(view: &EngineStatusView) -> EngineState {
     match report_of(view) {
         Report::Syncing => EngineState::Syncing,
         Report::Offline | Report::ServerError => EngineState::Offline,
         Report::Failed => EngineState::Error,
-        Report::Unknown | Report::Starting | Report::Idle | Report::Quiet => EngineState::Idle,
+        Report::Idle => EngineState::Idle,
+        Report::Unknown | Report::Starting | Report::Quiet => EngineState::Checking,
     }
 }
 

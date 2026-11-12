@@ -327,15 +327,15 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
         Session::of(gate, account)
     }
 
-    /// The b's inputs: the session from the handle, the engine's state from its last report ([`fold`]; the
-    /// flyout reads the same report). While nothing runs, or before the first report, the engine is idle here:
-    /// the b has no "checking" (`shell::tray`).
+    /// The b's inputs: the session from the handle, the engine's state from its last report while it runs
+    /// ([`fold`]; the flyout reads the same report). Not running is the b's "not syncing"; running, before a
+    /// finished check, its "checking": "up to date" only after the engine reported a finished check.
     fn tray_inputs(&self) -> TrayInputs {
         self.drain();
         let gate = self.engine.gate();
         let session_expired = gate != EngineGate::SignedOut && tray::session_ended(&self.engine);
         let paused = self.engine.is_paused();
-        let running = self.engine.is_syncing() && !paused;
+        let running = self.engine.is_syncing();
         let view = self.status_view();
         TrayInputs {
             signed_in: gate != EngineGate::SignedOut && !session_expired,
@@ -346,9 +346,9 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
             engine: if running {
                 tray::engine_state(&view)
             } else {
-                EngineState::Idle
+                EngineState::NotRunning
             },
-            files_remaining: view.files_remaining.filter(|_| running && view.is_syncing()),
+            files_remaining: view.files_remaining.filter(|_| running && !paused && view.is_syncing()),
             ..TrayInputs::default()
         }
     }
