@@ -16,7 +16,7 @@
 //! and caret as plain shapes. Only a scene sets `pictured`; the first press or key clears it.
 
 use rune::tok::Family;
-use rune::{Color, El, Icon, Shadow, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
+use rune::{Color, El, Icon, KeyEvent, Shadow, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
 
 use super::au::{self, Keys, type_au};
 use super::kit;
@@ -215,7 +215,15 @@ pub fn word_box(i: usize, edit: &TextEdit, input: El, state: WordState, h: f32, 
             .fill(t.field)
             .box_shadow(kit::ring_inset(t.separator))
             .focus_within_ring(2.0, 0.0, t.accent_deep),
-        WordState::Pictured => b.fill(t.card).box_shadow(kit::ring(2.0, t.accent_deep)),
+        // The 2px ring as a border two points outside the box: its corners are then two
+        // concentric round corners (13 and 11), as the board's `box-shadow: 0 0 0 2px` has them.
+        WordState::Pictured => b.fill(t.card).child(
+            el().a11y_hidden()
+                .absolute(-2.0, -2.0)
+                .size(WORD_WIDTH + 4.0, h + 4.0)
+                .radius(13.0)
+                .border(2.0, t.accent_deep),
+        ),
         WordState::NotAWord => {
             b.fill(t.field)
                 .box_shadow(kit::ring(1.5, t.red))
@@ -239,11 +247,11 @@ pub fn word_box(i: usize, edit: &TextEdit, input: El, state: WordState, h: f32, 
     }
     if state == WordState::Pictured {
         // The board's caret sits inside the word's own box (`em`, `overflow: hidden`), which
-        // cuts it at 1.1 times the 13px text: 17 tall as an element, 14.3 as drawn.
+        // cuts it short: 17 tall as an element, 14.5 as drawn (29 device pixels at 200 %, measured).
         b = b.child(
             el().a11y_hidden()
                 .absolute(33.0 + width, 8.0)
-                .size(1.5, 14.3)
+                .size(1.5, 14.5)
                 .clip_rounded(0.0)
                 .child(pictured_caret(format!("{key}-caret"), 0.0, 0.0, t)),
         );
@@ -286,6 +294,8 @@ pub struct FocusedSpec<'a> {
 /// `au::field`, for a screen whose one field holds the keyboard when it opens (DW-A28,
 /// DW-A30): the 1px deep amber line inside a 3px amber ring, on real focus and when `pictured`.
 ///
+/// `on_key` sees a key before the field does and returns `true` to take it.
+///
 /// A secure `edit` that is hidden gives the gate its bullets; one that is revealed (a backup
 /// code, shown as typed) gives it the characters while the gate records, and is measured by
 /// count (`mono` is then required).
@@ -297,6 +307,7 @@ pub fn focused_field(
     input_key: &'static str,
     on_edit: impl for<'a> Fn(&'a mut State) -> &'a mut TextEdit + 'static,
     on_change: impl Fn(&mut State, &mut Tx) + 'static,
+    on_key: fn(&mut State, &KeyEvent, &mut Tx) -> bool,
     trailing: Option<El>,
     t: &Theme,
 ) -> El {
@@ -344,6 +355,8 @@ pub fn focused_field(
         .invalid(error)
         .on_edit(on_edit)
         .on_input_change(on_change)
+        // A key the field does not need for editing (Escape) is the screen's first.
+        .on_input_key(on_key)
         .grow(1.0)
         .min_w(0.0);
     if let Some(message) = spec.error {
@@ -383,7 +396,11 @@ pub fn focused_field(
             .h_full(),
     );
     if spec.pictured && !error {
-        typed = typed.child(pictured_caret(format!("{key}-caret"), width + 1.0, 4.0, t));
+        // The caret hangs from the text's line: beside the smaller mono text the board has it a
+        // quarter point higher, on half a device pixel at 200 %. Rune draws a box from a whole
+        // device pixel, so it starts on the pixel the board's caret starts in.
+        let top = if spec.mono { 3.5 } else { 4.0 };
+        typed = typed.child(pictured_caret(format!("{key}-caret"), width + 1.0, top, t));
     }
     well = well.child(typed);
     if let Some(trailing) = trailing {

@@ -25,6 +25,8 @@ mod view_recovery;
 mod view_steps;
 
 #[cfg(test)]
+mod steps_tests;
+#[cfg(test)]
 mod tests;
 
 use std::time::Duration;

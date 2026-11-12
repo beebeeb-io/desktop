@@ -30,6 +30,12 @@ fn then(f: impl Fn(&mut Ui) + 'static) -> impl Fn(&mut State, &mut Tx) + 'static
     }
 }
 
+/// A focused field takes Escape for itself; on these screens Escape is the back link, so each
+/// field hands it to the group's keys first (`super::on_key`).
+fn escape_first(s: &mut State, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
+    ev.key == Key::Escape && super::on_key(s, ev, tx)
+}
+
 /// A link by itself on a line, centred.
 fn centered(link: El) -> El {
     el().w_full().h(15.0).center().child(link)
@@ -127,6 +133,7 @@ pub fn two_factor(ui: &Ui, backup: bool, k: &mut Keys, t: &Theme) -> El {
             BACKUP_KEY,
             |s: &mut State| &mut open(s).backup_code,
             then(Ui::backup_changed),
+            escape_first,
             None,
             t,
         ));
@@ -150,9 +157,9 @@ pub fn two_factor(ui: &Ui, backup: bool, k: &mut Keys, t: &Theme) -> El {
             CODE_DIGITS,
             |s: &mut State| &mut open(s).code,
         )
-        .on_input_key(|s: &mut State, ev: &rune::KeyEvent, _: &mut Tx| {
+        .on_input_key(|s: &mut State, ev: &rune::KeyEvent, tx: &mut Tx| {
             open(s).before_code_key(matches!(ev.key, Key::Text(_)));
-            false
+            escape_first(s, ev, tx)
         })
         .on_input_change(then(Ui::code_changed));
         c = c.child(
@@ -302,6 +309,7 @@ pub fn phrase(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             let input = au_entry::word_input(&ui.words[i], WORD_KEYS[i], i, not_a_word == Some(i), t)
                 .on_edit(edit_access(move |s: &mut State| &mut open(s).words[i]))
                 .on_input_change(then(move |ui| ui.word_changed(i)))
+                .on_input_key(escape_first)
                 // Twelve words pasted into any box fill them all.
                 .on_input_paste(move |s: &mut State, content: &rune::ClipboardContent, tx: &mut Tx| {
                     let ui = open(s);
@@ -384,6 +392,7 @@ pub fn unlock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             PASSWORD_KEY,
             |s: &mut State| &mut open(s).password,
             then(|ui| ui.pictured = None),
+            escape_first,
             Some(eye),
             t,
         ))
