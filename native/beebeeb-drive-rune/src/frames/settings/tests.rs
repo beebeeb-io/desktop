@@ -371,7 +371,11 @@ fn an_available_update_is_said_once_with_one_primary_action() {
 /// it must not: no city, no provider.
 #[test]
 fn every_built_frame_renders_and_names_no_city_and_no_provider() {
-    assert_eq!(super::FRAMES.len(), 28, "the frames the two settings lanes built");
+    assert_eq!(
+        super::FRAMES.len(),
+        31,
+        "the frames the settings lanes built (28, and Photo previews' 3)"
+    );
     for (frame, _) in super::FRAMES {
         let rt = runtime(frame);
         assert!(find(&rt, "set-main").is_some(), "{frame}");

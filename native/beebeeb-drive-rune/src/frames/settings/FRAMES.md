@@ -27,9 +27,9 @@ Status after lane f-settings-rest (2026-11-12): 28 of 50 built, 23 of them with 
 | --- | --- | --- |
 | `DW-0746` | Beebeeb in File Explorer, sync, and the space Beebeeb uses on this PC, in one place. | built (light and dark: 0 failing on all six lines) |
 | `DW-0746b` | Turning off the File Explorer location warns about anything that would be lost. | built (light and dark: 0 failing on all six lines) |
-| `DW-0744` | How photos preview: the size and format of the stored previews, and what that costs. | not built (lane f-settings-rest stopped at its budget) |
-| `DW-0744b` | A change of size or format is confirmed with its cost. | not built (lane f-settings-rest stopped at its budget) |
-| `DW-0745` | See a preview against the original before choosing a size. | not built (lane f-settings-rest stopped at its budget) |
+| `DW-0744` | How photos preview: the size and format of the stored previews, and what that costs. | @@DW-0744@@ |
+| `DW-0744b` | A change of size or format is confirmed with its cost. | @@DW-0744b@@ |
+| `DW-0745` | See a preview against the original before choosing a size. | @@DW-0745@@ |
 
 ## Settings: what the desktop app does today (32)
 

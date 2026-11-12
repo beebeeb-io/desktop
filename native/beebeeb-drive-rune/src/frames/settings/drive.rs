@@ -210,10 +210,34 @@ pub trait DriveSettings {
     fn insights(&self) -> &Insights;
     /// Ask for the insights again (DW-0783c, Try again): the page loads (DW-0783b).
     fn reload_insights(&mut self);
+    /// Thumbnails and previews (DW-0744). Engine: the preview setting, the sample's measured
+    /// weights, what previews use of the account and of this PC. Until a source answers:
+    /// unavailable, and the pane draws no value.
+    fn photo_previews(&self) -> super::previews::PhotoPreviews {
+        super::previews::PhotoPreviews::Unavailable
+    }
+    /// Make previews for photos, or not.
+    fn set_photo_previews(&mut self, _on: bool) {}
+    /// What all previews would take of the account's storage at this size and format
+    /// ("1.6 GB"), where the engine can estimate it (DW-0744b).
+    fn previews_cost(
+        &self,
+        _size: super::previews::PreviewSize,
+        _format: super::previews::PreviewFormat,
+    ) -> Option<String> {
+        None
+    }
+    /// Store the size and format and make the previews again in the background; the old
+    /// ones stay until the new ones have uploaded (DW-0744b, Apply).
+    fn apply_previews(&mut self, _size: super::previews::PreviewSize, _format: super::previews::PreviewFormat) {}
+    /// Make every preview again at the stored size and format (DW-0744, Rebuild previews).
+    fn rebuild_previews(&mut self) {}
 }
 
 /// The board's sample content for Drive's settings panes.
 pub struct BoardDrive {
+    /// Thumbnails and previews (lane settings-photo-previews).
+    photo: super::previews::BoardPreviews,
     storage: Storage,
     insights: Insights,
     sync: SyncPane,
@@ -235,6 +259,7 @@ impl BoardDrive {
         };
         let same = |path: &str, kind: &str, size: &str| large(path, path, kind, size);
         Self {
+            photo: super::previews::BoardPreviews::new(),
             storage: Storage {
                 used: "240 GB".into(),
                 total: "1 TB".into(),
@@ -402,6 +427,22 @@ impl DriveSettings for BoardDrive {
     }
     fn reload_insights(&mut self) {
         self.insights = Insights::Loading;
+    }
+    fn photo_previews(&self) -> super::previews::PhotoPreviews {
+        super::previews::PhotoPreviews::Ready(self.photo.previews.clone())
+    }
+    fn set_photo_previews(&mut self, on: bool) {
+        self.photo.previews.on = on;
+    }
+    fn previews_cost(
+        &self,
+        size: super::previews::PreviewSize,
+        format: super::previews::PreviewFormat,
+    ) -> Option<String> {
+        self.photo.cost(size, format)
+    }
+    fn apply_previews(&mut self, size: super::previews::PreviewSize, format: super::previews::PreviewFormat) {
+        self.photo.apply(size, format);
     }
 }
 
