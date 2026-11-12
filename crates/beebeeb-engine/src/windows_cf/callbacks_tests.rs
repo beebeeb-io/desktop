@@ -56,7 +56,7 @@ fn smaller_recorded_size_resolves_to_plaintext_len() {
 /// leading/trailing slash exactly as populate_placeholders does.
 #[test]
 fn safe_join_builds_path_under_root() {
-    let root = std::path::Path::new("C:\\Users\\me\\Beebeeb");
+    let root = std::path::Path::new("C:\\home\\me\\Beebeeb");
     // Leading slash + nested path → joined under the root.
     assert_eq!(
         safe_join_under_root(root, "/docs/report.txt"),
@@ -73,7 +73,7 @@ fn safe_join_builds_path_under_root() {
 /// rejected so a server-controlled path can never escape the sync root.
 #[test]
 fn safe_join_rejects_unsafe_paths() {
-    let root = std::path::Path::new("C:\\Users\\me\\Beebeeb");
+    let root = std::path::Path::new("C:\\home\\me\\Beebeeb");
     assert_eq!(safe_join_under_root(root, ""), None);
     assert_eq!(safe_join_under_root(root, "/"), None);
     assert_eq!(safe_join_under_root(root, "///"), None);

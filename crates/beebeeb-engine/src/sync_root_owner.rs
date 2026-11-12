@@ -97,9 +97,9 @@ mod tests {
 
     fn root() -> &'static Path {
         Path::new(if cfg!(windows) {
-            r"C:\Users\a\Beebeeb"
+            r"C:\home\a\Beebeeb"
         } else {
-            "/home/a/Beebeeb"
+            "/data/a/Beebeeb"
         })
     }
 

@@ -1,7 +1,7 @@
 # Night check — landed work on `v2-next`
 
 Date: 2026-11-11 (times from `date -Is`, this PC's clock).
-Worktree: `/home/guus/code/bb-worktrees/desktop-v2-night-3`, branch `night/2026-11-10-90-check-landed-work`.
+Worktree: `~/code/bb-worktrees/desktop-v2-night-3`, branch `night/2026-11-10-90-check-landed-work`.
 Base: `c5d9b699` (merge of night wave 1; merge base `03c0d06c`).
 
 Each file below was run in its **own** `bun test` process. Two files are never passed to one
@@ -51,4 +51,4 @@ line does not apply to this check.
 
 No file was red, so no production file was edited and no assertion was changed. The 26 counts
 above are the whole result; the raw per-file logs and the `date`-stamped count lines are in
-`/home/guus/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/night-check/`.
+`~/code/beebeeb.io/.claude/tasks/verification-evidence/desktop-v2/night-check/`.

@@ -271,7 +271,7 @@ fn each_change_says_where_it_is_and_when_a_failed_one_is_tried_again() {
         &db,
         "INSERT INTO operation_queue (op_id, kind, file_id, target_path, origin, source_path, attempts, max_attempts,
                                       next_retry_at, created_at)
-         VALUES ('backup', 'upload_file', 'b1', 'Backups/PC/Pictures/a.jpg', 'backup', 'C:\\Users\\me\\Pictures\\a.jpg',
+         VALUES ('backup', 'upload_file', 'b1', 'Backups/PC/Pictures/a.jpg', 'backup', 'C:\\home\\me\\Pictures\\a.jpg',
                  1, 5, ?1, 3)",
         params![NOW - 5],
     );
@@ -291,7 +291,7 @@ fn each_change_says_where_it_is_and_when_a_failed_one_is_tried_again() {
     let backup = by_id["backup"];
     assert_eq!(
         (backup.path.as_str(), backup.backup, backup.retry_at),
-        ("C:\\Users\\me\\Pictures\\a.jpg", true, None),
+        ("C:\\home\\me\\Pictures\\a.jpg", true, None),
         "due again"
     );
     assert!(!with_row.backup);
@@ -671,7 +671,7 @@ fn try_again_leaves_a_backup_and_a_recorded_completion_to_their_own_paths() {
         &db,
         "INSERT INTO operation_queue (op_id, kind, file_id, target_path, origin, source_path, attempts, max_attempts,
                                       next_retry_at, created_at)
-         VALUES ('backup', 'upload_file', 'b1', 'Backups/PC/a.jpg', 'backup', 'C:\\Users\\me\\a.jpg', 5, 5, 0, 1)",
+         VALUES ('backup', 'upload_file', 'b1', 'Backups/PC/a.jpg', 'backup', 'C:\\home\\me\\a.jpg', 5, 5, 0, 1)",
         [],
     );
     queue(&db, "completed", ("upload_version", None), (None, 5, 0), None, 2);

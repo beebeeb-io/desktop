@@ -89,13 +89,13 @@ Paths are relative to the desktop repo root.
 ## Lane, branch and conventions
 
 - **One lane, Tasks 1–12, strictly sequential**: each task consumes the previous one's types. Task 13 is lead-only, on the lead's Mac.
-- **Tree:** the lead allocates it from the head that carries this plan. The plan writes `$WT` for its root. Suggested: `git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop worktree add ~/code/bb-worktrees/desktop-1873-r4 -b fix/1873-r4-write-versions <plan commit>`.
+- **Tree:** the lead allocates it from the head that carries this plan. The plan writes `$WT` for its root. Suggested: `git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop worktree add ~/code/bb-worktrees/desktop-1873-r4 -b fix/1873-r4-write-versions <plan commit>`.
 - **Variables used in every task:**
 
 ```bash
 WT=~/code/bb-worktrees/desktop-1873-r4          # the lane's tree
-LOCK=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/scripts/coord/with-lock.sh
-EVID=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/.claude/tasks/_qa-evidence/1873
+LOCK=~/Development/Beebeeb/beebeeb.io/scripts/coord/with-lock.sh
+EVID=~/Development/Beebeeb/beebeeb.io/.claude/tasks/_qa-evidence/1873
 ```
 
 - **The test loop** (from `$WT/src-tauri`):
@@ -5351,8 +5351,8 @@ D1's log check follows plan Spec issue 14.
 - [ ] **Step 1: Gates at the head, in a fresh tree carrying only this branch**
 
 ```bash
-git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop fetch origin
-git -C /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/desktop worktree add --detach ~/code/bb-worktrees/desktop-1873-r4-gate <head of the lane's branch>
+git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop fetch origin
+git -C ~/Development/Beebeeb/beebeeb.io/repos/desktop worktree add --detach ~/code/bb-worktrees/desktop-1873-r4-gate <head of the lane's branch>
 G=~/code/bb-worktrees/desktop-1873-r4-gate
 cd $G/src-tauri && $LOCK cargo-build -- cargo test --locked > $EVID/r4-final-cargo-test.log 2>&1; echo $? > $EVID/r4-final-cargo-test.exit
 python3 ../scripts/assert-cargo-test-counts.py $EVID/r4-final-cargo-test.log --cargo-exit-code "$(cat $EVID/r4-final-cargo-test.exit)"
@@ -5386,14 +5386,14 @@ ls "$APPQA/Contents/PlugIns/"                                             # Beeb
 
 Preconditions:
 - The installed app is the `931b885` QA build (round 3's rung), its Finder location is kept, and the two old ops are still in its queue (D1). Do not reset anything before D1.
-- The local web app runs (the CLI login approval, D8 and the D8b dry run need it; `cd /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/web && bun dev`, in its own terminal).
+- The local web app runs (the CLI login approval, D8 and the D8b dry run need it; `cd ~/Development/Beebeeb/beebeeb.io/repos/web && bun dev`, in its own terminal).
 - `t.txt` and `d2-fixture.txt` exist and are materialized in `$ROOT` (from rounds 1834/1873). If not, create `t.txt` in step 4's setup and drop `d2-fixture.txt` from D7.
 
 ```bash
-cd /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/server && cargo run -p beebeeb-api --bin beebeeb-api   # its own terminal; `make dev-native` cannot start the API (progress ledger, 2026-10-09 09:13)
+cd ~/Development/Beebeeb/beebeeb.io/repos/server && cargo run -p beebeeb-api --bin beebeeb-api   # its own terminal; `make dev-native` cannot start the API (progress ledger, 2026-10-09 09:13)
 curl -sf localhost:3001/health
 launchctl setenv BB_API_BASE http://localhost:3001                         # for launchd-started helpers only; unset in step 16. The app itself is launched with the variable on its own command line (step 4): setenv does not reach a process started from the shell
-EVID=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/.claude/tasks/_qa-evidence/1873
+EVID=~/Development/Beebeeb/beebeeb.io/.claude/tasks/_qa-evidence/1873
 ROOT="$HOME/Library/CloudStorage/Beebeeb-Beebeeb"
 PSQL="psql postgresql://beebeeb:beebeeb_dev@localhost:5434/beebeeb -At"
 QA_TMP=$(mktemp -d)                                                       # scratch for big files, the D8b helper and the CLI's isolated HOME
@@ -5446,7 +5446,7 @@ ls -l "$STATE_DB"     # confirm; after step 4, also confirm the new build logged
 **The CLI session for D4b and D8b**, signed in once here with an isolated `HOME`, so the CLI never reads or writes the operator's own config (it holds a live session and master key):
 
 ```bash
-$LOCK cargo-build -- cargo build --release --manifest-path /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/cli/Cargo.toml && BB=/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/cli/target/release/bb   # built with the real HOME; never `cargo run` under the isolated one: cargo and rustup would find no toolchain
+$LOCK cargo-build -- cargo build --release --manifest-path ~/Development/Beebeeb/beebeeb.io/repos/cli/Cargo.toml && BB=~/Development/Beebeeb/beebeeb.io/repos/cli/target/release/bb   # built with the real HOME; never `cargo run` under the isolated one: cargo and rustup would find no toolchain
 HOME=$QA_TMP $BB --api http://localhost:3001 login        # approve in the local web app, signed in as the test account
 CFG="$QA_TMP/Library/Application Support/beebeeb/config.json"   # dirs::config_dir under the isolated HOME (repos/cli/src/config.rs:30-33)
 TOKEN=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_token"])' "$CFG")
@@ -5653,7 +5653,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-beebeeb-core = { path = "/Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/core/beebeeb-core" }
+beebeeb-core = { path = "~/Development/Beebeeb/beebeeb.io/repos/core/beebeeb-core" }
 base64 = "0.22"
 
 [workspace]

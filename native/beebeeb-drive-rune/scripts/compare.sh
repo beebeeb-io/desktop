@@ -29,7 +29,7 @@ case "$THEME" in light|dark) ;; *) usage ;; esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CRATE_DIR="$(dirname "$SCRIPT_DIR")"
 STEM="$FRAME_ID"; [ "$THEME" = dark ] && STEM="$FRAME_ID-dark"
-EVIDENCE_DIR="${EVIDENCE_DIR:-/home/guus/code/beebeeb.io/.claude/tasks/verification-evidence/2445/native}"
+EVIDENCE_DIR="${EVIDENCE_DIR:-$HOME/code/beebeeb.io/.claude/tasks/verification-evidence/2445/native}"
 OUT_DIR="$EVIDENCE_DIR/$STEM"
 BOARD_PNG="$CRATE_DIR/golden/$STEM-board.png"
 BOARD_JSON="$CRATE_DIR/golden/$STEM.json"
@@ -48,7 +48,7 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/code/bb-worktrees/target-nati
 BIN="$CARGO_TARGET_DIR/debug/beebeeb-drive"
 cd "$CRATE_DIR"
 if [ "$BUILD" = 1 ]; then
-    BUILD_SLOT="${BUILD_SLOT:-/home/guus/code/beebeeb.io/scripts/coord/build-slot.sh}"
+    BUILD_SLOT="${BUILD_SLOT:-$HOME/code/beebeeb.io/scripts/coord/build-slot.sh}"
     [ -x "$BUILD_SLOT" ] || die "no build-slot script at $BUILD_SLOT (set BUILD_SLOT, or pass --no-build after your own build)"
     "$BUILD_SLOT" -- cargo build --locked --bin beebeeb-drive || die "the build failed"
 fi
