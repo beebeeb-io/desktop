@@ -310,11 +310,11 @@ pub fn window(
     col()
         .key("window")
         .role("window")
-        .label("Beebeeb Drive")
+        .label(s.identity.main_window_title())
         .w_full()
         .h_full()
         .fill(t.bg)
-        .child(caption::caption_bar(t, cx))
+        .child(caption::caption_bar(s.identity.main_window_title(), t, cx))
         .child(
             row()
                 .key("body")

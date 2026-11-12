@@ -76,7 +76,7 @@ pub fn window(s: &State, cx: &mut Cx<State>, group: FrameGroup) -> El {
         body = body
             .child(ui::sidebar::sidebar(s, &t))
             .child(el().key("sidebar-separator").w(hairline).h_full().fill(t.separator));
-        ui::caption::caption_bar(&t, cx)
+        ui::caption::caption_bar(s.identity.main_window_title(), &t, cx)
     } else {
         cx.caption_color(if cx.system_dark() {
             rune::Color::WHITE

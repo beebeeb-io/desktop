@@ -250,7 +250,7 @@ impl EngineActions for FixtureEngine {
     fn open_in_file_explorer(&self) -> Result<(), ActionError> {
         let mut state = self.lock();
         if !(state.inputs.signed_in && state.inputs.explorer_ready) {
-            return Err(ActionError::NotAvailable("Beebeeb is not in File Explorer"));
+            return Err(ActionError::NotAvailable("the app is not in File Explorer"));
         }
         // The fixture has no folder to open; it records that it was asked.
         state.calls.push(FixtureCall::OpenInFileExplorer);
