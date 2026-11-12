@@ -10,18 +10,25 @@ Plain `makensis`, no Tauri CLI. Spec: `docs/superpowers/specs/2026-11-11-native-
 | `verify-install.ps1` | Read-only checks of an installed or uninstalled state; ends with a count line. |
 | `rehearsal/serve.ts`, `rehearsal/db-fingerprint.ts` | Helpers for the upgrade rehearsal below. |
 
-**Status: written on Linux, never run on Windows.** A lane cannot run Windows binaries; every command below is for
-the lead, on the Windows host, under the native-windows lock. Expect to fix small things on the first run and
-record them in the PR.
+**Status.** Section A and native check 1 ran on Windows for the first time on 2026-11-12, on the build VM
+`bb-build-win11` (Windows 11 23H2, beside an installed Beebeeb 0.8.25 that was not running, so step 8 had nothing
+to compare): steps 2 to 7 printed what they say below, and the scripts needed no change. That VM has no interactive
+desktop, so the app starts there but draws no window (step 5). Native checks 2 to 4 and section B have never run.
 
-Needs: NSIS 3.11 and `nsis_tauri_utils.dll` 0.5.3. Both are in `%LOCALAPPDATA%\tauri\NSIS` on a PC that has built
-0.8.x (the lead's has: `C:\Users\GuusLangelaar\AppData\Local\tauri\NSIS`). The plugin, `Bin\makensis.exe` and the
-stub `Stubs\lzma_solid-x86-unicode` are checked by SHA-256 (NSIS 3.11 as released): a release build refuses any
-other file, a test build prints a `NOTE` line and goes on.
+Needs: NSIS 3.11 and `nsis_tauri_utils.dll` 0.5.3. On a PC that has built 0.8.x both are in
+`%LOCALAPPDATA%\tauri\NSIS`, where the script looks by default. Elsewhere: NSIS 3.11 from its official release, the
+plugin from `github.com/tauri-apps/nsis-tauri-utils` (release `nsis_tauri_utils-v0.5.3`) in
+`<NSIS folder>\Plugins\x86-unicode\additional\`, and `-NsisDir <NSIS folder>` on the command line (the build VM:
+`-NsisDir 'C:\Program Files (x86)\NSIS'`). The plugin, `Bin\makensis.exe` and the stub `Stubs\lzma_solid-x86-unicode`
+are checked by SHA-256 (NSIS 3.11 as released): a release build refuses any other file, a test build prints a `NOTE`
+line and goes on. The output folder `out\` is ignored by git.
 
 **A test build shares nothing with the real Beebeeb (review P2-4).** It is `Beebeeb Test`, `io.beebeeb.app.test`,
-`beebeeb-desktop-test.exe`: its own install folder, data folder (`%LOCALAPPDATA%\io.beebeeb.app.test`), config and
-credentials. The installer looks only at processes of its own binary name and **never ends a process**: it asks a
+`beebeeb-desktop-test.exe`: its own install folder, data folder (`%LOCALAPPDATA%\io.beebeeb.app.test`), config
+(`%APPDATA%\beebeeb-test\desktop.toml`) and credentials (`io.beebeeb.app.test/…`). It has no server of its own: its
+API base is the engine's built-in default, production (`https://api.beebeeb.io`; the closed loopback port is a
+unit-test build's only), and only a dev build (a debug build, or the `dev-tools` feature) takes `--api-base`.
+The installer looks only at processes of its own binary name and **never ends a process**: it asks a
 running native app to quit (`--quit-for-update`), waits 20 seconds, then says "still running" and offers Retry or
 Cancel. Which app a binary is, is decided when it is built (`native\beebeeb-drive-rune\build.rs`):
 `BEEBEEB_APP_IDENTIFIER=io.beebeeb.app.test`, or the variable unset, gives the test app; `io.beebeeb.app` gives the
@@ -60,6 +67,8 @@ Start-Process -FilePath $installer -ArgumentList '/S' -Wait
 .\verify-install.ps1 -Mode test -Version 0.9.0 -Phase installed
 
 # 5. Start it once, look at it, quit it. Then: no WebView2 process may belong to it, and no profile may appear.
+#    Without an interactive desktop (an SSH session, the build VM) it starts and stays up, but Rune cannot create
+#    its windows ("the window's GPU surface refused its configuration"): quit it by its process id there.
 Start-Process "$env:LOCALAPPDATA\Beebeeb Test\beebeeb-desktop-test.exe"
 Start-Sleep 10
 @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -like '*io.beebeeb.app.test*' }).Count   # must print 0
@@ -79,7 +88,7 @@ Start-Process -FilePath "$env:LOCALAPPDATA\Beebeeb Test\uninstall.exe" -Argument
 
 1. Step 2 with a binary built with `BEEBEEB_APP_IDENTIFIER=io.beebeeb.app` must print `FAILED the binary was not
    built as the test app` and exit 1 (the guard can fail). A build with `BEEBEEB_APP_IDENTIFIER=banana` must not
-   compile at all (`is not an app`).
+   compile at all (`is not an app`). Both seen on 2026-11-12 (cargo exit 101 for `banana`).
 2. With the test app running, run the installer without `/S`: after about 20 seconds it must show "Beebeeb Test is
    still running" with Retry and Cancel, and `Get-Process beebeeb-desktop-test` must still list the same id.
 3. (Also with `/S`, and also over an MSI install: the scan runs in `.onInit` since Delta 3.) The version refusal: `reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Beebeeb Test" /v
@@ -94,11 +103,15 @@ Start-Process -FilePath "$env:LOCALAPPDATA\Beebeeb Test\uninstall.exe" -Argument
 Prove the checker can fail before trusting it: run step 4 with `-Version 9.9.9` (must print `FAIL  uninstall entry:
 DisplayVersion` and exit 1), and step 7 while the app is still installed (must fail 5 of 6).
 
-The silent uninstall keeps the data folder (`%LOCALAPPDATA%\io.beebeeb.app.test`) on purpose. The real Beebeeb's
-files and registry entries (`%LOCALAPPDATA%\Beebeeb`, `io.beebeeb.app`) are not touched by any step, but a running
-real Beebeeb is closed (see above), and the two builds share the credentials
-(`io.beebeeb.app/...` in Credential Manager) and `%APPDATA%\beebeeb\desktop.toml`, as the Tauri test build does
-today (spec §3).
+What a silent uninstall leaves, on purpose: the settings file `%APPDATA%\beebeeb-test\desktop.toml` (written at the
+first start), the data folder `%LOCALAPPDATA%\io.beebeeb.app.test` once there is one (a signed-out start that draws
+no window writes none), and the install-location key `HKCU\Software\beebeeb\Beebeeb Test`, as the 0.8.x
+uninstaller leaves `HKCU\Software\beebeeb\Beebeeb`. Credentials and an Explorer sync root, once the test app has
+them, stay too (spec §5). No step changes or closes anything of the real Beebeeb (`%LOCALAPPDATA%\Beebeeb`,
+`%LOCALAPPDATA%\io.beebeeb.app`, `%APPDATA%\beebeeb`, `%APPDATA%\io.beebeeb.app`, its registry keys, shortcuts and
+`io.beebeeb.app/…` credentials): the two builds share no name, except the parent key `HKCU\Software\beebeeb` that
+holds one subkey each (the uninstaller removes the parent only when it is empty, and only with "Delete the
+application data" ticked).
 
 ## B. Upgrade rehearsal: a Tauri build updates itself to the native build
 
