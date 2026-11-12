@@ -109,7 +109,8 @@ if ($Phase -eq 'artcraft') {
     $out = $env:BB_OUT
     if (-not $out) { throw 'BB_OUT is not set (run through remote-build)' }
     $log = "$out\artcraft.log"
-    function Say([string]$m) { Write-Output $m; Add-Content -LiteralPath $log -Value $m }
+    # Write-Host, not Write-Output: Run-Cli returns an exit code, and anything on the output stream would join it.
+    function Say([string]$m) { Write-Host $m; Add-Content -LiteralPath $log -Value $m }
     $Apps = @(
         @{ n = 'wordcraft'; v = '0.18.1'; sha = '257f670514057cb14967b88c85ac82d165da43ee7671e185acead61420af0389' },
         @{ n = 'gridcraft'; v = '0.19.1'; sha = '0b4bf8535f4904fac654326a360ff6d74ea6f4d184a8257c106388fafe74c9ac' },
