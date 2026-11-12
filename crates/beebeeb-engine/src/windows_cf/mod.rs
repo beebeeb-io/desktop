@@ -323,41 +323,6 @@ pub async fn wait_for_credential_release() -> std::result::Result<(), String> {
     Err("Sync workers are still stopping. Retry locking/signing out before switching accounts.".into())
 }
 
-pub fn unregister_sync_root(root: &std::path::Path) -> anyhow::Result<()> {
-    let wide: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
-    if let Err(error) = unsafe { CfUnregisterSyncRoot(PCWSTR(wide.as_ptr())) } {
-        use windows::Win32::Foundation::{ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT, ERROR_NOT_A_CLOUD_FILE};
-        if error.code() != HRESULT::from_win32(ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT.0)
-            && error.code() != HRESULT::from_win32(ERROR_NOT_A_CLOUD_FILE.0)
-        {
-            return Err(error.into());
-        }
-    }
-    // Prove the Cloud Files registration itself is gone, independently of the
-    // Explorer/WinRT registration and its per-user registry metadata.
-    let mut buffer = vec![0u64; 1024];
-    let result = unsafe {
-        CfGetSyncRootInfoByPath(
-            PCWSTR(wide.as_ptr()),
-            CF_SYNC_ROOT_INFO_BASIC,
-            buffer.as_mut_ptr().cast(),
-            (buffer.len() * 8) as u32,
-            None,
-        )
-    };
-    match result {
-        Err(error)
-            if error.code()
-                == HRESULT::from_win32(windows::Win32::Foundation::ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT.0)
-                || error.code() == HRESULT::from_win32(windows::Win32::Foundation::ERROR_NOT_A_CLOUD_FILE.0) =>
-        {
-            Ok(())
-        }
-        Err(error) => Err(anyhow::anyhow!("Could not verify Cloud Files unregister: {error}")),
-        Ok(()) => Err(anyhow::anyhow!("Cloud Files registration remains after unregister")),
-    }
-}
-
 /// Internal accessor for the daemon's tokio runtime handle, used by the
 /// fetch callback to bridge sync→async. `None` if [`connect_root`] never ran
 /// (e.g. registration failed before the handle was stashed) — the
@@ -382,7 +347,7 @@ pub fn register_sync_root(identity: &'static EngineIdentity, sync_root_path: &st
 
 /// [`register_sync_root`] as `provider`, with the Win32 hydration policy `hydration` (a test passes
 /// `PARTIAL` to stand for a 0.8.21 install).
-pub fn register_sync_root_with(
+pub(crate) fn register_sync_root_with(
     sync_root_path: &std::path::Path,
     provider: &SyncProvider,
     hydration: CF_HYDRATION_POLICY_PRIMARY,
@@ -528,7 +493,7 @@ pub fn register_shell_sync_root(identity: &'static EngineIdentity, sync_root: &s
 }
 
 /// [`register_shell_sync_root`] as `provider` (a test root registers as [`QA_PROVIDER`]).
-pub fn register_shell_sync_root_as(sync_root: &std::path::Path, provider: &SyncProvider) -> anyhow::Result<()> {
+pub(crate) fn register_shell_sync_root_as(sync_root: &std::path::Path, provider: &SyncProvider) -> anyhow::Result<()> {
     use windows::Foundation::Collections::IVector;
     use windows::Security::Cryptography::CryptographicBuffer;
     use windows::Storage::Provider::{

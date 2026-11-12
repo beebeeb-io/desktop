@@ -610,3 +610,46 @@ fn the_flyout_draws_the_tray_lanes_frame_in_the_state_the_b_shows() {
     assert!(texts.iter().any(|t| t == "Up to date"), "{texts:?}");
     assert!(!texts.iter().any(|t| t == "Flyout"), "{texts:?}");
 }
+
+/// The real engine's wiring in the poll: what the sign-in screens queued is taken on the next frame (not
+/// left to grow), and a gate that opens reads the folder again from the root and asks for sync, once.
+#[test]
+fn the_poll_drains_the_sign_in_queue_and_a_gate_that_opens_reloads_and_starts_sync() {
+    use crate::frames::signin::Intent as SignIn;
+    let engine = Arc::new(FixtureEngine::signed_out());
+    let platform = Arc::new(FakePlatform::default());
+    let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform)));
+    let starts = |engine: &FixtureEngine| engine.calls().iter().filter(|c| **c == FixtureCall::StartSync).count();
+    rt.update(|s, _| {
+        s.selected = Some(2);
+        s.signin
+            .as_mut()
+            .expect("the sign-in screens")
+            .leave(SignIn::CreateAccount);
+    });
+    rt.frame(1.0);
+    rt.update(|s, _| {
+        assert!(
+            s.signin.as_mut().unwrap().take_intents().is_empty(),
+            "the poll took the intent"
+        );
+        assert!(!drain_signin_intents(s), "nothing left to take");
+        assert_eq!(s.selected, Some(2), "no gate change, nothing reloaded");
+    });
+    assert_eq!(starts(&engine), 0, "signed out: sync is not asked for");
+
+    engine.set_gate(GateState::Ready);
+    rt.frame(2.0);
+    rt.update(|s, _| {
+        assert_eq!(s.shell.app.gate(), GateState::Ready);
+        assert_eq!(s.selected, None, "the folder was read again under the new gate");
+        assert!(s.list_error.is_none());
+    });
+    assert_eq!(starts(&engine), 1);
+    rt.frame(3.0);
+    assert_eq!(starts(&engine), 1, "once per change of the gate, not once per frame");
+
+    engine.set_gate(GateState::SignedOut);
+    rt.frame(4.0);
+    assert_eq!(starts(&engine), 1, "a gate that closes starts nothing");
+}

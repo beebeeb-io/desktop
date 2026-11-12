@@ -306,7 +306,18 @@ pub fn request(s: &mut State, intent: Intent) -> Outcome {
 /// the sidebar already routes. A ui lane that calls [`dispatch`] itself makes this a no-op.
 pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // The open file: the engine's answers, and a route that left it (lane f-viewers).
-    let viewer = crate::frames::viewers::poll(s, tx);
+    let mut changed = crate::frames::viewers::poll(s, tx);
+    // The engine's answers that arrive between presses (a sign-in that took a second, the other device).
+    changed |= crate::frames::signin::poll(s, tx);
+    // What the sign-in screens asked the shell for.
+    changed |= drain_signin_intents(s);
+    // The session and the tray: the engine may have changed since the last frame.
+    let gate_before = s.shell.app.gate();
+    changed |= s.shell.refresh();
+    if s.shell.app.gate() != gate_before {
+        on_gate_change(s);
+        changed = true;
+    }
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {
@@ -315,16 +326,54 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
             tx.resize_window_instant(size);
         }
         s.shell.window_kind = kind;
+        changed = true;
     }
-    if s.sidebar_section == s.shell.sidebar_seen {
-        return viewer;
+    if s.sidebar_section != s.shell.sidebar_seen {
+        let outcome = s
+            .shell
+            .app
+            .apply(Event::Navigate(Route::section(section_for(s.sidebar_section))));
+        sync_sidebar(s);
+        changed |= outcome == Outcome::Changed;
     }
-    let outcome = s
-        .shell
-        .app
-        .apply(Event::Navigate(Route::section(section_for(s.sidebar_section))));
-    sync_sidebar(s);
-    outcome == Outcome::Changed || viewer
+    changed
+}
+
+/// Takes every intent the sign-in screens queued (`signin::Ui::take_intents`) and acts on it. A finished
+/// sign-in is not routed from here: the session's gate is the one authority on which screen shows, and
+/// [`on_gate_change`] runs when it opens. What the shell cannot do yet is logged, never dropped silently.
+/// `true`: something was taken.
+pub fn drain_signin_intents(s: &mut State) -> bool {
+    use crate::frames::signin::Intent as SignIn;
+    let Some(intents) = s.signin.as_mut().map(crate::frames::signin::Ui::take_intents) else {
+        return false;
+    };
+    for intent in &intents {
+        match intent {
+            // The session is read on this same poll; the gate decides (Ready opens the window on Files).
+            SignIn::Next(_) => {}
+            SignIn::CreateAccount => log("NotWired(sign-in: create an account)"),
+            SignIn::WriteToSupport => log("NotWired(sign-in: write to support)"),
+            SignIn::CancelBilling | SignIn::EraseAllFiles | SignIn::DeleteAccount => {
+                log("NotWired(sign-in: an account dialog)")
+            }
+        }
+    }
+    !intents.is_empty()
+}
+
+/// The session's gate changed (a sign-in finished, the vault was locked, the account signed out). The
+/// folder the window holds was read under the old gate: read it again from the root, so a sign-in shows the
+/// account's files and a sign-out shows none of them. A gate that opened also starts sync (refused, and
+/// logged, while another agent holds the profile).
+fn on_gate_change(s: &mut State) {
+    let (listing, list_error) = super::state::load(s.source.as_ref(), None);
+    s.listing = listing;
+    s.list_error = list_error;
+    s.selected = None;
+    if s.shell.app.gate() == super::app::GateState::Ready {
+        s.shell.start_sync();
+    }
 }
 
 /// The shell's own keys, then the current frame's (DW-1232, DW-1233: Windows' words).

@@ -95,7 +95,7 @@ impl Drop for QaRoot {
             // SAFETY: the key of the connection made in `connect`, disconnected once.
             let _ = unsafe { CfDisconnectSyncRoot(key) };
         }
-        let _ = crate::windows_cf::unregister_sync_root(&self.root);
+        let _ = crate::windows_cf::unregister_any_sync_root(&self.root);
     }
 }
 

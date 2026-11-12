@@ -11,10 +11,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use beebeeb_engine::app::{Engine, EngineConfig};
+use beebeeb_engine::app::{CredentialStores, Engine, EngineConfig};
 use beebeeb_engine::config::DesktopConfig;
 use beebeeb_engine::engine_bridge::FinderStagingBases;
 use beebeeb_engine::host::ChannelHost;
+use beebeeb_engine::identity::EngineIdentity;
 use beebeeb_engine::identity::{REAL, TEST};
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::{local_state, state_paths};
@@ -266,4 +267,65 @@ fn the_engine_handle_opens_for_this_identity_only() {
         open(&REAL).is_err(),
         "a handle for the real app over the test build's state dir"
     );
+}
+
+/// Credential stores that write down which app each store was asked for.
+#[derive(Default)]
+struct AskedFor {
+    inner: MemoryCredentials,
+    identities: std::sync::Arc<std::sync::Mutex<Vec<&'static EngineIdentity>>>,
+}
+
+impl CredentialStores for AskedFor {
+    type Store = <MemoryCredentials as CredentialStores>::Store;
+    fn for_account(&self, identity: &'static EngineIdentity, account_id: &str) -> Self::Store {
+        self.identities.lock().unwrap().push(identity);
+        self.inner.for_account(identity, account_id)
+    }
+}
+
+/// Review of #309, P2-1: the handle took its identity twice (`Engine::open(&TEST, …, PlatformCredentials(&REAL))`
+/// was accepted and read the real app's credentials). Now the stores carry none: every store the handle asks for
+/// is asked for with the handle's own identity, and the platform stores cannot be built with one.
+#[test]
+#[cfg(not(target_os = "macos"))] // the test build does not open on a Mac (the test above)
+fn the_handle_names_its_own_identity_to_the_credential_stores() {
+    let (_, state) = opened_as_test();
+    let stores = AskedFor::default();
+    let asked = stores.identities.clone();
+    let (host, _messages) = ChannelHost::new(|| {});
+    let config = EngineConfig {
+        account_id: "acct-stores".to_string(),
+        state_dir: state.clone(),
+        api_base: "http://127.0.0.1:9".to_string(),
+    };
+    let engine = Engine::open(&TEST, config, host, stores).expect("opens as the test build");
+    let _ = engine.restore();
+    let _ = engine.gate();
+    let asked = asked.lock().unwrap();
+    assert!(!asked.is_empty(), "restore reads the credential store");
+    assert!(
+        asked.iter().all(|identity| std::ptr::eq(*identity, &TEST)),
+        "a store was asked for with another identity than the handle's"
+    );
+}
+
+/// The platform stores are a unit value: there is no identity to hand them, so none can differ from the handle's.
+#[test]
+fn the_platform_credential_stores_carry_no_identity() {
+    let app = include_str!("../src/app.rs").replace("\r\n", "\n");
+    assert!(
+        app.contains("\npub struct PlatformCredentials;\n"),
+        "PlatformCredentials grew a field"
+    );
+    assert!(
+        app.contains("fn for_account(&self, identity: &'static EngineIdentity, account_id: &str) -> Self::Store;"),
+        "the trait no longer takes the handle's identity per call"
+    );
+    assert!(
+        app.contains("AuthVault::new(self.stores.for_account(self.identity, &self.config.account_id))"),
+        "the handle's one vault constructor passes its own identity"
+    );
+    assert_eq!(app.matches(".for_account(").count(), 1, "one place asks the stores");
+    let _unit: beebeeb_engine::app::PlatformCredentials = beebeeb_engine::app::PlatformCredentials;
 }

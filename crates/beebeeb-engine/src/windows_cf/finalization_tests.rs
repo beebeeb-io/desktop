@@ -202,7 +202,7 @@ impl Drop for Root {
                 set_attributes(&entry.path(), 0x80);
             }
         }
-        let _ = crate::windows_cf::unregister_sync_root(&self.path);
+        let _ = crate::windows_cf::unregister_any_sync_root(&self.path);
     }
 }
 

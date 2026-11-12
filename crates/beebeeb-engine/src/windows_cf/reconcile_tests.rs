@@ -166,7 +166,7 @@ impl Drop for Root {
             // SAFETY: the key of the connection made in `connected`, disconnected once.
             let _ = unsafe { CfDisconnectSyncRoot(key) };
         }
-        crate::windows_cf::unregister_sync_root(&self.root).unwrap();
+        crate::windows_cf::unregister_any_sync_root(&self.root).unwrap();
     }
 }
 

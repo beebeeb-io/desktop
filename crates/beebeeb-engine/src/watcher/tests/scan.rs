@@ -125,7 +125,7 @@ fn round6_real_watcher_uses_queued_file_identity() {
     let actual =
         unsafe { std::slice::from_raw_parts(info.FileIdentity.as_ptr(), info.FileIdentityLength as usize) }.to_vec();
     drop(file);
-    crate::windows_cf::unregister_sync_root(&root).unwrap();
+    crate::windows_cf::unregister_any_sync_root(&root).unwrap();
     for op in ops.iter() {
         if let Some(payload) = &op.payload_path {
             fs::remove_file(payload).unwrap();
@@ -174,7 +174,7 @@ fn a_folder_made_on_this_pc_gets_no_cloud_files_identity() {
         )
     };
     drop(handle);
-    crate::windows_cf::unregister_sync_root(&root).unwrap();
+    crate::windows_cf::unregister_any_sync_root(&root).unwrap();
     assert!(id.is_some(), "the folder gets a row and a create");
     let error = info.expect_err("a folder made on this PC is no Cloud Files placeholder");
     assert_eq!(error.code().0 as u32, ERROR_NOT_A_CLOUD_FILE, "{error}");
