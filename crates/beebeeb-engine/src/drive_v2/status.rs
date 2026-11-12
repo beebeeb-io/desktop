@@ -18,70 +18,70 @@ use crate::transfer_progress::{ActiveTransferDto, Direction};
 /// The engine snapshot fields the tray flyout, the banners, Backups and the getting-ready strip draw.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct DriveStatus {
+pub struct DriveStatus {
     /// Signed out, or the session expired: sync and backups have stopped (banner DW-0101).
-    pub(crate) signed_out: bool,
+    pub signed_out: bool,
     /// Whether this PC's connection is metered. `None`: this build does not read the connection's cost.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) metered: Option<bool>,
+    pub metered: Option<bool>,
     /// Changes the queue stopped retrying (the flyout's "Sync stopped").
-    pub(crate) stopped_files: u32,
+    pub stopped_files: u32,
     /// Items that can't sync: stopped changes plus files that need a decision (banner DW-0103).
-    pub(crate) sync_problems: u32,
+    pub sync_problems: u32,
     /// Items that couldn't back up: stopped backup changes plus backups that stopped (banner DW-0104).
-    pub(crate) backup_problems: u32,
+    pub backup_problems: u32,
     /// Upload bytes per second now; absent while nothing uploads or before a rate is measured.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) upload_bps: Option<u64>,
+    pub upload_bps: Option<u64>,
     /// Seconds the uploads in flight take at that rate; absent without a rate.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) eta_seconds: Option<u64>,
+    pub eta_seconds: Option<u64>,
     /// Files in Beebeeb as this PC's list has them; absent before the first list.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) file_count: Option<u64>,
+    pub file_count: Option<u64>,
     /// Free bytes on the disk that holds the sync folder (DW-1517); absent when unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) free_space_bytes: Option<u64>,
-    pub(crate) backup: BackupView,
+    pub free_space_bytes: Option<u64>,
+    pub backup: BackupView,
     /// The engine's first check of the file list while it runs (the getting-ready strip, DW-1107).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) listing: Option<ListingProgress>,
+    pub listing: Option<ListingProgress>,
     /// Files that changed in two places and wait for a decision (the conflict dialog, DW-0429).
-    pub(crate) conflicts: Vec<ConflictRef>,
+    pub conflicts: Vec<ConflictRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub(crate) struct ListingProgress {
-    pub(crate) done: u64,
-    pub(crate) total: u64,
+pub struct ListingProgress {
+    pub done: u64,
+    pub total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct ConflictRef {
-    pub(crate) id: String,
-    pub(crate) name: String,
+pub struct ConflictRef {
+    pub id: String,
+    pub name: String,
 }
 
 /// This PC's backup, for Backups' "Last backup" and "Status" columns.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct BackupView {
-    pub(crate) state: BackupState,
+pub struct BackupView {
+    pub state: BackupState,
     /// When the newest pass of a folder that is on finished (ISO 8601); absent before the first pass.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) last_backup_at: Option<String>,
+    pub last_backup_at: Option<String>,
     /// This PC's folder in Backups (its name as the server layout has it); absent before the layout is known.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) device_folder: Option<String>,
+    pub device_folder: Option<String>,
     /// Folders that are on.
-    pub(crate) folders_on: u32,
+    pub folders_on: u32,
     /// Folders that are on but have not finished a first pass.
-    pub(crate) folders_getting_ready: u32,
+    pub folders_getting_ready: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum BackupState {
+pub enum BackupState {
     /// No folder of this PC is backed up.
     #[default]
     Off,
@@ -95,7 +95,7 @@ pub(crate) enum BackupState {
 
 /// `backup_view`: `enabled` are the folders that are on, `marks` each one's last pass (ms, server clock), `stops`
 /// how many backups stopped.
-pub(crate) fn backup_view(enabled: &[&str], marks: &HashMap<String, Option<i64>>, stops: usize) -> BackupView {
+pub fn backup_view(enabled: &[&str], marks: &HashMap<String, Option<i64>>, stops: usize) -> BackupView {
     let passes: Vec<i64> = enabled
         .iter()
         .filter_map(|k| marks.get(*k).copied().flatten())
@@ -123,7 +123,7 @@ pub(crate) fn backup_view(enabled: &[&str], marks: &HashMap<String, Option<i64>>
 
 /// Upload rate and time left from the transfers in flight. Only uploads count (the flyout's figure is the upload);
 /// a rate of 0 is "not measured yet", so both stay absent.
-pub(crate) fn upload_rate(board: &[ActiveTransferDto]) -> (Option<u64>, Option<u64>) {
+pub fn upload_rate(board: &[ActiveTransferDto]) -> (Option<u64>, Option<u64>) {
     let ups: Vec<&ActiveTransferDto> = board
         .iter()
         .filter(|t| t.direction == Direction::Up && !t.failed)
@@ -137,7 +137,7 @@ pub(crate) fn upload_rate(board: &[ActiveTransferDto]) -> (Option<u64>, Option<u
 }
 
 /// The free bytes of the disk whose mount point is the longest prefix of `path`.
-pub(crate) fn free_space_for(path: &Path, disks: &[(PathBuf, u64)]) -> Option<u64> {
+pub fn free_space_for(path: &Path, disks: &[(PathBuf, u64)]) -> Option<u64> {
     disks
         .iter()
         .filter(|(mount, _)| path.starts_with(mount))
@@ -148,37 +148,37 @@ pub(crate) fn free_space_for(path: &Path, disks: &[(PathBuf, u64)]) -> Option<u6
 /// One row of the Uploads panel (DW-0427) and of the live per-row progress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TransferRow {
+pub struct TransferRow {
     /// The file id for a moving row, the queue's change id for a waiting or stopped one.
-    pub(crate) id: String,
+    pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) file_id: Option<String>,
-    pub(crate) name: String,
+    pub file_id: Option<String>,
+    pub name: String,
     /// The folder it goes to, `""` at the root.
-    pub(crate) folder: String,
-    pub(crate) direction: TransferDirection,
-    pub(crate) state: TransferState,
-    pub(crate) bytes: u64,
+    pub folder: String,
+    pub direction: TransferDirection,
+    pub state: TransferState,
+    pub bytes: u64,
     /// Total bytes; absent when the engine has not learned it yet.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) total: Option<u64>,
+    pub total: Option<u64>,
     /// Why it stopped, in the board's plain words; only on a stopped row.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) reason: Option<&'static str>,
+    pub reason: Option<&'static str>,
     /// Try again applies (the queue's own rule).
-    pub(crate) retryable: bool,
+    pub retryable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum TransferDirection {
+pub enum TransferDirection {
     Up,
     Down,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum TransferState {
+pub enum TransferState {
     Moving,
     Waiting,
     Stopped,
@@ -193,7 +193,7 @@ fn leaf(path: &str) -> (String, String) {
 }
 
 /// Why a change did not sync, in plain words (DW-0428: "never a raw error code"). `None` when it has not stopped.
-pub(crate) fn reason_for(change: &UnsentChange) -> Option<&'static str> {
+pub fn reason_for(change: &UnsentChange) -> Option<&'static str> {
     if let Some(block) = change.blocked {
         return Some(match block {
             "superseded" => "A newer version is already in Beebeeb.",
@@ -215,13 +215,13 @@ pub(crate) fn reason_for(change: &UnsentChange) -> Option<&'static str> {
 }
 
 /// A change counts as a problem when it stopped, is blocked or parked, or was uploaded but not marked as synced.
-pub(crate) fn is_problem(change: &UnsentChange) -> bool {
+pub fn is_problem(change: &UnsentChange) -> bool {
     change.blocked.is_some() || change.parked || matches!(change.group.as_str(), "gave_up" | "not_marked_synced")
 }
 
 /// The Uploads panel: what moves now (the transfer board's uploads), then the queue's changes not sent yet. A
 /// change whose file is moving is shown once, as moving.
-pub(crate) fn transfer_rows(board: &[ActiveTransferDto], queue: &[UnsentChange]) -> Vec<TransferRow> {
+pub fn transfer_rows(board: &[ActiveTransferDto], queue: &[UnsentChange]) -> Vec<TransferRow> {
     let mut rows: Vec<TransferRow> = board
         .iter()
         .filter(|t| t.direction != Direction::Stream)
@@ -285,22 +285,22 @@ pub(crate) fn transfer_rows(board: &[ActiveTransferDto], queue: &[UnsentChange])
 /// One Sync history problem row (DW-0428): what did not sync and why, with Try again where it applies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SyncProblem {
+pub struct SyncProblem {
     /// The queue's change id: what `drive_sync_retry` takes.
-    pub(crate) id: String,
+    pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) file_id: Option<String>,
-    pub(crate) name: String,
-    pub(crate) folder: String,
-    pub(crate) reason: &'static str,
-    pub(crate) retryable: bool,
-    pub(crate) backup: bool,
+    pub file_id: Option<String>,
+    pub name: String,
+    pub folder: String,
+    pub reason: &'static str,
+    pub retryable: bool,
+    pub backup: bool,
     /// When it was queued (ISO 8601); absent when not recorded.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) at: Option<String>,
+    pub at: Option<String>,
 }
 
-pub(crate) fn sync_problems(queue: &[UnsentChange]) -> Vec<SyncProblem> {
+pub fn sync_problems(queue: &[UnsentChange]) -> Vec<SyncProblem> {
     queue
         .iter()
         .filter(|c| is_problem(c))
@@ -323,18 +323,18 @@ pub(crate) fn sync_problems(queue: &[UnsentChange]) -> Vec<SyncProblem> {
 /// One Available-offline row (DW-0715): a kept item that no kept folder holds, with a folder's file count and bytes.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct OfflineEntry {
-    pub(crate) item: DriveItem,
+pub struct OfflineEntry {
+    pub item: DriveItem,
     /// Files inside a folder (all levels); absent for a file.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) items: Option<u64>,
+    pub items: Option<u64>,
     /// The file's size, or the sum of every file inside the folder.
-    pub(crate) bytes: i64,
+    pub bytes: i64,
 }
 
 /// `rows` are the live rows with whether each is kept (its own or inherited pin). Only the top-most kept items are
 /// listed; a kept folder's total counts every file under its path.
-pub(crate) fn offline_entries(rows: &[(FileEntry, bool, DriveItem)]) -> Vec<OfflineEntry> {
+pub fn offline_entries(rows: &[(FileEntry, bool, DriveItem)]) -> Vec<OfflineEntry> {
     let kept: HashMap<&str, bool> = rows.iter().map(|(e, k, _)| (e.file_id.as_str(), *k)).collect();
     let mut out = Vec::new();
     for (entry, is_kept, item) in rows {

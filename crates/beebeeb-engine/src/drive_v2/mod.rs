@@ -7,6 +7,9 @@
 
 pub mod dto;
 pub mod model;
+pub mod model_shell;
+pub mod photo_meta;
+pub mod status;
 
 use std::fmt;
 

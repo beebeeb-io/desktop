@@ -1,14 +1,14 @@
 //! The two view models that read a shell module (`desktop_search`, `account_dto`). Every other one is the engine
 //! crate's (`beebeeb_engine::drive_v2::model`, no Tauri); `drive_v2::model` is both, under the old path.
 
-use beebeeb_engine::drive_v2::model::*;
+use super::model::*;
 
 use super::DriveError;
 use super::dto::*;
 use crate::state_db::StateDb;
 
 /// `drive_search`: names from the local index (the quick-open index), matched rows only.
-pub(crate) fn search(db: &StateDb, query: &str) -> Result<Vec<DriveItem>, DriveError> {
+pub fn search(db: &StateDb, query: &str) -> Result<Vec<DriveItem>, DriveError> {
     if query.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -24,7 +24,7 @@ pub(crate) fn search(db: &StateDb, query: &str) -> Result<Vec<DriveItem>, DriveE
 }
 
 /// `drive_trash`: the server's trash list (names already decrypted in Rust), with where each item was.
-pub(crate) fn trash_entries(db: Option<&StateDb>, raw: Vec<crate::account_dto::DesktopTrashItem>) -> Vec<TrashEntry> {
+pub fn trash_entries(db: Option<&StateDb>, raw: Vec<crate::account_dto::DesktopTrashItem>) -> Vec<TrashEntry> {
     raw.into_iter()
         .map(|t| {
             let parent = t

@@ -7,36 +7,36 @@
 use serde::Serialize;
 
 /// How much of a file is read for its metadata.
-pub(crate) const HEAD_BYTES: usize = 256 * 1024;
+pub const HEAD_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct PhotoMeta {
+pub struct PhotoMeta {
     /// When it was taken (EXIF `DateTimeOriginal`, as written: local time, no zone), ISO 8601 without an offset.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) taken_at: Option<String>,
+    pub taken_at: Option<String>,
     /// The camera: EXIF make and model ("Apple iPhone 15").
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) camera: Option<String>,
+    pub camera: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) width: Option<u32>,
+    pub width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) height: Option<u32>,
+    pub height: Option<u32>,
     /// A video's length in whole seconds.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) duration_seconds: Option<u64>,
+    pub duration_seconds: Option<u64>,
     /// The file is uploading from this PC now.
-    pub(crate) uploading: bool,
+    pub uploading: bool,
     /// The device whose backup holds it: the device folder under the Backups root (LD-0113 lays Backups out one folder
     /// per device). Absent for a photo outside Backups: no command knows which device took it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) device: Option<String>,
+    pub device: Option<String>,
 }
 
 /// The device folder a state DB `path` sits in under one of the Backups `roots` (their state DB paths): the first
 /// segment below the root, when the item is inside it (`Backups/Anna's iPhone/IMG_1.heic` → `Anna's iPhone`). A file
 /// directly in the root, or outside every root, has none. Names compare exactly, as the state DB stores them.
-pub(crate) fn backup_device(roots: &[String], path: &str) -> Option<String> {
+pub fn backup_device(roots: &[String], path: &str) -> Option<String> {
     let path = path.trim_matches('/');
     roots.iter().find_map(|root| {
         let root = root.trim_matches('/');
@@ -106,7 +106,7 @@ fn ascii(tiff: &[u8], entry: usize, le: bool) -> Option<String> {
 }
 
 /// Make, model, `DateTimeOriginal` and the pixel size from a TIFF block (IFD0 and its Exif IFD).
-pub(crate) fn parse_exif(tiff: &[u8], meta: &mut PhotoMeta) {
+pub fn parse_exif(tiff: &[u8], meta: &mut PhotoMeta) {
     let le = match tiff.get(0..2) {
         Some(b"II") => true,
         Some(b"MM") => false,
@@ -157,7 +157,7 @@ pub(crate) fn parse_exif(tiff: &[u8], meta: &mut PhotoMeta) {
 }
 
 /// `2026:10:12 14:03:22` → `2026-10-12T14:03:22`; anything else (including `0000:00:00 00:00:00`) is `None`.
-pub(crate) fn exif_date(raw: &str) -> Option<String> {
+pub fn exif_date(raw: &str) -> Option<String> {
     let b = raw.as_bytes();
     if b.len() < 19 || b[4] != b':' || b[7] != b':' || b[10] != b' ' {
         return None;
@@ -171,7 +171,7 @@ pub(crate) fn exif_date(raw: &str) -> Option<String> {
 }
 
 /// An MP4 / MOV's length from `moov/mvhd` (time scale and duration), in whole seconds.
-pub(crate) fn mp4_duration(b: &[u8]) -> Option<u64> {
+pub fn mp4_duration(b: &[u8]) -> Option<u64> {
     fn find<'a>(b: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
         let mut at = 0;
         while at + 8 <= b.len() {
@@ -207,7 +207,7 @@ pub(crate) fn mp4_duration(b: &[u8]) -> Option<u64> {
 }
 
 /// What the head of a file says. `is_video` picks the MP4 reader; an image also gets its header's pixel size.
-pub(crate) fn from_head(head: &[u8], is_video: bool) -> PhotoMeta {
+pub fn from_head(head: &[u8], is_video: bool) -> PhotoMeta {
     let mut meta = PhotoMeta::default();
     if is_video {
         meta.duration_seconds = mp4_duration(head);
