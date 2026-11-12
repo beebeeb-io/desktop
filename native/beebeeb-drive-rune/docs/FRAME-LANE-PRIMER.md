@@ -131,25 +131,20 @@ $RB linux desktop $B --dir native/beebeeb-drive-rune -- "cargo test --locked 2>&
   a `Pane` whose `section()` is not in `routed` falls back to General.
 - **Existing tests pin the old state.** `settings/tests.rs` counts `FRAMES`, expects `set-title` in every frame and
   lists what each sidebar item does; `shell/registry.rs` pins the number of frame groups and of `FRAMES` entries.
-  A new pane changes all five. Run `cargo test --locked shell::registry frames::<group>` is not possible (one
-  filter per call): run the two filters one after the other before the full run.
+  A new pane changes all five: run the filters `shell::registry` and `frames::<group>` (one per call) before the full run.
 - **Goldens keyed for part of a frame.** A golden holds only the keys the keymap had when it was captured. What it
   does not key is compared by the frame tiles count alone: no text check, no geometry. Count those elements for the
   pull request; do not recapture an existing golden unless the key set is a strict superset.
 - **Plain spaces.** The Windows goldens hold plain spaces where the Mac source in `board.html` has ` `; the text
   check compares characters. Take every string from `golden/<frame>.json`.
-- **The board source you find first is the Mac's** (`DM-…`, "this Mac", `chevUD`). Device names, platform words and
-  some icons differ on Windows: the golden decides.
-- **Inline gaps.** In a `flex` parent with `gap`, a text node and a `<span>` beside it are two items: the gap goes
-  between them, there is no space character.
+- **The board source you find first is the Mac's** (`DM-…`, "this Mac"): names and some icons differ; the golden decides.
+- **Inline gaps.** In a `flex` parent with `gap`, a text node and a `<span>` beside it are two items, `gap` apart.
 - **No baseline alignment in Rune.** A figure and its smaller unit: two labels in a row, the unit pushed down by the
   difference of the two baselines (`(lh - size * 1.32) / 2 + size * 1.02` for JetBrains Mono).
 - **An element under an open menu or dialog** can fail the pixel `edge` check in one theme (`DW-0787`, `DW-0785d`
   dark): a known red, named in `FRAMES.md`, never tuned away.
-- **`MAP.md`.** A `native/*` branch carries no `MAP.md` change (the hook skips it); maps are regenerated on
-  `v2-native` by the lead.
-- **Shared files.** New frames go in new files. `mod.rs`, the source file and `FRAMES.md` get additive lines; a
-  sibling lane adds its own in the same places, and a conflict keeps both sides.
+- **`MAP.md`.** A `native/*` branch carries no `MAP.md` change; the lead regenerates the maps on `v2-native`.
+- **Shared files.** New frames go in new files; `mod.rs`, the source file and `FRAMES.md` get additive lines only.
 - **Charts.** `rune::canvas(Shape::new().fill(points, colour).stroke(points, width, colour).line(..))` draws
   polygons and polylines in points. There is no dash: draw the segments. Make the canvas 2 pt larger than the plot
   on every side, or a line on its edge is cut.
