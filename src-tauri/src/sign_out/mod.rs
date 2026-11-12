@@ -5,16 +5,16 @@
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 pub(crate) mod copy;
-pub(crate) mod flow_window;
+pub(crate) use beebeeb_engine::sign_out::flow_window;
 #[cfg(target_os = "macos")]
 pub(crate) mod keep;
 pub(crate) use beebeeb_engine::sign_out::kept_names;
 pub(crate) mod kept_record;
 pub(crate) use beebeeb_engine::sign_out::kept_set;
 #[cfg(target_os = "macos")]
-pub(crate) mod kept_writer;
-pub(crate) mod send_phase;
-pub(crate) mod snapshot;
+pub(crate) use beebeeb_engine::sign_out::kept_writer;
+pub(crate) use beebeeb_engine::sign_out::send_phase;
+pub(crate) use beebeeb_engine::sign_out::snapshot;
 pub(crate) use beebeeb_engine::sign_out::waiting;
 
 /// Test builds only (spec 2026-10-10 U42): a real process death at `point` when `BB_TEST_CRASH_AT` names it. It
