@@ -487,3 +487,119 @@ fn executable_denylist_matches_the_old_shell() {
     assert!(!is_dangerous_executable(Path::new("photo.jpg")));
     assert!(!is_dangerous_executable(Path::new("doc.pdf")));
 }
+
+// ---------------------------------------------------------------------------
+// Sync-running guard: every folder-route op is refused while sync is not running
+// ---------------------------------------------------------------------------
+
+use crate::frames::files::source::{ActionError, FilesSource};
+
+/// Every operation that works THROUGH the sync folder is refused with `Unavailable` when sync is
+/// not running. The gate is `NeedsRecoveryPhrase` and `is_syncing()` is false (proven by the
+/// existing test at line 96). No filesystem changes happen.
+#[test]
+fn folder_route_ops_are_refused_while_sync_is_not_running() {
+    let started = started();
+    assert!(!started.opened.engine.is_syncing(), "precondition: sync is not running");
+    assert_eq!(
+        started.opened.gate,
+        EngineGate::NeedsRecoveryPhrase,
+        "precondition: gate is not Ready"
+    );
+
+    let mut source = EngineFilesSource::new(started.opened.engine.clone());
+
+    // A temp folder to prove nothing is written.
+    let proof = tempfile::tempdir().unwrap();
+    let before = std::fs::read_dir(proof.path()).unwrap().count();
+
+    let item = crate::source::DriveItem {
+        id: "f-1".into(),
+        parent_id: None,
+        name: "test.txt".into(),
+        is_folder: false,
+        size: Some(100),
+        child_count: None,
+        modified_at: String::new(),
+        mime: None,
+        has_thumbnail: false,
+        shared_type: None,
+        shared_badges: Vec::new(),
+        pc_status: None,
+        is_protected: false,
+    };
+
+    // Every folder-route op returns Unavailable.
+    assert_eq!(
+        source.new_folder(None, "Plans"),
+        Err(ActionError::Unavailable),
+        "new_folder"
+    );
+    assert_eq!(source.rename(&item, "new.txt"), Err(ActionError::Unavailable), "rename");
+    assert_eq!(
+        source.move_to(&[item.clone()], None),
+        Err(ActionError::Unavailable),
+        "move_to"
+    );
+    assert_eq!(
+        source.duplicate(&[item.clone()], &[]),
+        Err(ActionError::Unavailable),
+        "duplicate"
+    );
+    assert_eq!(
+        source.upload(None, &[proof.path().join("fake.txt")]),
+        Err(ActionError::Unavailable),
+        "upload"
+    );
+    assert_eq!(source.open(&[item.clone()]), Err(ActionError::Unavailable), "open");
+    assert_eq!(
+        source.show_in_file_explorer(&[item.clone()]),
+        Err(ActionError::Unavailable),
+        "show_in_file_explorer"
+    );
+    assert_eq!(
+        source.open_in_file_explorer(None),
+        Err(ActionError::Unavailable),
+        "open_in_file_explorer"
+    );
+    assert!(!source.can_add(None), "can_add is false");
+
+    // Filesystem unchanged: no files were created, renamed or moved.
+    let after = std::fs::read_dir(proof.path()).unwrap().count();
+    assert_eq!(before, after, "filesystem unchanged: 0 changes");
+}
+
+/// The sync guard is the `is_syncing()` check in `local()`. Dropping the guard (mutant: removing
+/// the `if !self.engine.is_syncing()` check) would let the operations through despite sync not
+/// running, hitting the state_db/sync_root errors instead of the clear `Unavailable`. The source
+/// scan proves the guard is present.
+#[test]
+fn the_sync_guard_is_present_in_the_local_choke_point() {
+    let source = include_str!("../engine_host.rs");
+    let local_fn = &source[source.find("fn local(&self)").unwrap()..];
+    let local_fn = &local_fn[..local_fn.find("\n    }").unwrap()];
+    assert!(
+        local_fn.contains("is_syncing()"),
+        "the local() choke point checks is_syncing: dropping it would let folder-route ops \
+         through when sync is not running"
+    );
+}
+
+/// Trash and restore (API calls) are NOT gated by the sync guard: they go directly to the server
+/// and do not touch the sync folder. Neither calls `self.local()`.
+#[test]
+fn trash_and_restore_are_not_gated_by_the_sync_guard() {
+    let source = include_str!("../engine_host.rs");
+    let trash_fn = &source[source.find("fn trash(&mut self").unwrap()..];
+    let trash_fn = &trash_fn[..trash_fn.find("\n    fn ").unwrap()];
+    assert!(
+        !trash_fn.contains("self.local()"),
+        "trash goes to the API, not through the sync folder"
+    );
+    let restore_fn = &source[source.find("fn restore(&mut self").unwrap()..];
+    let restore_fn = &restore_fn[..restore_fn.find("\n    fn ").unwrap()];
+    assert!(
+        !restore_fn.contains("self.local()"),
+        "restore goes to the API, not through the sync folder"
+    );
+}

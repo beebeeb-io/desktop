@@ -554,8 +554,13 @@ fn map_drive_err(e: DriveError) -> ActionError {
 }
 
 impl<C: CredentialStores> EngineFilesSource<C> {
-    /// The sync root and state database, both required for any local file operation.
+    /// The sync root and state database, both required for any local file operation. Refused when
+    /// sync is not running for this handle (`Engine::is_syncing`): changing a local folder that
+    /// nothing syncs is not an honest operation.
     fn local(&self) -> Result<(beebeeb_engine::state_db::StateDb, PathBuf), ActionError> {
+        if !self.engine.is_syncing() {
+            return Err(ActionError::Unavailable);
+        }
         let sync_root = self.engine.sync_root().map_err(|_| ActionError::Unavailable)?;
         let db = self.engine.state_db().map_err(|_| ActionError::Unavailable)?;
         Ok((db, sync_root))
@@ -614,11 +619,16 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     }
 
     fn trash(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
-        let (db, _) = self.local()?;
-        // Validate every item first.
-        for item in items {
-            let entry = file_ops::resolve(&db, &item.id).map_err(map_drive_err)?;
-            file_ops::check_trashable(&db, &entry).map_err(map_drive_err)?;
+        // Trash is an API call, not a sync-folder operation: it is NOT gated by is_syncing().
+        // Validate against the state database when it is available (a best-effort guard against
+        // trashing an uploading or protected item); when the database is not available, the
+        // server's own checks are the backstop.
+        if let Ok(db) = self.engine.state_db() {
+            for item in items {
+                if let Ok(entry) = file_ops::resolve(&db, &item.id) {
+                    file_ops::check_trashable(&db, &entry).map_err(map_drive_err)?;
+                }
+            }
         }
         let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
         self.engine.trash_items(&ids).map_err(|_| ActionError::Failed)
