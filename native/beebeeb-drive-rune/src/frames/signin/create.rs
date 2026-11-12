@@ -66,6 +66,7 @@ impl Step {
 
 /// The field a board frame draws holding the keyboard (scenes only; see `steps::Pictured`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // the scenes of DW-A40 to DW-A42 set `Word` and `Device`
 pub enum Pictured {
     Email,
     Code,
@@ -866,9 +867,9 @@ use super::create_source::{SignUpScript, sample};
 use super::source::{Script, board};
 use crate::State;
 
-pub const FRAME_IDS: [&str; 14] = [
-    "DW-A31", "DW-A32", "DW-A33", "DW-A34", "DW-A35", "DW-A36", "DW-A37", "DW-A38", "DW-A39", "DW-A40", "DW-A41",
-    "DW-A42", "DW-A43", "DW-A44",
+/// The frames with a scene here. DW-A39 to DW-A44 are drawn and linked; their scenes come with their gate.
+pub const FRAME_IDS: [&str; 8] = [
+    "DW-A31", "DW-A32", "DW-A33", "DW-A34", "DW-A35", "DW-A36", "DW-A37", "DW-A38",
 ];
 
 /// The frames of sign-up, for `frames::scenes`.
@@ -881,12 +882,6 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-A36", |s| super::set_scene(s, "DW-A36")),
     ("DW-A37", |s| super::set_scene(s, "DW-A37")),
     ("DW-A38", |s| super::set_scene(s, "DW-A38")),
-    ("DW-A39", |s| super::set_scene(s, "DW-A39")),
-    ("DW-A40", |s| super::set_scene(s, "DW-A40")),
-    ("DW-A41", |s| super::set_scene(s, "DW-A41")),
-    ("DW-A42", |s| super::set_scene(s, "DW-A42")),
-    ("DW-A43", |s| super::set_scene(s, "DW-A43")),
-    ("DW-A44", |s| super::set_scene(s, "DW-A44")),
 ];
 
 /// Sign-up on the first screen of a PC with no Beebeeb session, the email typed (DW-A31).
@@ -919,36 +914,6 @@ fn at_password(sign_up: SignUpScript, typed: usize) -> Ui {
     ui.password.replace_text("x".repeat(typed));
     ui.confirm.replace_text("x".repeat(typed));
     ui.create.pictured = Some(Pictured::Password);
-    ui
-}
-
-fn at_phrase(sign_up: SignUpScript) -> Ui {
-    let mut ui = at_password(sign_up, board::PASSWORD_LEN);
-    ui.check_password();
-    ui.create.pictured = None;
-    ui.toggle_saved();
-    ui
-}
-
-fn at_confirm(words: [&str; CONFIRM_WORDS]) -> Ui {
-    let mut ui = at_phrase(SignUpScript::default());
-    ui.verify_saved();
-    for (i, word) in words.iter().enumerate() {
-        ui.create.words[i].replace_text(*word);
-    }
-    ui.create.active_word = CONFIRM_WORDS - 1;
-    ui.create.pictured = Some(Pictured::Word(CONFIRM_WORDS - 1));
-    ui
-}
-
-fn at_device(sign_up: SignUpScript) -> Ui {
-    let mut ui = at_phrase(sign_up);
-    ui.verify_saved();
-    for (i, at) in sample::POSITIONS.iter().enumerate() {
-        ui.create.words[i].replace_text(board::WORDS[*at]);
-    }
-    ui.confirm_words();
-    ui.create.pictured = Some(Pictured::Device);
     ui
 }
 
@@ -1003,32 +968,6 @@ pub fn scene(frame: &str) -> Option<Ui> {
             );
             ui.check_password();
             ui.create.pictured = Some(Pictured::Password);
-            ui
-        }
-        "DW-A39" => at_phrase(SignUpScript::default()),
-        // Two words typed, the third begun.
-        "DW-A40" => at_confirm([board::WORDS[2], board::WORDS[6], &board::WORDS[10][..4]]),
-        "DW-A41" => {
-            let mut ui = at_confirm([board::WORDS[2], sample::WRONG_WORD, board::WORDS[10]]);
-            ui.confirm_words();
-            ui.create.pictured = Some(Pictured::Word(CONFIRM_WORDS - 1));
-            ui
-        }
-        "DW-A42" => at_device(SignUpScript::default()),
-        // The account is being made: no answer yet.
-        "DW-A43" => {
-            let mut ui = at_device(SignUpScript {
-                create_answers: false,
-                ..SignUpScript::default()
-            });
-            ui.create.pictured = None;
-            ui.create_account();
-            ui
-        }
-        "DW-A44" => {
-            let mut ui = at_device(SignUpScript::default());
-            ui.create.pictured = None;
-            ui.create_account();
             ui
         }
         _ => return None,
