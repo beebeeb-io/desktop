@@ -116,7 +116,9 @@ fn cloud_files_unregister_precedes_shell_unregister_and_propagates_failure() {
     let code = body(&SOURCE, "clear_session_impl");
     assert!(
         code.find("windows_cf::unregister_sync_root(&root)").unwrap()
-            < code.find("windows_cf::unregister_shell_sync_root(&root)").unwrap()
+            < code
+                .find("windows_cf::unregister_shell_sync_root(crate::APP, &root)")
+                .unwrap()
     );
     // Task 2191: the failure is propagated with the folder the purge kept copies in.
     assert!(code.contains("failed_after_purge(format!(\"Could not remove Explorer registration: {e}\")))?"));

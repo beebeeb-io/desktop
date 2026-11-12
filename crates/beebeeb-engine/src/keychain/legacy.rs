@@ -8,9 +8,9 @@ use super::*;
 /// and the legacy flat store, then runs [`migrate_legacy_keychain_between`].
 /// LOG+SWALLOW errors at the call site — a migration failure must never block
 /// startup, because the legacy READ FALLBACK keeps the vault usable.
-pub fn migrate_legacy_keychain_to_account(account_id: &str) -> AuthResult<()> {
-    let new = platform_keychain_store_for(account_id);
-    let legacy = legacy_platform_keychain_store();
+pub fn migrate_legacy_keychain_to_account(identity: &'static EngineIdentity, account_id: &str) -> AuthResult<()> {
+    let new = platform_keychain_store_for(identity, account_id);
+    let legacy = legacy_platform_keychain_store(identity);
     migrate_legacy_keychain_between(&new, &legacy)
 }
 

@@ -159,7 +159,7 @@ async fn a_save_staged_in_the_old_cache_root_still_uploads_and_its_copy_is_relea
     let ops = bridge.db.list_due_operations(i64::MAX).unwrap();
     assert_eq!(ops.len(), 1);
     let staged = PathBuf::from(ops[0].payload_path.clone().expect("a save carries its copy"));
-    let bases = FinderStagingBases::current();
+    let bases = FinderStagingBases::current(&crate::identity::REAL);
     assert!(
         staged.starts_with(bases.durable_root().unwrap()),
         "a new save stages in the data root: {staged:?}"

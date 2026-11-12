@@ -98,7 +98,9 @@ fn the_switch_snapshot_is_counted_for_the_window_label_not_a_literal() {
     let production = super::finder_setup_command_tests::production_source();
     let snapshot = super::finder_setup_command_tests::body_between(&production, "fn switch_snapshot(", "\n}\n");
     assert!(
-        snapshot.contains("count_ask(surfaces::policy::main_window_label(surfaces::policy::Platform::current()))?"),
+        // Squeezed: the call is one line or three, as rustfmt lays the file out.
+        crate::source_pin::squeeze(snapshot)
+            .contains("count_ask(surfaces::policy::main_window_label(surfaces::policy::Platform::current()))?"),
         "{snapshot}"
     );
     assert!(

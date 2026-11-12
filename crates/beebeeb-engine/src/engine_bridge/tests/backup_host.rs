@@ -454,7 +454,7 @@ async fn host_turns_off_when_the_folder_was_deleted_elsewhere() {
     let config_dir = tempfile::tempdir().unwrap();
     crate::config::CONFIG_DIR_OVERRIDE
         .scope(config_dir.path().to_path_buf(), async {
-            crate::config::DesktopConfig::update(|cfg| {
+            crate::config::DesktopConfig::update_for(&crate::identity::REAL, |cfg| {
                 cfg.set_known_folder("pictures", true);
                 cfg.set_known_folder("documents", true);
                 cfg.set_known_folder("music", true);
@@ -488,7 +488,7 @@ async fn host_turns_off_when_the_folder_was_deleted_elsewhere() {
             let reasons: Vec<(&str, &str)> = stops.iter().map(|s| (s.category.as_str(), s.reason.as_str())).collect();
             assert_eq!(reasons, [("pictures", "unknown")]);
             assert_eq!(fx.bridge.db.backup_category_folder("pictures").unwrap(), None);
-            let cfg = crate::config::DesktopConfig::load().unwrap();
+            let cfg = settings();
             assert_eq!(
                 cfg.known_folder_backup,
                 ["documents", "music"],
@@ -501,10 +501,7 @@ async fn host_turns_off_when_the_folder_was_deleted_elsewhere() {
                 .unwrap();
             assert_eq!(report.turned_off, Some(FolderPresence::DeviceDeleted));
             assert!(
-                crate::config::DesktopConfig::load()
-                    .unwrap()
-                    .known_folder_backup
-                    .is_empty(),
+                settings().known_folder_backup.is_empty(),
                 "a deleted device folder turns Music off too, though its pass never ran"
             );
             assert_eq!(
@@ -873,7 +870,7 @@ fn source_with(files: usize) -> tempfile::TempDir {
 }
 
 fn switch_on(keys: &[&str]) {
-    crate::config::DesktopConfig::update(|cfg| {
+    crate::config::DesktopConfig::update_for(&crate::identity::REAL, |cfg| {
         for key in keys {
             cfg.set_known_folder(key, true);
         }
@@ -940,12 +937,7 @@ async fn a_files_removed_notice_turns_every_backup_off_with_cores_words() {
                 [("documents", "erase_request"), ("pictures", "erase_request")]
                     .map(|(c, r)| (c.to_string(), r.to_string()))
             );
-            assert!(
-                crate::config::DesktopConfig::load()
-                    .unwrap()
-                    .known_folder_backup
-                    .is_empty()
-            );
+            assert!(settings().known_folder_backup.is_empty());
             let all_stops = fx.bridge.db.backup_stops().unwrap();
             let view = crate::backup::stop::stop_view(&all_stops, "documents", "Documents", false);
             assert_eq!(
@@ -1534,7 +1526,7 @@ async fn a_crash_between_the_gate_and_its_write_neither_loses_nor_repeats_the_st
                     let marks = (crashed.last_pass_at_ms, crashed.acknowledged);
                     assert_eq!(marks, (Some(last), Vec::new()), "{table}: {key}");
                 }
-                let on = crate::config::DesktopConfig::load().unwrap().known_folder_backup;
+                let on = settings().known_folder_backup;
                 assert_eq!(on.len(), 2, "{table}: both switches stay on: {on:?}");
                 assert_eq!(count_backup_ops(&fx.bridge), 0, "{table}: nothing uploaded");
 
@@ -1626,7 +1618,7 @@ async fn a_listing_past_the_page_cap_fails_the_check() {
 // ── LD-0139, the lead's review of #234 (2026-11-08): coverage and stopped backups ───────────────────────────────
 
 fn switched_on(key: &str) -> bool {
-    crate::config::DesktopConfig::load().unwrap().known_folder_enabled(key)
+    settings().known_folder_enabled(key)
 }
 
 /// Stops Pictures the way a pass does (an erase notice a minute old: its stop row, its last pass moved to the

@@ -564,15 +564,15 @@ mod tests {
     #[test]
     fn a_forwarded_link_becomes_an_intent_or_only_shows_the_window() {
         assert_eq!(
-            forwarded("beebeeb://open/photos"),
+            forwarded(&deeplink::link("open/photos")),
             Forwarded::Show(Intent::Go(Route::section(Section::Photos)))
         );
         assert_eq!(
-            forwarded("beebeeb://settings/security"),
+            forwarded(&deeplink::link("settings/security")),
             Forwarded::Show(Intent::Settings(SettingsPane::Security))
         );
         assert_eq!(
-            forwarded("beebeeb://quit"),
+            forwarded(&deeplink::link("quit")),
             Forwarded::ShowOnly(DeepLinkError::UnknownTarget)
         );
         assert_eq!(

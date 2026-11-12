@@ -73,7 +73,7 @@ fn review_p3_4_a_plaintext_folder_row_is_not_read_as_a_file() {
     })
     .unwrap();
     let fixture = Fixture::new(|_| None);
-    let bridge = crate::engine_bridge::EngineBridge::new(db, Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db, Arc::new(fixture.api()));
     let err = match run(bridge.resolved_owned_key(folder)) {
         Ok(_) => panic!("a plaintext owner name never resolves"),
         Err(err) => err.to_string(),

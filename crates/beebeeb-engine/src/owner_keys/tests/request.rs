@@ -72,6 +72,7 @@ fn a9c_request_row_keeps_content_under_c_and_name_under_derived() {
     });
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
+        &crate::identity::REAL,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
@@ -174,6 +175,7 @@ fn review_p2_2_request_keys_load_once_per_bridge() {
     let (fixture, seen, row) = request_world([0x77; 32], &derived, b"hello", ExpectedChunkFormat::Unrecorded);
     let temp = tempfile::tempdir().unwrap();
     let bridge = crate::engine_bridge::EngineBridge::new(
+        &crate::identity::REAL,
         Arc::new(StateDb::open(temp.path().join("db")).unwrap()),
         Arc::new(fixture.api()),
     );
@@ -219,7 +221,7 @@ fn review_p2_3_a_request_row_hydrates_whole_and_by_range() {
         ..Default::default()
     })
     .unwrap();
-    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db.clone(), Arc::new(fixture.api()));
 
     let dest = temp.path().join("report.txt");
     run(bridge.hydrate_file(OWNER, &dest, &[temp.path()])).unwrap();
@@ -268,7 +270,7 @@ fn review_p2_2_a_c_sealed_request_row_renames_under_the_string_key() {
         item_kind: crate::state_db::ItemKind::File,
     })
     .unwrap();
-    let bridge = crate::engine_bridge::EngineBridge::new(db.clone(), Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db.clone(), Arc::new(fixture.api()));
 
     // The real ingest: core opens the `C`-sealed name and the pin it records is
     // kept on the durable record.
@@ -365,7 +367,7 @@ fn review_p3_2_a_derived_name_request_row_renames_with_its_pin() {
     let temp = tempfile::tempdir().unwrap();
     let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
     seed_rename_row(&db, OWNER, "report.txt");
-    let bridge = crate::engine_bridge::EngineBridge::new(db, Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db, Arc::new(fixture.api()));
     let prepared = run(bridge.prepare_owned_rows(&[row.clone()])).unwrap();
     assert_eq!(
         prepared[0].record.request_name,

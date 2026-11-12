@@ -149,7 +149,9 @@ fn the_startup_resets_are_owed_to_the_first_ticks_signal() {
 #[test]
 fn the_tick_loop_opens_its_debt_with_the_startup_resets() {
     let source = include_str!("../../runner.rs").replace("\r\n", "\n");
-    let start = source.find("async fn run(\n    app: Host").expect("run exists");
+    let start = source
+        .find("async fn run(\n    identity: &'static crate::identity::EngineIdentity,\n    app: Host")
+        .expect("run exists");
     let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
     let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("`run` holds {needle}"));
     assert_eq!(body.matches("OwedWorkingSetSignal::").count(), 1, "one debt");
@@ -288,7 +290,9 @@ fn every_working_set_signal_in_the_tick_loop_goes_through_the_owed_wrapper() {
         2,
         "its definition and one call"
     );
-    let start = source.find("async fn run(\n    app: Host").expect("run exists");
+    let start = source
+        .find("async fn run(\n    identity: &'static crate::identity::EngineIdentity,\n    app: Host")
+        .expect("run exists");
     let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
     let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("`run` holds {needle}"));
     let call = at("signal_owed_debt_after_a_failed_tick(&mut owed_working_set_signal, &db);");
@@ -374,7 +378,9 @@ fn the_send_phase_runs_the_queue_step_alone() {
             "the arm reads the pause flag the tick reads:\n{arm}"
         );
     // §6.1 condition 3: the phase reads the link monitor that this runner's requests write.
-    let start = source.find("async fn run(\n    app: Host").expect("run exists");
+    let start = source
+        .find("async fn run(\n    identity: &'static crate::identity::EngineIdentity,\n    app: Host")
+        .expect("run exists");
     let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
     assert_eq!(
         body.matches("send_phase.attach(link.clone());").count(),

@@ -26,8 +26,8 @@ use crate::state_db::StateDb;
 /// hostname, and the folders that are on with where each is read from. No network. `None` when the settings
 /// cannot be read: the caller keeps its last answer (a read error never lifts a protection). Before the layout is
 /// resolved the device folder is `None`.
-pub fn own_backups(db: &StateDb) -> Option<OwnBackups> {
-    let cfg = crate::config::DesktopConfig::load().ok()?;
+pub fn own_backups(identity: &'static crate::identity::EngineIdentity, db: &StateDb) -> Option<OwnBackups> {
+    let cfg = crate::config::DesktopConfig::load_for(identity).ok()?;
     Some(own_backups_for(
         db,
         &sources::backup_sources_quiet(&cfg.known_folder_backup, &cfg.known_folder_source),

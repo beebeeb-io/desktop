@@ -43,8 +43,8 @@ fn parse_id(id: &str) -> Option<Uuid> {
 /// Turn the backup of these categories off in the settings (the same switch the person uses). `Ok(false)`: the
 /// settings could not be written; the stop notice still stands and no pass runs for a folder whose category folder
 /// is forgotten.
-pub fn switch_off_in_settings(keys: &[String]) -> bool {
-    crate::config::DesktopConfig::update(|cfg| {
+pub fn switch_off_in_settings(identity: &'static crate::identity::EngineIdentity, keys: &[String]) -> bool {
+    crate::config::DesktopConfig::update_for(identity, |cfg| {
         for key in keys {
             cfg.set_known_folder(key, false);
         }
@@ -319,7 +319,7 @@ impl DesktopBackupHost {
             // Review (2026-11-07): every folder switched on, the ones this tick did not pass included (a folder
             // waiting for the OneDrive answer), so none keeps going after its backup was removed.
             let mut on: Vec<Category> = self.enabled.clone();
-            if let Ok(cfg) = crate::config::DesktopConfig::load() {
+            if let Ok(cfg) = crate::config::DesktopConfig::load_for(self.bridge.identity) {
                 for category in cfg.known_folder_backup.iter().filter_map(|key| Category::from_key(key)) {
                     if !on.contains(&category) {
                         on.push(category);
@@ -370,7 +370,7 @@ impl DesktopBackupHost {
             marks: &marks,
         })
         .map_err(db_error("turn_off"))?;
-        let switched = switch_off_in_settings(&keys);
+        let switched = switch_off_in_settings(self.bridge.identity, &keys);
         tracing::info!(
             turned_off = keys.len(),
             switched,

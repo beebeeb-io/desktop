@@ -5,13 +5,13 @@ pub(super) fn test_bridge(db_path: &Path) -> EngineBridge {
         "token".into(),
         [7u8; 32],
     ));
-    EngineBridge::new(db, api)
+    EngineBridge::new(&crate::identity::REAL, db, api)
 }
 
 pub(super) fn test_bridge_with_api(db_path: &Path, base_url: String, master_key: [u8; 32]) -> EngineBridge {
     let db = Arc::new(StateDb::open(db_path).unwrap());
     let api = Arc::new(ApiClient::new(base_url, "token".into(), master_key));
-    EngineBridge::new(db, api)
+    EngineBridge::new(&crate::identity::REAL, db, api)
 }
 
 #[derive(Debug, Clone)]

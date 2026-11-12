@@ -283,12 +283,15 @@ fn names_this_device(
 /// Run when the scheduler starts and before each pass. The stopped categories, or the read's error (the caller then
 /// runs no pass: a failed read must never read as "nothing is stopped"). A switch-off that fails is logged and tried
 /// again next time; the stop row alone keeps the backup from passing.
-pub fn reconcile_stopped_switches(db: &StateDb) -> rusqlite::Result<Vec<String>> {
+pub fn reconcile_stopped_switches(
+    identity: &'static crate::identity::EngineIdentity,
+    db: &StateDb,
+) -> rusqlite::Result<Vec<String>> {
     let stopped: Vec<String> = db.backup_stops()?.into_iter().map(|stop| stop.category).collect();
     if stopped.is_empty() {
         return Ok(stopped);
     }
-    let still_on: Vec<String> = match crate::config::DesktopConfig::load() {
+    let still_on: Vec<String> = match crate::config::DesktopConfig::load_for(identity) {
         Ok(cfg) => stopped
             .iter()
             .filter(|key| cfg.known_folder_enabled(key))
@@ -297,7 +300,7 @@ pub fn reconcile_stopped_switches(db: &StateDb) -> rusqlite::Result<Vec<String>>
         Err(_) => stopped.clone(),
     };
     if !still_on.is_empty() {
-        let switched = crate::backup::host::switch_off_in_settings(&still_on);
+        let switched = crate::backup::host::switch_off_in_settings(identity, &still_on);
         tracing::warn!(
             still_on = still_on.len(),
             switched,
@@ -337,14 +340,17 @@ pub struct StopView {
 }
 
 /// The stops the card needs, read once: none (and no state DB opened) while every folder is on.
-pub fn stopped_backups(cfg: &crate::config::DesktopConfig) -> Vec<BackupStop> {
+pub fn stopped_backups(
+    identity: &'static crate::identity::EngineIdentity,
+    cfg: &crate::config::DesktopConfig,
+) -> Vec<BackupStop> {
     if crate::known_folder::KNOWN_FOLDERS
         .iter()
         .all(|kf| cfg.known_folder_enabled(kf.key))
     {
         return Vec::new();
     }
-    let db = crate::local_state::state_db_for_config(cfg).ok().flatten();
+    let db = crate::local_state::state_db_for_config(identity, cfg).ok().flatten();
     db.and_then(|db| db.backup_stops().ok()).unwrap_or_default()
 }
 

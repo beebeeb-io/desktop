@@ -950,7 +950,7 @@ fn the_real_config_path_is_never_under_a_disposable_cache_root() {
 #[test]
 fn disposable_cache_roots_includes_the_macos_hydrate_cache_dir() {
     let roots = disposable_cache_roots();
-    let hydrate_dir = crate::ipc_socket::macos_hydrate_cache_dir();
+    let hydrate_dir = crate::ipc_socket::macos_hydrate_cache_dir(crate::APP);
     assert!(
         roots.contains(&hydrate_dir),
         "disposable_cache_roots must include the macOS hydrate-cache dir so sign-out's \
@@ -965,8 +965,8 @@ fn disposable_cache_roots_includes_the_macos_hydrate_cache_dir() {
 #[test]
 fn free_up_space_allowed_roots_includes_the_macos_hydrate_cache_dir() {
     let sync_root = std::env::temp_dir();
-    let roots = free_up_space_allowed_roots(&sync_root);
-    let hydrate_dir = crate::ipc_socket::macos_hydrate_cache_dir();
+    let roots = free_up_space_allowed_roots(crate::APP, &sync_root);
+    let hydrate_dir = crate::ipc_socket::macos_hydrate_cache_dir(crate::APP);
     let expected = hydrate_dir.canonicalize().unwrap_or_else(|_| hydrate_dir.clone());
     assert!(
         roots.contains(&expected),

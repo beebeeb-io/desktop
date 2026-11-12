@@ -199,7 +199,7 @@ pub(super) fn enforce_cache_budget(
     // (`None`) or `Some(true)` keeps the default on-demand behaviour.
     // A missing/unreadable config defaults to on-demand (the safe, low-disk
     // behaviour). This is one cheap TOML read per 5s tick.
-    let cfg = crate::config::DesktopConfig::load().unwrap_or_default();
+    let cfg = crate::config::DesktopConfig::load_for(bridge.identity).unwrap_or_default();
     let local_cache_limit = cfg.local_cache_limit_for_eviction();
     match local_cache_limit {
         Some(limit) => match bridge.local_cache_usage_bytes() {

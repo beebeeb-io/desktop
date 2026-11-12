@@ -26,11 +26,14 @@ use super::*;
 /// group-container prefix is added, for most real usernames; `ipc.sock`
 /// does, with headroom to spare.
 #[cfg(target_os = "macos")]
-pub(super) fn macos_ipc_socket_path_in(home_dir: &std::path::Path) -> std::path::PathBuf {
+pub(super) fn macos_ipc_socket_path_in(
+    identity: &crate::identity::EngineIdentity,
+    home_dir: &std::path::Path,
+) -> std::path::PathBuf {
     home_dir
         .join("Library")
         .join("Group Containers")
-        .join(MACOS_APP_GROUP_ID)
+        .join(identity.macos_app_group())
         .join(MACOS_IPC_SOCKET_FILENAME)
 }
 
@@ -59,11 +62,14 @@ pub(super) fn macos_ipc_socket_path_in(home_dir: &std::path::Path) -> std::path:
 /// `XPCBridge.hydrateDestinationURL(for:)` is the Swift-side mirror; keep the
 /// directory name in sync with `MACOS_HYDRATE_CACHE_DIRNAME` there.
 #[cfg(target_os = "macos")]
-pub(super) fn macos_hydrate_cache_dir_in(home_dir: &std::path::Path) -> std::path::PathBuf {
+pub(super) fn macos_hydrate_cache_dir_in(
+    identity: &crate::identity::EngineIdentity,
+    home_dir: &std::path::Path,
+) -> std::path::PathBuf {
     home_dir
         .join("Library")
         .join("Group Containers")
-        .join(MACOS_APP_GROUP_ID)
+        .join(identity.macos_app_group())
         .join(MACOS_HYDRATE_CACHE_DIRNAME)
 }
 

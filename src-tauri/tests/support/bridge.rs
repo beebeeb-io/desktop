@@ -539,6 +539,7 @@ async fn hydrate(f: &Fixture, bridge: &EngineBridge, n: usize) -> anyhow::Result
 fn bridge(f: &Fixture, url: &str, account: &str) -> EngineBridge {
     let (token, key) = f.credentials(account);
     EngineBridge::new(
+        &crate::identity::REAL,
         Arc::new(StateDb::open(f.root.path().join(format!("{account}.db"))).unwrap()),
         Arc::new(ApiClient::new(url.into(), token.to_string(), *key)),
     )
@@ -571,7 +572,11 @@ async fn http_bridge_nested_hydration_thumbnails_and_cleanup_twice() {
             // (the macOS trash view mirrors the server trash).
             assert_eq!(bridge.db().list_files().unwrap().len(), 12);
             for n in [8, 9] {
-                let row = bridge.db().get_file(&id(n)).unwrap().expect("trash keeps the row (trash view)");
+                let row = bridge
+                    .db()
+                    .get_file(&id(n))
+                    .unwrap()
+                    .expect("trash keeps the row (trash view)");
                 assert_eq!(row.status, crate::state_db::FileStatus::Trashing);
             }
             f.expire("alice");
