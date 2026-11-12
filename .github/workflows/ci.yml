@@ -604,6 +604,24 @@ jobs:
           # The crate has no library: its one test binary is named, must be in the log, and has a floor.
           python3 ../../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/native-test.log" --cargo-exit-code "$cargo_exit" --expect deps/beebeeb_drive-
 
+      # The app binary itself, built as each identity: exactly one identity mark, the build's own; and the checker
+      # refuses the other app's name (it is seen to fail). An unnamed build is the test app.
+      - name: Each identity's binary carries exactly one identity mark (Linux)
+        if: runner.os == 'Linux'
+        working-directory: native/beebeeb-drive-rune
+        run: |
+          set -euo pipefail
+          cargo build --locked
+          bash ../../scripts/native-identity-mark.sh target/debug/beebeeb-drive io.beebeeb.app.test
+          if bash ../../scripts/native-identity-mark.sh target/debug/beebeeb-drive io.beebeeb.app; then
+            echo "::error::the checker accepted a test build as the real app"; exit 1
+          fi
+          BEEBEEB_APP_IDENTIFIER=io.beebeeb.app cargo build --locked
+          bash ../../scripts/native-identity-mark.sh target/debug/beebeeb-drive io.beebeeb.app
+          if bash ../../scripts/native-identity-mark.sh target/debug/beebeeb-drive io.beebeeb.app.test; then
+            echo "::error::the checker accepted the real app as a test build"; exit 1
+          fi
+
       - name: Build the native app (Windows)
         if: runner.os == 'Windows'
         working-directory: native/beebeeb-drive-rune

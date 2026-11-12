@@ -132,6 +132,7 @@ const CONSUMERS: &[(&str, &str, usize)] = &[
     ("sign_out/kept_names.rs", "bundle_identifier", 1),
     ("sign_out/kept_names.rs", "config_dir_name", 1),
     ("state_paths.rs", "state_dir_in", 1),
+    ("sync_root_owner.rs", "cloud_files_provider_name", 1),
     ("windows_cf/registration.rs", "cloud_files_provider_guid", 1),
     ("windows_cf/registration.rs", "cloud_files_provider_name", 2),
     ("windows_cf/status_ui.rs", "status_ui_class_id", 1),

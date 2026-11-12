@@ -175,15 +175,15 @@ impl AuthSecretStore for MacOsKeychainStore {
     }
 
     fn holds_session_token(&self) -> AuthResult<bool> {
-        macos_keychain::exists(&self.account_path(KeychainAccount::SessionToken))
+        macos_keychain::exists(self.service, &self.account_path(KeychainAccount::SessionToken))
     }
 
     fn holds_wrapped_master_key(&self) -> AuthResult<bool> {
-        macos_keychain::exists(&self.account_path(KeychainAccount::WrappedMasterKey))
+        macos_keychain::exists(self.service, &self.account_path(KeychainAccount::WrappedMasterKey))
     }
 
     fn holds_account_email(&self) -> AuthResult<bool> {
-        macos_keychain::exists(&self.account_path(KeychainAccount::AccountEmail))
+        macos_keychain::exists(self.service, &self.account_path(KeychainAccount::AccountEmail))
     }
 
     fn save_vault_key_owner(&self, user_id: &str) -> AuthResult<()> {
@@ -950,7 +950,7 @@ mod macos_keychain {
             return Err(status_error("add generic password", status));
         }
 
-        let Some(item) = find_item(account)? else {
+        let Some(item) = find_item(service, account)? else {
             return Err(AuthStoreError::NotFound);
         };
         let update_status = unsafe {
@@ -962,8 +962,8 @@ mod macos_keychain {
 
     /// Is there an item for `account`? Asks the item's attributes only: no password out-parameter, so no secret is
     /// read (the same lookup `delete` and `save` use to find the item).
-    pub fn exists(account: &str) -> AuthResult<bool> {
-        match find_item(account.as_bytes())? {
+    pub fn exists(service: &str, account: &str) -> AuthResult<bool> {
+        match find_item(service.as_bytes(), account.as_bytes())? {
             Some(item) => {
                 unsafe { CFRelease(item.cast()) };
                 Ok(true)
@@ -1007,7 +1007,7 @@ mod macos_keychain {
 
     pub fn delete(service: &str, account: &str) -> AuthResult<()> {
         let account = account.as_bytes();
-        let Some(item) = find_item(account)? else {
+        let Some(item) = find_item(service.as_bytes(), account)? else {
             return Ok(());
         };
         let status = unsafe { SecKeychainItemDelete(item) };
@@ -1015,8 +1015,7 @@ mod macos_keychain {
         status_ok("delete generic password", status)
     }
 
-    fn find_item(account: &[u8]) -> AuthResult<Option<SecKeychainItemRef>> {
-        let service = service.as_bytes();
+    fn find_item(service: &[u8], account: &[u8]) -> AuthResult<Option<SecKeychainItemRef>> {
         let mut item: SecKeychainItemRef = ptr::null_mut();
         let status = unsafe {
             SecKeychainFindGenericPassword(

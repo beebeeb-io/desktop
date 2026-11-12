@@ -390,7 +390,7 @@ fn session_facts(app: &tauri::AppHandle) -> SessionFacts {
         vault_unlocked,
         auth_present,
         crate::finder_removal_owed(),
-        DesktopConfig::load(),
+        DesktopConfig::load_for(crate::APP),
     )
 }
 
@@ -412,7 +412,7 @@ fn set_signed_out_by_choice(cfg: &mut DesktopConfig, value: bool) -> bool {
 }
 
 fn update_config(change: impl FnOnce(&mut DesktopConfig) -> bool) {
-    match DesktopConfig::path() {
+    match DesktopConfig::path_for(crate::APP) {
         Ok(path) => update_config_at(&path, change),
         Err(error) => tracing::warn!(%error, "finder setup: could not find desktop.toml"),
     }

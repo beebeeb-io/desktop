@@ -303,6 +303,7 @@ async fn round7_completed_upload_retry(signout_retry: bool) {
         assert_eq!(bridge.db.upload_finalizations().unwrap().len(), 0);
     }
     crate::windows_cf::signout::purge(
+        &crate::identity::REAL,
         &bridge.db,
         Some(&root),
         &crate::windows_cf::signout::UnknownFiles::Delete,

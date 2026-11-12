@@ -475,6 +475,7 @@ impl<C: CredentialStores> Engine<C> {
             let _step = self.transition.lock().await;
             #[cfg(target_os = "windows")]
             crate::windows_cf::ensure_reactivation_allowed()?;
+            crate::sync_root_owner::check(self.identity, &sync_root)?;
             let mut slot = self.acct.engine.lock().await;
             if slot.is_some() {
                 return Ok(SyncStart::AlreadyRunning);

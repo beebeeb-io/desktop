@@ -91,6 +91,7 @@ pub mod state_db;
 pub mod state_paths;
 pub mod surfaces;
 pub mod sync_activity;
+pub mod sync_root_owner;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_api;
 #[cfg(any(test, feature = "test-support"))]

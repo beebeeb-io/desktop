@@ -280,15 +280,7 @@ jobs:
       # searched for: both are in every binary).
       - name: Refuse a binary that is not built as the real app
         shell: bash
-        run: |
-          set -euo pipefail
-          exe=native/beebeeb-drive-rune/target/x86_64-pc-windows-msvc/release/beebeeb-drive.exe
-          marks="$(grep -a -o 'beebeeb-app-identity=[0-9a-z.]*;' "$exe" | sort -u || true)"
-          echo "identity marks in the binary: ${marks:-none}"
-          if [[ "$marks" != "beebeeb-app-identity=io.beebeeb.app;" ]]; then
-            echo "::error::the built binary is not the real app (found: ${marks:-no mark})."
-            exit 1
-          fi
+        run: bash scripts/native-identity-mark.sh native/beebeeb-drive-rune/target/x86_64-pc-windows-msvc/release/beebeeb-drive.exe io.beebeeb.app
 
       - name: Refuse a binary that does not report the commit's time as its build time
         shell: bash

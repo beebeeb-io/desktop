@@ -210,7 +210,7 @@ fn command_icon_uri() -> WinResult<Uri> {
 // never surfaced as a COM failure that would make the flyout look broken.
 #[implement(IStorageProviderUICommand)]
 struct FreeUpSpaceCommand {
-    identity: &'static crate::identity::EngineIdentity,
+    app: &'static crate::identity::EngineIdentity,
 }
 
 // windows-rs 0.58 convention: `#[implement(IFoo)] struct Bar;` generates a
@@ -237,7 +237,7 @@ impl IStorageProviderUICommand_Impl for FreeUpSpaceCommand_Impl {
         Ok(StorageProviderUICommandState::Enabled)
     }
     fn Invoke(&self) -> WinResult<()> {
-        match crate::free_up_space_blocking(self.identity) {
+        match crate::free_up_space_blocking(self.this.app) {
             Ok(result) => {
                 tracing::info!(
                     bytes_freed = result.bytes_freed,
@@ -285,7 +285,7 @@ impl IStorageProviderUICommand_Impl for InfoCommand_Impl {
 // ── The status UI source: builds the flyout's StorageProviderStatusUI ───────
 #[implement(IStorageProviderStatusUISource)]
 struct StatusUiSource {
-    identity: &'static crate::identity::EngineIdentity,
+    app: &'static crate::identity::EngineIdentity,
 }
 
 impl IStorageProviderStatusUISource_Impl for StatusUiSource_Impl {
@@ -349,10 +349,7 @@ impl IStorageProviderStatusUISource_Impl for StatusUiSource_Impl {
         }
 
         // ── Primary command: "Free up space" (the textual button) ──
-        let free_up: IStorageProviderUICommand = FreeUpSpaceCommand {
-            identity: self.identity,
-        }
-        .into();
+        let free_up: IStorageProviderUICommand = FreeUpSpaceCommand { app: self.this.app }.into();
         ui.SetProviderPrimaryCommand(&free_up)?;
 
         Ok(ui)
@@ -379,7 +376,7 @@ impl IStorageProviderStatusUISource_Impl for StatusUiSource_Impl {
 // ── The factory Windows asks for the source, keyed by sync-root id ──────────
 #[implement(IStorageProviderStatusUISourceFactory)]
 struct StatusUiSourceFactory {
-    identity: &'static crate::identity::EngineIdentity,
+    app: &'static crate::identity::EngineIdentity,
 }
 
 impl IStorageProviderStatusUISourceFactory_Impl for StatusUiSourceFactory_Impl {
@@ -387,10 +384,7 @@ impl IStorageProviderStatusUISourceFactory_Impl for StatusUiSourceFactory_Impl {
         // Single-account today: every sync-root id maps to the one source that
         // reads the shared snapshot. (A future multi-account build would branch
         // on `_syncrootid` here, mirroring CloudMirror's note.)
-        Ok(StatusUiSource {
-            identity: self.identity,
-        }
-        .into())
+        Ok(StatusUiSource { app: self.this.app }.into())
     }
 }
 
@@ -401,7 +395,7 @@ impl IStorageProviderStatusUISourceFactory_Impl for StatusUiSourceFactory_Impl {
 // shell never aggregates these.
 #[implement(IClassFactory)]
 struct StatusUiClassFactory {
-    identity: &'static crate::identity::EngineIdentity,
+    app: &'static crate::identity::EngineIdentity,
 }
 
 impl IClassFactory_Impl for StatusUiClassFactory_Impl {
@@ -421,10 +415,7 @@ impl IClassFactory_Impl for StatusUiClassFactory_Impl {
         if punkouter.is_some() {
             return Err(CLASS_E_NOAGGREGATION.into());
         }
-        let factory: IStorageProviderStatusUISourceFactory = StatusUiSourceFactory {
-            identity: self.identity,
-        }
-        .into();
+        let factory: IStorageProviderStatusUISourceFactory = StatusUiSourceFactory { app: self.this.app }.into();
         // SAFETY: `riid`/`ppvobject` come from the shell's QueryInterface-style
         // call; `query` writes the requested interface (or an error) into
         // `ppvobject` and returns the HRESULT, which `.ok()` maps to Result.
@@ -472,7 +463,7 @@ pub fn register_status_ui_source(
     // 1. Register the class object so this running exe is the local server for
     //    the CLSID. Once per process (Windows rejects a duplicate).
     if CLASS_OBJECT_COOKIE.get().is_none() {
-        let factory: IClassFactory = StatusUiClassFactory { identity }.into();
+        let factory: IClassFactory = StatusUiClassFactory { app: identity }.into();
         // SAFETY: `clsid` is a valid CLSID; `factory` outlives
         // the call (it is moved into COM's keeping via the cookie). We pass
         // `CLSCTX_LOCAL_SERVER | REGCLS_MULTIPLEUSE` exactly as CloudMirror does.

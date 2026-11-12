@@ -1024,14 +1024,14 @@ mod tests {
         // The FFI module is the last thing in the file, after this test, so the LAST match is the real one.
         let macos = &source[source.rfind("mod macos_keychain {").expect("the macOS FFI module")..];
         let ffi = &macos[macos
-            .find("pub fn exists(account: &str)")
+            .find("pub fn exists(service: &str, account: &str)")
             .expect("the attribute-only query")..];
         let exists = &ffi[..ffi.find("\n    }\n").unwrap()];
         assert!(
             exists.contains("find_item(") && !exists.contains("password_data"),
             "{exists}"
         );
-        let load = &macos[macos.find("pub fn load(account: &str)").unwrap()..];
+        let load = &macos[macos.find("pub fn load(service: &str, account: &str)").unwrap()..];
         let load = &load[..load.find("\n    }\n").unwrap()];
         assert!(
             load.contains("zeroize::Zeroize::zeroize(&mut bytes)"),

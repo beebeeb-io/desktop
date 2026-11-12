@@ -639,7 +639,7 @@ fn a_release_build_sweeps_every_directory_the_engine_stages_into() {
         release,
         [
             "fn release_staging_dirs() -> Vec<PathBuf> {",
-            "engine_bridge::finder_staging_candidates()"
+            "engine_bridge::finder_staging_candidates(crate::APP)"
         ],
         "the release list is the engine's own list, not a copy of it"
     );

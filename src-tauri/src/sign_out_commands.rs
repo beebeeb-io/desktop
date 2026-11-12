@@ -227,7 +227,7 @@ pub(super) async fn clear_session_impl(
                     windows_cf::signout::UnknownFiles::Delete
                 }
             };
-            let kept = windows_cf::signout::purge(&db, root.as_deref(), &choice)
+            let kept = windows_cf::signout::purge(crate::APP, &db, root.as_deref(), &choice)
                 .map_err(|e| format!("Sign-out paused: {e}"))?;
             windows_kept = kept.dir.map(|dir| KeptUnsent {
                 folder: dir.to_string_lossy().into_owned(),
@@ -972,7 +972,7 @@ pub(super) fn sign_out_kept_root() -> Result<PathBuf, String> {
     }
     #[cfg(not(test))]
     {
-        sign_out::kept_names::kept_root_for_this_app().ok_or_else(|| "no folder for kept changes".to_string())
+        sign_out::kept_names::kept_root_for_this_app(crate::APP).ok_or_else(|| "no folder for kept changes".to_string())
     }
 }
 

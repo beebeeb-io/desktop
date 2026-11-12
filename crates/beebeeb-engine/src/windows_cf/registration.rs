@@ -96,6 +96,29 @@ pub fn hydration_policy_of(path: &std::path::Path) -> anyhow::Result<(u16, u16)>
     Ok((info.HydrationPolicy.Primary.0, info.HydrationPolicy.Modifier.0))
 }
 
+/// The name of the provider Windows has `path` registered to as a Cloud Files sync root, or `None` when the
+/// folder is not a sync root (or cannot be read as one). Reads only. `sync_root_owner` decides with it.
+pub fn registered_provider_name(path: &std::path::Path) -> Option<String> {
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut buffer = vec![0u64; 1024];
+    // SAFETY: as in `hydration_policy_of`: a NUL-terminated path and a writable buffer of the stated length.
+    unsafe {
+        CfGetSyncRootInfoByPath(
+            PCWSTR(wide.as_ptr()),
+            CF_SYNC_ROOT_INFO_STANDARD,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 8) as u32,
+            None,
+        )
+    }
+    .ok()?;
+    // SAFETY: on success the buffer starts with a CF_SYNC_ROOT_STANDARD_INFO, and it is 8-byte aligned.
+    let info = unsafe { &*(buffer.as_ptr() as *const CF_SYNC_ROOT_STANDARD_INFO) };
+    let name = info.ProviderName;
+    let len = name.iter().position(|unit| *unit == 0).unwrap_or(name.len());
+    Some(String::from_utf16_lossy(&name[..len]))
+}
+
 /// Stable, deterministic 64-bit FNV-1a hash of the sync-root path bytes.
 ///
 /// Used only to mint the WinRT shell-registration `Id` (see

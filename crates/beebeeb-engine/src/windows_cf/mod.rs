@@ -68,7 +68,9 @@ mod ld0105_native_tests;
 #[cfg(test)]
 mod ld0113_kfm_native_tests;
 #[cfg(test)]
-mod ld0113_protect_native_tests; // LD-0113 Amendment 9: a folder OneDrive moved, on a QA sync root.
+mod ld0113_protect_native_tests;
+#[cfg(test)]
+mod sync_root_owner_native_tests; // a folder registered to another provider is read and refused // LD-0113 Amendment 9: a folder OneDrive moved, on a QA sync root.
 // LD-0113 Amendments 7 and 8a: files under Backups are read-only; the "Read-only" badge on the root.
 pub mod read_only;
 pub mod signout;
@@ -374,6 +376,7 @@ pub fn runtime() -> Option<tokio::runtime::Handle> {
 /// Idempotent at the OS layer: re-registering the same path with the
 /// same provider id returns success.
 pub fn register_sync_root(identity: &'static EngineIdentity, sync_root_path: &std::path::Path) -> anyhow::Result<()> {
+    crate::sync_root_owner::check(identity, sync_root_path).map_err(|refusal| anyhow::anyhow!(refusal))?;
     register_sync_root_with(sync_root_path, &app_provider(identity), HYDRATION_POLICY)
 }
 

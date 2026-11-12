@@ -166,6 +166,12 @@ async fn run(
     crate::backup_protect::set_notifier(app.clone());
     // macOS: the working-set signal goes through the host's File Provider bridge (a host without one: no-op).
     crate::file_provider_port::install_from(app.as_ref());
+    // Never in a folder another sync provider registered (the test build in the real app's, or the reverse).
+    if let Err(msg) = crate::sync_root_owner::check(identity, &sync_root) {
+        tracing::error!(error = %msg, "the sync folder belongs to another provider; the engine does not start");
+        emit_status(&app, "error", Some(&sync_root), Some(&msg));
+        return;
+    }
     // Windows Cloud Files: connect the sync root before any placeholder work.
     // Beebeeb metadata now lives in the app-local state dir, but Cloud Files
     // placeholder seeding still needs a connected root later in this task.

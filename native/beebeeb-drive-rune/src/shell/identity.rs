@@ -279,18 +279,59 @@ mod tests {
         assert_eq!(body.matches("shell::run();").count(), 1);
     }
 
+    /// What a packager searches the built file for, put together at run time: written out here it would be a
+    /// second mark in the test binary.
+    fn mark_prefix() -> String {
+        ["beebeeb-app", "-identity", "="].concat()
+    }
+
     /// The mark names this build's identifier, in the exact form the packager and the workflow search for.
     #[test]
     fn the_build_mark_names_this_build() {
         assert_eq!(
             BUILD_MARK,
-            format!("beebeeb-app-identity={};", AppIdentity::CURRENT.bundle_identifier())
+            [mark_prefix().as_str(), AppIdentity::CURRENT.bundle_identifier(), ";"].concat()
         );
         let main = include_str!("../main.rs");
         assert!(
             main.contains("std::hint::black_box(shell::identity::BUILD_MARK);"),
             "main keeps the mark in the binary"
         );
+    }
+
+    /// This built file holds exactly ONE mark, and it is this build's. Both apps' bare identifiers are in the
+    /// file (the engine names both), so "the file holds the identifier" proves nothing; the mark does. Run as
+    /// each identity (`BEEBEEB_APP_IDENTIFIER=io.beebeeb.app cargo test` for the real one);
+    /// `scripts/native-identity-mark.sh` does the same on the app binary itself.
+    #[test]
+    fn this_built_file_holds_exactly_one_identity_mark() {
+        let file = std::fs::read(std::env::current_exe().expect("this test binary")).expect("read it");
+        let prefix = mark_prefix().into_bytes();
+        let mut marks = Vec::new();
+        let mut at = 0;
+        while let Some(found) = file[at..]
+            .windows(prefix.len())
+            .position(|bytes| bytes == prefix.as_slice())
+        {
+            let start = at + found + prefix.len();
+            let id: Vec<u8> = file[start..]
+                .iter()
+                .copied()
+                .take_while(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'.')
+                .collect();
+            if file.get(start + id.len()) == Some(&b';') {
+                marks.push(String::from_utf8(id).expect("ascii"));
+            }
+            at = start;
+        }
+        assert_eq!(marks, [AppIdentity::CURRENT.bundle_identifier()]);
+        // And the other app's identifier IS in this file: why the mark exists.
+        let other = match AppIdentity::CURRENT {
+            AppIdentity::Real => AppIdentity::Test,
+            AppIdentity::Test => AppIdentity::Real,
+        };
+        let other_id = std::hint::black_box(other).engine().bundle_identifier().as_bytes();
+        assert!(file.windows(other_id.len()).any(|bytes| bytes == other_id));
     }
 
     /// A build nobody named is the test build (plain `cargo test`, as CI runs it, is one): the default never
