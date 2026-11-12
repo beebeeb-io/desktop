@@ -131,11 +131,6 @@ pub fn foot_row(buttons: Vec<El>, even: Option<f32>, t: &Theme) -> El {
     f
 }
 
-/// What pushes the buttons after it to a foot's trailing edge (`.mr-auto` on the one before).
-pub fn foot_gap() -> El {
-    rune::el().key("dlg-foot-gap").grow(1.0)
-}
-
 /// A dialog card of `parts` (head, body, foot) in the middle of the body, on its scrim.
 pub fn on_scrim(name: &str, width: f32, parts: Vec<El>, t: &Theme) -> El {
     scrimmed("dialog", name, width, parts, t)
@@ -196,27 +191,6 @@ pub fn alert(name: &str, width: f32, tile: El, title: &str, sub: &str, foot: Vec
         .child(words);
     let each = (width - 48.0 - 8.0 * (foot.len().max(1) - 1) as f32) / foot.len().max(1) as f32;
     scrimmed("alertdialog", name, width, vec![head, foot_row(foot, Some(each), t)], t)
-}
-
-/// A dialog-size button with a drawn border (`.kit-btn-md` on paper): an action that is
-/// neither the primary one nor the way out. Keys: `btn-<N>`, `btn-<N>-label`.
-pub fn button_outline(index: usize, label: &str, t: &Theme) -> El {
-    let key = format!("btn-{index}");
-    row()
-        .key(key.clone())
-        .role("button")
-        .label(label)
-        .h(28.0)
-        .px(12.0)
-        .center()
-        .radius(radius::MD)
-        .fill(t.paper)
-        .border(1.0, t.card_border)
-        .border_layout()
-        .hover(t.hover)
-        .press(t.press)
-        .focusable(true)
-        .child(kit::label(format!("{key}-label"), label, BUTTON_MD, t.text))
 }
 
 /// A dialog-size button for a destructive answer (`.kit-btn-md` on red): white on red, the

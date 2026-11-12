@@ -160,9 +160,9 @@ fn the_shell_opens_settings_on_general_and_esc_goes_back_to_drive() {
 #[test]
 fn a_section_of_another_lane_is_routed_by_the_shell() {
     let mut rt = runtime("DW-0701");
-    click(&mut rt, "Storage-row");
-    assert_eq!(on_settings(&rt), Some(SettingsPane::Storage));
-    assert!(find(&rt, "set-main").is_none(), "this lane does not draw Storage");
+    click(&mut rt, "Backups-row");
+    assert_eq!(on_settings(&rt), Some(SettingsPane::Backups));
+    assert!(find(&rt, "set-main").is_none(), "this lane does not draw Backups");
 }
 
 #[test]
@@ -367,7 +367,7 @@ fn an_available_update_is_said_once_with_one_primary_action() {
 /// it must not: no city, no provider.
 #[test]
 fn every_built_frame_renders_and_names_no_city_and_no_provider() {
-    assert_eq!(super::FRAMES.len(), 15, "the frames this lane built");
+    assert_eq!(super::FRAMES.len(), 28, "the frames the two settings lanes built");
     for (frame, _) in super::FRAMES {
         let rt = runtime(frame);
         assert!(find(&rt, "set-main").is_some(), "{frame}");

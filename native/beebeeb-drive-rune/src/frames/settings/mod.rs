@@ -26,6 +26,8 @@ pub mod storage_location;
 pub mod sync;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_drive;
 
 use crate::State;
 use crate::shell::app::{Event, Screen, SettingsPane};
