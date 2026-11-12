@@ -45,6 +45,13 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, t: &Theme) -> (
                 .on_press(|s: &mut State| super::go(s, "DW-0716"))
                 .child(lists::pop_button("item-0-0", &sec.lock_after, t)),
         );
+        // Where the delay menu's corner goes (DW-0716): 3 pt under the pop-up button, 4 pt
+        // inside the card's trailing edge.
+        lock_controls.push(
+            el().key(super::app_lock::ANCHOR)
+                .pin(None, Some(35.0), Some(134.0), None)
+                .size(0.0, 0.0),
+        );
     }
     lock_controls.push(
         lists::switch("item-0-0", "Lock Beebeeb", lock_on, t).on_press(move |s: &mut State| {
@@ -180,6 +187,7 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, t: &Theme) -> (
             true,
             t,
         )),
+        Some(Dialog::LockDelay(hot)) if lock_on => Some(super::app_lock::menu(&sec.lock_after, *hot, t)),
         _ => None,
     };
     let children = vec![
