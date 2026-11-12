@@ -635,3 +635,17 @@ fn the_history_tells_its_times_and_a_limit_above_the_speed_changes_nothing() {
     board.set_limit(Direction::Upload, Some(2));
     assert_eq!(board.bandwidth().upload.speed, Some(("250".into(), "KB/s".into())));
 }
+
+#[test]
+fn a_second_run_while_the_test_runs_starts_nothing() {
+    // The button is off while a test runs; the source holds the same rule for any other caller.
+    let mut drive = BoardDrive::new();
+    drive.run_speed_test();
+    drive.speed_test_reported(BoardBandwidth::test_downloading());
+    drive.run_speed_test();
+    assert_eq!(drive.bandwidth().test, BoardBandwidth::test_downloading());
+    // After the result it runs again, from its first step.
+    drive.speed_test_reported(BoardBandwidth::test_done());
+    drive.run_speed_test();
+    assert_eq!(drive.bandwidth().test, BoardBandwidth::test_uploading());
+}
