@@ -81,7 +81,7 @@ fn files_is_the_registered_frame_and_draws_dw_0401() {
 #[test]
 fn an_unbuilt_route_draws_the_placeholder_that_names_its_group() {
     let (_, _, mut rt) = fixture();
-    go(&mut rt, Section::Shared);
+    go(&mut rt, Section::Photos);
     assert!(rt.find("not-built").is_some());
     assert!(
         rt.find("file-list").is_none(),
@@ -90,7 +90,7 @@ fn an_unbuilt_route_draws_the_placeholder_that_names_its_group() {
     assert!(rt.find("detail-pane").is_none());
     let texts = texts(&rt);
     assert!(texts.iter().any(|t| t == "NOT BUILT YET"), "{texts:?}");
-    assert!(texts.iter().any(|t| t == "Board: Shared (DW-0501)"), "{texts:?}");
+    assert!(texts.iter().any(|t| t == "Board: Photos (DW-0601)"), "{texts:?}");
     // The window's real chrome stays: caption and sidebar.
     assert!(rt.find("caption-bar").is_some());
     assert!(rt.find("sidebar").is_some());
@@ -107,8 +107,8 @@ fn every_state_without_a_frame_has_a_placeholder_and_only_files_is_built() {
         unbuilt += usize::from(!built);
     }
     assert_eq!(
-        unbuilt, 4,
-        "four sections wait for their lanes (Sync history and Available offline are built)"
+        unbuilt, 2,
+        "two sections wait for their lanes (Shared, Trash, Sync history and Available offline are built)"
     );
     for gate in [
         GateState::SignedOut,
@@ -156,7 +156,10 @@ fn alt_arrows_walk_the_history() {
     assert!(rt.find("file-list").is_some());
     press(&mut rt, Key::Right, alt());
     assert_eq!(rt.state.shell.app.route(), &Route::section(Section::Shared));
-    assert!(rt.find("not-built").is_some());
+    assert!(
+        rt.find("file-list").is_none() && rt.find("seg-0").is_some(),
+        "Shared's own frame"
+    );
     // The sidebar's highlight follows the route.
     assert!(rt.state.sidebar_section == SidebarSection::Shared);
 }
@@ -300,10 +303,10 @@ fn signed_out_takes_no_shortcut_to_the_account() {
 fn a_sidebar_selection_becomes_a_navigation() {
     let (_, _, mut rt) = fixture();
     // What `ui::sidebar` does on a click.
-    rt.update(|s, _| s.sidebar_section = SidebarSection::Trash);
+    rt.update(|s, _| s.sidebar_section = SidebarSection::Backups);
     rt.frame(0.016);
     rt.frame(0.016);
-    assert_eq!(rt.state.shell.app.route(), &Route::section(Section::Trash));
+    assert_eq!(rt.state.shell.app.route(), &Route::section(Section::Backups));
     assert!(rt.state.shell.app.can_go_back());
     assert!(rt.find("not-built").is_some());
 }

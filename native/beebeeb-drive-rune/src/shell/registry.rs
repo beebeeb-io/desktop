@@ -148,6 +148,8 @@ pub const FRAMES: &[Frame] = &[
     },
     crate::frames::this_pc::SYNC_HISTORY,
     crate::frames::this_pc::AVAILABLE_OFFLINE,
+    crate::frames::SHARED,
+    crate::frames::TRASH,
     Frame {
         group: FrameGroup::Settings(SettingsPane::General),
         view: crate::frames::settings::view,
