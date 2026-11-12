@@ -207,10 +207,18 @@ fn serve(mut stream: TcpStream, handler: &Handler, log: Option<&Mutex<Vec<Reques
     let _ = stream.flush();
 }
 
+/// A single request must complete within this many seconds. A client sending one byte every 9 s (just under the
+/// per-read timeout) would otherwise keep a worker alive past `--max-seconds` indefinitely. The per-read timeout is
+/// shrunk to min(10 s, remaining) on each iteration (P2-2 of the PR #338 review).
+const REQUEST_DEADLINE_SECS: u64 = 60;
+
 fn read_request(stream: &mut TcpStream) -> Option<Request> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(REQUEST_DEADLINE_SECS);
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 8192];
     let header_end = loop {
+        let remaining = deadline.checked_duration_since(std::time::Instant::now())?;
+        let _ = stream.set_read_timeout(Some(remaining.min(std::time::Duration::from_secs(10))));
         let read = stream.read(&mut chunk).ok()?;
         if read == 0 {
             return None;
@@ -236,6 +244,8 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
         .unwrap_or(0);
     let mut body = buffer[header_end..].to_vec();
     while body.len() < length {
+        let remaining = deadline.checked_duration_since(std::time::Instant::now())?;
+        let _ = stream.set_read_timeout(Some(remaining.min(std::time::Duration::from_secs(10))));
         let read = stream.read(&mut chunk).ok()?;
         if read == 0 {
             return None;

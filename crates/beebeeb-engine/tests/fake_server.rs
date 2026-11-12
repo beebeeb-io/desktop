@@ -69,6 +69,16 @@ fn the_fixture_signs_in_a_real_engine_and_nobody_else_does() {
     assert_eq!(engine.gate(), GateState::Ready);
 
     let written = lines.lock().unwrap().clone();
+    assert_eq!(served.load(Ordering::SeqCst), 6);
+    assert_eq!(fake.requests().len(), 0, "the server keeps no request");
+    // The secrets check runs before the exact-match assertion so it guards against a future change to the access-line
+    // format that leaks a secret (P2-4 of the PR #338 review).
+    let secrets = [token.as_str(), FIXTURE_PASSWORD, "abandon", "Bearer"];
+    let leaking = written
+        .iter()
+        .filter(|line| secrets.iter().any(|s| line.contains(s)))
+        .count();
+    assert_eq!(leaking, 0, "a secret leaked into the access lines: {written:?}");
     assert_eq!(
         written,
         [
@@ -80,14 +90,6 @@ fn the_fixture_signs_in_a_real_engine_and_nobody_else_does() {
             "POST /api/v1/auth/verify-recovery-check -> 200",
         ]
     );
-    assert_eq!(served.load(Ordering::SeqCst), 6);
-    assert_eq!(fake.requests().len(), 0, "the server keeps no request");
-    let secrets = [token.as_str(), FIXTURE_PASSWORD, "abandon", "Bearer"];
-    let leaking = written
-        .iter()
-        .filter(|line| secrets.iter().any(|s| line.contains(s)))
-        .count();
-    assert_eq!(leaking, 0, "{written:?}");
 }
 
 fn read(rel: &str) -> String {
@@ -208,9 +210,14 @@ fn the_fake_server_is_built_only_when_asked_for_and_no_app_or_package_holds_it()
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         })
-        .filter(|line| line.split_whitespace().next() == Some("File"))
+        .filter(|line| {
+            line.split_whitespace()
+                .next()
+                .is_some_and(|word| word.eq_ignore_ascii_case("File"))
+        })
         .collect();
-    if file_commands != [r#"File "${MAINBINARYSRCPATH}""#] {
+    // Case-insensitive: NSIS directives are case-insensitive (File, file, FILE all work).
+    if file_commands.len() != 1 || !file_commands[0].eq_ignore_ascii_case(r#"File "${MAINBINARYSRCPATH}""#) {
         wrong.push(format!("the NSIS scripts pack {file_commands:?}"));
     }
     let packager = read("../../packaging/windows/build-installer.ps1");

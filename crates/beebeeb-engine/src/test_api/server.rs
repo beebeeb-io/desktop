@@ -8,7 +8,7 @@
 //! included: give the same `--listen` again). In front of it, [`fixture_handler`] answers a sign-in for any other email
 //! as a wrong password before OPAQUE runs, and writes one [`access_line`] per answer.
 //!
-//! The binary (`src/bin/bb-fake-server.rs`) is built only with `--features fake-server`, which implies `test-support`:
+//! The binary (`src/test_api/bin_main.rs`) is built only with `--features fake-server`, which implies `test-support`:
 //! the default feature set never builds it, a release profile refuses to compile it (`lib.rs`), and no app enables it
 //! (`tests/fake_server.rs` reads the manifests and the packaging scripts).
 //!
@@ -280,6 +280,15 @@ pub fn run<I: IntoIterator<Item = String>>(args: I) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    say(&format!(
+        "bb-fake-server: {FAKE_API_MARK}; fixture account {FIXTURE_EMAIL}; registering it (Argon2id) before listening"
+    ));
+    // Register the fixture account (Argon2id, ~27 s) BEFORE binding, so the port does not accept connections while
+    // the handler is not ready (P2-3 of the PR #338 review).
+    let served = Arc::new(AtomicU64::new(0));
+    let lines: LineWriter = Arc::new(say);
+    let account = fixture_account();
+    let handler = fixture_handler(account, lines, served.clone());
     let listener = match bind(options.listen) {
         Ok(listener) => listener,
         Err(error) => {
@@ -290,12 +299,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    say(&format!(
-        "bb-fake-server: {FAKE_API_MARK}; fixture account {FIXTURE_EMAIL}; registering it (Argon2id) before listening"
-    ));
-    let served = Arc::new(AtomicU64::new(0));
-    let lines: LineWriter = Arc::new(say);
-    let fake = match FakeApi::start_on(listener, fixture_handler(fixture_account(), lines, served.clone())) {
+    let fake = match FakeApi::start_on(listener, handler) {
         Ok(fake) => fake,
         Err(error) => {
             say(&format!("bb-fake-server: could not start: {error}"));
@@ -497,6 +501,22 @@ mod tests {
         assert_eq!(written.len(), 6);
         assert_eq!(written[0], "POST /api/v1/opaque/login-start -> 401");
         assert_eq!(written[3], "POST /api/v1/opaque/login-start -> 400");
+
+        // P2-1: the login-finish email guard, distinguished from OPAQUE's own answer. Start with the fixture's
+        // email to get a VALID server_state (OPAQUE 200), then send finish with that state but another email:
+        // the email guard returns 401, while OPAQUE itself would return 200 (the state is valid for that session)
+        // or 400 (bad_request). If the guard is removed, this line turns green at the wrong status.
+        let start_resp: Value = serde_json::from_slice(&handler(&start(FIXTURE_EMAIL)).body).unwrap();
+        let server_state = start_resp["server_state"].as_str().unwrap().to_string();
+        let hijack = post(
+            "/api/v1/opaque/login-finish",
+            json!({ "email": "someone@example.invalid", "client_message": "AA==", "server_state": server_state }),
+        );
+        assert_eq!(
+            handler(&hijack).status,
+            401,
+            "the email guard on login-finish returns 401 for another email"
+        );
     }
 
     #[test]
