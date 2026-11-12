@@ -9,9 +9,11 @@ use crate::frames::files::source::FilesFixture;
 use crate::frames::files::{Actions, Intent as FilesIntent};
 use crate::{State, init, view};
 
+/// Ctrl, as Windows reports it (the shortcut modifier and the Control key).
 fn ctrl() -> Mods {
     Mods {
         cmd: true,
+        ctrl: true,
         ..Mods::default()
     }
 }
@@ -34,6 +36,14 @@ fn runtime() -> (
     rt.poll = Some(crate::shell::host::poll);
     rt.frame(0.0);
     (rt, calls)
+}
+
+/// A click on the board's selected row (Contract draft.pdf): the keyboard is in the Files list.
+fn click_the_list(rt: &mut Runtime<State>) {
+    let [x, y, w, h] = info(rt, "row-6-date").rect;
+    rt.pointer_down(x + w / 2.0, y + h / 2.0);
+    rt.pointer_up(x + w / 2.0, y + h / 2.0);
+    rt.frame(0.0);
 }
 
 fn press_with(rt: &mut Runtime<State>, key: Key, mods: Mods) {
@@ -90,8 +100,9 @@ fn picked(rt: &Runtime<State>) -> Option<Kind> {
     rt.state.viewer.new_file.as_ref().map(|nf| nf.kind)
 }
 
-/// Ctrl+N in the Files window: the dialog, on the type.
+/// Ctrl+N in the Files list: the dialog, on the type.
 fn open_dialog(rt: &mut Runtime<State>) {
+    click_the_list(rt);
     press_with(rt, Key::Command('n'), ctrl());
     assert_eq!(dialog_step(rt), Some(Step::Pick), "Ctrl+N opens New file on the type");
 }
