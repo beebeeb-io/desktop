@@ -411,6 +411,12 @@ fn a_recording_plays_pauses_and_walks_its_queue() {
     assert_eq!(words(&rt, "status-details"), "Paused \u{00B7} Studio demos, 1 of 5");
     click(&mut rt, "pause");
     assert_eq!(calls.borrow().len(), 2);
+    // Space with the keyboard on the button is one press, not two.
+    assert_eq!(info(&rt, "pause").label.as_deref(), Some("Pause"));
+    press(&mut rt, Key::Text(" ".into()));
+    assert_eq!(calls.borrow().len(), 3);
+    assert_eq!(info(&rt, "pause").label.as_deref(), Some("Play"));
+    press(&mut rt, Key::Text(" ".into()));
     // A press on a track plays it; Ctrl+Left and the buttons step.
     click(&mut rt, "track-3");
     assert_eq!(viewer(&rt).file.name, "Client call, 30 Oct.m4a");
