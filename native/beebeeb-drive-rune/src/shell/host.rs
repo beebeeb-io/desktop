@@ -65,6 +65,9 @@ pub struct Shell {
     /// What the platform was last **successfully** told about capture exclusion. `false` at
     /// startup: the platform has not been told anything until the first `poll` calls it.
     capture_excluded: bool,
+    /// The gate and the account the last poll saw (`poll` ends the account lane's flows when
+    /// the session ends under them).
+    session_seen: Option<(super::app::GateState, Option<String>)>,
     /// Consecutive failures of the capture-exclusion platform call. Reset on success or when
     /// the desired state changes. Capped at 3: after 3 failures the call is not retried until
     /// the desired state changes (a navigation away and back resets it).
@@ -107,6 +110,7 @@ impl Shell {
             // The platform has not been told anything yet. The first poll that sees a secret
             // route (or any route, if a window handle exists) will apply it.
             capture_excluded: false,
+            session_seen: None,
             capture_exclusion_retries: 0,
             flyout_behind: false,
             #[cfg(test)]
@@ -434,6 +438,22 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= open_sync_refusal(s);
     // The first sync's files, once a check finished (R1.1).
     changed |= read_again_after_a_check(s);
+    // A lock, a sign-out or another account ends what was open inside the account sections: a
+    // review of another device's sign-in, a typed code or password, a Windows Hello that is up.
+    // Compared with what this poll saw last, not with this poll's own refresh: the engine's
+    // status events refresh the session between polls too.
+    let now = (s.shell.app.gate(), s.shell.app.account().map(str::to_owned));
+    if let Some((gate, account)) = s.shell.session_seen.replace(now.clone()) {
+        let left_ready = gate == super::app::GateState::Ready && now.0 != gate;
+        let other_account = account.is_some() && now.1 != account;
+        if left_ready || other_account {
+            crate::frames::account::end_flows(s);
+            changed = true;
+        }
+    }
+    // Windows Hello's answer to an approval of another device's sign-in (DW-A14). Read after the
+    // session: an answer that comes with a lock or a sign-out finds its wait already ended.
+    changed |= crate::frames::account::approve::poll(s);
     // The one window is the first-run window (960 x 640) or the main window, by the screen.
     let kind = surfaces::kind_for(&s.shell.app.screen());
     if kind != s.shell.window_kind {

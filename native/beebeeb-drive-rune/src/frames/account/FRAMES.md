@@ -4,7 +4,8 @@ Source: `design/desktop-v2/frames.json`, Windows tab, the five account groups (2
 draws each `DM-Axx` for Windows under the same number as `DW-Axx`). Every frame is the 960 x 640 window
 (a 958 x 638 client area), in the account kit's settings view (`.au-set`).
 
-Status after the review of #298 (2026-11-12, `origin/v2-native` 598ed681 merged): 29 of 29 built. 58 gate runs (29
+Status after the review of #298 (2026-11-12, `origin/v2-native` 598ed681 merged): 29 of 29 built. Since then the group
+"Approving a sign-in" was added at the end of this file: 7 more frames, 6 built and gated, 1 drawn by Windows (35 scenes in all). 58 gate runs (29
 frames, light and dark): 52 with every line at 0 failing, 6 with a red pixel line, each named in its row (8 keyed
 elements in all; no geometry, text, icon or fill line is red). The built frames are the scenes of `frames::account::FRAMES`.
 
@@ -81,3 +82,28 @@ goldens be captured again: a board change, not this lane's (board follow-up task
 Gate, light / dark, geometry failing: DW-0716 96 / 96, DW-0716b 83 / 83, DW-0708 59 / 59.
 Of those: DW-0716 86 pane keys + 10 menu keys; DW-0716b 83 pane keys; DW-0708 52 keys of the pane behind + 7 keys of the dialog's list.
 What task 2480 is expected to remove: all of them (a redraw in the account kit moves the card to 520 pt, so the menu follows, and gives the pane three lists, so the dialog's list becomes `list-3`). Expected, not measured: after the recapture, run the gate and correct these rows.
+
+## Approving a sign-in (7, lane signin-approving)
+
+The board's group "Approving a sign-in": the approving device's side of DW-A07. `approve.rs` (state, rules, views),
+`approve_tests.rs`. The code is a secret the screen shows as typed: one secure, shown `TextEdit`; DW-A12, DW-A13 and
+DW-A14 are in the capture-exclusion decision (`Pane::shows_secret`, `Dialog::shows_secret`).
+
+| Frame | What it is | Status |
+| --- | --- | --- |
+| `DW-A11` | Windows' toast: "Allow Drive on Anna's iPhone?" | OS-drawn toast, verified by a real-window capture (not done yet: phase 2 sends it). No gated scene: Windows draws it. Its words are `approve::notification`, bound to the golden by a test; a click is `approve::notification_clicked` (opens DW-A13 with an empty code field) |
+| `DW-A12` | Approve a sign-in: type the code the other device shows. | built (light and dark: 0 failing on all six lines) |
+| `DW-A13` | The review: what the server measured, what the device reports, the code, Approve and Deny. | built; light: 0 failing on all six lines; dark: 1 pixel line red, 2 keys (`list-0-body edge 10 > 9`, `item-0-1 edge 10 > 9`: where the dialog lies over that list's edge, as DW-A78) |
+| `DW-A14` | Windows Hello is asking; what approving shares, in amber. | built; geometry, text, icons and fills 0 failing in both themes; pixels differ (71 keys light, 30 dark): the board draws Windows' own prompt and a second scrim over the frame (as DW-A04, DW-A29) |
+| `DW-A15` | Approved: the new session, and where to end it. | built (light and dark: 0 failing on all six lines) |
+| `DW-A16` | Denied: nothing signed in, no keys shared; what to check. | built (light and dark: 0 failing on all six lines) |
+| `DW-A17` | This request expired (and "Already handled"). | built (light and dark: 0 failing on all six lines) |
+
+States the board gives a rule and no drawing, built from the rule's words (tests only): a code nothing waits for
+("We could not find a waiting request with that code. Check it on the other device."); the red "Unusual place" note
+above the facts; "Already handled" in place of DW-A17's heading; Windows Hello cancelled (back to the review, nothing
+sent); offline, at the lookup and after Windows Hello ("Beebeeb can't be reached. Nothing was approved.").
+
+Esc: the dialogs are modal. On the review Esc is Deny (the board); on a result it is the result's one button.
+
+Not tested, no fixture path: a request that runs out while it is only being looked at (`sign_in_request_gone`).

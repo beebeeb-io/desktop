@@ -1109,3 +1109,192 @@ fn the_first_finished_check_shows_the_files_without_a_click() {
     settle(&mut rt);
     assert_eq!(source.reads(), shown, "a root that reads is navigation's");
 }
+
+/// Approving a sign-in: the screens that hold the approval code are secret (DW-A12, DW-A13,
+/// DW-A14); the results, which show after the code is wiped, are not.
+#[test]
+fn the_approval_code_screens_are_secret_and_the_window_is_excluded_while_they_show() {
+    use crate::frames::account::{Dialog as AccountDialog, Pane};
+    assert!(Pane::ApproveCode.shows_secret(), "DW-A12");
+    assert!(AccountDialog::ApproveReview.shows_secret(), "DW-A13");
+    assert!(AccountDialog::ApproveHello.shows_secret(), "DW-A14");
+    assert!(!AccountDialog::ApproveApproved.shows_secret(), "DW-A15");
+    assert!(!AccountDialog::ApproveDenied.shows_secret(), "DW-A16");
+    assert!(
+        !AccountDialog::ApproveExpired { handled: false }.shows_secret(),
+        "DW-A17"
+    );
+    assert!(
+        !Pane::ApproveReview.shows_secret(),
+        "the pane under the dialogs has no secret of its own"
+    );
+
+    // End to end: the platform is told when the code page opens, and told again when it closes.
+    let engine = Arc::new(FixtureEngine::ready());
+    let platform = Arc::new(FakePlatform::default());
+    let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform.clone())));
+    assert!(platform.capture_exclusions.lock().unwrap().is_empty());
+    rt.update(|s, _| crate::frames::account::go(s, "DW-A12"));
+    rt.frame(1.0);
+    assert_eq!(
+        platform.capture_exclusions.lock().unwrap().clone(),
+        vec![true],
+        "DW-A12 excludes the window"
+    );
+    rt.update(|s, _| crate::frames::account::go(s, "DW-A52"));
+    rt.frame(2.0);
+    assert_eq!(platform.capture_exclusions.lock().unwrap().clone(), vec![true, false]);
+}
+
+/// A window on the review of another device's sign-in (DW-A13), its code typed on DW-A12, with the
+/// shell's engine in hand. `hold`: Windows Hello's prompt stays up once Approve is pressed.
+fn on_the_review(hold: bool) -> (Arc<FixtureEngine>, Runtime<State>) {
+    use crate::frames::account::source::BoardAccount;
+    use crate::frames::account::{self, Dialog as AccountDialog, approve};
+    let (engine, _, mut rt) = fixture();
+    rt.update(move |s, _| {
+        let board = BoardAccount::new();
+        s.account.source = Some(Box::new(if hold { board.holding_hello() } else { board }));
+        account::go(s, "DW-A12");
+    });
+    settle(&mut rt);
+    press(
+        &mut rt,
+        Key::Text(approve::BOARD_REQUEST_CODE.replace('-', "")),
+        Mods::default(),
+    );
+    press(&mut rt, Key::Enter, Mods::default());
+    assert_eq!(rt.state.account.dialog, Some(AccountDialog::ApproveReview));
+    assert!(rt.state.account.approve.matches, "the review holds the typed code");
+    (engine, rt)
+}
+
+/// What the account lane holds once a session ended under it: no request, no code, no wait, no
+/// dialog, and the section back on its list.
+fn assert_the_approval_is_gone(rt: &Runtime<State>, why: &str) {
+    use crate::frames::account::Pane;
+    let a = &rt.state.account.approve;
+    assert!(a.request.is_none(), "{why}: the request is forgotten");
+    assert!(a.code.text.is_empty(), "{why}: the code is wiped");
+    assert!(!a.matches && !a.waiting, "{why}: nothing is live");
+    assert_eq!(rt.state.account.dialog, None, "{why}: the review is closed");
+    assert_eq!(rt.state.account.pane, Pane::Security, "{why}: back on the list");
+}
+
+/// Review P2-1: a lock ends the approval. After the unlock the person starts again from the
+/// list: no code on screen, no Approve to press.
+#[test]
+fn a_lock_in_the_middle_of_a_review_ends_it_and_the_unlock_shows_no_code_and_no_approve() {
+    let (engine, mut rt) = on_the_review(false);
+    engine.set_gate(GateState::Locked);
+    settle(&mut rt);
+    assert_the_approval_is_gone(&rt, "locked");
+    engine.set_gate(GateState::Ready);
+    settle(&mut rt);
+    rt.update(|s, _| crate::frames::account::go(s, "DW-A52"));
+    settle(&mut rt);
+    assert_the_approval_is_gone(&rt, "unlocked");
+    let elements = rt.elements();
+    assert!(
+        !elements
+            .iter()
+            .any(|e| e.key.as_deref() == Some(crate::frames::account::approve::CODE_KEY)),
+        "no code field shows"
+    );
+    assert!(
+        !texts(&rt).iter().any(|t| t == "Approve" || t.contains("Anna's iPhone")),
+        "no Approve and nothing of the request shows"
+    );
+}
+
+/// Review P2-1: Windows Hello is up when the app locks. The prompt is cancelled, and its answer,
+/// arriving while the lock screen shows (and after), changes nothing.
+#[test]
+fn a_windows_hello_answer_that_arrives_while_locked_changes_nothing() {
+    use crate::frames::account::Dialog as AccountDialog;
+    let (engine, mut rt) = on_the_review(false);
+    // Approve, with the answer not read yet: the wait is open when the lock comes.
+    rt.update(|s, _| {
+        crate::frames::account::approve::press_approve(s);
+        assert!(s.account.approve.waiting);
+        assert_eq!(s.account.dialog, Some(AccountDialog::ApproveHello));
+    });
+    engine.set_gate(GateState::Locked);
+    // The engine's status event reads the session before the next poll does.
+    rt.update(|s, _| assert!(s.shell.refresh(), "the lock shows"));
+    settle(&mut rt);
+    assert_the_approval_is_gone(&rt, "locked with Windows Hello up");
+    let sent = rt.state.account.source.as_deref().expect("the fixture").sent();
+    assert_eq!(
+        sent.iter().filter(|line| line.starts_with("cancel approval")).count(),
+        1,
+        "the prompt was cancelled once: {sent:?}"
+    );
+    engine.set_gate(GateState::Ready);
+    settle(&mut rt);
+    settle(&mut rt);
+    assert_the_approval_is_gone(&rt, "unlocked");
+}
+
+/// Review P2-1: account A reviews a request, signs out, account B signs in and opens Sign-in and
+/// security. Nothing of A's request is there and Approve cannot be reached.
+#[test]
+fn a_sign_out_ends_the_review_and_the_next_account_sees_none_of_it() {
+    let (engine, mut rt) = on_the_review(false);
+    engine.set_gate(GateState::SignedOut);
+    settle(&mut rt);
+    assert_the_approval_is_gone(&rt, "signed out");
+    engine.set_account("user-b");
+    engine.set_gate(GateState::Ready);
+    settle(&mut rt);
+    rt.update(|s, _| crate::frames::account::go(s, "DW-A52"));
+    settle(&mut rt);
+    assert_eq!(rt.state.shell.app.account(), Some("user-b"));
+    assert_the_approval_is_gone(&rt, "the next account");
+    assert!(
+        !texts(&rt)
+            .iter()
+            .any(|t| t == "Approve" || t.contains("Anna's iPhone") || t.contains("203.0.113.47")),
+        "0 of the first account's request"
+    );
+    let before = rt.state.account.source.as_deref().expect("the fixture").sent().len();
+    rt.update(crate::frames::account::approve::press_approve_tx);
+    assert_eq!(
+        rt.state.account.source.as_deref().expect("the fixture").sent().len(),
+        before,
+        "Approve reaches nothing"
+    );
+}
+
+/// Review P2-1: the engine reports another account with no sign-out in between (the gate stays
+/// Ready): the review ends all the same.
+#[test]
+fn another_account_under_an_open_review_ends_it() {
+    let (engine, mut rt) = on_the_review(false);
+    engine.set_account("user-b");
+    settle(&mut rt);
+    assert_the_approval_is_gone(&rt, "another account");
+}
+
+/// Review P2-1, the same gap in the account forms (it was there before the approval flow): a
+/// password typed on Change password does not survive a lock.
+#[test]
+fn a_lock_wipes_what_was_typed_in_an_account_form() {
+    use crate::frames::account::Pane;
+    let (engine, _, mut rt) = fixture();
+    rt.update(|s, _| crate::frames::account::go(s, "DW-A67"));
+    settle(&mut rt);
+    press(&mut rt, Key::Text("typed-here".into()), Mods::default());
+    assert!(
+        !rt.state.account.form.current.text.is_empty(),
+        "the form holds what was typed"
+    );
+    engine.set_gate(GateState::Locked);
+    settle(&mut rt);
+    assert!(rt.state.account.form.current.text.is_empty(), "the lock wipes the form");
+    assert_eq!(
+        rt.state.account.pane,
+        Pane::Security,
+        "and the section is back on its list"
+    );
+}

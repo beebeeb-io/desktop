@@ -20,7 +20,7 @@ Gate state per frame is in the PR body; `0` = all six counts at 0 failing in bot
 | DW-A08 | Another device: approved | built, 0 |
 | DW-A09 | Another device: denied | built, 0 |
 | DW-A10 | Another device: the code expired | built, 0 |
-| DW-A11 to DW-A17 | Approving a sign-in (7 frames) | not built; no goldens yet |
+| DW-A11 to DW-A17 | Approving a sign-in (7 frames) | built in the account view (`.au-set`), where the board draws them: `frames/account/approve.rs`, rows in `frames/account/FRAMES.md` |
 | DW-A18 | Sign in: unlocking the vault | built, 0 |
 | DW-A19 | Sign in: email and password do not match | built; light 0, dark 1 pixel line open (`card-0-avatar`) |
 | DW-A20 | Sign in: offline | built; light 0, dark 1 pixel line open (`card-0-avatar`) |
@@ -47,6 +47,7 @@ Gate state per frame is in the PR body; `0` = all six counts at 0 failing in bot
 
 Built: 30 of 59 here, and the 11 frames of the first run below: 41 of 70. Not built: 29, none with a golden yet
 (DW-A11 to A17, DW-A31 to A44, DW-0009, DW-0014, DW-0380, DW-0301 to 0305).
+Since then DW-A12 to DW-A17 are built in the account view (the row above; DW-A11 is Windows' toast).
 
 ## First run on Windows (lane f-signin-rest): `setup/`
 
