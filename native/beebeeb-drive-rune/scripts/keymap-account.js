@@ -80,7 +80,7 @@ if (auSet) {
     node(`list-${L}-foot`, q(':scope > .kit-list-foot', list));
     each('.kit-item', list, (item, I) => {
       const k = `item-${L}-${I}`;
-      box(k, item, { danger: item.classList.contains('is-danger') });
+      box(k, item, { danger: item.classList.contains('is-danger'), selected: item.classList.contains('is-selected') });
       icon(`${k}-icon`, q('.kit-item-icon svg', item));
       const av = q('.kit-avatar', item);
       if (av) { box(`${k}-avatar`, av); node(`${k}-initials`, av); }
@@ -97,7 +97,7 @@ if (auSet) {
       if (pop) { box(`${k}-pop`, pop); node(`${k}-pop-label`, pop); icon(`${k}-pop-caret`, q('svg', pop)); }
       const sw = q('[role="switch"] > span', item);
       if (sw) { box(`${k}-switch`, sw, { checked: sw.parentElement.getAttribute('aria-checked') === 'true' }); box(`${k}-knob`, q('span', sw)); }
-      const more = q('.kit-item-more, .mk-more', item);
+      const more = q('.kit-item-more, .mk-more, .au-more', item);
       if (more) { box(`${k}-more`, more); icon(`${k}-more-icon`, q('svg', more)); }
     });
   });
@@ -143,6 +143,69 @@ if (auSet) {
     }
   });
   each('.au-digit', auSet, (d, i) => { box(`digit-${i}`, d); node(`digit-${i}-text`, d); });
+  // The n-th run of words of a paragraph that also holds a link or a mono value ("Didn't get it? " … " in " …).
+  const run = (key, n) => {
+    if (!n || !n.textContent.trim()) return;
+    const range = document.createRange();
+    range.setStart(n, n.textContent.search(/\S/));
+    range.setEnd(n, n.textContent.trimEnd().length);
+    const span = document.createElement('span');
+    range.surroundContents(span);
+    api.text(key, span);
+  };
+  // Links in the pane and in a dialog (`.au-link`), in document order.
+  each('.au-link', auSet, (l, i) => api.text(`link-${i}`, l));
+  // "Didn't get it? Send again in 42 s": the words around the link, and the countdown in mono.
+  each('p.au-dim', auSet, (p, i) => {
+    if (!q('.au-link', p) || !q('.au-mono', p)) return;
+    [...p.childNodes].filter((n) => n.nodeType === 3 && n.textContent.trim()).forEach((n, j) => run(`resend-${i}-${j}`, n));
+    text(`resend-${i}-time`, q('.au-mono', p));
+  });
+  // The steps of deleting the account (`.au-steps`): four bars, "1 of 4", the step's name.
+  const steps = q('.au-steps', col);
+  if (steps) {
+    box('steps', steps);
+    each(':scope > b > i', steps, (bar, j) => box(`step-${j}`, bar, { on: bar.classList.contains('on') }));
+    text('steps-count', q('.au-mono', steps));
+    text('steps-label', q('.au-dim', steps));
+  }
+  // Two-factor set-up (DW-A69): the QR code, its key and Copy key are ONE secure group. The key's
+  // characters are a secret: its box is keyed (geometry, pixels), its text is not exported.
+  const qr = q('.au-qr', col);
+  if (qr) {
+    const group = qr.closest('.au-row');
+    box('secure-setup', group);
+    box('qr', qr);
+    box('qr-code', q('svg', qr));
+    text('setup-label', q('.t-cap.au-dim', group));
+    box('setup-key', q('.au-mono', group));
+  }
+  // The backup codes (DW-A70): ONE secure group; each code's box is keyed, its digits are not exported.
+  const codes = q('.au-codes', col);
+  if (codes) {
+    box('secure-codes', codes);
+    each(':scope > span', codes, (c, i) => { box(`code-${i}`, c); text(`code-${i}-n`, q('i', c)); });
+  }
+  // An empty state (`.kit-empty`).
+  const empty = q('.kit-empty', col);
+  if (empty) {
+    box('empty', empty);
+    const tile = q('.kit-tile', empty);
+    box('empty-tile', tile);
+    icon('empty-icon', tile && q('svg', tile));
+    text('empty-title', q('.t-title', empty));
+    text('empty-sub', q('p', empty));
+  }
+  // The menu on one passkey (`.au-menu`): its rows are words only.
+  each('.au-menu', auSet, (menu, m) => {
+    box(`pop-${m}`, menu);
+    qa(':scope > span', menu).forEach((mi, i) => {
+      box(`pop-${m}-item-${i}`, mi);
+      text(`pop-${m}-item-${i}-label`, q('.au-red', mi) || mi);
+    });
+  });
+  // The lead of a confirm's paragraph in bold ("It's your only passkey that can unlock your data.").
+  text('dlg-bold', q('.wn-dlg .wn-dlg-body p > b', auSet));
   // The score ring of the security checkup, and the two lines beside it.
   const ring = q('.kit-ring', col);
   if (ring) {

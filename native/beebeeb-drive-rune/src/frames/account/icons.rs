@@ -9,6 +9,7 @@
 use rune::Icon;
 
 pub use crate::frames::signin::icons::LAPTOP as DEVICE_LAPTOP;
+pub use crate::frames::signin::icons::RETRY as REFRESH;
 pub use crate::theme::icons::LINK;
 pub use crate::theme::icons_settings::{
     ACTIVITY, APP_LOCK, BACK, BELL, CHAT, CHECK, CHEV_RIGHT, CLOCK, COPY, DATABASE, DEVICE_PHONE, EXTERNAL, FOLDER,

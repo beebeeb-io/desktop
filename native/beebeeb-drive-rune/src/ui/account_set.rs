@@ -45,6 +45,8 @@ pub const SIDE_TITLE: TextStyle = TextStyle::new(10.5, 600.0).lh(17.0).tracking(
 pub const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
 /// 12px/400 mono on a 15px line: a machine's value inside a second line.
 pub const SUB_MONO: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(15.0);
+/// 11.5px/400 mono on a 15px line: a row's second line when it is a machine's (`.kit-item-sub.font-mono`).
+pub const SUB_MONO_ROW: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(15.0);
 /// 11px/600 on a 13px line, tracked .01em: a pill's word (`.kit-pill`).
 pub const PILL: TextStyle = TextStyle::new(11.0, 600.0).lh(13.0).tracking(0.11);
 /// 12px/650: the initials on a 32 pt avatar.
@@ -315,6 +317,8 @@ pub enum Lead {
     Avatar { initials: String, hue: f32 },
     /// A 28 pt toned tile (`.kit-tile`).
     Tile(&'static Icon, Tone),
+    /// Nothing: the title starts at the row's edge (DW-A71's "Added").
+    None,
 }
 
 /// What sits at a row's trailing edge, in order.
@@ -345,6 +349,10 @@ pub struct Row {
     pub link: bool,
     /// What assistive technology reads instead of the words put together from the row.
     pub name: Option<String>,
+    /// The second line is a machine's (a time, a country, an address): in mono.
+    pub sub_mono: bool,
+    /// The row a menu or a confirm is about: the neutral tint (never Amber).
+    pub selected: bool,
 }
 
 impl Row {
@@ -357,7 +365,18 @@ impl Row {
             danger: false,
             link: false,
             name: None,
+            sub_mono: false,
+            selected: false,
         }
+    }
+    pub fn sub_mono(mut self, sub: impl Into<String>) -> Self {
+        self.sub = Some(sub.into());
+        self.sub_mono = true;
+        self
+    }
+    pub fn selected(mut self, on: bool) -> Self {
+        self.selected = on;
+        self
     }
     pub fn sub(mut self, sub: impl Into<String>) -> Self {
         self.sub = Some(sub.into());
@@ -458,7 +477,11 @@ pub fn item(list: usize, index: usize, it: &Row, extra: Vec<El>, t: &Theme) -> E
                 )),
         ),
         Lead::Tile(icon, tone) => r.child(tile(&format!("{key}-tile"), icon, 28.0, 8.0, *tone, t)),
+        Lead::None => r,
     };
+    if it.selected {
+        r = r.fill(selection(t));
+    }
     let ink = if it.danger { au::red_text(t) } else { t.text };
     let mut words = col()
         .key(format!("{key}-text"))
@@ -467,7 +490,13 @@ pub fn item(list: usize, index: usize, it: &Row, extra: Vec<El>, t: &Theme) -> E
         .gap(1.0)
         .child(kit::label(format!("{key}-title"), it.title.clone(), type_::ITEM_TITLE, ink).truncate());
     if let Some(sub) = &it.sub {
-        words = words.child(kit::label(format!("{key}-sub"), sub.clone(), SUB, t.text_tertiary).truncate());
+        let (style, ink) = match (it.sub_mono, it.selected) {
+            (true, _) => (SUB_MONO_ROW, t.text_tertiary),
+            // The board's selected row says its second line in the stronger ink.
+            (false, true) => (SUB, t.text_secondary),
+            (false, false) => (SUB, t.text_tertiary),
+        };
+        words = words.child(kit::label(format!("{key}-sub"), sub.clone(), style, ink).truncate());
     }
     r = r.child(words);
     for tail in &it.tails {
@@ -489,7 +518,6 @@ pub fn item(list: usize, index: usize, it: &Row, extra: Vec<El>, t: &Theme) -> E
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Look {
     /// The one primary action of a view: Amber.
-    #[allow(dead_code)] // Save, Send code, Change password: the pages FRAMES.md lists as not built
     Primary,
     /// Any other action: paper with a drawn border.
     Plain,
@@ -554,7 +582,8 @@ pub fn button(
         b = b.border(1.0, t.card_border).border_layout();
     }
     if let Some(icon) = icon {
-        b = b.child(kit::glyph(format!("{key}-icon"), icon, 14.0, ink));
+        let glyph = if size == Size::Medium { 16.0 } else { 14.0 };
+        b = b.child(kit::glyph(format!("{key}-icon"), icon, glyph, ink));
     }
     b.child(kit::label(format!("{key}-label"), label, style, ink))
 }
@@ -575,13 +604,28 @@ pub fn dialog(
     foot: Vec<(El, bool)>,
     t: &Theme,
 ) -> El {
+    let paragraph = kit::label("dlg-text-0", words, SUB, t.text_secondary).wrap().w_full();
+    dialog_with(name, width, title, paragraph, extra, foot, t)
+}
+
+/// [`dialog`] with the caller's own paragraph under the title (one whose lead is bold:
+/// `account_form::lead_paragraph`).
+pub fn dialog_with(
+    name: &str,
+    width: f32,
+    title: &str,
+    paragraph: El,
+    extra: Vec<El>,
+    foot: Vec<(El, bool)>,
+    t: &Theme,
+) -> El {
     let mut body = col()
         .key("dlg-body")
         .w_full()
         .pt(22.0)
         .px(24.0)
         .pb(18.0)
-        .gap(14.0)
+        .gap(12.0)
         .child(
             col()
                 .key("dlg-h")
@@ -594,7 +638,7 @@ pub fn dialog(
                         .wrap()
                         .w_full(),
                 )
-                .child(kit::label("dlg-text-0", words, SUB, t.text_secondary).wrap().w_full()),
+                .child(paragraph),
         );
     for child in extra {
         body = body.child(child);

@@ -13,13 +13,19 @@
 //! Navigation out of this lane goes through `frames::settings::go`, so the shell lane has ONE
 //! queue of requests to drain (`SettingsUi::take_intents`).
 
+mod activity;
+mod delete;
+mod form;
+mod forms;
 pub mod icons;
 mod overview;
+mod passkeys;
 mod security;
 mod sessions;
 pub mod source;
 #[cfg(test)]
 mod tests;
+mod two_factor;
 
 use crate::State;
 use crate::frames::settings;
@@ -42,15 +48,37 @@ pub enum Pane {
     Checkup,
     /// Devices and sessions (DW-A55).
     Sessions,
+    /// Account › Name (DW-A64).
+    Name,
+    /// Account › Change email (DW-A65), and its code (DW-A66).
+    Email,
+    EmailCode,
+    /// Security › Change password (DW-A67, DW-A68).
+    Password,
+    /// Security › Two-factor: its status (DW-A71), setting it up (DW-A69), the backup codes (DW-A70).
+    TwoFactor,
+    TwoFactorSetup,
+    BackupCodes,
+    /// Security › Passkeys (DW-A73, DW-A74).
+    Passkeys,
+    /// Security › Sign-in activity (DW-A77, DW-A79).
+    Activity,
+    /// Security › Delete the account, its four steps (DW-A58, DW-A80, DW-A81, DW-A82) and the
+    /// result of undoing it (DW-A83).
+    Delete,
+    DeleteFactor,
+    DeleteLink,
+    DeleteScheduled,
+    DeleteUndone,
 }
 
 impl Pane {
     /// The sidebar section a pane belongs to.
     pub fn section(self) -> SettingsPane {
         match self {
-            Pane::Account => SettingsPane::Account,
-            Pane::Security | Pane::Checkup => SettingsPane::Security,
+            Pane::Account | Pane::Name | Pane::Email | Pane::EmailCode => SettingsPane::Account,
             Pane::Sessions => SettingsPane::DevicesAndSessions,
+            _ => SettingsPane::Security,
         }
     }
     /// The pane a section opens on.
@@ -65,8 +93,13 @@ impl Pane {
     /// The frame Esc goes back to from a page under a section; `None` for a section itself.
     pub fn parent(self) -> Option<&'static str> {
         match self {
-            Pane::Checkup => Some("DW-A52"),
-            _ => None,
+            Pane::Account | Pane::Security | Pane::Sessions => None,
+            Pane::Name | Pane::Email => Some("DW-A51"),
+            Pane::EmailCode => Some("DW-A65"),
+            Pane::BackupCodes => Some("DW-A71"),
+            Pane::DeleteFactor => Some("DW-A58"),
+            Pane::DeleteUndone => Some("DW-0401"),
+            _ => Some("DW-A52"),
         }
     }
 }
@@ -82,12 +115,35 @@ pub enum Dialog {
     SignOutApp,
     /// Sign out of all Beebeeb apps on this PC (DW-A57a).
     SignOutAllApps,
+    /// A change that a current two-factor code confirms (DW-A72, DW-A78).
+    Code(CodeFor),
+    /// The menu on one passkey (DW-A75): the server's id of the passkey.
+    PasskeyMenu(String),
+    /// Remove a passkey (DW-A76).
+    RemovePasskey(String),
+    /// Leaving the backup codes without "I've saved them" (DW-A70's rule).
+    LeaveCodes,
+}
+
+/// What a code in a confirm is for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CodeFor {
+    /// Turn two-factor off (DW-A72).
+    TurnOffTwoFactor,
+    /// Make new backup codes (DW-A71: "Asks for a code, then shows 8 new codes").
+    NewBackupCodes,
+    /// Move to a new authenticator (DW-A71: "Asks for the current code, then the set-up screen").
+    MoveAuthenticator,
+    /// Stop security logging (DW-A78).
+    StopActivity,
 }
 
 /// What is open inside the account sections. (Which section shows is the shell's route.)
 pub struct AccountUi {
     pub pane: Pane,
     pub dialog: Option<Dialog>,
+    /// What is typed and shown on the pages with a field, a code or a secret.
+    pub form: form::Form,
     /// `None`: nothing answers yet (a build that ships before the engine lane wires it); the
     /// view then draws the shell's "not built yet" frame, never sample values.
     pub source: Option<Box<dyn AccountSource>>,
@@ -98,6 +154,7 @@ impl Default for AccountUi {
         Self {
             pane: Pane::Account,
             dialog: None,
+            form: form::Form::default(),
             source: source::first(instance::DEV_BUILD),
         }
     }
@@ -126,6 +183,8 @@ pub fn sync(s: &mut State) {
     let section = routed(s);
     if section != Some(s.account.pane.section()) {
         s.account.show(section.and_then(Pane::root).unwrap_or(Pane::Account));
+        // What was typed, and every secret a page held, goes with the page.
+        s.account.form = form::Form::default();
     }
 }
 
@@ -138,6 +197,22 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>)> {
         "DW-A57a" => (Pane::Security, Some(Dialog::SignOutAllApps)),
         "DW-A84" | "DW-A84a" => (Pane::Checkup, None),
         "DW-A55" => (Pane::Sessions, None),
+        "DW-A64" => (Pane::Name, None),
+        "DW-A65" => (Pane::Email, None),
+        "DW-A66" => (Pane::EmailCode, None),
+        "DW-A67" | "DW-A68" => (Pane::Password, None),
+        "DW-A69" => (Pane::TwoFactorSetup, None),
+        "DW-A70" => (Pane::BackupCodes, None),
+        "DW-A71" => (Pane::TwoFactor, None),
+        "DW-A72" => (Pane::TwoFactor, Some(Dialog::Code(CodeFor::TurnOffTwoFactor))),
+        "DW-A73" | "DW-A74" => (Pane::Passkeys, None),
+        "DW-A77" | "DW-A79" => (Pane::Activity, None),
+        "DW-A78" => (Pane::Activity, Some(Dialog::Code(CodeFor::StopActivity))),
+        "DW-A58" => (Pane::Delete, None),
+        "DW-A80" => (Pane::DeleteFactor, None),
+        "DW-A81" => (Pane::DeleteLink, None),
+        "DW-A82" => (Pane::DeleteScheduled, None),
+        "DW-A83" => (Pane::DeleteUndone, None),
         _ => return None,
     })
 }
@@ -157,6 +232,23 @@ pub fn go(s: &mut State, frame: &'static str) {
     }
     s.account.show(pane);
     s.account.dialog = dialog;
+    form::arrive(&mut s.account);
+}
+
+/// A handler of a page: it works on what this lane holds, and names the frame to show next
+/// (`None`: stay).
+pub(super) fn act(f: fn(&mut AccountUi) -> Option<&'static str>) -> impl Fn(&mut State) + 'static {
+    move |s: &mut State| {
+        if let Some(frame) = f(&mut s.account) {
+            go(s, frame);
+        }
+    }
+}
+
+/// Open the confirm `dialog` over the page that shows now.
+pub(super) fn ask(s: &mut State, dialog: Dialog) {
+    s.account.dialog = Some(dialog);
+    form::arrive(&mut s.account);
 }
 
 /// Ask to sign out the device `id` (DW-A56).
@@ -171,6 +263,8 @@ fn open_on(s: &mut State, frame: &'static str) {
 }
 
 /// The frames of this group that are built: the id, and what shows it on a fresh `State`.
+/// A page whose board frame shows typed text gets that text; the board draws most of them at
+/// a later moment than their opening (fields filled, no field in focus).
 pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-A51", |s| open_on(s, "DW-A51")),
     ("DW-A52", |s| open_on(s, "DW-A52")),
@@ -186,6 +280,97 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     }),
     ("DW-A57", |s| open_on(s, "DW-A57")),
     ("DW-A57a", |s| open_on(s, "DW-A57a")),
+    ("DW-A64", |s| open_on(s, "DW-A64")),
+    ("DW-A65", |s| {
+        open_on(s, "DW-A65");
+        let f = &mut s.account.form;
+        form::type_in(&mut f.email, "anna.visser@northwind.studio");
+        form::type_in(&mut f.current, "............");
+    }),
+    ("DW-A66", |s| {
+        s.account.source = Some(Box::new(
+            source::BoardAccount::new().changing_email_to("anna.visser@northwind.studio"),
+        ));
+        go(s, "DW-A65");
+        form::type_in(&mut s.account.form.email, "anna.visser@northwind.studio");
+        go(s, "DW-A66");
+        form::type_in(&mut s.account.form.code, "4827");
+    }),
+    ("DW-A67", |s| {
+        open_on(s, "DW-A67");
+        form::fill_passwords(&mut s.account.form);
+    }),
+    ("DW-A68", |s| {
+        open_on(s, "DW-A68");
+        form::fill_passwords(&mut s.account.form);
+        s.account.form.problem = Some(form::Problem::WrongPassword);
+    }),
+    ("DW-A69", |s| {
+        open_on(s, "DW-A69");
+        form::type_in(&mut s.account.form.code, "51");
+    }),
+    ("DW-A70", |s| {
+        open_on(s, "DW-A69");
+        form::type_in(&mut s.account.form.code, source::BOARD_CODE);
+        if let Some(frame) = two_factor::turn_on(&mut s.account) {
+            go(s, frame);
+        }
+    }),
+    ("DW-A71", |s| open_on(s, "DW-A71")),
+    ("DW-A72", |s| {
+        open_on(s, "DW-A72");
+        form::type_in(&mut s.account.form.code, "51");
+    }),
+    ("DW-A73", |s| open_on(s, "DW-A73")),
+    ("DW-A74", |s| {
+        open_on(s, "DW-A74");
+        s.account.source = Some(Box::new(source::BoardAccount::new().without_passkeys()));
+    }),
+    ("DW-A75", |s| {
+        open_on(s, "DW-A73");
+        ask(s, Dialog::PasskeyMenu("pk-icloud".into()));
+    }),
+    ("DW-A76", |s| {
+        open_on(s, "DW-A73");
+        ask(s, Dialog::RemovePasskey("pk-icloud".into()));
+    }),
+    ("DW-A77", |s| open_on(s, "DW-A77")),
+    ("DW-A78", |s| {
+        open_on(s, "DW-A78");
+        form::type_in(&mut s.account.form.code, "51");
+    }),
+    ("DW-A79", |s| {
+        open_on(s, "DW-A79");
+        s.account.source = Some(Box::new(source::BoardAccount::new().without_activity()));
+    }),
+    ("DW-A58", |s| {
+        open_on(s, "DW-A58");
+        form::type_in(&mut s.account.form.current, "............");
+        s.account.form.current.focused = false;
+    }),
+    ("DW-A80", |s| {
+        open_on(s, "DW-A58");
+        form::type_in(&mut s.account.form.current, source::BOARD_PASSWORD);
+        if let Some(frame) = delete::check_password(&mut s.account) {
+            go(s, frame);
+        }
+        form::type_in(&mut s.account.form.code, "51");
+    }),
+    ("DW-A81", |s| {
+        s.account.source = Some(Box::new(
+            source::BoardAccount::new().with_deletion(source::Deletion::LinkSent),
+        ));
+        go(s, "DW-A81");
+    }),
+    ("DW-A82", |s| {
+        s.account.source = Some(Box::new(source::BoardAccount::new().with_deletion(
+            source::Deletion::Scheduled {
+                on: "8 November at 19:42".into(),
+            },
+        )));
+        go(s, "DW-A82");
+    }),
+    ("DW-A83", |s| open_on(s, "DW-A83")),
 ];
 
 /// Show the frame `id` on `s` (a scene). `false`: this group has not built it.
@@ -286,11 +471,27 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         Pane::root(section).unwrap_or(Pane::Account)
     };
     let dialog = ui.dialog.as_ref().filter(|_| inside);
+    if pane == Pane::DeleteUndone {
+        // The result of undoing a deletion is a screen of its own (the account window's
+        // layout, DW-A83), not a pane of settings.
+        return delete::undone(&t, cx);
+    }
+    let form = &ui.form;
     let (pane_el, overlay) = match pane {
         Pane::Account => (overview::pane(source, &t), None),
         Pane::Security => security::pane(source, dialog, &t),
         Pane::Checkup => (security::checkup(source, &t), None),
         Pane::Sessions => sessions::pane(source, dialog, &t),
+        Pane::Name => (forms::name(form, &t), None),
+        Pane::Email => (forms::email(form, &t), None),
+        Pane::EmailCode => (forms::email_code(source, form, &t), None),
+        Pane::Password => (forms::password(source, form, &t), None),
+        Pane::TwoFactor | Pane::TwoFactorSetup | Pane::BackupCodes => two_factor::pane(pane, source, form, dialog, &t),
+        Pane::Passkeys => passkeys::pane(source, form, dialog, &t),
+        Pane::Activity => activity::pane(source, form, dialog, &t),
+        Pane::Delete | Pane::DeleteFactor | Pane::DeleteLink | Pane::DeleteScheduled | Pane::DeleteUndone => {
+            (delete::pane(pane, source, form, &t), None)
+        }
     };
     let mut body = row()
         .key("body")
@@ -323,6 +524,15 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         return false;
     }
     if s.account.dialog.take().is_some() {
+        form::arrive(&mut s.account);
+        return true;
+    }
+    if s.account.form.renaming.take().is_some() {
+        return true;
+    }
+    if s.account.pane == Pane::BackupCodes {
+        // "Did you save your backup codes? They won't be shown again."
+        ask(s, Dialog::LeaveCodes);
         return true;
     }
     go(s, s.account.pane.parent().unwrap_or("DW-0401"));

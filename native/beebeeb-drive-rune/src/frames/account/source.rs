@@ -3,14 +3,21 @@
 //!
 //! The engine lane implements the trait over core; each method names the call it stands for.
 //!
-//! **The password never leaves the device.** Changing the password, changing two-factor and
-//! deleting the account go through core's OPAQUE step-up. The trait's shape is the guard:
-//! [`AccountSource::step_up`] is the ONLY method that takes a [`Password`], and what comes back
-//! is a [`StepUp`]: an opaque confirmation with no text in it. Every guarded action takes that
-//! confirmation BY VALUE (used once), never the password, so there is no call a pane can make
-//! that puts a password next to something that is posted. `Password` cannot be printed, copied
-//! or compared; it gives its bytes up only to `Password::for_opaque`, the one place an
-//! implementation reads them (to feed core's OPAQUE client, which sends a blinded message).
+//! **The password never leaves the device.** Changing the email, the password and two-factor,
+//! and deleting the account, go through core's OPAQUE step-up. The trait's shape is the guard:
+//! [`AccountSource::step_up`] takes a [`Password`] and hands back a [`StepUp`]: an opaque
+//! confirmation with no text in it. Every guarded action takes that confirmation BY VALUE (used
+//! once), never the password, so there is no call a pane can make that puts the current password
+//! next to something that is posted. The two other methods that take a `Password` take the NEW
+//! one: [`AccountSource::password_strength`] (computed on this device) and
+//! [`AccountSource::change_password`] (core's OPAQUE registration and the re-wrap of the vault
+//! key, both on this device). `Password` cannot be printed, copied or compared; it gives its
+//! bytes up only to `Password::for_opaque`, the one place an implementation reads them (to feed
+//! core's OPAQUE client, which sends a blinded message).
+//!
+//! **Secrets on screen** (the two-factor key, the backup codes) travel as [`Secret`]: no `Debug`,
+//! no `Display`, no `Clone`; a pane reads one only to hand it to a secure text node or to the
+//! secret clipboard.
 
 use std::fmt;
 
@@ -244,6 +251,166 @@ pub enum Refused {
     Offline,
 }
 
+/// A secret a pane shows once (the two-factor key, a backup code). It cannot be printed, copied
+/// or compared; its bytes are overwritten when it is dropped (best effort: the allocator may
+/// have moved them before).
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(text: impl Into<String>) -> Self {
+        Secret(text.into())
+    }
+    /// The characters, for a secure text node or the secret clipboard and nothing else.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        let mut bytes = std::mem::take(&mut self.0).into_bytes();
+        bytes.fill(0);
+    }
+}
+
+/// Two-factor as it stands (DW-A71).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TwoFactor {
+    pub on: bool,
+    /// "28 Oct".
+    pub added: String,
+    /// "Today, 09:12".
+    pub last_used: String,
+    pub codes_left: usize,
+    pub codes_total: usize,
+}
+
+/// What setting two-factor up shows (DW-A69): the QR code's modules and the same key in words.
+pub struct Setup {
+    pub modules: Vec<Vec<bool>>,
+    /// "JBSW Y3DP EHPK 3PXP", as the server made it.
+    pub key: Secret,
+}
+
+/// One passkey of the account (DW-A73).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Passkey {
+    /// The server's id: what a rename or a removal names. Never shown.
+    pub id: String,
+    /// Where it is saved ("iCloud Keychain"); Beebeeb's own name for it.
+    pub name: String,
+    /// "28 Oct".
+    pub added: String,
+    /// Whether it can unlock the data on a new device (PRF), or only sign in.
+    pub can_unlock: bool,
+}
+
+impl Passkey {
+    pub fn does(&self) -> &'static str {
+        if self.can_unlock {
+            "Can unlock data"
+        } else {
+            "Sign-in only"
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventKind {
+    SignIn,
+    PasskeyAdded,
+    DeviceApproved,
+    WrongPassword,
+    PasswordChanged,
+    AccountCreated,
+}
+
+/// One sign-in or security change (DW-A77). Never which files or items were opened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Event {
+    pub kind: EventKind,
+    /// "New sign-in on Anna-Laptop".
+    pub what: String,
+    /// "09:12 · Netherlands · 203.0.113.24": when, the country (never a city), the address as
+    /// the server saw it. A machine's line, in mono.
+    pub when_where: String,
+}
+
+/// How strong a new password is, from core (the leak check runs on Beebeeb's own servers
+/// against a hashed prefix; the password is in no request).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Strength {
+    TooShort,
+    Weak,
+    Fair,
+    Good,
+    Strong,
+}
+
+impl Strength {
+    /// How many of the four bars are filled.
+    pub fn bars(self) -> usize {
+        match self {
+            Self::TooShort => 0,
+            Self::Weak => 1,
+            Self::Fair => 2,
+            Self::Good => 3,
+            Self::Strong => 4,
+        }
+    }
+    pub fn says(self) -> &'static str {
+        match self {
+            Self::TooShort => "Too short. At least 12 characters, checked against known leaks.",
+            Self::Weak => "Weak. At least 12 characters, checked against known leaks.",
+            Self::Fair => "Fair. At least 12 characters, checked against known leaks.",
+            Self::Good => "Good. At least 12 characters, checked against known leaks.",
+            Self::Strong => "Strong. At least 12 characters, checked against known leaks.",
+        }
+    }
+    /// Whether the server takes it.
+    pub fn accepted(self) -> bool {
+        matches!(self, Self::Good | Self::Strong)
+    }
+}
+
+/// Where deleting the account stands (DW-A58 to DW-A83).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Deletion {
+    /// Nothing asked, or cancelled.
+    None,
+    /// The confirmation link was sent; nothing is deleted until it is used.
+    LinkSent,
+    /// Scheduled: "8 November at 19:42", 72 hours after the link was used.
+    Scheduled { on: String },
+}
+
+/// Why a code was not taken. Nothing changed in any of these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeRefused {
+    Wrong,
+    Expired,
+    /// The confirmation that should come with it was missing, used or for something else.
+    NotConfirmed,
+    Offline,
+}
+
+/// A deletion that was not asked for: why, and the step-up's confirmation when it was not used up.
+#[derive(Debug)]
+pub struct DeletionRefused {
+    pub why: CodeRefused,
+    pub confirmation: Option<StepUp>,
+}
+
+/// Why an email change did not start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmailRefused {
+    /// "This email is already in use."
+    InUse,
+    NotAnAddress,
+    NotConfirmed,
+    Offline,
+}
+
 pub trait AccountSource {
     /// Engine: the signed-in account (`session.account`).
     fn identity(&self) -> Identity;
@@ -274,6 +441,77 @@ pub trait AccountSource {
     /// Engine: `core::opaque` step-up (`POST /api/v1/auth/step-up/start` + `/finish`, both
     /// carrying OPAQUE messages only). The one call that takes a password.
     fn step_up(&mut self, password: Password<'_>, purpose: Purpose) -> Result<StepUp, Refused>;
+
+    /// Engine: `PATCH /api/v1/account` `{display_name}`; 1 to 64 characters, trimmed. `false`:
+    /// refused (empty, too long, or Beebeeb could not be reached); nothing changed.
+    fn set_name(&mut self, name: &str) -> bool;
+    /// Engine: `POST /api/v1/account/email-change` with the step-up's token and the new address;
+    /// the server sends an 8-digit code there. The old address stays until the code is entered.
+    fn start_email_change(&mut self, confirmation: StepUp, new_email: &str) -> Result<(), EmailRefused>;
+    /// Engine: `POST /api/v1/account/email-change/confirm` with the 8 digits.
+    fn confirm_email_change(&mut self, code: &str) -> Result<(), CodeRefused>;
+    /// Engine: seconds until another code or link may be sent (60 after each one); 0: now.
+    fn resend_wait(&self) -> u32;
+    /// Engine: sends the code (email change) or the link (deletion) again. `false`: too soon.
+    fn send_again(&mut self) -> bool;
+
+    /// Engine: `core::password::strength` on this device, and the leak check by hashed prefix.
+    fn password_strength(&self, candidate: &Password<'_>) -> Strength;
+    /// Engine: core re-wraps the vault key under the new password and registers it with OPAQUE
+    /// (`POST /api/v1/auth/password/start` + `/finish`, OPAQUE messages and the wrapped key
+    /// only). Devices that never unlocked the data are signed out by the server.
+    fn change_password(&mut self, confirmation: StepUp, new: Password<'_>) -> Result<(), Refused>;
+
+    /// Engine: `GET /api/v1/account/two-factor`.
+    fn two_factor(&self) -> TwoFactor;
+    /// Engine: `POST /api/v1/account/two-factor/setup`: a new secret, not active until a code
+    /// from it is entered. `confirmation`: the step-up the server wants when the session is
+    /// older than 5 minutes, or a current code's proof when moving to a new authenticator.
+    fn begin_two_factor(&mut self, confirmation: Option<StepUp>) -> Result<Setup, Refused>;
+    /// Engine: `POST /api/v1/account/two-factor/enable` with the 6 digits: turns it on (or
+    /// replaces the secret) and returns the 8 new backup codes, shown once.
+    fn turn_on_two_factor(&mut self, code: &str) -> Result<Vec<Secret>, CodeRefused>;
+    /// Engine: `POST /api/v1/account/two-factor/backup-codes` with a current code: 8 new codes;
+    /// the old ones stop working.
+    fn new_backup_codes(&mut self, code: &str) -> Result<Vec<Secret>, CodeRefused>;
+    /// Engine: `POST /api/v1/account/two-factor/verify` with a current code, before the set-up
+    /// screen is shown again (moving to a new authenticator).
+    fn check_code(&mut self, code: &str) -> Result<(), CodeRefused>;
+    /// Engine: `DELETE /api/v1/account/two-factor` with a current code.
+    fn turn_off_two_factor(&mut self, code: &str) -> Result<(), CodeRefused>;
+
+    /// Engine: `GET /api/v1/account/passkeys`.
+    fn passkeys(&self) -> Vec<Passkey>;
+    /// Engine: confirms it is the person (Windows Hello), then the system passkey dialog (the
+    /// Windows WebAuthn API, no web view) and `POST /api/v1/account/passkeys`.
+    fn add_passkey(&mut self) -> Result<(), Refused>;
+    /// Engine: `PATCH /api/v1/account/passkeys/<id>` `{name}`: Beebeeb's name for it only.
+    fn rename_passkey(&mut self, id: &str, name: &str) -> bool;
+    /// Engine: `DELETE /api/v1/account/passkeys/<id>`. The copy in the password manager stays.
+    fn remove_passkey(&mut self, id: &str) -> bool;
+
+    /// Engine: `GET /api/v1/account/activity`, by period ("Today", "October", "Earlier");
+    /// `None` while security logging is off.
+    fn activity(&self) -> Option<Vec<(String, Vec<Event>)>>;
+    /// Engine: `PUT /api/v1/account/activity-tracking` on: a new log starts at once.
+    fn start_activity(&mut self);
+    /// Engine: the same, off, with a current two-factor code (the step-up when two-factor is
+    /// off): recording stops and what was recorded is deleted within 30 days.
+    fn stop_activity(&mut self, code: &str) -> Result<(), CodeRefused>;
+
+    /// Engine: `GET /api/v1/account/deletion`.
+    fn deletion(&self) -> Deletion;
+    /// Engine: `POST /api/v1/account/deletion` with the step-up's token and the second factor
+    /// (6 digits, or an 8-digit backup code): the server sends the confirmation link. Nothing
+    /// is scheduled until that link is used. A wrong code hands the confirmation back, so the
+    /// person retypes the code and not the password.
+    fn request_deletion(&mut self, confirmation: StepUp, code: &str) -> Result<(), DeletionRefused>;
+    /// Engine: `DELETE /api/v1/account/deletion` before the link is used: the link stops working.
+    fn cancel_deletion_request(&mut self);
+    /// Engine: `GET /api/v1/account/deletion` again ("I've opened the link"). `true`: scheduled.
+    fn deletion_link_used(&mut self) -> bool;
+    /// Engine: `POST /api/v1/account/deletion/undo` during the 72 hours.
+    fn undo_deletion(&mut self) -> bool;
 }
 
 /// Counts what is done: "7 of 7".
@@ -295,6 +533,33 @@ pub struct BoardAccount {
     granted: Vec<(u64, Purpose)>,
     next_handle: u64,
     pub signed_out: Option<&'static str>,
+    name: String,
+    email: String,
+    /// The address an email change waits on.
+    new_email: Option<String>,
+    two_factor: TwoFactor,
+    /// A set-up that waits for its first code.
+    setting_up: bool,
+    passkeys: Vec<Passkey>,
+    activity: bool,
+    deletion: Deletion,
+    wait: u32,
+}
+
+/// The password the fixture's account has.
+pub const BOARD_PASSWORD: &str = "correct horse battery staple";
+/// The codes the fixture's server takes: the authenticator's, the email's, one backup code.
+pub const BOARD_CODE: &str = "514208";
+pub const BOARD_EMAIL_CODE: &str = "48271590";
+pub const BOARD_BACKUP_CODE: &str = "30617724";
+/// The board's eight backup codes (DW-A70) and its set-up key (DW-A69): sample values.
+const BOARD_CODES: [&str; 8] = [
+    "48271590", "30617724", "99150382", "62405518", "18739046", "55023197", "73682251", "04198873",
+];
+const BOARD_KEY: &str = "JBSW Y3DP EHPK 3PXP";
+
+fn board_codes() -> Vec<Secret> {
+    BOARD_CODES.iter().map(|c| Secret::new(*c)).collect()
 }
 
 impl BoardAccount {
@@ -366,21 +631,73 @@ impl BoardAccount {
                 (ProductKind::Mail, ProductState::NotSignedIn),
             ],
             wire: Vec::new(),
-            accepts: "correct horse battery staple",
+            accepts: BOARD_PASSWORD,
             granted: Vec::new(),
             next_handle: 1,
             signed_out: None,
+            name: "Anna Visser".into(),
+            email: "anna@northwind.studio".into(),
+            new_email: None,
+            two_factor: TwoFactor {
+                on: true,
+                added: "28 Oct".into(),
+                last_used: "Today, 09:12".into(),
+                codes_left: 6,
+                codes_total: 8,
+            },
+            setting_up: false,
+            passkeys: vec![
+                Passkey {
+                    id: "pk-icloud".into(),
+                    name: "iCloud Keychain".into(),
+                    added: "28 Oct".into(),
+                    can_unlock: true,
+                },
+                Passkey {
+                    id: "pk-1password".into(),
+                    name: "1Password".into(),
+                    added: "2 Nov".into(),
+                    can_unlock: false,
+                },
+            ],
+            activity: true,
+            deletion: Deletion::None,
+            wait: 42,
         }
     }
 
-    /// DW-A84a: no passkey yet.
+    /// DW-A79: security logging off.
+    pub fn without_activity(mut self) -> Self {
+        self.activity = false;
+        self.security.sign_in_activity = false;
+        self
+    }
+    /// DW-A66: an email change that waits for its code.
+    pub fn changing_email_to(mut self, address: &str) -> Self {
+        self.new_email = Some(address.into());
+        self
+    }
+    /// DW-A81, DW-A82: a deletion that waits for its link, or is scheduled.
+    pub fn with_deletion(mut self, deletion: Deletion) -> Self {
+        self.deletion = deletion;
+        self
+    }
+    /// A two-factor code as the fixture's server judges it.
+    fn code_ok(code: &str) -> Result<(), CodeRefused> {
+        if code == BOARD_CODE {
+            Ok(())
+        } else {
+            Err(CodeRefused::Wrong)
+        }
+    }
+
+    /// DW-A84a, DW-A74: no passkey yet.
     pub fn without_passkeys(mut self) -> Self {
-        self.security.passkeys = 0;
+        self.passkeys.clear();
         self
     }
 
     /// Uses up a confirmation: `true` once, for the purpose it was granted for.
-    #[cfg_attr(not(test), allow(dead_code))] // the guarded actions (password, two-factor, delete) are not built yet
     pub fn redeem(&mut self, confirmation: StepUp, purpose: Purpose) -> bool {
         let wanted = (confirmation.handle(), purpose);
         match self.granted.iter().position(|g| *g == wanted) {
@@ -396,9 +713,15 @@ impl BoardAccount {
 impl AccountSource for BoardAccount {
     fn identity(&self) -> Identity {
         Identity {
-            name: "Anna Visser".into(),
-            initials: "AV".into(),
-            email: "anna@northwind.studio".into(),
+            name: self.name.clone(),
+            initials: self
+                .name
+                .split_whitespace()
+                .filter_map(|w| w.chars().next())
+                .take(2)
+                .collect::<String>()
+                .to_uppercase(),
+            email: self.email.clone(),
         }
     }
     fn products(&self) -> Vec<(ProductKind, ProductState)> {
@@ -414,6 +737,9 @@ impl AccountSource for BoardAccount {
     fn security(&self) -> Security {
         Security {
             sessions: self.sessions.len(),
+            two_factor: self.two_factor.on,
+            passkeys: self.passkeys.len(),
+            sign_in_activity: self.activity,
             ..self.security.clone()
         }
     }
@@ -488,6 +814,258 @@ impl AccountSource for BoardAccount {
         self.next_handle += 1;
         self.granted.push((handle, purpose));
         Ok(StepUp::granted(purpose, handle))
+    }
+
+    fn set_name(&mut self, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 64 {
+            return false;
+        }
+        self.name = name.to_string();
+        self.wire.push("PATCH account display_name".into());
+        true
+    }
+    fn start_email_change(&mut self, confirmation: StepUp, new_email: &str) -> Result<(), EmailRefused> {
+        if !self.redeem(confirmation, Purpose::ChangeEmail) {
+            return Err(EmailRefused::NotConfirmed);
+        }
+        let address = new_email.trim();
+        if !address.contains('@') || address.starts_with('@') || address.ends_with('@') {
+            return Err(EmailRefused::NotAnAddress);
+        }
+        if address.eq_ignore_ascii_case("taken@northwind.studio") {
+            return Err(EmailRefused::InUse);
+        }
+        self.wire
+            .push("POST account/email-change step-up-token new-address".into());
+        self.new_email = Some(address.to_string());
+        self.wait = 60;
+        Ok(())
+    }
+    fn confirm_email_change(&mut self, code: &str) -> Result<(), CodeRefused> {
+        if code != BOARD_EMAIL_CODE {
+            return Err(CodeRefused::Wrong);
+        }
+        match self.new_email.take() {
+            Some(address) => {
+                self.email = address;
+                self.wire.push("POST account/email-change/confirm code".into());
+                Ok(())
+            }
+            None => Err(CodeRefused::Expired),
+        }
+    }
+    fn resend_wait(&self) -> u32 {
+        self.wait
+    }
+    fn send_again(&mut self) -> bool {
+        if self.wait > 0 {
+            return false;
+        }
+        self.wait = 60;
+        self.wire.push("POST send-again".into());
+        true
+    }
+    fn password_strength(&self, candidate: &Password<'_>) -> Strength {
+        // Stands in for core's estimate: length only.
+        match candidate.for_opaque().len() {
+            0..=11 => Strength::TooShort,
+            12 => Strength::Fair,
+            13 => Strength::Good,
+            _ => Strength::Strong,
+        }
+    }
+    fn change_password(&mut self, confirmation: StepUp, new: Password<'_>) -> Result<(), Refused> {
+        if !self.redeem(confirmation, Purpose::ChangePassword) {
+            return Err(Refused::NotConfirmed);
+        }
+        // The request carries OPAQUE registration messages and the re-wrapped vault key: the
+        // fixture writes their lengths where a real client writes the bytes.
+        let _ = new.for_opaque().len();
+        self.wire
+            .push("POST auth/password opaque-registration-bytes=192 wrapped-vault-key-bytes=60".into());
+        self.security.password_changed = "Just now".into();
+        Ok(())
+    }
+    fn two_factor(&self) -> TwoFactor {
+        self.two_factor.clone()
+    }
+    fn begin_two_factor(&mut self, _confirmation: Option<StepUp>) -> Result<Setup, Refused> {
+        self.setting_up = true;
+        self.wire.push("POST account/two-factor/setup".into());
+        Ok(Setup {
+            modules: crate::frames::signin::qr::board_modules(),
+            key: Secret::new(BOARD_KEY),
+        })
+    }
+    fn turn_on_two_factor(&mut self, code: &str) -> Result<Vec<Secret>, CodeRefused> {
+        if !self.setting_up {
+            return Err(CodeRefused::Expired);
+        }
+        Self::code_ok(code)?;
+        self.setting_up = false;
+        self.two_factor = TwoFactor {
+            on: true,
+            added: "Today".into(),
+            last_used: "Just now".into(),
+            codes_left: 8,
+            codes_total: 8,
+        };
+        self.wire.push("POST account/two-factor/enable code".into());
+        Ok(board_codes())
+    }
+    fn new_backup_codes(&mut self, code: &str) -> Result<Vec<Secret>, CodeRefused> {
+        Self::code_ok(code)?;
+        self.two_factor.codes_left = 8;
+        self.wire.push("POST account/two-factor/backup-codes code".into());
+        Ok(board_codes())
+    }
+    fn check_code(&mut self, code: &str) -> Result<(), CodeRefused> {
+        Self::code_ok(code)
+    }
+    fn turn_off_two_factor(&mut self, code: &str) -> Result<(), CodeRefused> {
+        Self::code_ok(code)?;
+        self.two_factor.on = false;
+        self.two_factor.codes_left = 0;
+        self.wire.push("DELETE account/two-factor code".into());
+        Ok(())
+    }
+    fn passkeys(&self) -> Vec<Passkey> {
+        self.passkeys.clone()
+    }
+    fn add_passkey(&mut self) -> Result<(), Refused> {
+        // The board: Windows Hello adds a passkey saved on this PC, listed as Windows Hello.
+        self.passkeys.push(Passkey {
+            id: format!("pk-hello-{}", self.passkeys.len()),
+            name: "Windows Hello".into(),
+            added: "Today".into(),
+            can_unlock: true,
+        });
+        self.wire.push("POST account/passkeys attestation".into());
+        Ok(())
+    }
+    fn rename_passkey(&mut self, id: &str, name: &str) -> bool {
+        let name = name.trim();
+        match self.passkeys.iter_mut().find(|p| p.id == id) {
+            Some(passkey) if !name.is_empty() => {
+                passkey.name = name.to_string();
+                true
+            }
+            _ => false,
+        }
+    }
+    fn remove_passkey(&mut self, id: &str) -> bool {
+        let before = self.passkeys.len();
+        self.passkeys.retain(|p| p.id != id);
+        self.passkeys.len() < before
+    }
+    fn activity(&self) -> Option<Vec<(String, Vec<Event>)>> {
+        if !self.activity {
+            return None;
+        }
+        let event = |kind, what: &str, when_where: &str| Event {
+            kind,
+            what: what.into(),
+            when_where: when_where.into(),
+        };
+        // The board's own rows (DW-A77).
+        Some(vec![
+            (
+                "Today".into(),
+                vec![event(
+                    EventKind::SignIn,
+                    "New sign-in on Anna-Laptop",
+                    "09:12 · Netherlands · 203.0.113.24",
+                )],
+            ),
+            (
+                "October".into(),
+                vec![
+                    event(
+                        EventKind::PasskeyAdded,
+                        "Passkey added",
+                        "28 Oct · This iPhone · 198.51.100.7",
+                    ),
+                    event(
+                        EventKind::DeviceApproved,
+                        "Device approved: Anna's iPad",
+                        "19 Oct · This iPhone · 198.51.100.7",
+                    ),
+                    event(
+                        EventKind::WrongPassword,
+                        "Wrong password, 3 tries",
+                        "4 Oct · Germany · 192.0.2.61",
+                    ),
+                ],
+            ),
+            (
+                "Earlier".into(),
+                vec![
+                    event(
+                        EventKind::PasswordChanged,
+                        "Password changed",
+                        "14 Mar · This iPhone · 198.51.100.7",
+                    ),
+                    event(
+                        EventKind::AccountCreated,
+                        "Account created",
+                        "2 Feb · Netherlands · 198.51.100.7",
+                    ),
+                ],
+            ),
+        ])
+    }
+    fn start_activity(&mut self) {
+        self.activity = true;
+        self.wire.push("PUT account/activity-tracking on".into());
+    }
+    fn stop_activity(&mut self, code: &str) -> Result<(), CodeRefused> {
+        Self::code_ok(code)?;
+        self.activity = false;
+        self.wire.push("PUT account/activity-tracking off code".into());
+        Ok(())
+    }
+    fn deletion(&self) -> Deletion {
+        self.deletion.clone()
+    }
+    fn request_deletion(&mut self, confirmation: StepUp, code: &str) -> Result<(), DeletionRefused> {
+        if code != BOARD_CODE && code != BOARD_BACKUP_CODE {
+            return Err(DeletionRefused {
+                why: CodeRefused::Wrong,
+                confirmation: Some(confirmation),
+            });
+        }
+        if !self.redeem(confirmation, Purpose::DeleteAccount) {
+            return Err(DeletionRefused {
+                why: CodeRefused::NotConfirmed,
+                confirmation: None,
+            });
+        }
+        self.deletion = Deletion::LinkSent;
+        self.wait = 60;
+        self.wire.push("POST account/deletion step-up-token code".into());
+        Ok(())
+    }
+    fn cancel_deletion_request(&mut self) {
+        self.deletion = Deletion::None;
+        self.wire.push("DELETE account/deletion".into());
+    }
+    fn deletion_link_used(&mut self) -> bool {
+        // The fixture's person opened the link (the board's next frame, DW-A82).
+        if self.deletion == Deletion::LinkSent {
+            self.deletion = Deletion::Scheduled {
+                on: "8 November at 19:42".into(),
+            };
+        }
+        matches!(self.deletion, Deletion::Scheduled { .. })
+    }
+    fn undo_deletion(&mut self) -> bool {
+        let scheduled = matches!(self.deletion, Deletion::Scheduled { .. });
+        if scheduled {
+            self.deletion = Deletion::None;
+            self.wire.push("POST account/deletion/undo".into());
+        }
+        scheduled
     }
 }
 
