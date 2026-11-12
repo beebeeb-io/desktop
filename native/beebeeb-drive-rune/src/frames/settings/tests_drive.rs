@@ -425,11 +425,24 @@ fn a_build_that_ships_draws_no_sample_value_on_drives_panes() {
     );
 }
 
-/// A section this lane has not built stays the shell's: its "not built yet" frame, never
-/// another pane's content under that section's route.
+/// A section nothing answers for yet stays the shell's: its "not built yet" frame, never
+/// another pane's content under that section's route. (Every section is drawn now; the case
+/// left is a source that does not answer for Thumbnails and previews.)
 #[test]
 fn a_section_not_built_yet_is_left_to_the_shell() {
-    let mut rt = runtime("DW-0712");
+    let mut state = init();
+    assert!(super::scene("DW-0712", &mut state));
+    state.settings.drive = Box::new(super::tests_previews::Bare(BoardDrive::new()));
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, view, (958.0, 718.0), env);
+    rt.on_key = Some(host::on_key);
+    rt.poll = Some(host::poll);
+    rt.frame(0.0);
+    settle(&mut rt);
+    assert!(find(&rt, "set-main").is_some(), "Storage is drawn");
     press(&mut rt, "Thumbnails and previews-row");
     assert_eq!(
         rt.state.shell.app.screen(),

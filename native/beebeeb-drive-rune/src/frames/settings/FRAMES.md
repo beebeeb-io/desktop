@@ -28,9 +28,9 @@ Status after the Bandwidth lane (2026-11-12): Bandwidth's 6 and the speed test's
 | --- | --- | --- |
 | `DW-0746` | Beebeeb in File Explorer, sync, and the space Beebeeb uses on this PC, in one place. | built (light and dark: 0 failing on all six lines) |
 | `DW-0746b` | Turning off the File Explorer location warns about anything that would be lost. | built (light and dark: 0 failing on all six lines) |
-| `DW-0744` | How photos preview: the size and format of the stored previews, and what that costs. | not built (lane f-settings-rest stopped at its budget) |
-| `DW-0744b` | A change of size or format is confirmed with its cost. | not built (lane f-settings-rest stopped at its budget) |
-| `DW-0745` | See a preview against the original before choosing a size. | not built (lane f-settings-rest stopped at its budget) |
+| `DW-0744` | How photos preview: the size and format of the stored previews, and what that costs. | built (light and dark: 0 failing on all six lines) |
+| `DW-0744b` | A change of size or format is confirmed with its cost. | built (light and dark: 0 failing on all six lines) |
+| `DW-0745` | See a preview against the original before choosing a size. | built; light and dark: 3 pixel lines red (`item-3-1`, `item-3-2`, `list-3-body` edge: the rows are under the compare view and their edges run through the words at its foot, which Rune sets on whole device pixels) |
 
 ## Settings: what the desktop app does today (32)
 

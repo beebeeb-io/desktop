@@ -373,8 +373,8 @@ fn an_available_update_is_said_once_with_one_primary_action() {
 fn every_built_frame_renders_and_names_no_city_and_no_provider() {
     assert_eq!(
         super::FRAMES.len(),
-        44,
-        "the frames the settings lanes built (28, Bandwidth's 10, Diagnostics' 2 and Keep on this PC's 4)"
+        47,
+        "the frames the settings lanes built (28, Bandwidth's 10, Diagnostics' 2, Keep on this PC's 4, Photo previews' 3)"
     );
     for (frame, _) in super::FRAMES {
         let rt = runtime(frame);

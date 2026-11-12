@@ -24,6 +24,7 @@ pub mod insights;
 pub mod keep;
 pub mod more;
 pub mod notifications;
+pub mod previews;
 pub mod recent;
 pub mod source;
 pub mod storage;
@@ -37,6 +38,8 @@ mod tests_bandwidth;
 mod tests_drive;
 #[cfg(test)]
 mod tests_more;
+#[cfg(test)]
+mod tests_previews;
 
 use crate::State;
 use crate::shell::app::{Event, Screen, SettingsPane};
@@ -71,6 +74,8 @@ pub enum Pane {
     Bandwidth,
     /// General › Diagnostics (DW-0790).
     Diagnostics,
+    /// Thumbnails and previews (DW-0744).
+    Previews,
 }
 
 /// Which menu a pop-up button drops.
@@ -139,6 +144,10 @@ pub enum Dialog {
     Keep,
     /// Before downloaded copies leave this PC (DW-0784b), over Keep's choices.
     KeepConfirm,
+    /// A new preview size or format, confirmed with its cost (DW-0744b).
+    ApplyPreviews,
+    /// The compare view over Thumbnails and previews (DW-0745).
+    Compare,
 }
 
 /// What settings asks of the app around it. The shell lane drains `SettingsUi::intents`.
@@ -184,6 +193,8 @@ pub struct SettingsUi {
     pub bandwidth: bandwidth::Held,
     /// What Diagnostics and Keep on this PC hold open (lane settings-rest).
     pub more: more::MoreUi,
+    /// What Thumbnails and previews holds open: a drafted choice, the compare view.
+    pub previews: previews::PreviewsUi,
 }
 
 impl Default for SettingsUi {
@@ -200,6 +211,7 @@ impl Default for SettingsUi {
             draft_gb: 0,
             bandwidth: bandwidth::Held::default(),
             more: more::MoreUi::default(),
+            previews: previews::PreviewsUi::default(),
         }
     }
 }
@@ -467,6 +479,16 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         }));
         open_on(s, "DW-0784");
     }),
+    ("DW-0744", |s| open_on(s, "DW-0744")),
+    ("DW-0744b", |s| {
+        open_on(s, "DW-0744");
+        // The board asks about 2K, the format as it is.
+        s.settings.choose_previews(Some(previews::PreviewSize::K2), None);
+    }),
+    ("DW-0745", |s| {
+        open_on(s, "DW-0744");
+        s.settings.open_compare();
+    }),
 ];
 
 pub(super) fn open_on(s: &mut State, frame: &'static str) {
@@ -482,6 +504,7 @@ fn routed(s: &State) -> Option<Pane> {
         Screen::Settings(SettingsPane::Storage) => Some(Pane::Storage),
         Screen::Settings(SettingsPane::SyncAndFileExplorer) => Some(Pane::Sync),
         Screen::Settings(SettingsPane::Bandwidth) => Some(Pane::Bandwidth),
+        Screen::Settings(SettingsPane::ThumbnailsAndPreviews) => Some(Pane::Previews),
         _ => None,
     }
 }
@@ -516,6 +539,7 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>, Option<MenuKind>)> {
         "DW-0790" | "DW-0790b" => (Pane::Diagnostics, None, None),
         "DW-0784" | "DW-0784c" | "DW-0784d" => (Pane::Sync, Some(Dialog::Keep), None),
         "DW-0784b" => (Pane::Sync, Some(Dialog::KeepConfirm), None),
+        "DW-0744" => (Pane::Previews, None, None),
         _ => return None,
     })
 }
@@ -572,6 +596,7 @@ fn shell_pane(section: Pane) -> SettingsPane {
         Pane::Storage | Pane::Insights => SettingsPane::Storage,
         Pane::Sync => SettingsPane::SyncAndFileExplorer,
         Pane::Bandwidth => SettingsPane::Bandwidth,
+        Pane::Previews => SettingsPane::ThumbnailsAndPreviews,
         _ => SettingsPane::General,
     }
 }
@@ -586,7 +611,6 @@ pub fn go(s: &mut State, frame: &'static str) {
         "DW-A52" => Some(SettingsPane::Security),
         "DW-A55" => Some(SettingsPane::DevicesAndSessions),
         "DW-0737" => Some(SettingsPane::Backups),
-        "DW-0744" => Some(SettingsPane::ThumbnailsAndPreviews),
         _ => None,
     };
     if let Some(pane) = foreign {
@@ -650,6 +674,7 @@ impl Pane {
             Pane::Storage | Pane::Insights => Pane::Storage,
             Pane::Sync => Pane::Sync,
             Pane::Bandwidth => Pane::Bandwidth,
+            Pane::Previews => Pane::Previews,
         }
     }
 }
@@ -721,7 +746,7 @@ const DRIVE_SECTIONS: &[Section] = &[
         label: "Thumbnails and previews",
         icon: &ic::CHEV_RIGHT,
         frame: "DW-0744",
-        pane: None,
+        pane: Some(Pane::Previews),
     },
     Section {
         label: "Bandwidth",
@@ -781,6 +806,11 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         Pane::Sync => sync::pane(ui, &t),
         Pane::Bandwidth => bandwidth::pane(ui, &t),
         Pane::Diagnostics => diagnostics::pane(ui, &t),
+        // A source that does not answer for this pane: the same "not built yet" frame.
+        Pane::Previews if ui.drive.photo_previews() == previews::PhotoPreviews::Unavailable => {
+            return placeholder::window(s, cx, registry::group_for(&s.shell.app));
+        }
+        Pane::Previews => previews::pane(ui, &t),
     };
     let overlay = overlay.filter(|_| inside);
     let mut body = row()
