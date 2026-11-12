@@ -205,8 +205,9 @@ pub trait DriveSettings {
     /// Remove Beebeeb from File Explorer (DW-0746b): Windows unregisters its folder.
     fn turn_off_explorer(&mut self);
     /// Storage insights. Engine: usage plus the breakdown by kind and the 50 largest files,
-    /// worked out on this PC from the decrypted file list.
-    fn insights(&self) -> Insights;
+    /// worked out on this PC from the decrypted file list. Lent, never copied: a page asks
+    /// on every draw, and the answer holds the 50 largest files.
+    fn insights(&self) -> &Insights;
     /// Ask for the insights again (DW-0783c, Try again): the page loads (DW-0783b).
     fn reload_insights(&mut self);
 }
@@ -396,8 +397,8 @@ impl DriveSettings for BoardDrive {
         self.sync.in_explorer = false;
         self.sync.not_uploaded = None;
     }
-    fn insights(&self) -> Insights {
-        self.insights.clone()
+    fn insights(&self) -> &Insights {
+        &self.insights
     }
     fn reload_insights(&mut self) {
         self.insights = Insights::Loading;
@@ -426,8 +427,9 @@ impl DriveSettings for UnwiredDrive {
     fn sync_anyway(&mut self) {}
     fn repair(&mut self) {}
     fn turn_off_explorer(&mut self) {}
-    fn insights(&self) -> Insights {
-        Insights::Loading
+    fn insights(&self) -> &Insights {
+        static NOTHING: Insights = Insights::Loading;
+        &NOTHING
     }
     fn reload_insights(&mut self) {}
 }

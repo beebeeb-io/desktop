@@ -206,14 +206,23 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     (shell::pane(children, t), overlay)
 }
 
+/// The words before the link in the metered foot, and the link's own word.
+const BEFORE: &str = "Sync on metered connections is off in";
+const LINK: &str = "Bandwidth";
+
+/// The metered foot's sentence and the bytes of it that are the link: its underline and its
+/// press target are both this one range.
+pub(super) fn metered_words() -> (String, std::ops::Range<usize>) {
+    let words = format!("{BEFORE} {LINK}. Sync resumes by itself on a connection that isn't metered.");
+    let at = BEFORE.len() + 1;
+    (words, at..at + LINK.len())
+}
+
 /// The Sync list's foot while sync waits on a metered connection (DW-0746e): why, and a link
 /// to the setting. The board's export keys the words before the link (`list-1-foot`), so a
 /// marker as wide as those words stands where they are drawn.
 fn metered_foot(t: &Theme) -> El {
-    const BEFORE: &str = "Sync on metered connections is off in";
-    const LINK: &str = "Bandwidth";
-    let words = format!("{BEFORE} {LINK}. Sync resumes by itself on a connection that isn't metered.");
-    let at = BEFORE.len() + 1;
+    let (words, link) = metered_words();
     kit::note_text("list-1-foot", "list-1-foot-mark", BEFORE, FOOT, t.text_tertiary);
     col()
         .key("list-1-foot-box")
@@ -226,11 +235,11 @@ fn metered_foot(t: &Theme) -> El {
                 .size(rune::text::advance(&format!("{BEFORE} "), FOOT), 15.0),
         )
         .child(
-            rich(words, vec![Span::new(at, at + LINK.len()).underline(t.text_tertiary)])
+            rich(words, vec![Span::new(link.start, link.end).underline(t.text_tertiary)])
                 .key("list-1-foot-words")
                 .font(FOOT)
                 .color(t.text_tertiary)
-                .link(Link::new(at..at + LINK.len(), "bandwidth").label("Bandwidth settings"))
+                .link(Link::new(link, "bandwidth").label("Bandwidth settings"))
                 .on_link(|s: &mut State, _: &str, _| super::go(s, "DW-0785f")),
         )
 }

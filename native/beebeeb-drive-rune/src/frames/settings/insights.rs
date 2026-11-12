@@ -43,7 +43,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     ];
     match ui.drive.insights() {
         Insights::Loading => children.extend(loading(t)),
-        Insights::Failed(why) => children.push(failed(&why, t)),
+        Insights::Failed(why) => children.push(failed(why, t)),
         Insights::Empty => children.push(notices::empty_sized(
             0,
             0,
@@ -53,7 +53,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             333.09,
             t,
         )),
-        Insights::Ready(data) => children.extend(ready(&data, t)),
+        Insights::Ready(data) => children.extend(ready(data, t)),
     }
     (shell::pane(children, t), None)
 }

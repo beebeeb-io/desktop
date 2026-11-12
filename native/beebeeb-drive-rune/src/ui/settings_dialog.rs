@@ -197,7 +197,7 @@ pub fn alert(name: &str, width: f32, tile: El, title: &str, sub: &str, foot: Vec
 /// same in both themes. Keys: `btn-<N>`, `btn-<N>-label`.
 pub fn button_danger(index: usize, label: &str, t: &Theme) -> El {
     let key = format!("btn-{index}");
-    let fill = rune::oklch(0.55, 0.2, 25.0);
+    let fill = crate::theme::tokens::red_fill();
     row()
         .key(key.clone())
         .role("button")

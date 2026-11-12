@@ -329,9 +329,9 @@ pub fn list(index: usize, title: Option<&str>, rows: Vec<El>, foot: Option<&str>
     l
 }
 
-/// `--red-deep`: the ink of a destructive row's title.
+/// `--color-red-text`: the ink of a destructive row's title.
 pub fn danger_ink(t: &Theme) -> rune::Color {
-    rune::color::hex(if t.dark { "#FF645F" } else { "#B00A1D" }).unwrap_or(t.red)
+    crate::theme::tokens::red_text(t.dark)
 }
 
 /// A destructive row (`.kit-item.is-danger`): its title in red ink, a button to assistive

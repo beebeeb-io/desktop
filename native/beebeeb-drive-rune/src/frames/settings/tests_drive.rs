@@ -202,7 +202,7 @@ fn insights_say_loading_failed_and_empty_and_try_again_loads() {
     assert_eq!(info(&rt, "card-0").role, "alert");
     assert!(find(&rt, "insbar-0").is_none(), "no stale numbers beside the failure");
     press(&mut rt, "btn-0");
-    assert_eq!(ui(&rt).drive.insights(), Insights::Loading, "Try again loads again");
+    assert_eq!(ui(&rt).drive.insights(), &Insights::Loading, "Try again loads again");
     assert!(find(&rt, "skel-0").is_some());
 }
 
@@ -339,6 +339,74 @@ fn sync_rows_open_the_limit_and_free_up_space_and_the_metered_link_asks_for_band
     );
     press(&mut rt, "btn-0");
     assert!(ui(&rt).intents.contains(&Intent::Open("file-explorer")));
+}
+
+/// Review of #304, P2 3: a page asks for the insights on every draw; the answer (the 50 largest
+/// files) is lent, the same value each time, never a copy.
+#[test]
+fn the_insights_are_lent_not_copied_on_every_draw() {
+    let d = BoardDrive::new();
+    assert!(std::ptr::eq(d.insights(), d.insights()), "one value, lent twice");
+    let (Insights::Ready(a), Insights::Ready(b)) = (d.insights(), d.insights()) else {
+        panic!("the board's insights are loaded")
+    };
+    assert!(
+        std::ptr::eq(a.largest.as_ptr(), b.largest.as_ptr()),
+        "the list of largest files is not allocated again"
+    );
+    let rt = runtime("DW-0783");
+    let before = ui(&rt).drive.insights() as *const Insights;
+    let mut rt = rt;
+    settle(&mut rt);
+    assert!(std::ptr::eq(before, ui(&rt).drive.insights()), "a draw copies nothing");
+}
+
+/// Review of #304, P2 1 and 2: the destructive row's ink and the destructive answer's fill are
+/// the board's tokens (`--color-red-text`, `--color-red-fill`), not values written at the use.
+#[test]
+fn a_destructive_row_and_its_answer_take_the_boards_red_tokens() {
+    use crate::theme::tokens;
+    assert_eq!(tokens::red_fill(), rune::oklch(0.55, 0.2, 25.0), "--color-red-fill");
+    assert_eq!(
+        tokens::red_text(false),
+        rune::oklch(0.48, 0.19, 25.0),
+        "--color-red-text, light"
+    );
+    assert_eq!(
+        tokens::red_text(true),
+        rune::oklch(0.70, 0.19, 25.0),
+        "--color-red-text, dark"
+    );
+    for dark in [false, true] {
+        let t = tokens::theme(dark);
+        assert_eq!(crate::ui::settings_list::danger_ink(&t), tokens::red_text(dark));
+        assert_eq!(crate::ui::au::red_text(&t), tokens::red_text(dark), "one red for words");
+    }
+    let mut rt = runtime("DW-0746");
+    assert_eq!(info(&rt, "item-3-0-title").text_color, Some(tokens::red_text(false)));
+    press(&mut rt, "item-3-0");
+    let answer = info(&rt, "btn-5");
+    assert_eq!(answer.fill, tokens::red_fill());
+    assert_ne!(
+        answer.fill,
+        tokens::theme(false).accent,
+        "a destructive answer is never Amber"
+    );
+}
+
+/// Review of #304, P3 4: the link in the metered foot is exactly the word Bandwidth.
+#[test]
+fn the_metered_foots_link_is_exactly_the_word_bandwidth() {
+    let (words, link) = super::sync::metered_words();
+    assert_eq!(&words[link.clone()], "Bandwidth");
+    assert_eq!(
+        words,
+        "Sync on metered connections is off in Bandwidth. Sync resumes by itself on a connection that isn't metered."
+    );
+    assert_eq!(&words[..link.start], "Sync on metered connections is off in ");
+    let mut rt = runtime("DW-0746e");
+    assert_eq!(info(&rt, "list-1-foot-words").text.as_deref(), Some(words.as_str()));
+    settle(&mut rt);
 }
 
 #[test]
