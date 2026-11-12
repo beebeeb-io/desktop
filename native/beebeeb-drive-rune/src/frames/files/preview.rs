@@ -160,6 +160,7 @@ fn head(panel: &Panel, t: &Theme) -> El {
         .gap(8.0)
         .center_y()
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
+        .border_layout()
         .child(
             tool("pv-close", "Close preview", &icons_files::CLOSE, 14.0, t)
                 .on_press_tx(|s: &mut State, tx: &mut Tx| s.close_dialog(tx)),

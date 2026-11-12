@@ -224,8 +224,9 @@ impl More {
                 there: side("Anna's iPad", Device::Tablet, "Today, 08:50", "1.3 MB"),
             },
             Conflict {
-                file: "budget".to_string(),
-                name: "Budget 2026.xlsx".to_string(),
+                // A file of another folder (Documents), so the board's Files shows one such row.
+                file: "doc-shot-list".to_string(),
+                name: "Shot list.docx".to_string(),
                 here: side("This PC", Device::Computer, "Today, 09:12", "84 KB"),
                 there: side("Anna's iPhone", Device::Phone, "Today, 09:05", "86 KB"),
             },

@@ -111,7 +111,9 @@ impl State {
         let on = share.password_on;
         self.actions.share_password.clear();
         if on {
-            tx.focus(PASSWORD_INPUT, true);
+            // The field takes the keyboard when it appears (`autofocus`); this is for a field
+            // that is there already.
+            tx.focus(PASSWORD_INPUT, false);
         }
     }
 
@@ -340,7 +342,11 @@ pub fn view(s: &State, share: &Share, t: &Theme) -> El {
             &s.actions.share_password,
             PASSWORD_INPUT,
             |s: &mut State| &mut s.actions.share_password,
-            |input| input.on_submit(|s: &mut State, tx: &mut Tx| s.share_copy_link(tx)),
+            |input| {
+                input
+                    .autofocus()
+                    .on_submit(|s: &mut State, tx: &mut Tx| s.share_copy_link(tx))
+            },
             t,
         ));
     }

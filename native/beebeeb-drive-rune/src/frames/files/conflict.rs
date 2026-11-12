@@ -69,10 +69,11 @@ impl State {
     }
 
     /// Cancel: the dialog closes; both versions stay and the file keeps waiting.
-    pub fn leave_conflict(&mut self) {
+    pub fn leave_conflict(&mut self, tx: &mut Tx) {
         self.actions.conflicts_done = 0;
         if matches!(self.shell.app.dialog(), Some(Dialog::Conflict { .. })) {
             host::dispatch(self, Event::Escape);
+            self.focus_list(tx);
         }
     }
 
@@ -83,7 +84,7 @@ impl State {
             return;
         };
         if let Err(why) = self.actions.source.keep_version(&conflict.file, keep) {
-            self.leave_conflict();
+            self.leave_conflict(tx);
             self.failed(Action::KeepVersion, why, tx);
             return;
         }
@@ -93,10 +94,12 @@ impl State {
         self.actions.conflicts_done += 1;
         match self.actions.source.conflicts().first() {
             Some(next) => {
+                // One dialog at a time: this one closes, the next file's opens.
                 let file = Some(next.file.clone());
+                host::dispatch(self, Event::Escape);
                 host::dispatch(self, Event::OpenDialog(Dialog::Conflict { file }));
             }
-            None => self.leave_conflict(),
+            None => self.leave_conflict(tx),
         }
     }
 }
@@ -185,7 +188,7 @@ pub fn card(_dialog: &Dialog, s: &State, cx: &mut Cx<State>) -> El {
         let foot = row().center_y().justify_end().child(
             button::outline_button("btn-0", "Close", None, &t)
                 .default_button()
-                .on_press(|s: &mut State| s.leave_conflict()),
+                .on_press_tx(|s: &mut State, tx: &mut Tx| s.leave_conflict(tx)),
         );
         return dialog::card(
             "Two versions",
@@ -195,7 +198,8 @@ pub fn card(_dialog: &Dialog, s: &State, cx: &mut Cx<State>) -> El {
             Vec::new(),
             foot,
             &t,
-        );
+        )
+        .mt(crate::TITLEBAR_H);
     };
     let sub = format!("{at} of {of} \u{00B7} {} changed in two places at once", conflict.name);
     let body = vec![
@@ -242,8 +246,10 @@ pub fn card(_dialog: &Dialog, s: &State, cx: &mut Cx<State>) -> El {
         .child(
             settings_dialog::button(3, "Cancel", Weight::Quiet, &t)
                 .w_full()
-                .on_press(|s: &mut State| s.leave_conflict()),
+                .on_press_tx(|s: &mut State, tx: &mut Tx| s.leave_conflict(tx)),
         );
+    // The shell centres a dialog in the whole window; the board centres this one in the area
+    // under the caption (as `tray::shortcuts` places its card): the caption's height above it.
     dialog::card(
         "Two versions",
         560.0,
@@ -253,4 +259,5 @@ pub fn card(_dialog: &Dialog, s: &State, cx: &mut Cx<State>) -> El {
         foot,
         &t,
     )
+    .mt(crate::TITLEBAR_H)
 }

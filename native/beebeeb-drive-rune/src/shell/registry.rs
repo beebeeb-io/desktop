@@ -271,7 +271,6 @@ pub struct DialogFrame {
 pub const DIALOGS: &[DialogFrame] = &[
     crate::frames::tray::shortcuts::DIALOG,
     crate::frames::files::conflict::DIALOG,
-    // DialogFrame { group: FrameGroup::ConflictDialog, view: crate::frames::conflict::card, on_key: None, feedback: FeedbackPolicy::Denied("its lane has not opted in yet") },
 ];
 
 /// The scrim between a dialog and the window: the board's `--kit-scrim`, "color-mix(in oklch,
@@ -464,7 +463,7 @@ mod tests {
         );
         assert_eq!(
             DIALOGS.len(),
-            1,
+            2,
             "a dialog was added to DIALOGS without updating this test"
         );
     }

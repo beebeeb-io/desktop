@@ -124,8 +124,9 @@ pub fn details(s: &State, item: &DriveItem, t: &Theme) -> El {
         let index = rows.len();
         let it = Item::new(None, "Version history")
             .trailing(Trailing::Value(count))
-            .opens()
-            .ruled();
+            // No hairline above it: the board wraps this row in its link, so the rule between
+            // neighbouring rows does not apply.
+            .opens();
         rows.push(lists::item(0, index, &it, t).on_press(|s: &mut State| {
             s.begin_versions();
         }));

@@ -59,8 +59,18 @@ pub fn no_preview(s: &mut State) {
 
 /// The board's window with its two waiting files (DW-0429), behind the same folders.
 pub fn with_conflicts(s: &mut State) {
+    install(s, conflict_fixture());
+}
+
+/// The board's sample source with its two waiting files.
+pub fn conflict_fixture() -> FilesFixture {
     let mut fixture = FilesFixture::default();
     fixture.more.conflicts = More::board_conflicts();
+    fixture
+}
+
+/// Put `fixture` behind the window, with the folders that show its changes.
+pub fn install(s: &mut State, fixture: FilesFixture) {
     s.source = Box::new(BoardDrive::sharing(&fixture.edits));
     (s.listing, s.list_error) = crate::load(s.source.as_ref(), None);
     s.actions.source = Box::new(fixture);
