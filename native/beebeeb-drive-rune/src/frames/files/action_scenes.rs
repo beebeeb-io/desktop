@@ -84,3 +84,54 @@ pub fn two_versions(s: &mut State) {
     s.actions.conflicts_done = 0;
     crate::shell::host::dispatch(s, Event::OpenDialog(Dialog::Conflict { file: None }));
 }
+
+/// DW-0481: three files dragged from File Explorer, over Documents.
+pub fn drag_over_documents(s: &mut State) {
+    s.clear_selection();
+    s.show_detail_pane = false;
+    s.actions.drop_hover = Some(super::uploads::DropHover {
+        row: None,
+        count: Some(3),
+    });
+    s.drop_over(1, true);
+}
+
+/// A row of Lisbon trip that is on its way up (the board's two: one moving, one waiting).
+fn arriving(id: &str, name: &str, bytes: i64) -> DriveItem {
+    DriveItem {
+        id: id.to_string(),
+        parent_id: Some("f-lisbon".to_string()),
+        name: name.to_string(),
+        size: Some(bytes),
+        modified_at: "2026-11-05T09:30:00Z".to_string(),
+        mime: Some("image/heic".to_string()),
+        has_thumbnail: true,
+        pc_status: Some("on_this_pc".to_string()),
+        ..super::actions_data::blank_item()
+    }
+}
+
+/// DW-0426: Lisbon trip while three of five upload: the files dropped there stand in its rows,
+/// one with its bar, one waiting, and the status line says how far it is.
+pub fn uploading(s: &mut State) {
+    s.clear_selection();
+    s.show_detail_pane = false;
+    s.open_folder(Some("f-lisbon".to_string()));
+    let mut tx = rune::Tx::default();
+    let files = [
+        std::path::PathBuf::from("Miradouro.heic"),
+        std::path::PathBuf::from("Ponte.heic"),
+    ];
+    if s.upload(Some("f-lisbon".to_string()), &files, &mut tx) {
+        s.listing
+            .items
+            .push(arriving("up-miradouro", "Miradouro.heic", 3_774_874));
+        s.listing.items.push(arriving("up-ponte", "Ponte.heic", 3_355_443));
+    }
+}
+
+/// DW-0427: Uploads, opened from the status line.
+pub fn uploads_panel(s: &mut State) {
+    uploading(s);
+    s.status_pressed();
+}

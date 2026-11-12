@@ -1,7 +1,7 @@
 //! The Files window with what the Files frames add: several selected rows, the menus, the toasts,
 //! the selected item's own details.
 
-use super::{Intent, MenuKind, Toast, details, dialogs, list, menus, rename};
+use super::{MenuKind, Toast, details, dialogs, list, menus, rename};
 use super::{sidebar, toolbar};
 use crate::State;
 use crate::theme::tokens::{self, Theme};
@@ -234,13 +234,20 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 None => details.clone(),
             };
             // Without a connection the line says so (`frames::global`, DW-0121).
+            // While something uploads the line says so, and opens Uploads (DW-0426, DW-0427).
+            let uploading = super::uploads::status(s, &details, &t);
+            let name = match &uploading {
+                Some((_, words)) => format!("{words}. {details}"),
+                None => name,
+            };
             crate::frames::global::status_line(state.as_deref(), &details, &t)
+                .or(uploading.map(|(line, _)| line))
                 .unwrap_or_else(|| status_line::status_line(state.as_deref(), &details, &t))
                 .role("button")
                 .label(name)
                 .description("Shows sync status")
                 .focusable(true)
-                .on_press(|s: &mut State| s.intent(Intent::Frame("DW-1201")))
+                .on_press(|s: &mut State| s.status_pressed())
         });
     if let Some(kind) = s.live_toast() {
         main = main.child(toast::layer(toast_of(kind, &t)));
@@ -286,10 +293,16 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .child(caption::caption_bar(s.identity.main_window_title(), &t, cx))
         .child(body);
     // What lies over the window: the open menu, the reason a name cannot be given, a dialog.
-    let layers: Vec<El> = [menu_layer(s, &t), rename::tip_layer(s, &t), dialogs::layer(s, &t)]
-        .into_iter()
-        .flatten()
-        .collect();
+    let layers: Vec<El> = [
+        menu_layer(s, &t),
+        rename::tip_layer(s, &t),
+        super::uploads::drop_layer(s, &t),
+        super::uploads::layer(s, &t),
+        dialogs::layer(s, &t),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     if layers.is_empty() {
         return window;
     }

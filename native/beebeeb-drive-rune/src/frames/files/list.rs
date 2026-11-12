@@ -86,18 +86,29 @@ pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
                             // The row being renamed shows its name as a field (DW-0410).
                             let renaming = s.actions.rename.as_ref().is_some_and(|r| r.row == i && r.id == item.id);
                             let field = renaming.then(|| super::rename::name_field(s, &t));
-                            let mut row = file_row(i, item, s.is_selected(i), date, field, &t);
+                            // What uploads shows where it lands: its bar, or that it waits (DW-0426).
+                            let uploading = s
+                                .actions
+                                .source
+                                .uploads()
+                                .and_then(|u| u.of(&item.id).map(|u| u.state.clone()));
+                            // A folder a drag is over: outlined, on the selection's tint (DW-0481).
+                            let dropping = s.drop_row() == Some(i);
+                            let mut row = file_row(i, item, s.is_selected(i) || dropping, date, field, uploading, &t);
+                            if dropping {
+                                row = row.border(2.0, t.text_tertiary);
+                            }
                             if blocked {
                                 row = row.opacity(0.45);
                             }
                             if item.is_folder {
                                 // "Drop on a folder: uploads into that folder"; Backups refuses (`State::upload`).
                                 let id = item.id.clone();
-                                row = row.on_drop_files(
-                                    move |s: &mut State, files: &[std::path::PathBuf], tx: &mut Tx| {
+                                row = row
+                                    .on_drop_files(move |s: &mut State, files: &[std::path::PathBuf], tx: &mut Tx| {
                                         s.upload(Some(id.clone()), files, tx);
-                                    },
-                                );
+                                    })
+                                    .on_drop_hover(move |s: &mut State, over: bool, _: &mut Tx| s.drop_over(i, over));
                             }
                             row.on_press_tx(move |s: &mut State, tx: &mut Tx| {
                                 let mods = tx.mods();
@@ -229,6 +240,7 @@ pub fn file_row(
     selected: bool,
     date: Option<String>,
     renaming: Option<El>,
+    uploading: Option<super::uploads::UploadState>,
     t: &Theme,
 ) -> El {
     let k = format!("row-{i}");
@@ -265,12 +277,67 @@ pub fn file_row(
         item.size.map(crate::source::format_size).unwrap_or_default()
     };
 
+    use super::uploads::UploadState;
     let mut pc = el().key("pc-cell").w(COL_PC_W).center();
-    if let Some(state) = PcState::of(item.pc_status.as_deref()) {
-        pc = pc.child(pc_glyph(format!("{k}-pc"), state, surface, t));
+    match &uploading {
+        // `.mk-mac.is-up`, `.mk-mac`: an arrow in the deep Amber while it uploads, a clock while it waits.
+        Some(UploadState::Uploading { .. }) => {
+            pc = pc.child(kit::state_glyph(
+                format!("{k}-pc"),
+                &crate::theme::icons_settings::ARROW_UP,
+                None,
+                "uploading",
+                14.0,
+                t.accent_deep,
+            ));
+        }
+        Some(UploadState::Waiting(_)) => {
+            pc = pc.child(kit::state_glyph(
+                format!("{k}-pc"),
+                &crate::theme::icons_settings::CLOCK,
+                None,
+                "waiting-to-upload",
+                14.0,
+                t.text_tertiary,
+            ));
+        }
+        _ => {
+            if let Some(state) = PcState::of(item.pc_status.as_deref()) {
+                pc = pc.child(pc_glyph(format!("{k}-pc"), state, surface, t));
+            }
+        }
     }
+    // An upload that moves: its words and its bar where the date and the size stand.
+    let progress = match &uploading {
+        Some(UploadState::Uploading { row: words, done, .. }) => Some(
+            col()
+                .key(format!("{k}-upload"))
+                .w(COL_DATE_W + COL_GAP + COL_SIZE_W)
+                .gap(3.0)
+                .child(
+                    kit::label(
+                        format!("{k}-upload-words"),
+                        words.clone(),
+                        TWO_VERSIONS,
+                        t.text_secondary,
+                    )
+                    .truncate(),
+                )
+                .child(super::uploads::bar(
+                    &format!("{k}-bar"),
+                    *done,
+                    &format!("{}, {words}", item.name),
+                    t,
+                )),
+        ),
+        _ => None,
+    };
+    let date = match &uploading {
+        Some(UploadState::Waiting(_)) => "Just now".to_string(),
+        _ => date,
+    };
 
-    row()
+    let r = row()
         .key(k.clone())
         .role("row")
         .label(row_name(item, &date, &size_text))
@@ -283,29 +350,32 @@ pub fn file_row(
         .fill(if selected { t.selection_row } else { Color::TRANSPARENT })
         .hover(t.hover)
         .press(t.press)
-        .child(name)
-        .child(
-            kit::label(
-                format!("{k}-date"),
-                date.clone(),
-                // Words in place of a date are words: Inter, as the board sets them (DW-0429).
-                if date == super::conflict::ROW_WORDS {
-                    TWO_VERSIONS
-                } else {
-                    type_::META_MONO
-                },
-                meta,
+        .child(name);
+    let r = match progress {
+        Some(progress) => r.child(progress),
+        None => r
+            .child(
+                kit::label(
+                    format!("{k}-date"),
+                    date.clone(),
+                    // Words in place of a date are words: Inter, as the board sets them (DW-0429).
+                    if date == super::conflict::ROW_WORDS {
+                        TWO_VERSIONS
+                    } else {
+                        type_::META_MONO
+                    },
+                    meta,
+                )
+                .w(COL_DATE_W)
+                .truncate(),
             )
-            .w(COL_DATE_W)
-            .truncate(),
-        )
-        .child(
-            kit::label(format!("{k}-size"), size_text, type_::META_MONO, meta)
-                .w(COL_SIZE_W)
-                .align(Align::End),
-        )
-        .child(shared_cell(&k, item, meta, surface, t))
-        .child(pc)
+            .child(
+                kit::label(format!("{k}-size"), size_text, type_::META_MONO, meta)
+                    .w(COL_SIZE_W)
+                    .align(Align::End),
+            ),
+    };
+    r.child(shared_cell(&k, item, meta, surface, t)).child(pc)
 }
 
 /// The Shared column: who it is shared with, "Link", or a dash.

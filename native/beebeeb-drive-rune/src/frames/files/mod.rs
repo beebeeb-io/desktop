@@ -21,6 +21,7 @@ pub mod share;
 pub mod sidebar;
 pub mod source;
 pub mod toolbar;
+pub mod uploads;
 pub mod window;
 
 #[cfg(test)]
@@ -31,6 +32,8 @@ mod rest_tests;
 mod review_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod uploads_tests;
 
 use std::collections::BTreeSet;
 
@@ -180,6 +183,13 @@ pub struct Actions {
     pub share_password: rune::TextEdit,
     /// Files answered since Two versions opened (DW-0429): the second reads "2 of 2".
     pub conflicts_done: usize,
+    /// Windows' picker to open (DW-0415, DW-0480): the shell takes it (`State::take_picker`).
+    pub picker: Option<uploads::PickerAsk>,
+    /// Files dragged over the list (DW-0481).
+    pub drop_hover: Option<uploads::DropHover>,
+    /// Uploads is open over the status line (DW-0427), and the row whose menu is open in it.
+    pub uploads_open: bool,
+    pub upload_menu: Option<String>,
 }
 
 pub const INTENTS_KEPT: usize = 32;
@@ -208,6 +218,10 @@ impl Actions {
             host: names::Host::this(),
             share_password: rune::TextEdit::new("").secure(),
             conflicts_done: 0,
+            picker: None,
+            drop_hover: None,
+            uploads_open: false,
+            upload_menu: None,
         }
     }
 }
@@ -392,6 +406,9 @@ impl State {
             "DW-0413" => {
                 self.begin_versions();
             }
+            // Windows draws these two: the request for its picker, with our words on it.
+            "DW-0415" => self.ask_picker(uploads::PickerKind::Files),
+            "DW-0480" => self.ask_picker(uploads::PickerKind::Folder),
             _ => {}
         }
         if let Some(event) = event {
@@ -806,6 +823,7 @@ impl State {
             self.failed(Action::Upload, why, tx);
             return false;
         }
+        self.actions.drop_hover = None;
         true
     }
 
@@ -857,7 +875,12 @@ impl State {
                 self.open_in_file_explorer(tx);
             }
             // These are asked again from their own dialog: the message goes, nothing is repeated blind.
-            Action::RestoreVersion | Action::OpenWith | Action::KeepVersion | Action::Invite => {}
+            Action::RestoreVersion
+            | Action::OpenWith
+            | Action::KeepVersion
+            | Action::Invite
+            | Action::PauseUploads
+            | Action::CancelUpload => {}
         }
     }
 
@@ -1138,4 +1161,8 @@ pub const SCENES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-0408", action_scenes::preview),
     ("DW-0408b", action_scenes::no_preview),
     ("DW-0429", action_scenes::two_versions),
+    // Uploads (lane files-actions): a drag over the list, uploads in their folder, the panel.
+    ("DW-0481", action_scenes::drag_over_documents),
+    ("DW-0426", action_scenes::uploading),
+    ("DW-0427", action_scenes::uploads_panel),
 ];

@@ -28,6 +28,15 @@ pub static DOC_BLANK: Icon = line24!(
     r#"<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM13 2v7h7"></path>"#
 );
 
+/// Where a drop goes (DW-0481's tip): the board's `upload`.
+pub static UPLOAD: Icon = line24!(
+    "upload",
+    r#"<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"></path>"#
+);
+
+/// Pause all (DW-0427): the board's `pause`.
+pub static PAUSE: Icon = line24!("pause", r#"<path d="M6 4h4v16H6zM14 4h4v16h-4z"></path>"#);
+
 /// The failed message's mark (DW-0109): the board's `alert`.
 pub static ALERT: Icon = line24!(
     "alert",
