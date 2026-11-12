@@ -16,6 +16,8 @@ pub struct OpenFile {
     pub name: String,
     /// The line under the path: "Video · 120 MB".
     pub facts: String,
+    /// Which version of the file this is (every save is a new one).
+    pub version: u32,
     pub body: Body,
     /// What the details panel says about the file.
     pub details: Details,
@@ -60,11 +62,44 @@ pub enum Body {
     Markdown(MdDoc),
 }
 
-/// A Markdown note: its text, and which version of the file that text is.
+/// A Markdown note: its text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MdDoc {
     pub source: String,
+}
+
+/// Which side stays when a file was saved elsewhere while it was being edited (DW-1526).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keep {
+    /// Mine is saved next to theirs under its own name.
+    Both,
+    /// Mine becomes the newest version; theirs stays in the history.
+    Mine,
+    /// My edit is dropped; theirs opens.
+    Theirs,
+}
+
+/// The other side of a conflict.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Conflict {
+    /// "Anna's iPhone".
+    pub from: String,
+    /// "09:14".
+    pub at: String,
     pub version: u32,
+}
+
+/// What became of a save.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SaveOutcome {
+    /// Encrypted on this PC and stored as a new version: the file as it is now, and when.
+    Saved { file: OpenFile, at: String },
+    /// The edit was dropped and this file is open instead (Keep theirs).
+    Opened(OpenFile),
+    /// Someone saved the same file elsewhere meanwhile: nothing was written.
+    Conflict(Conflict),
+    /// Not saved, and nothing changed.
+    Failed,
 }
 
 /// Which of the theme's inks a run of text is drawn in.
@@ -122,7 +157,6 @@ impl TextDoc {
 }
 
 /// A text with no colours: every line one plain run (what a file without a tokenizer shows).
-#[cfg_attr(not(test), allow(dead_code))] // the engine's source uses it
 pub fn plain_lines(text: &str) -> Vec<Vec<Run>> {
     text.lines()
         .map(|line| {
@@ -161,6 +195,29 @@ pub trait ViewerSource {
     fn set_offline(&mut self, _file_id: &str, _on: bool) -> bool {
         false
     }
+    /// Save `text` as a new, encrypted version of the file whose version `base` was edited.
+    fn save(&mut self, _file_id: &str, _text: &str, _base: u32) -> SaveOutcome {
+        SaveOutcome::Failed
+    }
+    /// Settle a conflict the last save reported.
+    fn resolve(&mut self, _file_id: &str, _text: &str, _keep: Keep) -> SaveOutcome {
+        SaveOutcome::Failed
+    }
+    /// The newer version another device saved while this one is open (DW-1519's Show it).
+    fn newer(&mut self, _file_id: &str) -> Result<OpenFile, OpenError> {
+        Err(OpenError::NotFound)
+    }
+    /// The lines of `text` as the editor colours them. The default: Markdown's marks dimmed
+    /// for a note, plain lines for any other text.
+    fn colours(&self, file: &OpenFile, text: &str) -> Vec<Vec<Run>> {
+        match file.body {
+            Body::Markdown(_) => text.split('\n').map(super::md_source::line).collect(),
+            _ => text
+                .split('\n')
+                .map(|line| plain_lines(line).pop().unwrap_or_default())
+                .collect(),
+        }
+    }
     /// Download and decrypt again after a failure.
     fn retry(&mut self, file_id: &str) -> Result<OpenFile, OpenError>;
 }
@@ -190,11 +247,43 @@ pub mod board {
 #[derive(Default)]
 pub struct FixtureViewerSource {
     pub calls: Vec<String>,
+    /// DW-1519: another device saved a newer version of the note while it is open.
+    pub newer: bool,
+    /// DW-1526: the next save of the note finds that newer version in its way.
+    pub conflict: bool,
 }
 
 impl FixtureViewerSource {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The device of the board's DW-1519 and DW-1526.
+    fn other_side() -> Newer {
+        Newer {
+            from: "Anna's iPhone".into(),
+            at: "09:14".into(),
+        }
+    }
+
+    /// The file after a save of `text` as `version`.
+    fn saved(id: &str, text: &str, version: u32) -> Option<OpenFile> {
+        let mut file = Self::file(id)?;
+        file.version = version;
+        match &mut file.body {
+            Body::Markdown(doc) => {
+                doc.source = text.to_string();
+                file.facts = "Markdown \u{00B7} 1.5 KB".into();
+                for fact in &mut file.details.facts {
+                    if fact.0 == "Version history" {
+                        fact.1 = format!("{version} versions");
+                    }
+                }
+            }
+            Body::Text(doc) if doc.truncated.is_none() => doc.lines = plain_lines(text),
+            _ => return None,
+        }
+        Some(file)
     }
 
     fn file(id: &str) -> Option<OpenFile> {
@@ -203,6 +292,7 @@ impl FixtureViewerSource {
             path: path.iter().map(|p| p.to_string()).collect(),
             name: name.to_string(),
             facts: facts.to_string(),
+            version: 1,
             body,
             details: Details::default(),
             newer: None,
@@ -260,9 +350,9 @@ impl FixtureViewerSource {
                     "Markdown \u{00B7} 1.4 KB",
                     Body::Markdown(MdDoc {
                         source: board::NOTES_TEXT.to_string(),
-                        version: 3,
                     }),
                 );
+                file.version = 3;
                 file.details = Details {
                     kind: "Markdown".into(),
                     size: "1.4 KB".into(),
@@ -286,7 +376,90 @@ impl FixtureViewerSource {
 impl ViewerSource for FixtureViewerSource {
     fn open(&mut self, file_id: &str) -> Result<OpenFile, OpenError> {
         self.calls.push(format!("open {file_id}"));
-        Self::file(file_id).ok_or(OpenError::NotFound)
+        let mut file = Self::file(file_id).ok_or(OpenError::NotFound)?;
+        if self.newer && file_id == board::NOTES {
+            file.newer = Some(Self::other_side());
+        }
+        Ok(file)
+    }
+
+    /// The fixture saves the note as the board's DW-1524 shows it: version 4 at 09:41, 1.5 KB
+    /// in the toolbar, "4 versions" in the panel. (The board's panel still says 1.4 KB and
+    /// "Changed Today, 09:20" there: its own slip, kept as drawn and named in the PR body.)
+    fn save(&mut self, file_id: &str, text: &str, base: u32) -> SaveOutcome {
+        self.calls.push(format!("save {file_id} from version {base}"));
+        if self.conflict {
+            let other = Self::other_side();
+            return SaveOutcome::Conflict(Conflict {
+                from: other.from,
+                at: other.at,
+                version: base + 1,
+            });
+        }
+        match Self::saved(file_id, text, base + 1) {
+            Some(file) => SaveOutcome::Saved {
+                file,
+                at: "09:41".into(),
+            },
+            None => SaveOutcome::Failed,
+        }
+    }
+
+    fn resolve(&mut self, file_id: &str, text: &str, keep: Keep) -> SaveOutcome {
+        self.calls.push(format!("resolve {file_id} {keep:?}"));
+        self.conflict = false;
+        let Some(theirs) = Self::file(file_id) else {
+            return SaveOutcome::Failed;
+        };
+        let saved = |version: u32, name: Option<&str>| match Self::saved(file_id, text, version) {
+            Some(mut file) => {
+                if let Some(name) = name {
+                    file.name = name.to_string();
+                }
+                SaveOutcome::Saved {
+                    file,
+                    at: "09:41".into(),
+                }
+            }
+            None => SaveOutcome::Failed,
+        };
+        match keep {
+            // Mine next to theirs, under this PC's name (the board's words for it).
+            Keep::Both => saved(1, Some("Meeting notes 4 Nov (Anna-Laptop).md")),
+            Keep::Mine => saved(theirs.version + 2, None),
+            Keep::Theirs => SaveOutcome::Opened(OpenFile {
+                version: theirs.version + 1,
+                ..theirs
+            }),
+        }
+    }
+
+    fn newer(&mut self, file_id: &str) -> Result<OpenFile, OpenError> {
+        self.calls.push(format!("newer {file_id}"));
+        self.newer = false;
+        let file = Self::file(file_id).ok_or(OpenError::NotFound)?;
+        Ok(OpenFile {
+            version: file.version + 1,
+            ..file
+        })
+    }
+
+    /// The board colours its samples by hand: a line of the board's own text keeps the board's
+    /// runs, any other line is coloured by rule.
+    fn colours(&self, file: &OpenFile, text: &str) -> Vec<Vec<Run>> {
+        let board = super::fixture_text::notes_source();
+        text.split('\n')
+            .map(|line| {
+                let drawn = board
+                    .iter()
+                    .find(|runs| runs.iter().map(|r| r.text.as_str()).collect::<String>() == line);
+                match (drawn, &file.body) {
+                    (Some(runs), Body::Markdown(_)) => runs.clone(),
+                    (_, Body::Markdown(_)) => super::md_source::line(line),
+                    _ => plain_lines(line).pop().unwrap_or_default(),
+                }
+            })
+            .collect()
     }
 
     fn poll(&mut self, _: &str) -> Option<Body> {

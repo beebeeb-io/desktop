@@ -134,6 +134,11 @@ if (/^DW-15(0[1-6]|1[2-9]|2[0-7])$/.test(vwFrame)) {
     if (dt) { box('dlg-tile', dt); icon('dlg-icon', q('svg', dt)); }
     text('dlg-title', q('.wn-dlg-head .t-title', dlg));
     text('dlg-sub', q('.wn-dlg-head .t-sub', dlg));
+    qa('.wn-dlg-body .kit-card', dlg).forEach((c, i) => {
+      box(`dlg-card-${i}`, c); icon(`dlg-card-${i}-icon`, q('svg', c));
+      text(`dlg-card-${i}-title`, q('.t-head', c)); text(`dlg-card-${i}-sub`, q('.t-cap', c));
+    });
+    text('dlg-note', q('.wn-dlg-body > p.t-cap', dlg));
     box('dlg-foot', q('.wn-dlg-foot', dlg));
     qa('.wn-dlg-foot button.kit-btn', dlg).forEach((b, i) => button(`dlg-btn-${i}`, b));
   }

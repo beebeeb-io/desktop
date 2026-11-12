@@ -86,12 +86,9 @@ pub fn banner(t: &Theme) -> Color {
     }
 }
 
-/// The line the caret is on, in the editor.
+/// The line the caret is on, in the editor: ink at 9 %, as the bar's track.
 pub fn current_line(t: &Theme) -> Color {
-    Color {
-        a: 15.0 / 255.0,
-        ..pick(t, "#111111", "#EEDDDD")
-    }
+    bar_track(t)
 }
 
 /// A keyed text exactly as wide as its glyphs. Rune rounds a text's width up to half a point;
@@ -116,3 +113,8 @@ pub fn knob_shadow(alpha: f32) -> Color {
         ..rune::color::hex("#14110D").unwrap_or(Color::BLACK)
     }
 }
+
+/// `.t-cap.font-mono`: mono 11px/500 on 14px.
+pub const CAP_MONO: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
+/// `.kit-toast` words: 12.5px/550 on 17px.
+pub const TOAST: TextStyle = TextStyle::new(12.5, 550.0).lh(17.0);

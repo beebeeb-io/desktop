@@ -68,3 +68,22 @@ pub fn log() -> Vec<Vec<Run>> {
         vec![r("2026-11-05 09:31:01", Ink::Red, 0), r("  sync  ", Ink::Plain, 0), r("ok", Ink::Green, 0), r("  uploaded chunk 4141 of 41206", Ink::Plain, 0)],
     ]
 }
+
+/// DW-1523: Meeting notes 4 Nov.md as its source, with the line being typed, as the board
+/// colours each line (empty lines and the line being typed left out). Two lines are not
+/// coloured by the rule the others follow (line 1's `# ` is not dimmed, line 11 dims `see `):
+/// the board's own, kept as drawn and named in the PR body.
+#[rustfmt::skip]
+pub fn notes_source() -> Vec<Vec<Run>> {
+    vec![
+        vec![r("# Meeting notes, 4 Nov", Ink::Plain, 0)],
+        vec![r("Present: Anna, Lotte, Jonas", Ink::Plain, 0)],
+        vec![r("## ", Ink::Faint, 2), r("Harbourlight shoot", Ink::Plain, 0)],
+        vec![r("- ", Ink::Faint, 2), r("Final selects due ", Ink::Plain, 0), r("**", Ink::Faint, 2), r("Friday", Ink::Strong, 1), r("**", Ink::Faint, 2)],
+        vec![r("- ", Ink::Faint, 2), r("Colour grade in ", Ink::Plain, 0), r("`", Ink::Faint, 2), r("Shoot selects/graded", Ink::Green, 0), r("`", Ink::Faint, 2)],
+        vec![r("- ", Ink::Faint, 2), r("Send the agreement: ", Ink::Plain, 0), r("[", Ink::Faint, 2), r("Service agreement", Ink::Plain, 0), r("](", Ink::Faint, 2), r("Service agreement.docx", Ink::Green, 0), r(")", Ink::Faint, 2)],
+        vec![r("## ", Ink::Faint, 2), r("Studio", Ink::Plain, 0)],
+        vec![r("- ", Ink::Faint, 2), r("Rent goes up in January (", Ink::Plain, 0), r("see ", Ink::Faint, 2), r("Studio rent 2026.pdf)", Ink::Plain, 0)],
+        vec![r("- ", Ink::Faint, 2), r("Book the Lisbon follow-up", Ink::Plain, 0)],
+    ]
+}

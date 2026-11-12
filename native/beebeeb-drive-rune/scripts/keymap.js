@@ -177,7 +177,8 @@ if (foot) {
 // Not in a settings frame (`.mk-set`) and not in an account window (`.au-mac`): those lanes key their
 // own lists, buttons, pills and menus (below, and in keymap-signin.js) under their own names. Without
 // this scope a recapture of DW-0701 exported 4 keys more and DW-A02 8 more (integration I2).
-if (!q('.mk-set') && !q('.au-mac')) {
+// (nor an open file: DW-1501 to DW-1527 are keyed by keymap-viewers.js alone, lane f-viewers)
+if (!q('.mk-set') && !q('.au-mac') && !/^DW-15(0[1-6]|1[2-9]|2[0-7])$/.test((win.closest('[id^="DW-"]') || {}).id || '')) {
 const inDet = (el) => !!el.closest('.mk-det');
 // A button (`.kit-btn`): `btn-<its words>`, `-label`, `-icon`.
 const btnSeen = {};

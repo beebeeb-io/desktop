@@ -8,15 +8,25 @@ use std::rc::Rc;
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 use super::source::{
-    Body, FixtureViewerSource, OpenError, OpenFile, ViewerSource, board, count_words, percent, plain_lines,
-    progress_words, size_words,
+    Body, FixtureViewerSource, Ink, Keep, OpenError, OpenFile, Run, SaveOutcome, ViewerSource, board, count_words,
+    percent, plain_lines, progress_words, size_words,
 };
-use super::{Intent, open, open_from, scene_file, set_scene};
+use super::{Dialog, Intent, markdown, md_source, open, open_from, scene_file, set_scene};
 use crate::shell::app::{Event, Screen};
 use crate::{State, init, view};
 
 /// Every built frame, and its first words.
-const BUILT: [(&str, &str, &str); 5] = [
+const BUILT: [(&str, &str, &str); 11] = [
+    ("DW-1513", "md-h1", "Meeting notes, 4 Nov"),
+    (
+        "DW-1519",
+        "banner-text",
+        "A newer version arrived from Anna's iPhone, 09:14.",
+    ),
+    ("DW-1523", "run-12-1", "Ask Priya about the invoices"),
+    ("DW-1524", "toast-text", "Saved \u{00B7} encrypted \u{00B7} version 4"),
+    ("DW-1525", "dlg-title", "You have unsaved changes"),
+    ("DW-1526", "dlg-title", "Two versions"),
     ("DW-1516", "state-title", "Decrypting on this PC"),
     ("DW-1517", "state-title", "Too large to preview here"),
     ("DW-1518", "state-title", "Couldn't decrypt this file"),
@@ -51,6 +61,27 @@ impl ViewerSource for Recording {
         self.calls.borrow_mut().push(format!("retry {id}"));
         self.inner.retry(id)
     }
+    fn set_offline(&mut self, id: &str, on: bool) -> bool {
+        self.calls.borrow_mut().push(format!("offline {id} {on}"));
+        self.inner.set_offline(id, on)
+    }
+    fn save(&mut self, id: &str, text: &str, base: u32) -> SaveOutcome {
+        self.calls
+            .borrow_mut()
+            .push(format!("save {id} from {base}, {} lines", text.lines().count()));
+        self.inner.save(id, text, base)
+    }
+    fn resolve(&mut self, id: &str, text: &str, keep: Keep) -> SaveOutcome {
+        self.calls.borrow_mut().push(format!("resolve {id} {keep:?}"));
+        self.inner.resolve(id, text, keep)
+    }
+    fn newer(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+        self.calls.borrow_mut().push(format!("newer {id}"));
+        self.inner.newer(id)
+    }
+    fn colours(&self, file: &OpenFile, text: &str) -> Vec<Vec<Run>> {
+        self.inner.colours(file, text)
+    }
 }
 
 fn runtime_of(state: State, dark: bool) -> Runtime<State> {
@@ -61,6 +92,7 @@ fn runtime_of(state: State, dark: bool) -> Runtime<State> {
     let mut rt = Runtime::new(state, view, (1278.0, 798.0), env);
     // As the app runs: the shell's keys first, then this group's through the registry.
     rt.on_key = Some(crate::shell::host::on_key);
+    rt.poll = Some(crate::shell::host::poll);
     rt.frame(0.0);
     rt
 }
@@ -273,16 +305,321 @@ fn code_has_wrap_copy_and_edit_and_each_works_from_the_keyboard() {
     assert!(!rt.state.viewer.as_ref().unwrap().wrap, "No wrap is chosen");
 
     operate(&mut rt, "tb-btn-0");
-    assert_eq!(intents(&mut rt), [Intent::Edit]);
+    assert!(
+        rt.state.viewer.as_ref().unwrap().editor.is_some(),
+        "Edit opens the editor"
+    );
+    assert_eq!(info(&rt, "tb-btn-0").label.as_deref(), Some("Save"));
+    // Nothing was typed: Save leaves the editor and saves no version.
+    ctrl(&mut rt, 's');
+    assert!(rt.state.viewer.as_ref().unwrap().editor.is_none());
+    assert_eq!(rt.state.viewer.as_ref().unwrap().file.version, 1, "no new version");
+    ctrl(&mut rt, 'e');
+    assert!(rt.state.viewer.as_ref().unwrap().editor.is_some(), "Ctrl+E");
+    assert_eq!(
+        focused(&rt).as_deref(),
+        Some(super::EDITOR_KEY),
+        "the keyboard is the editor's"
+    );
+}
+
+fn ctrl(rt: &mut Runtime<State>, key: char) {
     press_with(
-        &mut rt,
-        Key::Command('e'),
+        rt,
+        Key::Command(key),
         Mods {
             cmd: true,
             ..Mods::default()
         },
     );
-    assert_eq!(intents(&mut rt), [Intent::Edit], "Ctrl+E");
+}
+
+fn viewer(rt: &Runtime<State>) -> &super::Ui {
+    rt.state.viewer.as_ref().expect("a file is open")
+}
+
+/// The note, open on a source that records what is asked of it.
+fn note(newer: bool, conflict: bool) -> (Runtime<State>, Calls) {
+    let calls = Calls::default();
+    let mut state = init();
+    let source = Recording {
+        inner: FixtureViewerSource {
+            newer,
+            conflict,
+            ..FixtureViewerSource::new()
+        },
+        calls: calls.clone(),
+    };
+    assert!(open_from(&mut state, Box::new(source), board::NOTES));
+    (runtime_of(state, false), calls)
+}
+
+/// Open the editor on the note and type one more line at its end.
+fn edit_and_type(rt: &mut Runtime<State>) {
+    ctrl(rt, 'e');
+    assert_eq!(focused(rt).as_deref(), Some(super::EDITOR_KEY));
+    for ch in "- Ask".chars() {
+        press(rt, Key::Text(ch.to_string()));
+    }
+    assert!(
+        viewer(rt).dirty(),
+        "typing reaches the editor: {:?}",
+        viewer(rt).editor.as_ref().map(|e| e.edit.text.clone())
+    );
+}
+
+#[test]
+fn markdown_is_parsed_into_headings_paragraphs_lists_code_and_links() {
+    let blocks = markdown::parse(board::NOTES_TEXT);
+    assert_eq!(blocks.len(), 6, "{blocks:?}");
+    let markdown::Block::List(items) = &blocks[3] else {
+        panic!("the fourth block is the first list: {:?}", blocks[3]);
+    };
+    assert_eq!(items.len(), 3);
+    assert!(items[0].iter().any(|p| p.bold && p.text == "Friday"));
+    assert!(items[1].iter().any(|p| p.code && p.text == "Shoot selects/graded"));
+    // A link whose target has a space in it is a link, as people write a file's name.
+    let link = items[2].iter().find(|p| p.link.is_some()).expect("a link");
+    assert_eq!(link.text, "Service agreement");
+    assert_eq!(link.link.as_deref(), Some("Service agreement.docx"));
+    assert!(!markdown::is_web("Service agreement.docx"));
+    assert!(markdown::is_web("https://example.org/a"));
+    // Raw HTML is shown as the text it is, never run or dropped.
+    let html = markdown::parse("before <script>alert(1)</script> after");
+    let markdown::Block::Para(pieces) = &html[0] else {
+        panic!("{html:?}")
+    };
+    let shown: String = pieces.iter().map(|p| p.text.as_str()).collect();
+    assert_eq!(shown, "before <script>alert(1)</script> after");
+}
+
+#[test]
+fn a_notes_source_dims_its_marks_and_keeps_every_character() {
+    for line in board::NOTES_TEXT
+        .lines()
+        .chain(["plain", "**bold** and `code`", "# ", "[a](b) [c"])
+    {
+        let runs = md_source::line(line);
+        let joined: String = runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(joined, line, "no character is lost or added");
+    }
+    let runs = md_source::line("- Final selects due **Friday**");
+    assert_eq!(
+        (runs[0].text.as_str(), runs[0].ink, runs[0].italic),
+        ("- ", Ink::Faint, true)
+    );
+    assert_eq!(
+        (runs[3].text.as_str(), runs[3].ink, runs[3].bold),
+        ("Friday", Ink::Strong, true)
+    );
+}
+
+#[test]
+fn a_note_is_read_rendered_or_as_source_and_its_links_and_panel_work_from_the_keyboard() {
+    let (mut rt, calls) = note(false, false);
+    assert_eq!(info(&rt, "seg-0").label.as_deref(), Some("Rendered"));
+    assert_eq!(info(&rt, "md-h1").role, "heading");
+    assert_eq!(info(&rt, "md-li-0").role, "listitem");
+    // The link is a link, reached by Tab, and asks the shell to open the file in Drive.
+    let link = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.role == "link" && e.label.as_deref() == Some("Service agreement"))
+        .expect("the link");
+    let key = link.key.clone().expect("the link has a key");
+    operate(&mut rt, &key);
+    assert_eq!(intents(&mut rt), [Intent::OpenInDrive("Service agreement.docx".into())]);
+    // Source shows the text; Rendered brings the note back.
+    operate(&mut rt, "seg-1");
+    assert!(viewer(&rt).md_source);
+    assert_eq!(info(&rt, "ln-11").text.as_deref(), Some("12"));
+    assert!(!has(&rt, "md-h1"));
+    operate(&mut rt, "seg-0");
+    assert!(has(&rt, "md-h1"));
+    // The details panel: Alt+Shift+P, then the switch and the two actions.
+    assert!(!has(&rt, "detail-pane"));
+    press_with(
+        &mut rt,
+        Key::Text("P".into()),
+        Mods {
+            alt: true,
+            shift: true,
+            ..Mods::default()
+        },
+    );
+    assert_eq!(info(&rt, "detail-pane").role, "complementary");
+    assert_eq!(info(&rt, "detail-name").text.as_deref(), Some("Meeting notes 4 Nov.md"));
+    assert_eq!(
+        info(&rt, "detail-note").text.as_deref(),
+        Some(super::details::DECRYPTED_HERE)
+    );
+    assert_eq!(info(&rt, "offline-card").role, "switch");
+    operate(&mut rt, "offline-card");
+    assert_eq!(
+        calls.borrow().last().map(String::as_str),
+        Some("offline meeting-notes-4-nov.md false")
+    );
+    assert!(!viewer(&rt).file.details.offline);
+    operate(&mut rt, "share-box");
+    operate(&mut rt, "versions-box");
+    assert_eq!(intents(&mut rt), [Intent::Share, Intent::VersionHistory]);
+}
+
+#[test]
+fn a_route_to_a_file_opens_it_and_an_unknown_file_leaves_the_placeholder() {
+    // What Files does for Enter on a file: the shell's event, nothing of this group's.
+    let mut state = init();
+    crate::shell::host::dispatch(&mut state, Event::OpenItem(board::NOTES.to_string()));
+    let rt = runtime_of(state, false);
+    assert_eq!(viewer(&rt).file.name, "Meeting notes 4 Nov.md");
+    assert!(has(&rt, "md-h1"));
+    let mut state = init();
+    crate::shell::host::dispatch(&mut state, Event::OpenItem("no-such-file".to_string()));
+    let rt = runtime_of(state, false);
+    assert!(rt.state.viewer.is_none());
+    assert!(!has(&rt, "viewer-body"));
+}
+
+#[test]
+fn a_newer_version_waits_for_show_it() {
+    let (mut rt, calls) = note(true, false);
+    assert_eq!(info(&rt, "banner").role, "status");
+    assert_eq!(viewer(&rt).file.version, 3, "the version on screen stays");
+    assert!(!calls.borrow().iter().any(|c| c.starts_with("newer")));
+    operate(&mut rt, "banner-btn");
+    assert_eq!(viewer(&rt).file.version, 4);
+    assert!(!has(&rt, "banner"), "the note is gone with the version it was about");
+    assert_eq!(
+        calls.borrow().last().map(String::as_str),
+        Some("newer meeting-notes-4-nov.md")
+    );
+}
+
+#[test]
+fn typing_marks_the_edit_unsaved_and_ctrl_s_saves_a_new_version() {
+    let (mut rt, calls) = note(false, false);
+    edit_and_type(&mut rt);
+    assert_eq!(info(&rt, "crumb-dot").label.as_deref(), Some("Not saved"));
+    let unsaved = "Changes not saved yet \u{00B7} version 3";
+    assert_eq!(info(&rt, "item-count").text.as_deref(), Some(unsaved));
+    assert_eq!(info(&rt, "status-text").text.as_deref(), Some(unsaved));
+    assert_eq!(
+        info(&rt, "status-details").text.as_deref(),
+        Some("Markdown \u{00B7} UTF-8 \u{00B7} line 13")
+    );
+    assert_eq!(info(&rt, "tb-btn-0").label.as_deref(), Some("Save"));
+    assert!(!has(&rt, "seg"), "the editor has no Rendered / Source");
+    ctrl(&mut rt, 's');
+    assert_eq!(
+        calls.borrow().last().map(String::as_str),
+        Some("save meeting-notes-4-nov.md from 3, 13 lines")
+    );
+    let ui = viewer(&rt);
+    assert!(ui.editor.is_none(), "saving leaves the editor");
+    assert_eq!(ui.file.version, 4);
+    assert_eq!(info(&rt, "toast").role, "status");
+    assert_eq!(
+        info(&rt, "status-text").text.as_deref(),
+        Some("Saved \u{00B7} encrypted \u{00B7} version 4 \u{00B7} 09:41")
+    );
+    assert_eq!(
+        info(&rt, "md-li-5").label.as_deref(),
+        Some("Ask"),
+        "the new line is in the note"
+    );
+    assert!(!has(&rt, "crumb-dot"));
+}
+
+#[test]
+fn leaving_with_changes_asks_first_and_each_answer_does_what_it_says() {
+    // The shell leaves the file (its Back, a section of the sidebar) with unsaved changes: the
+    // route comes back to the file before the next frame, and the question is up. (In the
+    // editor Esc and Alt+Left are the text field's own keys.)
+    let (mut rt, calls) = note(false, false);
+    edit_and_type(&mut rt);
+    crate::shell::host::dispatch(&mut rt.state, Event::Escape);
+    assert!(!on_a_file(&rt), "the shell left the file");
+    rt.invalidate();
+    rt.frame(0.0);
+    assert!(on_a_file(&rt), "the route is still on the file");
+    assert_eq!(viewer(&rt).dialog, Some(Dialog::Unsaved));
+    assert_eq!(info(&rt, "dlg").role, "alertdialog");
+    assert_eq!(info(&rt, "dlg-btn-1").label.as_deref(), Some("Discard changes"));
+    // Keep editing: back to the edit, still not saved.
+    operate(&mut rt, "dlg-btn-2");
+    assert_eq!(viewer(&rt).dialog, None);
+    assert!(viewer(&rt).dirty());
+    // The toolbar's Back asks too; Discard changes drops the edit and keeps version 3.
+    operate(&mut rt, "back");
+    assert_eq!(viewer(&rt).dialog, Some(Dialog::Unsaved));
+    operate(&mut rt, "dlg-btn-1");
+    let ui = viewer(&rt);
+    assert!(ui.editor.is_none() && ui.dialog.is_none());
+    assert_eq!(ui.file.version, 3);
+    assert!(
+        !calls.borrow().iter().any(|c| c.starts_with("save")),
+        "nothing was saved"
+    );
+    // Save from the question saves.
+    edit_and_type(&mut rt);
+    operate(&mut rt, "back");
+    operate(&mut rt, "dlg-btn-0");
+    assert_eq!(viewer(&rt).file.version, 4);
+    assert!(viewer(&rt).dialog.is_none());
+    // With nothing unsaved, Back leaves the file and its content leaves memory.
+    operate(&mut rt, "back");
+    assert!(rt.state.viewer.is_none());
+    assert!(!on_a_file(&rt));
+}
+
+#[test]
+fn a_save_that_meets_another_devices_version_overwrites_nothing() {
+    for (button, keep, version, editing) in [
+        ("dlg-btn-0", Some(Keep::Both), 1, false),
+        ("dlg-btn-1", Some(Keep::Mine), 5, false),
+        ("dlg-btn-2", Some(Keep::Theirs), 4, false),
+        ("dlg-btn-3", None, 3, true),
+    ] {
+        let (mut rt, calls) = note(false, true);
+        edit_and_type(&mut rt);
+        ctrl(&mut rt, 's');
+        let Some(Dialog::Conflict(other)) = viewer(&rt).dialog.clone() else {
+            panic!("the two-versions question is up");
+        };
+        assert_eq!(
+            (other.from.as_str(), other.at.as_str(), other.version),
+            ("Anna's iPhone", "09:14", 4)
+        );
+        assert_eq!(info(&rt, "dlg").role, "dialog");
+        assert_eq!(
+            info(&rt, "dlg-card-0-sub").text.as_deref(),
+            Some("this PC \u{00B7} not saved \u{00B7} +1 line")
+        );
+        assert_eq!(info(&rt, "dlg-btn-2").label.as_deref(), Some("Keep Anna's iPhone's"));
+        assert_eq!(
+            viewer(&rt).file.version,
+            3,
+            "nothing is written while the question is up"
+        );
+        operate(&mut rt, button);
+        let ui = viewer(&rt);
+        assert_eq!(ui.dialog, None, "{button}");
+        assert_eq!(ui.editor.is_some(), editing, "{button}");
+        assert_eq!(ui.file.version, version, "{button}");
+        match keep {
+            Some(keep) => assert_eq!(
+                calls.borrow().last().cloned(),
+                Some(format!("resolve meeting-notes-4-nov.md {keep:?}"))
+            ),
+            None => assert!(
+                !calls.borrow().iter().any(|c| c.starts_with("resolve")),
+                "Cancel settles nothing"
+            ),
+        }
+        if keep == Some(Keep::Both) {
+            assert_eq!(ui.file.name, "Meeting notes 4 Nov (Anna-Laptop).md");
+        }
+    }
 }
 
 #[test]
@@ -436,13 +773,10 @@ fn progress_from_the_engine_moves_the_bar_and_a_finished_file_replaces_the_state
         },
     ];
     assert!(open_from(&mut state, Box::new(Stepping(steps)), board::DECRYPTING));
+    // The shell asks the open file for progress before every frame (`host::poll`).
     let mut rt = runtime_of(state, false);
-    assert!(rt.state.viewer.as_mut().unwrap().pump());
-    rt.invalidate();
-    rt.frame(0.0);
     assert_eq!(info(&rt, "state-sub-mono").text.as_deref(), Some("90 of 120 MB"));
     assert_eq!(info(&rt, "state-bar").label.as_deref(), Some("Decrypting, 75 percent"));
-    assert!(rt.state.viewer.as_mut().unwrap().pump());
     rt.invalidate();
     rt.frame(0.0);
     assert_eq!(

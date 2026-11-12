@@ -33,8 +33,18 @@ pub struct Status {
 
 const SEARCH_PLACEHOLDER: &str = "Search names";
 
+/// What the toolbar says about the file beyond its path.
+#[derive(Default)]
+pub struct Head {
+    /// The line under the path, where it is not the file's own facts ("Changes not saved yet").
+    pub facts: Option<String>,
+    /// A dot after the name: the edit is not saved.
+    pub unsaved: bool,
+}
+
 /// The path and the line under it (`.mk-title` with `.mk-crumbs`).
-fn title(file: &OpenFile, t: &Theme) -> El {
+fn title(file: &OpenFile, head: &Head, t: &Theme) -> El {
+    let facts = head.facts.clone().unwrap_or_else(|| file.facts.clone());
     let mut crumbs = row().key("crumbs").w_full().min_w(0.0).center_y().gap(4.0);
     for (i, folder) in file.path.iter().enumerate() {
         crumbs = crumbs
@@ -53,18 +63,39 @@ fn title(file: &OpenFile, t: &Theme) -> El {
         style::CRUMB_NAME,
         t.text_tertiary,
     ));
+    if head.unsaved {
+        crumbs = crumbs.child(
+            el().key("crumb-dot")
+                .role("image")
+                .label("Not saved")
+                .size(7.0, 7.0)
+                .radius(3.5)
+                .ml(2.0)
+                .fill(t.text)
+                // As the status dot: a little of the ground inside the edge, for Chromium's
+                // lighter outermost rows ("Rune limitations", PR body).
+                .box_shadow(rune::Shadow {
+                    x: 0.0,
+                    y: 0.0,
+                    blur: 0.0,
+                    spread: 0.05,
+                    color: t.toolbar_bg,
+                    inset: true,
+                }),
+        );
+    }
     col()
         .key("file-info")
         .role("group")
-        .label(format!("{}, {}", file.name, file.facts))
+        .label(format!("{}, {}", file.name, facts))
         .px(4.0)
         .shrink()
         .child(crumbs)
-        .child(kit::label("item-count", file.facts.clone(), type_::TITLE_SUB, t.text_tertiary).w_full())
+        .child(kit::label("item-count", facts, type_::TITLE_SUB, t.text_tertiary).w_full())
 }
 
 /// The toolbar of an open file. `tools` are the file's own controls, drawn before the "more" button.
-pub fn toolbar(s: &State, ui: &Ui, tools: Vec<El>, t: &Theme) -> El {
+pub fn toolbar(s: &State, ui: &Ui, head: &Head, tools: Vec<El>, t: &Theme) -> El {
     let nav = row()
         .key("nav")
         .child(
@@ -200,7 +231,7 @@ pub fn toolbar(s: &State, ui: &Ui, tools: Vec<El>, t: &Theme) -> El {
         .center_y()
         .gap(8.0)
         .child(nav)
-        .child(title(&ui.file, t))
+        .child(title(&ui.file, head, t))
         .child(el().key("toolbar-spacer").grow(1.0))
         .child(file_tools)
         .child(view_toggle)
@@ -273,6 +304,7 @@ pub fn window(
     s: &State,
     cx: &mut Cx<State>,
     ui: &Ui,
+    head: Head,
     tools: Vec<El>,
     banner: Option<El>,
     body: El,
@@ -286,7 +318,7 @@ pub fn window(
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(toolbar(s, ui, tools, t));
+        .child(toolbar(s, ui, &head, tools, t));
     if let Some(banner) = banner {
         main = main.child(banner);
     }
@@ -308,15 +340,29 @@ pub fn window(
         .h_full()
         .fill(t.bg)
         .child(caption::caption_bar(t, cx))
-        .child(
-            row()
-                .key("body")
-                .grow(1.0)
-                .min_h(0.0)
-                .w_full()
-                .child(sidebar::sidebar(s, t))
-                .child(main),
-        )
+        .child({
+            // Under the caption: the window's body, and what sits over it.
+            let mut under = el().key("under-caption").grow(1.0).min_h(0.0).w_full().child(
+                row()
+                    .key("body")
+                    .w_full()
+                    .h_full()
+                    .child(sidebar::sidebar(s, t))
+                    .child(main),
+            );
+            if let Some(words) = &ui.toast {
+                under = under.child(super::dialogs::toast(words, t));
+            }
+            match &ui.dialog {
+                Some(super::Dialog::Unsaved) => under = under.child(super::dialogs::unsaved(&ui.file.name, t)),
+                Some(super::Dialog::Conflict(other)) => {
+                    let mine = ui.editor.as_ref().map(super::Editor::change_words).unwrap_or_default();
+                    under = under.child(super::dialogs::conflict(&ui.file.name, &mine, other, t));
+                }
+                None => {}
+            }
+            under
+        })
 }
 
 /// How a button of the kit shows (`.kit-btn`).

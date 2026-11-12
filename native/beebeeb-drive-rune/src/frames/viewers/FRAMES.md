@@ -5,22 +5,22 @@ Markdown editing" (8): 22 frames, plus the Windows entry state of "Office: Docs,
 2026-11-11: office documents are not edited in the app in 0.9.0; a link that opens the web app).
 
 Built = drawn from `viewers::Ui`, reachable by its controls, a scene, gated in light and dark.
-5 of 23 are built (lane f-viewers, 2026-11-11); the other 18 are open and each line below is the checklist.
-The gate state per frame is in the PR body.
+11 of 23 are built (lane f-viewers, 2026-11-12): 7 at 0 failing in both themes, 4 with open reds
+named below and in the PR body. The other 12 are not built; each line is the checklist.
 
 | Frame | What | State |
 | --- | --- | --- |
-| DW-1516 | A large file: "Decrypting on this PC", the size done, a bar, Cancel | built |
-| DW-1517 | Too large to preview with the space this PC has: the numbers, Free up space…, Download to… | built |
-| DW-1518 | Decrypting failed: nothing changed; Try again, Report a problem | built |
-| DW-1512 | Code: colours, line numbers, Wrap / No wrap, Copy, Edit Ctrl+E | built, NOT done: gate 4 pixel checks red in light, 2 in dark; Wrap's rows overlap (PR body) |
-| DW-1527 | A text file over 2 MB: read-only, the first 500 lines, Open in another app… | built |
-| DW-1513 | Markdown rendered, Rendered / Source, Edit Ctrl+E, the details panel | not built |
-| DW-1519 | A newer version arrived while reading: a banner with Show it | not built |
-| DW-1523 | The editor: mono, line numbers, Markdown marks dimmed, the caret, Save Ctrl+S | not built |
-| DW-1524 | Saved: the note with the new line, "Saved · encrypted · version 4" | not built |
-| DW-1525 | Leaving with changes: Save, Discard changes, Keep editing | not built |
-| DW-1526 | Two versions while editing: Keep both, Keep this PC's, Keep Anna's iPhone's, Cancel | not built |
+| DW-1516 | A large file: "Decrypting on this PC", the size done, a bar, Cancel | built, 0 failing |
+| DW-1517 | Too large to preview with the space this PC has: the numbers, Free up space…, Download to… | built, 0 failing |
+| DW-1518 | Decrypting failed: nothing changed; Try again, Report a problem | built, 0 failing |
+| DW-1512 | Code: colours, line numbers, Wrap / No wrap, Copy, Edit Ctrl+E | built; open reds: 4 pixel checks in light, 2 in dark (a glyph of the path under the control's edge, one line's tile); Wrap works |
+| DW-1527 | A text file over 2 MB: read-only, the first 500 lines, Open in another app… | built, 0 failing |
+| DW-1513 | Markdown rendered, Rendered / Source, Edit Ctrl+E, the details panel | built, 0 failing |
+| DW-1519 | A newer version arrived while reading: a banner with Show it | built, 0 failing |
+| DW-1523 | The editor: mono, line numbers, Markdown marks dimmed, the caret, Save Ctrl+S | built; open red: 1 pixel check (the unsaved dot's edge) in both themes |
+| DW-1524 | Saved: the note with the new line, "Saved · encrypted · version 4" | built, 0 failing |
+| DW-1525 | Leaving with changes: Save, Discard changes, Keep editing | built; open reds: the toolbar under the scrim (the board draws it without the dot and without Ctrl+S there, against DW-1523) and the Save button's edge |
+| DW-1526 | Two versions while editing: Keep both, Keep this PC's, Keep Anna's iPhone's, Cancel | built; open reds: the toolbar under the scrim, as DW-1525 |
 | DW-1520 | New's menu: New folder, New file…, New document…, Upload files…, Upload a folder… | not built |
 | DW-1521 | New file: pick a type (Markdown, Text, Word, Excel, PowerPoint) | not built |
 | DW-1522 | New text file: the name and the extension as its own field, suggestions | not built |

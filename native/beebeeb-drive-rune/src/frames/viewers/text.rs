@@ -1,10 +1,10 @@
 //! Text and code (DW-1512, DW-1527): the file in JetBrains Mono with line numbers, each run in
 //! the ink the source gave it; and the toolbar controls and the banner of a text file.
 
-use rune::{Align, Color, El, Icon, Span, col, row};
+use rune::{Align, Color, El, Icon, Span, col, el, row, text_input};
 
 use super::chrome::{Dot, Status};
-use super::source::{Ink, Run, TextDoc, count_words};
+use super::source::{Ink, OpenFile, Run, TextDoc, count_words};
 use super::{Intent, icons, style, ui};
 use crate::State;
 use crate::theme::tokens::Theme;
@@ -56,10 +56,15 @@ pub fn line(i: usize, runs: &[Run], current: bool, t: &Theme) -> El {
         .w_full()
         .h(LINE_H)
         .child(
-            kit::label(format!("ln-{i}"), (i + 1).to_string(), style::CODE, t.text_tertiary)
-                .w(GUTTER_W)
-                .px(16.0)
-                .align(Align::End),
+            kit::label(
+                format!("ln-{i}"),
+                (i + 1).to_string(),
+                style::CODE,
+                if current { t.text_secondary } else { t.text_tertiary },
+            )
+            .w(GUTTER_W)
+            .px(16.0)
+            .align(Align::End),
         )
         .child(text);
     if current {
@@ -263,6 +268,107 @@ pub fn md_tools(source: bool, t: &Theme) -> Vec<El> {
     ]
 }
 
+/// The editor (DW-1523): the text in JetBrains Mono with line numbers, the line the caret is on
+/// marked. The coloured lines are drawn as the reader draws them; over them lies the text
+/// field that takes the typing (its own glyphs clear, its caret and selection showing), set in
+/// the same type on the same lines, so every key, the pointer, the clipboard, undo and the
+/// input method are the field's.
+pub fn editor(editor: &super::Editor, lines: &[Vec<Run>], t: &Theme) -> El {
+    // The line the caret is on, while the editor has the keyboard (not under a dialog).
+    let current = editor.edit.focused.then(|| editor.caret_line());
+    let mut under = col().key("editor-lines").w_full();
+    for (i, runs) in lines.iter().enumerate() {
+        if current == Some(i) {
+            // On the caret's line the marks are not dimmed: they are what is being typed.
+            let shown: Vec<Run> = runs
+                .iter()
+                .map(|run| Run {
+                    ink: if run.ink == Ink::Faint { Ink::Plain } else { run.ink },
+                    ..run.clone()
+                })
+                .collect();
+            under = under.child(line(i, &shown, true, t));
+        } else {
+            under = under.child(line(i, runs, false, t));
+        }
+    }
+    // The caret as the board draws it: 1.5 wide, 15 high, one point after the text.
+    let at = editor.edit.focus.min(editor.edit.text.len());
+    let column = editor.edit.text[..at]
+        .rsplit('\n')
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .count();
+    let caret_x = GUTTER_W + column as f32 * rune::text::advance("0", style::CODE) + 1.0;
+    let mut field = el().key("editor-field").w_full().child(under).child(
+        text_input(&editor.edit, style::CODE)
+            .key(super::EDITOR_KEY)
+            .label("Text")
+            .shortcut_hint("Ctrl+S")
+            .color(Color::TRANSPARENT)
+            .caret(Color::TRANSPARENT, t.selection)
+            .on_edit(super::editor_edit)
+            .pin(Some(GUTTER_W), Some(0.0), Some(0.0), Some(0.0)),
+    );
+    if let Some(current) = current {
+        field = field.child(
+            el().key(format!("caret-{current}"))
+                .ime_cursor()
+                .absolute(caret_x, current as f32 * LINE_H + 3.0)
+                .size(1.5, 15.0)
+                .radius(1.0)
+                .fill(t.accent_deep),
+        );
+    }
+    col()
+        .key("viewer-body")
+        .role("document")
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
+        .h_full()
+        .py(12.0)
+        .fill(t.bg)
+        .clip_rounded(0.0)
+        .child(field)
+}
+
+/// The toolbar's control of the editor: Save, a plain button with the lock (New stays the
+/// window's one Amber control).
+pub fn editor_tools(t: &Theme) -> Vec<El> {
+    vec![
+        tool_action("tb-btn-0", "Save", Some(&icons::LOCK), Some("Ctrl+S"), t).on_press(|s: &mut State| {
+            if let Some(ui) = ui(s) {
+                ui.save();
+            }
+        }),
+    ]
+}
+
+/// DW-1519: another device saved a newer version while this one is open. The version on
+/// screen stays until Show it.
+pub fn newer_banner(file: &OpenFile, t: &Theme) -> Option<El> {
+    let newer = file.newer.as_ref()?;
+    let words = format!("A newer version arrived from {}, {}.", newer.from, newer.at);
+    // The time is a figure: mono.
+    let time = words.len() - newer.at.len() - 1;
+    let show = super::chrome::button("banner-btn", "Show it", super::chrome::ButtonKind::Outline, true, t).on_press(
+        |s: &mut State| {
+            if let Some(ui) = ui(s) {
+                ui.show_newer();
+            }
+        },
+    );
+    Some(banner_spans(
+        &icons::REFRESH,
+        &words,
+        vec![Span::new(time, time + newer.at.len()).mono()],
+        Some(show),
+        t,
+    ))
+}
+
 /// The note over a file that opened read-only (DW-1527).
 pub fn banner(doc: &TextDoc, t: &Theme) -> Option<El> {
     doc.truncated?;
@@ -277,6 +383,11 @@ pub fn banner(doc: &TextDoc, t: &Theme) -> Option<El> {
 /// A banner under the toolbar (`.mk-banner`): an icon, a sentence, and a button if given.
 /// Keys: `banner`, `banner-icon`, `banner-text`; the button is the caller's.
 pub fn banner_el(icon: &'static Icon, words: &str, action: Option<El>, t: &Theme) -> El {
+    banner_spans(icon, words, Vec::new(), action, t)
+}
+
+/// [`banner_el`] with spans in its sentence (a figure in mono).
+pub fn banner_spans(icon: &'static Icon, words: &str, spans: Vec<Span>, action: Option<El>, t: &Theme) -> El {
     let mut b = row()
         .key("banner")
         .role("status")
@@ -290,7 +401,14 @@ pub fn banner_el(icon: &'static Icon, words: &str, action: Option<El>, t: &Theme
         .radius(10.0)
         .fill(style::banner(t))
         .child(kit::glyph("banner-icon", icon, 16.0, t.text_secondary))
-        .child(kit::label("banner-text", words, style::BANNER, t.text_secondary).grow(1.0));
+        .child({
+            let sentence = kit::label("banner-text", words, style::BANNER, t.text_secondary).grow(1.0);
+            if spans.is_empty() {
+                sentence
+            } else {
+                sentence.spans(spans)
+            }
+        });
     if let Some(action) = action {
         b = b.child(action);
     }

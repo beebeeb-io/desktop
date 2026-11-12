@@ -15,6 +15,7 @@
 
 mod chrome;
 mod details;
+mod dialogs;
 mod fixture_text;
 pub mod icons;
 mod markdown;
@@ -34,7 +35,9 @@ use crate::shell::app::{Event, Screen};
 use crate::shell::host;
 use crate::shell::registry::FrameGroup;
 use crate::theme::tokens;
-use source::{Body, FixtureViewerSource, OpenError, OpenFile, TextDoc, ViewerSource, board};
+use source::{
+    Body, Conflict, FixtureViewerSource, Keep, OpenError, OpenFile, SaveOutcome, TextDoc, ViewerSource, board,
+};
 
 /// Where the person goes when an action leaves this group. The shell opens it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,8 +50,6 @@ pub enum Intent {
     ReportProblem,
     /// DW-1520: New's menu.
     NewMenu,
-    /// DW-1523: the editor on this file.
-    Edit,
     /// The system's "Open with" for this file, decrypted for the app the person picks.
     OpenInAnotherApp,
     /// DW-0407: share this file.
@@ -61,6 +62,49 @@ pub enum Intent {
     OpenInBrowser(String),
 }
 
+/// The file being edited (DW-1523): the text as typed, and the text it started from.
+pub struct Editor {
+    pub edit: rune::TextEdit,
+    base: String,
+}
+
+impl Editor {
+    /// The text differs from the version it started from.
+    pub fn dirty(&self) -> bool {
+        self.edit.text != self.base
+    }
+
+    /// The line the caret is on, from 0.
+    pub fn caret_line(&self) -> usize {
+        let at = self.edit.focus.min(self.edit.text.len());
+        self.edit.text.as_bytes()[..at].iter().filter(|b| **b == b'\n').count()
+    }
+
+    /// "+1 line", "-2 lines", "same length": how the edit's length differs from the saved text.
+    pub fn change_words(&self) -> String {
+        let count = |text: &str| text.lines().count() as i64;
+        match count(&self.edit.text) - count(&self.base) {
+            0 => "same length".into(),
+            1 => "+1 line".into(),
+            -1 => "-1 line".into(),
+            n if n > 0 => format!("+{n} lines"),
+            n => format!("{n} lines"),
+        }
+    }
+}
+
+/// A question over the open file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Dialog {
+    /// DW-1525: leaving with changes.
+    Unsaved,
+    /// DW-1526: saved elsewhere while editing.
+    Conflict(Conflict),
+}
+
+/// The key of the editor's text field.
+pub const EDITOR_KEY: &str = "editor-input";
+
 pub struct Ui {
     source: Box<dyn ViewerSource>,
     pub file: OpenFile,
@@ -70,6 +114,13 @@ pub struct Ui {
     pub wrap: bool,
     /// A Markdown note shows its text, not the rendered note (DW-1513's Source).
     pub md_source: bool,
+    /// The editor, while the file is being edited.
+    pub editor: Option<Editor>,
+    pub dialog: Option<Dialog>,
+    /// The message after a save ("Saved · encrypted · version 4"), until the next action.
+    pub toast: Option<String>,
+    /// When this session last saved the file ("09:41"): the status line says so.
+    pub saved_at: Option<String>,
     /// The element that takes keyboard focus once this change is on screen.
     focus: Option<&'static str>,
     intents: Vec<Intent>,
@@ -85,6 +136,10 @@ impl Ui {
             show_details: false,
             wrap: false,
             md_source: false,
+            editor: None,
+            dialog: None,
+            toast: None,
+            saved_at: None,
             focus: None,
             intents: Vec::new(),
         })
@@ -139,21 +194,129 @@ impl Ui {
         }
     }
 
-    /// Edit (Ctrl+E): the editor, DW-1523 (the shell opens it). A file over the editor's limit
-    /// stays read-only (DW-1527), so there it does nothing.
+    /// Edit (Ctrl+E): the editor on this file (DW-1523). A file over the editor's limit stays
+    /// read-only (DW-1527), so there it does nothing.
     pub fn edit(&mut self) {
-        let editable = match &self.file.body {
-            Body::Text(doc) => doc.truncated.is_none(),
-            Body::Markdown(_) => true,
-            _ => false,
+        let text = match &self.file.body {
+            Body::Text(doc) if doc.truncated.is_none() => doc.plain(),
+            Body::Markdown(doc) => doc.source.clone(),
+            _ => return,
         };
-        if editable {
-            self.intent(Intent::Edit);
+        if self.editor.is_some() {
+            return;
+        }
+        let mut edit = rune::TextEdit::new(text.clone());
+        edit.set_caret(text.len());
+        self.editor = Some(Editor { edit, base: text });
+        self.toast = None;
+        self.focus = Some(EDITOR_KEY);
+    }
+
+    /// The edit has changes that are not saved.
+    pub fn dirty(&self) -> bool {
+        self.editor.as_ref().is_some_and(Editor::dirty)
+    }
+
+    /// The lines of the text being edited, as the source colours them.
+    pub fn editor_lines(&self) -> Vec<Vec<source::Run>> {
+        match &self.editor {
+            Some(editor) => self.source.colours(&self.file, &editor.edit.text),
+            None => Vec::new(),
         }
     }
 
+    fn outcome(&mut self, outcome: SaveOutcome) {
+        match outcome {
+            SaveOutcome::Saved { file, at } => {
+                self.toast = Some(format!("Saved \u{00B7} encrypted \u{00B7} version {}", file.version));
+                self.saved_at = Some(at);
+                self.show(file);
+            }
+            SaveOutcome::Opened(file) => self.show(file),
+            SaveOutcome::Conflict(other) => self.ask(Dialog::Conflict(other)),
+            // Not saved: the edit stays as it is, and so does what the status line says.
+            SaveOutcome::Failed => self.dialog = None,
+        }
+    }
+
+    /// Leave the editor for the reader on `file`.
+    fn show(&mut self, file: OpenFile) {
+        self.file = file;
+        self.editor = None;
+        self.dialog = None;
+        self.md_source = false;
+        self.focus = Some("tb-btn-0");
+    }
+
+    /// Save (Ctrl+S): encrypted on this PC, a new version (DW-1524); or the two-versions
+    /// question when someone saved it elsewhere meanwhile (DW-1526).
+    pub fn save(&mut self) {
+        let Some(editor) = &self.editor else { return };
+        if !editor.dirty() {
+            // Nothing to save: back to the reader, no new version.
+            self.editor = None;
+            self.dialog = None;
+            return;
+        }
+        let outcome = self.source.save(&self.file.id, &editor.edit.text, self.file.version);
+        self.outcome(outcome);
+    }
+
+    /// DW-1525's Discard changes: the edit is dropped, the saved version stays (DW-1513).
+    pub fn discard(&mut self) {
+        self.editor = None;
+        self.dialog = None;
+        self.focus = Some("tb-btn-0");
+    }
+
+    /// Keep editing / Cancel / Esc: back to the edit, still not saved.
+    pub fn keep_editing(&mut self) {
+        self.dialog = None;
+        if self.editor.is_some() {
+            self.focus = Some(EDITOR_KEY);
+        }
+    }
+
+    /// DW-1526: which side stays. Either way the other version stays in version history.
+    pub fn resolve(&mut self, keep: Keep) {
+        let Some(editor) = &self.editor else { return };
+        let outcome = self.source.resolve(&self.file.id, &editor.edit.text, keep);
+        self.outcome(outcome);
+    }
+
+    /// DW-1519's Show it: the newer version replaces the one on screen, at the person's press.
+    pub fn show_newer(&mut self) {
+        if self.file.newer.is_none() || self.editor.is_some() {
+            return;
+        }
+        if let Ok(file) = self.source.newer(&self.file.id) {
+            self.file = file;
+            self.focus = Some("tb-btn-0");
+        }
+    }
+
+    /// Leaving the file was asked for. `true`: there are unsaved changes, so the question is
+    /// up (DW-1525) and the file stays.
+    pub fn hold_for_changes(&mut self) -> bool {
+        if !self.dirty() {
+            return false;
+        }
+        if self.dialog.is_none() {
+            self.ask(Dialog::Unsaved);
+        }
+        true
+    }
+
+    /// Put a question over the edit: the keyboard is the dialog's until it is answered.
+    fn ask(&mut self, dialog: Dialog) {
+        if let Some(editor) = self.editor.as_mut() {
+            editor.edit.focused = false;
+        }
+        self.dialog = Some(dialog);
+        self.focus = Some("dlg-btn-0");
+    }
+
     /// The engine's progress since the last call. `true`: the view must run again.
-    #[cfg_attr(not(test), allow(dead_code))] // called by `poll`, which waits for the shell
     pub fn pump(&mut self) -> bool {
         match self.source.poll(&self.file.id) {
             Some(body) => {
@@ -182,6 +345,7 @@ fn route_item(s: &State) -> Option<String> {
 
 /// Open a file in the viewer: the route goes to it and its content is asked of the source.
 /// `false`: there is no such file (the route does not move).
+#[cfg_attr(not(test), allow(dead_code))] // the call for Files' preview and open (DW-0408, another lane)
 pub fn open(s: &mut State, file_id: &str) -> bool {
     open_from(s, Box::new(FixtureViewerSource::new()), file_id)
 }
@@ -200,6 +364,9 @@ pub fn open_from(s: &mut State, source: Box<dyn ViewerSource>, file_id: &str) ->
 /// Back to the folder the file was opened from; the decrypted content is dropped.
 pub fn close(s: &mut State) {
     if let Some(ui) = s.viewer.as_mut() {
+        if ui.hold_for_changes() {
+            return;
+        }
         ui.cancel();
     }
     s.viewer = None;
@@ -216,7 +383,31 @@ pub fn sync(s: &mut State) {
         .as_ref()
         .is_some_and(|ui| here.as_deref() != Some(ui.file.id.as_str()))
     {
+        // Unsaved changes: the route comes back to the file and the question is asked
+        // (DW-1525). An open question is answered first: Esc there is "keep editing".
+        let held = s.viewer.as_mut().is_some_and(|ui| {
+            if ui.dialog.is_some() {
+                ui.keep_editing();
+                true
+            } else {
+                ui.hold_for_changes()
+            }
+        });
+        if held {
+            let id = s.viewer.as_ref().map(|ui| ui.file.id.clone()).unwrap_or_default();
+            host::dispatch(s, Event::OpenItem(id));
+            return;
+        }
         close_stale(s);
+    }
+}
+
+/// The text field the editor's keys go to. (With no editor open no key reaches this; the
+/// window's search field is what the type asks for.)
+pub fn editor_edit(s: &mut State) -> &mut rune::TextEdit {
+    match s.viewer.as_mut().and_then(|ui| ui.editor.as_mut()) {
+        Some(editor) => &mut editor.edit,
+        None => &mut s.search,
     }
 }
 
@@ -237,14 +428,22 @@ pub fn copy_text(s: &mut State, tx: &mut Tx) {
 
 /// The engine's answers that arrive between presses, and the route leaving the file. `true`:
 /// the view must run again. For `shell::host::poll`.
-#[allow(dead_code)] // waits for its one line in `shell/host.rs` (PR body)
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let had = s.viewer.is_some();
     sync(s);
+    // The route names a file that is not open yet (Files dispatched `Event::OpenItem`): ask the
+    // source for it. A file the source does not have leaves the shell's placeholder.
+    if let (None, Some(id)) = (&s.viewer, route_item(s)) {
+        if let Ok(ui) = Ui::open(Box::new(FixtureViewerSource::new()), &id) {
+            s.viewer = Some(ui);
+            return true;
+        }
+    }
     let Some(ui) = ui(s) else { return had };
     let changed = ui.pump();
     if let Some(key) = ui.focus.take() {
-        tx.focus(key, true);
+        // Not after a key of this group (those take it in `on_key`): no ring is drawn.
+        tx.focus(key, false);
     }
     changed
 }
@@ -259,25 +458,67 @@ pub fn frame(s: &State, cx: &mut Cx<State>) -> El {
     }
 }
 
+/// The first word of the file's facts: "Markdown" of "Markdown · 1.4 KB".
+fn kind_word(file: &OpenFile) -> &str {
+    file.facts.split(" \u{00B7} ").next().unwrap_or_default()
+}
+
 fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
     let t = tokens::theme(cx.system_dark());
+    if let Some(editor) = &ui.editor {
+        let dirty = editor.dirty();
+        let unsaved = format!("Changes not saved yet \u{00B7} version {}", ui.file.version);
+        let status = chrome::Status {
+            dot: if dirty { chrome::Dot::Warn } else { chrome::Dot::Green },
+            text: if dirty {
+                unsaved.clone()
+            } else {
+                details::DECRYPTED_HERE.into()
+            },
+            details: format!(
+                "{} \u{00B7} UTF-8 \u{00B7} line {}",
+                kind_word(&ui.file),
+                editor.caret_line() + 1
+            ),
+        };
+        let head = chrome::Head {
+            facts: dirty.then_some(unsaved),
+            unsaved: dirty,
+        };
+        let body = text::editor(editor, &ui.editor_lines(), &t);
+        return chrome::window(s, cx, ui, head, text::editor_tools(&t), None, body, &status, &t);
+    }
+    let head = chrome::Head::default();
+    let reading = |doc_truncated: Option<source::Truncated>| match &ui.saved_at {
+        // After a save the status line says what was saved, and when.
+        Some(at) => chrome::Status {
+            dot: chrome::Dot::Green,
+            text: format!(
+                "Saved \u{00B7} encrypted \u{00B7} version {} \u{00B7} {at}",
+                ui.file.version
+            ),
+            details: format!("{} \u{00B7} UTF-8", kind_word(&ui.file)),
+        },
+        None => text::status(&TextDoc {
+            lines: Vec::new(),
+            truncated: doc_truncated,
+        }),
+    };
+    let banner = text::newer_banner(&ui.file, &t);
     if let Body::Text(doc) = &ui.file.body {
         return chrome::window(
             s,
             cx,
             ui,
+            head,
             text::tools(doc, ui.wrap, &t),
-            text::banner(doc, &t),
+            banner.or_else(|| text::banner(doc, &t)),
             text::body(doc, ui.wrap, &t),
-            &text::status(doc),
+            &reading(doc.truncated),
             &t,
         );
     }
     if let Body::Markdown(doc) = &ui.file.body {
-        let plain = text::status(&TextDoc {
-            lines: Vec::new(),
-            truncated: None,
-        });
         let body = if ui.md_source {
             text::body(
                 &TextDoc {
@@ -290,13 +531,23 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
         } else {
             markdown::body(&markdown::parse(&doc.source), &t)
         };
-        return chrome::window(s, cx, ui, text::md_tools(ui.md_source, &t), None, body, &plain, &t);
+        return chrome::window(
+            s,
+            cx,
+            ui,
+            head,
+            text::md_tools(ui.md_source, &t),
+            banner,
+            body,
+            &reading(None),
+            &t,
+        );
     }
     let (body, status) = match (states::body(&ui.file, &t), states::status(&ui.file.body)) {
         (Some(body), Some(status)) => (body, status),
         _ => return crate::shell::placeholder::window(s, cx, FrameGroup::Viewer),
     };
-    chrome::window(s, cx, ui, Vec::new(), None, body, &status, &t)
+    chrome::window(s, cx, ui, head, Vec::new(), None, body, &status, &t)
 }
 
 /// The viewer's keys. The shell's own ran first (`host::on_key`): Esc and Alt+Left already
@@ -313,6 +564,11 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         // Ctrl+E: edit.
         Key::Command('e') if !ev.mods.alt && !ev.mods.shift => {
             ui.edit();
+            true
+        }
+        // Ctrl+S: save the edit as a new, encrypted version.
+        Key::Command('s') if !ev.mods.alt && !ev.mods.shift && ui.editor.is_some() && ui.dialog.is_none() => {
+            ui.save();
             true
         }
         _ => false,
@@ -335,19 +591,41 @@ pub fn scene_file(frame: &str) -> Option<&'static str> {
         "DW-1518" => board::FAILED,
         "DW-1512" => board::CODE,
         "DW-1527" => board::LOG,
-        "DW-1513" => board::NOTES,
+        "DW-1513" | "DW-1519" | "DW-1523" | "DW-1524" | "DW-1525" | "DW-1526" => board::NOTES,
         _ => return None,
     })
 }
 
-/// Put the window in a board frame's state.
+/// The line the board's editor frames have typed at the end of the note.
+pub const BOARD_TYPED: &str = "- Ask Priya about the invoices";
+
+/// Put the window in a board frame's state, by the calls a person's presses make.
 pub fn set_scene(s: &mut State, frame: &str) {
-    if let Some(file) = scene_file(frame) {
-        open(s, file);
+    let Some(file) = scene_file(frame) else { return };
+    let source = FixtureViewerSource {
+        newer: frame == "DW-1519",
+        conflict: frame == "DW-1526",
+        ..FixtureViewerSource::new()
+    };
+    open_from(s, Box::new(source), file);
+    let Some(ui) = ui(s) else { return };
+    // The board draws the note and its saved version with the details panel open.
+    ui.show_details = matches!(frame, "DW-1513" | "DW-1524");
+    if matches!(frame, "DW-1523" | "DW-1524" | "DW-1525" | "DW-1526") {
+        ui.edit();
+        if let Some(editor) = ui.editor.as_mut() {
+            let end = editor.edit.text.len();
+            editor.edit.set_caret(end);
+            editor.edit.insert(BOARD_TYPED);
+            editor.edit.focused = true;
+        }
     }
-    if let Some(ui) = ui(s) {
-        // The board draws the note with its details panel open.
-        ui.show_details = frame == "DW-1513";
+    match frame {
+        "DW-1524" | "DW-1526" => ui.save(),
+        "DW-1525" => {
+            ui.hold_for_changes();
+        }
+        _ => {}
     }
 }
 
@@ -359,4 +637,9 @@ pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1512", |s| set_scene(s, "DW-1512")),
     ("DW-1527", |s| set_scene(s, "DW-1527")),
     ("DW-1513", |s| set_scene(s, "DW-1513")),
+    ("DW-1519", |s| set_scene(s, "DW-1519")),
+    ("DW-1523", |s| set_scene(s, "DW-1523")),
+    ("DW-1524", |s| set_scene(s, "DW-1524")),
+    ("DW-1525", |s| set_scene(s, "DW-1525")),
+    ("DW-1526", |s| set_scene(s, "DW-1526")),
 ];
