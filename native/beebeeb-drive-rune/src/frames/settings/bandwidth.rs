@@ -421,8 +421,8 @@ fn chart(h: &History, tip: Option<usize>, t: &Theme) -> El {
             .absolute(-PAD, -PAD)
             .size(PLOT_W + 2.0 * PAD, PLOT_H + 2.0 * PAD),
     );
-    // The axis: the top, the middle, the floor (`text` baselines at 8, 55 and 107).
-    for (j, (mb, baseline)) in [(h.top_mb, 8.0), (h.top_mb / 2.0, 55.0), (0.0, 107.0)]
+    // The axis: the top, the middle, the floor (`text` baselines at 8, 57 and 107).
+    for (j, (mb, baseline)) in [(h.top_mb, 8.0), (h.top_mb / 2.0, 57.0), (0.0, 107.0)]
         .into_iter()
         .enumerate()
     {
