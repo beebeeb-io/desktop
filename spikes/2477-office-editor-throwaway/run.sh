@@ -124,10 +124,12 @@ fi
 # ---- run ----
 [ -x "$BIN/zz-bb-wc-edit" ] || { echo "run 'build' first"; exit 1; }
 RES=$WORK/res; mkdir -p "$RES"
-# the network block: every measured command runs in its own empty network namespace (bubblewrap --unshare-net:
-# no interface but a loopback that reaches nothing outside the namespace)
-NONET="bwrap --unshare-net --dev-bind / /"
-$NONET true 2>/dev/null || { echo "bwrap --unshare-net is not allowed here: NO NETWORK BLOCK, STOP"; exit 1; }
+# the network block: every measured command runs in its own EMPTY network namespace (unshare -n: one loopback
+# interface that is down), as the build user, not as root. Tried first and refused on this machine: unshare -rn and
+# bubblewrap (unprivileged user namespaces are restricted); `systemd-run --user -p PrivateNetwork=yes` ran but did
+# NOT block (the probe connected), so it is not used.
+NONET="sudo -n unshare -n -- setpriv --reuid=$(id -u) --regid=$(id -g) --init-groups env HOME=$HOME"
+$NONET true 2>/dev/null || { echo "a new network namespace is not allowed here: NO NETWORK BLOCK, STOP"; exit 1; }
 python3 -c 'import socket
 s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1",47811)); s.listen(8)
 while True:
