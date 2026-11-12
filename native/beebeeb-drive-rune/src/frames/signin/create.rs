@@ -873,7 +873,7 @@ pub const FRAME_IDS: [&str; 8] = [
 ];
 
 /// The frames of sign-up, for `frames::scenes`.
-pub const FRAMES: &[(&str, fn(&mut State))] = &[
+pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-A31", |s| super::set_scene(s, "DW-A31")),
     ("DW-A32", |s| super::set_scene(s, "DW-A32")),
     ("DW-A33", |s| super::set_scene(s, "DW-A33")),
