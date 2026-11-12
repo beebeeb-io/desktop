@@ -99,6 +99,9 @@ pub(super) fn focus_list(s: &State, tx: &mut Tx) {
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     // A dialog takes every key; so does a name being typed in a row (its field has the keyboard,
     // and what the field does not use is nobody's).
+    if let Some(handled) = super::protected::key(s, ev, tx) {
+        return handled;
+    }
     if s.actions.dialog.is_some() {
         return s.dialog_key(ev, tx);
     }

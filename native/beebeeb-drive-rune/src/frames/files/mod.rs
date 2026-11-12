@@ -11,12 +11,16 @@ pub mod keys;
 pub mod list;
 pub mod menus;
 pub mod names;
+pub mod protected;
+pub mod protected_fixture;
 pub mod rename;
 pub mod sidebar;
 pub mod source;
 pub mod toolbar;
 pub mod window;
 
+#[cfg(test)]
+mod protected_tests;
 #[cfg(test)]
 mod rest_tests;
 #[cfg(test)]
@@ -168,6 +172,8 @@ pub struct Actions {
     pub made: Vec<DriveItem>,
     /// Whose disk a typed name has to fit on: this computer's (a test names the other one).
     pub host: names::Host,
+    /// The protected folders: the open message, the section last seen (`protected.rs`).
+    pub protected: protected::Ui,
 }
 
 pub const INTENTS_KEPT: usize = 32;
@@ -194,6 +200,7 @@ impl Actions {
             name_error: None,
             made: Vec::new(),
             host: names::Host::this(),
+            protected: protected::Ui::default(),
         }
     }
 }
@@ -247,6 +254,9 @@ impl State {
         if row >= self.listing.items.len() {
             return;
         }
+        if self.selects_one_at_a_time() {
+            return self.select_only(row);
+        }
         let mut rows: BTreeSet<usize> = self.selected_rows().into_iter().collect();
         if !rows.remove(&row) {
             rows.insert(row);
@@ -264,6 +274,9 @@ impl State {
         if row >= count {
             return;
         }
+        if self.selects_one_at_a_time() {
+            return self.select_only(row);
+        }
         let from = self.actions.anchor.or(self.selected).unwrap_or(row).min(count - 1);
         self.actions.selection = (from.min(row)..=from.max(row)).collect();
         self.actions.anchor = Some(from);
@@ -272,7 +285,7 @@ impl State {
 
     pub fn select_all(&mut self) {
         let count = self.listing.items.len();
-        if count == 0 {
+        if count == 0 || self.selects_one_at_a_time() {
             return;
         }
         self.actions.selection = (0..count).collect();
@@ -398,13 +411,15 @@ impl State {
     pub(super) fn failed(&mut self, action: Action, why: ActionError, tx: &mut Tx) {
         if why == ActionError::Protected {
             self.intent(Intent::Frame("DW-1110"));
+            // Where the source has words for it, they are said here (`protected.rs`).
+            self.say_protected(action, tx);
         } else {
             self.show_toast(Toast::Failed(action, why), tx);
         }
     }
 
     /// Show a toast, and take it away again after its time.
-    fn show_toast(&mut self, toast: Toast, tx: &mut Tx) {
+    pub(super) fn show_toast(&mut self, toast: Toast, tx: &mut Tx) {
         let stay = toast.stays();
         self.actions.toast = Some(toast);
         self.actions.toast_until = Some(std::time::Instant::now() + stay);
@@ -592,6 +607,11 @@ impl State {
         if items.is_empty() {
             return false;
         }
+        // Refused before the source is asked (`protected.rs`).
+        if self.protection_of(&items).is_some() {
+            self.failed(Action::Trash, ActionError::Protected, tx);
+            return true;
+        }
         if let Err(why) = self.actions.source.trash(&items) {
             self.failed(Action::Trash, why, tx);
             // Handled: there is a message to draw.
@@ -636,6 +656,10 @@ impl State {
         let items = self.selected_items();
         if items.is_empty() {
             return false;
+        }
+        if self.protection_of(&items).is_some() {
+            self.failed(Action::Duplicate, ActionError::Protected, tx);
+            return true;
         }
         let names: Vec<&str> = self.listing.items.iter().map(|i| i.name.as_str()).collect();
         if let Err(why) = self.actions.source.duplicate(&items, &names) {
@@ -689,6 +713,10 @@ impl State {
         let items = self.selected_items();
         if items.is_empty() {
             return false;
+        }
+        if self.protection_of(&items).is_some() {
+            self.failed(Action::CopyLink, ActionError::Protected, tx);
+            return true;
         }
         self.forget_undo();
         match self.actions.source.copy_link(&items) {
@@ -850,6 +878,11 @@ impl State {
     /// Put the rows in the folder's order; what was selected stays selected. Backups stays the
     /// first row whatever the sort (DW-0404).
     pub fn apply_sort(&mut self) {
+        // A protected folder stays in the order its owner gives it (devices, then services; the
+        // years newest first: DW-0422, DW-0424).
+        if self.in_protected_folder() {
+            return;
+        }
         let sort = self.actions.sort;
         let id_of = |s: &State, row: usize| s.listing.items.get(row).map(|i| i.id.clone());
         let lead = self.selected.and_then(|i| id_of(self, i));
@@ -914,6 +947,7 @@ impl State {
             "preview" => {
                 self.preview();
             }
+            "share" if self.protects_selection() => self.failed(Action::CopyLink, ActionError::Protected, tx),
             "share" => self.intent(Intent::Frame("DW-0407")),
             "copy-link" => {
                 self.copy_link(tx);

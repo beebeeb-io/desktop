@@ -417,6 +417,8 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         sync_sidebar(s);
         changed |= outcome == Outcome::Changed;
     }
+    // Backups shows its own folder in the Files window (`frames::files::protected`, DW-0422).
+    changed |= crate::frames::files::protected::poll(s);
     // The ONE place capture-exclusion is checked: every path above (gate change, signin
     // intents, sidebar navigation, viewer) that may change what is on screen has run.
     // A new path cannot forget this: it runs unconditionally at the end of every frame.
