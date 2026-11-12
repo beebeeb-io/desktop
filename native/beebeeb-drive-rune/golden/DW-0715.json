@@ -1778,7 +1778,7 @@
    ],
    "tracking": 0
   },
-  "remove-all": {
+  "btn-remove-all-from-this-pc": {
    "kind": "box",
    "x": 631.72,
    "y": 43.75,
@@ -1791,7 +1791,7 @@
     255
    ]
   },
-  "remove-all-label": {
+  "btn-remove-all-from-this-pc-label": {
    "kind": "text",
    "x": 644.72,
    "y": 46.18,
@@ -1810,7 +1810,7 @@
    ],
    "tracking": -0.06
   },
-  "note": {
+  "banner": {
    "kind": "box",
    "x": 234,
    "y": 88,
@@ -1822,6 +1822,25 @@
     17,
     15
    ]
+  },
+  "banner-text": {
+   "kind": "text",
+   "x": 272,
+   "y": 97,
+   "w": 982,
+   "h": 17,
+   "text": "These stay on this PC and open without a connection. They don't count toward your downloaded files limit.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12.5,
+   "weight": 400,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
   },
   "note-icon": {
    "kind": "icon",
@@ -1841,25 +1860,6 @@
     61,
     255
    ]
-  },
-  "note-text": {
-   "kind": "text",
-   "x": 272,
-   "y": 97,
-   "w": 982,
-   "h": 17,
-   "text": "These stay on this PC and open without a connection. They don't count toward your downloaded files limit.",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 12.5,
-   "weight": 400,
-   "color": [
-    70,
-    66,
-    61,
-    255
-   ],
-   "tracking": 0
   }
  },
  "theme": "light"

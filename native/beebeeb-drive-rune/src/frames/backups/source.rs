@@ -2,6 +2,8 @@
 //! (DW-0737, DW-1411, DW-0739, DW-0741: exactly the board's sample content).
 
 /// What a person can try to do to a folder from the app.
+/// (Backups itself only opens the root; the lane that draws the root's row in Files reads the rest.)
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootAction {
     Open,
@@ -39,6 +41,8 @@ pub enum Status {
         done: u32,
         total: u32,
         minutes_left: u32,
+        /// The first backup of this folder ("the first backup takes longest").
+        first: bool,
     },
 }
 
@@ -67,6 +71,8 @@ pub enum DeviceKind {
 pub struct Device {
     pub id: String,
     pub name: String,
+    /// What the device is called in a sentence ("iPad": "Photos still on the iPad …").
+    pub model: String,
     pub kind: DeviceKind,
     pub photos: u32,
     /// "38 GB" (DW-0739); the list (DW-0737) shows the count only.
@@ -85,6 +91,17 @@ pub struct NotBackedUp {
     pub why: String,
     /// By design (a file larger than 4 GB): listed apart, without Try again.
     pub excluded: bool,
+    /// Which glyph its tile carries.
+    pub kind: FileKind,
+}
+
+/// The kind of file, for its glyph (neutral ink, as the board draws file types here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    Video,
+    Document,
+    Sheet,
+    Image,
 }
 
 pub trait BackupsSource {
@@ -103,11 +120,21 @@ pub trait BackupsSource {
     fn remove_folder(&mut self, id: &str, move_copy_to_trash: bool);
     fn retry(&mut self, id: &str);
     fn retry_all(&mut self);
+    /// Move another device's backup to Trash. It is a risky action: the engine checks the
+    /// second-factor `code` first. `false`: the code was not accepted, nothing changed.
+    fn delete_device_backup(&mut self, id: &str, code: &str) -> bool;
+}
+
+/// What stands in for the engine in a build that ships before the engine lane wires Backups:
+/// nothing to show (the view draws the shell's "not built yet" frame, never sample values).
+pub fn first(dev_build: bool) -> Option<Box<dyn BackupsSource>> {
+    dev_build.then(|| Box::new(FixtureSource::board()) as Box<dyn BackupsSource>)
 }
 
 pub struct FixtureSource {
     status: Status,
     folders: Vec<Folder>,
+    devices: Vec<Device>,
     failures: Vec<NotBackedUp>,
 }
 
@@ -124,14 +151,47 @@ impl FixtureSource {
             last_backup: last.map(str::to_string),
         };
         let today = Some("Today, 09:30");
-        let failure = |id: &str, name: &str, folder: &str, why: &str, excluded| NotBackedUp {
+        let failure = |id: &str, name: &str, folder: &str, why: &str, excluded, kind| NotBackedUp {
+            kind,
             id: id.into(),
             name: name.into(),
             folder: folder.into(),
             why: why.into(),
             excluded,
         };
+        let device = |id: &str, name: &str, kind, photos, size: Option<&str>, last: Option<&str>, signed_in| Device {
+            id: id.into(),
+            name: name.into(),
+            model: if kind == DeviceKind::Tablet { "iPad" } else { "iPhone" }.into(),
+            kind,
+            photos,
+            size: size.map(str::to_string),
+            last_backup: last.map(str::to_string),
+            signed_in,
+        };
+        let devices = vec![
+            device(
+                "iphone",
+                "Anna's iPhone",
+                DeviceKind::Phone,
+                12_418,
+                None,
+                Some("Today"),
+                true,
+            ),
+            device(
+                "ipad",
+                "Anna's iPad",
+                DeviceKind::Tablet,
+                4_120,
+                Some("38 GB"),
+                Some("19 Oct"),
+                true,
+            ),
+            device("old-iphone", "Old iPhone", DeviceKind::Phone, 8_204, None, None, false),
+        ];
         FixtureSource {
+            devices,
             status: Status::AllBackedUp {
                 last: "09:30".into(),
                 from_this_pc: "27.8 GB".into(),
@@ -152,6 +212,7 @@ impl FixtureSource {
                     "Documents",
                     "the file is open in another app",
                     false,
+                    FileKind::Video,
                 ),
                 failure(
                     "f-invoice",
@@ -159,6 +220,7 @@ impl FixtureSource {
                     "Desktop",
                     "this file is damaged",
                     false,
+                    FileKind::Document,
                 ),
                 failure(
                     "f-budget",
@@ -166,6 +228,7 @@ impl FixtureSource {
                     "Documents",
                     "it kept changing while it was backing up",
                     false,
+                    FileKind::Sheet,
                 ),
                 failure(
                     "x-site",
@@ -173,22 +236,32 @@ impl FixtureSource {
                     "Desktop",
                     "files larger than 4 GB are not backed up from this PC",
                     true,
+                    FileKind::Image,
                 ),
             ],
         }
     }
 
-    /// DW-1411: the first backup of Documents is running.
+    /// DW-1411: the first backup of Documents is running. The board draws only Documents'
+    /// switch on here, nothing that could not back up, and the rows' words as in DW-0737.
     pub fn first_backup() -> FixtureSource {
-        FixtureSource {
+        let mut source = FixtureSource {
             status: Status::Running {
                 folder: "Documents".into(),
                 done: 612,
                 total: 1_820,
                 minutes_left: 20,
+                first: true,
             },
+            failures: Vec::new(),
             ..Self::board()
+        };
+        for folder in &mut source.folders {
+            if !folder.chosen_by_you {
+                folder.on = folder.id == "documents";
+            }
         }
+        source
     }
 }
 
@@ -210,36 +283,7 @@ impl BackupsSource for FixtureSource {
     }
 
     fn devices(&self) -> Vec<Device> {
-        let device = |id: &str, name: &str, kind, photos, size: Option<&str>, last: Option<&str>, signed_in| Device {
-            id: id.into(),
-            name: name.into(),
-            kind,
-            photos,
-            size: size.map(str::to_string),
-            last_backup: last.map(str::to_string),
-            signed_in,
-        };
-        vec![
-            device(
-                "iphone",
-                "Anna's iPhone",
-                DeviceKind::Phone,
-                12_418,
-                None,
-                Some("Today"),
-                true,
-            ),
-            device(
-                "ipad",
-                "Anna's iPad",
-                DeviceKind::Tablet,
-                4_120,
-                Some("38 GB"),
-                Some("19 Oct"),
-                true,
-            ),
-            device("old-iphone", "Old iPhone", DeviceKind::Phone, 8_204, None, None, false),
-        ]
+        self.devices.clone()
     }
 
     fn not_backed_up(&self) -> Vec<NotBackedUp> {
@@ -252,6 +296,15 @@ impl BackupsSource for FixtureSource {
 
     fn back_up_now(&mut self) {
         self.status = FixtureSource::first_backup().status;
+    }
+
+    fn delete_device_backup(&mut self, id: &str, code: &str) -> bool {
+        // The fixture's authenticator: six digits pass, except six zeros (so a refusal can be seen).
+        let accepted = code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()) && code != "000000";
+        if accepted {
+            self.devices.retain(|d| d.id != id);
+        }
+        accepted
     }
 
     fn set_folder(&mut self, id: &str, on: bool) {

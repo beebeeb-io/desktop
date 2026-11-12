@@ -287,6 +287,7 @@ pub fn dispatch(s: &mut State, event: Event) -> Outcome {
     let outcome = s.shell.app.apply(event);
     sync_sidebar(s);
     crate::frames::settings::sync(s); // what was open inside settings is forgotten when the route leaves it
+    crate::frames::backups::sync(s); // the same for Backups, and its one-time code is wiped
     outcome
 }
 

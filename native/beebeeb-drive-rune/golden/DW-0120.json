@@ -1245,13 +1245,6 @@
    ],
    "tracking": 0
   },
-  "empty": {
-   "kind": "box",
-   "x": 611.45,
-   "y": 328.5,
-   "w": 275.11,
-   "h": 191
-  },
   "empty-tile": {
    "kind": "box",
    "x": 723,
@@ -1303,7 +1296,7 @@
    ],
    "tracking": -0.2
   },
-  "empty-text": {
+  "empty-sub": {
    "kind": "text",
    "x": 635.45,
    "y": 446.5,
@@ -1321,6 +1314,13 @@
     255
    ],
    "tracking": 0
+  },
+  "empty": {
+   "kind": "box",
+   "x": 611.45,
+   "y": 328.5,
+   "w": 275.11,
+   "h": 191
   }
  },
  "theme": "light"

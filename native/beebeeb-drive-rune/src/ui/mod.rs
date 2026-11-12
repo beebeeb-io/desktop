@@ -1,6 +1,7 @@
 //! UI components for the Beebeeb Drive window: the design system every frame builds on.
 
 pub mod au;
+pub mod backups_kit;
 pub mod caption;
 pub mod detail_pane;
 pub mod file_list;

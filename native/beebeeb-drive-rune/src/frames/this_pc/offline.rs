@@ -44,7 +44,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     // "Remove all is hidden" when nothing is kept (DW-0120).
     if !kept.is_empty() {
         right.push(
-            chrome::outline_button("remove-all", "Remove all from this PC", None, &t)
+            chrome::outline_button("btn-remove-all-from-this-pc", "Remove all from this PC", None, &t)
                 .on_press(|s: &mut State| s.this_pc.ask(super::Intent::AskRemoveAll)),
         );
     }
@@ -109,7 +109,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 /// The note over the list (`.mk-banner`).
 fn note(t: &Theme) -> El {
     row()
-        .key("note")
+        .key("banner")
         .role("note")
         .mt(10.0)
         .mx(14.0)
@@ -123,7 +123,7 @@ fn note(t: &Theme) -> El {
         .child(kit::glyph("note-icon", &base::AVAILABLE_OFFLINE, 16.0, t.text_secondary))
         .child(
             kit::label(
-                "note-text",
+                "banner-text",
                 "These stay on this PC and open without a connection. They don't count toward your downloaded files limit.",
                 type_::SEARCH,
                 t.text_secondary,
@@ -290,7 +290,7 @@ fn kept_row(i: usize, item: &Kept, selected: bool, t: &Theme) -> El {
 }
 
 /// The row menu (`.wn-menu`, DW-1306): Open · Show in File Explorer · Remove from this PC.
-/// Keys: `menu`, `menu-item-<i>`, `menu-item-<i>-label`, `menu-item-0-shortcut`, `menu-sep-0`.
+/// Keys: `menu`, `mi-<words>`, `mi-<words>-label`, `mi-open-sc`, `msep-0`.
 fn menu(open: RowMenu, t: &Theme) -> El {
     const SHORTCUT: TextStyle = TextStyle::new(12.0, 400.0).lh(14.5);
     const ITEM: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
@@ -310,10 +310,10 @@ fn menu(open: RowMenu, t: &Theme) -> El {
         });
     for (i, words) in MENU_ITEMS.into_iter().enumerate() {
         if i == 2 {
-            card = card.child(el().key("menu-sep-0").w_full().h(kit::HAIR).my(4.0).fill(t.separator));
+            card = card.child(el().key("msep-0").w_full().h(kit::HAIR).my(4.0).fill(t.separator));
         }
         let mut item = row()
-            .key(format!("menu-item-{i}"))
+            .key(format!("mi-{}", crate::ui::settings_shell::slug(words)))
             .role("menuitem")
             .label(words)
             .h(30.0)
@@ -333,9 +333,17 @@ fn menu(open: RowMenu, t: &Theme) -> El {
             })
             .on_press(move |s: &mut State| s.this_pc.pick(i))
             .child(el().key("check-slot").w(14.0))
-            .child(kit::label(format!("menu-item-{i}-label"), words, ITEM, t.text).grow(1.0));
+            .child(
+                kit::label(
+                    format!("mi-{}-label", crate::ui::settings_shell::slug(words)),
+                    words,
+                    ITEM,
+                    t.text,
+                )
+                .grow(1.0),
+            );
         if i == 0 {
-            item = item.child(kit::label("menu-item-0-shortcut", "Enter", SHORTCUT, t.text_tertiary).ml(24.0));
+            item = item.child(kit::label("mi-open-sc", "Enter", SHORTCUT, t.text_tertiary).pl(24.0));
         }
         card = card.child(item);
     }
@@ -343,7 +351,7 @@ fn menu(open: RowMenu, t: &Theme) -> El {
 }
 
 /// Nothing to list (`.kit-empty`): a tile, a title, one sentence. Keys: `empty`, `empty-tile`,
-/// `empty-icon`, `empty-title`, `empty-text`.
+/// `empty-icon`, `empty-title`, `empty-sub`.
 pub fn empty_state(ic: &'static Icon, title: &str, words: &str, t: &Theme) -> El {
     const TITLE: TextStyle = TextStyle::new(17.0, 600.0).lh(22.0).tracking(-0.204);
     const WORDS: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
@@ -366,7 +374,7 @@ pub fn empty_state(ic: &'static Icon, title: &str, words: &str, t: &Theme) -> El
             )
             .child(kit::label("empty-title", title, TITLE, t.text))
             .child(
-                kit::label("empty-text", words, WORDS, t.text_tertiary)
+                kit::label("empty-sub", words, WORDS, t.text_tertiary)
                     .w(227.11)
                     .wrap()
                     .align(Align::Center),

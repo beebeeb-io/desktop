@@ -58,18 +58,18 @@ fn filter(ui: &Ui, t: &Theme) -> El {
     const SEG: TextStyle = TextStyle::new(12.0, 550.0).lh(17.0);
     let problems = ui.problem_count();
     let mut seg = row()
-        .key("filter")
+        .key("seg-0")
         .role("tablist")
         .label("Show")
         .padding(2.0)
         .radius(10.0)
         .fill(t.field)
         .box_shadow(kit::ring_inset(t.separator));
-    for (i, f) in Filter::ALL.into_iter().enumerate() {
+    for f in Filter::ALL {
         let on = ui.filter == f;
         let words = f.label(problems);
         let mut tab = el()
-            .key(format!("filter-{i}"))
+            .key(format!("seg-0-{}", crate::ui::settings_shell::slug(&words)))
             .role("tab")
             .label(words.clone())
             .checked(on)
@@ -80,7 +80,7 @@ fn filter(ui: &Ui, t: &Theme) -> El {
             .focusable(true)
             .on_press(move |s: &mut State| s.this_pc.set_filter(f))
             .child(kit::label(
-                format!("filter-{i}-label"),
+                format!("seg-0-{}-label", crate::ui::settings_shell::slug(&words)),
                 words,
                 SEG,
                 if on { t.text } else { t.text_secondary },
@@ -123,7 +123,7 @@ fn problems_bar(t: &Theme) -> El {
         ))
         .child(el().key("problems-bar-spacer").grow(1.0))
         .child(
-            chrome::outline_button("try-all", "Try all again", Some(&icons::RETRY), t)
+            chrome::outline_button("btn-try-all-again", "Try all again", Some(&icons::RETRY), t)
                 .on_press(|s: &mut State| s.this_pc.retry_all()),
         )
 }
@@ -157,6 +157,8 @@ fn list(ui: &Ui, t: &Theme) -> El {
     let mut days = col().key("history").w_full();
     let mut day: Option<NaiveDate> = None;
     let mut d = 0;
+    // Try again buttons are counted through the frame, as the gate keys them by their words.
+    let mut retries = 0;
     for (i, change) in changes.iter().enumerate() {
         if day != Some(change.date) {
             day = Some(change.date);
@@ -170,7 +172,7 @@ fn list(ui: &Ui, t: &Theme) -> El {
                     .px(12.0)
                     .pb(4.0)
                     .child(kit::label(
-                        format!("day-{d}"),
+                        format!("label-{}", crate::ui::settings_shell::slug(&words)),
                         words.to_uppercase(),
                         type_::SECTION_LABEL,
                         t.text_tertiary,
@@ -178,7 +180,10 @@ fn list(ui: &Ui, t: &Theme) -> El {
             );
             d += 1;
         }
-        days = days.child(change_row(i, change, t));
+        if change.problem().is_some() {
+            retries += 1;
+        }
+        days = days.child(change_row(i, change, retries, t));
     }
     col()
         .key("history-scroll")
@@ -239,8 +244,9 @@ fn tile(k: &str, change: &Change, t: &Theme) -> El {
 }
 
 /// One change (`.grid` 30 · rest · 150 · 96 · 48, 44 pt). Keys: `change-<i>` and
-/// `change-<i>-tile|icon|name|sub|device-icon|device|retry|retry-icon|retry-label|time`.
-fn change_row(i: usize, change: &Change, t: &Theme) -> El {
+/// `change-<i>-tile|icon|name|sub|device-icon|device|time`; a problem's button is
+/// `btn-try-again`, the second in the frame `btn-try-again-2` (+ `-icon`, `-label`).
+fn change_row(i: usize, change: &Change, retry_no: usize, t: &Theme) -> El {
     let k = format!("change-{i}");
     let line = change.what.line();
     let failed = change.problem().map(str::to_string);
@@ -248,8 +254,13 @@ fn change_row(i: usize, change: &Change, t: &Theme) -> El {
 
     let mut retry = el().key("retry-cell").w(96.0);
     if let Some(problem) = failed.clone() {
+        let key = if retry_no > 1 {
+            format!("btn-try-again-{retry_no}")
+        } else {
+            "btn-try-again".to_string()
+        };
         retry = retry.child(
-            chrome::outline_button(&format!("{k}-retry"), "Try again", Some(&icons::RETRY), t)
+            chrome::outline_button(&key, "Try again", Some(&icons::RETRY), t)
                 .on_press(move |s: &mut State| s.this_pc.retry(&problem)),
         );
     }

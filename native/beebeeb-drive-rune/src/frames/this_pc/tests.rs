@@ -130,28 +130,28 @@ fn each_filter_lists_the_boards_changes() {
     }
     let rt = runtime(scenes::dw_1304, false);
     assert_eq!(text(&rt, "change-0-name"), "Contract draft.pdf");
-    assert_eq!(text(&rt, "day-0"), "YESTERDAY");
+    assert_eq!(text(&rt, "label-yesterday"), "YESTERDAY");
 }
 
 #[test]
 fn a_click_on_a_filter_narrows_the_list_and_checks_its_tab() {
     let mut rt = runtime(scenes::dw_1301, false);
-    assert_eq!(text(&rt, "filter-3-label"), "Problems \u{00B7} 3");
-    click(&mut rt, "filter-1");
+    assert_eq!(text(&rt, "seg-0-problems-3-label"), "Problems \u{00B7} 3");
+    click(&mut rt, "seg-0-this-pc");
     assert_eq!(rt.state.this_pc.filter, Filter::ThisPc);
     assert!(rt.state.this_pc.changes().iter().all(|c| c.origin.label() == "This PC"));
     assert!(!has(&rt, "problems-bar"));
-    click(&mut rt, "filter-3");
+    click(&mut rt, "seg-0-problems-3");
     assert_eq!(rt.state.this_pc.filter, Filter::Problems);
     assert!(has(&rt, "problems-bar"), "the Can't sync bar is the Problems filter's");
-    assert_eq!(info(&rt, "filter").role, "tablist");
-    assert_eq!(info(&rt, "filter-3").role, "tab");
+    assert_eq!(info(&rt, "seg-0").role, "tablist");
+    assert_eq!(info(&rt, "seg-0-problems-3").role, "tab");
 }
 
 #[test]
 fn the_keyboard_reaches_a_filter_and_space_chooses_it() {
     let mut rt = runtime(scenes::dw_1301, false);
-    tab_to(&mut rt, "filter-2");
+    tab_to(&mut rt, "seg-0-other-devices");
     press(&mut rt, Key::Text(" ".into()));
     assert_eq!(rt.state.this_pc.filter, Filter::OtherDevices);
 }
@@ -161,15 +161,15 @@ fn try_again_takes_the_item_off_the_list_and_the_counts_follow() {
     let mut rt = runtime(scenes::dw_0428, false);
     assert_eq!(text(&rt, "Sync history-badge"), "3");
     assert_eq!(text(&rt, "status-text"), "Sync stopped");
-    assert_eq!(info(&rt, "change-0-retry").role, "button");
-    assert_eq!(info(&rt, "change-0-retry").label.as_deref(), Some("Try again"));
-    click(&mut rt, "change-0-retry");
+    assert_eq!(info(&rt, "btn-try-again").role, "button");
+    assert_eq!(info(&rt, "btn-try-again").label.as_deref(), Some("Try again"));
+    click(&mut rt, "btn-try-again");
     assert_eq!(rt.state.this_pc.problem_count(), 2);
     assert_eq!(text(&rt, "Sync history-badge"), "2");
-    assert_eq!(text(&rt, "filter-3-label"), "Problems \u{00B7} 2");
+    assert_eq!(text(&rt, "seg-0-problems-2-label"), "Problems \u{00B7} 2");
     assert_eq!(text(&rt, "change-0-name"), "Tram 28.mov");
     // The keyboard: Try all again.
-    tab_to(&mut rt, "try-all");
+    tab_to(&mut rt, "btn-try-all-again");
     press(&mut rt, Key::Text(" ".into()));
     assert_eq!(rt.state.this_pc.problem_count(), 0);
     assert!(!has(&rt, "Sync history-pill"), "no red count without problems");
@@ -190,7 +190,7 @@ fn a_problem_says_why_in_words_and_that_nothing_was_lost() {
     }
     // Try again on the history's own problem row reaches the same item.
     let mut rt = runtime(scenes::dw_1301, false);
-    click(&mut rt, "change-1-retry");
+    click(&mut rt, "btn-try-again");
     assert_eq!(rt.state.this_pc.problem_count(), 2);
     assert_eq!(rt.state.this_pc.changes().len(), 18);
 }
@@ -237,7 +237,7 @@ fn enter_on_a_change_asks_to_show_its_file() {
 fn a_new_pc_has_no_history_and_says_so() {
     let rt = runtime(scenes::dw_1305, false);
     assert_eq!(text(&rt, "empty-title"), "No changes yet");
-    assert_eq!(text(&rt, "filter-3-label"), "Problems \u{00B7} 0");
+    assert_eq!(text(&rt, "seg-0-problems-0-label"), "Problems \u{00B7} 0");
     assert!(!has(&rt, "Sync history-pill"));
     assert_eq!(count(&rt, "change-", "-name"), 0);
 }
@@ -255,19 +255,22 @@ fn available_offline_lists_what_is_kept_with_its_total() {
     assert_eq!(text(&rt, "row-2-size"), "84 KB");
     assert_eq!(text(&rt, "row-2-dash"), "Files");
     assert_eq!(info(&rt, "row-0-pc").label.as_deref(), Some("Available offline"));
-    assert_eq!(info(&rt, "remove-all").role, "button");
+    assert_eq!(info(&rt, "btn-remove-all-from-this-pc").role, "button");
 }
 
 #[test]
 fn remove_all_asks_first_and_removes_only_after_the_yes() {
     let mut rt = runtime(scenes::dw_0715, false);
-    click(&mut rt, "remove-all");
+    click(&mut rt, "btn-remove-all-from-this-pc");
     assert_eq!(rt.state.this_pc.take_intents(), vec![Intent::AskRemoveAll]);
     assert_eq!(rt.state.this_pc.kept_count(), 3, "nothing is removed before the answer");
     rt.update(|s, _| s.this_pc.remove_all_confirmed());
     rt.frame(0.0);
     assert_eq!(text(&rt, "empty-title"), "Nothing available offline");
-    assert!(!has(&rt, "remove-all"), "Remove all is hidden when nothing is kept");
+    assert!(
+        !has(&rt, "btn-remove-all-from-this-pc"),
+        "Remove all is hidden when nothing is kept"
+    );
     assert!(!has(&rt, "Available offline-badge"));
 }
 
@@ -279,7 +282,10 @@ fn the_row_menu_opens_from_the_keyboard_and_removes_the_copy() {
     press(&mut rt, Key::ContextMenu);
     assert!(has(&rt, "menu"), "the Menu key opens the row's menu");
     assert_eq!(info(&rt, "menu").role, "menu");
-    assert_eq!(info(&rt, "menu-item-2").label.as_deref(), Some("Remove from this PC"));
+    assert_eq!(
+        info(&rt, "mi-remove-from-this-pc").label.as_deref(),
+        Some("Remove from this PC")
+    );
     press(&mut rt, Key::Down);
     press(&mut rt, Key::Down);
     press(&mut rt, Key::Enter);

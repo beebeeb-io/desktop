@@ -1308,7 +1308,207 @@
    ],
    "tracking": 0
   },
-  "filter": {
+  "btn-try-all-again": {
+   "kind": "box",
+   "x": 1148.33,
+   "y": 84,
+   "w": 115.67,
+   "h": 22,
+   "bg": [
+    251,
+    250,
+    247,
+    255
+   ]
+  },
+  "btn-try-all-again-icon": {
+   "kind": "icon",
+   "x": 1161.33,
+   "y": 88,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M20 12a8 8 0 1 1-2.3-5.6L20 8.5",
+    "M20 4v4.5h-4.5"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "btn-try-all-again-label": {
+   "kind": "text",
+   "x": 1182.33,
+   "y": 86.43,
+   "w": 68.67,
+   "h": 17.14,
+   "text": "Try all again",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "btn-try-again": {
+   "kind": "box",
+   "x": 1094,
+   "y": 160.5,
+   "w": 99.85,
+   "h": 22,
+   "bg": [
+    251,
+    250,
+    247,
+    255
+   ]
+  },
+  "btn-try-again-icon": {
+   "kind": "icon",
+   "x": 1107,
+   "y": 164.5,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M20 12a8 8 0 1 1-2.3-5.6L20 8.5",
+    "M20 4v4.5h-4.5"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "btn-try-again-label": {
+   "kind": "text",
+   "x": 1128,
+   "y": 162.93,
+   "w": 52.85,
+   "h": 17.14,
+   "text": "Try again",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "btn-try-again-2": {
+   "kind": "box",
+   "x": 1094,
+   "y": 204.5,
+   "w": 99.85,
+   "h": 22,
+   "bg": [
+    251,
+    250,
+    247,
+    255
+   ]
+  },
+  "btn-try-again-2-icon": {
+   "kind": "icon",
+   "x": 1107,
+   "y": 208.5,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M20 12a8 8 0 1 1-2.3-5.6L20 8.5",
+    "M20 4v4.5h-4.5"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "btn-try-again-2-label": {
+   "kind": "text",
+   "x": 1128,
+   "y": 206.93,
+   "w": 52.85,
+   "h": 17.14,
+   "text": "Try again",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "btn-try-again-3": {
+   "kind": "box",
+   "x": 1094,
+   "y": 248.5,
+   "w": 99.85,
+   "h": 22,
+   "bg": [
+    251,
+    250,
+    247,
+    255
+   ]
+  },
+  "btn-try-again-3-icon": {
+   "kind": "icon",
+   "x": 1107,
+   "y": 252.5,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M20 12a8 8 0 1 1-2.3-5.6L20 8.5",
+    "M20 4v4.5h-4.5"
+   ],
+   "filled": false,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ]
+  },
+  "btn-try-again-3-label": {
+   "kind": "text",
+   "x": 1128,
+   "y": 250.93,
+   "w": 52.85,
+   "h": 17.14,
+   "text": "Try again",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 500,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "seg-0": {
    "kind": "box",
    "x": 496.67,
    "y": 40.75,
@@ -1321,7 +1521,7 @@
     255
    ]
   },
-  "filter-0": {
+  "seg-0-all": {
    "kind": "box",
    "x": 498.67,
    "y": 42.75,
@@ -1329,7 +1529,7 @@
    "h": 24,
    "on": false
   },
-  "filter-0-label": {
+  "seg-0-all-label": {
    "kind": "text",
    "x": 508.67,
    "y": 47.25,
@@ -1348,7 +1548,7 @@
    ],
    "tracking": 0
   },
-  "filter-1": {
+  "seg-0-this-pc": {
    "kind": "box",
    "x": 533.46,
    "y": 42.75,
@@ -1356,7 +1556,7 @@
    "h": 24,
    "on": false
   },
-  "filter-1-label": {
+  "seg-0-this-pc-label": {
    "kind": "text",
    "x": 543.46,
    "y": 47.25,
@@ -1375,7 +1575,7 @@
    ],
    "tracking": 0
   },
-  "filter-2": {
+  "seg-0-other-devices": {
    "kind": "box",
    "x": 597.89,
    "y": 42.75,
@@ -1383,7 +1583,7 @@
    "h": 24,
    "on": false
   },
-  "filter-2-label": {
+  "seg-0-other-devices-label": {
    "kind": "text",
    "x": 607.89,
    "y": 47.25,
@@ -1402,7 +1602,7 @@
    ],
    "tracking": 0
   },
-  "filter-3": {
+  "seg-0-problems-3": {
    "kind": "box",
    "x": 698.37,
    "y": 42.75,
@@ -1416,7 +1616,7 @@
    ],
    "on": true
   },
-  "filter-3-label": {
+  "seg-0-problems-3-label": {
    "kind": "text",
    "x": 708.37,
    "y": 47.25,
@@ -1434,6 +1634,25 @@
     255
    ],
    "tracking": 0
+  },
+  "label-today": {
+   "kind": "text",
+   "x": 248,
+   "y": 133,
+   "w": 37.95,
+   "h": 12,
+   "text": "TODAY",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0.7
   },
   "problems-bar": {
    "kind": "box",
@@ -1485,75 +1704,6 @@
     255
    ],
    "tracking": 0
-  },
-  "try-all": {
-   "kind": "box",
-   "x": 1148.33,
-   "y": 84,
-   "w": 115.67,
-   "h": 22,
-   "bg": [
-    251,
-    250,
-    247,
-    255
-   ]
-  },
-  "try-all-icon": {
-   "kind": "icon",
-   "x": 1161.33,
-   "y": 88,
-   "w": 14,
-   "h": 14,
-   "icon": [
-    "M20 12a8 8 0 1 1-2.3-5.6L20 8.5",
-    "M20 4v4.5h-4.5"
-   ],
-   "filled": false,
-   "color": [
-    20,
-    17,
-    13,
-    255
-   ]
-  },
-  "try-all-label": {
-   "kind": "text",
-   "x": 1182.33,
-   "y": 86.43,
-   "w": 68.67,
-   "h": 17.14,
-   "text": "Try all again",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 12,
-   "weight": 500,
-   "color": [
-    20,
-    17,
-    13,
-    255
-   ],
-   "tracking": -0.06
-  },
-  "day-0": {
-   "kind": "text",
-   "x": 248,
-   "y": 133,
-   "w": 37.95,
-   "h": 12,
-   "text": "TODAY",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 10,
-   "weight": 600,
-   "color": [
-    108,
-    104,
-    99,
-    255
-   ],
-   "tracking": 0.7
   },
   "change-0": {
    "kind": "box",
@@ -1668,56 +1818,6 @@
    ],
    "tracking": 0
   },
-  "change-0-retry": {
-   "kind": "box",
-   "x": 1094,
-   "y": 160.5,
-   "w": 99.85,
-   "h": 22,
-   "bg": [
-    251,
-    250,
-    247,
-    255
-   ]
-  },
-  "change-0-retry-icon": {
-   "kind": "icon",
-   "x": 1107,
-   "y": 164.5,
-   "w": 14,
-   "h": 14,
-   "icon": [
-    "M20 12a8 8 0 1 1-2.3-5.6L20 8.5",
-    "M20 4v4.5h-4.5"
-   ],
-   "filled": false,
-   "color": [
-    20,
-    17,
-    13,
-    255
-   ]
-  },
-  "change-0-retry-label": {
-   "kind": "text",
-   "x": 1128,
-   "y": 162.93,
-   "w": 52.85,
-   "h": 17.14,
-   "text": "Try again",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 12,
-   "weight": 500,
-   "color": [
-    20,
-    17,
-    13,
-    255
-   ],
-   "tracking": -0.06
-  },
   "change-0-time": {
    "kind": "text",
    "x": 1202,
@@ -1826,56 +1926,6 @@
     255
    ],
    "tracking": 0
-  },
-  "change-1-retry": {
-   "kind": "box",
-   "x": 1094,
-   "y": 204.5,
-   "w": 99.85,
-   "h": 22,
-   "bg": [
-    251,
-    250,
-    247,
-    255
-   ]
-  },
-  "change-1-retry-icon": {
-   "kind": "icon",
-   "x": 1107,
-   "y": 208.5,
-   "w": 14,
-   "h": 14,
-   "icon": [
-    "M20 12a8 8 0 1 1-2.3-5.6L20 8.5",
-    "M20 4v4.5h-4.5"
-   ],
-   "filled": false,
-   "color": [
-    20,
-    17,
-    13,
-    255
-   ]
-  },
-  "change-1-retry-label": {
-   "kind": "text",
-   "x": 1128,
-   "y": 206.93,
-   "w": 52.85,
-   "h": 17.14,
-   "text": "Try again",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 12,
-   "weight": 500,
-   "color": [
-    20,
-    17,
-    13,
-    255
-   ],
-   "tracking": -0.06
   },
   "change-1-time": {
    "kind": "text",
@@ -2008,56 +2058,6 @@
     255
    ],
    "tracking": 0
-  },
-  "change-2-retry": {
-   "kind": "box",
-   "x": 1094,
-   "y": 248.5,
-   "w": 99.85,
-   "h": 22,
-   "bg": [
-    251,
-    250,
-    247,
-    255
-   ]
-  },
-  "change-2-retry-icon": {
-   "kind": "icon",
-   "x": 1107,
-   "y": 252.5,
-   "w": 14,
-   "h": 14,
-   "icon": [
-    "M20 12a8 8 0 1 1-2.3-5.6L20 8.5",
-    "M20 4v4.5h-4.5"
-   ],
-   "filled": false,
-   "color": [
-    20,
-    17,
-    13,
-    255
-   ]
-  },
-  "change-2-retry-label": {
-   "kind": "text",
-   "x": 1128,
-   "y": 250.93,
-   "w": 52.85,
-   "h": 17.14,
-   "text": "Try again",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 12,
-   "weight": 500,
-   "color": [
-    20,
-    17,
-    13,
-    255
-   ],
-   "tracking": -0.06
   },
   "change-2-time": {
    "kind": "text",

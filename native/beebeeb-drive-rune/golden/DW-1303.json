@@ -1308,7 +1308,7 @@
    ],
    "tracking": 0
   },
-  "filter": {
+  "seg-0": {
    "kind": "box",
    "x": 496.67,
    "y": 40.75,
@@ -1321,7 +1321,7 @@
     255
    ]
   },
-  "filter-0": {
+  "seg-0-all": {
    "kind": "box",
    "x": 498.67,
    "y": 42.75,
@@ -1329,7 +1329,7 @@
    "h": 24,
    "on": false
   },
-  "filter-0-label": {
+  "seg-0-all-label": {
    "kind": "text",
    "x": 508.67,
    "y": 47.25,
@@ -1348,7 +1348,7 @@
    ],
    "tracking": 0
   },
-  "filter-1": {
+  "seg-0-this-pc": {
    "kind": "box",
    "x": 533.46,
    "y": 42.75,
@@ -1356,7 +1356,7 @@
    "h": 24,
    "on": false
   },
-  "filter-1-label": {
+  "seg-0-this-pc-label": {
    "kind": "text",
    "x": 543.46,
    "y": 47.25,
@@ -1375,7 +1375,7 @@
    ],
    "tracking": 0
   },
-  "filter-2": {
+  "seg-0-other-devices": {
    "kind": "box",
    "x": 597.89,
    "y": 42.75,
@@ -1389,7 +1389,7 @@
    ],
    "on": true
   },
-  "filter-2-label": {
+  "seg-0-other-devices-label": {
    "kind": "text",
    "x": 607.89,
    "y": 47.25,
@@ -1408,7 +1408,7 @@
    ],
    "tracking": 0
   },
-  "filter-3": {
+  "seg-0-problems-3": {
    "kind": "box",
    "x": 698.37,
    "y": 42.75,
@@ -1416,7 +1416,7 @@
    "h": 24,
    "on": false
   },
-  "filter-3-label": {
+  "seg-0-problems-3-label": {
    "kind": "text",
    "x": 708.37,
    "y": 47.25,
@@ -1435,13 +1435,89 @@
    ],
    "tracking": 0
   },
-  "day-0": {
+  "label-today": {
    "kind": "text",
    "x": 248,
    "y": 98.5,
    "w": 37.95,
    "h": 12,
    "text": "TODAY",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0.7
+  },
+  "label-yesterday": {
+   "kind": "text",
+   "x": 248,
+   "y": 259.5,
+   "w": 65.58,
+   "h": 12,
+   "text": "YESTERDAY",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0.7
+  },
+  "label-sunday-1-nov": {
+   "kind": "text",
+   "x": 248,
+   "y": 376.5,
+   "w": 81.77,
+   "h": 12,
+   "text": "SUNDAY 1 NOV",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0.7
+  },
+  "label-saturday-31-oct": {
+   "kind": "text",
+   "x": 248,
+   "y": 449.5,
+   "w": 101.54,
+   "h": 12,
+   "text": "SATURDAY 31 OCT",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "tracking": 0.7
+  },
+  "label-friday-30-oct": {
+   "kind": "text",
+   "x": 248,
+   "y": 566.5,
+   "w": 84.39,
+   "h": 12,
+   "text": "FRIDAY 30 OCT",
    "family": "sans",
    "fontFamily": "Inter",
    "size": 10,
@@ -1804,25 +1880,6 @@
    ],
    "tracking": 0
   },
-  "day-1": {
-   "kind": "text",
-   "x": 248,
-   "y": 259.5,
-   "w": 65.58,
-   "h": 12,
-   "text": "YESTERDAY",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 10,
-   "weight": 600,
-   "color": [
-    108,
-    104,
-    99,
-    255
-   ],
-   "tracking": 0.7
-  },
   "change-3": {
    "kind": "box",
    "x": 236,
@@ -2086,25 +2143,6 @@
    ],
    "tracking": 0
   },
-  "day-2": {
-   "kind": "text",
-   "x": 248,
-   "y": 376.5,
-   "w": 81.77,
-   "h": 12,
-   "text": "SUNDAY 1 NOV",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 10,
-   "weight": 600,
-   "color": [
-    108,
-    104,
-    99,
-    255
-   ],
-   "tracking": 0.7
-  },
   "change-5": {
    "kind": "box",
    "x": 236,
@@ -2213,25 +2251,6 @@
     255
    ],
    "tracking": 0
-  },
-  "day-3": {
-   "kind": "text",
-   "x": 248,
-   "y": 449.5,
-   "w": 101.54,
-   "h": 12,
-   "text": "SATURDAY 31 OCT",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 10,
-   "weight": 600,
-   "color": [
-    108,
-    104,
-    99,
-    255
-   ],
-   "tracking": 0.7
   },
   "change-6": {
    "kind": "box",
@@ -2473,25 +2492,6 @@
     255
    ],
    "tracking": 0
-  },
-  "day-4": {
-   "kind": "text",
-   "x": 248,
-   "y": 566.5,
-   "w": 84.39,
-   "h": 12,
-   "text": "FRIDAY 30 OCT",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 10,
-   "weight": 600,
-   "color": [
-    108,
-    104,
-    99,
-    255
-   ],
-   "tracking": 0.7
   },
   "change-8": {
    "kind": "box",
