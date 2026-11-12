@@ -327,6 +327,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         Some(frame) => (frame.view)(s, cx),
         None => placeholder::window(s, cx, group),
     };
+    let behind = crate::frames::signin::setup::guide::over(s, cx, behind); // the first-time guide's tip, over the frame
     let (Some(dialog), Some(dialog_group)) = (s.shell.app.dialog(), dialog_group_for(&s.shell.app)) else {
         return behind;
     };

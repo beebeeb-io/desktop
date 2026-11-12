@@ -386,6 +386,8 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= crate::frames::signin::poll(s, tx);
     // What the sign-in screens asked the shell for.
     changed |= drain_signin_intents(s);
+    // "Open my Beebeeb" at the end of the first run starts the first-time guide (DW-0380).
+    changed |= crate::frames::signin::setup::guide::poll(s);
     // The session and the tray: the engine may have changed since the last frame.
     let gate_before = s.shell.app.gate();
     changed |= s.shell.refresh();
@@ -485,6 +487,10 @@ fn shell_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let plain_cmd = !ev.mods.alt && !ev.mods.shift;
     // "/" is a shifted key on many layouts (Shift+7 on German): Shift is part of typing it.
     let slash_cmd = !ev.mods.alt;
+    // Esc is Skip while a tip of the first-time guide shows (DW-0301).
+    if ev.key == Key::Escape && crate::frames::signin::setup::guide::escape(s) {
+        return true;
+    }
     let event = match ev.key {
         Key::Left if plain_alt => Some(Event::Back),
         Key::Right if plain_alt => Some(Event::Forward),

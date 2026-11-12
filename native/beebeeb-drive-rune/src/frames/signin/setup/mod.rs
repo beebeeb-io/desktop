@@ -8,10 +8,13 @@
 //!
 //! Nothing here is a secret: no password, code or phrase is shown or typed in these steps.
 
+pub mod guide;
 pub mod icons;
 pub mod source;
 mod view;
 
+#[cfg(test)]
+mod guide_tests;
 #[cfg(test)]
 mod tests;
 
