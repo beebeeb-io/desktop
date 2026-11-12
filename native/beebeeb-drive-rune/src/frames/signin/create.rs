@@ -952,8 +952,15 @@ fn at_device(sign_up: SignUpScript) -> Ui {
     ui
 }
 
-/// The state of one board frame of sign-up, by its id.
+/// The state of one board frame of sign-up, by its id. A scene holds no keyboard focus: the focus its last
+/// step asked for is dropped, so a snapshot draws the board's pictured field and no second, real caret.
 pub fn scene(frame: &str) -> Option<Ui> {
+    let mut ui = drawn(frame)?;
+    ui.focus = None;
+    Some(ui)
+}
+
+fn drawn(frame: &str) -> Option<Ui> {
     Some(match frame {
         "DW-A31" => {
             let mut ui = at_email(SignUpScript::default());

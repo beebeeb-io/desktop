@@ -26,20 +26,20 @@ Gate state per frame is in the PR body; `0` = all six counts at 0 failing in bot
 | DW-A20 | Sign in: offline | built; light 0, dark 1 pixel line open (`card-0-avatar`) |
 | DW-A21 | Sign in: too many tries from this network | built; light 0, dark 1 pixel line open (`card-0-avatar`) |
 | DW-A22 | Sign in: the lock explained | built; the note wraps one word later than the board (3 pixel lines), dark also `card-0-avatar` |
-| DW-A31 | Create an account, step 1: the email | built; gate in the PR body |
-| DW-A32 | Step 2: the 8-digit code from the email, four digits typed | built; gate in the PR body |
-| DW-A33 | Step 2: that code is not right, or it has expired | built; gate in the PR body |
-| DW-A34 | Step 2: a new code was sent | built; gate in the PR body |
-| DW-A35 | Step 3: the terms, both boxes ticked | built; gate in the PR body |
-| DW-A36 | Step 4: the password, strong | built; gate in the PR body |
-| DW-A37 | Step 4: the password is two characters short | built; gate in the PR body |
-| DW-A38 | Step 4: the password is known from a breach | built; gate in the PR body |
-| DW-A39 | Step 5: the recovery phrase, shown once | built; gate in the PR body |
-| DW-A40 | Step 5: three words typed back, with suggestions | built; gate in the PR body |
-| DW-A41 | Step 5: the words do not match | built; gate in the PR body |
-| DW-A42 | Step 6: this device's name | built; gate in the PR body |
-| DW-A43 | Creating your account | built; gate in the PR body |
-| DW-A44 | Your account is ready | built; gate in the PR body |
+| DW-A31 | Create an account, step 1: the email | built; tree gate 0, pixels owed (PR body) |
+| DW-A32 | Step 2: the 8-digit code from the email, four digits typed | built; tree gate 0, pixels owed (PR body) |
+| DW-A33 | Step 2: that code is not right, or it has expired | built; tree gate 0, pixels owed (PR body) |
+| DW-A34 | Step 2: a new code was sent | built; tree gate 0, pixels owed (PR body) |
+| DW-A35 | Step 3: the terms, both boxes ticked | built; tree gate 0, pixels owed (PR body) |
+| DW-A36 | Step 4: the password, strong | built; tree gate 0, pixels owed (PR body) |
+| DW-A37 | Step 4: the password is two characters short | built; tree gate 0, pixels owed (PR body) |
+| DW-A38 | Step 4: the password is known from a breach | built; tree gate 0, pixels owed (PR body) |
+| DW-A39 | Step 5: the recovery phrase, shown once | built; tree gate 0, pixels owed (PR body) |
+| DW-A40 | Step 5: three words typed back, with suggestions | built; tree gate 0, pixels owed (PR body) |
+| DW-A41 | Step 5: the words do not match | built; tree gate 0, pixels owed (PR body) |
+| DW-A42 | Step 6: this device's name | built; tree gate 0, pixels owed (PR body) |
+| DW-A43 | Creating your account | built; tree gate 0, pixels owed (PR body) |
+| DW-A44 | Your account is ready | built; tree gate 0, pixels owed (PR body) |
 | DW-A63 | The account was deleted: the sign-in form says so under the password | built; light 0, dark 1 pixel line open (`card-0-avatar`, as DW-A19) |
 | DW-A23 | The 12 words on a new device (five typed, the sixth box holding the keyboard) | built, 0 |
 | DW-A24 | The words did not open this account (the third box marked) | built, 0 |
