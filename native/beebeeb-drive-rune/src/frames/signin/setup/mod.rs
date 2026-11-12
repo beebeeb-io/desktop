@@ -188,6 +188,8 @@ pub struct Ui {
     preview: Pixels,
     focus: Option<&'static str>,
     intents: Vec<Intent>,
+    /// "Open my Beebeeb" was pressed and the guide has not asked yet ([`Ui::guide_due`]).
+    finished: bool,
 }
 
 /// Decode a PNG into pixels Rune draws. A file that does not decode draws nothing.
@@ -243,6 +245,7 @@ impl Ui {
             source,
             focus: None,
             intents: Vec::new(),
+            finished: false,
         }
     }
 
@@ -460,7 +463,18 @@ impl Ui {
         if self.step == Step::Done {
             self.source.finish();
             self.intents.push(Intent::OpenDrive);
+            self.finished = true;
         }
+    }
+
+    /// Once after "Open my Beebeeb": whether the first-time guide starts now. It does unless this
+    /// PC has shown it (`SetupSource::guide_shown`), and it is marked shown here. For `guide::poll`.
+    pub fn guide_due(&mut self) -> bool {
+        if !std::mem::take(&mut self.finished) || self.source.guide_shown() {
+            return false;
+        }
+        self.source.mark_guide_shown();
+        true
     }
 
     /// Read again what the engine changed on its own. `true`: something did.

@@ -222,7 +222,8 @@ fn skip_and_esc_end_the_whole_guide_where_the_window_is() {
     assert_eq!(rt.state.guide.step, None);
     assert!(rect(&rt, COACH_KEY).is_none() && rect(&rt, RING_KEY).is_none());
     // With no guide, Esc is the window's again: it is not swallowed by a guide that is gone.
-    assert!(!guide::escape(&mut rt.state));
+    press(&mut rt, Key::Escape);
+    assert_eq!(rt.state.guide.step, None);
 }
 
 #[test]
@@ -233,20 +234,6 @@ fn the_window_under_a_tip_stays_usable() {
     click(&mut rt, "row-9");
     assert_eq!(rt.state.selected, Some(9));
     assert_eq!(rt.state.guide.step, Some(Step::Tip(1)), "and the tip is still there");
-
-    // Tip 2 says "Right-click a file": the file's menu (DW-0402) is in front of the tip, and Esc is
-    // the menu's, not Skip.
-    let mut rt = at_scene("DW-0302");
-    let menu = crate::frames::files::SCENES
-        .iter()
-        .find(|(id, _)| *id == "DW-0402")
-        .unwrap();
-    rt.update(|s, _| (menu.1)(s));
-    rt.frame(0.0);
-    assert!(rt.state.actions.menu.is_some());
-    assert!(rect(&rt, COACH_KEY).is_none() && rect(&rt, RING_KEY).is_none());
-    assert!(!guide::escape(&mut rt.state));
-    assert_eq!(rt.state.guide.step, Some(Step::Tip(2)));
 
     // The control inside the ring takes its click too: the gear opens settings.
     let mut rt = at_scene("DW-0305");
@@ -260,27 +247,50 @@ fn the_window_under_a_tip_stays_usable() {
     assert!(rect(&rt, COACH_KEY).is_some(), "back on Files the tip shows again");
 }
 
+/// The first-run window on "You're set up", on a PC that has or has not shown the guide.
+fn set_up(guide_shown: bool) -> (Runtime<State>, super::source::CallLog) {
+    use super::source::{Explorer, FixtureSetupSource, Script};
+    let source = FixtureSetupSource::new(Script {
+        explorer: Explorer::Added,
+        guide_shown,
+        ..Script::default()
+    });
+    let log = source.log();
+    let mut ui = super::Ui::new(Box::new(source));
+    ui.skip();
+    let mut state = init();
+    host::dispatch(&mut state, Event::Gate(GateState::FirstRun));
+    state.setup = Some(ui);
+    (window_sized(state, (958.0, 638.0)), log)
+}
+
 #[test]
 fn open_my_beebeeb_at_the_end_of_the_first_run_starts_the_guide() {
-    let mut state = init();
-    super::set_scene(&mut state, "DW-0208");
-    let ui = state.setup.as_mut().unwrap();
-    // A row of "You're set up" is not the guide's to take.
-    ui.open_setting(super::Setting::AppLock);
-    let mut rt = window(state);
+    let (mut rt, log) = set_up(false);
+    // A row of "You're set up" is not the guide's to take, and starts nothing.
+    click(&mut rt, "item-1");
     rt.update(|s, tx| {
-        host::poll(s, 0.0, tx);
+        guide::poll(s, tx);
     });
     assert_eq!(rt.state.guide.step, None, "nothing starts the guide before the press");
 
-    rt.update(|s, _| s.setup.as_mut().unwrap().finish());
+    click(&mut rt, "btn-0");
     rt.update(|s, tx| {
         host::poll(s, 0.0, tx);
     });
     assert_eq!(rt.state.guide.step, Some(Step::Tray));
+    assert!(
+        log.borrow().iter().any(|line| line == "mark_guide_shown"),
+        "{:?}",
+        log.borrow()
+    );
+    // The first run's intents are all still there for the shell: the guide read none of them.
     assert_eq!(
         rt.state.setup.as_mut().unwrap().take_intents(),
-        [super::Intent::OpenSetting(super::Setting::AppLock)]
+        [
+            super::Intent::OpenSetting(super::Setting::AppLock),
+            super::Intent::OpenDrive
+        ]
     );
     // The tip shows once the window is the main window on Files (the session's gate opens it:
     // the fixture's is open), never over the first-run window.
@@ -293,6 +303,184 @@ fn open_my_beebeeb_at_the_end_of_the_first_run_starts_the_guide() {
     rt.frame(0.0);
     assert_eq!(rt.state.guide.step, Some(Step::Tray));
     assert!(rect(&rt, COACH_KEY).is_none(), "no tip over the first-run window");
+}
+
+#[test]
+fn a_pc_that_has_shown_the_guide_does_not_start_it_again() {
+    let (mut rt, log) = set_up(true);
+    click(&mut rt, "btn-0");
+    rt.update(|s, tx| {
+        host::poll(s, 0.0, tx);
+    });
+    assert_eq!(rt.state.guide.step, None);
+    assert!(!log.borrow().iter().any(|line| line == "mark_guide_shown"));
+    assert_eq!(
+        rt.state.setup.as_mut().unwrap().take_intents(),
+        [super::Intent::OpenDrive]
+    );
+}
+
+#[test]
+fn the_guide_ends_when_the_account_locks_signs_out_or_changes() {
+    for gate in [GateState::Locked, GateState::SignedOut] {
+        let mut rt = at_scene("DW-0303");
+        rt.update(|s, tx| {
+            host::dispatch(s, Event::Gate(gate));
+            guide::poll(s, tx);
+        });
+        assert_eq!(rt.state.guide, guide::Guide::default(), "{gate:?}");
+        // Back in: no tip resumes.
+        rt.update(|s, _| {
+            host::dispatch(s, Event::Gate(GateState::Ready));
+        });
+        rt.frame(0.0);
+        assert!(rect(&rt, COACH_KEY).is_none(), "{gate:?}");
+    }
+    // The same account: the step stays. Another account's step is not this account's.
+    let mut rt = at_scene("DW-0301");
+    assert!(rt.state.shell.app.account().is_some(), "the fixture is signed in");
+    rt.update(|s, tx| {
+        guide::poll(s, tx);
+    });
+    assert_eq!(rt.state.guide.step, Some(Step::Tip(1)));
+    rt.update(|s, tx| {
+        s.guide.account = Some("another-account".into());
+        guide::poll(s, tx);
+    });
+    assert_eq!(rt.state.guide.step, None);
+}
+
+/// What `shell::host::poll` does at the start of a frame, then the frame.
+fn tick(rt: &mut Runtime<State>) {
+    rt.update(|s, tx| {
+        host::poll(s, 0.0, tx);
+    });
+    rt.frame(0.0);
+}
+
+fn focused(rt: &Runtime<State>) -> Option<String> {
+    rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key)
+}
+
+#[test]
+fn the_keyboard_is_the_cards_tab_stays_in_it_and_enter_steps() {
+    let mut rt = started();
+    tick(&mut rt);
+    assert_eq!(focused(&rt).as_deref(), Some(NEXT_KEY), "focus starts on Got it");
+    // DW-0380 has one button: Tab stays on it.
+    press(&mut rt, Key::Tab);
+    assert_eq!(focused(&rt).as_deref(), Some(NEXT_KEY));
+    press(&mut rt, Key::Enter);
+    assert_eq!(rt.state.guide.step, Some(Step::Tip(1)));
+    assert_eq!(
+        focused(&rt).as_deref(),
+        Some(NEXT_KEY),
+        "focus is on Next after the step"
+    );
+    // Tab goes to Skip and back to Next: it never leaves the card.
+    press(&mut rt, Key::Tab);
+    assert_eq!(focused(&rt).as_deref(), Some(SKIP_KEY));
+    press(&mut rt, Key::Tab);
+    assert_eq!(focused(&rt).as_deref(), Some(NEXT_KEY));
+    press(&mut rt, Key::Enter);
+    assert_eq!(rt.state.guide.step, Some(Step::Tip(2)));
+    // Enter on Skip ends the guide.
+    press(&mut rt, Key::Tab);
+    press(&mut rt, Key::Enter);
+    assert_eq!(rt.state.guide.step, None);
+
+    // From Settings, by the keyboard's route: focus lands on the card too.
+    let mut state = init();
+    host::dispatch(&mut state, Event::OpenSettings(SettingsPane::General));
+    let mut rt = window(state);
+    click(&mut rt, "item-1-0");
+    tick(&mut rt);
+    assert_eq!(focused(&rt).as_deref(), Some(NEXT_KEY));
+}
+
+#[test]
+fn what_a_section_has_in_front_hides_the_tip_and_gets_esc_first() {
+    // Tip 1 rings New; New, then "New folder": the dialog is in front.
+    let mut rt = started();
+    click(&mut rt, NEXT_KEY);
+    assert_eq!(rt.state.guide.step, Some(Step::Tip(1)));
+    rt.update(|s, _| {
+        s.begin_new_folder();
+    });
+    rt.frame(0.0);
+    assert!(rt.state.actions.dialog.is_some());
+    assert!(rect(&rt, COACH_KEY).is_none() && rect(&rt, RING_KEY).is_none());
+    press(&mut rt, Key::Escape);
+    assert!(rt.state.actions.dialog.is_none(), "Esc closed the dialog");
+    assert_eq!(
+        rt.state.guide.step,
+        Some(Step::Tip(1)),
+        "and the guide is still on tip 1"
+    );
+    assert!(rect(&rt, COACH_KEY).is_some(), "which shows again");
+
+    // Tip 2 says "Right-click a file": the file's menu (DW-0402) is in front.
+    let mut rt = at_scene("DW-0302");
+    let menu = crate::frames::files::SCENES
+        .iter()
+        .find(|(id, _)| *id == "DW-0402")
+        .unwrap();
+    rt.update(|s, _| (menu.1)(s));
+    rt.frame(0.0);
+    assert!(rt.state.actions.menu.is_some());
+    assert!(rect(&rt, COACH_KEY).is_none() && rect(&rt, RING_KEY).is_none());
+    press(&mut rt, Key::Escape);
+    assert!(rt.state.actions.menu.is_none());
+    assert_eq!(rt.state.guide.step, Some(Step::Tip(2)));
+
+    // Tip 3 over Shared: a dialog of Shared.
+    let mut rt = at_scene("DW-0303");
+    rt.update(|s, _| {
+        s.frames
+            .shared
+            .open_dialog(crate::frames::shared::dialogs::Dialog::NewRequest)
+    });
+    rt.frame(0.0);
+    assert!(rect(&rt, COACH_KEY).is_none());
+    press(&mut rt, Key::Escape);
+    assert!(rt.state.frames.shared.dialog.is_none(), "Esc closed the dialog");
+    assert_eq!(rt.state.guide.step, Some(Step::Tip(3)));
+    assert!(rect(&rt, COACH_KEY).is_some());
+
+    // Tip 4 over Photos: an opened photo.
+    let mut rt = at_scene("DW-0304");
+    rt.update(|s, _| s.photos.open_tile(0, 0));
+    rt.frame(0.0);
+    assert!(rt.state.photos.viewer.is_some());
+    assert!(rect(&rt, COACH_KEY).is_none());
+    press(&mut rt, Key::Escape);
+    assert!(rt.state.photos.viewer.is_none(), "Esc closed the photo");
+    assert_eq!(rt.state.guide.step, Some(Step::Tip(4)));
+    assert!(rect(&rt, COACH_KEY).is_some());
+}
+
+#[test]
+fn at_the_windows_smallest_size_every_card_and_ring_is_inside_it() {
+    // 960 x 640 less the frame the OS draws.
+    let size = (958.0, 638.0);
+    for (frame, target) in [
+        ("DW-0301", Some("new-btn")),
+        ("DW-0302", Some("row-6")),
+        ("DW-0303", Some("Shared-row")),
+        ("DW-0304", Some("Photos-row")),
+        ("DW-0305", Some("settings-btn")),
+        ("DW-0380", None),
+    ] {
+        let rt = at_scene_sized(frame, size);
+        let card = rect(&rt, COACH_KEY).unwrap_or_else(|| panic!("{frame} draws its card"));
+        assert!(
+            card[0] >= 0.0 && card[1] >= 0.0 && card[0] + card[2] <= size.0 && card[1] + card[3] <= size.1,
+            "{frame}: the card {card:?} is inside {size:?}"
+        );
+        if let Some(target) = target {
+            ring_holds(&rt, target, 1.5);
+        }
+    }
 }
 
 #[test]

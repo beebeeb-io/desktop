@@ -76,11 +76,16 @@ The board's group "First run on Windows", 11 frames, in the same 960 x 640 windo
 A coach card over the main window with a ring around the real control each tip explains (`cx.window_layout` of the
 control's key: the ring follows it). State: `State::guide`. It starts when the first run ends ("Open my Beebeeb",
 `guide::poll`) and from Settings › General › "Show the guide again" (`settings::go("DW-0380")`). Got it, Next and Done
-step; Skip and Esc end it; the window under a tip takes every press. Tests: `setup/guide_tests.rs`.
+step; Skip and Esc end it; the window under a tip takes every press, and whatever the section has in front (a menu,
+a dialog, an opened photo) hides the tip and gets Esc first. The keyboard is the card's while a tip shows (focus on
+its button, Tab stays in the card, Enter presses). It ends when the account locks, signs out or changes. "Once per
+PC" is `SetupSource::guide_shown` / `mark_guide_shown` (not wired: the guide follows each first run). Tests:
+`setup/guide_tests.rs`. Not built: the second way back the board names ("and Help"); the card's 22 pt button is
+drawn here, not by the kit (a design-system need).
 
 | Frame | What | State |
 | --- | --- | --- |
-| DW-0380 | Where the b is: "Beebeeb lives in the notification area", Got it | built in the main window; the board draws it as its own window by the tray: follow-up task 2479. Its 5 `coach*` keys: geometry and text 0; the other 220 keys are the board's desktop (the window at 72 %) and stay red |
+| DW-0380 | Where the b is: "Beebeeb lives in the notification area", Got it | built in the main window (its lower right corner, clear of the details panel's buttons); the board draws it as its own window by the tray: follow-up task 2479. Its arrow points at nothing in the window until then. Gate state in the PR body |
 | DW-0301 | Tip 1: New | built; geometry, text, icons, fills, frame tiles 0; pixel lines open: `coach-ring`, `coach-dot-0`, `coach-dots` |
 | DW-0302 | Tip 2: a file's row (left out when the folder shows no file) | built; 1 pixel line open (`coach-dot-1`) |
 | DW-0303 | Tip 3: Shared, on the Shared view | built; the guide's own keys: 1 pixel line open (`coach-dot-2`). Also red: the Shared toolbar (the board gained a button there) and `btn-skip` / `btn-next`, which the golden keys a second time for the card's two buttons |

@@ -7,17 +7,23 @@
 //! ring and its dim take no press), so the window stays usable while a tip shows.
 //!
 //! A tip belongs to a place (Files, Shared, Photos). While the window shows another place, a
-//! viewer, settings, a dialog or an open menu of Files, the tip is not drawn and takes no key; it is there again when the
-//! window is back on its place.
+//! viewer, settings, or anything the place has in front of itself (a menu, a dialog, a name being
+//! typed, a photo opened), the tip is not drawn and takes no key: what is in front gets Esc first.
+//! The tip is there again when the window is back on its place with nothing in front.
+//!
+//! While a tip shows, the keyboard is the card's: focus goes to its button, Tab moves between
+//! Skip and Next, Enter presses the focused one, Esc is Skip.
+//!
+//! The guide ends when the account signs out, locks or changes: another account never resumes it.
 //!
 //! Nothing here is a secret.
 
 use std::f32::consts::FRAC_PI_4;
 
-use rune::{Color, Cx, El, Shadow, TextStyle, Tx, col, el, row};
+use rune::{Color, Cx, El, Key, KeyEvent, Shadow, TextStyle, Tx, col, el, row};
 
 use crate::State;
-use crate::shell::app::{Screen, Section};
+use crate::shell::app::{GateState, Screen, Section};
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::kit;
 
@@ -88,11 +94,15 @@ impl Step {
 }
 
 /// The guide's state: the step that shows, or none (the guide is not running).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Guide {
     pub step: Option<Step>,
     /// The row that was selected when the guide started: tip 2 points at it when it is a file.
     pub row: Option<usize>,
+    /// The account the guide started for. Another account never sees its step.
+    pub(super) account: Option<String>,
+    /// The step changed: focus goes to the card's button once it is drawn ([`poll`]).
+    focus: bool,
 }
 
 /// The row tip 2 points at: the file that was selected when the guide started (the board points
@@ -109,6 +119,7 @@ pub fn file_row(s: &State) -> Option<usize> {
 /// Start the guide on Files, at DW-0380. From the first run's end and from Settings.
 pub fn start(s: &mut State) {
     s.guide.row = s.selected;
+    s.guide.account = s.shell.app.account().map(str::to_string);
     show(s, Step::Tray);
 }
 
@@ -119,6 +130,7 @@ fn show(s: &mut State, step: Step) {
         crate::frames::go(s, step.place());
     }
     s.guide.step = Some(step);
+    s.guide.focus = true;
 }
 
 /// "Got it", "Next" and "Done": the next step (its view comes by itself), or the end on Files.
@@ -141,7 +153,18 @@ pub fn next(s: &mut State) {
 
 /// "Skip" and Esc: the whole guide ends; the window stays where it is.
 pub fn skip(s: &mut State) {
-    s.guide.step = None;
+    s.guide = Guide::default();
+}
+
+/// Whether the place under a tip has something of its own in front: a menu, a dialog, a name
+/// being typed in a row, an opened photo. It gets the keys (Esc closes it), not the tip.
+fn in_front(s: &State, place: Section) -> bool {
+    match place {
+        Section::Files => s.actions.menu.is_some() || s.actions.dialog.is_some() || s.actions.rename.is_some(),
+        Section::Shared => s.frames.shared.menu.is_some() || s.frames.shared.dialog.is_some(),
+        Section::Photos => s.photos.menu.is_some() || s.photos.dialog.is_some() || s.photos.viewer.is_some(),
+        _ => false,
+    }
 }
 
 /// The step the window shows now: the guide's step, while the window is on its place with
@@ -151,31 +174,70 @@ pub fn showing(s: &State) -> Option<Step> {
     let app = &s.shell.app;
     let on_place =
         matches!(app.screen(), Screen::Drive(route) if route.section == step.place() && route.item.is_none());
-    // An open menu of Files is in front: the tip waits (the menu gets its place and its Esc).
-    (on_place && app.dialog().is_none() && s.tray.is_none() && s.actions.menu.is_none()).then_some(step)
+    (on_place && app.dialog().is_none() && s.tray.is_none() && !in_front(s, step.place())).then_some(step)
 }
 
-/// Esc is Skip while a tip shows. `true`: the key was the guide's. For `shell::host::shell_keys`.
-pub fn escape(s: &mut State) -> bool {
-    let shown = showing(s).is_some();
-    if shown {
-        skip(s);
-    }
-    shown
-}
-
-/// "Open my Beebeeb" at the end of the first run starts the guide ("then the guide (DW-0380)").
-/// Reads only that intent; a row of "You're set up" stays queued for its own reader. For
-/// `shell::host::poll`. `true`: the guide started.
-pub fn poll(s: &mut State) -> bool {
-    let Some(setup) = s.setup.as_mut() else { return false };
-    let before = setup.intents.len();
-    setup.intents.retain(|intent| *intent != super::Intent::OpenDrive);
-    if setup.intents.len() == before {
+/// The keys of a tip that shows: Esc is Skip, Tab moves between the card's buttons (it stays in
+/// the card), Enter presses the focused one. `true`: the key was the guide's. The card's own
+/// key handler (focus is in the card), and `shell::host::shell_keys` before the shell's own keys.
+pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    let Some(step) = showing(s) else { return false };
+    let m = ev.mods;
+    if m.cmd || m.ctrl || m.alt || m.logo {
         return false;
     }
-    s.guide.step = Some(Step::Tray);
+    match ev.key {
+        Key::Escape if !m.shift => skip(s),
+        Key::Tab => {
+            // Skip is on tips 1 to 4.
+            let has_skip = matches!(step, Step::Tip(n) if n < 5);
+            let to = if has_skip && tx.focused() == Some(NEXT_KEY) {
+                SKIP_KEY
+            } else {
+                NEXT_KEY
+            };
+            tx.focus(to, true);
+        }
+        Key::Enter if !m.shift => match tx.focused() {
+            Some(NEXT_KEY) => go_on(s, tx),
+            Some(SKIP_KEY) => skip(s),
+            // Focus is on something of the window's (the person clicked there): its Enter.
+            _ => return false,
+        },
+        _ => return false,
+    }
     true
+}
+
+/// Runs every frame (`shell::host::poll`). The guide ends when the account signs out, locks or
+/// changes; it starts when the first run ends ("Open my Beebeeb": "then the guide (DW-0380)")
+/// unless this PC has shown it; and focus goes to the card's button after a step changed.
+/// `true`: something changed.
+pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    let mut changed = false;
+    if s.guide.step.is_some() {
+        let gone = matches!(s.shell.app.gate(), GateState::SignedOut | GateState::Locked)
+            || s.shell.app.account() != s.guide.account.as_deref();
+        if gone {
+            s.guide = Guide::default();
+            changed = true;
+        }
+    }
+    // The first run's own flag, not its `Intent::OpenDrive`: that intent stays for the shell.
+    if s.setup.as_mut().is_some_and(super::Ui::guide_due) {
+        s.guide = Guide {
+            step: Some(Step::Tray),
+            row: None,
+            account: s.shell.app.account().map(str::to_string),
+            focus: true,
+        };
+        changed = true;
+    }
+    if s.guide.focus && showing(s).is_some() {
+        s.guide.focus = false;
+        tx.focus(NEXT_KEY, tx.focus_visible());
+    }
+    changed
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +373,7 @@ fn button(key: &str, label: &str, kind: Kind, t: &Theme) -> El {
 fn go_on(s: &mut State, tx: &mut Tx) {
     next(s);
     if s.guide.step.is_some() {
+        s.guide.focus = false;
         tx.focus(NEXT_KEY, tx.focus_visible());
     }
 }
@@ -329,6 +392,8 @@ fn card(width: f32, name: &str, t: &Theme) -> El {
         .fill(t.card)
         .box_shadow(kit::drop(16.0, 44.0, Color::BLACK.alpha(0.26)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))
+        // With focus on one of its buttons the card gets the key before Rune's own Tab walk.
+        .on_key(on_key)
 }
 
 /// DW-0380's card: the heading, the words, "Got it". A view of its own (no place, no arrow
@@ -417,12 +482,14 @@ pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
     let t = tokens::theme(cx.system_dark());
     let layer = el().key("window-with-guide").w_full().h_full().child(behind);
     let n = match step {
-        // Interim (the lead, 2026-11-12): the board draws this card on the desktop, by the b;
-        // until it has a window of its own it stands in the main window at the board's offsets.
+        // Interim (the lead, 2026-11-12): the board draws this card on the desktop, by the b, where
+        // it covers only the window's lower right corner. Until it has a window of its own (task
+        // 2479) it stands in that corner of the main window, over the status line's end, clear of
+        // the details panel's buttons.
         Step::Tray => {
             return layer.child(
                 el().key("coach-place")
-                    .pin(None, None, Some(94.0), Some(120.0))
+                    .pin(None, None, Some(16.0), Some(44.0))
                     .child(tray_card(&t)),
             );
         }
@@ -466,13 +533,19 @@ pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
 fn on_files(s: &mut State, step: Step) {
     s.clear_selection();
     s.show_detail_pane = false;
+    at(s, step);
+}
+
+/// The guide on `step`, for the account that is signed in.
+fn at(s: &mut State, step: Step) {
     s.guide.step = Some(step);
+    s.guide.account = s.shell.app.account().map(str::to_string);
 }
 
 /// The six board frames of the guide, for `frames::scenes`.
 pub const FRAMES: &[(&str, fn(&mut State))] = &[
     // The board's desktop holds the window as DW-0401 draws it (a file selected, its details).
-    ("DW-0380", |s| s.guide.step = Some(Step::Tray)),
+    ("DW-0380", |s| at(s, Step::Tray)),
     ("DW-0301", |s| on_files(s, Step::Tip(1))),
     ("DW-0302", |s| {
         // The file DW-0401 has selected ("Contract draft.pdf"), as when the guide starts there.
@@ -481,11 +554,11 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     }),
     ("DW-0303", |s| {
         crate::frames::shared::scenes::dw_0501(s);
-        s.guide.step = Some(Step::Tip(3));
+        at(s, Step::Tip(3));
     }),
     ("DW-0304", |s| {
         crate::frames::photos::set_scene(s, "DW-0601");
-        s.guide.step = Some(Step::Tip(4));
+        at(s, Step::Tip(4));
     }),
     ("DW-0305", |s| on_files(s, Step::Tip(5))),
 ];
