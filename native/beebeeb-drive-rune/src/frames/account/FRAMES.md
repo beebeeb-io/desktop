@@ -61,3 +61,27 @@ elements in all; no geometry, text, icon or fill line is red). The built frames 
 | `DW-A81` | Step 3 of 4: confirm by an email link. | built (light and dark: 0 failing on all six lines) |
 | `DW-A82` | Step 4 of 4: the deletion is scheduled, when, and how to undo it. | built (light and dark: 0 failing on all six lines) |
 | `DW-A83` | The undo worked: nothing was deleted. | built (light and dark: 0 failing on all six lines) |
+
+## Approving a sign-in (7, lane signin-approving)
+
+The board's group "Approving a sign-in": the approving device's side of DW-A07. `approve.rs` (state, rules, views),
+`approve_tests.rs`. The code is a secret the screen shows as typed: one secure, shown `TextEdit`; DW-A12, DW-A13 and
+DW-A14 are in the capture-exclusion decision (`Pane::shows_secret`, `Dialog::shows_secret`).
+
+| Frame | What it is | Status |
+| --- | --- | --- |
+| `DW-A11` | Windows' toast: "Allow Drive on Anna's iPhone?" | OS-drawn toast, verified by a real-window capture (not done yet: phase 2 sends it). No gated scene: Windows draws it. Its words are `approve::notification`, bound to the golden by a test; a click is `approve::notification_clicked` (opens DW-A13 with an empty code field) |
+| `DW-A12` | Approve a sign-in: type the code the other device shows. | built (light and dark: 0 failing on all six lines) |
+| `DW-A13` | The review: what the server measured, what the device reports, the code, Approve and Deny. | built; light: 0 failing on all six lines; dark: 1 pixel line red, 2 keys (`list-0-body edge 10 > 9`, `item-0-1 edge 10 > 9`: where the dialog lies over that list's edge, as DW-A78) |
+| `DW-A14` | Windows Hello is asking; what approving shares, in amber. | built; geometry, text, icons and fills 0 failing in both themes; pixels differ (71 keys light, 30 dark): the board draws Windows' own prompt and a second scrim over the frame (as DW-A04, DW-A29) |
+| `DW-A15` | Approved: the new session, and where to end it. | built (light and dark: 0 failing on all six lines) |
+| `DW-A16` | Denied: nothing signed in, no keys shared; what to check. | built (light and dark: 0 failing on all six lines) |
+| `DW-A17` | This request expired (and "Already handled"). | built (light and dark: 0 failing on all six lines) |
+
+States the board gives a rule and no drawing, built from the rule's words (tests only): a code nothing waits for
+("We could not find a waiting request with that code. Check it on the other device."); the red "Unusual place" note
+above the facts; "Already handled" in place of DW-A17's heading; Windows Hello cancelled (back to the review, nothing
+sent); offline.
+
+Esc: on the review it is Deny while the code field holds the keyboard. With the keyboard on a button the shell takes
+Esc first and closes settings, as on every account page: the flow ends with nothing approved and nothing sent.

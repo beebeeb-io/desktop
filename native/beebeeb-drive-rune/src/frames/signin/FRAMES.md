@@ -20,7 +20,7 @@ Gate state per frame is in the PR body; `0` = all six counts at 0 failing in bot
 | DW-A08 | Another device: approved | built, 0 |
 | DW-A09 | Another device: denied | built, 0 |
 | DW-A10 | Another device: the code expired | built, 0 |
-| DW-A11 to DW-A17 | Approving a sign-in (7 frames) | not built; no goldens yet |
+| DW-A11 to DW-A17 | Approving a sign-in (7 frames) | built in the account view (`.au-set`), where the board draws them: `frames/account/approve.rs`, rows in `frames/account/FRAMES.md` |
 | DW-A18 | Sign in: unlocking the vault | built, 0 |
 | DW-A19 | Sign in: email and password do not match | built; light 0, dark 1 pixel line open (`card-0-avatar`) |
 | DW-A20 | Sign in: offline | built; light 0, dark 1 pixel line open (`card-0-avatar`) |
