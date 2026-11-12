@@ -197,3 +197,9 @@ required-features = ["fake-server"]
 test = false
 bench = false
 doc = false
+
+# A fake Beebeeb API on a loopback port for the native rungs (`examples/fake_api.rs`): the invented account of
+# `test_api::fake_account`. Built only with the test helpers, so never by a release build.
+[[example]]
+name = "fake_api"
+required-features = ["test-support"]

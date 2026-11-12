@@ -23,6 +23,7 @@ use beebeeb_engine::engine_status::{EngineStatusView, REASON_AUTH, REASON_ENGINE
 use beebeeb_engine::signin::gate::GateState as EngineGate;
 use beebeeb_engine::state_db::{FileStatus, LocalActivityKind, StateDb};
 use beebeeb_engine::state_paths;
+use beebeeb_engine::sync_view::Start;
 
 use super::{EngineDriveSource, EngineFilesSource, LiveEngine, log};
 use crate::frames::files::source::FilesSource;
@@ -81,10 +82,11 @@ impl<C: CredentialStores> EngineTraySource<C> {
     /// What the flyout is drawn from, read now. The engine's queued reports are taken first.
     pub fn facts(&self) -> Facts {
         self.live.drain();
-        let engine = &self.live.engine;
-        let gate = gate_of(engine.gate());
-        let running = engine.is_syncing();
-        let paused = engine.is_paused();
+        // The handle's view, which never waits: a start holds the engine slot while it registers the folder.
+        let sync = self.live.engine.view();
+        let gate = gate_of(sync.gate);
+        let running = sync.start == Start::Running;
+        let paused = sync.paused;
         let view = self.live.status_view();
         let report = report_of(&view);
         let ready = gate == Gate::Ready;
@@ -97,7 +99,7 @@ impl<C: CredentialStores> EngineTraySource<C> {
         };
         Facts {
             gate,
-            session_ended: session_ended(engine),
+            session_ended: sync.session_ended,
             running,
             paused,
             report,
@@ -211,16 +213,8 @@ fn gate_of(gate: EngineGate) -> Gate {
     }
 }
 
-/// Beebeeb refused this account's session again and again (`AuthHealth`): it ended (DW-1219).
-pub(super) fn session_ended<C: CredentialStores>(engine: &Engine<C>) -> bool {
-    engine
-        .accounts()
-        .active_account()
-        .is_ok_and(|account| account.auth_health.is_expired())
-}
-
 /// The engine's last report, in the flyout's terms. An `error` with the `auth` reason is Beebeeb
-/// answering 401, not a way to Beebeeb that failed: the session decides ([`session_ended`]), and until
+/// answering 401, not a way to Beebeeb that failed: the session decides (the view's `session_ended`), and until
 /// it does the state is not known. Before the first report, and after a resume, nothing is known.
 /// `idle` is a finished check only with the time of one (`last_tick_ok_at`, which the engine empties when
 /// it starts): the engine also says `idle` when the files that moved during its first check are done

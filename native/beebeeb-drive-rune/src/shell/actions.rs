@@ -12,6 +12,7 @@ use super::app::{AccountId, GateState, Session};
 use super::instance::ProfileHolder;
 use super::platform::{Platform, PlatformError};
 use super::tray::{EngineState, TrayInputs};
+use crate::frames::global::sync_off::SyncOff;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActionError {
@@ -58,6 +59,11 @@ pub trait EngineActions: Send + Sync {
     /// A scene function sets the gate on the engine so that `refresh()` reads it back. Only the
     /// fixture engine acts on this; the real engine is the authority and ignores it (the default).
     fn set_gate_for_scene(&self, _gate: GateState) {}
+    /// The last start's refusal while it stands, with the attempt it was (the refusal modal, Q3). Cheap: asked on
+    /// every frame.
+    fn sync_refusal(&self) -> Option<SyncOff> {
+        None
+    }
 }
 
 /// Everything a frame, the tray menu or the flyout may ask the shell to do beyond navigation.
@@ -78,6 +84,8 @@ pub trait ShellActions: Send + Sync {
     fn set_autostart(&self, enabled: bool) -> Result<(), ActionError>;
     /// A scene function sets the gate on the engine; see [`EngineActions::set_gate_for_scene`].
     fn set_gate_for_scene(&self, gate: GateState);
+    /// See [`EngineActions::sync_refusal`].
+    fn sync_refusal(&self) -> Option<SyncOff>;
 }
 
 /// The real [`ShellActions`]: the engine for what is the engine's, the OS for the rest.
@@ -132,6 +140,9 @@ impl ShellActions for HostActions {
     fn set_gate_for_scene(&self, gate: GateState) {
         self.engine.set_gate_for_scene(gate);
     }
+    fn sync_refusal(&self) -> Option<SyncOff> {
+        self.engine.sync_refusal()
+    }
 }
 
 /// What a [`FixtureEngine`] was asked to do, for tests.
@@ -155,6 +166,7 @@ struct Fixture {
     /// Whether `set_gate_for_scene` updates this engine's gate. True in fixture mode (scenes
     /// set the gate); false simulates a real engine that is the authority and ignores scene gates.
     accepts_scene_gate: bool,
+    refusal: Option<SyncOff>,
 }
 
 /// An engine that is not there: a signed-in, up-to-date account in memory. Pause and resume
@@ -190,6 +202,7 @@ impl FixtureEngine {
                 holder: None,
                 calls: Vec::new(),
                 accepts_scene_gate: true,
+                refusal: None,
             }),
         }
     }
@@ -228,6 +241,12 @@ impl FixtureEngine {
 
     pub fn calls(&self) -> Vec<FixtureCall> {
         self.lock().calls.clone()
+    }
+
+    /// A start's refusal stands (or none does), as the engine's view would say.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_sync_refusal(&self, refusal: Option<SyncOff>) {
+        self.lock().refusal = refusal;
     }
 }
 
@@ -285,6 +304,9 @@ impl EngineActions for FixtureEngine {
             drop(state);
             self.set_gate(gate);
         }
+    }
+    fn sync_refusal(&self) -> Option<SyncOff> {
+        self.lock().refusal.clone()
     }
 }
 

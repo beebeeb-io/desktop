@@ -235,6 +235,9 @@ pub enum Dialog {
     Conflict { file: Option<ItemId> },
     /// Commands and keyboard shortcuts (DW-1232, Ctrl+/).
     Shortcuts,
+    /// A sync start was refused: what happened and how to fix it, where a fix exists (Q3 of the sync-start
+    /// contract; no board frame). Its words are the shell's refusal (`Shell::sync_off`).
+    SyncOff,
 }
 
 /// What the main window shows right now.

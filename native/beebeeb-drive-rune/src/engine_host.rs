@@ -22,7 +22,7 @@ use std::thread;
 
 use zeroize::Zeroizing;
 
-use beebeeb_engine::app::{CredentialStores, Engine, SyncStart};
+use beebeeb_engine::app::{CredentialStores, Engine};
 use beebeeb_engine::drive_v2::DriveError;
 use beebeeb_engine::drive_v2::model::{self, Sort as EngineSort};
 use beebeeb_engine::engine_status::EngineStatusView;
@@ -32,6 +32,7 @@ use beebeeb_engine::identity::EngineIdentity;
 use beebeeb_engine::signin::gate::{
     GateState as EngineGate, NextAfterSignIn as EngineNext, SignInProblem as EngineProblem,
 };
+use beebeeb_engine::sync_view::Start;
 
 use crate::frames::files::source::{
     self as files_source, Account, ActionError, Change, Counts, Details, FilesSource, StorageSplit,
@@ -43,17 +44,19 @@ use crate::frames::signin::source::{
 use crate::shell::actions::{self, EngineActions};
 use crate::shell::app::{GateState as ShellGate, Session};
 use crate::shell::instance::ProfileHolder;
-use crate::shell::tray::{EngineState, TrayInputs};
+use crate::shell::tray::TrayInputs;
 use crate::source::{DriveItem, DriveSource, Listing, SourceError, StorageSummary};
 
 pub mod backups;
 #[cfg(test)]
 mod binding_tests;
 pub mod open;
+pub mod sync;
 #[cfg(test)]
 mod tests;
 pub mod tray;
 
+pub use sync::EngineGlobalSource;
 pub use tray::EngineTraySource;
 
 // ---------------------------------------------------------------------------
@@ -240,6 +243,8 @@ pub struct LiveEngine<C: CredentialStores> {
     /// The engine's last report of itself, folded from the messages by [`LiveEngine::drain`] ([`fold`]): one
     /// value, never a list. The b and the flyout read it; whoever drains first moves it for both.
     status: Mutex<EngineStatusView>,
+    /// One start at a time, and the name of the folder it asked for ([`sync::StartWorker`]).
+    starts: sync::StartWorker,
 }
 
 impl<C: CredentialStores> LiveEngine<C> {
@@ -249,6 +254,7 @@ impl<C: CredentialStores> LiveEngine<C> {
             identity: opened.identity,
             messages: Mutex::new(messages),
             status: Mutex::new(EngineStatusView::default()),
+            starts: sync::StartWorker::default(),
         }
     }
 
@@ -303,22 +309,11 @@ fn fold(view: &mut EngineStatusView, message: &HostMessage) {
     }
 }
 
-/// Start sync into the folder the settings name, else the identity's suggestion. Blocks.
-fn start_sync_now<C: CredentialStores>(
-    engine: &Engine<C>,
-    identity: &'static EngineIdentity,
-) -> Result<SyncStart, String> {
-    let config = beebeeb_engine::config::DesktopConfig::load_for(identity)?;
-    let sync_root = config
-        .sync_root
-        .unwrap_or_else(|| beebeeb_engine::config::default_sync_root_suggestion(identity));
-    engine.start_sync(sync_root)
-}
-
 impl<C: CredentialStores> EngineActions for LiveEngine<C> {
+    /// The gate from the handle's view (read without waiting: the UI thread asks it on every frame).
     fn session(&self) -> Session {
         self.drain();
-        let gate = map_gate_shell(self.engine.gate());
+        let gate = map_gate_shell(self.engine.view().gate);
         // Whose session: the email is known from the stored session at start, the user id only once the
         // server named it in this run. One of them, always the same one for one account in one run.
         let account = self
@@ -334,25 +329,7 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     /// finished check, its "checking": "up to date" only after the engine reported a finished check.
     fn tray_inputs(&self) -> TrayInputs {
         self.drain();
-        let gate = self.engine.gate();
-        let session_expired = gate != EngineGate::SignedOut && tray::session_ended(&self.engine);
-        let paused = self.engine.is_paused();
-        let running = self.engine.is_syncing();
-        let view = self.status_view();
-        TrayInputs {
-            signed_in: gate != EngineGate::SignedOut && !session_expired,
-            session_expired,
-            locked: gate == EngineGate::Locked,
-            paused,
-            explorer_ready: false, // Cloud Files registration not wired
-            engine: if running {
-                tray::engine_state(&view)
-            } else {
-                EngineState::NotRunning
-            },
-            files_remaining: view.files_remaining.filter(|_| running && !paused && view.is_syncing()),
-            ..TrayInputs::default()
-        }
+        sync::tray_inputs_of(&self.engine.view(), &self.status_view())
     }
 
     fn pause_sync(&self) -> Result<(), actions::ActionError> {
@@ -373,25 +350,23 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
         None
     }
 
-    /// Asks the engine to start, on a worker thread: the engine's start blocks (it binds the local data and,
-    /// on Windows, registers the folder) and this is called from the window's thread. `Ok` means "asked"; the
-    /// outcome is logged, and the session and the b show whether sync runs. Without a session nothing is asked.
+    /// Asks the engine to start, on a `start-sync` worker, one at a time (contract §4.3): the engine's start blocks
+    /// (it binds the local data and, on Windows, registers the folder) and this is called from the window's thread.
+    /// `Ok` means "asked"; the view says where the start got to, and a refusal opens the modal. Without a session
+    /// nothing is asked.
     fn start_sync(&self) -> Result<(), actions::ActionError> {
-        if self.engine.gate() != EngineGate::Ready {
+        if self.engine.view().gate != EngineGate::Ready {
             return Err(actions::ActionError::NotAvailable("not signed in and unlocked"));
         }
-        let (engine, identity) = (self.engine.clone(), self.identity);
-        thread::Builder::new()
-            .name("start-sync".into())
-            .spawn(move || match start_sync_now(&engine, identity) {
-                Ok(SyncStart::Started) => log("sync started"),
-                Ok(SyncStart::AlreadyRunning) => {}
-                Ok(SyncStart::NoSession) => log("sync was not started: no session"),
-                // The engine's sentence names a folder by its name at most, never a path, a key or a token.
-                Err(error) => log(format!("sync was not started: {error}")),
-            })
+        let (engine, folder) = (self.engine.clone(), self.starts.folder());
+        self.starts
+            .ask(move || sync::start_sync_now(&engine, &folder))
             .map(|_| ())
             .map_err(|_| actions::ActionError::Failed("could not start a thread".into()))
+    }
+
+    fn sync_refusal(&self) -> Option<crate::frames::global::sync_off::SyncOff> {
+        sync::sync_refusal(&self.engine.view(), self.starts.folder_name())
     }
 
     fn stop_for_quit(&self) {
@@ -424,8 +399,9 @@ impl<C: CredentialStores> EngineSignInSource<C> {
 }
 
 impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
+    /// The gate from the handle's view: read without waiting, on every frame.
     fn gate(&self) -> GateState {
-        map_gate_signin(self.engine.gate())
+        map_gate_signin(self.engine.view().gate)
     }
 
     fn shared_session(&self) -> Option<SharedSession> {
@@ -638,14 +614,10 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         None
     }
 
+    /// The status line's word for the handle's view (`sync::sync_word`): read without waiting, on every frame, and
+    /// never "Up to date" for an engine that does not run.
     fn sync_state(&self) -> Option<String> {
-        if self.engine.is_paused() {
-            Some("Paused".into())
-        } else if self.engine.is_syncing() {
-            Some("Syncing".into())
-        } else {
-            Some("Up to date".into())
-        }
+        sync::sync_word(&self.engine.view()).map(str::to_string)
     }
 
     fn details(&self, item: &DriveItem, folder: &str) -> Details {
@@ -657,8 +629,9 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     }
 
     fn can_add(&self, _folder: Option<&str>) -> bool {
-        // Writable when there is a sync root and a state database.
-        self.local().is_ok()
+        // Writable while an engine runs on the folder (asked on every frame: the view, which never waits). The
+        // operation itself goes through `local()`, which asks the engine again.
+        self.engine.view().start == Start::Running
     }
 
     fn sort_of(&self, _: Option<&str>) -> Option<crate::frames::files::Sort> {

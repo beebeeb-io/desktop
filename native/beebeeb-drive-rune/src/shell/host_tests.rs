@@ -1034,3 +1034,78 @@ fn dispatching_gate_ready_does_not_override_the_engines_authority() {
         );
     }
 }
+
+/// A source with nothing synced on this PC yet (`state.db` does not exist: every read is `Unreadable`) until the
+/// test says the first sync wrote it; it counts the reads.
+#[derive(Clone, Default)]
+struct FirstSync {
+    synced: Arc<std::sync::atomic::AtomicBool>,
+    reads: Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl FirstSync {
+    fn reads(&self) -> u32 {
+        self.reads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl crate::source::DriveSource for FirstSync {
+    fn list(&self, folder_id: Option<&str>) -> Result<crate::source::Listing, crate::source::SourceError> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if !self.synced.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(crate::source::SourceError::Unreadable);
+        }
+        crate::source::DriveSource::list(&crate::source::BoardFixtureSource::new(), folder_id)
+    }
+    fn storage(&self) -> Option<crate::source::StorageSummary> {
+        None
+    }
+}
+
+/// The first sign-in on a PC (R1.1 of the sync-start contract): the gate opens before anything has synced, so the
+/// root cannot be read and the window says so. The running engine's first finished check reads the root again, with
+/// no click. Nothing is read on the frames in between, and a root that reads is not read again from here.
+#[test]
+fn the_first_finished_check_shows_the_files_without_a_click() {
+    use super::super::tray::EngineState;
+    let engine = Arc::new(FixtureEngine::with(GateState::SignedOut, TrayInputs::default()));
+    let source = FirstSync::default();
+    let shell = Shell::fixture_on(engine.clone(), Arc::new(FakePlatform::default()));
+    let mut rt = runtime(state::init_from(shell, Box::new(source.clone()), None));
+    let state = |engine_state| TrayInputs {
+        signed_in: true,
+        engine: engine_state,
+        ..TrayInputs::default()
+    };
+    engine.set_inputs(state(EngineState::NotRunning));
+    engine.set_gate(GateState::Ready);
+    settle(&mut rt);
+    assert_eq!(rt.state.list_error, Some(crate::source::SourceError::Unreadable));
+    let after_the_gate = source.reads();
+
+    engine.set_inputs(state(EngineState::Checking));
+    settle(&mut rt);
+    source.synced.store(true, std::sync::atomic::Ordering::SeqCst);
+    engine.set_inputs(state(EngineState::Syncing));
+    settle(&mut rt);
+    assert_eq!(
+        source.reads(),
+        after_the_gate,
+        "nothing is read before a check finishes"
+    );
+    assert_eq!(rt.state.list_error, Some(crate::source::SourceError::Unreadable));
+
+    engine.set_inputs(state(EngineState::Idle));
+    settle(&mut rt);
+    assert_eq!(rt.state.list_error, None, "the finished check showed the files");
+    let board = crate::source::DriveSource::list(&crate::source::BoardFixtureSource::new(), None).unwrap();
+    assert_eq!(rt.state.listing.items.len(), board.items.len());
+    assert!(rt.find("file-list-error").is_none());
+
+    let shown = source.reads();
+    engine.set_inputs(state(EngineState::Syncing));
+    settle(&mut rt);
+    engine.set_inputs(state(EngineState::Idle));
+    settle(&mut rt);
+    assert_eq!(source.reads(), shown, "a root that reads is navigation's");
+}
