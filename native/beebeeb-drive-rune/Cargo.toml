@@ -18,6 +18,9 @@ beebeeb-engine = { path = "../../crates/beebeeb-engine" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 # The sign-in source hands secrets to the engine as Zeroizing<String> (wiped on drop).
 zeroize = "1"
+# Checks `--api-base` (`engine_host/open.rs`) with the parser reqwest connects with; already in the lock through
+# the engine's reqwest, so no new crate is built.
+url = "2"
 
 serde_json = "1"
 # Parses Markdown for the viewer (`frames/viewers/markdown.rs`): MIT, pure Rust, no network, no HTML output.

@@ -43,7 +43,7 @@ fn engine_at(api_base: &str) -> Arc<Engine<MemoryCredentials>> {
 
 /// A signed-out engine whose API is the test build's closed loopback port: it reaches nothing.
 fn offline_engine() -> Arc<Engine<MemoryCredentials>> {
-    engine_at(&open::api_base(None, true))
+    engine_at(open::ApiBase::engine_default().origin())
 }
 
 /// The host's side of `engine` (`LiveEngine`), with a queue the test sends the engine's reports into.

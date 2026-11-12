@@ -47,6 +47,8 @@ use crate::shell::tray::{EngineState, TrayInputs};
 use crate::source::{DriveItem, DriveSource, Listing, SourceError, StorageSummary};
 
 pub mod backups;
+#[cfg(test)]
+mod binding_tests;
 pub mod open;
 #[cfg(test)]
 mod tests;

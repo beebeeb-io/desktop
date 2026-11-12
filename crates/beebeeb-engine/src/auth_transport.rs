@@ -5,8 +5,15 @@ use beebeeb_core::auth_flow::{HttpRequest, HttpResponse, Method, RequestAuth};
 /// A network failure (no answer at all): the UI's offline message.
 pub const OFFLINE: &str = "offline";
 
+/// [`client_for`] the process's API base ([`crate::runner::api_base_url`]): the client [`send`] goes with.
 pub fn client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    client_for(&crate::runner::api_base_url())
+}
+
+/// The client for the auth requests to `api_base`, with its proxy rule (`api_client::api_base_client_builder`: a
+/// plain-http base on this computer never goes through a proxy).
+pub fn client_for(api_base: &str) -> Result<reqwest::Client, String> {
+    crate::api_client::api_base_client_builder(api_base)
         // A stuck request ends after 30 s with the offline message (DW-A18).
         .timeout(std::time::Duration::from_secs(30))
         .default_headers(crate::api_client::provenance_headers())
