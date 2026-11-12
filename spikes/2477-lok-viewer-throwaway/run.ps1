@@ -5,7 +5,7 @@
 #   -Phase remove    delete everything the spike put on the machine and count what is left
 # Everything lives under ONE folder ($Root); the only other thing touched is one firewall rule.
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('install', 'run', 'lokdiag', 'artcraft', 'remove', 'count')][string]$Phase,
+    [Parameter(Mandatory = $true)][ValidateSet('install', 'run', 'lokdiag', 'artcraft', 'rustnet', 'remove', 'count')][string]$Phase,
     [string]$Root = 'C:\bb\spike-2477'
 )
 $ErrorActionPreference = 'Stop'
@@ -191,7 +191,7 @@ if ($Phase -eq 'artcraft') {
 }
 
 # ---- run
-$prog = Find-Program
+$prog = if ($Phase -eq 'rustnet') { $null } else { Find-Program }   # rustnet needs no LibreOffice install
 $out = $env:BB_OUT
 if (-not $out) { throw 'BB_OUT is not set (run through remote-build)' }
 New-Item -ItemType Directory -Force "$out\png" | Out-Null
@@ -253,6 +253,116 @@ function Make-Legacy {
     Say "legacy fixtures written by soffice --convert-to: $($made.Count) of 3 ($(($made | ForEach-Object { "$($_.Name)=$($_.Length)" }) -join ', '))"
     New-Item -ItemType Directory -Force "$out\legacy" | Out-Null
     $made | Copy-Item -Destination "$out\legacy"
+}
+
+if ($Phase -eq 'rustnet') {
+    # Do the three Rust tools open ANY connection? Two instruments, each first seen to count:
+    #   1. a loopback listener on 127.0.0.1:47477, where the remote.* fixtures point (hits are written to a file);
+    #   2. Windows' own record of every connection it permitted (event 5156) or blocked (event 5157), per program.
+    # Pass "open": no firewall rule for the tools. Pass "blocked": an outbound block rule per tool.
+    $log = "$out\rustnet.log"
+    Say (Count-Leftovers 'before-rustnet')
+    $Apps = @(
+        @{ n = 'wordcraft'; v = '0.18.1'; sha = '257f670514057cb14967b88c85ac82d165da43ee7671e185acead61420af0389' },
+        @{ n = 'gridcraft'; v = '0.19.1'; sha = '0b4bf8535f4904fac654326a360ff6d74ea6f4d184a8257c106388fafe74c9ac' },
+        @{ n = 'deckcraft'; v = '0.18.1'; sha = '6df6f60b2182065c427fe4c3fe1b5d74b92706b238c6f35f3f91e5f359042e99' })
+    $ac = "$Root\artcraft"; $o = "$out\rustnet"; $fx = "$Here\fixtures"
+    New-Item -ItemType Directory -Force $ac, $o, "$o\dc-remote", "$o\dc-hard" | Out-Null
+    $cli = @{}
+    foreach ($a in $Apps) {
+        $zip = "$ac\$($a.n).zip"
+        if (-not (Test-Path -LiteralPath $zip)) {
+            & curl.exe -fsSL -o $zip "https://github.com/storytold/$($a.n)/releases/download/v$($a.v)/$($a.n)-$($a.v)-windows-x64-portable.zip"
+            if ($LASTEXITCODE -ne 0) { throw "download failed: $($a.n)" }
+        }
+        if ((Sha256 $zip) -ne $a.sha) { throw "SHA-256 mismatch: $($a.n)" }
+        if (-not (Test-Path -LiteralPath "$ac\$($a.n)")) { Expand-Archive -LiteralPath $zip -DestinationPath "$ac\$($a.n)" }
+        $cli[$a.n] = (Get-ChildItem -LiteralPath "$ac\$($a.n)" -Recurse -Filter "$($a.n)-cli.exe" | Select-Object -First 1).FullName
+    }
+    Say "tools: $($cli.Count) of 3 zips match their pinned SHA-256"
+
+    $sub = '{0CCE9226-69AE-11D9-BED3-505054503030}'   # audit subcategory "Filtering Platform Connection"
+    $auditBefore = (& auditpol /get /subcategory:$sub /r | ConvertFrom-Csv).'Inclusion Setting'
+    Say "audit setting before: '$auditBefore'"
+    function Conn([string]$ExeName, [datetime]$Since, [int]$Id) {
+        @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = $Id; StartTime = $Since } -ErrorAction SilentlyContinue |
+            Where-Object { "$($_.Properties[1].Value)" -like "*\$ExeName" })
+    }
+    function Hits { @(Get-Content -LiteralPath "$Root\hits.txt" -ErrorAction SilentlyContinue).Count }
+    function Tool([string]$App, [string[]]$A) {
+        $p = Start-Process -FilePath $cli[$App] -ArgumentList $A -PassThru -NoNewWindow -RedirectStandardOutput "$ac\so.txt" -RedirectStandardError "$ac\se.txt"
+        $null = $p.Handle
+        if (-not $p.WaitForExit(60000)) { Stop-Process -Id $p.Id -Force; return 'TIMEOUT' }
+        $p.WaitForExit(); return "$($p.ExitCode)"
+    }
+    $listener = $null
+    try {
+        & auditpol /set /subcategory:$sub /success:enable /failure:enable | Out-Null
+        $listener = Start-Process -FilePath $exe -ArgumentList @('listen', '47477', '900', "$Root\hits.txt") -PassThru -NoNewWindow
+        for ($i = 0; $i -lt 50 -and -not (Test-Path -LiteralPath "$Root\hits.txt"); $i++) { Start-Sleep -Milliseconds 100 }
+
+        # ---- the instruments must be able to count
+        $t0 = Get-Date
+        & curl.exe -s -o NUL "http://127.0.0.1:47477/instrument-check"
+        Start-Sleep -Seconds 1
+        $h = Hits
+        Say "instrument 1 (listener): hits after one curl request = $h (wanted 1)"
+        if ($h -ne 1) { throw 'the listener does not count' }
+        & $exe probe 'download.documentfoundation.org:443' | ForEach-Object { Say "no rule:   $_" }
+        New-NetFirewallRule -DisplayName $RuleName -Direction Outbound -Program $exe -Action Block -Profile Any | Out-Null
+        Start-Sleep -Seconds 2
+        & $exe probe 'download.documentfoundation.org:443' | ForEach-Object { Say "with rule: $_" }
+        Get-NetFirewallRule -DisplayName $RuleName | Remove-NetFirewallRule
+        Start-Sleep -Seconds 3
+        $permit = (Conn 'lok-spike.exe' $t0 5156).Count; $block = (Conn 'lok-spike.exe' $t0 5157).Count
+        Say "instrument 2 (Windows connection events) for our own probe: permitted=$permit blocked=$block (wanted both above 0)"
+        if ($permit -lt 1 -or $block -lt 1) { throw 'the connection-event instrument does not count' }
+        $loop = (Conn 'curl.exe' $t0 5156).Count
+        Say "instrument 2 sees loopback connections too: curl.exe permitted events = $loop"
+
+        # ---- the three tools, twice
+        foreach ($pass in 'open', 'blocked') {
+            if ($pass -eq 'blocked') {
+                foreach ($a in $Apps) { New-NetFirewallRule -DisplayName "$RuleName-$($a.n)" -Direction Outbound -Program $cli[$a.n] -Action Block -Profile Any | Out-Null }
+                Start-Sleep -Seconds 2
+            }
+            $t = Get-Date; $h0 = Hits
+            $codes = @{ wordcraft = @(); deckcraft = @(); gridcraft = @() }
+            $codes.wordcraft += Tool 'wordcraft' @('info', "$fx\remote.docx")
+            $codes.wordcraft += Tool 'wordcraft' @('render', "$fx\remote.docx", "$o\wc-remote-$pass.png", '--page', '1', '--scale', '1')
+            $codes.wordcraft += Tool 'wordcraft' @('convert', "$fx\remote.docx", "$o\wc-remote-$pass.pdf")
+            $codes.wordcraft += Tool 'wordcraft' @('render', "$fx\hard.docx", "$o\wc-hard-$pass.png", '--page', '1', '--scale', '1')
+            $codes.deckcraft += Tool 'deckcraft' @('info', "$fx\remote.pptx")
+            $codes.deckcraft += Tool 'deckcraft' @('render', "$fx\remote.pptx", '--all', '--scale', '1', "$o\dc-remote")
+            $codes.deckcraft += Tool 'deckcraft' @('convert', "$fx\remote.pptx", "$o\dc-remote-$pass.pdf")
+            $codes.deckcraft += Tool 'deckcraft' @('render', "$fx\hard.pptx", '--all', '--scale', '1', "$o\dc-hard")
+            $codes.gridcraft += Tool 'gridcraft' @('info', "$fx\remote.xlsx", '--json')
+            $codes.gridcraft += Tool 'gridcraft' @('cat', "$fx\remote.xlsx")
+            Copy-Item -LiteralPath "$ac\so.txt" "$o\gc-cat-remote-$pass.stdout.txt"
+            $codes.gridcraft += Tool 'gridcraft' @('convert', "$fx\remote.xlsx", "$o\gc-remote-$pass.pdf")
+            $codes.gridcraft += Tool 'gridcraft' @('convert', "$fx\remote.xlsx", "$o\gc-remote-$pass.html")
+            $codes.gridcraft += Tool 'gridcraft' @('cat', "$fx\hard.xlsx")
+            Start-Sleep -Seconds 4
+            foreach ($a in $Apps) {
+                $n = "$($a.n)-cli.exe"
+                $pe = Conn $n $t 5156; $be = Conn $n $t 5157
+                $dest = (@($pe) + @($be) | ForEach-Object { "$($_.Properties[5].Value):$($_.Properties[6].Value)" } | Sort-Object -Unique) -join ' '
+                Say "pass=$pass tool=$n runs=$($codes[$a.n].Count) exit_codes=$($codes[$a.n] -join ',') permitted_connections=$($pe.Count) blocked_connections=$($be.Count) destinations='$dest'"
+            }
+            Say "pass=$pass listener_hits_delta=$((Hits) - $h0) (all three tools together)"
+        }
+        Say "listener file: $((@(Get-Content -LiteralPath "$Root\hits.txt") | ForEach-Object { "[$_]" }) -join ' ')"
+    }
+    finally {
+        if ($listener -and -not $listener.HasExited) { Stop-Process -Id $listener.Id -Force }
+        Get-NetFirewallRule -DisplayName "$RuleName*" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+        $s = if ($auditBefore -match 'Success') { 'enable' } else { 'disable' }
+        $f = if ($auditBefore -match 'Failure') { 'enable' } else { 'disable' }
+        & auditpol /set /subcategory:$sub /success:$s /failure:$f | Out-Null
+        $auditAfter = (& auditpol /get /subcategory:$sub /r | ConvertFrom-Csv).'Inclusion Setting'
+        Say "audit setting restored: '$auditAfter' (before: '$auditBefore'); firewall rules left: $(@(Get-NetFirewallRule -DisplayName "$RuleName*" -ErrorAction SilentlyContinue).Count)"
+    }
+    exit 0
 }
 
 if ($Phase -eq 'lokdiag') {

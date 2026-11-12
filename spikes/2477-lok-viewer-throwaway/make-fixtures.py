@@ -5,6 +5,7 @@
   spike.xlsx   2 sheets ("SHEET n OF 2" plus a small table)
   spike.pptx   3 slides ("SLIDE n OF 3")
   remote.docx  1 page with an image LINKED to http://127.0.0.1:47477/remote.png
+  remote.pptx  spike.pptx plus a LINKED picture; remote.xlsx: WEBSERVICE(), a linked workbook, a LINKED picture
                (the spike program listens there and counts the fetch attempts)
 Deterministic: fixed timestamps, so a re-run gives the same bytes.
 """
@@ -198,3 +199,54 @@ for n in (1, 2, 3):
     parts.append((f"ppt/slides/slide{n}.xml", slide(n)))
     parts.append((f"ppt/slides/_rels/slide{n}.xml.rels", rels([("rId1", "slideLayout", "../slideLayouts/slideLayout1.xml", False)])))
 write("spike.pptx", parts)
+
+# ---- remote.pptx: spike.pptx with one LINKED (not embedded) picture on slide 1
+LINK = "http://127.0.0.1:47477/remote-pptx.png"
+rpic = ('<p:pic><p:nvPicPr><p:cNvPr id="9" name="Remote"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>'
+        '<p:blipFill><a:blip r:link="rId2"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>'
+        '<p:spPr><a:xfrm><a:off x="685800" y="4419600"/><a:ext cx="1905000" cy="1905000"/></a:xfrm>'
+        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>')
+rparts = []
+for path, body in parts:
+    if path == "ppt/slides/slide1.xml":
+        body = body.replace("</p:spTree>", rpic + "</p:spTree>")
+    if path == "ppt/slides/_rels/slide1.xml.rels":
+        body = rels([("rId1", "slideLayout", "../slideLayouts/slideLayout1.xml", False), ("rId2", "image", LINK, True)])
+    rparts.append((path, body))
+write("remote.pptx", rparts)
+
+# ---- remote.xlsx: a WEBSERVICE formula, a link to a workbook on a web server, and a LINKED picture
+XDR = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+rsheet = (f'<worksheet xmlns="{S}" xmlns:r="{R}"><sheetData>'
+          '<row r="1"><c r="A1" t="inlineStr"><is><t>REMOTE CONTENT BELOW</t></is></c></row>'
+          '<row r="2"><c r="A2"><f>WEBSERVICE("http://127.0.0.1:47477/remote-xlsx-webservice")</f></c></row>'
+          '<row r="3"><c r="A3"><f>[1]Sheet1!$A$1</f></c></row>'
+          '<row r="4"><c r="A4"><f>1+1</f></c></row>'
+          '</sheetData><drawing r:id="rId1"/></worksheet>')
+rdrawing = (f'<xdr:wsDr xmlns:xdr="{XDR}" xmlns:a="{A}" xmlns:r="{R}"><xdr:oneCellAnchor>'
+            '<xdr:from><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>'
+            '<xdr:ext cx="1905000" cy="1905000"/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="2" name="Remote"/><xdr:cNvPicPr/></xdr:nvPicPr>'
+            '<xdr:blipFill><a:blip r:link="rId1"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>'
+            '<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1905000" cy="1905000"/></a:xfrm>'
+            '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>')
+rext = (f'<externalLink xmlns="{S}" xmlns:r="{R}"><externalBook r:id="rId1"><sheetNames><sheetName val="Sheet1"/></sheetNames>'
+        '</externalBook></externalLink>')
+write("remote.xlsx", [
+    ("[Content_Types].xml", types([("/xl/workbook.xml", "spreadsheetml.sheet.main"),
+                                   ("/xl/worksheets/sheet1.xml", "spreadsheetml.worksheet"),
+                                   ("/xl/drawings/drawing1.xml", "drawing"),
+                                   ("/xl/externalLinks/externalLink1.xml", "spreadsheetml.externalLink")])),
+    ("_rels/.rels", rels([("rId1", "officeDocument", "xl/workbook.xml", False)])),
+    ("xl/workbook.xml", f'<workbook xmlns="{S}" xmlns:r="{R}"><sheets><sheet name="Remote" sheetId="1" r:id="rId1"/></sheets>'
+                        '<externalReferences><externalReference r:id="rId2"/></externalReferences>'
+                        '<calcPr fullCalcOnLoad="1"/></workbook>'),
+    ("xl/_rels/workbook.xml.rels", rels([("rId1", "worksheet", "worksheets/sheet1.xml", False),
+                                         ("rId2", "externalLink", "externalLinks/externalLink1.xml", False)])),
+    ("xl/worksheets/sheet1.xml", rsheet),
+    ("xl/worksheets/_rels/sheet1.xml.rels", rels([("rId1", "drawing", "../drawings/drawing1.xml", False)])),
+    ("xl/drawings/drawing1.xml", rdrawing),
+    ("xl/drawings/_rels/drawing1.xml.rels", rels([("rId1", "image", "http://127.0.0.1:47477/remote-xlsx.png", True)])),
+    ("xl/externalLinks/externalLink1.xml", rext),
+    ("xl/externalLinks/_rels/externalLink1.xml.rels",
+     rels([("rId1", "externalLinkPath", "http://127.0.0.1:47477/remote-xlsx-book.xlsx", True)])),
+])

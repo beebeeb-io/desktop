@@ -183,6 +183,37 @@ fn main() {
             println!("probe {addr}: {}", if ok { "CONNECTED" } else { "NO CONNECTION" });
             std::process::exit(if ok { 0 } else { 1 });
         }
+        Some("listen") => {
+            // listen <port> <seconds> <file>: one line in <file> per accepted connection (its request line).
+            use std::io::Read;
+            let port: u16 = args.get(2).and_then(|p| p.parse().ok()).expect("port");
+            let secs: u64 = args.get(3).and_then(|p| p.parse().ok()).expect("seconds");
+            let out = args.get(4).expect("file");
+            let l = std::net::TcpListener::bind(("127.0.0.1", port)).expect("bind");
+            l.set_nonblocking(true).expect("nonblocking");
+            std::fs::write(out, "").expect("create the hit file"); // the file existing = ready
+            let end = Instant::now() + std::time::Duration::from_secs(secs);
+            while Instant::now() < end {
+                match l.accept() {
+                    Ok((mut s, _)) => {
+                        let _ = s.set_nonblocking(false);
+                        let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+                        let mut buf = [0u8; 512];
+                        let n = s.read(&mut buf).unwrap_or(0);
+                        let first = String::from_utf8_lossy(&buf[..n])
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
+                        let mut f = std::fs::OpenOptions::new().append(true).open(out).expect("hit file");
+                        let _ = writeln!(f, "hit {first}");
+                        let _ =
+                            s.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+                }
+            }
+        }
         Some("render") if args.iter().any(|a| a == "--load-on-thread") => {
             // Diagnosis: every LibreOfficeKit call on a worker thread; the main thread pumps messages.
             let a = args.clone();
@@ -191,7 +222,7 @@ fn main() {
         }
         Some("render") => render(&args),
         _ => {
-            eprintln!("usage: lok-spike probe <host:port> | render --install … --profile … --file … --out …");
+            eprintln!("usage: lok-spike probe <host:port> | listen <port> <seconds> <file> | render --install … --profile … --file … --out …");
             std::process::exit(2);
         }
     }
