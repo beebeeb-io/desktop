@@ -31,7 +31,7 @@ pub(super) async fn check_for_update(app: &tauri::AppHandle) {
                 "update available — notifying frontend"
             );
             let version = update.version.to_string();
-            macos_popover::note_update(channel.as_str(), Some(&version));
+            popover_data::note_update(channel.as_str(), Some(&version));
             // Emit to the webview so the frontend can show a banner.
             // Frontend listens with: import { listen } from "@tauri-apps/api/event"
             //   await listen("update-available", handler)
@@ -46,7 +46,7 @@ pub(super) async fn check_for_update(app: &tauri::AppHandle) {
             );
         }
         Ok(None) => {
-            macos_popover::note_update(channel.as_str(), None);
+            popover_data::note_update(channel.as_str(), None);
             tracing::debug!("no update available");
         }
         Err(e) => {
