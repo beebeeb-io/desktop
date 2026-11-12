@@ -77,4 +77,5 @@ Decision (lane, 2026-11-12): one Security pane and one Account pane, in the acco
 says "Security is one pane (final review C3): DW-A52" and DW-0708's says it is "reached from the plan card Drive adds
 to the shared Account page (DW-A51)". The three goldens were captured from drawings in the other kit; no tolerance
 was loosened and no key dropped. To turn them green the BOARD has to draw these three in the account kit, and the
-goldens be captured again: a board change, not this lane's.
+goldens be captured again: a board change, not this lane's (board follow-up task 2480).
+Gate, light / dark, geometry failing: DW-0716 96 / 96, DW-0716b 83 / 83, DW-0708 59 / 59.
