@@ -230,6 +230,8 @@ pub fn scrim(t: &Theme) -> El {
 
 /// A switch (36 x 20): ink when on, as the board draws it on the desktop.
 fn switch(key: &str, name: &str, on: bool, t: &Theme) -> El {
+    // `oklch(0.18 0.01 70)`: the ink of the knob's shadow, the same in both themes.
+    let knob_ink = rune::color::hex("#14110d").unwrap_or(Color::BLACK);
     el().key(format!("{key}-switch"))
         .role("switch")
         .label(name)
@@ -241,11 +243,13 @@ fn switch(key: &str, name: &str, on: bool, t: &Theme) -> El {
         .focusable(true)
         .child(
             el().key(format!("{key}-knob"))
-                .absolute(if on { 18.0 } else { 2.0 }, 2.0)
+                .absolute(if on { 19.0 } else { 3.0 }, 3.0)
                 .size(14.0, 14.0)
                 .radius(7.0)
                 .fill(if on { t.paper } else { Color::WHITE })
-                .box_shadow(kit::drop(1.0, 2.0, t.shadow)),
+                // `.kit-switch i`: ink at 4 % over 3 pt and at 6 % over 2 pt, in both themes.
+                .box_shadow(kit::drop(1.0, 3.0, knob_ink.alpha(0.04)))
+                .box_shadow(kit::drop(1.0, 2.0, knob_ink.alpha(0.06))),
         )
 }
 
@@ -343,7 +347,7 @@ fn note(words: &str, t: &Theme) -> El {
         .wrap()
 }
 
-fn sources(ui: &Ui, draft: &SourcesDraft, t: &Theme) -> (f32, Vec<El>, Vec<El>) {
+fn sources(ui: &Ui, draft: &SourcesDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
     let devices = ui.source.devices();
     // The dialog lists the tablets between the phones as the board does: by name is not its
     // order, so the board's is kept: the newest phone, the tablets, the older phones.
@@ -425,16 +429,17 @@ fn sources(ui: &Ui, draft: &SourcesDraft, t: &Theme) -> (f32, Vec<El>, Vec<El>) 
         ),
     ];
     let foot = vec![
-        chrome::button("ph-dlg-btn-0", "Done", None, Tone::Primary, 28.0, style::BUTTON, t)
-            .default_button()
-            .on_press(|s: &mut State| s.photos.confirm_dialog()),
-        chrome::button("ph-dlg-btn-1", "Cancel", None, Tone::Quiet, 28.0, style::BUTTON, t)
-            .on_press(|s: &mut State| s.photos.close_dialog()),
+        foot_button("ph-dlg-btn-0", "Done", None, Tone::Primary, t, |b| {
+            b.default_button().on_press(|s: &mut State| s.photos.confirm_dialog())
+        }),
+        foot_button("ph-dlg-btn-1", "Cancel", None, Tone::Quiet, t, |b| {
+            b.on_press(|s: &mut State| s.photos.close_dialog())
+        }),
     ];
     (460.0, body, foot)
 }
 
-fn share(ui: &Ui, draft: &ShareDraft, t: &Theme) -> (f32, Vec<El>, Vec<El>) {
+fn share(ui: &Ui, draft: &ShareDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
     let viewing = ui.viewing();
     let (name, bytes, id) = viewing.as_ref().map_or((String::new(), 0, None), |v| {
         (v.name.clone(), v.original_bytes, Some(v.id))
@@ -522,40 +527,26 @@ fn share(ui: &Ui, draft: &ShareDraft, t: &Theme) -> (f32, Vec<El>, Vec<El>) {
         ),
     ];
     let foot = vec![
-        chrome::button(
-            "ph-dlg-btn-0",
-            "Send a copy\u{2026}",
-            None,
-            Tone::Plain,
-            28.0,
-            style::BUTTON,
-            t,
-        )
-        .on_press(|s: &mut State| {
-            if let Some(id) = s.photos.viewer.as_ref().map(|v| v.id) {
-                s.photos.ask(Intent::SendCopy(id));
-                s.photos.close_dialog();
-            }
+        foot_button("ph-dlg-btn-0", "Send a copy\u{2026}", None, Tone::Plain, t, |b| {
+            b.on_press(|s: &mut State| {
+                if let Some(id) = s.photos.viewer.as_ref().map(|v| v.id) {
+                    s.photos.ask(Intent::SendCopy(id));
+                    s.photos.close_dialog();
+                }
+            })
         }),
-        el().key("ph-dlg-foot-spacer").grow(1.0),
-        chrome::button(
-            "ph-dlg-btn-1",
-            "Copy link",
-            Some(&icons::LINK),
-            Tone::Primary,
-            28.0,
-            style::BUTTON,
-            t,
-        )
-        .default_button()
-        .on_press(|s: &mut State| s.photos.confirm_dialog()),
-        chrome::button("ph-dlg-btn-2", "Cancel", None, Tone::Quiet, 28.0, style::BUTTON, t)
-            .on_press(|s: &mut State| s.photos.close_dialog()),
+        (el(), None),
+        foot_button("ph-dlg-btn-1", "Copy link", Some(&icons::LINK), Tone::Primary, t, |b| {
+            b.default_button().on_press(|s: &mut State| s.photos.confirm_dialog())
+        }),
+        foot_button("ph-dlg-btn-2", "Cancel", None, Tone::Quiet, t, |b| {
+            b.on_press(|s: &mut State| s.photos.close_dialog())
+        }),
     ];
     (440.0, body, foot)
 }
 
-fn details(ui: &Ui, t: &Theme) -> (f32, Vec<El>, Vec<El>) {
+fn details(ui: &Ui, t: &Theme) -> (f32, Vec<El>, Foot) {
     let id = ui.viewing().map(|v| v.id);
     let lines = id.map(|id| ui.source.details(id)).unwrap_or_default();
     let items = lines
@@ -597,16 +588,63 @@ fn details(ui: &Ui, t: &Theme) -> (f32, Vec<El>, Vec<El>) {
             row
         })
         .collect();
-    let foot = vec![
-        chrome::button("ph-dlg-btn-0", "Done", None, Tone::Plain, 28.0, style::BUTTON, t)
-            .default_button()
-            .on_press(|s: &mut State| s.photos.close_dialog()),
-    ];
+    let foot = vec![foot_button("ph-dlg-btn-0", "Done", None, Tone::Plain, t, |b| {
+        b.default_button().on_press(|s: &mut State| s.photos.close_dialog())
+    })];
     (420.0, vec![list(0, None, items, t)], foot)
 }
 
 /// A dialog (`.wn-dlg`), centred in the window under the caption.
-pub fn dialog(ui: &Ui, dialog: &Dialog, t: &Theme) -> El {
+/// A dialog's foot, left to right: its buttons, each with its width on the board, and `None`
+/// for the space that pushes what follows to the right.
+type Foot = Vec<(El, Option<f32>)>;
+
+/// A button of a dialog's foot (28 pt) and its width on the board; `with` gives it what it does.
+fn foot_button(
+    key: &str,
+    label: &str,
+    ic: Option<&'static Icon>,
+    tone: Tone,
+    t: &Theme,
+    with: impl FnOnce(El) -> El,
+) -> (El, Option<f32>) {
+    let w = chrome::button_width(label, ic.is_some(), tone, 28.0, style::BUTTON);
+    (
+        with(chrome::button(key, label, ic, tone, 28.0, style::BUTTON, t)),
+        Some(w),
+    )
+}
+
+/// The foot's buttons with their edges on whole device pixels, counted from the dialog's own
+/// left edge. The dialog does not snap (it sits on a quarter point, see `dialog`), and a
+/// button's width follows its words, so its left and right would fall between pixels and draw
+/// soft. The board snaps each edge inside the dialog and moves the dialog as a whole.
+fn foot_on_pixels(foot: Foot, width: f32, scale: f32) -> Vec<El> {
+    const PAD: f32 = 24.0;
+    const GAP: f32 = 8.0;
+    let snap = |x: f32| (x * scale + 0.5).floor() / scale;
+    // No space: the board's foot is `justify-content: flex-end`, so all of it sits right.
+    let split = foot.iter().position(|(_, w)| w.is_none()).unwrap_or(0);
+    let right: f32 = foot[split..].iter().filter_map(|(_, w)| *w).map(|w| w + GAP).sum();
+    let mut x = PAD;
+    let mut at = PAD;
+    let mut out = Vec::new();
+    for (i, (button, w)) in foot.into_iter().enumerate() {
+        if i == split {
+            x = width - PAD - (right - GAP).max(0.0);
+        }
+        let Some(w) = w else { continue };
+        let (l, r) = (snap(x), snap(x + w));
+        out.push(el().w((l - at).max(0.0)));
+        out.push(button.w(r - l));
+        at = r;
+        x += w + GAP;
+    }
+    out
+}
+
+/// A dialog (`.wn-dlg`), centred in the window under the caption. `scale`: device pixels a point.
+pub fn dialog(ui: &Ui, dialog: &Dialog, scale: f32, t: &Theme) -> El {
     let (title, (width, body, foot)) = match dialog {
         Dialog::Sources(draft) => ("Photo sources", sources(ui, draft, t)),
         Dialog::Share(draft) => ("Share", share(ui, draft, t)),
@@ -616,42 +654,50 @@ pub fn dialog(ui: &Ui, dialog: &Dialog, t: &Theme) -> El {
         .key("ph-dlg")
         .role("dialog")
         .label(title)
+        // A dialog whose height ends in a half point is centred on a quarter point; the board
+        // draws it there, every edge inside it half covered (as `ui::settings_dialog` does).
+        .pixel_snap(false)
         .w(width)
         .radius(8.0)
         .fill(t.card)
         .box_shadow(kit::drop(24.0, 60.0, Color::BLACK.alpha(0.28)))
         .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .child(
-            el().key("ph-dlg-head").w_full().px(24.0).pt(20.0).pb(4.0).child(
-                kit::label("ph-dlg-title", title, style::TITLE, t.text)
-                    .role("heading")
-                    .w_full(),
-            ),
-        )
+        // The shadow and the ring are outside the card; the clip that rounds the foot's corners
+        // (`.wn-dlg { overflow: hidden }`) would cut them, so it sits one level in.
         .child(
             col()
-                .key("ph-dlg-body")
+                .key("ph-dlg-clip")
                 .w_full()
-                .px(24.0)
-                .pt(10.0)
-                .pb(18.0)
-                .gap(12.0)
-                .children(body),
-        )
-        .child(
-            row()
-                .key("ph-dlg-foot")
-                .w_full()
-                .px(24.0)
-                .py(16.0)
-                .gap(8.0)
-                .center_y()
-                .justify_end()
-                .corners([0.0, 0.0, 8.0, 8.0])
-                .fill(t.surface)
-                .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-                .border_layout()
-                .children(foot),
+                .clip_rounded(8.0)
+                .child(
+                    el().key("ph-dlg-head").w_full().px(24.0).pt(20.0).pb(4.0).child(
+                        kit::label("ph-dlg-title", title, style::TITLE, t.text)
+                            .role("heading")
+                            .w_full(),
+                    ),
+                )
+                .child(
+                    col()
+                        .key("ph-dlg-body")
+                        .w_full()
+                        .px(24.0)
+                        .pt(10.0)
+                        .pb(18.0)
+                        .gap(12.0)
+                        .children(body),
+                )
+                .child(
+                    row()
+                        .key("ph-dlg-foot")
+                        .w_full()
+                        .px(24.0)
+                        .py(16.0)
+                        .center_y()
+                        .fill(t.surface)
+                        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
+                        .border_layout()
+                        .children(foot_on_pixels(foot, width, scale)),
+                ),
         );
     col()
         .key("ph-dlg-layer")

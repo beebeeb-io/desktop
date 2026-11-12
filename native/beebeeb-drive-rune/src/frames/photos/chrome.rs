@@ -335,6 +335,14 @@ pub enum Tone {
     Primary,
 }
 
+/// A button's width on the board: the words as the font gives them, the icon and its gap, 12 pt
+/// each side (and a plain button's two borders).
+pub fn button_width(label: &str, icon: bool, tone: Tone, h: f32, font: TextStyle) -> f32 {
+    let icon_size = if h > 24.0 { 16.0 } else { 14.0 };
+    let content = advance(label, font) + if icon { icon_size + 7.0 } else { 0.0 };
+    content + if tone == Tone::Plain { 26.0 } else { 24.0 }
+}
+
 pub fn button(key: &str, label: &str, ic: Option<&'static Icon>, tone: Tone, h: f32, font: TextStyle, t: &Theme) -> El {
     let ink = match tone {
         Tone::Plain => t.text,
@@ -342,14 +350,12 @@ pub fn button(key: &str, label: &str, ic: Option<&'static Icon>, tone: Tone, h: 
         Tone::Primary => t.accent_text_on,
     };
     let icon_size = if h > 24.0 { 16.0 } else { 14.0 };
-    // The board's width: the words as the font gives them, the icon and its gap, 12 pt each side.
-    let content = advance(label, font) + ic.map_or(0.0, |_| icon_size + 7.0);
     let mut b = row()
         .key(key.to_string())
         .role("button")
         .label(label)
         .h(h)
-        .w(content + if tone == Tone::Plain { 26.0 } else { 24.0 })
+        .w(button_width(label, ic.is_some(), tone, h, font))
         .gap(7.0)
         .center()
         .radius(6.0)

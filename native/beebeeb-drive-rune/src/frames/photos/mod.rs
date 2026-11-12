@@ -677,7 +677,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     }
     if let Some(dialog) = &ui.dialog {
         front.push(overlay::scrim(&t));
-        front.push(overlay::dialog(ui, dialog, &t));
+        front.push(overlay::dialog(ui, dialog, cx.env().scale, &t));
     }
     match ui.viewing() {
         Some(viewing) => chrome::window(
