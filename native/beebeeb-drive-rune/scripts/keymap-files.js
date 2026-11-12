@@ -3,6 +3,19 @@
 // their own menus and empty states under their own names (integration I2).
 if (groupOf === 'files') {
 
+// ---- Toolbar: Open in Finder / Open in File Explorer (the button between the panel toggle and the separator) ----
+const explorerBtn = q('.mk-tb > .mk-tbtn[title^="Open in"]');
+if (explorerBtn) { api.box('open-explorer', explorerBtn); api.icon('open-explorer-icon', q('svg', explorerBtn)); }
+
+// ---- Details panel: Free up space (the button under the Available offline card, when the item has a copy) ----
+const freeUp = q('.mk-det > button:has(svg)');
+// The native key is `free-up`; the button is a `.kit-btn` with the cloud icon.
+if (freeUp && /Free up/.test(freeUp.textContent)) {
+  api.box('free-up-box', freeUp);
+  api.icon('free-up-icon', q('svg', freeUp));
+  api.text('free-up-label', q('span', freeUp));
+}
+
 // ---- Menus (`.wn-menu`): the file menu, Sort, New, the list's background menu and its submenu ----
 qa('.wn-menu').forEach((m, mi) => {
   const mk = mi ? `menu-${mi}` : 'menu';
