@@ -6,7 +6,11 @@ Status is `built` (gated light and dark, both truth lines at 0 failing) or `not 
 State after the review delta (2026-11-11): 11 built here (plus DW-0401, built before), 38 not built.
 State after lane f-files-rest (2026-11-12, PR 305): 16 built (2 of them with a gate not at 0), 34 not built.
 Not on the board, added on the owner's request (PR 305): Free up space (file menu, details panel) and the
-toolbar's Open in File Explorer; they move four keys of every Files frame until the board draws them.
+toolbar's Open in File Explorer; until the board draws them and the goldens are recaptured, NO Files frame
+gates at 0: the toolbar button moves ten keys in each of the 16 frames (`view-toggle`, `view-list`,
+`view-grid` and their icons, `sort-btn`, `sort-icon`, `sort-caret`, `panel-toggle-btn`, `panel-icon`), and
+Free up space moves more in DW-0404, DW-0406 and DW-1104. Where a row below says "0 failing on all six", read:
+before those two additions (at `1b2da021`). The 32 truth lines at the PR's head are in the PR body.
 
 | Frame | Group | What it is | Status |
 | --- | --- | --- | --- |
@@ -19,7 +23,7 @@ toolbar's Open in File Explorer; they move four keys of every Files frame until 
 | `DW-0407` | Files | Share a file with a link, or invite someone. | not built as a frame (the dialog is the Shared lane's); the entry point works: Share… emits `Intent::Frame("DW-0407")` |
 | `DW-0408` | Files | Look at a file without leaving Beebeeb: Preview in the window; Open hands it to its app. | not built; Space and Preview emit `Intent::Frame("DW-0408")` |
 | `DW-0408b` | Files | Preview on a file Windows cannot preview: say so, instead of a blank panel. | not built |
-| `DW-0409` | Files | Move the selection to another folder. | built (lane f-files-rest, PR 305: light and dark at 0 failing on all six). Move… opens it; `FilesSource::move_to`. Not built: dragging a row onto a folder or a sidebar item |
+| `DW-0409` | Files | Move the selection to another folder. | built (lane f-files-rest, PR 305: light and dark at 0 failing on all six before the toolbar button). Move… opens it; Tab goes round it, and Left goes back up from a folder without folders; `FilesSource::move_to`. Not built: dragging a row onto a folder or a sidebar item |
 | `DW-0410` | Files | Rename where the name is, as File Explorer does. | built, gate NOT at 0 (PR 305): F2 and Rename work in the row through `FilesSource::rename`; the board's caret takes 3.5 pt of the line, a text field's takes none, so `.pdf` stands 3.5 pt further left (geometry 1, pixels 5) |
 | `DW-0410b` | Files | A name that is already used in the folder: say so and keep the old name. | built, gate NOT at 0 (PR 305): the error style and the tip are drawn and work; same caret cause as DW-0410, and the board's status line says "4 on this PC" with five such rows (text 1) |
 | `DW-0411` | Files | Everything about one file, the same rows as the iPhone's Details. | not built; Alt+Enter and Details emit `Intent::Frame("DW-0411")` |
