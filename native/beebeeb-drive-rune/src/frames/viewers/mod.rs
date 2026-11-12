@@ -333,7 +333,7 @@ impl Ui {
 
 /// The open file, while the route is on it.
 pub fn ui(s: &mut State) -> Option<&mut Ui> {
-    s.viewer.as_mut()
+    s.viewer.ui.as_mut()
 }
 
 fn route_item(s: &State) -> Option<String> {
@@ -343,11 +343,47 @@ fn route_item(s: &State) -> Option<String> {
     }
 }
 
-/// Open a file in the viewer: the route goes to it and its content is asked of the source.
-/// `false`: there is no such file (the route does not move).
+/// What the window keeps for this group (`State::viewer`): the open file, and where the route's
+/// files are read from.
+#[derive(Default)]
+pub struct Slot {
+    /// The open file, while the route is on it.
+    pub(crate) ui: Option<Ui>,
+    /// Makes the source a file named by the route is asked of. `None` (a window on `--db`, and
+    /// the engine's drive until its source is wired with [`wire`]): no file opens here, the
+    /// route shows the shell's placeholder. The board's fixture is here only in the board's
+    /// sample window ([`board_fixture`]), never as a fallback.
+    route: Option<RouteSource>,
+}
+
+/// Makes one source per opened file.
+pub type RouteSource = Box<dyn Fn() -> Box<dyn ViewerSource>>;
+
+/// Read the route's files from `route` from now on (the engine's source, once it exists).
+pub fn wire(s: &mut State, route: RouteSource) {
+    s.viewer.route = Some(route);
+}
+
+/// The board's sample window: its open files are the board's (`FixtureViewerSource`). What
+/// headless renders, the gate and the tests start from, beside `frames::files::board_fixture`;
+/// a window on any other drive is never given this.
+pub fn board_fixture(mut s: State) -> State {
+    wire(&mut s, Box::new(|| Box::new(FixtureViewerSource::new())));
+    s
+}
+
+fn route_source(s: &State) -> Option<Box<dyn ViewerSource>> {
+    s.viewer.route.as_ref().map(|make| make())
+}
+
+/// Open a file in the viewer: the route goes to it and its content is asked of the window's
+/// source. `false`: there is no such file, or the window has no source (the route does not move).
 #[cfg_attr(not(test), allow(dead_code))] // the call for Files' preview and open (DW-0408, another lane)
 pub fn open(s: &mut State, file_id: &str) -> bool {
-    open_from(s, Box::new(FixtureViewerSource::new()), file_id)
+    match route_source(s) {
+        Some(source) => open_from(s, source, file_id),
+        None => false,
+    }
 }
 
 /// [`open`] with the source to read from (the engine's, once it is wired).
@@ -357,19 +393,19 @@ pub fn open_from(s: &mut State, source: Box<dyn ViewerSource>, file_id: &str) ->
     };
     sync(s);
     host::dispatch(s, Event::OpenItem(file_id.to_string()));
-    s.viewer = Some(ui);
+    s.viewer.ui = Some(ui);
     true
 }
 
 /// Back to the folder the file was opened from; the decrypted content is dropped.
 pub fn close(s: &mut State) {
-    if let Some(ui) = s.viewer.as_mut() {
+    if let Some(ui) = s.viewer.ui.as_mut() {
         if ui.hold_for_changes() {
             return;
         }
         ui.cancel();
     }
-    s.viewer = None;
+    s.viewer.ui = None;
     if route_item(s).is_some() {
         host::dispatch(s, Event::Escape);
     }
@@ -380,12 +416,13 @@ pub fn close(s: &mut State) {
 pub fn sync(s: &mut State) {
     let here = route_item(s);
     if s.viewer
+        .ui
         .as_ref()
         .is_some_and(|ui| here.as_deref() != Some(ui.file.id.as_str()))
     {
         // Unsaved changes: the route comes back to the file and the question is asked
         // (DW-1525). An open question is answered first: Esc there is "keep editing".
-        let held = s.viewer.as_mut().is_some_and(|ui| {
+        let held = s.viewer.ui.as_mut().is_some_and(|ui| {
             if ui.dialog.is_some() {
                 ui.keep_editing();
                 true
@@ -394,7 +431,7 @@ pub fn sync(s: &mut State) {
             }
         });
         if held {
-            let id = s.viewer.as_ref().map(|ui| ui.file.id.clone()).unwrap_or_default();
+            let id = s.viewer.ui.as_ref().map(|ui| ui.file.id.clone()).unwrap_or_default();
             host::dispatch(s, Event::OpenItem(id));
             return;
         }
@@ -405,21 +442,21 @@ pub fn sync(s: &mut State) {
 /// The text field the editor's keys go to. (With no editor open no key reaches this; the
 /// window's search field is what the type asks for.)
 pub fn editor_edit(s: &mut State) -> &mut rune::TextEdit {
-    match s.viewer.as_mut().and_then(|ui| ui.editor.as_mut()) {
+    match s.viewer.ui.as_mut().and_then(|ui| ui.editor.as_mut()) {
         Some(editor) => &mut editor.edit,
         None => &mut s.search,
     }
 }
 
 fn close_stale(s: &mut State) {
-    if let Some(mut ui) = s.viewer.take() {
+    if let Some(mut ui) = s.viewer.ui.take() {
         ui.cancel();
     }
 }
 
 /// Copy: the open text file's text goes on the clipboard, at the person's own press.
 pub fn copy_text(s: &mut State, tx: &mut Tx) {
-    match s.viewer.as_ref().map(|ui| &ui.file.body) {
+    match s.viewer.ui.as_ref().map(|ui| &ui.file.body) {
         Some(Body::Text(doc)) => tx.copy(doc.plain()),
         Some(Body::Markdown(doc)) => tx.copy(doc.source.clone()),
         _ => {}
@@ -429,13 +466,13 @@ pub fn copy_text(s: &mut State, tx: &mut Tx) {
 /// The engine's answers that arrive between presses, and the route leaving the file. `true`:
 /// the view must run again. For `shell::host::poll`.
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
-    let had = s.viewer.is_some();
+    let had = s.viewer.ui.is_some();
     sync(s);
     // The route names a file that is not open yet (Files dispatched `Event::OpenItem`): ask the
-    // source for it. A file the source does not have leaves the shell's placeholder.
-    if let (None, Some(id)) = (&s.viewer, route_item(s)) {
-        if let Ok(ui) = Ui::open(Box::new(FixtureViewerSource::new()), &id) {
-            s.viewer = Some(ui);
+    // window's source for it. No source, or a file it does not have: the shell's placeholder.
+    if let (None, Some(id)) = (&s.viewer.ui, route_item(s)) {
+        if let Some(Ok(ui)) = route_source(s).map(|source| Ui::open(source, &id)) {
+            s.viewer.ui = Some(ui);
             return true;
         }
     }
@@ -451,7 +488,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
 /// The registry's line for `FrameGroup::Viewer`.
 pub fn frame(s: &State, cx: &mut Cx<State>) -> El {
     let here = route_item(s);
-    match &s.viewer {
+    match &s.viewer.ui {
         // Only the file the route names is drawn: a stale one never shows under another's path.
         Some(ui) if here.as_deref() == Some(ui.file.id.as_str()) => view(s, ui, cx),
         _ => crate::shell::placeholder::window(s, cx, FrameGroup::Viewer),

@@ -36,7 +36,7 @@ pub struct State {
     pub frames: crate::frames::Ui,
     pub settings: crate::frames::settings::SettingsUi,
     pub(crate) signin: Option<crate::frames::signin::Ui>,
-    pub(crate) viewer: Option<crate::frames::viewers::Ui>,
+    pub(crate) viewer: crate::frames::viewers::Slot,
 }
 
 /// The state headless renders and tests start from: the fixture engine, nothing wired.
@@ -45,7 +45,8 @@ pub fn init() -> State {
 }
 
 pub fn init_with(shell: Shell) -> State {
-    crate::frames::files::board_fixture(init_from(shell, Box::new(BoardFixtureSource::new()), Some(6)))
+    let board = init_from(shell, Box::new(BoardFixtureSource::new()), Some(6));
+    crate::frames::viewers::board_fixture(crate::frames::files::board_fixture(board))
 }
 
 /// The folder as the window holds it: the listing, or an empty one and the reason it could not be read.
@@ -93,6 +94,6 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         frames: crate::frames::Ui::default(),
         settings: Default::default(),
         signin: crate::frames::signin::start(),
-        viewer: None,
+        viewer: Default::default(),
     }
 }

@@ -158,7 +158,7 @@ fn operate(rt: &mut Runtime<State>, key: &str) {
 }
 
 fn intents(rt: &mut Runtime<State>) -> Vec<Intent> {
-    rt.state.viewer.as_mut().expect("a file is open").take_intents()
+    rt.state.viewer.ui.as_mut().expect("a file is open").take_intents()
 }
 
 fn on_a_file(rt: &Runtime<State>) -> bool {
@@ -197,7 +197,7 @@ fn the_toolbar_names_the_file_by_its_path_and_facts() {
 fn an_unknown_file_does_not_move_the_route() {
     let mut state = init();
     assert!(!open(&mut state, "no-such-file"));
-    assert!(state.viewer.is_none());
+    assert!(state.viewer.ui.is_none());
     assert!(matches!(state.shell.app.screen(), Screen::Drive(route) if route.item.is_none()));
     assert_eq!(scene_file("DW-9999"), None);
 }
@@ -216,7 +216,7 @@ fn decrypting_shows_the_amount_and_cancel_stops_it_from_the_keyboard() {
     assert_eq!(info(&rt, "state-btn-0").label.as_deref(), Some("Cancel"));
     operate(&mut rt, "state-btn-0");
     assert_eq!(*calls.borrow(), ["open tram-28.mov", "cancel tram-28.mov"]);
-    assert!(rt.state.viewer.is_none(), "nothing of the file is kept");
+    assert!(rt.state.viewer.ui.is_none(), "nothing of the file is kept");
     assert!(!on_a_file(&rt), "back in the folder");
     assert!(has(&rt, "file-list"), "the folder's list is drawn again");
 }
@@ -229,7 +229,7 @@ fn escape_leaves_the_file_and_the_next_key_drops_what_was_decrypted() {
     assert!(!on_a_file(&rt));
     assert!(!has(&rt, "state-title"), "a file the route left is not drawn");
     super::sync(&mut rt.state);
-    assert!(rt.state.viewer.is_none());
+    assert!(rt.state.viewer.ui.is_none());
     assert_eq!(calls.borrow().last().map(String::as_str), Some("cancel tram-28.mov"));
 }
 
@@ -298,24 +298,24 @@ fn code_has_wrap_copy_and_edit_and_each_works_from_the_keyboard() {
     assert_eq!(info(&rt, "ln-17").text.as_deref(), Some("18"));
     assert!(!has(&rt, "ln-18"));
 
-    assert!(!rt.state.viewer.as_ref().unwrap().wrap);
+    assert!(!rt.state.viewer.ui.as_ref().unwrap().wrap);
     operate(&mut rt, "seg-0");
-    assert!(rt.state.viewer.as_ref().unwrap().wrap, "Wrap is chosen");
+    assert!(rt.state.viewer.ui.as_ref().unwrap().wrap, "Wrap is chosen");
     operate(&mut rt, "seg-1");
-    assert!(!rt.state.viewer.as_ref().unwrap().wrap, "No wrap is chosen");
+    assert!(!rt.state.viewer.ui.as_ref().unwrap().wrap, "No wrap is chosen");
 
     operate(&mut rt, "tb-btn-0");
     assert!(
-        rt.state.viewer.as_ref().unwrap().editor.is_some(),
+        rt.state.viewer.ui.as_ref().unwrap().editor.is_some(),
         "Edit opens the editor"
     );
     assert_eq!(info(&rt, "tb-btn-0").label.as_deref(), Some("Save"));
     // Nothing was typed: Save leaves the editor and saves no version.
     ctrl(&mut rt, 's');
-    assert!(rt.state.viewer.as_ref().unwrap().editor.is_none());
-    assert_eq!(rt.state.viewer.as_ref().unwrap().file.version, 1, "no new version");
+    assert!(rt.state.viewer.ui.as_ref().unwrap().editor.is_none());
+    assert_eq!(rt.state.viewer.ui.as_ref().unwrap().file.version, 1, "no new version");
     ctrl(&mut rt, 'e');
-    assert!(rt.state.viewer.as_ref().unwrap().editor.is_some(), "Ctrl+E");
+    assert!(rt.state.viewer.ui.as_ref().unwrap().editor.is_some(), "Ctrl+E");
     assert_eq!(
         focused(&rt).as_deref(),
         Some(super::EDITOR_KEY),
@@ -335,7 +335,7 @@ fn ctrl(rt: &mut Runtime<State>, key: char) {
 }
 
 fn viewer(rt: &Runtime<State>) -> &super::Ui {
-    rt.state.viewer.as_ref().expect("a file is open")
+    rt.state.viewer.ui.as_ref().expect("a file is open")
 }
 
 /// The note, open on a source that records what is asked of it.
@@ -476,8 +476,55 @@ fn a_route_to_a_file_opens_it_and_an_unknown_file_leaves_the_placeholder() {
     let mut state = init();
     crate::shell::host::dispatch(&mut state, Event::OpenItem("no-such-file".to_string()));
     let rt = runtime_of(state, false);
-    assert!(rt.state.viewer.is_none());
+    assert!(rt.state.viewer.ui.is_none());
     assert!(!has(&rt, "viewer-body"));
+}
+
+#[test]
+fn a_window_on_a_drive_that_is_not_the_boards_never_reads_the_boards_sample_files() {
+    // `--db` today, the engine's drive later: such a window has no source for an open file until
+    // the engine's is wired, and the board's fixture must not answer for it, whatever the id.
+    for id in [board::NOTES, board::CODE, board::DECRYPTING] {
+        let drive = Box::new(crate::source::LargeFixtureSource::new(3));
+        let mut state = crate::shell::state::init_from(crate::shell::host::Shell::fixture(), drive, None);
+        assert!(!open(&mut state, id), "{id}: no source, so nothing opens");
+        crate::shell::host::dispatch(&mut state, Event::OpenItem(id.to_string()));
+        let rt = runtime_of(state, false);
+        assert!(
+            rt.state.viewer.ui.is_none(),
+            "{id}: the fixture answered on a real drive"
+        );
+        assert!(!has(&rt, "viewer-body") && !has(&rt, "md-h1") && !has(&rt, "state-title"));
+    }
+}
+
+#[test]
+fn escape_on_the_unsaved_changes_question_keeps_editing() {
+    // The reviewer's P3: Esc on DW-1525 / DW-1526 is "Keep editing" / "Cancel", end to end.
+    for conflict in [false, true] {
+        let (mut rt, calls) = note(false, conflict);
+        edit_and_type(&mut rt);
+        if conflict {
+            ctrl(&mut rt, 's');
+            assert_eq!(info(&rt, "dlg-title").text.as_deref(), Some("Two versions"));
+        } else {
+            operate(&mut rt, "back");
+            assert_eq!(viewer(&rt).dialog, Some(Dialog::Unsaved));
+        }
+        let saves = calls.borrow().iter().filter(|c| c.starts_with("save")).count();
+        press(&mut rt, Key::Escape);
+        rt.invalidate();
+        rt.frame(0.0);
+        let ui = viewer(&rt);
+        assert_eq!(ui.dialog, None, "conflict {conflict}: Esc answers the question");
+        assert!(ui.editor.is_some() && ui.dirty(), "the edit is kept, still unsaved");
+        assert!(on_a_file(&rt), "the route stays on the file");
+        assert!(!has(&rt, "dlg"));
+        assert_eq!(ui.file.version, 3);
+        let after = calls.borrow().iter().filter(|c| c.starts_with("save")).count();
+        assert_eq!(saves, after, "Esc saved nothing");
+        assert!(!calls.borrow().iter().any(|c| c.starts_with("resolve")));
+    }
 }
 
 #[test]
@@ -568,7 +615,7 @@ fn leaving_with_changes_asks_first_and_each_answer_does_what_it_says() {
     assert!(viewer(&rt).dialog.is_none());
     // With nothing unsaved, Back leaves the file and its content leaves memory.
     operate(&mut rt, "back");
-    assert!(rt.state.viewer.is_none());
+    assert!(rt.state.viewer.ui.is_none());
     assert!(!on_a_file(&rt));
 }
 
@@ -664,9 +711,9 @@ fn alt_shift_p_and_the_button_toggle_the_details_panel() {
             ..Mods::default()
         },
     );
-    assert!(rt.state.viewer.as_ref().unwrap().show_details);
+    assert!(rt.state.viewer.ui.as_ref().unwrap().show_details);
     operate(&mut rt, "panel-toggle-btn");
-    assert!(!rt.state.viewer.as_ref().unwrap().show_details);
+    assert!(!rt.state.viewer.ui.as_ref().unwrap().show_details);
 }
 
 #[test]
@@ -695,7 +742,7 @@ fn back_and_new_leave_through_the_shell() {
     operate(&mut rt, "back");
     assert!(!on_a_file(&rt));
     assert!(
-        rt.state.viewer.is_none(),
+        rt.state.viewer.ui.is_none(),
         "the decrypted text left memory with the file"
     );
 }
@@ -783,7 +830,7 @@ fn progress_from_the_engine_moves_the_bar_and_a_finished_file_replaces_the_state
         info(&rt, "state-title").text.as_deref(),
         Some("Couldn't decrypt this file")
     );
-    assert!(!rt.state.viewer.as_mut().unwrap().pump(), "nothing new");
+    assert!(!rt.state.viewer.ui.as_mut().unwrap().pump(), "nothing new");
 }
 
 #[test]
