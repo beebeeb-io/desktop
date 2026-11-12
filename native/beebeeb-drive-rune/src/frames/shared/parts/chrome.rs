@@ -37,6 +37,8 @@ pub fn window(s: &State, cx: &mut Cx<State>, t: &Theme, toolbar: El, body: El, s
         .h_full()
         .fill(t.bg)
         .child(toolbar)
+        // The one banner of the whole window (`frames::global`: "on every view of the window").
+        .children(crate::frames::global::banner_under_toolbar(s, t))
         .child(body.grow(1.0).min_h(0.0).w_full())
         .child(status_line(&s.frames.pc.sync_words(), status, t));
     let mut window = col()
