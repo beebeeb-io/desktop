@@ -14,7 +14,7 @@ use rune::{Color, Cx, El, Key, KeyEvent, Shadow, TextEdit, TextStyle, Tx, col, e
 
 use super::{Intent, style};
 use crate::State;
-use crate::frames::files::names::{self, Host, NameError};
+use crate::frames::files::names::{self, NameError};
 use crate::shell::app::{Screen, Section};
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::dialog::{self, Sub};
@@ -103,7 +103,8 @@ pub struct NewFile {
     pub folder: Option<String>,
     pub name: TextEdit,
     pub ext: TextEdit,
-    /// Why the name as it was when Create file was pressed can't be given. Typing takes it away.
+    /// Why the whole name (the name and its extension, [`NewFile::full_name`]) as it was when Create
+    /// file was pressed can't be given. Typing in either field takes it away.
     pub error: Option<(String, NameError)>,
     /// The control that takes the keyboard once this change is on screen.
     focus: Option<&'static str>,
@@ -161,7 +162,8 @@ fn in_files(s: &State) -> bool {
 /// New file… (DW-1520's item, Ctrl+N): the dialog on the type, Markdown chosen. `false`: the
 /// folder shown takes no new files (Backups, a service's folder: New is dimmed there).
 pub fn begin(s: &mut State) -> bool {
-    if !in_files(s) || !s.can_add() {
+    // Open already (a second Ctrl+N in the same frame): it stays as it is, nothing typed is lost.
+    if s.viewer.new_file.is_some() || !in_files(s) || !s.can_add() {
         return false;
     }
     s.actions.menu = None;
@@ -169,9 +171,23 @@ pub fn begin(s: &mut State) -> bool {
     true
 }
 
-/// Cancel, Esc, a press on the scrim: the dialog closes; nothing was made.
+/// Cancel, Esc, a press on the scrim, and after Create file or an office type's Continue: the
+/// dialog closes and the keyboard goes back to the Files list, as Files' own dialogs give it back.
 pub fn close(s: &mut State) {
-    s.viewer.new_file = None;
+    if s.viewer.new_file.take().is_some() {
+        s.viewer.refocus_list = true;
+    }
+}
+
+/// Where the keyboard goes back to in the Files window: the list (Files' `focus_list`).
+pub fn list_key(s: &State) -> &'static str {
+    if s.list_error.is_some() {
+        "file-list-error"
+    } else if s.listing.items.is_empty() && s.can_add() {
+        "empty-area"
+    } else {
+        "rows"
+    }
 }
 
 /// Choose a type (a press on its tile, or the arrows).
@@ -226,9 +242,14 @@ pub fn create(s: &mut State) {
         return;
     }
     let full = nf.full_name();
-    let typed = nf.name.text.clone();
     let others = s.listing.items.iter().map(|i| (i.name.as_str(), i.is_folder));
-    let checked = names::check_on(Host::this(), &full, others);
+    // The extension alone is not a name: a blank name would make a hidden file called `.txt`.
+    let checked = if nf.name.text.trim().is_empty() {
+        Err(NameError::Empty)
+    } else {
+        // The host the Files window checks its names for (Rename and New folder do the same).
+        names::check_on(s.actions.host, &full, others)
+    };
     match checked {
         Ok(name) => {
             let folder = nf.folder.clone();
@@ -237,7 +258,7 @@ pub fn create(s: &mut State) {
         }
         Err(why) => {
             if let Some(nf) = ui(s) {
-                nf.error = Some((typed, why));
+                nf.error = Some((full, why));
                 nf.focus = Some(NAME_INPUT);
             }
         }
@@ -252,7 +273,7 @@ pub fn take_focus(s: &mut State) -> Option<&'static str> {
 /// The route left Files (another section, settings, a file): the dialog goes with it.
 pub fn sync(s: &mut State) {
     if s.viewer.new_file.is_some() && !in_files(s) {
-        close(s);
+        s.viewer.new_file = None;
     }
 }
 
@@ -325,17 +346,19 @@ fn field_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     }
 }
 
+/// The name's field. An edit that arrives after the dialog closed (two keys in one frame) goes to a
+/// field nobody shows, never to the Files window's search.
 fn name_edit(s: &mut State) -> &mut TextEdit {
     match s.viewer.new_file.as_mut() {
         Some(nf) => &mut nf.name,
-        None => &mut s.search,
+        None => &mut s.viewer.stray,
     }
 }
 
 fn ext_edit(s: &mut State) -> &mut TextEdit {
     match s.viewer.new_file.as_mut() {
         Some(nf) => &mut nf.ext,
-        None => &mut s.search,
+        None => &mut s.viewer.stray,
     }
 }
 
@@ -594,7 +617,7 @@ fn name(nf: &NewFile, t: &Theme) -> El {
     let error = nf
         .error
         .as_ref()
-        .filter(|(typed, _)| typed == &nf.name.text)
+        .filter(|(given, _)| given == &nf.full_name())
         .map(|(_, why)| why.message());
     let name_field = field::bare_field(
         field::Bare {
@@ -648,8 +671,14 @@ fn name(nf: &NewFile, t: &Theme) -> El {
 /// The Files window with the New file dialog over it, while it is open; else `behind` as it is.
 /// The registry's one line (`shell/registry.rs`, `view`).
 pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
-    let Some(nf) = s.viewer.new_file.as_ref().filter(|_| in_files(s)) else {
+    if !in_files(s) {
         return behind;
+    }
+    // One parent whether the dialog is open or not: the list behind it keeps its identity (its
+    // scroll position, hover and focus) when the dialog opens and closes.
+    let window = el().key("window-with-new-file").w_full().h_full().child(behind);
+    let Some(nf) = s.viewer.new_file.as_ref() else {
+        return window;
     };
     let t = tokens::theme(cx.system_dark());
     let card = match nf.step {
@@ -663,9 +692,5 @@ pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
         .child(dialog::scrim(crate::TITLEBAR_H, card, &t))
         .on_key(dialog_key)
         .modal_tx(false, |s: &mut State, _tx: &mut Tx| close(s));
-    el().key("window-with-new-file")
-        .w_full()
-        .h_full()
-        .child(behind)
-        .child(layer)
+    window.child(layer)
 }

@@ -303,3 +303,128 @@ fn leaving_the_files_window_closes_the_dialog() {
     assert_eq!(dialog_step(&rt), None, "the dialog belongs to the Files window");
     assert!(!has(&rt, "dialog-new-file"));
 }
+
+/// To the naming step on Text, the name typed as `name` and the extension set to `ext`.
+fn named(rt: &mut Runtime<State>, name: &str, ext: &str) {
+    open_dialog(rt);
+    press(rt, Key::Right);
+    operate(rt, "btn-0");
+    assert_eq!(dialog_step(rt), Some(Step::Name));
+    if let Some(nf) = rt.state.viewer.new_file.as_mut() {
+        nf.name = rune::TextEdit::new(name);
+        nf.ext = rune::TextEdit::new(ext);
+    }
+    rt.frame(0.0);
+}
+
+#[test]
+fn a_blank_name_is_refused_and_no_hidden_file_is_asked_for() {
+    let (mut rt, _) = runtime();
+    for blank in ["", "   "] {
+        named(&mut rt, blank, ".txt");
+        super::new_file::create(&mut rt.state);
+        rt.frame(0.0);
+        assert_eq!(dialog_step(&rt), Some(Step::Name), "{blank:?}: the dialog stays");
+        assert!(
+            super::take_asked(&mut rt.state).is_empty(),
+            "{blank:?}: a file named only by its extension was asked for"
+        );
+        assert_eq!(info(&rt, "field-0-msg").role, "alert");
+        press(&mut rt, Key::Escape);
+    }
+}
+
+#[test]
+fn closing_gives_the_keyboard_back_to_the_list() {
+    let (mut rt, _) = runtime();
+    open_dialog(&mut rt);
+    operate(&mut rt, "btn-1");
+    assert_eq!(dialog_step(&rt), None);
+    rt.frame(0.0);
+    assert_eq!(
+        focused(&rt).as_deref(),
+        Some("rows"),
+        "Cancel: the list has the keyboard again"
+    );
+    open_dialog(&mut rt);
+    press(&mut rt, Key::Escape);
+    rt.frame(0.0);
+    assert_eq!(
+        focused(&rt).as_deref(),
+        Some("rows"),
+        "Esc: the list has the keyboard again"
+    );
+}
+
+#[test]
+fn a_second_ask_in_the_same_frame_keeps_the_dialog_as_it_is() {
+    let (mut rt, _) = runtime();
+    // Two Ctrl+N queued before the dialog exists: one dialog.
+    rt.state.actions.intents.push(FilesIntent::Frame("DW-1521"));
+    rt.state.actions.intents.push(FilesIntent::Frame("DW-1521"));
+    rt.frame(0.0);
+    assert_eq!(dialog_step(&rt), Some(Step::Pick));
+    for _ in 0..3 {
+        press(&mut rt, Key::Right);
+    }
+    assert_eq!(picked(&rt), Some(Kind::Excel));
+    rt.frame(0.0);
+    assert_eq!(picked(&rt), Some(Kind::Excel), "the second ask reset the dialog");
+    // And an ask that arrives while it is open changes nothing in it either.
+    rt.state.actions.intents.push(FilesIntent::Frame("DW-1521"));
+    rt.frame(0.0);
+    assert_eq!(picked(&rt), Some(Kind::Excel), "an ask while open reset the dialog");
+    assert!(
+        !rt.state.actions.intents.contains(&FilesIntent::Frame("DW-1521")),
+        "every ask was taken"
+    );
+}
+
+#[test]
+fn the_message_follows_the_whole_name_and_the_extension_takes_it_away() {
+    let (mut rt, _) = runtime();
+    let taken = rt
+        .state
+        .listing
+        .items
+        .iter()
+        .find(|item| !item.is_folder && item.name.contains('.'))
+        .map(|item| item.name.clone())
+        .expect("the board's folder holds a file");
+    let (stem, ext) = taken.rsplit_once('.').expect("a name with an extension");
+    named(&mut rt, stem, &format!(".{ext}"));
+    super::new_file::create(&mut rt.state);
+    rt.frame(0.0);
+    assert!(has(&rt, "field-0-msg"), "the taken name says why");
+    // Typed in the extension's field: the whole name is another one now.
+    if let Some(nf) = rt.state.viewer.new_file.as_mut() {
+        nf.ext = rune::TextEdit::new(".md");
+    }
+    rt.frame(0.0);
+    assert!(
+        !has(&rt, "field-0-msg"),
+        "the message stayed for a name that is not taken"
+    );
+}
+
+#[test]
+fn a_name_is_checked_for_the_host_the_window_was_given() {
+    let (mut rt, _) = runtime();
+    rt.state.actions.host = crate::frames::files::names::Host::Windows;
+    named(&mut rt, "CON", ".txt");
+    super::new_file::create(&mut rt.state);
+    rt.frame(0.0);
+    assert_eq!(dialog_step(&rt), Some(Step::Name), "Windows keeps CON for itself");
+    assert!(super::take_asked(&mut rt.state).is_empty(), "CON.txt was asked for");
+}
+
+#[test]
+fn the_list_behind_the_dialog_keeps_its_identity() {
+    let (mut rt, _) = runtime();
+    let path = |rt: &Runtime<State>| info(rt, "rows").path;
+    let before = path(&rt);
+    open_dialog(&mut rt);
+    assert_eq!(path(&rt), before, "opening the dialog moved the list to a new parent");
+    press(&mut rt, Key::Escape);
+    assert_eq!(path(&rt), before, "closing the dialog moved the list again");
+}

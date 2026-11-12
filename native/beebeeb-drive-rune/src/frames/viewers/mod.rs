@@ -366,6 +366,12 @@ pub struct Slot {
     pub(crate) new_file: Option<new_file::NewFile>,
     /// What the New file dialog asked of the shell, oldest first ([`take_asked`]).
     pub(crate) asked: Vec<Intent>,
+    /// The New file dialog closed by the person's press: the Files list takes the keyboard back on
+    /// the next poll.
+    pub(crate) refocus_list: bool,
+    /// Where a key goes that reaches a text field of this group after the field's owner closed
+    /// (two keys in one frame): a field nobody shows, never the Files window's search.
+    pub(crate) stray: rune::TextEdit,
 }
 
 /// What the New file dialog asked for that is outside this group (make a file, New document),
@@ -463,7 +469,7 @@ pub fn sync(s: &mut State) {
 pub fn editor_edit(s: &mut State) -> &mut rune::TextEdit {
     match s.viewer.ui.as_mut().and_then(|ui| ui.editor.as_mut()) {
         Some(editor) => &mut editor.edit,
-        None => &mut s.search,
+        None => &mut s.viewer.stray,
     }
 }
 
@@ -511,8 +517,10 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
 fn new_file_poll(s: &mut State, tx: &mut Tx) -> bool {
     let mut changed = false;
     let asked = crate::frames::files::Intent::Frame("DW-1521");
-    if let Some(i) = s.actions.intents.iter().position(|intent| *intent == asked) {
-        s.actions.intents.remove(i);
+    // Every ask since the last poll (two Ctrl+N in one frame are one dialog, opened once).
+    let before = s.actions.intents.len();
+    s.actions.intents.retain(|intent| *intent != asked);
+    if s.actions.intents.len() != before {
         changed |= new_file::begin(s);
     }
     let open = s.viewer.new_file.is_some();
@@ -520,6 +528,11 @@ fn new_file_poll(s: &mut State, tx: &mut Tx) -> bool {
     changed |= open && s.viewer.new_file.is_none();
     if let Some(key) = new_file::take_focus(s) {
         tx.focus(key, false);
+        changed = true;
+    }
+    // Closed by a press: the keyboard goes back to the list, as after Files' own dialogs.
+    if std::mem::take(&mut s.viewer.refocus_list) && s.viewer.new_file.is_none() && s.viewer.ui.is_none() {
+        tx.focus(new_file::list_key(s), false);
         changed = true;
     }
     changed
