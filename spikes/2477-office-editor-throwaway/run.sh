@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # THROWAWAY (task 2477 editor spike). Runs on the LINUX build VM through remote-build; never on a developer machine.
-#   run.sh build      clone the three upstream tags, check each tree against the tree our private subtree repo holds,
-#                     copy the spike crates in, apply the font-store patch, build our own binaries, measure closures
+#   run.sh build      clone OUR subtree repository (github.com/beebeeb-io/desktop-office, main), check each subtree's
+#                     tree against the tree of the upstream release commit, copy the spike crates in, apply the
+#                     font-store patch, build our own binaries, measure closures
 #   run.sh run        network block proven per binary, then round trips, frame commands and timings (no network)
 #   run.sh remove     delete everything this spike put on the machine and count what is left
-# Our subtree repository is private and the build VM only fetches public repositories, so the sources are cloned
-# from upstream at the pinned commit and the TREE HASH is compared with the subtree's tree: same tree = same files.
+# The sources that are built are the ones in our repository. Upstream is cloned only to read the tree hash of each
+# pinned release commit: same tree hash = the same files, byte for byte.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 OUT=${BB_OUT:?run through remote-build}
@@ -35,31 +36,34 @@ if [ "$PHASE" = build ]; then
   mkdir -p "$WORK" && cd "$WORK" || exit 1
   export CARGO_TARGET_DIR="$WORK/target"
   echo "toolchain: $(rustc --version) / $(cargo --version) / $(uname -sm)"
+  OFFICE=$WORK/office
+  [ -d "$OFFICE/.git" ] || git clone --quiet --branch main https://github.com/beebeeb-io/desktop-office "$OFFICE" || exit 1
+  echo "our repository: desktop-office main at $(git -C "$OFFICE" rev-parse HEAD)"
   for spec in $SPECS; do
     IFS=: read -r name tag commit tree <<<"$spec"
-    dir="$WORK/$name"
-    [ -d "$dir/.git" ] || git clone --quiet --depth 1 --branch "$tag" "https://github.com/storytold/$name" "$dir" || exit 1
-    gotc=$(git -C "$dir" rev-parse HEAD); gott=$(git -C "$dir" rev-parse 'HEAD^{tree}')
-    [ "$gotc" = "$commit" ] && [ "$gott" = "$tree" ] || { echo "== $name: commit $gotc tree $gott DIFFERS from the pin: STOP"; exit 1; }
+    up="$WORK/upstream/$name"
+    [ -d "$up/.git" ] || git clone --quiet --depth 1 --branch "$tag" "https://github.com/storytold/$name" "$up" 2>/dev/null || exit 1
+    upc=$(git -C "$up" rev-parse HEAD); upt=$(git -C "$up" rev-parse 'HEAD^{tree}'); ours=$(git -C "$OFFICE" rev-parse "HEAD:$name")
+    [ "$upc" = "$commit" ] && [ "$upt" = "$ours" ] && [ "$ours" = "$tree" ] || { echo "== $name: upstream commit $upc tree $upt, our subtree $ours: DIFFERENT, STOP"; exit 1; }
     # the comparison must be able to fail: the same test against a tree hash with one digit changed
-    wrong=${tree%?}0; [ "$wrong" = "$tree" ] && wrong=${tree%?}1
-    echo "== $name $tag commit=$gotc tree=$gott MATCHES our subtree's tree (same test against a wrong hash: $([ "$gott" = "$wrong" ] && echo MATCHES || echo DIFFERS))"
+    wrong=${upt%?}0; [ "$wrong" = "$upt" ] && wrong=${upt%?}1
+    echo "== $name: our subtree tree=$ours EQUALS upstream $tag (commit $upc) tree=$upt (same test against a wrong hash: $([ "$ours" = "$wrong" ] && echo EQUALS || echo DIFFERS))"
   done
   for pair in wc-edit:wordcraft wc-engine:wordcraft gc-edit:gridcraft dc-edit:deckcraft; do
-    mkdir -p "$WORK/${pair#*:}/crates/zz-bb-${pair%%:*}" && cp -r "$HERE/${pair%%:*}/." "$WORK/${pair#*:}/crates/zz-bb-${pair%%:*}/"
+    mkdir -p "$OFFICE/${pair#*:}/crates/zz-bb-${pair%%:*}" && cp -r "$HERE/${pair%%:*}/." "$OFFICE/${pair#*:}/crates/zz-bb-${pair%%:*}/"
   done
 
   closure() { # <label> <dir> <target> <cargo tree args…>
     local label=$1 dir=$2 target=$3; shift 3
     (cd "$dir" && cargo tree -e normal --prefix none --target "$target" -f '{p}|{l}' "$@" 2>"$WORK/tree.err" | sort -u >"$WORK/tree.txt")
     [ -s "$WORK/tree.txt" ] || { echo "== closure $label [$target]: cargo tree FAILED: $(tail -1 "$WORK/tree.err" | scrub)"; return; }
-    python3 - "$WORK/tree.txt" "$dir-audit.json" "$label [$target]" "$NET" "$ALLOW" <<'P'
+    python3 - "$WORK/tree.txt" "$WORK/$(basename "$dir")-audit.json" "$label [$target]" "$NET" "$ALLOW" <<'P'
 import json, re, sys
 rows = [l.rstrip("\n") for l in open(sys.argv[1]) if l.strip()]
 au = json.load(open(sys.argv[2])); label = sys.argv[3]; net = set(sys.argv[4].split()); allow = set(sys.argv[5].split("|"))
 ps = []
 for r in rows:
-    p, lic = r.rsplit("|", 1)
+    p, lic = r.replace(" (*)", "").rsplit("|", 1)
     m = re.match(r"(\S+) v(\S+)(?: \((.*)\))?", p.replace(" (proc-macro)", ""))
     ps.append((m.group(1), m.group(2), m.group(3) or "", lic))
 ps = sorted(set(ps))
@@ -90,28 +94,28 @@ P
   export PATH="$TOOLS/bin:$PATH"; echo "tools: $(cargo audit --version)"
   # unpatched wordcraft first: what wordcraft-engine brings as upstream ships it (the spike crates add no package)
   for n in wordcraft gridcraft deckcraft; do
-    (cd "$WORK/$n" && cargo audit --json >"$WORK/$n-audit.json" 2>/dev/null; echo "$n: cargo audit over the whole lockfile exit=$? vulnerabilities=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["vulnerabilities"]["count"])' "$WORK/$n-audit.json")")
+    (cd "$OFFICE/$n" && cargo audit --json >"$WORK/$n-audit.json" 2>/dev/null; echo "$n: cargo audit over the whole lockfile exit=$? vulnerabilities=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["vulnerabilities"]["count"])' "$WORK/$n-audit.json")")
   done
   for t in x86_64-pc-windows-msvc x86_64-unknown-linux-gnu; do
-    closure "wordcraft-engine as upstream ships it" "$WORK/wordcraft" $t -p wordcraft-engine
+    closure "wordcraft-engine as upstream ships it" "$OFFICE/wordcraft" $t -p wordcraft-engine
   done
-  (cd "$WORK/wordcraft" && git apply --check "$HERE/patches/wordcraft-engine-font-store-optional.patch" && git apply "$HERE/patches/wordcraft-engine-font-store-optional.patch" && echo "patch: applied ($(git diff --shortstat -- crates/engine))") || { echo "patch does not apply: STOP"; exit 1; }
+  (cd "$OFFICE" && git apply --directory=wordcraft --check "$HERE/patches/wordcraft-engine-font-store-optional.patch" && git apply --directory=wordcraft "$HERE/patches/wordcraft-engine-font-store-optional.patch" && echo "patch: applied ($(git diff --shortstat -- wordcraft/crates/engine))") || { echo "patch does not apply: STOP"; exit 1; }
   for t in x86_64-pc-windows-msvc x86_64-unknown-linux-gnu; do
-    closure "wordcraft below the engine (zz-bb-wc-edit: doc+docx+docbin+layout+render)" "$WORK/wordcraft" $t -p zz-bb-wc-edit
-    closure "wordcraft-engine PATCHED, default features (must equal upstream)" "$WORK/wordcraft" $t -p wordcraft-engine
-    closure "wordcraft-engine PATCHED, no font store (zz-bb-wc-engine)" "$WORK/wordcraft" $t -p zz-bb-wc-engine
-    closure "gridcraft-engine (zz-bb-gc-edit)" "$WORK/gridcraft" $t -p zz-bb-gc-edit
-    closure "deckcraft-engine (zz-bb-dc-edit)" "$WORK/deckcraft" $t -p zz-bb-dc-edit
-    closure "deckcraft below the engine (model+pptx+render)" "$WORK/deckcraft" $t -p deckcraft-model -p deckcraft-pptx -p deckcraft-render
+    closure "wordcraft below the engine (zz-bb-wc-edit: doc+docx+docbin+layout+render)" "$OFFICE/wordcraft" $t -p zz-bb-wc-edit
+    closure "wordcraft-engine PATCHED, default features (must equal upstream)" "$OFFICE/wordcraft" $t -p wordcraft-engine
+    closure "wordcraft-engine PATCHED, no font store (zz-bb-wc-engine)" "$OFFICE/wordcraft" $t -p zz-bb-wc-engine
+    closure "gridcraft-engine (zz-bb-gc-edit)" "$OFFICE/gridcraft" $t -p zz-bb-gc-edit
+    closure "deckcraft-engine (zz-bb-dc-edit)" "$OFFICE/deckcraft" $t -p zz-bb-dc-edit
+    closure "deckcraft below the engine (model+pptx+render)" "$OFFICE/deckcraft" $t -p deckcraft-model -p deckcraft-pptx -p deckcraft-render
   done
   for spec in "wordcraft:zz-bb-wc-edit zz-bb-wc-engine" "gridcraft:zz-bb-gc-edit" "deckcraft:zz-bb-dc-edit"; do
     name=${spec%%:*}; t0=$(date +%s)
     for p in ${spec#*:}; do
-      (cd "$WORK/$name" && cargo build --release -p "$p" >"$WORK/build-$p.log" 2>&1); rc=$?
+      (cd "$OFFICE/$name" && cargo build --release -p "$p" >"$WORK/build-$p.log" 2>&1); rc=$?
       echo "build $p: exit=$rc $(grep -E '^(warning: .*craft-fonts|error)' "$WORK/build-$p.log" | scrub | head -3 | tr '\n' ' ')"
       [ $rc -eq 0 ] || { tail -30 "$WORK/build-$p.log" | scrub; exit 1; }
     done
-    echo "built $name in $(( $(date +%s) - t0 )) s; Cargo.lock lines changed by adding the spike crates: $(git -C "$WORK/$name" diff --numstat -- Cargo.lock | awk '{print "+"$1" -"$2}')"
+    echo "built $name in $(( $(date +%s) - t0 )) s; Cargo.lock lines changed by adding the spike crates: $(git -C "$OFFICE" diff --numstat -- "$name/Cargo.lock" | awk '{print "+"$1" -"$2}')"
   done
   for b in zz-bb-wc-edit zz-bb-wc-engine zz-bb-gc-edit zz-bb-dc-edit; do echo "binary $b: $(stat -c %s "$BIN/$b") bytes"; done
   exit 0
