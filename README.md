@@ -1,15 +1,9 @@
-> **Correction — 2026-09-29, task 1611:** The historical architecture/build
-> descriptions below are retained for provenance, not current instructions.
-> Shipping entrypoints are desktop-owned `src/main.tsx` and `src-tauri/src/lib.rs`;
-> `runner.rs`, `engine_bridge.rs`, and `state_db.rs` own scheduling and sync.
-> `repos/web` is not this frontend; core provides shared primitives.
-> Run `bun run tauri:dev` / `bun run tauri:build` from the desktop root.
-> macOS uses the active ~~`macos/FileProviderExtension`~~ `BeebeebFileProvider/`
-> (path corrected on resume, 2026-09-29; built by `scripts/build-fileprovider-extension.sh`), Windows
-> uses `src-tauri/src/windows_cf` (CFAPI), and Linux FUSE is an unmounted prototype.
-> The legacy native-shell build recipes and Linux online-only claims below are
-> historical. Spec 030 is historical and never authorizes raw keys in config.
-> Credentials belong in the OS store; Linux currently fails closed.
+> **Correction — 2026-11-12:** Beebeeb Desktop 0.9.0 is a full Rust native app on Windows and
+> macOS, with no web view. The React frontend (`src/`, `tests/`, `packages/`) was removed on
+> the `v2-native` line. The Rust sync engine lives in `src-tauri/src/` and `crates/beebeeb-engine/`;
+> the native UI is built in `native/beebeeb-drive-rune/` (Rune). macOS still uses
+> `BeebeebFileProvider/` (built by `scripts/build-fileprovider-extension.sh`), Windows uses
+> `src-tauri/src/windows_cf` (CFAPI). Credentials belong in the OS store; Linux fails closed.
 > See [the current capability contract](docs/CAPABILITIES.md) for shell reachability and limitations.
 
 <p align="center">

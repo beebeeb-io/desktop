@@ -227,12 +227,32 @@ pub(crate) fn auth_signup_phrase_words() -> Result<Vec<String>, String> {
 }
 
 /// DW-A39 Copy (B11 ruling): Rust puts the 12 words on the clipboard itself, numbered, and clears them after 60 s if
-/// the clipboard still holds them. The web view never runs the copy.
+/// the clipboard still holds them. The web view never runs the copy. The engine owns the policy; the shell provides the
+/// clipboard through `ClipboardAccess`.
 #[tauri::command]
 pub(crate) fn auth_signup_phrase_copy(app: tauri::AppHandle) -> Result<(), String> {
     let words = with(&SIGNUP, |f| f.phrase_words().map_err(code))?;
     let text = Zeroizing::new(words.iter().map(|w| w.as_str()).collect::<Vec<_>>().join(" "));
-    crate::auth_v2::private_screen::copy_for_60s(&app, text)
+    let clipboard = std::sync::Arc::new(TauriClipboard(app));
+    beebeeb_engine::clipboard::copy_and_clear_after(clipboard, text)
+}
+
+/// Tauri's clipboard plugin, behind the engine's [`beebeeb_engine::clipboard::ClipboardAccess`] trait.
+struct TauriClipboard(tauri::AppHandle);
+
+impl beebeeb_engine::clipboard::ClipboardAccess for TauriClipboard {
+    fn write_text(&self, text: String) -> Result<(), String> {
+        use tauri_plugin_clipboard_manager::ClipboardExt;
+        self.0.clipboard().write_text(text).map_err(|e| e.to_string())
+    }
+    fn read_text(&self) -> Result<String, String> {
+        use tauri_plugin_clipboard_manager::ClipboardExt;
+        self.0.clipboard().read_text().map_err(|e| e.to_string())
+    }
+    fn clear(&self) -> Result<(), String> {
+        use tauri_plugin_clipboard_manager::ClipboardExt;
+        self.0.clipboard().clear().map_err(|e| e.to_string())
+    }
 }
 
 /// DW-A39 Save as file: written from Rust's copy of the words, a plain text file with the email in its name.

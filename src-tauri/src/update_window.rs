@@ -415,17 +415,17 @@ pub(super) async fn check_for_updates_now(app: tauri::AppHandle) -> Result<Manua
             }
 
             if let Some(payload) = payload {
-                macos_popover::note_update(&payload.channel, Some(&payload.version));
+                popover_data::note_update(&payload.channel, Some(&payload.version));
                 let _ = app.emit("update-available", payload);
             } else {
-                macos_popover::note_update(channel.as_str(), None);
+                popover_data::note_update(channel.as_str(), None);
             }
 
             Ok(result)
         }
         Ok(None) => {
             tracing::info!(channel = %channel.as_str(), "manual update check found no manifest release");
-            macos_popover::note_update(channel.as_str(), None);
+            popover_data::note_update(channel.as_str(), None);
             Ok(manual_update_up_to_date_result(channel))
         }
         Err(error) => Err(format!(
@@ -823,7 +823,7 @@ pub(super) fn consume_main_navigation(window: tauri::WebviewWindow) -> Option<Ma
 /// Opens (or shows and focuses) the Beebeeb window and asks it to show `nav`.
 #[cfg(target_os = "macos")]
 pub(super) fn show_main_window(app: &tauri::AppHandle, nav: MainNav) {
-    macos_popover::hide(app);
+    // macos_popover::hide deleted; the popover window no longer exists in v2-native.
     let label = surfaces::policy::main_window_label(surfaces::policy::Platform::current());
     store_main_nav(&MAIN_NAV_PENDING, nav);
     // §9.1: the Dock icon (and with it the app menu) comes first, so it is there when the window is.
@@ -1087,14 +1087,9 @@ pub(super) fn set_macos_dock_icon(app: &tauri::AppHandle, wanted: bool) {
     }
 }
 
-/// Hides a window whose close policy is Hide. On a Mac the popover goes through `macos_popover::hide`, which tells it,
-/// so it stops reading its snapshot (self-review of #202: ⌘W on the popover hid it without telling it).
+/// Hides a window whose close policy is Hide. The macOS popover's special hide path (macos_popover::hide) was deleted
+/// with the web-view popover; the native app has its own flyout.
 pub(super) fn hide_on_close(window: &tauri::Window) {
-    #[cfg(target_os = "macos")]
-    if window.label() == "popover" {
-        macos_popover::hide(window.app_handle());
-        return;
-    }
     let _ = window.hide();
 }
 
@@ -1195,6 +1190,11 @@ pub(super) fn window_state_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(super) fn window_state_denylist_labels() -> &'static [&'static str] {
-    // `main-app` keeps its own frame in logical points (`place_desktop_main_window`), so the plugin leaves it alone.
+    // `main-app` kept its own frame in logical points (`place_desktop_main_window`, now deleted), so the plugin left it alone.
     &["tray", "windows-onboarding", "main-app"]
 }
+
+// Tests relocated from desktop_main_window.rs live in flyout_geometry_tests.rs (the file-size ratchet).
+#[cfg(test)]
+#[path = "flyout_geometry_tests.rs"]
+mod flyout_geometry_tests;

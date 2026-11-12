@@ -15,13 +15,14 @@ pub(crate) mod hello;
 pub(crate) mod key_owner;
 pub(crate) mod password;
 pub(crate) mod phrase;
-pub(crate) mod private_screen;
+// private_screen: deleted (auth_screen_private was web-view capture exclusion; copy_for_60s moved to the engine's
+// clipboard module behind ClipboardAccess).
 pub(crate) mod qr;
 /// v2 b11: create an account, recover one (declared here: lib.rs is not rustfmt-clean on v2).
 #[path = "../signup_v2/mod.rs"]
 pub(crate) mod signup_v2;
 pub(crate) mod transport;
-pub(crate) mod webview_autofill;
+// webview_autofill: deleted (v2-native has no web views; task 2422's autofill switches are not needed).
 
 #[cfg(test)]
 mod dto_tests;

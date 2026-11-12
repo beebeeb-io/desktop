@@ -182,8 +182,8 @@ fn a_row_is_server_known_by_its_version_or_its_server_timestamp() {
     );
 }
 
-/// The rows behind `tests/fixtures/selective-sync-tree.json`, the browser fixture `tests/render-sync-activity.mjs`
-/// screenshots: Guus's shape with synthetic names. Every top folder the server knows also has a row this PC created
+/// The rows behind `src-tauri/tests/fixtures/selective-sync-tree.json`.
+/// Guus's shape with synthetic names. Every top folder the server knows also has a row this PC created
 /// on 4 Oct and never sent (and so do two subfolders, under the never-sent parents); every file hangs under the
 /// server's folders; an `error` row with no parent repeats a file's path. `Music` has no twin.
 fn guus_shaped_rows() -> Vec<VaultEntryRow> {
@@ -261,10 +261,7 @@ fn the_selective_sync_browser_fixture_is_the_trees_real_output() {
         "before": build_vault_tree_of_rows(&rows, &excluded),
         "after": build_vault_tree(&rows, &excluded),
     });
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../tests/fixtures/selective-sync-tree.json"
-    );
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/selective-sync-tree.json");
     if std::env::var_os("BB_UPDATE_FIXTURES").is_some() {
         std::fs::write(path, format!("{}\n", serde_json::to_string_pretty(&fixture).unwrap())).unwrap();
     }
@@ -491,19 +488,8 @@ fn is_altgr_chord(accelerator: &str) -> bool {
     parts.contains(&"Alt") && (parts.contains(&"Ctrl") || parts.contains(&"CmdOrCtrl"))
 }
 
-/// 0.8.15: the switch that turns WebView2's browser shortcuts off is registered on the builder, before the `setup`
-/// hook builds the windows, so its `on_webview_ready` sees every webview.
-#[test]
-fn the_browser_keys_plugin_is_registered_before_any_window_is_built() {
-    let source = crate::root_source::lib_rs().replace("\r\n", "\n");
-    let run = &source[source.find("\npub fn run() {").expect("run()")..];
-    let plugin = run.find(".plugin(webview_browser_keys::plugin())").expect("registered");
-    let setup = run.find(".setup(|app|").expect("run() has a setup hook");
-    assert!(
-        plugin < setup,
-        "the browser-keys plugin is registered in run(), before .setup builds the windows"
-    );
-}
+// the_browser_keys_plugin_is_registered_before_any_window_is_built: deleted (webview_browser_keys removed; v2-native
+// has no web views).
 
 #[test]
 fn no_windows_or_linux_menu_shortcut_is_a_web_view_browser_key_or_an_altgr_chord() {

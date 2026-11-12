@@ -203,7 +203,7 @@ fn the_syncing_and_offline_events_are_exactly_the_shared_fixtures() {
         .unwrap()
         .to_json();
     let expected: Value =
-        serde_json::from_str(include_str!("../../../../../tests/fixtures/engine-status.syncing.json")).unwrap();
+        serde_json::from_str(include_str!("../../../tests/fixtures/engine-status.syncing.json")).unwrap();
     assert_eq!(syncing, expected);
 
     let t = tracker();
@@ -212,6 +212,6 @@ fn the_syncing_and_offline_events_are_exactly_the_shared_fixtures() {
         .finish_tick(&tick_outcome(Err(&err), &link_with(None), 0), 500, Activity::default())
         .to_json();
     let expected: Value =
-        serde_json::from_str(include_str!("../../../../../tests/fixtures/engine-status.offline.json")).unwrap();
+        serde_json::from_str(include_str!("../../../tests/fixtures/engine-status.offline.json")).unwrap();
     assert_eq!(offline, expected);
 }
