@@ -159,8 +159,8 @@ fn token_only_sign_in(store: &MemStore, token: &str, user_id: &str, email: &str)
     Ok(removed)
 }
 /// The REAL loader (`load_session_from_vault`, the shared tail of `load_session_from_keychain`).
-fn load(store: &MemStore) -> Result<Option<crate::Session>, String> {
-    crate::load_session_from_vault(store.vault(), None)
+fn load(store: &MemStore) -> Result<Option<crate::session::Session>, String> {
+    crate::signin::store::load_session_from_vault(store.vault(), None)
 }
 
 // ── the pure comparison ─────────────────────────────────────────────────────────
@@ -237,8 +237,8 @@ fn a_stale_key_and_a_different_account_the_key_is_removed_and_the_gate_asks_for_
     assert!(!store.has(KEY) && !store.has(KEY_OWNER), "A's key and its tag are gone");
     assert_eq!(stored_key_state(&store.vault()), StoredKey::Absent);
     assert_eq!(
-        crate::auth_v2::gate::decide_gate(true, false, stored_key_state(&store.vault()), false),
-        crate::auth_v2::gate::GateState::NeedsRecoveryPhrase
+        crate::signin::gate::decide_gate(true, false, stored_key_state(&store.vault()), false),
+        crate::signin::gate::GateState::NeedsRecoveryPhrase
     );
     // The loader has no key to give, so no session reaches memory and no engine can start (`keys_for_engine_start`
     // reads only the session in memory).
@@ -326,8 +326,8 @@ fn the_loader_refuses_a_key_bound_to_another_user_id() {
     assert!(load(&unreadable).is_err());
     assert_eq!(stored_key_state(&unreadable.vault()), StoredKey::Unreadable);
     assert_eq!(
-        crate::auth_v2::gate::decide_gate(true, false, StoredKey::Unreadable, false),
-        crate::auth_v2::gate::GateState::KeyStoreUnavailable
+        crate::signin::gate::decide_gate(true, false, StoredKey::Unreadable, false),
+        crate::signin::gate::GateState::KeyStoreUnavailable
     );
 }
 

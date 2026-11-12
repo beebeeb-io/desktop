@@ -95,6 +95,7 @@ fn item_at_path(db: &StateDb, rel: &str, is_folder: bool, parent_id: Option<Stri
         local: if is_folder { None } else { Some(LocalState::Syncing) },
         read_only: None,
         has_thumbnail: false,
+        backup: Default::default(),
         name,
     })
 }

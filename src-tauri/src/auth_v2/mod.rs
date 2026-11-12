@@ -26,12 +26,4 @@ pub(crate) mod webview_autofill;
 #[cfg(test)]
 mod dto_tests;
 
-use beebeeb_core::auth_flow::AuthFlowError;
-
-/// The code string the web view maps to the board's words (`rate_limited:30` carries the wait).
-pub(crate) fn flow_code(e: &AuthFlowError) -> String {
-    match e {
-        AuthFlowError::RateLimited { retry_after_secs } => format!("rate_limited:{retry_after_secs}"),
-        other => other.code().to_string(),
-    }
-}
+pub(crate) use beebeeb_engine::signin::flow_code;

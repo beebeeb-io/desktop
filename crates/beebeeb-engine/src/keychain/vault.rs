@@ -79,6 +79,7 @@ pub trait AuthSecretStore: Send + Sync {
 
 /// One rule for every "is anything of an account left?" probe: present is present; a store that cannot hold secrets
 /// (`Unsupported`) or has none (`NotFound`) holds none; any other answer counts as present, so a caller fails closed.
+#[cfg(any(any(test, feature = "test-support"), not(target_os = "windows")))]
 pub(super) fn presence(answer: AuthResult<bool>) -> bool {
     match answer {
         Ok(present) => present,
@@ -88,11 +89,13 @@ pub(super) fn presence(answer: AuthResult<bool>) -> bool {
 }
 
 /// Does this store still hold a session token? Never reads the token where the store can avoid it; fails closed.
+#[cfg(any(any(test, feature = "test-support"), not(target_os = "windows")))]
 pub fn holds_session_token<S: AuthSecretStore>(store: &S) -> bool {
     presence(store.holds_session_token())
 }
 
 /// Does this store still hold an account email? Fails closed like [`holds_session_token`].
+#[cfg(any(any(test, feature = "test-support"), not(target_os = "windows")))]
 pub fn holds_account_email<S: AuthSecretStore>(store: &S) -> bool {
     presence(store.holds_account_email())
 }
@@ -100,6 +103,7 @@ pub fn holds_account_email<S: AuthSecretStore>(store: &S) -> bool {
 /// Does this store still hold a vault key? It never unlocks and never reads the key where the store can avoid it. A
 /// store that cannot hold secrets (`Unsupported`) or has none (`NotFound`) holds none. Any other answer counts as
 /// present, so a caller that asks whether anything of an account is left fails closed.
+#[cfg(any(any(test, feature = "test-support"), not(target_os = "windows")))]
 pub fn holds_vault_key<S: AuthSecretStore>(store: &S) -> bool {
     presence(store.holds_wrapped_master_key())
 }
