@@ -6,14 +6,19 @@
 //! (counts, the account, the sync state; every action is a call on it, answered in a toast).
 
 pub mod details;
+pub mod dialogs;
 pub mod keys;
 pub mod list;
 pub mod menus;
+pub mod names;
+pub mod rename;
 pub mod sidebar;
 pub mod source;
 pub mod toolbar;
 pub mod window;
 
+#[cfg(test)]
+mod rest_tests;
 #[cfg(test)]
 mod review_tests;
 #[cfg(test)]
@@ -98,6 +103,8 @@ pub enum Toast {
     Keeping,
     /// "Link copied" (DW-0107).
     LinkCopied,
+    /// "Freed up space on this PC": the copies on this PC are gone, the items are online only.
+    FreedUp,
     /// "Couldn't rename. Check your connection." with Try again (DW-0109).
     Failed(Action, ActionError),
 }
@@ -149,6 +156,18 @@ pub struct Actions {
     pub board_crop_top: f32,
     /// The folders Back left, nearest last: where Forward goes. Opening a folder empties it.
     pub forward: Vec<Option<String>>,
+    /// The open dialog: New folder (DW-0417) or Move to (DW-0409).
+    pub dialog: Option<dialogs::Dialog>,
+    /// The row whose name is a field (DW-0410).
+    pub rename: Option<rename::Rename>,
+    /// The name being typed: in the New folder dialog, or in a row.
+    pub name_edit: rune::TextEdit,
+    /// The name that was refused, and why (DW-0410b). It is shown while the field still holds that name.
+    pub name_error: Option<(String, names::NameError)>,
+    /// Folders the source made since the window last looked (`Change::Made`).
+    pub made: Vec<DriveItem>,
+    /// Whose disk a typed name has to fit on: this computer's (a test names the other one).
+    pub host: names::Host,
 }
 
 pub const INTENTS_KEPT: usize = 32;
@@ -169,6 +188,12 @@ impl Actions {
             window: (1278.0, 798.0),
             board_crop_top: 0.0,
             forward: Vec::new(),
+            dialog: None,
+            rename: None,
+            name_edit: rune::TextEdit::default(),
+            name_error: None,
+            made: Vec::new(),
+            host: names::Host::this(),
         }
     }
 }
@@ -185,9 +210,12 @@ impl Default for Actions {
 /// The board's sample window: its folders (`source::BoardDrive`) and its account, counts and
 /// actions (`source::FilesFixture`). What headless renders, the gate and the tests start from.
 pub fn board_fixture(mut s: State) -> State {
-    s.source = Box::new(source::BoardDrive::new());
+    // One set of changes behind both: what New folder, Rename and Move do is still there when a
+    // folder is listed again.
+    let fixture = FilesFixture::default();
+    s.source = Box::new(source::BoardDrive::sharing(&fixture.edits));
     (s.listing, s.list_error) = crate::load(s.source.as_ref(), None);
-    s.actions = Actions::new(Box::new(FilesFixture::default()));
+    s.actions = Actions::new(Box::new(fixture));
     s
 }
 
@@ -349,7 +377,7 @@ impl State {
         self.list_error.is_none() && self.actions.source.can_add(self.listing.folder.id.as_deref())
     }
 
-    fn selected_items(&self) -> Vec<DriveItem> {
+    pub(super) fn selected_items(&self) -> Vec<DriveItem> {
         self.selected_rows()
             .into_iter()
             .map(|i| self.listing.items[i].clone())
@@ -357,12 +385,12 @@ impl State {
     }
 
     /// Something else was done: Ctrl+Z no longer brings the trashed rows back (DW-0108).
-    fn forget_undo(&mut self) {
+    pub(super) fn forget_undo(&mut self) {
         self.actions.undo.clear();
     }
 
     /// An action did not happen: say so (DW-0109). A protected folder says why in its own frame (DW-1110).
-    fn failed(&mut self, action: Action, why: ActionError, tx: &mut Tx) {
+    pub(super) fn failed(&mut self, action: Action, why: ActionError, tx: &mut Tx) {
         if why == ActionError::Protected {
             self.intent(Intent::Frame("DW-1110"));
         } else {
@@ -391,6 +419,14 @@ impl State {
                         copies.push(item.id.clone());
                         self.listing.items.insert(at + 1, *item);
                     }
+                }
+                Change::Made { item } => {
+                    // A folder made in the folder shown stands in its rows, in the folder's order.
+                    if item.parent_id == self.listing.folder.id {
+                        self.listing.items.push((*item).clone());
+                        self.apply_sort();
+                    }
+                    self.actions.made.push(*item);
                 }
                 Change::Failed(action, why) => failures.push((action, why)),
             }
@@ -435,6 +471,7 @@ impl State {
         self.actions.anchor = None;
         self.actions.undo.clear();
         self.actions.menu = None;
+        self.actions.rename = None;
         self.selected = None;
         self.actions.sort = self
             .actions
@@ -667,6 +704,54 @@ impl State {
         true
     }
 
+    /// Does anything selected have a copy on this PC (downloaded, or kept)? Then Free up space
+    /// has something to remove.
+    pub fn selection_is_on_this_pc(&self) -> bool {
+        self.selected_items()
+            .iter()
+            .any(|i| matches!(i.pc_status.as_deref(), Some("on_this_pc" | "available_offline")))
+    }
+
+    /// Free up space: the copies of the selection on this PC go; the items stay in Beebeeb and
+    /// download again when opened. What was kept on this PC is no longer kept.
+    pub fn free_up_space(&mut self, tx: &mut Tx) -> bool {
+        let rows = self.selected_rows();
+        let items: Vec<DriveItem> = self
+            .selected_items()
+            .into_iter()
+            .filter(|i| matches!(i.pc_status.as_deref(), Some("on_this_pc" | "available_offline")))
+            .collect();
+        if items.is_empty() {
+            return false;
+        }
+        if let Err(why) = self.actions.source.free_up_space(&items) {
+            self.failed(Action::FreeUpSpace, why, tx);
+            return true;
+        }
+        self.forget_undo();
+        for i in rows {
+            if items.iter().any(|item| item.id == self.listing.items[i].id) {
+                self.listing.items[i].pc_status = Some("online_only".into());
+            }
+        }
+        self.show_toast(Toast::FreedUp, tx);
+        true
+    }
+
+    /// The toolbar's Open in File Explorer: the folder shown, in Explorer.
+    pub fn open_in_file_explorer(&mut self, tx: &mut Tx) -> bool {
+        let folder = self.listing.folder.id.clone();
+        if let Err(why) = self.actions.source.open_in_file_explorer(folder.as_deref()) {
+            self.failed(Action::OpenInFileExplorer, why, tx);
+        }
+        true
+    }
+
+    /// After the folder, a dialog or a field changed: the keyboard is the list's again.
+    pub(super) fn focus_list(&self, tx: &mut Tx) {
+        keys::focus_list(self, tx);
+    }
+
     /// Files dropped from File Explorer: into `folder` (`None`: the root). A folder that takes
     /// nothing refuses the drop, silently (DW-0481: "the row does not light up").
     pub fn upload(&mut self, folder: Option<String>, files: &[std::path::PathBuf], tx: &mut Tx) -> bool {
@@ -714,7 +799,21 @@ impl State {
                     self.upload(folder, &files, tx);
                 }
             }
-            Action::Rename => self.intent(Intent::Frame("DW-0410")),
+            Action::Rename => {
+                self.begin_rename(tx);
+            }
+            Action::NewFolder => {
+                self.begin_new_folder();
+            }
+            Action::Move => {
+                self.begin_move(tx);
+            }
+            Action::FreeUpSpace => {
+                self.free_up_space(tx);
+            }
+            Action::OpenInFileExplorer => {
+                self.open_in_file_explorer(tx);
+            }
         }
     }
 
@@ -821,8 +920,15 @@ impl State {
                 self.show_in_file_explorer(tx);
             }
             "details" => self.intent(Intent::Frame("DW-0411")),
-            "rename" => self.intent(Intent::Frame("DW-0410")),
-            "move" => self.intent(Intent::Frame("DW-0409")),
+            "rename" => {
+                self.begin_rename(tx);
+            }
+            "move" => {
+                self.begin_move(tx);
+            }
+            "free-up-space" => {
+                self.free_up_space(tx);
+            }
             "duplicate" => {
                 self.duplicate_selected(tx);
             }
@@ -855,7 +961,9 @@ impl State {
                 folders_first: !sort.folders_first,
                 ..sort
             }),
-            "new-folder" => self.intent(Intent::Frame("DW-0417")),
+            "new-folder" => {
+                self.begin_new_folder();
+            }
             "new-file" => self.intent(Intent::Frame("DW-1521")),
             "new-document" => self.intent(Intent::Frame("DW-1558")),
             "upload-files" => self.intent(Intent::Frame("DW-0415")),
@@ -945,5 +1053,38 @@ pub const SCENES: &[crate::ui::gate::Scene<State>] = &[
     }),
     ("DW-1106", |s| {
         s.open_folder(Some(source::NEW_FOLDER_ID.to_string()));
+    }),
+    // DW-0417: New folder, over the window as it is, "Untitled folder" selected in its field.
+    ("DW-0417", |s| {
+        s.select_only(6);
+        s.begin_new_folder();
+        s.actions.name_edit.focused = true;
+    }),
+    // DW-0409: Move to, for Contract draft.pdf, Documents chosen.
+    ("DW-0409", |s| {
+        s.select_only(6);
+        let items = s.selected_items();
+        s.open_move(items);
+    }),
+    // DW-0410: Contract draft.pdf's name as a field, "Contract draft" selected.
+    ("DW-0410", |s| {
+        s.select_only(6);
+        s.open_rename(6);
+        s.actions.name_edit.focused = true;
+    }),
+    // DW-0410b: the copy, being given the original's name: refused, and the tip says why.
+    ("DW-0410b", |s| {
+        s.select_only(6);
+        s.show_detail_pane = false;
+        let names: Vec<&str> = s.listing.items.iter().map(|i| i.name.as_str()).collect();
+        let original = s.listing.items[6].clone();
+        if s.actions.source.duplicate(&[original.clone()], &names).is_ok() && s.take_changes().0 {
+            s.open_rename(7);
+            let mut edit = rune::TextEdit::new(original.name.clone());
+            edit.set_caret(names::stem_len(&original.name, false));
+            edit.focused = true;
+            s.actions.name_edit = edit;
+            s.check_rename();
+        }
     }),
 ];

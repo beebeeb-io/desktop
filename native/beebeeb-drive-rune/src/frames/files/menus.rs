@@ -12,7 +12,8 @@ pub const SORT_MENU_W: f32 = 190.0;
 /// The file menu for the selection, by the board's rules (DW-0402):
 /// - Backups and service folders offer Open, Preview, Show in File Explorer and Details only;
 /// - several selected items leave out Rename, Version history… and Details;
-/// - Make available offline reads Remove from this PC when the item already is.
+/// - Make available offline reads Remove from this PC when the item already is;
+/// - Free up space follows it when something selected has a copy on this PC.
 ///
 /// A folder's Preview stays in the menu, dimmed: it cannot be picked ("Open goes into it and Preview is dimmed").
 pub fn file_menu(s: &State) -> Vec<Entry> {
@@ -39,8 +40,13 @@ pub fn file_menu(s: &State) -> Vec<Entry> {
         Entry::item("copy-link", "Copy link"),
         Entry::Sep,
         keep,
-        explorer,
     ];
+    // Free up space, as File Explorer offers it: where something selected has a copy on this PC
+    // (downloaded, or kept). Not on the board yet (PR 305, Decision: owner request 2026-11-12).
+    if s.selection_is_on_this_pc() {
+        entries.push(Entry::item("free-up-space", "Free up space"));
+    }
+    entries.push(explorer);
     if !several {
         entries.push(details);
     }
