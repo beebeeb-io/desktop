@@ -33,7 +33,7 @@ fn a_backup_op_never_holds_its_source_where_desktop_deletes_paths() {
     refusals += usize::from(refused(raw(
         &db,
         "INSERT INTO operation_queue (op_id, kind, origin, source_path, payload_path)
-             VALUES ('op-mutant', 'upload_file', 'backup', '/home/p/Pictures/a.jpg', '/home/p/Pictures/a.jpg')",
+             VALUES ('op-mutant', 'upload_file', 'backup', '/data/p/Pictures/a.jpg', '/data/p/Pictures/a.jpg')",
     )));
     refusals += usize::from(refused(raw(
         &db,
@@ -43,7 +43,7 @@ fn a_backup_op_never_holds_its_source_where_desktop_deletes_paths() {
     refusals += usize::from(refused(raw(
         &db,
         "INSERT INTO operation_queue (op_id, kind, origin, source_path)
-             VALUES ('op-sync-with-source', 'upload_file', 'sync', '/home/p/Pictures/a.jpg')",
+             VALUES ('op-sync-with-source', 'upload_file', 'sync', '/data/p/Pictures/a.jpg')",
     )));
     refusals += usize::from(refused(raw(
         &db,
@@ -55,7 +55,7 @@ fn a_backup_op_never_holds_its_source_where_desktop_deletes_paths() {
         raw(
             &db,
             "INSERT INTO operation_queue (op_id, kind, origin, source_path)
-                 VALUES ('op-backup', 'upload_file', 'backup', '/home/p/Pictures/a.jpg')",
+                 VALUES ('op-backup', 'upload_file', 'backup', '/data/p/Pictures/a.jpg')",
         )
         .unwrap(),
         1
@@ -72,16 +72,16 @@ fn a_backup_op_never_holds_its_source_where_desktop_deletes_paths() {
         &db,
         "INSERT INTO upload_resume (op_id, payload_path, payload_size, payload_mtime_ns, upload_session_id,
                  server_file_id, object_version_id, chunk_size_bytes, chunk_count)
-             VALUES ('op-backup', '/home/p/Pictures/a.jpg', 1, 1, 's', 'f', 'o', 1, 1)",
+             VALUES ('op-backup', '/data/p/Pictures/a.jpg', 1, 1, 's', 'f', 'o', 1, 1)",
     )));
     refusals += usize::from(refused(raw(
         &db,
         "INSERT INTO upload_finalizations (op_id, local_file_id, server_file_id, target_path, payload_path)
-             VALUES ('op-backup', 'f', 'f', 'a.jpg', '/home/p/Pictures/a.jpg')",
+             VALUES ('op-backup', 'f', 'f', 'a.jpg', '/data/p/Pictures/a.jpg')",
     )));
     refusals += usize::from(refused(raw(
         &db,
-        "INSERT INTO staged_payloads (path, completed) VALUES ('/home/p/Pictures/a.jpg', 0)",
+        "INSERT INTO staged_payloads (path, completed) VALUES ('/data/p/Pictures/a.jpg', 0)",
     )));
     assert_eq!(
         refusals, 9,
@@ -108,7 +108,7 @@ fn a_backup_op_never_holds_its_source_where_desktop_deletes_paths() {
         .backup_upload_op("op-backup")
         .unwrap()
         .expect("the backup op reads back");
-    assert_eq!(backup.source_path, std::path::PathBuf::from("/home/p/Pictures/a.jpg"));
+    assert_eq!(backup.source_path, std::path::PathBuf::from("/data/p/Pictures/a.jpg"));
     assert_eq!(
         db.get_operation("op-backup").unwrap().expect("queued").payload_path,
         None,

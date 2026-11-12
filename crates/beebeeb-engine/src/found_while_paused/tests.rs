@@ -856,38 +856,38 @@ fn a_staged_copy_the_journal_does_not_name_is_never_deleted() {
 #[test]
 fn a_folder_in_a_onedrive_or_dropbox_folder_says_which_syncs_it() {
     let roots = vec![
-        (PathBuf::from("/home/user/OneDrive - Initlabs"), "OneDrive"),
-        (PathBuf::from("/home/user/Dropbox"), "Dropbox"),
+        (PathBuf::from("/data/user/OneDrive - Initlabs"), "OneDrive"),
+        (PathBuf::from("/data/user/Dropbox"), "Dropbox"),
     ];
     assert_eq!(
-        synced_by(Path::new("/home/user/OneDrive - Initlabs"), &roots),
+        synced_by(Path::new("/data/user/OneDrive - Initlabs"), &roots),
         Some("OneDrive"),
         "the root itself"
     );
     assert_eq!(
-        synced_by(Path::new("/home/user/onedrive - initlabs/Docs"), &roots),
+        synced_by(Path::new("/data/user/onedrive - initlabs/Docs"), &roots),
         Some("OneDrive"),
         "any case"
     );
-    assert_eq!(synced_by(Path::new("/home/user/Dropbox/Work"), &roots), Some("Dropbox"));
+    assert_eq!(synced_by(Path::new("/data/user/Dropbox/Work"), &roots), Some("Dropbox"));
     assert_eq!(
-        synced_by(Path::new("/home/user/Dropbox Old"), &roots),
+        synced_by(Path::new("/data/user/Dropbox Old"), &roots),
         None,
         "a name that only starts the same"
     );
-    assert_eq!(synced_by(Path::new("/home/user"), &roots), None, "above it");
+    assert_eq!(synced_by(Path::new("/data/user"), &roots), None, "above it");
 }
 
 #[test]
 fn dropbox_names_its_personal_and_business_folders_in_info_json() {
-    let info = r#"{"personal": {"path": "C:\\Users\\a\\Dropbox", "host": 1}, "business": {"path": "C:\\Users\\a\\Dropbox (Initlabs)"}, "other": 3}"#;
+    let info = r#"{"personal": {"path": "C:\\home\\a\\Dropbox", "host": 1}, "business": {"path": "C:\\home\\a\\Dropbox (Initlabs)"}, "other": 3}"#;
     let mut roots = dropbox_roots(info);
     roots.sort();
     assert_eq!(
         roots,
         vec![
-            PathBuf::from(r"C:\Users\a\Dropbox"),
-            PathBuf::from(r"C:\Users\a\Dropbox (Initlabs)")
+            PathBuf::from(r"C:\home\a\Dropbox"),
+            PathBuf::from(r"C:\home\a\Dropbox (Initlabs)")
         ]
     );
     assert!(dropbox_roots("not json").is_empty());

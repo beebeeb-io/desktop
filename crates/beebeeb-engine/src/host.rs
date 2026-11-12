@@ -552,7 +552,7 @@ mod tests {
             format!(
                 "{:?}",
                 Notice::BackupRefusal {
-                    message: "This is a backup of C:\\Users\\Payslip March. Change the original instead.".into()
+                    message: "This is a backup of C:\\home\\Payslip March. Change the original instead.".into()
                 }
             ),
             format!(

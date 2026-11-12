@@ -20,7 +20,7 @@ fn standard_words_are_lowercase_ascii() {
 fn issue_example_path_and_known_multiword_name_are_gone() {
     let out = redact_for_export(ISSUE_ERROR, &names(&["Tax 2025/aangifte.pdf"]));
     for leaked in [
-        "/Users/guus",
+        "/Users/alice",
         "CloudStorage",
         "Beebeeb-Drive",
         "Tax 2025",
@@ -82,9 +82,9 @@ fn unknown_names_are_removed_by_the_allow_list() {
 #[test]
 fn path_shapes_are_all_redacted() {
     for p in [
-        "/Users/guus/Documents/x.txt",
+        "/Users/alice/Documents/x.txt",
         "~/Documents/x.txt",
-        "C:\\Users\\guus\\Documents\\x.txt",
+        "C:\\Users\\alice\\Documents\\x.txt",
         "D:\\x.txt",
         "\\\\server\\share\\x.txt",
         "Library/CloudStorage/Beebeeb-Drive",

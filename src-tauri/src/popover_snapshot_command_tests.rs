@@ -404,7 +404,7 @@ fn the_real_status_listener_keeps_old_consumers_on_the_old_state_and_feeds_the_p
 
 /// The same command and the same engine HTTP client, against a REAL local API. Ignored by
 /// default (needs a running server and a session token); the evidence run is in
-/// `/home/user/evidence/1683-s2/real-api/`.
+/// `~/evidence/1683-s2/real-api/`.
 ///
 /// ```text
 /// BB_REAL_API_BASE=http://127.0.0.1:3001 BB_REAL_API_TOKEN=<session token> \

@@ -294,10 +294,10 @@ fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Optio
 /// real identity too, so no build writes a note into the real app's folder by default.
 #[test]
 fn the_inbox_is_the_flag_then_the_env_then_the_test_identitys_folder() {
-    let base: &[(&str, &str)] = &[("HOME", "/home/t"), ("LOCALAPPDATA", "C:\\Users\\t\\AppData\\Local")];
+    let base: &[(&str, &str)] = &[("HOME", "/data/t"), ("LOCALAPPDATA", "C:\\home\\t\\AppData\\Local")];
     let both: &[(&str, &str)] = &[
-        ("HOME", "/home/t"),
-        ("LOCALAPPDATA", "C:\\Users\\t\\AppData\\Local"),
+        ("HOME", "/data/t"),
+        ("LOCALAPPDATA", "C:\\home\\t\\AppData\\Local"),
         (paths::DIR_ENV, "/env/inbox"),
     ];
     assert_eq!(

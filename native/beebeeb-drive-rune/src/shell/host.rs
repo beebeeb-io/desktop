@@ -68,6 +68,12 @@ pub struct Shell {
     /// the desired state changes. Capped at 3: after 3 failures the call is not retried until
     /// the desired state changes (a navigation away and back resets it).
     capture_exclusion_retries: u8,
+    /// The b's inputs changed since the flyout last read them. A hidden flyout is not read
+    /// ([`Shell::refresh`]); this says it reads them once it shows.
+    flyout_behind: bool,
+    /// How many reads the shell asked of the flyout ([`Shell::read_flyout`]), for the tests.
+    #[cfg(test)]
+    flyout_reads: u32,
 }
 
 impl Shell {
@@ -91,6 +97,9 @@ impl Shell {
             // route (or any route, if a window handle exists) will apply it.
             capture_excluded: false,
             capture_exclusion_retries: 0,
+            flyout_behind: false,
+            #[cfg(test)]
+            flyout_reads: 0,
         }
     }
 
@@ -139,9 +148,13 @@ impl Shell {
         if inputs != self.tray_inputs {
             // The flyout reads the inputs themselves (counts), not only what the b shows.
             self.tray_inputs = inputs;
-            if let Some(flyout) = &self.wiring.flyout {
-                flyout.update(|s, _| s.refresh());
-            }
+            self.flyout_behind = true;
+        }
+        // A hidden flyout is not read: each read opens this PC's state database and may ask
+        // Beebeeb for the storage. The click that opens it reads it first (`toggle_flyout`); a
+        // change that came while it opened is read here once it shows.
+        if self.flyout_behind && self.wiring.flyout.as_ref().is_some_and(AppHandle::is_visible) {
+            self.read_flyout();
         }
         let model = tray_model(&self.tray_inputs);
         if model != self.tray_model {
@@ -244,8 +257,23 @@ impl Shell {
         }
     }
 
-    fn toggle_flyout(&self, anchor: Option<flyout::Anchor>) {
-        let Some(flyout) = &self.wiring.flyout else { return };
+    /// Asks the flyout to read the engine and the tray inputs again: one read of the engine and
+    /// of this PC's state database, when Rune runs it on the flyout's turn.
+    fn read_flyout(&mut self) {
+        if let Some(flyout) = &self.wiring.flyout {
+            flyout.update(|s, _| s.refresh());
+            self.flyout_behind = false;
+            #[cfg(test)]
+            {
+                self.flyout_reads += 1;
+            }
+        }
+    }
+
+    fn toggle_flyout(&mut self, anchor: Option<flyout::Anchor>) {
+        let Some(flyout) = self.wiring.flyout.clone() else {
+            return;
+        };
         let since_hide = unpoisoned(&self.wiring.flyout_hidden_at).map(|at| at.elapsed().as_millis() as u64);
         match flyout::on_tray_click(flyout.is_visible(), since_hide) {
             Toggle::Hide => flyout.hide(),
@@ -254,7 +282,8 @@ impl Shell {
                 if let Some(anchor) = anchor {
                     flyout.set_position(flyout::position(&anchor));
                 }
-                flyout.update(|s, _| s.refresh());
+                // Read before it shows: a hidden flyout was not kept current.
+                self.read_flyout();
                 flyout.open();
             }
         }

@@ -161,7 +161,7 @@ fn client_sync_sessions_parse() {
                     "id": "cs1",
                     "name": "Documents sync",
                     "session_type": "sync",
-                    "local_path": "/Users/guus/Beebeeb",
+                    "local_path": "/Users/alice/Beebeeb",
                     "remote_path": "/",
                     "status": "active",
                     "heartbeat_interval_secs": 60,
@@ -184,7 +184,7 @@ fn client_sync_sessions_parse() {
     let list: ClientSyncSessionList = serde_json::from_str(json).unwrap();
     assert_eq!(list.sessions.len(), 1);
     let s = &list.sessions[0];
-    assert_eq!(s.local_path.as_deref(), Some("/Users/guus/Beebeeb"));
+    assert_eq!(s.local_path.as_deref(), Some("/Users/alice/Beebeeb"));
     assert_eq!(s.files_synced, Some(100));
     assert_eq!(s.speed_bps, Some(5000000));
 }

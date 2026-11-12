@@ -36,7 +36,7 @@ use crate::state_db::StateDb;
 pub struct OwnBackupFolder {
     /// The category folder's name under the device folder (`"Pictures"`).
     pub display_name: String,
-    /// Where the original folder is on this device (`C:\Users\guus\Pictures`).
+    /// Where the original folder is on this device (`C:\Users\alice\Pictures`).
     pub source_path: PathBuf,
 }
 

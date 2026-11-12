@@ -117,7 +117,7 @@ fn fixture() -> (tempfile::TempDir, StateDb, OwnBackups) {
         device_folder: Some("GLegion".into()),
         folders: vec![OwnBackupFolder {
             display_name: "Pictures".into(),
-            source_path: PathBuf::from("/home/a/Pictures"),
+            source_path: PathBuf::from("/data/a/Pictures"),
         }],
     };
     (dir, db, own)
@@ -190,7 +190,7 @@ fn the_root_and_everything_that_is_not_a_whole_backup_never_reach_the_server() {
     // This device's own backup of a folder it backs up now: change the original instead.
     assert!(matches!(
         run(&api, &db, &own, OWN_PICTURES, PASSWORD),
-        Err(DeleteBackupError::Refused(words)) if words.contains("/home/a/Pictures")
+        Err(DeleteBackupError::Refused(words)) if words.contains("/data/a/Pictures")
     ));
     for (id, want) in [
         (OUTSIDE, DeleteBackupError::NotABackup),

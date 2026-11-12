@@ -11,6 +11,19 @@
 //! ```
 //!
 //! Lanes: add ONE `mod` line for your module below, in alphabetical order, and nothing else.
+//!
+//! Decision (lane, 2026-11-12): release and TEST builds on Windows use the GUI subsystem (PE 2)
+//! so Windows does not attach a console window beside the app. Debug builds keep the console
+//! subsystem (PE 3) for developer convenience and so compare.sh's debug render path keeps its
+//! stdout/stderr visible in the terminal. The cfg_attr guard is `all(windows,
+//! not(debug_assertions))`, which is true for every --release build and false for every debug
+//! build, matching the profile used for both the installer TEST binary and the shipped binary.
+//! eprintln! output is still delivered to a redirected handle (pipes, Start-Process
+//! -RedirectStandardError) under a GUI-subsystem binary; only an unredirected terminal drops it.
+
+// Release builds on Windows: GUI subsystem (PE 2) — no console window beside the app.
+// Debug builds retain the console subsystem for developer convenience.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod engine_host;
 #[cfg(feature = "feedback")]

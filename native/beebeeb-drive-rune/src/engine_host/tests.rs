@@ -49,6 +49,13 @@ fn started() -> &'static Started {
     })
 }
 
+/// The process's state folder, which the start path makes once (`started`): every other engine handle a test
+/// opens is on it (the engine refuses another). A test that opens one must not write in it.
+pub(super) fn process_state_dir() -> PathBuf {
+    started();
+    state_paths::beebeeb_state_dir_for(engine_identity()).expect("the process's state folder")
+}
+
 fn put(db: &StateDb, id: &str, path: &str, parent: Option<&str>, folder: bool) {
     let entry = FileEntry {
         file_id: id.to_string(),
@@ -216,18 +223,18 @@ fn the_sync_folder_is_not_a_backup_folder_for_the_identity_that_owns_it() {
     let p = |text: &str| PathBuf::from(text);
     for (identity, own, others) in [(&TEST, "Beebeeb Test", "Beebeeb"), (&REAL, "Beebeeb", "Beebeeb Test")] {
         assert_eq!(identity.sync_folder_name(), own);
-        assert!(!may_back_up(identity, None, &p(&format!("/home/a/{own}"))), "{own}");
-        assert!(!may_back_up(identity, None, &p(&format!("/home/a/{own}/Photos"))));
+        assert!(!may_back_up(identity, None, &p(&format!("/data/a/{own}"))), "{own}");
+        assert!(!may_back_up(identity, None, &p(&format!("/data/a/{own}/Photos"))));
         assert!(!may_back_up(
             identity,
             None,
-            &p(&format!("/home/a/{}", own.to_uppercase()))
+            &p(&format!("/data/a/{}", own.to_uppercase()))
         ));
         assert!(
-            may_back_up(identity, None, &p(&format!("/home/a/{others}/Photos"))),
+            may_back_up(identity, None, &p(&format!("/data/a/{others}/Photos"))),
             "{others}"
         );
-        assert!(may_back_up(identity, None, &p("/home/a/Documents")));
+        assert!(may_back_up(identity, None, &p("/data/a/Documents")));
         // A sync folder the person chose elsewhere, under any name.
         let chosen = p("/data/Cloud");
         assert!(!may_back_up(identity, Some(&chosen), &p("/data/Cloud")));
