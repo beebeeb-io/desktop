@@ -20,7 +20,7 @@ use crate::ui::sidebar::{SidebarSection, brand, side_item};
 pub fn search_focused(cx: &rune::Cx<State>) -> bool {
     cx.caret(crate::ui::keys::SEARCH_KEY).is_some()
 }
-use crate::ui::toolbar::{ToolState, kbd, segment, segmented, tool_button};
+use crate::ui::toolbar::{self as tb, kbd};
 
 const SIDEBAR_W: f32 = 220.0;
 
@@ -271,32 +271,6 @@ fn foot(s: &State, t: &Theme) -> El {
         .child(account)
 }
 
-/// Back and Forward (`.mk-tb > .inline-flex`), through the route machine.
-pub fn nav(s: &State, ui: &Ui, t: &Theme) -> El {
-    let (back, forward) = if ui.first_place {
-        (false, false)
-    } else {
-        (s.shell.app.can_go_back(), s.shell.app.can_go_forward())
-    };
-    let state = |on: bool| if on { ToolState::Idle } else { ToolState::Off };
-    row()
-        .key("nav")
-        .child(
-            tool_button("back", "Back", &icons::CHEVRON_LEFT, 16.0, state(back), t)
-                .shortcut_hint("Alt+Left")
-                .on_press(|s: &mut State| {
-                    host::dispatch(s, Event::Back);
-                }),
-        )
-        .child(
-            tool_button("forward", "Forward", &icons::CHEVRON_RIGHT, 16.0, state(forward), t)
-                .shortcut_hint("Alt+Right")
-                .on_press(|s: &mut State| {
-                    host::dispatch(s, Event::Forward);
-                }),
-        )
-}
-
 /// The section's name and the line under it (`.mk-title`).
 pub fn title(name: &str, sub: String, t: &Theme) -> El {
     col()
@@ -314,65 +288,6 @@ pub enum FilesControls {
     AsFiles,
     /// The view switch at 45 % and the panel button off (the board's Available offline).
     Dimmed,
-}
-
-/// A control the board draws and the section has nothing for: it is there to be seen, says so
-/// to assistive technology (disabled) and takes no focus. `Decision` in the PR body.
-fn inert(control: El) -> El {
-    control.disabled(true).focusable(false)
-}
-
-/// View switch, Sort, Details panel, the hairline, New: the right-hand run of `.mk-tb`.
-pub fn files_controls(how: FilesControls, t: &Theme) -> Vec<El> {
-    let dimmed = how == FilesControls::Dimmed;
-    let mut view = inert(segmented(
-        "view-toggle",
-        "View",
-        vec![
-            inert(segment("view-list", "as List", &icons::VIEW_LIST, !dimmed, t)),
-            inert(segment("view-grid", "as Grid", &icons::VIEW_GRID, false, t)),
-        ],
-        t,
-    ));
-    if dimmed {
-        view = view.opacity(0.45);
-    }
-    let sort = inert(
-        tool_button("sort-btn", "Sort", &icons::SORT, 15.0, ToolState::Idle, t).child(kit::glyph(
-            "sort-caret",
-            &icons::CHEVRON_DOWN,
-            11.0,
-            t.text_secondary,
-        )),
-    );
-    let panel = inert(tool_button(
-        "panel-toggle-btn",
-        "Details panel",
-        &icons::PANEL_TOGGLE,
-        16.0,
-        if dimmed { ToolState::Off } else { ToolState::On },
-        t,
-    ));
-    let sep = el().key("toolbar-sep").w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
-    let new_btn = row()
-        .key("new-btn")
-        .role("button")
-        .label("New")
-        .h(28.0)
-        .pl(8.0)
-        .pr(9.0)
-        .gap(5.0)
-        .center_y()
-        .radius(radius::CONTROL)
-        .fill(t.accent)
-        .hover(t.press)
-        .press(t.press)
-        .focusable(true)
-        .on_press(|s: &mut State| s.this_pc.ask(super::Intent::New))
-        .child(kit::glyph("plus-icon", &icons::PLUS, 14.0, t.accent_text_on))
-        .child(kit::label("new-label", "New", type_::LABEL, t.accent_text_on))
-        .child(kit::glyph("new-caret", &icons::CHEVRON_DOWN, 11.0, t.accent_text_on));
-    vec![view, sort, panel, sep, new_btn]
 }
 
 /// The search field (`.mk-search`) over the section's own text. With words in it the field is
@@ -455,24 +370,65 @@ pub fn search_field(ui: &Ui, focused: bool, placeholder: &'static str, t: &Theme
     field
 }
 
-/// The toolbar (`.mk-tb`): `left` after Back and Forward, then the space, then `right`.
-pub fn toolbar(name: &'static str, left: Vec<El>, right: Vec<El>, t: &Theme) -> El {
-    row()
-        .key("toolbar")
-        .role("toolbar")
-        .label(name)
-        .h(46.0)
-        .w_full()
-        .fill(t.toolbar_bg)
-        .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
-        .border_layout()
-        .pl(10.0)
-        .pr(12.0)
-        .center_y()
-        .gap(8.0)
-        .children(left)
-        .child(el().key("toolbar-spacer").grow(1.0))
-        .children(right)
+/// The toolbar (`.mk-tb`): the one window toolbar (`ui::toolbar::bar`) with the section's title,
+/// its own controls in the slot (`slot`), the Files controls as `how` says, and its search field.
+pub fn toolbar(
+    s: &State,
+    ui: &Ui,
+    name: &'static str,
+    sub: String,
+    slot: Vec<El>,
+    how: FilesControls,
+    search: El,
+    t: &Theme,
+) -> El {
+    // Back and Forward go through the route machine.
+    let (back, forward) = if ui.first_place {
+        (false, false)
+    } else {
+        (s.shell.app.can_go_back(), s.shell.app.can_go_forward())
+    };
+    let dimmed = how == FilesControls::Dimmed;
+    tb::bar(
+        tb::Bar {
+            name: name.into(),
+            back: (
+                back,
+                tb::press(|s, _| {
+                    host::dispatch(s, Event::Back);
+                }),
+            ),
+            forward: (
+                forward,
+                tb::press(|s, _| {
+                    host::dispatch(s, Event::Forward);
+                }),
+            ),
+            title: title(name, sub, t),
+            slot: Some(row().key("toolbar-slot").center_y().gap(8.0).children(slot)),
+            slot_sep: false,
+            // The board draws these and the section has nothing for them: there to be seen,
+            // disabled to assistive technology, no focus (`inert`). `Decision` in PR 289's body.
+            view: if dimmed { tb::View::NotHere } else { tb::View::List },
+            on_view: None,
+            sort: tb::Sort::Idle,
+            on_sort: None,
+            details: if dimmed {
+                tb::Details::NotHere
+            } else {
+                tb::Details::Open
+            },
+            on_details: None,
+            inert: true,
+            // These sections show no folder: the Beebeeb location.
+            on_explorer: Box::new(tb::open_beebeeb_location),
+            new: tb::New::Idle,
+            on_new: tb::press(|s, _| s.this_pc.ask(super::Intent::New)),
+            search,
+            trailing_inset: 0.0,
+        },
+        t,
+    )
 }
 
 /// An outlined small button (`.kit-btn-sm`, 22 pt): an optional glyph and its words. Keys:

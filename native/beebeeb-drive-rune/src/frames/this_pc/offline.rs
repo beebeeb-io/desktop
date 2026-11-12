@@ -53,15 +53,14 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .on_press(|s: &mut State| s.this_pc.ask(super::Intent::AskRemoveAll)),
         );
     }
-    right.extend(chrome::files_controls(FilesControls::Dimmed, &t));
-    right.push(chrome::search_field(ui, focused, "Search names", &t));
     let toolbar = chrome::toolbar(
+        s,
+        ui,
         "Available offline",
-        vec![
-            chrome::nav(s, ui, &t),
-            chrome::title("Available offline", summary(&kept), &t),
-        ],
+        summary(&kept),
         right,
+        FilesControls::Dimmed,
+        chrome::search_field(ui, focused, "Search names", &t),
         &t,
     );
 
