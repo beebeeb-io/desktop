@@ -99,7 +99,7 @@ pub fn hydration_policy_of(path: &std::path::Path) -> anyhow::Result<(u16, u16)>
 /// The name of the provider Windows has `path` registered to as a Cloud Files sync root, or the HRESULT of the
 /// read that failed. Reads only. `sync_root_owner::registration_of` decides what a failure means (two codes say
 /// "not a sync root"; any other is not an answer).
-pub fn registered_provider_name(path: &std::path::Path) -> Result<String, i32> {
+pub fn registered_provider_name(path: &std::path::Path) -> std::result::Result<String, i32> {
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut buffer = vec![0u64; 1024];
     // SAFETY: as in `hydration_policy_of`: a NUL-terminated path and a writable buffer of the stated length.
