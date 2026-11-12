@@ -183,7 +183,8 @@ if (foot) {
 // Measured without it: a recapture of DW-0701 exported 4 keys more, DW-A02 8 more, DW-0402 33 more
 // (`mi-*`), DW-0505 17 more (`menu-item-*`), and DW-0508 did not capture at all.
 const sectionOn = (() => { const on = q('.mk-side-item.on .mk-side-label'); return on ? on.textContent.trim() : ''; })();
-const groupOf = q('.mk-set') ? 'settings' : q('.au-mac') ? 'account' : q('.au-set') ? 'account-settings' : (sectionOn === 'Shared' || sectionOn === 'Trash') ? 'shared-trash' : (sectionOn === 'Sync history' || sectionOn === 'Available offline') ? 'this-pc' : sectionOn === 'Photos' ? 'photos' : 'files';
+// The b's flyout and its menus (`.wn-fly`) are keyed in keymap-tray.js, which numbers its buttons.
+const groupOf = q('.wn-fly') ? 'flyout' : q('.mk-set') ? 'settings' : q('.au-mac') ? 'account' : q('.au-set') ? 'account-settings' : (sectionOn === 'Shared' || sectionOn === 'Trash') ? 'shared-trash' : (sectionOn === 'Sync history' || sectionOn === 'Available offline') ? 'this-pc' : sectionOn === 'Photos' ? 'photos' : 'files';
 // The This PC sections (Sync history, Available offline) were keyed with this section's names too
 // (`btn-<words>`, `seg-<n>`, `label-<words>`), plus their own in keymap-this-pc.js.
 if (groupOf === 'shared-trash' || groupOf === 'this-pc') {

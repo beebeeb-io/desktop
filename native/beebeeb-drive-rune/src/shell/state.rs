@@ -40,6 +40,9 @@ pub struct State {
     pub settings: crate::frames::settings::SettingsUi,
     pub account: crate::frames::account::AccountUi,
     pub(crate) signin: Option<crate::frames::signin::Ui>,
+    /// The b's flyout as a scene of this window (the frame gate); `None` in the running app.
+    pub(crate) tray: Option<crate::frames::tray::Ui>,
+    pub(crate) shortcuts: crate::frames::tray::shortcuts::Shortcuts,
     pub(crate) setup: Option<crate::frames::signin::setup::Ui>,
     /// Sync history and Available offline (`frames::this_pc`).
     pub(crate) this_pc: crate::frames::this_pc::Ui,
@@ -104,6 +107,8 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         settings: Default::default(),
         account: Default::default(),
         signin: crate::frames::signin::start(),
+        tray: None,
+        shortcuts: Default::default(),
         setup: None,
         this_pc: crate::frames::this_pc::Ui::fixture(),
         backups: crate::frames::backups::BackupsUi::first(crate::shell::instance::DEV_BUILD),

@@ -18,6 +18,7 @@ pub mod shared;
 pub mod signin;
 pub mod this_pc;
 pub mod trash;
+pub mod tray;
 
 use std::sync::OnceLock;
 
@@ -43,6 +44,7 @@ pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
             signin::setup::FRAMES,
             this_pc::scenes::FRAMES,
             backups::FRAMES,
+            tray::FRAMES,
         ]
         .concat()
     })

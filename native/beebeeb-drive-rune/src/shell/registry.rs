@@ -203,7 +203,7 @@ pub const FRAMES: &[Frame] = &[
 ];
 
 /// The flyout's content, once the tray lane builds it: `Some(crate::frames::tray::view)`.
-pub const FLYOUT: Option<FlyoutFn> = None;
+pub const FLYOUT: Option<FlyoutFn> = Some(crate::frames::tray::view);
 
 /// A dialog's card: its own content, sized by itself. The shell layers it over the frame
 /// behind (which stays drawn), on the scrim, centred. `dialog` is the route machine's state
@@ -224,6 +224,7 @@ pub struct DialogFrame {
 
 /// The built dialogs. ONE line per dialog.
 pub const DIALOGS: &[DialogFrame] = &[
+    crate::frames::tray::shortcuts::DIALOG,
     // DialogFrame { group: FrameGroup::ConflictDialog, view: crate::frames::conflict::card, on_key: None, feedback: FeedbackPolicy::Denied("its lane has not opted in yet") },
 ];
 
@@ -272,6 +273,10 @@ pub fn dialog_frame(group: FrameGroup) -> Option<&'static DialogFrame> {
 /// The main window's view: the registered frame for the state (or the placeholder), and over
 /// it the open dialog on its scrim.
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
+    // The frame gate's scenes of the flyout (`--scene DW-1203 --size 340x520`): never set in the running app.
+    if let Some(flyout) = crate::frames::tray::scene(s, cx) {
+        return flyout;
+    }
     let group = group_for(&s.shell.app);
     let behind = match frame(group) {
         Some(frame) => (frame.view)(s, cx),
@@ -290,12 +295,21 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .h_full()
         .child(behind)
         .child(
-            rune::el()
-                .key("dialog-scrim")
+            // The scrim starts under the caption (the board's `.mk-scrim` in DW-1232: the
+            // window's client area less the 32 px caption band, which keeps its own colours).
+            rune::col()
+                .key("dialog-scrim-place")
                 .absolute(0.0, 0.0)
                 .w_full()
                 .h_full()
-                .fill(scrim(cx.system_dark())),
+                .pt(crate::TITLEBAR_H)
+                .child(
+                    rune::el()
+                        .key("dialog-scrim")
+                        .w_full()
+                        .grow(1.0)
+                        .fill(scrim(cx.system_dark())),
+                ),
         )
         .child(
             rune::col()

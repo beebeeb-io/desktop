@@ -217,7 +217,7 @@ fn ctrl_slash_opens_the_shortcuts_dialog_and_esc_closes_it() {
 }
 
 /// P2-8. A dialog draws OVER the frame behind it: Files stays drawn, the scrim covers the
-/// window, the dialog's card is on top, and the frame behind gets no keys.
+/// window under its caption, the dialog's card is on top, and the frame behind gets no keys.
 #[test]
 fn a_dialog_is_layered_over_the_frame_behind_it() {
     let (_, _, mut rt) = fixture();
@@ -230,7 +230,8 @@ fn a_dialog_is_layered_over_the_frame_behind_it() {
     );
     assert!(rt.find("file-list").is_some(), "Files is still drawn behind the dialog");
     assert!(rt.find("sidebar").is_some());
-    // In front: the scrim over the whole window, then the card.
+    // In front: the scrim over the window under its caption (the board's `.mk-scrim` in
+    // DW-1232: the 1278 x 798 client area less the 32 px caption band), then the card.
     let rect_of = |rt: &Runtime<State>, key: &str| {
         rt.elements()
             .into_iter()
@@ -238,10 +239,16 @@ fn a_dialog_is_layered_over_the_frame_behind_it() {
             .map(|e| e.rect)
             .expect(key)
     };
+    let (scrim, window) = (rect_of(&rt, "dialog-scrim"), rect_of(&rt, "window"));
     assert_eq!(
-        rect_of(&rt, "dialog-scrim"),
-        rect_of(&rt, "window"),
-        "the scrim covers the window"
+        scrim,
+        [
+            window[0],
+            window[1] + crate::TITLEBAR_H,
+            window[2],
+            window[3] - crate::TITLEBAR_H
+        ],
+        "the scrim covers the window under the caption"
     );
     assert!(
         rt.elements()
@@ -582,21 +589,16 @@ fn the_tray_starts_only_when_wired_and_then_follows_the_model() {
     assert_eq!(shell.tray_model().icon, TrayIconState::NeedsDecision);
 }
 
+/// The flyout draws the tray lane's frames (`registry::FLYOUT`), not the placeholder, in the
+/// state the b shows. Its own tests are `frames/tray/tests.rs`.
 #[test]
-fn the_flyout_draws_its_placeholder_and_says_where_its_state_comes_from() {
+fn the_flyout_draws_the_tray_lanes_frame_in_the_state_the_b_shows() {
     let mut rt = Runtime::new(flyout_window::fixture_state(), flyout_window::view, (340.0, 520.0), ENV);
     rt.frame(0.0);
-    assert!(rt.find("flyout").is_some());
+    assert!(rt.find("fly").is_some(), "the tray lane's flyout");
+    assert!(rt.find("flyout").is_none(), "not the placeholder");
+    assert_eq!(rt.state.model.label, "Up to date");
     let texts: Vec<String> = rt.elements().into_iter().filter_map(|e| e.text).collect();
-    assert!(texts.iter().any(|t| t == "Flyout"), "{texts:?}");
-    assert!(
-        texts.iter().any(|t| t == "Tray state (fixture engine): Up to date"),
-        "{texts:?}"
-    );
-    assert!(
-        texts
-            .iter()
-            .any(|t| t == "Board: The notification area: the b and its flyout (DW-1201)"),
-        "{texts:?}"
-    );
+    assert!(texts.iter().any(|t| t == "Up to date"), "{texts:?}");
+    assert!(!texts.iter().any(|t| t == "Flyout"), "{texts:?}");
 }
