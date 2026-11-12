@@ -270,7 +270,7 @@ impl Shell {
         }
     }
 
-    fn toggle_flyout(&mut self, anchor: Option<flyout::Anchor>) {
+    pub(crate) fn toggle_flyout(&mut self, anchor: Option<flyout::Anchor>) {
         let Some(flyout) = self.wiring.flyout.clone() else {
             return;
         };

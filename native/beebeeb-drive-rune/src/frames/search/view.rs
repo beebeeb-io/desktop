@@ -124,7 +124,7 @@ fn status(s: &State, t: &Theme) -> El {
         .label(name)
         .description("Shows sync status")
         .focusable(true)
-        .on_press(push(Intent::Frame("DW-1201")))
+        .on_press(crate::frames::tray::show_from_window)
 }
 
 /// The toolbar (`.mk-tb`) while searching: "Search" and what was found, the Files window's

@@ -250,3 +250,54 @@ fn in_the_smallest_window_the_card_stays_inside_it_and_the_lists_scroll() {
         "the lists' viewport is lower than their content: {body:?}"
     );
 }
+
+/// DW-1234 has no golden (the document editor behind it is not built), so its scene is held by
+/// this test instead of the frame gate: a document open, the dialog in front, the editor's four
+/// lists in the board's order with the board's first and last commands, and Close and Esc go
+/// back to the document.
+#[test]
+fn the_scene_of_dw_1234_is_the_editors_four_lists_over_an_open_document() {
+    let scene = super::FRAMES
+        .iter()
+        .find(|(id, _)| *id == "DW-1234")
+        .expect("DW-1234 is a scene of the tray group")
+        .1;
+    let mut rt = runtime();
+    rt.update(|s, _| scene(s));
+    rt.frame(0.0);
+    assert_eq!(registry::group_for(&rt.state.shell.app), FrameGroup::Viewer);
+    assert!(is_open(&rt), "the dialog is in front");
+    assert_eq!(drawn(&rt), ["EDIT", "VIEW", "FORMAT", "INSERT"]);
+    assert_eq!(drawn(&rt), capitals(EDITOR));
+    assert_eq!(info(&rt, "sc-title").text.as_deref(), Some(shortcuts::TITLE));
+    for (c, list) in EDITOR.iter().enumerate() {
+        let last = list.commands.len() - 1;
+        for r in [0, last] {
+            let (name, home) = list.commands[r];
+            assert_eq!(info(&rt, &format!("sc-{c}-{r}-name")).text.as_deref(), Some(name));
+            assert_eq!(info(&rt, &format!("sc-{c}-{r}-home")).text.as_deref(), Some(home));
+        }
+        assert!(
+            !has(&rt, &format!("sc-{c}-{}", last + 1)),
+            "{}: no row past the last",
+            list.name
+        );
+    }
+    assert!(!has(&rt, "sc-4"), "four lists");
+    let dialog = info(&rt, "sc-dlg");
+    assert_eq!(dialog.role, "dialog");
+    assert_eq!(
+        dialog.label.as_deref(),
+        Some("Commands and keyboard shortcuts: Edit, View, Format, Insert")
+    );
+    press(&mut rt, Key::Escape);
+    assert!(!is_open(&rt), "Esc closes it");
+    assert_eq!(
+        registry::group_for(&rt.state.shell.app),
+        FrameGroup::Viewer,
+        "and the document is still open"
+    );
+    // Ctrl+/ from the document opens the same lists again.
+    open(&mut rt);
+    assert_eq!(drawn(&rt), capitals(EDITOR));
+}
