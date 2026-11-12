@@ -18,7 +18,9 @@
 pub const REAL_BUNDLE_IDENTIFIER: &str = "io.beebeeb.app";
 /// The test build's bundle identifier.
 pub const TEST_BUNDLE_IDENTIFIER: &str = "io.beebeeb.app.test";
-/// The identifier this binary was built with.
+/// The identifier the Tauri shell reads from `build.rs`; kept for the `from_bundle_identifier`
+/// path but no longer used by `CURRENT` (which is fixed at compile time by rule b).
+#[cfg_attr(not(test), allow(dead_code))]
 pub const BUILT_BUNDLE_IDENTIFIER: &str = match option_env!("BEEBEEB_APP_IDENTIFIER") {
     Some(identifier) => identifier,
     None => REAL_BUNDLE_IDENTIFIER,

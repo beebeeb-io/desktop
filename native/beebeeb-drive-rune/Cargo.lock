@@ -553,6 +553,7 @@ dependencies = [
  "tempfile",
  "wgpu",
  "windows-sys 0.59.0",
+ "zeroize",
 ]
 
 [[package]]

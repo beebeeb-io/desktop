@@ -16,6 +16,8 @@ rune-notify = { git = "https://github.com/anomalyco/rune", rev = "c92e462e" }
 # The engine without Tauri: the real `DriveSource` (`src/source_engine.rs`) reads a state.db through it.
 beebeeb-engine = { path = "../../crates/beebeeb-engine" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# The sign-in source hands secrets to the engine as Zeroizing<String> (wiped on drop).
+zeroize = "1"
 
 serde_json = "1"
 # Decodes the bundled b glyph for the notification-area icons (`shell/tray_icon.rs`).
