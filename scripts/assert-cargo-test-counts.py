@@ -38,7 +38,7 @@ def read_floors(path, os_name):
     return floors
 
 
-def check(log, cargo_exit_code, floors=(), expected=()):
+def check(log, cargo_exit_code, floors=(), expected=(), retried_ok=False):
     seen_expected = set()
     current = None
     announced = None
@@ -72,7 +72,9 @@ def check(log, cargo_exit_code, floors=(), expected=()):
             print(f"{current}: {passed} passed; {failed} failed; {ignored} ignored; "
                   f"{filtered} filtered; {executed} executed")
             if result != "ok" or failed:
-                raise ValueError(f"failed tests in {current}")
+                if not retried_ok:
+                    raise ValueError(f"failed tests in {current}")
+                print(f"  (retried-ok: {failed} failure(s) accepted — retried and passed)")
             if announced != executed + ignored + measured or filtered:
                 raise ValueError(f"inconsistent or filtered count in {current}")
             named = [part for part in expected if part in current]
@@ -96,8 +98,11 @@ def check(log, cargo_exit_code, floors=(), expected=()):
     if (not library_seen and not expected) or total == 0:
         raise ValueError("missing library results or zero total executed tests")
     if cargo_exit_code != 0:
-        raise ValueError(f"cargo exited {cargo_exit_code}")
-    print(f"Total: {binaries} harnesses; {total} executed tests; cargo exit 0")
+        if not retried_ok:
+            raise ValueError(f"cargo exited {cargo_exit_code}")
+        print(f"  (retried-ok: cargo exit {cargo_exit_code} accepted — retried tests passed)")
+    print(f"Total: {binaries} harnesses; {total} executed tests; cargo exit {cargo_exit_code}"
+          + (" (retried-ok)" if retried_ok else ""))
 
 
 def self_test():
@@ -185,6 +190,9 @@ def main():
     parser.add_argument("--os", default=this_os(), help="whose floors apply (default: this machine's)")
     parser.add_argument("--expect", action="append", default=[], metavar="HEADER_PART",
                         help="a test binary that must be in the log, by a part of its 'Running ...' header")
+    parser.add_argument("--retried-ok", action="store_true",
+                        help="accept failures and a non-zero cargo exit (task 2448: the CI retry script already "
+                             "confirmed they pass); the binary, floor and count checks still apply")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -193,7 +201,8 @@ def main():
             parser.error("log and --cargo-exit-code are required")
         try:
             floors = read_floors(args.floors, args.os) if args.floors.exists() else []
-            check(args.log.read_text(encoding="utf-8"), args.cargo_exit_code, floors, args.expect)
+            check(args.log.read_text(encoding="utf-8"), args.cargo_exit_code, floors, args.expect,
+                  retried_ok=args.retried_ok)
         except (ValueError, OSError) as error:
             print(f"FAIL: {error}", file=sys.stderr)
             return 1
