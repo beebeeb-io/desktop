@@ -253,6 +253,11 @@ fn an_invite_adds_the_address_as_invited_and_refuses_someone_already_there() {
     let mut rt = runtime(scenes::dw_0514);
     click(&mut rt, "btn-send-invite");
     assert!(matches!(dialog(&rt), Some(Dialog::Invite { .. })));
+    assert_eq!(
+        focused(&rt).as_deref(),
+        Some(super::EMAIL_INPUT),
+        "the field takes the keyboard back"
+    );
     assert_eq!(rt.state.frames.shared.source.members(LISBON).len(), 3);
     assert_eq!(rt.state.frames.shared.fields.email.text, "jonas@northwind.studio");
     // Cancel: back to People, the field emptied.

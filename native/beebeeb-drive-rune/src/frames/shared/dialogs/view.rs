@@ -445,11 +445,7 @@ fn invite(s: &State, share: &PeopleShare, access: Access, t: &Theme) -> El {
         },
         &ui.fields.email,
         |s: &mut State| &mut s.frames.shared.fields.email,
-        |input| {
-            input.on_submit(|s: &mut State, _: &mut Tx| {
-                s.frames.shared.send_invite();
-            })
-        },
+        |input| input.on_submit(send_invite),
         t,
     );
     let tabs: Vec<(&'static str, bool)> = ACCESS.iter().map(|a| (a.words(), *a == access)).collect();
@@ -473,9 +469,7 @@ fn invite(s: &State, share: &PeopleShare, access: Access, t: &Theme) -> El {
     ];
     let back = share.id.clone();
     let foot = trailing(vec![
-        button("Send invite", ButtonKind::Amber, None, t).on_press(|s: &mut State| {
-            s.frames.shared.send_invite();
-        }),
+        button("Send invite", ButtonKind::Amber, None, t).on_press_tx(send_invite),
         button("Cancel", ButtonKind::Ghost, None, t).on_press(move |s: &mut State| {
             s.frames.shared.show_people(&back);
         }),
@@ -489,6 +483,14 @@ fn invite(s: &State, share: &PeopleShare, access: Access, t: &Theme) -> El {
         foot,
         t,
     )
+}
+
+/// Send invite: sent, and People shows them as invited. Nothing typed, or they are on the share
+/// already: nothing is sent, and the address field takes the keyboard to type or correct it.
+fn send_invite(s: &mut State, tx: &mut Tx) {
+    if !s.frames.shared.send_invite() {
+        tx.focus(EMAIL_INPUT, true);
+    }
 }
 
 fn set_invite_access(s: &mut State, to: Access) {
