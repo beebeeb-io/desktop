@@ -800,3 +800,101 @@ fn deleting_the_account_takes_four_steps_and_can_be_undone() {
     assert_eq!(board.stop_activity("000000"), Err(CodeRefused::Wrong));
     assert!(board.activity().is_some(), "a wrong code stops nothing");
 }
+
+/// The board's sample devices, word for word (DW-A55's rows, DW-A56's sentence): the confirm
+/// says what the source gives for THAT device, and a device with one app gets the plain form.
+#[test]
+fn the_confirm_names_the_apps_the_source_gives_for_that_device() {
+    let board = BoardAccount::new();
+    let rows: Vec<(String, String)> = board.sessions().into_iter().map(|s| (s.name, s.apps)).collect();
+    let rows: Vec<(&str, &str)> = rows.iter().map(|(n, a)| (n.as_str(), a.as_str())).collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("Anna-Laptop", "Drive, Drive"),
+            ("Anna's iPhone", "Drive, Pass"),
+            ("Studio-PC (bb)", "Command line"),
+            ("Chrome on Windows", "Drive web"),
+        ],
+        "DW-A55, as the board draws it"
+    );
+    let mut rt = runtime("DW-A56");
+    assert_eq!(says(&rt, "dlg-title"), "Sign out Anna's iPhone?");
+    assert!(
+        says(&rt, "dlg-text-0").starts_with("Drive and Drive on that device are signed out the next time"),
+        "DW-A56, as the board draws it"
+    );
+    // Another source, another device: its own apps, never the sample's.
+    rt.update(|s, _| {
+        s.account.dialog = None;
+        let source = s.account.source.as_deref_mut().expect("the fixture");
+        source.sign_out_device("dev-iphone");
+    });
+    settle(&mut rt);
+    assert!(source(&rt).sessions().iter().all(|s| s.name != "Anna's iPhone"));
+    click(&mut rt, "btn-0");
+    assert_eq!(says(&rt, "dlg-title"), "Sign out Studio-PC (bb)?");
+    assert!(
+        says(&rt, "dlg-text-0").starts_with("The Beebeeb apps on that device are signed out"),
+        "one app there: no pair of names"
+    );
+}
+
+/// Sign-in activity (DW-A77 to DW-A79): turning it off asks for a current code first (DW-A78),
+/// Esc and a wrong code stop nothing, the right code stops it, and turning it on asks nothing.
+#[test]
+fn sign_in_activity_stops_only_after_a_current_code() {
+    let mut rt = runtime("DW-A77");
+    assert_eq!(info(&rt, "item-0-0-switch").role, "switch");
+    assert!(source(&rt).activity().is_some());
+    tab_to(&mut rt, "item-0-0-switch");
+    key(&mut rt, Key::Text(" ".into()));
+    assert_eq!(
+        rt.state.account.dialog,
+        Some(Dialog::Code(super::CodeFor::StopActivity)),
+        "the switch opens the confirm (DW-A78)"
+    );
+    assert!(source(&rt).activity().is_some(), "nothing stops before the code");
+    assert_eq!(info(&rt, "dlg").role, "dialog");
+    key(&mut rt, Key::Escape);
+    assert_eq!(rt.state.account.dialog, None, "Esc cancels");
+    assert!(source(&rt).activity().is_some());
+    assert_eq!(section(&rt), Some(SettingsPane::Security), "and settings stays open");
+
+    click(&mut rt, "item-0-0-switch");
+    rt.update(|s, _| form::type_in(&mut s.account.form.code, "000000"));
+    settle(&mut rt);
+    click(&mut rt, "btn-0");
+    assert_eq!(says(&rt, "code-msg"), "Incorrect code. Try again.");
+    assert!(source(&rt).activity().is_some(), "a wrong code stops nothing");
+    rt.update(|s, _| form::type_in(&mut s.account.form.code, BOARD_CODE));
+    settle(&mut rt);
+    key(&mut rt, Key::Enter);
+    assert_eq!(rt.state.account.dialog, None);
+    assert!(source(&rt).activity().is_none(), "the log is off (DW-A79)");
+
+    // On again: no confirm, a new log starts at once.
+    click(&mut rt, "item-0-0-switch");
+    assert_eq!(rt.state.account.dialog, None);
+    assert!(source(&rt).activity().is_some());
+}
+
+/// DW-A82's second button: "Sign out" asks the app's own sign-out question over Sign-in and
+/// security (DW-A57); cancelling it signs nothing out and the deletion stays scheduled.
+#[test]
+fn sign_out_on_the_scheduled_page_asks_the_sign_out_question() {
+    let mut rt = runtime("DW-A82");
+    assert_eq!(rt.state.account.pane, Pane::DeleteScheduled);
+    let scheduled = source(&rt).deletion();
+    assert_eq!(says(&rt, "btn-1-label"), "Sign out");
+    tab_to(&mut rt, "btn-1");
+    key(&mut rt, Key::Enter);
+    assert_eq!(rt.state.account.pane, Pane::Security);
+    assert_eq!(rt.state.account.dialog, Some(Dialog::SignOutApp));
+    assert_eq!(name(&rt, "dlg"), "Sign out of Drive?");
+    // Enter is Cancel (the safe choice).
+    key(&mut rt, Key::Enter);
+    assert_eq!(rt.state.account.dialog, None);
+    assert!(asked(&rt).is_empty(), "nobody was signed out");
+    assert_eq!(source(&rt).deletion(), scheduled, "the deletion stays scheduled");
+}

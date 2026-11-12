@@ -584,7 +584,13 @@ impl BoardAccount {
                 sign_in_activity: true,
                 sessions: 4,
             },
-            // The board's own words, row by row (DW-A55, DW-A56).
+            // The board's own words, row by row (DW-A55, DW-A56). The board writes this app's name
+            // into both from one template (`${c.PR.name}, Drive · now`, `${c.PR.name} and Drive on
+            // that device are signed out…`), so on the Drive board the laptop reads "Drive, Drive"
+            // and the confirm for the iPhone ("Drive, Pass" in its row) reads "Drive and Drive".
+            // These are the board's sample words, kept as drawn (the gate reads them; review of
+            // #298, P2 1 and 2; the Decision line is in the PR). A real source gives each device
+            // its own apps in both fields.
             sessions: vec![
                 session(
                     "dev-laptop",
