@@ -74,6 +74,14 @@ pub enum Action {
     FreeUpSpace,
     /// Open the folder shown in File Explorer (the toolbar's button).
     OpenInFileExplorer,
+    /// Go back to an earlier version (DW-0413).
+    RestoreVersion,
+    /// Open in another app… (DW-0408b).
+    OpenWith,
+    /// Answer a file that changed in two places (DW-0429).
+    KeepVersion,
+    /// Invite someone… (DW-0407 to DW-0514).
+    Invite,
 }
 
 impl Action {
@@ -94,6 +102,10 @@ impl Action {
             Action::Move => "move",
             Action::FreeUpSpace => "free up space",
             Action::OpenInFileExplorer => "open File Explorer",
+            Action::RestoreVersion => "go back to that version",
+            Action::OpenWith => "open it in another app",
+            Action::KeepVersion => "keep that version",
+            Action::Invite => "invite someone to this",
         }
     }
 }
@@ -122,6 +134,14 @@ pub enum Call {
     FreeUpSpace(Vec<String>),
     /// File Explorer opens on the folder with this id (`None`: the root of the sync folder).
     OpenInFileExplorer(Option<String>),
+    /// A link to these, made with these options and put on the clipboard (DW-0407).
+    ShareLink(Vec<String>, super::actions_data::ShareOptions),
+    /// The file with this id goes back to the version with this id (DW-0413).
+    RestoreVersion(String, String),
+    /// Windows' app chooser for the file with this id (DW-0408b).
+    OpenWith(String),
+    /// The file with this id that changed in two places: what is kept (DW-0429).
+    KeepVersion(String, super::actions_data::Keep),
 }
 
 /// What an accepted action changed since the window last asked.
@@ -204,6 +224,49 @@ pub trait FilesSource: Send + 'static {
     fn open_in_file_explorer(&mut self, folder: Option<&str>) -> Result<(), ActionError>;
     /// What accepted actions changed since the last call, oldest first.
     fn changes(&mut self) -> Vec<Change>;
+
+    // ---- The action dialogs (lane files-actions). Each has a default for a source that knows
+    // nothing: no sample data in a build that ships, and every action refused. ----
+
+    /// Make a link to these with these options and put it on the clipboard (DW-0407). The link
+    /// itself is never handed to the window: it is not drawn anywhere.
+    fn share_link(
+        &mut self,
+        _items: &[DriveItem],
+        _options: &super::actions_data::ShareOptions,
+    ) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    /// The id of the share people are invited to for this item, as the Shared section knows it
+    /// (DW-0514). `None`: there is none to invite to.
+    fn share_of(&self, _item: &DriveItem) -> Option<String> {
+        None
+    }
+    /// The versions of a file, the current one first (DW-0413). Empty: not known.
+    fn versions(&self, _item: &DriveItem) -> Vec<super::actions_data::Version> {
+        Vec::new()
+    }
+    /// Make the version with this id the current one. No version is deleted by it.
+    fn restore_version(&mut self, _item: &DriveItem, _version: &str) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    /// What Preview shows of a file (DW-0408). `None`: no preview for it (DW-0408b).
+    fn preview(&mut self, _item: &DriveItem) -> Option<super::actions_data::PreviewOf> {
+        None
+    }
+    /// Windows' app chooser for this file; it is decrypted for the app picked (DW-0408b).
+    fn open_with(&mut self, _item: &DriveItem) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    /// The files that changed in two places and wait for a choice, the first to answer first (DW-0429).
+    fn conflicts(&self) -> Vec<super::actions_data::Conflict> {
+        Vec::new()
+    }
+    /// Answer the conflict of the file with this id. Whatever is kept, no version is lost: the
+    /// other one stays in the file's version history, or beside it (Keep both).
+    fn keep_version(&mut self, _file: &str, _keep: super::actions_data::Keep) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
 }
 
 fn ids(items: &[DriveItem]) -> Vec<String> {
@@ -383,6 +446,8 @@ pub struct FilesFixture {
     /// What New folder, Rename and Move changed in the board's folders: shared with the
     /// [`BoardDrive`] that lists them, so a change is still there when the folder is shown again.
     pub edits: SharedEdits,
+    /// What the action dialogs changed: versions, the files that wait for a choice.
+    pub more: super::actions_data::More,
 }
 
 /// What the fixture's actions changed in the board's folders.
@@ -482,7 +547,10 @@ impl FilesSource for FilesFixture {
             changed: self.changed_label(item).unwrap_or(row.changed.clone()),
             changed_on: Some(changed_on.to_string()),
             added: Some(added.to_string()),
-            versions: Some(versions.to_string()),
+            versions: Some(match self.more.version_count(&item.id) {
+                Some(count) => super::actions_data::versions_words(count),
+                None => versions.to_string(),
+            }),
             shared: shared.to_string(),
             ..row
         }
@@ -663,6 +731,74 @@ impl FilesSource for FilesFixture {
     fn open_in_file_explorer(&mut self, folder: Option<&str>) -> Result<(), ActionError> {
         self.refuse(Action::OpenInFileExplorer, &[])?;
         self.record(Call::OpenInFileExplorer(folder.map(str::to_string)));
+        Ok(())
+    }
+
+    fn share_link(
+        &mut self,
+        items: &[DriveItem],
+        options: &super::actions_data::ShareOptions,
+    ) -> Result<(), ActionError> {
+        self.refuse(Action::CopyLink, items)?;
+        self.record(Call::ShareLink(ids(items), options.clone()));
+        Ok(())
+    }
+
+    fn share_of(&self, item: &DriveItem) -> Option<String> {
+        // The Shared section's sample has one share with people: Contract draft.pdf's.
+        (item.id == "contract").then(|| "p-contract".to_string())
+    }
+
+    fn versions(&self, item: &DriveItem) -> Vec<super::actions_data::Version> {
+        self.more
+            .versions(item, &self.details(item, ""), self.copies.contains(&item.id))
+    }
+
+    fn restore_version(&mut self, item: &DriveItem, version: &str) -> Result<(), ActionError> {
+        self.refuse(Action::RestoreVersion, std::slice::from_ref(item))?;
+        self.record(Call::RestoreVersion(item.id.clone(), version.to_string()));
+        let all = self.versions(item);
+        if self.more.restore(item, all, version) {
+            Ok(())
+        } else {
+            Err(ActionError::Failed)
+        }
+    }
+
+    fn preview(&mut self, item: &DriveItem) -> Option<super::actions_data::PreviewOf> {
+        super::actions_data::More::preview(item)
+    }
+
+    fn open_with(&mut self, item: &DriveItem) -> Result<(), ActionError> {
+        self.refuse(Action::OpenWith, std::slice::from_ref(item))?;
+        self.record(Call::OpenWith(item.id.clone()));
+        Ok(())
+    }
+
+    fn conflicts(&self) -> Vec<super::actions_data::Conflict> {
+        self.more.conflicts.clone()
+    }
+
+    fn keep_version(&mut self, file: &str, keep: super::actions_data::Keep) -> Result<(), ActionError> {
+        self.refuse(Action::KeepVersion, &[])?;
+        let Some(conflict) = self.more.conflicts.iter().find(|c| c.file == file).cloned() else {
+            return Err(ActionError::Failed);
+        };
+        self.record(Call::KeepVersion(file.to_string(), keep));
+        let item = super::actions_data::More::conflict_item(&conflict);
+        let all = self.versions(&item);
+        if keep == super::actions_data::Keep::Both {
+            // The other device's version becomes a file beside this one, its device's name added.
+            self.changes.push(Change::Copied {
+                after: file.to_string(),
+                item: Box::new(DriveItem {
+                    id: format!("{file}-from-other-device"),
+                    name: super::actions_data::kept_beside_name(&conflict.name, &conflict.there.device),
+                    ..item
+                }),
+            });
+        }
+        self.more.answered(&conflict, keep, all);
         Ok(())
     }
 

@@ -422,7 +422,10 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
             group,
             registry::FrameGroup::Settings(pane) if crate::frames::account::Pane::root(pane).is_some()
         ) && s.account.shows_secret()
-    };
+    }
+    // A link's password being typed in the Files window's Share dialog (DW-0407).
+    || (matches!(registry::group_for(&s.shell.app), registry::FrameGroup::Section(_))
+        && crate::frames::files::share::shows_secret(s));
     s.shell.apply_capture_exclusion(secret);
     changed
 }

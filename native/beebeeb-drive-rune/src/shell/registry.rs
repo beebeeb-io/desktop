@@ -270,6 +270,7 @@ pub struct DialogFrame {
 /// The built dialogs. ONE line per dialog.
 pub const DIALOGS: &[DialogFrame] = &[
     crate::frames::tray::shortcuts::DIALOG,
+    crate::frames::files::conflict::DIALOG,
     // DialogFrame { group: FrameGroup::ConflictDialog, view: crate::frames::conflict::card, on_key: None, feedback: FeedbackPolicy::Denied("its lane has not opted in yet") },
 ];
 
@@ -350,7 +351,13 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .pt(crate::TITLEBAR_H)
                 .child(
                     rune::el()
-                        .key("dialog-scrim")
+                        // Two versions' board frame keys its scrim (DW-0429: `scrim`); the
+                        // shortcuts dialog's frames do not, and keep the name they had.
+                        .key(if dialog_group == FrameGroup::ConflictDialog {
+                            "scrim"
+                        } else {
+                            "dialog-scrim"
+                        })
                         .w_full()
                         .grow(1.0)
                         .fill(scrim(cx.system_dark())),
