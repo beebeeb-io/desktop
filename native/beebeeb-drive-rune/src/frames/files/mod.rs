@@ -369,6 +369,8 @@ impl State {
     pub(super) fn intent(&mut self, intent: Intent) {
         use crate::shell::app::{Event, Route, Section, SettingsPane};
         let Intent::Frame(frame) = &intent;
+        // The status line shows the b's flyout (DW-0401 to DW-1201): a second surface, no route.
+        let flyout = *frame == "DW-1201";
         let event = match *frame {
             "DW-0701" => Some(Event::OpenSettings(SettingsPane::General)),
             "DW-1301" => Some(Event::Navigate(Route::section(Section::SyncHistory))),
@@ -379,6 +381,9 @@ impl State {
             self.actions.intents.remove(0);
         }
         self.actions.intents.push(intent);
+        if flyout {
+            crate::frames::tray::show_from_window(self);
+        }
         if let Some(event) = event {
             crate::shell::host::dispatch(self, event);
         }
