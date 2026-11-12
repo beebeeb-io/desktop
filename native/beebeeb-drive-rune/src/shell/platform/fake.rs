@@ -150,7 +150,7 @@ impl Platform for FakePlatform {
         Delivery::Unreachable
     }
 
-    fn set_capture_exclusion(&self, _window: &rune::WindowHandle, exclude: bool) -> Result<(), PlatformError> {
+    fn set_capture_exclusion(&self, _window: Option<&rune::WindowHandle>, exclude: bool) -> Result<(), PlatformError> {
         if self.capture_exclusion_fails.load(Ordering::SeqCst) {
             return Err(PlatformError::Os("SetWindowDisplayAffinity failed (fake)".into()));
         }

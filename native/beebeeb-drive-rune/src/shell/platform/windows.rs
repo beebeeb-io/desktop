@@ -276,7 +276,10 @@ impl Platform for WindowsPlatform {
         }
     }
 
-    fn set_capture_exclusion(&self, window: &rune::WindowHandle, exclude: bool) -> Result<(), PlatformError> {
+    fn set_capture_exclusion(&self, window: Option<&rune::WindowHandle>, exclude: bool) -> Result<(), PlatformError> {
+        let Some(window) = window else {
+            return Err(PlatformError::Os("no window handle yet".into()));
+        };
         let hwnd = window.with_raw_handle(|handle| match handle.as_raw() {
             raw_window_handle::RawWindowHandle::Win32(win32) => Some(win32.hwnd.get()),
             _ => None,

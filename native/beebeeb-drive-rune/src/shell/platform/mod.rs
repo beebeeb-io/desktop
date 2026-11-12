@@ -127,7 +127,9 @@ pub trait Platform: Send + Sync {
     /// (or absent) in screenshots, screen recordings and screen-sharing; clearing restores it.
     /// The default is a no-op (Linux, macOS without the NSWindow bridge). Failure is logged
     /// without content; the content stays drawn.
-    fn set_capture_exclusion(&self, _window: &rune::WindowHandle, _exclude: bool) -> Result<(), PlatformError> {
+    /// `window` is `None` when the handle does not exist yet; the Shell retries on the next
+    /// poll. An implementation that does not need the handle (the fake, the no-ops) ignores it.
+    fn set_capture_exclusion(&self, _window: Option<&rune::WindowHandle>, _exclude: bool) -> Result<(), PlatformError> {
         Ok(())
     }
 }
