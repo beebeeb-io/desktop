@@ -177,7 +177,7 @@ if (foot) {
 // Not in a settings frame (`.mk-set`) and not in an account window (`.au-mac`): those lanes key their
 // own lists, buttons, pills and menus (below, and in keymap-signin.js) under their own names. Without
 // this scope a recapture of DW-0701 exported 4 keys more and DW-A02 8 more (integration I2).
-if (!q('.mk-set') && !q('.au-mac')) {
+if (!q('.mk-set') && !q('.au-mac') && !q('.wn-fly')) { // nor the b's flyout: keymap-tray.js numbers its buttons
 const inDet = (el) => !!el.closest('.mk-det');
 // A button (`.kit-btn`): `btn-<its words>`, `-label`, `-icon`.
 const btnSeen = {};

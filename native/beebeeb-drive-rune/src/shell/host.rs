@@ -287,6 +287,7 @@ pub fn dispatch(s: &mut State, event: Event) -> Outcome {
     let outcome = s.shell.app.apply(event);
     sync_sidebar(s);
     crate::frames::settings::sync(s); // what was open inside settings is forgotten when the route leaves it
+    crate::frames::tray::shortcuts::sync(s); // a closed shortcuts list forgets its page
     outcome
 }
 

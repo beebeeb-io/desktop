@@ -36,6 +36,7 @@ pub struct State {
     pub(crate) signin: Option<crate::frames::signin::Ui>,
     /// The b's flyout as a scene of this window (the frame gate); `None` in the running app.
     pub(crate) tray: Option<crate::frames::tray::Ui>,
+    pub(crate) shortcuts: crate::frames::tray::shortcuts::Shortcuts,
 }
 
 /// The state headless renders and tests start from: the fixture engine, nothing wired.
@@ -92,5 +93,6 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         settings: Default::default(),
         signin: crate::frames::signin::start(),
         tray: None,
+        shortcuts: Default::default(),
     }
 }

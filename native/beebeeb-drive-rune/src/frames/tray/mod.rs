@@ -12,7 +12,11 @@
 //! --size 340x520`). [`Host`] is the one difference between them: where the [`Ui`] lives and
 //! who carries out what it asks for.
 
+mod commands;
 mod icons;
+pub mod shortcuts;
+#[cfg(test)]
+mod shortcuts_tests;
 pub mod source;
 #[cfg(test)]
 mod tests;
@@ -342,6 +346,12 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-1220", |s| set_scene(s, "DW-1220")),
     ("DW-1221", |s| set_scene(s, "DW-1221")),
     ("DW-1222", |s| set_scene(s, "DW-1222")),
+    // Commands and keyboard shortcuts, over the window (1278 x 798).
+    ("DW-1232", shortcuts::open),
+    ("DW-1233", |s| {
+        shortcuts::open(s);
+        s.shortcuts.page = shortcuts::Page::Window;
+    }),
 ];
 
 /// Puts one board frame's flyout in the window (`--scene DW-1203 --size 340x520`).

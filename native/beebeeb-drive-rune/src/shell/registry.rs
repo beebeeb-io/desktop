@@ -191,6 +191,7 @@ pub struct DialogFrame {
 
 /// The built dialogs. ONE line per dialog.
 pub const DIALOGS: &[DialogFrame] = &[
+    crate::frames::tray::shortcuts::DIALOG,
     // DialogFrame { group: FrameGroup::ConflictDialog, view: crate::frames::conflict::card, on_key: None, feedback: FeedbackPolicy::Denied("its lane has not opted in yet") },
 ];
 
@@ -261,12 +262,21 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .h_full()
         .child(behind)
         .child(
-            rune::el()
-                .key("dialog-scrim")
+            // The scrim starts under the caption (the board's `.mk-scrim` in DW-1232: the
+            // window's client area less the 32 px caption band, which keeps its own colours).
+            rune::col()
+                .key("dialog-scrim-place")
                 .absolute(0.0, 0.0)
                 .w_full()
                 .h_full()
-                .fill(scrim(cx.system_dark())),
+                .pt(crate::TITLEBAR_H)
+                .child(
+                    rune::el()
+                        .key("dialog-scrim")
+                        .w_full()
+                        .grow(1.0)
+                        .fill(scrim(cx.system_dark())),
+                ),
         )
         .child(
             rune::col()
