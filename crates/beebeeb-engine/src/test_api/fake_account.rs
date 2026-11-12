@@ -109,8 +109,14 @@ impl FakeAccount {
     /// key, so a client that sends the plaintext name instead of the ciphertext is caught.
     pub fn add_item(&self, id: &str, parent_id: Option<&str>, name: &str, is_folder: bool, size_bytes: u64) {
         let master = beebeeb_core::kdf::MasterKey::from_bytes(self.master_key);
-        #[allow(deprecated)] // The new sealer API (task 2275) is not needed by a test fixture.
-        let name_encrypted = beebeeb_core::encrypt::encrypt_name(&master, id, name, None).expect("encrypt name");
+        let file_key = beebeeb_core::kdf::derive_file_key(&master, id.as_bytes());
+        let name_encrypted = beebeeb_core::encrypt::encrypt_name_for(
+            &file_key,
+            name,
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .expect("encrypt name");
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         let item = VaultItem {
             id: id.to_string(),
@@ -439,6 +445,24 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
             // ── Search shards ───────────────────────────────────────────
             "GET /api/v1/search-index/shards" => Reply::ok(json!({ "shards": [] })),
 
+            // ── Shares invites ──────────────────────────────────────────
+            "GET /api/v1/shares/invites/incoming" => Reply::ok(json!({ "invites": [] })),
+
+            // ── Single file (canonical row for the owner-keys prepare path) ──
+            route_str if route_str.starts_with("GET /api/v1/files/") && !route_str.contains('?') => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                let path_only = req.path.split('?').next().unwrap_or("");
+                let id = path_only.strip_prefix("/api/v1/files/").unwrap_or("");
+                // Serve the item from the vault if it exists.
+                let items = account.items.lock().expect("vault items");
+                match items.get(id) {
+                    Some(item) => Reply::ok(item.to_node()),
+                    None => Reply::json(404, json!({ "error": "not_found" })),
+                }
+            }
+
             // ── Backups root ────────────────────────────────────────────
             "GET /api/v1/backups/root" => Reply::json(404, json!({ "error": "not_found" })),
 
@@ -497,17 +521,56 @@ pub fn test_account() -> (Arc<FakeAccount>, String, FakeApi) {
     let (account, phrase) = FakeAccount::register("test@example.eu", "correct horse battery", TEST_PHRASE);
     let account = Arc::new(account);
 
+    // Use real UUIDs for item ids: the engine's owner-keys prepare path calls `item_class(id)` which
+    // requires a valid UUID (a non-UUID id makes the class unknown, the row unreadable, and the
+    // decrypted name empty in state.db).
+    let folder_docs = "a0000000-0000-4000-8000-000000000001";
+    let folder_photos = "a0000000-0000-4000-8000-000000000002";
+    let file_readme = "a0000000-0000-4000-8000-000000000003";
+    let file_notes = "a0000000-0000-4000-8000-000000000004";
+    let file_report = "a0000000-0000-4000-8000-000000000005";
+    let file_photo1 = "a0000000-0000-4000-8000-000000000006";
+    let file_photo2 = "a0000000-0000-4000-8000-000000000007";
+
     // 2 folders
-    account.add_item("folder-docs", None, "Documents", true, 0);
-    account.add_item("folder-photos", None, "Photos", true, 0);
+    account.add_item(folder_docs, None, "Documents", true, 0);
+    account.add_item(folder_photos, None, "Photos", true, 0);
 
     // 5 files: various sizes
-    account.add_item("file-readme", Some("folder-docs"), "readme.txt", false, 0);
-    account.add_item("file-notes", Some("folder-docs"), "notes.md", false, 1_024);
-    account.add_item("file-report", Some("folder-docs"), "report.pdf", false, 512_000);
-    account.add_item("file-photo1", Some("folder-photos"), "sunset.jpg", false, 2_048_000);
-    account.add_item("file-photo2", Some("folder-photos"), "portrait.png", false, 4_096_000);
+    account.add_item(file_readme, Some(folder_docs), "readme.txt", false, 0);
+    account.add_item(file_notes, Some(folder_docs), "notes.md", false, 1_024);
+    account.add_item(file_report, Some(folder_docs), "report.pdf", false, 512_000);
+    account.add_item(file_photo1, Some(folder_photos), "sunset.jpg", false, 2_048_000);
+    account.add_item(file_photo2, Some(folder_photos), "portrait.png", false, 4_096_000);
 
     let fake = start_fake(account.clone());
     (account, phrase, fake)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encrypt_decrypt_round_trips_with_the_fakes_master_key() {
+        let (account, _phrase) = FakeAccount::register("a@b.eu", "pw", TEST_PHRASE);
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes(account.master_key);
+        let fk = beebeeb_core::kdf::derive_file_key(&mk, b"item-1");
+        let enc = beebeeb_core::encrypt::encrypt_name_for(
+            &fk,
+            "hello.txt",
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        eprintln!("encrypted: {enc} (len {})", enc.len());
+        let mk2 = beebeeb_core::kdf::MasterKey::from_bytes(account.master_key);
+        let dec = beebeeb_core::encrypt::decrypt_name(&mk2, "item-1", &enc);
+        eprintln!("decrypted: {dec:?}");
+        assert_eq!(dec.unwrap(), "hello.txt");
+        // Also: decrypt_name_metadata must succeed (the owner-keys prepare path checks this).
+        let mk3 = beebeeb_core::kdf::MasterKey::from_bytes(account.master_key);
+        let meta = beebeeb_core::encrypt::decrypt_name_metadata(&mk3, "item-1", &enc);
+        assert!(meta.is_ok(), "decrypt_name_metadata must succeed: {meta:?}");
+    }
 }
