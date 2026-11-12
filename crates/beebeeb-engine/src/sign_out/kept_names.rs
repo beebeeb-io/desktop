@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 
 /// The folder's name under the container's `Documents` (§7.1).
 pub const KEPT_FOLDER_NAME: &str = "Changes not sent";
-/// `tauri.conf.json`'s `identifier`, from the process-wide identity; a test pins the two equal.
+/// `tauri.conf.json`'s `identifier`. **Deprecated:** the Tauri shell still imports this const.
+/// New code uses [`app_bundle_id`] which reads from the process-wide identity.
+pub const APP_BUNDLE_ID: &str = "io.beebeeb.app";
+/// The app's bundle identifier, from the process-wide identity. Prefer this over `APP_BUNDLE_ID`.
 pub fn app_bundle_id() -> &'static str {
     crate::identity::credential_service()
 }

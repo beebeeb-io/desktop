@@ -10,7 +10,9 @@ pub const POSIX_DOMAIN: &str = "NSPOSIXErrorDomain";
 pub const BRIDGE_DOMAIN: &str = "io.beebeeb.bridge";
 /// Errors the Rust side synthesizes (engine start, saving the sync folder, a bridge
 /// return code the bridge does not document, a refused launch location).
-/// Reads from the process-wide identity.
+/// **Deprecated:** the Tauri shell still imports this. New code uses [`app_domain`].
+pub const APP_DOMAIN: &'static str = "io.beebeeb.app";
+/// The app's error domain, from the process-wide identity. Prefer this over `APP_DOMAIN`.
 pub fn app_domain() -> &'static str {
     crate::identity::credential_service()
 }
