@@ -35,8 +35,10 @@ const EMPTY: u8 = 3;
 struct Account {
     fake: FakeApi,
     mode: Arc<AtomicU8>,
-    /// How long the region read waits before it answers, in ms.
+    /// How long the region read waits before it answers (with what the server held when it was asked), in ms.
     delay_ms: Arc<AtomicU64>,
+    /// How long a change waits before the server stores it, in ms.
+    put_delay_ms: Arc<AtomicU64>,
     writes: Arc<Mutex<Vec<Value>>>,
     email: String,
     phrase: String,
@@ -47,12 +49,14 @@ fn account(email: &str) -> Account {
     let account = Arc::new(account);
     let token = account.session_token.clone();
     let rest = account_handler(account);
-    let (mode, delay_ms, writes) = (
+    let (mode, delay_ms, put_delay_ms, writes) = (
         Arc::new(AtomicU8::new(ANSWER)),
+        Arc::new(AtomicU64::new(0)),
         Arc::new(AtomicU64::new(0)),
         Arc::new(Mutex::new(Vec::new())),
     );
-    let (mode_in, delay_in, writes_in) = (mode.clone(), delay_ms.clone(), writes.clone());
+    let (mode_in, delay_in, put_delay_in, writes_in) =
+        (mode.clone(), delay_ms.clone(), put_delay_ms.clone(), writes.clone());
     let stored = Arc::new(Mutex::new(json!({ "preferred_region": "de", "region_strict": true })));
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
         let route = req.route();
@@ -67,8 +71,8 @@ fn account(email: &str) -> Account {
         if req.bearer() != Some(token.as_str()) {
             return Reply::json(401, json!({}));
         }
-        std::thread::sleep(Duration::from_millis(delay_in.load(Ordering::SeqCst)));
         if route.starts_with("PUT") {
+            std::thread::sleep(Duration::from_millis(put_delay_in.load(Ordering::SeqCst)));
             let body = req.json();
             writes_in.lock().unwrap().push(body.clone());
             *stored.lock().unwrap() = json!({
@@ -89,6 +93,7 @@ fn account(email: &str) -> Account {
             ])
         };
         let now = stored.lock().unwrap().clone();
+        std::thread::sleep(Duration::from_millis(delay_in.load(Ordering::SeqCst)));
         Reply::ok(json!({
             "preferred_region": now["preferred_region"],
             "region_strict": now["region_strict"],
@@ -100,6 +105,7 @@ fn account(email: &str) -> Account {
         fake,
         mode,
         delay_ms,
+        put_delay_ms,
         writes,
         email: email.to_string(),
         phrase,
@@ -201,7 +207,11 @@ fn a_choice_is_sent_once_and_shown_only_after_beebeeb_took_it() {
         1,
         "still the old choice before the answer"
     );
-    assert_eq!(settle(&mut source), [CHOSEN]);
+    assert_eq!(
+        settle(&mut source),
+        [STILL_SAVING, CHOSEN],
+        "the waiting change is said, not dropped"
+    );
     let now = source.locations().unwrap();
     assert_eq!((now.chosen, now.only_here), (2, true), "Finland, still only there");
     assert_eq!(source.general().storage_location, "Finland");
@@ -299,12 +309,28 @@ fn a_session_that_ends_mid_change_shows_nothing_of_the_account() {
     let mut source = EngineSettingsSource::new(engine.clone());
     settle(&mut source);
     assert_eq!(source.general().storage_location, "Germany");
-    account.delay_ms.store(400, Ordering::SeqCst);
+    account.put_delay_ms.store(400, Ordering::SeqCst);
     source.choose_location(2);
     engine.sign_out_keeping_local_data().expect("signs out");
     settle(&mut source);
     assert!(source.locations().is_none(), "no list of an account that signed out");
     assert_eq!(source.general().storage_location, "", "and no place in General");
+}
+
+/// A read that began before a change Beebeeb took lands late, with what the server held before it: it never
+/// undoes the change on screen.
+#[test]
+fn a_read_that_began_before_a_change_never_undoes_it() {
+    let account = account("settings-race@example.eu");
+    let mut source = EngineSettingsSource::new(signed_in(&account));
+    settle(&mut source);
+    account.delay_ms.store(800, Ordering::SeqCst);
+    source.reload_locations();
+    std::thread::sleep(Duration::from_millis(150)); // the read has seen Germany
+    source.choose_location(2);
+    settle(&mut source);
+    assert_eq!(source.general().storage_location, "Finland");
+    assert_eq!(source.locations().unwrap().chosen, 2);
 }
 
 #[test]

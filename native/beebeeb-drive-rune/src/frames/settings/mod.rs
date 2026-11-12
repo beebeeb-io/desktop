@@ -225,7 +225,7 @@ impl SettingsUi {
 
     /// The theme the window draws in: the person's choice, or the system's.
     pub fn dark(&self, system_dark: bool) -> bool {
-        match self.source.general().theme {
+        match self.source.theme() {
             ThemeChoice::System => system_dark,
             ThemeChoice::Light => false,
             ThemeChoice::Dark => true,
@@ -251,7 +251,7 @@ impl SettingsUi {
     pub fn chosen(&self, kind: MenuKind) -> usize {
         match kind {
             MenuKind::Theme => {
-                let now = self.source.general().theme;
+                let now = self.source.theme();
                 ThemeChoice::ALL.iter().position(|c| *c == now).unwrap_or(0)
             }
             MenuKind::Channel => {

@@ -296,6 +296,10 @@ pub trait SettingsSource {
     fn locations_loading(&self) -> bool {
         false
     }
+    /// The theme preference alone (every window reads it on every frame).
+    fn theme(&self) -> ThemeChoice {
+        self.general().theme
+    }
     /// Engine: the Recent notifications page has been opened and left: nothing on it is new
     /// any more, and the count on the Notifications row is 0.
     fn mark_recent_seen(&mut self);

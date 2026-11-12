@@ -49,21 +49,35 @@ pub const CHOSEN: &str = "Storage location updated";
 pub const NOT_CHOSEN: &str = "Couldn't change the storage location. Nothing changed.";
 pub const THEME_NOT_SAVED: &str = "Couldn't save the theme on this PC.";
 
+/// What the "still saving" toast says: a change waits for the one before it.
+pub const STILL_SAVING: &str = "Still saving the last change. Try again in a moment.";
+
 /// Settings on the real engine. See the module's doc for what each pane reads.
 pub struct EngineSettingsSource<C: CredentialStores> {
     engine: Arc<Engine<C>>,
     identity: &'static EngineIdentity,
+    /// The theme the windows draw in, and the one this PC's settings file holds.
     theme: ThemeChoice,
+    saved_theme: ThemeChoice,
+    /// The one writer of the theme, in the order the person chose (started on the first change).
+    theme_writer: Option<mpsc::Sender<ThemeChoice>>,
+    /// Theme writes on their way.
+    saving: usize,
     region: Region,
     /// Whose account `region` is (`account_of`): another account never shows it.
     region_of: Option<String>,
+    /// The list as the pane draws it and each row's id, worked out once per answer.
+    listing: Option<(Locations, Vec<String>)>,
     /// When the region was last answered.
     read_at: Option<Instant>,
     reading: bool,
     /// A change of the storage location is on its way: no second one starts until it is answered.
     writing: bool,
-    /// Theme writes on their way (each writes only the theme).
-    saving: usize,
+    /// Counts the changes Beebeeb took: a read that began before one of them is stale when it lands.
+    generation: u64,
+    /// A toast for the next poll (a change that has to wait).
+    toast_next: Option<&'static str>,
+    version: String,
     answers: mpsc::Sender<Answer>,
     inbox: mpsc::Receiver<Answer>,
     /// The panes this source does not answer for.
@@ -72,25 +86,20 @@ pub struct EngineSettingsSource<C: CredentialStores> {
 
 /// What Beebeeb last said about where new files go.
 enum Region {
-    /// Not answered yet.
+    /// Not answered yet, or the last read failed (its kind is logged when it arrives).
     Unknown,
-    /// The last read failed (its kind is logged when it arrives).
-    Failed,
     Known(UserRegionResponse),
 }
 
 /// What a worker sends back.
 enum Answer {
-    /// What Beebeeb said, and the account it was asked for.
-    Region(Option<String>, Result<UserRegionResponse, AccountCallError>),
-    /// A change of the storage location: what Beebeeb stored, or why not.
+    /// What Beebeeb said, the account it was asked for (`None`: it changed during the call), and the generation
+    /// the read began in.
+    Region(Option<String>, u64, Result<UserRegionResponse, AccountCallError>),
+    /// A change of the storage location: the account it was sent for, and what Beebeeb stored, or why not.
     Chosen(Option<String>, Result<(Option<String>, bool), AccountCallError>),
-    /// A theme write: the theme it wrote, the one before it, and whether the file took it.
-    Theme {
-        wanted: ThemeChoice,
-        before: ThemeChoice,
-        saved: bool,
-    },
+    /// A theme write: the theme it wrote, and whether the file took it.
+    Theme { wanted: ThemeChoice, saved: bool },
 }
 
 fn theme_of(theme: DesktopTheme) -> ThemeChoice {
@@ -158,13 +167,8 @@ fn listed(region: &UserRegionResponse) -> Option<(Locations, Vec<String>)> {
         }
     }
     let wanted = region.preferred_region.as_deref().unwrap_or(DEFAULT_ID);
-    let chosen = match ids.iter().position(|id| id == wanted) {
-        Some(index) => index,
-        // No choice stored: placed as the default.
-        None if region.preferred_region.is_none() => choices.iter().position(|c| c.default)?,
-        // A choice this list does not have: never a guess at what it was.
-        None => return None,
-    };
+    // A choice this list does not have: never a guess at what it was.
+    let chosen = ids.iter().position(|id| id == wanted)?;
     let unavailable = !choices[chosen].default && !choices[chosen].live;
     Some((
         Locations {
@@ -183,9 +187,14 @@ fn account_of<C: CredentialStores>(engine: &Engine<C>) -> Option<String> {
     engine.account_email().or_else(|| engine.user_id())
 }
 
+/// The account a call was for, when it was the same one before and after it: else `None` (never shown).
+fn same_account<C: CredentialStores>(engine: &Engine<C>, before: Option<String>) -> Option<String> {
+    before.filter(|whose| account_of(engine).as_ref() == Some(whose))
+}
+
 impl<C: CredentialStores> EngineSettingsSource<C> {
     /// The source of the running app. Reads this PC's settings file now (local and small: the first paint is
-    /// local) and asks Beebeeb for the storage location on a worker.
+    /// local) and, when someone is signed in, asks Beebeeb for the storage location on a worker.
     pub fn new(engine: Arc<Engine<C>>) -> Self {
         Self::for_identity(engine, crate::shell::identity::engine_identity())
     }
@@ -203,17 +212,25 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
             engine,
             identity,
             theme,
+            saved_theme: theme,
+            theme_writer: None,
+            saving: 0,
             region: Region::Unknown,
             region_of: None,
+            listing: None,
             read_at: None,
             reading: false,
             writing: false,
-            saving: 0,
+            generation: 0,
+            toast_next: None,
+            version: version_words(),
             answers,
             inbox,
             rest: Unwired,
         };
-        source.read_region();
+        if account_of(&source.engine).is_some() {
+            source.read_region();
+        }
         source
     }
 
@@ -222,12 +239,14 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
         if self.reading {
             return;
         }
-        let (engine, answers) = (self.engine.clone(), self.answers.clone());
+        let (engine, answers, generation) = (self.engine.clone(), self.answers.clone(), self.generation);
         let started = std::thread::Builder::new()
             .name("settings-region".into())
             .spawn(move || {
-                let whose = account_of(&engine);
-                let _ = answers.send(Answer::Region(whose, engine.storage_region()));
+                let before = account_of(&engine);
+                let answer = engine.storage_region();
+                let whose = same_account(&engine, before);
+                let _ = answers.send(Answer::Region(whose, generation, answer));
             });
         self.reading = started.is_ok();
         if started.is_err() {
@@ -235,38 +254,74 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
         }
     }
 
-    /// Send a change of the storage location, on a worker. `false`: one is on its way already, or no thread.
-    fn send_choice(&mut self, id: String, strict: bool) -> bool {
+    /// Send a change of the storage location, on a worker. One at a time: a change while one is on its way waits,
+    /// and the toast says so.
+    fn send_choice(&mut self, id: String, strict: bool) {
         if self.writing {
-            return false;
+            self.toast_next = Some(STILL_SAVING);
+            return;
         }
         let (engine, answers) = (self.engine.clone(), self.answers.clone());
         let started = std::thread::Builder::new()
             .name("settings-region-set".into())
             .spawn(move || {
-                let whose = account_of(&engine);
+                let before = account_of(&engine);
                 let stored = engine
                     .set_storage_region(Some(&id), Some(strict))
                     .map(|answer| (answer.preferred_region, answer.region_strict));
+                let whose = same_account(&engine, before);
                 let _ = answers.send(Answer::Chosen(whose, stored));
             });
         self.writing = started.is_ok();
-        self.writing
+        if started.is_err() {
+            log("settings: could not start a thread for a change of the storage location");
+            self.toast_next = Some(NOT_CHOSEN);
+        }
     }
 
-    /// What Beebeeb said, while it is the account signed in now.
-    fn known(&self) -> Option<&UserRegionResponse> {
-        match &self.region {
-            Region::Known(region) if self.region_of.is_some() && self.region_of == account_of(&self.engine) => {
-                Some(region)
-            }
-            _ => None,
-        }
+    /// The list and its ids, while what was read is the signed-in account's.
+    fn listing(&self) -> Option<&(Locations, Vec<String>)> {
+        let mine = self.region_of.is_some() && self.region_of == account_of(&self.engine);
+        self.listing.as_ref().filter(|_| mine)
+    }
+
+    fn relist(&mut self) {
+        self.listing = match &self.region {
+            Region::Known(region) => listed(region),
+            Region::Unknown => None,
+        };
     }
 
     /// The panes of this source that draw only what it has read.
     fn answers_for(pane: Pane) -> bool {
         matches!(pane, Pane::General | Pane::StorageLocation)
+    }
+
+    /// The one writer of the theme: each change in the order chosen, merge-only (the theme alone).
+    fn theme_writer(&mut self) -> Option<&mpsc::Sender<ThemeChoice>> {
+        if self.theme_writer.is_none() {
+            let (wants, wanted) = mpsc::channel::<ThemeChoice>();
+            let (identity, answers) = (self.identity, self.answers.clone());
+            let started = std::thread::Builder::new()
+                .name("settings-theme".into())
+                .spawn(move || {
+                    // Ends when the source is dropped (its sender with it).
+                    for theme in wanted {
+                        let saved = DesktopConfig::update_for(identity, |config| {
+                            let wanted = desktop_theme(theme);
+                            let changed = config.theme != wanted;
+                            config.theme = wanted;
+                            (changed, ())
+                        })
+                        .is_ok();
+                        let _ = answers.send(Answer::Theme { wanted: theme, saved });
+                    }
+                });
+            if started.is_ok() {
+                self.theme_writer = Some(wants);
+            }
+        }
+        self.theme_writer.as_ref()
     }
 }
 
@@ -281,50 +336,71 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
     }
 
     fn opened(&mut self, pane: Pane) {
-        let fresh = self.read_at.is_some_and(|at| at.elapsed() < FRESH_FOR) && self.known().is_some();
+        let fresh = self.read_at.is_some_and(|at| at.elapsed() < FRESH_FOR) && self.listing().is_some();
         if Self::answers_for(pane) && !fresh {
             self.read_region();
         }
     }
 
     fn pump(&mut self) -> Pumped {
-        let mut pumped = Pumped::default();
+        let mut pumped = Pumped {
+            toast: self.toast_next.take(),
+            ..Pumped::default()
+        };
+        pumped.changed = pumped.toast.is_some();
         while let Ok(answer) = self.inbox.try_recv() {
             pumped.changed = true;
             match answer {
-                Answer::Region(whose, result) => {
+                Answer::Region(whose, generation, result) => {
                     self.reading = false;
+                    // A change Beebeeb took after this read began is newer than what the read says.
+                    if generation != self.generation {
+                        continue;
+                    }
                     self.read_at = Some(Instant::now());
-                    self.region_of = whose;
-                    self.region = match result {
-                        Ok(region) => Region::Known(region),
-                        Err(kind) => {
-                            log(format!("settings: the storage location did not load ({kind})"));
-                            Region::Failed
+                    match result {
+                        Ok(region) => {
+                            self.region = Region::Known(region);
+                            self.region_of = whose;
                         }
-                    };
+                        Err(kind) => {
+                            if kind != AccountCallError::NotSignedIn {
+                                log(format!("settings: the storage location did not load ({kind})"));
+                            }
+                            self.region = Region::Unknown;
+                            self.region_of = None;
+                        }
+                    }
+                    self.relist();
                 }
                 Answer::Chosen(whose, result) => {
                     self.writing = false;
-                    let same = whose.is_some() && whose == self.region_of;
+                    let mine = whose.is_some() && whose == self.region_of;
                     match (result, &mut self.region) {
-                        (Ok((preferred, strict)), Region::Known(region)) if same => {
+                        (Ok((preferred, strict)), Region::Known(region)) if mine => {
                             region.preferred_region = preferred;
                             region.region_strict = strict;
+                            self.generation += 1;
+                            self.relist();
                             pumped.toast = Some(CHOSEN);
                         }
-                        (Ok(_), _) => pumped.toast = Some(CHOSEN),
+                        // Taken for an account that is not the one shown now: nothing on screen changes.
+                        (Ok(_), _) => self.generation += 1,
                         (Err(kind), _) => {
                             log(format!("settings: the storage location was not changed ({kind})"));
-                            pumped.toast = Some(NOT_CHOSEN);
+                            if mine {
+                                pumped.toast = Some(NOT_CHOSEN);
+                            }
                         }
                     }
                 }
-                Answer::Theme { wanted, before, saved } => {
+                Answer::Theme { wanted, saved } => {
                     self.saving = self.saving.saturating_sub(1);
-                    // Put back only when nothing newer was chosen meanwhile.
-                    if !saved && self.theme == wanted {
-                        self.theme = before;
+                    if saved {
+                        self.saved_theme = wanted;
+                    } else if self.saving == 0 {
+                        // The last write failed: back to what the file holds.
+                        self.theme = self.saved_theme;
                         pumped.toast = Some(THEME_NOT_SAVED);
                     }
                 }
@@ -335,7 +411,11 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
     }
 
     fn locations_loading(&self) -> bool {
-        self.reading && self.known().is_none()
+        self.reading && self.listing().is_none()
+    }
+
+    fn theme(&self) -> ThemeChoice {
+        self.theme
     }
 
     fn mark_recent_seen(&mut self) {
@@ -358,28 +438,28 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
     }
 
     fn locations(&self) -> Option<Locations> {
-        self.known().and_then(listed).map(|(locations, _)| locations)
+        self.listing().map(|(locations, _)| locations.clone())
     }
 
     /// Sent once; the pane shows the new choice, and the toast says so, only after Beebeeb took it. Never a place
     /// that is not live. `false` always: nothing is taken yet when this returns.
     fn choose_location(&mut self, index: usize) -> bool {
-        let Some((locations, ids)) = self.known().and_then(listed) else {
+        let Some((locations, ids)) = self.listing() else {
             return false;
         };
         let Some(place) = locations.choices.get(index).filter(|place| place.live) else {
             return false;
         };
-        if index == locations.chosen && !locations.unavailable {
+        if index == locations.chosen {
             return false;
         }
-        let strict = !place.default && locations.only_here;
-        self.send_choice(ids[index].clone(), strict);
+        let (id, strict) = (ids[index].clone(), !place.default && locations.only_here);
+        self.send_choice(id, strict);
         false
     }
 
     fn set_only_here(&mut self, on: bool) {
-        let Some((locations, ids)) = self.known().and_then(listed) else {
+        let Some((locations, ids)) = self.listing() else {
             return;
         };
         if locations.choices[locations.chosen].default || locations.only_here == on {
@@ -402,52 +482,38 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
 
     fn general(&self) -> General {
         let storage_location = self
-            .known()
-            .and_then(listed)
-            .and_then(|(locations, _)| {
-                let chosen = locations.chosen()?;
-                Some(if chosen.default {
+            .listing()
+            .and_then(|(locations, _)| locations.chosen())
+            .map(|chosen| {
+                if chosen.default {
                     "Europe".to_string()
                 } else {
                     chosen.name.clone()
-                })
+                }
             })
             .unwrap_or_default();
         General {
             theme: self.theme,
             storage_location,
-            version: version_words(),
+            version: self.version.clone(),
             update: Update::Current,
         }
     }
 
-    /// Applies at once (every window reads it on its next frame); written to this PC's settings file on a worker,
-    /// merge-only. A write that fails puts the theme back and says so.
+    /// Applies at once (every window reads it on its next frame); written to this PC's settings file by the one
+    /// theme writer, in the order chosen, merge-only. A last write that fails puts back what the file holds, and
+    /// the toast says so.
     fn set_theme(&mut self, theme: ThemeChoice) {
         if theme == self.theme {
             return;
         }
-        let before = std::mem::replace(&mut self.theme, theme);
-        let (identity, answers) = (self.identity, self.answers.clone());
-        let started = std::thread::Builder::new()
-            .name("settings-theme".into())
-            .spawn(move || {
-                let saved = DesktopConfig::update_for(identity, |config| {
-                    let wanted = desktop_theme(theme);
-                    let changed = config.theme != wanted;
-                    config.theme = wanted;
-                    (changed, ())
-                })
-                .is_ok();
-                let _ = answers.send(Answer::Theme {
-                    wanted: theme,
-                    before,
-                    saved,
-                });
-            });
-        match started {
-            Ok(_) => self.saving += 1,
-            Err(_) => self.theme = before,
+        let sent = self.theme_writer().is_some_and(|writer| writer.send(theme).is_ok());
+        if sent {
+            self.theme = theme;
+            self.saving += 1;
+        } else {
+            log("settings: the theme could not be saved (no writer)");
+            self.toast_next = Some(THEME_NOT_SAVED);
         }
     }
 }
