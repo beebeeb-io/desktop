@@ -171,6 +171,8 @@ fn render(args: &[String]) {
     }
 
     let c = |s: &str| CString::new(s).expect("no NUL");
+    let stage = |m: &str| eprintln!("stage {m} +{:.0}ms", t_process.elapsed().as_secs_f64() * 1000.0);
+    stage("init");
     let t = Instant::now();
     let k = unsafe { bb_lok_init(c(&install).as_ptr(), c(&file_url(&profile)).as_ptr()) };
     let init_ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -182,6 +184,7 @@ fn render(args: &[String]) {
         std::process::exit(3);
     }
     let version = take(k, unsafe { bb_lok_version(k) });
+    stage("load");
 
     let t = Instant::now();
     let d = unsafe { bb_lok_load(k, c(&file_url(&file)).as_ptr(), c(&options).as_ptr()) };
@@ -195,10 +198,12 @@ fn render(args: &[String]) {
         );
         std::process::exit(4);
     }
+    stage("init_render");
     let t = Instant::now();
     unsafe { bb_doc_init_render(d, std::ptr::null()) };
     let init_render_ms = t.elapsed().as_secs_f64() * 1000.0;
 
+    stage("parts");
     let doc_type = unsafe { bb_doc_type(d) }; // 0 text, 1 spreadsheet, 2 presentation, 3 drawing
     let parts = unsafe { bb_doc_parts(d) };
     let tile_mode = unsafe { bb_doc_tile_mode(d) }; // 0 RGBA, 1 BGRA
@@ -215,6 +220,7 @@ fn render(args: &[String]) {
         }
     } else {
         for p in 0..parts {
+            stage("set_part/size");
             unsafe { bb_doc_set_part(d, p) };
             let (mut w, mut h): (c_long, c_long) = (0, 0);
             unsafe { bb_doc_size(d, &mut w, &mut h) };
@@ -243,6 +249,7 @@ fn render(args: &[String]) {
             ((*h as f64) / 15.0 * scale).round() as i32,
         );
         let mut buf = vec![0u8; (cw as usize) * (ch as usize) * 4];
+        stage("paint");
         let t = Instant::now();
         unsafe { bb_doc_paint(d, buf.as_mut_ptr(), cw, ch, *x, *y, *w, *h) };
         page_ms.push(t.elapsed().as_secs_f64() * 1000.0);
