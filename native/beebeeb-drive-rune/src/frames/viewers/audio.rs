@@ -3,7 +3,7 @@
 //! the folder's other recordings as the queue.
 
 use rune::tok::Family;
-use rune::{Align, Color, El, Icon, SurfaceFit, TextStyle, col, el, row};
+use rune::{Align, Color, El, Icon, TextStyle, col, el, row};
 
 use super::chrome::{Dot, Status};
 use super::kinds::clock;
@@ -55,7 +55,9 @@ pub fn status(doc: &AudioDoc) -> Status {
 
 /// Previous or next: two chevrons (`.mk-tbtn`). Keys: `<key>`, `<key>-icon`, `<key>-icon-2`.
 fn skip(key: &'static str, name: &'static str, icon: &'static Icon, delta: isize, can: bool, t: &Theme) -> El {
-    let ink = if can { t.text_secondary } else { t.text_quaternary };
+    // The board draws both in the same ink at either end of the queue; the one that cannot
+    // step is not operable.
+    let ink = t.text_secondary;
     row()
         .key(key)
         .role("button")
@@ -82,7 +84,6 @@ fn player(ui: &Ui, doc: &AudioDoc, t: &Theme) -> El {
         .label(format!("Artwork of {}", doc.title))
         .size(260.0, 260.0)
         .radius(14.0)
-        .clip_rounded(14.0)
         .box_shadow(rune::Shadow {
             x: 0.0,
             y: 18.0,
@@ -92,17 +93,23 @@ fn player(ui: &Ui, doc: &AudioDoc, t: &Theme) -> El {
             inset: false,
         });
     let artwork = match ui.source.picture(&ui.file.id, Picture::Artwork) {
-        Some(pixels) => artwork.pixels_fit(&pixels, SurfaceFit::Fill),
+        Some(pixels) => artwork.pixels(&pixels),
         // No artwork in the tags: a plain tile.
         None => artwork.fill(style::tile_neutral(t)),
     };
+    // The artist's line is as wide as the title's (one centred block).
+    let title_w = rune::text::advance(&doc.title, style::TITLE);
     let mut names =
         col()
             .key("audio-names")
             .items_center()
             .child(style::fitted("audio-title", &doc.title, style::TITLE, t.text));
     if !doc.artist.is_empty() {
-        names = names.child(style::fitted("audio-artist", &doc.artist, style::SUB, t.text_tertiary));
+        names = names.child(
+            kit::label("audio-artist", doc.artist.clone(), style::SUB, t.text_tertiary)
+                .w(title_w)
+                .align(Align::Center),
+        );
     }
     let part = if doc.length == 0 {
         0.0
@@ -229,8 +236,15 @@ fn queue(doc: &AudioDoc, t: &Theme) -> El {
                 t.text_tertiary,
             )
             .w_full()
+            .px(10.0)
             .mb(6.0),
         );
+    // `.kit-list-body`: the rows in one outlined box, a hairline between them.
+    let mut rows = col()
+        .key("queue-body")
+        .w_full()
+        .radius(10.0)
+        .box_shadow(kit::ring(kit::HAIR, t.separator));
     for (i, track) in doc.queue.iter().enumerate() {
         let id = track.id.clone();
         let length = clock(track.length);
@@ -244,7 +258,7 @@ fn queue(doc: &AudioDoc, t: &Theme) -> El {
             .px(10.0)
             .gap(8.0)
             .center_y()
-            .radius(7.0)
+            .border_sides([if i == 0 { 0.0 } else { kit::HAIR }, 0.0, 0.0, 0.0], t.separator)
             .focusable(true)
             .cursor(rune::Cursor::Pointer)
             .on_press(move |s: &mut State| {
@@ -286,9 +300,9 @@ fn queue(doc: &AudioDoc, t: &Theme) -> El {
         } else {
             item.hover(t.hover).press(t.press)
         };
-        list = list.child(item);
+        rows = rows.child(item);
     }
-    list
+    list.child(rows)
 }
 
 pub fn body(ui: &Ui, doc: &AudioDoc, t: &Theme) -> El {

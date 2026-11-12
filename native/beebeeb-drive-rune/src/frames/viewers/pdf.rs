@@ -262,7 +262,7 @@ fn thumbs(ui: &Ui, doc: &PdfDoc, t: &Theme) -> El {
         .gap(12.0)
         .items_center()
         .fill(t.sidebar_bg)
-        .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.text)
+        .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
         .border_layout()
         .clip_rounded(0.0);
     for n in 1..=doc.pages {

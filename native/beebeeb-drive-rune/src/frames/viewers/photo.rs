@@ -87,10 +87,9 @@ fn picture(ui: &Ui, file: &OpenFile, width: f32, height: f32) -> El {
         .role("image")
         .label(file.name.clone())
         .size(width, height)
-        .radius(4.0)
-        .clip_rounded(4.0);
+        .radius(4.0);
     match ui.source.picture(&file.id, Picture::Photo) {
-        Some(pixels) => photo.pixels_fit(&pixels, SurfaceFit::Fill),
+        Some(pixels) => photo.pixels_fit(&pixels, SurfaceFit::Fit),
         None => photo.fill(plain()),
     }
 }
@@ -123,14 +122,13 @@ pub fn body(ui: &Ui, doc: &PhotoDoc, t: &Theme) -> El {
             .checked(item.current)
             .size(if item.current { 52.0 } else { 36.0 }, 52.0)
             .radius(3.0)
-            .clip_rounded(3.0)
             .focusable(true)
             .cursor(rune::Cursor::Pointer)
             .on_press(move |s: &mut State| {
                 media::switch_to(s, &id);
             });
         thumb = match ui.source.picture(&ui.file.id, Picture::Strip(i)) {
-            Some(pixels) => thumb.pixels_fit(&pixels, SurfaceFit::Fill),
+            Some(pixels) => thumb.pixels(&pixels),
             None => thumb.fill(plain()),
         };
         strip = strip.child(if item.current {

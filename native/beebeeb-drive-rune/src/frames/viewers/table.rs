@@ -141,13 +141,21 @@ pub fn body(ui: &Ui, doc: &TableDoc, t: &Theme) -> El {
         .shrink()
         .min_h(0.0)
         .radius(8.0)
-        .clip_rounded(8.0)
         .fill(t.card)
         .box_shadow(kit::ring(kit::HAIR, t.separator))
         .focusable(true)
         .focus_ring(2.0, 2.0, t.accent_deep)
-        .child(head)
-        .child(rows);
+        // The ring is outside the table's box, so what clips the corners is a box inside it.
+        .child(
+            col()
+                .key("csv-clip")
+                .w_full()
+                .shrink()
+                .min_h(0.0)
+                .clip_rounded(8.0)
+                .child(head)
+                .child(rows),
+        );
     col()
         .key("viewer-body")
         .grow(1.0)
