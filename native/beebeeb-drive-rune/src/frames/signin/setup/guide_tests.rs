@@ -234,6 +234,20 @@ fn the_window_under_a_tip_stays_usable() {
     assert_eq!(rt.state.selected, Some(9));
     assert_eq!(rt.state.guide.step, Some(Step::Tip(1)), "and the tip is still there");
 
+    // Tip 2 says "Right-click a file": the file's menu (DW-0402) is in front of the tip, and Esc is
+    // the menu's, not Skip.
+    let mut rt = at_scene("DW-0302");
+    let menu = crate::frames::files::SCENES
+        .iter()
+        .find(|(id, _)| *id == "DW-0402")
+        .unwrap();
+    rt.update(|s, _| (menu.1)(s));
+    rt.frame(0.0);
+    assert!(rt.state.actions.menu.is_some());
+    assert!(rect(&rt, COACH_KEY).is_none() && rect(&rt, RING_KEY).is_none());
+    assert!(!guide::escape(&mut rt.state));
+    assert_eq!(rt.state.guide.step, Some(Step::Tip(2)));
+
     // The control inside the ring takes its click too: the gear opens settings.
     let mut rt = at_scene("DW-0305");
     click(&mut rt, "settings-btn");

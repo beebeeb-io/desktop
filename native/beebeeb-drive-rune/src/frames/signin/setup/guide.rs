@@ -7,7 +7,7 @@
 //! ring and its dim take no press), so the window stays usable while a tip shows.
 //!
 //! A tip belongs to a place (Files, Shared, Photos). While the window shows another place, a
-//! viewer, settings or a dialog, the tip is not drawn and takes no key; it is there again when the
+//! viewer, settings, a dialog or an open menu of Files, the tip is not drawn and takes no key; it is there again when the
 //! window is back on its place.
 //!
 //! Nothing here is a secret.
@@ -151,7 +151,8 @@ pub fn showing(s: &State) -> Option<Step> {
     let app = &s.shell.app;
     let on_place =
         matches!(app.screen(), Screen::Drive(route) if route.section == step.place() && route.item.is_none());
-    (on_place && app.dialog().is_none() && s.tray.is_none()).then_some(step)
+    // An open menu of Files is in front: the tip waits (the menu gets its place and its Esc).
+    (on_place && app.dialog().is_none() && s.tray.is_none() && s.actions.menu.is_none()).then_some(step)
 }
 
 /// Esc is Skip while a tip shows. `true`: the key was the guide's. For `shell::host::shell_keys`.
