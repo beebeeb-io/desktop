@@ -28,6 +28,8 @@ pub struct State {
     /// The shell: the route machine, the gate, the b, the actions (`shell/host.rs`).
     pub shell: Shell,
     // --- one line per frame group below ---
+    /// What the Files frames keep: selection, menus, toasts (`frames::files`).
+    pub(crate) actions: crate::frames::files::Actions,
     /// The live feedback mode (test builds only).
     #[cfg(feature = "feedback")]
     pub(crate) feedback: crate::feedback::Feedback,
@@ -43,7 +45,7 @@ pub fn init() -> State {
 }
 
 pub fn init_with(shell: Shell) -> State {
-    init_from(shell, Box::new(BoardFixtureSource::new()), Some(6))
+    crate::frames::files::board_fixture(init_from(shell, Box::new(BoardFixtureSource::new()), Some(6)))
 }
 
 /// The folder as the window holds it: the listing, or an empty one and the reason it could not be read.
@@ -85,6 +87,7 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         show_detail_pane: true,
         files: crate::ui::FilesUi::default(),
         shell,
+        actions: crate::frames::files::Actions::default(),
         #[cfg(feature = "feedback")]
         feedback: crate::feedback::Feedback::new(),
         frames: crate::frames::Ui::default(),
