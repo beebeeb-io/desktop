@@ -138,6 +138,11 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
           "$py" scripts/assert-cargo-test-counts.py --self-test
 
+      - name: Flaky-test retry self-test (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash scripts/ci-retry-flaky-tests.sh --self-test
+
       - name: Cargo check
         working-directory: src-tauri
         shell: bash
@@ -169,7 +174,21 @@ jobs:
           echo "$cargo_exit" > "$RUNNER_TEMP/cargo-test.exit"
           # Windows: `python`, as before (python3 can be the Store stub there); macOS: python3.
           if [ "$RUNNER_OS" = Windows ]; then py=python; else py=python3; fi
-          "$py" ../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/cargo-test.log" --cargo-exit-code "$cargo_exit"
+
+          # Task 2448: on Windows, retry listed flaky Cloud Files tests before the count guard.
+          retried_ok=""
+          if [ "$cargo_exit" -ne 0 ] && [ "$RUNNER_OS" = Windows ]; then
+            retry_exit=0
+            bash ../scripts/ci-retry-flaky-tests.sh "$RUNNER_TEMP/cargo-test.log" \
+              ../scripts/ci-flaky-windows-cf-tests.txt \
+              --crate-dir . --summary "${GITHUB_STEP_SUMMARY:-/dev/null}" || retry_exit=$?
+            if [ "$retry_exit" -eq 0 ]; then
+              echo "ci-retry: all failures passed on retry."
+              retried_ok="--retried-ok"
+            fi
+          fi
+
+          "$py" ../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/cargo-test.log" --cargo-exit-code "$cargo_exit" $retried_ok
 
       - name: Upload Rust evidence
         if: always()

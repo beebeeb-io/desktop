@@ -14,7 +14,7 @@ import sys
 import tempfile
 
 
-def check(log, cargo_exit_code):
+def check(log, cargo_exit_code, retried_ok=False):
     current = None
     announced = None
     binaries = 0
@@ -47,7 +47,9 @@ def check(log, cargo_exit_code):
             print(f"{current}: {passed} passed; {failed} failed; {ignored} ignored; "
                   f"{filtered} filtered; {executed} executed")
             if result != "ok" or failed:
-                raise ValueError(f"failed tests in {current}")
+                if not retried_ok:
+                    raise ValueError(f"failed tests in {current}")
+                print(f"  (retried-ok: {failed} failure(s) accepted — retried and passed)")
             if announced != executed + ignored + measured or filtered:
                 raise ValueError(f"inconsistent or filtered count in {current}")
             empty_allowed = current.startswith(("Running unittests src/main.rs (", "Doc-tests "))
@@ -62,8 +64,11 @@ def check(log, cargo_exit_code):
     if not library_seen or total == 0:
         raise ValueError("missing library results or zero total executed tests")
     if cargo_exit_code != 0:
-        raise ValueError(f"cargo exited {cargo_exit_code}")
-    print(f"Total: {binaries} harnesses; {total} executed tests; cargo exit 0")
+        if not retried_ok:
+            raise ValueError(f"cargo exited {cargo_exit_code}")
+        print(f"  (retried-ok: cargo exit {cargo_exit_code} accepted — retried tests passed)")
+    print(f"Total: {binaries} harnesses; {total} executed tests; cargo exit {cargo_exit_code}"
+          + (" (retried-ok)" if retried_ok else ""))
 
 
 def self_test():
@@ -79,33 +84,37 @@ def self_test():
     integration = "Running tests/keychain.rs (target/debug/deps/keychain-123.exe)"
     good = fixture(lib, 3) + fixture(main, 0) + fixture(integration, 2) + fixture("Doc-tests beebeeb_desktop_lib", 0)
     cases = [
-        ("positive per-binary counts", good, 0, None),
-        ("Windows CRLF, paths and ANSI", good.replace("/", "\\").replace("\n", "\r\n").replace("Running", "\x1b[32mRunning\x1b[0m"), 0, None),
-        ("zero-test log", fixture(lib, 0), 0, "zero executed tests"),
-        ("ignored-only library", fixture(lib, 0, ignored=3), 0, "zero executed tests"),
-        ("empty integration after passing library", fixture(lib, 3) + fixture(integration, 0), 0, "zero executed tests"),
-        ("empty log", "", 0, "missing library results"),
-        ("summary without header", good.split("\n", 1)[1], 0, "test count without"),
-        ("truncated next binary", fixture(lib, 3) + integration, 0, "missing result"),
-        ("missing library", fixture(integration, 2), 0, "missing library results"),
-        ("failed test", fixture(lib, 2, failed=1), 0, "failed tests"),
-        ("nonzero cargo exit after passing tests", good, 101, "cargo exited 101"),
-        ("inconsistent count", fixture(lib, 3).replace("running 3", "running 4"), 0, "inconsistent or filtered count"),
-        ("filtered run", fixture(lib, 3).replace("0 filtered", "2 filtered"), 0, "inconsistent or filtered count"),
+        # (name, log, cargo_exit, error_in_stderr, extra_args)
+        ("positive per-binary counts", good, 0, None, []),
+        ("Windows CRLF, paths and ANSI", good.replace("/", "\\").replace("\n", "\r\n").replace("Running", "\x1b[32mRunning\x1b[0m"), 0, None, []),
+        ("zero-test log", fixture(lib, 0), 0, "zero executed tests", []),
+        ("ignored-only library", fixture(lib, 0, ignored=3), 0, "zero executed tests", []),
+        ("empty integration after passing library", fixture(lib, 3) + fixture(integration, 0), 0, "zero executed tests", []),
+        ("empty log", "", 0, "missing library results", []),
+        ("summary without header", good.split("\n", 1)[1], 0, "test count without", []),
+        ("truncated next binary", fixture(lib, 3) + integration, 0, "missing result", []),
+        ("missing library", fixture(integration, 2), 0, "missing library results", []),
+        ("failed test", fixture(lib, 2, failed=1), 0, "failed tests", []),
+        ("nonzero cargo exit after passing tests", good, 101, "cargo exited 101", []),
+        ("inconsistent count", fixture(lib, 3).replace("running 3", "running 4"), 0, "inconsistent or filtered count", []),
+        ("filtered run", fixture(lib, 3).replace("0 filtered", "2 filtered"), 0, "inconsistent or filtered count", []),
+        # task 2448: --retried-ok accepts failures and a non-zero cargo exit
+        ("retried-ok: accepts non-zero cargo exit", good, 101, None, ["--retried-ok"]),
+        ("retried-ok: accepts failed tests", fixture(lib, 2, failed=1), 1, None, ["--retried-ok"]),
     ]
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "cargo-test.log"
-        for name, log, cargo_exit, error in cases:
+        for name, log, cargo_exit, error, extra_args in cases:
             path.write_text(log, encoding="utf-8")
             run = subprocess.run(
                 [sys.executable, str(Path(__file__).resolve()), str(path),
-                 "--cargo-exit-code", str(cargo_exit)], capture_output=True, text=True,
+                 "--cargo-exit-code", str(cargo_exit)] + extra_args, capture_output=True, text=True,
             )
             expected = 1 if error else 0
             if run.returncode != expected or (error and error not in run.stderr):
                 raise AssertionError(f"{name}: expected exit {expected} / {error!r}, "
                                      f"got {run.returncode}\n{run.stdout}\n{run.stderr}")
-            if error is None and "4 harnesses; 5 executed tests" not in run.stdout:
+            if error is None and not extra_args and "4 harnesses; 5 executed tests" not in run.stdout:
                 raise AssertionError(f"{name}: per-binary aggregation failed: {run.stdout}")
             print(f"PASS {name}: guard exit {run.returncode}" + (f"; {run.stderr.strip()}" if error else ""))
     print(f"Self-test: {len(cases)} passed; 0 failed")
@@ -116,6 +125,9 @@ def main():
     parser.add_argument("log", nargs="?", type=Path)
     parser.add_argument("--cargo-exit-code", type=int)
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--retried-ok", action="store_true",
+                        help="accept failures and a non-zero cargo exit (task 2448: the CI retry script already "
+                             "confirmed they pass); the binary and count checks still apply")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -123,7 +135,8 @@ def main():
         if args.log is None or args.cargo_exit_code is None:
             parser.error("log and --cargo-exit-code are required")
         try:
-            check(args.log.read_text(encoding="utf-8"), args.cargo_exit_code)
+            check(args.log.read_text(encoding="utf-8"), args.cargo_exit_code,
+                  retried_ok=args.retried_ok)
         except (ValueError, OSError) as error:
             print(f"FAIL: {error}", file=sys.stderr)
             return 1
