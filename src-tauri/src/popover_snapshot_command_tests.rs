@@ -157,9 +157,9 @@ fn the_real_command_reads_the_session_the_engine_status_and_the_storage_api() {
             first["finder"]["setup"], "ready",
             "an installed Finder state reads as ready"
         );
-        // The same shape the TypeScript side validates.
+        // The same shape the fixture validates.
         let shared: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/popover-snapshot.synced.json")).unwrap();
+            serde_json::from_str(include_str!("../tests/fixtures/popover-snapshot.synced.json")).unwrap();
         for key in shared.as_object().unwrap().keys() {
             assert!(first.get(key).is_some(), "the command's snapshot lacks `{key}`");
         }
@@ -587,7 +587,7 @@ fn real_api_a_tick_is_synced_then_offline_when_the_server_goes_away() {
     let db = Arc::new(state_db::StateDb::open(dir.path().join("state.db")).unwrap());
     let api = Arc::new(api_client::ApiClient::new(base.clone(), token, [0u8; 32]));
     let link = api.link();
-    let bridge = engine_bridge::EngineBridge::new(db, api);
+    let bridge = engine_bridge::EngineBridge::new(crate::APP, db, api);
     // A multi-thread runtime, like the engine's: it keeps polling the pooled connection
     // between ticks, so it notices the server closing it (a runtime that is only ever
     // driven inside `block_on` would write the next request to a dead socket and get a

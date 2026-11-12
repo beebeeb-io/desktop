@@ -373,7 +373,7 @@ impl EngineBridge {
     }
 
     pub fn enforce_configured_cache_limit(&self) -> anyhow::Result<CacheCleanupOutcome> {
-        let cfg = crate::config::DesktopConfig::load().unwrap_or_default();
+        let cfg = crate::config::DesktopConfig::load_for(self.identity).unwrap_or_default();
         self.enforce_local_cache_limit(cfg.local_cache_limit_for_eviction())
     }
 
@@ -388,7 +388,8 @@ impl EngineBridge {
             }
         };
 
-        let source_path = linux_thumbnail_source_path_for_entry(&entry).unwrap_or_else(|| dest_path.to_path_buf());
+        let source_path =
+            linux_thumbnail_source_path_for_entry(self.identity, &entry).unwrap_or_else(|| dest_path.to_path_buf());
         let thumbnail = match tokio::time::timeout(
             Duration::from_secs(8),
             self.fetch_thumbnail_to_memory(file_id, "medium"),
@@ -431,7 +432,7 @@ impl EngineBridge {
                     continue;
                 }
             };
-            let Some(source_path) = linux_thumbnail_source_path_for_entry(&entry) else {
+            let Some(source_path) = linux_thumbnail_source_path_for_entry(self.identity, &entry) else {
                 continue;
             };
             if let Err(error) = crate::linux_thumbnail::remove_freedesktop_thumbnails(&source_path) {

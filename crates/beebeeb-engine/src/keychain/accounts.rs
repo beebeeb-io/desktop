@@ -109,6 +109,14 @@ pub(super) fn account_path(prefix: Option<&AccountId>, account: KeychainAccount)
     }
 }
 
+/// The whole name of one stored item: `<the identity's credential service>/<account path>`. On Windows it is
+/// the credential's target name; on macOS the Keychain item's service and account. The one place the two halves
+/// are joined, so a store cannot name an item outside its identity's service.
+#[cfg(any(any(test, feature = "test-support"), target_os = "macos", target_os = "windows"))]
+pub(super) fn item_name(service: &str, path: &str) -> String {
+    format!("{service}/{path}")
+}
+
 /// Construct the secret store for the current OS, segmented under `account_id`
 /// (task 0800 — multi-account Phase 1). Used by the Tauri runner so
 /// session/vault persistence routes to the platform-native credential vault
@@ -118,8 +126,8 @@ pub(super) fn account_path(prefix: Option<&AccountId>, account: KeychainAccount)
 /// constructor is deliberately not exposed (see `legacy_platform_keychain_store`)
 /// so a reviewer can grep every legacy-keyed access — there is exactly one, in
 /// the migration path.
-pub fn platform_keychain_store_for(account_id: &str) -> PlatformKeychainStore {
-    PlatformKeychainStore::with_account(account_id)
+pub fn platform_keychain_store_for(identity: &'static EngineIdentity, account_id: &str) -> PlatformKeychainStore {
+    PlatformKeychainStore::with_account(identity, account_id)
 }
 
 /// Construct the legacy (un-segmented) secret store — the pre-Phase-1 flat
@@ -135,8 +143,8 @@ pub fn platform_keychain_store_for(account_id: &str) -> PlatformKeychainStore {
 /// New session WRITES must NEVER go through this store (that would re-create the
 /// orphan-able flat entries). Production write paths use
 /// `platform_keychain_store_for` exclusively.
-pub fn legacy_platform_keychain_store() -> PlatformKeychainStore {
-    PlatformKeychainStore::new()
+pub fn legacy_platform_keychain_store(identity: &'static EngineIdentity) -> PlatformKeychainStore {
+    PlatformKeychainStore::new(identity)
 }
 
 #[cfg(test)]

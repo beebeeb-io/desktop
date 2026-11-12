@@ -111,6 +111,10 @@ one JSON record per key. The board loads Inter and JetBrains Mono from Google Fo
 | Toast | `toast::layer(toast::toast(icon, tone, message, Option<ToastAction>, t))`; `Tone::Failed` is the red one (DW-0109) | `toast`, `toast-icon`, `toast-text`, `toast-action`, `toast-action-text` |
 | Outline button | `button::outline_button(key, label, icon, t)` | `<key>`, `<key>-icon`, `<key>-label` |
 | Empty state | `empty::empty_state(key, icon, title, sentence, t)` | `<key>`, `<key>-tile`, `<key>-icon`, `<key>-title`, `<key>-text` |
+| Banner under the toolbar | `banner::banner(&Banner { tone, icon, runs, action, dismiss }, t)`; `Run::Words` / `Run::Figure` (a figure is set in JetBrains Mono); `banner::pressable(button, handler)` makes Enter press a button too | `banner`, `banner-icon`, `banner-text`, `banner-figure-<i>`, `banner-action` (+`-label`), `banner-dismiss` (+`-icon`) |
+| Loading strip | `load_strip::load_strip(title, count_runs, fraction, detail, t)` | `banner`, `strip-title`, `strip-count`, `strip-figure-<i>`, `strip-bar`, `strip-bar-fill`, `strip-detail` |
+| Panel of a preview that cannot open | `blocked_preview::blocked_preview(name, icon, title, sentence, (word, retry), close, t)` | `preview-card`, `preview-close`, `blocked`, `blocked-tile/icon/title/text`, `blocked-retry` (+`-label`) |
+| Grid of a folder | `grid_tiles::grid(rows, tiles)`, `grid_tiles::tile(i, &Tile { name, sub, thumb, length, selected }, t)`, `Thumb::Glyph / Plain / Picture`, `grid_tiles::columns(width)` | `grid`, `rows`, `grid-<i>`, `grid-<i>-thumb/icon/badge/badge-icon/badge-text/name/sub` |
 
 ### Settings, inside the window (`src/frames/settings/`, `src/ui/settings_*.rs`)
 
@@ -151,6 +155,7 @@ src/
     icons.rs        the board's SVG icons, and the Beebeeb mark
   frames/
     files/          the Files frames: menus, selection, toasts, folders (FRAMES.md is the checklist)
+    global/         what sits on every view: the one banner, the loading strip, a preview that needs a connection, a folder as a grid (FRAMES.md is the checklist)
   ui/
     kit.rs          label / glyph / avatar / mark / shadows, and the notes the gate reads
     gate.rs         --gate-export: the native element tree as JSON

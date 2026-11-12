@@ -20,11 +20,7 @@ pub fn run() {
         .manage(AppState::default())
         // Task 1683 slice 2: transfer board, last engine status, cached storage summary.
         .manage(popover_data::PopoverRuntime::default())
-        .plugin(tauri_plugin_opener::init())
-        // 0.8.15: before any window exists, so its `on_webview_ready` sees every webview (Ctrl+Shift+P printed in 0.8.14).
-        .plugin(webview_browser_keys::plugin())
-        // v2 b10, task 2422: no web view offers to save or fill a password, a phrase or a code.
-        .plugin(crate::auth_v2::webview_autofill::plugin());
+        .plugin(tauri_plugin_opener::init());
     // Windows and Linux keep the window-state plugin; a Mac keeps the Beebeeb window's frame itself (task 1683 slice 1,
     // review item 5; see `window_state_plugin`).
     #[cfg(not(target_os = "macos"))]
@@ -54,7 +50,7 @@ pub fn run() {
             crate::auth_v2::device::auth_device_request_start, crate::auth_v2::device::auth_device_request_poll, crate::auth_v2::device::auth_device_request_cancel, crate::auth_v2::approve::auth_approve_lookup, crate::auth_v2::approve::auth_approve_request, crate::auth_v2::hello::auth_windows_hello_available, crate::auth_v2::hello::auth_unlock_with_windows_hello, crate::auth_v2::phrase::auth_phrase_unknown_words, // v2 b10
             crate::auth_v2::gate::auth_gate_state, crate::auth_v2::gate::auth_sign_in_problem, crate::auth_v2::gate::auth_next_after_sign_in, crate::auth_v2::gate::auth_two_factor_error, crate::auth_v2::gate::auth_phrase_error, crate::auth_v2::gate::auth_approve_error_text, crate::auth_v2::gate::auth_device_status_text, // v2 task 2445
             crate::auth_v2::signup_v2::auth_signup_begin, crate::auth_v2::signup_v2::auth_signup_send_code, crate::auth_v2::signup_v2::auth_signup_verify_code, crate::auth_v2::signup_v2::auth_signup_password_meter, crate::auth_v2::signup_v2::auth_signup_breach_check, crate::auth_v2::signup_v2::auth_signup_set_password, crate::auth_v2::signup_v2::auth_signup_phrase_words, crate::auth_v2::signup_v2::auth_signup_phrase_save, crate::auth_v2::signup_v2::auth_signup_phrase_challenge, crate::auth_v2::signup_v2::auth_signup_confirm_phrase, crate::auth_v2::signup_v2::auth_signup_default_device_name, crate::auth_v2::signup_v2::auth_signup_create, crate::auth_v2::signup_v2::auth_signup_cancel, crate::auth_v2::signup_v2::auth_recover_with_phrase, crate::auth_v2::signup_v2::auth_recover_set_password, crate::auth_v2::signup_v2::auth_phrase_suggest, // v2 b11
-            account_v2::account_backup_codes_regenerate, account_v2::account_delete_confirm_link, crate::auth_v2::private_screen::auth_screen_private, crate::auth_v2::signup_v2::auth_signup_phrase_copy, // v2 b10b
+            account_v2::account_backup_codes_regenerate, account_v2::account_delete_confirm_link, crate::auth_v2::signup_v2::auth_signup_phrase_copy, // v2 b10b (auth_screen_private deleted: web-view capture exclusion)
             crate::passkey_commands::auth_passkey_sign_in, crate::passkey_commands::account_passkeys_list, crate::passkey_commands::account_passkeys_add, crate::passkey_commands::account_passkeys_remove, // v2 b15
             crate::share_v2::drive_delete_permanently, crate::share_v2::reads::share_list, crate::share_v2::reads::share_accept, crate::share_v2::reads::share_decline, crate::share_v2::reads::share_leave, crate::share_v2::reads::share_people, crate::share_v2::flows::share_invite, crate::share_v2::reads::share_set_access, crate::share_v2::flows::share_revoke, crate::share_v2::flows::share_link_copy, crate::share_v2::reads::share_link_update,  crate::share_v2::requests::file_request_create, crate::share_v2::requests::file_request_copy, crate::share_v2::requests::file_request_update, crate::share_v2::reads::file_request_remove, // v2 b05
             crate::share_v2::safety::share_safety_number, crate::share_v2::safety::share_mark_compared, crate::share_v2::safety::share_accept_changed_key, // v2 b05e
@@ -76,12 +72,8 @@ pub fn run() {
             lock_vault,
             sync_status,
             popover_snapshot,
-            macos_popover::popover_hide,
-            macos_popover::popover_quit,
-            macos_popover::popover_open_window,
-            macos_popover::popover_retry_sync,
-            macos_popover::popover_unlock,
-            macos_popover::popover_gear_menu,
+            // macos_popover commands deleted (popover_hide, popover_quit, popover_open_window,
+            // popover_retry_sync, popover_unlock, popover_gear_menu): the web-view popover is removed.
             desktop_storage_summary,
             free_up_space,
             export_diagnostics,
@@ -296,11 +288,7 @@ pub fn run() {
                     let _ = w.hide();
                 }
             }
-            // v2 w1: the main window's kept frame (or the fitted default), applied while it is still hidden.
-            #[cfg(not(target_os = "macos"))]
-            if let Some(w) = app.get_webview_window(surfaces::policy::main_window_label(surfaces::policy::Platform::current())) {
-                place_desktop_main_window(&app.handle().clone(), &w);
-            }
+            // v2 w1: the web-view main window's kept frame was applied here (deleted: v2-native has no web views).
             attach_tray_status_listener(&app.handle().clone());
             {
                 let app_state = app.state::<AppState>();
@@ -498,8 +486,7 @@ pub fn run() {
             // Task 1683 slice 1: the Beebeeb window's end resets the menu and saves its frame; the Dock icon follows.
             #[cfg(target_os = "macos")]
             macos_window_lifecycle(window, event);
-            #[cfg(not(target_os = "macos"))]
-            desktop_main_window_lifecycle(window, event);
+            // desktop_main_window_lifecycle: deleted (web-view main window frame; v2-native has no web views).
         })
         .build(tauri::generate_context!())
         .expect("error while building Beebeeb desktop")

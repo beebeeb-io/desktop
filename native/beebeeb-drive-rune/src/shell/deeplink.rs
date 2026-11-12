@@ -61,6 +61,13 @@ pub fn parse(link: &str) -> Result<Intent, DeepLinkError> {
     parse_for(link, AppIdentity::CURRENT)
 }
 
+/// `<this build's scheme>://<rest>`: what a test hands to code that parses for THIS build, so it passes whether
+/// the build under test is the real app or the test build.
+#[cfg(test)]
+pub fn link(rest: &str) -> String {
+    format!("{}://{rest}", AppIdentity::CURRENT.url_scheme())
+}
+
 pub fn parse_for(link: &str, identity: AppIdentity) -> Result<Intent, DeepLinkError> {
     if link.len() > MAX_LEN {
         return Err(DeepLinkError::TooLong);
@@ -173,6 +180,25 @@ pub fn scheme_registration(identity: AppIdentity, exe: &str) -> Vec<RegistryValu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rules below are written with the real app's links (`beebeeb://…`); they hold for either build.
+    fn parse(link: &str) -> Result<Intent, DeepLinkError> {
+        parse_for(link, AppIdentity::Real)
+    }
+
+    /// The entry the app calls parses for the identity this binary was built as, and for no other.
+    #[test]
+    fn the_app_entry_parses_this_builds_links_only() {
+        assert!(super::parse(&link("open")).is_ok());
+        let other = match AppIdentity::CURRENT {
+            AppIdentity::Real => AppIdentity::Test,
+            AppIdentity::Test => AppIdentity::Real,
+        };
+        assert_eq!(
+            super::parse(&format!("{}://open", other.url_scheme())),
+            Err(DeepLinkError::NotOurScheme)
+        );
+    }
 
     fn go(section: Section, folder: Option<&str>) -> Result<Intent, DeepLinkError> {
         Ok(Intent::Go(Route {

@@ -66,7 +66,12 @@ struct Kept {
     hash: String,
 }
 
-pub fn purge(db: &StateDb, root: Option<&Path>, unknown: &UnknownFiles) -> anyhow::Result<KeptAtSignOut> {
+pub fn purge(
+    identity: &crate::identity::EngineIdentity,
+    db: &StateDb,
+    root: Option<&Path>,
+    unknown: &UnknownFiles,
+) -> anyhow::Result<KeptAtSignOut> {
     if let Some(root) = root {
         super::upload_finalization::retry(db, root);
     }
@@ -106,7 +111,7 @@ pub fn purge(db: &StateDb, root: Option<&Path>, unknown: &UnknownFiles) -> anyho
     let mut kept_files = 0usize;
     cleanup::purge(
         cache_paths,
-        crate::is_disposable_cache_path,
+        |path| crate::is_disposable_cache_path(identity, path),
         || {
             let mut handles = Vec::new();
             let mut directories = Vec::new();

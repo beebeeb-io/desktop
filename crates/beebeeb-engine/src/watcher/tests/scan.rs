@@ -28,7 +28,7 @@ fn test_bridge(db_path: &std::path::Path) -> (Arc<StateDb>, EngineBridge) {
         "token".into(),
         [17u8; 32],
     ));
-    let bridge = EngineBridge::new(db.clone(), api);
+    let bridge = EngineBridge::new(&crate::identity::REAL, db.clone(), api);
     (db, bridge)
 }
 

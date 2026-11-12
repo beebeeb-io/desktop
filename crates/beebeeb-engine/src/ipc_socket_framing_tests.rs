@@ -80,7 +80,7 @@ impl IpcFixture {
         let db = Arc::new(StateDb::open(state_dir.path().join("state.db")).unwrap());
         seed(&db);
         let api = Arc::new(ApiClient::new("http://127.0.0.1:9".into(), "token".into(), [7u8; 32]));
-        let bridge = Arc::new(EngineBridge::new(db.clone(), api));
+        let bridge = Arc::new(EngineBridge::new(&crate::identity::REAL, db.clone(), api));
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();

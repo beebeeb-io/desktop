@@ -237,6 +237,7 @@ impl Platform for WindowsPlatform {
             let style = GetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE);
             SetWindowLongPtrW(hwnd as HWND, GWL_EXSTYLE, style | WS_EX_TOOLWINDOW as isize);
         }
+        round_corners(hwnd as HWND);
     }
 
     fn show_start_refusal(&self, title: &str, message: &str) {
@@ -268,5 +269,25 @@ impl Platform for WindowsPlatform {
             Ok(name) => windows_control::send(&name, request, timeout),
             Err(_) => Delivery::Unreachable,
         }
+    }
+}
+
+/// The flyout's corners and shadow (DW-1201, `.wn-fly .mk-pop`: "border-radius: 8px" and a drop
+/// shadow): on Windows 11 the compositor rounds a window that asks for it (8 px at 100 %) and
+/// draws the shadow of a rounded window itself. A borderless window gets neither unless asked.
+/// Windows 10 has no such attribute: the call fails there and the flyout stays square.
+/// Returns the HRESULT (0: rounded).
+fn round_corners(hwnd: HWND) -> i32 {
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute};
+    let preference = DWMWCP_ROUND;
+    // SAFETY: `hwnd` is this process's own live window; the attribute is read from a local
+    // of exactly the size passed, during the call only.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            std::ptr::from_ref(&preference).cast(),
+            std::mem::size_of_val(&preference) as u32,
+        )
     }
 }

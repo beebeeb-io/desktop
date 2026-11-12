@@ -604,7 +604,7 @@ fn the_engine_start_reset_sweeps_every_production_staging_directory() {
 /// (behaviour, and `engine_bridge`'s own test that those are the engine's directories).
 #[test]
 fn a_release_build_sweeps_every_directory_the_engine_stages_into() {
-    let candidates = engine_bridge::finder_staging_candidates();
+    let candidates = engine_bridge::finder_staging_candidates(crate::APP);
     // macOS: the data root, then the cache root and the temp root that builds before the move used (spec
     // 2026-10-09 §8.4). Elsewhere: the preferred directory and the temp-dir fallback.
     let expected = if cfg!(target_os = "macos") { 3 } else { 2 };
@@ -639,7 +639,7 @@ fn a_release_build_sweeps_every_directory_the_engine_stages_into() {
         release,
         [
             "fn release_staging_dirs() -> Vec<PathBuf> {",
-            "engine_bridge::finder_staging_candidates()"
+            "engine_bridge::finder_staging_candidates(crate::APP)"
         ],
         "the release list is the engine's own list, not a copy of it"
     );

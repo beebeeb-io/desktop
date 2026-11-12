@@ -67,8 +67,8 @@ impl LockFile {
     /// - `Err(...)` if the prior holder is still alive — message
     ///   includes the recorded agent and pid so the operator can
     ///   identify the conflict.
-    pub fn acquire(agent: &str) -> Result<Self, String> {
-        let state_dir = crate::state_paths::beebeeb_state_dir()?;
+    pub fn acquire(identity: &'static crate::identity::EngineIdentity, agent: &str) -> Result<Self, String> {
+        let state_dir = crate::state_paths::beebeeb_state_dir_for(identity)?;
         fs::create_dir_all(&state_dir).map_err(|e| format!("create lock dir {}: {e}", state_dir.display()))?;
         let path = state_dir.join(crate::state_paths::LOCK_FILENAME);
 

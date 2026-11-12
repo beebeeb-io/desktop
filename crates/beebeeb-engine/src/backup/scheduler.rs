@@ -150,7 +150,7 @@ impl BackupScheduler {
         // LD-0139 (review 2026-11-08): when the scheduler starts, every stopped backup's switch is off, persisted (a
         // kill between a stop's commit and its switch-off, or a settings write that failed); a read that fails is
         // tried again on the next tick. Each pass reconciles again (`run_passes`).
-        if !self.reconciled && super::stop::reconcile_stopped_switches(bridge.db()).is_ok() {
+        if !self.reconciled && super::stop::reconcile_stopped_switches(bridge.identity, bridge.db()).is_ok() {
             self.reconciled = true;
         }
         self.watch(&sources);
@@ -169,7 +169,7 @@ impl BackupScheduler {
         let layout = match bridge.db().backup_layout() {
             Ok(Some(layout)) => layout,
             Ok(None) => {
-                let Some(me) = super::device::device_self() else {
+                let Some(me) = super::device::device_self(bridge.identity) else {
                     tracing::warn!("backup: this device has no usable name or machine id; no pass");
                     return None;
                 };
@@ -218,7 +218,7 @@ pub async fn run_passes(
     // Review (2026-11-07): a backup with a stop row is off until "Back up again", even when its switch could not be
     // turned off; it is never passed. Review (2026-11-08): the stops are read first (and any switch still on next to a
     // stop row goes off); a read that fails runs no pass, since it cannot tell a stopped backup from one that is on.
-    let stopped = match super::stop::reconcile_stopped_switches(bridge.db()) {
+    let stopped = match super::stop::reconcile_stopped_switches(bridge.identity, bridge.db()) {
         Ok(stopped) => stopped,
         Err(error) => {
             tracing::warn!(%error, "backup: the stopped backups could not be read; no pass (the next pass retries)");
