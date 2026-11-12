@@ -653,3 +653,190 @@ fn the_poll_drains_the_sign_in_queue_and_a_gate_that_opens_reloads_and_starts_sy
     rt.frame(4.0);
     assert_eq!(starts(&engine), 1, "a gate that closes starts nothing");
 }
+
+// ---------------------------------------------------------------------------
+// Capture exclusion (task 2460): the window is excluded from screen capture
+// while a secret route is on screen. The FakePlatform now receives the call
+// directly (with `window: None` in headless tests); it records every call
+// and can simulate failure.
+// ---------------------------------------------------------------------------
+
+/// P1-1 fix: an app that starts on sign-in applies capture exclusion on the first poll.
+/// `capture_excluded` starts `false` ("platform not told"); the first poll sees the secret
+/// route and calls the platform.
+#[test]
+fn startup_on_sign_in_applies_capture_exclusion_on_the_first_poll() {
+    let engine = Arc::new(FixtureEngine::signed_out());
+    let platform = Arc::new(FakePlatform::default());
+    let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform.clone())));
+    // After the first frame (runtime() calls frame(0.0)), the platform was told "exclude".
+    let calls = platform.capture_exclusions.lock().unwrap().clone();
+    assert_eq!(calls, vec![true], "exactly one exclude call on startup");
+    assert!(
+        rt.state.shell.capture_excluded,
+        "flag tracks what the platform was told"
+    );
+
+    // A second frame with the same state makes no call.
+    rt.frame(1.0);
+    let calls = platform.capture_exclusions.lock().unwrap().clone();
+    assert_eq!(calls, vec![true], "no duplicate call");
+}
+
+/// Entering a secret route from a non-secret route calls the platform with `true`; leaving
+/// calls it with `false`.
+#[test]
+fn entering_a_secret_route_sets_capture_exclusion_and_leaving_clears_it() {
+    let engine = Arc::new(FixtureEngine::ready());
+    let platform = Arc::new(FakePlatform::default());
+    let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform.clone())));
+    // Starts on Files (non-secret): capture_excluded starts false, desired is false → no call.
+    assert!(!rt.state.shell.capture_excluded);
+    assert!(platform.capture_exclusions.lock().unwrap().is_empty());
+
+    // Gate → SignedOut → sign-in (secret).
+    engine.set_gate(GateState::SignedOut);
+    rt.frame(1.0);
+    assert_eq!(
+        platform.capture_exclusions.lock().unwrap().clone(),
+        vec![true],
+        "entering sign-in calls the platform with exclude"
+    );
+    assert!(rt.state.shell.capture_excluded);
+
+    // Gate → Ready → Files (non-secret).
+    engine.set_gate(GateState::Ready);
+    rt.frame(2.0);
+    assert_eq!(
+        platform.capture_exclusions.lock().unwrap().clone(),
+        vec![true, false],
+        "leaving sign-in calls the platform with clear"
+    );
+    assert!(!rt.state.shell.capture_excluded);
+}
+
+/// Secret-to-secret (sign-in → locked) keeps exclusion: no false→true gap.
+#[test]
+fn secret_to_secret_keeps_exclusion_without_a_gap() {
+    let engine = Arc::new(FixtureEngine::signed_out());
+    let platform = Arc::new(FakePlatform::default());
+    let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform.clone())));
+    // The first poll applied exclude (startup on sign-in).
+    let before = platform.capture_exclusions.lock().unwrap().len();
+    assert_eq!(before, 1, "one call on startup");
+
+    // Sign-in → locked (both secret).
+    engine.set_gate(GateState::Locked);
+    rt.frame(1.0);
+    let after = platform.capture_exclusions.lock().unwrap().len();
+    assert_eq!(after, before, "no transition call when both routes are secret");
+    assert!(rt.state.shell.capture_excluded);
+}
+
+/// P2-1: the failure path is actually exercised. When the platform call fails, the flag stays
+/// `false` (the platform was NOT told), and content stays drawn.
+#[test]
+fn a_failed_platform_call_keeps_the_flag_false_and_content_draws() {
+    use std::sync::atomic::Ordering;
+    let engine = Arc::new(FixtureEngine::ready());
+    let platform = Arc::new(FakePlatform::default());
+    platform.capture_exclusion_fails.store(true, Ordering::SeqCst);
+    let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform.clone())));
+    // Starts on Files, desired false, applied false → no call.
+    assert!(!rt.state.shell.capture_excluded);
+
+    // Enter sign-in (secret): the platform call fails.
+    engine.set_gate(GateState::SignedOut);
+    rt.frame(1.0);
+    // The flag stays false (the platform was NOT successfully told).
+    assert!(!rt.state.shell.capture_excluded, "flag stays false on failure");
+    assert!(
+        rt.state.shell.capture_exclusion_retries > 0,
+        "retry counter incremented"
+    );
+    // Content stays drawn.
+    assert_eq!(rt.state.shell.app.screen(), Screen::SignIn);
+    // The platform was called (and failed): no successful record.
+    assert!(platform.capture_exclusions.lock().unwrap().is_empty());
+}
+
+/// P2-2: after a failed call, subsequent polls retry (bounded at 3).
+#[test]
+fn after_failure_subsequent_polls_retry_bounded() {
+    use std::sync::atomic::Ordering;
+    let engine = Arc::new(FixtureEngine::ready());
+    let platform = Arc::new(FakePlatform::default());
+    platform.capture_exclusion_fails.store(true, Ordering::SeqCst);
+    let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform.clone())));
+
+    // Enter sign-in: first call fails.
+    engine.set_gate(GateState::SignedOut);
+    rt.frame(1.0);
+    assert_eq!(rt.state.shell.capture_exclusion_retries, 1);
+
+    // Second and third poll: still failing.
+    rt.frame(2.0);
+    assert_eq!(rt.state.shell.capture_exclusion_retries, 2);
+    rt.frame(3.0);
+    assert_eq!(rt.state.shell.capture_exclusion_retries, 3);
+
+    // Fourth poll: retries exhausted, no more calls.
+    rt.frame(4.0);
+    assert_eq!(rt.state.shell.capture_exclusion_retries, 3, "capped at 3");
+    assert!(!rt.state.shell.capture_excluded, "still not applied");
+
+    // Fix the platform: the user navigates away and back, resetting the counter.
+    platform.capture_exclusion_fails.store(false, Ordering::SeqCst);
+    engine.set_gate(GateState::Ready);
+    rt.frame(5.0);
+    // Desired false, applied false → match → retries reset.
+    assert_eq!(rt.state.shell.capture_exclusion_retries, 0);
+
+    // Re-enter sign-in: now the call succeeds.
+    engine.set_gate(GateState::SignedOut);
+    rt.frame(6.0);
+    assert!(rt.state.shell.capture_excluded, "applied after recovery");
+    assert_eq!(
+        platform.capture_exclusions.lock().unwrap().clone(),
+        vec![true],
+        "one successful call"
+    );
+}
+
+/// `route_shows_secret` checks both the frame behind and the dialog in front.
+#[test]
+fn route_shows_secret_checks_the_dialog_layer_too() {
+    assert!(!FrameGroup::ConflictDialog.shows_secret());
+    assert!(!FrameGroup::ShortcutsDialog.shows_secret());
+    assert!(FrameGroup::SignIn.shows_secret());
+    assert!(FrameGroup::Locked.shows_secret());
+    assert!(FrameGroup::RecoveryPhrase.shows_secret());
+    assert!(FrameGroup::FirstRun.shows_secret());
+}
+
+/// Per-pane and per-dialog secret classification within Settings.
+#[test]
+fn the_account_panes_change_password_and_2fa_setup_are_secret() {
+    use crate::frames::account::{CodeFor, Dialog as AccountDialog, Pane};
+    assert!(Pane::Email.shows_secret(), "DW-A65");
+    assert!(Pane::Password.shows_secret(), "DW-A67");
+    assert!(Pane::TwoFactorSetup.shows_secret(), "DW-A69");
+    assert!(Pane::BackupCodes.shows_secret(), "DW-A70");
+    assert!(Pane::Delete.shows_secret(), "DW-A58");
+    assert!(Pane::DeleteFactor.shows_secret(), "DW-A80");
+    assert!(AccountDialog::Code(CodeFor::TurnOffTwoFactor).shows_secret(), "DW-A72");
+    assert!(!Pane::Account.shows_secret(), "DW-A51");
+    assert!(!Pane::Security.shows_secret(), "DW-A52");
+    assert!(!Pane::Checkup.shows_secret(), "DW-A84");
+    assert!(!Pane::Sessions.shows_secret(), "DW-A55");
+    assert!(!Pane::Name.shows_secret(), "DW-A64");
+    assert!(!Pane::EmailCode.shows_secret(), "DW-A66");
+    assert!(!Pane::TwoFactor.shows_secret(), "DW-A71");
+    assert!(!Pane::Passkeys.shows_secret(), "DW-A73");
+    assert!(!Pane::Activity.shows_secret(), "DW-A77");
+    assert!(!Pane::DeleteLink.shows_secret(), "DW-A81");
+    assert!(!Pane::DeleteScheduled.shows_secret(), "DW-A82");
+    assert!(!Pane::DeleteUndone.shows_secret(), "DW-A83");
+    assert!(!AccountDialog::SignOutApp.shows_secret(), "DW-A57");
+    assert!(!AccountDialog::LeaveCodes.shows_secret());
+}

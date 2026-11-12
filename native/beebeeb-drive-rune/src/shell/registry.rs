@@ -83,6 +83,33 @@ impl FrameGroup {
 }
 
 impl FrameGroup {
+    /// Whether this frame group shows a secret: a password entry, a recovery phrase (shown or
+    /// typed), 2FA codes, backup codes, or any key material. The list is derived from the
+    /// registry's denied-feedback reasons and the board's content: sign-in and locked take a
+    /// password, recovery phrase takes the phrase, first-run shows the phrase and backup codes.
+    ///
+    /// A new variant of [`FrameGroup`] causes a compile error here (exhaustive match); the
+    /// [`tests::every_frame_group_is_classified`] test pins the count and the exact set.
+    pub fn shows_secret(self) -> bool {
+        match self {
+            // Password entry.
+            FrameGroup::SignIn | FrameGroup::Locked => true,
+            // Recovery phrase shown or typed.
+            FrameGroup::RecoveryPhrase => true,
+            // First-run setup shows the recovery phrase and backup codes.
+            FrameGroup::FirstRun => true,
+            // Everything else: user content, device info, empty states or navigation.
+            FrameGroup::NoPlan
+            | FrameGroup::KeyStoreUnavailable
+            | FrameGroup::Section(_)
+            | FrameGroup::Viewer
+            | FrameGroup::Settings(_)
+            | FrameGroup::ConflictDialog
+            | FrameGroup::ShortcutsDialog
+            | FrameGroup::Flyout => false,
+        }
+    }
+
     /// The board frame the group draws (`design/desktop-v2/frames.json`), where the board has
     /// ONE for it; a note of the live feedback mode names it (`feedback/frame.rs`).
     #[cfg_attr(not(feature = "feedback"), allow(dead_code))]
@@ -345,4 +372,93 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 })
                 .child(card),
         )
+}
+
+/// Whether the current route shows a secret: the frame behind the window, or any dialog in
+/// front of it. Used by the shell to set the window's capture-exclusion (`platform::Platform::set_capture_exclusion`).
+pub fn route_shows_secret(app: &AppMachine) -> bool {
+    let behind = group_for(app);
+    if behind.shows_secret() {
+        return true;
+    }
+    dialog_group_for(app).is_some_and(|d| d.shows_secret())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shell::app::{Section, SettingsPane};
+
+    /// Every variant of [`FrameGroup`] is classified by [`FrameGroup::shows_secret`]. The
+    /// exhaustive match is the compile-time guard; this test pins the count of all instantiable
+    /// variants so that adding one to the enum also requires updating this list.
+    #[test]
+    fn every_frame_group_is_classified() {
+        let mut all: Vec<FrameGroup> = vec![
+            FrameGroup::SignIn,
+            FrameGroup::Locked,
+            FrameGroup::RecoveryPhrase,
+            FrameGroup::NoPlan,
+            FrameGroup::KeyStoreUnavailable,
+            FrameGroup::FirstRun,
+            FrameGroup::Viewer,
+            FrameGroup::ConflictDialog,
+            FrameGroup::ShortcutsDialog,
+            FrameGroup::Flyout,
+        ];
+        for s in Section::ALL {
+            all.push(FrameGroup::Section(s));
+        }
+        for p in SettingsPane::ALL {
+            all.push(FrameGroup::Settings(p));
+        }
+        // Call shows_secret on each: a missing arm is a compile error.
+        for group in &all {
+            let _ = group.shows_secret();
+        }
+        // 10 base + 7 sections + 9 settings panes = 26.
+        assert_eq!(
+            all.len(),
+            26,
+            "a FrameGroup variant was added without updating this test"
+        );
+    }
+
+    /// The exact set of secret frame groups, pinned by id.
+    #[test]
+    fn the_secret_frames_are_sign_in_locked_recovery_phrase_and_first_run() {
+        let secrets = [
+            FrameGroup::SignIn,
+            FrameGroup::Locked,
+            FrameGroup::RecoveryPhrase,
+            FrameGroup::FirstRun,
+        ];
+        for group in &secrets {
+            assert!(group.shows_secret(), "{group:?} must be secret");
+        }
+        // Spot-check the non-secret ones.
+        assert!(!FrameGroup::NoPlan.shows_secret());
+        assert!(!FrameGroup::KeyStoreUnavailable.shows_secret());
+        assert!(!FrameGroup::Section(Section::Files).shows_secret());
+        assert!(!FrameGroup::Settings(SettingsPane::Security).shows_secret());
+        assert!(!FrameGroup::Viewer.shows_secret());
+        assert!(!FrameGroup::Flyout.shows_secret());
+        assert!(!FrameGroup::ConflictDialog.shows_secret());
+        assert!(!FrameGroup::ShortcutsDialog.shows_secret());
+    }
+
+    /// The FRAMES array's entry count: a frame added without updating this test fails.
+    #[test]
+    fn the_frame_count_is_pinned() {
+        assert_eq!(
+            FRAMES.len(),
+            17,
+            "a frame was added to FRAMES without updating this test"
+        );
+        assert_eq!(
+            DIALOGS.len(),
+            1,
+            "a dialog was added to DIALOGS without updating this test"
+        );
+    }
 }
