@@ -17,9 +17,16 @@
 
 pub mod icons;
 pub mod qr;
+pub mod setup;
 pub mod source;
+pub mod steps;
 mod view;
+mod view_recover;
+mod view_recovery;
+mod view_steps;
 
+#[cfg(test)]
+mod steps_tests;
 #[cfg(test)]
 mod tests;
 
@@ -31,9 +38,10 @@ use crate::State;
 use crate::shell::app::{Event, GateState};
 use crate::shell::host;
 use source::{
-    DeviceRequest, DeviceStatus, FixtureSignInSource, HelloOutcome, NextAfterSignIn, Script, SharedSession,
-    SignInAnswer, SignInEvent, SignInProblem, SignInSource, board,
+    DeviceRequest, DeviceStatus, FixtureSignInSource, HelloOutcome, NextAfterSignIn, PhraseProblem, Script,
+    SharedSession, SignInAnswer, SignInEvent, SignInProblem, SignInSource, TwoFactorProblem, board,
 };
+use steps::Pictured;
 
 pub use view::view;
 
@@ -68,6 +76,24 @@ pub enum Screen {
     KeysNotReceived,
     /// DW-A09.
     Denied { by: String },
+    /// DW-A26 and DW-A27; DW-A28 when `backup`.
+    TwoFactor { backup: bool },
+    /// DW-A23 and DW-A24: the twelve words on a device that holds no keys.
+    Phrase,
+    /// DW-A25: no phrase and no signed-in device.
+    NoPhrase,
+    /// DW-A30: a passkey proved the person; the vault still needs the password.
+    UnlockVault,
+    /// DW-A45.
+    Forgot,
+    /// DW-A46.
+    CannotRecover,
+    /// DW-A47 and DW-A48: recovery, step 1: the email and the twelve words.
+    Recover,
+    /// DW-A49: recovery, last step: a new password.
+    NewPassword,
+    /// DW-A50.
+    PasswordUpdated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,14 +109,15 @@ pub enum HelloFailure {
 pub enum Intent {
     /// Sign-up, at its email step: DW-A31 (DW-A31 to DW-A44, not built in this group yet).
     CreateAccount,
-    /// DW-A45.
-    ForgotPassword,
-    /// DW-A29.
-    UsePasskey,
-    /// A sign-in step succeeded: the frame `gate.rs` names for it (DW-0201, DW-A23, DW-A26).
+    /// A sign-in step succeeded and what follows is outside this group: the frame `gate.rs`
+    /// names for it (DW-0201). The two-factor code and the twelve words are screens of this group.
     Next(NextAfterSignIn),
-    /// DW-A63.
-    AccountDeleted,
+    /// DW-A25's rows: Drive's own dialogs (cancel billing; erase all files; delete the account).
+    CancelBilling,
+    EraseAllFiles,
+    DeleteAccount,
+    /// The support address (DW-A46): a message to it in the person's mail app.
+    WriteToSupport,
 }
 
 pub struct Ui {
@@ -114,6 +141,31 @@ pub struct Ui {
     /// The element that takes keyboard focus once this change is on screen.
     focus: Option<&'static str>,
     intents: Vec<Intent>,
+    /// The password was right and the account is deleted (DW-A63).
+    deleted: bool,
+    /// The six digits of the authenticator code: ONE secure field, made in `Ui::new`.
+    pub code: TextEdit,
+    /// The eight digits of a backup code: secure, shown as typed (DW-A28).
+    pub backup_code: TextEdit,
+    verifying: bool,
+    code_problem: Option<TwoFactorProblem>,
+    /// The twelve words: secure fields, shown as typed (DW-A23), made in `Ui::new`.
+    pub words: [TextEdit; 12],
+    restoring: bool,
+    phrase_problem: Option<PhraseProblem>,
+    /// Windows' passkey dialog is up and its answer has not come (DW-A29).
+    passkey_waiting: bool,
+    unlocking: bool,
+    unlock_problem: Option<SignInProblem>,
+    /// The field a scene draws holding the keyboard (`steps::Pictured`).
+    pictured: Option<Pictured>,
+    /// Recovery: the phrase is being verified (DW-A47).
+    recovering: bool,
+    /// "Confirm password" (DW-A49): secure, made in `Ui::new`. The new password itself is
+    /// typed into `password`, the one password field.
+    pub confirm: TextEdit,
+    setting: bool,
+    set_problem: Option<SignInProblem>,
 }
 
 impl Ui {
@@ -141,11 +193,37 @@ impl Ui {
             code_copy: None,
             focus: None,
             intents: Vec::new(),
+            deleted: false,
+            // The one place each of these secret fields is made. Scenes and tests fill THESE.
+            code: TextEdit::new("").secure(),
+            backup_code: TextEdit::new("").secure().revealed(true),
+            verifying: false,
+            code_problem: None,
+            words: std::array::from_fn(|_| TextEdit::new("").secure().revealed(true)),
+            restoring: false,
+            phrase_problem: None,
+            passkey_waiting: false,
+            unlocking: false,
+            unlock_problem: None,
+            pictured: None,
+            recovering: false,
+            confirm: TextEdit::new("").secure(),
+            setting: false,
+            set_problem: None,
         }
     }
 
+    /// The account of the password just proven is deleted (DW-A63).
+    pub fn deleted(&self) -> bool {
+        self.deleted
+    }
+
+    pub fn pictured(&self) -> Option<Pictured> {
+        self.pictured
+    }
+
     /// What the shell should open, oldest first.
-    #[cfg_attr(not(test), allow(dead_code))] // no frame of the targets is built yet: see FRAMES.md
+    #[cfg_attr(not(test), allow(dead_code))] // waits for its reader in the shell (PR body)
     pub fn take_intents(&mut self) -> Vec<Intent> {
         std::mem::take(&mut self.intents)
     }
@@ -180,17 +258,21 @@ impl Ui {
         let looks_like_address = email
             .split_once('@')
             .is_some_and(|(name, host)| !name.is_empty() && host.contains('.') && !host.ends_with('.'));
-        looks_like_address && !self.password.text.is_empty() && !self.busy && self.retry_wait().is_none()
+        looks_like_address
+            && !self.password.text.is_empty()
+            && !self.busy
+            && !self.passkey_waiting
+            && self.retry_wait().is_none()
     }
 
     fn go(&mut self, intent: Intent) {
         self.intents.push(intent);
     }
 
-    /// A link out of this screen (create an account, forgot password, a passkey). Off while a
-    /// sign-in runs: "Back and the other paths are disabled while it runs" (DW-A18).
+    /// A link out of the group (create an account). Off while a sign-in runs: "Back and the
+    /// other paths are disabled while it runs" (DW-A18).
     pub fn leave(&mut self, intent: Intent) {
-        if self.busy {
+        if self.busy || self.passkey_waiting {
             return;
         }
         self.go(intent);
@@ -219,11 +301,16 @@ impl Ui {
         if let Some(copy) = self.code_copy.take() {
             copy.clear_now();
         }
+        self.drop_steps();
     }
 
     pub fn open_sign_in(&mut self) {
         if self.busy {
             return;
+        }
+        // A password typed to unlock after a passkey is not the sign-in form's.
+        if self.screen == Screen::UnlockVault {
+            self.password.clear();
         }
         self.drop_waits();
         self.screen = Screen::SignIn;
@@ -236,6 +323,7 @@ impl Ui {
         }
         self.busy = true;
         self.problem = None;
+        self.deleted = false;
         self.source.begin_sign_in(self.email.text.trim(), &self.password.text);
         self.pump();
     }
@@ -248,7 +336,7 @@ impl Ui {
     /// The Continue as card's button, and "Try again": Windows Hello is asked every time.
     pub fn continue_as(&mut self) {
         // One prompt at a time: a second press while Windows is asking does nothing.
-        if self.busy || self.shared.is_none() || self.hello_waiting {
+        if self.busy || self.shared.is_none() || self.hello_waiting || self.passkey_waiting {
             return;
         }
         self.screen = Screen::ContinueAs(None);
@@ -259,7 +347,7 @@ impl Ui {
 
     /// "Sign in with another device", "Ask again" and "Get a new code".
     pub fn ask_other_device(&mut self) {
-        if self.busy {
+        if self.busy || self.passkey_waiting {
             return;
         }
         self.drop_waits();
@@ -309,7 +397,7 @@ impl Ui {
                 self.problem = None;
                 // The password did its work: it does not stay in memory behind the next screens.
                 self.password.clear();
-                self.go(Intent::Next(next));
+                self.proceed(next);
             }
             SignInEvent::SignedIn(Err(problem)) if self.busy => {
                 self.busy = false;
@@ -330,9 +418,12 @@ impl Ui {
                 self.focus = Some(PASSWORD_KEY);
             }
             SignInEvent::AccountDeleted if self.busy => {
+                // Said plainly, once, under the field whose password was right (DW-A63). The
+                // form stays as it is: Sign in tries again.
                 self.busy = false;
-                self.password.clear();
-                self.go(Intent::AccountDeleted);
+                self.problem = None;
+                self.deleted = true;
+                self.focus = Some(PASSWORD_KEY);
             }
             SignInEvent::RetryAfter { seconds } => {
                 if let Some(SignInProblem::RateLimited { .. }) = self.problem {
@@ -343,7 +434,7 @@ impl Ui {
             SignInEvent::Hello(outcome) if self.hello_waiting && self.screen == Screen::ContinueAs(None) => {
                 self.hello_waiting = false;
                 match outcome {
-                    HelloOutcome::Succeeded(next) => self.go(Intent::Next(next)),
+                    HelloOutcome::Succeeded(next) => self.proceed(next),
                     HelloOutcome::NotRecognized => {
                         self.screen = Screen::ContinueAs(Some(HelloFailure::NotRecognized));
                         // "Focus returns to Try again" (DW-A05).
@@ -389,8 +480,8 @@ impl Ui {
                     copy.clear_now();
                 }
             }
-            // Answers of frames this group has not built yet, or of a screen already left.
-            _ => {}
+            // The steps after the password (`steps.rs`), or an answer of a screen already left.
+            other => self.apply_step(other),
         }
     }
 }
@@ -404,6 +495,7 @@ fn ui(s: &mut State) -> Option<&mut Ui> {
 pub fn act(f: fn(&mut Ui)) -> impl Fn(&mut State, &mut Tx) + 'static {
     move |s: &mut State, tx: &mut Tx| {
         if let Some(ui) = ui(s) {
+            ui.pictured = None;
             f(ui);
             ui.pump();
             ui.settle(tx);
@@ -455,12 +547,17 @@ pub fn on_window_focus(s: &mut State, focused: bool) {
 /// Ctrl+C on the screen with the code copies the code (DW-A07).
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let Some(ui) = ui(s) else { return false };
-    let has_back = matches!(
-        ui.screen,
-        Screen::ContinueAs(_) | Screen::Device { .. } | Screen::Denied { .. } | Screen::KeysNotReceived
-    );
-    if ev.key == Key::Escape && has_back {
-        ui.open_sign_in();
+    if ev.key == Key::Escape {
+        // Escape goes where the screen's back link goes.
+        match ui.screen {
+            Screen::Welcome | Screen::SignIn | Screen::Approved { .. } | Screen::PasswordUpdated => return false,
+            Screen::Recover => ui.leave_recovery(),
+            Screen::NewPassword => ui.recover_with_phrase(),
+            Screen::NoPhrase => ui.lost_phrase(false),
+            Screen::CannotRecover => ui.cannot_recover(false),
+            _ => ui.open_sign_in(),
+        }
+        ui.settle(tx);
         return true;
     }
     if ev.key == Key::Command('c') && !ev.mods.alt && !ev.mods.shift {
@@ -545,9 +642,166 @@ pub fn scene(frame: &str) -> Option<Ui> {
         "DW-A20" => failing(SignInProblem::Offline),
         "DW-A21" => failing(SignInProblem::RateLimited { seconds: 30 }),
         "DW-A22" => failing(SignInProblem::LockedHint),
+        "DW-A63" => {
+            let mut ui = fixture(Script {
+                sign_in: SignInAnswer::AccountDeleted,
+                ..Script::default()
+            });
+            ui.submit();
+            ui
+        }
+        // Four digits typed: the fifth box is next.
+        "DW-A26" => {
+            let mut ui = two_factor(None);
+            ui.code.replace_text(&board::TOTP[..4]);
+            ui
+        }
+        "DW-A27" => {
+            let mut ui = two_factor(Some(TwoFactorProblem::WrongCode));
+            ui.code.replace_text(board::TOTP);
+            ui.code_changed();
+            ui
+        }
+        "DW-A28" => {
+            let mut ui = two_factor(None);
+            ui.switch_code(true);
+            ui.backup_code.replace_text(board::BACKUP_CODE);
+            ui.pictured = Some(Pictured::BackupCode);
+            ui
+        }
+        // Five words typed: the sixth box holds the keyboard.
+        "DW-A23" => {
+            let mut ui = phrase(&board::WORDS[..5]);
+            ui.pictured = Some(Pictured::Word(5));
+            ui
+        }
+        "DW-A24" => {
+            let mut words = board::WORDS;
+            words[2] = board::WRONG_WORD;
+            let mut ui = phrase(&words);
+            ui.restore();
+            ui
+        }
+        "DW-A25" => {
+            let mut ui = phrase(&[]);
+            ui.lost_phrase(true);
+            ui
+        }
+        // Windows' passkey dialog is up: no answer yet.
+        "DW-A29" => {
+            let mut ui = fixture(Script {
+                hold: true,
+                ..no_session()
+            });
+            ui.open_sign_in();
+            ui.use_passkey();
+            ui
+        }
+        "DW-A30" => {
+            let mut ui = fixture(no_session());
+            ui.open_sign_in();
+            ui.use_passkey();
+            ui.password.replace_text("x".repeat(board::PASSWORD_LEN));
+            ui.pictured = Some(Pictured::VaultPassword);
+            ui
+        }
+        "DW-A45" => {
+            let mut ui = fixture(Script::default());
+            ui.forgot();
+            ui
+        }
+        "DW-A46" => {
+            let mut ui = fixture(Script::default());
+            ui.forgot();
+            ui.cannot_recover(true);
+            ui
+        }
+        // Eight words typed: the ninth box holds the keyboard.
+        "DW-A47" => {
+            let mut ui = recovery(&board::WORDS[..8]);
+            ui.pictured = Some(Pictured::Word(8));
+            ui
+        }
+        "DW-A48" => {
+            let mut words = board::WORDS;
+            words[2] = board::WRONG_WORD;
+            let mut ui = recovery(&words);
+            ui.verify_phrase();
+            ui
+        }
+        "DW-A49" => new_password(),
+        "DW-A50" => {
+            let mut ui = new_password();
+            ui.set_password();
+            ui
+        }
         _ => return None,
     })
 }
+
+/// Recovery at its first step (DW-A47), with `words` typed.
+fn recovery(words: &[&str]) -> Ui {
+    let mut ui = fixture(Script::default());
+    ui.forgot();
+    ui.recover_with_phrase();
+    for (i, word) in words.iter().enumerate() {
+        ui.words[i].replace_text(*word);
+    }
+    ui
+}
+
+/// The phrase was verified and the new password is typed twice (DW-A49).
+fn new_password() -> Ui {
+    let mut ui = recovery(&board::WORDS);
+    ui.verify_phrase();
+    ui.password.replace_text("x".repeat(board::PASSWORD_LEN));
+    ui.confirm.replace_text("x".repeat(board::PASSWORD_LEN));
+    ui.pictured = Some(Pictured::NewPassword);
+    ui
+}
+
+/// The password was right and a code is asked for (DW-A26); `problem` is what the code gets.
+fn two_factor(problem: Option<TwoFactorProblem>) -> Ui {
+    let mut ui = fixture(Script {
+        two_factor_problem: problem,
+        ..Script::default()
+    });
+    ui.submit();
+    ui
+}
+
+/// The password was right and this PC holds no keys (DW-A23), with `words` typed.
+fn phrase(words: &[&str]) -> Ui {
+    let mut ui = fixture(Script {
+        sign_in: SignInAnswer::Next(NextAfterSignIn::RecoveryPhrase),
+        ..Script::default()
+    });
+    ui.submit();
+    for (i, word) in words.iter().enumerate() {
+        ui.words[i].replace_text(*word);
+    }
+    ui
+}
+
+/// The frames of this group whose scenes live here (`frames::scenes`); DW-A01 to DW-A22 are
+/// named in `shell::SCENES`.
+pub const FRAMES: &[(&str, fn(&mut State))] = &[
+    ("DW-A23", |s| set_scene(s, "DW-A23")),
+    ("DW-A24", |s| set_scene(s, "DW-A24")),
+    ("DW-A25", |s| set_scene(s, "DW-A25")),
+    ("DW-A26", |s| set_scene(s, "DW-A26")),
+    ("DW-A27", |s| set_scene(s, "DW-A27")),
+    ("DW-A28", |s| set_scene(s, "DW-A28")),
+    ("DW-A29", |s| set_scene(s, "DW-A29")),
+    ("DW-A30", |s| set_scene(s, "DW-A30")),
+    ("DW-A45", |s| set_scene(s, "DW-A45")),
+    ("DW-A46", |s| set_scene(s, "DW-A46")),
+    ("DW-A47", |s| set_scene(s, "DW-A47")),
+    ("DW-A48", |s| set_scene(s, "DW-A48")),
+    ("DW-A49", |s| set_scene(s, "DW-A49")),
+    ("DW-A50", |s| set_scene(s, "DW-A50")),
+    ("DW-A63", |s| set_scene(s, "DW-A63")),
+];
 
 /// Put the window in a board frame's state (`shell/mod.rs` `SCENES`): signed out, so the
 /// registry draws this group, and the frame's own state.
