@@ -119,7 +119,7 @@ fn asked(rt: &Runtime<State>) -> Vec<Intent> {
 
 #[test]
 fn every_built_frame_renders_and_names_no_city_and_no_provider() {
-    assert_eq!(super::FRAMES.len(), 29, "the frames this lane built");
+    assert_eq!(super::FRAMES.len(), 32, "the frames this lane built");
     for (frame, _) in super::FRAMES {
         let rt = runtime(frame);
         assert!(find(&rt, "caption-bar").is_some(), "{frame}: the same window");
@@ -202,7 +202,12 @@ fn account_says_who_is_signed_in_and_the_phrase_row_is_text() {
     assert_eq!(rt.state.account.pane, Pane::Email);
     key(&mut rt, Key::Escape);
     click(&mut rt, "card-0");
-    assert_eq!(asked(&rt), vec![Intent::Show("DW-0708")]);
+    assert_eq!(
+        rt.state.account.dialog,
+        Some(Dialog::Plan),
+        "the plan, read only (DW-0708)"
+    );
+    assert_eq!(asked(&rt), Vec::new());
 }
 
 #[test]
@@ -227,7 +232,7 @@ fn every_row_of_sign_in_and_security_goes_where_it_points() {
             assert_eq!(rt.state.account.pane, Pane::Security, "{row}: Esc goes back");
         }
     }
-    for (row, frame) in [("item-2-1", "DW-A12"), ("item-0-0-pop-button", "DW-0716")] {
+    for (row, frame) in [("item-2-1", "DW-A12")] {
         let mut rt = runtime("DW-A52");
         tab_to(&mut rt, row);
         key(&mut rt, Key::Enter);
@@ -897,4 +902,154 @@ fn sign_out_on_the_scheduled_page_asks_the_sign_out_question() {
     assert_eq!(rt.state.account.dialog, None);
     assert!(asked(&rt).is_empty(), "nobody was signed out");
     assert_eq!(source(&rt).deletion(), scheduled, "the deletion stays scheduled");
+}
+
+// ---- The plan (DW-0708) and App lock's delay (DW-0716, DW-0716b) ----
+
+#[test]
+fn the_plan_card_opens_the_plan_read_only_and_done_closes_it() {
+    let mut rt = runtime("DW-A51");
+    tab_to(&mut rt, "card-0");
+    key(&mut rt, Key::Enter);
+    assert_eq!(rt.state.account.dialog, Some(Dialog::Plan));
+    assert_eq!(
+        section(&rt),
+        Some(SettingsPane::Account),
+        "over Account, not a page of its own"
+    );
+    let dlg = info(&rt, "dlg");
+    assert_eq!(dlg.role, "dialog");
+    assert_eq!(says(&rt, "dlg-title"), "Plan");
+    assert_eq!(says(&rt, "plan-size"), "1 TB");
+    assert_eq!(says(&rt, "item-3-0-title"), "Renews");
+    assert_eq!(says(&rt, "item-3-0-value"), "14 Mar 2027");
+    assert_eq!(says(&rt, "item-3-1-value"), "Yearly");
+    // The meter is the share that is used: 24 % of the dialog's 352 pt.
+    let part = info(&rt, "meter-0-part-0").rect;
+    assert!((part[2] - 84.48).abs() < 0.01, "{part:?}");
+    // Read only: two buttons, and neither buys anything. The first leaves for the website.
+    click(&mut rt, "btn-0");
+    assert_eq!(asked(&rt), vec![Intent::Web("plan")]);
+    assert_eq!(rt.state.account.dialog, Some(Dialog::Plan), "the dialog stays");
+    click(&mut rt, "btn-1");
+    assert_eq!(rt.state.account.dialog, None, "Done closes");
+    assert_eq!(rt.state.account.pane, Pane::Account);
+    // Esc closes it too, and leaves settings open.
+    click(&mut rt, "card-0");
+    key(&mut rt, Key::Escape);
+    assert_eq!(rt.state.account.dialog, None);
+    assert_eq!(section(&rt), Some(SettingsPane::Account));
+}
+
+#[test]
+fn the_plan_scene_is_the_dialog_over_account_and_holds_no_buy_button() {
+    let rt = runtime("DW-0708");
+    assert_eq!(rt.state.account.dialog, Some(Dialog::Plan));
+    assert_eq!(rt.state.account.pane, Pane::Account);
+    let buttons: Vec<String> = rt
+        .elements()
+        .into_iter()
+        .filter(|e| e.role == "button" && e.key.as_deref().is_some_and(|k| k.starts_with("btn-")))
+        .filter_map(|e| e.label)
+        .collect();
+    assert_eq!(buttons, vec!["Manage on beebeeb.io, opens in the browser", "Done"]);
+}
+
+#[test]
+fn a_plan_nobody_can_describe_opens_the_website_instead_of_an_empty_dialog() {
+    let mut rt = runtime("DW-A51");
+    rt.update(|s, _| s.account.source = Some(Box::new(BoardAccount::new().without_plan_details())));
+    settle(&mut rt);
+    click(&mut rt, "card-0");
+    assert_eq!(rt.state.account.dialog, None);
+    assert!(find(&rt, "dlg").is_none());
+    assert_eq!(asked(&rt), vec![Intent::Web("plan")]);
+}
+
+#[test]
+fn the_delay_menu_opens_on_the_current_choice_and_the_keys_choose() {
+    let mut rt = runtime("DW-A52");
+    tab_to(&mut rt, "item-0-0-pop-button");
+    key(&mut rt, Key::Enter);
+    assert_eq!(
+        rt.state.account.dialog,
+        Some(Dialog::LockDelay(1)),
+        "on 5 min, the current choice"
+    );
+    assert_eq!(asked(&rt), Vec::new(), "nothing is asked of the shell");
+    assert_eq!(info(&rt, "menu-0").role, "menu");
+    let labels: Vec<String> = (0..4).map(|i| says(&rt, &format!("menu-0-item-{i}-label"))).collect();
+    assert_eq!(labels, vec!["Immediately", "5 min", "30 min", "60 min"]);
+    assert!(
+        find(&rt, "menu-0-item-1-check").is_some(),
+        "the current choice is checked"
+    );
+    assert!(find(&rt, "menu-0-item-2-check").is_none());
+    // The menu hangs under its pop-up button, inside the card.
+    let (menu, pop) = (info(&rt, "menu-0").rect, info(&rt, "item-0-0-pop").rect);
+    assert!(
+        (menu[1] - (pop[1] + pop[3] + 3.0)).abs() < 0.01,
+        "{menu:?} under {pop:?}"
+    );
+    key(&mut rt, Key::Down);
+    assert_eq!(rt.state.account.dialog, Some(Dialog::LockDelay(2)));
+    key(&mut rt, Key::End);
+    assert_eq!(rt.state.account.dialog, Some(Dialog::LockDelay(3)));
+    key(&mut rt, Key::Down);
+    assert_eq!(
+        rt.state.account.dialog,
+        Some(Dialog::LockDelay(3)),
+        "the last stays the last"
+    );
+    key(&mut rt, Key::Up);
+    key(&mut rt, Key::Enter);
+    assert_eq!(source(&rt).security().lock_after, "30 min");
+    assert_eq!(rt.state.account.dialog, None, "the pop-up closes");
+    assert_eq!(says(&rt, "item-0-0-pop-label"), "30 min");
+    assert_eq!(rt.state.account.pane, Pane::Security);
+}
+
+#[test]
+fn the_delay_menu_takes_a_press_and_esc_changes_nothing() {
+    let mut rt = runtime("DW-0716");
+    assert_eq!(rt.state.account.dialog, Some(Dialog::LockDelay(1)));
+    key(&mut rt, Key::Home);
+    key(&mut rt, Key::Escape);
+    assert_eq!(rt.state.account.dialog, None);
+    assert_eq!(source(&rt).security().lock_after, "5 min", "Esc chooses nothing");
+    assert_eq!(section(&rt), Some(SettingsPane::Security), "and settings stays open");
+    click(&mut rt, "item-0-0-pop-button");
+    click(&mut rt, "menu-0-item-3");
+    assert_eq!(source(&rt).security().lock_after, "60 min");
+    assert!(find(&rt, "menu-0").is_none());
+}
+
+#[test]
+fn with_the_lock_off_there_is_no_delay_and_turning_it_on_brings_it_back() {
+    let mut rt = runtime("DW-0716b");
+    assert!(!source(&rt).security().app_lock);
+    assert!(find(&rt, "item-0-0-pop").is_none(), "no time choice");
+    assert!(find(&rt, "menu-0").is_none());
+    assert_eq!(says(&rt, "item-0-0-sub"), "Off: anyone using this PC can open Beebeeb");
+    // Asking for the menu while the lock is off opens nothing.
+    rt.update(|s, _| super::go(s, "DW-0716"));
+    settle(&mut rt);
+    assert_eq!(rt.state.account.dialog, None);
+    click(&mut rt, "item-0-0-switch");
+    assert!(source(&rt).security().app_lock, "DW-0716");
+    assert_eq!(says(&rt, "item-0-0-sub"), "Windows Hello · locks again after");
+    assert!(find(&rt, "item-0-0-pop").is_some());
+}
+
+#[test]
+fn neither_the_plan_nor_the_delay_menu_is_a_secret_screen() {
+    for frame in ["DW-0708", "DW-0716", "DW-0716b"] {
+        let rt = runtime(frame);
+        assert!(!rt.state.account.shows_secret(), "{frame}");
+        // No field of any kind: nothing is typed on these three.
+        assert!(
+            rt.elements().into_iter().all(|e| e.role != "textbox"),
+            "{frame} has a field"
+        );
+    }
 }
