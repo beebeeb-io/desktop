@@ -12,6 +12,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 /// The Files window's keys (arrows, Enter, back, Ctrl+F). The shell's own shortcuts ran first
 /// (`host::on_key`).
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    // The protected-folder message is modal: no key reaches search or the list under it.
+    if let Some(handled) = crate::frames::files::protected::key(s, ev, tx) {
+        return handled;
+    }
     crate::frames::search::files_key(s, ev, tx).unwrap_or_else(|| crate::frames::files::keys::on_key(s, ev, tx))
 }
 

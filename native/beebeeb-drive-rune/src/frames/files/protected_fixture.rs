@@ -134,6 +134,15 @@ pub fn entry(item: &DriveItem) -> Option<BackupEntry> {
     })
 }
 
+/// The device a top folder of Backups belongs to, by the id the Backups section lists it under
+/// (`frames::backups`'s fixture: "iphone", "ipad", "old-iphone"; this PC is "this-pc").
+fn device_id(folder: &str) -> String {
+    match folder {
+        LAPTOP_ID => "this-pc".to_string(),
+        other => other.trim_start_matches("b-").to_string(),
+    }
+}
+
 const TITLE: &str = "Beebeeb manages this folder";
 /// DW-1110: the service's own folder.
 const OF_THE_FOLDER: &str = "Mail Backup keeps its files here, so it can't be moved, renamed or deleted. You can turn the service on or off in Settings.";
@@ -155,13 +164,13 @@ pub fn protection(folder: Option<&str>, item: Option<&DriveItem>) -> Option<Prot
         Some(item) => match top_of(&item.id)?.as_str() {
             MAIL_ID if item.id == MAIL_ID => Some(words(OF_THE_FOLDER)),
             MAIL_ID => Some(words(OF_WHAT_IS_INSIDE)),
-            device => Some(Protection::DeviceBackup(device.to_string())),
+            device => Some(Protection::DeviceBackup(device_id(device))),
         },
         None => match folder? {
             BACKUPS_ID => Some(Protection::BackupsRoot),
             id => match top_of(id)?.as_str() {
                 MAIL_ID => Some(words(OF_WHAT_IS_INSIDE)),
-                device => Some(Protection::DeviceBackup(device.to_string())),
+                device => Some(Protection::DeviceBackup(device_id(device))),
             },
         },
     }
