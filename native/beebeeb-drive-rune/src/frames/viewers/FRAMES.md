@@ -7,6 +7,7 @@ Markdown editing" (8): 22 frames, plus the Windows entry state of "Office: Docs,
 Built = drawn from `viewers::Ui`, reachable by its controls, a scene, gated in light and dark.
 11 of 23 are built (lane f-viewers, 2026-11-12): 7 at 0 failing in both themes, 4 with open reds
 named below and in the PR body. The other 12 are not built; each line is the checklist.
+Lane b19-viewers built 7 more (2026-11-12): 18 of 23 are built, 5 are not (DW-1520 to DW-1522, DW-1504, DW-1507).
 
 | Frame | What | State |
 | --- | --- | --- |
@@ -24,12 +25,26 @@ named below and in the PR body. The other 12 are not built; each line is the che
 | DW-1520 | New's menu: New folder, New file…, New document…, Upload files…, Upload a folder… | not built |
 | DW-1521 | New file: pick a type (Markdown, Text, Word, Excel, PowerPoint) | not built |
 | DW-1522 | New text file: the name and the extension as its own field, suggestions | not built |
-| DW-1501 | A RAW photo: the camera's preview, the pill, the gallery strip, Share / Offline / Details / Trash | not built |
-| DW-1502 | The RAW's facts in the details panel | not built |
-| DW-1505 | A PDF: page thumbnails, the page on grey, zoom, Find | not built |
-| DW-1506 | Find in a PDF: the find bar, matches highlighted (neutral) | not built |
-| DW-1514 | A CSV or TSV as a table; a selected cell | not built |
-| DW-1515 | An archive's list, without unpacking | not built |
-| DW-1503 | The audio player with the folder as the queue | not built |
+| DW-1501 | A RAW photo: the camera's preview, the pill, the gallery strip, Share / Offline / Details / Trash | built (lane b19-viewers); open reds: the toolbar's (see below) |
+| DW-1502 | The RAW's facts in the details panel | built; open reds: the toolbar's |
+| DW-1505 | A PDF: page thumbnails, the page on grey, zoom, Find | built; open reds: the toolbar's (the golden keys the zoom group as `view-toggle` too) |
+| DW-1506 | Find in a PDF: the find bar, matches highlighted (neutral) | built; open reds: the toolbar's, as DW-1505 |
+| DW-1514 | A CSV or TSV as a table; a selected cell; sort by a column | built; open reds: the toolbar's |
+| DW-1515 | An archive's list, without unpacking; a folder's row steps into it | built; open reds: the toolbar's |
+| DW-1503 | The audio player with the folder as the queue | built; open reds: the toolbar's |
 | DW-1504 | Playback in Windows' media controls (Windows draws Quick Settings) | not built |
 | DW-1507 (entry) | An office document: the entry state with the link that opens the web app | not built |
+
+## The photo, audio, PDF, table and archive viewers (lane b19-viewers, 2026-11-12)
+
+- **The router by file type** is `kinds::viewer_of`; the one way a list's file opens here is `viewers::open_item`
+  (it ends in `Event::OpenItem`). Files calls it for Enter and a double press on one file.
+- **Pictures are the source's** (`ViewerSource::picture`: the photo, a strip thumbnail, the artwork, a PDF page), and
+  the trait's default is none. Only the board's sample window has the fixture's pictures; any other source gets the
+  plain tile (photo, artwork) or a blank page (PDF), never a sample.
+- **The toolbar's reds:** the goldens of these seven frames carry the board's new toolbar button (36 pt), which the
+  toolbar this group draws does not have yet. Until the board lane's toolbar lands here, the toolbar keys the rules
+  name fail, and the file's own controls beside them (pill, zoom, Find, Share, Edit, more) sit 36 pt to the right;
+  where the board's toolbar is full its path separators are narrower (DW-1506, DW-1515).
+- **Shift+Enter in the find field** asks `Tx::mods` for Shift; the test runtime's submit carries no modifiers, so
+  the tests prove the previous-match chevron and Enter, not Shift+Enter in the field.
