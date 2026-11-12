@@ -104,6 +104,8 @@ fn picked(rt: &Runtime<State>) -> Option<Kind> {
 fn open_dialog(rt: &mut Runtime<State>) {
     click_the_list(rt);
     press_with(rt, Key::Command('n'), ctrl());
+    // The key queues Files' intent; the dialog opens on the poll of the frame after it.
+    rt.frame(0.0);
     assert_eq!(dialog_step(rt), Some(Step::Pick), "Ctrl+N opens New file on the type");
 }
 
