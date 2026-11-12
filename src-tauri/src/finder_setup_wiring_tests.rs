@@ -359,7 +359,8 @@ fn every_engine_start_refuses_while_a_stop_is_unconfirmed() {
             "{name}: slot, then the refusal, then the start:\n{body}"
         );
     }
-    let refusal = body_between(&production, "fn keys_for_engine_start(", "\n}\n");
+    let start = include_str!("../../crates/beebeeb-engine/src/signin/start.rs").replace("\r\n", "\n");
+    let refusal = body_between(&start, "fn keys_for_engine_start(", "\n}\n");
     let flag = refusal
         .find("engine_start_refusal(")
         .expect("the gate's key read refuses first");

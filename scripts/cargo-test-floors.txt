@@ -11,10 +11,15 @@
 # macOS, first CI run that compiles it (run 43022179510 on 91eadeb2, 2026-11-11), executed: desktop lib 1,236
 # (1,234 passed, 2 source pins failed and were re-pointed), engine lib 1,854. Floors raised from the provisional
 # Linux values to 5% under those counts.
-linux 900 deps/beebeeb_desktop_lib-
-windows 870 deps/beebeeb_desktop_lib-
-macos 1170 deps/beebeeb_desktop_lib-
-linux 1690 deps/beebeeb_engine-
-windows 1600 deps/beebeeb_engine-
-macos 1760 deps/beebeeb_engine-
+# Step 3 of the engine move (2026-11-11, PR 296): 60 tests moved from the desktop lib to the engine crate (the
+# gate's rules, the key-owner rules, the password legs) and the engine gained 11 of its own, so the desktop floors
+# go DOWN by 60 and the engine floors go UP by 70. Executed on Linux (Legion): desktop lib 894, engine lib 1,863.
+# Windows and macOS are the last measured counts (921 / 1,236 and 1,689 / 1,854) moved by the same tests, not yet
+# measured after the move.
+linux 840 deps/beebeeb_desktop_lib-
+windows 810 deps/beebeeb_desktop_lib-
+macos 1110 deps/beebeeb_desktop_lib-
+linux 1760 deps/beebeeb_engine-
+windows 1670 deps/beebeeb_engine-
+macos 1830 deps/beebeeb_engine-
 linux 18 deps/beebeeb_drive-

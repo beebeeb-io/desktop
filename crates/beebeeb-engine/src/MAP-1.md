@@ -10,7 +10,13 @@ Modules 1–34, sorted by path.
 | `account_binding.rs` | Ruling R10 (spec 2026-10-06 §5.6): the local data on this computer belongs to the account that created it, and a different account never reu | — |
 | `account_dto.rs` | Typed DTOs for the desktop **data layer** — the read-only account, billing, devices, sessions, activity, and notifications views the fronten | AccountAccess (1), AccountProfile (9), BillingUsage (3), Subscription (19), SetPreferredRegionResponse (2), UserRegionResponse (4), AccountActivity (2), SecurityScore (4), AccountSessionList (1), ClientDeviceList (1), ClientSyncSessionList (1), RevokeAllResult (1), … (+16 more) |
 | `api_client.rs` | HTTP client for the Beebeeb API, used by the desktop sync daemon. | BodyBytes (2), ChunkApiError (3), GrantReply (3), OnBody, fetch_from_storage, now_ms, provenance_headers, ApiResult, ErrorChain (1), DesktopApiError (7), Listing (2), FileId, … (+30 more) |
+| `app.rs` | One engine handle for a host without a UI toolkit (the native shell, a test): restore the stored session, say which screen the window shows, | — |
 | `auth_attempts.rs` | Authentication starts before there is an unlocked command session. | — |
+| `auth_transport.rs` | Sends one core `auth_flow` request over reqwest and hands the answer back. | — |
+| `backup_actions.rs` | LD-0113 for the app's own window: what the person may do to a row at or under the Backups root, and the words of a refusal. | — |
+| `backup_actions_tests.rs` | LD-0113 in the app's window: every action at every place in the Backups tree, against core's words; then the same rule read from a state dat | — |
+| `backup_delete.rs` | Delete a whole backup from the app's window (LD-0113): a device's folder, or one backed-up folder of a device. | — |
+| `backup_delete_tests.rs` | The delete-backup call against the local fake API: the password is proven with real OPAQUE, the server's single-use token is spent on the de | — |
 | `backup_protect.rs` | LD-0113 (spec §6.2, §6.3, Amendments 6, 7 and 8): what this device refuses to change in its drive. | — |
 | `backup_protect_tests.rs` | LD-0113 (spec §4.2 rule 7, §6.2, Amendment 6): the drive's protection rule, on fixture rows in a scratch state DB. | — |
 | `callback_gate.rs` | Revocable ownership for native callbacks. | — |
@@ -34,9 +40,3 @@ Modules 1–34, sorted by path.
 | `found_while_paused/tests.rs` | `found_while_paused` unit tests, split out of `found_while_paused.rs`. | — |
 | `free_up_space.rs` | Free up space: make unpinned local files online-only again. | — |
 | `held_queue.rs` | Tasks 1888 + 2226 (spec `docs/superpowers/specs/2026-10-28-1888-2226-reconcile-then-resume-design.md`, workspace): the reconcile pass over t | Counts (21), NEEDS_REVIEW, Op (8), Options (2), Row (6), Unit (3), is_parent_404, same_leaf, PresendBlock (2), plan, presend_block |
-| `hexfmt.rs` | Lower-case hex for digests and 32-byte public keys: the one encoder and the one strict decoder the v2 modules share (`office_v2` checks a pi | — |
-| `host.rs` | The seam between the engine and the shell that shows it: what the engine tells the UI ([`EngineEvent`]) and what it asks of the program arou | — |
-| `ipc_frame.rs` | Wire framing for the desktop daemon's Unix-socket IPC (task 1670 issue 3). | — |
-| `ipc_socket.rs` | Unix-domain-socket IPC between the desktop daemon and the macOS File Provider extension (and the Linux FUSE mount). | CAP_WRITE, FP_TRASH_APPLE, FileProviderChangePayload (5), FileProviderItemPayload (22), IpcRequest (11), IpcResponse (10), file_entry_payload_for_db, persist_thumbnail_plaintext, thumbnail_variant, StagedContents, StagingDir, StagingDirRefusal (3), … (+10 more) |
-| `ipc_socket_framing_tests.rs` | End-to-end framing tests for the daemon IPC socket (task 1670 issue 3). | — |
-| `ipc_write_dedup.rs` | Idempotency table for Finder write-queue requests (task 1684). | — |

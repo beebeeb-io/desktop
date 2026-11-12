@@ -457,28 +457,6 @@ pub(super) const FINDER_SIGN_OUT_UNCONFIRMED_WARNING: &str = "You are signed out
 pub(super) const LOCK_ENGINE_UNCONFIRMED_WARNING: &str =
     "The vault is locked, but the sync engine did not confirm it stopped. Restart Beebeeb before unlocking again.";
 
-pub(super) const ENGINE_START_REFUSED_ERROR: &str =
-    "Could not start the sync engine: a previous one did not confirm it stopped. Restart Beebeeb.";
-
-/// Lead ruling T8-lockflag: every place that puts an engine in the slot calls this with the slot
-/// held, so two engines can never run at once. The flag is set when an engine's stop could not be
-/// confirmed (its task may still be running with the keys) and stays set until a restart.
-/// `finder_setup_wiring_tests` keeps the list of starts complete.
-pub(super) fn engine_start_refusal(acct: &account::AccountRuntime) -> Result<(), String> {
-    if acct.engine_stop_unconfirmed.load(Ordering::SeqCst) {
-        tracing::error!("engine start refused: an earlier stop was never confirmed; restart Beebeeb");
-        // Spec §5.6: the refusal has its own code and sentence on `sync_status.engine_refusal`, so the surfaces say to
-        // quit and reopen instead of offering a "Try again" that cannot work. Cleared like the binding refusals, by
-        // every session transition (no start runs while the flag is set).
-        *acct
-            .engine_refusal
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(account_binding::Refusal::EngineStopUnconfirmed);
-        return Err(ENGINE_START_REFUSED_ERROR.to_string());
-    }
-    Ok(())
-}
-
 /// The one way the in-memory session is cleared for a Lock or a Sign-out (lead ruling T10-lockorder). It takes
 /// the engine-slot guard as a parameter, so the clear can only be written while the caller still holds the
 /// slot: "release the slot, then clear the session" would be a use of a moved guard and does not compile. That
@@ -595,61 +573,6 @@ pub(super) async fn stop_engine_for_repair(
         engine_stop_unconfirmed: acct.engine_stop_unconfirmed.load(Ordering::SeqCst),
     }
 }
-
-/// Why an engine start has no keys to start with.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum EngineStartBlocked {
-    /// An engine stop was never confirmed (the sentence says to restart), or the session mutex is unusable.
-    Refused(String),
-    /// Nothing is signed in with keys in memory: locked, signed out, or a Lock that won the slot first.
-    NoSession,
-}
-
-/// Shown when a start finds the vault locked at the moment it holds the engine slot.
-pub(super) const ENGINE_START_NO_SESSION: &str = "The vault is locked, so sync didn’t start.";
-
-impl std::fmt::Display for EngineStartBlocked {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Refused(sentence) => f.write_str(sentence),
-            Self::NoSession => f.write_str(ENGINE_START_NO_SESSION),
-        }
-    }
-}
-
-/// The keys every engine start uses, and the identity of the session they belong to, read together UNDER
-/// the engine slot (lead rulings T8-⚠lock, T9-starts and T10-identity). Lock and Sign-out clear the session
-/// before they release the slot, so a start that was waiting for the slot finds nothing here instead of
-/// starting an engine with keys that were just cleared. No start receives keys from its caller, so there
-/// is nothing to read them from but this. The identity comes from the SAME `Session` (its own email, and
-/// the cached profile only when that profile has that exact email), never from separate fields that a
-/// sign-in updates at another moment. Refuses first while an earlier engine stop is unconfirmed. The
-/// copies are `Zeroizing`, so none outlives the engine start that takes them.
-pub(super) fn keys_for_engine_start(
-    acct: &account::AccountRuntime,
-) -> Result<(EngineKeys, account_binding::Identity), EngineStartBlocked> {
-    engine_start_refusal(acct).map_err(EngineStartBlocked::Refused)?;
-    let (keys, email) = acct
-        .session
-        .lock()
-        .map_err(|_| EngineStartBlocked::Refused("session mutex poisoned".to_string()))?
-        .as_ref()
-        .map(|session| {
-            (
-                (
-                    zeroize::Zeroizing::new(session.token.clone()),
-                    zeroize::Zeroizing::new(session.master_key),
-                ),
-                session.email.clone(),
-            )
-        })
-        .ok_or(EngineStartBlocked::NoSession)?;
-    let profile = acct.cached_profile.lock().ok().and_then(|guard| guard.clone());
-    Ok((keys, identity_of_session(email.as_deref(), profile.as_ref())))
-}
-
-/// The session token and master key an engine start hands to the engine, wiped when dropped.
-pub(super) type EngineKeys = (zeroize::Zeroizing<String>, zeroize::Zeroizing<[u8; 32]>);
 
 /// What a bound engine start came to (see [`spawn_bound_engine`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

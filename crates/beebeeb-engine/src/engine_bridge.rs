@@ -76,7 +76,7 @@ pub struct EngineBridge {
     request_rows: std::sync::Mutex<std::collections::HashSet<String>>,
     /// The owner's request keys, loaded once per account pass instead of once
     /// per download (P2-2).
-    pub request_keys: std::sync::Mutex<Option<crate::owner_keys::RequestKeys>>,
+    pub(crate) request_keys: std::sync::Mutex<Option<crate::owner_keys::RequestKeys>>,
     /// Re-snapshots that failed in a row (spec §6.3.2, macOS): from
     /// [`FAILED_SNAPSHOTS_BEFORE_THE_QUEUE_RUNS`] on, a failed one no longer ends the tick.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
