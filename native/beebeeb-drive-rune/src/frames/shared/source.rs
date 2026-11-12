@@ -63,6 +63,11 @@ pub struct Request {
 }
 
 pub trait SharedSource {
+    /// `false`: nothing answers yet (`Unwired`), and the view draws the shell's "not built yet"
+    /// frame instead of a section of sample values.
+    fn wired(&self) -> bool {
+        true
+    }
     fn invitations(&self) -> Vec<Invitation>;
     /// Shared with the person, newest first.
     fn with_me(&self) -> Vec<Row>;
@@ -329,5 +334,60 @@ impl SharedSource for BoardShared {
         let before = self.requests.len();
         self.requests.retain(|r| r.id != id || r.state == RequestState::Open);
         self.requests.len() != before
+    }
+}
+
+/// The source of a build that ships before the engine lane has wired Shared: it answers
+/// nothing, and the view draws the shell's "not built yet" frame instead of the section.
+/// No value of it is ever shown.
+pub struct Unwired;
+
+impl SharedSource for Unwired {
+    fn wired(&self) -> bool {
+        false
+    }
+    fn invitations(&self) -> Vec<Invitation> {
+        Vec::new()
+    }
+    fn with_me(&self) -> Vec<Row> {
+        Vec::new()
+    }
+    fn people_shares(&self) -> Vec<PeopleShare> {
+        Vec::new()
+    }
+    fn links(&self) -> Vec<LinkShare> {
+        Vec::new()
+    }
+    fn requests(&self) -> Vec<Request> {
+        Vec::new()
+    }
+    fn accept(&mut self, _id: &str) -> bool {
+        false
+    }
+    fn decline(&mut self, _id: &str) -> bool {
+        false
+    }
+    fn keep_offline(&mut self, _id: &str) -> bool {
+        false
+    }
+    fn stop_sharing(&mut self, _id: &str) -> bool {
+        false
+    }
+    fn close_request(&mut self, _id: &str) -> bool {
+        false
+    }
+    fn remove_request(&mut self, _id: &str) -> bool {
+        false
+    }
+}
+
+/// The source Shared starts on. A development build (and every test and headless render)
+/// starts on the board's sample content; a build that ships starts on `Unwired`, so sample
+/// values are never shown as a person's own. The engine lane replaces this.
+pub fn first(dev_build: bool) -> Box<dyn SharedSource> {
+    if dev_build {
+        Box::new(BoardShared::new())
+    } else {
+        Box::new(Unwired)
     }
 }
