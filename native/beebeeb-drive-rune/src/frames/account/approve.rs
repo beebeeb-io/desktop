@@ -140,6 +140,9 @@ pub struct Approve {
     pub request: Option<SignInRequest>,
     /// The typed code is this request's code: Approve is live.
     pub matches: bool,
+    /// The code was typed (or changed) on the review itself, after its facts showed. Only then
+    /// is Enter Approve: a review that opens with the code already typed takes no Enter.
+    pub typed_here: bool,
     pub problem: Option<Problem>,
     /// Windows Hello is up and its answer has not come.
     pub waiting: bool,
@@ -158,6 +161,7 @@ impl Default for Approve {
             code,
             request: None,
             matches: false,
+            typed_here: false,
             problem: None,
             waiting: false,
             pictured: false,
@@ -223,6 +227,7 @@ pub fn edited(s: &mut State, _tx: &mut Tx) {
     ui.approve.pictured = false;
     ui.approve.problem = None;
     tidy(&mut ui.approve);
+    ui.approve.typed_here = ui.dialog == Some(Dialog::ApproveReview);
     recheck(ui);
 }
 
@@ -613,10 +618,14 @@ fn review_foot(a: &Approve, waiting: bool, t: &Theme) -> Vec<(El, bool)> {
     let live = a.matches && !waiting;
     let (mut yes, yes_b) = foot_button(0, "Approve", Look::Primary, !a.matches, t);
     if live {
-        // Enter is Approve only when the code matches.
-        // The keyboard starts on Approve once the code is there (the board draws the field at
-        // rest on DW-A13); until then it starts in the field, the dialog's first control.
-        yes = yes.default_button().autofocus().on_press(approve);
+        // Approve never holds the keyboard when the review opens, and it is the default (the
+        // board: "Enter is Approve only when the code matches") only once the code was typed
+        // here, under the facts. A review that opens with the code typed on DW-A12 takes no
+        // Enter: a second or a repeating Enter must not reach Windows Hello.
+        yes = yes.on_press(approve);
+        if a.typed_here {
+            yes = yes.default_button();
+        }
     }
     let (mut no, no_b) = foot_button(1, "Deny", Look::Plain, false, t);
     if waiting {
@@ -664,7 +673,7 @@ fn review(a: &Approve, request: &SignInRequest, t: &Theme) -> El {
             t,
         ));
     }
-    children.push(lists::list(
+    let mut measured = lists::list(
         1,
         Some("Measured by Beebeeb"),
         vec![
@@ -680,7 +689,13 @@ fn review(a: &Approve, request: &SignInRequest, t: &Theme) -> El {
         ],
         None,
         t,
-    ));
+    );
+    if a.matches && !a.typed_here {
+        // The review opened with the code already typed: the keyboard starts on the facts, where
+        // Enter does nothing, never on Approve.
+        measured = measured.focusable(true).autofocus();
+    }
+    children.push(measured);
     children.push(lists::list(
         2,
         Some("Reported by that device (it can be wrong)"),

@@ -383,8 +383,8 @@ fn the_review_is_modal_tab_stays_inside_and_the_pane_behind_takes_no_press() {
     stops.sort();
     assert_eq!(
         stops,
-        vec![CODE_KEY.to_string(), "btn-0".into(), "btn-1".into()],
-        "the code, Approve, Deny"
+        vec![CODE_KEY.to_string(), "btn-0".into(), "btn-1".into(), "list-1".into()],
+        "the code, Approve, Deny, and the facts (where the keyboard starts)"
     );
     // The row behind the dialog, where it shows beside it.
     let row = info(&rt, "item-0-0").rect;
@@ -537,4 +537,61 @@ fn the_notifications_words_are_the_boards_and_carry_no_code() {
         !title.contains("K7QM") && !body.contains("K7QM"),
         "the push carries no code"
     );
+}
+
+/// Review P2-2: the code typed on DW-A12, then Enter, opens the review. A second Enter, a third
+/// and Space do nothing: Approve does not hold the keyboard and is not the default, so Windows
+/// Hello is not reached with the facts unread.
+#[test]
+fn enter_twice_from_the_code_page_does_not_reach_windows_hello() {
+    let mut rt = on_code_page();
+    type_(&mut rt, &BOARD_REQUEST_CODE.replace('-', "").to_lowercase());
+    key(&mut rt, Key::Enter);
+    assert_eq!(dialog(&rt), Some(Dialog::ApproveReview), "the first Enter is Continue");
+    assert!(rt.state.account.approve.matches, "the code is this request's");
+    let focused = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.focused && !e.exiting)
+        .and_then(|e| e.key);
+    assert_eq!(focused.as_deref(), Some("list-1"), "the keyboard starts on the facts");
+    for press in [Key::Enter, Key::Enter, Key::Text(" ".into())] {
+        key(&mut rt, press);
+        assert_eq!(dialog(&rt), Some(Dialog::ApproveReview), "still the review");
+        assert!(!rt.state.account.approve.waiting, "Windows Hello was not asked");
+    }
+    assert_eq!(
+        wire(&rt).iter().filter(|line| line.contains("/approve")).count(),
+        0,
+        "no approval was begun: {:?}",
+        wire(&rt)
+    );
+    // Approve is still there for a deliberate press.
+    click(&mut rt, "btn-0");
+    assert_eq!(
+        wire(&rt).iter().filter(|line| line.contains("/approve")).count(),
+        1,
+        "a press on Approve begins it"
+    );
+}
+
+/// The board's sentence still holds where it is safe: "Enter is Approve only when the code
+/// matches", once the code was typed on the review itself, under its facts.
+#[test]
+fn enter_approves_once_the_code_was_typed_on_the_review_itself() {
+    let mut state = init();
+    state.account.source = Some(Box::new(BoardAccount::new().holding_hello()));
+    let mut rt = window(state);
+    rt.update(|s, _| assert!(approve::notification_clicked(s)));
+    settle(&mut rt);
+    key(&mut rt, Key::Enter);
+    assert_eq!(
+        dialog(&rt),
+        Some(Dialog::ApproveReview),
+        "no code yet: Enter does nothing"
+    );
+    type_(&mut rt, &BOARD_REQUEST_CODE.replace('-', ""));
+    assert!(rt.state.account.approve.matches && rt.state.account.approve.typed_here);
+    key(&mut rt, Key::Enter);
+    assert_eq!(dialog(&rt), Some(Dialog::ApproveHello), "Enter is Approve now");
 }
