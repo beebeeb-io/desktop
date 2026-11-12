@@ -169,9 +169,10 @@ pub fn run_one_scan_with(bridge: &EngineBridge, sync_root: &std::path::Path, mem
     // backup-originated path whose folder is no longer enabled. A `None` config
     // (read failure) is treated as "nothing disabled" — fail-open keeps a normal
     // user's uploads flowing; the purge already removed the in-flight backlog.
-    let enabled_backup_keys: Option<std::collections::HashSet<String>> = crate::config::DesktopConfig::load()
-        .ok()
-        .map(|cfg| cfg.known_folder_backup.iter().cloned().collect());
+    let enabled_backup_keys: Option<std::collections::HashSet<String>> =
+        crate::config::DesktopConfig::load_for(bridge.identity)
+            .ok()
+            .map(|cfg| cfg.known_folder_backup.iter().cloned().collect());
 
     // `true` if `rel`-derived path belongs to a backup folder that is currently
     // DISABLED (so its mirrored-but-orphaned files must not be (re)enqueued).

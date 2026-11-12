@@ -446,7 +446,10 @@ fn counting_bridge(qa: &QaRoot) -> (crate::engine_bridge::EngineBridge, std::net
         [7u8; 32],
     );
     let db = Arc::new(StateDb::open(qa._dir.path().join("state.db")).unwrap());
-    (crate::engine_bridge::EngineBridge::new(db, Arc::new(api)), listener)
+    (
+        crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db, Arc::new(api)),
+        listener,
+    )
 }
 
 /// What reaches the server after a change: each of `rels` gone from disk is handed to the watcher, as

@@ -283,7 +283,7 @@ pub(super) fn assert_clean_line(logs: &str, message: &str, fields: &[&str], dir:
     // The test build's staging folder, and the per-process sandbox it lives in. On a Mac
     // `/Users/` covers them too; on Linux and Windows only these entries catch a staged
     // copy's path.
-    let staging = default_finder_staging_root().expect("the test build's staging root");
+    let staging = default_finder_staging_root(&crate::identity::REAL).expect("the test build's staging root");
     let staging = staging.to_string_lossy();
     let sandbox = crate::test_sandbox::dir("data").expect("the unit-test sandbox");
     let sandbox = sandbox.parent().expect("the sandbox root").to_string_lossy();

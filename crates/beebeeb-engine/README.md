@@ -16,9 +16,10 @@ use beebeeb_engine::host::ChannelHost;
 
 let (host, messages) = ChannelHost::new(|| { /* post a wake-up to the UI loop; nothing else */ });
 let engine = std::sync::Arc::new(Engine::open(
+    identity,                                    // &'static EngineIdentity: REAL or TEST, fixed when the host is built
     EngineConfig { account_id, state_dir, api_base: beebeeb_engine::runner::api_base_url() },
     host,
-    PlatformCredentials,
+    PlatformCredentials(identity),
 )?);
 match engine.restore() { /* GateState: SignedOut, NeedsRecoveryPhrase, Locked, Ready, KeyStoreUnavailable */ }
 engine.sign_in_password(email, password)?;   // -> NextAfterSignIn::{TwoFactor, RecoveryPhrase, Drive}
@@ -56,10 +57,21 @@ that account. A start onto another account's local data is refused on every OS a
 
 **Not in the handle yet:** the plan check (`GateState::NoPlan` is never answered), device approval, passkeys,
 Windows Hello, the legacy flat credential layout (read by the Tauri shell only), a sign-out that sends or deletes
-local data (only "keep"), a startup probe of the stored token against the server, storage numbers. The API base,
-the config dir and the state dir are process-wide in the engine (`BB_API_BASE`, `state_paths`), and the
-credential store's service name and the config folder name are constants: a second app identity on the same
-user account needs the app-identity port (PR 288) before it may open a handle with `PlatformCredentials`.
+local data (only "keep"), a startup probe of the stored token against the server, storage numbers. The API base
+is process-wide and read at run time (`BB_API_BASE`).
+
+**App identity** (`identity.rs`). Every entry that reaches credentials, the settings file, local state or an OS
+registration takes a `&'static EngineIdentity`; there are exactly two, `REAL` and `TEST`, and no default: code
+without one does not compile. The identity owns every per-app name: the config/data folder, the state folder's
+name (the host passes a BASE dir to `state_paths::init_from_app_local_data_dir(identity, base)`, once; another
+identity or folder afterwards is an error), the credential service, the suggested sync folder, the Cloud Files
+provider name, GUID and class ids, the backup device (the test build is another device and never adopts a
+folder), the daemon socket, the macOS app group, the log folder, and the part of the temp and cache dirs a purge
+may delete from. A host decides its identity when it is BUILT (the Tauri shell: `real_app.rs`; the native app:
+`build.rs`, from `BEEBEEB_APP_IDENTIFIER`), never at run time. The test build does not run on macOS
+(`EngineIdentity::refusal_on`), and no engine starts in a folder registered to another sync provider
+(`sync_root_owner`). Never write one of those names as a literal and never name `identity::REAL` or `TEST` in
+engine code: `identity_pin_tests.rs` fails on both. `tests/test_identity.rs` runs one process as `TEST`.
 
 Contract test: `tests/host_contract.rs` (the local fake API with a real OPAQUE server side, the in-memory
 credential store).

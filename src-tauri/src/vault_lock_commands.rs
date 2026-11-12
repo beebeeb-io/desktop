@@ -675,7 +675,7 @@ pub(super) async fn stop_engine_for_lock(
 /// [`with_upload_staging_for_test`] (a folder the test created).
 pub(super) fn upload_staging_dir_for_session_purge() -> Option<std::path::PathBuf> {
     #[cfg(all(target_os = "macos", not(test)))]
-    return Some(crate::ipc_socket::macos_upload_staging_dir());
+    return Some(crate::ipc_socket::macos_upload_staging_dir(crate::APP));
     #[cfg(test)]
     return UPLOAD_STAGING_FOR_TEST.try_with(Clone::clone).ok();
     #[cfg(not(any(target_os = "macos", test)))]

@@ -576,6 +576,7 @@ async fn real_api_region_choice_upload_lands_in_the_chosen_country() {
     let http = reqwest::Client::new();
     let dir = tempfile::tempdir().unwrap();
     let bridge = EngineBridge::new(
+        &crate::identity::REAL,
         Arc::new(StateDb::open(&dir.path().join("state.db")).unwrap()),
         api.clone(),
     );
@@ -1040,7 +1041,7 @@ mod direct_download_engine {
                 // A fresh client per cell: each asks discovery itself. The 32 zero bytes are the
                 // test account's master key (the server never sees it).
                 let api = Arc::new(ApiClient::new(url.clone(), token.clone(), [0u8; 32]));
-                let bridge = EngineBridge::new(db, api);
+                let bridge = EngineBridge::new(&crate::identity::REAL, db, api);
                 bridge.seams.use_transport(transport);
                 if fail_storage {
                     bridge.seams.fail_storage(503);

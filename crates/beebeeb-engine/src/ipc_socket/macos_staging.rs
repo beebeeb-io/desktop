@@ -3,11 +3,14 @@
 use super::*;
 
 #[cfg(target_os = "macos")]
-pub(super) fn macos_upload_staging_dir_in(home_dir: &std::path::Path) -> std::path::PathBuf {
+pub(super) fn macos_upload_staging_dir_in(
+    identity: &crate::identity::EngineIdentity,
+    home_dir: &std::path::Path,
+) -> std::path::PathBuf {
     home_dir
         .join("Library")
         .join("Group Containers")
-        .join(MACOS_APP_GROUP_ID)
+        .join(identity.macos_app_group())
         .join(MACOS_UPLOAD_STAGING_DIRNAME)
 }
 
@@ -311,13 +314,14 @@ pub enum WriteContentsPolicy {
 }
 
 impl WriteContentsPolicy {
-    pub fn platform_default() -> Self {
+    pub fn platform_default(identity: &crate::identity::EngineIdentity) -> Self {
         #[cfg(target_os = "macos")]
         {
-            Self::StagingDir(macos_upload_staging_dir())
+            Self::StagingDir(macos_upload_staging_dir(identity))
         }
         #[cfg(not(target_os = "macos"))]
         {
+            let _ = identity;
             Self::AnyPath
         }
     }

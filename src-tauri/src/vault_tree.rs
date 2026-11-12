@@ -86,7 +86,7 @@ pub(super) fn dehydrate_excluded_subtrees_windows(
 ) -> Result<u64, String> {
     use std::collections::HashSet;
     let target: HashSet<&str> = file_ids.iter().map(String::as_str).collect();
-    let allowed_roots = free_up_space_allowed_roots(sync_root);
+    let allowed_roots = free_up_space_allowed_roots(crate::APP, sync_root);
     let mut bytes_freed: u64 = 0;
     let mut dehydrated_ids: Vec<String> = Vec::new();
 
@@ -740,7 +740,7 @@ pub(super) fn set_recursive_pin(item_id: String, pinned: bool) -> Result<engine_
         String::new(),
         [0u8; 32],
     ));
-    let bridge = engine_bridge::EngineBridge::new(db, api);
+    let bridge = engine_bridge::EngineBridge::new(crate::APP, db, api);
     // `sync_root` is threaded through so the Windows path can resolve the
     // affected placeholder(s) and set the OS-level pin state (CfSetPinState);
     // it is unused on macOS/Linux.

@@ -56,6 +56,7 @@ fn an_unwritable_staging_folder_answers_write_retry_later_and_stages_and_queues_
     // A file where the staging folder's parent would be: `beebeeb/finder-writes` cannot be created.
     std::fs::write(data.join("beebeeb"), b"in the way").unwrap();
     fx.bridge.seams.stage_under(crate::engine_bridge::FinderStagingBases {
+        folder: "beebeeb",
         data: Some(data.clone()),
         cache: Some(bases_dir.path().join("cache")),
         temp: bases_dir.path().join("temp"),

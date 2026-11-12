@@ -398,7 +398,7 @@ impl EngineBridge {
             .transfers
             .begin_named(&op.file_id, &label, crate::transfer_progress::Direction::Up, total);
         progress.update(crate::transfer_progress::uploaded_bytes(first_chunk, chunk_size, total));
-        let upload_kbps_limit = crate::config::DesktopConfig::load()
+        let upload_kbps_limit = crate::config::DesktopConfig::load_for(self.identity)
             .map(|c| c.upload_kbps_limit)
             .unwrap_or(0);
         for chunk_index in 0..chunk_count {

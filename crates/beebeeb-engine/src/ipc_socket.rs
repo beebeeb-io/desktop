@@ -12,17 +12,13 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-/// The macOS App Group shared between the containing app
-/// (`src-tauri/entitlements.plist`) and the File Provider extension
-/// (`BeebeebFileProvider/BeebeebFileProvider.entitlements`) — both declare
-/// `com.apple.security.application-groups: [<this>]`. This is the ONE place
-/// the id is defined on the Rust side; `BeebeebFileProvider/XPCBridge.swift`
-/// mirrors the identical literal (Swift has no practical way to `include!` a
-/// Rust const, and there is no existing shared-codegen step in this repo —
-/// see `docs/MACOS_BRINGUP_BRIEF.md`). Keep all three in sync if it ever
-/// changes.
-#[cfg(target_os = "macos")]
-pub const MACOS_APP_GROUP_ID: &str = "R8352WDJJR.io.beebeeb.app.fileprovider";
+// The macOS App Group shared between the containing app (`src-tauri/entitlements.plist`) and the File
+// Provider extension (`BeebeebFileProvider/BeebeebFileProvider.entitlements`), both of which declare
+// `com.apple.security.application-groups: [<the id>]`, is the app identity's:
+// `EngineIdentity::macos_app_group` (pinned in `identity.rs`). `BeebeebFileProvider/XPCBridge.swift`
+// mirrors the real app's literal (Swift has no practical way to `include!` a Rust const, and there is no
+// shared-codegen step in this repo: see `docs/MACOS_BRINGUP_BRIEF.md`). Keep all three in sync if it ever
+// changes.
 
 /// Task 1524: the daemon is sandboxed on macOS (`com.apple.security.app-
 /// sandbox`), so `/tmp` and `$XDG_RUNTIME_DIR` (which macOS never sets in the
@@ -34,8 +30,8 @@ pub const MACOS_APP_GROUP_ID: &str = "R8352WDJJR.io.beebeeb.app.fileprovider";
 /// Finder location" (`Timed out waiting for the local Beebeeb sync daemon…`)
 /// with no indication of the real cause.
 #[cfg(target_os = "macos")]
-pub fn ipc_socket_path() -> std::path::PathBuf {
-    macos_ipc_socket_path_in(&macos_real_home_dir())
+pub fn ipc_socket_path(identity: &crate::identity::EngineIdentity) -> std::path::PathBuf {
+    macos_ipc_socket_path_in(identity, &macos_real_home_dir())
 }
 
 /// Task 1670: subdirectory (of the same shared App Group container as
@@ -48,8 +44,8 @@ pub fn ipc_socket_path() -> std::path::PathBuf {
 const MACOS_HYDRATE_CACHE_DIRNAME: &str = "hydrate-cache";
 
 #[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
-pub fn macos_hydrate_cache_dir() -> std::path::PathBuf {
-    macos_hydrate_cache_dir_in(&macos_real_home_dir())
+pub fn macos_hydrate_cache_dir(identity: &crate::identity::EngineIdentity) -> std::path::PathBuf {
+    macos_hydrate_cache_dir_in(identity, &macos_real_home_dir())
 }
 
 /// A test build resolves a per-process sandbox with the same
@@ -59,9 +55,9 @@ pub fn macos_hydrate_cache_dir() -> std::path::PathBuf {
 /// thumbnail handlers) or empties it (`purge_macos_hydrate_cache`: sign-out and lock). Pinned
 /// by `unit_tests_resolve_the_hydrate_dir_in_a_sandbox_never_the_real_group_container`.
 #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-pub fn macos_hydrate_cache_dir() -> std::path::PathBuf {
+pub fn macos_hydrate_cache_dir(identity: &crate::identity::EngineIdentity) -> std::path::PathBuf {
     let home = crate::test_sandbox::dir("real-home").expect("create the unit-test sandbox");
-    macos_hydrate_cache_dir_in(&home)
+    macos_hydrate_cache_dir_in(identity, &home)
 }
 
 /// Task 1670 round 3 (lead review of round 2): Apple's own `fetchContents`
@@ -296,8 +292,8 @@ pub fn macos_sweep_stale_hydrate_cache_entries(
 const MACOS_UPLOAD_STAGING_DIRNAME: &str = "upload-staging";
 
 #[cfg(target_os = "macos")]
-pub fn macos_upload_staging_dir() -> std::path::PathBuf {
-    macos_upload_staging_dir_in(&macos_real_home_dir())
+pub fn macos_upload_staging_dir(identity: &crate::identity::EngineIdentity) -> std::path::PathBuf {
+    macos_upload_staging_dir_in(identity, &macos_real_home_dir())
 }
 
 /// How old a handed-over copy must be before the purge removes it. Each copy
@@ -375,16 +371,20 @@ pub fn macos_prepare_upload_staging_dir(
 
 /// Runner startup: prepare the real directory and purge it. Best-effort.
 #[cfg(target_os = "macos")]
-pub fn macos_prepare_upload_staging() {
-    let dir = macos_upload_staging_dir();
+pub fn macos_prepare_upload_staging(identity: &crate::identity::EngineIdentity) {
+    let dir = macos_upload_staging_dir(identity);
     let result = macos_prepare_upload_staging_dir(&dir, UPLOAD_STAGING_MAX_AGE, std::time::SystemTime::now());
     log_upload_staging_purge("daemon-startup", result);
 }
 
 /// Runner tick: purge the real directory. Best-effort.
 #[cfg(target_os = "macos")]
-pub fn macos_sweep_upload_staging() {
-    sweep_upload_staging_at(&macos_upload_staging_dir(), "periodic", std::time::SystemTime::now());
+pub fn macos_sweep_upload_staging(identity: &crate::identity::EngineIdentity) {
+    sweep_upload_staging_at(
+        &macos_upload_staging_dir(identity),
+        "periodic",
+        std::time::SystemTime::now(),
+    );
 }
 
 /// Sign-out and Lock: remove every entry of `dir`, logged. The caller
@@ -435,9 +435,9 @@ pub fn macos_real_home_dir() -> std::path::PathBuf {
 /// environments without a systemd user session. Linux desktop builds are not
 /// sandboxed, so both are always reachable.
 #[cfg(not(target_os = "macos"))]
-pub fn ipc_socket_path() -> std::path::PathBuf {
+pub fn ipc_socket_path(identity: &crate::identity::EngineIdentity) -> std::path::PathBuf {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
-    std::path::PathBuf::from(runtime_dir).join("beebeeb-daemon.sock")
+    std::path::PathBuf::from(runtime_dir).join(identity.daemon_socket_name())
 }
 
 /// The reply to a Finder write, for the engine's own `anyhow` result: the

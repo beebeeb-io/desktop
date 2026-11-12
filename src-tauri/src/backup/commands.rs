@@ -6,11 +6,14 @@
 /// (`default`). Kept in the folder's backup setting; the question is settled, and the next pass backs the folder up
 /// from there.
 #[tauri::command]
-pub(crate) async fn set_known_folder_source(key: String, choice: crate::config::KnownFolderSource) -> Result<(), String> {
+pub(crate) async fn set_known_folder_source(
+    key: String,
+    choice: crate::config::KnownFolderSource,
+) -> Result<(), String> {
     if crate::known_folder::known_folder_by_key(&key).is_none() {
         return Err(format!("unknown known-folder key: {key}"));
     }
-    let cfg = crate::config::DesktopConfig::update(|cfg| {
+    let cfg = crate::config::DesktopConfig::update_for(crate::APP, |cfg| {
         cfg.known_folder_source.insert(key.clone(), choice);
         (true, cfg.clone())
     })?;
@@ -18,7 +21,7 @@ pub(crate) async fn set_known_folder_source(key: String, choice: crate::config::
         if let Err(e) = db.settle_backup_source_question(&key) {
             tracing::warn!(folder = %key, error = %e, "known-folder source: the question was not cleared");
         }
-        crate::backup_protect::refresh_own_backups(&db);
+        crate::backup_protect::refresh_own_backups(crate::APP, &db);
     }
     tracing::info!(folder = %key, ?choice, "known-folder source chosen");
     Ok(())

@@ -204,9 +204,10 @@ pub fn init(dir: PathBuf, names: fn() -> KnownNames) {
     *GLOBAL.lock().unwrap_or_else(|e| e.into_inner()) = Some((LifecycleLog::new(dir, MAX_BYTES), names));
 }
 
-/// `<home>/Library/Logs/Beebeeb`.
+/// `<home>/Library/Logs/Beebeeb`: the folder name is the app identity's, the one the engine's purge never touches
+/// (`local_state::is_lifecycle_log_path`).
 pub fn default_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join("Library").join("Logs").join("Beebeeb"))
+    dirs::home_dir().map(|home| home.join("Library").join("Logs").join(crate::APP.logs_dir_name()))
 }
 
 pub fn event(event: LifecycleEvent) {

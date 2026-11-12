@@ -140,13 +140,29 @@ first position; it is never written.
 
 ## Identity
 
-`identity.rs` is the one place a per-app name comes from: `AppIdentity::CURRENT` is `Real`
-(`io.beebeeb.app`, "Beebeeb") unless the build sets `BEEBEEB_APP_IDENTIFIER` to anything else, which
-makes it `Test` (`io.beebeeb.app.test`, "Beebeeb Test"). The control channel, the state folder, the
-Run value's name, the window titles, the tray window's class, the tooltip and the link scheme all
-derive from it, and a test asserts each differs between the two. Never write one of those names
-anywhere else. Same names and values as `src-tauri/src/app_identity.rs`
-(`fix/2445-test-build-isolation`), to be unified.
+`identity.rs` is the one place a per-app name comes from. Which app a binary is, is decided by
+`build.rs` when it is built and by nothing else:
+
+| `BEEBEEB_APP_IDENTIFIER` | `BEEBEEB_RELEASE_VERSION` | `AppIdentity::CURRENT` |
+|---|---|---|
+| `io.beebeeb.app` | set or unset | `Real` ("Beebeeb") |
+| `io.beebeeb.app.test` | unset | `Test` ("Beebeeb Test") |
+| unset | unset | `Test`: plain `cargo build`, `cargo run`, `cargo test` |
+| `io.beebeeb.app.test` or unset | set | the build stops: a release is the real app and says so |
+| anything else | any | the build stops |
+
+The profile (`debug_assertions`), run-time environment variables and arguments decide nothing. The
+control channel, the state folder, the Run value's name, the window titles, the tray window's class,
+the tooltip and the link scheme all derive from it, and a test asserts each differs between the two.
+Never write one of those names anywhere else. Every name the ENGINE owns (credential service,
+settings folder, suggested sync folder, Cloud Files provider name, GUID and class ids, backup device,
+daemon socket) is in the engine's one identity file (`crates/beebeeb-engine/src/identity.rs`),
+reached through `AppIdentity::engine()`: the host hands that value to `Engine::open`, and no engine
+entry works without one. The tests name the identity they mean (`deeplink::link` builds a link for
+this build), so `cargo test` passes as either app. The test build does not start on macOS
+(`AppIdentity::start_refusal`, asked first thing in `main`). The binary carries one mark,
+`beebeeb-app-identity=<identifier>;` (`BUILD_MARK`), which the packager and the release workflow
+read. To run the real app from source: `BEEBEEB_APP_IDENTIFIER=io.beebeeb.app cargo run`.
 
 ## The b
 

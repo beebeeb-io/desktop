@@ -29,6 +29,7 @@ use crate::auth_transport;
 use crate::drive_v2::dto::DriveItem;
 use crate::drive_v2::model::{self, Sort};
 use crate::host::EngineHost;
+use crate::identity::EngineIdentity;
 use crate::keychain::{AuthSecretStore, AuthVault, SecretBytes, SessionToken};
 use crate::runner::{EngineRunner, ResumeTicket};
 use crate::session::Session;
@@ -47,12 +48,12 @@ pub trait CredentialStores: Send + Sync + 'static {
 }
 
 /// The platform's credential store (Windows Credential Manager, the macOS Keychain), per account id.
-pub struct PlatformCredentials;
+pub struct PlatformCredentials(pub &'static EngineIdentity);
 
 impl CredentialStores for PlatformCredentials {
     type Store = crate::keychain::PlatformKeychainStore;
     fn for_account(&self, account_id: &str) -> Self::Store {
-        crate::keychain::platform_keychain_store_for(account_id)
+        crate::keychain::platform_keychain_store_for(self.0, account_id)
     }
 }
 
@@ -95,6 +96,8 @@ pub enum SyncStop {
 
 /// The handle. Share it as an `Arc`; every method takes `&self`.
 pub struct Engine<C: CredentialStores> {
+    /// Which app this is: every name the engine touches outside its own memory comes from here.
+    identity: &'static EngineIdentity,
     config: EngineConfig,
     host: Arc<dyn EngineHost>,
     stores: C,
@@ -117,7 +120,15 @@ pub struct Engine<C: CredentialStores> {
 
 impl<C: CredentialStores> Engine<C> {
     /// Build the handle. Reads nothing yet: call [`Engine::restore`] next.
-    pub fn open(config: EngineConfig, host: Arc<dyn EngineHost>, stores: C) -> Result<Self, String> {
+    pub fn open(
+        identity: &'static EngineIdentity,
+        config: EngineConfig,
+        host: Arc<dyn EngineHost>,
+        stores: C,
+    ) -> Result<Self, String> {
+        if let Some(refusal) = identity.refusal_on(std::env::consts::OS) {
+            return Err(refusal.to_string());
+        }
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_name("beebeeb-engine")
@@ -126,13 +137,14 @@ impl<C: CredentialStores> Engine<C> {
         let client = auth_transport::client()?;
         // The running engine reads the process-wide state dir; a handle that names another one would bind one
         // database and sync into another.
-        if state_paths::beebeeb_state_dir().ok().as_deref() != Some(config.state_dir.as_path()) {
+        if state_paths::beebeeb_state_dir_for(identity).ok().as_deref() != Some(config.state_dir.as_path()) {
             return Err("the engine handle's state dir is not the process's state dir".to_string());
         }
         let accounts = Accounts::default();
         crate::account::synthesize_single_account(&accounts, AccountId(config.account_id.clone()));
         let acct = accounts.active_account()?;
         Ok(Self {
+            identity,
             config,
             host,
             stores,
@@ -463,6 +475,7 @@ impl<C: CredentialStores> Engine<C> {
             let _step = self.transition.lock().await;
             #[cfg(target_os = "windows")]
             crate::windows_cf::ensure_reactivation_allowed()?;
+            crate::sync_root_owner::check(self.identity, &sync_root)?;
             let mut slot = self.acct.engine.lock().await;
             if slot.is_some() {
                 return Ok(SyncStart::AlreadyRunning);
@@ -470,7 +483,7 @@ impl<C: CredentialStores> Engine<C> {
             // A restart while paused stays paused: the flag follows the file, under the config-write lock.
             {
                 let flag = &self.acct.sync_paused;
-                let _ = crate::config::DesktopConfig::path().and_then(|path| {
+                let _ = crate::config::DesktopConfig::path_for(self.identity).and_then(|path| {
                     crate::config::DesktopConfig::update_at_then(
                         &path,
                         |_| (false, ()),
@@ -491,6 +504,7 @@ impl<C: CredentialStores> Engine<C> {
             drop(data);
             let (token, key) = keys;
             *slot = Some(EngineRunner::spawn(
+                self.identity,
                 self.host.clone(),
                 sync_root,
                 token,
@@ -521,7 +535,7 @@ impl<C: CredentialStores> Engine<C> {
     fn set_paused(&self, paused: bool) -> Result<(), String> {
         let flag = &self.acct.sync_paused;
         crate::config::DesktopConfig::update_at_then(
-            &crate::config::DesktopConfig::path()?,
+            &crate::config::DesktopConfig::path_for(self.identity)?,
             |cfg| {
                 cfg.pause_sync = paused;
                 (true, ())

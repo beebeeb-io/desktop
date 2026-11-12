@@ -49,7 +49,7 @@ pub async fn serve_ipc(
     bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
     cancel: oneshot::Receiver<()>,
 ) -> std::io::Result<()> {
-    serve_ipc_at(ipc_socket_path(), db, bridge, cancel).await
+    serve_ipc_at(ipc_socket_path(bridge.identity), db, bridge, cancel).await
 }
 
 /// Real IPC server, bound to an explicit `path`. `serve_ipc` calls this with the
@@ -71,7 +71,8 @@ pub async fn serve_ipc_at(
     bridge: std::sync::Arc<crate::engine_bridge::EngineBridge>,
     cancel: oneshot::Receiver<()>,
 ) -> std::io::Result<()> {
-    serve_ipc_at_with_ready(path, db, bridge, cancel, None, WriteContentsPolicy::platform_default()).await
+    let policy = WriteContentsPolicy::platform_default(bridge.identity);
+    serve_ipc_at_with_ready(path, db, bridge, cancel, None, policy).await
 }
 
 /// Readiness means the listener is bound, hardened and published. On startup
@@ -604,7 +605,7 @@ impl Connection {
         // `HydrateFile` (sync root, temp dir, and on macOS the shared App Group
         // hydrate-cache directory) — BEFORE any fetch runs, and keep the
         // plaintext staging write atomic (`.part` + rename).
-        let allowed_roots = thumbnail_allowed_roots();
+        let allowed_roots = thumbnail_allowed_roots(self.bridge.identity);
         let dest = std::path::PathBuf::from(&dest_path);
         if let Some(message) = thumbnail_destination_error(&dest, &allowed_roots) {
             return IpcResponse::Error { message };
