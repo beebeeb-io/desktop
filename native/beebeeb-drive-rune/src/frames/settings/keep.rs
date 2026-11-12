@@ -287,8 +287,13 @@ fn tree_row(f: &Folder, depth: usize, change: Option<&Change>, t: &Theme) -> El 
     let check = el()
         .key(format!("{key}-check"))
         .role("checkbox")
-        .label(format!("{}, {said}", f.name))
-        .checked(state == Check::On)
+        .label(format!("{}, {said}", f.name));
+    // Three states, also for assistive technology: Narrator reads "Lisbon trip, mixed".
+    let check = match state {
+        Check::Mixed => check.checked_mixed(),
+        state => check.checked(state == Check::On),
+    };
+    let check = check
         .radius(4.0)
         .focusable(true)
         .on_press(move |s: &mut State| s.settings.more.keep.toggle(&id_check))
