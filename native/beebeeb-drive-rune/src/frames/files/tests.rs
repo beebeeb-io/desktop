@@ -332,6 +332,8 @@ fn a_right_click_the_menu_key_and_shift_f10_open_the_file_menu() {
             "Share\u{2026}",
             "Copy link",
             "Make available offline",
+            // Harbour.heic is downloaded: there is a copy on this PC to free (PR 305).
+            "Free up space",
             "Show in File Explorer",
             "Details",
             "Rename",
