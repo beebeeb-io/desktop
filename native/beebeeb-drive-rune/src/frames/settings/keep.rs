@@ -262,7 +262,7 @@ fn tree_row(f: &Folder, depth: usize, change: Option<&Change>, t: &Theme) -> El 
     let key = format!("tree-{}", f.id);
     let state = f.check();
     let (id_open, id_check) = (f.id.clone(), f.id.clone());
-    let mut disclosure = el().key(format!("{key}-disc")).w(12.0).h(15.0).center();
+    let mut disclosure = el().key(format!("{key}-disc")).w(12.0).h(15.0).center_y();
     if f.expandable {
         disclosure = disclosure
             .role("button")
@@ -337,7 +337,9 @@ fn tree_row(f: &Folder, depth: usize, change: Option<&Change>, t: &Theme) -> El 
         .h(32.0)
         .px(12.0)
         .center_y()
+        // The hairline takes room (a CSS border): the row's content is centred under it.
         .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
+        .border_layout()
         .child(name)
         .child(
             kit::label(
