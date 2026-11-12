@@ -1911,64 +1911,6 @@
    ],
    "tracking": -0.06
   },
-  "btn-skip": {
-   "kind": "box",
-   "x": 380.73,
-   "y": 166,
-   "w": 48.66,
-   "h": 22
-  },
-  "btn-skip-label": {
-   "kind": "text",
-   "x": 392.73,
-   "y": 168.43,
-   "w": 24.66,
-   "h": 17.14,
-   "text": "Skip",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 12,
-   "weight": 500,
-   "color": [
-    70,
-    66,
-    61,
-    255
-   ],
-   "tracking": -0.06
-  },
-  "btn-next": {
-   "kind": "box",
-   "x": 437.39,
-   "y": 166,
-   "w": 52.61,
-   "h": 22,
-   "bg": [
-    251,
-    250,
-    247,
-    255
-   ]
-  },
-  "btn-next-label": {
-   "kind": "text",
-   "x": 450.39,
-   "y": 168.43,
-   "w": 26.61,
-   "h": 17.14,
-   "text": "Next",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 12,
-   "weight": 500,
-   "color": [
-    20,
-    17,
-    13,
-    255
-   ],
-   "tracking": -0.06
-  },
   "seg-0": {
    "kind": "box",
    "x": 555.2,
