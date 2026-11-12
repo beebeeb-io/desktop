@@ -72,7 +72,7 @@ impl EngineSource {
     }
 }
 
-fn crumb(crumb: dto::Crumb) -> Crumb {
+pub(crate) fn crumb(crumb: dto::Crumb) -> Crumb {
     Crumb {
         id: crumb.id,
         name: crumb.name,
@@ -80,7 +80,7 @@ fn crumb(crumb: dto::Crumb) -> Crumb {
 }
 
 /// The engine's row as the UI's row. One place, so a field the UI adds is mapped once.
-fn item(item: dto::DriveItem) -> DriveItem {
+pub(crate) fn item(item: dto::DriveItem) -> DriveItem {
     DriveItem {
         id: item.id,
         parent_id: item.parent_id,

@@ -1,23 +1,32 @@
 //! The bridge between the engine crate and the native shell's trait system.
 //!
-//! `LiveEngine` wraps `Arc<Engine<PlatformCredentials>>` and implements `EngineActions`.
-//! `EngineSignInSource` implements `SignInSource` by spawning worker threads for each blocking
-//! engine call and delivering results through a channel. `EngineDriveSource` implements
-//! `DriveSource` on the live engine's listing.
+//! [`open::open`] is the start path: it makes the one engine handle of this process, for the identity this
+//! binary was built as (`shell::identity::engine_identity`, the only place the native app asks for it).
+//! `LiveEngine` wraps that handle and implements `EngineActions`. `EngineSignInSource` implements
+//! `SignInSource` by spawning worker threads for each blocking engine call and delivering results through a
+//! channel. `EngineDriveSource` implements `DriveSource` on the handle's local state, with the engine's own
+//! view models. Every type is generic over the credential stores, so a test runs the same code on stores in
+//! memory; the app uses the platform's.
+//!
+//! No per-app name is spelled here: the sync folder, the settings file and the state folder come from the
+//! identity the handle was opened with.
 //!
 //! Secrets: the password, codes and recovery phrase arrive as `&str` from a secure `TextEdit`
 //! (wiped on drop) and go into the engine call as `Zeroizing<String>`, then nowhere else: not
 //! into the element tree, not into a label, not into a log line, not into the feedback mode's
 //! capture. The engine events that cross to the UI use the redacting `Debug`.
 
-use std::sync::{Arc, mpsc};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 use zeroize::Zeroizing;
 
-use beebeeb_engine::app::{Engine, PlatformCredentials, SyncStart};
-use beebeeb_engine::drive_v2::dto;
-use beebeeb_engine::drive_v2::model::Sort as EngineSort;
+use beebeeb_engine::app::{CredentialStores, Engine, SyncStart};
+use beebeeb_engine::drive_v2::DriveError;
+use beebeeb_engine::drive_v2::model::{self, Sort as EngineSort};
+use beebeeb_engine::host::HostMessage;
+use beebeeb_engine::identity::EngineIdentity;
 use beebeeb_engine::signin::gate::{
     GateState as EngineGate, NextAfterSignIn as EngineNext, SignInProblem as EngineProblem,
 };
@@ -33,7 +42,12 @@ use crate::shell::actions::{self, EngineActions};
 use crate::shell::app::{GateState as ShellGate, Session};
 use crate::shell::instance::ProfileHolder;
 use crate::shell::tray::{EngineState, TrayInputs};
-use crate::source::{Crumb, DriveItem, DriveSource, Listing, SourceError, StorageSummary};
+use crate::source::{DriveItem, DriveSource, Listing, SourceError, StorageSummary};
+
+pub mod backups;
+pub mod open;
+#[cfg(test)]
+mod tests;
 
 // ---------------------------------------------------------------------------
 // Gate / type mapping (one place, never a name or a path)
@@ -82,6 +96,38 @@ fn map_problem(p: EngineProblem) -> SignInProblem {
     }
 }
 
+/// The engine answers a failed second factor with one of its own sentences (`gate::two_factor_error`); the
+/// screen wants the kind. By the exact sentence: an answer this does not know is `Other`, never "wrong code".
+fn two_factor_problem(words: &str) -> TwoFactorProblem {
+    use beebeeb_engine::signin::gate;
+    if words == gate::WRONG_2FA_CODE {
+        TwoFactorProblem::WrongCode
+    } else if words == gate::TWO_FACTOR_EXPIRED {
+        TwoFactorProblem::Expired
+    } else if words == gate::two_factor_error("offline") {
+        TwoFactorProblem::Offline
+    } else if words == gate::two_factor_error("rate_limited") {
+        TwoFactorProblem::RateLimited
+    } else {
+        TwoFactorProblem::Other
+    }
+}
+
+/// The same for the twelve words (`gate::phrase_error`). "The phrase is right, sync did not start" is not a
+/// wrong phrase.
+fn phrase_problem(words: &str) -> PhraseProblem {
+    use beebeeb_engine::signin::gate;
+    if words == gate::WRONG_PHRASE {
+        PhraseProblem::WrongPhrase { bad_word: None }
+    } else if words == gate::TOO_MANY_PHRASE_TRIES {
+        PhraseProblem::TooManyTries
+    } else if words == gate::phrase_error("offline") {
+        PhraseProblem::Offline
+    } else {
+        PhraseProblem::Other
+    }
+}
+
 fn log(message: impl AsRef<str>) {
     eprintln!("beebeeb engine_host: {}", message.as_ref());
 }
@@ -91,20 +137,64 @@ fn log(message: impl AsRef<str>) {
 // ---------------------------------------------------------------------------
 
 /// The real engine behind the shell's `EngineActions`.
-pub struct LiveEngine {
-    engine: Arc<Engine<PlatformCredentials>>,
+pub struct LiveEngine<C: CredentialStores> {
+    engine: Arc<Engine<C>>,
+    /// The identity the handle was opened with: the settings file and the suggested sync folder are its.
+    identity: &'static EngineIdentity,
+    /// What the engine reported since the last look. Drained on every refresh, so the queue never grows; the
+    /// shell reads the state it needs from the handle itself.
+    messages: Mutex<mpsc::Receiver<HostMessage>>,
 }
 
-impl LiveEngine {
-    pub fn new(engine: Arc<Engine<PlatformCredentials>>) -> Self {
-        Self { engine }
+impl<C: CredentialStores> LiveEngine<C> {
+    pub fn new(opened: &open::Opened<C>, messages: mpsc::Receiver<HostMessage>) -> Self {
+        Self {
+            engine: opened.engine.clone(),
+            identity: opened.identity,
+            messages: Mutex::new(messages),
+        }
+    }
+
+    /// Takes everything the engine queued. Returns how many messages there were (a test reads it).
+    pub fn drain(&self) -> usize {
+        let messages = self.messages.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        messages.try_iter().count()
+    }
+
+    /// Where this app syncs: the folder the settings name, else the identity's own suggestion (never another
+    /// app's folder: the engine refuses a folder registered to another provider, `sync_root_owner`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn sync_root(&self) -> Result<PathBuf, String> {
+        let config = beebeeb_engine::config::DesktopConfig::load_for(self.identity)?;
+        Ok(config
+            .sync_root
+            .unwrap_or_else(|| beebeeb_engine::config::default_sync_root_suggestion(self.identity)))
     }
 }
 
-impl EngineActions for LiveEngine {
+/// Start sync into the folder the settings name, else the identity's suggestion. Blocks.
+fn start_sync_now<C: CredentialStores>(
+    engine: &Engine<C>,
+    identity: &'static EngineIdentity,
+) -> Result<SyncStart, String> {
+    let config = beebeeb_engine::config::DesktopConfig::load_for(identity)?;
+    let sync_root = config
+        .sync_root
+        .unwrap_or_else(|| beebeeb_engine::config::default_sync_root_suggestion(identity));
+    engine.start_sync(sync_root)
+}
+
+impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     fn session(&self) -> Session {
+        self.drain();
         let gate = map_gate_shell(self.engine.gate());
-        let account = self.engine.user_id().unwrap_or_default();
+        // Whose session: the email is known from the stored session at start, the user id only once the
+        // server named it in this run. One of them, always the same one for one account in one run.
+        let account = self
+            .engine
+            .account_email()
+            .or_else(|| self.engine.user_id())
+            .unwrap_or_default();
         Session::of(gate, account)
     }
 
@@ -145,14 +235,25 @@ impl EngineActions for LiveEngine {
         None
     }
 
+    /// Asks the engine to start, on a worker thread: the engine's start blocks (it binds the local data and,
+    /// on Windows, registers the folder) and this is called from the window's thread. `Ok` means "asked"; the
+    /// outcome is logged, and the session and the b show whether sync runs. Without a session nothing is asked.
     fn start_sync(&self) -> Result<(), actions::ActionError> {
-        let sync_root = beebeeb_engine::config::default_sync_root_suggestion();
-        match self.engine.start_sync(sync_root) {
-            Ok(SyncStart::Started) => Ok(()),
-            Ok(SyncStart::AlreadyRunning) => Ok(()),
-            Ok(SyncStart::NoSession) => Err(actions::ActionError::NotAvailable("not signed in")),
-            Err(e) => Err(actions::ActionError::Failed(e)),
+        if self.engine.gate() != EngineGate::Ready {
+            return Err(actions::ActionError::NotAvailable("not signed in and unlocked"));
         }
+        let (engine, identity) = (self.engine.clone(), self.identity);
+        thread::Builder::new()
+            .name("start-sync".into())
+            .spawn(move || match start_sync_now(&engine, identity) {
+                Ok(SyncStart::Started) => log("sync started"),
+                Ok(SyncStart::AlreadyRunning) => {}
+                Ok(SyncStart::NoSession) => log("sync was not started: no session"),
+                // The engine's sentence names a folder by its name at most, never a path, a key or a token.
+                Err(error) => log(format!("sync was not started: {error}")),
+            })
+            .map(|_| ())
+            .map_err(|_| actions::ActionError::Failed("could not start a thread".into()))
     }
 
     fn stop_for_quit(&self) {
@@ -171,20 +272,20 @@ impl EngineActions for LiveEngine {
 /// `SignInSource` backed by the real engine. Each `begin_*` spawns a named thread that calls the
 /// blocking engine method and sends the result through a channel; `poll` drains it. Secrets go
 /// from the `&str` argument into `Zeroizing<String>` for the thread and nowhere else.
-pub struct EngineSignInSource {
-    engine: Arc<Engine<PlatformCredentials>>,
+pub struct EngineSignInSource<C: CredentialStores> {
+    engine: Arc<Engine<C>>,
     tx: mpsc::Sender<SignInEvent>,
     rx: mpsc::Receiver<SignInEvent>,
 }
 
-impl EngineSignInSource {
-    pub fn new(engine: Arc<Engine<PlatformCredentials>>) -> Self {
+impl<C: CredentialStores> EngineSignInSource<C> {
+    pub fn new(engine: Arc<Engine<C>>) -> Self {
         let (tx, rx) = mpsc::channel();
         Self { engine, tx, rx }
     }
 }
 
-impl SignInSource for EngineSignInSource {
+impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
     fn gate(&self) -> GateState {
         map_gate_signin(self.engine.gate())
     }
@@ -238,16 +339,7 @@ impl SignInSource for EngineSignInSource {
                 let result = engine.two_factor(code);
                 let event = match result {
                     Ok(next) => SignInEvent::TwoFactor(Ok(map_next(next))),
-                    Err(words) => {
-                        let problem = if words.contains("expired") || words.contains("again") {
-                            TwoFactorProblem::Expired
-                        } else if words.contains("offline") || words.contains("connect") {
-                            TwoFactorProblem::Offline
-                        } else {
-                            TwoFactorProblem::WrongCode
-                        };
-                        SignInEvent::TwoFactor(Err(problem))
-                    }
+                    Err(words) => SignInEvent::TwoFactor(Err(two_factor_problem(words))),
                 };
                 let _ = tx.send(event);
             })
@@ -264,14 +356,7 @@ impl SignInSource for EngineSignInSource {
                 let result = engine.unlock_with_phrase(phrase);
                 let event = match result {
                     Ok(()) => SignInEvent::PhraseRestored(Ok(NextAfterSignIn::Drive)),
-                    Err(words) => {
-                        let problem = if words.contains("phrase") || words.contains("not a valid") {
-                            PhraseProblem::WrongPhrase { bad_word: None }
-                        } else {
-                            PhraseProblem::Other
-                        };
-                        SignInEvent::PhraseRestored(Err(problem))
-                    }
+                    Err(words) => SignInEvent::PhraseRestored(Err(phrase_problem(words))),
                 };
                 let _ = tx.send(event);
             })
@@ -300,75 +385,49 @@ impl SignInSource for EngineSignInSource {
 }
 
 // ---------------------------------------------------------------------------
-// EngineDriveSource: DriveSource on the live engine listing
+// EngineDriveSource: DriveSource on the handle's local state
 // ---------------------------------------------------------------------------
 
-/// The engine's listing as a `DriveSource`. Names in a synced `state.db` are the decrypted ones
+/// The handle's local state as a `DriveSource`: the same view models (`drive_v2::model`) and the same row
+/// mapping as the read-only `source_engine::EngineSource`. Names in a synced `state.db` are the decrypted ones
 /// the engine stored; nothing here logs them.
-pub struct EngineDriveSource {
-    engine: Arc<Engine<PlatformCredentials>>,
+pub struct EngineDriveSource<C: CredentialStores> {
+    engine: Arc<Engine<C>>,
 }
 
-impl EngineDriveSource {
-    pub fn new(engine: Arc<Engine<PlatformCredentials>>) -> Self {
+impl<C: CredentialStores> EngineDriveSource<C> {
+    pub fn new(engine: Arc<Engine<C>>) -> Self {
         Self { engine }
     }
 }
 
-fn map_item(item: dto::DriveItem) -> DriveItem {
-    DriveItem {
-        id: item.id,
-        parent_id: item.parent_id,
-        name: item.name,
-        is_folder: item.is_folder,
-        size: item.size,
-        child_count: item.child_count,
-        modified_at: item.modified_at,
-        mime: item.mime,
-        has_thumbnail: item.has_thumbnail,
-        shared_type: None,
-        shared_badges: Vec::new(),
-        pc_status: item.local.as_ref().and_then(|local| match local {
-            dto::LocalState::Downloaded => Some("on_this_pc".to_string()),
-            dto::LocalState::OnlineOnly => Some("online_only".to_string()),
-            dto::LocalState::AvailableOffline => Some("available_offline".to_string()),
-            dto::LocalState::Syncing | dto::LocalState::Failed => None,
-        }),
-        is_protected: item.backup.is_protected,
-    }
-}
-
-impl DriveSource for EngineDriveSource {
+impl<C: CredentialStores> DriveSource for EngineDriveSource<C> {
+    /// The whole folder, name ascending, with its crumbs from the root. Before the first sync there is no local
+    /// state: that, a folder that is gone and a database that cannot be read are errors, never an empty folder.
     fn list(&self, folder_id: Option<&str>) -> Result<Listing, SourceError> {
-        let (items, _total) = self
-            .engine
-            .listing(folder_id, EngineSort::default(), 0, usize::MAX)
-            .map_err(|_| SourceError::Unreadable)?;
-
-        let folder_name = if folder_id.is_some() { "Folder" } else { "Files" };
-        let folder = Crumb {
-            id: folder_id.map(str::to_string),
-            name: folder_name.to_string(),
+        let db = self.engine.state_db().map_err(|_| SourceError::Unreadable)?;
+        let read = || -> Result<Listing, DriveError> {
+            let (rows, _total) = model::children_of(&db, folder_id, EngineSort::default(), 0, usize::MAX)?;
+            let folder = model::resolve_folder(&db, folder_id)?;
+            let path: Vec<_> = model::crumbs(&db, folder.as_ref())?
+                .into_iter()
+                .map(crate::source_engine::crumb)
+                .collect();
+            let folder = path.last().cloned().ok_or(DriveError::NotFound)?;
+            Ok(Listing {
+                folder,
+                path,
+                items: rows.into_iter().map(crate::source_engine::item).collect(),
+            })
         };
-        let root = Crumb {
-            id: None,
-            name: "Files".into(),
-        };
-        let path = if folder_id.is_some() {
-            vec![root, folder.clone()]
-        } else {
-            vec![folder.clone()]
-        };
-
-        Ok(Listing {
-            folder,
-            path,
-            items: items.into_iter().map(map_item).collect(),
+        read().map_err(|error| match error {
+            DriveError::NotFound => SourceError::NotFound,
+            _ => SourceError::Unreadable,
         })
     }
 
     fn storage(&self) -> Option<StorageSummary> {
-        None // storage numbers not in the engine handle yet
+        None // the account's used and total bytes are the server's; the handle does not ask for them yet
     }
 }
 
@@ -378,12 +437,12 @@ impl DriveSource for EngineDriveSource {
 
 /// `FilesSource` on the real engine. Actions the engine cannot perform yet answer
 /// `Err(ActionError::Unavailable)` and log `NotWired(<action>)`.
-pub struct EngineFilesSource {
-    engine: Arc<Engine<PlatformCredentials>>,
+pub struct EngineFilesSource<C: CredentialStores> {
+    engine: Arc<Engine<C>>,
 }
 
-impl EngineFilesSource {
-    pub fn new(engine: Arc<Engine<PlatformCredentials>>) -> Self {
+impl<C: CredentialStores> EngineFilesSource<C> {
+    pub fn new(engine: Arc<Engine<C>>) -> Self {
         Self { engine }
     }
 }
@@ -393,7 +452,7 @@ fn not_wired(what: &str) -> ActionError {
     ActionError::Unavailable
 }
 
-impl FilesSource for EngineFilesSource {
+impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     fn counts(&self) -> Option<Counts> {
         None
     }
@@ -466,6 +525,21 @@ impl FilesSource for EngineFilesSource {
     }
     fn upload(&mut self, _: Option<&str>, _: &[std::path::PathBuf]) -> Result<(), ActionError> {
         Err(not_wired("upload"))
+    }
+    fn new_folder(&mut self, _: Option<&str>, _: &str) -> Result<(), ActionError> {
+        Err(not_wired("new_folder"))
+    }
+    fn rename(&mut self, _: &DriveItem, _: &str) -> Result<(), ActionError> {
+        Err(not_wired("rename"))
+    }
+    fn move_to(&mut self, _: &[DriveItem], _: Option<&str>) -> Result<(), ActionError> {
+        Err(not_wired("move_to"))
+    }
+    fn free_up_space(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
+        Err(not_wired("free_up_space"))
+    }
+    fn open_in_file_explorer(&mut self, _: Option<&str>) -> Result<(), ActionError> {
+        Err(not_wired("open_in_file_explorer"))
     }
 
     fn changes(&mut self) -> Vec<Change> {

@@ -215,30 +215,6 @@ pub fn run() {
     crate::feedback::paths::set_flag_dir(launch.feedback_dir.clone());
     let platform = platform::current();
 
-    // --- engine wiring (E6): identity, state paths, and the engine handle ---
-    // Before any engine work: initialise the process-wide identity and state paths.
-    identity.assert_macos_ready();
-    beebeeb_engine::identity::init(&identity.engine_identity());
-
-    // The real engine, for the running app (not tooling runs).
-    let real_engine: Option<Arc<beebeeb_engine::app::Engine<beebeeb_engine::app::PlatformCredentials>>> =
-        if launch.tooling {
-            None
-        } else {
-            match setup_engine(identity, &launch) {
-                Ok(engine) => Some(engine),
-                Err(error) => {
-                    host::log(format!("engine could not be opened: {error}"));
-                    None
-                }
-            }
-        };
-
-    let engine: Arc<dyn EngineActions> = match &real_engine {
-        Some(e) => Arc::new(crate::engine_host::LiveEngine::new(e.clone())),
-        None => Arc::new(FixtureEngine::ready()),
-    };
-
     let control_target = Arc::new(Mutex::new(None));
     let (claim, _control_server) = if launch.tooling {
         (Claim::First, None)
@@ -258,7 +234,36 @@ pub fn run() {
             }
         }
     };
-    let start = match instance::plan(&launch, claim, identity) {
+    let plan = instance::plan(&launch, claim, identity);
+    // The real engine: only for the one instance that is the app (after the claim, so a second launch never
+    // opens a second handle), never in a tooling run and never beside `--db` (a dev build's read-only look at
+    // one state.db). A handle that cannot be opened ends the start: the window never shows the fixture's
+    // sample files in place of an account's.
+    let wake_target: WakeTarget = Arc::new(Mutex::new(None));
+    let real_engine = if matches!(plan, Plan::BeTheApp) && launch.db.is_none() {
+        match open_engine(identity, &launch, wake_target.clone()) {
+            Ok(opened) => Some(opened),
+            Err(error) => {
+                let message = format!(
+                    "{} could not open its data on this computer. {error}",
+                    identity.product_name()
+                );
+                host::log(&message);
+                platform.show_start_refusal(identity.product_name(), &message);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+    let engine: Arc<dyn EngineActions> = match &real_engine {
+        Some((opened, live)) => {
+            host::log(format!("the engine is open; the stored session says {:?}", opened.gate));
+            live.clone()
+        }
+        None => Arc::new(FixtureEngine::ready()),
+    };
+    let start = match plan {
         Plan::Tooling => None,
         Plan::ExitQuietly => return,
         Plan::BeTheApp => Some(instance::start(&launch, engine.profile_holder())),
@@ -395,22 +400,14 @@ pub fn run() {
         state_file,
     };
     let (shell_actions, shell_platform) = (actions.clone(), platform.clone());
-    let init_engine = real_engine.clone();
+    let init_engine = real_engine.as_ref().map(|(opened, _)| opened.engine.clone());
+    // From here on the engine's reports wake the window (`host::poll` reads what changed).
+    *wake_target.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(main.clone());
     let main_app = main_app.init(move || {
         let shell = Shell::new(shell_actions, shell_platform, wiring);
         match (source, init_engine) {
             (Some(source), _) => state::init_from(shell, source, None),
-            (None, Some(engine)) => {
-                let drive: Box<dyn DriveSource> = Box::new(crate::engine_host::EngineDriveSource::new(engine.clone()));
-                let mut s = state::init_from(shell, drive, None);
-                s.actions = crate::frames::files::Actions::new(Box::new(crate::engine_host::EngineFilesSource::new(
-                    engine.clone(),
-                )));
-                s.signin = Some(crate::frames::signin::Ui::new(Box::new(
-                    crate::engine_host::EngineSignInSource::new(engine),
-                )));
-                s
-            }
+            (None, Some(engine)) => state::init_on_engine(shell, engine),
             (None, None) => state::init_with(shell),
         }
     });
@@ -459,49 +456,39 @@ pub fn run() {
     });
 }
 
-/// Build the engine handle: identity must be initialised before this is called. Runs BEFORE any
-/// engine thread (no race on `BB_API_BASE` or state paths). The `api_base` comes from
-/// `--api-base` (dev builds only) or from `runner::api_base_url()` (which reads `BB_API_BASE`).
-fn setup_engine(
-    identity: AppIdentity,
-    launch: &instance::Launch,
-) -> Result<Arc<beebeeb_engine::app::Engine<beebeeb_engine::app::PlatformCredentials>>, String> {
-    use beebeeb_engine::app::{Engine, EngineConfig, PlatformCredentials};
-    use beebeeb_engine::host::ChannelHost;
+/// The main window's handle, once it exists: what an engine thread wakes.
+type WakeTarget = Arc<Mutex<Option<rune::AppHandle<State>>>>;
+type RealEngine = (
+    crate::engine_host::open::Opened<beebeeb_engine::app::PlatformCredentials>,
+    Arc<crate::engine_host::LiveEngine<beebeeb_engine::app::PlatformCredentials>>,
+);
 
-    // State paths: the app-local data dir from Rune's dirs, under the identity.
+/// The OS folder the engine keeps this app's local state under, for the app-dirs of `identity`. It is the
+/// folder the 0.8.x app (Tauri's `app_local_data_dir`) used, so the real app finds its `state.db` after the
+/// update: `%LOCALAPPDATA%\<id>` on Windows (Rune's `state`), and Rune's `data` elsewhere
+/// (`~/Library/Application Support/<id>`, `$XDG_DATA_HOME/<id>`).
+pub(crate) fn local_data_of(dirs: &rune::dirs::AppDirs, os: &str) -> std::path::PathBuf {
+    if os == "windows" { dirs.state() } else { dirs.data() }.to_path_buf()
+}
+
+/// Open the real engine for this binary's identity (`engine_host::open` asks for it, once) on the platform's
+/// credential store. `--api-base` reaches the engine as an argument (dev builds only); no environment
+/// variable is read for it.
+fn open_engine(identity: AppIdentity, launch: &instance::Launch, wake: WakeTarget) -> Result<RealEngine, String> {
     let dirs = rune::dirs::AppDirs::new(identity.state_dir_id())
-        .ok_or_else(|| "could not resolve the app-local data directory".to_string())?;
-    beebeeb_engine::state_paths::init_from_app_local_data_dir(&dirs.data())?;
-
-    // The account id from desktop.toml (created on first run).
-    let account_id = beebeeb_engine::config::DesktopConfig::ensure_account_id()?;
-
-    // API base: from --api-base (non-release only), else the engine's own default.
-    let api_base = match &launch.api_base {
-        Some(url) if instance::DEV_BUILD => url.clone(),
-        _ => beebeeb_engine::runner::api_base_url(),
-    };
-
-    let (host, _messages) = ChannelHost::new(|| {
-        // The wake hook: nothing yet. The UI refreshes on every poll, which runs at the frame
-        // rate. A more precise wake (calling `main.update`) needs the AppHandle, which is not
-        // available here: the engine is created before the App. A future commit can fill this
-        // with an `Arc<Mutex<Option<AppHandle>>>` as `control_target` does.
-    });
-
-    let config = EngineConfig {
-        account_id,
-        state_dir: dirs.data().to_path_buf(),
+        .ok_or_else(|| "The folder for app data could not be found.".to_string())?;
+    let api_base = crate::engine_host::open::api_base(launch.api_base.as_deref(), instance::DEV_BUILD);
+    let (opened, messages) = crate::engine_host::open::open(
+        &local_data_of(&dirs, std::env::consts::OS),
         api_base,
-    };
-
-    let engine = Engine::open(config, host, PlatformCredentials)?;
-    let engine = Arc::new(engine);
-
-    // Restore the session (reads credential store, no network).
-    let gate = engine.restore();
-    host::log(format!("engine restore: {gate:?}"));
-
-    Ok(engine)
+        beebeeb_engine::app::PlatformCredentials,
+        move || {
+            // On an engine thread: wake the window's loop and do nothing else.
+            if let Some(main) = wake.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+                main.update(|_: &mut State, _| {});
+            }
+        },
+    )?;
+    let live = Arc::new(crate::engine_host::LiveEngine::new(&opened, messages));
+    Ok((opened, live))
 }

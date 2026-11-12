@@ -114,3 +114,21 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         backups: crate::frames::backups::BackupsUi::first(crate::shell::instance::DEV_BUILD),
     }
 }
+
+/// The window on the real engine: Files and sign-in ask the handle. Every other group keeps what it shows
+/// without an engine, and Backups shows "not built yet" (never the board's sample devices beside a real
+/// account; `engine_host/backups.rs`).
+pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
+    shell: Shell,
+    engine: std::sync::Arc<beebeeb_engine::app::Engine<C>>,
+) -> State {
+    let drive: Box<dyn DriveSource> = Box::new(crate::engine_host::EngineDriveSource::new(engine.clone()));
+    let mut s = init_from(shell, drive, None);
+    s.actions =
+        crate::frames::files::Actions::new(Box::new(crate::engine_host::EngineFilesSource::new(engine.clone())));
+    s.signin = Some(crate::frames::signin::Ui::new(Box::new(
+        crate::engine_host::EngineSignInSource::new(engine),
+    )));
+    s.backups = crate::frames::backups::BackupsUi::new(None);
+    s
+}

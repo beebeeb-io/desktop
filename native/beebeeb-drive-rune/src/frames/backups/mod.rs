@@ -87,6 +87,12 @@ pub struct BackupsUi {
 }
 
 impl BackupsUi {
+    /// Whether anything stands behind the section (`false`: the "not built yet" frame).
+    #[cfg(test)]
+    pub fn has_source(&self) -> bool {
+        self.source.is_some()
+    }
+
     pub fn new(source: Option<Box<dyn BackupsSource>>) -> BackupsUi {
         BackupsUi {
             source,
