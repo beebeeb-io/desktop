@@ -6,8 +6,7 @@ bun.lockb
 
 # Build artifacts
 target/
-dist/*
-!dist/index.html
+dist/
 build/
 .next/
 .astro/

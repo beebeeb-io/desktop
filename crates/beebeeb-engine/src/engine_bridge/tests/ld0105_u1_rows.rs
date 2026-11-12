@@ -345,8 +345,7 @@ fn ld0105_u1_the_ipc_rows_are_the_shared_fixture() {
         "get_active_transfers": transfers,
         "desktop_recent_files": recent,
     });
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/active-transfers.ld0105-u1.json");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/active-transfers.ld0105-u1.json");
     if std::env::var_os("BB_WRITE_U1_FIXTURE").is_some() {
         std::fs::write(&path, serde_json::to_string_pretty(&emitted).unwrap() + "\n").unwrap();
     }

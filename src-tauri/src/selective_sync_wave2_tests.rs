@@ -182,8 +182,8 @@ fn a_row_is_server_known_by_its_version_or_its_server_timestamp() {
     );
 }
 
-/// The rows behind `tests/fixtures/selective-sync-tree.json`, the browser fixture `tests/render-sync-activity.mjs`
-/// screenshots: Guus's shape with synthetic names. Every top folder the server knows also has a row this PC created
+/// The rows behind `src-tauri/tests/fixtures/selective-sync-tree.json`.
+/// Guus's shape with synthetic names. Every top folder the server knows also has a row this PC created
 /// on 4 Oct and never sent (and so do two subfolders, under the never-sent parents); every file hangs under the
 /// server's folders; an `error` row with no parent repeats a file's path. `Music` has no twin.
 fn guus_shaped_rows() -> Vec<VaultEntryRow> {
@@ -261,10 +261,7 @@ fn the_selective_sync_browser_fixture_is_the_trees_real_output() {
         "before": build_vault_tree_of_rows(&rows, &excluded),
         "after": build_vault_tree(&rows, &excluded),
     });
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../tests/fixtures/selective-sync-tree.json"
-    );
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/selective-sync-tree.json");
     if std::env::var_os("BB_UPDATE_FIXTURES").is_some() {
         std::fs::write(path, format!("{}\n", serde_json::to_string_pretty(&fixture).unwrap())).unwrap();
     }
