@@ -604,9 +604,15 @@ fn review_foot(a: &Approve, waiting: bool, t: &Theme) -> Vec<(El, bool)> {
     let (mut yes, yes_b) = foot_button(0, "Approve", Look::Primary, !a.matches, t);
     if live {
         // Enter is Approve only when the code matches.
-        yes = yes.default_button().on_press(approve);
+        // The keyboard starts on Approve once the code is there (the board draws the field at
+        // rest on DW-A13); until then it starts in the field, the dialog's first control.
+        yes = yes.default_button().autofocus().on_press(approve);
     }
-    let (no, no_b) = foot_button(1, "Deny", Look::Plain, false, t);
+    let (mut no, no_b) = foot_button(1, "Deny", Look::Plain, false, t);
+    if waiting {
+        // While Windows Hello is up Deny is the one thing this dialog can do.
+        no = no.autofocus();
+    }
     vec![(yes, yes_b), (no.on_press(deny), no_b)]
 }
 
