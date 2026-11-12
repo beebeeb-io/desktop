@@ -726,6 +726,12 @@ fn a_scenes_pictured_focus_goes_with_the_first_key_or_press() {
     click(&mut rt, EMAIL_KEY);
     type_(&mut rt, "x");
     assert!(!has(&rt, "field-0-caret"), "a real field again");
+    // A press that is not in the field does it too: the eye of the password field (DW-A36).
+    let mut rt = runtime("DW-A36");
+    assert!(has(&rt, "field-0-caret"));
+    click(&mut rt, "field-0-act");
+    assert!(ui(&mut rt).password.is_revealed(), "the eye was pressed");
+    assert!(!has(&rt, "field-0-caret"), "and the pictured caret went with it");
     let mut rt = runtime("DW-A35");
     tab_to(&mut rt, "check-0-row");
     space(&mut rt);
