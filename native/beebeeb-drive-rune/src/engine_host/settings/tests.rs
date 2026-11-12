@@ -30,11 +30,19 @@ const ANSWER: u8 = 0;
 const SERVER_ERROR: u8 = 1;
 const SESSION_ENDED: u8 = 2;
 const EMPTY: u8 = 3;
+/// A 2xx with a body that does not parse as the expected shape.
+const UNREADABLE: u8 = 4;
+/// Close the connection before answering (timeout / transport error).
+const DROP_CONNECTION: u8 = 5;
 
 /// One account on a fake of its own, with the storage-location routes: the account's handler answers the rest.
 struct Account {
     fake: FakeApi,
-    mode: Arc<AtomicU8>,
+    /// How the GET route answers (ANSWER, SERVER_ERROR, SESSION_ENDED, EMPTY, UNREADABLE, DROP_CONNECTION).
+    get_mode: Arc<AtomicU8>,
+    /// How the PUT route answers (same values). Separate from `get_mode` so a write can fail while the
+    /// re-read it starts succeeds, with no timing dependency.
+    put_mode: Arc<AtomicU8>,
     /// How long the region read waits before it answers (with what the server held when it was asked), in ms.
     delay_ms: Arc<AtomicU64>,
     /// How long a change waits before the server stores it, in ms.
@@ -49,29 +57,43 @@ fn account(email: &str) -> Account {
     let account = Arc::new(account);
     let token = account.session_token.clone();
     let rest = account_handler(account);
-    let (mode, delay_ms, put_delay_ms, writes) = (
+    let (get_mode, put_mode, delay_ms, put_delay_ms, writes) = (
+        Arc::new(AtomicU8::new(ANSWER)),
         Arc::new(AtomicU8::new(ANSWER)),
         Arc::new(AtomicU64::new(0)),
         Arc::new(AtomicU64::new(0)),
         Arc::new(Mutex::new(Vec::new())),
     );
-    let (mode_in, delay_in, put_delay_in, writes_in) =
-        (mode.clone(), delay_ms.clone(), put_delay_ms.clone(), writes.clone());
+    let (get_mode_in, put_mode_in, delay_in, put_delay_in, writes_in) = (
+        get_mode.clone(),
+        put_mode.clone(),
+        delay_ms.clone(),
+        put_delay_ms.clone(),
+        writes.clone(),
+    );
     let stored = Arc::new(Mutex::new(json!({ "preferred_region": "de", "region_strict": true })));
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
         let route = req.route();
         if !route.ends_with(" /api/v1/me/region") {
             return rest(req);
         }
-        match mode_in.load(Ordering::SeqCst) {
+        let is_put = route.starts_with("PUT");
+        let mode = if is_put {
+            put_mode_in.load(Ordering::SeqCst)
+        } else {
+            get_mode_in.load(Ordering::SeqCst)
+        };
+        match mode {
             SERVER_ERROR => return Reply::json(500, json!({ "error": "a server body" })),
             SESSION_ENDED => return Reply::json(401, json!({ "error": "a server body" })),
+            UNREADABLE => return Reply::ok(json!("not the expected shape")),
+            DROP_CONNECTION => return Reply::empty(0),
             _ => {}
         }
         if req.bearer() != Some(token.as_str()) {
             return Reply::json(401, json!({}));
         }
-        if route.starts_with("PUT") {
+        if is_put {
             std::thread::sleep(Duration::from_millis(put_delay_in.load(Ordering::SeqCst)));
             let body = req.json();
             writes_in.lock().unwrap().push(body.clone());
@@ -81,7 +103,7 @@ fn account(email: &str) -> Account {
             });
             return Reply::ok(stored.lock().unwrap().clone());
         }
-        let choices = if mode_in.load(Ordering::SeqCst) == EMPTY {
+        let choices = if get_mode_in.load(Ordering::SeqCst) == EMPTY {
             json!([])
         } else {
             json!([
@@ -103,7 +125,8 @@ fn account(email: &str) -> Account {
     }));
     Account {
         fake,
-        mode,
+        get_mode,
+        put_mode,
         delay_ms,
         put_delay_ms,
         writes,
@@ -222,7 +245,7 @@ fn a_choice_is_sent_once_and_shown_only_after_beebeeb_took_it() {
     );
 
     // Refused: the old choice stands, and the toast says nothing changed.
-    account.mode.store(SERVER_ERROR, Ordering::SeqCst);
+    account.put_mode.store(SERVER_ERROR, Ordering::SeqCst);
     source.choose_location(1);
     assert_eq!(settle(&mut source), [NOT_CHOSEN]);
     assert_eq!(source.locations().unwrap().chosen, 2);
@@ -230,7 +253,7 @@ fn a_choice_is_sent_once_and_shown_only_after_beebeeb_took_it() {
     assert_eq!(settle(&mut source), [NOT_CHOSEN]);
     assert!(source.locations().unwrap().only_here, "the switch is put back");
 
-    account.mode.store(ANSWER, Ordering::SeqCst);
+    account.put_mode.store(ANSWER, Ordering::SeqCst);
     source.set_only_here(false);
     assert!(settle(&mut source).len() == 1 && !source.locations().unwrap().only_here);
     // The default never keeps "only here".
@@ -251,14 +274,14 @@ fn a_read_that_fails_or_answers_nothing_says_it_could_not_load() {
         (EMPTY, "no place"),
     ] {
         let account = account(&format!("settings-fails-{mode}@example.eu"));
-        account.mode.store(mode, Ordering::SeqCst);
+        account.get_mode.store(mode, Ordering::SeqCst);
         let mut source = EngineSettingsSource::new(signed_in(&account));
         settle(&mut source);
         assert!(source.locations().is_none(), "{why}: the list could not load");
         assert!(!source.locations_loading(), "{why}: not loading any more");
         assert_eq!(source.general().storage_location, "", "{why}: no guess in General");
         // Try again asks again, and an answer then shows.
-        account.mode.store(ANSWER, Ordering::SeqCst);
+        account.get_mode.store(ANSWER, Ordering::SeqCst);
         source.reload_locations();
         settle(&mut source);
         assert!(source.locations().is_some(), "{why}: Try again loads it");
@@ -315,6 +338,92 @@ fn a_session_that_ends_mid_change_shows_nothing_of_the_account() {
     settle(&mut source);
     assert!(source.locations().is_none(), "no list of an account that signed out");
     assert_eq!(source.general().storage_location, "", "and no place in General");
+}
+
+/// P2-1 (task 2473): "Nothing changed" is said only after an HTTP refusal. A timeout after the request left, a
+/// transport error mid-flight, or a 2xx with an unreadable body each say the result is unknown and start a
+/// re-read, so the pane shows what the server has.
+#[test]
+fn a_timeout_or_unreadable_2xx_says_unknown_and_re_reads() {
+    // Case 1: an HTTP refusal (500) says "Nothing changed" and does NOT re-read.
+    let account = account("settings-p2-1@example.eu");
+    let mut source = EngineSettingsSource::new(signed_in(&account));
+    settle(&mut source);
+    assert_eq!(source.general().storage_location, "Germany");
+    account.put_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    source.choose_location(2);
+    assert_eq!(settle(&mut source), [NOT_CHOSEN], "a 500 says nothing changed");
+    assert_eq!(
+        source.general().storage_location,
+        "Germany",
+        "the old choice stands after a 500"
+    );
+    // No re-read was started: the source is idle.
+    assert!(!source.pump().busy, "a 500 does not start a re-read");
+
+    // Case 2: a transport error (offline / timeout) says unknown and re-reads.
+    // PUT fails, GET stays ANSWER so the re-read succeeds: no timing dependency.
+    account.put_mode.store(DROP_CONNECTION, Ordering::SeqCst);
+    source.choose_location(2);
+    let toasts = settle(&mut source);
+    assert_eq!(toasts.first(), Some(&UNKNOWN_CHANGE), "a transport error says unknown");
+    // The re-read succeeded, so the pane shows what the server has.
+    assert_eq!(source.general().storage_location, "Germany");
+    assert!(!source.pump().busy);
+
+    // Case 3: a 2xx with an unreadable body says unknown and re-reads.
+    account.put_mode.store(UNREADABLE, Ordering::SeqCst);
+    source.choose_location(2);
+    let toasts = settle(&mut source);
+    assert_eq!(toasts.first(), Some(&UNKNOWN_CHANGE), "an unreadable 2xx says unknown");
+    assert_eq!(source.general().storage_location, "Germany");
+    assert!(!source.pump().busy);
+}
+
+/// A read answered for one account is not shown after a sign-out: another session on the same engine
+/// never sees the first account's storage location.
+#[test]
+fn a_read_answered_for_one_account_is_not_shown_after_a_sign_out() {
+    let account = account("settings-account-a@example.eu");
+    let engine = signed_in(&account);
+    let mut source = EngineSettingsSource::for_identity(engine.clone(), &TEST);
+    settle(&mut source);
+    assert_eq!(source.general().storage_location, "Germany");
+
+    // Sign out: the source no longer shows the list or the location.
+    engine.sign_out_keeping_local_data().expect("signs out");
+    assert!(source.locations().is_none(), "signed out: no list");
+    assert_eq!(source.general().storage_location, "");
+    // Even pumping again does not bring it back (the data is still in `region` but `region_of` no
+    // longer matches the now-absent account).
+    source.pump();
+    assert!(source.locations().is_none(), "still no list after pump");
+}
+
+/// A panic in a worker thread clears the in-flight flag and shows the failed state; the source does not hang.
+#[test]
+fn a_worker_panic_clears_the_in_flight_flag() {
+    // Build a source whose engine is signed in, then inject a panic through a custom handler.
+    let account = account("settings-panic@example.eu");
+    let engine = signed_in(&account);
+    let mut source = EngineSettingsSource::for_identity(engine.clone(), &TEST);
+    settle(&mut source);
+    assert_eq!(source.general().storage_location, "Germany");
+    assert!(!source.reading && !source.writing);
+
+    // Drop the fake so the engine call panics or errors. Either way the flag must clear.
+    let Account { fake, .. } = account;
+    drop(fake);
+    source.read_region();
+    assert!(source.reading, "a read is in flight");
+    let toasts = settle(&mut source);
+    assert!(!source.reading, "the read flag is cleared after the worker returns");
+    assert!(!source.pump().busy, "the source is idle");
+
+    // A write that encounters a transport error also clears.
+    source.choose_location(2); // nothing to send to (the fake is gone), so it will error
+    settle(&mut source);
+    assert!(!source.writing, "the write flag is cleared");
 }
 
 /// A read that began before a change Beebeeb took lands late, with what the server held before it: it never

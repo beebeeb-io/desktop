@@ -44,9 +44,12 @@ const FRESH_FOR: Duration = Duration::from_secs(30);
 /// The id the account's default carries in Beebeeb's list (`account_dto::region`).
 const DEFAULT_ID: &str = "europe";
 
-/// What the toasts say. A refusal says that nothing changed: the old choice stands.
+/// What the toasts say. `NOT_CHOSEN` may be said ONLY after an HTTP refusal (a status code the
+/// server returned): the old choice stands. `UNKNOWN_CHANGE` is for a timeout, a transport error
+/// mid-flight, or a 2xx with an unreadable body: the change may have landed.
 pub const CHOSEN: &str = "Storage location updated";
 pub const NOT_CHOSEN: &str = "Couldn't change the storage location. Nothing changed.";
+pub const UNKNOWN_CHANGE: &str = "Couldn't confirm the change. Checking what the server has.";
 pub const THEME_NOT_SAVED: &str = "Couldn't save the theme on this PC.";
 
 /// What the "still saving" toast says: a change waits for the one before it.
@@ -243,10 +246,21 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
         let started = std::thread::Builder::new()
             .name("settings-region".into())
             .spawn(move || {
-                let before = account_of(&engine);
-                let answer = engine.storage_region();
-                let whose = same_account(&engine, before);
-                let _ = answers.send(Answer::Region(whose, generation, answer));
+                // A panic in this worker must not leave `reading` set for good: send an error.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let before = account_of(&engine);
+                    let answer = engine.storage_region();
+                    let whose = same_account(&engine, before);
+                    (whose, answer)
+                }));
+                match result {
+                    Ok((whose, answer)) => {
+                        let _ = answers.send(Answer::Region(whose, generation, answer));
+                    }
+                    Err(_) => {
+                        let _ = answers.send(Answer::Region(None, generation, Err(AccountCallError::Offline)));
+                    }
+                }
             });
         self.reading = started.is_ok();
         if started.is_err() {
@@ -265,12 +279,23 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
         let started = std::thread::Builder::new()
             .name("settings-region-set".into())
             .spawn(move || {
-                let before = account_of(&engine);
-                let stored = engine
-                    .set_storage_region(Some(&id), Some(strict))
-                    .map(|answer| (answer.preferred_region, answer.region_strict));
-                let whose = same_account(&engine, before);
-                let _ = answers.send(Answer::Chosen(whose, stored));
+                // A panic in this worker must not leave `writing` set for good: send an error.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let before = account_of(&engine);
+                    let stored = engine
+                        .set_storage_region(Some(&id), Some(strict))
+                        .map(|answer| (answer.preferred_region, answer.region_strict));
+                    let whose = same_account(&engine, before);
+                    (whose, stored)
+                }));
+                match result {
+                    Ok((whose, stored)) => {
+                        let _ = answers.send(Answer::Chosen(whose, stored));
+                    }
+                    Err(_) => {
+                        let _ = answers.send(Answer::Chosen(None, Err(AccountCallError::Offline)));
+                    }
+                }
             });
         self.writing = started.is_ok();
         if started.is_err() {
@@ -389,7 +414,19 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
                         (Err(kind), _) => {
                             log(format!("settings: the storage location was not changed ({kind})"));
                             if mine {
-                                pumped.toast = Some(NOT_CHOSEN);
+                                // "Nothing changed" only after an HTTP refusal (the server answered
+                                // and said no). A timeout, a transport error mid-flight, or an
+                                // unreadable 2xx: the change may have landed, so say the result is
+                                // unknown and re-read what the server has (P2-1, task 2473).
+                                match kind {
+                                    AccountCallError::ServerError | AccountCallError::SessionEnded => {
+                                        pumped.toast = Some(NOT_CHOSEN);
+                                    }
+                                    _ => {
+                                        pumped.toast = Some(UNKNOWN_CHANGE);
+                                        self.read_region();
+                                    }
+                                }
                             }
                         }
                     }
