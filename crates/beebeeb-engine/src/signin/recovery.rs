@@ -121,7 +121,7 @@ pub fn normalized_phrase(input: &str) -> Result<zeroize::Zeroizing<String>, Stri
     Ok(phrase)
 }
 
-/// [`normalized_phrase`] as a plain `String`, for the old shell's callers. The native phrase path never calls it.
+/// [`normalized_phrase`] for a caller that compares the text (the old shell's tests); no phrase path calls it.
 pub fn normalize_recovery_phrase_input(input: &str) -> Result<String, String> {
     normalized_phrase(input).map(|phrase| phrase.as_str().to_owned())
 }

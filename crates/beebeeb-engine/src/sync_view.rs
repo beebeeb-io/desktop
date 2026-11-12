@@ -57,7 +57,10 @@ pub struct SyncView {
     pub offline: bool,
     /// The server refused this session's token again and again (`AuthHealth`).
     pub session_ended: bool,
-    /// When a check last reached the server and finished (Unix seconds), as the engine reported it.
+    /// What the running engine last reported of itself (`engine-status`); `None` before its first report.
+    pub reported: Option<State>,
+    /// When the running engine's last finished check reached the server (Unix seconds), as its last report said;
+    /// `None` before its first finished check.
     pub last_check_at: Option<i64>,
 }
 
@@ -72,6 +75,7 @@ impl Default for SyncView {
             paused: false,
             offline: false,
             session_ended: false,
+            reported: None,
             last_check_at: None,
         }
     }
@@ -140,9 +144,8 @@ impl EngineHost for ViewHost {
             let (state, checked_at) = (status.status.state, status.status.last_tick_ok_at);
             self.cell.write(|view| {
                 view.offline = state == State::Offline;
-                if checked_at.is_some() {
-                    view.last_check_at = checked_at;
-                }
+                view.reported = Some(state);
+                view.last_check_at = checked_at;
             });
         }
         self.inner.event(event);

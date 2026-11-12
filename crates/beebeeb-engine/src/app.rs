@@ -266,6 +266,12 @@ impl<C: CredentialStores> Engine<C> {
         view
     }
 
+    /// Test builds only: the view as a start or a stop leaves it, for a test that fills the engine slot itself.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_view_for_test(&self, change: impl FnOnce(&mut SyncView)) {
+        self.view.write(change);
+    }
+
     /// The end of a transition: the view's gate is the gate now, and the window is woken to read it.
     fn publish(&self) {
         let gate = self.gate();
@@ -721,10 +727,14 @@ impl<C: CredentialStores> Engine<C> {
                     )
                 });
             }
-            // Before the task exists: its first report must find the view saying it runs.
+            // Before the task exists: its first report must find the view saying it runs, and nothing an earlier
+            // engine said is taken for this one's.
             self.view.write(|view| {
                 view.start = Start::Running;
                 view.attempt += 1;
+                view.offline = false;
+                view.reported = None;
+                view.last_check_at = None;
             });
             let (token, key) = keys;
             *slot = Some(EngineRunner::spawn(
@@ -1092,3 +1102,7 @@ impl account_binding::LocalData for LocalState {
             .map_err(|e| format!("adopt the local data owner: {e}"))
     }
 }
+
+#[cfg(test)]
+#[path = "sync_start_tests.rs"]
+mod sync_start_tests;
