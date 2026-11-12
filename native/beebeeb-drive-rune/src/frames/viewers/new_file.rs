@@ -397,6 +397,30 @@ fn inset(width: f32, color: Color) -> Shadow {
     }
 }
 
+/// An inset ring as the board's browser paints one in this dialog, for the first child of the box it
+/// rings (it takes no room; content drawn after it lies over it, as over a CSS inset shadow). The
+/// dialog is centred on a quarter point, so a box's top and bottom edges fall on half a device pixel.
+/// There the browser clips the shadow to the box and also anti-aliases the shadow's own edge: the
+/// outer, half-covered row gets a quarter of the ring's colour, the inner one half (measured on
+/// DW-1521's tiles: 186 over the selection's 242 for the dark ring, 200 over 232 for a document's
+/// outline). A ring drawn under a hard-edged clip of the same box mixes the same way, and on whole
+/// pixels (the left and right edges) it is as before.
+fn ring_under_clip(key: String, width: f32, radius: f32, color: Color) -> El {
+    el().key(key)
+        .a11y_hidden()
+        .absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .clip_rounded(0.0)
+        .child(
+            el().absolute(0.0, 0.0)
+                .w_full()
+                .h_full()
+                .radius(radius)
+                .box_shadow(inset(width, color)),
+        )
+}
+
 /// One type (DW-1521): a tile with the outline of a document holding the extension, the word under
 /// it. `x`: where the board lays the tile out, from the body's left edge.
 fn type_tile(kind: Kind, on: bool, x: f32, t: &Theme) -> El {
@@ -410,9 +434,10 @@ fn type_tile(kind: Kind, on: bool, x: f32, t: &Theme) -> El {
         .size(DOC_W, 54.0)
         .ml(doc_left - tile_left)
         .radius(4.0)
-        .box_shadow(inset(1.5, t.text_tertiary))
         .center()
+        .child(ring_under_clip(format!("{key}-doc-ring"), 1.5, 4.0, t.text_tertiary))
         .child(kit::label(format!("{key}-ext"), kind.ext(), DOC_EXT, t.text_secondary).offset(doc_x - doc_left, 0.0));
+    let (ring_width, ring_color) = if on { (2.0, t.text) } else { (kit::HAIR, t.separator) };
     let tile = col()
         .key(key)
         .role("radio")
@@ -426,6 +451,7 @@ fn type_tile(kind: Kind, on: bool, x: f32, t: &Theme) -> El {
         .focusable(true)
         .focus_ring(2.0, 2.0, t.accent_deep)
         .cursor(rune::Cursor::Pointer)
+        .child(ring_under_clip(format!("{key}-ring"), ring_width, 10.0, ring_color))
         .child(doc)
         .child(
             row().key(format!("{key}-word")).w_full().justify_center().child(
@@ -444,9 +470,9 @@ fn type_tile(kind: Kind, on: bool, x: f32, t: &Theme) -> El {
             go_on(s);
         });
     if on {
-        tile.fill(t.selection).box_shadow(inset(2.0, t.text))
+        tile.fill(t.selection)
     } else {
-        tile.box_shadow(kit::ring_inset(t.separator)).hover(t.hover)
+        tile.hover(t.hover)
     }
 }
 
