@@ -11,9 +11,16 @@
 //! frame gate, the main window of a headless run ([`scene`], state `State`; `--scene DW-1203
 //! --size 340x520`). [`Host`] is the one difference between them: where the [`Ui`] lives and
 //! who carries out what it asks for.
+//!
+//! What it draws comes from a [`TraySource`]: in the running app the engine's
+//! (`engine_host::EngineTraySource`, put in place by [`on_engine`]; its words are `live.rs`'s),
+//! in the frame gate's scenes and in a run without an engine the board's fixture.
 
 mod commands;
 mod icons;
+pub mod live;
+#[cfg(test)]
+mod live_tests;
 pub mod shortcuts;
 #[cfg(test)]
 mod shortcuts_tests;
@@ -95,7 +102,8 @@ impl Ui {
         Ui::board("DW-1202").unwrap_or_else(|| unreachable!("DW-1202 is a flyout frame"))
     }
 
-    /// The flyout of the running app: the fixture, on the frame the shell's tray state names.
+    /// The flyout of a run without an engine (tooling, `--db`, tests): the fixture, on the frame
+    /// the shell's tray state names. The app on the real engine replaces it ([`on_engine`]).
     pub fn following(shell: &TrayInputs) -> Ui {
         let mut ui = Ui::fixture();
         ui.follow(shell);
@@ -147,9 +155,9 @@ impl Ui {
         }
     }
 
-    /// The status block's button.
+    /// The status block's button, as drawn ([`Snapshot::button`]).
     pub fn press_action(&mut self) {
-        let Some((action, _)) = self.snapshot.status.action() else {
+        let Some((action, _)) = self.snapshot.button else {
             return;
         };
         self.source.act(action);
@@ -261,6 +269,22 @@ const FLYOUT: Host<FlyoutState> = Host {
     ui: |s| &mut s.tray,
     after: carry_out,
 };
+
+/// The flyout of the app on the real engine: the engine's source in place of the board's
+/// fixture (`shell::run` is the one caller; without an engine the flyout keeps following the
+/// fixture, [`Ui::following`]). From here the flyout reads the engine itself, also while the
+/// main window is closed: every snapshot first takes what the engine reported
+/// (`LiveEngine::drain`).
+pub fn on_engine<C: beebeeb_engine::app::CredentialStores>(
+    mut flyout: FlyoutState,
+    live: Option<std::sync::Arc<crate::engine_host::LiveEngine<C>>>,
+) -> FlyoutState {
+    if let Some(live) = live {
+        flyout.tray = Ui::new(Box::new(crate::engine_host::EngineTraySource::new(live)));
+        flyout.tray.follow(&flyout.inputs);
+    }
+    flyout
+}
 
 /// The flyout's content (`registry::FLYOUT`).
 pub fn view(s: &FlyoutState, cx: &mut Cx<FlyoutState>) -> El {

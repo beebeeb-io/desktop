@@ -561,10 +561,10 @@ fn names_and_roles() {
     assert_eq!(
         Status::Syncing {
             files: 1,
-            left: String::new(),
-            about: String::new(),
-            fraction: 0.0,
-            speed: String::new()
+            left: None,
+            about: None,
+            fraction: None,
+            speed: None
         }
         .title("Beebeeb"),
         "Syncing 1 file"
