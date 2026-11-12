@@ -169,7 +169,15 @@ fn the_types_are_one_radio_group_and_the_arrows_choose_one() {
         Some(Kind::PowerPoint),
         "Left from the first wraps to the last"
     );
-    // A key the dialog does not use stops at it: Delete never reaches the selected file behind it.
+    // A key the dialog does not use stops at it. The Files window answers Ctrl+F wherever focus is
+    // (the search field), and Delete moves the selected file to Trash: neither reaches it.
+    press_with(&mut rt, Key::Command('f'), ctrl());
+    rt.frame(0.0);
+    assert_eq!(
+        focused(&rt).as_deref(),
+        Some("type-4"),
+        "Ctrl+F reached the window behind the dialog"
+    );
     press(&mut rt, Key::Delete);
     assert_eq!(dialog_step(&rt), Some(Step::Pick));
     assert!(
