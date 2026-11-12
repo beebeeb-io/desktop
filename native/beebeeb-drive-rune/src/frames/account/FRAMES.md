@@ -4,9 +4,9 @@ Source: `design/desktop-v2/frames.json`, Windows tab, the five account groups (2
 draws each `DM-Axx` for Windows under the same number as `DW-Axx`). Every frame is the 960 x 640 window
 (a 958 x 638 client area), in the account kit's settings view (`.au-set`).
 
-Status at the end of this lane's run (2026-11-11): 8 of 29 built, 7 of them with every gate line at 0 failing in both
-themes, 1 with its one red line named; 21 not built (hand-over in the pull request). The built frames are the scenes of
-`frames::account::FRAMES`.
+Status at the end of this lane's second run (2026-11-12): 29 of 29 built. 58 gate runs (29 frames, light and dark):
+51 with every line at 0 failing, 7 with a red pixel line, each named in its row (9 keyed elements in all; no
+geometry, text, icon or fill line is red). The built frames are the scenes of `frames::account::FRAMES`.
 
 ## Account in settings (8)
 
@@ -25,39 +25,39 @@ themes, 1 with its one red line named; 21 not built (hand-over in the pull reque
 
 | Frame | What it is | Status |
 | --- | --- | --- |
-| `DW-A64` | Change the account's display name. | not built (this lane stopped at its budget) |
-| `DW-A65` | Change the sign-in email: the new address and the password. | not built (this lane stopped at its budget) |
-| `DW-A66` | Prove the new address: the 8-digit code. | not built (this lane stopped at its budget) |
-| `DW-A67` | Change the password. | not built (this lane stopped at its budget) |
-| `DW-A68` | The current password was wrong: nothing changed. | not built (this lane stopped at its budget) |
+| `DW-A64` | Change the account's display name. | built (light and dark: 0 failing on all six lines) |
+| `DW-A65` | Change the sign-in email: the new address and the password. | built; light: 0 failing on all six lines; dark: 1 pixel line red (`field-0-caret edge 10 > 9`) |
+| `DW-A66` | Prove the new address: the 8-digit code. | built (light and dark: 0 failing on all six lines) |
+| `DW-A67` | Change the password. | built (light and dark: 0 failing on all six lines) |
+| `DW-A68` | The current password was wrong: nothing changed. | built (light and dark: 0 failing on all six lines) |
 
 ## Two-factor and passkeys in settings (8)
 
 | Frame | What it is | Status |
 | --- | --- | --- |
-| `DW-A69` | Turn on two-factor with an authenticator app: QR code, key, 6-digit code. | not built (this lane stopped at its budget) |
-| `DW-A70` | The 8 single-use backup codes, shown once. | not built (this lane stopped at its budget) |
-| `DW-A71` | Two-factor status, the backup codes left, and the ways to change it. | not built (this lane stopped at its budget) |
-| `DW-A72` | Confirm turning two-factor off with a current code. | not built (this lane stopped at its budget) |
-| `DW-A73` | The account's passkeys, and adding one. | not built (this lane stopped at its budget) |
-| `DW-A74` | Passkeys with none added. | not built (this lane stopped at its budget) |
-| `DW-A75` | The menu on one passkey: Rename, Remove. | not built (this lane stopped at its budget) |
-| `DW-A76` | Confirm removing a passkey. | not built (this lane stopped at its budget) |
+| `DW-A69` | Turn on two-factor with an authenticator app: QR code, key, 6-digit code. | built (light and dark: 0 failing on all six lines) |
+| `DW-A70` | The 8 single-use backup codes, shown once. | built (light and dark: 0 failing on all six lines) |
+| `DW-A71` | Two-factor status, the backup codes left, and the ways to change it. | built (light and dark: 0 failing on all six lines) |
+| `DW-A72` | Confirm turning two-factor off with a current code. | built; 1 pixel line red in each theme (`digit-2 edge 31 > 9` light, `25 > 9` dark: the focus ring of a box on a half device pixel) |
+| `DW-A73` | The account's passkeys, and adding one. | built (light and dark: 0 failing on all six lines) |
+| `DW-A74` | Passkeys with none added. | built (light and dark: 0 failing on all six lines) |
+| `DW-A75` | The menu on one passkey: Rename, Remove. | built (light and dark: 0 failing on all six lines) |
+| `DW-A76` | Confirm removing a passkey. | built (light and dark: 0 failing on all six lines) |
 
 ## Sign-in activity (3)
 
 | Frame | What it is | Status |
 | --- | --- | --- |
-| `DW-A77` | Sign-ins and security changes, with time, country and address; the security-logging switch. | not built (this lane stopped at its budget) |
-| `DW-A78` | The confirm before security logging stops. | not built (this lane stopped at its budget) |
-| `DW-A79` | Sign-in activity while security logging is off. | not built (this lane stopped at its budget) |
+| `DW-A77` | Sign-ins and security changes, with time, country and address; the security-logging switch. | built (light and dark: 0 failing on all six lines) |
+| `DW-A78` | The confirm before security logging stops. | built; light: 1 pixel line red (`digit-2 edge 31 > 9`); dark: 3 (`digit-2 edge 25`, `list-2-body edge 11`, `item-2-0 edge 11`) |
+| `DW-A79` | Sign-in activity while security logging is off. | built (light and dark: 0 failing on all six lines) |
 
 ## Delete the account (5)
 
 | Frame | What it is | Status |
 | --- | --- | --- |
-| `DW-A58` | Step 1 of 4: what goes, the 72 hours to undo, the password. | not built (this lane stopped at its budget) |
-| `DW-A80` | Step 2 of 4: the second factor. | not built (this lane stopped at its budget) |
-| `DW-A81` | Step 3 of 4: confirm by an email link. | not built (this lane stopped at its budget) |
-| `DW-A82` | Step 4 of 4: the deletion is scheduled, when, and how to undo it. | not built (this lane stopped at its budget) |
-| `DW-A83` | The undo worked: nothing was deleted. | not built (this lane stopped at its budget) |
+| `DW-A58` | Step 1 of 4: what goes, the 72 hours to undo, the password. | built (light and dark: 0 failing on all six lines) |
+| `DW-A80` | Step 2 of 4: the second factor. | built (light and dark: 0 failing on all six lines) |
+| `DW-A81` | Step 3 of 4: confirm by an email link. | built; light: 1 pixel line red (`set-main tile 27 > 26`); dark: 0 failing on all six lines |
+| `DW-A82` | Step 4 of 4: the deletion is scheduled, when, and how to undo it. | built (light and dark: 0 failing on all six lines) |
+| `DW-A83` | The undo worked: nothing was deleted. | built (light and dark: 0 failing on all six lines) |

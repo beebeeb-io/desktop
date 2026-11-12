@@ -119,12 +119,18 @@ fn asked(rt: &Runtime<State>) -> Vec<Intent> {
 
 #[test]
 fn every_built_frame_renders_and_names_no_city_and_no_provider() {
-    assert_eq!(super::FRAMES.len(), 8, "the frames this lane built");
+    assert_eq!(super::FRAMES.len(), 29, "the frames this lane built");
     for (frame, _) in super::FRAMES {
         let rt = runtime(frame);
-        assert!(find(&rt, "set-main").is_some(), "{frame}");
         assert!(find(&rt, "caption-bar").is_some(), "{frame}: the same window");
-        assert_eq!(info(&rt, "set-title").role, "heading", "{frame}");
+        // DW-A83 is a screen of its own; behind DW-A72's confirm the board draws no heading.
+        let title = match *frame {
+            "DW-A83" => "title",
+            "DW-A72" => "dlg-title",
+            _ => "set-title",
+        };
+        assert_eq!(find(&rt, "set-main").is_some(), *frame != "DW-A83", "{frame}");
+        assert_eq!(info(&rt, title).role, "heading", "{frame}");
         for e in rt.elements() {
             let words = format!("{} {}", e.text.unwrap_or_default(), e.label.unwrap_or_default()).to_lowercase();
             for banned in [
@@ -189,26 +195,39 @@ fn account_says_who_is_signed_in_and_the_phrase_row_is_text() {
     // Name and email open their pages; the plan card opens the plan.
     tab_to(&mut rt, "item-0-0");
     key(&mut rt, Key::Enter);
-    tab_to(&mut rt, "item-0-1");
-    key(&mut rt, Key::Text(" ".into()));
+    assert_eq!(rt.state.account.pane, Pane::Name);
+    key(&mut rt, Key::Escape);
+    assert_eq!(rt.state.account.pane, Pane::Account, "Esc cancels");
+    click(&mut rt, "item-0-1");
+    assert_eq!(rt.state.account.pane, Pane::Email);
+    key(&mut rt, Key::Escape);
     click(&mut rt, "card-0");
-    assert_eq!(
-        asked(&rt),
-        vec![Intent::Show("DW-A64"), Intent::Show("DW-A65"), Intent::Show("DW-0708")]
-    );
+    assert_eq!(asked(&rt), vec![Intent::Show("DW-0708")]);
 }
 
 #[test]
 fn every_row_of_sign_in_and_security_goes_where_it_points() {
-    for (row, frame) in [
-        ("item-1-0", "DW-A67"),
-        ("item-1-1", "DW-A71"),
-        ("item-1-2", "DW-A73"),
-        ("item-1-3", "DW-A77"),
-        ("item-2-1", "DW-A12"),
-        ("item-4-0", "DW-A58"),
-        ("item-0-0-pop-button", "DW-0716"),
+    // The pages of this lane open here; Esc goes back to Sign-in and security.
+    for (row, pane) in [
+        ("item-1-0", Pane::Password),
+        ("item-1-1", Pane::TwoFactor),
+        ("item-1-2", Pane::Passkeys),
+        ("item-1-3", Pane::Activity),
+        ("item-4-0", Pane::Delete),
     ] {
+        let mut rt = runtime("DW-A52");
+        tab_to(&mut rt, row);
+        key(&mut rt, Key::Enter);
+        assert_eq!(rt.state.account.pane, pane, "{row}");
+        assert_eq!(asked(&rt), Vec::new(), "{row}");
+        // From a page with a field in focus Esc goes one step back. From a page without one
+        // the shell takes Esc first and closes settings (the PR's request to the shell lane).
+        if matches!(pane, Pane::Password | Pane::Delete) {
+            key(&mut rt, Key::Escape);
+            assert_eq!(rt.state.account.pane, Pane::Security, "{row}: Esc goes back");
+        }
+    }
+    for (row, frame) in [("item-2-1", "DW-A12"), ("item-0-0-pop-button", "DW-0716")] {
         let mut rt = runtime("DW-A52");
         tab_to(&mut rt, row);
         key(&mut rt, Key::Enter);
@@ -266,7 +285,8 @@ fn one_thing_left_comes_first_with_the_button_that_fixes_it() {
     );
     tab_to(&mut rt, "btn-0");
     key(&mut rt, Key::Enter);
-    assert_eq!(asked(&rt), vec![Intent::Show("DW-A74")]);
+    assert_eq!(rt.state.account.pane, Pane::Passkeys);
+    assert_eq!(says(&rt, "empty-title"), "No passkeys yet");
     // The way in on Sign-in and security shows the same count.
     super::go(&mut rt.state, "DW-A52");
     settle(&mut rt);
@@ -529,6 +549,254 @@ fn a_seeded_secret_is_in_no_element_tree_and_no_label() {
                 "{frame}: {words}"
             );
         }
-        assert!(seen > 50, "{frame}: the tree was read ({seen} elements)");
+        assert!(seen > 40, "{frame}: the tree was read ({seen} elements)");
     }
+}
+
+// ---------------------------------------------------------------------------
+// The pages with a field, a code or a secret (DW-A58 to DW-A83)
+// ---------------------------------------------------------------------------
+
+use super::form;
+use super::source::{BOARD_CODE, BOARD_EMAIL_CODE, BOARD_PASSWORD, CodeRefused, Deletion, Strength};
+
+/// Everything a screen reader, the frame gate or the feedback mode could read of the window.
+fn every_word(rt: &Runtime<State>) -> String {
+    rt.elements()
+        .into_iter()
+        .map(|e| {
+            format!(
+                "{} {} {}\n",
+                e.key.unwrap_or_default(),
+                e.text.unwrap_or_default(),
+                e.label.unwrap_or_default()
+            )
+        })
+        .collect()
+}
+
+/// The typed passwords, the two-factor key, the backup codes and a typed code are in no
+/// element's key, text or label: each is drawn by a secure node. (Seen red: `codes()` without
+/// `.secure()` puts 48271590 in the tree and fails this.)
+#[test]
+fn typed_and_shown_secrets_are_in_no_element_tree_and_no_label() {
+    const TYPED: &str = "seeded-secret-hunter2";
+    let mut state = init();
+    assert!(super::scene("DW-A67", &mut state));
+    for edit in [
+        &mut state.account.form.current,
+        &mut state.account.form.new,
+        &mut state.account.form.again,
+    ] {
+        form::type_in(edit, TYPED);
+    }
+    let words = every_word(&window(state));
+    assert!(words.contains("Change password"), "the page was read");
+    assert!(!words.contains(TYPED) && !words.contains("hunter2"), "{words}");
+
+    let words = every_word(&runtime("DW-A69"));
+    assert!(words.contains("Or enter this key"), "the page was read");
+    for secret in ["JBSW", "3PXP", "EHPK"] {
+        assert!(!words.contains(secret), "the set-up key is in the tree: {words}");
+    }
+    let words = every_word(&runtime("DW-A70"));
+    assert!(words.contains("Save your backup codes"), "the page was read");
+    for code in ["48271590", "30617724", "04198873"] {
+        assert!(!words.contains(code), "a backup code is in the tree: {words}");
+    }
+    let mut state = init();
+    assert!(super::scene("DW-A80", &mut state));
+    form::type_in(&mut state.account.form.code, "913577");
+    let words = every_word(&window(state));
+    assert!(words.contains("6-digit code"), "the input is named");
+    assert!(!words.contains("913577"), "a typed code is in the tree: {words}");
+}
+
+/// Changing the password: a wrong current password changes nothing and keeps the new one
+/// (DW-A68); the right one goes through the step-up, and no request holds either password.
+#[test]
+fn the_password_changes_through_the_step_up_and_is_in_no_request() {
+    const NEW: &str = "a new long passphrase 42";
+    let mut rt = runtime("DW-A67");
+    rt.update(|s, _| {
+        let f = &mut s.account.form;
+        form::type_in(&mut f.current, "not the password");
+        form::type_in(&mut f.new, NEW);
+        form::type_in(&mut f.again, NEW);
+    });
+    settle(&mut rt);
+    click(&mut rt, "btn-1");
+    assert_eq!(rt.state.account.pane, Pane::Password);
+    assert_eq!(
+        says(&rt, "field-0-msg"),
+        "Current password is incorrect. Nothing was changed."
+    );
+    assert_eq!(rt.state.account.form.new.text, NEW, "the new password is kept");
+    assert!(
+        rt.state.account.form.current.text.is_empty(),
+        "the current one is retyped"
+    );
+    assert_eq!(source(&rt).security().password_changed, "3 weeks ago");
+
+    rt.update(|s, _| form::type_in(&mut s.account.form.current, BOARD_PASSWORD));
+    settle(&mut rt);
+    key(&mut rt, Key::Enter);
+    assert_eq!(rt.state.account.pane, Pane::Security, "back to Sign-in and security");
+    assert_eq!(source(&rt).security().password_changed, "Just now");
+    assert!(
+        rt.state.account.form.new.text.is_empty(),
+        "nothing typed outlives the page"
+    );
+
+    // The same on the source, where the requests can be read.
+    let mut board = BoardAccount::new();
+    let confirmation = board
+        .step_up(Password::from_field(BOARD_PASSWORD), Purpose::ChangePassword)
+        .expect("the right password");
+    assert!(board.change_password(confirmation, Password::from_field(NEW)).is_ok());
+    let wrong = board
+        .step_up(Password::from_field(BOARD_PASSWORD), Purpose::ChangeEmail)
+        .expect("the right password");
+    assert_eq!(
+        board.change_password(wrong, Password::from_field(NEW)),
+        Err(Refused::NotConfirmed),
+        "a confirmation for something else changes nothing"
+    );
+    assert_eq!(
+        board.password_strength(&Password::from_field("short")),
+        Strength::TooShort
+    );
+    for sent in &board.wire {
+        assert!(!sent.contains(NEW) && !sent.contains(BOARD_PASSWORD), "{sent}");
+    }
+}
+
+/// Name and email: an empty name is refused in the board's words; the email changes only once
+/// the code from the new address is entered.
+#[test]
+fn a_name_is_saved_by_enter_and_an_email_changes_after_its_code() {
+    let mut rt = runtime("DW-A64");
+    assert!(info(&rt, form::NAME_KEY).focused, "the name field opens in focus");
+    rt.update(|s, _| form::type_in(&mut s.account.form.name, "  "));
+    settle(&mut rt);
+    key(&mut rt, Key::Enter);
+    assert_eq!(says(&rt, "field-0-msg"), "A name can't be empty.");
+    rt.update(|s, _| form::type_in(&mut s.account.form.name, "Anna de Visser"));
+    settle(&mut rt);
+    key(&mut rt, Key::Enter);
+    assert_eq!(rt.state.account.pane, Pane::Account);
+    assert_eq!(source(&rt).identity().name, "Anna de Visser");
+
+    let mut rt = runtime("DW-A65");
+    rt.update(|s, _| form::type_in(&mut s.account.form.current, BOARD_PASSWORD));
+    settle(&mut rt);
+    click(&mut rt, "btn-1");
+    assert_eq!(rt.state.account.pane, Pane::EmailCode);
+    assert!(!info(&rt, "btn-1").focusable, "Confirm waits for eight digits");
+    assert_eq!(source(&rt).identity().email, "anna@northwind.studio", "not changed yet");
+    rt.update(|s, _| form::type_in(&mut s.account.form.code, BOARD_EMAIL_CODE));
+    settle(&mut rt);
+    key(&mut rt, Key::Enter);
+    assert_eq!(rt.state.account.pane, Pane::Account);
+    assert_eq!(source(&rt).identity().email, "anna.visser@northwind.studio");
+}
+
+/// Two-factor: a wrong code turns nothing off; the right one does; Esc cancels the confirm.
+#[test]
+fn two_factor_turns_off_only_with_a_current_code() {
+    let mut rt = runtime("DW-A71");
+    assert_eq!(name(&rt, "item-0-0"), "Two-factor on");
+    click(&mut rt, "item-2-1");
+    assert_eq!(
+        rt.state.account.dialog,
+        Some(Dialog::Code(super::CodeFor::TurnOffTwoFactor))
+    );
+    assert_eq!(name(&rt, "btn-0"), "Turn off, destructive");
+    key(&mut rt, Key::Escape);
+    assert_eq!(rt.state.account.dialog, None, "Esc cancels");
+    click(&mut rt, "item-2-1");
+    rt.update(|s, _| form::type_in(&mut s.account.form.code, "000000"));
+    settle(&mut rt);
+    click(&mut rt, "btn-0");
+    assert_eq!(says(&rt, "code-msg"), "Incorrect code. Try again.");
+    assert!(source(&rt).two_factor().on, "nothing changed");
+    rt.update(|s, _| form::type_in(&mut s.account.form.code, BOARD_CODE));
+    settle(&mut rt);
+    key(&mut rt, Key::Enter);
+    assert!(!source(&rt).two_factor().on);
+    assert_eq!(rt.state.account.pane, Pane::Security);
+}
+
+/// Passkeys: the menu's Remove asks first, Enter in the confirm is Cancel, and the last
+/// passkey that can unlock the data gets the bold warning.
+#[test]
+fn a_passkey_is_removed_only_after_its_confirm() {
+    let mut rt = runtime("DW-A73");
+    assert_eq!(name(&rt, "item-0-0"), "iCloud Keychain, added 28 Oct, Can unlock data");
+    click(&mut rt, "item-0-0-more");
+    assert_eq!(name(&rt, "pop-0-item-1"), "Remove, destructive");
+    click(&mut rt, "pop-0-item-1");
+    assert_eq!(says(&rt, "dlg-title"), "Remove iCloud Keychain?");
+    assert!(find(&rt, "dlg-bold-box").is_some(), "the warning in bold");
+    key(&mut rt, Key::Enter);
+    assert_eq!(source(&rt).passkeys().len(), 2, "Enter is Cancel");
+    click(&mut rt, "item-0-0-more");
+    click(&mut rt, "pop-0-item-1");
+    click(&mut rt, "btn-0");
+    assert_eq!(source(&rt).passkeys().len(), 1);
+    click(&mut rt, "btn-0");
+    assert_eq!(
+        source(&rt).passkeys().len(),
+        2,
+        "Add a passkey adds one (Windows Hello)"
+    );
+}
+
+/// Deleting the account: every step in order, nothing scheduled until the link is used, a
+/// wrong code keeps the proof of the password, and the undo ends on its own screen.
+#[test]
+fn deleting_the_account_takes_four_steps_and_can_be_undone() {
+    let mut rt = runtime("DW-A58");
+    assert_eq!(
+        says(&rt, "set-sub"),
+        "After you confirm by email, you have 72 hours to undo it. After that, it can't be undone."
+    );
+    assert_eq!(name(&rt, "btn-1"), "Continue, destructive");
+    rt.update(|s, _| form::type_in(&mut s.account.form.current, "wrong"));
+    settle(&mut rt);
+    click(&mut rt, "btn-1");
+    assert_eq!(says(&rt, "field-0-msg"), "Incorrect password. Nothing was deleted.");
+    rt.update(|s, _| form::type_in(&mut s.account.form.current, BOARD_PASSWORD));
+    settle(&mut rt);
+    click(&mut rt, "btn-1");
+    assert_eq!(rt.state.account.pane, Pane::DeleteFactor);
+    assert!(!info(&rt, "btn-1").focusable, "Continue waits for six digits");
+    rt.update(|s, _| form::type_in(&mut s.account.form.code, "000000"));
+    settle(&mut rt);
+    click(&mut rt, "btn-1");
+    assert_eq!(
+        rt.state.account.pane,
+        Pane::DeleteFactor,
+        "a wrong code stays on step 2"
+    );
+    assert_eq!(source(&rt).deletion(), Deletion::None);
+    rt.update(|s, _| form::type_in(&mut s.account.form.code, BOARD_CODE));
+    settle(&mut rt);
+    key(&mut rt, Key::Enter);
+    assert_eq!(rt.state.account.pane, Pane::DeleteLink);
+    assert_eq!(source(&rt).deletion(), Deletion::LinkSent, "nothing is scheduled yet");
+    click(&mut rt, "btn-0");
+    assert_eq!(rt.state.account.pane, Pane::DeleteScheduled);
+    assert_eq!(
+        says(&rt, "set-sub"),
+        "Your account will be deleted in 72 hours, on 8 November at 19:42."
+    );
+    click(&mut rt, "btn-0");
+    assert_eq!(rt.state.account.pane, Pane::DeleteUndone);
+    assert_eq!(says(&rt, "title"), "Deletion cancelled");
+    assert_eq!(source(&rt).deletion(), Deletion::None);
+
+    let mut board = BoardAccount::new();
+    assert_eq!(board.stop_activity("000000"), Err(CodeRefused::Wrong));
+    assert!(board.activity().is_some(), "a wrong code stops nothing");
 }

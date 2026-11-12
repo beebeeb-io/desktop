@@ -40,14 +40,12 @@ fn setup(f: &Form, t: &Theme) -> El {
         return set::pane(Vec::new(), t);
     };
     let complete = form::code(f, 6).len() == 6;
-    let copy = fm::link(0, "Copy key", fm::CAP, false, t)
-        .w_full()
-        .on_press_tx(|s: &mut State, tx: &mut Tx| {
-            let f = &mut s.account.form;
-            if let Some(setup) = &f.setup {
-                f.copied = Some(tx.copy_secret(setup.key.expose(), CLIPBOARD_CLEARS));
-            }
-        });
+    let copy = fm::link_block(0, "Copy key", fm::CAP, t).on_press_tx(|s: &mut State, tx: &mut Tx| {
+        let f = &mut s.account.form;
+        if let Some(setup) = &f.setup {
+            f.copied = Some(tx.copy_secret(setup.key.expose(), CLIPBOARD_CLEARS));
+        }
+    });
     let (cancel, cancel_b) = button(0, "Cancel", Look::Plain, false, t);
     let (turn_on_el, turn_on_b) = button(1, "Turn on", Look::Primary, !complete, t);
     let turn_on_el = if complete {

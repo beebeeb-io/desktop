@@ -102,9 +102,13 @@ pub fn field(
         .label(spec.label)
         .single_line()
         .color(t.text)
-        .caret(t.accent_deep, t.selection)
+        .caret(Color::TRANSPARENT, t.selection)
         .invalid(spec.error)
         .on_edit(on_edit)
+        // Esc in a field is the page's Esc (cancel, go back): the field does not keep it.
+        .on_input_key(|s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx| {
+            ev.key == rune::Key::Escape && crate::frames::account::on_key(s, ev, tx)
+        })
         .grow(1.0)
         .min_w(0.0);
     if let Some(message) = spec.message {
@@ -144,15 +148,28 @@ pub fn field(
             .w(width)
             .h_full(),
     );
-    if focused && edit.focus >= edit.text.len() {
-        // Where the caret stands at the end of the text (`.kit-caret`: 1.5 x 17). Rune draws
-        // the caret itself; this box is its place, for the gate's geometry.
-        inner = inner.child(
-            el().key(format!("{key}-caret"))
-                .a11y_hidden()
-                .absolute(width + 1.0, 4.5)
-                .size(1.5, 17.0),
-        );
+    if focused {
+        // The caret as the board draws it (`.kit-caret`: 1.5 x 17, 1 pt after the character it
+        // follows), where the model says it stands. Rune's own caret is 2 pt wide and touches
+        // the text, so it is left unseen (see the PR's Rune notes); this one does not blink.
+        let before = edit.text[..edit.focus.min(edit.text.len())].chars().count();
+        let x = match shown.as_deref() {
+            Some(shown) => {
+                let end = shown.char_indices().nth(before).map_or(shown.len(), |(at, _)| at);
+                rune::text::advance(&shown[..end], style)
+            }
+            None => 0.0,
+        };
+        if shown.is_some() {
+            inner = inner.child(
+                el().key(format!("{key}-caret"))
+                    .a11y_hidden()
+                    .absolute(x + 1.0, 4.5)
+                    .size(1.5, 17.0)
+                    .radius(1.0)
+                    .fill(t.accent_deep),
+            );
+        }
     }
     well = well.child(inner);
     let mut wrap = col().key(format!("{key}-wrap")).w_full().gap(6.0).child(
@@ -220,7 +237,7 @@ pub fn digits(
     t: &Theme,
 ) -> El {
     let typed: Vec<char> = edit.text.chars().filter(char::is_ascii_digit).take(count).collect();
-    let mut boxes = row().key("digits").gap(8.0);
+    let mut boxes = row().key("digits").pixel_snap(false).gap(8.0);
     for i in 0..count {
         let key = format!("digit-{}", first + i);
         let active = edit.focused && i == typed.len().min(count - 1) && typed.len() < count;
@@ -233,14 +250,7 @@ pub fn digits(
         b = if active {
             b.fill(t.card)
                 .box_shadow(kit::ring(3.0, t.accent.alpha(0.40)))
-                .box_shadow(rune::Shadow {
-                    x: 0.0,
-                    y: 0.0,
-                    blur: 0.0,
-                    spread: 1.0,
-                    color: t.accent_deep,
-                    inset: true,
-                })
+                .border(1.0, t.accent_deep)
         } else {
             b.fill(t.field).box_shadow(kit::ring_inset(t.separator))
         };
@@ -268,12 +278,17 @@ pub fn digits(
         .color(Color::TRANSPARENT)
         .caret(Color::TRANSPARENT, Color::TRANSPARENT)
         .on_edit(on_edit)
-        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-        .opacity(0.0);
+        // Esc in a field is the page's Esc (cancel, go back): the field does not keep it.
+        .on_input_key(|s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx| {
+            ev.key == rune::Key::Escape && crate::frames::account::on_key(s, ev, tx)
+        })
+        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0));
+    // Not snapped to whole pixels: a confirm is centred on quarter points, as the board's is.
     el().key("secure-code")
+        .pixel_snap(false)
         .w_full()
         .center()
-        .child(el().child(boxes).child(input))
+        .child(el().pixel_snap(false).child(boxes).child(input))
 }
 
 /// The underline of a link, as the board's browser draws it (skipping the ink of descenders):
@@ -310,6 +325,15 @@ fn underline_bars(label: &str, style: TextStyle) -> Vec<(f32, f32)> {
 /// An underlined link (`.au-link`) in `style` (11px in a caption, 12px in a paragraph).
 /// `dimmed`: not pressable now (a countdown runs). Key: `link-<N>`.
 pub fn link(index: usize, label: &str, style: TextStyle, dimmed: bool, t: &Theme) -> El {
+    link_in(index, label, style, dimmed, false, t)
+}
+
+/// [`link`] as a block: its box is the column's width (DW-A69's Copy key).
+pub fn link_block(index: usize, label: &str, style: TextStyle, t: &Theme) -> El {
+    link_in(index, label, style, false, true, t).w_full()
+}
+
+fn link_in(index: usize, label: &str, style: TextStyle, dimmed: bool, block: bool, t: &Theme) -> El {
     let key = format!("link-{index}");
     // The underline sits 2px under the baseline: 12.9px down a 14px line at 11px, 13.9 at 12px.
     let y = style.line_height - 1.1;
@@ -329,7 +353,10 @@ pub fn link(index: usize, label: &str, style: TextStyle, dimmed: bool, t: &Theme
         .role("link")
         .label(label)
         .radius(4.0)
-        .child(kit::label(key, label, style, t.text))
+        .child({
+            let words = kit::label(key, label, style, t.text);
+            if block { words.w_full() } else { words }
+        })
         .children(bars);
     if dimmed {
         l = l.disabled(true);
@@ -349,8 +376,9 @@ pub fn resend(index: usize, link_el: El, wait: u32, t: &Theme) -> El {
     let mut r = row()
         .key(format!("{key}-row"))
         .w_full()
-        .h(14.0)
-        .items_end()
+        // The mono countdown makes the board's line half a point taller than its words.
+        .h(14.5)
+        .items_start()
         .child(kit::label(format!("{key}-0"), "Didn't get it?", CAP, t.text_tertiary).mr(2.93))
         .child(link_el);
     if wait > 0 {
@@ -384,18 +412,24 @@ pub fn actions(buttons: Vec<(El, bool)>) -> El {
 /// the step's name. One status for assistive technology.
 pub fn steps(done: usize, of: usize, label: &str, t: &Theme) -> El {
     let count = format!("{done} of {of}");
-    let mut bars = row().key("steps-bars").grow(1.0).gap(4.0).center_y();
+    // The bars share what the two labels leave, to the hundredth of a point (Rune rounds a
+    // text's own box to half points, the board does not).
+    let free = set::COLUMN_W - 20.0 - rune::text::advance(&count, CAP_MONO) - rune::text::advance(label, CAP);
+    let bar = (free - 4.0 * (of.max(1) as f32 - 1.0)) / of.max(1) as f32;
+    let mut bars = row().key("steps-bars").pixel_snap(false).w(free).gap(4.0).center_y();
     for j in 0..of {
         bars = bars.child(
             el().key(format!("step-{j}"))
-                .grow(1.0)
+                .w(bar)
                 .h(3.0)
                 .radius(2.0)
                 .fill(if j < done { t.text } else { t.separator }),
         );
     }
+    let count_el = exact("steps-count", &count, CAP_MONO, t);
     row()
         .key("steps")
+        .pixel_snap(false)
         .role("status")
         .label(format!("Step {count}: {label}"))
         .w_full()
@@ -403,8 +437,20 @@ pub fn steps(done: usize, of: usize, label: &str, t: &Theme) -> El {
         .gap(10.0)
         .center_y()
         .child(bars)
-        .child(kit::label("steps-count", count, CAP_MONO, t.text_tertiary).a11y_hidden())
-        .child(kit::label("steps-label", label, CAP, t.text_tertiary).a11y_hidden())
+        .child(count_el)
+        .child(exact("steps-label", label, CAP, t))
+}
+
+/// A caption in a box exactly as wide as its words: Rune rounds a text's own box up to half
+/// a point, which would move words that end at a column's edge.
+fn exact(key: &str, words: &str, style: TextStyle, t: &Theme) -> El {
+    kit::note_text(key, &format!("{key}-box"), words, style, t.text_tertiary);
+    el().key(format!("{key}-box"))
+        .a11y_hidden()
+        .pixel_snap(false)
+        .w(rune::text::advance(words, style))
+        .h(14.0)
+        .child(text(words).font(style).color(t.text_tertiary).pixel_snap(false))
 }
 
 /// A QR code as one canvas `size` points across: each run of dark modules in a row is one
@@ -460,10 +506,13 @@ pub fn setup(modules: &[Vec<bool>], key: &str, copy: El, t: &Theme) -> El {
                 .gap(8.0)
                 .child(kit::label("setup-label", "Or enter this key", CAP, t.text_tertiary).w_full())
                 .child(
-                    el().key("setup-key")
-                        .w_full()
-                        .h(15.0)
-                        .child(text(key).secure().revealed(true).font(set::SUB_MONO).color(t.text)),
+                    el().key("setup-key").w_full().h(15.0).child(
+                        text(key)
+                            .secure()
+                            .revealed(true)
+                            .font(set::SUB_MONO)
+                            .color(t.text_tertiary),
+                    ),
                 )
                 .child(copy),
         )
@@ -477,11 +526,13 @@ pub fn codes(list: &[&str], t: &Theme) -> El {
             .key(format!("code-{i}"))
             .w(235.0)
             .h(19.0)
-            .items_end()
+            .items_start()
             .child(
                 kit::label(format!("code-{i}-n"), (i + 1).to_string(), CODE_N, t.text_tertiary)
                     .a11y_hidden()
+                    .align(rune::Align::End)
                     .w(12.0)
+                    .mt(2.0)
                     .mr(8.0),
             )
             .child(text(code).secure().revealed(true).font(BACKUP_CODE).color(t.text))
@@ -516,13 +567,22 @@ pub fn empty(icon: &'static Icon, title: &str, words: &str, t: &Theme) -> El {
         .px(24.0)
         .gap(8.0)
         .items_center()
-        .child(set::tile("empty", icon, 52.0, 15.0, Tone::Neutral, t).a11y_hidden())
+        .child(
+            el().key("empty-tile")
+                .a11y_hidden()
+                .size(52.0, 52.0)
+                .radius(15.0)
+                .fill(au::tone(Tone::Neutral, t).2)
+                .center()
+                .child(kit::glyph("empty-icon", icon, 26.0, au::tone(Tone::Neutral, t).0)),
+        )
         .child(kit::label("empty-title", title, TITLE, t.text).role("heading").level(2))
         .child(
             kit::label("empty-sub", words, SUB, t.text_tertiary)
                 .wrap()
                 .align(rune::Align::Center)
-                .w(240.0),
+                // `max-width: 30ch`: thirty zeros of its own font wide.
+                .w(30.0 * rune::text::advance("0", SUB)),
         )
 }
 
@@ -579,7 +639,12 @@ pub fn pop(name: &str, items: Vec<El>, t: &Theme) -> El {
         .w(180.0)
         .py(4.0)
         .radius(12.0)
-        .fill(t.paper.alpha(0.72))
+        // `--kit-glass`: the paper, seen through.
+        .fill(if t.dark {
+            t.paper2.alpha(0.68)
+        } else {
+            t.paper.alpha(0.72)
+        })
         .backdrop_blur(22.0)
         .border(kit::HAIR, t.separator)
         .border_layout()

@@ -95,7 +95,10 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
             )
         })
         .collect();
-    let mut list = el().key("passkeys").w_full().child(lists::list(0, None, rows, None, t));
+    let mut list = rune::col()
+        .key("passkeys")
+        .w_full()
+        .child(lists::list(0, None, rows, None, t).w_full());
     let mut overlay = None;
     match dialog {
         Some(Dialog::PasskeyMenu(id)) => {
