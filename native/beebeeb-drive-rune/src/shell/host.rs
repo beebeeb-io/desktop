@@ -305,7 +305,8 @@ pub fn request(s: &mut State, intent: Intent) -> Outcome {
 /// section by writing `State::sidebar_section`; this turns that write into a navigation, so
 /// the sidebar already routes. A ui lane that calls [`dispatch`] itself makes this a no-op.
 pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
-    let mut changed = false;
+    // The open file: the engine's answers, and a route that left it (lane f-viewers).
+    let mut changed = crate::frames::viewers::poll(s, tx);
     // The engine's answers that arrive between presses (a sign-in that took a second, the other device).
     changed |= crate::frames::signin::poll(s, tx);
     // What the sign-in screens asked the shell for.

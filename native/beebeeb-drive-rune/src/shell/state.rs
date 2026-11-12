@@ -40,6 +40,7 @@ pub struct State {
     pub settings: crate::frames::settings::SettingsUi,
     pub account: crate::frames::account::AccountUi,
     pub(crate) signin: Option<crate::frames::signin::Ui>,
+    pub(crate) viewer: crate::frames::viewers::Slot,
     /// The b's flyout as a scene of this window (the frame gate); `None` in the running app.
     pub(crate) tray: Option<crate::frames::tray::Ui>,
     pub(crate) shortcuts: crate::frames::tray::shortcuts::Shortcuts,
@@ -56,7 +57,8 @@ pub fn init() -> State {
 }
 
 pub fn init_with(shell: Shell) -> State {
-    crate::frames::files::board_fixture(init_from(shell, Box::new(BoardFixtureSource::new()), Some(6)))
+    let board = init_from(shell, Box::new(BoardFixtureSource::new()), Some(6));
+    crate::frames::viewers::board_fixture(crate::frames::files::board_fixture(board))
 }
 
 /// The folder as the window holds it: the listing, or an empty one and the reason it could not be read.
@@ -107,6 +109,7 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         settings: Default::default(),
         account: Default::default(),
         signin: crate::frames::signin::start(),
+        viewer: Default::default(),
         tray: None,
         shortcuts: Default::default(),
         setup: None,

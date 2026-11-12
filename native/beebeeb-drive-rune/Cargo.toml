@@ -20,6 +20,8 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 zeroize = "1"
 
 serde_json = "1"
+# Parses Markdown for the viewer (`frames/viewers/markdown.rs`): MIT, pure Rust, no network, no HTML output.
+pulldown-cmark = { version = "0.13", default-features = false }
 # Decodes the bundled b glyph for the notification-area icons (`shell/tray_icon.rs`).
 png = "0.18"
 # Only for the `feedback` feature: names the surface format and device types of the capture;
