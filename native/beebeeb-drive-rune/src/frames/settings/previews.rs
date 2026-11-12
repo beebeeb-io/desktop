@@ -328,12 +328,11 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         .zip(&p.uses)
         .enumerate()
         .map(|(i, (title, value))| {
-            lists::item(
-                3,
-                i,
-                &Item::new(None, *title).trailing(Trailing::Mono(value.clone())),
-                t,
-            )
+            let mut it = Item::new(None, *title).trailing(Trailing::Mono(value.clone()));
+            if i > 0 {
+                it = it.ruled();
+            }
+            lists::item(3, i, &it, t)
         })
         .collect();
     let mut counts = format!(
@@ -384,7 +383,9 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             lists::item(
                 5,
                 1,
-                &Item::new(None, "Fallback preview, with HEIC").trailing(Trailing::Value("WebP, 720p".into())),
+                &Item::new(None, "Fallback preview, with HEIC")
+                    .trailing(Trailing::Value("WebP, 720p".into()))
+                    .ruled(),
                 t,
             ),
         ],
@@ -720,6 +721,9 @@ fn compare_view(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
     }
     foot = foot.child(
         controls::button(2, "Choose photo", None, Emphasis::Plain, t)
+            // As wide as its words to the fraction of a point (12 pt and the border each
+            // side): the row is centred, so a rounded width would move every choice in it.
+            .w(26.0 + rune::text::advance("Choose photo", type_::BUTTON_SM))
             .on_press(|s: &mut State| s.settings.ask(Intent::Open("choose-photo"))),
     );
     // The buttons are the light theme's paper on the dark ground in both themes, as the
@@ -750,6 +754,8 @@ fn compare_view(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
         .key("scrim")
         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .items_center()
+        // The sheet hangs from the caption: its shadow and ring never reach over it.
+        .clip_rounded(0.0)
         .fill(dialogs::scrim_color(t))
         .child(sheet)
         .modal(false, |s: &mut State| s.settings.close_compare())
