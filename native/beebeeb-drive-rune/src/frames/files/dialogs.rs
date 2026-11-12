@@ -386,10 +386,22 @@ impl State {
         let Some(Dialog::Move(m)) = &self.actions.dialog else {
             return false;
         };
+        let (picked, depth, empty) = (m.picked, m.path.len(), m.choices.is_empty());
+        if empty {
+            // A folder without folders has no list to hold the keyboard (it is on the path or a
+            // button): Left and Backspace still go back up, or the arrows would be a dead end.
+            return match ev.key {
+                Key::Left | Key::Backspace if depth > 1 => {
+                    self.move_up_to(depth - 2);
+                    self.focus_move_list(tx);
+                    true
+                }
+                _ => false,
+            };
+        }
         if tx.focused() != Some(MOVE_LIST) {
             return false;
         }
-        let (picked, depth) = (m.picked, m.path.len());
         match ev.key {
             Key::Down => self.move_step(1),
             Key::Up => self.move_step(-1),
@@ -408,6 +420,16 @@ impl State {
             _ => return false,
         }
         true
+    }
+
+    /// The list of folders takes the keyboard when the folder shown has one: after a way up was
+    /// pressed (the link may be gone from the path) and after Left out of a folder without folders.
+    pub fn focus_move_list(&mut self, tx: &mut Tx) {
+        if let Some(Dialog::Move(m)) = &self.actions.dialog
+            && !m.choices.is_empty()
+        {
+            tx.focus(MOVE_LIST, false);
+        }
     }
 }
 
@@ -606,7 +628,10 @@ fn move_to(m: &MoveTo, t: &Theme) -> El {
                     kit::label(format!("dlg-path-{i}"), crumb.name.clone(), SUB, t.text_tertiary)
                         .role("link")
                         .focusable(true)
-                        .on_press(move |s: &mut State| s.move_up_to(i)),
+                        .on_press_tx(move |s: &mut State, tx: &mut Tx| {
+                            s.move_up_to(i);
+                            s.focus_move_list(tx);
+                        }),
                 )
                 .child(kit::glyph(
                     format!("dlg-path-sep-{i}"),

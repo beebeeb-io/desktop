@@ -406,6 +406,100 @@ fn move_refuses_a_folder_that_has_the_name_and_a_protected_selection() {
     assert_eq!(rt.state.actions.intents.last(), Some(&Intent::Frame("DW-1110")));
 }
 
+// ---- Tab inside the dialogs (review of PR 305, P2 2) ----
+
+/// Tab inside a dialog: the keys that have the keyboard, one press of Tab each, until the first
+/// comes round again.
+fn tab_cycle(rt: &mut Runtime<State>, mods: Mods) -> Vec<String> {
+    let first = focused(rt).expect("something in the dialog has the keyboard");
+    let mut stops = vec![first.clone()];
+    for _ in 0..12 {
+        press(rt, Key::Tab, mods);
+        let now = focused(rt).expect("Tab leaves the keyboard somewhere");
+        if now == first {
+            return stops;
+        }
+        stops.push(now);
+    }
+    panic!("Tab did not come back to {first} in 12 presses: {stops:?}");
+}
+
+#[test]
+fn tab_goes_round_the_new_folder_dialog_and_never_under_it() {
+    let (mut rt, calls, _) = wired();
+    press(&mut rt, Key::Command('n'), Mods { shift: true, ..CTRL });
+    // The field, the amber button, the way out, the field again: the board's order.
+    assert_eq!(tab_cycle(&mut rt, NONE), [NAME_INPUT, "btn-0", "btn-1"]);
+    assert_eq!(tab_cycle(&mut rt, SHIFT), [NAME_INPUT, "btn-1", "btn-0"]);
+    // Tab chose nothing and asked nothing; the dialog is still the one open.
+    assert!(matches!(rt.state.actions.dialog, Some(Dialog::NewFolder(_))));
+    assert!(asked(&calls).is_empty());
+    // On Cancel, Space presses it.
+    press(&mut rt, Key::Tab, SHIFT);
+    assert_eq!(focused(&rt).as_deref(), Some("btn-1"));
+    press(&mut rt, Key::Text(" ".into()), NONE);
+    assert!(rt.state.actions.dialog.is_none());
+    assert!(asked(&calls).is_empty());
+}
+
+#[test]
+fn tab_goes_round_the_move_dialog_and_never_under_it() {
+    let (mut rt, calls, _) = wired();
+    open_move(&mut rt);
+    // At the top: the list of folders, the three buttons.
+    assert_eq!(tab_cycle(&mut rt, NONE), [MOVE_LIST, "btn-0", "btn-1", "btn-2"]);
+    assert_eq!(tab_cycle(&mut rt, SHIFT), [MOVE_LIST, "btn-2", "btn-1", "btn-0"]);
+    // Inside a folder the way up is a stop too.
+    click(&mut rt, "item-0-2");
+    press(&mut rt, Key::Right, NONE);
+    assert_eq!(focused(&rt).as_deref(), Some(MOVE_LIST), "the list keeps the keyboard");
+    assert_eq!(
+        tab_cycle(&mut rt, NONE),
+        [MOVE_LIST, "btn-0", "btn-1", "btn-2", "dlg-path-0"]
+    );
+    // A folder without folders has no list: the keyboard is still inside the dialog, Tab goes
+    // round what is left, and Left goes back up to the list.
+    press(&mut rt, Key::Down, NONE);
+    press(&mut rt, Key::Right, NONE);
+    let Some(Dialog::Move(m)) = &rt.state.actions.dialog else {
+        panic!("no Move dialog")
+    };
+    assert_eq!((m.here().name.as_str(), m.choices.len()), ("Day 1", 0));
+    assert!(find(&rt, MOVE_LIST).is_none());
+    let stops = tab_cycle(&mut rt, NONE);
+    let mut sorted = stops.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        ["btn-0", "btn-1", "btn-2", "dlg-path-0", "dlg-path-1"],
+        "{stops:?}"
+    );
+    press(&mut rt, Key::Left, NONE);
+    let Some(Dialog::Move(m)) = &rt.state.actions.dialog else {
+        panic!("no Move dialog")
+    };
+    assert_eq!(
+        (m.here().name.as_str(), m.picked),
+        ("Lisbon trip", Some(0)),
+        "Left went back up"
+    );
+    assert_eq!(
+        focused(&rt).as_deref(),
+        Some(MOVE_LIST),
+        "back up: the list has the keyboard"
+    );
+    // A way up pressed with the keyboard (Space on the link) leaves the keyboard on the list too.
+    press(&mut rt, Key::Tab, SHIFT);
+    assert_eq!(focused(&rt).as_deref(), Some("dlg-path-0"));
+    press(&mut rt, Key::Text(" ".into()), NONE);
+    let Some(Dialog::Move(m)) = &rt.state.actions.dialog else {
+        panic!("no Move dialog")
+    };
+    assert_eq!((m.path.len(), m.picked), (1, Some(2)));
+    assert_eq!(focused(&rt).as_deref(), Some(MOVE_LIST));
+    assert!(asked(&calls).is_empty());
+}
+
 // ---- The board's scenes ----
 
 #[test]
