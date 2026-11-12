@@ -281,7 +281,7 @@ fn installed_release_channel_defaults_absent_and_round_trips_separately_from_con
 #[test]
 #[cfg(target_os = "macos")]
 fn default_sync_root_uses_private_file_provider_state_folder() {
-    let path = default_sync_root_suggestion();
+    let path = default_sync_root_suggestion(&crate::identity::REAL);
 
     assert_eq!(
         path.file_name().and_then(|name| name.to_str()),
@@ -293,7 +293,7 @@ fn default_sync_root_uses_private_file_provider_state_folder() {
 #[test]
 #[cfg(not(target_os = "macos"))]
 fn default_sync_root_uses_user_facing_beebeeb_folder() {
-    let path = default_sync_root_suggestion();
+    let path = default_sync_root_suggestion(&crate::identity::REAL);
 
     assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("Beebeeb"));
 }
@@ -784,17 +784,17 @@ fn unit_tests_resolve_the_config_path_in_a_sandbox_never_the_real_one() {
     // so a test that calls `load()`/`update()` (directly, or through a command it exercises)
     // cannot read, delete or rewrite the real `desktop.toml` in the person's config dir.
     // Only paths are computed here; nothing is read.
-    let sandboxed = DesktopConfig::path().expect("config path resolves");
+    let sandboxed = DesktopConfig::path_for(&crate::identity::REAL).expect("config path resolves");
     let real_dir = dirs::config_dir().expect("a user config dir exists on a dev machine or CI runner");
     let real = real_dir
-        .join(super::paths::APP_CONFIG_DIR)
+        .join(crate::identity::REAL.config_dir_name())
         .join(super::paths::CONFIG_FILENAME);
 
     assert_ne!(sandboxed, real, "unit tests resolved the REAL desktop.toml");
     // The specific real `beebeeb` config folder, not the whole config dir: a `CARGO_TARGET_DIR`
     // under `~/Library/Application Support` (or `~/.config`) puts the sandbox inside the config
     // dir legitimately.
-    let real_app_dir = real_dir.join(super::paths::APP_CONFIG_DIR);
+    let real_app_dir = real_dir.join(crate::identity::REAL.config_dir_name());
     assert!(
         !sandboxed.starts_with(&real_app_dir),
         "{sandboxed:?} is inside the real config folder {real_app_dir:?}"

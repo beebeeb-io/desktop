@@ -295,7 +295,7 @@ pub fn dismiss_kept_folder(cfg: &mut crate::config::DesktopConfig, shown: &str) 
 /// config-write lock (r5: the app-start sweep and a Settings save can run at the same time, and
 /// both go through the one `desktop.toml.tmp`). Returns whether the config changed.
 pub fn remember_kept_folder(location: &str) -> Result<bool, String> {
-    remember_kept_folder_at(&crate::config::DesktopConfig::path()?, location)
+    remember_kept_folder_at(&crate::config::DesktopConfig::path_for(crate::APP)?, location)
 }
 
 /// [`remember_kept_folder`] on the config file at `path` (a seam for the tests).
@@ -320,8 +320,8 @@ pub(crate) fn remember_kept_folder_at(path: &std::path::Path, location: &str) ->
 /// is logged without the path and the alert still names the folder).
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn remember_kept_folder_held(cfg: &mut crate::config::HeldConfig, location: &str) {
-    let saved =
-        crate::config::DesktopConfig::path().and_then(|path| remember_kept_folder_held_at(cfg, &path, location));
+    let saved = crate::config::DesktopConfig::path_for(crate::APP)
+        .and_then(|path| remember_kept_folder_held_at(cfg, &path, location));
     if let Err(error) = saved {
         cfg.queue_for_next_write(record_kept_folder, location);
         tracing::warn!(error = %error, "could not save the kept folder for Settings › Sync; it rides the next write");
@@ -360,7 +360,7 @@ pub struct DismissOutcome {
 /// The row's "Dismiss" in `desktop.toml`, as one load-change-save under the config-write lock.
 /// See [`DismissOutcome`] and [`dismiss_kept_folder`].
 pub fn dismiss_saved_kept_folder(shown: &str) -> Result<DismissOutcome, String> {
-    dismiss_saved_kept_folder_at(&crate::config::DesktopConfig::path()?, shown)
+    dismiss_saved_kept_folder_at(&crate::config::DesktopConfig::path_for(crate::APP)?, shown)
 }
 
 /// [`dismiss_saved_kept_folder`] on the config file at `path` (a seam for the tests).
@@ -588,7 +588,6 @@ mod tests {
     fn removal(kept: KeptFolder) -> DomainRemoval {
         DomainRemoval { kept }
     }
-
 
     fn every_removal_settles_a_missing_folder(raw: &str) {
         let full = lf(raw);

@@ -90,7 +90,7 @@ fn world(poison: bool) -> (Fixture, Arc<Mutex<Vec<String>>>) {
 
 fn bridge(dir: &std::path::Path, fixture: &Fixture) -> crate::engine_bridge::EngineBridge {
     let db = Arc::new(StateDb::open(dir.join("db")).unwrap());
-    let bridge = crate::engine_bridge::EngineBridge::new(db, Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db, Arc::new(fixture.api()));
     bridge.db().remember_folder_custody_at_revision(ROOT, 0).unwrap();
     seed(&bridge, ROOT, ItemKind::Folder, None);
     seed(&bridge, OWNER_FOLDER, ItemKind::Folder, Some(ROOT));
@@ -184,7 +184,7 @@ fn bare_world() -> (Fixture, Arc<Mutex<Vec<String>>>) {
 
 fn bare_bridge(dir: &std::path::Path, fixture: &Fixture) -> crate::engine_bridge::EngineBridge {
     let db = Arc::new(StateDb::open(dir.join("db")).unwrap());
-    let bridge = crate::engine_bridge::EngineBridge::new(db, Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db, Arc::new(fixture.api()));
     bridge.db().remember_folder_custody_at_revision(ROOT, 0).unwrap();
     bridge.db().remember_folder_custody_at_revision(ROOT_TWO, 0).unwrap();
     seed(&bridge, ROOT, ItemKind::Folder, None);
@@ -396,7 +396,7 @@ fn review_p2_3_a_parent_change_without_a_source_uploads() {
     let sync_root = temp.path().join("sync");
     std::fs::create_dir_all(&sync_root).unwrap();
     let db = Arc::new(StateDb::open(temp.path().join("db")).unwrap());
-    let bridge = crate::engine_bridge::EngineBridge::new(db, Arc::new(fixture.api()));
+    let bridge = crate::engine_bridge::EngineBridge::new(&crate::identity::REAL, db, Arc::new(fixture.api()));
     bridge.db().remember_folder_custody_at_revision(ROOT, 0).unwrap();
     seed(&bridge, ROOT, ItemKind::Folder, None);
     seed(&bridge, OWNER_FOLDER, ItemKind::Folder, Some(ROOT));

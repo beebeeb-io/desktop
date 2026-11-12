@@ -86,11 +86,13 @@ const THUMBNAIL_FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 // Minted once (UUIDv4) and hardcoded so the registry binding written at
 // registration and the `CoRegisterClassObject` at startup always agree, and so
 // `unregister` can find and remove the same key. Distinct from
-// `BEEBEEB_PROVIDER_GUID` (the sync-root identity GUID) and
-// `STATUS_UI_FACTORY_CLSID`.
+// the provider GUID (the sync-root identity GUID) and the status-UI factory's class id.
 //
-// `{b2e0a7d4-9c61-4f3a-8d2e-7a1c5e9b0f44}`
-pub const THUMBNAIL_PROVIDER_CLSID: GUID = GUID::from_u128(0xb2e0_a7d4_9c61_4f3a_8d2e_7a1c5e9b0f44);
+// The value is the app identity's (`EngineIdentity::thumbnail_provider_class_id`, pinned in
+// `identity.rs`): the test build registers its own class, so it never replaces the real app's.
+pub(super) fn thumbnail_provider_clsid(identity: &crate::identity::EngineIdentity) -> GUID {
+    GUID::from_u128(identity.thumbnail_provider_class_id())
+}
 
 // ── The provider instance: holds the resolved file_id between Initialize and
 //    GetThumbnail ─────────────────────────────────────────────────────────────
@@ -433,33 +435,30 @@ static CLASS_OBJECT_COOKIE: OnceLock<u32> = OnceLock::new();
 /// `CoRegisterClassObject` requires the calling thread to have initialized COM
 /// (the caller — [`super::register_thumbnail_provider_for_sync_root`] — handles
 /// that on its dedicated STA thread).
-pub fn rebind(shell_id: &str) -> anyhow::Result<()> {
+pub fn rebind(identity: &'static crate::identity::EngineIdentity, shell_id: &str) -> anyhow::Result<()> {
     anyhow::ensure!(CLASS_OBJECT_COOKIE.get().is_some(), "COM factory is not ready");
-    register_thumbnail_provider(shell_id)
+    register_thumbnail_provider(identity, shell_id)
 }
 
-pub fn register_thumbnail_provider(shell_id: &str) -> anyhow::Result<()> {
+pub fn register_thumbnail_provider(
+    identity: &'static crate::identity::EngineIdentity,
+    shell_id: &str,
+) -> anyhow::Result<()> {
+    let clsid = thumbnail_provider_clsid(identity);
     // 1. Register the class object so this exe is the CLSID's local server.
     if CLASS_OBJECT_COOKIE.get().is_none() {
         let factory: IClassFactory = ThumbnailClassFactory.into();
-        // SAFETY: `THUMBNAIL_PROVIDER_CLSID` is a valid CLSID; the factory is
+        // SAFETY: `clsid` is a valid CLSID; the factory is
         // moved into COM's keeping via the returned cookie.
-        let cookie = unsafe {
-            CoRegisterClassObject(
-                &THUMBNAIL_PROVIDER_CLSID,
-                &factory,
-                CLSCTX_LOCAL_SERVER,
-                REGCLS_MULTIPLEUSE,
-            )
-        }
-        .map_err(|e| anyhow::anyhow!("CoRegisterClassObject(thumbnail provider) failed: {e}"))?;
+        let cookie = unsafe { CoRegisterClassObject(&clsid, &factory, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE) }
+            .map_err(|e| anyhow::anyhow!("CoRegisterClassObject(thumbnail provider) failed: {e}"))?;
         let _ = CLASS_OBJECT_COOKIE.set(cookie);
         tracing::info!(cookie, "thumbnail provider class object registered");
     }
 
     // 2. Write the CLSID's LocalServer32 (the exe path) so the shell can launch us
     //    on demand if we are not already running.
-    let clsid_str = format!("{{{:?}}}", THUMBNAIL_PROVIDER_CLSID);
+    let clsid_str = format!("{{{:?}}}", clsid);
     let exe = std::env::current_exe().map_err(|e| anyhow::anyhow!("resolve current exe for LocalServer32: {e}"))?;
     let exe_str = exe.to_string_lossy().into_owned();
     let local_server_key = format!("Software\\Classes\\CLSID\\{clsid_str}\\LocalServer32");
@@ -506,7 +505,7 @@ pub fn register_thumbnail_provider(shell_id: &str) -> anyhow::Result<()> {
 /// [`register_thumbnail_provider`]). Keeps the credential-free COM factory and removes the
 /// `ThumbnailProvider` binding under the sync-root key, and deletes the CLSID
 /// subtree. Best-effort: each step is independent and a failure is logged.
-pub fn unregister_thumbnail_provider(shell_id: &str) {
+pub fn unregister_thumbnail_provider(identity: &'static crate::identity::EngineIdentity, shell_id: &str) {
     // The credential-free class factory stays registered on its original STA.
     // Callback leases deny all account access while locked/signed out. Re-login
     // restores the registry binding without reusing a revoked COM cookie.
@@ -526,7 +525,7 @@ pub fn unregister_thumbnail_provider(shell_id: &str) {
     }
 
     // Remove our CLSID subtree.
-    let clsid_str = format!("{{{:?}}}", THUMBNAIL_PROVIDER_CLSID);
+    let clsid_str = format!("{{{:?}}}", thumbnail_provider_clsid(identity));
     let clsid_key = HSTRING::from(format!("Software\\Classes\\CLSID\\{clsid_str}"));
     // SAFETY: deletes our own CLSID subtree under HKCU.
     let _ = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &clsid_key) };

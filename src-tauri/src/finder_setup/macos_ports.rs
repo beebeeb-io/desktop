@@ -390,7 +390,7 @@ fn session_facts(app: &tauri::AppHandle) -> SessionFacts {
         vault_unlocked,
         auth_present,
         crate::finder_removal_owed(),
-        DesktopConfig::load(),
+        DesktopConfig::load_for(crate::APP),
     )
 }
 
@@ -412,7 +412,7 @@ fn set_signed_out_by_choice(cfg: &mut DesktopConfig, value: bool) -> bool {
 }
 
 fn update_config(change: impl FnOnce(&mut DesktopConfig) -> bool) {
-    match DesktopConfig::path() {
+    match DesktopConfig::path_for(crate::APP) {
         Ok(path) => update_config_at(&path, change),
         Err(error) => tracing::warn!(%error, "finder setup: could not find desktop.toml"),
     }
@@ -451,7 +451,7 @@ impl Ports for MacosPorts {
                 // the engine is spawned (see the module comment).
                 Op::StartEngine => OpResult::EngineStarted(
                     async {
-                        let root = crate::config::default_sync_root_suggestion();
+                        let root = crate::config::default_sync_root_suggestion(crate::APP);
                         crate::config::ensure_directory(&root)
                             .map_err(|error| FpError::app(app_code::ENGINE_START, error))?;
                         let state = app.state::<AppState>();
@@ -479,7 +479,7 @@ impl Ports for MacosPorts {
                 Op::FinishReady => OpResult::Finished(
                     within(op, limit, async {
                         let state = app.state::<AppState>();
-                        let root = crate::config::default_sync_root_suggestion();
+                        let root = crate::config::default_sync_root_suggestion(crate::APP);
                         crate::ensure_sync_root_and_engine(app.clone(), &state, root)
                             .await
                             .map_err(|error| FpError::app(app_code::FINISH_READY, error))

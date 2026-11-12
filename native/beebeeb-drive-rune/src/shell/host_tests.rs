@@ -330,7 +330,13 @@ fn the_gate_closing_mid_navigation_hides_the_account_and_reopens_in_place() {
     rt.update(|s, _| assert!(s.shell.refresh()));
     rt.frame(0.016);
     assert_eq!(registry::group_for(&rt.state.shell.app), FrameGroup::Locked);
-    assert_eq!(rt.state.shell.tray_model().tooltip, "Beebeeb: locked");
+    assert_eq!(
+        rt.state.shell.tray_model().tooltip,
+        format!(
+            "{}: locked",
+            crate::shell::identity::AppIdentity::CURRENT.product_name()
+        )
+    );
     engine.set_gate(GateState::Ready);
     rt.update(|s, _| assert!(s.shell.refresh()));
     assert_eq!(
@@ -382,14 +388,16 @@ fn a_refused_menu_action_changes_nothing() {
 #[test]
 fn a_link_only_ever_navigates_and_a_bad_one_does_nothing() {
     let (engine, _, mut rt) = fixture();
-    rt.update(|s, tx| on_open_url(s, "beebeeb://open/trash", tx));
+    rt.update(|s, tx| on_open_url(s, &crate::shell::deeplink::link("open/trash"), tx));
     assert_eq!(rt.state.shell.app.route(), &Route::section(Section::Trash));
+    let link = crate::shell::deeplink::link;
     for bad in [
-        "beebeeb://quit",
-        "beebeeb://pause",
-        "https://example.com/",
-        "beebeeb://open/../settings",
+        link("quit"),
+        link("pause"),
+        "https://example.com/".to_string(),
+        link("open/../settings"),
     ] {
+        let bad = bad.as_str();
         rt.update(|s, tx| on_open_url(s, bad, tx));
         assert_eq!(rt.state.shell.app.route(), &Route::section(Section::Trash), "{bad}");
     }
@@ -402,7 +410,7 @@ fn a_link_while_locked_waits_and_one_naming_a_folder_dies_with_a_sign_out() {
     engine.set_gate(GateState::Locked);
     rt.update(|s, tx| {
         s.shell.refresh();
-        on_open_url(s, "beebeeb://open/files?folder=f-123", tx);
+        on_open_url(s, &crate::shell::deeplink::link("open/files?folder=f-123"), tx);
     });
     assert_eq!(rt.state.shell.app.screen(), Screen::Gate(GateState::Locked));
     engine.set_gate(GateState::SignedOut);
@@ -508,14 +516,14 @@ fn a_control_request_shows_navigates_or_quits_and_nothing_else() {
         rt.state.shell.app.screen(),
         Screen::Drive(Route::section(Section::Files))
     );
-    rt.update(|s, tx| on_control(s, Request::Open("beebeeb://open/photos".into()), tx));
+    rt.update(|s, tx| on_control(s, Request::Open(crate::shell::deeplink::link("open/photos")), tx));
     assert_eq!(
         rt.state.shell.app.screen(),
         Screen::Drive(Route::section(Section::Photos))
     );
     // A link that is not on the list (it cannot come out of `Request::decode`, and is still
     // checked again here) changes nothing.
-    rt.update(|s, tx| on_control(s, Request::Open("beebeeb://quit".into()), tx));
+    rt.update(|s, tx| on_control(s, Request::Open(crate::shell::deeplink::link("quit")), tx));
     assert_eq!(
         rt.state.shell.app.screen(),
         Screen::Drive(Route::section(Section::Photos))

@@ -649,7 +649,7 @@ pub(super) async fn popover_snapshot(
 /// IPC command thread isn't held by SQLite + `remove_file` syscalls.
 #[tauri::command]
 pub(super) async fn free_up_space() -> Result<FreeUpSpaceResult, String> {
-    tokio::task::spawn_blocking(free_up_space_blocking)
+    tokio::task::spawn_blocking(|| free_up_space_blocking(crate::APP))
         .await
         .map_err(|e| format!("free_up_space task join: {e}"))?
 }

@@ -21,7 +21,7 @@ fn hydrate_file_fails_closed_on_symlink_destination_toctou() {
 
     let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
     let api = Arc::new(ApiClient::new(server.base_url.clone(), "token".into(), master_key));
-    let bridge = Arc::new(EngineBridge::new(db.clone(), api));
+    let bridge = Arc::new(EngineBridge::new(&crate::identity::REAL, db.clone(), api));
     seed_bridge_row(
         &bridge,
         TEST_FILE_ID,

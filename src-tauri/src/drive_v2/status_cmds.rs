@@ -75,7 +75,7 @@ pub(crate) async fn drive_status(
             listing,
             ..DriveStatus::default()
         };
-        let cfg = crate::config::DesktopConfig::load().map_err(|_| DriveError::Failed("config"))?;
+        let cfg = crate::config::DesktopConfig::load_for(crate::APP).map_err(|_| DriveError::Failed("config"))?;
         if let Some(root) = cfg.sync_root.as_deref() {
             out.free_space_bytes = status::free_space_for(root, &disks());
         }
@@ -113,7 +113,7 @@ pub(crate) async fn drive_status(
                 )
             })
             .collect();
-        let stops = crate::backup::stop::stopped_backups(&cfg).len();
+        let stops = crate::backup::stop::stopped_backups(crate::APP, &cfg).len();
         out.backup = status::backup_view(&enabled, &marks, stops);
         out.backup.device_folder = db
             .backup_layout()

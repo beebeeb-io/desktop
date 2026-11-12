@@ -358,7 +358,7 @@ async fn an_old_timestamp_base_parks_at_its_first_attempt() {
 async fn an_earlier_builds_copy_in_the_old_cache_root_is_never_handed_over_and_never_lost() {
     let master_key = [102u8; 32];
     let (dir, sync_root, server, bridge) = rule3_setup(master_key);
-    let bases = FinderStagingBases::current();
+    let bases = FinderStagingBases::current(&crate::identity::REAL);
     let old_root = bases.cache_root();
     std::fs::create_dir_all(&old_root).unwrap();
     let mut queued = Vec::new();

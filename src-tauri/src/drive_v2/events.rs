@@ -69,8 +69,8 @@ fn run(app: tauri::AppHandle) {
             last_seen = None;
             continue;
         };
-        let Ok(Some(db)) =
-            crate::config::DesktopConfig::load().and_then(|cfg| crate::local_state_purge::state_db_for_config(&cfg))
+        let Ok(Some(db)) = crate::config::DesktopConfig::load_for(crate::APP)
+            .and_then(|cfg| crate::local_state_purge::state_db_for_config(&cfg))
         else {
             continue;
         };

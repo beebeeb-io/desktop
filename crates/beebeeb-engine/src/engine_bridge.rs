@@ -42,6 +42,8 @@ use crate::state_db::{
 };
 
 pub struct EngineBridge {
+    /// Which install this bridge works for: every config, state and staging path it resolves is this identity's.
+    pub(crate) identity: &'static crate::identity::EngineIdentity,
     #[cfg(not(any(test, feature = "test-support")))]
     db: Arc<StateDb>,
     /// Tests of another crate read the database the bridge writes.
@@ -199,6 +201,11 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::Mutex;
     use std::thread;
+
+    /// The settings as the suites see them: the real identity's file, in the test sandbox.
+    fn settings() -> crate::config::DesktopConfig {
+        crate::config::DesktopConfig::load_for(&crate::identity::REAL).unwrap()
+    }
 
     mod basics;
     mod conflicts;
@@ -488,11 +495,13 @@ mod landing;
 #[cfg(windows)]
 pub use landing::retry_kept_originals;
 use landing::*;
-pub use landing::{FinderStagingBases, finder_staging_candidates, keep_both_name};
+pub use landing::{finder_staging_candidates, keep_both_name};
+mod staging_bases;
 pub use landing::{
     FinderWriteItemKind, FinderWriteOutcome, FinderWriteTarget, VersionConflictEntry, is_ignored_finder_name,
     version_conflict_feed_from_db,
 };
+pub use staging_bases::FinderStagingBases;
 
 pub mod syncflow;
 #[cfg(any(test, feature = "test-support"))]

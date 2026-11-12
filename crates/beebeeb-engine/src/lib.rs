@@ -48,6 +48,10 @@ pub mod free_up_space;
 pub mod held_queue;
 pub mod hexfmt;
 pub mod host;
+pub mod identity;
+// The identity pin: where a per-app name may stand, in all three Rust trees.
+#[cfg(test)]
+mod identity_pin_tests;
 #[cfg(unix)]
 pub mod ipc_frame;
 #[cfg(unix)]
@@ -88,6 +92,7 @@ pub mod state_db;
 pub mod state_paths;
 pub mod surfaces;
 pub mod sync_activity;
+pub mod sync_root_owner;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_api;
 #[cfg(any(test, feature = "test-support"))]

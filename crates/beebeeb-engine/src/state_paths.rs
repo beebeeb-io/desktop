@@ -5,6 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use crate::identity::EngineIdentity;
+
 pub const LEGACY_STATE_DIR_NAME: &str = ".beebeeb";
 pub const STATE_DB_FILENAME: &str = "state.db";
 pub const LOCK_FILENAME: &str = ".beebeeb-sync.lock";
@@ -12,7 +14,10 @@ pub const DEVICE_IDENTITY_FILENAME: &str = ".device.json";
 
 const LEGACY_STATE_ARCHIVE_DIR_NAME: &str = "legacy-sync-root-state";
 
-static BEEBEEB_STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
+/// Where this process keeps its local state, and for WHICH identity: one value, set once by the host. A read names
+/// the identity it is for and is refused when that is not the one the folder was resolved for, so one app's state
+/// folder is never opened under the other's names.
+static BEEBEEB_STATE_DIR: OnceLock<(&'static EngineIdentity, PathBuf)> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateDirMigration {
@@ -21,44 +26,39 @@ pub enum StateDirMigration {
     SkippedExistingState,
 }
 
-/// Resolve the process-wide state dir from the app-local data dir the shell names (Tauri: `app_local_data_dir()`).
-pub fn init_from_app_local_data_dir(app_local_data_dir: &Path) -> Result<(), String> {
+/// Resolve the process's state dir: the identity's folder in the base dir the host names (Tauri:
+/// `app_local_data_dir()`; see [`EngineIdentity::state_dir_in`]). Once per process: a second call that names another
+/// identity or another folder is an error, never a silent "first one wins".
+pub fn init_from_app_local_data_dir(identity: &'static EngineIdentity, base_dir: &Path) -> Result<(), String> {
     // A relative path would resolve against whatever the working directory is when each file is opened.
-    if !app_local_data_dir.is_absolute() {
+    if !base_dir.is_absolute() {
         return Err("the app-local data dir must be an absolute path".to_string());
     }
-    let state_dir = beebeeb_state_dir_from_app_local_data(app_local_data_dir);
-
-    match BEEBEEB_STATE_DIR.set(state_dir.clone()) {
+    let state_dir = identity.state_dir_in(base_dir);
+    match BEEBEEB_STATE_DIR.set((identity, state_dir.clone())) {
         Ok(()) => {
             tracing::info!(state_dir = %state_dir.display(), "Beebeeb state dir resolved from the app-local data dir");
+            Ok(())
         }
-        Err(_) => {
-            if BEEBEEB_STATE_DIR.get() != Some(&state_dir) {
-                tracing::warn!(
-                    state_dir = %state_dir.display(),
-                    existing = BEEBEEB_STATE_DIR
-                        .get()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "<unset>".to_string()),
-                    "Beebeeb state dir was already initialized to a different path"
-                );
-            }
-        }
+        Err(_) => match BEEBEEB_STATE_DIR.get() {
+            Some((existing, dir)) if std::ptr::eq(*existing, identity) && *dir == state_dir => Ok(()),
+            _ => Err("the Beebeeb state dir is already resolved for another identity or another folder".to_string()),
+        },
     }
-
-    Ok(())
 }
 
-pub fn beebeeb_state_dir() -> Result<PathBuf, String> {
+/// The state dir of `identity`. `Err` when no host resolved one yet, and when the one resolved is another
+/// identity's.
+pub fn beebeeb_state_dir_for(identity: &'static EngineIdentity) -> Result<PathBuf, String> {
     #[cfg(any(test, feature = "test-support"))]
     if let Ok(dir) = STATE_DIR_OVERRIDE.try_with(PathBuf::clone) {
         return Ok(dir);
     }
-    BEEBEEB_STATE_DIR
-        .get()
-        .cloned()
-        .ok_or_else(|| "Beebeeb state dir has not been initialized".to_string())
+    match BEEBEEB_STATE_DIR.get() {
+        None => Err("Beebeeb state dir has not been initialized".to_string()),
+        Some((resolved_for, dir)) if std::ptr::eq(*resolved_for, identity) => Ok(dir.clone()),
+        Some(_) => Err("the Beebeeb state dir was resolved for another identity".to_string()),
+    }
 }
 
 // Tests only: the state dir for one future (`STATE_DIR_OVERRIDE.scope(dir, future)`), instead of the process-wide
@@ -86,12 +86,12 @@ tokio::task_local! {
 pub fn init_for_test() -> PathBuf {
     static SCRATCH: OnceLock<tempfile::TempDir> = OnceLock::new();
     let scratch = SCRATCH.get_or_init(|| tempfile::tempdir().expect("create scratch state dir"));
-    let _ = BEEBEEB_STATE_DIR.set(scratch.path().to_path_buf());
-    BEEBEEB_STATE_DIR.get().cloned().expect("state dir set just above")
-}
-
-pub fn beebeeb_state_dir_from_app_local_data(app_local_data_dir: &Path) -> PathBuf {
-    app_local_data_dir.to_path_buf()
+    // The suites run as the real identity (today's names, in sandboxed and scratch dirs).
+    let _ = BEEBEEB_STATE_DIR.set((&crate::identity::REAL, scratch.path().to_path_buf()));
+    BEEBEEB_STATE_DIR
+        .get()
+        .map(|(_, dir)| dir.clone())
+        .expect("state dir set just above")
 }
 
 pub fn state_db_path_from_state_dir(state_dir: &Path) -> PathBuf {
@@ -153,8 +153,11 @@ pub fn prepare_beebeeb_state_dir_at(sync_root: &Path, state_dir: &Path) -> Resul
     }
 }
 
-pub fn prepare_beebeeb_state_dir_for_sync_root(sync_root: &Path) -> Result<StateDirMigration, String> {
-    let state_dir = beebeeb_state_dir()?;
+pub fn prepare_beebeeb_state_dir_for_sync_root(
+    identity: &'static EngineIdentity,
+    sync_root: &Path,
+) -> Result<StateDirMigration, String> {
+    let state_dir = beebeeb_state_dir_for(identity)?;
     prepare_beebeeb_state_dir_at(sync_root, &state_dir)
 }
 
@@ -362,7 +365,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let sync_root = temp.path().join("sync-root");
         let app_local_data = temp.path().join("app-local-data");
-        let state_dir = beebeeb_state_dir_from_app_local_data(&app_local_data);
+        let state_dir = crate::identity::REAL.state_dir_in(&app_local_data);
         fs::create_dir_all(&sync_root).unwrap();
 
         let outcome = prepare_beebeeb_state_dir_at(&sync_root, &state_dir).unwrap();

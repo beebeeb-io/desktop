@@ -104,14 +104,23 @@ if ($Mode -eq 'release') { $product = 'Beebeeb'; $bundleId = $RealIdentifier; $M
 else { $product = 'Beebeeb Test'; $bundleId = $TestIdentifier; $MainBinaryName = 'beebeeb-desktop-test' }
 
 # The binary's identity must be the installer's. The native app takes its identifier at build time
-# (BEEBEEB_APP_IDENTIFIER, default io.beebeeb.app) and derives its data folder, config file and credential names
-# from it. A test installer around a real-identity binary would run a second engine on the real account's data, so
-# test mode refuses a binary that does not carry the test identifier, and release mode one that does.
-$isTestBinary = Test-BinaryHolds $Exe $TestIdentifier
-if ($Mode -eq 'test' -and !$isTestBinary) {
-  Fail "the binary was not built as the test app: build it with BEEBEEB_APP_IDENTIFIER=$TestIdentifier (it would share credentials, config and state with the real Beebeeb)"
+# (BEEBEEB_APP_IDENTIFIER; unset, a build is the test app; native\beebeeb-drive-rune\build.rs) and every name it and
+# the engine use comes from it: data folder, config file, credential names, sync folder, Cloud Files registration.
+# A test installer around a real-identity binary would run a second engine on the real account's data. The binary
+# carries ONE mark, `beebeeb-app-identity=<identifier>;` (shell\identity.rs, BUILD_MARK): the installer is built
+# only around a binary with this mode's mark and without the other mode's. The bare identifiers are not searched
+# for: both are in every binary, because the engine names both apps.
+$realMark = "beebeeb-app-identity=$RealIdentifier;"
+$testMark = "beebeeb-app-identity=$TestIdentifier;"
+$isRealBinary = Test-BinaryHolds $Exe $realMark
+$isTestBinary = Test-BinaryHolds $Exe $testMark
+if ($isRealBinary -eq $isTestBinary) {
+  Fail "the binary does not carry exactly one identity mark (real: $isRealBinary, test: $isTestBinary): build it from this branch's native\beebeeb-drive-rune"
 }
-if ($Mode -eq 'release' -and $isTestBinary) { Fail "the binary was built as the test app ($TestIdentifier): not a release binary" }
+if ($Mode -eq 'test' -and !$isTestBinary) {
+  Fail "the binary was not built as the test app: build it with BEEBEEB_APP_IDENTIFIER=$TestIdentifier, or with the variable unset (it would share credentials, config and state with the real Beebeeb)"
+}
+if ($Mode -eq 'release' -and !$isRealBinary) { Fail "the binary was built as the test app ($TestIdentifier): not a release binary" }
 
 $stage = Join-Path $OutDir "stage-$Mode"
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
