@@ -7,8 +7,9 @@
 // Files window's own (keyed by keymap.js).
 //
 // Keys match the goldens captured 2026-11-11, which used the shared-trash naming scheme before
-// `groupOf` was introduced on 2026-11-12; the view code uses these names. `check-keymap-scope.sh`
-// was not run here (a capture needs the network).
+// `groupOf` was introduced on 2026-11-12; the view code uses these names. Checked against the goldens
+// with `check-keymap-scope.sh DW-0401 DW-0801 DW-0802 DW-0802b DW-0803` (the same key sets) and record
+// by record: the only values that differ are the toolbar's, which the board changed since the capture.
 const searchActive = !!q('.mk-search.is-focus');
 if (searchActive) {
 
@@ -33,10 +34,12 @@ qa('.mk-body .t-label').forEach((l) => {
 // DW-0802's list is inside `.mk-det` (the native code uses `twice()` to give the Available offline
 // card both `offline-card` from keymap.js's detail pane and `list-0` from here).
 qa('.kit-list').forEach((list, L) => {
-  api.box(`list-${L}`, list);
+  // The golden's `list-<n>` is the list's body (its fill), and an item says whether it is selected:
+  // as keymap.js keys a grouped list for Shared and Trash.
+  api.box(`list-${L}`, q(':scope > .kit-list-body', list));
   qa('.kit-item', list).forEach((item, I) => {
     const k = `item-${L}-${I}`;
-    api.box(k, item);
+    api.box(k, item, { selected: item.classList.contains('is-selected') });
     // A recent search has a clock icon (`.kit-item-icon svg`); the Available offline card has none.
     api.icon(`${k}-icon`, q('.kit-item-icon svg', item));
     api.text(`${k}-title`, q('.kit-item-title', item));
