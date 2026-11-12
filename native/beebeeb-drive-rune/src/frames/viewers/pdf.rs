@@ -186,6 +186,13 @@ pub fn find_bar(ui: &Ui, t: &Theme) -> Option<El> {
                         .color(t.text)
                         .caret(Color::TRANSPARENT, t.selection)
                         .on_edit(find_edit)
+                        // Enter in the field: the next match. Shift+Enter: the previous one.
+                        .on_submit(|s: &mut State, tx: &mut rune::Tx| {
+                            let back = tx.mods().shift;
+                            if let Some(ui) = super::ui(s) {
+                                ui.find_step(if back { -1 } else { 1 });
+                            }
+                        })
                         .size(245.0, 17.0),
                 )
                 .child(

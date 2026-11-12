@@ -223,10 +223,16 @@ impl Ui {
 
     // ---- Archive ----
 
-    /// The entries of the archive's folder on screen, in the list's order.
+    /// The entries on screen, in the list's order: the whole list at the archive's top (as the
+    /// board draws it, folders by their full path), else what is under the folder stepped into.
     pub fn entries(&self) -> Vec<&Entry> {
+        let dir = &self.media.dir;
         match &self.file.body {
-            Body::Archive(doc) => doc.entries.iter().filter(|e| e.parent() == self.media.dir).collect(),
+            Body::Archive(doc) => doc
+                .entries
+                .iter()
+                .filter(|e| e.path.starts_with(dir.as_str()) && e.path != *dir)
+                .collect(),
             _ => Vec::new(),
         }
     }

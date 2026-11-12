@@ -39,7 +39,7 @@ fn strip_id(place: usize) -> String {
     if place == STRIP_OPEN {
         board::RAW.to_string()
     } else {
-        format!("dsc0417{}.arw", 8 + place)
+        format!("dsc{:05}.arw", 4178 + place)
     }
 }
 
@@ -73,7 +73,7 @@ fn photo(id: &str, place: usize) -> OpenFile {
     let strip = (0..STRIP.len())
         .map(|i| StripItem {
             id: strip_id(i),
-            name: format!("DSC0417{}.ARW", 8 + i),
+            name: format!("DSC{:05}.ARW", 4178 + i),
             current: i == place,
         })
         .collect();
@@ -82,7 +82,7 @@ fn photo(id: &str, place: usize) -> OpenFile {
         note: "RAW \u{00B7} the camera's own preview, not a developed RAW".into(),
         strip,
     });
-    let name = format!("DSC0417{}.ARW", 8 + place);
+    let name = format!("DSC{:05}.ARW", 4178 + place);
     if place != STRIP_OPEN {
         // The board draws one photo of the folder; of the others the fixture knows the name only.
         return open_file(id, &["Files", "Shoot selects"], &name, "RAW", body);

@@ -115,17 +115,6 @@ pub struct Entry {
     pub size: String,
 }
 
-impl Entry {
-    /// The folder this entry is in ("" at the top, else ending in "/").
-    pub fn parent(&self) -> &str {
-        let inner = self.path.trim_end_matches('/');
-        match inner.rfind('/') {
-            Some(at) => &self.path[..=at],
-            None => "",
-        }
-    }
-}
-
 /// A picture the viewer draws from the source's decoded pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Picture {
