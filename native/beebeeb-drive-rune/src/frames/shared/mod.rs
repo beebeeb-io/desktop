@@ -1,7 +1,9 @@
 //! Shared (`DW-0501` With me, `DW-0502` By me, `DW-0503` Requests, their empty states
-//! `DW-0508`, `DW-0509`, `DW-0510`, and an item's menu `DW-0505`, `DW-0506`, `DW-0507`). Its
-//! dialogs are listed in `FRAMES.md`.
+//! `DW-0508`, `DW-0509`, `DW-0510`, and an item's menu `DW-0505`, `DW-0506`, `DW-0507`), and
+//! the lane's dialogs (`dialogs`: DW-0504, DW-0511 to DW-0515, Trash's DW-0749). The checklist
+//! is `FRAMES.md`.
 
+pub mod dialogs;
 pub mod parts;
 pub mod scenes;
 pub mod source;
@@ -10,6 +12,7 @@ pub(crate) mod tests;
 
 use crate::State;
 use crate::frames::{self, Intent};
+use crate::shell::app::Section;
 use crate::theme::tokens::{Theme, type_};
 use crate::theme::{icons, tokens};
 use crate::ui::kit;
@@ -49,6 +52,10 @@ pub struct SharedUi {
     pub selected: Option<usize>,
     /// The selected item's menu, while it is open (DW-0505, DW-0506, DW-0507).
     pub menu: Option<Open>,
+    /// The lane's open dialog, over Shared or over Trash (`dialogs`).
+    pub dialog: Option<dialogs::Dialog>,
+    /// What the open dialog's fields hold.
+    pub fields: dialogs::Fields,
 }
 
 impl Default for SharedUi {
@@ -58,6 +65,8 @@ impl Default for SharedUi {
             tab: Tab::WithMe,
             selected: None,
             menu: None,
+            dialog: None,
+            fields: dialogs::Fields::default(),
         }
     }
 }
@@ -71,6 +80,18 @@ impl SharedUi {
         }
     }
 
+    /// Enter (or a double-click) on the selected item: a share with people opens People with
+    /// access here (DW-0511); anything else asks for what it points at.
+    pub fn open_selected(&mut self) -> Option<Intent> {
+        let i = self.selected?;
+        if self.tab == Tab::ByMe && i < self.source.people_shares().len() {
+            let id = self.selected_id()?;
+            self.show_people(&id);
+            return None;
+        }
+        self.open_intent()
+    }
+
     /// How many items the tab that shows lists.
     pub fn count(&self) -> usize {
         match self.tab {
@@ -80,15 +101,14 @@ impl SharedUi {
         }
     }
 
-    /// What Enter (or a double-click) on the selected item asks for.
+    /// What opening the selected item asks of another frame. A share with people asks
+    /// nothing: People with access is drawn here (`open_selected`).
     pub fn open_intent(&self) -> Option<Intent> {
         let i = self.selected?;
         match self.tab {
             Tab::WithMe => self.source.with_me().get(i).map(|r| Intent::OpenItem(r.id.clone())),
-            // A share with people opens People with access; a link or a request opens what it points at.
-            Tab::ByMe if i < self.source.people_shares().len() => {
-                self.selected_id().map(|id| Intent::About("DW-0511", id))
-            }
+            // A link or a request opens what it points at.
+            Tab::ByMe if i < self.source.people_shares().len() => None,
             Tab::ByMe => self
                 .source
                 .links()
@@ -180,6 +200,9 @@ impl SharedUi {
             "Copy link" => Some(Intent::Do("copy-link", id)),
             "Change expiry" => Some(Intent::Do("change-expiry", id)),
             "Password\u{2026}" => Some(Intent::Do("link-password", id)),
+            // People with access is drawn here for a share with people; a link's People is
+            // another frame's to decide (the board draws none).
+            "People" if self.show_people(&id) => None,
             "People" => Some(Intent::About("DW-0511", id)),
             "Stop sharing" => {
                 gone = self.source.stop_sharing(&id);
@@ -229,12 +252,14 @@ const MENU_REQUEST: &[Entry] = &[
 const MENU_REQUEST_OVER: &[Entry] = &[Entry::new("View files"), Entry::new("Remove").danger().rule()];
 
 /// Do what the menu's item `n` says; focus goes back to the item the menu was about (or to
-/// the one that took its place).
+/// the one that took its place), unless the item opened a dialog: focus is the dialog's then.
 fn pick(s: &mut State, n: usize, tx: &mut Tx) {
     if let Some(intent) = s.frames.shared.pick(n) {
         s.frames.intents.push(intent);
     }
-    return_focus(s, tx);
+    if !s.frames.shared.dialog_over(Section::Shared) {
+        return_focus(s, tx);
+    }
 }
 
 fn close_menu(s: &mut State, tx: &mut Tx) {
@@ -262,7 +287,7 @@ fn select(i: usize) -> impl Fn(&mut State) + 'static {
 fn open(i: usize) -> impl Fn(&mut State) + 'static {
     move |s: &mut State| {
         s.frames.shared.selected = Some(i);
-        if let Some(intent) = s.frames.shared.open_intent() {
+        if let Some(intent) = s.frames.shared.open_selected() {
             s.frames.intents.push(intent);
         }
     }
@@ -285,12 +310,12 @@ fn menu_under(i: usize, under: String) -> impl Fn(&mut State) + 'static {
     }
 }
 
-/// A click on the people of share `i`: People with access (DW-0502's action).
+/// A click on the people of share `i`: People with access (DW-0502's action, DW-0511).
 fn open_people(i: usize) -> impl Fn(&mut State) + 'static {
     move |s: &mut State| {
         s.frames.shared.selected = Some(i);
         if let Some(id) = s.frames.shared.selected_id() {
-            s.frames.intents.push(Intent::About("DW-0511", id));
+            s.frames.shared.show_people(&id);
         }
     }
 }
@@ -650,6 +675,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 /// shows (Space, Alt+Enter) do what that item does, and the Menu key or Shift+F10 opens the
 /// menu of the SELECTED item under it. In the search field, Enter asks for the search.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    // A dialog in front takes every key that reaches the section: the list never moves under it.
+    if let Some(took) = dialogs::section_keys(s, ev, tx, Section::Shared) {
+        return took;
+    }
     if let Some(mut open) = s.frames.shared.menu.take() {
         let entries = s.frames.shared.menu_entries().1;
         let took = open.on_key(ev, entries, tx);
@@ -704,8 +733,10 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Up => ui.select(ui.selected.map_or(0, |i| i.saturating_sub(1)), tx),
         Key::Home => ui.select(0, tx),
         Key::End => ui.select(count - 1, tx),
-        Key::Enter => match ui.open_intent() {
+        Key::Enter => match ui.open_selected() {
             Some(intent) => s.frames.intents.push(intent),
+            // People with access opened here: the key is taken.
+            None if ui.dialog_over(Section::Shared) => {}
             None => return false,
         },
         _ => return false,
