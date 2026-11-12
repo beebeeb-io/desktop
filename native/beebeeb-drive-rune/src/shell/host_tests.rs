@@ -906,7 +906,7 @@ fn sign_up_opens_in_the_sign_in_window_and_every_screen_of_it_stays_excluded_fro
             secret_screens += usize::from(step.shows_secret());
         }
     }
-    assert_eq!(secret_screens, 3, "DW-A36 to DW-A38");
+    assert_eq!(secret_screens, 6, "DW-A36 to DW-A41");
     assert_eq!(
         platform.capture_exclusions.lock().unwrap().clone(),
         vec![true],
