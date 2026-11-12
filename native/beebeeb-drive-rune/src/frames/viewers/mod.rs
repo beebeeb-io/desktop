@@ -27,6 +27,8 @@ mod style;
 mod text;
 
 #[cfg(test)]
+mod new_file_tests;
+#[cfg(test)]
 mod tests;
 
 use rune::{Cx, El, Key, KeyEvent, Tx};
