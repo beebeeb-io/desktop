@@ -1,7 +1,9 @@
 // keymap-this-pc.js: the gate keys of Sync history and Available offline (DW-1301 to DW-1306,
 // DW-0428, DW-0715, DW-0120). Runs after keymap.js, in the same scope (`win`, `api`, `q`, `qa`).
 // By the board's class names, counted in document order: the native side counts the same way.
-{
+// Only in those two sections (`groupOf`, keymap.js): unscoped it gave `note-icon` to the global
+// frames and `empty` to Shared's and Trash's empty states (integration I2).
+if (groupOf === 'this-pc') {
   const tb = q('.mk-tb');
   // The filter (`.kit-seg`) is keymap.js's `seg-0`, its tabs `seg-0-<words>`; a `.kit-btn` its `btn-<words>`.
   // ---- The search field with words in it (DW-1304): the caret and the clear glyph ----
