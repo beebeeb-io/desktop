@@ -67,6 +67,50 @@ fn peak_memory_mb() -> (f64, f64) {
     (0.0, 0.0)
 }
 
+#[cfg(windows)]
+fn pump_until(done: impl Fn() -> bool) {
+    #[repr(C)]
+    struct Msg {
+        hwnd: isize,
+        message: u32,
+        wparam: usize,
+        lparam: isize,
+        time: u32,
+        pt: [i32; 2],
+        private: u32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn PeekMessageW(m: *mut Msg, hwnd: isize, min: u32, max: u32, remove: u32) -> i32;
+        fn TranslateMessage(m: *const Msg) -> i32;
+        fn DispatchMessageW(m: *const Msg) -> isize;
+    }
+    let mut m = Msg {
+        hwnd: 0,
+        message: 0,
+        wparam: 0,
+        lparam: 0,
+        time: 0,
+        pt: [0, 0],
+        private: 0,
+    };
+    while !done() {
+        unsafe {
+            while PeekMessageW(&mut m, 0, 0, 0, 1) != 0 {
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+#[cfg(not(windows))]
+fn pump_until(done: impl Fn() -> bool) {
+    while !done() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 fn file_url(p: &Path) -> String {
     let s = p.to_string_lossy().replace('\\', "/").replace(' ', "%20");
     if s.starts_with('/') {
@@ -138,6 +182,12 @@ fn main() {
                 .unwrap_or(false);
             println!("probe {addr}: {}", if ok { "CONNECTED" } else { "NO CONNECTION" });
             std::process::exit(if ok { 0 } else { 1 });
+        }
+        Some("render") if args.iter().any(|a| a == "--load-on-thread") => {
+            // Diagnosis: every LibreOfficeKit call on a worker thread; the main thread pumps messages.
+            let a = args.clone();
+            let worker = std::thread::spawn(move || render(&a));
+            pump_until(|| worker.is_finished());
         }
         Some("render") => render(&args),
         _ => {

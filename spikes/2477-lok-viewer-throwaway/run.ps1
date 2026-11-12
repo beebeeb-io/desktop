@@ -5,7 +5,7 @@
 #   -Phase remove    delete everything the spike put on the machine and count what is left
 # Everything lives under ONE folder ($Root); the only other thing touched is one firewall rule.
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('install', 'run', 'artcraft', 'remove', 'count')][string]$Phase,
+    [Parameter(Mandatory = $true)][ValidateSet('install', 'run', 'lokdiag', 'artcraft', 'remove', 'count')][string]$Phase,
     [string]$Root = 'C:\bb\spike-2477'
 )
 $ErrorActionPreference = 'Stop'
@@ -218,15 +218,15 @@ $exe = "$env:CARGO_TARGET_DIR\release\lok-spike.exe"
 if (-not (Test-Path -LiteralPath $exe)) { throw "build produced no $exe" }
 Say "spike exe bytes=$((Get-Item -LiteralPath $exe).Length)"
 
-function Run-Spike([string]$Label, [string]$Fixture, [string[]]$Extra, [string]$Dir = "$Here\fixtures") {
+function Run-Spike([string]$Label, [string]$Fixture, [string[]]$Extra, [string]$Dir = "$Here\fixtures", [int]$TimeoutMs = 90000) {
     $stdout = "$Root\stdout-$Label-$Fixture.txt"
     $stderr = "$Root\stderr-$Label-$Fixture.txt"
     $a = @('render', '--install', $prog, '--profile', "$Root\profile", '--file', "$Dir\$Fixture", '--out', "$out\png", '--label', $Label) + $Extra
     $p = Start-Process -FilePath $exe -ArgumentList $a -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     $null = $p.Handle
-    if (-not $p.WaitForExit(90000)) {
+    if (-not $p.WaitForExit($TimeoutMs)) {
         Stop-Process -Id $p.Id -Force
-        Say "RED $Label ${Fixture}: no exit within 90 s, killed pid $($p.Id); last stderr line: $(@(Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue) | Select-Object -Last 1)"
+        Say "RED $Label ${Fixture}: no exit within $($TimeoutMs / 1000) s, killed pid $($p.Id); last stderr line: $(@(Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue) | Select-Object -Last 1)"
         Copy-Item -LiteralPath $stderr "$out\stderr-$Label-$Fixture.txt"
         return
     }
@@ -252,6 +252,24 @@ function Make-Legacy {
     Say "legacy fixtures written by soffice --convert-to: $($made.Count) of 3 ($(($made | ForEach-Object { "$($_.Name)=$($_.Length)" }) -join ', '))"
     New-Item -ItemType Directory -Force "$out\legacy" | Out-Null
     $made | Copy-Item -Destination "$out\legacy"
+}
+
+if ($Phase -eq 'lokdiag') {
+    # Narrowing the LibreOfficeKit hang on spreadsheets and presentations (no network needed: local files).
+    New-NetFirewallRule -DisplayName $RuleName -Direction Outbound -Program $exe -Action Block -Profile Any | Out-Null
+    try {
+        $env:MAX_CONCURRENCY = '1'
+        foreach ($f in 'spike.xlsx', 'spike.pptx') { Run-Spike 'diag-1thread' $f @() "$Here\fixtures" 40000 }
+        Remove-Item Env:\MAX_CONCURRENCY
+        foreach ($f in 'spike.xlsx', 'spike.pptx') { Run-Spike 'diag-batch' $f @('--options', 'Batch=true') "$Here\fixtures" 40000 }
+        foreach ($f in 'spike.xlsx', 'spike.pptx') { Run-Spike 'diag-thread' $f @('--load-on-thread') "$Here\fixtures" 40000 }
+        Run-Spike 'diag-thread' 'spike.docx' @('--load-on-thread') "$Here\fixtures" 40000
+    }
+    finally {
+        Get-NetFirewallRule -DisplayName "$RuleName*" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+        Say "firewall rules left: $(@(Get-NetFirewallRule -DisplayName "$RuleName*" -ErrorAction SilentlyContinue).Count)"
+    }
+    exit 0
 }
 
 $probeHost = 'download.documentfoundation.org:443'
