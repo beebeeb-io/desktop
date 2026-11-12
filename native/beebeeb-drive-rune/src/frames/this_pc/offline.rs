@@ -80,11 +80,12 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             .child(crate::ui::status_bar::status_bar(&t));
     } else {
         let bytes = kept.iter().map(|k| k.bytes).sum();
-        main = main
-            .child(note(&t))
-            .child(headers(&t))
-            .child(rows(ui, &kept, &t))
-            .child(chrome::status_line(
+        // Two board frames, two status lines (PR body, Decision): DW-0715 names the section's
+        // total, DW-1306 keeps Files' counts under the open row menu.
+        let status = if matches!(ui.menu, Some(open) if open.row < kept.len()) {
+            crate::ui::status_bar::status_bar(&t)
+        } else {
+            chrome::status_line(
                 ui,
                 format!(
                     "{} available offline \u{00B7} {} on this PC",
@@ -92,7 +93,13 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                     format_size(bytes)
                 ),
                 &t,
-            ));
+            )
+        };
+        main = main
+            .child(note(&t))
+            .child(headers(&t))
+            .child(rows(ui, &kept, &t))
+            .child(status);
     }
     let window = super::window(s, cx, Section::AvailableOffline, main);
     match ui.menu {

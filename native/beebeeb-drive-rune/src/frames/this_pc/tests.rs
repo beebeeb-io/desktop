@@ -295,6 +295,28 @@ fn the_row_menu_opens_from_the_keyboard_and_removes_the_copy() {
     assert_eq!(text(&rt, "item-count"), "2 items \u{00B7} 1.4 GB");
 }
 
+/// Review of PR 306, P2: DW-1306 draws Files' counts in the status line under the open menu,
+/// DW-0715 (no menu) the section's own. Each frame reads as the board draws it.
+#[test]
+fn the_status_line_under_the_row_menu_reads_as_dw_1306_draws_it() {
+    const FILES: &str = "4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only";
+    const SECTION: &str = "3 available offline \u{00B7} 1.4 GB on this PC";
+    for dark in [false, true] {
+        let mut rt = runtime(scenes::dw_1306, dark);
+        assert!(has(&rt, "menu"));
+        assert_eq!(text(&rt, "status-details"), FILES, "DW-1306, dark {dark}");
+        assert_eq!(text(&rt, "status-text"), "Up to date");
+        assert_eq!(count(&rt, "status-details", ""), 1, "one status line, never two");
+        press(&mut rt, Key::Escape);
+        assert!(!has(&rt, "menu"));
+        assert_eq!(
+            text(&rt, "status-details"),
+            SECTION,
+            "DW-0715 again once the menu closes"
+        );
+    }
+}
+
 #[test]
 fn the_row_menu_closes_on_esc_and_its_items_ask_for_their_frames() {
     let mut rt = runtime(scenes::dw_1306, false);
