@@ -68,6 +68,8 @@ pub struct Shell {
     /// The gate and the account the last poll saw (`poll` ends the account lane's flows when
     /// the session ends under them).
     session_seen: Option<(super::app::GateState, Option<String>)>,
+    /// The last poll saw a screen with a secret (`poll_capture` drops exclusion one poll late).
+    secret_seen: bool,
     /// Consecutive failures of the capture-exclusion platform call. Reset on success or when
     /// the desired state changes. Capped at 3: after 3 failures the call is not retried until
     /// the desired state changes (a navigation away and back resets it).
@@ -111,6 +113,7 @@ impl Shell {
             // route (or any route, if a window handle exists) will apply it.
             capture_excluded: false,
             session_seen: None,
+            secret_seen: false,
             capture_exclusion_retries: 0,
             flyout_behind: false,
             #[cfg(test)]
@@ -418,6 +421,13 @@ pub fn request(s: &mut State, intent: Intent) -> Outcome {
 /// section by writing `State::sidebar_section`; this turns that write into a navigation, so
 /// the sidebar already routes. A ui lane that calls [`dispatch`] itself makes this a no-op.
 pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
+    let mut changed = poll_screen(s, tx);
+    changed |= poll_capture(s, tx);
+    changed
+}
+
+/// Everything a poll does but the capture decision.
+fn poll_screen(s: &mut State, tx: &mut Tx) -> bool {
     // The open file: the engine's answers, and a route that left it (lane f-viewers).
     let mut changed = crate::frames::viewers::poll(s, tx);
     // The engine's answers that arrive between presses (a sign-in that took a second, the other device).
@@ -474,11 +484,22 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         sync_sidebar(s);
         changed |= outcome == Outcome::Changed;
     }
-    // The ONE place capture-exclusion is checked: every path above (gate change, signin
-    // intents, sidebar navigation, viewer) that may change what is on screen has run.
-    // A new path cannot forget this: it runs unconditionally at the end of every frame.
-    // The decision combines the route-level check (SignIn, Locked, RecoveryPhrase, FirstRun)
-    // with the account pane's per-screen check (change password, 2FA setup, backup codes).
+    changed
+}
+
+/// The ONE place capture exclusion is decided: every path of the poll (gate change, sign-in
+/// intents, sidebar navigation, viewer, an answer of Windows Hello) that may change what is on
+/// screen has run. A new path cannot forget this: it runs unconditionally at the end of every poll.
+/// The decision combines the route-level check (SignIn, Locked, RecoveryPhrase, FirstRun) with
+/// the account pane's per-screen check (change password, 2FA setup, backup codes, the approval code).
+///
+/// Leaving a secret screen, exclusion drops ONE POLL LATE. The poll runs before the frame it
+/// belongs to is built and shown, and a press animates what it removes: on the poll that first
+/// sees "no secret" the last shown frame still holds it, and the leaving elements would go on
+/// painting it for the length of their animation. So that poll keeps the window excluded and
+/// lands every running animation (the leaving elements are gone from the frame it builds); the
+/// next poll, which it asks for, tells the platform.
+fn poll_capture(s: &mut State, tx: &mut Tx) -> bool {
     let secret = registry::route_shows_secret(&s.shell.app) || {
         let group = registry::group_for(&s.shell.app);
         matches!(
@@ -486,8 +507,13 @@ pub fn poll(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
             registry::FrameGroup::Settings(pane) if crate::frames::account::Pane::root(pane).is_some()
         ) && s.account.shows_secret()
     };
-    s.shell.apply_capture_exclusion(secret);
-    changed
+    let leaving = std::mem::replace(&mut s.shell.secret_seen, secret) && !secret;
+    if leaving {
+        tx.settle();
+        tx.wake_after(std::time::Duration::from_millis(1));
+    }
+    s.shell.apply_capture_exclusion(secret || leaving);
+    leaving
 }
 
 /// Takes every intent the sign-in screens queued (`signin::Ui::take_intents`) and acts on it. A finished

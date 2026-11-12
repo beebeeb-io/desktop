@@ -432,7 +432,10 @@ fn offline_says_so_and_approves_nothing() {
 fn a_request_from_a_country_never_seen_is_marked_above_the_facts() {
     let rt = review_of(UNUSUAL_REQUEST_CODE);
     assert_eq!(says(&rt, "banner-0-title"), "Unusual place");
-    assert!(says(&rt, "banner-0-text").contains("Brazil"));
+    let note = says(&rt, "banner-0-text");
+    assert!(note.contains("appears to come from Brazil"), "an estimate: {note}");
+    assert!(note.contains("estimated from the network address"), "{note}");
+    assert!(!note.contains("never"), "not said as a fact: {note}");
     assert!(
         info(&rt, "banner-0").rect[1] < info(&rt, "list-1-body").rect[1],
         "above the facts"
@@ -756,4 +759,45 @@ fn a_denial_that_loses_to_this_pcs_own_approval_says_what_happened() {
     );
     click(&mut rt, "btn-0");
     assert_eq!(rt.state.account.pane, Pane::Sessions);
+}
+
+/// Review P2-6: a requester that names itself to read like the app's own words. The heading,
+/// the dialog's accessible name and the toast show one bounded line of it.
+#[test]
+fn a_hostile_device_name_is_bounded_in_the_heading_the_accessible_name_and_the_toast() {
+    use super::request::{DEVICE_CHARS, HOSTILE_NAME};
+    let mut state = init();
+    state.account.source = Some(Box::new(BoardAccount::new()));
+    let mut rt = window(state);
+    rt.update(|s, _| assert!(approve::notification_clicked(s, "req-hostile")));
+    settle(&mut rt);
+    let request = rt
+        .state
+        .account
+        .approve
+        .request
+        .clone()
+        .expect("the request under review");
+    assert!(HOSTILE_NAME.chars().count() > DEVICE_CHARS && HOSTILE_NAME.contains('\n'));
+    let (toast, _) = approve::notification(&request);
+    let cap = "Allow Drive on ?".chars().count() + DEVICE_CHARS;
+    for (what, shown) in [
+        ("the heading", says(&rt, "dlg-title")),
+        ("the accessible name", info(&rt, "dlg").label.unwrap_or_default()),
+        ("the toast", toast),
+        ("the name in the facts", says(&rt, "item-2-0-value")),
+    ] {
+        assert!(!shown.is_empty(), "{what} shows");
+        assert!(shown.chars().count() <= cap, "{what} is bounded: {shown:?}");
+        assert!(
+            shown
+                .chars()
+                .all(|c| !c.is_control() && c != '\u{202E}' && c != '\u{200B}'),
+            "{what} is one line with no hidden character: {shown:?}"
+        );
+        assert!(
+            !shown.contains("Press Approve"),
+            "{what} lost what was over the cap: {shown:?}"
+        );
+    }
 }

@@ -33,23 +33,7 @@ pub const CODE_KEY: &str = "acct-approve-code";
 const CODE_CHARS: usize = 8;
 const DIALOG_W: f32 = 440.0;
 
-/// A sign-in that waits for an answer, as the server describes it.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct SignInRequest {
-    /// The server's id of the request. Not the code.
-    pub id: String,
-    /// The product the request is for ("Drive").
-    pub product: String,
-    /// Reported by that device, unverified: its name and its app.
-    pub device: String,
-    pub app: String,
-    /// Measured by the server: the requester cannot choose these.
-    pub country: String,
-    pub address: String,
-    pub asked_at: String,
-    /// The account has never signed in from this country.
-    pub unusual_place: bool,
-}
+pub use super::request::{Reported, SignInRequest};
 
 /// What looking up a code found.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -108,16 +92,16 @@ pub const FOUND_LATER_REQUEST_CODE: &str = "L4T3-R0K0";
 
 /// The board's waiting request (DW-A13): Drive on Anna's iPhone, asked from Germany.
 pub fn board_request(id: &str, country: &str, unusual_place: bool) -> SignInRequest {
-    SignInRequest {
-        id: id.into(),
-        product: "Drive".into(),
-        device: "Anna's iPhone".into(),
-        app: "Drive 1.0".into(),
-        country: country.into(),
-        address: "203.0.113.47".into(),
-        asked_at: "09:41:12".into(),
+    SignInRequest::bounded(Reported {
+        id,
+        product: "Drive",
+        device: "Anna's iPhone",
+        app: "Drive 1.0",
+        country,
+        address: "203.0.113.47",
+        asked_at: "09:41:12",
         unusual_place,
-    }
+    })
 }
 
 /// What the fixture's server finds for `code`.
@@ -207,7 +191,7 @@ pub fn leave(ui: &mut AccountUi) {
     if ui.approve.waiting
         && let (Some(request), Some(source)) = (ui.approve.request.as_ref(), ui.source.as_mut())
     {
-        source.cancel_approval(&request.id);
+        source.cancel_approval(request.id());
     }
     ui.approve = Approve::default();
 }
@@ -254,7 +238,8 @@ fn recheck(ui: &mut AccountUi) {
         return;
     };
     if whole(a) {
-        a.matches = matches!(source.find_sign_in_request(&a.code.text), Lookup::Found(found) if found.id == request.id);
+        a.matches =
+            matches!(source.find_sign_in_request(&a.code.text), Lookup::Found(found) if found.id() == request.id());
     }
 }
 
@@ -291,10 +276,10 @@ fn look_up(ui: &mut AccountUi) -> Option<&'static str> {
 #[allow(dead_code)]
 pub fn notification(request: &SignInRequest) -> (String, String) {
     (
-        format!("Allow {} on {}?", request.product, request.device),
+        format!("Allow {} on {}?", request.product(), request.device()),
         format!(
             "Sign-in request from {}. Open to review it. Don't approve it if it wasn't you.",
-            request.country
+            request.country()
         ),
     )
 }
@@ -330,7 +315,7 @@ pub(super) fn approve(s: &mut State) {
     let (Some(request), Some(source)) = (ui.approve.request.as_ref(), ui.source.as_mut()) else {
         return;
     };
-    source.begin_approval(&request.id, &ui.approve.code.text);
+    source.begin_approval(request.id(), &ui.approve.code.text);
     ui.approve.waiting = true;
     ui.approve.problem = None;
     ui.approve.code.focused = false;
@@ -358,10 +343,10 @@ fn deny(s: &mut State) {
         return;
     };
     if ui.approve.waiting {
-        source.cancel_approval(&request.id);
+        source.cancel_approval(request.id());
         ui.approve.waiting = false;
     }
-    let end = match source.deny_sign_in(&request.id) {
+    let end = match source.deny_sign_in(request.id()) {
         Denial::Denied => Dialog::ApproveDenied,
         Denial::Expired => Dialog::ApproveExpired { handled: false },
         Denial::AlreadyHandled => Dialog::ApproveExpired { handled: true },
@@ -383,20 +368,20 @@ fn finish(ui: &mut AccountUi, end: Dialog) {
 /// by the wait it answers. `true`: something changed.
 pub fn poll(s: &mut State) -> bool {
     let ui = &mut s.account;
-    if !ours(ui.pane) {
-        return false;
-    }
     let Some(source) = ui.source.as_mut() else {
         return false;
     };
     // An answer names its request. One that is not for the wait that is open (a prompt that was
-    // left, a request that is not the one on screen) is taken and dropped.
+    // left, a lock, a request that is not the one on screen) is taken and dropped, whatever shows.
     let answer = source.approval_answer();
+    if !ours(ui.pane) {
+        return false;
+    }
     if ui.dialog == Some(Dialog::ApproveUnsure { denying: false }) {
         // The result was not known. Only "approved", for this request, settles it: any other
         // late word cannot say whether this PC's claim went through.
         let settled = matches!((&answer, ui.approve.request.as_ref()),
-            (Some((id, Approval::Approved)), Some(shown)) if *id == shown.id);
+            (Some((id, Approval::Approved)), Some(shown)) if *id == shown.id());
         if settled {
             finish(ui, Dialog::ApproveApproved);
         }
@@ -406,7 +391,7 @@ pub fn poll(s: &mut State) -> bool {
         let Some((id, answer)) = answer else {
             return false;
         };
-        if ui.approve.request.as_ref().is_none_or(|shown| shown.id != id) {
+        if ui.approve.request.as_ref().is_none_or(|shown| shown.id() != id) {
             return false;
         }
         ui.approve.waiting = false;
@@ -427,7 +412,7 @@ pub fn poll(s: &mut State) -> bool {
     }
     if ui.dialog == Some(Dialog::ApproveReview)
         && let Some(request) = ui.approve.request.as_ref()
-        && let Some(gone) = source.sign_in_request_gone(&request.id)
+        && let Some(gone) = source.sign_in_request_gone(request.id())
     {
         let handled = gone == Denial::AlreadyHandled;
         finish(ui, Dialog::ApproveExpired { handled });
@@ -630,7 +615,7 @@ fn foot_button(index: usize, label: &str, look: Look, dimmed: bool, t: &Theme) -
 
 /// The question at the head of the review: the product and the device as it named itself.
 fn question(request: &SignInRequest) -> String {
-    format!("Allow {} on {}?", request.product, request.device)
+    format!("Allow {} on {}?", request.product(), request.device())
 }
 
 fn review_head(request: &SignInRequest, t: &Theme) -> El {
@@ -692,15 +677,16 @@ fn review(a: &Approve, request: &SignInRequest, t: &Theme) -> El {
     };
     let mut children = vec![review_head(request, t)];
     let mut keys = Keys::new();
-    if request.unusual_place {
+    if request.unusual_place() {
         children.push(au::banner(
             &mut keys,
             Tone::Red,
             &crate::theme::icons_settings::INFO,
             Some("Unusual place"),
+            // The country is derived from a network address: said as an estimate, never as a fact.
             Some(&format!(
-                "This account has never signed in from {}. Don't approve it unless that is you.",
-                request.country
+                "This request appears to come from {}. Beebeeb has not seen a sign-in from there on this account before. The country is estimated from the network address. Don't approve it unless that is you.",
+                request.country()
             )),
             true,
             t,
@@ -721,15 +707,27 @@ fn review(a: &Approve, request: &SignInRequest, t: &Theme) -> El {
         1,
         Some("Measured by Beebeeb"),
         vec![
-            fact(1, 0, &icons::GLOBE, "Country", Tail::Value(request.country.clone())),
+            fact(
+                1,
+                0,
+                &icons::GLOBE,
+                "Country",
+                Tail::Value(request.country().to_owned()),
+            ),
             fact(
                 1,
                 1,
                 &icons::ACTIVITY,
                 "Network address",
-                Tail::Mono(request.address.clone()),
+                Tail::Mono(request.address().to_owned()),
             ),
-            fact(1, 2, &icons::CLOCK, "Asked at", Tail::Mono(request.asked_at.clone())),
+            fact(
+                1,
+                2,
+                &icons::CLOCK,
+                "Asked at",
+                Tail::Mono(request.asked_at().to_owned()),
+            ),
         ],
         None,
         t,
@@ -744,8 +742,14 @@ fn review(a: &Approve, request: &SignInRequest, t: &Theme) -> El {
         2,
         Some("Reported by that device (it can be wrong)"),
         vec![
-            fact(2, 0, &icons::DEVICE_PHONE, "Name", Tail::Value(request.device.clone())),
-            fact(2, 1, &icons::FOLDER, "App", Tail::Mono(request.app.clone())),
+            fact(
+                2,
+                0,
+                &icons::DEVICE_PHONE,
+                "Name",
+                Tail::Value(request.device().to_owned()),
+            ),
+            fact(2, 1, &icons::FOLDER, "App", Tail::Mono(request.app().to_owned())),
         ],
         None,
         t,
@@ -826,7 +830,8 @@ fn approved(request: &SignInRequest, t: &Theme) -> El {
         "Approved",
         &format!(
             "{} is signed in on {}. You can sign that device out any time in Devices and sessions.",
-            request.product, request.device
+            request.product(),
+            request.device()
         ),
         t,
     );
@@ -836,7 +841,7 @@ fn approved(request: &SignInRequest, t: &Theme) -> El {
         vec![set::item(
             1,
             0,
-            &Row::new(Lead::Icon(&icons::DEVICE_PHONE), request.device.clone())
+            &Row::new(Lead::Icon(&icons::DEVICE_PHONE), request.device().to_owned())
                 .sub("New session, just now")
                 .tail(Tail::Pill {
                     label: "Signed in".into(),
@@ -864,7 +869,7 @@ fn denied(request: &SignInRequest, t: &Theme) -> El {
         &crate::ui::global_icons::CLOSE,
         Tone::Neutral,
         "Denied",
-        &format!("Nothing was signed in on {} and no keys were shared.", request.device),
+        &format!("Nothing was signed in on {} and no keys were shared.", request.device()),
         t,
     );
     let mut keys = Keys::new();
@@ -928,7 +933,7 @@ fn unsure(denying: bool, request: &SignInRequest, t: &Theme) -> El {
         "Result not known",
         &format!(
             "Beebeeb could not be reached after Windows Hello, so this PC does not know whether {} was signed in. It keeps checking. A new session in Devices and sessions means it was.",
-            request.device
+            request.device()
         ),
         t,
     );
@@ -950,7 +955,8 @@ fn too_late(request: &SignInRequest, t: &Theme) -> El {
         "Already approved",
         &format!(
             "This PC's approval reached Beebeeb before the denial. {} is signed in on {}. Sign that device out in Devices and sessions if that was a mistake.",
-            request.product, request.device
+            request.product(),
+            request.device()
         ),
         t,
     );

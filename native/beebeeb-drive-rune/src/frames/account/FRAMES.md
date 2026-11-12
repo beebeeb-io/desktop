@@ -101,9 +101,20 @@ DW-A14 are in the capture-exclusion decision (`Pane::shows_secret`, `Dialog::sho
 
 States the board gives a rule and no drawing, built from the rule's words (tests only): a code nothing waits for
 ("We could not find a waiting request with that code. Check it on the other device."); the red "Unusual place" note
-above the facts; "Already handled" in place of DW-A17's heading; Windows Hello cancelled (back to the review, nothing
-sent); offline, at the lookup and after Windows Hello ("Beebeeb can't be reached. Nothing was approved.").
+above the facts, worded as an estimate (the country is derived from a network address); "Already handled" in place
+of DW-A17's heading; Windows Hello cancelled (back to the review, nothing sent); offline at the lookup, and before
+anything was sent ("Beebeeb can't be reached. Nothing was approved.").
 
-Esc: the dialogs are modal. On the review Esc is Deny (the board); on a result it is the result's one button.
+Ends with no board frame and no gated scene (the security review of the frames PR; tests only, `request.rs` holds
+the types): "Result not known" (the connection went after Windows Hello with the claim sent: the screen keeps
+checking and only "approved" for this request settles it), "Not denied" (the denial could not be sent: Try again,
+Close) and "Already approved" (Deny came after this PC's own approval went through). None of them holds the code.
+
+Rules the review added: a lock, a sign-out or another account ends the flow (and the account forms) from the
+shell's poll; Approve never holds the keyboard when the review opens and is the default only once the code was
+typed on the review itself; every answer and every notification click names its request; a request's strings are
+bounded by `SignInRequest::bounded` (one line, a cap in characters, no control, direction or hidden character).
+
+Esc: the dialogs are modal. On the review Esc is Deny (the board); on a result it is the result's first way out.
 
 Not tested, no fixture path: a request that runs out while it is only being looked at (`sign_in_request_gone`).
