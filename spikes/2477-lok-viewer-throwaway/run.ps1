@@ -134,7 +134,7 @@ function Run-Spike([string]$Label, [string]$Fixture, [string[]]$Extra) {
     $stderr = "$Root\stderr-$Label-$Fixture.txt"
     $a = @('render', '--install', $prog, '--profile', "$Root\profile", '--file', "$Here\fixtures\$Fixture", '--out', "$out\png", '--label', $Label) + $Extra
     $p = Start-Process -FilePath $exe -ArgumentList $a -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-    if (-not $p.WaitForExit(180000)) { Stop-Process -Id $p.Id -Force; Say "RED $Label $Fixture: no exit within 180 s, killed pid $($p.Id)"; return }
+    if (-not $p.WaitForExit(180000)) { Stop-Process -Id $p.Id -Force; Say "RED $Label ${Fixture}: no exit within 180 s, killed pid $($p.Id)"; return }
     $p.WaitForExit()
     $line = Get-Content -LiteralPath $stdout | Where-Object { $_ -like '{*' } | Select-Object -First 1
     if ($line) { Add-Content -LiteralPath $metrics -Value $line }
