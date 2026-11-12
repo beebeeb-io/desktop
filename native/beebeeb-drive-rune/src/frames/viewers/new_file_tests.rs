@@ -40,6 +40,8 @@ fn runtime() -> (
 
 /// A click on the board's selected row (Contract draft.pdf): the keyboard is in the Files list.
 fn click_the_list(rt: &mut Runtime<State>) {
+    // A second apart, so two clicks are never one double click (that opens the file).
+    rt.frame(1.0);
     let [x, y, w, h] = info(rt, "row-6-date").rect;
     rt.pointer_down(x + w / 2.0, y + h / 2.0);
     rt.pointer_up(x + w / 2.0, y + h / 2.0);
@@ -85,6 +87,8 @@ fn operate(rt: &mut Runtime<State>, key: &str) {
     for _ in 0..30 {
         if focused(rt).as_deref() == Some(key) {
             press(rt, Key::Text(" ".into()));
+            // Where the press sends the keyboard is applied on the poll of the next frame.
+            rt.frame(0.0);
             return;
         }
         press(rt, Key::Tab);
