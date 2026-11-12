@@ -91,15 +91,24 @@ impl Step {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Guide {
     pub step: Option<Step>,
+    /// The row that was selected when the guide started: tip 2 points at it when it is a file.
+    pub row: Option<usize>,
 }
 
-/// The row tip 2 points at: the first file among the folder's first [`TIP_2_ROWS`] rows.
+/// The row tip 2 points at: the file that was selected when the guide started (the board points
+/// at the file its Files frame has selected), otherwise the first file; among the folder's first
+/// [`TIP_2_ROWS`] rows.
 pub fn file_row(s: &State) -> Option<usize> {
+    let is_file = |i: &usize| *i < TIP_2_ROWS && s.listing.items.get(*i).is_some_and(|item| !item.is_folder);
+    if let Some(row) = s.guide.row.filter(is_file) {
+        return Some(row);
+    }
     s.listing.items.iter().take(TIP_2_ROWS).position(|item| !item.is_folder)
 }
 
 /// Start the guide on Files, at DW-0380. From the first run's end and from Settings.
 pub fn start(s: &mut State) {
+    s.guide.row = s.selected;
     show(s, Step::Tray);
 }
 
@@ -464,7 +473,11 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     // The board's desktop holds the window as DW-0401 draws it (a file selected, its details).
     ("DW-0380", |s| s.guide.step = Some(Step::Tray)),
     ("DW-0301", |s| on_files(s, Step::Tip(1))),
-    ("DW-0302", |s| on_files(s, Step::Tip(2))),
+    ("DW-0302", |s| {
+        // The file DW-0401 has selected ("Contract draft.pdf"), as when the guide starts there.
+        s.guide.row = s.selected;
+        on_files(s, Step::Tip(2));
+    }),
     ("DW-0303", |s| {
         crate::frames::shared::scenes::dw_0501(s);
         s.guide.step = Some(Step::Tip(3));

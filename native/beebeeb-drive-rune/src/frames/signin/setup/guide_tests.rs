@@ -140,6 +140,17 @@ fn each_ring_is_on_the_real_control_and_follows_it() {
     ] {
         ring_holds(&at_scene(frame), target, 0.0);
     }
+    // With no file selected when the guide starts, tip 2 points at the folder's first file.
+    let mut state = init();
+    state.clear_selection();
+    guide::start(&mut state);
+    let mut rt = window(state);
+    click(&mut rt, NEXT_KEY);
+    click(&mut rt, NEXT_KEY);
+    assert_eq!(rt.state.guide.step, Some(Step::Tip(2)));
+    ring_holds(&rt, "row-5", 0.0);
+    let (ring, row) = (rect(&rt, RING_KEY).unwrap(), rect(&rt, "row-5").unwrap());
+    assert!((ring[1] - row[1]).abs() < 0.01, "the ring {ring:?} is on row 5 {row:?}");
     // The board's ring ends 1.5 above the gear button's lower edge.
     ring_holds(&at_scene("DW-0305"), "settings-btn", 1.5);
 
