@@ -101,6 +101,48 @@ mod tests {
         assert!(refusal(&TEST, Some("Beebeeb"), root()).is_some());
     }
 
+    /// The three callers ask before they act: the handle before it makes an engine, the runner before it connects
+    /// the root, the Windows registration before it registers.
+    #[test]
+    fn every_way_into_a_sync_folder_asks_first() {
+        let read = |file: &str| {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(file);
+            std::fs::read_to_string(path).unwrap().replace("\r\n", "\n")
+        };
+        for (file, from, ask, act) in [
+            (
+                "app.rs",
+                "pub fn start_sync(",
+                "crate::sync_root_owner::check(self.identity, &sync_root)?;",
+                "EngineRunner::spawn(",
+            ),
+            (
+                "runner.rs",
+                "async fn run(",
+                "if let Err(msg) = crate::sync_root_owner::check(identity, &sync_root) {",
+                "crate::windows_cf::connect_root(identity, &sync_root);",
+            ),
+            (
+                "windows_cf/mod.rs",
+                "pub fn register_sync_root(",
+                "crate::sync_root_owner::check(identity, sync_root_path).map_err(|refusal| anyhow::anyhow!(refusal))?;",
+                "register_sync_root_with(sync_root_path, &app_provider(identity), HYDRATION_POLICY)",
+            ),
+        ] {
+            let source = read(file);
+            let body = &source[source.find(from).unwrap_or_else(|| panic!("{file}: {from}"))..];
+            let asked = body.find(ask).unwrap_or_else(|| panic!("{file} does not ask"));
+            let acted = body.find(act).unwrap_or_else(|| panic!("{file}: {act}"));
+            assert!(asked < acted, "{file} acts before it asks");
+        }
+        // The runner's refusal ends the run.
+        let runner = read("runner.rs");
+        let asked = &runner[runner
+            .find("crate::sync_root_owner::check(identity, &sync_root)")
+            .unwrap()..];
+        assert!(asked[..asked.find("\n    }\n").unwrap()].contains("return;"));
+    }
+
     /// Off Windows no folder has a registration, so nothing is refused here (the pure rule above is the test).
     #[cfg(not(target_os = "windows"))]
     #[test]
