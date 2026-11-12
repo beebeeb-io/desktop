@@ -675,6 +675,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         Pane::Storage => storage::pane(ui, &t),
         Pane::Insights => insights::pane(ui, &t),
         Pane::Sync => sync::pane(ui, &t),
+        // A source that does not answer for this pane: the same "not built yet" frame.
+        Pane::Previews if ui.drive.photo_previews() == previews::PhotoPreviews::Unavailable => {
+            return placeholder::window(s, cx, registry::group_for(&s.shell.app));
+        }
         Pane::Previews => previews::pane(ui, &t),
     };
     let overlay = overlay.filter(|_| inside);

@@ -36,6 +36,9 @@ pub const WIPE_STEP: f32 = 0.05;
 /// What the pane says once new previews are being made.
 pub const REBUILDING: &str = "Making new previews in the background";
 
+/// What stands where a weight would, for a size and format not measured yet.
+pub const NOT_MEASURED: &str = "not measured yet";
+
 /// 11px/500 mono: what a choice weighs, in the compare view (`.t-cap.font-mono`).
 const CAP_MONO: TextStyle = TextStyle::new(11.0, 500.0).family(Family::Mono).lh(14.0);
 
@@ -244,15 +247,9 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let mut children = vec![shell::heading("Thumbnails and previews", Some(HEAD_SUB), t)];
     let p = match ui.drive.photo_previews() {
         PhotoPreviews::Ready(p) => p,
+        // Not drawn: `settings::view` shows the shell's "not built yet" frame for a source
+        // that does not answer for this pane. Never a value, never a false error.
         PhotoPreviews::Unavailable => {
-            children.push(notices::problem(
-                0,
-                0,
-                "Couldn't load your preview settings",
-                "Nothing was changed.",
-                None,
-                t,
-            ));
             return (shell::pane(children, t), None);
         }
     };
@@ -424,13 +421,15 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
 /// (`.kit-card.p-3`). The board's line is one text of mixed runs; so is this (`card-0-sub`).
 fn sample_card(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
     let strong = format!("{} \u{b7} ", name(p.size, p.format));
-    let weight = p.weight(p.size, p.format).unwrap_or_default();
+    // A size and format nobody has measured yet says so, in words.
+    let measured = p.weight(p.size, p.format);
+    let weight = measured.clone().unwrap_or_else(|| NOT_MEASURED.to_string());
     let middle = ", original ";
     let words = format!("{strong}{weight}{middle}{}", p.original);
     let weight_at = strong.len()..strong.len() + weight.len();
     let original_at = weight_at.end + middle.len()..words.len();
     let mut spans = vec![Span::new(0, weight_at.start).weight(500.0).color(t.text)];
-    if !weight.is_empty() {
+    if measured.is_some() {
         spans.push(
             Span::new(weight_at.start, weight_at.end)
                 .weight(500.0)
@@ -631,14 +630,48 @@ fn option(j: usize, label: &str, weight: Option<String>, on: bool, t: &Theme) ->
         .focusable(true)
         .focus_ring(2.0, 0.0, t.accent_deep)
         .cursor(rune::Cursor::Pointer)
-        .child(kit::label(format!("cmp-opt-{j}"), label, type_::HEAD, Color::WHITE).a11y_hidden());
+        .child(
+            kit::label(format!("cmp-opt-{j}"), label, type_::HEAD, Color::WHITE)
+                .w(rune::text::advance(label, type_::HEAD))
+                .a11y_hidden(),
+        );
     if on {
         o = o.fill(Color::WHITE.alpha(0.18));
     }
     if let Some(weight) = weight {
-        o = o.child(kit::label(format!("cmp-opt-{j}-bytes"), weight, CAP_MONO, dim).a11y_hidden());
+        let wide = rune::text::advance(&weight, CAP_MONO);
+        o = o.child(
+            kit::label(format!("cmp-opt-{j}-bytes"), weight, CAP_MONO, dim)
+                .w(wide)
+                .a11y_hidden(),
+        );
     }
     o
+}
+
+/// A small button of the compare view (`.kit-btn.kit-btn-sm`, as `settings_controls::button`),
+/// its words exactly as wide as they measure: a hugging text is snapped up to a device pixel,
+/// which moves the words of a centred row by a fraction. Keys: `btn-<N>`, `btn-<N>-label`.
+fn word_button(index: usize, label: &str, t: &Theme) -> El {
+    let key = format!("btn-{index}");
+    row()
+        .key(key.clone())
+        .role("button")
+        .label(label)
+        .h(22.0)
+        .px(12.0)
+        .center()
+        .radius(radius::MD)
+        .fill(t.paper)
+        .border(1.0, t.card_border)
+        .border_layout()
+        .hover(t.hover)
+        .press(t.press)
+        .focusable(true)
+        .child(
+            kit::label(format!("{key}-label"), label, type_::BUTTON_SM, t.text)
+                .w(rune::text::advance(label, type_::BUTTON_SM)),
+        )
 }
 
 /// DW-0745: a preview against the original, before choosing a size.
@@ -656,7 +689,7 @@ fn compare_view(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
         .gap(12.0)
         .center_y()
         .child(
-            controls::button(1, "Done", None, Emphasis::Plain, t)
+            word_button(1, "Done", t)
                 .default_button()
                 .on_press(|s: &mut State| s.settings.close_compare()),
         )
@@ -720,11 +753,7 @@ fn compare_view(ui: &SettingsUi, p: &Previews, t: &Theme) -> El {
         );
     }
     foot = foot.child(
-        controls::button(2, "Choose photo", None, Emphasis::Plain, t)
-            // As wide as its words to the fraction of a point (12 pt and the border each
-            // side): the row is centred, so a rounded width would move every choice in it.
-            .w(26.0 + rune::text::advance("Choose photo", type_::BUTTON_SM))
-            .on_press(|s: &mut State| s.settings.ask(Intent::Open("choose-photo"))),
+        word_button(2, "Choose photo", t).on_press(|s: &mut State| s.settings.ask(Intent::Open("choose-photo"))),
     );
     // The buttons are the light theme's paper on the dark ground in both themes, as the
     // board draws them; the sheet hangs from the caption, centred across the window.
@@ -835,9 +864,10 @@ impl BoardPreviews {
             self.previews.total = total.clone();
             self.previews.on_pc = total;
         }
-        if let Some(kb) = board_kb(size, format) {
-            self.previews.uses[0] = words_of(kb * BOARD_PHOTOS);
-        }
+        self.previews.uses[0] = match board_kb(size, format) {
+            Some(kb) => words_of(kb * BOARD_PHOTOS),
+            None => "Not measured yet".into(),
+        };
         self.previews.uses[1] = if format == PreviewFormat::Heic {
             "420 MB".into()
         } else {

@@ -4,7 +4,7 @@
 //! Input is scripted: keys and presses go through Rune's `Runtime`, as a person's would.
 
 use super::drive::{BoardDrive, DriveSettings, Insights, Kept, Storage, SyncPane};
-use super::previews::{CompareMode, PhotoPreviews, PreviewFormat, PreviewSize, REBUILDING};
+use super::previews::{CompareMode, NOT_MEASURED, PhotoPreviews, PreviewFormat, PreviewSize, REBUILDING};
 use super::{Dialog, Intent, Pane};
 use crate::shell::app::{Screen, SettingsPane};
 use crate::shell::host;
@@ -279,7 +279,7 @@ fn on_this_pc_opens_storage_and_rebuild_says_so() {
 }
 
 /// A source that knows nothing of this pane: only the trait's default bodies answer.
-struct Bare(BoardDrive);
+pub(super) struct Bare(pub(super) BoardDrive);
 
 impl DriveSettings for Bare {
     fn storage(&self) -> Storage {
@@ -326,9 +326,10 @@ fn a_source_that_does_not_answer_draws_no_sample_value() {
     assert!(super::scene("DW-0744", &mut state));
     state.settings.drive = Box::new(Bare(BoardDrive::new()));
     let mut rt = start(state);
-    assert_eq!(text(&rt, "set-title"), "Thumbnails and previews");
-    for sample in ["2,431", "30.9 MB", "3.1 GB", "4K HEIC"] {
-        assert!(!says(&rt, sample), "no sample value: {sample}");
+    // The shell's "not built yet" frame: no pane, no value, and no error that is not one.
+    assert!(find(&rt, "set-main").is_none());
+    for sample in ["2,431", "30.9 MB", "3.1 GB", "4K HEIC", "Couldn't load"] {
+        assert!(!says(&rt, sample), "not drawn: {sample}");
     }
     assert!(find(&rt, "btn-0").is_none() && find(&rt, "item-0-0-switch").is_none());
     // And its controls' entry points do nothing.
@@ -348,4 +349,37 @@ fn a_build_that_ships_draws_no_sample_value_on_thumbnails_and_previews() {
     for sample in ["2,431", "30.9 MB", "3.1 GB"] {
         assert!(!says(&rt, sample), "no sample value: {sample}");
     }
+}
+
+/// Every size and format can be stored by presses; three of the eight pairs have no measured
+/// weight on the fixture. The sample line never leaves a separator dangling: it says the
+/// weight, or that there is none yet.
+#[test]
+fn every_size_and_format_says_its_weight_or_that_it_is_not_measured() {
+    let mut unmeasured = 0;
+    for size in PreviewSize::ALL {
+        for format in PreviewFormat::ALL {
+            let mut rt = runtime("DW-0744");
+            rt.state.settings.choose_previews(Some(size), Some(format));
+            rt.state.settings.apply_previews();
+            settle(&mut rt);
+            let line = text(&rt, "card-0-sub");
+            let name = super::previews::name(size, format);
+            assert!(!line.contains("\u{b7} ,") && !line.contains("  "), "{name}: {line}");
+            let weight = match rt.state.settings.drive.photo_previews() {
+                PhotoPreviews::Ready(p) => p.weight(size, format),
+                PhotoPreviews::Unavailable => panic!("the fixture answers"),
+            };
+            let says = weight.clone().unwrap_or_else(|| NOT_MEASURED.to_string());
+            assert_eq!(line, format!("{name} \u{b7} {says}, original 30.9 MB"));
+            unmeasured += usize::from(weight.is_none());
+            // The compare view's tag and the question never dangle either.
+            rt.state.settings.open_compare();
+            settle(&mut rt);
+            let tag = text(&rt, "cmp-tag-1");
+            assert!(tag == name || tag.starts_with(&format!("{name} \u{b7} ")), "{tag}");
+            assert!(!tag.ends_with('\u{b7}') && !tag.ends_with(' '), "{tag}");
+        }
+    }
+    assert_eq!(unmeasured, 3, "the fixture's unmeasured pairs");
 }

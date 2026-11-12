@@ -427,14 +427,28 @@ fn a_build_that_ships_draws_no_sample_value_on_drives_panes() {
     );
 }
 
-/// A section this lane does not draw stays the shell's: never one of this lane's panes
-/// under that section's route. (Thumbnails and previews was the last one not built; it is
-/// `tests_previews`' now.)
+/// A section nothing answers for yet stays the shell's: its "not built yet" frame, never
+/// another pane's content under that section's route. (Every section is drawn now; the case
+/// left is a source that does not answer for Thumbnails and previews.)
 #[test]
-fn a_section_of_another_group_is_left_to_the_shell() {
-    let mut rt = runtime("DW-0712");
-    press(&mut rt, "Backups-row");
-    assert_eq!(rt.state.shell.app.screen(), Screen::Settings(SettingsPane::Backups));
-    // Backups is another group's pane: nothing of Storage's is drawn under its route.
-    assert!(find(&rt, "usage").is_none(), "no pane of this lane is drawn for it");
+fn a_section_not_built_yet_is_left_to_the_shell() {
+    let mut state = init();
+    assert!(super::scene("DW-0712", &mut state));
+    state.settings.drive = Box::new(super::tests_previews::Bare(BoardDrive::new()));
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, view, (958.0, 718.0), env);
+    rt.on_key = Some(host::on_key);
+    rt.poll = Some(host::poll);
+    rt.frame(0.0);
+    settle(&mut rt);
+    assert!(find(&rt, "set-main").is_some(), "Storage is drawn");
+    press(&mut rt, "Thumbnails and previews-row");
+    assert_eq!(
+        rt.state.shell.app.screen(),
+        Screen::Settings(SettingsPane::ThumbnailsAndPreviews)
+    );
+    assert!(find(&rt, "set-main").is_none(), "no settings pane is drawn for it");
 }
