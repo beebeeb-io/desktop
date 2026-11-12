@@ -44,7 +44,8 @@ pub struct Words {
 pub enum Protection {
     /// A Beebeeb service manages it: the message says so (DW-0425, DW-1110).
     Managed(Words),
-    /// It is (in) the backup of the device with this id: only the backup changes it, and deleting
+    /// It is (in) the backup of the device with this id (the id the Backups section knows the
+    /// device by): only the backup changes it, and deleting
     /// it is Delete this backup, behind a code (DW-0742).
     DeviceBackup(String),
     /// The Backups folder itself: only backups add to it.
@@ -200,7 +201,15 @@ impl State {
             Some(Protection::DeviceBackup(device)) if action == Action::Trash => {
                 self.intent(Intent::Frame("DW-0742"));
                 crate::shell::host::dispatch(self, Event::OpenSettings(SettingsPane::Backups));
-                self.backups.ask_delete_device(&device);
+                // The dialog is the Backups section's, for a device IT lists; this PC's own
+                // backup is managed on the section itself.
+                let listed = self
+                    .backups
+                    .source()
+                    .is_some_and(|source| source.devices().iter().any(|d| d.id == device));
+                if listed {
+                    self.backups.ask_delete_device(&device);
+                }
                 true
             }
             Some(Protection::DeviceBackup(_) | Protection::BackupsRoot) => {
@@ -230,13 +239,16 @@ impl State {
     }
 }
 
-/// The message's keys: it is modal, so nothing reaches the list under it. `None`: it is not open.
+/// The message's keys: Esc. Nothing reaches the window under it. `None`: it is not open.
 pub fn key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> Option<bool> {
     s.actions.protected.alert.as_ref()?;
+    // Esc closes it. Every other key is the dialog's own (Enter and Space press the focused
+    // button, Tab goes to the next): unhandled here, and never the window's under it.
     if ev.key == Key::Escape {
         s.close_protected(tx);
+        return Some(true);
     }
-    Some(true)
+    Some(false)
 }
 
 /// Is the listing a folder of the tree under `root`?
@@ -271,12 +283,17 @@ pub fn poll(s: &mut State) -> bool {
     };
     let section = route.section;
     let seen = s.actions.protected.seen.replace(section);
-    // A folder that could not be read shows its reason where it was asked for.
-    if s.list_error.is_some() {
+    let within = inside(s, &root);
+    // A folder that could not be read shows its reason where it was asked for: the section does
+    // not follow it. A change of section still shows that section's folder.
+    let unread = s.list_error.is_some();
+    if unread && seen == Some(section) {
         return false;
     }
-    let within = inside(s, &root);
     let (target, load) = match (section, within, seen == Some(section)) {
+        // Away from a folder that could not be read: the section's own folder, read again.
+        (Section::Backups, _, false) if unread => (Section::Backups, Some(Some(root))),
+        (Section::Files, _, false) if unread => (Section::Files, Some(None)),
         // The section changed (the sidebar, a shortcut, the shell's back): the folder follows.
         (Section::Backups, false, false) => (Section::Backups, Some(Some(root))),
         (Section::Files, true, false) => (Section::Files, Some(None)),
@@ -328,6 +345,8 @@ const COL_PC_W: f32 = 34.0;
 const COL_GAP: f32 = 12.0;
 /// The Status column's words (`.mk-row .t-cap`).
 const STATUS: TextStyle = TextStyle::new(12.0, 400.0).lh(14.5);
+/// The words beside a name (`.mk-row .t-cap` in the name cell).
+const NOTE: TextStyle = TextStyle::new(11.0, 400.0).lh(13.0);
 
 fn is_root(s: &State) -> bool {
     s.selects_one_at_a_time()
@@ -461,7 +480,7 @@ pub fn row_of(s: &State, i: usize, item: &DriveItem, t: &Theme) -> Option<El> {
     };
     let note = entry.as_ref().and_then(|e| e.note.clone());
     if let Some(note) = &note {
-        name = name.child(kit::label(format!("{k}-note"), note.clone(), STATUS, t.text_tertiary));
+        name = name.child(kit::label(format!("{k}-note"), note.clone(), NOTE, t.text_tertiary));
     }
     let status = entry.as_ref().and_then(|e| e.status.clone());
     let pc_state = PcState::of(item.pc_status.as_deref());
