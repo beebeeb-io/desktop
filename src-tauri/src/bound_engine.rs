@@ -306,6 +306,7 @@ pub(super) fn spawn_bound_engine(
         EngineRunner::spawn(
             crate::APP,
             crate::engine_host::host(&app),
+            runner::api_base_url(),
             sync_root,
             token,
             key,

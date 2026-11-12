@@ -41,7 +41,7 @@ pub const QA_PROVIDER: SyncProvider = SyncProvider {
 
 /// Register a TEST sync root (tests only): [`QA_PROVIDER`], today's policies.
 #[cfg(any(test, feature = "test-support"))]
-pub fn register_test_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()> {
+pub(crate) fn register_test_sync_root(sync_root_path: &std::path::Path) -> anyhow::Result<()> {
     super::register_sync_root_with(sync_root_path, &QA_PROVIDER, HYDRATION_POLICY)
 }
 
@@ -96,9 +96,10 @@ pub fn hydration_policy_of(path: &std::path::Path) -> anyhow::Result<(u16, u16)>
     Ok((info.HydrationPolicy.Primary.0, info.HydrationPolicy.Modifier.0))
 }
 
-/// The name of the provider Windows has `path` registered to as a Cloud Files sync root, or `None` when the
-/// folder is not a sync root (or cannot be read as one). Reads only. `sync_root_owner` decides with it.
-pub fn registered_provider_name(path: &std::path::Path) -> Option<String> {
+/// The name of the provider Windows has `path` registered to as a Cloud Files sync root, or the HRESULT of the
+/// read that failed. Reads only. `sync_root_owner::registration_of` decides what a failure means (two codes say
+/// "not a sync root"; any other is not an answer).
+pub fn registered_provider_name(path: &std::path::Path) -> Result<String, i32> {
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut buffer = vec![0u64; 1024];
     // SAFETY: as in `hydration_policy_of`: a NUL-terminated path and a writable buffer of the stated length.
@@ -111,12 +112,56 @@ pub fn registered_provider_name(path: &std::path::Path) -> Option<String> {
             None,
         )
     }
-    .ok()?;
+    .map_err(|error| error.code().0)?;
     // SAFETY: on success the buffer starts with a CF_SYNC_ROOT_STANDARD_INFO, and it is 8-byte aligned.
     let info = unsafe { &*(buffer.as_ptr() as *const CF_SYNC_ROOT_STANDARD_INFO) };
     let name = info.ProviderName;
     let len = name.iter().position(|unit| *unit == 0).unwrap_or(name.len());
-    Some(String::from_utf16_lossy(&name[..len]))
+    Ok(String::from_utf16_lossy(&name[..len]))
+}
+
+/// Remove `root`'s Cloud Files registration (every cloud-only placeholder in it goes with it). Refused, with
+/// nothing changed, when the folder is registered to another provider than `identity`'s or its registration
+/// cannot be read: one app never unregisters another's sync folder (review of #309, P2-3).
+pub fn unregister_sync_root(identity: &crate::identity::EngineIdentity, root: &std::path::Path) -> anyhow::Result<()> {
+    crate::sync_root_owner::check(identity, root).map_err(|refusal| anyhow::anyhow!(refusal))?;
+    unregister_any_sync_root(root)
+}
+
+/// [`unregister_sync_root`] without the owner check: for this crate's tests, whose roots are the QA provider's.
+pub(crate) fn unregister_any_sync_root(root: &std::path::Path) -> anyhow::Result<()> {
+    let wide: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+    if let Err(error) = unsafe { CfUnregisterSyncRoot(PCWSTR(wide.as_ptr())) } {
+        use windows::Win32::Foundation::{ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT, ERROR_NOT_A_CLOUD_FILE};
+        if error.code() != HRESULT::from_win32(ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT.0)
+            && error.code() != HRESULT::from_win32(ERROR_NOT_A_CLOUD_FILE.0)
+        {
+            return Err(error.into());
+        }
+    }
+    // Prove the Cloud Files registration itself is gone, independently of the
+    // Explorer/WinRT registration and its per-user registry metadata.
+    let mut buffer = vec![0u64; 1024];
+    let result = unsafe {
+        CfGetSyncRootInfoByPath(
+            PCWSTR(wide.as_ptr()),
+            CF_SYNC_ROOT_INFO_BASIC,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 8) as u32,
+            None,
+        )
+    };
+    match result {
+        Err(error)
+            if error.code()
+                == HRESULT::from_win32(windows::Win32::Foundation::ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT.0)
+                || error.code() == HRESULT::from_win32(windows::Win32::Foundation::ERROR_NOT_A_CLOUD_FILE.0) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(anyhow::anyhow!("Could not verify Cloud Files unregister: {error}")),
+        Ok(()) => Err(anyhow::anyhow!("Cloud Files registration remains after unregister")),
+    }
 }
 
 /// Stable, deterministic 64-bit FNV-1a hash of the sync-root path bytes.

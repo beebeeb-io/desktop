@@ -249,7 +249,7 @@ pub(super) async fn clear_session_impl(
         if !already_signed_out {
             if let Some(root) = root {
                 // Cloud Files must release the root before WinRT removes its shell registration.
-                windows_cf::unregister_sync_root(&root)
+                windows_cf::unregister_sync_root(crate::APP, &root)
                     .map_err(|e| failed_after_purge(format!("Could not unregister Cloud Files: {e}")))?;
                 windows_cf::unregister_shell_sync_root(crate::APP, &root)
                     .map_err(|e| failed_after_purge(format!("Could not remove Explorer registration: {e}")))?;

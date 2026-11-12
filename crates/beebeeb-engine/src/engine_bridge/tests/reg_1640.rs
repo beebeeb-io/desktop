@@ -225,7 +225,7 @@ async fn regression_2271_several_rows_at_a_cloud_only_placeholder_read_no_bytes(
         fn drop(&mut self) {
             // SAFETY: the key of the connection made below, disconnected once.
             let _ = unsafe { CfDisconnectSyncRoot(self.1) };
-            let _ = crate::windows_cf::unregister_sync_root(&self.0);
+            let _ = crate::windows_cf::unregister_any_sync_root(&self.0);
         }
     }
     let (_dir, sync_root, server, bridge) = rule3_setup([229u8; 32]);

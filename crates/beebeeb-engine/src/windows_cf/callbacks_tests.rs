@@ -142,7 +142,7 @@ fn desktop_0815_probe_the_guard_reads_a_cloud_only_file_without_fetching_it() {
     struct Registered(std::path::PathBuf);
     impl Drop for Registered {
         fn drop(&mut self) {
-            let _ = crate::windows_cf::unregister_sync_root(&self.0);
+            let _ = crate::windows_cf::unregister_any_sync_root(&self.0);
         }
     }
     struct Connected(CF_CONNECTION_KEY);

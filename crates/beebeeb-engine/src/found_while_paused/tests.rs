@@ -917,7 +917,7 @@ struct Registered(PathBuf);
 #[cfg(target_os = "windows")]
 impl Drop for Registered {
     fn drop(&mut self) {
-        let _ = crate::windows_cf::unregister_sync_root(&self.0);
+        let _ = crate::windows_cf::unregister_any_sync_root(&self.0);
     }
 }
 
