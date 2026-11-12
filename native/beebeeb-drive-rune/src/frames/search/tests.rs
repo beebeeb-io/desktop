@@ -628,9 +628,11 @@ fn alt_left_while_searching_does_not_leave_the_place_behind_the_results() {
     type_text(&mut rt, "Contr");
     for step in ["in the field", "on a result"] {
         press(&mut rt, Key::Left, ALT);
-        press(&mut rt, Key::Right, ALT);
-        assert_eq!(rt.state.shell.app.route(), &before, "{step}");
+        assert_eq!(rt.state.shell.app.route(), &before, "{step}: Alt+Left");
         assert!(rt.state.shell.app.can_go_back(), "{step}: the history is untouched");
+        assert!(!rt.state.shell.app.can_go_forward(), "{step}: nothing went back");
+        press(&mut rt, Key::Right, ALT);
+        assert_eq!(rt.state.shell.app.route(), &before, "{step}: Alt+Right");
         assert_eq!(text(&rt, "item-count"), "3 results", "{step}");
         press(&mut rt, Key::Down, NONE);
     }
@@ -655,4 +657,22 @@ fn ctrl_f_from_inside_the_files_list_opens_search() {
     assert_eq!(focused(&rt).as_deref(), Some(SEARCH_KEY));
     assert_eq!(text(&rt, "folder-title"), "Search");
     assert_eq!(text(&rt, "item-0-0-title"), "contract");
+}
+
+/// The toolbar's Open in File Explorer (the Files toolbar's button, DW-0401) asks the shell for
+/// what the b's menu item does.
+#[test]
+fn the_toolbars_open_in_file_explorer_asks_the_shell() {
+    use crate::shell::actions::{FixtureCall, FixtureEngine};
+    let engine = std::sync::Arc::new(FixtureEngine::ready());
+    let shell = crate::shell::host::Shell::fixture_on(engine.clone(), crate::shell::platform::current());
+    let mut state = crate::shell::state::init_with(shell);
+    dw_0802(&mut state);
+    let mut rt = window(state);
+    let button = info(&rt, "open-explorer");
+    assert_eq!(button.role, "button");
+    assert_eq!(button.label.as_deref(), Some("Open in File Explorer"));
+    let before = engine.calls().len();
+    click(&mut rt, "open-explorer");
+    assert_eq!(&engine.calls()[before..], [FixtureCall::OpenInFileExplorer]);
 }

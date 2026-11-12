@@ -171,6 +171,19 @@ fn toolbar(s: &State, sub: &str, focused: bool, t: &Theme) -> El {
     .shortcut_hint("Alt+Shift+P")
     .checked(s.show_detail_pane)
     .on_press(|s: &mut State| s.show_detail_pane = !s.show_detail_pane);
+    // "Open in File Explorer", between the panel toggle and the separator (the Files toolbar's,
+    // DW-0401): the b's menu item (`host::on_menu`).
+    let explorer = tool_button(
+        "open-explorer",
+        "Open in File Explorer",
+        &icons::FILES,
+        16.0,
+        ToolState::Idle,
+        t,
+    )
+    .on_press_tx(|s: &mut State, tx: &mut Tx| {
+        crate::shell::host::on_menu(s, crate::shell::tray::MenuAction::OpenInFileExplorer, tx);
+    });
     let sep = el().key("toolbar-sep").w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
     let new_btn = row()
         .key("new-btn")
@@ -209,6 +222,7 @@ fn toolbar(s: &State, sub: &str, focused: bool, t: &Theme) -> El {
         .child(view_toggle)
         .child(sort)
         .child(panel)
+        .child(explorer)
         .child(sep)
         .child(new_btn)
         .child(search_field(s, focused, t))
