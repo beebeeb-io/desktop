@@ -359,6 +359,12 @@ fn sync_sidebar(s: &mut State) {
 /// The one way a frame changes what the window shows: a click on a section, a folder, the
 /// back chevron, the gear.
 pub fn dispatch(s: &mut State, event: Event) -> Outcome {
+    // A scene sets the gate on the engine so that `refresh()` reads it back as the authority.
+    // `Event::Gate` via dispatch is used only by scene functions; the running app's gate comes
+    // through `Event::Session` in `refresh`. The real engine ignores `set_gate_for_scene`.
+    if let Event::Gate(gate) = &event {
+        s.shell.actions.set_gate_for_scene(*gate);
+    }
     let outcome = s.shell.app.apply(event);
     sync_sidebar(s);
     crate::frames::settings::sync(s); // what was open inside settings is forgotten when the route leaves it

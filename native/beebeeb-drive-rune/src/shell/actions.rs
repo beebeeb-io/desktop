@@ -55,6 +55,9 @@ pub trait EngineActions: Send + Sync {
     fn stop_for_quit(&self);
     /// A Windows shutdown that ran [`EngineActions::stop_for_quit`] was cancelled: carry on.
     fn resume_after_cancelled_quit(&self);
+    /// A scene function sets the gate on the engine so that `refresh()` reads it back. Only the
+    /// fixture engine acts on this; the real engine is the authority and ignores it (the default).
+    fn set_gate_for_scene(&self, _gate: GateState) {}
 }
 
 /// Everything a frame, the tray menu or the flyout may ask the shell to do beyond navigation.
@@ -73,6 +76,8 @@ pub trait ShellActions: Send + Sync {
     /// "Open Beebeeb when you log in" (DW-0281, Settings).
     fn autostart_enabled(&self) -> bool;
     fn set_autostart(&self, enabled: bool) -> Result<(), ActionError>;
+    /// A scene function sets the gate on the engine; see [`EngineActions::set_gate_for_scene`].
+    fn set_gate_for_scene(&self, gate: GateState);
 }
 
 /// The real [`ShellActions`]: the engine for what is the engine's, the OS for the rest.
@@ -124,6 +129,9 @@ impl ShellActions for HostActions {
     fn set_autostart(&self, enabled: bool) -> Result<(), ActionError> {
         Ok(self.platform.set_autostart(enabled)?)
     }
+    fn set_gate_for_scene(&self, gate: GateState) {
+        self.engine.set_gate_for_scene(gate);
+    }
 }
 
 /// What a [`FixtureEngine`] was asked to do, for tests.
@@ -144,6 +152,9 @@ struct Fixture {
     inputs: TrayInputs,
     holder: Option<ProfileHolder>,
     calls: Vec<FixtureCall>,
+    /// Whether `set_gate_for_scene` updates this engine's gate. True in fixture mode (scenes
+    /// set the gate); false simulates a real engine that is the authority and ignores scene gates.
+    accepts_scene_gate: bool,
 }
 
 /// An engine that is not there: a signed-in, up-to-date account in memory. Pause and resume
@@ -178,8 +189,17 @@ impl FixtureEngine {
                 inputs,
                 holder: None,
                 calls: Vec::new(),
+                accepts_scene_gate: true,
             }),
         }
+    }
+
+    /// A fixture engine that ignores `set_gate_for_scene`: simulates a real engine where the
+    /// engine is the authority on the gate and scene functions cannot override it.
+    pub fn live_stand_in(gate: GateState) -> FixtureEngine {
+        let engine = FixtureEngine::with(gate, TrayInputs::default());
+        engine.lock().accepts_scene_gate = false;
+        engine
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Fixture> {
@@ -258,6 +278,13 @@ impl EngineActions for FixtureEngine {
     }
     fn profile_holder(&self) -> Option<ProfileHolder> {
         self.lock().holder.clone()
+    }
+    fn set_gate_for_scene(&self, gate: GateState) {
+        let state = self.lock();
+        if state.accepts_scene_gate {
+            drop(state);
+            self.set_gate(gate);
+        }
     }
 }
 

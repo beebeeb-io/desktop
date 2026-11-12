@@ -930,3 +930,107 @@ fn the_status_line_of_the_window_opens_the_flyout() {
     click_status(&mut rt);
     assert_eq!(rt.state.shell.flyout_reads, 1);
 }
+
+// ---------------------------------------------------------------------------
+// Snapshot gate: scenes that set a non-Ready gate must survive the poll's
+// refresh, which reads the fixture engine. Regression d6506fb7.
+// ---------------------------------------------------------------------------
+
+/// The snapshot path: a scene sets the gate to SignedOut, poll runs, and the gate stays
+/// SignedOut. Before the fix, `refresh()` read `Ready` from the fixture engine and flipped
+/// the sign-in gate to Files.
+#[test]
+fn a_scene_gate_survives_the_polls_refresh() {
+    let engine = Arc::new(FixtureEngine::ready());
+    let platform = Arc::new(FakePlatform::default());
+    let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform)));
+    assert_eq!(
+        rt.state.shell.app.screen(),
+        Screen::Drive(Route::section(Section::Files))
+    );
+    // Apply a scene that sets the gate to SignedOut (the sign-in scene's mechanism).
+    rt.update(|s, _| {
+        dispatch(s, Event::Gate(GateState::SignedOut));
+    });
+    assert_eq!(rt.state.shell.app.screen(), Screen::SignIn);
+    // Run two frames: the poll's refresh must not flip the gate back to Ready.
+    rt.frame(1.0);
+    assert_eq!(
+        rt.state.shell.app.screen(),
+        Screen::SignIn,
+        "the scene's SignedOut gate must survive the first poll"
+    );
+    rt.frame(2.0);
+    assert_eq!(
+        rt.state.shell.app.screen(),
+        Screen::SignIn,
+        "the scene's SignedOut gate must survive the second poll"
+    );
+    // The app machine's gate is still SignedOut (the fixture engine says so too).
+    assert_eq!(rt.state.shell.app.gate(), GateState::SignedOut);
+    // The sidebar must not be drawn behind the gate.
+    assert!(rt.find("sidebar").is_none(), "no sidebar behind sign-in");
+    assert!(rt.find("file-list").is_none(), "no file list behind sign-in");
+}
+
+/// Every gate scene keeps its gate through two frames of poll.
+#[test]
+fn every_gate_scene_survives_two_polls() {
+    for (gate, name) in [
+        (GateState::SignedOut, "signed-out"),
+        (GateState::Locked, "locked"),
+        (GateState::NoPlan, "no-plan"),
+        (GateState::FirstRun, "first-run"),
+    ] {
+        let engine = Arc::new(FixtureEngine::ready());
+        let platform = Arc::new(FakePlatform::default());
+        let mut rt = runtime(state::init_with(Shell::fixture_on(engine, platform)));
+        rt.update(|s, _| {
+            dispatch(s, Event::Gate(gate));
+        });
+        rt.frame(1.0);
+        rt.frame(2.0);
+        assert_ne!(
+            rt.state.shell.app.screen(),
+            Screen::Drive(Route::section(Section::Files)),
+            "scene {name}: Files must not show behind a {gate:?} gate"
+        );
+        assert!(
+            rt.find("file-list").is_none(),
+            "scene {name}: no file list behind a {gate:?} gate"
+        );
+    }
+}
+
+/// The guard: with an engine that is the authority (the live-engine stand-in), dispatching
+/// `Event::Gate(Ready)` and polling does NOT show Files. This proves that in the real app
+/// the engine's gate cannot be overridden by a dispatch.
+#[test]
+fn dispatching_gate_ready_does_not_override_the_engines_authority() {
+    for gate in [GateState::Locked, GateState::SignedOut, GateState::NeedsRecoveryPhrase] {
+        let engine = Arc::new(FixtureEngine::live_stand_in(gate));
+        let platform = Arc::new(FakePlatform::default());
+        let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform)));
+        // The engine says `gate`; dispatch tries to set Ready.
+        rt.update(|s, _| {
+            dispatch(s, Event::Gate(GateState::Ready));
+        });
+        // The dispatch set the app machine to Ready momentarily, but the very next poll's
+        // refresh reads the engine (still `gate`) and overrides it.
+        rt.frame(1.0);
+        assert_eq!(
+            rt.state.shell.app.gate(),
+            gate,
+            "the engine's {gate:?} must win over a dispatched Ready"
+        );
+        assert_ne!(
+            rt.state.shell.app.screen(),
+            Screen::Drive(Route::section(Section::Files)),
+            "Files must not show when the engine says {gate:?}"
+        );
+        assert!(
+            rt.find("file-list").is_none(),
+            "no file list when the engine says {gate:?}"
+        );
+    }
+}
