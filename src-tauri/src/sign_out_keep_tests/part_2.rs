@@ -249,7 +249,7 @@ async fn the_kept_folder_is_recorded_before_the_purge() {
         !after.contains("writer.keep(") && !after.contains(".finish()") && !after.contains("sync_all"),
         "{after}"
     );
-    let writer = include_str!("../sign_out/kept_writer.rs");
+    let writer = include_str!("../../../crates/beebeeb-engine/src/sign_out/kept_writer.rs");
     let finish = &writer[writer.find("pub(crate) fn finish(self)").expect("finish")..];
     assert!(
         finish[..finish.find("\n    }\n").unwrap()].contains("sync_all()"),
