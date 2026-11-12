@@ -34,6 +34,9 @@ pub static UPLOAD: Icon = line24!(
     r#"<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"></path>"#
 );
 
+/// An upload on its way (the PC column, DW-0426): the board's `arrow-up`.
+pub static ARROW_UP: Icon = line24!("arrow-up", r#"<path d="M12 19V5M5 12l7-7 7 7"></path>"#);
+
 /// Pause all (DW-0427): the board's `pause`.
 pub static PAUSE: Icon = line24!("pause", r#"<path d="M6 4h4v16H6zM14 4h4v16h-4z"></path>"#);
 

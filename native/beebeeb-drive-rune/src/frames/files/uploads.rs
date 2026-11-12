@@ -152,21 +152,24 @@ pub fn drop_layer(s: &State, t: &Theme) -> Option<El> {
     // `.mk-rows` starts 110 pt under the caption's top edge; a row is 30 pt and its first 4 pt
     // in; the board hangs the badge 18 pt under the row's top, 210 pt into the list.
     let top = 114.0 + 30.0 * at as f32 + 18.0;
-    let mut pages = el().key("drag-pages").size(46.0, 46.0);
+    // The pages are turned, so the board paints them over the badge: the badge first.
+    let mut pages = el().key("drag-pages").size(58.0, 46.0);
+    if let Some(count) = hover.count {
+        pages = pages.child(
+            row()
+                .key("drag-badge")
+                .absolute(40.0, -1.0)
+                .min_w(18.0)
+                .h(18.0)
+                .px(5.0)
+                .center()
+                .radius(9.0)
+                .fill(crate::theme::tokens::red_fill())
+                .child(kit::label("drag-count", count.to_string(), type_::BADGE, t.white)),
+        );
+    }
     for i in [2usize, 1, 0] {
         pages = pages.child(drag_page(i, t));
-    }
-    let mut badge = row_el("drag-badge")
-        .min_w(18.0)
-        .h(18.0)
-        .px(5.0)
-        .center()
-        .radius(9.0)
-        .fill(crate::theme::tokens::red_fill())
-        .ml(-14.0)
-        .mt(-30.0);
-    if let Some(count) = hover.count {
-        badge = badge.child(kit::label("drag-count", count.to_string(), type_::BADGE, t.white));
     }
     let words = format!("Upload to {}", folder.name);
     let tip = row()
@@ -183,23 +186,13 @@ pub fn drop_layer(s: &State, t: &Theme) -> Option<El> {
         .box_shadow(kit::ring(kit::HAIR, t.separator))
         .child(kit::glyph("tip-icon", &icons_files::UPLOAD, 13.0, t.text))
         .child(kit::label("tip-text", words, TIP, t.text));
-    let mut layer = row()
+    let layer = row()
         .key("drop-layer")
         .absolute(430.0, top)
         .center_y()
         .gap(8.0)
         .child(pages);
-    if hover.count.is_some() {
-        layer = layer.child(badge);
-    } else {
-        // No count from the system: the tip stands where it stands with a badge.
-        layer = layer.child(el().key("drag-badge-gap").w(4.0));
-    }
     Some(layer.child(tip))
-}
-
-fn row_el(key: &str) -> El {
-    row().key(key.to_string())
 }
 
 /// `.mk-tip`: 11.5 px on the status line's 17 pt line.

@@ -284,7 +284,7 @@ pub fn file_row(
         Some(UploadState::Uploading { .. }) => {
             pc = pc.child(kit::state_glyph(
                 format!("{k}-pc"),
-                &crate::theme::icons_settings::ARROW_UP,
+                &crate::theme::icons_files::ARROW_UP,
                 None,
                 "uploading",
                 14.0,

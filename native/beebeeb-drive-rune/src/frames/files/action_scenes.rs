@@ -106,7 +106,8 @@ fn arriving(id: &str, name: &str, bytes: i64) -> DriveItem {
         modified_at: "2026-11-05T09:30:00Z".to_string(),
         mime: Some("image/heic".to_string()),
         has_thumbnail: true,
-        pc_status: Some("on_this_pc".to_string()),
+        // Not here yet, not in Beebeeb yet: its PC column says uploading or waiting.
+        pc_status: None,
         ..super::actions_data::blank_item()
     }
 }
@@ -114,8 +115,8 @@ fn arriving(id: &str, name: &str, bytes: i64) -> DriveItem {
 /// DW-0426: Lisbon trip while three of five upload: the files dropped there stand in its rows,
 /// one with its bar, one waiting, and the status line says how far it is.
 pub fn uploading(s: &mut State) {
+    // Nothing is selected, so no panel shows (its toggle stays on, as the board draws it).
     s.clear_selection();
-    s.show_detail_pane = false;
     s.open_folder(Some("f-lisbon".to_string()));
     let mut tx = rune::Tx::default();
     let files = [
