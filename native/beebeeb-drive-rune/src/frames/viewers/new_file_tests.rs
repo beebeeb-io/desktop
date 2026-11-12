@@ -401,10 +401,19 @@ fn the_message_follows_the_whole_name_and_the_extension_takes_it_away() {
     rt.frame(0.0);
     assert!(has(&rt, "field-0-msg"), "the taken name says why");
     // Typed in the extension's field: the whole name is another one now.
-    if let Some(nf) = rt.state.viewer.new_file.as_mut() {
-        nf.ext = rune::TextEdit::new(".md");
+    for _ in 0..10 {
+        if focused(&rt).as_deref() == Some(super::new_file::EXT_INPUT) {
+            break;
+        }
+        press(&mut rt, Key::Tab);
     }
-    rt.frame(0.0);
+    assert_eq!(focused(&rt).as_deref(), Some(super::new_file::EXT_INPUT));
+    type_text(&mut rt, "x");
+    assert_ne!(
+        rt.state.viewer.new_file.as_ref().map(|nf| nf.full_name()),
+        Some(taken.clone()),
+        "the typing reached the extension"
+    );
     assert!(
         !has(&rt, "field-0-msg"),
         "the message stayed for a name that is not taken"
