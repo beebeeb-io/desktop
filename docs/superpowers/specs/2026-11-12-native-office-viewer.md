@@ -11,35 +11,37 @@ DeckCraft) in one repository of ours, `desktop-office`; LibreOfficeKit is the fa
 Measured on the Windows build VM (Windows 11, 16 vCPU, no GPU), every program under an outbound firewall block that
 was first proven able to fail (the same exe connected before the rule and could not with it). "Pages" are pages of a
 document, sheets of a workbook, slides of a deck. A page counts only if its PNG was looked at and shows the expected
-text; a flat-colour image counts as 0.
+text; a flat-colour image counts as 0. All 23 counted page images were looked at (8 LibreOfficeKit, 8 WordCraft, 7 DeckCraft).
 
 | | LibreOfficeKit 26.2.7 | Rust: WordCraft 0.18.1 / GridCraft 0.19.1 / DeckCraft 0.18.1 |
 |---|---|---|
 | **.docx** easy (3 pages) | 3 of 3 | 3 of 3 (looser line spacing than LibreOffice on a file with no styles part) |
 | **.docx** hard (2 pages: styles, list, table, picture, header, footer) | 2 of 2 | 2 of 2 |
 | **.doc** (3 pages) | 3 of 3 | 3 of 3 |
-| **.xlsx** easy (2 sheets) | **0 of 2: hangs in `documentLoad`** | values of 2 of 2 sheets read; no sheet image from the CLI (PDF export: 1 page, looked at) |
+| **.xlsx** easy (2 sheets) | **0 of 2: hangs in `documentLoad`** | 2 of 2 sheets read (42 cells each); sheet 1's values looked at; no sheet image from the CLI (PDF export: 1 page, looked at) |
 | **.xlsx** hard (3 sheets, 19 formulas without cached values, a chart) | **0 of 3: hangs** | 19 of 19 formula cells show the expected value; currency and percent formats right; the chart draws (PDF) |
-| **.xls** (2 sheets) | **0 of 2: hangs** | values read; the tool warns that charts, pictures and comments of .xls are not read |
+| **.xls** (2 sheets) | **0 of 2: hangs** | 2 of 2 sheets read (42 cells each); the tool warns that charts, pictures and comments of .xls are not read |
 | **.pptx** easy (3 slides) | **0 of 3: hangs** | 3 of 3 |
 | **.pptx** hard (4 slides: master, 2 layouts, inherited placeholders, table, picture, gradient) | **0 of 4: hangs** | 4 of 4 |
 | **.ppt** (3 slides) | **0 of 3: hangs** | **0 of 3: refused** ("not a presentation DeckCraft can read") |
 | A linked remote image | not fetched (0 connections), placeholder drawn | not fetched (0 connections), left out; `--strict` names it |
-| Time to the last page, warm | 2.6 to 3.7 s per document (init 1.7 to 2.8 s, load 0.4 to 0.6 s, 5 to 9 ms per further page at 96 DPI, 29 to 34 ms at 192 DPI) | 43 to 86 ms per page **including** process start, load and layout (document layout alone: 43 to 49 ms) |
+| Time to the last page, warm | 2.6 to 3.7 s per document (init 1.7 to 2.8 s, load 0.4 to 0.6 s, 5 to 9 ms per further page at 96 DPI, 29 to 34 ms at 192 DPI) | WordCraft: 43 to 86 ms per page **including** process start, load and layout (layout alone: 43 to 49 ms). DeckCraft: 53 to 67 ms for a whole deck of 3 or 4 slides, process start included |
 | First start ever | 8.4 s (first run after install), 6.6 s (new profile) | 1.4 s (first run of the 95 MB tool), then as above |
 | Peak memory | 318 to 358 MB working set | not measured (the process had exited before the counter was read) |
 | Size | 373 MB installer, 1,522 MB in 19,487 files extracted (`program` 711 MB, `share` 720 MB) | CLI executables 95 / 21 / 94 MB, each with its fonts inside; no separate download |
-| Language | C++, in a helper process | Rust; 0 `unsafe` blocks in the three projects' own crates (their dependencies not counted) |
+| Language | C++, in a helper process | Rust; a text search finds no `unsafe` block in the three projects' own crates (32 source files declare `forbid(unsafe_code)`); their dependencies are not counted and do contain `unsafe` |
 
 **The LibreOfficeKit hang.** Text documents work. Every spreadsheet and presentation load blocked forever at 0 % CPU
-inside `documentLoad`: 21 of 21 attempts over 3 runs, across .xlsx, .xls, .pptx and .ppt. Four variations changed
+inside `documentLoad`: 21 of 21 attempts over 3 runs, across .xlsx, .xls, .pptx and .ppt (18 are in the committed logs; the other 3 were in the first run, which was stopped by hand and whose log is not committed). Four variations changed
 nothing (6 of 6 still hung in the diagnosis phase, plus 1 of 1 with OpenCL probing off): `SAL_DISABLE_OPENCL=1`,
 `MAX_CONCURRENCY=1`, the load option `Batch=true`, and every LibreOfficeKit call on a worker thread while the main
 thread pumps Win32 messages. LibreOffice itself is not broken on that machine: `soffice --headless --convert-to`
-wrote the .xls and .ppt fixtures from the same files in the same session. The cause is **not found**; the
+wrote the .xls and .ppt fixtures from the same files in the same session. **Every attempt ran from an SSH session, which has no desktop**; the same program was never tried in the
+logged-in desktop session, so a missing window station is a possible cause that this spike did not rule out. The
+cause is **not found**; the
 upstream page still calls the tiled-rendering API experimental ([docs.libreoffice.org][lokdoc]). A viewer must
-never hang on a document, so this alone rules LibreOfficeKit out as the 0.9.0 engine for sheets and slides unless
-someone finds the cause.
+never hang on a document, so LibreOfficeKit is **not shown to work** for sheets and slides on Windows, and cannot be the 0.9.0 engine for them
+until someone finds the cause.
 
 **Recommendation: Rust first, for all three types, in-process; LibreOfficeKit is not built in 0.9.0.**
 The Rust option rendered 15 of 15 pages of the formats it claims and refused the one it does not (.ppt) with a clear
@@ -74,9 +76,13 @@ and nothing here was compared against Microsoft Office's own rendering.
   scale, opts)` and `render_region(doc, page, w, h, view, opts)` return pixels. So the answer to "can it draw into
   our Rune window?" is: **yes, as pixels we put on a Rune surface, the same way LibreOfficeKit tiles would arrive.**
   The egui editor chrome cannot be embedded in Rune and is not needed for a viewer.
-- **Network code exists upstream, above the layers we use:** a Zotero client, an MCP server, a control channel and
-  speech support (`reqwest`, `ureq`, `hyper` are in the lockfiles). The engine crates' own manifests name none of
-  them. Our crate depends on the lower layers only and CI proves the absence (§5).
+- **Network code exists upstream, and one engine crate reaches it.** Walking each `Cargo.lock` from the workspace
+  members: `wordcraft-engine` reaches `ureq` and `rustls`; `gridcraft-engine` reaches no network crate;
+  `deckcraft-pptx`, `deckcraft-pdf` and `deckcraft-engine` reach `tokio` (an async runtime; whether its network
+  feature is on was not checked). The WordCraft crates below the engine (`doc`, `docx`, `layout`, `render`, `fonts`,
+  `formats`) reach none. So the viewer links WordCraft **below** `wordcraft-engine`, never the engine crate itself,
+  and for DeckCraft PR 1 must show what pulls `tokio` and with which features. A lockfile lists every optional
+  dependency, so this is an upper bound; the real answer is `cargo tree` on our crate, which CI checks (§3, §5).
 - **Code execution exists upstream:** GridCraft can run a workbook's Python cells in a sandbox (Linux, macOS; on
   Windows it refuses and shows `#BLOCKED!`); WordCraft has command macros. Neither is reachable from the viewer API,
   and the viewer build leaves those crates out.
@@ -188,7 +194,7 @@ take the app down.
 |---|---|---|
 | Macros, scripts | The viewer links no macro, Python or automation crate; VBA parts are never interpreted. | A test: a corpus file with a `vbaProject.bin` and one with a Python cell open as plain content. |
 | External content (linked images, linked workbooks, remote templates) | The readers mark external targets as missing; nothing fetches (seen: 0 connections). | The loopback test in CI; the OS-level block. |
-| Memory corruption | 0 `unsafe` in the projects' own crates; their dependencies (image decoders, font shaping, zip, XML) do contain `unsafe`. | The helper process, so a decoder bug lands in a process with no file, network or key access. |
+| Memory corruption | No `unsafe` block found in the projects' own crates; their dependencies (image decoders, font shaping, zip, XML) do contain `unsafe`. | The helper process, so a decoder bug lands in a process with no file, network or key access. |
 | Crash, panic, endless loop, zip bomb, huge allocation | Not known; the three trackers hold 5,691 open issues and pull requests between them. | The helper has a job object with a memory cap, a CPU-time cap per page and a wall-clock timeout; `Limits` caps unpacked size, page count and image dimensions; a dead or silent helper becomes the DW-1556 state within the timeout. The app never blocks on it. |
 | Writing files | The viewer API has no write path. | The helper's token cannot write anywhere. |
 | Leaking the document | n/a | No logs of content; the helper's stderr is dropped in release builds. |
@@ -333,7 +339,7 @@ PR 7 can start with PR 1 and should: it is the evidence this spike does not have
   keys, 0 firewall rules, 0 profile folders, 0 processes.
 - Did not: test with files from Microsoft Office; test macros, password-protected or damaged files; measure the
   Rust tools' memory; look at a sheet as pixels; build the Rust crates ourselves (the released binaries were run,
-  so "links only the lower layers" is read from the manifests, not built); run `cargo deny` or `cargo audit` on
+  so "links only the lower layers" is read from the manifests and lockfiles, not built); run `cargo deny` or `cargo audit` on
   them; prove an AppContainer; find the cause of the LibreOfficeKit hang; try LibreOfficeKit in the logged-in
   desktop session instead of the SSH session; measure a trimmed LibreOffice bundle; draw anything in Rune.
 
