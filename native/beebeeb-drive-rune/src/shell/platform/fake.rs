@@ -22,6 +22,10 @@ pub struct FakePlatform {
     pub removed_for_quit: Arc<Mutex<u32>>,
     /// The handler the shell gave the tray, so a test can send what the OS would.
     pub tray_handler: Mutex<Option<TrayHandler>>,
+    /// Each `set_capture_exclusion` call records the `exclude` argument, in order.
+    pub capture_exclusions: Mutex<Vec<bool>>,
+    /// When true, `set_capture_exclusion` fails with `PlatformError::Os`.
+    pub capture_exclusion_fails: AtomicBool,
 }
 
 impl Default for FakePlatform {
@@ -35,6 +39,8 @@ impl Default for FakePlatform {
             icon_present: Arc::new(AtomicBool::new(true)),
             removed_for_quit: Arc::default(),
             tray_handler: Mutex::default(),
+            capture_exclusions: Mutex::default(),
+            capture_exclusion_fails: AtomicBool::new(false),
         }
     }
 }
@@ -142,5 +148,13 @@ impl Platform for FakePlatform {
 
     fn send_control(&self, _identity: AppIdentity, _request: &Request, _timeout: Duration) -> Delivery {
         Delivery::Unreachable
+    }
+
+    fn set_capture_exclusion(&self, _window: Option<&rune::WindowHandle>, exclude: bool) -> Result<(), PlatformError> {
+        if self.capture_exclusion_fails.load(Ordering::SeqCst) {
+            return Err(PlatformError::Os("SetWindowDisplayAffinity failed (fake)".into()));
+        }
+        self.capture_exclusions.lock().unwrap().push(exclude);
+        Ok(())
     }
 }
