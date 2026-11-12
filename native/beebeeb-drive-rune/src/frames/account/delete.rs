@@ -330,7 +330,7 @@ fn scheduled(on: &str, email: &str, t: &Theme) -> El {
 }
 
 /// Deletion cancelled (DW-A83): a screen of its own, in the account window's layout.
-pub fn undone(t: &Theme, cx: &mut Cx<State>) -> El {
+pub fn undone(name: &str, t: &Theme, cx: &mut Cx<State>) -> El {
     use crate::frames::signin::icons as si;
     let mut keys = Keys::new();
     let column = au::column()
@@ -357,5 +357,5 @@ pub fn undone(t: &Theme, cx: &mut Cx<State>) -> El {
                 .on_press(|s: &mut State| super::go(s, "DW-0401")),
             ),
         );
-    au::page("Drive", [&si::LOCK, &si::PEOPLE, &si::GLOBE], column, t, cx).on_key(super::on_key)
+    au::page(name, "Drive", [&si::LOCK, &si::PEOPLE, &si::GLOBE], column, t, cx).on_key(super::on_key)
 }

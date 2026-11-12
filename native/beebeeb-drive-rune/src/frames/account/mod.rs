@@ -474,7 +474,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     if pane == Pane::DeleteUndone {
         // The result of undoing a deletion is a screen of its own (the account window's
         // layout, DW-A83), not a pane of settings.
-        return delete::undone(&t, cx);
+        return delete::undone(s.identity.product_name(), &t, cx);
     }
     let form = &ui.form;
     let (pane_el, overlay) = match pane {
@@ -506,12 +506,12 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     col()
         .key("window")
         .role("window")
-        .label("Beebeeb Drive, Settings")
+        .label(format!("{}, Settings", s.identity.main_window_title()))
         .on_key(on_key)
         .w_full()
         .h_full()
         .fill(t.surface)
-        .child(caption::caption_bar(&t, cx))
+        .child(caption::caption_bar(s.identity.main_window_title(), &t, cx))
         .child(body)
 }
 

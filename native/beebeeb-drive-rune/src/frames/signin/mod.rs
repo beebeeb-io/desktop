@@ -514,9 +514,10 @@ pub fn start() -> Option<Ui> {
 
 /// The registry's line for `FrameGroup::SignIn`: the whole first-run window.
 pub fn frame(s: &State, cx: &mut Cx<State>) -> El {
+    let name = s.identity.product_name();
     match &s.signin {
-        Some(ui) => view(ui, cx),
-        None => view::closed(cx),
+        Some(ui) => view(ui, name, cx),
+        None => view::closed(name, cx),
     }
 }
 

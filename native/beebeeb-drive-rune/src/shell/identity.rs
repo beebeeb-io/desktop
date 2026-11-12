@@ -73,6 +73,10 @@ impl AppIdentity {
     };
     #[cfg_attr(not(test), allow(dead_code))]
     pub const BOTH: [Self; 2] = [Self::Real, Self::Test];
+    /// The identity a golden/snapshot export compares against: always the real app's values,
+    /// so the rendered text matches the design board. The live app reads `CURRENT`; this is
+    /// what a headless scene render reads.
+    pub const GOLDEN: Self = Self::BOTH[0];
 
     /// Only the two exact identifiers name an app. Anything else (a typo, a fork's id, an empty
     /// value, another case) names none: an unknown build is not built.
@@ -386,5 +390,94 @@ mod tests {
         for os in ["macos", "windows", "linux"] {
             assert_eq!(AppIdentity::Real.start_refusal(os), None, "{os}");
         }
+    }
+
+    /// `GOLDEN` is the real app: golden/snapshot exports compare against the board, which
+    /// draws the real app's name.
+    #[test]
+    fn golden_is_the_real_app() {
+        assert_eq!(AppIdentity::GOLDEN, AppIdentity::Real);
+        assert_eq!(AppIdentity::GOLDEN.product_name(), "Beebeeb");
+        assert_eq!(AppIdentity::GOLDEN.main_window_title(), "Beebeeb Drive");
+    }
+
+    // --- identity-following tests: every surface that names the app produces different text
+    // for the two identities ---
+
+    /// The tray menu says "Open <name>" and "Quit <name>", so a test build beside the real
+    /// one is tellable apart.
+    #[test]
+    fn tray_menu_names_the_build() {
+        use crate::shell::tray::{MenuEntry, TrayInputs, tray_model_for};
+        let inputs = TrayInputs {
+            signed_in: true,
+            explorer_ready: true,
+            ..TrayInputs::default()
+        };
+        for identity in AppIdentity::BOTH {
+            let model = tray_model_for(&inputs, identity);
+            let labels: Vec<&str> = model
+                .menu
+                .iter()
+                .filter_map(|e| match e {
+                    MenuEntry::Item { label, .. } => Some(label.as_str()),
+                    MenuEntry::Separator => None,
+                })
+                .collect();
+            let name = identity.product_name();
+            assert!(labels.iter().any(|l| *l == format!("Open {name}")), "{name}: Open",);
+            assert!(labels.iter().any(|l| *l == format!("Quit {name}")), "{name}: Quit",);
+        }
+        // The two builds produce different Open and Quit labels.
+        let real = tray_model_for(&inputs, AppIdentity::Real);
+        let test = tray_model_for(&inputs, AppIdentity::Test);
+        assert_ne!(real.menu, test.menu);
+    }
+
+    /// The tray tooltip says "<name>: <state>": the test build shows "Beebeeb Test: …".
+    #[test]
+    fn tray_tooltip_names_the_build() {
+        use crate::shell::tray::{TrayInputs, tray_model_for};
+        let inputs = TrayInputs {
+            signed_in: true,
+            explorer_ready: true,
+            ..TrayInputs::default()
+        };
+        let real = tray_model_for(&inputs, AppIdentity::Real);
+        let test = tray_model_for(&inputs, AppIdentity::Test);
+        assert!(real.tooltip.starts_with("Beebeeb:"), "{}", real.tooltip);
+        assert!(test.tooltip.starts_with("Beebeeb Test:"), "{}", test.tooltip);
+        assert_ne!(real.tooltip, test.tooltip);
+    }
+
+    /// The flyout status titles that name the app differ between the two identities.
+    #[test]
+    fn flyout_status_titles_name_the_build() {
+        use crate::frames::tray::source::Status;
+        let self_naming = [
+            Status::Offline,
+            Status::UpdateRequired,
+            Status::Locked,
+            Status::AddingToExplorer,
+            Status::ExplorerFailed { code: "E1".into() },
+        ];
+        for status in &self_naming {
+            let real = status.title("Beebeeb");
+            let test = status.title("Beebeeb Test");
+            assert_ne!(real, test, "title for {status:?}");
+            assert!(real.contains("Beebeeb"), "real title: {real}");
+            assert!(test.contains("Beebeeb Test"), "test title: {test}");
+        }
+    }
+
+    /// The main window title follows the build identity.
+    #[test]
+    fn main_window_title_follows_identity() {
+        assert_eq!(AppIdentity::Real.main_window_title(), "Beebeeb Drive");
+        assert_eq!(AppIdentity::Test.main_window_title(), "Beebeeb Test Drive");
+        assert_ne!(
+            AppIdentity::Real.main_window_title(),
+            AppIdentity::Test.main_window_title(),
+        );
     }
 }

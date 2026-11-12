@@ -665,12 +665,12 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     col()
         .key("window")
         .role("window")
-        .label("Beebeeb Drive, Settings")
+        .label(format!("{}, Settings", s.identity.main_window_title()))
         .on_key(on_key)
         .w_full()
         .h_full()
         .fill(t.surface)
-        .child(caption::caption_bar(&t, cx))
+        .child(caption::caption_bar(s.identity.main_window_title(), &t, cx))
         .child(body)
 }
 

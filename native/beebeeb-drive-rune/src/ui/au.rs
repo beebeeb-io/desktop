@@ -147,7 +147,8 @@ pub const FACTS: [&str; 3] = [
 ];
 
 /// The lockup: the mark, "beebeeb.io" and the product name. `prefix` is `side` or `col`.
-pub fn lockup(prefix: &str, mark: f32, product: &str, t: &Theme) -> El {
+/// `name` is the build's product name (`AppIdentity::product_name` on the identity State holds).
+pub fn lockup(prefix: &str, mark: f32, name: &str, product: &str, t: &Theme) -> El {
     let word = "beebeeb.io";
     let io = Span {
         start: 7,
@@ -158,7 +159,7 @@ pub fn lockup(prefix: &str, mark: f32, product: &str, t: &Theme) -> El {
     row()
         .key(format!("{prefix}-lockup"))
         .role("image")
-        .label(format!("Beebeeb {product}"))
+        .label(format!("{name} {product}"))
         .gap(mark * 6.461_54 / 24.0)
         .center_y()
         .child(kit::mark(format!("{prefix}-mark"), mark))
@@ -175,7 +176,7 @@ pub fn lockup(prefix: &str, mark: f32, product: &str, t: &Theme) -> El {
         )
 }
 
-fn side_panel(product: &str, icons: [&'static Icon; 3], t: &Theme) -> El {
+fn side_panel(name: &str, product: &str, icons: [&'static Icon; 3], t: &Theme) -> El {
     let mut facts = col().key("facts").role("list").gap(12.0);
     for (i, (fact, ic)) in FACTS.iter().zip(icons).enumerate() {
         facts = facts.child(
@@ -210,7 +211,7 @@ fn side_panel(product: &str, icons: [&'static Icon; 3], t: &Theme) -> El {
         .fill(t.card)
         .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
         .border_layout()
-        .child(lockup("side", 34.0, product, t))
+        .child(lockup("side", 34.0, name, product, t))
         .child(kit::label(
             "side-tagline",
             "Your files, encrypted on your devices.",
@@ -222,23 +223,32 @@ fn side_panel(product: &str, icons: [&'static Icon; 3], t: &Theme) -> El {
 }
 
 /// The account window (`.au-mac`): caption, the brand panel, and `column` centred in the
-/// ground. `column` comes from [`column`].
-pub fn page(product: &str, fact_icons: [&'static Icon; 3], column: El, t: &Theme, cx: &mut Cx<State>) -> El {
+/// ground. `column` comes from [`column`]. `name` is the build's product name
+/// (`State::identity.product_name()`).
+pub fn page(
+    name: &str,
+    product: &str,
+    fact_icons: [&'static Icon; 3],
+    column: El,
+    t: &Theme,
+    cx: &mut Cx<State>,
+) -> El {
+    let title = format!("{name} {product}");
     col()
         .key("window")
         .role("window")
-        .label("Beebeeb Drive")
+        .label(&title)
         .w_full()
         .h_full()
         .fill(t.surface)
-        .child(caption::caption_bar(t, cx))
+        .child(caption::caption_bar(&title, t, cx))
         .child(
             row()
                 .key("au-body")
                 .grow(1.0)
                 .min_h(0.0)
                 .w_full()
-                .child(side_panel(product, fact_icons, t))
+                .child(side_panel(name, product, fact_icons, t))
                 .child(
                     el().key("au-main")
                         .role("main")
