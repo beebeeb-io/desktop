@@ -43,10 +43,13 @@ Gate state per frame is in the PR body; `0` = all six counts at 0 failing in bot
 | DW-A49 | Recovery: a new password, with the strength meter | built, 0 |
 | DW-A50 | Password updated | built, 0 |
 | DW-0009, DW-0014 | Locked, no plan yet | not built; no goldens yet |
-| DW-0380, DW-0301 to DW-0305 | The first-time guide | not built; no goldens yet |
+| DW-0380, DW-0301 to DW-0305 | The first-time guide | see "The first-time guide" below |
 
 Built: 30 of 59 here, and the 11 frames of the first run below: 41 of 70. Not built: 29, none with a golden yet
 (DW-A11 to A17, DW-A31 to A44, DW-0009, DW-0014, DW-0380, DW-0301 to 0305).
+
+Since then (lane b04): the 6 frames of the first-time guide, below. Not built: 23 (DW-A11 to A17, DW-A31 to A44,
+DW-0009, DW-0014).
 
 ## First run on Windows (lane f-signin-rest): `setup/`
 
@@ -67,6 +70,25 @@ The board's group "First run on Windows", 11 frames, in the same 960 x 640 windo
 | DW-0207 | Step 6: notifications | built, 0 |
 | DW-0281 | Step 7: open at login | built, 0 |
 | DW-0208 | You're set up | built, 0 |
+
+## The first-time guide (lane b04): `setup/guide.rs`
+
+A coach card over the main window with a ring around the real control each tip explains (`cx.window_layout` of the
+control's key: the ring follows it). State: `State::guide`. It starts when the first run ends ("Open my Beebeeb",
+`guide::poll`) and from Settings › General › "Show the guide again" (`settings::go("DW-0380")`). Got it, Next and Done
+step; Skip and Esc end it; the window under a tip takes every press. Tests: `setup/guide_tests.rs`.
+
+| Frame | What | State |
+| --- | --- | --- |
+| DW-0380 | Where the b is: "Beebeeb lives in the notification area", Got it | built in the main window; the board draws it as its own window by the tray: follow-up task 2479. Its 5 `coach*` keys: geometry and text 0; the other 220 keys are the board's desktop (the window at 72 %) and stay red |
+| DW-0301 | Tip 1: New | built; geometry, text, icons, fills, frame tiles 0; pixel lines open: `coach-ring`, `coach-dot-0`, `coach-dots` |
+| DW-0302 | Tip 2: a file's row (left out when the folder shows no file) | built; 1 pixel line open (`coach-dot-1`) |
+| DW-0303 | Tip 3: Shared, on the Shared view | built; the guide's own keys: 1 pixel line open (`coach-dot-2`). Also red: the Shared toolbar (the board gained a button there) and `btn-skip` / `btn-next`, which the golden keys a second time for the card's two buttons |
+| DW-0304 | Tip 4: Photos, on the Photos view | built; the guide's own keys: 1 pixel line open (`coach-dot-3`). Also red: the Photos toolbar (the same button) |
+| DW-0305 | Tip 5: the gear | built; 2 pixel lines open (`coach-dot-4`, `coach-dots`) |
+
+The open `coach-dot-*` lines are the 6 pt dot's edge (as `status-dot` in DW-A07). The words of DW-0380 are the board
+drawing's (`guide::TRAY_TEXT`); the frame's note in `frames.json` has other words (decision 2478).
 
 States with a rule and no drawing, built from the rule's words (tests only): the compare view's Stacked and Hold to
 flip; "You're set up" after Not now or Skip setup ("Not added", "Off"); Turn on backup with no folder on (disabled).

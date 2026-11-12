@@ -337,7 +337,7 @@ pub fn tray_card(t: &Theme) -> El {
         .child(arrow(Arrow::Down(150.0), t))
         .child(kit::label("coach-title", TRAY_TITLE, type_::HEAD, t.text))
         .child(
-            kit::label("coach-text", TRAY_TEXT, SUB, t.text_secondary)
+            kit::label("coach-text", TRAY_TEXT, SUB, t.text_tertiary)
                 .wrap()
                 .w_full(),
         )
