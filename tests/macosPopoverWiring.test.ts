@@ -84,7 +84,8 @@ describe('the shipping macOS popover boundary', () => {
 
   test('while sign-out sends, a failed count leaves the count out, never the whole snapshot (review P3-5 of #160)', () => {
     const lib = libRsSource()
-    const start = lib.indexOf('let sending = state.sign_out.phase')
+    // Layout-independent: rustfmt may put the chain on its own lines.
+    const start = lib.search(/let sending = state\s*\.sign_out\s*\.phase/)
     expect(start).toBeGreaterThan(0)
     const branch = lib.slice(start, lib.indexOf('Ok(snapshot)', start))
     expect(branch).toContain('macos_popover::changes_left(')

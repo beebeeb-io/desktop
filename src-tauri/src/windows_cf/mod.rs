@@ -57,7 +57,13 @@ pub(crate) mod streaming;
 // LD-0105 S0: a fetch's byte progress reported to Cloud Files.
 pub(crate) mod fetch_progress;
 // LD-0105 S7: providers, the hydration policy and its read-back, the Explorer registration's Id.
+mod notify_slot;
+mod provider_identity;
 mod registration;
+use notify_slot::NOTIFY_TX;
+pub(crate) use notify_slot::notify_sender;
+pub use notify_slot::set_notify_sender;
+pub use provider_identity::{BEEBEEB_PROVIDER_GUID, PROVIDER_ID, PROVIDER_VERSION};
 pub(crate) use registration::*;
 #[cfg(test)]
 mod reconcile_tests;
@@ -66,8 +72,9 @@ mod reconcile_tests;
 mod ld0105_native_tests;
 // LD-0113 D1: the pre-operation delete and rename callbacks on a QA sync root.
 #[cfg(test)]
-mod ld0113_protect_native_tests;
-#[cfg(test)] mod ld0113_kfm_native_tests; // LD-0113 Amendment 9: a folder OneDrive moved, on a QA sync root.
+mod ld0113_kfm_native_tests;
+#[cfg(test)]
+mod ld0113_protect_native_tests; // LD-0113 Amendment 9: a folder OneDrive moved, on a QA sync root.
 // LD-0113 Amendments 7 and 8a: files under Backups are read-only; the "Read-only" badge on the root.
 pub(crate) mod read_only;
 pub mod signout;
@@ -83,26 +90,6 @@ use windows::Win32::Storage::CloudFilters::*;
 use windows::core::*;
 
 use crate::engine_bridge::EngineBridge;
-
-/// Identifier shown to Windows for our sync provider. Surfaced in the
-/// Sync settings UI ("Files synced by Beebeeb"). Keep stable —
-/// changing this between releases would orphan existing placeholders.
-pub const PROVIDER_ID: &str = "Beebeeb";
-
-/// Provider version reported alongside `PROVIDER_ID`. It is written into the
-/// Explorer SHELL registration (`StorageProviderSyncRootInfo::SetVersion`) when a root
-/// is first registered.
-///
-/// LD-0105 S7 (0.8.22): bumping it NO LONGER re-registers anything. Up to 0.8.21 a
-/// version that differed from (or could not be read back as) this constant made
-/// `register_shell_sync_root` run the WinRT `Unregister`, and an unregister deletes
-/// every cloud-only placeholder of the root. An existing registration is now kept as
-/// it is ([`shell_step`]); a policy change reaches existing installs through the Win32
-/// registration, which is re-applied with `CF_REGISTER_FLAG_UPDATE` on every start.
-/// A change that really needs a new Explorer registration needs its own migration.
-///
-/// `1.0.0` → `1.1.0`: dropped `AutoDehydrationAllowed` from the hydration modifier.
-pub const PROVIDER_VERSION: &str = "1.1.0";
 
 // Each connection carries a monotonically increasing context ID. Old OS
 // callbacks cannot borrow credentials from a later account, even if Windows
@@ -148,57 +135,6 @@ static SYNC_ROOT: RwLock<Option<std::path::PathBuf>> = RwLock::new(None);
 /// `NormalizedPath` is unavailable.
 pub(crate) fn sync_root() -> Option<std::path::PathBuf> {
     SYNC_ROOT.read().ok().and_then(|root| root.clone())
-}
-
-/// Stable provider GUID for the Beebeeb sync root.
-///
-/// Minted once (UUIDv4 `b33b33b0-5217-4c0a-9e3f-1f2a7c4d8e90`) and
-/// hardcoded so the sync-root identity is stable across releases and
-/// machines. Previously `GUID::zeroed()`, a dev shortcut that let
-/// Windows pick a per-machine default — fine for local testing but it
-/// would orphan placeholders if the default ever changed. A fixed GUID
-/// keeps the provider identity deterministic.
-///
-/// `GUID::from_u128` lays the value out in the canonical
-/// big-endian-string order, so the literal here matches the dashed
-/// form above.
-pub const BEEBEEB_PROVIDER_GUID: GUID = GUID::from_u128(0xb33b33b0_5217_4c0a_9e3f_1f2a7c4d8e90);
-
-/// Sender into the upload driver's debounce loop (`crate::watcher`). The
-/// `extern "system"` NOTIFY callbacks can't capture state, so they reach the
-/// live channel through this slot. Overwritten by [`set_notify_sender`] from
-/// `watcher::spawn`; read by [`notify_sender`] in the callback module.
-///
-/// **Must be RE-POINTABLE, not set-once.** On a re-login or sync-root change the
-/// runner DROPS the old runner and re-spawns IN THE SAME PROCESS (see
-/// `runner::run` lifecycle), so `watcher::spawn` runs again and creates a BRAND
-/// NEW channel. The previous debounce loop has ended, so the old channel's
-/// receiver is gone and every `send` into it errors. A set-once `OnceLock` would
-/// keep the dead first sender forever → local uploads would silently stop after
-/// the first logout→login. So we store the sender in a `RwLock<Option<…>>` and
-/// OVERWRITE it on every (re)spawn, always pointing at the live debounce loop.
-///
-static NOTIFY_TX: RwLock<Option<tokio::sync::mpsc::UnboundedSender<crate::watcher::NotifyEvent>>> =
-    RwLock::new(None);
-
-/// Register (or RE-register) the upload driver's event sender so the Cloud Files
-/// NOTIFY callbacks ([`callbacks::notify_file_close_completion_callback`] and
-/// friends) push create/modify/delete/rename events into the LIVE debounce loop.
-/// Called from `watcher::spawn` on every (re)spawn — it OVERWRITES any prior
-/// sender so a re-login installs the new channel and uploads keep working.
-pub fn set_notify_sender(tx: tokio::sync::mpsc::UnboundedSender<crate::watcher::NotifyEvent>) {
-    if let Ok(mut slot) = NOTIFY_TX.write() {
-        *slot = Some(tx);
-    }
-}
-
-/// Internal accessor for the callback module: a clone of the CURRENT NOTIFY-event
-/// sender, or `None` if `watcher::spawn` hasn't registered one yet (e.g. a NOTIFY
-/// callback raced engine startup, or a logout cleared it). The callback drops the
-/// event in that case — a missed startup event is reconciled by the next
-/// `sync_tick`.
-pub(crate) fn notify_sender() -> Option<tokio::sync::mpsc::UnboundedSender<crate::watcher::NotifyEvent>> {
-    NOTIFY_TX.read().ok().and_then(|slot| slot.clone())
 }
 
 /// Publish only while the runner is live, serialized with connection teardown.
@@ -346,11 +282,23 @@ pub fn unregister_sync_root(root: &std::path::Path) -> anyhow::Result<()> {
     // Prove the Cloud Files registration itself is gone, independently of the
     // Explorer/WinRT registration and its per-user registry metadata.
     let mut buffer = vec![0u64; 1024];
-    let result = unsafe { CfGetSyncRootInfoByPath(PCWSTR(wide.as_ptr()), CF_SYNC_ROOT_INFO_BASIC,
-        buffer.as_mut_ptr().cast(), (buffer.len() * 8) as u32, None) };
+    let result = unsafe {
+        CfGetSyncRootInfoByPath(
+            PCWSTR(wide.as_ptr()),
+            CF_SYNC_ROOT_INFO_BASIC,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 8) as u32,
+            None,
+        )
+    };
     match result {
-        Err(error) if error.code() == HRESULT::from_win32(windows::Win32::Foundation::ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT.0)
-            || error.code() == HRESULT::from_win32(windows::Win32::Foundation::ERROR_NOT_A_CLOUD_FILE.0) => Ok(()),
+        Err(error)
+            if error.code()
+                == HRESULT::from_win32(windows::Win32::Foundation::ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT.0)
+                || error.code() == HRESULT::from_win32(windows::Win32::Foundation::ERROR_NOT_A_CLOUD_FILE.0) =>
+        {
+            Ok(())
+        }
         Err(error) => Err(anyhow::anyhow!("Could not verify Cloud Files unregister: {error}")),
         Ok(()) => Err(anyhow::anyhow!("Cloud Files registration remains after unregister")),
     }
@@ -529,9 +477,8 @@ pub(crate) fn register_shell_sync_root_as(sync_root: &std::path::Path, provider:
     use windows::Foundation::Collections::IVector;
     use windows::Security::Cryptography::CryptographicBuffer;
     use windows::Storage::Provider::{
-        StorageProviderHardlinkPolicy, StorageProviderHydrationPolicy,
-        StorageProviderHydrationPolicyModifier, StorageProviderInSyncPolicy,
-        StorageProviderItemPropertyDefinition, StorageProviderPopulationPolicy,
+        StorageProviderHardlinkPolicy, StorageProviderHydrationPolicy, StorageProviderHydrationPolicyModifier,
+        StorageProviderInSyncPolicy, StorageProviderItemPropertyDefinition, StorageProviderPopulationPolicy,
         StorageProviderProtectionMode, StorageProviderSyncRootInfo, StorageProviderSyncRootManager,
     };
     use windows::Storage::{IStorageFolder, StorageFolder};
@@ -563,8 +510,7 @@ pub(crate) fn register_shell_sync_root_as(sync_root: &std::path::Path, provider:
     let info = StorageProviderSyncRootInfo::new()
         .map_err(|e| anyhow::anyhow!("StorageProviderSyncRootInfo::new failed: {e}"))?;
 
-    info.SetId(&id_h)
-        .map_err(|e| anyhow::anyhow!("SetId failed: {e}"))?;
+    info.SetId(&id_h).map_err(|e| anyhow::anyhow!("SetId failed: {e}"))?;
     // `SetPath` takes `Param<IStorageFolder>` (the interface), and the
     // `Param<…, InterfaceType> for &U` blanket impl only fires when `U:
     // CanInto<IStorageFolder>`. `StorageFolder` (the concrete runtime class) does
@@ -654,9 +600,13 @@ pub(crate) fn register_shell_sync_root_as(sync_root: &std::path::Path, provider:
     // LD-0113 Amendment 8a: the "Read-only" custom state the Backups root carries (core's MSG_BADGE).
     // Only a new registration declares it (an existing one is kept, above); a failure here costs the
     // badge, never the registration.
-    match read_only::read_only_state_definition(beebeeb_core::backup::MSG_BADGE).and_then(|definition| props.Append(&definition)) {
+    match read_only::read_only_state_definition(beebeeb_core::backup::MSG_BADGE)
+        .and_then(|definition| props.Append(&definition))
+    {
         Ok(()) => {}
-        Err(e) => tracing::warn!(error = %e, "the Read-only custom state could not be declared; Backups shows no badge"),
+        Err(e) => {
+            tracing::warn!(error = %e, "the Read-only custom state could not be declared; Backups shows no badge")
+        }
     }
 
     // Register. Swallow an "already registered" race as success (idempotent) —
@@ -751,16 +701,24 @@ fn remove_owned_shell_key(id: &str) -> anyhow::Result<()> {
     use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS};
     use windows::Win32::System::Registry::*;
     use windows::core::HSTRING;
-    let key = HSTRING::from(format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{id}"));
+    let key = HSTRING::from(format!(
+        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{id}"
+    ));
     unsafe {
         let result = RegDeleteTreeW(HKEY_CURRENT_USER, &key);
-        anyhow::ensure!(result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND || result == ERROR_PATH_NOT_FOUND,
-            "Could not remove owned Explorer registry key: {result:?}");
+        anyhow::ensure!(
+            result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND || result == ERROR_PATH_NOT_FOUND,
+            "Could not remove owned Explorer registry key: {result:?}"
+        );
         let mut handle = HKEY::default();
         let remaining = RegOpenKeyExW(HKEY_CURRENT_USER, &key, 0, KEY_READ, &mut handle);
-        if remaining == ERROR_SUCCESS { let _ = RegCloseKey(handle); }
-        anyhow::ensure!(remaining == ERROR_FILE_NOT_FOUND || remaining == ERROR_PATH_NOT_FOUND,
-            "Could not verify owned Explorer registry key removal: {remaining:?}");
+        if remaining == ERROR_SUCCESS {
+            let _ = RegCloseKey(handle);
+        }
+        anyhow::ensure!(
+            remaining == ERROR_FILE_NOT_FOUND || remaining == ERROR_PATH_NOT_FOUND,
+            "Could not verify owned Explorer registry key removal: {remaining:?}"
+        );
     }
     Ok(())
 }
@@ -1099,14 +1057,20 @@ pub fn connect_root(sync_root: &std::path::Path) {
     // LD-0105 S7: the policy Windows holds now, after both registrations. Anything but PROGRESSIVE
     // with no modifier keeps the whole-file path (W2 reads `progressive_in_effect`).
     let read_back = hydration_policy_of(sync_root).ok();
-    *HYDRATION_IN_EFFECT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = read_back;
+    *HYDRATION_IN_EFFECT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = read_back;
     streaming::read_switch_at_engine_start();
     match read_back {
         Some(policy) if hydration_policy_is_ours(Some(policy)) => {
             tracing::info!("Cloud Files hydration policy in effect: progressive")
         }
         Some((primary, modifier)) => {
-            tracing::warn!(primary, modifier, "Cloud Files hydration policy in effect is not progressive; whole-file path kept")
+            tracing::warn!(
+                primary,
+                modifier,
+                "Cloud Files hydration policy in effect is not progressive; whole-file path kept"
+            )
         }
         None => tracing::warn!("Cloud Files hydration policy could not be read back; whole-file path kept"),
     }
@@ -1383,12 +1347,27 @@ pub fn guard_unknown_placeholders(sync_root: &std::path::Path, generation: u64) 
     let mut progress = |done: usize| {
         STARTUP_GUARD.advance(generation, done as u64);
         if guard_progress_due(done, total) {
-            tracing::info!(done, total, elapsed_secs = started.elapsed().as_secs(), "guard: progress");
+            tracing::info!(
+                done,
+                total,
+                elapsed_secs = started.elapsed().as_secs(),
+                "guard: progress"
+            );
         }
     };
     let mut mark = |path: &std::path::Path| placeholders::mark_not_in_sync_path(path);
-    let mut control = GuardControl { stop: &stop, progress: &mut progress };
-    match crate::unknown_check::guard_rows(bridge.db(), sync_root, &rows, &placeholders::platform_view, &mut mark, &mut control) {
+    let mut control = GuardControl {
+        stop: &stop,
+        progress: &mut progress,
+    };
+    match crate::unknown_check::guard_rows(
+        bridge.db(),
+        sync_root,
+        &rows,
+        &placeholders::platform_view,
+        &mut mark,
+        &mut control,
+    ) {
         Ok(summary) if !summary.stopped => {
             STARTUP_GUARD.finish(generation);
             tracing::info!(
@@ -1402,7 +1381,11 @@ pub fn guard_unknown_placeholders(sync_root: &std::path::Path, generation: u64) 
         }
         Ok(summary) => {
             STARTUP_GUARD.abandon(generation);
-            tracing::info!(walked = summary.walked, guarded = total, "guard: the start-up pass stopped with the engine");
+            tracing::info!(
+                walked = summary.walked,
+                guarded = total,
+                "guard: the start-up pass stopped with the engine"
+            );
         }
         Err(e) => {
             STARTUP_GUARD.abandon(generation);
@@ -1545,13 +1528,19 @@ pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
                 .flatten()
                 .is_some_and(|contract| contract.local_hash.is_some());
             if has_baseline {
-                in_sync_seen().lock().unwrap_or_else(|p| p.into_inner()).insert(file_id.clone(), fingerprint);
+                in_sync_seen()
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(file_id.clone(), fingerprint);
                 continue;
             }
             checked += 1;
             match placeholders::promote_fetched_content(bridge.db(), file_id, &local_path) {
                 Ok(true) => {
-                    in_sync_seen().lock().unwrap_or_else(|p| p.into_inner()).insert(file_id.clone(), fingerprint);
+                    in_sync_seen()
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .insert(file_id.clone(), fingerprint);
                 }
                 Ok(false) => {}
                 Err(e) => {
@@ -1570,7 +1559,10 @@ pub fn stamp_local_files_in_sync(sync_root: &std::path::Path) {
             Ok(true) => {
                 stamped += 1;
                 if let Some(after) = file_fingerprint(&local_path) {
-                    in_sync_seen().lock().unwrap_or_else(|p| p.into_inner()).insert(file_id.clone(), after);
+                    in_sync_seen()
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .insert(file_id.clone(), after);
                 }
             }
             Ok(false) => {}

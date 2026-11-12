@@ -32,8 +32,14 @@ pub(super) struct UnknownFilesAtSignOut {
 /// the home folder for a sync folder at a drive root. `None`: there is no place outside it.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(super) fn kept_unknown_files_dir(root: &std::path::Path) -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(std::path::PathBuf::from);
-    unknown_check::kept_files_dir(root, &chrono::Local::now().format("%Y-%m-%d %H%M").to_string(), home.as_deref())
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from);
+    unknown_check::kept_files_dir(
+        root,
+        &chrono::Local::now().format("%Y-%m-%d %H%M").to_string(),
+        home.as_deref(),
+    )
 }
 
 /// Task 2191 (D11): the files the Windows sign-out would keep or delete as unknown: by the same
@@ -51,7 +57,12 @@ pub(super) fn count_unknown_files_at_sign_out() -> Result<UnknownFilesAtSignOut,
         .into_iter()
         .map(|(path, _, _)| (path, ExpectedAt::OrphanCandidate))
         .collect();
-    places.extend(db.list_guarded().map_err(|e| e.to_string())?.into_iter().map(|row| (row.path, ExpectedAt::Guarded(row.file_id))));
+    places.extend(
+        db.list_guarded()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|row| (row.path, ExpectedAt::Guarded(row.file_id))),
+    );
     let mut count = 0;
     for (rel, expected) in places {
         let Some(path) = engine_bridge::EngineBridge::placeholder_path_under(&root, &rel) else {
@@ -80,7 +91,9 @@ pub(super) fn count_unknown_files_at_sign_out() -> Result<UnknownFilesAtSignOut,
             count += 1;
         }
     }
-    let folder = kept_unknown_files_dir(&root).filter(|_| count > 0).map(|dir| dir.to_string_lossy().into_owned());
+    let folder = kept_unknown_files_dir(&root)
+        .filter(|_| count > 0)
+        .map(|dir| dir.to_string_lossy().into_owned());
     Ok(UnknownFilesAtSignOut { count, folder })
 }
 
@@ -410,7 +423,10 @@ pub(super) fn kept_unsent_folder() -> Result<Option<String>, String> {
 
 /// The row's "Dismiss": forgets the folder it showed, never deletes it (§7.3).
 #[tauri::command]
-pub(super) fn dismiss_kept_unsent_folder(app: tauri::AppHandle, path: String) -> Result<finder_removal::DismissOutcome, String> {
+pub(super) fn dismiss_kept_unsent_folder(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<finder_removal::DismissOutcome, String> {
     let outcome = sign_out::kept_record::dismiss_saved_kept_unsent_at(&DesktopConfig::path()?, &path)?;
     emit_kept_folder_changed(&app);
     Ok(outcome)
@@ -491,7 +507,11 @@ pub(super) fn dismiss_kept_unsynced_folder(path: String) -> Result<finder_remova
 /// (see its doc): the lock that preceded this already moved the epoch, and a cold start has no
 /// cached storage summary to go stale. Split out of `unlock_vault` so a test can run the real
 /// install after the real `lock_vault`; the Keychain read before it has no Linux backend.
-pub(super) fn install_unlocked_session(_write: &SessionWrite, acct: &AccountRuntime, session: Session) -> Result<(), String> {
+pub(super) fn install_unlocked_session(
+    _write: &SessionWrite,
+    acct: &AccountRuntime,
+    session: Session,
+) -> Result<(), String> {
     let mut guard = acct.session.lock().map_err(|_| "session mutex poisoned".to_string())?;
     *guard = Some(session);
     Ok(())
@@ -516,13 +536,14 @@ pub(super) fn install_keychain_session(
 /// phrase (`isNoVaultKey`, pinned equal in `tests/signInModel.test.ts`). Without it the person read the Keychain's own
 /// words, "unlock vault key from Keychain: secret not found". Windows and Linux keep what they showed.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(super) const NO_VAULT_KEY_UNLOCK_ERROR: &str = "This Mac does not have your encryption keys yet. Restore them to continue.";
+pub(super) const NO_VAULT_KEY_UNLOCK_ERROR: &str =
+    "This Mac does not have your encryption keys yet. Restore them to continue.";
 
 /// The same test the startup restore applies to this failure (`error.contains("secret not found")`, in
 /// `restore_session_inner`): the token is there and the key is not.
 pub(super) fn unlock_failure(error: String) -> String {
     #[cfg(target_os = "macos")]
-    if error.contains("secret not found") {
+    if error.contains("secret not found") || error == crate::auth_v2::key_owner::KEY_NOT_THIS_ACCOUNTS {
         return NO_VAULT_KEY_UNLOCK_ERROR.to_string();
     }
     error
@@ -661,11 +682,13 @@ pub(super) fn upload_staging_dir_for_session_purge() -> Option<std::path::PathBu
     None
 }
 
-
 /// Test builds: run `body` with `staging` as the upload-staging folder the session purge empties, so a test drives
 /// the real sign-out or Lock path against a folder it created. Only this task sees it.
 #[cfg(all(test, unix))]
-pub(super) async fn with_upload_staging_for_test<T>(staging: std::path::PathBuf, body: impl std::future::Future<Output = T>) -> T {
+pub(super) async fn with_upload_staging_for_test<T>(
+    staging: std::path::PathBuf,
+    body: impl std::future::Future<Output = T>,
+) -> T {
     UPLOAD_STAGING_FOR_TEST.scope(staging, body).await
 }
 

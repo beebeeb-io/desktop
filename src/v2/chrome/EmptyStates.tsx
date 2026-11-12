@@ -31,6 +31,33 @@ export function EmptyFiles({ onAddFiles }: { /** Opens the New menu under the bu
   )
 }
 
+/** Rust's answer for an account whose first file list is not loaded on this PC (`drive_v2/first_sync.rs`). */
+export interface NeverSyncedNotice { reason: 'paused' | 'checking' | 'offline' | 'error'; title: string; detail: string; action: string | null }
+
+/** What `drive_list` adds to a listing with no rows: the notice, or nothing for a truly empty folder. */
+export const neverSyncedOf = (listing: unknown): NeverSyncedNotice | null =>
+  (listing as { neverSynced?: NeverSyncedNotice | null } | null)?.neverSynced ?? null
+
+/** Files, not loaded yet: never the empty-folder message. The words and the action are Rust's. */
+export function NotLoadedYet({ notice, onAction }: { notice: NeverSyncedNotice; onAction?: () => void }) {
+  return (
+    <div data-empty="never-synced" data-reason={notice.reason} role="status" className="flex flex-1 flex-col items-center justify-center gap-3 px-8 text-center">
+      <CloudTile />
+      <h2 className="m-0 text-[16px] font-semibold leading-6 text-ink">{notice.title}</h2>
+      <p className="m-0 max-w-[340px] text-[13px] leading-5 text-ink-3">{notice.detail}</p>
+      {notice.action && <button type="button" onClick={onAction} className="h-8 rounded-md bg-amber px-4 text-[13px] font-medium text-ink hover:brightness-95 focus-visible:outline-2 focus-visible:outline-ink-3">{notice.action}</button>}
+    </div>
+  )
+}
+
+/** What the Files area shows for a listing with no rows: the not-loaded notice for a never-synced account, the
+ *  empty-folder message only for a folder that is loaded and empty (and can take new files). */
+export function filesEmptyState(o: { listing: unknown; addable: boolean; onAddFiles?: (e: React.MouseEvent<HTMLButtonElement>) => void; onResume?: () => void }): ReactNode | undefined {
+  const notice = neverSyncedOf(o.listing)
+  if (notice) return <NotLoadedYet notice={notice} onAction={o.onResume} />
+  return o.addable ? <EmptyFiles onAddFiles={o.onAddFiles} /> : undefined
+}
+
 export interface ListLoading { done: number; total: number; /** Absent when the engine has no estimate: the strip leaves it out. */ minutesLeft?: number; thumbnails: 'waiting' | 'in-progress' | 'done' }
 
 const nf = new Intl.NumberFormat('en-US')

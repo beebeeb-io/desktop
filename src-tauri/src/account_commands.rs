@@ -529,7 +529,8 @@ pub(super) async fn desktop_trash_list(
             .filter_map(|file_meta| {
                 let mut item = trash_item_from_meta(file_meta, api.master_key())?;
                 if let Some(db) = db.as_ref()
-                    && let Ok(Some(name)) = owner_keys::stored_name(db, &item.id, api.master_key())
+                    && let Ok(owner_keys::StoredName::Name(name)) =
+                        owner_keys::stored_name(db, &item.id, api.master_key())
                 {
                     item.name = name;
                 }

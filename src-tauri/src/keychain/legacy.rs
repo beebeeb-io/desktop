@@ -77,6 +77,10 @@ pub fn migrate_legacy_keychain_between<N: AuthSecretStore, L: AuthSecretStore>(n
     if !key_existed {
         new.delete_wrapped_master_key()?;
     }
+    // Task 2447: owner tags the segmented store kept describe what it held before, not the legacy token or key
+    // written below; they go first, and a removal that fails stops the migration (it runs again at the next start).
+    new.delete_session_owner()?;
+    new.delete_vault_key_owner()?;
     // Token: SessionToken is Clone, but we own `legacy_token` here so pass by ref.
     new.save_session_token(&legacy_token)?;
     // Key: SecretBytes is !Clone → MOVE the loaded value straight into save.

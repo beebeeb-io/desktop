@@ -151,7 +151,11 @@ pub(super) fn finish_repair_after_removal(
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(super) fn persist_finder_install_result(cfg: &mut HeldConfig, installed: bool, error: Option<String>) -> Result<(), String> {
+pub(super) fn persist_finder_install_result(
+    cfg: &mut HeldConfig,
+    installed: bool,
+    error: Option<String>,
+) -> Result<(), String> {
     // Task 1889: the result is written onto the file as it is now (`update_held`), not by saving the copy this
     // flow loaded before its slow work, which would put back what another writer saved since.
     cfg.update_held(|held| {
@@ -352,9 +356,10 @@ pub(super) fn disposable_cache_roots_in(
 /// T5-⚠c), so no purge may treat anything under it as disposable, whatever root it sits in.
 pub(super) fn is_lifecycle_log_path(path: &std::path::Path) -> bool {
     let names: Vec<&str> = path.components().filter_map(|part| part.as_os_str().to_str()).collect();
-    names
-        .windows(2)
-        .any(|pair| pair[0].eq_ignore_ascii_case("Logs") && pair[1].eq_ignore_ascii_case("Beebeeb"))
+    names.windows(2).any(|pair| {
+        pair[0].eq_ignore_ascii_case("Logs")
+            && pair[1].eq_ignore_ascii_case(crate::app_identity::AppIdentity::CURRENT.logs_dir_name())
+    })
 }
 
 pub(super) fn is_disposable_cache_path(path: &std::path::Path) -> bool {
@@ -990,7 +995,9 @@ pub(super) fn remove_file_provider_domain() -> Result<finder_removal::DomainRemo
 /// Windows and Linux only in the app: on macOS every File Provider call goes through the reconciler's bridge
 /// gate, which runs it on the blocking pool itself (`finder_setup::macos_ports::BridgeGate`).
 #[cfg_attr(target_os = "macos", allow(dead_code))]
-pub(super) async fn on_blocking_pool<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+pub(super) async fn on_blocking_pool<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
     tokio::task::spawn_blocking(work)
         .await
         .map_err(|error| format!("A File Provider call did not finish: {error}"))
@@ -998,8 +1005,8 @@ pub(super) async fn on_blocking_pool<T: Send + 'static>(work: impl FnOnce() -> T
 
 /// The removal, off the runtime (round 4).
 #[cfg(not(target_os = "macos"))]
-pub(super) async fn remove_file_provider_domain_blocking() -> Result<finder_removal::DomainRemoval, finder_removal::RemovalFailure>
-{
+pub(super) async fn remove_file_provider_domain_blocking()
+-> Result<finder_removal::DomainRemoval, finder_removal::RemovalFailure> {
     match on_blocking_pool(remove_file_provider_domain).await {
         Ok(result) => result,
         Err(message) => Err(message.into()),
@@ -1008,7 +1015,8 @@ pub(super) async fn remove_file_provider_domain_blocking() -> Result<finder_remo
 
 /// The install, off the runtime (round 4): its cleanup is a removal.
 #[cfg(not(target_os = "macos"))]
-pub(super) async fn install_file_provider_domain_blocking() -> Result<FileProviderInstallOutcome, finder_removal::InstallFailure> {
+pub(super) async fn install_file_provider_domain_blocking()
+-> Result<FileProviderInstallOutcome, finder_removal::InstallFailure> {
     match on_blocking_pool(install_file_provider_domain).await {
         Ok(result) => result,
         Err(message) => Err(message.into()),

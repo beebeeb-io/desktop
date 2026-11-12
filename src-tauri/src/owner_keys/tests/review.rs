@@ -12,7 +12,8 @@ const OWNER: &str = "10000000-0000-4000-8000-0000000000b2";
 fn review_p3_1_a_persisted_block_matches_after_the_fingerprint_grew() {
     let master = MasterKey::from_bytes([7; 32]);
     let key = beebeeb_core::kdf::derive_file_key(&master, OWNER.as_bytes());
-    let name = beebeeb_core::encrypt::encrypt_name_for(&key, "notes.txt", None, ExpectedChunkFormat::Unrecorded).unwrap();
+    let name =
+        beebeeb_core::encrypt::encrypt_name_for(&key, "notes.txt", None, ExpectedChunkFormat::Unrecorded).unwrap();
     let record = OwnedKeyRecord {
         file_id: OWNER.into(),
         name_encrypted: name,
@@ -39,7 +40,7 @@ fn review_p2_9_a_foreign_row_without_a_key_is_unavailable() {
     .unwrap();
     assert_eq!(
         stored_name(&db, FOREIGN, &[7; 32]).unwrap(),
-        Some(blocked_name(FOREIGN)),
+        crate::owner_keys::StoredName::Blocked,
         "a foreign id never falls back to a derived key and the server's plaintext name"
     );
 }
@@ -95,6 +96,9 @@ fn review_p3_5_equal_keys_compare_equal_and_one_flipped_byte_does_not() {
         let mut bytes = *right.as_bytes();
         bytes[position] ^= 1;
         let other = beebeeb_core::kdf::FileKey::from_bytes(bytes);
-        assert!(!same_key(&left, &other), "one flipped byte at {position} is a different key");
+        assert!(
+            !same_key(&left, &other),
+            "one flipped byte at {position} is a different key"
+        );
     }
 }

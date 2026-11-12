@@ -18,9 +18,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
+use crate::api_client::ApiClient;
 use beebeeb_core::encrypt::NameMetadata;
 use beebeeb_core::kdf::{FileKey, MasterKey};
-use crate::api_client::ApiClient;
 
 /// A 2236 request upload row's envelope fields (L12). The row is an owner-class
 /// item whose content key is the request key `C`, not a derived key.
@@ -93,7 +93,11 @@ impl RequestKeys {
     /// checks, the row-bound seal, then the shipped empty-id seal. Content is
     /// `C`; the rename target is the string-derived key and the recorded pin,
     /// never `C`, and `None` for an upper-repair (read-only) name.
-    pub(crate) fn row_keys(&mut self, master: &MasterKey, row: &Value) -> Option<beebeeb_core::owned_keys::RequestRowKeys> {
+    pub(crate) fn row_keys(
+        &mut self,
+        master: &MasterKey,
+        row: &Value,
+    ) -> Option<beebeeb_core::owned_keys::RequestRowKeys> {
         let fields = request_upload_fields(row)?;
         let id = row.get("id")?.as_str()?;
         let encrypted = row.get("name_encrypted")?.as_str()?;
@@ -181,15 +185,27 @@ pub(crate) fn block_malformed_row(
 /// ([`RequestKeys::row_keys`]), never field presence: the server can plant a
 /// well-formed-shaped envelope on a normal owner row.
 pub(crate) fn request_envelope(row: &Value) -> anyhow::Result<Option<RequestUploadFields>> {
-    let carries = ["file_request_id", "sender_ephemeral_pubkey", "wrapped_content_key"]
+    // Task 2445: a field counts as carried only when present AND non-null.
+    // The server snapshot always emits `"file_request_id": null` (etc.) for
+    // ordinary rows; `row.get(field).is_some()` is true for JSON null and
+    // would block every snapshot row as "malformed envelope".
+    let non_null = |field: &str| row.get(field).is_some_and(|v| !v.is_null());
+    let present: Vec<bool> = ["file_request_id", "sender_ephemeral_pubkey", "wrapped_content_key"]
         .iter()
-        .all(|field| row.get(field).is_some());
-    if !carries {
+        .map(|field| non_null(field))
+        .collect();
+    // All absent/null → no envelope.
+    if present.iter().all(|p| !p) {
         return Ok(None);
     }
-    request_upload_fields(row)
-        .map(Some)
-        .ok_or_else(|| anyhow::anyhow!("a row carries a malformed 2236 request envelope"))
+    // All present and non-null → must be well-formed.
+    if present.iter().all(|p| *p) {
+        return request_upload_fields(row)
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("a row carries a malformed 2236 request envelope"));
+    }
+    // A mix of null and non-null is malformed.
+    anyhow::bail!("a row carries a malformed 2236 request envelope")
 }
 
 /// The key and pin a rename of a request row must seal under (§15, P2-2): the
@@ -200,7 +216,10 @@ pub(crate) fn rename_material(
     master: &MasterKey,
     id: &str,
     record: &crate::owner_keys::OwnedKeyRecord,
-) -> anyhow::Result<(beebeeb_core::kdf::FileKey, beebeeb_core::chunk_stream::ExpectedChunkFormat)> {
+) -> anyhow::Result<(
+    beebeeb_core::kdf::FileKey,
+    beebeeb_core::chunk_stream::ExpectedChunkFormat,
+)> {
     use beebeeb_core::chunk_stream::ExpectedChunkFormat;
 
     let name = record

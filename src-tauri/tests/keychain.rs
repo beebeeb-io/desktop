@@ -5,6 +5,9 @@
 // The include also re-exports the production migration entry point, which only the lib calls.
 #![allow(unused_imports)]
 
+// The facade names its credential service through `crate::app_identity`: the lib's own module, not a second copy.
+use beebeeb_desktop_lib::app_identity;
+
 #[path = "../src/keychain.rs"]
 mod keychain;
 

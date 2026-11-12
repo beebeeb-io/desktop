@@ -1,7 +1,7 @@
 // The live Files and Backups view: reads and acts only through useDriveSource() (B01/B02); drops go through uploadDroppedPaths.
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { DriveSourceError, useDriveSource, type DriveItem, type ItemDetails, type Listing, type VersionEntry } from '@beebeeb/shared/drive-ui'
-import { EmptyFiles, GettingReadyStrip, NeedsConnection } from '../../chrome/EmptyStates'
+import { GettingReadyStrip, NeedsConnection, filesEmptyState } from '../../chrome/EmptyStates'
 import { backupMetaFor, uploadSummary, useLiveFolderExtras } from './liveExtras'
 import { showToast } from '../../chrome/Toast'
 import { uploadDroppedPaths } from '../../source/desktop'
@@ -426,6 +426,8 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
   const conflict = live.conflicts[0]
 
   const emptyAndAddable = items.length === 0 && listing && canNew
+  // A never-synced account is not an empty folder (the rule and the words are Rust's: drive_v2/first_sync.rs).
+  const resumeSync = () => { void setSyncPaused(false).then((r) => { if (r.ok) load(); else showToast({ kind: 'failed', text: 'Couldn’t resume sync' }) }) }
   return (
     <div role="presentation" className="relative flex min-h-0 flex-1" data-listing={listing ? 'loaded' : 'loading'} onClick={() => setMenu(null)}>
       <FilesPane
@@ -434,7 +436,7 @@ export function FolderView({ nav, mode }: { nav: Navigation; mode: 'files' | 'ba
           columns: mode === 'backups' && path.length === 1 ? 'backups' : 'files', canNew, top,
           title: mode === 'backups' ? 'Backups' : 'Files', handlers,
           transfers: live.transfers, backupMeta: backupMetaFor(live.status, items),
-          empty: emptyAndAddable ? <EmptyFiles onAddFiles={(e) => openNewMenu(e, 'center')} /> : undefined,
+          empty: items.length === 0 ? filesEmptyState({ listing, addable: Boolean(emptyAndAddable), onAddFiles: (e) => openNewMenu(e, 'center'), onResume: resumeSync }) : undefined,
         }}
       />
       {connectionNeeded && <NeedsConnection fileName={connectionNeeded.name} onTryAgain={() => tryConnection(connectionNeeded)} onClose={() => setConnectionNeeded(null)} />}

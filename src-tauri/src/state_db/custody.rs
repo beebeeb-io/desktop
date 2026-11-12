@@ -221,4 +221,40 @@ impl StateDb {
         conn.execute("DELETE FROM owned_key_records WHERE file_id = ?1", [id])?;
         Ok(())
     }
+    /// Task 2445: whether any owned_key_records are blocked or any files have
+    /// empty paths (the symptom the null-envelope bug left). Used to decide
+    /// whether a re-snapshot is needed.
+    pub fn has_blocked_or_nameless_rows(&self) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let has: bool = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM owned_key_records
+                WHERE json_extract(record, '$.blocked_fingerprint') IS NOT NULL
+            ) OR EXISTS(
+                SELECT 1 FROM files WHERE path = '' AND status != 'trashing'
+            )",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(has)
+    }
+    /// Task 2445: whether the envelope-heal migration has run.
+    pub fn envelope_heal_done(&self) -> Result<bool> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn
+            .query_row("SELECT 1 FROM sync_state WHERE key = 'envelope_heal_2445'", [], |_| {
+                Ok(())
+            })
+            .optional()?
+            .is_some())
+    }
+    /// Task 2445: mark the envelope-heal migration as done.
+    pub fn mark_envelope_heal_done(&self) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO sync_state (key, value) VALUES ('envelope_heal_2445', '1') ON CONFLICT(key) DO NOTHING",
+            [],
+        )?;
+        Ok(())
+    }
 }

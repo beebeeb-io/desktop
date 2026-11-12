@@ -20,6 +20,7 @@ mod account;
 mod account_binding;
 mod account_dto;
 mod api_client;
+pub mod app_identity;
 mod auth_v2; // v2 b10
 mod v2_snap; // v2 b03
 // LD-0113: what this device refuses to delete, rename or move (the Backups root, its own backups).

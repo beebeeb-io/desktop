@@ -121,7 +121,12 @@ pub struct VersionConflictEntry {
 /// ([`crate::sign_out::kept_names`]'s `with_suffix`, 255 bytes): the stem is cut at a character boundary,
 /// never the suffix, the counter or the extension. The device is cut first, to
 /// [`KEEP_BOTH_DEVICE_MAX_BYTES`], so the suffix always leaves the stem room.
-pub(crate) fn keep_both_name(original: &str, device: &str, hhmm: &str, taken: &std::collections::HashSet<String>) -> String {
+pub(crate) fn keep_both_name(
+    original: &str,
+    device: &str,
+    hhmm: &str,
+    taken: &std::collections::HashSet<String>,
+) -> String {
     let device = crate::sign_out::kept_names::prefix_within(device, KEEP_BOTH_DEVICE_MAX_BYTES);
     let mut counter = 1u32;
     loop {
@@ -196,9 +201,17 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
         });
     }
     if let Some((first_id, _, first_at)) = not_checked.first().cloned() {
-        let names: Vec<String> = not_checked.iter().take(5).map(|(_, path, _)| display_name_for_path(path)).collect();
+        let names: Vec<String> = not_checked
+            .iter()
+            .take(5)
+            .map(|(_, path, _)| display_name_for_path(path))
+            .collect();
         let more = not_checked.len().saturating_sub(names.len());
-        let files = if not_checked.len() == 1 { "1 file".to_string() } else { format!("{} files", not_checked.len()) };
+        let files = if not_checked.len() == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{} files", not_checked.len())
+        };
         entries.push(VersionConflictEntry {
             id: "held:content_unknown".to_string(),
             file_id: first_id,
@@ -210,7 +223,11 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
                 "A change to one of them stays on this PC and isn't sent until a later update checks it. \
                  Nothing is lost. {}{}",
                 names.join(", "),
-                if more > 0 { format!(" and {more} more") } else { String::new() }
+                if more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                }
             ),
             action: "review_upload".to_string(),
             op_id: None,
@@ -241,7 +258,9 @@ pub fn version_conflict_feed_from_db(db: &StateDb) -> anyhow::Result<Vec<Version
     for op in db.list_review_operations()? {
         match review_entry_for_operation(&op, db) {
             Ok(entry) => entries.push(entry),
-            Err(e) => tracing::warn!(op_id = %op.op_id, error = %e, "review feed: an entry could not be read; it is left out"),
+            Err(e) => {
+                tracing::warn!(op_id = %op.op_id, error = %e, "review feed: an entry could not be read; it is left out")
+            }
         }
     }
 
@@ -363,68 +382,6 @@ pub(crate) struct FinderStagingBases {
     pub(crate) temp: PathBuf,
 }
 
-impl FinderStagingBases {
-    /// This process's bases: the OS's data, cache and temp dirs.
-    #[cfg(not(test))]
-    pub(crate) fn current() -> Self {
-        Self {
-            data: dirs::data_dir(),
-            cache: dirs::cache_dir(),
-            temp: std::env::temp_dir(),
-        }
-    }
-
-    /// A test build stages under a per-process sandbox, never the person's real data or cache
-    /// dir: the installed app stages there too, and every test that queues a Finder write
-    /// (engine bridge, IPC socket, watcher) would otherwise add plaintext files to it. A test
-    /// points one bridge at bases of its own with `Seams::stage_under`. Pinned by
-    /// `unit_tests_stage_finder_writes_in_a_sandbox_never_the_real_cache`.
-    #[cfg(test)]
-    pub(crate) fn current() -> Self {
-        Self {
-            data: Some(crate::test_sandbox::dir("data").expect("create the unit-test sandbox")),
-            cache: Some(crate::test_sandbox::dir("cache").expect("create the unit-test sandbox")),
-            temp: std::env::temp_dir(),
-        }
-    }
-
-    /// `<data dir>/beebeeb/finder-writes`, where macOS stages: a folder the system does not
-    /// purge. `None` when the OS gives no data dir.
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-    pub(crate) fn durable_root(&self) -> Option<PathBuf> {
-        self.data
-            .as_ref()
-            .map(|data| data.join("beebeeb").join("finder-writes"))
-    }
-
-    /// `<cache dir>/beebeeb/finder-writes` (the temp dir when the OS gives no cache dir): where
-    /// every platform staged before, and where Windows and Linux still stage.
-    pub(crate) fn cache_root(&self) -> PathBuf {
-        self.cache
-            .as_ref()
-            .unwrap_or(&self.temp)
-            .join("beebeeb")
-            .join("finder-writes")
-    }
-
-    /// `<temp dir>/beebeeb/finder-writes`: the fallback when the cache root is not writable
-    /// (Windows and Linux; macOS used it before as well).
-    pub(crate) fn temp_root(&self) -> PathBuf {
-        self.temp.join("beebeeb").join("finder-writes")
-    }
-
-    /// Every folder a staged copy can be in. On macOS: the data root, then the cache root and the
-    /// temp root, which builds before the move staged into, so their copies are still found. Elsewhere:
-    /// the cache root and the temp root.
-    pub(crate) fn candidates(&self) -> Vec<PathBuf> {
-        let mut candidates = Vec::with_capacity(3);
-        #[cfg(target_os = "macos")]
-        candidates.extend(self.durable_root());
-        candidates.extend([self.cache_root(), self.temp_root()]);
-        candidates
-    }
-}
-
 /// Where this process stages a Finder write's plaintext copy now.
 pub(super) fn default_finder_staging_root() -> Result<PathBuf, FinderStagingUnavailable> {
     finder_staging_root_from(&FinderStagingBases::current())
@@ -501,7 +458,10 @@ pub(super) fn decidable_check(db: &StateDb, op_id: &str) -> Result<bool, EngineE
     Ok(db.is_decidable_parked(op_id)?)
 }
 
-pub(super) fn review_entry_for_operation(op: &PendingOperation, db: &StateDb) -> Result<VersionConflictEntry, EngineError> {
+pub(super) fn review_entry_for_operation(
+    op: &PendingOperation,
+    db: &StateDb,
+) -> Result<VersionConflictEntry, EngineError> {
     let file_id = op.file_id.clone().unwrap_or_else(|| op.op_id.clone());
     let file_name = op
         .target_path
@@ -654,7 +614,9 @@ pub(super) fn remove_scaffold_dirs(sync_root: &Path, dirs: &[String]) {
         .map(Path::new)
         .filter(|rel| {
             rel.components().next().is_some()
-                && rel.components().all(|part| matches!(part, std::path::Component::Normal(_)))
+                && rel
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)))
         })
         .collect();
     inside.sort_by_key(|rel| std::cmp::Reverse(rel.components().count()));
@@ -693,7 +655,9 @@ pub(crate) fn remove_pruned_entry(
         Ok(None) => {}
         Ok(Some(_)) => {
             // Zero-knowledge: never the path.
-            tracing::warn!("remote-deletion reconcile: the name reaches a different entry (8.3 alias); it is left alone");
+            tracing::warn!(
+                "remote-deletion reconcile: the name reaches a different entry (8.3 alias); it is left alone"
+            );
             return PrunedEntry::Gone;
         }
         Err(error) => {
@@ -735,7 +699,11 @@ pub(crate) fn remove_pruned_entry(
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => OriginalRemoval::Removed,
                         Err(_) => OriginalRemoval::InPlace,
                     };
-                    PrunedEntry::KeptCopy { copy, copied_hash, removal }
+                    PrunedEntry::KeptCopy {
+                        copy,
+                        copied_hash,
+                        removal,
+                    }
                 }
                 Err(_) => PrunedEntry::KeptInPlace(KeptReason::CopyFailed),
             }
@@ -805,7 +773,11 @@ pub(crate) fn copy_as_this_pc(path: &Path, dir: &Path) -> std::io::Result<(PathB
         }
     };
     for n in 1..=99 {
-        let suffix = if n == 1 { " (this PC)".to_string() } else { format!(" (this PC {n})") };
+        let suffix = if n == 1 {
+            " (this PC)".to_string()
+        } else {
+            format!(" (this PC {n})")
+        };
         let name = match ext {
             Some(ext) => format!("{stem}{suffix}.{ext}"),
             None => format!("{stem}{suffix}"),
@@ -821,7 +793,10 @@ pub(crate) fn copy_as_this_pc(path: &Path, dir: &Path) -> std::io::Result<(PathB
         }
     }
     let _ = std::fs::remove_file(&temp);
-    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free name for the copy"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "no free name for the copy",
+    ))
 }
 
 /// Task 1640 (review N3): where a copy of `path` can upload from: its folder, or the nearest
@@ -883,7 +858,11 @@ pub(super) fn record_kept_copy(
         Some(copy) => db.record_local_activity(LocalActivityEventInput {
             event_type: LocalActivityKind::KeptLocalCopy,
             file_id: Some(file_id.to_string()),
-            file_name: copy.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string(),
+            file_name: copy
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string(),
             rel_path: Some(copy_path.clone()),
             occurred_at: now,
         }),
@@ -936,13 +915,25 @@ pub(super) fn remove_pruned_entries(
         let agreed = row.local_hash.as_deref().or(row.fetched_hash.as_deref());
         // Task 2191 (G-engine, review-114 F-P1-4): the platform's in-sync state is trusted only
         // for a file with agreed content; one of unknown content is read by its size on disk.
-        let state = if row.is_dir { LocalEntry::InSync } else { local(&path, agreed.is_some()) };
+        let state = if row.is_dir {
+            LocalEntry::InSync
+        } else {
+            local(&path, agreed.is_some())
+        };
         let copy_dir = kept_copy_dir(db, sync_root, &path, &removed_dirs);
-        let kind = if row.is_dir { RemovedKind::Dir } else { RemovedKind::File };
+        let kind = if row.is_dir {
+            RemovedKind::Dir
+        } else {
+            RemovedKind::File
+        };
         match remove_pruned_entry(sync_root, &path, kind, agreed, state, &copy_dir) {
             PrunedEntry::Removed if !row.is_dir => remove_office_owner_files(sync_root, &path),
             PrunedEntry::Removed | PrunedEntry::Gone => {}
-            PrunedEntry::KeptCopy { copy, copied_hash, removal } => {
+            PrunedEntry::KeptCopy {
+                copy,
+                copied_hash,
+                removal,
+            } => {
                 if removal.is_removed() {
                     remove_office_owner_files(sync_root, &path);
                 }
@@ -972,7 +963,17 @@ pub(super) fn remove_pruned_entries(
                 );
                 // Condition 5: ONE entry per file (a second remote op skips it, above); the retry
                 // resolves it once it can be removed, copied or is gone.
-                record_kept_copy(db, sync_root, &row.file_id, &path, None, agreed.unwrap_or_default(), OriginalRemoval::InPlace, reason, None);
+                record_kept_copy(
+                    db,
+                    sync_root,
+                    &row.file_id,
+                    &path,
+                    None,
+                    agreed.unwrap_or_default(),
+                    OriginalRemoval::InPlace,
+                    reason,
+                    None,
+                );
             }
             PrunedEntry::FolderKept => {
                 tracing::warn!(file_id = %row.file_id, "remote-deletion reconcile: kept a folder that still holds something");
@@ -997,8 +998,11 @@ pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn F
     // Review-151d P2-1: a dismissed entry's tombstone goes once its file is gone, or once the place
     // is the server's again.
     for (id, rel) in db.list_dismissed_kept_originals().unwrap_or_default() {
-        let gone = EngineBridge::placeholder_path_under(sync_root, &rel).is_none_or(|path| std::fs::symlink_metadata(path).is_err());
-        let listed = db.get_file_by_path(&rel).is_ok_and(|row| row.is_some_and(|row| row.status != FileStatus::Trashing));
+        let gone = EngineBridge::placeholder_path_under(sync_root, &rel)
+            .is_none_or(|path| std::fs::symlink_metadata(path).is_err());
+        let listed = db
+            .get_file_by_path(&rel)
+            .is_ok_and(|row| row.is_some_and(|row| row.status != FileStatus::Trashing));
         if gone || listed {
             let _ = db.delete_kept_copy(id);
         }
@@ -1042,12 +1046,23 @@ pub(crate) fn retry_kept_originals(db: &StateDb, sync_root: &Path, local: &dyn F
         let agreed = Some(copy.copied_hash.as_str()).filter(|hash| !hash.is_empty());
         // Review F2: the engine's own remove queues no trash (`engine_remove` registers it).
         // Task 2191 (review-114 F-P1-4): an entry with no agreed content never trusts in sync.
-        match remove_pruned_entry(sync_root, &original, RemovedKind::File, agreed, local(&original, agreed.is_some()), &copy_dir) {
+        match remove_pruned_entry(
+            sync_root,
+            &original,
+            RemovedKind::File,
+            agreed,
+            local(&original, agreed.is_some()),
+            &copy_dir,
+        ) {
             PrunedEntry::Removed | PrunedEntry::Gone => {
                 remove_office_owner_files(sync_root, &original);
                 resolve(&copy);
             }
-            PrunedEntry::KeptCopy { copy: new_copy, copied_hash, removal } => {
+            PrunedEntry::KeptCopy {
+                copy: new_copy,
+                copied_hash,
+                removal,
+            } => {
                 if removal.is_removed() {
                     remove_office_owner_files(sync_root, &original);
                 }
@@ -1135,7 +1150,12 @@ pub(super) fn remove_empty_kept_folders(db: &StateDb, sync_root: &Path) {
 
 #[cfg(target_os = "windows")]
 pub(super) fn remove_pruned_placeholders(db: &StateDb, sync_root: &Path, rows: &[crate::state_db::PrunedRow]) {
-    remove_pruned_entries(db, sync_root, rows, &crate::windows_cf::placeholders::placeholder_local_entry_trusting);
+    remove_pruned_entries(
+        db,
+        sync_root,
+        rows,
+        &crate::windows_cf::placeholders::placeholder_local_entry_trusting,
+    );
 }
 
 /// No-op stand-in on non-Windows builds so the call sites stay platform-agnostic.

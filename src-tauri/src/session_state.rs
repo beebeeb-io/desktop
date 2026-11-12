@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// Task 2447: whose vault key is stored next to whose session token (declared here: lib.rs is not rustfmt-clean on v2).
+#[path = "session_owner.rs"]
+mod session_owner;
+pub(crate) use session_owner::*;
+
 /// Work a command starts as a task of its own, which may outlive the command (the popover's storage fetch), is bound to
 /// the session when it is created: on Windows a lock cancels it and waits for what it holds to drop, and once the
 /// session is closed it never starts (#139 review P1; tests/windows_session_wiring.rs guards the callers).
@@ -577,7 +582,8 @@ pub(super) fn persist_account_email_to_keychain(
 }
 
 /// Store the vault key the recovery phrase proved. Only inside a checked turn (`_write`). The key is borrowed: no copy of
-/// it is made here but the one the store wipes (`SecretBytes`).
+/// it is made here but the one the store wipes (`SecretBytes`). The store removes the previous key's owner tag first
+/// (task 2447); the caller binds the new owner (`bind_vault_key_to_session_owner_in_keychain`).
 pub(super) fn persist_vault_key_to_keychain(
     _write: &SessionWrite,
     account_id: &str,
@@ -645,6 +651,15 @@ pub(super) fn load_session_from_vault<S: keychain::AuthSecretStore>(
     else {
         return Ok(None);
     };
+    // Task 2447: whose key is this? Asked before the key is read, here, where every loader of token + key passes
+    // (startup restore, unlock, re-sign-in; both layouts). Another account's key, or a tagged key next to a session
+    // nobody named, is refused; an untagged key (from before the tags) loads as it always did.
+    if !crate::auth_v2::key_owner::stored_key_ownership(&vault)
+        .map_err(|e| keychain_error("read the vault key's owner", e))?
+        .may_load()
+    {
+        return Err(crate::auth_v2::key_owner::KEY_NOT_THIS_ACCOUNTS.to_string());
+    }
     vault
         .unlock()
         .map_err(|e| keychain_error("unlock vault key from Keychain", e))?;

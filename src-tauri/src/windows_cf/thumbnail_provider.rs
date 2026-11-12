@@ -59,19 +59,18 @@ use std::time::Duration;
 
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, DeleteObject, HBITMAP,
-    HDC,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, DeleteObject, HBITMAP, HDC,
 };
 use windows::Win32::System::Com::{
     CLSCTX_LOCAL_SERVER, CoRegisterClassObject, IClassFactory, IClassFactory_Impl, REGCLS_MULTIPLEUSE,
 };
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
-    RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegSetValueExW, RegDeleteTreeW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
+    RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteTreeW, RegSetValueExW,
 };
 use windows::Win32::UI::Shell::{
-    IInitializeWithItem, IInitializeWithItem_Impl, IShellItem, IThumbnailProvider,
-    IThumbnailProvider_Impl, SIGDN_FILESYSPATH, WTS_ALPHATYPE, WTSAT_ARGB,
+    IInitializeWithItem, IInitializeWithItem_Impl, IShellItem, IThumbnailProvider, IThumbnailProvider_Impl,
+    SIGDN_FILESYSPATH, WTS_ALPHATYPE, WTSAT_ARGB,
 };
 use windows::core::{GUID, HSTRING, Interface, PCWSTR, Result as WinResult, implement};
 
@@ -92,7 +91,7 @@ const THUMBNAIL_FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 //
 // `{b2e0a7d4-9c61-4f3a-8d2e-7a1c5e9b0f44}`
 pub const THUMBNAIL_PROVIDER_CLSID: GUID =
-    GUID::from_u128(0xb2e0_a7d4_9c61_4f3a_8d2e_7a1c5e9b0f44);
+    GUID::from_u128(crate::app_identity::AppIdentity::CURRENT.thumbnail_provider_class_id());
 
 // ── The provider instance: holds the resolved file_id between Initialize and
 //    GetThumbnail ─────────────────────────────────────────────────────────────
@@ -158,12 +157,7 @@ impl IInitializeWithItem_Impl for ThumbnailProvider_Impl {
 }
 
 impl IThumbnailProvider_Impl for ThumbnailProvider_Impl {
-    fn GetThumbnail(
-        &self,
-        cx: u32,
-        phbmp: *mut HBITMAP,
-        pdwalpha: *mut WTS_ALPHATYPE,
-    ) -> WinResult<()> {
+    fn GetThumbnail(&self, cx: u32, phbmp: *mut HBITMAP, pdwalpha: *mut WTS_ALPHATYPE) -> WinResult<()> {
         use windows::Win32::Foundation::{E_FAIL, E_POINTER};
 
         if phbmp.is_null() || pdwalpha.is_null() {
@@ -467,8 +461,7 @@ pub fn register_thumbnail_provider(shell_id: &str) -> anyhow::Result<()> {
     // 2. Write the CLSID's LocalServer32 (the exe path) so the shell can launch us
     //    on demand if we are not already running.
     let clsid_str = format!("{{{:?}}}", THUMBNAIL_PROVIDER_CLSID);
-    let exe = std::env::current_exe()
-        .map_err(|e| anyhow::anyhow!("resolve current exe for LocalServer32: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| anyhow::anyhow!("resolve current exe for LocalServer32: {e}"))?;
     let exe_str = exe.to_string_lossy().into_owned();
     let local_server_key = format!("Software\\Classes\\CLSID\\{clsid_str}\\LocalServer32");
     write_string_value(HKEY_CURRENT_USER, &local_server_key, None, &exe_str)
@@ -493,9 +486,7 @@ pub fn register_thumbnail_provider(shell_id: &str) -> anyhow::Result<()> {
     //    CLSID — the shell reads the *server* registration from HKCU just fine (it
     //    does the same for OneDrive's handler). Only the *binding* value must be in
     //    HKLM where the cloud-files thumbnail lookup reads it.
-    let sync_root_key = format!(
-        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{shell_id}"
-    );
+    let sync_root_key = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{shell_id}");
     write_string_value(
         HKEY_LOCAL_MACHINE,
         &sync_root_key,
@@ -523,18 +514,14 @@ pub fn unregister_thumbnail_provider(shell_id: &str) {
 
     // Remove the ThumbnailProvider binding under the sync-root key (leave the rest
     // of the key, which `unregister_shell_sync_root` owns).
-    let sync_root_key = format!(
-        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{shell_id}"
-    );
+    let sync_root_key = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{shell_id}");
     let sync_root_key_h = HSTRING::from(sync_root_key);
     let value_h = HSTRING::from("ThumbnailProvider");
     // SAFETY: removes a single named value under HKLM (the hive register writes it
     // to — see register_thumbnail_provider step 3); both wide strings outlive the
     // call. The HKLM sync-root key ACL grants the interactive user delete rights on
     // its own values, so this needs no elevation.
-    let rc = unsafe {
-        RegDeleteKeyValueW(HKEY_LOCAL_MACHINE, &sync_root_key_h, PCWSTR(value_h.as_ptr()))
-    };
+    let rc = unsafe { RegDeleteKeyValueW(HKEY_LOCAL_MACHINE, &sync_root_key_h, PCWSTR(value_h.as_ptr())) };
     if rc != ERROR_SUCCESS {
         tracing::debug!(rc = ?rc, "remove ThumbnailProvider binding (may already be gone)");
     }
@@ -550,12 +537,7 @@ pub fn unregister_thumbnail_provider(shell_id: &str) {
 
 /// Create-or-open `subkey` under `root` and set a REG_SZ value (`value_name`
 /// `None` ⇒ the key's default value) to `data`. Closes the key before returning.
-fn write_string_value(
-    root: HKEY,
-    subkey: &str,
-    value_name: Option<&str>,
-    data: &str,
-) -> anyhow::Result<()> {
+fn write_string_value(root: HKEY, subkey: &str, value_name: Option<&str>, data: &str) -> anyhow::Result<()> {
     let subkey_h = HSTRING::from(subkey);
     let mut hkey = HKEY::default();
     // SAFETY: out-params are stack locals; `subkey_h` outlives the call.
@@ -579,8 +561,7 @@ fn write_string_value(
     // REG_SZ data is a NUL-terminated wide string; pass the bytes including the
     // trailing NUL.
     let wide: Vec<u16> = data.encode_utf16().chain(std::iter::once(0)).collect();
-    let bytes: &[u8] =
-        unsafe { std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
+    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
     let name_h = value_name.map(HSTRING::from);
     let name_pcwstr = name_h.as_ref().map_or(PCWSTR::null(), |h| PCWSTR(h.as_ptr()));
     // SAFETY: `hkey` is open; `bytes` outlives the call; `name_pcwstr` valid for

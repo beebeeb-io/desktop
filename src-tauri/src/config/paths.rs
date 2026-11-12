@@ -14,7 +14,7 @@ pub(super) const CONFIG_FILENAME: &str = "desktop.toml";
 /// Subdirectory inside the user's config dir (e.g.
 /// `~/.config/beebeeb/` on Linux, `~/Library/Application Support/beebeeb/`
 /// on macOS).
-pub(super) const APP_CONFIG_DIR: &str = "beebeeb";
+pub(super) const APP_CONFIG_DIR: &str = crate::app_identity::AppIdentity::CURRENT.data_dir_name();
 
 #[cfg(not(target_os = "macos"))]
 pub(super) fn user_visible_home_dir() -> Option<PathBuf> {
@@ -41,9 +41,16 @@ pub fn default_sync_root_suggestion() -> PathBuf {
 /// expose an actual local folder as the user-facing sync surface.
 #[cfg(not(target_os = "macos"))]
 pub fn default_sync_root_suggestion() -> PathBuf {
-    user_visible_home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Beebeeb")
+    sync_root_suggestion_in(
+        &user_visible_home_dir().unwrap_or_else(|| PathBuf::from(".")),
+        crate::app_identity::AppIdentity::CURRENT,
+    )
+}
+
+/// `<home>/Beebeeb` for the real app; a test build suggests its own folder, never the real app's.
+#[cfg(any(test, not(target_os = "macos")))]
+pub(super) fn sync_root_suggestion_in(home: &Path, identity: crate::app_identity::AppIdentity) -> PathBuf {
+    home.join(identity.sync_folder_name())
 }
 
 /// Ensure `path` exists as a directory, creating it (and any missing

@@ -8,6 +8,7 @@ import { unknownPhraseWords } from '../api'
 import * as api from '../create/api'
 import { recoverErrorText } from '../create/model'
 import { PasswordFields } from '../create/views'
+import { usePrivateScreen } from '../privateScreen'
 import { seed } from '../../seed'
 
 // ── Views ────────────────────────────────────────────────────────────────────
@@ -53,6 +54,8 @@ export function RecoverPhraseView({ email, words, focus, unknown, state, onEmail
   state: 'idle' | 'verifying' | 'wrong' | 'too-many' | 'offline'
   onEmail: (v: string) => void; onWords: (w: string[]) => void; onVerify: () => void; onLost: () => void
 }) {
+  // This screen replaces the options, so nothing above it is still holding capture exclusion.
+  usePrivateScreen()
   const filled = phraseFilled(words) && email.includes('@')
   return (
     <AuthWindow>

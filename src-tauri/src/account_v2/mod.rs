@@ -361,7 +361,16 @@ async fn install_rotated_session(
             .lock()
             .ok()
             .and_then(|g| g.as_ref().and_then(|s| s.email.clone()));
+        // Task 2447: the same session with the token the server issued in its place, so its owner tag is carried
+        // over (read only when the stored token is the one being replaced; the store removes the tag on the write).
+        let owner = acct.session.lock().ok().and_then(|g| {
+            g.as_ref()
+                .and_then(|s| crate::session_owner_for_rotation(acct.id.as_str(), &s.token))
+        });
         persist_session_token_to_keychain(&write, acct.id.as_str(), new_token, email.as_deref())?;
+        if let Some(owner) = owner {
+            crate::bind_session_owner_in_keychain(&write, acct.id.as_str(), &owner);
+        }
         let mut guard = acct.session.lock().map_err(|_| "internal".to_string())?;
         if let Some(session) = guard.as_mut() {
             let mut old = std::mem::replace(&mut session.token, new_token.to_string());

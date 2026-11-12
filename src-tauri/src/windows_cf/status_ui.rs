@@ -63,20 +63,19 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
+use windows::Foundation::Uri;
+use windows::Storage::Provider::{
+    IStorageProviderStatusUISource, IStorageProviderStatusUISource_Impl, IStorageProviderStatusUISourceFactory,
+    IStorageProviderStatusUISourceFactory_Impl, IStorageProviderUICommand, IStorageProviderUICommand_Impl,
+    StorageProviderQuotaUI, StorageProviderState, StorageProviderStatusUI, StorageProviderUICommandState,
+};
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Com::{
     CLSCTX_LOCAL_SERVER, CoRegisterClassObject, IClassFactory, IClassFactory_Impl, REGCLS_MULTIPLEUSE,
 };
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
-    RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW,
-};
-use windows::Foundation::Uri;
-use windows::Storage::Provider::{
-    IStorageProviderStatusUISource, IStorageProviderStatusUISourceFactory,
-    IStorageProviderStatusUISource_Impl, IStorageProviderStatusUISourceFactory_Impl,
-    IStorageProviderUICommand, IStorageProviderUICommand_Impl, StorageProviderQuotaUI,
-    StorageProviderState, StorageProviderStatusUI, StorageProviderUICommandState,
+    HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW,
+    RegSetValueExW,
 };
 use windows::core::{GUID, HSTRING, Interface, PCWSTR, Result as WinResult, implement, w};
 
@@ -89,7 +88,8 @@ use windows::core::{GUID, HSTRING, Interface, PCWSTR, Result as WinResult, imple
 // id of the *factory*, not the provider.
 //
 // `{c0b33b33-5217-4c0a-9e3f-2f3b8d5e9fa1}`
-pub const STATUS_UI_FACTORY_CLSID: GUID = GUID::from_u128(0xc0b3_3b33_5217_4c0a_9e3f_2f3b8d5e9fa1);
+pub const STATUS_UI_FACTORY_CLSID: GUID =
+    GUID::from_u128(crate::app_identity::AppIdentity::CURRENT.status_ui_class_id());
 
 // ── Cached, lock-light status snapshot read by the COM `GetStatusUI` ────────
 //
@@ -291,11 +291,7 @@ impl IStorageProviderStatusUISource_Impl for StatusUiSource_Impl {
         ui.SetProviderState(state)?;
 
         let (state_label, banner_label, banner_desc) = match state {
-            StorageProviderState::Syncing => (
-                "Syncing",
-                "Your files are syncing",
-                "Beebeeb is syncing your files.",
-            ),
+            StorageProviderState::Syncing => ("Syncing", "Your files are syncing", "Beebeeb is syncing your files."),
             StorageProviderState::Paused => (
                 "Paused",
                 "Sync is paused",
@@ -356,10 +352,7 @@ impl IStorageProviderStatusUISource_Impl for StatusUiSource_Impl {
     fn StatusUIChanged(
         &self,
         _handler: Option<
-            &windows::Foundation::TypedEventHandler<
-                IStorageProviderStatusUISource,
-                windows::core::IInspectable,
-            >,
+            &windows::Foundation::TypedEventHandler<IStorageProviderStatusUISource, windows::core::IInspectable>,
         >,
     ) -> WinResult<windows::Foundation::EventRegistrationToken> {
         // We do not push change notifications; Windows re-polls `GetStatusUI`
@@ -369,10 +362,7 @@ impl IStorageProviderStatusUISource_Impl for StatusUiSource_Impl {
         Ok(windows::Foundation::EventRegistrationToken::default())
     }
 
-    fn RemoveStatusUIChanged(
-        &self,
-        _token: &windows::Foundation::EventRegistrationToken,
-    ) -> WinResult<()> {
+    fn RemoveStatusUIChanged(&self, _token: &windows::Foundation::EventRegistrationToken) -> WinResult<()> {
         Ok(())
     }
 }
@@ -382,10 +372,7 @@ impl IStorageProviderStatusUISource_Impl for StatusUiSource_Impl {
 struct StatusUiSourceFactory;
 
 impl IStorageProviderStatusUISourceFactory_Impl for StatusUiSourceFactory_Impl {
-    fn GetStatusUISource(
-        &self,
-        _syncrootid: &HSTRING,
-    ) -> WinResult<IStorageProviderStatusUISource> {
+    fn GetStatusUISource(&self, _syncrootid: &HSTRING) -> WinResult<IStorageProviderStatusUISource> {
         // Single-account today: every sync-root id maps to the one source that
         // reads the shared snapshot. (A future multi-account build would branch
         // on `_syncrootid` here, mirroring CloudMirror's note.)
@@ -482,8 +469,7 @@ pub fn register_status_ui_source(shell_id: &str) -> anyhow::Result<()> {
     // 2. Write HKCU\Software\Classes\CLSID\{clsid}\LocalServer32 = "<exe>" so the
     //    shell can launch us on demand if we are not already running.
     let clsid_str = format!("{{{:?}}}", STATUS_UI_FACTORY_CLSID);
-    let exe = std::env::current_exe()
-        .map_err(|e| anyhow::anyhow!("resolve current exe for LocalServer32: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| anyhow::anyhow!("resolve current exe for LocalServer32: {e}"))?;
     let exe_str = exe.to_string_lossy().into_owned();
     let local_server_key = format!("Software\\Classes\\CLSID\\{clsid_str}\\LocalServer32");
     write_string_value(HKEY_CURRENT_USER, &local_server_key, None, &exe_str)
@@ -493,9 +479,7 @@ pub fn register_status_ui_source(shell_id: &str) -> anyhow::Result<()> {
     //    StorageProviderStatusUISourceFactory = {clsid} under the SyncRootManager
     //    key the WinRT Register created. This is what tells the shell to ask our
     //    factory for THIS sync root's flyout.
-    let sync_root_key = format!(
-        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{shell_id}"
-    );
+    let sync_root_key = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{shell_id}");
     write_string_value(
         HKEY_CURRENT_USER,
         &sync_root_key,
@@ -524,10 +508,12 @@ pub fn unregister_status_ui_source(shell_id: &str) {
 
     // Remove the binding under the sync-root key (leave the rest of the key,
     // which `unregister_shell_sync_root` owns).
-    let sync_root_key = format!(
-        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{shell_id}"
-    );
-    if let Err(e) = delete_value(HKEY_CURRENT_USER, &sync_root_key, w!("StorageProviderStatusUISourceFactory")) {
+    let sync_root_key = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager\\{shell_id}");
+    if let Err(e) = delete_value(
+        HKEY_CURRENT_USER,
+        &sync_root_key,
+        w!("StorageProviderStatusUISourceFactory"),
+    ) {
         tracing::debug!(error = %e, "remove StatusUISourceFactory binding (may already be gone)");
     }
 
@@ -542,12 +528,7 @@ pub fn unregister_status_ui_source(shell_id: &str) {
 
 /// Create-or-open `subkey` under `root` and set a REG_SZ value (`value_name`
 /// `None` ⇒ the key's default value) to `data`. Closes the key before returning.
-fn write_string_value(
-    root: HKEY,
-    subkey: &str,
-    value_name: Option<&str>,
-    data: &str,
-) -> anyhow::Result<()> {
+fn write_string_value(root: HKEY, subkey: &str, value_name: Option<&str>, data: &str) -> anyhow::Result<()> {
     let subkey_h = HSTRING::from(subkey);
     let mut hkey = HKEY::default();
     // SAFETY: out-params are stack locals; `subkey_h` outlives the call.
@@ -571,8 +552,7 @@ fn write_string_value(
     // REG_SZ data is a NUL-terminated wide string; pass the bytes including the
     // trailing NUL.
     let wide: Vec<u16> = data.encode_utf16().chain(std::iter::once(0)).collect();
-    let bytes: &[u8] =
-        unsafe { std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
+    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
     let name_h = value_name.map(HSTRING::from);
     let name_pcwstr = name_h.as_ref().map_or(PCWSTR::null(), |h| PCWSTR(h.as_ptr()));
     // SAFETY: `hkey` is open; `bytes` outlives the call; `name_pcwstr` is valid

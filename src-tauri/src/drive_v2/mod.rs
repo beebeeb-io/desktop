@@ -15,6 +15,7 @@ mod absent_row; // slice 58
 mod commands;
 mod dto;
 mod events;
+pub(crate) mod first_sync;
 mod fsops;
 pub(crate) mod model;
 mod photo_meta; // v2 b02b
