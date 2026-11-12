@@ -2,7 +2,7 @@
 
 Kept by the integrator (I2). First written on 2026-11-12 03:30 CET as `docs/wave-1-open.md`, with the last of the
 four wave-1 pull requests (#291 sign-in, #292 settings, #293 shared and trash, #294 files). Renamed and brought up
-to date on 2026-11-12 08:15 CET with the last pull request of the second batch (#304 settings rest; before it #298,
+to date on 2026-11-12 08:10 CET with the last pull request of the second batch (#304 settings rest; before it #298,
 #299, #300, #305, #306, #297, #303, #302).
 
 **Sections 1, 2 and 2a to 2c are measured on the tree of #304** (branch `native/f-settings-rest` at 6682d809, which
