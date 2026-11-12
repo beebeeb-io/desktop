@@ -13,8 +13,9 @@ use super::steps::CONFIRM_KEY;
 use super::tests::{click, focused, has, info, press, readable, runtime, runtime_of, space, tab_to, ui};
 use super::{EMAIL_KEY, Intent, PASSWORD_KEY, Screen, TITLE_KEY, Ui};
 use crate::State;
+use crate::ui::kit;
 
-const HEADINGS: [&str; 8] = [
+const HEADINGS: [&str; 14] = [
     "Create your Beebeeb account",
     "Check your email",
     "Check your email",
@@ -23,6 +24,12 @@ const HEADINGS: [&str; 8] = [
     "Set a password",
     "Set a password",
     "Set a password",
+    "Your recovery phrase",
+    "Confirm your phrase",
+    "Confirm your phrase",
+    "Name this PC",
+    "Creating your account",
+    "Your account is ready",
 ];
 
 type Calls = std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>;
@@ -146,7 +153,7 @@ fn every_frame_has_a_scene_its_heading_and_fits_the_window_in_both_themes() {
             );
         }
     }
-    assert_eq!(super::create::FRAMES.len(), 8);
+    assert_eq!(super::create::FRAMES.len(), 14);
 }
 
 #[test]
@@ -518,6 +525,20 @@ fn the_shown_phrase_is_in_no_tree_and_no_label() {
     let mut lent = false;
     ui(&mut rt).with_phrase(&mut |_| lent = true);
     assert!(!lent, "the phrase is lent on its own screen only");
+}
+
+#[test]
+fn the_gate_is_told_the_phrase_only_while_it_records() {
+    let rt = runtime("DW-A39");
+    assert!(kit::take().is_empty(), "no note outside a gate export");
+    drop(rt);
+    kit::record();
+    let _rt = runtime("DW-A39");
+    let notes = kit::take();
+    assert_eq!(
+        notes.get("word-11-text").and_then(|n| n.text.as_deref()),
+        Some(board::WORDS[11])
+    );
 }
 
 #[test]

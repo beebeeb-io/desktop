@@ -34,12 +34,12 @@ Gate state per frame is in the PR body; `0` = all six counts at 0 failing in bot
 | DW-A36 | Step 4: the password, strong | built; tree gate 0, pixels owed (PR body) |
 | DW-A37 | Step 4: the password is two characters short | built; tree gate 0, pixels owed (PR body) |
 | DW-A38 | Step 4: the password is known from a breach | built; tree gate 0, pixels owed (PR body) |
-| DW-A39 | Step 5: the recovery phrase, shown once | drawn and linked; its scene and gate are the next PR |
-| DW-A40 | Step 5: three words typed back, with suggestions | drawn and linked; its scene and gate are the next PR |
-| DW-A41 | Step 5: the words do not match | drawn and linked; its scene and gate are the next PR |
-| DW-A42 | Step 6: this device's name | drawn and linked; its scene and gate are the next PR |
-| DW-A43 | Creating your account | drawn and linked; its scene and gate are the next PR |
-| DW-A44 | Your account is ready | drawn and linked; its scene and gate are the next PR |
+| DW-A39 | Step 5: the recovery phrase, shown once | built; tree gate 0, pixels owed (PR body) |
+| DW-A40 | Step 5: three words typed back, with suggestions | built; tree gate 0, pixels owed (PR body) |
+| DW-A41 | Step 5: the words do not match | built; tree gate 0, pixels owed (PR body) |
+| DW-A42 | Step 6: this device's name | built; tree gate 0, pixels owed (PR body) |
+| DW-A43 | Creating your account | built; tree gate 0, pixels owed (PR body) |
+| DW-A44 | Your account is ready | built; tree gate 0, pixels owed (PR body) |
 | DW-A63 | The account was deleted: the sign-in form says so under the password | built; light 0, dark 1 pixel line open (`card-0-avatar`, as DW-A19) |
 | DW-A23 | The 12 words on a new device (five typed, the sixth box holding the keyboard) | built, 0 |
 | DW-A24 | The words did not open this account (the third box marked) | built, 0 |
@@ -59,10 +59,9 @@ Gate state per frame is in the PR body; `0` = all six counts at 0 failing in bot
 | DW-0014 | No plan yet (the main window, gate `NoPlan`) | built (`before_files.rs`); geometry, text, icons and fills 0 failing in both themes; pixels NOT measured: the same `--snap` regression |
 | DW-0380, DW-0301 to DW-0305 | The first-time guide | not built; no goldens yet |
 
-Built: 40 of 59 here (DW-0009 and DW-0014 in `before_files.rs`, DW-A31 to A38 in `create.rs`; the count is the two
-lanes' lists joined at their merge), and the 11 frames of the first run below: 51 of 70.
-Not built in this group's files: 19 (DW-A39 to A44 are drawn and linked, their scenes and gate follow; DW-A11 to A17,
-DW-0380, DW-0301 to 0305); other lanes have them.
+Built: 46 of 59 here (DW-0009 and DW-0014 in `before_files.rs`, DW-A31 to A44 in `create.rs` and its files; the count
+is the lanes' lists joined at their merge), and the 11 frames of the first run below: 57 of 70.
+Not built in this group's files: 13 (DW-A11 to A17, DW-0380, DW-0301 to 0305); other lanes have them.
 Since then DW-A12 to DW-A17 are built in the account view (the row above; DW-A11 is Windows' toast).
 
 ## First run on Windows (lane f-signin-rest): `setup/`
