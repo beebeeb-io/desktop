@@ -129,6 +129,21 @@ impl FilesSource for SampleFiles {
     fn upload(&mut self, folder: Option<&str>, files: &[std::path::PathBuf]) -> Result<(), ActionError> {
         self.files.upload(folder, files)
     }
+    fn new_folder(&mut self, parent: Option<&str>, name: &str) -> Result<(), ActionError> {
+        self.files.new_folder(parent, name)
+    }
+    fn rename(&mut self, item: &DriveItem, name: &str) -> Result<(), ActionError> {
+        self.files.rename(item, name)
+    }
+    fn move_to(&mut self, items: &[DriveItem], folder: Option<&str>) -> Result<(), ActionError> {
+        self.files.move_to(items, folder)
+    }
+    fn free_up_space(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
+        self.files.free_up_space(items)
+    }
+    fn open_in_file_explorer(&mut self, folder: Option<&str>) -> Result<(), ActionError> {
+        self.files.open_in_file_explorer(folder)
+    }
     fn changes(&mut self) -> Vec<Change> {
         self.files.changes()
     }
