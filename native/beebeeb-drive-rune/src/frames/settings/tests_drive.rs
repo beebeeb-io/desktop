@@ -333,10 +333,8 @@ fn sync_rows_open_the_limit_and_free_up_space_and_the_metered_link_asks_for_band
     assert_eq!(ui(&rt).dialog, Some(Dialog::FreeUp));
     key(&mut rt, Key::Escape);
     press(&mut rt, "btn-3");
-    assert!(
-        ui(&rt).intents.contains(&Intent::Show("DW-0784")),
-        "the folder tree is not built: asked of the shell"
-    );
+    assert_eq!(ui(&rt).dialog, Some(Dialog::Keep), "the folder tree (DW-0784)");
+    key(&mut rt, Key::Escape);
     press(&mut rt, "btn-0");
     assert!(ui(&rt).intents.contains(&Intent::Open("file-explorer")));
 }

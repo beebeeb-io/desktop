@@ -31,6 +31,8 @@ pub mod sync;
 mod tests;
 #[cfg(test)]
 mod tests_drive;
+#[cfg(test)]
+mod tests_more;
 
 use crate::State;
 use crate::shell::app::{Event, Screen, SettingsPane};
