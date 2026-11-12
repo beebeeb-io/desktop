@@ -17,9 +17,13 @@ pub mod account;
 pub mod account_binding;
 pub mod account_dto;
 pub mod api_client;
+pub mod app;
 #[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
 pub mod auth_attempts;
+pub mod auth_transport;
 pub mod backup;
+pub mod backup_actions;
+pub mod backup_delete;
 pub mod backup_protect;
 #[cfg(any(target_os = "windows", any(test, feature = "test-support")))]
 pub mod callback_gate;
@@ -75,6 +79,7 @@ pub mod session;
 pub mod session_commands;
 pub mod shared_folder_index;
 pub mod sign_out;
+pub mod signin;
 #[cfg(any(test, feature = "test-support"))]
 pub mod source_pin;
 pub mod staged_payload;
@@ -82,6 +87,8 @@ pub mod state_db;
 pub mod state_paths;
 pub mod surfaces;
 pub mod sync_activity;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_api;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_sandbox;
 pub mod transfer_progress;

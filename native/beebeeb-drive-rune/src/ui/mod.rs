@@ -3,12 +3,15 @@
 pub mod account_form;
 pub mod account_set;
 pub mod au;
+pub mod button;
 pub mod caption;
 pub mod detail_pane;
+pub mod empty;
 pub mod file_list;
 pub mod gate;
 pub mod keys;
 pub mod kit;
+pub mod menu;
 pub mod settings_card;
 pub mod settings_controls;
 pub mod settings_dialog;
@@ -17,6 +20,8 @@ pub mod settings_notice;
 pub mod settings_shell;
 pub mod sidebar;
 pub mod status_bar;
+pub mod status_line;
+pub mod toast;
 pub mod toolbar;
 pub mod window;
 

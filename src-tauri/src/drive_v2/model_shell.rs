@@ -37,6 +37,7 @@ pub(crate) fn trash_entries(db: Option<&StateDb>, raw: Vec<crate::account_dto::D
             };
             let item = DriveItem {
                 has_thumbnail: !t.is_folder && has_thumbnail(&t.name),
+                backup: Default::default(),
                 mime: (!t.is_folder)
                     .then(|| mime_for_name(&t.name).map(str::to_string))
                     .flatten(),

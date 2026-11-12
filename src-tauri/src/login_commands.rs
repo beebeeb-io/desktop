@@ -994,8 +994,6 @@ pub(super) fn install_recovered_session(
     Ok(())
 }
 
-pub(super) const INCORRECT_RECOVERY_PHRASE: &str = "Incorrect recovery phrase. Check your words and try again.";
-
 /// What the recovery-phrase unlock says when a Sign-out, or another account's sign-in, happened while it waited for the
 /// server (Task 12 fix round 2, item 5).
 pub(super) const UNLOCK_ACCOUNT_CHANGED: &str =
@@ -1075,21 +1073,4 @@ where
     let master_key = verify_vault_key_from_phrase(client, base_url, session_token, recovery_phrase).await?;
     persist(*master_key)?;
     Ok(*master_key)
-}
-
-/// Verification has no persistent side effects; callers fence installation.
-pub(super) async fn verify_vault_key_from_phrase(
-    client: &reqwest::Client,
-    base_url: &str,
-    session_token: &str,
-    recovery_phrase: &str,
-) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
-    let recovery_phrase = normalize_recovery_phrase_input(recovery_phrase)?;
-    let master_key_struct = beebeeb_core::recovery::recover_from_phrase(&recovery_phrase)
-        .map_err(|_| "Recovery phrase does not match a valid 12-word Beebeeb phrase.".to_string())?;
-    if !recovered_key_matches_account(client, base_url, session_token, &master_key_struct).await? {
-        // `master_key_struct` zeroizes on drop.
-        return Err(INCORRECT_RECOVERY_PHRASE.to_string());
-    }
-    Ok(zeroize::Zeroizing::new(master_key_struct.to_bytes()))
 }

@@ -64,7 +64,7 @@ if (tb) {
   const nav = qa(':scope > .inline-flex > .mk-tbtn', tb);
   ['back', 'forward'].forEach((k, i) => { api.box(k, nav[i]); api.icon(`${k}-icon`, nav[i] && q('svg', nav[i])); });
   api.text('folder-title', q('.mk-title b', tb));
-  api.text('item-count', q('.mk-title span', tb));
+  api.text('item-count', q('.mk-title > span:last-child', tb));
   const group = q('.mk-tgroup', tb);
   if (group) {
     api.box('view-toggle', group);
@@ -174,11 +174,17 @@ if (foot) {
 // Everything below is keyed by class, per occurrence in document order, and only outside the
 // details pane (`.mk-det`): what the pane draws is keyed above, by the Files lane, under its own
 // names. `scripts/check-keymap-scope.sh` proves a Files capture exports the same keys as before.
-// Not in a settings frame (`.mk-set`), an account window (`.au-mac`) or the account sections in settings
-// (`.au-set`, keymap-account.js): those lanes key their
-// own lists, buttons, pills and menus (below, and in keymap-signin.js) under their own names. Without
-// this scope a recapture of DW-0701 exported 4 keys more and DW-A02 8 more (integration I2).
-if (!q('.mk-set') && !q('.au-mac') && !q('.au-set')) {
+// Which group's key names a frame gets (integration I2). Four lanes key the same board classes
+// (`.kit-btn`, `.kit-list`, `.wn-menu`, `.kit-empty`) under their own names, and each group's native
+// tree knows only its own: settings frames (`.mk-set`) are keyed below, account windows (`.au-mac`) in
+// keymap-signin.js, the Shared and Trash sections here, every other section of the main window in
+// keymap-files.js. The section is the sidebar item the board draws selected (`.mk-side-item.on`).
+// The account sections inside settings (`.au-set`) are keyed in keymap-account.js.
+// Measured without it: a recapture of DW-0701 exported 4 keys more, DW-A02 8 more, DW-0402 33 more
+// (`mi-*`), DW-0505 17 more (`menu-item-*`), and DW-0508 did not capture at all.
+const sectionOn = (() => { const on = q('.mk-side-item.on .mk-side-label'); return on ? on.textContent.trim() : ''; })();
+const groupOf = q('.mk-set') ? 'settings' : q('.au-mac') ? 'account' : q('.au-set') ? 'account-settings' : (sectionOn === 'Shared' || sectionOn === 'Trash') ? 'shared-trash' : 'files';
+if (groupOf === 'shared-trash') {
 const inDet = (el) => !!el.closest('.mk-det');
 // A button (`.kit-btn`): `btn-<its words>`, `-label`, `-icon`.
 const btnSeen = {};
@@ -279,7 +285,7 @@ if (mkBanner) {
   api.box('banner-bar', q('.mk-bar', mkBanner));
   api.box('banner-bar-fill', q('.mk-bar i', mkBanner));
 }
-} // not a settings frame, not an account window
+} // groupOf === 'shared-trash'
 
 // ---- Settings, inside the window (`.mk-set`: lane f-settings, src/frames/settings) ----
 // One scheme for every pane: lists and their rows by order (`list-<L>`, `item-<L>-<I>`), every

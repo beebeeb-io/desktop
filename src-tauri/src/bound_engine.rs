@@ -2,19 +2,6 @@
 
 use super::*;
 
-/// R10: who a session is, from the session's OWN email and, when the cached profile is that account's, its
-/// user id. The profile counts only when its email is exactly the session's, so a profile left over from
-/// another account is never taken for this one; a session with no email is unidentified (and an owner that
-/// cannot be compared with it refuses the start).
-pub(super) fn identity_of_session(
-    email: Option<&str>,
-    profile: Option<&account_dto::AccountProfile>,
-) -> account_binding::Identity {
-    let email = email.map(str::trim).filter(|email| !email.is_empty());
-    let profile = profile.filter(|profile| email.is_some_and(|email| profile.email.trim() == email));
-    account_binding::Identity::new(profile.map(|profile| profile.user_id.as_str()), email)
-}
-
 /// R10: bind `data` to `session` before an engine starts. Another account's data is reset first
 /// (refused on Windows). An owner that cannot be compared stops the start and deletes nothing. Any
 /// error means: do not start the engine.
