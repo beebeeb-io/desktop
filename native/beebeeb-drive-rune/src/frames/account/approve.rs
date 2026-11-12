@@ -89,6 +89,9 @@ pub const EXPIRED_REQUEST_CODE: &str = "T2XP-8RED";
 pub const HANDLED_REQUEST_CODE: &str = "H4ND-L3D7";
 pub const CANCELLED_REQUEST_CODE: &str = "C4NC-3LED";
 pub const UNUSUAL_REQUEST_CODE: &str = "N3WP-L4C3";
+/// The server cannot be reached for the lookup; and for the approval, after Windows Hello.
+pub const OFFLINE_REQUEST_CODE: &str = "0FFL-1NE0";
+pub const DROPPED_REQUEST_CODE: &str = "DR0P-5NET";
 
 /// The board's waiting request (DW-A13): Drive on Anna's iPhone, asked from Germany.
 pub fn board_request(id: &str, country: &str, unusual_place: bool) -> SignInRequest {
@@ -112,6 +115,8 @@ pub fn board_lookup(code: &str) -> Lookup {
         HANDLED_REQUEST_CODE => ("req-handled", "Germany", false),
         CANCELLED_REQUEST_CODE => ("req-cancelled", "Germany", false),
         UNUSUAL_REQUEST_CODE => ("req-unusual", "Brazil", true),
+        DROPPED_REQUEST_CODE => ("req-dropped", "Germany", false),
+        OFFLINE_REQUEST_CODE => return Lookup::Offline,
         _ => return Lookup::NotFound,
     };
     Lookup::Found(board_request(id, country, unusual))
@@ -553,6 +558,11 @@ fn shell(role: &'static str, name: &str, children: Vec<El>, foot: Vec<(El, bool)
         .center()
         .fill(scrim_color(t))
         .child(dlg)
+        // Modal: Tab stays inside, the pane behind takes no press, and Esc is this flow's Esc
+        // (Deny on the review, the one button on a result).
+        .modal(false, |s: &mut State| {
+            on_escape(s);
+        })
 }
 
 fn foot_button(index: usize, label: &str, look: Look, dimmed: bool, t: &Theme) -> (El, bool) {

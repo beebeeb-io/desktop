@@ -2,8 +2,8 @@
 //! secret, and what reaches the source. Input is scripted through Rune's `Runtime`.
 
 use super::approve::{
-    self, BOARD_REQUEST_CODE, CANCELLED_REQUEST_CODE, CODE_KEY, EXPIRED_REQUEST_CODE, HANDLED_REQUEST_CODE, Lookup,
-    UNUSUAL_REQUEST_CODE,
+    self, BOARD_REQUEST_CODE, CANCELLED_REQUEST_CODE, CODE_KEY, DROPPED_REQUEST_CODE, EXPIRED_REQUEST_CODE,
+    HANDLED_REQUEST_CODE, Lookup, OFFLINE_REQUEST_CODE, UNUSUAL_REQUEST_CODE,
 };
 use super::source::{AccountSource, BoardAccount};
 use super::{Dialog, Pane};
@@ -13,8 +13,12 @@ use crate::{State, init, view};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 fn window(state: State) -> Runtime<State> {
+    window_in(state, false)
+}
+
+fn window_in(state: State, dark: bool) -> Runtime<State> {
     let env = Env {
-        system_dark: false,
+        system_dark: dark,
         scale: 2.0,
     };
     let mut rt = Runtime::new(state, view, (958.0, 638.0), env);
@@ -105,13 +109,17 @@ fn the_six_frames_are_scenes_with_their_headings_in_both_themes() {
         ("DW-A16", "dlg-title", "Denied"),
         ("DW-A17", "dlg-title", "This request expired"),
     ] {
-        let rt = runtime(frame);
-        assert_eq!(says(&rt, key), heading, "{frame}");
-        assert_eq!(
-            rt.state.shell.app.screen(),
-            Screen::Settings(SettingsPane::Security),
-            "{frame} is in the Security section"
-        );
+        for dark in [false, true] {
+            let mut state = init();
+            assert!(super::scene(frame, &mut state), "{frame} is a built frame");
+            let rt = window_in(state, dark);
+            assert_eq!(says(&rt, key), heading, "{frame}");
+            assert_eq!(
+                rt.state.shell.app.screen(),
+                Screen::Settings(SettingsPane::Security),
+                "{frame} is in the Security section"
+            );
+        }
     }
 }
 
@@ -328,13 +336,14 @@ fn deny_and_escape_end_the_request_and_the_results_lead_on() {
     assert_eq!(dialog(&rt), Some(Dialog::ApproveDenied), "Esc is Deny");
     assert!(wire(&rt).iter().any(|l| l == "POST /cli-auth/deny req-iphone"));
 
-    // With the keyboard on a button the shell takes Esc first and closes settings (as on every
-    // account page: see `tests.rs`). The flow ends with nothing approved and nothing sent; the
-    // request then runs out by itself.
+    // And wherever the keyboard is: the dialog is modal, so Esc is its own.
     let mut rt = review_of(BOARD_REQUEST_CODE);
     key(&mut rt, Key::Escape);
-    assert_eq!(dialog(&rt), None);
-    assert!(rt.state.account.approve.code.text.is_empty(), "the code is wiped");
+    assert_eq!(
+        dialog(&rt),
+        Some(Dialog::ApproveDenied),
+        "Esc is Deny with the keyboard on a button"
+    );
     assert!(
         !wire(&rt).iter().any(|l| l.contains("/approve")),
         "nothing was approved"
@@ -351,6 +360,71 @@ fn deny_and_escape_end_the_request_and_the_results_lead_on() {
     click(&mut rt, "btn-0");
     assert_eq!((rt.state.account.pane, dialog(&rt)), (Pane::Account, None));
     assert!(rt.state.account.approve.request.is_none(), "and the flow is over");
+}
+
+/// The review and its results are modal: Tab stays in the dialog and the pane behind takes no press.
+#[test]
+fn the_review_is_modal_tab_stays_inside_and_the_pane_behind_takes_no_press() {
+    let mut rt = review_of(BOARD_REQUEST_CODE);
+    let mut stops = Vec::new();
+    for _ in 0..12 {
+        key(&mut rt, Key::Tab);
+        if let Some(now) = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.focused && !e.exiting)
+            .and_then(|e| e.key)
+        {
+            if !stops.contains(&now) {
+                stops.push(now);
+            }
+        }
+    }
+    stops.sort();
+    assert_eq!(
+        stops,
+        vec![CODE_KEY.to_string(), "btn-0".into(), "btn-1".into()],
+        "the code, Approve, Deny"
+    );
+    // The row behind the dialog, where it shows beside it.
+    let row = info(&rt, "item-0-0").rect;
+    let dlg = info(&rt, "dlg").rect;
+    let (x, y) = (dlg[0] + dlg[2] + 20.0, row[1] + row[3] / 2.0);
+    assert!(x < row[0] + row[2], "the row reaches past the dialog");
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(&mut rt);
+    assert_eq!(
+        (rt.state.account.pane, dialog(&rt)),
+        (Pane::ApproveReview, Some(Dialog::ApproveReview))
+    );
+}
+
+#[test]
+fn offline_says_so_and_approves_nothing() {
+    // The lookup cannot reach the server.
+    let mut rt = on_code_page();
+    type_(&mut rt, &OFFLINE_REQUEST_CODE.replace('-', ""));
+    click(&mut rt, "btn-0");
+    assert_eq!(rt.state.account.pane, Pane::ApproveCode);
+    assert_eq!(
+        says(&rt, "field-0-msg"),
+        "Beebeeb can't be reached. Nothing was approved."
+    );
+    // The connection drops after Windows Hello: back on the review, with the same words.
+    let mut rt = review_of(DROPPED_REQUEST_CODE);
+    click(&mut rt, "btn-0");
+    rt.frame(1.0);
+    settle(&mut rt);
+    assert_eq!(dialog(&rt), Some(Dialog::ApproveReview));
+    assert_eq!(
+        says(&rt, "banner-0-text"),
+        "Beebeeb can't be reached. Nothing was approved."
+    );
+    assert_eq!(
+        rt.state.account.approve.code.text, DROPPED_REQUEST_CODE,
+        "the code is kept to try again"
+    );
 }
 
 #[test]

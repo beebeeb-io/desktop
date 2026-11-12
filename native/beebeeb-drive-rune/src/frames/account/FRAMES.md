@@ -81,7 +81,8 @@ DW-A14 are in the capture-exclusion decision (`Pane::shows_secret`, `Dialog::sho
 States the board gives a rule and no drawing, built from the rule's words (tests only): a code nothing waits for
 ("We could not find a waiting request with that code. Check it on the other device."); the red "Unusual place" note
 above the facts; "Already handled" in place of DW-A17's heading; Windows Hello cancelled (back to the review, nothing
-sent); offline.
+sent); offline, at the lookup and after Windows Hello ("Beebeeb can't be reached. Nothing was approved.").
 
-Esc: on the review it is Deny while the code field holds the keyboard. With the keyboard on a button the shell takes
-Esc first and closes settings, as on every account page: the flow ends with nothing approved and nothing sent.
+Esc: the dialogs are modal. On the review Esc is Deny (the board); on a result it is the result's one button.
+
+Not tested, no fixture path: a request that runs out while it is only being looked at (`sign_in_request_gone`).

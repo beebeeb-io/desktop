@@ -1131,6 +1131,7 @@ impl AccountSource for BoardAccount {
             "req-expired" => Approval::Expired,
             "req-handled" => Approval::AlreadyHandled,
             "req-cancelled" => Approval::Cancelled,
+            "req-dropped" => Approval::Offline,
             _ => Approval::Approved,
         });
     }
