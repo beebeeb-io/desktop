@@ -1071,3 +1071,27 @@ fn an_empty_state_db_is_an_empty_snapshot_not_an_error() {
     assert_eq!(view.backlog, TransferBacklog::default());
     assert!(view.conflicts.is_empty() && view.in_flight.is_empty() && view.failed.is_empty() && view.recent.is_empty());
 }
+
+// ── Moved from macos_popover::tests ────────────────────────────────────
+
+/// Review P3-5 (#160): during sign-out's send phase, one failed read of the waiting changes failed the whole
+/// snapshot, so the popover and the Beebeeb window showed a read failure for that tick. It leaves the count out
+/// instead (`progressLine` shows none for 0); a read that works counts files and other changes.
+#[test]
+fn a_failed_count_while_sign_out_sends_leaves_the_count_out() {
+    use crate::sign_out::waiting::{OtherChange, WaitingChanges, WaitingFile};
+    assert_eq!(super::changes_left(Err("database is locked".into())), 0);
+    let file = |id: &str| WaitingFile {
+        file_id: id.into(),
+        path: None,
+        writes: Vec::new(),
+    };
+    let waiting = WaitingChanges {
+        files: vec![file("a"), file("b")],
+        others: vec![OtherChange {
+            op_id: "op".into(),
+            live: false,
+        }],
+    };
+    assert_eq!(super::changes_left(Ok(waiting)), 3);
+}
