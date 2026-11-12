@@ -292,8 +292,12 @@ fn open_my_beebeeb_at_the_end_of_the_first_run_starts_the_guide() {
             super::Intent::OpenDrive
         ]
     );
-    // The tip shows once the window is the main window on Files (the session's gate opens it:
-    // the fixture's is open), never over the first-run window.
+    // The tip shows once the window is the main window on Files (the session's gate opens it),
+    // never over the first-run window. Since scene gates are set on the fixture engine and
+    // survive the poll's refresh, the test opens the gate as the engine would.
+    rt.update(|s, _| {
+        host::dispatch(s, Event::Gate(GateState::Ready));
+    });
     rt.frame(0.0);
     assert_eq!(section(&rt), Some(Section::Files));
     assert_eq!(text(&rt, "coach-title").as_deref(), Some(TRAY_TITLE));

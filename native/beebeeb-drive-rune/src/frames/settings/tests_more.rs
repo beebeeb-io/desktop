@@ -147,10 +147,11 @@ fn app_activity_is_four_measures_each_with_its_value_in_words() {
 
 #[test]
 fn every_help_row_of_diagnostics_goes_where_it_points() {
-    // Bandwidth is another lane's page: asked of the shell by its frame id.
+    // Bandwidth is built in this group since the two lanes merged: the row shows it, and asks nothing of the shell.
     let mut rt = runtime("DW-0790");
     click(&mut rt, "item-2-0");
-    assert_eq!(ui(&rt).intents, vec![Intent::Show("DW-0785")]);
+    assert_eq!(ui(&rt).intents, Vec::new());
+    assert_eq!(ui(&rt).pane, Pane::Bandwidth);
     let mut rt = runtime("DW-0790");
     assert_eq!(info(&rt, "item-2-1").role, "link");
     assert!(named(&rt, "item-2-1").contains("opens in the browser"));
