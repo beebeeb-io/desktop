@@ -213,6 +213,18 @@ pub enum Standing {
     NoPlan,
 }
 
+impl Standing {
+    /// Whether the account's email, its storage block and the items' counts are drawn in this
+    /// standing. The ONE switch for them: today every standing draws them, as the board does
+    /// (DW-0009 shows all three while locked). A ruling that a locked window shows less is this
+    /// line, the board's frame first.
+    pub fn shows_account_details(self) -> bool {
+        match self {
+            Standing::Open | Standing::Locked | Standing::NoPlan => true,
+        }
+    }
+}
+
 pub fn sidebar(s: &State, t: &Theme) -> El {
     sidebar_in(s, t, Standing::Open)
 }
@@ -221,12 +233,17 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
 pub fn sidebar_in(s: &State, t: &Theme, standing: Standing) -> El {
     let open = standing == Standing::Open;
     let no_plan = standing == Standing::NoPlan;
+    let details = standing.shows_account_details();
     let storage = s.storage;
     let active = s.sidebar_section;
 
     let mut sections = col().key("sidebar-sections").gap(1.0);
     for &section in SidebarSection::all() {
-        let count = if no_plan { None } else { badge_for(s, section) };
+        let count = if no_plan || !details {
+            None
+        } else {
+            badge_for(s, section)
+        };
         let item = side_item(
             section.label(),
             section.icon(),
@@ -243,7 +260,7 @@ pub fn sidebar_in(s: &State, t: &Theme, standing: Standing) -> El {
     }
 
     let kept = s.this_pc.kept_count() as u32;
-    let offline_count = (kept > 0 && !no_plan).then_some(Count::Plain(kept));
+    let offline_count = (kept > 0 && !no_plan && details).then_some(Count::Plain(kept));
     let this_pc = col()
         .key("this-pc")
         .gap(1.0)
@@ -403,15 +420,17 @@ pub fn sidebar_in(s: &State, t: &Theme, standing: Standing) -> El {
                 .grow(1.0)
                 .min_w(0.0)
                 .child(kit::label("account-name", "Anna Visser", type_::BODY_SEMI, t.text).truncate())
-                .child(
+                .child(if details {
                     kit::label(
                         "account-email",
                         "anna@northwind.studio",
                         type_::BODY_SM,
                         t.text_tertiary,
                     )
-                    .truncate(),
-                ),
+                    .truncate()
+                } else {
+                    el().key("account-email-off")
+                }),
         )
         .child(
             el().key("settings-btn")
@@ -435,9 +454,9 @@ pub fn sidebar_in(s: &State, t: &Theme, standing: Standing) -> El {
         .pt(10.0)
         .px(6.0)
         .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .child(meter)
-        .child(account);
+        .border_layout();
+    let foot = if details { foot.child(meter) } else { foot };
+    let foot = foot.child(account);
 
     let side = col()
         .key("sidebar")
