@@ -135,19 +135,41 @@ fn log(message: impl AsRef<str>) {
 
 // ---------------------------------------------------------------------------
 // OS integration: open a file or folder, reveal in Explorer/Finder
+//
+// SECURITY: file names are ATTACKER-controlled (a shared folder's owner names
+// the files). Nothing here routes a path through cmd.exe, PowerShell, bash or
+// any shell. On Windows, `ShellExecuteW` takes the path as one wide string,
+// never a command line. On macOS/Linux, `Command::new("open"/"xdg-open").arg`
+// passes it as a single argv entry, never through a shell.
 // ---------------------------------------------------------------------------
 
-/// Open a file or folder with the OS's default handler.
+/// Open a file or folder with the OS's default handler. Never passes the path
+/// through a shell interpreter.
 fn open_path(path: &std::path::Path) -> Result<(), files_source::ActionError> {
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", &path.to_string_lossy()])
-            .spawn()
-            .map_err(|_| files_source::ActionError::Failed)?;
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let verb: Vec<u16> = "open\0".encode_utf16().collect();
+        // SAFETY: ShellExecuteW is called with valid null-terminated wide strings. The function
+        // returns a value > 32 on success. No shell interpretation of the path occurs.
+        let result = unsafe {
+            windows_sys::Win32::UI::Shell::ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                wide.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+            )
+        };
+        if (result as usize) <= 32 {
+            return Err(files_source::ActionError::Failed);
+        }
     }
     #[cfg(target_os = "macos")]
     {
+        // `open` on macOS: the path is passed as a single argv element, not through a shell.
         std::process::Command::new("open")
             .arg(path)
             .spawn()
@@ -155,6 +177,7 @@ fn open_path(path: &std::path::Path) -> Result<(), files_source::ActionError> {
     }
     #[cfg(target_os = "linux")]
     {
+        // `xdg-open` on Linux: the path is passed as a single argv element, not through a shell.
         std::process::Command::new("xdg-open")
             .arg(path)
             .spawn()
@@ -163,25 +186,29 @@ fn open_path(path: &std::path::Path) -> Result<(), files_source::ActionError> {
     Ok(())
 }
 
-/// Reveal a file or folder in File Explorer / Finder / Files.
+/// Reveal a file or folder in File Explorer / Finder / Files. Never passes the
+/// path through a shell interpreter.
 fn reveal_in_file_explorer(path: &std::path::Path) -> Result<(), files_source::ActionError> {
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
-            .arg(format!("/select,{}", path.to_string_lossy()))
+        // `explorer.exe /select,<path>` as ONE argv element: the process is started directly
+        // via `CreateProcessW`, no shell in between. The path is never parsed by cmd.exe.
+        std::process::Command::new("explorer.exe")
+            .arg(format!("/select,{}", path.display()))
             .spawn()
             .map_err(|_| files_source::ActionError::Failed)?;
     }
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
-            .args(["-R", &path.to_string_lossy()])
+            .arg("-R")
+            .arg(path)
             .spawn()
             .map_err(|_| files_source::ActionError::Failed)?;
     }
     #[cfg(target_os = "linux")]
     {
-        // xdg-open on the parent folder.
+        // Open the parent folder.
         if let Some(parent) = path.parent() {
             std::process::Command::new("xdg-open")
                 .arg(parent)

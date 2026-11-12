@@ -335,3 +335,54 @@ fn the_local_state_is_where_the_08x_app_kept_it() {
         assert_eq!(crate::shell::local_data_of(&dirs, os), dirs.data(), "{os}");
     }
 }
+
+/// P1: file names are attacker-controlled. The open/reveal code must never route a path through
+/// cmd.exe, PowerShell, bash or any shell. On Windows: `ShellExecuteW` (the wide-string API). On
+/// macOS/Linux: the path is a single argv element to `open`/`xdg-open`, never a shell command.
+#[test]
+fn the_open_and_reveal_code_never_routes_through_a_shell() {
+    let source = include_str!("../engine_host.rs");
+    // Scan from the open_path function to the LiveEngine section.
+    let open_section = &source[source.find("fn open_path").unwrap()..];
+    let open_section = &open_section[..open_section.find("// LiveEngine").unwrap_or(open_section.len())];
+    assert!(!open_section.contains("\"cmd\""), "open_path must not use cmd.exe");
+    assert!(
+        !open_section.contains("\"sh\"") && !open_section.contains("\"bash\""),
+        "open_path must not use a Unix shell"
+    );
+    assert!(
+        !open_section.contains("\"powershell\""),
+        "open_path must not use PowerShell"
+    );
+    // Verify open_path on Windows uses ShellExecuteW.
+    #[cfg(target_os = "windows")]
+    assert!(
+        open_section.contains("ShellExecuteW"),
+        "on Windows, open_path must use ShellExecuteW"
+    );
+}
+
+/// The dangerous-executable list matches the old Tauri shell's list EXACTLY. An `.lnk` or `.scr`
+/// added to the shared folder by another user must be revealed, never opened.
+#[test]
+fn executable_denylist_matches_the_old_shell() {
+    use beebeeb_engine::file_ops::is_dangerous_executable;
+    use std::path::Path;
+    // The old shell's list from src-tauri/src/file_open_commands.rs.
+    for ext in [
+        "exe", "bat", "cmd", "com", "scr", "lnk", "url", "hta", "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi",
+        "reg", "cpl", "pif", "msc", "jar",
+    ] {
+        assert!(
+            is_dangerous_executable(Path::new(&format!("a&calc.{ext}"))),
+            "{ext} must be blocked even with shell metacharacters in the name"
+        );
+    }
+    // A file with shell metacharacters in its name: always blocked for its extension.
+    assert!(is_dangerous_executable(Path::new("a&calc.exe")));
+    assert!(is_dangerous_executable(Path::new("x^y%PATH%.lnk")));
+    assert!(is_dangerous_executable(Path::new("file\".scr")));
+    // Safe types.
+    assert!(!is_dangerous_executable(Path::new("photo.jpg")));
+    assert!(!is_dangerous_executable(Path::new("doc.pdf")));
+}

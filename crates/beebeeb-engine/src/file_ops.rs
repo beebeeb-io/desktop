@@ -374,18 +374,19 @@ pub fn item_path(sync_root: &Path, entry: &FileEntry) -> Result<PathBuf, DriveEr
     full_path(sync_root, &entry.path)
 }
 
-/// Whether the file has an extension usually marked as executable, which the old shell refused to
-/// launch via "Open". Matching the rule: `.exe`, `.bat`, `.cmd`, `.com`, `.msi`, `.ps1`, `.vbs`,
-/// `.js`, `.wsh`, `.wsf`.
+/// Whether the file has an extension the old shell refused to launch via "Open"
+/// (`src-tauri/src/file_open_commands.rs::is_dangerous_executable`). Such files are revealed in
+/// the folder instead of opened; the list matches the old shell exactly.
 pub fn is_dangerous_executable(path: &Path) -> bool {
-    let ext = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    matches!(
-        ext.as_str(),
-        "exe" | "bat" | "cmd" | "com" | "msi" | "ps1" | "vbs" | "js" | "wsh" | "wsf"
-    )
+    const DANGEROUS_EXTS: &[&str] = &[
+        "exe", "bat", "cmd", "com", "scr", "lnk", "url", "hta", "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi",
+        "reg", "cpl", "pif", "msc", "jar",
+    ];
+    let Some(ext) = path.extension() else {
+        return false;
+    };
+    let ext_lower = ext.to_string_lossy().to_lowercase();
+    DANGEROUS_EXTS.contains(&ext_lower.as_str())
 }
 
 #[cfg(test)]
@@ -723,5 +724,63 @@ mod tests {
         );
         // The folder's parent path doesn't exist on disk, so create_dir fails.
         assert!(result.is_err(), "error is surfaced, never swallowed");
+    }
+
+    // ── injection safety ────────────────────────────────────────────
+
+    #[test]
+    fn dangerous_executable_matches_the_old_shells_list() {
+        // Every extension from src-tauri/src/file_open_commands.rs::is_dangerous_executable.
+        for ext in [
+            "exe", "bat", "cmd", "com", "scr", "lnk", "url", "hta", "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh",
+            "msi", "reg", "cpl", "pif", "msc", "jar",
+        ] {
+            assert!(
+                is_dangerous_executable(Path::new(&format!("name.{ext}"))),
+                "{ext} must be blocked"
+            );
+        }
+        // Safe extensions.
+        for ext in ["pdf", "jpg", "docx", "txt", "mp4", "zip"] {
+            assert!(
+                !is_dangerous_executable(Path::new(&format!("name.{ext}"))),
+                "{ext} must not be blocked"
+            );
+        }
+        // No extension.
+        assert!(!is_dangerous_executable(Path::new("README")));
+    }
+
+    #[test]
+    fn names_with_shell_metacharacters_are_valid_file_names() {
+        // These names contain characters dangerous in cmd.exe but are valid filesystem names.
+        // The validate_name function accepts them (they're valid on all three OSes).
+        assert!(validate_name("a&calc.exe").is_ok());
+        assert!(validate_name("x^y%PATH%.txt").is_ok());
+        assert!(validate_name("file with spaces.txt").is_ok());
+        assert!(validate_name("file\"quotes.txt").is_err(), "quotes are a bad char");
+    }
+
+    #[test]
+    fn path_traversal_names_are_rejected() {
+        // These names attempt path traversal and must be rejected.
+        assert!(validate_name("..").is_err());
+        assert!(validate_name("../../../etc/passwd").is_err(), "contains /");
+        assert!(validate_name("..\\..\\evil.txt").is_err(), "contains \\");
+    }
+
+    #[test]
+    fn reserved_windows_names_are_rejected() {
+        assert!(validate_name("CON").is_err());
+        assert!(validate_name("CON.txt").is_err());
+        assert!(validate_name("NUL").is_err());
+        assert!(validate_name("LPT1").is_err());
+    }
+
+    #[test]
+    fn full_path_refuses_escape_from_sync_root() {
+        let root = sync_root();
+        assert!(full_path(root.path(), "..").is_err(), ".. is refused");
+        assert!(full_path(root.path(), "../../etc/passwd").is_err());
     }
 }
