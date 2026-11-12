@@ -675,6 +675,103 @@ impl<C: CredentialStores> Engine<C> {
     pub fn accounts(&self) -> &Accounts {
         &self.accounts
     }
+
+    // ── File operations (the native shell's engine_host wires these) ──────────────────────────
+
+    /// The sync root path: where the settings name, else the identity's own suggestion.
+    pub fn sync_root(&self) -> Result<PathBuf, String> {
+        let config = crate::config::DesktopConfig::load_for(self.identity)?;
+        Ok(config
+            .sync_root
+            .unwrap_or_else(|| crate::config::default_sync_root_suggestion(self.identity)))
+    }
+
+    /// The session token (cloned for a single API call). `Err` when locked or signed out.
+    fn session_token(&self) -> Result<String, String> {
+        self.acct
+            .session
+            .lock()
+            .map_err(|_| "session mutex poisoned".to_string())?
+            .as_ref()
+            .map(|s| s.token.clone())
+            .ok_or_else(|| "not signed in".to_string())
+    }
+
+    /// Storage use and quota from the server (`/api/v1/billing/usage`).
+    pub fn storage_info(&self) -> Result<(i64, i64), String> {
+        let token = self.session_token()?;
+        self.runtime.block_on(async {
+            #[derive(serde::Deserialize)]
+            struct Usage {
+                used_bytes: i64,
+                quota_bytes: i64,
+            }
+            let resp = self
+                .client
+                .get(format!("{}/api/v1/billing/usage", self.config.api_base))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .map_err(|_| "offline".to_string())?
+                .error_for_status()
+                .map_err(|_| "could not read storage".to_string())?;
+            let usage: Usage = resp.json().await.map_err(|_| "invalid storage response".to_string())?;
+            Ok((usage.used_bytes.max(0), usage.quota_bytes.max(0)))
+        })
+    }
+
+    /// Move items to Trash (server-side, recoverable). Each file id must be known to the server.
+    pub fn trash_items(&self, file_ids: &[&str]) -> Result<(), String> {
+        if file_ids.is_empty() {
+            return Ok(());
+        }
+        let token = self.session_token()?;
+        self.runtime.block_on(async {
+            for id in file_ids {
+                let resp = self
+                    .client
+                    .delete(format!("{}/api/v1/files/{id}", self.config.api_base))
+                    .bearer_auth(&token)
+                    .send()
+                    .await
+                    .map_err(|_| "offline".to_string())?;
+                if !resp.status().is_success() {
+                    return Err(format!("could not trash item"));
+                }
+            }
+            // Ask the sync engine to re-snapshot so the listing updates.
+            if let Ok(db) = self.state_db() {
+                let _ = db.request_resnapshot();
+            }
+            Ok(())
+        })
+    }
+
+    /// Restore items from Trash (server-side).
+    pub fn restore_items(&self, file_ids: &[&str]) -> Result<(), String> {
+        if file_ids.is_empty() {
+            return Ok(());
+        }
+        let token = self.session_token()?;
+        self.runtime.block_on(async {
+            for id in file_ids {
+                let resp = self
+                    .client
+                    .post(format!("{}/api/v1/files/{id}/restore", self.config.api_base))
+                    .bearer_auth(&token)
+                    .send()
+                    .await
+                    .map_err(|_| "offline".to_string())?;
+                if !resp.status().is_success() {
+                    return Err(format!("could not restore item"));
+                }
+            }
+            if let Ok(db) = self.state_db() {
+                let _ = db.request_resnapshot();
+            }
+            Ok(())
+        })
+    }
 }
 
 /// The server's record of the account behind `token` (`GET /api/v1/auth/me`). The body is never passed on.
