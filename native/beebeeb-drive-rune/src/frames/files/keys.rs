@@ -114,7 +114,8 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let m = ev.mods;
     // The window's shortcuts, wherever focus is.
     if ev.is_command('f') {
-        tx.focus(SEARCH_KEY, true);
+        // Search opens with its recent searches (DW-0801), wherever focus was.
+        crate::frames::search::open(s, tx);
         return true;
     }
     if let Key::Command(c) = ev.key {

@@ -128,7 +128,7 @@ impl Default for Ui {
         Ui {
             shared: shared::SharedUi::default(),
             trash: trash::TrashUi::default(),
-            find: search::SearchUi::default(),
+            find: search::SearchUi::first(crate::shell::instance::DEV_BUILD),
             intents: Vec::new(),
             search: rune::TextEdit::new(""),
             pc: Box::new(BoardPc),

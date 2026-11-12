@@ -83,9 +83,10 @@ pub enum Answer {
 
 /// Search's data. Every call answers at once from what is on this PC.
 pub trait SearchSource {
-    /// `false`: nothing answers yet (`Unwired`): the view says search is not available yet.
+    /// `false`: nothing answers yet: the view says search is not available yet. The default, so a
+    /// source says so itself once it can answer (task 2468: a source is unwired until it says it is).
     fn wired(&self) -> bool {
-        true
+        false
     }
     /// The searches run on this PC, newest first ("Recent searches stay on this PC only").
     fn recent(&self) -> Vec<String>;
@@ -208,6 +209,9 @@ impl Default for BoardSearch {
 }
 
 impl SearchSource for BoardSearch {
+    fn wired(&self) -> bool {
+        true
+    }
     fn recent(&self) -> Vec<String> {
         self.recent.clone()
     }
@@ -253,10 +257,18 @@ impl SearchSource for BoardSearch {
 /// no facts. The view says search is not available yet; it never shows the board's sample.
 pub struct Unwired;
 
-impl SearchSource for Unwired {
-    fn wired(&self) -> bool {
-        false
+/// What a window without an engine searches: the board's sample in a development build, nothing
+/// in a build that ships (the rule of `settings::source::first`). A window on the engine is
+/// `Unwired` whatever the build (`shell::state::init_on_engine`).
+pub fn first(dev_build: bool) -> Box<dyn SearchSource> {
+    if dev_build {
+        Box::new(BoardSearch::new())
+    } else {
+        Box::new(Unwired)
     }
+}
+
+impl SearchSource for Unwired {
     fn recent(&self) -> Vec<String> {
         Vec::new()
     }
