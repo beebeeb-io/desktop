@@ -72,7 +72,8 @@ pub struct EngineSettingsSource<C: CredentialStores> {
 enum Region {
     /// Not answered yet.
     Unknown,
-    Failed(AccountCallError),
+    /// The last read failed (its kind is logged when it arrives).
+    Failed,
     Known(UserRegionResponse),
 }
 
@@ -283,7 +284,7 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
                         Ok(region) => Region::Known(region),
                         Err(kind) => {
                             log(format!("settings: the storage location did not load ({kind})"));
-                            Region::Failed(kind)
+                            Region::Failed
                         }
                     };
                 }
