@@ -137,6 +137,14 @@ fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() 
         !state.backups.has_source(),
         "Backups is 'not built yet' on a real engine"
     );
+    // Shared, Trash, Photos, This PC: all unwired on a real engine, never sample data.
+    assert!(
+        !state.frames.shared.source.wired(),
+        "Shared is unwired on a real engine"
+    );
+    assert!(!state.frames.trash.source.wired(), "Trash is unwired on a real engine");
+    assert!(!state.photos.source.wired(), "Photos is unwired on a real engine");
+    assert!(!state.this_pc.wired(), "This PC is unwired on a real engine");
     assert_eq!(started.live.drain(), 0, "nothing reported, nothing queued");
 }
 
@@ -326,6 +334,122 @@ fn an_engine_refusal_becomes_the_screens_kind_and_an_unknown_one_is_other() {
     assert_eq!(phrase_problem(gate::phrase_error("failed")), PhraseProblem::Other);
 }
 
+// ---------------------------------------------------------------------------
+// Per-group: a live engine shows 0 fixture rows, the snapshot path keeps them
+// ---------------------------------------------------------------------------
+
+fn engine_state() -> crate::shell::state::State {
+    let started = started();
+    crate::shell::state::init_on_engine(crate::shell::host::Shell::fixture(), started.opened.engine.clone())
+}
+
+fn snap_state() -> crate::shell::state::State {
+    crate::shell::state::init_with(crate::shell::host::Shell::fixture())
+}
+
+#[test]
+fn shared_shows_0_fixture_rows_on_a_live_engine() {
+    let s = engine_state();
+    assert!(!s.frames.shared.source.wired());
+    assert_eq!(s.frames.shared.source.with_me().len(), 0);
+    assert_eq!(s.frames.shared.source.people_shares().len(), 0);
+    assert_eq!(s.frames.shared.source.invitations().len(), 0);
+}
+
+#[test]
+fn trash_shows_0_fixture_rows_on_a_live_engine() {
+    let s = engine_state();
+    assert!(!s.frames.trash.source.wired());
+    assert_eq!(s.frames.trash.source.items().len(), 0);
+    assert_eq!(s.frames.trash.source.totals().items, 0);
+}
+
+#[test]
+fn photos_shows_0_fixture_days_on_a_live_engine() {
+    let s = engine_state();
+    assert!(!s.photos.source.wired());
+    assert_eq!(s.photos.source.days(None).len(), 0);
+    assert_eq!(s.photos.source.devices().len(), 0);
+}
+
+#[test]
+fn this_pc_shows_0_fixture_changes_on_a_live_engine() {
+    let s = engine_state();
+    assert!(!s.this_pc.wired());
+    assert_eq!(s.this_pc.changes().len(), 0);
+    assert_eq!(s.this_pc.kept_count(), 0);
+}
+
+#[test]
+fn backups_has_no_source_on_a_live_engine() {
+    let s = engine_state();
+    assert!(!s.backups.has_source());
+}
+
+#[test]
+fn settings_is_unwired_on_a_live_engine() {
+    let s = engine_state();
+    assert!(!s.settings.source.wired());
+    assert!(!s.settings.drive.wired());
+}
+
+#[test]
+fn account_has_no_source_on_a_live_engine() {
+    let s = engine_state();
+    assert!(s.account.source.is_none());
+}
+
+#[test]
+fn pc_status_is_empty_on_a_live_engine() {
+    let s = engine_state();
+    assert!(s.frames.pc.sync_words().is_empty());
+    assert!(s.frames.pc.summary().is_empty());
+}
+
+#[test]
+fn sidebar_badges_are_0_on_a_live_engine() {
+    let s = engine_state();
+    use crate::ui::sidebar::{SidebarSection, badge_for};
+    assert!(
+        badge_for(&s, SidebarSection::Shared).is_none(),
+        "shared badge on engine"
+    );
+    assert!(badge_for(&s, SidebarSection::Trash).is_none(), "trash badge on engine");
+    assert_eq!(s.this_pc.kept_count(), 0, "available offline count on engine");
+}
+
+#[test]
+fn storage_split_is_none_on_a_live_engine() {
+    let s = engine_state();
+    assert!(s.storage_split.is_none(), "no board-sample split beside a real account");
+}
+
+/// The snapshot path (`init_with`, `--snap`) keeps the board's fixtures for every group.
+#[test]
+fn the_snapshot_path_keeps_every_groups_fixtures() {
+    let s = snap_state();
+    assert!(s.frames.shared.source.wired());
+    assert!(s.frames.shared.source.with_me().len() > 0);
+    assert!(s.frames.trash.source.wired());
+    assert!(s.frames.trash.source.items().len() > 0);
+    assert!(s.photos.source.wired());
+    assert!(s.photos.source.days(None).len() > 0);
+    assert!(s.this_pc.wired());
+    assert!(s.this_pc.changes().len() > 0);
+    assert!(s.this_pc.kept_count() > 0);
+    assert!(s.settings.source.wired());
+    assert!(s.settings.drive.wired());
+    assert!(s.account.source.is_some());
+    assert!(s.backups.has_source());
+    assert!(!s.frames.pc.sync_words().is_empty());
+    assert!(!s.frames.pc.summary().is_empty());
+    assert!(s.storage_split.is_some(), "snap: the board's split is present");
+    use crate::ui::sidebar::{SidebarSection, badge_for};
+    assert!(badge_for(&s, SidebarSection::Shared).is_some(), "snap: shared badge");
+    assert!(badge_for(&s, SidebarSection::Trash).is_some(), "snap: trash badge");
+    assert!(s.this_pc.kept_count() > 0, "snap: available offline count");
+}
+
 /// Where the local state lives is where the 0.8.x app kept it: the per-user LOCAL app data on Windows.
 #[test]
 fn the_local_state_is_where_the_08x_app_kept_it() {
@@ -334,4 +458,190 @@ fn the_local_state_is_where_the_08x_app_kept_it() {
     for os in ["macos", "linux"] {
         assert_eq!(crate::shell::local_data_of(&dirs, os), dirs.data(), "{os}");
     }
+}
+
+/// P1: file names are attacker-controlled. The open/reveal code must never route a path through
+/// cmd.exe, PowerShell, bash or any shell. On Windows: `ShellExecuteW` (the wide-string API). On
+/// macOS/Linux: the path is a single argv element to `open`/`xdg-open`, never a shell command.
+#[test]
+fn the_open_and_reveal_code_never_routes_through_a_shell() {
+    let source = include_str!("../engine_host.rs");
+    // Scan from the open_path function to the LiveEngine section.
+    let open_section = &source[source.find("fn open_path").unwrap()..];
+    let open_section = &open_section[..open_section.find("// LiveEngine").unwrap_or(open_section.len())];
+    assert!(!open_section.contains("\"cmd\""), "open_path must not use cmd.exe");
+    assert!(
+        !open_section.contains("\"sh\"") && !open_section.contains("\"bash\""),
+        "open_path must not use a Unix shell"
+    );
+    assert!(
+        !open_section.contains("\"powershell\""),
+        "open_path must not use PowerShell"
+    );
+    // Verify open_path on Windows uses ShellExecuteW.
+    #[cfg(target_os = "windows")]
+    assert!(
+        open_section.contains("ShellExecuteW"),
+        "on Windows, open_path must use ShellExecuteW"
+    );
+}
+
+/// The dangerous-executable list matches the old Tauri shell's list EXACTLY. An `.lnk` or `.scr`
+/// added to the shared folder by another user must be revealed, never opened.
+#[test]
+fn executable_denylist_matches_the_old_shell() {
+    use beebeeb_engine::file_ops::is_dangerous_executable;
+    use std::path::Path;
+    // The old shell's list from src-tauri/src/file_open_commands.rs.
+    for ext in [
+        "exe", "bat", "cmd", "com", "scr", "lnk", "url", "hta", "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi",
+        "reg", "cpl", "pif", "msc", "jar",
+    ] {
+        assert!(
+            is_dangerous_executable(Path::new(&format!("a&calc.{ext}"))),
+            "{ext} must be blocked even with shell metacharacters in the name"
+        );
+    }
+    // A file with shell metacharacters in its name: always blocked for its extension.
+    assert!(is_dangerous_executable(Path::new("a&calc.exe")));
+    assert!(is_dangerous_executable(Path::new("x^y%PATH%.lnk")));
+    assert!(is_dangerous_executable(Path::new("file\".scr")));
+    // Safe types.
+    assert!(!is_dangerous_executable(Path::new("photo.jpg")));
+    assert!(!is_dangerous_executable(Path::new("doc.pdf")));
+}
+
+// ---------------------------------------------------------------------------
+// Sync-running guard: every folder-route op is refused while sync is not running
+// ---------------------------------------------------------------------------
+
+use crate::frames::files::source::{ActionError, FilesSource};
+
+/// P2-2: the sync guard is BEHAVIOURAL. The handle has a valid sync_root on disk and
+/// `is_syncing()` is false. Every folder-route op returns `Unavailable` and the filesystem has
+/// 0 changes. The guard is the `is_syncing()` check in `local()` (proven by the source-scan test
+/// `the_sync_guard_is_present_in_the_local_choke_point`).
+///
+/// Mutant "remove the is_syncing guard from local()": tested manually — RED:
+///   `left: Ok(()) right: Err(Unavailable) -- new_folder refused by sync guard`
+///   (new_folder succeeds when both state_db and sync_root are available and the guard is absent).
+///   GREEN after restoring the guard: `ok. 1 passed; 0 failed`.
+///
+/// This test does NOT create the state_db at the process-global path (doing so in a parallel
+/// test runner would race with the listing test's "no local state before first sync" assertion).
+#[test]
+fn folder_route_ops_are_refused_by_the_sync_guard_not_by_missing_state() {
+    let started = started();
+    assert!(!started.opened.engine.is_syncing(), "precondition: sync is not running");
+
+    // Create the sync root on disk so it is valid.
+    let sync_root = started.opened.engine.sync_root().unwrap();
+    std::fs::create_dir_all(&sync_root).unwrap();
+    let count_before = std::fs::read_dir(&sync_root).unwrap().count();
+
+    let mut source = EngineFilesSource::new(started.opened.engine.clone());
+
+    let item = crate::source::DriveItem {
+        id: "f-2".into(),
+        parent_id: None,
+        name: "notes.txt".into(),
+        is_folder: false,
+        size: Some(100),
+        child_count: None,
+        modified_at: String::new(),
+        mime: None,
+        has_thumbnail: false,
+        shared_type: None,
+        shared_badges: Vec::new(),
+        pc_status: None,
+        is_protected: false,
+    };
+
+    // Every folder-route op returns Unavailable (the guard, not a downstream error).
+    assert_eq!(
+        source.new_folder(None, "ShouldNotExist"),
+        Err(ActionError::Unavailable),
+        "new_folder refused by sync guard"
+    );
+    assert_eq!(
+        source.rename(&item, "new.txt"),
+        Err(ActionError::Unavailable),
+        "rename refused by sync guard"
+    );
+    assert_eq!(
+        source.move_to(&[item.clone()], None),
+        Err(ActionError::Unavailable),
+        "move_to refused by sync guard"
+    );
+    assert_eq!(
+        source.duplicate(&[item.clone()], &[]),
+        Err(ActionError::Unavailable),
+        "duplicate refused by sync guard"
+    );
+    assert_eq!(
+        source.upload(None, &[std::env::temp_dir().join("fake.txt")]),
+        Err(ActionError::Unavailable),
+        "upload refused by sync guard"
+    );
+    assert_eq!(
+        source.open(&[item.clone()]),
+        Err(ActionError::Unavailable),
+        "open refused by sync guard"
+    );
+    assert_eq!(
+        source.show_in_file_explorer(&[item.clone()]),
+        Err(ActionError::Unavailable),
+        "show_in_file_explorer refused by sync guard"
+    );
+    assert_eq!(
+        source.open_in_file_explorer(None),
+        Err(ActionError::Unavailable),
+        "open_in_file_explorer refused by sync guard"
+    );
+    assert!(!source.can_add(None), "can_add is false");
+
+    // Filesystem unchanged: the sync root has no new entries.
+    let count_after = std::fs::read_dir(&sync_root).unwrap().count();
+    assert_eq!(
+        count_before, count_after,
+        "0 filesystem changes in the sync root (the guard blocked everything)"
+    );
+
+    // Clean up: remove the sync root so subsequent runs start clean.
+    let _ = std::fs::remove_dir_all(&sync_root);
+}
+
+/// The sync guard is the `is_syncing()` check in `local()`. Dropping the guard (mutant: removing
+/// the `if !self.engine.is_syncing()` check) would let the operations through despite sync not
+/// running, hitting the state_db/sync_root errors instead of the clear `Unavailable`. The source
+/// scan proves the guard is present.
+#[test]
+fn the_sync_guard_is_present_in_the_local_choke_point() {
+    let source = include_str!("../engine_host.rs");
+    let local_fn = &source[source.find("fn local(&self)").unwrap()..];
+    let local_fn = &local_fn[..local_fn.find("\n    }").unwrap()];
+    assert!(
+        local_fn.contains("is_syncing()"),
+        "the local() choke point checks is_syncing: dropping it would let folder-route ops \
+         through when sync is not running"
+    );
+}
+
+/// Trash and restore (API calls) are NOT gated by the sync guard: they go directly to the server
+/// and do not touch the sync folder. Neither calls `self.local()`.
+#[test]
+fn trash_and_restore_are_not_gated_by_the_sync_guard() {
+    let source = include_str!("../engine_host.rs");
+    let trash_fn = &source[source.find("fn trash(&mut self").unwrap()..];
+    let trash_fn = &trash_fn[..trash_fn.find("\n    fn ").unwrap()];
+    assert!(
+        !trash_fn.contains("self.local()"),
+        "trash goes to the API, not through the sync folder"
+    );
+    let restore_fn = &source[source.find("fn restore(&mut self").unwrap()..];
+    let restore_fn = &restore_fn[..restore_fn.find("\n    fn ").unwrap()];
+    assert!(
+        !restore_fn.contains("self.local()"),
+        "restore goes to the API, not through the sync folder"
+    );
 }

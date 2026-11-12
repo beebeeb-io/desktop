@@ -51,16 +51,6 @@ impl SidebarSection {
         }
     }
 
-    /// The count beside a section. Shared's is a pill (a request is waiting for an answer),
-    /// Trash's a plain figure.
-    pub fn badge(self) -> Option<u32> {
-        match self {
-            Self::Shared => Some(1),
-            Self::Trash => Some(12),
-            _ => None,
-        }
-    }
-
     /// The board's tooltip: the name and its shortcut.
     pub fn shortcut(self) -> &'static str {
         match self {
@@ -185,19 +175,30 @@ pub fn brand(product: &str, t: &Theme) -> El {
         )
 }
 
+/// The badge count for a section, from the state's live sources. `None`: no badge (the source
+/// has nothing, or is unwired). The snapshot path's fixtures give the board's numbers; a live
+/// window with an engine gives the engine's.
+pub(crate) fn badge_for(s: &State, section: SidebarSection) -> Option<Count> {
+    match section {
+        SidebarSection::Shared => {
+            let n = s.frames.shared.source.invitations().len() as u32;
+            (n > 0).then_some(Count::Pill(n))
+        }
+        SidebarSection::Trash => {
+            let n = s.frames.trash.source.totals().items as u32;
+            (n > 0).then_some(Count::Plain(n))
+        }
+        _ => None,
+    }
+}
+
 pub fn sidebar(s: &State, t: &Theme) -> El {
     let storage = s.storage;
     let active = s.sidebar_section;
 
     let mut sections = col().key("sidebar-sections").gap(1.0);
     for &section in SidebarSection::all() {
-        let count = section.badge().map(|n| {
-            if section == SidebarSection::Shared {
-                Count::Pill(n)
-            } else {
-                Count::Plain(n)
-            }
-        });
+        let count = badge_for(s, section);
         sections = sections.child(
             side_item(
                 section.label(),
@@ -211,6 +212,8 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
         );
     }
 
+    let kept = s.this_pc.kept_count() as u32;
+    let offline_count = (kept > 0).then_some(Count::Plain(kept));
     let this_pc = col()
         .key("this-pc")
         .gap(1.0)
@@ -231,7 +234,7 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
         .child(side_item(
             "Available offline",
             &icons::AVAILABLE_OFFLINE,
-            Some(Count::Plain(3)),
+            offline_count,
             false,
             "Ctrl+7",
             t,
@@ -247,11 +250,9 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
         .child(sections)
         .child(this_pc);
 
-    // Storage meter (`.mk-store`). The split is the board's sample: Files 24 GB, Photos 216 GB.
-    const FILES_BYTES: i64 = 24_000_000_000;
-    let quota = storage.quota_bytes.max(1) as f64;
-    let files_frac = (FILES_BYTES.min(storage.used_bytes) as f64 / quota) as f32;
-    let photos_frac = ((storage.used_bytes - FILES_BYTES).max(0) as f64 / quota) as f32;
+    // Storage meter (`.mk-store`). The split (Files / Photos) is from `storage_split` when
+    // the engine provides it; the board's snapshot path passes `Some((files, photos))` from
+    // the fixture; a live window without a wired split shows one plain segment.
     let track_w = SIDEBAR_W - 2.0 * (10.0 + 6.0 + 4.0) - kit::HAIR;
     let storage_value = if s.storage_known {
         format!(
@@ -262,6 +263,20 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
     } else {
         // No figure without the server (a `--db` source never asks it).
         "Unavailable".to_string()
+    };
+    let quota = storage.quota_bytes.max(1) as f64;
+    // The split: the board's snapshot path holds a fixture split in `storage_split`; a live
+    // window shows one segment (total used) until the engine wires the category breakdown.
+    let (seg_0, seg_1) = match s.storage_split {
+        Some((files, _photos)) => {
+            let files_frac = (files.min(storage.used_bytes) as f64 / quota) as f32;
+            let photos_frac = ((storage.used_bytes - files).max(0) as f64 / quota) as f32;
+            (files_frac, photos_frac)
+        }
+        None => {
+            let used_frac = (storage.used_bytes as f64 / quota) as f32;
+            (used_frac, 0.0)
+        }
     };
     let mut meter = col()
         .key("storage-meter")
@@ -290,33 +305,36 @@ pub fn sidebar(s: &State, t: &Theme) -> El {
                 .clip_rounded(2.5)
                 .fill(t.separator)
                 // Neutral fills: Amber is only encryption state and the primary action.
-                .child(el().key("meter-fill-0").h_full().w(track_w * files_frac).fill(t.text))
+                .child(el().key("meter-fill-0").h_full().w(track_w * seg_0).fill(t.text))
                 .child(
                     el().key("meter-fill-1")
                         .h_full()
-                        .w(track_w * photos_frac)
+                        .w(track_w * seg_1)
                         .fill(t.text_quaternary),
                 ),
         );
-    // The split, like the total, is the server's: nothing is shown in its place.
-    if s.storage_known {
-        meter = meter.child(
-            row()
-                .key("storage-breakdown")
-                .justify_between()
-                .child(kit::label(
-                    "storage-files",
-                    format!("Files {}", format_storage(FILES_BYTES)),
-                    type_::KBD,
-                    t.text_tertiary,
-                ))
-                .child(kit::label(
-                    "storage-photos",
-                    format!("Photos {}", format_storage((storage.used_bytes - FILES_BYTES).max(0))),
-                    type_::KBD,
-                    t.text_tertiary,
-                )),
-        );
+    // The category breakdown: only when the source provides one (never a board sample
+    // beside a real account's total).
+    if let Some((files, _)) = s.storage_split {
+        if s.storage_known {
+            meter = meter.child(
+                row()
+                    .key("storage-breakdown")
+                    .justify_between()
+                    .child(kit::label(
+                        "storage-files",
+                        format!("Files {}", format_storage(files)),
+                        type_::KBD,
+                        t.text_tertiary,
+                    ))
+                    .child(kit::label(
+                        "storage-photos",
+                        format!("Photos {}", format_storage((storage.used_bytes - files).max(0))),
+                        type_::KBD,
+                        t.text_tertiary,
+                    )),
+            );
+        }
     }
 
     let account = row()

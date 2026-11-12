@@ -188,6 +188,11 @@ pub struct Kept {
 
 /// What the two This PC sections read and ask. Engine calls: see the PR body.
 pub trait ThisPcSource {
+    /// `false`: nothing answers yet (`Unwired`), and the view draws the shell's "not built yet"
+    /// frame instead of sample sync history.
+    fn wired(&self) -> bool {
+        true
+    }
     /// This PC's date, for "Today" and "Yesterday".
     fn today(&self) -> NaiveDate;
     /// The last 30 days, newest first.
@@ -489,4 +494,30 @@ impl ThisPcSource for FixtureSource {
     fn remove_all_from_pc(&mut self) {
         self.kept.clear();
     }
+}
+
+/// The source of a build that ships before the engine lane has wired This PC: it answers
+/// nothing, and the view draws the shell's "not built yet" frame instead of sample history.
+pub struct Unwired;
+
+impl ThisPcSource for Unwired {
+    fn wired(&self) -> bool {
+        false
+    }
+    fn today(&self) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 1, 1).unwrap_or_default()
+    }
+    fn history(&self) -> Vec<Change> {
+        Vec::new()
+    }
+    fn problems(&self) -> Vec<Change> {
+        Vec::new()
+    }
+    fn retry(&mut self, _problem: &str) {}
+    fn retry_all(&mut self) {}
+    fn kept(&self) -> Vec<Kept> {
+        Vec::new()
+    }
+    fn remove_from_pc(&mut self, _id: &str) {}
+    fn remove_all_from_pc(&mut self) {}
 }

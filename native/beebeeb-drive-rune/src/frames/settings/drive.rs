@@ -409,6 +409,12 @@ impl DriveSettings for BoardDrive {
 /// `wired()` is `false`, so no pane ever draws a value of it.
 pub struct UnwiredDrive(BoardDrive);
 
+impl UnwiredDrive {
+    pub fn new() -> Self {
+        Self(BoardDrive::new())
+    }
+}
+
 impl DriveSettings for UnwiredDrive {
     fn wired(&self) -> bool {
         false

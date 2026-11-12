@@ -18,6 +18,11 @@ pub struct Emptying {
 }
 
 pub trait TrashSource {
+    /// `false`: nothing answers yet (`Unwired`), and the view draws the shell's "not built yet"
+    /// frame instead of sample rows.
+    fn wired(&self) -> bool {
+        true
+    }
     /// The deleted items of the last 30 days, newest deleted first.
     fn items(&self) -> Vec<Row>;
     /// Everything in Trash, also what the list has not loaded.
@@ -147,5 +152,30 @@ impl TrashSource for BoardTrash {
         let before = self.rows.len();
         self.rows.retain(|r| r.id != id);
         self.rows.len() != before
+    }
+}
+
+/// The source of a build that ships before the engine lane has wired Trash: it answers
+/// nothing, and the view draws the shell's "not built yet" frame instead of sample rows.
+pub struct Unwired;
+
+impl TrashSource for Unwired {
+    fn wired(&self) -> bool {
+        false
+    }
+    fn items(&self) -> Vec<Row> {
+        Vec::new()
+    }
+    fn totals(&self) -> TrashTotals {
+        TrashTotals {
+            items: 0,
+            size: String::new(),
+        }
+    }
+    fn emptying(&self) -> Option<Emptying> {
+        None
+    }
+    fn restore(&mut self, _id: &str) -> bool {
+        false
     }
 }

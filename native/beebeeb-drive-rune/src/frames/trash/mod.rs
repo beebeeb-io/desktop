@@ -171,6 +171,11 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 }
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
+    // Nothing answers for Trash yet (a build that ships before the engine lane wires it):
+    // the shell's "not built yet" frame, never a list of sample rows.
+    if !s.frames.trash.source.wired() {
+        return crate::shell::placeholder::window(s, cx, crate::shell::registry::group_for(&s.shell.app));
+    }
     let t = tokens::theme(cx.system_dark());
     let ui = &s.frames.trash;
     let items = ui.source.items();

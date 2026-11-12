@@ -91,6 +91,19 @@ impl PcStatus for BoardPc {
     }
 }
 
+/// A live window with an engine before the engine lane wires the status line: no words,
+/// never the board's sample counts.
+pub struct UnwiredPc;
+
+impl PcStatus for UnwiredPc {
+    fn sync_words(&self) -> String {
+        String::new()
+    }
+    fn summary(&self) -> String {
+        String::new()
+    }
+}
+
 /// What the lane's groups keep on `State` (ONE field: `State::frames`).
 pub struct Ui {
     pub shared: shared::SharedUi,

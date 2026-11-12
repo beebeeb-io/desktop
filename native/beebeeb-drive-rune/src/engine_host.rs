@@ -25,6 +25,7 @@ use zeroize::Zeroizing;
 use beebeeb_engine::app::{CredentialStores, Engine, SyncStart};
 use beebeeb_engine::drive_v2::DriveError;
 use beebeeb_engine::drive_v2::model::{self, Sort as EngineSort};
+use beebeeb_engine::file_ops;
 use beebeeb_engine::host::HostMessage;
 use beebeeb_engine::identity::EngineIdentity;
 use beebeeb_engine::signin::gate::{
@@ -130,6 +131,92 @@ fn phrase_problem(words: &str) -> PhraseProblem {
 
 fn log(message: impl AsRef<str>) {
     eprintln!("beebeeb engine_host: {}", message.as_ref());
+}
+
+// ---------------------------------------------------------------------------
+// OS integration: open a file or folder, reveal in Explorer/Finder
+//
+// SECURITY: file names are ATTACKER-controlled (a shared folder's owner names
+// the files). Nothing here routes a path through cmd.exe, PowerShell, bash or
+// any shell. On Windows, `ShellExecuteW` takes the path as one wide string,
+// never a command line. On macOS/Linux, `Command::new("open"/"xdg-open").arg`
+// passes it as a single argv entry, never through a shell.
+// ---------------------------------------------------------------------------
+
+/// Open a file or folder with the OS's default handler. Never passes the path
+/// through a shell interpreter.
+fn open_path(path: &std::path::Path) -> Result<(), files_source::ActionError> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let verb: Vec<u16> = "open\0".encode_utf16().collect();
+        // SAFETY: ShellExecuteW is called with valid null-terminated wide strings. The function
+        // returns a value > 32 on success. No shell interpretation of the path occurs.
+        let result = unsafe {
+            windows_sys::Win32::UI::Shell::ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                wide.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+            )
+        };
+        if (result as usize) <= 32 {
+            return Err(files_source::ActionError::Failed);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // `open` on macOS: the path is passed as a single argv element, not through a shell.
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|_| files_source::ActionError::Failed)?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // `xdg-open` on Linux: the path is passed as a single argv element, not through a shell.
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|_| files_source::ActionError::Failed)?;
+    }
+    Ok(())
+}
+
+/// Reveal a file or folder in File Explorer / Finder / Files. Never passes the
+/// path through a shell interpreter.
+fn reveal_in_file_explorer(path: &std::path::Path) -> Result<(), files_source::ActionError> {
+    #[cfg(target_os = "windows")]
+    {
+        // `explorer.exe /select,<path>` as ONE argv element: the process is started directly
+        // via `CreateProcessW`, no shell in between. The path is never parsed by cmd.exe.
+        std::process::Command::new("explorer.exe")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()
+            .map_err(|_| files_source::ActionError::Failed)?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+            .map_err(|_| files_source::ActionError::Failed)?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Open the parent folder.
+        if let Some(parent) = path.parent() {
+            std::process::Command::new("xdg-open")
+                .arg(parent)
+                .spawn()
+                .map_err(|_| files_source::ActionError::Failed)?;
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -427,7 +514,10 @@ impl<C: CredentialStores> DriveSource for EngineDriveSource<C> {
     }
 
     fn storage(&self) -> Option<StorageSummary> {
-        None // the account's used and total bytes are the server's; the handle does not ask for them yet
+        self.engine.storage_info().ok().map(|(used, quota)| StorageSummary {
+            used_bytes: used,
+            quota_bytes: quota,
+        })
     }
 }
 
@@ -435,8 +525,8 @@ impl<C: CredentialStores> DriveSource for EngineDriveSource<C> {
 // EngineFilesSource: FilesSource (most actions not wired)
 // ---------------------------------------------------------------------------
 
-/// `FilesSource` on the real engine. Actions the engine cannot perform yet answer
-/// `Err(ActionError::Unavailable)` and log `NotWired(<action>)`.
+/// `FilesSource` on the real engine. Actions call through the `Engine` handle; Cloud Files actions
+/// (`keep_offline`, `free_up_space`) stay `not_wired` (they need a registered sync root).
 pub struct EngineFilesSource<C: CredentialStores> {
     engine: Arc<Engine<C>>,
 }
@@ -450,6 +540,31 @@ impl<C: CredentialStores> EngineFilesSource<C> {
 fn not_wired(what: &str) -> ActionError {
     log(format!("NotWired({what})"));
     ActionError::Unavailable
+}
+
+/// Map a `DriveError` to the UI's `ActionError`.
+fn map_drive_err(e: DriveError) -> ActionError {
+    match e {
+        DriveError::ReadOnly => ActionError::Protected,
+        DriveError::NameTaken | DriveError::InvalidName => ActionError::NameTaken,
+        DriveError::NotFound => ActionError::Failed,
+        DriveError::Conflict => ActionError::Failed,
+        _ => ActionError::Failed,
+    }
+}
+
+impl<C: CredentialStores> EngineFilesSource<C> {
+    /// The sync root and state database, both required for any local file operation. Refused when
+    /// sync is not running for this handle (`Engine::is_syncing`): changing a local folder that
+    /// nothing syncs is not an honest operation.
+    fn local(&self) -> Result<(beebeeb_engine::state_db::StateDb, PathBuf), ActionError> {
+        if !self.engine.is_syncing() {
+            return Err(ActionError::Unavailable);
+        }
+        let sync_root = self.engine.sync_root().map_err(|_| ActionError::Unavailable)?;
+        let db = self.engine.state_db().map_err(|_| ActionError::Unavailable)?;
+        Ok((db, sync_root))
+    }
 }
 
 impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
@@ -490,8 +605,9 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         None
     }
 
-    fn can_add(&self, _: Option<&str>) -> bool {
-        false
+    fn can_add(&self, _folder: Option<&str>) -> bool {
+        // Writable when there is a sync root and a state database.
+        self.local().is_ok()
     }
 
     fn sort_of(&self, _: Option<&str>) -> Option<crate::frames::files::Sort> {
@@ -502,44 +618,114 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         log("NotWired(set_sort)");
     }
 
-    fn trash(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
-        Err(not_wired("trash"))
+    fn trash(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
+        // Trash is an API call, not a sync-folder operation: it is NOT gated by is_syncing().
+        // Validate against the state database when it is available (a best-effort guard against
+        // trashing an uploading or protected item); when the database is not available, the
+        // server's own checks are the backstop.
+        if let Ok(db) = self.engine.state_db() {
+            for item in items {
+                if let Ok(entry) = file_ops::resolve(&db, &item.id) {
+                    file_ops::check_trashable(&db, &entry).map_err(map_drive_err)?;
+                }
+            }
+        }
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        self.engine.trash_items(&ids).map_err(|_| ActionError::Failed)
     }
-    fn restore(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
-        Err(not_wired("restore"))
+
+    fn restore(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        self.engine.restore_items(&ids).map_err(|_| ActionError::Failed)
     }
-    fn duplicate(&mut self, _: &[DriveItem], _: &[&str]) -> Result<(), ActionError> {
-        Err(not_wired("duplicate"))
+
+    fn duplicate(&mut self, items: &[DriveItem], _taken: &[&str]) -> Result<(), ActionError> {
+        let (db, sync_root) = self.local()?;
+        for item in items {
+            let entry = file_ops::resolve(&db, &item.id).map_err(map_drive_err)?;
+            file_ops::duplicate(&db, &sync_root, &entry).map_err(map_drive_err)?;
+        }
+        Ok(())
     }
+
     fn keep_offline(&mut self, _: &[DriveItem], _: bool) -> Result<(), ActionError> {
         Err(not_wired("keep_offline"))
     }
+
     fn copy_link(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
         Err(not_wired("copy_link"))
     }
-    fn open(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
-        Err(not_wired("open"))
+
+    fn open(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
+        let (db, sync_root) = self.local()?;
+        for item in items {
+            let entry = file_ops::resolve(&db, &item.id).map_err(map_drive_err)?;
+            let path = file_ops::item_path(&sync_root, &entry).map_err(map_drive_err)?;
+            if !entry.is_dir() && file_ops::is_dangerous_executable(&path) {
+                return Err(ActionError::Failed);
+            }
+            open_path(&path)?;
+        }
+        Ok(())
     }
-    fn show_in_file_explorer(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
-        Err(not_wired("show_in_file_explorer"))
+
+    fn show_in_file_explorer(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
+        let (db, sync_root) = self.local()?;
+        for item in items {
+            let entry = file_ops::resolve(&db, &item.id).map_err(map_drive_err)?;
+            let path = file_ops::item_path(&sync_root, &entry).map_err(map_drive_err)?;
+            reveal_in_file_explorer(&path)?;
+        }
+        Ok(())
     }
-    fn upload(&mut self, _: Option<&str>, _: &[std::path::PathBuf]) -> Result<(), ActionError> {
-        Err(not_wired("upload"))
+
+    fn upload(&mut self, folder: Option<&str>, files: &[std::path::PathBuf]) -> Result<(), ActionError> {
+        let (db, sync_root) = self.local()?;
+        let parent = file_ops::resolve_folder(&db, folder).map_err(map_drive_err)?;
+        file_ops::copy_in(&db, &sync_root, parent.as_ref(), files).map_err(map_drive_err)?;
+        Ok(())
     }
-    fn new_folder(&mut self, _: Option<&str>, _: &str) -> Result<(), ActionError> {
-        Err(not_wired("new_folder"))
+
+    fn new_folder(&mut self, parent: Option<&str>, name: &str) -> Result<(), ActionError> {
+        let (db, sync_root) = self.local()?;
+        let parent_entry = file_ops::resolve_folder(&db, parent).map_err(map_drive_err)?;
+        file_ops::create_folder(&db, &sync_root, parent_entry.as_ref(), name).map_err(map_drive_err)?;
+        Ok(())
     }
-    fn rename(&mut self, _: &DriveItem, _: &str) -> Result<(), ActionError> {
-        Err(not_wired("rename"))
+
+    fn rename(&mut self, item: &DriveItem, name: &str) -> Result<(), ActionError> {
+        let (db, sync_root) = self.local()?;
+        let entry = file_ops::resolve(&db, &item.id).map_err(map_drive_err)?;
+        file_ops::rename(&db, &sync_root, &entry, name).map_err(map_drive_err)?;
+        Ok(())
     }
-    fn move_to(&mut self, _: &[DriveItem], _: Option<&str>) -> Result<(), ActionError> {
-        Err(not_wired("move_to"))
+
+    fn move_to(&mut self, items: &[DriveItem], folder: Option<&str>) -> Result<(), ActionError> {
+        let (db, sync_root) = self.local()?;
+        let entries: Vec<_> = items
+            .iter()
+            .map(|i| file_ops::resolve(&db, &i.id))
+            .collect::<Result<_, _>>()
+            .map_err(map_drive_err)?;
+        let target = file_ops::resolve_folder(&db, folder).map_err(map_drive_err)?;
+        file_ops::move_items(&db, &sync_root, &entries, target.as_ref()).map_err(map_drive_err)?;
+        Ok(())
     }
+
     fn free_up_space(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
         Err(not_wired("free_up_space"))
     }
-    fn open_in_file_explorer(&mut self, _: Option<&str>) -> Result<(), ActionError> {
-        Err(not_wired("open_in_file_explorer"))
+
+    fn open_in_file_explorer(&mut self, folder: Option<&str>) -> Result<(), ActionError> {
+        let (db, sync_root) = self.local()?;
+        let path = match folder {
+            Some(id) => {
+                let entry = file_ops::resolve(&db, id).map_err(map_drive_err)?;
+                file_ops::item_path(&sync_root, &entry).map_err(map_drive_err)?
+            }
+            None => sync_root,
+        };
+        open_path(&path)
     }
 
     fn changes(&mut self) -> Vec<Change> {
