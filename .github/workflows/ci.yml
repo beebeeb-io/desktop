@@ -414,3 +414,26 @@ jobs:
         with:
           name: release-branch-point-test
           path: ${{ runner.temp }}/release-branch-point-test.log
+
+  release-workflow-ifs:
+    # Pins the if: conditions on the `release` and `publish-manifest` jobs in release.yml so
+    # neither can be silently skipped after a successful `build` on a workflow_dispatch from
+    # main (task 2458, run 43141563099: verify-branch-point is skipped for a dispatch from
+    # main; without an explicit status function the implicit success() evaluated the entire
+    # transitive dependency chain and skipped `release` even though build succeeded).
+    # The truth line is a count ("release-workflow-ifs: N passed, 0 failed"), and the
+    # self-test proves the count guard can go red.
+    name: Release workflow if-condition pin
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+
+      - name: Count guard self-test
+        run: python3 scripts/test-release-workflow-ifs.py --self-test
+
+      - name: Release workflow if-condition check
+        run: python3 scripts/test-release-workflow-ifs.py

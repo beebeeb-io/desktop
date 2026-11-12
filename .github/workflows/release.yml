@@ -565,17 +565,33 @@ jobs:
 
   release:
     name: Create GitHub Release
-    # Default (implicit) success-gating: this job only runs if `needs: build` succeeds, which
-    # requires EVERY enabled matrix platform to succeed — currently Windows + Linux, both of
-    # which are the full supported set now that macOS is commented out of the matrix entirely
-    # (see the matrix comment above). Do NOT relax this to "publish if any platform succeeded"
-    # while only fully-supported platforms are enabled — that was only safe for as long as an
-    # explicitly-optional, expected-to-fail platform (macOS) sat in the matrix alongside the
-    # required ones; without that, a silent partial release (e.g. Linux succeeds, Windows
-    # doesn't) would ship with a missing supported platform and no indication anything is wrong.
+    # Explicit status gating: `needs.build.result == 'success'` together with `!cancelled()`
+    # ensures this job runs only when build succeeded, while letting GitHub evaluate the
+    # condition regardless of skipped jobs earlier in the dependency chain.
+    #
+    # Without an explicit status function the implicit success() evaluates the entire transitive
+    # dependency chain.  verify-branch-point is skipped for a dispatch from main (main is
+    # protected by PRs), so the implicit success() returns false and the job is silently skipped
+    # even though build itself succeeded (task 2458, run 43141563099).
+    #
+    # `needs.build.result == 'success'` preserves "every enabled platform must succeed": the
+    # matrix result is 'success' only when all enabled runners completed without error — a
+    # failed or cancelled build still blocks this job.
+    #
+    # Do NOT relax this to "publish if any platform succeeded" while only fully-supported
+    # platforms are enabled — that was only safe for as long as an explicitly-optional,
+    # expected-to-fail platform (macOS) sat in the matrix alongside the required ones; without
+    # that, a silent partial release (e.g. Linux succeeds, Windows doesn't) would ship with a
+    # missing supported platform and no indication anything is wrong.
     # If macOS is re-enabled as an optional platform later, this needs a deliberate per-platform
-    # required/optional check again, not a blanket `!cancelled()`.
-    if: github.event_name == 'workflow_dispatch' && !inputs.publish_existing
+    # required/optional check again.
+    if: >-
+      ${{
+        !cancelled() &&
+        github.event_name == 'workflow_dispatch' &&
+        !inputs.publish_existing &&
+        needs.build.result == 'success'
+      }}
     needs: build
     runs-on: ubuntu-latest
     permissions:
