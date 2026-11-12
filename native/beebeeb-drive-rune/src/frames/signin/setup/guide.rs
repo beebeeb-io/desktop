@@ -379,17 +379,25 @@ fn tip_card(n: u8, arrow_at: Arrow, t: &Theme) -> El {
 }
 
 /// The ring around the target, and the dim over everything else (`.mk-ring`: "0 0 0 2px ink-2,
-/// 0 0 0 9999px black 22%"). It takes no press: what is under it stays usable.
+/// 0 0 0 9999px black 22%"), in window points. The dim ends under the caption, which keeps its own
+/// colours (the board's overlay is the window's body). It takes no press: what is under it stays
+/// usable.
 fn ring(rect: [f32; 4], radius: f32, t: &Theme) -> El {
-    el().key(RING_KEY)
-        .absolute(rect[0], rect[1])
-        .w(rect[2])
-        .h(rect[3])
-        .radius(radius)
-        .box_shadow(kit::ring(2.0, t.text_secondary))
-        .box_shadow(kit::ring(9999.0, Color::BLACK.alpha(0.22)))
+    el().key("coach-dim")
+        .pin(Some(0.0), Some(crate::TITLEBAR_H), Some(0.0), Some(0.0))
+        .clip_rounded(0.0)
         .inert()
         .a11y_hidden()
+        .child(
+            el().key(RING_KEY)
+                .absolute(rect[0], rect[1] - crate::TITLEBAR_H)
+                .w(rect[2])
+                .h(rect[3])
+                .radius(radius)
+                // The ring is drawn over the dim, as the first of two CSS shadows is.
+                .box_shadow(kit::ring(9999.0, Color::BLACK.alpha(0.22)))
+                .box_shadow(kit::ring(2.0, t.text_secondary)),
+        )
 }
 
 /// The frame of the window with the guide's step over it, when one shows. For
@@ -411,8 +419,9 @@ pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
         Step::Tip(n) => n,
     };
     let Some(spot) = spot(n, s) else { return layer };
-    // Where the real control is. Unknown until it is laid out once: the view runs again then.
-    let Some([x, y, w, h]) = cx.layout(&spot.target) else {
+    // Where the real control is in the window now (a row moves when its list scrolls). Unknown
+    // until it is laid out once: the view runs again then.
+    let Some([x, y, w, h]) = cx.window_layout(&spot.target) else {
         return layer;
     };
     let [l, top, r, b] = spot.out;
