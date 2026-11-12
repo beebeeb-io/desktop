@@ -60,7 +60,8 @@ if (empty) {
 if (groupOf === 'files') {
 
 // ---- A dialog on the window's scrim (`.mk-scrim` + `.wn-dlg`): New folder (DW-0417), Move to (DW-0409) ----
-const dlg = q('.wn-dlg');
+// Not the commands and shortcuts dialog (`.wn-cmds`): keymap-shortcuts.js keys that one (`sc-*`).
+const dlg = q('.wn-dlg .wn-cmds') ? null : q('.wn-dlg');
 if (dlg) {
   api.box('scrim', q('.mk-scrim'));
   api.box('dlg', dlg);
