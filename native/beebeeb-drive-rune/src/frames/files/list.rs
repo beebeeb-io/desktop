@@ -80,7 +80,11 @@ pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
                             // The row being renamed shows its name as a field (DW-0410).
                             let renaming = s.actions.rename.as_ref().is_some_and(|r| r.row == i && r.id == item.id);
                             let field = renaming.then(|| super::rename::name_field(s, &t));
-                            let mut row = file_row(i, item, s.is_selected(i), date, field, &t);
+                            // A protected folder draws its own rows (`protected.rs`).
+                            let mut row = match super::protected::row_of(s, i, item, &t) {
+                                Some(row) => row,
+                                None => file_row(i, item, s.is_selected(i), date, field, &t),
+                            };
                             if blocked {
                                 row = row.opacity(0.45);
                             }
