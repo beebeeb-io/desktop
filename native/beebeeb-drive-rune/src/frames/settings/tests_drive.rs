@@ -358,3 +358,16 @@ fn a_build_that_ships_draws_no_sample_value_on_drives_panes() {
         "no sample figure"
     );
 }
+
+/// A section this lane has not built stays the shell's: its "not built yet" frame, never
+/// another pane's content under that section's route.
+#[test]
+fn a_section_not_built_yet_is_left_to_the_shell() {
+    let mut rt = runtime("DW-0712");
+    press(&mut rt, "Thumbnails and previews-row");
+    assert_eq!(
+        rt.state.shell.app.screen(),
+        Screen::Settings(SettingsPane::ThumbnailsAndPreviews)
+    );
+    assert!(find(&rt, "set-main").is_none(), "no settings pane is drawn for it");
+}

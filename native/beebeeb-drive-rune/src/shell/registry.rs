@@ -167,12 +167,6 @@ pub const FRAMES: &[Frame] = &[
         feedback: FeedbackPolicy::Denied("its lane has not opted in yet"),
     },
     Frame {
-        group: FrameGroup::Settings(SettingsPane::ThumbnailsAndPreviews),
-        view: crate::frames::settings::view,
-        on_key: Some(crate::frames::settings::on_key),
-        feedback: FeedbackPolicy::Denied("its lane has not opted in yet"),
-    },
-    Frame {
         group: FrameGroup::Settings(SettingsPane::Storage),
         view: crate::frames::settings::view,
         on_key: Some(crate::frames::settings::on_key),
