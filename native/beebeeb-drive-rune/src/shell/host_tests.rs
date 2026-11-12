@@ -747,6 +747,14 @@ fn entering_a_secret_route_sets_capture_exclusion_and_leaving_clears_it() {
     rt.frame(2.0);
     assert_eq!(
         platform.capture_exclusions.lock().unwrap().clone(),
+        vec![true],
+        "the poll that first sees no secret keeps the window excluded"
+    );
+    // Exclusion drops one poll late: the poll that first sees no secret keeps it and lands the
+    // leaving elements; the next one tells the platform.
+    rt.frame(2.5);
+    assert_eq!(
+        platform.capture_exclusions.lock().unwrap().clone(),
         vec![true, false],
         "leaving sign-in calls the platform with clear"
     );
@@ -827,6 +835,9 @@ fn after_failure_subsequent_polls_retry_bounded() {
     platform.capture_exclusion_fails.store(false, Ordering::SeqCst);
     engine.set_gate(GateState::Ready);
     rt.frame(5.0);
+    // Exclusion drops one poll late: the poll that first sees no secret keeps it and lands the
+    // leaving elements; the next one tells the platform.
+    rt.frame(5.5);
     // Desired false, applied false → match → retries reset.
     assert_eq!(rt.state.shell.capture_exclusion_retries, 0);
 
@@ -916,6 +927,10 @@ fn the_approval_code_screens_are_secret_and_the_window_is_excluded_while_they_sh
     );
     rt.update(|s, _| crate::frames::account::go(s, "DW-A52"));
     rt.frame(2.0);
+    assert_eq!(platform.capture_exclusions.lock().unwrap().clone(), vec![true]);
+    // Exclusion drops one poll late: the poll that first sees no secret keeps it and lands the
+    // leaving elements; the next one tells the platform.
+    rt.frame(2.5);
     assert_eq!(platform.capture_exclusions.lock().unwrap().clone(), vec![true, false]);
 }
 
@@ -1070,4 +1085,73 @@ fn a_lock_wipes_what_was_typed_in_an_account_form() {
         Pane::Security,
         "and the section is back on its list"
     );
+}
+
+/// The reviewer's open point: capture exclusion must not drop while the code can still be
+/// painted. Rune keeps a leaving element in the tree while it animates out, and the poll that
+/// drops exclusion runs before the frame without the code is shown. So on every way out of a
+/// screen that holds the code (a press, Windows Hello's answer inside the poll, a lock), at every
+/// frame where the platform was last told "not excluded", the code field is not in the tree, not
+/// even as a leaving element.
+#[test]
+fn capture_exclusion_drops_only_after_the_code_is_out_of_the_tree() {
+    use crate::frames::account::Dialog as AccountDialog;
+    use crate::frames::account::approve::{self, CODE_KEY};
+    use crate::frames::account::source::BoardAccount;
+    type Way = fn(&Arc<FixtureEngine>, &mut Runtime<State>);
+    let ways: [(&str, Way); 5] = [
+        // A key inside a frame: its handler runs after that frame's poll, and its commit animates.
+        ("Esc (Deny), pressed inside a frame", |_, rt| {
+            rt.key(KeyEvent {
+                key: Key::Escape,
+                mods: Mods::default(),
+            })
+        }),
+        ("Deny between frames", |_, rt| {
+            rt.update(|s, _| assert!(approve::on_escape(s)))
+        }),
+        ("the answer of Windows Hello, inside the poll", |_, rt| {
+            rt.update(|s, _| approve::press_approve(s))
+        }),
+        ("leaving the section", |_, rt| {
+            rt.update(|s, _| crate::frames::account::go(s, "DW-A51"))
+        }),
+        ("a sign-out to another account", |engine, _| {
+            engine.set_account("user-b")
+        }),
+    ];
+    for (way, leave) in ways {
+        let engine = Arc::new(FixtureEngine::ready());
+        let platform = Arc::new(FakePlatform::default());
+        let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform.clone())));
+        rt.update(|s, _| {
+            s.account.source = Some(Box::new(BoardAccount::new()));
+            crate::frames::account::go(s, "DW-A12");
+        });
+        settle(&mut rt);
+        press(
+            &mut rt,
+            Key::Text(approve::BOARD_REQUEST_CODE.replace('-', "")),
+            Mods::default(),
+        );
+        press(&mut rt, Key::Enter, Mods::default());
+        assert_eq!(rt.state.account.dialog, Some(AccountDialog::ApproveReview), "{way}");
+        let excluded = |platform: &FakePlatform| platform.capture_exclusions.lock().unwrap().last().copied();
+        assert_eq!(excluded(&platform), Some(true), "{way}: the review is excluded");
+        leave(&engine, &mut rt);
+        let mut frames_with_the_code = 0;
+        for frame in 0..60 {
+            rt.frame(0.016);
+            let code_in_tree = rt.elements().iter().any(|e| e.key.as_deref() == Some(CODE_KEY));
+            frames_with_the_code += usize::from(code_in_tree);
+            assert!(
+                !(code_in_tree && excluded(&platform) == Some(false)),
+                "{way}: frame {frame} still has the code field in the tree and capture is not excluded"
+            );
+        }
+        assert_eq!(excluded(&platform), Some(false), "{way}: exclusion drops in the end");
+        assert!(!rt.state.account.shows_secret(), "{way}");
+        // At most the one frame of a press inside a frame (still excluded) holds the leaving field.
+        assert!(frames_with_the_code <= 1, "{way}: {frames_with_the_code} frames");
+    }
 }
