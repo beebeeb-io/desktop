@@ -63,7 +63,7 @@ if ($Phase -eq 'produce') {
         '.pptx' = 'pptx'; '.pptm' = 'pptm:Impress MS PowerPoint 2007 XML VBA' }
     $made = 0; $failed = 0
     foreach ($f in Get-ChildItem -LiteralPath "$Here\fixtures" -File | Where-Object { $_.Name -notlike 'remote.*' -and $_.Name -notlike 'big-*' } | Sort-Object Name) {
-        $conv = "$Root\conv\$($f.BaseName)"
+        $conv = "$Root\conv\$($f.Name)"
         New-Item -ItemType Directory -Force $conv | Out-Null
         $p = Start-Process -FilePath $soffice -PassThru -NoNewWindow -ArgumentList @(
             "-env:UserInstallation=$inst", '--headless', '--norestore', '--convert-to', "`"$($filters[$f.Extension])`"", '--outdir', $conv, $f.FullName)
@@ -74,7 +74,9 @@ if ($Phase -eq 'produce') {
             Stop-Process -Id $p.Id -Force
             Write-Output "RED $($f.Name): soffice --convert-to did not exit in 120 s, stopped pid $($p.Id)"; $failed++; continue
         }
-        $o = Get-ChildItem -LiteralPath $conv -File | Select-Object -First 1
+        $o = @(Get-ChildItem -LiteralPath $conv -File)
+        if ($o.Count -gt 1) { throw "more than one output for $($f.Name)" }
+        $o = $o | Select-Object -First 1
         if ($o) { Copy-Item -LiteralPath $o.FullName -Destination "$dst\lo-$($f.Name)"; $made++; Write-Output "LibreOffice $Version re-saved $($f.Name): $($f.Length) -> $($o.Length) bytes" }
         else { $failed++; Write-Output "RED $($f.Name): no output file" }
     }
