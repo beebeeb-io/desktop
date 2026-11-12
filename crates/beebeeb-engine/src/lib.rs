@@ -47,6 +47,7 @@ pub mod free_up_space;
 pub mod held_queue;
 pub mod hexfmt;
 pub mod host;
+pub mod identity;
 #[cfg(unix)]
 pub mod ipc_frame;
 #[cfg(unix)]

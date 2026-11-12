@@ -8,7 +8,7 @@
 //! Tests: `crate::config::tests`.
 
 use super::lock::config_write_guard;
-use super::paths::{APP_CONFIG_DIR, CONFIG_FILENAME};
+use super::paths::{CONFIG_FILENAME, app_config_dir};
 use super::*;
 
 /// Which OS a load is for, named so both branches run on any test host.
@@ -34,7 +34,7 @@ impl DesktopConfig {
     /// strings so they can flow through Tauri commands.
     pub fn path() -> Result<PathBuf, String> {
         let base = Self::config_base_dir().map_err(String::from)?;
-        let dir = base.join(APP_CONFIG_DIR);
+        let dir = base.join(app_config_dir());
         fs::create_dir_all(&dir)
             .map_err(ConfigError::CreateConfigDirectory)
             .map_err(String::from)?;

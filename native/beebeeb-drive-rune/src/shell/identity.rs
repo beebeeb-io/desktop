@@ -146,6 +146,35 @@ impl AppIdentity {
             Self::Test => "URL:Beebeeb Test",
         }
     }
+
+    // --- engine identity (the fields the engine crate needs) ---
+
+    /// The credential service name (`KEYCHAIN_SERVICE`): the Windows Credential Manager target
+    /// prefix and the macOS Keychain service name. Matches the engine's `identity::REAL` /
+    /// `identity::TEST` values.
+    pub const fn credential_service(self) -> &'static str {
+        match self {
+            Self::Real => "io.beebeeb.app",
+            Self::Test => "io.beebeeb.app.test",
+        }
+    }
+
+    /// The config folder name (`APP_CONFIG_DIR`): the subfolder of `~/.config/`, `~/Library/
+    /// Application Support/`, or `%APPDATA%/` where `desktop.toml` and kept copies live.
+    pub const fn config_dir_name(self) -> &'static str {
+        match self {
+            Self::Real => "beebeeb",
+            Self::Test => "beebeeb-test",
+        }
+    }
+
+    /// The engine identity to pass to `beebeeb_engine::identity::init`.
+    pub fn engine_identity(self) -> beebeeb_engine::identity::EngineIdentity {
+        beebeeb_engine::identity::EngineIdentity {
+            credential_service: self.credential_service(),
+            config_dir_name: self.config_dir_name(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -166,6 +195,8 @@ mod tests {
         assert_eq!(real.tray_window_class(), "BeebeebTray");
         assert_eq!(real.url_scheme(), "beebeeb");
         assert_eq!(real.url_scheme_label(), "URL:Beebeeb");
+        assert_eq!(real.credential_service(), "io.beebeeb.app");
+        assert_eq!(real.config_dir_name(), "beebeeb");
     }
 
     #[test]
@@ -173,6 +204,8 @@ mod tests {
         let test = AppIdentity::Test;
         assert_eq!(test.bundle_identifier(), "io.beebeeb.app.test");
         assert_eq!(test.product_name(), "Beebeeb Test");
+        assert_eq!(test.credential_service(), "io.beebeeb.app.test");
+        assert_eq!(test.config_dir_name(), "beebeeb-test");
     }
 
     #[test]
@@ -193,8 +226,14 @@ mod tests {
             ("tray_window_class", real.tray_window_class(), test.tray_window_class()),
             ("url_scheme", real.url_scheme(), test.url_scheme()),
             ("url_scheme_label", real.url_scheme_label(), test.url_scheme_label()),
+            (
+                "credential_service",
+                real.credential_service(),
+                test.credential_service(),
+            ),
+            ("config_dir_name", real.config_dir_name(), test.config_dir_name()),
         ];
-        assert_eq!(pairs.len(), 10, "one line per derived value");
+        assert_eq!(pairs.len(), 12, "one line per derived value");
         for (name, real, test) in pairs {
             assert_ne!(real, test, "{name}");
             assert!(!real.is_empty() && !test.is_empty(), "{name}");
@@ -226,5 +265,14 @@ mod tests {
             assert_eq!(AppIdentity::CURRENT, AppIdentity::Real);
         }
         assert_eq!(AppIdentity::BOTH.len(), 2);
+    }
+
+    /// The native shell's identity matches the engine crate's identity constants.
+    #[test]
+    fn engine_identity_values_match_the_engine_crate() {
+        let real = AppIdentity::Real.engine_identity();
+        assert_eq!(real, beebeeb_engine::identity::REAL);
+        let test = AppIdentity::Test.engine_identity();
+        assert_eq!(test, beebeeb_engine::identity::TEST);
     }
 }

@@ -787,14 +787,14 @@ fn unit_tests_resolve_the_config_path_in_a_sandbox_never_the_real_one() {
     let sandboxed = DesktopConfig::path().expect("config path resolves");
     let real_dir = dirs::config_dir().expect("a user config dir exists on a dev machine or CI runner");
     let real = real_dir
-        .join(super::paths::APP_CONFIG_DIR)
+        .join(super::paths::app_config_dir())
         .join(super::paths::CONFIG_FILENAME);
 
     assert_ne!(sandboxed, real, "unit tests resolved the REAL desktop.toml");
     // The specific real `beebeeb` config folder, not the whole config dir: a `CARGO_TARGET_DIR`
     // under `~/Library/Application Support` (or `~/.config`) puts the sandbox inside the config
     // dir legitimately.
-    let real_app_dir = real_dir.join(super::paths::APP_CONFIG_DIR);
+    let real_app_dir = real_dir.join(super::paths::app_config_dir());
     assert!(
         !sandboxed.starts_with(&real_app_dir),
         "{sandboxed:?} is inside the real config folder {real_app_dir:?}"

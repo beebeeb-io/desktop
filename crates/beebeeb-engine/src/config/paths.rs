@@ -13,8 +13,10 @@ pub(super) const CONFIG_FILENAME: &str = "desktop.toml";
 
 /// Subdirectory inside the user's config dir (e.g.
 /// `~/.config/beebeeb/` on Linux, `~/Library/Application Support/beebeeb/`
-/// on macOS).
-pub(super) const APP_CONFIG_DIR: &str = "beebeeb";
+/// on macOS). Reads from the process-wide identity (`crate::identity::config_dir_name`).
+pub(super) fn app_config_dir() -> &'static str {
+    crate::identity::config_dir_name()
+}
 
 #[cfg(not(target_os = "macos"))]
 pub(super) fn user_visible_home_dir() -> Option<PathBuf> {
@@ -33,7 +35,7 @@ pub fn default_sync_root_suggestion() -> PathBuf {
     dirs::data_dir()
         .or_else(dirs::config_dir)
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(APP_CONFIG_DIR)
+        .join(app_config_dir())
         .join("file-provider-state")
 }
 

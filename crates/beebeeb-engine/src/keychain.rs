@@ -6,9 +6,12 @@
 
 use std::fmt;
 
-/// The service every platform store (and the test store) names its items with; the Linux stub has no item to name.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-const KEYCHAIN_SERVICE: &str = "io.beebeeb.app";
+/// The service every platform store (and the test store) names its items with. Reads from the
+/// process-wide identity (`crate::identity::credential_service`); the Linux stub has no item to name.
+#[cfg(any(any(test, feature = "test-support"), target_os = "macos", target_os = "windows"))]
+fn keychain_service() -> &'static str {
+    crate::identity::credential_service()
+}
 const MASTER_KEY_BYTES: usize = 32;
 
 #[derive(PartialEq, Eq)]
@@ -504,7 +507,8 @@ impl TestKeychainStore {
             .unwrap_or_else(|e| e.into_inner())
             .insert(self.account_prefix.as_deref().map(str::to_string));
         format!(
-            "{KEYCHAIN_SERVICE}/{}",
+            "{}/{}",
+            keychain_service(),
             account_path(self.account_prefix.as_ref(), account)
         )
     }
@@ -684,7 +688,7 @@ mod windows_credentials {
     //! `CredDeleteW`. `CredReadW` allocates a `CREDENTIALW`; we copy the blob
     //! out and free it with `CredFree` before returning.
 
-    use super::{AuthResult, AuthStoreError, KEYCHAIN_SERVICE};
+    use super::{AuthResult, AuthStoreError, keychain_service};
     use windows::Win32::Security::Credentials::{
         CRED_PERSIST_ENTERPRISE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW, CredWriteW,
     };
@@ -698,10 +702,10 @@ mod windows_credentials {
     /// `HRESULT` bit pattern (the literal exceeds `i32::MAX`).
     const HRESULT_ERROR_NOT_FOUND: HRESULT = HRESULT(0x80070490u32 as i32);
 
-    /// Build the UTF-16, NUL-terminated target name `io.beebeeb.app/<account>`.
+    /// Build the UTF-16, NUL-terminated target name `<credential_service>/<account>`.
     /// Returned `Vec<u16>` must outlive every pointer derived from it.
     fn target_name(account: &str) -> Vec<u16> {
-        let combined = format!("{KEYCHAIN_SERVICE}/{account}");
+        let combined = format!("{}/{account}", keychain_service());
         combined.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
@@ -821,7 +825,7 @@ mod tests;
 
 #[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
 mod macos_keychain {
-    use super::{AuthResult, AuthStoreError, KEYCHAIN_SERVICE};
+    use super::{AuthResult, AuthStoreError, keychain_service};
     use std::ffi::c_void;
     use std::ptr;
 
@@ -872,7 +876,7 @@ mod macos_keychain {
     }
 
     pub fn save(account: &str, secret: &[u8]) -> AuthResult<()> {
-        let service = KEYCHAIN_SERVICE.as_bytes();
+        let service = keychain_service().as_bytes();
         let account = account.as_bytes();
         let status = unsafe {
             SecKeychainAddGenericPassword(
@@ -916,7 +920,7 @@ mod macos_keychain {
     }
 
     pub fn load(account: &str) -> AuthResult<Option<Vec<u8>>> {
-        let service = KEYCHAIN_SERVICE.as_bytes();
+        let service = keychain_service().as_bytes();
         let account = account.as_bytes();
         let mut password_len: UInt32 = 0;
         let mut password_data: *mut c_void = ptr::null_mut();
@@ -959,7 +963,7 @@ mod macos_keychain {
     }
 
     fn find_item(account: &[u8]) -> AuthResult<Option<SecKeychainItemRef>> {
-        let service = KEYCHAIN_SERVICE.as_bytes();
+        let service = keychain_service().as_bytes();
         let mut item: SecKeychainItemRef = ptr::null_mut();
         let status = unsafe {
             SecKeychainFindGenericPassword(
