@@ -129,7 +129,7 @@ pub(crate) use beebeeb_engine::name_alias;
 pub(crate) use beebeeb_engine::held_queue;
 // v2: the one lower-case hex encoder and 32-byte decoder (office_v2 pins, share_v2 keys).
 pub(crate) use beebeeb_engine::hexfmt;
-mod macos_popover;
+// macos_popover: deleted (the NSPopover/NSStatusItem web-view window; cross-platform state moved to popover_data).
 mod popover_data;
 // Ruling R8 (spec 2026-10-06): the pure decision between a first sign-in, the same account signing in again and
 // an account switch. Windows keeps its refusal while a session exists and never asks.
@@ -148,8 +148,7 @@ pub(crate) use real_app::state_paths;
 pub(crate) use beebeeb_engine::sync_activity;
 #[allow(unused_imports)]
 pub(crate) use beebeeb_engine::transfer_progress;
-// 0.8.15: WebView2's browser shortcuts (print, reload, find, ...) are off in every window; no-op off Windows.
-mod webview_browser_keys;
+// 0.8.15: WebView2's browser shortcuts were turned off in every web-view window (deleted: v2-native has no web views).
 pub(crate) use beebeeb_engine::write_token;
 // Task 1683 slice 1: pure macOS-popover surface logic, compiled and tested on every
 // platform. Slices 2-6 wire the rest of it; until then only `policy` has callers,
@@ -293,9 +292,8 @@ pub use activity_conflict_commands::{SpeedtestLatency, SpeedtestResult};
 pub(crate) use activity_conflict_commands::{
     notify_conflict_impl, notify_quota_warning_impl, notify_sync_complete_impl, open_conflict_window_impl,
 };
-mod desktop_main_window;
+// desktop_main_window: deleted (web-view main window sizing; v2-native has no web views).
 mod update_window;
-use desktop_main_window::*;
 use update_window::*;
 mod app_run;
 pub use app_run::run;

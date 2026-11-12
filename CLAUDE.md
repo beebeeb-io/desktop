@@ -1,39 +1,32 @@
 # beebeeb-io/desktop
 
-Beebeeb desktop app (PUBLIC repo). **Tauri v2** shell around the web client (`repos/web`) plus the Rust sync engine from `core`; macOS, Windows, Linux.
-Entrypoints: `src/main.tsx` (desktop-owned frontend), `src-tauri/src/lib.rs` (`run()`, command handlers); `runner.rs`, `engine_bridge.rs`, `state_db.rs` own scheduling and sync.
-Capabilities per OS: `docs/CAPABILITIES.md`. Moved detail (release status, architecture, File Provider rules, macOS window rules, API client, sync engine, signing): `docs/agent-notes.md`.
-Pre-distillation CLAUDE.md verbatim and per-task details: `docs/runbook/desktop-task-history.md`.
+Beebeeb desktop app (PUBLIC repo). Full Rust on Windows and macOS (0.9.0); the React/Tauri web view was removed on `v2-native`.
+Entrypoints: `src-tauri/src/lib.rs` (`run()`, command handlers); `runner.rs`, `engine_bridge.rs`, `state_db.rs` own scheduling and sync.
+Native UI: `native/beebeeb-drive-rune/` (Rune). Capabilities per OS: `docs/CAPABILITIES.md`.
+Moved detail (release status, architecture, File Provider rules, macOS window rules, API client, sync engine, signing): `docs/agent-notes.md`.
 
 ## Commands
 
 ```sh
-bun install
-bun run tauri:dev                 # vite on :5173 + native window (loads repos/web on :5173 when it runs)
-bun run tauri:build               # .dmg / .msi / .deb / .AppImage
-bun test; bunx tsc --noEmit; bun run lint                    # frontend: the CI job
-cd src-tauri && cargo check --locked --all-targets           # Rust side without the frontend
+cd src-tauri && cargo check --locked --all-targets           # compile check
 cd src-tauri && cargo test --locked 2>&1 | tee /tmp/bb-desktop-test.log
+cd crates/beebeeb-engine && cargo test --locked 2>&1 | tee /tmp/bb-engine-test.log
+cd crates/beebeeb-updater && cargo test --locked --features net   # the native updater's rules
 python3 scripts/assert-cargo-test-counts.py --self-test      # the count guard CI uses (proves it rejects empty runs)
+scripts/check-engine-boundary.sh                              # engine must not depend on tauri
 scripts/release-macos-local.sh <VERSION> <CHANNEL>           # macOS release: local only, fail-closed (docs/RELEASING.md)
-cd crates/beebeeb-updater && cargo test --locked --features net   # the native updater's rules (truth line: test result: ok. N passed; 0 failed)
 ```
 
-Truth lines: `cargo test` → per-binary `test result: ok. N passed; 0 failed` (each library/integration binary must execute tests; only the
-`src/main.rs` harness and doctests may be empty); `bun test` → `N pass, 0 fail`; `tauri build … -- --locked` asserts the exit code and bundle files on
-disk (`ls` them, paste the listing). A Windows cross-check on Linux is not a native test pass. A release is verified by `RELEASE_NOTES.md` naming the
-version AND the workflow run green AND the manifest resolving: three counts, not one adjective. "Cannot be done here" is the normal state
-(macOS signing/notary, Windows installers, Finder/File Provider need hardware and credentials): route to `.claude/tasks/decisions/`; never fake a local folder root or a UI timeout to pass a gate.
-Quiet checks, from the workspace root: `make test-quiet REPO=desktop` and `make check-quiet REPO=desktop` print one PASS line per target; Rust stays the Legion gate's.
+Truth lines: `cargo test` -> per-binary `test result: ok. N passed; 0 failed` (each library/integration binary must execute tests; only the
+`src/main.rs` harness and doctests may be empty). A Windows cross-check on Linux is not a native test pass. A release is verified by
+`RELEASE_NOTES.md` naming the version AND the workflow run green AND the manifest resolving: three counts, not one adjective.
+Quiet checks, from the workspace root: `make test-quiet REPO=desktop` and `make check-quiet REPO=desktop` print one PASS line per target.
 
 ## Module map
 
-Module map: `MAP.md` (generated; `make map REPO=desktop`) — start here for "where does X live"; do not hand-edit.
-Task recipes: `docs/agents/recipes.md` — the four changes asked for most, each naming a real file and item (`bun scripts/outline/recipes.ts desktop` from the workspace root).
+Module map: `MAP.md` (generated; `make map REPO=desktop`) -- start here for "where does X live"; do not hand-edit.
 
 ```
-src/main.tsx, MacApp.tsx, PopoverApp.tsx   frontend roots: Windows/Linux windows, the Mac `main` window, the menu-bar popover
-src/*Model.ts, *Copy.ts, signInFlowStore.ts   pure view models and copy (macCopyGuard scans every person-facing string)
 src-tauri/src/lib.rs        run(): Builder + #[tauri::command] handlers (41k lines: outline it, never read it whole); capabilities/default.json = permissions
 src-tauri/src/runner.rs, engine_bridge/, state_db.rs   scheduling, bridge to core's sync engine, local state (state.db records the account owner)
 src-tauri/src/account_binding.rs, own_data_proof.rs    R10: local data belongs to ONE account; every engine start goes through spawn_bound_engine
@@ -43,9 +36,11 @@ src-tauri/src/keychain.rs, session_commands.rs, sign_out/, browser_login.rs, rea
 src-tauri/src/finder_setup/, finder_removal.rs, macos_file_provider.rs, macos_popover.rs, surfaces/   macOS Finder + window surfaces
 src-tauri/src/windows_cf/   Windows Cloud Files (CFAPI); linux_fuse/ = unmounted prototype
 BeebeebFileProvider/        macOS File Provider extension (Swift; ExtensionLog.swift is its only logger); built by scripts/build-fileprovider-extension.sh
-src-tauri/macos/FileProviderBridge.m   ObjC bridge; tests/ (bun tests incl. macCopyGuard, macNoInPlaceInstall); scripts/ (release, signing, count guards)
-docs/ (RELEASING.md, CAPABILITIES.md, IPC_PROTOCOL.md, specs/, plans/)   linux/, macos/, windows/ = pre-Tauri scaffolds kept for reference
-crates/beebeeb-updater/     the native updater (no Tauri, no UI): manifest, minisign check, policy, one State + step; `cargo test --locked` there
+src-tauri/macos/FileProviderBridge.m   ObjC bridge; scripts/ (release, signing, count guards)
+native/beebeeb-drive-rune/  the Rune-based native UI (0.9.0)
+crates/beebeeb-engine/      the sync engine (no tauri dep); tests/fixtures/ holds the JSON contract fixtures
+crates/beebeeb-updater/     the native updater (no Tauri, no UI): manifest, minisign check, policy, one State + step
+docs/ (RELEASING.md, CAPABILITIES.md, IPC_PROTOCOL.md, specs/, plans/)
 packaging/windows/          the native app's NSIS installer by plain makensis (README.md = the lead's Windows commands and the upgrade rehearsal)
 ```
 
@@ -60,7 +55,7 @@ packaging/windows/          the native app's NSIS installer by plain makensis (R
 - **Local data belongs to one account (R10):** every engine start goes through `spawn_bound_engine`; another account's data resets first (Windows refuses instead).
 - **Sign-out:** `clear_session_impl` ends every server session it removes; it keeps waiting Finder saves (task 1887) and refuses with `unsent_changes:` until the person was asked.
 - **A Mac never installs an update in place** (App Sandbox, task 2176): "Download update" only; no "Restart to update" on a Mac. Nothing a Mac compiles starts `/usr/bin/open`.
-- **No developer word in person-facing Mac copy** (`tests/macCopyGuard.test.ts`); every window opener calls `show_main_window(app, MainNav)`; closing `main` destroys it and the app keeps running.
+- **No developer word in person-facing Mac copy** (the bun copy guard was removed with the React frontend; the Rust source pins remain); every window opener calls `show_main_window(app, MainNav)`; closing `main` destroys it and the app keeps running.
 - **Direct S3 / downloads:** storage links go through the separate storage client only (no default headers, redirects; https); a storage failure is a status number, never reqwest's text (it holds the signed URL);
   a download pins `download_version` (`?object_version_id=`), never invent a pin; `BB_TRANSPORT=api` forces the API.
 - **Conflicts never silently drop a version** (default `KeepBoth`, loser renamed `file (Device, HH:MM).ext`); resumable uploads persist in `upload_resume`.
@@ -86,7 +81,7 @@ The rules whose breakage costs data, a key, a credential or a user. One line eac
 - Finder writes (`write_id`): record the completion first; the op is never abandoned/parked — it retries only local landing (one transaction).
 - A sync-folder create, truncate, replace, rename, copy, upload-from or delete by a name the folder did not report asks `name_alias::conflict_below` (core's `short_name_alias`) first, and takes its conflict path on a conflict: on Windows the name can reach another file through its 8.3 short name (task 2407).
 - A per-app name (bundle id, config/state folder, credential service, sync folder, Cloud Files provider name/GUID/class ids, backup device, daemon socket, app group, log folder) comes from the `EngineIdentity` the code is handed (`crates/beebeeb-engine/src/identity.rs`: `REAL` and `TEST`, nothing else): never a literal, never `identity::REAL` outside `src-tauri/src/real_app.rs` and the native `shell/identity.rs` (`identity_pin_tests.rs`). A native build is the TEST app unless built with `BEEBEEB_APP_IDENTIFIER=io.beebeeb.app`.
-- A storage location is a COUNTRY, never a city (Guus, 2026-10-19; `tests/noCityInCopy.test.ts` fails on a city name).
+- A storage location is a COUNTRY, never a city (Guus, 2026-10-19).
 - The Backups root is the row flagged `system_role = backups_root`, never a folder found by name; everything at or under it, and a move into it, is refused BEFORE a Windows delete/rename and by Finder's capabilities (core's `check_drive_mutation` on its `BackupPosition`; an item created in the tree is not refused), answered from the state DB only (never the network, never this process's own change); its files are read-only (Windows `FILE_ATTRIBUTE_READONLY`, which the engine's own changes lift through `read_only::Lifted` only; Finder without `allowsWriting`); a device's `.device.json` is never listed; `docs/CAPABILITIES.md` (LD-0113).
 
 ## How we work
@@ -97,7 +92,7 @@ New command: `#[tauri::command]` in `lib.rs`, register in `invoke_handler!`, per
 
 ## Design files
 
-`design/hifi/` holds THREE live design sources and nothing else: `macos-menubar-popover.html`, `macos-settings-dialogs.html` and `macos-two-surface.html`. They are desktop's only copies, the design source of truth that the macOS specs and plans cite, and tests read them (`tests/accountViewCopy.test.ts`, `finderSetupCopy.test.ts`, `macSettingsModel.test.ts`, `menuBarHintModel.test.ts`, `reauthInPlace.test.tsx`), so do not move or rename them. All other design files live in the workspace root `../../design/hifi/` — never copy them into this public repo (a snapshot once published a false external-audit claim; removed in task 1365). A code comment or README that names `design/hifi/hifi-*.jsx`, `styles.css` or `hifi-styles.css` means that workspace copy.
+`design/hifi/` holds THREE live design sources and nothing else: `macos-menubar-popover.html`, `macos-settings-dialogs.html` and `macos-two-surface.html`. They are desktop's only copies, the design source of truth that the macOS specs and plans cite. All other design files live in the workspace root `../../design/hifi/` -- never copy them into this public repo.
 
 ## Graphify and shared docs
 

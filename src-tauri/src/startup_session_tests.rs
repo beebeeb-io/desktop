@@ -393,13 +393,7 @@ fn the_fresh_profile_asks_the_server_every_time_and_touches_neither_the_cache_no
             "{touches}: it must read the server and nothing else:\n{command}"
         );
     }
-    // And Security is the one that asks it: its page does not read the cached command.
-    let security = include_str!("../../src/MacSecurity.tsx").replace("\r\n", "\n");
-    assert!(
-        security.contains("accountProfileFresh()"),
-        "Security reads the fresh profile"
-    );
-    assert!(!security.contains("accountProfile()"), "and never the cached one");
+    // The MacSecurity.tsx pin was removed: the React frontend is gone on the native line (0.9.0).
 }
 
 /// Fix round 1, item 8 (review M7): every refusal says what fits its path, each in its own sentence.

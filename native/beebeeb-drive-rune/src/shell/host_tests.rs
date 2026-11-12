@@ -107,8 +107,8 @@ fn every_state_without_a_frame_has_a_placeholder_and_only_files_is_built() {
         unbuilt += usize::from(!built);
     }
     assert_eq!(
-        unbuilt, 4,
-        "four sections wait for their lanes (Shared and Trash are built)"
+        unbuilt, 2,
+        "two sections wait for their lanes (Shared, Trash, Sync history and Available offline are built)"
     );
     for gate in [
         GateState::SignedOut,

@@ -44,7 +44,7 @@ const GUID_DIGITS: [&str; 6] = [
 ];
 
 /// Rule 1's allow-list: `(file, literals, why)`. Exact counts: a literal added to one of these files is seen too.
-const LITERALS_ALLOWED: [(&str, usize, &str); 13] = [
+const LITERALS_ALLOWED: [(&str, usize, &str); 14] = [
     (
         "crates/beebeeb-engine/src/identity.rs",
         24,
@@ -65,6 +65,11 @@ const LITERALS_ALLOWED: [(&str, usize, &str); 13] = [
         "native/beebeeb-drive-rune/src/shell/identity.rs",
         9,
         "the native shell's one identity file",
+    ),
+    (
+        "native/beebeeb-drive-rune/src/frames/backups/source.rs",
+        1,
+        "the FIXTURE source's stand-in for 'the sync folder is not a backup folder' (no disk, no engine): the engine source must ask the identity",
     ),
     (
         "native/beebeeb-drive-rune/src/frames/signin/setup/view.rs",

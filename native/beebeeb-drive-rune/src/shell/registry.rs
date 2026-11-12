@@ -146,6 +146,9 @@ pub const FRAMES: &[Frame] = &[
         on_key: Some(files_frame::on_key),
         feedback: FeedbackPolicy::Allowed,
     },
+    crate::frames::this_pc::SYNC_HISTORY,
+    crate::frames::this_pc::AVAILABLE_OFFLINE,
+    crate::frames::backups::FRAME,
     crate::frames::SHARED,
     crate::frames::TRASH,
     Frame {
