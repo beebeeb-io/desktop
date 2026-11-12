@@ -75,7 +75,7 @@ fn action(i: usize, name: &'static str, icon: &'static Icon) -> El {
         .child(
             kit::label(format!("action-{i}-label"), name, CAP, Color::WHITE)
                 .size(width, 36.0)
-                .pt(22.0)
+                .pt(21.0)
                 .align(Align::Center),
         )
         .child(kit::glyph(format!("action-{i}-icon"), icon, 18.0, Color::WHITE).absolute((width - 18.0) / 2.0, 0.0))

@@ -155,7 +155,8 @@ pub fn find_bar(ui: &Ui, t: &Theme) -> Option<El> {
     let find = ui.media.find.as_ref()?;
     let words = &find.edit.text;
     kit::note_text("find-text", FIND_KEY, words, type_::SEARCH, t.text);
-    let caret_x = rune::text::advance(words, type_::SEARCH);
+    // The caret stands one point after the words (`.kit-caret`).
+    let caret_x = rune::text::advance(words, type_::SEARCH) + 1.0;
     let field = row()
         .key("find-field")
         .role("search")
@@ -229,7 +230,7 @@ pub fn find_bar(ui: &Ui, t: &Theme) -> Option<El> {
             .role("toolbar")
             .label("Find")
             .w_full()
-            .h(40.5)
+            .h(40.0)
             .px(14.0)
             .gap(8.0)
             .center_y()
