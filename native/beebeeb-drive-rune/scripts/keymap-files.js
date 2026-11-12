@@ -39,8 +39,7 @@ if (crumbs) {
 }
 
 // ---- An empty folder (`.kit-empty`) ----
-// Not in Photos: its empty state is keyed in keymap-photos.js (`ph-*`); DW-0116's golden holds none of these.
-const empty = sectionOn === 'Photos' ? null : q('.mk-body .kit-empty');
+const empty = q('.mk-body .kit-empty');
 if (empty) {
   api.box('empty', empty);
   api.box('empty-tile', q('.kit-tile', empty));
@@ -48,7 +47,7 @@ if (empty) {
   api.text('empty-title', q('.t-title', empty));
   api.text('empty-text', q('.t-sub', empty));
   const add = q('button', empty);
-  if (add) { // an empty state without a button (Photos' "No photos yet", DW-0116)
+  if (add) { // an empty state may have no button
     api.box('empty-add', add);
     api.icon('empty-add-icon', q('svg', add));
     api.text('empty-add-label', q('span', add));
