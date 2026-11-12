@@ -2,6 +2,11 @@
  * header does the DLL loading, and every call goes through the version-matched vtable structs, so
  * Rust never guesses a struct offset.
  * C++ on purpose: on Windows the 26.2 init header uses reinterpret_cast, so it does not compile as C. */
+#include <cassert>
+#include <climits>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #define LOK_USE_UNSTABLE_API
 #include <LibreOfficeKit/LibreOfficeKitInit.h>
 #include <LibreOfficeKit/LibreOfficeKit.h>
