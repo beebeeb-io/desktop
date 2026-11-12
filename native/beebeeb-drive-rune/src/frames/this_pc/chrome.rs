@@ -284,7 +284,7 @@ pub fn title(name: &str, sub: String, t: &Theme) -> El {
 /// How the toolbar's Files controls show in a section that has no use for them.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FilesControls {
-    /// Drawn as in Files (the board's Sync history), and inert: see `inert`.
+    /// Drawn as in Files (the board's Sync history), and inert (`ui::toolbar::Bar::inert`).
     AsFiles,
     /// The view switch at 45 % and the panel button off (the board's Available offline).
     Dimmed,
@@ -408,7 +408,7 @@ pub fn toolbar(
             slot: Some(row().key("toolbar-slot").center_y().gap(8.0).children(slot)),
             slot_sep: false,
             // The board draws these and the section has nothing for them: there to be seen,
-            // disabled to assistive technology, no focus (`inert`). `Decision` in PR 289's body.
+            // disabled to assistive technology, no focus (`Bar::inert`).
             view: if dimmed { tb::View::NotHere } else { tb::View::List },
             on_view: None,
             sort: tb::Sort::Idle,

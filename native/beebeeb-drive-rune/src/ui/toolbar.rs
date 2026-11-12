@@ -186,12 +186,12 @@ pub struct Bar {
     pub trailing_inset: f32,
 }
 
-/// Open in File Explorer where the window shows no folder of its own (Shared, Photos, Trash): the
-/// Beebeeb location, through the shell's action, as the b's menu opens it (DW-1180). A refusal is
-/// logged, as the menu's is.
+/// Open in File Explorer where the window shows no folder of its own (Shared, Photos, Trash, This
+/// PC): the Beebeeb location, asked of the same source Files asks for its folder (`None` is the
+/// location itself). A refusal is logged: only the Files window has a toast to say it in.
 pub fn open_beebeeb_location(s: &mut State, _: &mut rune::Tx) {
-    if let Err(error) = s.shell.actions.open_in_file_explorer() {
-        eprintln!("beebeeb shell: the toolbar: Open in File Explorer did not run ({error:?})");
+    if let Err(why) = s.actions.source.open_in_file_explorer(None) {
+        eprintln!("beebeeb: the toolbar's Open in File Explorer did not run ({why:?})");
     }
 }
 

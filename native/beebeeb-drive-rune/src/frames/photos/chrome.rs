@@ -8,7 +8,6 @@ use rune::{Color, El, Icon, TextStyle, col, el, row, text_input};
 
 use super::Intent;
 use crate::State;
-use crate::theme::icons as shared;
 use crate::theme::tokens::{Theme, radius, type_};
 use crate::ui::toolbar as tb;
 use crate::ui::{caption, kit, sidebar};
