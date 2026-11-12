@@ -253,14 +253,19 @@ fn command(c: usize, r: usize, name: &str, home: &str, t: &Theme) -> El {
                         .wrap()
                         .shrink(),
                 )
-                .child(
+                .child(if home.is_empty() {
+                    // No home (Free up space): the board's empty box, nothing wide or tall, on the baseline.
+                    kit::label(format!("{key}-home"), home, type_sc::HOME, t.text_secondary)
+                        .size(0.0, 0.0)
+                        .mt(12.5)
+                } else {
                     kit::label(format!("{key}-home"), home, type_sc::HOME, t.text_secondary)
                         .wrap()
                         .shrink()
                         .align(Align::End)
                         // The line box is 16.5 tall: the smaller words hang half a point lower.
-                        .mt(0.5),
-                ),
+                        .mt(0.5)
+                }),
         )
         // `border-bottom: .5px solid var(--kit-hair)`.
         .child(el().key(format!("{key}-line")).w_full().h(kit::HAIR).fill(t.separator))
