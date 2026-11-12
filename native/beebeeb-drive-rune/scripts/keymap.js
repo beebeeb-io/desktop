@@ -170,6 +170,116 @@ if (foot) {
   api.text('status-details', q('.ml-auto', foot));
 }
 
+// ==== Lane f-shared-search-trash: Shared, Search and Trash (src/frames/{shared,search,trash}) ====
+// Everything below is keyed by class, per occurrence in document order, and only outside the
+// details pane (`.mk-det`): what the pane draws is keyed above, by the Files lane, under its own
+// names. `scripts/check-keymap-scope.sh` proves a Files capture exports the same keys as before.
+// Not in a settings frame (`.mk-set`) and not in an account window (`.au-mac`): those lanes key their
+// own lists, buttons, pills and menus (below, and in keymap-signin.js) under their own names. Without
+// this scope a recapture of DW-0701 exported 4 keys more and DW-A02 8 more (integration I2).
+if (!q('.mk-set') && !q('.au-mac')) {
+const inDet = (el) => !!el.closest('.mk-det');
+// A button (`.kit-btn`): `btn-<its words>`, `-label`, `-icon`.
+const btnSeen = {};
+qa('.kit-btn').filter((b) => !inDet(b)).forEach((b) => {
+  // The same words twice in one frame (New request in the toolbar and in the empty state): `-2` for the second.
+  const base = `btn-${slug(b.textContent)}`;
+  btnSeen[base] = (btnSeen[base] || 0) + 1;
+  const k = btnSeen[base] > 1 ? `${base}-${btnSeen[base]}` : base;
+  api.box(k, b);
+  api.icon(`${k}-icon`, q('svg', b));
+  api.text(`${k}-label`, q('span', b));
+});
+// A worded segmented control (`.kit-seg`): `seg-<n>`, each tab `seg-<n>-<its words>` and `-label`.
+qa('.kit-seg').filter((seg) => !inDet(seg)).forEach((seg, n) => {
+  api.box(`seg-${n}`, seg);
+  qa(':scope > span', seg).forEach((tab) => {
+    const k = `seg-${n}-${slug(tab.textContent)}`;
+    api.box(k, tab, { on: tab.classList.contains('on') });
+    api.textNode(`${k}-label`, tab);
+  });
+});
+if (tb) {
+  const seps = qa('.mk-sep', tb);
+  if (seps.length > 1) api.box('toolbar-sep-2', seps[1]);
+}
+// A section label (`.t-label`) outside a card: `label-<its words>`.
+// (the words themselves: the element's box includes its padding)
+qa('.mk-body .t-label').forEach((l) => { if (!l.closest('.kit-card')) api.textNode(`label-${slug(l.textContent)}`, l); });
+// The invitation card (`.kit-card`).
+qa('.mk-body .kit-card').forEach((card, n) => {
+  const k = `card-${n}`;
+  api.box(k, card);
+  api.box(`${k}-tile`, q('.mk-ftile', card));
+  api.icon(`${k}-icon`, q('.mk-ftile svg', card));
+  api.text(`${k}-label`, q('.t-label', card));
+  api.text(`${k}-head`, q('.t-head', card));
+  api.text(`${k}-sub`, q('.t-sub', card));
+});
+// A row's person (the From column): avatar and name.
+qa('.mk-rows > .mk-row').forEach((row, i) => {
+  const from = q(':scope > .min-w-0 > .flex', row);
+  if (!from) return;
+  api.text(`row-${i}-from-avatar`, q('.kit-avatar', from));
+  api.text(`row-${i}-from`, q('.mk-cell', from));
+});
+// A grouped list (`.kit-list`): `list-<n>`, its items `item-<n>-<m>` and their parts.
+qa('.kit-list').filter((list) => !inDet(list)).forEach((list, n) => {
+  api.text(`list-${n}-title`, q(':scope > .kit-list-title', list));
+  api.text(`list-${n}-foot`, q(':scope > .kit-list-foot', list));
+  api.box(`list-${n}`, q(':scope > .kit-list-body', list));
+  qa('.kit-item', list).forEach((item, m) => {
+    const k = `item-${n}-${m}`;
+    api.box(k, item, { selected: item.classList.contains('is-selected') });
+    const tile = q('.mk-ftile', item);
+    if (tile) { api.box(`${k}-tile`, tile, { thumb: tile.classList.contains('mk-ph') }); api.icon(`${k}-tile-icon`, q('svg', tile)); }
+    api.icon(`${k}-icon`, q('.kit-item-icon svg', item));
+    const lead = q(':scope > .kit-avatar', item);
+    if (lead) api.text(`${k}-person`, lead);
+    api.text(`${k}-title`, q('.kit-item-title', item));
+    api.text(`${k}-sub`, q('.kit-item-sub', item));
+    api.text(`${k}-value`, q('.kit-item-value', item));
+    qa('.kit-avatars .kit-avatar', item).forEach((a, j) => api.text(`${k}-avatar-${j}`, a));
+    const pill = q('.kit-pill', item);
+    if (pill) { api.box(`${k}-pill`, pill); api.box(`${k}-pill-dot`, q('.kit-dot', pill)); api.textNode(`${k}-pill-label`, pill); }
+    const link = q('.mk-link', item);
+    if (link) { api.icon(`${k}-link-icon`, q('svg', link)); api.textNode(`${k}-link`, link); }
+    api.icon(`${k}-more`, q(':scope > .mk-mac svg', item));
+    api.icon(`${k}-chev`, q('.kit-item-chev svg', item));
+    const pop = q('.mk-pop2', item);
+    if (pop) { api.box(`${k}-pop`, pop); api.textNode(`${k}-pop-label`, pop); api.icon(`${k}-pop-caret`, q('svg', pop)); }
+  });
+});
+// An empty state (`.kit-empty`).
+const empty = q('.kit-empty');
+if (empty) {
+  api.box('empty-tile', q('.kit-tile', empty));
+  api.icon('empty-icon', q('.kit-tile svg', empty));
+  api.text('empty-title', q('.t-title', empty));
+  api.text('empty-sub', q('.t-sub', empty));
+}
+// A context menu (`.wn-menu`): `menu`, items `mi-<its words>` (+ `-label`, `-sc`, `-sc-icon`), separators `msep-<n>`.
+qa('.wn-menu').forEach((menu) => {
+  api.box('menu', menu);
+  qa('.wn-mi', menu).forEach((mi) => {
+    const k = `mi-${slug(q('.lb', mi).textContent)}`;
+    api.box(k, mi, { hot: mi.classList.contains('is-hot') });
+    api.text(`${k}-label`, q('.lb', mi));
+    const sc = q('.sc', mi);
+    if (sc && q('svg', sc)) api.icon(`${k}-sc-icon`, q('svg', sc)); else if (sc) api.text(`${k}-sc`, sc);
+  });
+  qa('.wn-msep', menu).forEach((sep, n) => api.box(`msep-${n}`, sep));
+});
+// The emptying note (`.mk-banner`) and its bar.
+const mkBanner = q('.mk-banner');
+if (mkBanner) {
+  api.box('banner', mkBanner);
+  api.text('banner-text', q(':scope > span', mkBanner));
+  api.box('banner-bar', q('.mk-bar', mkBanner));
+  api.box('banner-bar-fill', q('.mk-bar i', mkBanner));
+}
+} // not a settings frame, not an account window
+
 // ---- Settings, inside the window (`.mk-set`: lane f-settings, src/frames/settings) ----
 // One scheme for every pane: lists and their rows by order (`list-<L>`, `item-<L>-<I>`), every
 // button, banner, card and menu by order. A pane's own drawings (charts, trees) have their own lines.

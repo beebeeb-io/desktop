@@ -146,6 +146,8 @@ pub const FRAMES: &[Frame] = &[
         on_key: Some(files_frame::on_key),
         feedback: FeedbackPolicy::Allowed,
     },
+    crate::frames::SHARED,
+    crate::frames::TRASH,
     Frame {
         group: FrameGroup::Settings(SettingsPane::General),
         view: crate::frames::settings::view,
