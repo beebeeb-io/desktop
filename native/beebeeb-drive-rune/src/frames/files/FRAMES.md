@@ -1,9 +1,12 @@
-# Files frames: the lane's checklist (f-files-actions)
+# Files frames: the lanes' checklist (f-files-actions, then f-files-rest)
 
 Windows frames of the FRAMES.md groups "Files: the full Drive in the window", "Browse files" and
 "Folders, Backups and uploads", plus the list's states drawn under "Global elements on Windows".
 Status is `built` (gated light and dark, both truth lines at 0 failing) or `not built`.
 State after the review delta (2026-11-11): 11 built here (plus DW-0401, built before), 38 not built.
+State after lane f-files-rest (2026-11-12, PR 305): 16 built (2 of them with a gate not at 0), 34 not built.
+Not on the board, added on the owner's request (PR 305): Free up space (file menu, details panel) and the
+toolbar's Open in File Explorer; they move four keys of every Files frame until the board draws them.
 
 | Frame | Group | What it is | Status |
 | --- | --- | --- | --- |
@@ -16,16 +19,16 @@ State after the review delta (2026-11-11): 11 built here (plus DW-0401, built be
 | `DW-0407` | Files | Share a file with a link, or invite someone. | not built as a frame (the dialog is the Shared lane's); the entry point works: Share… emits `Intent::Frame("DW-0407")` |
 | `DW-0408` | Files | Look at a file without leaving Beebeeb: Preview in the window; Open hands it to its app. | not built; Space and Preview emit `Intent::Frame("DW-0408")` |
 | `DW-0408b` | Files | Preview on a file Windows cannot preview: say so, instead of a blank panel. | not built |
-| `DW-0409` | Files | Move the selection to another folder. | not built; Move… emits `Intent::Frame("DW-0409")` |
-| `DW-0410` | Files | Rename where the name is, as File Explorer does. | not built: golden captured; F2 and Rename emit `Intent::Frame("DW-0410")` |
-| `DW-0410b` | Files | A name that is already used in the folder: say so and keep the old name. | not built: golden captured |
+| `DW-0409` | Files | Move the selection to another folder. | built (lane f-files-rest, PR 305: light and dark at 0 failing on all six). Move… opens it; `FilesSource::move_to`. Not built: dragging a row onto a folder or a sidebar item |
+| `DW-0410` | Files | Rename where the name is, as File Explorer does. | built, gate NOT at 0 (PR 305): F2 and Rename work in the row through `FilesSource::rename`; the board's caret takes 3.5 pt of the line, a text field's takes none, so `.pdf` stands 3.5 pt further left (geometry 1, pixels 5) |
+| `DW-0410b` | Files | A name that is already used in the folder: say so and keep the old name. | built, gate NOT at 0 (PR 305): the error style and the tip are drawn and work; same caret cause as DW-0410, and the board's status line says "4 on this PC" with five such rows (text 1) |
 | `DW-0411` | Files | Everything about one file, the same rows as the iPhone's Details. | not built; Alt+Enter and Details emit `Intent::Frame("DW-0411")` |
 | `DW-0412` | Files | Keep a file on this PC, also without a connection. | not built: golden captured; the action works (state, toast "Keeping on this PC"), the row's progress bar and "Syncing" are not drawn |
 | `DW-0413` | Files | Go back to an earlier version without losing the current one. | not built; Version history… emits `Intent::Frame("DW-0413")` |
 | `DW-0414` | Files | Everything that adds to the folder you're in: the one amber control. | built (light and dark: 0 failing on all six) |
 | `DW-0415` | Files | Pick files from this PC to upload to the folder you're in. | not built; Ctrl+O and Upload files… emit `Intent::Frame("DW-0415")` |
 | `DW-0416` | Files | Pick photos to upload: the file picker's Photos section, which needs no Photos access. | not built |
-| `DW-0417` | Files | Make a folder in the folder you're in. | not built: golden captured; Ctrl+Shift+N and New folder emit `Intent::Frame("DW-0417")` |
+| `DW-0417` | Files | Make a folder in the folder you're in. | built (PR 305: light at 0 failing on all six; dark pixels 2: the caret's rounded rim, and row-8's edge under the dialog's title). Ctrl+Shift+N and New folder open it; `FilesSource::new_folder`, then the folder is shown (DW-1106) |
 | `DW-0480` | Files | Upload a whole folder, with everything in it, keeping its structure. | not built; Upload a folder… emits `Intent::Frame("DW-0480")` |
 | `DW-0481` | Files | Drag files from File Explorer into the list to upload them. | not built as a frame (drop highlight, drag badge); a drop works: `Intent::Upload(folder, files)` |
 | `DW-0420` | Folders | The same view one level deeper. | not built: golden captured; the fixture lists the folder's 7 rows and the path title is drawn; the four photo thumbnails and the video mark are not |

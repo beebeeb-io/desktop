@@ -77,8 +77,9 @@ fn menu_layer(s: &State, t: &Theme) -> Option<El> {
         menu::menu("menu", name, width, &entries, open.hot, t, pick, hover, close).on_key(super::keys::on_key);
     Some(match open.kind {
         MenuKind::File => surface.absolute(open.at.0, open.at.1),
-        // `.wn-menu` of Sort: 226 pt from the window's right edge; of New: 42 pt.
-        MenuKind::Sort => layer(226.0, surface),
+        // `.wn-menu` of Sort: under its button, 226 pt from the window's right edge on the board,
+        // and 36 more with the Open in File Explorer button beside it; of New: 42 pt.
+        MenuKind::Sort => layer(226.0 + 36.0, surface),
         MenuKind::New => layer(42.0, surface),
     })
 }

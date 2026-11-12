@@ -423,3 +423,86 @@ fn the_four_scenes_set_what_their_frames_draw() {
         assert!(find(&rt, key).is_some(), "{frame} draws {key}");
     }
 }
+
+// ---- Free up space, and Open in File Explorer (owner requests, 2026-11-12) ----
+
+#[test]
+fn free_up_space_is_offered_where_there_is_a_copy_on_this_pc_and_makes_it_online_only() {
+    let (mut rt, calls, _) = wired();
+    // Contract draft.pdf is online only: nothing to free, so the menu and the panel leave it out.
+    right_click(&mut rt, "row-6-date");
+    assert!(!menu_labels(&rt).iter().any(|l| l == "Free up space"));
+    press(&mut rt, Key::Escape, NONE);
+    assert!(find(&rt, "free-up-box").is_none());
+
+    // Harbour.heic is downloaded: the menu offers it, after Make available offline.
+    click(&mut rt, "row-7-date");
+    right_click(&mut rt, "row-7-date");
+    let labels = menu_labels(&rt);
+    let at = labels.iter().position(|l| l == "Free up space").expect("offered");
+    assert_eq!(labels[at - 1], "Make available offline");
+    assert_eq!(labels[at + 1], "Show in File Explorer");
+    let item = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.role == "menuitem" && e.label.as_deref() == Some("Free up space"))
+        .and_then(|e| e.key)
+        .unwrap();
+    click(&mut rt, &item);
+    assert_eq!(asked(&calls), [Call::FreeUpSpace(ids(&["harbour"]))]);
+    assert_eq!(rt.state.listing.items[7].pc_status.as_deref(), Some("online_only"));
+    assert_eq!(rt.state.live_toast(), Some(Toast::FreedUp));
+
+    // A kept folder: the panel's button, with the keyboard.
+    click(&mut rt, "row-1-date");
+    let button = info(&rt, "free-up-box");
+    assert_eq!(
+        (button.role, button.label.as_deref(), button.focusable),
+        ("button", Some("Free up space"), true)
+    );
+    rt.update(|_, tx| tx.focus("free-up-box", true));
+    settle(&mut rt);
+    press(&mut rt, Key::Text(" ".into()), NONE);
+    assert_eq!(asked(&calls).last(), Some(&Call::FreeUpSpace(ids(&["f-docs"]))));
+    assert_eq!(rt.state.listing.items[1].pc_status.as_deref(), Some("online_only"));
+    assert!(find(&rt, "free-up-box").is_none(), "nothing left to free");
+}
+
+#[test]
+fn free_up_space_says_a_failure_and_changes_nothing() {
+    let (mut rt, _, fails) = wired();
+    fails.lock().unwrap().push((Action::FreeUpSpace, ActionError::Failed));
+    click(&mut rt, "row-7-date");
+    click(&mut rt, "free-up-box");
+    assert_eq!(rt.state.listing.items[7].pc_status.as_deref(), Some("on_this_pc"));
+    assert_eq!(
+        rt.state.live_toast(),
+        Some(Toast::Failed(Action::FreeUpSpace, ActionError::Failed))
+    );
+}
+
+#[test]
+fn the_toolbars_last_icon_button_opens_the_folder_shown_in_file_explorer() {
+    let (mut rt, calls, _) = wired();
+    let button = info(&rt, "open-explorer");
+    assert_eq!(
+        (button.role, button.label.as_deref(), button.focusable),
+        ("button", Some("Open in File Explorer"), true)
+    );
+    // After the details-panel button, before the rule and New.
+    let x = |key: &str| info(&rt, key).rect[0];
+    assert!(x("panel-toggle-btn") < x("open-explorer") && x("open-explorer") < x("toolbar-sep"));
+    click(&mut rt, "open-explorer");
+    assert_eq!(asked(&calls), [Call::OpenInFileExplorer(None)]);
+    // Inside a folder it is that folder; with the keyboard.
+    rt.update(|s, _| s.open_folder(Some("f-lisbon".into())));
+    settle(&mut rt);
+    rt.update(|_, tx| tx.focus("open-explorer", true));
+    settle(&mut rt);
+    // Space presses a focused button (Return does only under `Cx::web_focus`: wave-1-open.md, Rune limitation 5).
+    press(&mut rt, Key::Text(" ".into()), NONE);
+    assert_eq!(
+        asked(&calls).last(),
+        Some(&Call::OpenInFileExplorer(Some("f-lisbon".into())))
+    );
+}
