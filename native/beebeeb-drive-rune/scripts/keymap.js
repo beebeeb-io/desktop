@@ -194,7 +194,8 @@ if (groupOf === 'shared-trash' || groupOf === 'this-pc') {
 const inDet = (el) => !!el.closest('.mk-det');
 // A button (`.kit-btn`): `btn-<its words>`, `-label`, `-icon`.
 const btnSeen = {};
-qa('.kit-btn').filter((b) => !inDet(b)).forEach((b) => {
+// Not the first-time guide's card (`.mk-coach`): its buttons are `coach-skip` / `coach-next` (keymap-signin-setup.js).
+qa('.kit-btn').filter((b) => !inDet(b) && !b.closest('.mk-coach')).forEach((b) => {
   // The same words twice in one frame (New request in the toolbar and in the empty state): `-2` for the second.
   const base = `btn-${slug(b.textContent)}`;
   btnSeen[base] = (btnSeen[base] || 0) + 1;
