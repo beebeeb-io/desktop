@@ -36,14 +36,15 @@ pub fn panel(file: &OpenFile, t: &Theme) -> El {
     }
     let mut meta = col().key("detail-meta").role("list").gap(6.0);
     for (label, value, mono) in &d.facts {
-        meta = meta.child(detail_pane::meta_row(fact_key(label), label, value, *mono, t));
+        meta = meta.child(fact_row(fact_key(label), label, value, *mono, t));
     }
     let state = if d.offline {
         "Available offline"
     } else {
         "Online only now"
     };
-    let sub = if d.size.is_empty() {
+    // A file that is not kept on this PC takes no room on it: no size after "Online only now".
+    let sub = if d.size.is_empty() || !d.offline {
         state.to_string()
     } else {
         format!("{state} \u{00B7} {}", d.size)
@@ -84,6 +85,31 @@ pub fn panel(file: &OpenFile, t: &Theme) -> El {
                     .on_press(intent(Intent::VersionHistory)),
             ),
     )
+}
+
+/// The width of a fact's value: the panel's 251.5 less the label (92) and the gap (8).
+const VALUE_W: f32 = 151.5;
+
+/// One fact. A value wider than its column wraps onto a second line (the board's Exposure and
+/// Preview of a RAW), where `ui::detail_pane::meta_row` would cut it short.
+fn fact_row(key: &'static str, label: &'static str, value: &str, mono: bool, t: &Theme) -> El {
+    let text_style = if mono { type_::META_MONO } else { type_::BODY };
+    if rune::text::advance(value, text_style) <= VALUE_W {
+        return detail_pane::meta_row(key, label, value, mono, t);
+    }
+    row()
+        .key(format!("meta-row-{key}"))
+        .role("listitem")
+        .label(format!("{label}: {value}"))
+        .w_full()
+        .gap(8.0)
+        .child(kit::label(key, label, type_::BODY, t.text_tertiary).w(92.0))
+        .child(
+            kit::label(format!("{key}-value"), value, text_style, t.text)
+                .grow(1.0)
+                .min_w(0.0)
+                .wrap(),
+        )
 }
 
 /// The gate key of a fact, from the board's label ("Changed on" is `detail-changed-on`).

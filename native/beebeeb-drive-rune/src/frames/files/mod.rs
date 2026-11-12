@@ -549,6 +549,10 @@ impl State {
         if files.is_empty() {
             return false;
         }
+        // One file of a type the window shows itself: its viewer (`frames::viewers`, the router).
+        if matches!(&files[..], [only] if crate::frames::viewers::open_item(self, only)) {
+            return true;
+        }
         self.forget_undo();
         if let Err(why) = self.actions.source.open(&files) {
             self.failed(Action::Open, why, tx);
