@@ -2,7 +2,7 @@
 
 Source: `design/desktop-v2/frames.json`, Windows tab, the three settings groups (50 frames). Account-related groups are a later wave.
 Status after lane f-settings-rest (2026-11-12): 28 of 50 built, 23 of them with every gate line at 0 failing in both themes, 5 with the red lines named; 22 not built (3 belong to lane f-account's panes, 19 are in the pull request's hand-over).
-Status after the Bandwidth lane (2026-11-12): Bandwidth's 6 and the speed test's 4 are built (`bandwidth.rs`, `bandwidth_data.rs`): 5 of the 10 with every gate line at 0 failing in both themes, 5 with the red lines named below.
+Status after the Bandwidth lane (2026-11-12): Bandwidth's 6 and the speed test's 4 are built (`bandwidth.rs`, `bandwidth_data.rs`): 9 of the 10 with every gate line at 0 failing in both themes, 1 (`DW-0785d`, dark) with its red line named below. The speed test's steps are reached from Run test: the board fixture moves on with the window's clock.
 
 ## Settings, inside the window (13)
 
@@ -36,12 +36,12 @@ Status after the Bandwidth lane (2026-11-12): Bandwidth's 6 and the speed test's
 
 | Frame | What it is | Status |
 | --- | --- | --- |
-| `DW-0785` | See what Beebeeb is sending and receiving now and over the last 20 hours, each device's sync, the speed limits and a speed test, in one place. | built; light: 2 pixel lines red (`set-main`, `card-1`) and 3 frame tiles; dark: 1 pixel line and 1 tile: the Upload swatch in the chart's legend, about 1 pt left of the board's |
-| `DW-0785b` | Nothing is moving: say so instead of showing zeros. | built (the head of the pane; the app draws the whole pane); light: 2 pixel lines red and 2 frame tiles; dark: 1 tile: the Upload swatch in the chart's legend, about 1 pt left of the board's |
-| `DW-0785c` | A limit is on: say that the speed is held back on purpose, and by how much. | built; light: 2 pixel lines red and 2 frame tiles; dark: 1 tile: the Upload swatch in the chart's legend, about 1 pt left of the board's |
+| `DW-0785` | See what Beebeeb is sending and receiving now and over the last 20 hours, each device's sync, the speed limits and a speed test, in one place. | built (light and dark: 0 failing on all six lines) |
+| `DW-0785b` | Nothing is moving: say so instead of showing zeros. | built (the head of the pane; the app draws the whole pane; light and dark: 0 failing on all six lines) |
+| `DW-0785c` | A limit is on: say that the speed is held back on purpose, and by how much. | built (light and dark: 0 failing on all six lines) |
 | `DW-0785d` | Choose how fast Beebeeb may upload from this PC. | built (the pane from its devices down); light: 0 failing on all six lines; dark: 1 pixel line red (`item-1-2-switch edge 13 > 9`: the switch is under the open menu) |
 | `DW-0785e` | Right after sign-in there is no history yet: say when it starts. | built (the head of the pane; light and dark: 0 failing on all six lines) |
-| `DW-0785f` | Sync on metered connections is off and the PC is on one: say that sync waits, why, and how to change it. | built (the head and the Limits); light: 2 pixel lines red and 3 frame tiles; dark: 1 pixel line and 1 tile: the Upload swatch in the chart's legend, about 1 pt left of the board's |
+| `DW-0785f` | Sync on metered connections is off and the PC is on one: say that sync waits, why, and how to change it. | built (the head and the Limits; light and dark: 0 failing on all six lines) |
 | `DW-0791` | The account's recent alerts inside the app, for when a notification was missed or dismissed. | built (light and dark: 0 failing on all six lines; the pill dots are vector circles since lane f-settings-rest) |
 | `DW-0791b` | Nothing to show. | built (light and dark: 0 failing on all six lines) |
 | `DW-0786` | The test runs: show which step it is on, so a long wait reads as progress. | built (the pane from its devices down; light and dark: 0 failing on all six lines) |
