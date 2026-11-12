@@ -278,7 +278,9 @@ impl SettingsUi {
     /// Whether `pane` draws from a source that answers for it (Drive's own panes ask `drive`).
     pub fn wired(&self, pane: Pane) -> bool {
         match pane {
-            Pane::Storage | Pane::Insights | Pane::Sync => self.drive.wired(pane),
+            Pane::Storage | Pane::Insights | Pane::Sync | Pane::Bandwidth | Pane::Diagnostics | Pane::Previews => {
+                self.drive.wired(pane)
+            }
             _ => self.source.wired(pane),
         }
     }
