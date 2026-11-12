@@ -5,6 +5,7 @@ pub mod button;
 pub mod caption;
 pub mod detail_pane;
 pub mod empty;
+pub mod field;
 pub mod file_list;
 pub mod gate;
 pub mod keys;

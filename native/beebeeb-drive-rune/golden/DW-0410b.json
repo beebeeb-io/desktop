@@ -3038,6 +3038,102 @@
     255
    ],
    "tracking": 0
+  },
+  "rename-field": {
+   "kind": "box",
+   "x": 266,
+   "y": 328,
+   "w": 121.51,
+   "h": 22,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ]
+  },
+  "rename-text": {
+   "kind": "text",
+   "x": 266,
+   "y": 328,
+   "w": 121.51,
+   "h": 22,
+   "text": "Contract draft.pdf",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 400,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "rename-caret": {
+   "kind": "box",
+   "x": 356.53,
+   "y": 333.5,
+   "w": 1.5,
+   "h": 14,
+   "bg": [
+    153,
+    87,
+    0,
+    255
+   ]
+  },
+  "tip": {
+   "kind": "box",
+   "x": 262,
+   "y": 356,
+   "w": 442.72,
+   "h": 25,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ]
+  },
+  "tip-icon": {
+   "kind": "icon",
+   "x": 270,
+   "y": 362,
+   "w": 13,
+   "h": 13,
+   "icon": [
+    "M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17z",
+    "M12 8v4.6",
+    "M12 15.9v.1"
+   ],
+   "filled": false,
+   "color": [
+    176,
+    10,
+    29,
+    255
+   ]
+  },
+  "tip-text": {
+   "kind": "text",
+   "x": 289,
+   "y": 361.5,
+   "w": 407.72,
+   "h": 14,
+   "text": "There's already a file called Contract draft.pdf here. Choose another name.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11.5,
+   "weight": 400,
+   "color": [
+    176,
+    10,
+    29,
+    255
+   ],
+   "tracking": 0
   }
  },
  "theme": "light"

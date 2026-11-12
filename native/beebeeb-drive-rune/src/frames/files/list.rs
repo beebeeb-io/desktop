@@ -70,7 +70,10 @@ pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
                     move |s: &State, i| match s.listing.items.get(i) {
                         Some(item) => {
                             let date = s.actions.source.changed_label(item);
-                            let mut row = file_row(i, item, s.is_selected(i), date, &t);
+                            // The row being renamed shows its name as a field (DW-0410).
+                            let renaming = s.actions.rename.as_ref().is_some_and(|r| r.row == i && r.id == item.id);
+                            let field = renaming.then(|| super::rename::name_field(s, &t));
+                            let mut row = file_row(i, item, s.is_selected(i), date, field, &t);
                             if item.is_folder {
                                 // "Drop on a folder: uploads into that folder"; Backups refuses (`State::upload`).
                                 let id = item.id.clone();
@@ -200,7 +203,15 @@ pub fn column_headers(sort: super::Sort, t: &Theme) -> El {
 }
 
 /// One row (`.mk-row`). `date`: the source's own words for the date, else the list's.
-pub fn file_row(i: usize, item: &DriveItem, selected: bool, date: Option<String>, t: &Theme) -> El {
+/// `renaming`: the field that stands where the name is while it is being typed (DW-0410).
+pub fn file_row(
+    i: usize,
+    item: &DriveItem,
+    selected: bool,
+    date: Option<String>,
+    renaming: Option<El>,
+    t: &Theme,
+) -> El {
     let k = format!("row-{i}");
     let date = date.unwrap_or_else(|| format_date(&item.modified_at));
     let meta = if selected { t.text_secondary } else { t.text_tertiary };
@@ -213,11 +224,12 @@ pub fn file_row(i: usize, item: &DriveItem, selected: bool, date: Option<String>
         .center_y()
         .gap(8.0)
         .child(file_tile(&k, item, t))
-        .child(
-            kit::label(format!("{k}-name"), item.name.clone(), type_::LIST_ITEM, t.text)
+        .child(match renaming {
+            Some(field) => field,
+            None => kit::label(format!("{k}-name"), item.name.clone(), type_::LIST_ITEM, t.text)
                 .truncate()
                 .min_w(0.0),
-        );
+        });
     if item.is_protected {
         name = name.child(
             kit::glyph(format!("{k}-lock"), &icons::LOCK, 11.0, t.text_tertiary)

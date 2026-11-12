@@ -48,6 +48,8 @@ pub enum ActionError {
     Unavailable,
     /// It was tried and did not work.
     Failed,
+    /// The folder already has an item with this name (DW-0410b): the source saw it, the window did not.
+    NameTaken,
 }
 
 /// What a person asked for, in the words the failure message uses (DW-0109: "Couldn't rename.").
@@ -62,8 +64,16 @@ pub enum Action {
     Open,
     ShowInFileExplorer,
     Upload,
-    /// Asked in its own frame (DW-0410); here for the message's words and Try again.
+    /// Rename in the row (DW-0410).
     Rename,
+    /// New folder (DW-0417).
+    NewFolder,
+    /// Move to another folder (DW-0409).
+    Move,
+    /// Free up space: the copy on this PC goes, the item stays in Beebeeb.
+    FreeUpSpace,
+    /// Open the folder shown in File Explorer (the toolbar's button).
+    OpenInFileExplorer,
 }
 
 impl Action {
@@ -80,6 +90,10 @@ impl Action {
             Action::ShowInFileExplorer => "show in File Explorer",
             Action::Upload => "upload",
             Action::Rename => "rename",
+            Action::NewFolder => "make the folder",
+            Action::Move => "move",
+            Action::FreeUpSpace => "free up space",
+            Action::OpenInFileExplorer => "open File Explorer",
         }
     }
 }
@@ -98,6 +112,16 @@ pub enum Call {
     Upload(Option<String>, Vec<std::path::PathBuf>),
     /// The folder with this id (`None`: the root) is now sorted like this.
     Sort(Option<String>, super::Sort),
+    /// A folder with this name, in the folder with this id (`None`: the root).
+    NewFolder(Option<String>, String),
+    /// The item with this id gets this name.
+    Rename(String, String),
+    /// These go into the folder with this id (`None`: the root).
+    Move(Vec<String>, Option<String>),
+    /// The copies of these on this PC go; the items stay in Beebeeb.
+    FreeUpSpace(Vec<String>),
+    /// File Explorer opens on the folder with this id (`None`: the root of the sync folder).
+    OpenInFileExplorer(Option<String>),
 }
 
 /// What an accepted action changed since the window last asked.
@@ -105,6 +129,8 @@ pub enum Call {
 pub enum Change {
     /// A copy now stands next to the item with the id `after` (DW-0406).
     Copied { after: String, item: Box<DriveItem> },
+    /// A folder was made (DW-0417); `item.parent_id` says where.
+    Made { item: Box<DriveItem> },
     /// An accepted action did not work after all.
     Failed(Action, ActionError),
 }
@@ -163,6 +189,19 @@ pub trait FilesSource: Send + 'static {
     fn show_in_file_explorer(&mut self, items: &[DriveItem]) -> Result<(), ActionError>;
     /// Upload these files of this PC into the folder with this id (`None`: the root).
     fn upload(&mut self, folder: Option<&str>, files: &[std::path::PathBuf]) -> Result<(), ActionError>;
+    /// Make a folder with this name in the folder with this id (`None`: the root). It arrives
+    /// through [`FilesSource::changes`] (`Change::Made`). The name is encrypted on this PC first.
+    fn new_folder(&mut self, parent: Option<&str>, name: &str) -> Result<(), ActionError>;
+    /// Give the item this name (already checked by `names::check` against the rows shown).
+    fn rename(&mut self, item: &DriveItem, name: &str) -> Result<(), ActionError>;
+    /// Move these into the folder with this id (`None`: the root). `NameTaken`: the folder has
+    /// one of the names, and nothing was moved.
+    fn move_to(&mut self, items: &[DriveItem], folder: Option<&str>) -> Result<(), ActionError>;
+    /// Remove the copies of these from this PC; they stay in Beebeeb and download again when opened.
+    fn free_up_space(&mut self, items: &[DriveItem]) -> Result<(), ActionError>;
+    /// Open the folder with this id (`None`: the root) in File Explorer. The engine maps the id
+    /// to its path under the sync folder.
+    fn open_in_file_explorer(&mut self, folder: Option<&str>) -> Result<(), ActionError>;
     /// What accepted actions changed since the last call, oldest first.
     fn changes(&mut self) -> Vec<Change>;
 }
@@ -305,6 +344,21 @@ impl FilesSource for NoEngine {
     fn upload(&mut self, _: Option<&str>, _: &[std::path::PathBuf]) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
     }
+    fn new_folder(&mut self, _: Option<&str>, _: &str) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    fn rename(&mut self, _: &DriveItem, _: &str) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    fn move_to(&mut self, _: &[DriveItem], _: Option<&str>) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    fn free_up_space(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    fn open_in_file_explorer(&mut self, _: Option<&str>) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
     fn changes(&mut self) -> Vec<Change> {
         Vec::new()
     }
@@ -326,6 +380,26 @@ pub struct FilesFixture {
     pub fail_later: Vec<(Action, ActionError)>,
     sorts: std::collections::HashMap<Option<String>, super::Sort>,
     changes: Vec<Change>,
+    /// What New folder, Rename and Move changed in the board's folders: shared with the
+    /// [`BoardDrive`] that lists them, so a change is still there when the folder is shown again.
+    pub edits: SharedEdits,
+}
+
+/// What the fixture's actions changed in the board's folders.
+#[derive(Default)]
+pub struct Edits {
+    /// Folders made in this session.
+    made: Vec<DriveItem>,
+    /// New names, by id.
+    names: std::collections::HashMap<String, String>,
+    /// New parents, by id (`None`: the root).
+    parents: std::collections::HashMap<String, Option<String>>,
+}
+
+pub type SharedEdits = std::sync::Arc<std::sync::Mutex<Edits>>;
+
+fn edits_of(shared: &SharedEdits) -> std::sync::MutexGuard<'_, Edits> {
+    shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The fixture's protected folder: the board's Backups row.
@@ -346,7 +420,14 @@ impl FilesFixture {
         }
         let changes = matches!(
             action,
-            Action::Trash | Action::Duplicate | Action::KeepOffline | Action::RemoveOffline | Action::CopyLink
+            Action::Trash
+                | Action::Duplicate
+                | Action::KeepOffline
+                | Action::RemoveOffline
+                | Action::CopyLink
+                | Action::Rename
+                | Action::Move
+                | Action::FreeUpSpace
         );
         if changes && items.iter().any(|i| i.is_protected) {
             return Err(ActionError::Protected);
@@ -408,7 +489,8 @@ impl FilesSource for FilesFixture {
     }
 
     fn changed_label(&self, item: &DriveItem) -> Option<String> {
-        self.copies.contains(&item.id).then(|| "Just now".to_string())
+        let made = edits_of(&self.edits).made.iter().any(|made| made.id == item.id);
+        (made || self.copies.contains(&item.id)).then(|| "Just now".to_string())
     }
 
     fn can_add(&self, folder: Option<&str>) -> bool {
@@ -509,10 +591,88 @@ impl FilesSource for FilesFixture {
         Ok(())
     }
 
+    fn new_folder(&mut self, parent: Option<&str>, name: &str) -> Result<(), ActionError> {
+        self.refuse(Action::NewFolder, &[])?;
+        if !self.can_add(parent) {
+            return Err(ActionError::Protected);
+        }
+        self.record(Call::NewFolder(parent.map(str::to_string), name.to_string()));
+        if let Some(&(action, why)) = self.fail_later.iter().find(|(a, _)| *a == Action::NewFolder) {
+            self.changes.push(Change::Failed(action, why));
+            return Ok(());
+        }
+        let mut edits = edits_of(&self.edits);
+        let item = DriveItem {
+            // The first folder made is the one DW-1106 shows.
+            id: match edits.made.len() {
+                0 => NEW_FOLDER_ID.to_string(),
+                n => format!("{NEW_FOLDER_ID}-{}", n + 1),
+            },
+            parent_id: parent.map(str::to_string),
+            name: name.to_string(),
+            is_folder: true,
+            size: None,
+            child_count: Some(0),
+            modified_at: NOW.into(),
+            mime: None,
+            has_thumbnail: false,
+            shared_type: None,
+            shared_badges: Vec::new(),
+            pc_status: Some("on_this_pc".into()),
+            is_protected: false,
+        };
+        edits.made.push(item.clone());
+        drop(edits);
+        self.changes.push(Change::Made { item: Box::new(item) });
+        Ok(())
+    }
+
+    fn rename(&mut self, item: &DriveItem, name: &str) -> Result<(), ActionError> {
+        self.refuse(Action::Rename, std::slice::from_ref(item))?;
+        self.record(Call::Rename(item.id.clone(), name.to_string()));
+        let mut edits = edits_of(&self.edits);
+        if let Some(made) = edits.made.iter_mut().find(|made| made.id == item.id) {
+            made.name = name.to_string();
+        }
+        edits.names.insert(item.id.clone(), name.to_string());
+        Ok(())
+    }
+
+    fn move_to(&mut self, items: &[DriveItem], folder: Option<&str>) -> Result<(), ActionError> {
+        self.refuse(Action::Move, items)?;
+        if !self.can_add(folder) {
+            return Err(ActionError::Protected);
+        }
+        self.record(Call::Move(ids(items), folder.map(str::to_string)));
+        let mut edits = edits_of(&self.edits);
+        for item in items {
+            if let Some(made) = edits.made.iter_mut().find(|made| made.id == item.id) {
+                made.parent_id = folder.map(str::to_string);
+            }
+            edits.parents.insert(item.id.clone(), folder.map(str::to_string));
+        }
+        Ok(())
+    }
+
+    fn free_up_space(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
+        self.refuse(Action::FreeUpSpace, items)?;
+        self.record(Call::FreeUpSpace(ids(items)));
+        Ok(())
+    }
+
+    fn open_in_file_explorer(&mut self, folder: Option<&str>) -> Result<(), ActionError> {
+        self.refuse(Action::OpenInFileExplorer, &[])?;
+        self.record(Call::OpenInFileExplorer(folder.map(str::to_string)));
+        Ok(())
+    }
+
     fn changes(&mut self) -> Vec<Change> {
         std::mem::take(&mut self.changes)
     }
 }
+
+/// When the fixture's session is: a folder made now reads "Just now" (`changed_label`).
+const NOW: &str = "2026-10-28T12:00:00Z";
 
 /// The board's folders: `BoardFixtureSource` holds the root (DW-0401); this honours the folder id.
 /// Lisbon trip holds the seven rows of DW-0420, "New folder" nothing (DW-1106). A folder the board
@@ -521,6 +681,8 @@ impl FilesSource for FilesFixture {
 /// An id that is no folder: `NotFound`.
 pub struct BoardDrive {
     root: crate::source::BoardFixtureSource,
+    /// What the fixture's actions changed (`FilesFixture::edits`).
+    edits: SharedEdits,
 }
 
 /// The folder DW-0417 makes and DW-1106 shows.
@@ -530,6 +692,26 @@ impl BoardDrive {
     pub fn new() -> Self {
         BoardDrive {
             root: crate::source::BoardFixtureSource::new(),
+            edits: SharedEdits::default(),
+        }
+    }
+
+    /// The board's folders, showing what this fixture's New folder, Rename and Move change.
+    pub fn sharing(edits: &SharedEdits) -> Self {
+        BoardDrive {
+            root: crate::source::BoardFixtureSource::new(),
+            edits: edits.clone(),
+        }
+    }
+
+    /// The board's rows of one folder, before any change: the root's, Lisbon trip's.
+    fn drawn(&self, folder: Option<&str>) -> Option<Vec<DriveItem>> {
+        match folder {
+            None => crate::source::DriveSource::list(&self.root, None)
+                .ok()
+                .map(|listing| listing.items),
+            Some("f-lisbon") => Some(lisbon_trip("f-lisbon")),
+            _ => None,
         }
     }
 }
@@ -599,30 +781,68 @@ impl crate::source::DriveSource for BoardDrive {
     fn list(&self, folder_id: Option<&str>) -> Result<crate::source::Listing, crate::source::SourceError> {
         use crate::source::{Crumb, Listing, SourceError};
         let root = self.root.list(None)?;
-        let Some(id) = folder_id else { return Ok(root) };
-        let name = if id == NEW_FOLDER_ID {
-            "New folder".to_string()
-        } else {
-            root.items
+        let edits = edits_of(&self.edits);
+        // Every item this fixture knows, where the board drew it.
+        let mut known: Vec<DriveItem> = root.items.clone();
+        known.extend(lisbon_trip("f-lisbon"));
+        known.extend(edits.made.iter().cloned());
+        for item in &mut known {
+            if let Some(name) = edits.names.get(&item.id) {
+                item.name = name.clone();
+            }
+            if let Some(parent) = edits.parents.get(&item.id) {
+                item.parent_id = parent.clone();
+            }
+        }
+        let made = |id: &str| edits.made.iter().any(|item| item.id == id);
+        let folder = match folder_id {
+            None => root.folder.clone(),
+            // The folder DW-1106 shows, before anything made it.
+            Some(NEW_FOLDER_ID) if !made(NEW_FOLDER_ID) => Crumb {
+                id: Some(NEW_FOLDER_ID.to_string()),
+                name: "New folder".to_string(),
+            },
+            Some(id) => known
                 .iter()
                 .find(|i| i.id == id && i.is_folder)
-                .map(|i| i.name.clone())
-                .ok_or(SourceError::NotFound)?
+                .map(|i| Crumb {
+                    id: Some(id.to_string()),
+                    name: i.name.clone(),
+                })
+                .ok_or(SourceError::NotFound)?,
         };
-        let folder = Crumb {
-            id: Some(id.to_string()),
-            name,
+        // A folder the board never opens has things in it that the board does not draw: it
+        // cannot be read here, whatever was moved into it. A folder made here starts empty.
+        let drawn = match folder_id {
+            Some(id) if id == NEW_FOLDER_ID || made(id) => true,
+            other => self.drawn(other).is_some(),
         };
-        let items = match id {
-            "f-lisbon" => lisbon_trip(id),
-            NEW_FOLDER_ID => Vec::new(),
-            _ => return Err(SourceError::Unreadable),
-        };
-        Ok(Listing {
-            path: vec![root.folder.clone(), folder.clone()],
-            folder,
-            items,
-        })
+        if !drawn {
+            return Err(SourceError::Unreadable);
+        }
+        // The board's own order: its rows where it drew them, then what came in.
+        let here = |item: &&DriveItem| item.parent_id.as_deref() == folder_id;
+        let items: Vec<DriveItem> = known.iter().filter(here).cloned().collect();
+        // The way up: every folder above this one.
+        let mut path = vec![folder.clone()];
+        let mut at = folder_id.map(str::to_string);
+        while let Some(id) = at {
+            let parent = known.iter().find(|i| i.id == id).and_then(|i| i.parent_id.clone());
+            path.push(match &parent {
+                None => root.folder.clone(),
+                Some(up) => Crumb {
+                    id: Some(up.clone()),
+                    name: known
+                        .iter()
+                        .find(|i| &i.id == up)
+                        .map(|i| i.name.clone())
+                        .unwrap_or_default(),
+                },
+            });
+            at = parent;
+        }
+        path.reverse();
+        Ok(Listing { path, folder, items })
     }
 
     fn storage(&self) -> Option<crate::source::StorageSummary> {

@@ -1,7 +1,7 @@
 //! The Files window with what the Files frames add: several selected rows, the menus, the toasts,
 //! the selected item's own details.
 
-use super::{Intent, MenuKind, Toast, details, list, menus};
+use super::{Intent, MenuKind, Toast, details, dialogs, list, menus, rename};
 use super::{sidebar, toolbar};
 use crate::State;
 use crate::theme::tokens::{self, Theme};
@@ -106,6 +106,13 @@ fn toast_of(kind: Toast, t: &Theme) -> El {
             t,
         ),
         Toast::LinkCopied => toast::toast(&icons_files::CHECK, toast::Tone::Done, "Link copied", None, t),
+        Toast::FreedUp => toast::toast(
+            &icons_files::CHECK,
+            toast::Tone::Done,
+            "Freed up space on this PC",
+            None,
+            t,
+        ),
         Toast::Failed(action, why) => toast::toast(
             &icons_files::ALERT,
             toast::Tone::Failed,
@@ -256,8 +263,17 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .fill(t.bg)
         .child(caption::caption_bar(&t, cx))
         .child(body);
-    match menu_layer(s, &t) {
-        Some(layer) => el().key("files-root").w_full().h_full().child(window).child(layer),
-        None => window,
+    // What lies over the window: the open menu, the reason a name cannot be given, a dialog.
+    let layers: Vec<El> = [menu_layer(s, &t), rename::tip_layer(s, &t), dialogs::layer(s, &t)]
+        .into_iter()
+        .flatten()
+        .collect();
+    if layers.is_empty() {
+        return window;
     }
+    let mut root = el().key("files-root").w_full().h_full().child(window);
+    for layer in layers {
+        root = root.child(layer);
+    }
+    root
 }
