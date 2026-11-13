@@ -149,9 +149,11 @@ fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() 
     // Shared, Photos: unwired on a real engine, never sample data. Trash reads the engine
     // (`engine_host::trash`): this handle has no session in memory, so it draws the signed-out state, no row.
     // This PC reads the engine (`engine_host::this_pc`) but is held off until its chrome is honest.
-    assert!(
-        !state.frames.shared.source.wired(),
-        "Shared is unwired on a real engine"
+    // Shared reads the engine (`engine_host::shared`): no session in memory here, so no row.
+    assert!(state.frames.shared.source.wired(), "Shared is on the engine");
+    assert_eq!(
+        state.frames.shared.source.loaded(),
+        crate::frames::shared::source::Loaded::SignedOut
     );
     assert_eq!(
         (
@@ -588,7 +590,7 @@ fn snap_state() -> crate::shell::state::State {
 #[test]
 fn shared_shows_0_fixture_rows_on_a_live_engine() {
     let s = engine_state();
-    assert!(!s.frames.shared.source.wired());
+    assert!(s.frames.shared.source.wired());
     assert_eq!(s.frames.shared.source.with_me().len(), 0);
     assert_eq!(s.frames.shared.source.people_shares().len(), 0);
     assert_eq!(s.frames.shared.source.invitations().len(), 0);

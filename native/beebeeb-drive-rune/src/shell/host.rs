@@ -436,6 +436,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= crate::frames::settings::poll(s, tx);
     // Trash: a gate or account change drops its names; the section opening reads the list; answers come in.
     changed |= crate::frames::trash::poll(s, tx);
+    // Shared: the same rule (`frames::shared::poll`).
+    changed |= crate::frames::shared::poll(s, tx);
     // This PC's answers and refusals (`frames::this_pc::poll`).
     changed |= crate::frames::this_pc::poll(s, tx);
     // The speed test's steps (Settings, Bandwidth).
