@@ -444,6 +444,8 @@ pub fn open<C: CredentialStores>(
         api_base: api_base.origin().to_owned(),
     };
     let engine = Arc::new(Engine::open(identity, config, host, stores)?);
+    // Explorer's "Free up space" command asks this handle, and is Disabled unless it proves the signed-in owner.
+    engine.serve_explorer_command();
     let gate = engine.restore();
     Ok((Opened { engine, identity, gate }, messages))
 }
