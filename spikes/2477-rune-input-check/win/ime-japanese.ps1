@@ -10,7 +10,8 @@ $ErrorActionPreference = 'Stop'
 $action = if ($env:IME_JAPANESE) { $env:IME_JAPANESE } else { 'status' }
 function Show([string]$When) {
   [Console]::Out.WriteLine("$When language list:")
-  foreach ($l in @(Get-WinUserLanguageList)) { [Console]::Out.WriteLine("  $($l.LanguageTag) tips=$($l.InputMethodTips -join ',')") }
+  $now = Get-WinUserLanguageList   # a List: held in a variable first, so that foreach walks its items
+  foreach ($l in $now) { [Console]::Out.WriteLine("  $($l.LanguageTag) tips=$($l.InputMethodTips -join ',')") }
   [Console]::Out.WriteLine("  default input method override: '$((Get-WinDefaultInputMethodOverride).InputMethodTip)'")
 }
 Show 'before'
