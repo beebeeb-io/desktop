@@ -4,7 +4,19 @@
 
 use std::path::PathBuf;
 
+/// Task 2488: `pub` only with the `direct-state-db` feature (the Tauri shell). The native shell reaches the local
+/// state through `app::Engine::local_state`.
+#[cfg(any(test, feature = "direct-state-db"))]
 pub fn state_db_for_config(
+    identity: &'static crate::identity::EngineIdentity,
+    cfg: &crate::config::DesktopConfig,
+) -> Result<Option<crate::state_db::StateDb>, String> {
+    state_db_for_config_unbound(identity, cfg)
+}
+
+/// The state database for a configuration, opened WITHOUT asking whose it is: for the engine's own device-level
+/// reads (`backup::stop`) and the Tauri shell's door above.
+pub(crate) fn state_db_for_config_unbound(
     identity: &'static crate::identity::EngineIdentity,
     cfg: &crate::config::DesktopConfig,
 ) -> Result<Option<crate::state_db::StateDb>, String> {
@@ -144,4 +156,14 @@ pub fn is_disposable_cache_path(identity: &crate::identity::EngineIdentity, path
         .into_iter()
         .filter_map(|root| root.canonicalize().ok())
         .any(|root| canonical_path.starts_with(root))
+}
+
+/// A development build's read-only look at one state database file the person names (`--db` of the native app).
+/// It asks nobody whose the file is: it is the developer's own file, on their own command line. Compiled into debug
+/// builds and builds with the `dev-viewer` feature only; a shipped build has no such door (task 2488).
+#[cfg(any(debug_assertions, test, feature = "dev-viewer"))]
+pub fn open_for_dev_viewer(
+    path: &std::path::Path,
+) -> Result<crate::state_db::StateDb, crate::state_db::ReadOnlyOpenError> {
+    crate::state_db::StateDb::open_read_only(path)
 }

@@ -237,7 +237,7 @@ impl IStorageProviderUICommand_Impl for FreeUpSpaceCommand_Impl {
         Ok(StorageProviderUICommandState::Enabled)
     }
     fn Invoke(&self) -> WinResult<()> {
-        match crate::free_up_space_blocking(self.this.app) {
+        match crate::free_up_space::free_up_space_unbound(self.this.app) {
             Ok(result) => {
                 tracing::info!(
                     bytes_freed = result.bytes_freed,

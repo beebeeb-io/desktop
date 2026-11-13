@@ -16,13 +16,13 @@
 //! into the element tree, not into a label, not into a log line, not into the feedback mode's
 //! capture. The engine events that cross to the UI use the redacting `Debug`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 
 use zeroize::Zeroizing;
 
-use beebeeb_engine::app::{CredentialStores, Engine};
+use beebeeb_engine::app::{CredentialStores, Engine, LocalStateRefused};
 use beebeeb_engine::drive_v2::DriveError;
 use beebeeb_engine::drive_v2::model::{self, Sort as EngineSort};
 use beebeeb_engine::engine_status::EngineStatusView;
@@ -32,6 +32,7 @@ use beebeeb_engine::identity::EngineIdentity;
 use beebeeb_engine::signin::gate::{
     GateState as EngineGate, NextAfterSignIn as EngineNext, SignInProblem as EngineProblem,
 };
+use beebeeb_engine::state_db::StateDb;
 use beebeeb_engine::sync_view::Start;
 
 use crate::frames::files::source::{
@@ -516,15 +517,25 @@ impl<C: CredentialStores> EngineDriveSource<C> {
     }
 }
 
+/// What the window says for a local state that is not handed out: local data that is not provably this account's
+/// has its own words; everything else (signed out, locked, nothing synced yet, unreadable) is "cannot be read".
+/// Never an empty folder.
+fn source_error(refused: LocalStateRefused) -> SourceError {
+    if refused.not_this_accounts() {
+        SourceError::NotThisAccounts
+    } else {
+        SourceError::Unreadable
+    }
+}
+
 impl<C: CredentialStores> DriveSource for EngineDriveSource<C> {
     /// The whole folder, name ascending, with its crumbs from the root. Before the first sync there is no local
     /// state: that, a folder that is gone and a database that cannot be read are errors, never an empty folder.
     fn list(&self, folder_id: Option<&str>) -> Result<Listing, SourceError> {
-        let db = self.engine.state_db().map_err(|_| SourceError::Unreadable)?;
-        let read = || -> Result<Listing, DriveError> {
-            let (rows, _total) = model::children_of(&db, folder_id, EngineSort::default(), 0, usize::MAX)?;
-            let folder = model::resolve_folder(&db, folder_id)?;
-            let path: Vec<_> = model::crumbs(&db, folder.as_ref())?
+        let read = |db: &StateDb| -> Result<Listing, DriveError> {
+            let (rows, _total) = model::children_of(db, folder_id, EngineSort::default(), 0, usize::MAX)?;
+            let folder = model::resolve_folder(db, folder_id)?;
+            let path: Vec<_> = model::crumbs(db, folder.as_ref())?
                 .into_iter()
                 .map(crate::source_engine::crumb)
                 .collect();
@@ -535,10 +546,16 @@ impl<C: CredentialStores> DriveSource for EngineDriveSource<C> {
                 items: rows.into_iter().map(crate::source_engine::item).collect(),
             })
         };
-        read().map_err(|error| match error {
-            DriveError::NotFound => SourceError::NotFound,
-            _ => SourceError::Unreadable,
-        })
+        // The account-bound handle (task 2488): a state that is not the signed-in account's answers nothing, and
+        // an answer read across a lock or a sign-out is dropped.
+        self.engine
+            .local_state()
+            .and_then(|state| state.with(read))
+            .map_err(source_error)?
+            .map_err(|error| match error {
+                DriveError::NotFound => SourceError::NotFound,
+                _ => SourceError::Unreadable,
+            })
     }
 
     fn storage(&self) -> Option<StorageSummary> {
@@ -582,16 +599,19 @@ fn map_drive_err(e: DriveError) -> ActionError {
 }
 
 impl<C: CredentialStores> EngineFilesSource<C> {
-    /// The sync root and state database, both required for any local file operation. Refused when
-    /// sync is not running for this handle (`Engine::is_syncing`): changing a local folder that
-    /// nothing syncs is not an honest operation.
-    fn local(&self) -> Result<(beebeeb_engine::state_db::StateDb, PathBuf), ActionError> {
+    /// A local file operation, on the signed-in account's local state (the account-bound handle, task 2488) and
+    /// the sync root: both are required. Refused when sync is not running for this handle (`Engine::is_syncing`):
+    /// changing a local folder that nothing syncs is not an honest operation. Refused too when the session
+    /// changed while the operation ran.
+    fn local<T>(&self, operation: impl FnOnce(&StateDb, &Path) -> Result<T, ActionError>) -> Result<T, ActionError> {
         if !self.engine.is_syncing() {
             return Err(ActionError::Unavailable);
         }
         let sync_root = self.engine.sync_root().map_err(|_| ActionError::Unavailable)?;
-        let db = self.engine.state_db().map_err(|_| ActionError::Unavailable)?;
-        Ok((db, sync_root))
+        self.engine
+            .local_state_for_changes()
+            .and_then(|state| state.with(|db| operation(db, &sync_root)))
+            .map_err(|_| ActionError::Unavailable)?
     }
 }
 
@@ -648,11 +668,17 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         // Validate against the state database when it is available (a best-effort guard against
         // trashing an uploading or protected item); when the database is not available, the
         // server's own checks are the backstop.
-        if let Ok(db) = self.engine.state_db() {
-            for item in items {
-                if let Ok(entry) = file_ops::resolve(&db, &item.id) {
-                    file_ops::check_trashable(&db, &entry).map_err(map_drive_err)?;
+        if let Ok(state) = self.engine.local_state() {
+            let checked = state.with(|db| {
+                for item in items {
+                    if let Ok(entry) = file_ops::resolve(db, &item.id) {
+                        file_ops::check_trashable(db, &entry).map_err(map_drive_err)?;
+                    }
                 }
+                Ok(())
+            });
+            if let Ok(refused @ Err(_)) = checked {
+                return refused;
             }
         }
         let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
@@ -665,12 +691,13 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     }
 
     fn duplicate(&mut self, items: &[DriveItem], _taken: &[&str]) -> Result<(), ActionError> {
-        let (db, sync_root) = self.local()?;
-        for item in items {
-            let entry = file_ops::resolve(&db, &item.id).map_err(map_drive_err)?;
-            file_ops::duplicate(&db, &sync_root, &entry).map_err(map_drive_err)?;
-        }
-        Ok(())
+        self.local(|db, sync_root| {
+            for item in items {
+                let entry = file_ops::resolve(db, &item.id).map_err(map_drive_err)?;
+                file_ops::duplicate(db, sync_root, &entry).map_err(map_drive_err)?;
+            }
+            Ok(())
+        })
     }
 
     fn keep_offline(&mut self, _: &[DriveItem], _: bool) -> Result<(), ActionError> {
@@ -682,59 +709,69 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     }
 
     fn open(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
-        let (db, sync_root) = self.local()?;
-        for item in items {
-            let entry = file_ops::resolve(&db, &item.id).map_err(map_drive_err)?;
-            let path = file_ops::item_path(&sync_root, &entry).map_err(map_drive_err)?;
-            if !entry.is_dir() && file_ops::is_dangerous_executable(&path) {
-                return Err(ActionError::Failed);
+        // The paths are resolved under the handle; the OS is asked after it answered.
+        let paths = self.local(|db, sync_root| {
+            let mut paths = Vec::with_capacity(items.len());
+            for item in items {
+                let entry = file_ops::resolve(db, &item.id).map_err(map_drive_err)?;
+                let path = file_ops::item_path(sync_root, &entry).map_err(map_drive_err)?;
+                if !entry.is_dir() && file_ops::is_dangerous_executable(&path) {
+                    return Err(ActionError::Failed);
+                }
+                paths.push(path);
             }
-            open_path(&path)?;
-        }
-        Ok(())
+            Ok(paths)
+        })?;
+        paths.iter().try_for_each(|path| open_path(path))
     }
 
     fn show_in_file_explorer(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
-        let (db, sync_root) = self.local()?;
-        for item in items {
-            let entry = file_ops::resolve(&db, &item.id).map_err(map_drive_err)?;
-            let path = file_ops::item_path(&sync_root, &entry).map_err(map_drive_err)?;
-            reveal_in_file_explorer(&path)?;
-        }
-        Ok(())
+        let paths = self.local(|db, sync_root| {
+            let mut paths = Vec::with_capacity(items.len());
+            for item in items {
+                let entry = file_ops::resolve(db, &item.id).map_err(map_drive_err)?;
+                paths.push(file_ops::item_path(sync_root, &entry).map_err(map_drive_err)?);
+            }
+            Ok(paths)
+        })?;
+        paths.iter().try_for_each(|path| reveal_in_file_explorer(path))
     }
 
     fn upload(&mut self, folder: Option<&str>, files: &[std::path::PathBuf]) -> Result<(), ActionError> {
-        let (db, sync_root) = self.local()?;
-        let parent = file_ops::resolve_folder(&db, folder).map_err(map_drive_err)?;
-        file_ops::copy_in(&db, &sync_root, parent.as_ref(), files).map_err(map_drive_err)?;
-        Ok(())
+        self.local(|db, sync_root| {
+            let parent = file_ops::resolve_folder(db, folder).map_err(map_drive_err)?;
+            file_ops::copy_in(db, sync_root, parent.as_ref(), files).map_err(map_drive_err)?;
+            Ok(())
+        })
     }
 
     fn new_folder(&mut self, parent: Option<&str>, name: &str) -> Result<(), ActionError> {
-        let (db, sync_root) = self.local()?;
-        let parent_entry = file_ops::resolve_folder(&db, parent).map_err(map_drive_err)?;
-        file_ops::create_folder(&db, &sync_root, parent_entry.as_ref(), name).map_err(map_drive_err)?;
-        Ok(())
+        self.local(|db, sync_root| {
+            let parent_entry = file_ops::resolve_folder(db, parent).map_err(map_drive_err)?;
+            file_ops::create_folder(db, sync_root, parent_entry.as_ref(), name).map_err(map_drive_err)?;
+            Ok(())
+        })
     }
 
     fn rename(&mut self, item: &DriveItem, name: &str) -> Result<(), ActionError> {
-        let (db, sync_root) = self.local()?;
-        let entry = file_ops::resolve(&db, &item.id).map_err(map_drive_err)?;
-        file_ops::rename(&db, &sync_root, &entry, name).map_err(map_drive_err)?;
-        Ok(())
+        self.local(|db, sync_root| {
+            let entry = file_ops::resolve(db, &item.id).map_err(map_drive_err)?;
+            file_ops::rename(db, sync_root, &entry, name).map_err(map_drive_err)?;
+            Ok(())
+        })
     }
 
     fn move_to(&mut self, items: &[DriveItem], folder: Option<&str>) -> Result<(), ActionError> {
-        let (db, sync_root) = self.local()?;
-        let entries: Vec<_> = items
-            .iter()
-            .map(|i| file_ops::resolve(&db, &i.id))
-            .collect::<Result<_, _>>()
-            .map_err(map_drive_err)?;
-        let target = file_ops::resolve_folder(&db, folder).map_err(map_drive_err)?;
-        file_ops::move_items(&db, &sync_root, &entries, target.as_ref()).map_err(map_drive_err)?;
-        Ok(())
+        self.local(|db, sync_root| {
+            let entries: Vec<_> = items
+                .iter()
+                .map(|i| file_ops::resolve(db, &i.id))
+                .collect::<Result<_, _>>()
+                .map_err(map_drive_err)?;
+            let target = file_ops::resolve_folder(db, folder).map_err(map_drive_err)?;
+            file_ops::move_items(db, sync_root, &entries, target.as_ref()).map_err(map_drive_err)?;
+            Ok(())
+        })
     }
 
     fn free_up_space(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
@@ -742,14 +779,13 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     }
 
     fn open_in_file_explorer(&mut self, folder: Option<&str>) -> Result<(), ActionError> {
-        let (db, sync_root) = self.local()?;
-        let path = match folder {
+        let path = self.local(|db, sync_root| match folder {
             Some(id) => {
-                let entry = file_ops::resolve(&db, id).map_err(map_drive_err)?;
-                file_ops::item_path(&sync_root, &entry).map_err(map_drive_err)?
+                let entry = file_ops::resolve(db, id).map_err(map_drive_err)?;
+                file_ops::item_path(sync_root, &entry).map_err(map_drive_err)
             }
-            None => sync_root,
-        };
+            None => Ok(sync_root.to_path_buf()),
+        })?;
         open_path(&path)
     }
 

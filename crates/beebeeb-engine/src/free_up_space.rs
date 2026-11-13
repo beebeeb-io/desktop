@@ -76,7 +76,18 @@ pub fn remove_linux_freedesktop_thumbnails_for_evicted_files(
 // (the WebView IPC and the shell flyout button). It is a synchronous blocking fn
 // (DB + filesystem work), so the COM `Invoke` can call it directly off the
 // arbitrary thread Windows delivers the command on, without a tokio runtime.
+///
+/// Task 2488: `pub` only with the `direct-state-db` feature (the Tauri shell): it opens the state database itself,
+/// asking nobody whose it is. Inside the crate it is the Explorer command's ([`free_up_space_unbound`]).
+#[cfg(any(test, feature = "direct-state-db"))]
 pub fn free_up_space_blocking(identity: &'static crate::identity::EngineIdentity) -> Result<FreeUpSpaceResult, String> {
+    free_up_space_unbound(identity)
+}
+
+#[cfg_attr(not(any(test, feature = "direct-state-db", target_os = "windows")), allow(dead_code))]
+pub(crate) fn free_up_space_unbound(
+    identity: &'static crate::identity::EngineIdentity,
+) -> Result<FreeUpSpaceResult, String> {
     let cfg = crate::config::DesktopConfig::load_for(identity)?;
     let Some(sync_root) = cfg.sync_root.clone() else {
         return Ok(FreeUpSpaceResult { bytes_freed: 0 });

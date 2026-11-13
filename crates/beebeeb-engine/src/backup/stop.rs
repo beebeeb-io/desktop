@@ -350,7 +350,9 @@ pub fn stopped_backups(
     {
         return Vec::new();
     }
-    let db = crate::local_state::state_db_for_config(identity, cfg).ok().flatten();
+    let db = crate::local_state::state_db_for_config_unbound(identity, cfg)
+        .ok()
+        .flatten();
     db.and_then(|db| db.backup_stops().ok()).unwrap_or_default()
 }
 
