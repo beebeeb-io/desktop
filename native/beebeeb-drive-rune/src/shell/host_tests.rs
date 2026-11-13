@@ -1062,3 +1062,5 @@ fn dispatching_gate_ready_does_not_override_the_engines_authority() {
 mod files;
 #[path = "host_tests_flows.rs"]
 mod flows;
+#[path = "host_tests_owned_state.rs"]
+mod owned_state;

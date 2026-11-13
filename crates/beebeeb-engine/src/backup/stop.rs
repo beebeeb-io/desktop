@@ -340,6 +340,10 @@ pub struct StopView {
 }
 
 /// The stops the card needs, read once: none (and no state DB opened) while every folder is on.
+///
+/// Task 2488: `pub` only with the `direct-state-db` feature (the Tauri shell): it opens the state database itself,
+/// asking nobody whose it is. The native shell has no such reader.
+#[cfg(any(test, feature = "direct-state-db"))]
 pub fn stopped_backups(
     identity: &'static crate::identity::EngineIdentity,
     cfg: &crate::config::DesktopConfig,
@@ -350,7 +354,9 @@ pub fn stopped_backups(
     {
         return Vec::new();
     }
-    let db = crate::local_state::state_db_for_config(identity, cfg).ok().flatten();
+    let db = crate::local_state::state_db_for_config_unbound(identity, cfg)
+        .ok()
+        .flatten();
     db.and_then(|db| db.backup_stops().ok()).unwrap_or_default()
 }
 

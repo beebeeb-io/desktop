@@ -181,9 +181,19 @@ beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "f76ccfc3
 beebeeb-engine = { path = ".", features = ["test-support"] }
 
 [features]
+# Task 2488: the local state database's raw constructors (`StateDb::open`, `StateDb::open_read_only`,
+# `local_state::state_db_for_config`, `free_up_space_blocking`) are `pub` only with this feature. It is on by
+# default for the Tauri shell, which opens the database itself. The native shell depends on this crate with
+# `default-features = false`: it reaches the local state through `app::Engine::local_state` (a handle bound to the
+# signed-in account) and nothing else, so a direct open there does not compile.
+default = ["direct-state-db"]
+direct-state-db = []
+# The `--db` viewer of a development build of the native app (`local_state::open_for_dev_viewer`). Debug builds have
+# it without the feature; a shipped build has neither.
+dev-viewer = []
 # Test helpers (`*_for_test`, in-memory databases, injected failures) for the tests of a crate that depends on this
 # one. Never enabled by a release build: `src-tauri` turns it on under `[dev-dependencies]` only.
-test-support = []
+test-support = ["direct-state-db"]
 # Task 2475: `bb-fake-server` (below), the test helpers' fake account on loopback for native checks of a TEST build.
 # Dev-only: it implies `test-support`, so a release build of it does not compile (`lib.rs`); no app names it
 # (`tests/fake_server.rs`); the default feature set does not build it.
@@ -206,7 +216,7 @@ required-features = ["test-support"]
 
 # Task 2448: the Windows engine job ran into its 30-minute limit. Each integration binary in `tests/` registers the
 # invented account, signs in and unlocks with core's production Argon2id parameters, and at opt-level 0 that cost
-# 45-63 s per binary on both hosted runners (19 binaries, about 20 minutes, run one after another). The same list as
+# 45-63 s per binary on both hosted runners (18 binaries, about 20 minutes, run one after another). The same list as
 # `src-tauri/Cargo.toml` ("Fast tests and a usable dev app", docs/ci/2026-11-11-rust-ci-speed.md): these third-party
 # crypto, KDF, hash and SQLite crates are compiled optimised in the dev and test profiles. No KDF parameter, no crypto
 # code, no release setting changes; Cargo.lock is unchanged. A name that matches no package is a cargo warning.

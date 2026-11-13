@@ -44,10 +44,22 @@ pub struct EngineSource {
 impl EngineSource {
     /// Open `path` read-only. A file that is missing, not a database, not a state database, from an older build or
     /// held by another program is refused with that reason (`ReadOnlyOpenError`), before any window opens on it.
+    ///
+    /// The one read of a state database in this app that asks nobody whose it is (task 2488): the engine has this
+    /// door in a development build only (`local_state::open_for_dev_viewer`). In a shipped build it is refused
+    /// here, and `--db` is not read at all (`shell::instance::DEV_BUILD`).
     pub fn open(path: &Path) -> Result<Self, ReadOnlyOpenError> {
-        Ok(Self {
-            db: StateDb::open_read_only(path)?,
-        })
+        #[cfg(any(debug_assertions, feature = "dev-tools"))]
+        {
+            Ok(Self {
+                db: beebeeb_engine::local_state::open_for_dev_viewer(path)?,
+            })
+        }
+        #[cfg(not(any(debug_assertions, feature = "dev-tools")))]
+        {
+            let _ = path;
+            Err(ReadOnlyOpenError::NotFound)
+        }
     }
 
     /// A page of `folder_id` (`None`: the root), sorted folders-first by `sort`.

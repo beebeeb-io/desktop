@@ -7,7 +7,7 @@ Markdown editing" (8): 22 frames, plus the Windows entry state of "Office: Docs,
 Built = drawn from `viewers::Ui` (or, for DW-1520 to DW-1522, from `viewers::new_file` over the Files
 window), reachable by its controls, a scene, gated in light and dark.
 21 of 23 are built (lanes f-viewers, 2472 and b19-viewers, 2026-11-12; the count is the two lanes' lists joined
-at their merge): 7 at 0 failing in both themes, 14 with open reds named below and in the PR bodies. The other 2
+at their merge): not at 0: see the integration ledger; the viewers still draw their own toolbar. The other 2
 (DW-1504, DW-1507) are not built; each line is the checklist and why.
 
 The Files toolbar under DW-1520 to DW-1522 has the Open in File Explorer button the board does not draw

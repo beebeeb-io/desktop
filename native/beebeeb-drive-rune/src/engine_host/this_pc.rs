@@ -22,7 +22,7 @@
 //!
 //! Whose state (task 2488): the local state database can still belong to an EARLIER account after a sign-out that
 //! keeps local data. Nothing is read from it, and nothing is changed in it, unless its recorded owner is the signed-in
-//! account ([`Engine::owns_local_state`]); otherwise the lists are empty.
+//! account (the engine's account-bound handle, `Engine::local_state`); otherwise the lists are empty.
 //!
 //! When it reads (P2-2): when the gate or the account changes to an open vault, when a section opens and the last
 //! answer is older than [`FRESH_FOR`], and after each change. Never on a timer; never a query per row (the kept items
@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use beebeeb_engine::app::{CredentialStores, Engine};
+use beebeeb_engine::app::{CredentialStores, Engine, LocalStateRefused};
 use beebeeb_engine::backup_protect::BackupsTree;
 use beebeeb_engine::drive_v2::model;
 use beebeeb_engine::drive_v2::status::{self, SyncProblem};
@@ -93,10 +93,11 @@ pub trait ThisPcEngine: Send + Sync + 'static {
     fn unlocked(&self) -> bool;
     /// Whose account is signed in (the stored email, else the user id the server named). Never waits.
     fn account(&self) -> Option<String>;
-    /// The local state database. `Err`: nothing synced on this computer yet, or it could not be opened.
-    fn state_db(&self) -> Result<StateDb, String>;
-    /// `db`'s recorded owner is the signed-in account (task 2488). One small read.
-    fn owns(&self, db: &StateDb) -> bool;
+    /// Read the signed-in account's local state, through the engine's account-bound handle (task 2488). `Err`: it
+    /// is not handed out, and why (nothing synced yet, another account's, the session changed, unreadable).
+    fn local_state<T>(&self, read: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused>;
+    /// The same for an operation that writes into it.
+    fn change_local_state<T>(&self, change: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused>;
     /// Sync runs for this handle. May wait: a worker's.
     fn syncing(&self) -> bool;
     /// Keep an item on this PC, or stop keeping it. Blocks: a worker's.
@@ -110,11 +111,11 @@ impl<C: CredentialStores> ThisPcEngine for Engine<C> {
     fn account(&self) -> Option<String> {
         self.account_email().or_else(|| self.user_id())
     }
-    fn state_db(&self) -> Result<StateDb, String> {
-        Engine::state_db(self)
+    fn local_state<T>(&self, read: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused> {
+        Engine::local_state(self).and_then(|state| state.with(read))
     }
-    fn owns(&self, db: &StateDb) -> bool {
-        self.owns_local_state(db)
+    fn change_local_state<T>(&self, change: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused> {
+        Engine::local_state_for_changes(self).and_then(|state| state.with(change))
     }
     fn syncing(&self) -> bool {
         self.is_syncing()
@@ -282,10 +283,8 @@ fn run<E: ThisPcEngine>(engine: &E, answers: &mpsc::Sender<Answer>, job: Job) {
     };
     match ask {
         Ask::Read => {}
-        Ask::Retry(ids) => match owned_db(engine, &account) {
-            Some(db) => {
-                let now = chrono::Utc::now().timestamp();
-                let failed = ids.iter().filter(|id| db.retry_unsent_change(id, now).is_err()).count();
+        Ask::Retry(ids) => match retry(engine, &account, &ids) {
+            Some(failed) => {
                 if failed > 0 {
                     log(format!(
                         "this pc: {failed} of {} changes could not be tried again",
@@ -303,7 +302,7 @@ fn run<E: ThisPcEngine>(engine: &E, answers: &mpsc::Sender<Answer>, job: Job) {
             if !engine.syncing() {
                 log("this pc: not removed from this PC: sync does not run");
                 refuse(NOT_SYNCING);
-            } else if owned_db(engine, &account).is_none() {
+            } else if !owns_state(engine, &account) {
                 log("this pc: not removed from this PC (no local state of this account)");
                 refuse(NOT_REMOVED);
             } else {
@@ -328,12 +327,21 @@ fn run<E: ThisPcEngine>(engine: &E, answers: &mpsc::Sender<Answer>, job: Job) {
     });
 }
 
-/// The local state database, when the vault is open for `account` and the database is that account's.
-fn owned_db<E: ThisPcEngine>(engine: &E, account: &str) -> Option<StateDb> {
+/// Tries `ids` again in `account`'s local state: how many could not be. `None`: the vault is not open for
+/// `account`, or the local state is not handed out to it (the account-bound handle, task 2488).
+fn retry<E: ThisPcEngine>(engine: &E, account: &str, ids: &[String]) -> Option<usize> {
     if !still_for(engine, account) {
         return None;
     }
-    engine.state_db().ok().filter(|db| engine.owns(db))
+    let now = chrono::Utc::now().timestamp();
+    engine
+        .change_local_state(|db| ids.iter().filter(|id| db.retry_unsent_change(id, now).is_err()).count())
+        .ok()
+}
+
+/// The vault is open for `account` and the local state is handed out to it.
+fn owns_state<E: ThisPcEngine>(engine: &E, account: &str) -> bool {
+    still_for(engine, account) && engine.local_state(|_| ()).is_ok()
 }
 
 /// Everything the sections show for `account`. Another account's local state reads as nothing (task 2488); a state
@@ -342,14 +350,14 @@ fn read_for<E: ThisPcEngine>(engine: &E, account: &str) -> Result<Snapshot, ()> 
     if !still_for(engine, account) {
         return Ok(Snapshot::default());
     }
-    let db = engine
-        .state_db()
-        .map_err(|_| log("this pc: the local state could not be opened"))?;
-    if !engine.owns(&db) {
-        // Not this account's: nothing of it is shown (and nothing of it is read).
-        return Ok(Snapshot::default());
+    match engine.local_state(|db| read(db, chrono::Utc::now().timestamp())) {
+        Ok(read) => read.map_err(|_| log("this pc: the local history could not be read")),
+        // Not this account's, or read across a lock or a sign-out: nothing of it is shown.
+        Err(refused) if refused.not_this_accounts() || refused == LocalStateRefused::SessionChanged => {
+            Ok(Snapshot::default())
+        }
+        Err(_) => Err(log("this pc: the local state could not be opened")),
     }
-    read(&db, chrono::Utc::now().timestamp()).map_err(|_| log("this pc: the local history could not be read"))
 }
 
 /// Everything the two sections show, from the local state database at `now` (Unix seconds).

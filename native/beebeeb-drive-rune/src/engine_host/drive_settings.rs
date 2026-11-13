@@ -8,8 +8,9 @@
 //! - Sync and File Explorer: the sync state from the handle's view, Pause and Resume ([`Engine::pause`] /
 //!   [`Engine::resume`]), Open at login through the shell's own autostart call (`Platform::set_autostart`, no
 //!   registry write of its own), the downloaded and kept sizes, Free up space
-//!   (`free_up_space::free_up_space_blocking`). Missing: a repair and a turn-off of File Explorer in the engine
-//!   crate, a limit that can say "no limit" (the engine's default), an engine that honours "Show sync status".
+//!   ([`Engine::free_up_space`], in the signed-in account's local state through the account-bound handle).
+//!   Missing: a repair and a turn-off of File Explorer in the engine crate, a limit that can say "no limit" (the
+//!   engine's default), an engine that honours "Show sync status".
 //! - Storage: `storage()` holds only what the engine has (use, downloaded, kept); the per-kind use, the Trash size,
 //!   the previews' size and limit have no engine call.
 //! - Keep on this PC (a dialog of Sync and Storage): the folder tree with sizes and the kept set from the local
@@ -40,7 +41,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use beebeeb_engine::app::{CredentialStores, Engine};
+use beebeeb_engine::app::{CredentialStores, Engine, LocalStateRefused};
 use beebeeb_engine::backup_protect::BackupsTree;
 use beebeeb_engine::config::DesktopConfig;
 use beebeeb_engine::drive_v2::{dto::DriveItem, model, status};
@@ -86,9 +87,9 @@ pub trait DriveEngine: Send + Sync + 'static {
     fn view(&self) -> SyncView;
     /// Whose account is signed in (the stored email, else the user id the server named). Never waits.
     fn account(&self) -> Option<String>;
-    fn state_db(&self) -> Result<StateDb, String>;
-    /// `db`'s recorded owner is the signed-in account (task 2488). One small read.
-    fn owns(&self, db: &StateDb) -> bool;
+    /// Read the signed-in account's local state, through the engine's account-bound handle (task 2488). `Err`: it
+    /// is not handed out, and why (nothing synced yet, another account's, the session changed, unreadable).
+    fn local_state<T>(&self, read: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused>;
     /// Used and quota bytes from Beebeeb. A network call: a worker's.
     fn storage_info(&self) -> Result<(i64, i64), String>;
     fn set_paused(&self, paused: bool) -> Result<(), String>;
@@ -108,11 +109,8 @@ impl<C: CredentialStores> DriveEngine for Engine<C> {
     fn account(&self) -> Option<String> {
         self.account_email().or_else(|| self.user_id())
     }
-    fn state_db(&self) -> Result<StateDb, String> {
-        Engine::state_db(self)
-    }
-    fn owns(&self, db: &StateDb) -> bool {
-        self.owns_local_state(db)
+    fn local_state<T>(&self, read: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused> {
+        Engine::local_state(self).and_then(|state| state.with(read))
     }
     fn storage_info(&self) -> Result<(i64, i64), String> {
         Engine::storage_info(self)
@@ -127,8 +125,8 @@ impl<C: CredentialStores> DriveEngine for Engine<C> {
         Engine::set_kept(self, file_id, kept)
     }
     fn free_up_space(&self) -> Result<u64, String> {
-        beebeeb_engine::free_up_space::free_up_space_blocking(crate::shell::identity::engine_identity())
-            .map(|freed| freed.bytes_freed)
+        // The engine's own, in the signed-in account's local state (the account-bound handle, task 2488).
+        Engine::free_up_space(self)
     }
     fn local_settings(&self) -> Result<(i64, bool), String> {
         let config = DesktopConfig::load_for(crate::shell::identity::engine_identity())?;
@@ -320,12 +318,8 @@ fn read_local<E: DriveEngine>(engine: &E, platform: &dyn Platform, answers: &mps
         let _ = answers.send(Answer::Keep(Keep::Failed));
         return;
     }
-    let read = engine.state_db().and_then(|db| {
-        // Task 2488: another account's local state reads as nothing.
-        if !engine.owns(&db) {
-            return Ok(None);
-        }
-        let rows = rows(&db)?;
+    let read = engine.local_state(|db| -> Result<_, String> {
+        let rows = rows(db)?;
         let (limit_bytes, status_on_files) = engine.local_settings()?;
         let downloaded = db.cache_bytes_by_effective_pin(false).map_err(|_| "cache")?;
         let summary = db.kept_summary().map_err(|_| "kept")?;
@@ -338,6 +332,13 @@ fn read_local<E: DriveEngine>(engine: &E, platform: &dyn Platform, answers: &mps
         };
         Ok(Some((on_pc, keep_of(&rows))))
     });
+    // Task 2488: a local state that is not this account's reads as nothing; so does one read across a lock or a
+    // sign-out. Anything else that is not handed out could not be read.
+    let read = match read {
+        Ok(read) => read,
+        Err(refused) if refused.not_this_accounts() || refused == LocalStateRefused::SessionChanged => Ok(None),
+        Err(_) => Err("not handed out".to_string()),
+    };
     match read {
         Ok(Some((on_pc, keep))) => {
             let _ = answers.send(Answer::OnThisPc(Some(on_pc)));
@@ -373,6 +374,11 @@ fn rows(db: &StateDb) -> Result<Vec<(FileEntry, bool, DriveItem)>, String> {
     Ok(rows)
 }
 
+/// The files among `rows` (no folders).
+fn files_of(rows: &[(FileEntry, bool, DriveItem)]) -> Vec<&FileEntry> {
+    rows.iter().map(|(e, _, _)| e).filter(|e| !e.is_dir()).collect()
+}
+
 /// Storage insights: the account's use from Beebeeb, the rest from this PC's file list.
 fn insights<E: DriveEngine>(engine: &E) -> (Insights, Option<(i64, i64)>) {
     if engine.view().gate != GateState::Ready {
@@ -390,23 +396,12 @@ fn insights<E: DriveEngine>(engine: &E) -> (Insights, Option<(i64, i64)>) {
         }
     };
     // Task 2488: another account's local state reads as nothing for insights.
-    let db = match engine.state_db() {
-        Ok(db) if engine.owns(&db) => db,
-        Ok(_) => {
-            // Not this account's state: show usage only, no breakdown.
-            return (insights_of(&[], usage), Some(usage));
-        }
-        Err(_) => {
-            log("drive settings: the file list could not be read for insights");
-            return (Insights::Failed(INSIGHTS_FAILED.into()), Some(usage));
-        }
-    };
-    match rows(&db) {
-        Ok(rows) => {
-            let files: Vec<&FileEntry> = rows.iter().map(|(e, _, _)| e).filter(|e| !e.is_dir()).collect();
-            (insights_of(&files, usage), Some(usage))
-        }
-        Err(_) => {
+    let read = engine.local_state(|db| rows(db).map(|rows| insights_of(&files_of(&rows), usage)));
+    match read {
+        Ok(Ok(insights)) => (insights, Some(usage)),
+        // Not this account's state: show usage only, no breakdown.
+        Err(refused) if refused.not_this_accounts() => (insights_of(&[], usage), Some(usage)),
+        Ok(Err(_)) | Err(_) => {
             log("drive settings: the file list could not be read for insights");
             (Insights::Failed(INSIGHTS_FAILED.into()), Some(usage))
         }

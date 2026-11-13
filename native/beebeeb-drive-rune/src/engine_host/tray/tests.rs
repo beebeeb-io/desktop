@@ -635,11 +635,17 @@ fn a_running_engine_gives_the_b_its_reports_and_up_to_date_only_after_a_finished
     // The flyout: a file the database has as uploading is on its way while the engine syncs or is up to
     // date, and not while it cannot reach Beebeeb or has not finished a check.
     let dir = tempfile::tempdir().unwrap();
-    drop(synced_database(&dir.path().join("state.db"), now()));
-    let tray = EngineTraySource {
-        database: Some(dir.path().join("state.db")),
-        ..EngineTraySource::new(live.clone())
-    };
+    let database = synced_database(&dir.path().join("state.db"), now());
+    // The flyout reads through the engine's account-bound handle: the database is the signed-in account's.
+    database
+        .set_owner(&beebeeb_engine::account_binding::Identity::new(
+            engine.user_id().as_deref(),
+            Some(EMAIL),
+        ))
+        .unwrap();
+    drop(database);
+    engine.use_local_state_for_test(dir.path().join("state.db"));
+    let tray = EngineTraySource::new(live.clone());
     let uploading = |tray: &EngineTraySource<MemoryCredentials>| {
         let local = tray
             .facts()

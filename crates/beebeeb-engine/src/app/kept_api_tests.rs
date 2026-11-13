@@ -56,9 +56,25 @@ fn the_pin_change_keeps_a_folder_with_its_contents_and_releases_it() {
     put(&db, "f-1", "A/one.txt", false);
     put(&db, "f-2", "other.txt", false);
     let open = || StateDb::open(&path).unwrap();
-    pin(&REAL, "http://127.0.0.1:9", open(), sync_root.path(), "d-a", true).expect("the pin");
+    pin(
+        &REAL,
+        "http://127.0.0.1:9",
+        std::sync::Arc::new(open()),
+        sync_root.path(),
+        "d-a",
+        true,
+    )
+    .expect("the pin");
     let kept: Vec<String> = db.kept_rows().unwrap().into_iter().map(|e| e.file_id).collect();
     assert_eq!(kept, ["d-a", "f-1"]);
-    pin(&REAL, "http://127.0.0.1:9", open(), sync_root.path(), "d-a", false).expect("the release");
+    pin(
+        &REAL,
+        "http://127.0.0.1:9",
+        std::sync::Arc::new(open()),
+        sync_root.path(),
+        "d-a",
+        false,
+    )
+    .expect("the release");
     assert!(db.kept_rows().unwrap().is_empty());
 }

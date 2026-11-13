@@ -14,7 +14,10 @@ rune = { git = "https://github.com/anomalyco/rune", rev = "c92e462e", default-fe
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "c92e462e" }
 rune-notify = { git = "https://github.com/anomalyco/rune", rev = "c92e462e" }
 # The engine without Tauri: the real `DriveSource` (`src/source_engine.rs`) reads a state.db through it.
-beebeeb-engine = { path = "../../crates/beebeeb-engine" }
+# `default-features = false` (task 2488): without the engine's `direct-state-db` the state database's constructors
+# are not `pub`, so this crate reaches the local state through `Engine::local_state` (the account-bound handle) or
+# it does not compile. Tests build fixtures with the engine's writers (`test-support`, dev-dependencies only).
+beebeeb-engine = { path = "../../crates/beebeeb-engine", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 # The sign-in source hands secrets to the engine as Zeroizing<String> (wiped on drop).
 zeroize = "1"
@@ -35,7 +38,7 @@ wgpu = { version = "30", default-features = false, optional = true }
 # Development and diagnostic flags in a RELEASE build (Rune's `--snap`, `--out`, `--html`,
 # `--script`, …, and `--db`). Debug builds have them without it. A shipped build is built
 # without this feature and ignores every one of them (`shell/instance.rs`: `DEV_BUILD`).
-dev-tools = []
+dev-tools = ["beebeeb-engine/dev-viewer"]
 # Live feedback mode (src/feedback/): on for test builds, OFF for release.
 feedback = ["dep:wgpu"]
 
@@ -50,7 +53,7 @@ raw-window-handle = "0.6"
 # `engine_host` tests open the engine on credential stores in memory, with the settings file in the engine's test
 # sandbox and a closed loopback port as the default API: no test of this crate reaches the OS credential store,
 # the person's settings or the production API. Dev-only (`scripts/check-engine-boundary.sh` refuses it elsewhere).
-beebeeb-engine = { path = "../../crates/beebeeb-engine", features = ["test-support"] }
+beebeeb-engine = { path = "../../crates/beebeeb-engine", default-features = false, features = ["test-support"] }
 # `source_engine` tests build a state.db with the engine's own writers.
 tempfile = "3"
 # The timing test asks SQLite for its query plan; same version the engine links.

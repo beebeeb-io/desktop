@@ -57,7 +57,7 @@ pub(super) fn started() -> &'static Started {
 
 /// The process's state folder, which the start path makes once (`started`): every other engine handle a test
 /// opens is on it (the engine refuses another). A test that opens one must not write in it.
-pub(super) fn process_state_dir() -> PathBuf {
+pub(crate) fn process_state_dir() -> PathBuf {
     started();
     state_paths::beebeeb_state_dir_for(engine_identity()).expect("the process's state folder")
 }
@@ -126,37 +126,41 @@ fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() 
     put(&db, "f-2", "/notes.txt", None, false);
     drop(db);
 
-    let names = |listing: &Listing| listing.items.iter().map(|item| item.name.clone()).collect::<Vec<_>>();
-    let crumbs = |listing: &Listing| listing.path.iter().map(|crumb| crumb.name.clone()).collect::<Vec<_>>();
-    let root = drive.list(None).expect("the root");
-    assert_eq!(names(&root), ["Plans", "notes.txt"]);
-    assert_eq!(crumbs(&root).len(), 1);
-    let inner = drive.list(Some("d-2027")).expect("a folder two levels down");
-    assert_eq!(names(&inner), ["budget.ods"]);
+    // The session is signed in and NOT unlocked: the local state is not handed out (the account-bound handle,
+    // task 2488), whatever the database holds. Rows without a recorded owner are nobody's to show.
     assert_eq!(
-        crumbs(&inner)[1..],
-        ["Plans", "2027"],
-        "the folder's own name, from the engine's crumbs"
+        started.opened.engine.local_state_refusal(),
+        Some(beebeeb_engine::app::LocalStateRefused::Locked)
     );
-    assert_eq!(inner.folder.id.as_deref(), Some("d-2027"));
-    assert_eq!(drive.list(Some("gone")).err(), Some(SourceError::NotFound));
+    assert_eq!(drive.list(None).err(), Some(SourceError::Unreadable));
+    assert_eq!(drive.list(Some("d-2027")).err(), Some(SourceError::Unreadable));
 
-    // The window on this engine: Files reads the handle, Backups shows no sample devices.
+    // The window on this engine: Files reads the handle (nothing while locked), Backups shows no sample devices.
+    // A signed-in, unlocked account's listing with its crumbs is `shell::host::tests::owned_state`'s.
     let state =
         crate::shell::state::init_on_engine(crate::shell::host::Shell::fixture(), started.opened.engine.clone());
-    assert_eq!(names(&state.listing), ["Plans", "notes.txt"]);
-    assert!(state.list_error.is_none() && state.selected.is_none());
+    assert!(state.listing.items.is_empty());
+    assert_eq!(state.list_error, Some(SourceError::Unreadable));
+    assert!(state.selected.is_none());
     assert!(
         !state.backups.has_source(),
         "Backups is 'not built yet' on a real engine"
     );
-    // Shared, Trash, Photos: unwired on a real engine, never sample data. This PC reads the engine
-    // (`engine_host::this_pc`) but is held off until its chrome is honest; this vault is not open, so no name.
+    // Shared, Photos: unwired on a real engine, never sample data. Trash reads the engine
+    // (`engine_host::trash`): this handle has no session in memory, so it draws the signed-out state, no row.
+    // This PC reads the engine (`engine_host::this_pc`) but is held off until its chrome is honest.
     assert!(
         !state.frames.shared.source.wired(),
         "Shared is unwired on a real engine"
     );
-    assert!(!state.frames.trash.source.wired(), "Trash is unwired on a real engine");
+    assert_eq!(
+        (
+            state.frames.trash.source.items().len(),
+            state.frames.trash.source.loaded()
+        ),
+        (0, crate::frames::trash::source::Loaded::SignedOut),
+        "Trash on a real engine without a session: signed out, no row"
+    );
     assert!(!state.photos.source.wired(), "Photos is unwired on a real engine");
     assert_eq!(
         state.this_pc.wired(),
@@ -593,9 +597,14 @@ fn shared_shows_0_fixture_rows_on_a_live_engine() {
 #[test]
 fn trash_shows_0_fixture_rows_on_a_live_engine() {
     let s = engine_state();
-    assert!(!s.frames.trash.source.wired());
+    // Trash reads the engine (it is wired); without a session it holds no row and no count, never the board's.
     assert_eq!(s.frames.trash.source.items().len(), 0);
     assert_eq!(s.frames.trash.source.totals().items, 0);
+    assert_eq!(s.frames.trash.source.count(), None, "no sidebar count from the engine");
+    assert_eq!(
+        s.frames.trash.source.loaded(),
+        crate::frames::trash::source::Loaded::SignedOut
+    );
 }
 
 #[test]
@@ -869,30 +878,95 @@ fn folder_route_ops_are_refused_by_the_sync_guard_not_by_missing_state() {
 #[test]
 fn the_sync_guard_is_present_in_the_local_choke_point() {
     let source = include_str!("../engine_host.rs");
-    let local_fn = &source[source.find("fn local(&self)").unwrap()..];
+    let local_fn = &source[source.find("fn local<T>(&self").unwrap()..];
     let local_fn = &local_fn[..local_fn.find("\n    }").unwrap()];
     assert!(
         local_fn.contains("is_syncing()"),
         "the local() choke point checks is_syncing: dropping it would let folder-route ops \
          through when sync is not running"
     );
+    // Task 2488: the choke point's database is the signed-in account's, from the engine's account-bound handle.
+    assert!(
+        local_fn.contains(".local_state_for_changes()") && local_fn.contains("state.with("),
+        "the local() choke point reaches the state through the account-bound handle"
+    );
+}
+
+/// Task 2488: outside its tests this crate has no way to a state database but the engine's account-bound handle
+/// (`Engine::local_state`, `Engine::local_state_for_changes`). The engine's raw constructors are not `pub` for
+/// this crate (`Cargo.toml`: `default-features = false`), which a shipped build proves by compiling; this pin
+/// names the doors, so a test build (where `test-support` opens them for fixtures) cannot grow a reader either.
+/// The one exception is named: the development build's `--db` viewer.
+#[test]
+fn no_source_file_opens_a_state_database_around_the_account_bound_handle() {
+    fn sources(dir: &std::path::Path, found: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name != "tests" {
+                    sources(&path, found);
+                }
+            } else if name.ends_with(".rs") && !name.contains("tests") {
+                found.push(path);
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    sources(&root, &mut files);
+    assert!(
+        files.len() > 100,
+        "the scan read {} files (the wrong folder?)",
+        files.len()
+    );
+    let doors = [
+        ["StateDb::", "open("].concat(),
+        ["StateDb::", "open_read_only("].concat(),
+        [".state_", "db()"].concat(),
+        ["state_db_", "for_config"].concat(),
+        ["state_db_path", "_from_state_dir"].concat(),
+        ["rusqlite", "::"].concat(),
+        ["free_up_space", "_blocking"].concat(),
+    ];
+    let dev_viewer = ["open_for_", "dev_viewer"].concat();
+    let (mut handle_readers, mut dev_viewers) = (0, Vec::new());
+    for file in &files {
+        let text = std::fs::read_to_string(file).unwrap();
+        let name = file.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+        for door in &doors {
+            assert!(
+                !text.contains(door.as_str()),
+                "{name} reaches the local state by `{door}`"
+            );
+        }
+        if text.contains(&dev_viewer) {
+            dev_viewers.push(name);
+        }
+        handle_readers += text.matches(".local_state()").count() + text.matches(".local_state_for_changes()").count();
+    }
+    assert_eq!(dev_viewers, ["source_engine.rs"], "the development viewer's one door");
+    assert!(
+        handle_readers >= 4,
+        "the scan saw {handle_readers} readers on the handle (it reads nothing?)"
+    );
 }
 
 /// Trash and restore (API calls) are NOT gated by the sync guard: they go directly to the server
-/// and do not touch the sync folder. Neither calls `self.local()`.
+/// and do not touch the sync folder. Neither calls `self.local(…)`.
 #[test]
 fn trash_and_restore_are_not_gated_by_the_sync_guard() {
     let source = include_str!("../engine_host.rs");
     let trash_fn = &source[source.find("fn trash(&mut self").unwrap()..];
     let trash_fn = &trash_fn[..trash_fn.find("\n    fn ").unwrap()];
     assert!(
-        !trash_fn.contains("self.local()"),
+        !trash_fn.contains("self.local("),
         "trash goes to the API, not through the sync folder"
     );
     let restore_fn = &source[source.find("fn restore(&mut self").unwrap()..];
     let restore_fn = &restore_fn[..restore_fn.find("\n    fn ").unwrap()];
     assert!(
-        !restore_fn.contains("self.local()"),
+        !restore_fn.contains("self.local("),
         "restore goes to the API, not through the sync folder"
     );
 }
