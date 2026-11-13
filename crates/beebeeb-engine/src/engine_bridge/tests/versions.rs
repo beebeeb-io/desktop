@@ -145,6 +145,13 @@ pub(super) fn versioned_server_answer(request: &RecordedRequest, s: &mut Version
         && let Some(id) = path.strip_prefix("/api/v1/files/")
     {
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null);
+        if body.get("name_encrypted").is_some()
+            && let Some(status) = s.refuse_name_patch_once.take()
+        {
+            s.patches
+                .push((id.to_string(), serde_json::json!({ "refused": status })));
+            return http_json(status, serde_json::json!({ "error": "refused" }));
+        }
         // A server without version metadata has one name per file: the last one written.
         if s.version_metadata_off
             && let Some(name) = body["name_encrypted"].as_str()

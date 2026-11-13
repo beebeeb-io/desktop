@@ -897,3 +897,141 @@ async fn a_restore_sends_its_metadata_with_the_restore_and_nothing_after() {
     assert_eq!(bridge.db.highest_file_version(file).unwrap(), Some(3));
     assert!(bridge.db.list_due_operations(i64::MAX).unwrap().is_empty());
 }
+
+/// The step after `complete` never undoes the upload. On a server that ignored the completion name
+/// the commitment goes out as a metadata update; here that update is refused once (404). The save's
+/// completion is recorded BEFORE the update is tried, so the failure is not read as a dead session:
+/// nothing is abandoned and nothing is uploaded again. The retry starts from the recorded
+/// completion, asks the row, writes the commitment, and lands.
+/// Mutants: the recorded-completion path without the publish step (it lands a version that opens
+/// nowhere); the publish step ahead of the recorded completion (no completion after pass 1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_publish_after_complete_keeps_the_completion_and_is_retried_alone() {
+    let master_key = [185u8; 32];
+    let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+    {
+        let mut state = server.state.lock().unwrap();
+        state.serve_downloads = true;
+        state.version_metadata_off = true;
+        state.refuse_name_patch_once = Some("404 Not Found");
+    }
+    let bytes = b"completed, and its name not yet published";
+    let contents = dir.path().join("create.txt");
+    std::fs::write(&contents, bytes).unwrap();
+    bridge
+        .queue_file_provider_create(finder_file_target(None, "notes.txt", &contents, None))
+        .unwrap();
+    let now = now_secs();
+
+    let first = bridge.process_due_operations(&sync_root, now).await.unwrap();
+    assert!(
+        first.completed_op_ids.is_empty(),
+        "the refused update fails the attempt: {first:?}"
+    );
+    let op = bridge.db.list_due_operations(i64::MAX).unwrap().remove(0);
+    let recorded = bridge
+        .db
+        .get_upload_resume(&op.op_id)
+        .unwrap()
+        .expect("the session row stays");
+    assert_eq!(
+        recorded.completed_version,
+        Some(1),
+        "the completion is recorded before the name is published"
+    );
+    let id = recorded.server_file_id.clone();
+    let seen = |server: &VersionedServerMock| server.state.lock().unwrap().requests.clone();
+    let count = |requests: &[(String, String)], method: &str, suffix: &str| {
+        requests
+            .iter()
+            .filter(|(m, p)| m == method && p.ends_with(suffix))
+            .count()
+    };
+    let after_first = seen(&server);
+    assert_eq!(count(&after_first, "POST", "/uploads/init"), 1);
+    assert_eq!(count(&after_first, "POST", "/complete"), 1);
+    assert_eq!(
+        count(&after_first, "POST", "/upload/abandon"),
+        0,
+        "a completed upload is never abandoned"
+    );
+    assert_eq!(
+        count(&after_first, "PATCH", &format!("/files/{id}")),
+        1,
+        "the refused update"
+    );
+
+    bridge
+        .process_due_operations(&sync_root, now.saturating_add(100_000))
+        .await
+        .unwrap();
+    assert!(
+        bridge.db.list_due_operations(i64::MAX).unwrap().is_empty(),
+        "landed by the retry"
+    );
+    let after_second = &seen(&server)[after_first.len()..];
+    assert_eq!(
+        after_second
+            .iter()
+            .filter(|(method, path)| !(method == "PUT" && path.contains("/thumbnail/")))
+            .map(|(method, path)| (method.as_str(), path.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("GET", format!("/api/v1/files/{id}").as_str()),
+            ("PATCH", format!("/api/v1/files/{id}").as_str()),
+        ],
+        "the retry reads the row and writes the commitment: no init, no chunk, no complete"
+    );
+    assert_eq!(
+        record_on_server(&server, master_key, &id)
+            .version
+            .map(|version| version.counter),
+        Some(1)
+    );
+    assert_eq!(
+        &**bridge.hydrate_file_to_memory_metered(&id, None).await.unwrap().bytes,
+        bytes
+    );
+    let state = server.finish();
+    assert_eq!(state.files[&id].versions.len(), 1, "one version");
+}
+
+/// A new version is never built on the local record when the row could not be read for a reason
+/// that says nothing about the row (a rate limit, a timeout): the attempt fails before its init and
+/// the retry reads the row. Only a row that is gone or not this account's to read (403, 404, 410)
+/// falls back to the local record.
+/// Mutant: the fallback on every 4xx (the first attempt then inits on a possibly stale record).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_row_read_that_was_rate_limited_fails_the_attempt_before_its_init() {
+    let master_key = [186u8; 32];
+    let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+    server.state.lock().unwrap().serve_downloads = true;
+    let id = created(&bridge, &server, dir.path(), &sync_root, b"version one").await;
+
+    server.state.lock().unwrap().refuse_row_read_once = Some("429 Too Many Requests");
+    fp_save(
+        &bridge,
+        dir.path(),
+        &id,
+        "notes.txt",
+        b"version two",
+        &held_content_version(&bridge, &id),
+    );
+    let now = now_secs();
+    bridge.process_due_operations(&sync_root, now).await.unwrap();
+    assert_eq!(
+        server.state.lock().unwrap().inits.len(),
+        1,
+        "the create's init only: the replacement did not init on the local record"
+    );
+    assert_eq!(
+        bridge.db.list_due_operations(i64::MAX).unwrap().len(),
+        1,
+        "it is retried"
+    );
+
+    drain_upload_queue(&bridge, &sync_root).await;
+    let state = server.finish();
+    assert_eq!(state.inits.len(), 2);
+    assert_eq!(state.latest_plaintext(&id, master_key), b"version two");
+}

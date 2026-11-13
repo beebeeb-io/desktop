@@ -328,8 +328,8 @@ impl EngineBridge {
     /// higher counter wins (what this device published may be newer than a row read just before
     /// its completion landed). The served counter is remembered.
     ///
-    /// With `local_when_unreadable`, a read the server refuses (the row is gone, or is not this
-    /// account's to read) and a served name that does not open under this device's key (a request
+    /// With `local_when_unreadable`, a read the server refuses with 403, 404 or 410 (the row is gone,
+    /// or is not this account's to read) and a served name that does not open under this device's key (a request
     /// row's, a blocked row's) give the local record.
     pub(super) async fn row_material(
         &self,
@@ -340,10 +340,10 @@ impl EngineBridge {
         let (key, local, local_name) = owned_material(&self.db, self.api.master_key(), id)?;
         let row = match api.get_file(id).await {
             Ok(row) => row,
-            // Any refusal of the read (gone, or not this account's to read): the local record.
-            Err(error)
-                if local_when_unreadable && error_http_status(&error).is_some_and(|s| (400..500).contains(&s)) =>
-            {
+            // The row is gone, or is not this account's to read: the local record. Any other failure
+            // of the read (a timeout, a rate limit) fails the attempt: a write built on a stale record
+            // is worse than a retry.
+            Err(error) if local_when_unreadable && matches!(error_http_status(&error), Some(403 | 404 | 410)) => {
                 return Ok((key, local, local_name));
             }
             Err(error) => return Err(error.into()),

@@ -198,6 +198,10 @@ pub(super) struct VersionedServerState {
     /// (file id, version number) -> that version's metadata (`version_metadata_encrypted`): the
     /// completion name of the upload, or the name of the restore, that made it.
     pub(super) version_metadata: HashMap<(String, usize), String>,
+    /// The next `GET /files/{id}` (the row) answers this status line.
+    pub(super) refuse_row_read_once: Option<&'static str>,
+    /// The next `PATCH /files/{id}` that carries a name answers this status line and writes nothing.
+    pub(super) refuse_name_patch_once: Option<&'static str>,
     /// file id -> the prefix of its object version ids in `GET /files/{id}/versions`
     /// (`{prefix}-v{n}`, the form the restore route reads); unset: `object-{file id}`.
     pub(super) version_id_prefix: HashMap<String, String>,
@@ -379,6 +383,14 @@ fn versioned_server_response(
             Some((file_id, index)) => (file_id.to_string(), index.parse::<usize>().ok()),
             None => (rest.to_string(), None),
         };
+        if chunk.is_none()
+            && let Some(status) = s.refuse_row_read_once.take()
+        {
+            return (
+                None,
+                http_json(status, serde_json::json!({ "error": "refused" })).into_bytes(),
+            );
+        }
         let selected = s.files.get(&file_id).and_then(|file| match &pinned {
             Some(pin) => (1..=file.versions.len())
                 .find(|n| mock_object_version_id(&file_id, *n) == *pin)
