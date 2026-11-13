@@ -412,6 +412,90 @@ fn a_failure_is_not_hidden_by_a_later_success_and_each_toast_has_its_time() {
     assert_eq!(source.notice(), None, "nothing else waits");
 }
 
+/// The line the toasts wait in: what was not done goes before what worked (which is up or waits), refusals keep
+/// their order, one toast per sign-out, and what worked replaces only what worked.
+#[test]
+fn the_line_puts_what_was_not_done_first_and_never_drops_it_for_what_worked() {
+    let server = server();
+    let source = Source::new(signed_in(&server));
+    let turn = source.engine.session_turn();
+    let about = |id: &str| {
+        Some(About {
+            key: id.to_string(),
+            ids: vec![id.to_string()],
+        })
+    };
+    let words = |line: &Line| line.iter().map(|(_, said)| said.words).collect::<Vec<_>>();
+    let mut line = Line::new();
+    line_up(&mut line, turn, Said::done(SIGNED_OUT));
+    line_up(&mut line, turn, Said::failed(NOT_SIGNED_OUT, about("a"), true));
+    assert_eq!(words(&line), [NOT_SIGNED_OUT, SIGNED_OUT], "the refusal shows first");
+    line_up(&mut line, turn, Said::failed(UNKNOWN_SIGN_OUT, about("b"), false));
+    assert_eq!(
+        words(&line),
+        [NOT_SIGNED_OUT, UNKNOWN_SIGN_OUT, SIGNED_OUT],
+        "refusals in their order"
+    );
+    line_up(&mut line, turn, Said::done(SIGNED_OUT_ELSEWHERE));
+    assert_eq!(
+        words(&line),
+        [NOT_SIGNED_OUT, UNKNOWN_SIGN_OUT, SIGNED_OUT_ELSEWHERE],
+        "what worked replaces what worked, and nothing else"
+    );
+    // A newer word about the same sign-out replaces the older one.
+    line_up(&mut line, turn, Said::failed(NOT_SENT, about("a"), true));
+    assert_eq!(words(&line), [UNKNOWN_SIGN_OUT, NOT_SENT, SIGNED_OUT_ELSEWHERE]);
+    // The same sentence about no sign-out is said once.
+    line_up(&mut line, turn, Said::failed(STILL_SIGNING_OUT, None, false));
+    line_up(&mut line, turn, Said::failed(STILL_SIGNING_OUT, None, false));
+    assert_eq!(line.len(), 4);
+}
+
+/// A refusal's Try again when there is no list to send against (another sign-out was taken, and the list could
+/// not be read after it): nothing is sent, the toast keeps its button, and it works once the list is read.
+#[test]
+fn try_again_with_no_list_keeps_its_button_until_the_list_is_read() {
+    let server = server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    *server.refused_ids.lock().unwrap() = vec!["s-phone"];
+    assert!(source.sign_out_device("s-phone"));
+    settle(&mut source);
+    server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    assert!(source.sign_out_device("s-web"));
+    settle(&mut source);
+    assert_eq!(
+        source.pane_state(Pane::Sessions),
+        PaneState::Failed,
+        "taken, and not read after it"
+    );
+    assert_eq!(
+        source.notice(),
+        Some(NOT_SIGNED_OUT),
+        "the refusal is still what is said"
+    );
+    server.refused_ids.lock().unwrap().clear();
+    source.run_notice_action();
+    settle(&mut source);
+    assert_eq!(
+        server.deleted.lock().unwrap().clone(),
+        ["s-phone", "s-web"],
+        "nothing was sent"
+    );
+    assert_eq!(source.notice(), Some(NOT_SENT));
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN), "the way back is not lost");
+    server.read_mode.store(ANSWER, Ordering::SeqCst);
+    source.reload(Pane::Sessions);
+    settle(&mut source);
+    assert_eq!(ids(&source), ["s-this", "s-phone"]);
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN));
+    source.run_notice_action();
+    settle(&mut source);
+    assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone", "s-web", "s-phone"]);
+    assert_eq!(source.notice(), Some(SIGNED_OUT));
+    assert_eq!(ids(&source), ["s-this"]);
+}
+
 /// "Sign out everywhere else" that Beebeeb did not take: its Try again fades as every toast does, and it ends
 /// only the sessions that were listed at the confirm. A session made since is never ended by it.
 #[test]
