@@ -4,7 +4,8 @@
 //! (`src-tauri/src/account_commands.rs`) so the native app needs no shell code for it; the Tauri command is left
 //! as it was.
 //!
-//! [`Engine::restore_items_for`] puts items back, bound to the session of the press (nothing is sent under another).
+//! [`Engine::restore_items_for`] puts items back and [`Engine::trash_items_for`] moves items to Trash, each bound to
+//! the session of the press (nothing is sent under another). There is no unbound form of either.
 //!
 //! [`Engine::trash_listing`] BLOCKS on the handle's runtime, as every method of the handle does: call it from a worker
 //! thread, never from the UI thread. A failure is an [`AccountCallError`] (fixed words, never a server's body).
@@ -18,7 +19,7 @@ use super::settings_api::{AccountCallError, kind_of};
 use super::{CredentialStores, Engine};
 use crate::account::SessionGeneration;
 use crate::account_dto::DesktopTrashItem;
-use crate::api_client::ApiClient;
+use crate::api_client::{ApiClient, ProtectedFolderRefused};
 use crate::owner_keys;
 
 /// The account's Trash as the server listed it, and the session it was listed for.
@@ -28,6 +29,15 @@ pub struct TrashListing {
     /// whose session is gone (a lock, a sign-out, another account's sign-in), before it draws a name of it.
     pub session: SessionGeneration,
     pub items: Vec<DesktopTrashItem>,
+}
+
+/// Why an item was not moved to Trash ([`Engine::trash_items_for`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotTrashed {
+    /// Beebeeb refuses it for what the item is (the Backups folder): asking again changes nothing.
+    Protected,
+    /// The call failed, by its kind. `NotSignedIn`: the session of the press is gone, and nothing was sent.
+    Call(AccountCallError),
 }
 
 /// How many items, never one of them: a listing holds decrypted names, and a `{:?}` must not print one.
@@ -86,9 +96,8 @@ impl<C: CredentialStores> Engine<C> {
     /// while the session in memory is still that one, asked with no session change half done
     /// (`AccountRuntime::while_session_is`); a session that moved on since (a lock, a sign-out, another sign-in,
     /// even back to the same account): [`AccountCallError::NotSignedIn`], and nothing (more) is sent. Stops at the
-    /// first item that fails: the ones before it are restored. The Trash window uses this form:
-    /// [`Engine::restore_items`] sends under whatever session is in memory when it runs, and an id chosen in one
-    /// account's Trash must never be sent with another session's token.
+    /// first item that fails: the ones before it are restored. The only form there is: an id chosen under one
+    /// account must never be sent with another session's token.
     ///
     /// BLOCKS on the handle's runtime: call it from a worker thread.
     pub fn restore_items_for(&self, session: SessionGeneration, file_ids: &[&str]) -> Result<(), AccountCallError> {
@@ -105,6 +114,44 @@ impl<C: CredentialStores> Engine<C> {
         if restored {
             // Ask the sync engine to take the server's list again (the signed-in account's local state only; asks
             // nothing of a state that is not the session's), also when a later item failed.
+            self.request_resnapshot();
+        }
+        outcome
+    }
+
+    /// WRITES: move items to Trash (`DELETE /api/v1/files/{id}`, one call each, in order; never the permanent
+    /// delete, never a confirm token), for the session a person pressed under and no other. `session` is
+    /// [`Engine::session_turn`] as the host read it AT THE PRESS; the rule is [`Engine::restore_items_for`]'s:
+    /// before EACH item the token is copied only while the session in memory is still that one, and a session that
+    /// moved on since is [`AccountCallError::NotSignedIn`] with nothing (more) sent. Stops at the first item that
+    /// fails: the ones before it are in Trash. A 2xx whose body does not read is a trash that was made.
+    ///
+    /// BLOCKS on the handle's runtime: call it from a worker thread.
+    pub fn trash_items_for(&self, session: SessionGeneration, file_ids: &[&str]) -> Result<(), NotTrashed> {
+        let mut trashed = false;
+        let mut outcome = Ok(());
+        for id in file_ids {
+            let id = id.to_string();
+            let sent = self.account_call_for(session, move |api| async move {
+                match api.trash_file(&id).await {
+                    Ok(_) => Ok(true),
+                    Err(error) if error.chain().any(|cause| cause.is::<ProtectedFolderRefused>()) => Ok(false),
+                    Err(error) => Err(error),
+                }
+            });
+            outcome = match sent {
+                // Beebeeb answered 2xx: the item is in Trash, whatever its body reads as.
+                Ok(true) | Err(AccountCallError::Unreadable) => Ok(()),
+                Ok(false) => Err(NotTrashed::Protected),
+                Err(kind) => Err(NotTrashed::Call(kind)),
+            };
+            if outcome.is_err() {
+                break;
+            }
+            trashed = true;
+        }
+        if trashed {
+            // As after a restore: the signed-in account's local state only, also when a later item failed.
             self.request_resnapshot();
         }
         outcome

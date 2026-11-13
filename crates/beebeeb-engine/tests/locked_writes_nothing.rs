@@ -27,7 +27,9 @@ fn locked_writes_nothing() {
     );
     assert_eq!(s.engine.start_sync(folder), Ok(SyncStart::NoSession));
     assert!(
-        s.engine.trash_items(&["a0000000-0000-4000-8000-000000000003"]).is_err(),
+        s.engine
+            .trash_items_for(s.engine.session_turn(), &["a0000000-0000-4000-8000-000000000003"])
+            .is_err(),
         "a file operation needs the session"
     );
     std::thread::sleep(std::time::Duration::from_secs(2));
