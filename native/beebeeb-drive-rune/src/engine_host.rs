@@ -606,6 +606,12 @@ fn local_items(items: &[DriveItem]) -> Vec<(String, bool)> {
         .collect()
 }
 
+/// What `upload_left` answers after a drop of which `copied` files went in, in the order dropped: the files that
+/// are NOT in the folder yet. `None`: it was not refused, or nothing went in (Try again sends all of it).
+fn upload_rest(files: &[PathBuf], copied: usize, refused: bool) -> Option<Vec<PathBuf>> {
+    (refused && copied > 0).then(|| files.iter().skip(copied).cloned().collect())
+}
+
 fn not_wired(what: &str) -> ActionError {
     log(format!("NotWired({what})"));
     ActionError::Unavailable
@@ -770,20 +776,19 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         // One file at a time, so a refusal part-way knows what is already in the folder: Try again sends the rest
         // alone (`upload_left`), never a second copy of a file that went in.
         self.upload_left = None;
-        let mut left = files.to_vec();
+        // How many files are in: the copies stop at the first refusal, so what is left is the files from there on.
+        let mut copied = 0;
         let result = self.local(|db, sync_root| {
             let parent = file_ops::resolve_folder(db, folder).map_err(map_drive_err)?;
             for file in files {
                 file_ops::copy_in(db, sync_root, parent.as_ref(), std::slice::from_ref(file)).map_err(map_drive_err)?;
-                if let Some(at) = left.iter().position(|path| path == file) {
-                    left.remove(at);
-                }
+                copied += 1;
             }
             Ok(())
         });
-        if result.is_err() && left.len() < files.len() {
-            self.upload_left = Some(left);
-        }
+        // Also when every file is in and the answer was still refused (the session changed during the last
+        // copy): an EMPTY list, which the window reads as "nothing to try again" (`None` would send all again).
+        self.upload_left = upload_rest(files, copied, result.is_err());
         result
     }
 
@@ -793,6 +798,10 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
 
     fn answers_later(&self) -> bool {
         true
+    }
+
+    fn wake_after(&mut self, after: std::time::Duration) {
+        self.copies.wake_after(after);
     }
 
     fn backups_root(&self) -> Option<String> {
