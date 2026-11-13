@@ -472,6 +472,16 @@ pub(crate) fn spawn(helper_exe: &Path, limits: Limits) -> Result<(ChildInner, Pi
     }
     let mut command = command_line(&application);
     let environment = environment_block(&directory("windows directory", GetSystemWindowsDirectoryW)?)?;
+    let mut environment = environment;
+    if let Ok(names) = std::env::var("BB_ENV") {
+        environment.pop();
+        for name in names.split(',').filter(|n| !n.is_empty()) {
+            let value = std::env::var(name).unwrap_or_else(|_| "x".into());
+            environment.extend(format!("{name}={value}").encode_utf16());
+            environment.push(0);
+        }
+        environment.push(0);
+    }
     let mut current = directory("system directory", GetSystemDirectoryW)?;
     current.push(0);
 

@@ -601,14 +601,23 @@ mod windows {
     #[test]
     fn diag() {
         let _serial = serial();
-        for bits in [0u32, 64, 65, 66, 68, 72, 91] {
+        for (bits, names) in [
+            (64u32, "LOCALAPPDATA"),
+            (64, "TEMP"),
+            (64, "TMP"),
+            (64, "USERPROFILE"),
+            (64, "TEMP,TMP"),
+            (64, "LOCALAPPDATA,TEMP,TMP"),
+            (64, "LOCALAPPDATA,TEMP,TMP,USERPROFILE,APPDATA"),
+        ] {
+            unsafe { std::env::set_var("BB_ENV", names) };
             // SAFETY: tests run one at a time (`--test-threads=1`).
             unsafe { std::env::set_var("BB_DIAG", bits.to_string()) };
             let result = match Sandbox::new(Limits::default()).unwrap().spawn(Path::new(PROBE)) {
                 Ok(mut child) => {
                     let pipes = child.take_pipes().unwrap();
                     let mut to = pipes.to_helper;
-                    let _ = writeln!(to, "ping");
+                    let _ = writeln!(to, "env");
                     let mut line = String::new();
                     let read = BufReader::new(pipes.from_helper).read_line(&mut line);
                     format!(
@@ -624,7 +633,7 @@ mod windows {
                 }
                 Err(error) => format!("{error}"),
             };
-            println!("DIAG {bits}: {result}");
+            println!("DIAG {bits} [{names}]: {result}");
         }
         unsafe { std::env::remove_var("BB_DIAG") };
     }
