@@ -24,6 +24,10 @@ mod macos;
 mod windows;
 #[cfg(windows)]
 mod windows_control;
+// Waiting on the core two-level lock (decision 2495): nothing calls it yet. Compiled on every platform (a stub
+// off Windows).
+#[allow(dead_code)]
+pub mod windows_hello;
 #[cfg(windows)]
 mod windows_tray;
 
