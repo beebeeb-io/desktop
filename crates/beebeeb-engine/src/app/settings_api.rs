@@ -178,8 +178,8 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// [`Engine::account_call`] for one session only: the token is copied only while the session in memory is the
-    /// one `session` names, asked with no session change half done (the session-write lock is held for the question
-    /// and the copy, as `session_is_still` in `trash_api` holds it), so the token of a later session never carries a
+    /// one `session` names, asked with no session change half done (`AccountRuntime::while_session_is`: the
+    /// session-write lock is held for the question and the copy), so the token of a later session never carries a
     /// change chosen under an earlier one. Never waits on a session change: while one is under way the answer is
     /// `NotSignedIn`, and nothing is sent.
     fn account_call_for<T, F, Fut>(&self, session: SessionGeneration, call: F) -> Result<T, AccountCallError>
@@ -187,17 +187,10 @@ impl<C: CredentialStores> Engine<C> {
         F: FnOnce(ApiClient) -> Fut,
         Fut: Future<Output = anyhow::Result<T>>,
     {
-        let token = {
-            let _writes = match self.writes.try_read() {
-                Ok(writes) => writes,
-                Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => return Err(AccountCallError::NotSignedIn),
-            };
-            if !self.acct.session_unchanged_since(session) {
-                return Err(AccountCallError::NotSignedIn);
-            }
-            self.session_token().map_err(|_| AccountCallError::NotSignedIn)?
-        };
+        let token = self
+            .acct
+            .while_session_is(&self.writes, session, |current| current.token.clone())
+            .ok_or(AccountCallError::NotSignedIn)?;
         let api = ApiClient::new(self.config.api_base.clone(), token, [0; 32]);
         self.runtime.block_on(call(api)).map_err(|error| kind_of(&error))
     }
