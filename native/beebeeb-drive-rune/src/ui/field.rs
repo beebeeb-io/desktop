@@ -86,18 +86,23 @@ pub fn bare_field(
 ) -> El {
     let key = spec.key;
     let (from, to) = edit.range();
-    let selected = edit.focused && from != to;
+    // A secure field has no "selection" for the gate: none of its text is read or measured here.
+    let selected = edit.focused && from != to && !edit.is_secure();
     // The gate reads the text of the selection, as the board marks it up; else the whole text.
-    let shown = if selected {
-        &edit.text[from..to]
+    // A secure field's characters never leave the field: the gate is told the bullets' count
+    // (`au::gate_text`), and nothing at all while the field is revealed.
+    let shown: std::borrow::Cow<'_, str> = if edit.is_secure() {
+        super::au::gate_text(edit).unwrap_or_default()
+    } else if selected {
+        std::borrow::Cow::Borrowed(&edit.text[from..to])
     } else {
-        edit.text.as_str()
+        std::borrow::Cow::Borrowed(edit.text.as_str())
     };
     if !shown.is_empty() {
         kit::note_text(
             &format!("{key}-value"),
             &format!("{key}-value-box"),
-            shown,
+            &shown,
             VALUE,
             t.text,
         );
@@ -125,8 +130,12 @@ pub fn bare_field(
         (false, true) => (t.accent_deep, Some(t.accent.alpha(0.30))),
         (false, false) => (Color::TRANSPARENT, None),
     };
-    let before = advance(&edit.text[..from], VALUE);
-    let width = advance(shown, VALUE);
+    let before = if selected {
+        advance(&edit.text[..from], VALUE)
+    } else {
+        0.0
+    };
+    let width = advance(&shown, VALUE);
     let mut text_row = row()
         .key(format!("{key}-main"))
         .grow(1.0)

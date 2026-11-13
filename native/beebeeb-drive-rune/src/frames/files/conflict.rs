@@ -19,7 +19,7 @@ use crate::shell::registry::{DialogFrame, FeedbackPolicy, FrameGroup};
 use crate::theme::icons_settings;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::settings_dialog::{self, Weight};
-use crate::ui::{button, dialog, kit};
+use crate::ui::{banner, button, dialog, kit};
 use rune::{Color, Cx, El, Tx, col, el, row};
 
 /// What the list says in the date column of a file that waits for a choice.
@@ -234,20 +234,21 @@ pub fn card(_dialog: &Dialog, s: &State, cx: &mut Cx<State>) -> El {
         // `.flex-1` between the default and the other answers: one more gap.
         .child(el().key("dlg-foot-gap").h(0.0))
         .child(
-            button::outline_button("btn-1", &keep_here, None, &t)
-                .w_full()
-                .on_press_tx(|s: &mut State, tx: &mut Tx| s.keep_version(Keep::Here, tx)),
+            // Enter on a focused button presses THAT button, never the default one (the Files
+            // window has no web focus, so Rune would send Return to Keep both).
+            banner::pressable(
+                button::outline_button("btn-1", &keep_here, None, &t).w_full(),
+                |s: &mut State, tx: &mut Tx| s.keep_version(Keep::Here, tx),
+            ),
         )
-        .child(
-            button::outline_button("btn-2", &keep_there, None, &t)
-                .w_full()
-                .on_press_tx(|s: &mut State, tx: &mut Tx| s.keep_version(Keep::There, tx)),
-        )
-        .child(
-            settings_dialog::button(3, "Cancel", Weight::Quiet, &t)
-                .w_full()
-                .on_press_tx(|s: &mut State, tx: &mut Tx| s.leave_conflict(tx)),
-        );
+        .child(banner::pressable(
+            button::outline_button("btn-2", &keep_there, None, &t).w_full(),
+            |s: &mut State, tx: &mut Tx| s.keep_version(Keep::There, tx),
+        ))
+        .child(banner::pressable(
+            settings_dialog::button(3, "Cancel", Weight::Quiet, &t).w_full(),
+            State::leave_conflict,
+        ));
     // The shell centres a dialog in the whole window; the board centres this one in the area
     // under the caption (as `tray::shortcuts` places its card): the caption's height above it.
     dialog::card(

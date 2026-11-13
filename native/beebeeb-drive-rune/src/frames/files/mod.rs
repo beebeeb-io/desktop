@@ -160,6 +160,9 @@ pub struct Actions {
     pub intents: Vec<Intent>,
     /// An upload that failed: what Try again uploads.
     pub retry_upload: Option<(Option<String>, Vec<std::path::PathBuf>)>,
+    /// A link that could not be made: the dialog Try again opens again, with the same items
+    /// and choices. Never the password: that is typed again.
+    pub retry_share: Option<share::Share>,
     /// The window's size, for keeping a menu inside it.
     pub window: (f32, f32),
     /// A board frame that draws only the lower part of the window (DW-0107, DW-0108): how many
@@ -207,6 +210,7 @@ impl Actions {
             undo: Vec::new(),
             intents: Vec::new(),
             retry_upload: None,
+            retry_share: None,
             window: (1278.0, 798.0),
             board_crop_top: 0.0,
             forward: Vec::new(),
@@ -848,6 +852,9 @@ impl State {
             Action::CopyLink => {
                 self.copy_link(tx);
             }
+            // The Share dialog again, with the items and the choices it had. No link is made
+            // here: a plain link would drop the password, the access and the end date.
+            Action::ShareLink => self.share_again(tx),
             Action::Open => {
                 self.open_selection(tx);
             }

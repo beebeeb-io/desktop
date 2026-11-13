@@ -61,6 +61,8 @@ pub enum Action {
     KeepOffline,
     RemoveOffline,
     CopyLink,
+    /// A link with choices (the Share dialog), as distinct from the plain Copy link.
+    ShareLink,
     Open,
     ShowInFileExplorer,
     Upload,
@@ -98,6 +100,7 @@ impl Action {
             Action::KeepOffline => "keep on this PC",
             Action::RemoveOffline => "remove from this PC",
             Action::CopyLink => "copy the link",
+            Action::ShareLink => "make the link",
             Action::Open => "open",
             Action::ShowInFileExplorer => "show in File Explorer",
             Action::Upload => "upload",
@@ -518,6 +521,7 @@ impl FilesFixture {
                 | Action::KeepOffline
                 | Action::RemoveOffline
                 | Action::CopyLink
+                | Action::ShareLink
                 | Action::Rename
                 | Action::Move
                 | Action::FreeUpSpace
@@ -769,7 +773,7 @@ impl FilesSource for FilesFixture {
         items: &[DriveItem],
         options: &super::actions_data::ShareOptions,
     ) -> Result<(), ActionError> {
-        self.refuse(Action::CopyLink, items)?;
+        self.refuse(Action::ShareLink, items)?;
         self.record(Call::ShareLink(ids(items), options.clone()));
         Ok(())
     }

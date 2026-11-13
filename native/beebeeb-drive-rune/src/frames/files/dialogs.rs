@@ -105,6 +105,12 @@ fn item_count(folder: &DriveItem) -> String {
     }
 }
 
+/// Enter with no modifier: what a focused control in a dialog hears itself, so that Return
+/// never goes on to the dialog's default button from another control.
+pub(super) fn plain_enter(ev: &KeyEvent) -> bool {
+    ev.key == rune::Key::Enter && !(ev.mods.shift || ev.mods.cmd || ev.mods.alt || ev.mods.ctrl)
+}
+
 impl State {
     /// The folders the Move dialog offers inside `folder`: the rows of the source that are
     /// folders, without Backups and service folders (DW-0409) and without what is being moved.
