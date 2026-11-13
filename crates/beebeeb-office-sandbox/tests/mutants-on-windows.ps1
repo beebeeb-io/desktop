@@ -7,6 +7,8 @@ $file = Join-Path (Get-Location) 'src\windows.rs'
 $original = [IO.File]::ReadAllText($file)
 
 # name -> (regular expression, replacement). Each expression must match exactly once.
+# 'profile-kept' is known to turn NO test red (measured twice): with its profile kept, the helper still cannot
+# write to the folders the system names for it. It stays in the list so that this is seen, not assumed.
 $mutants = [ordered]@{
     'no-container'        = @('attributes\.set\(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities\)\?;', 'let _ = &capabilities;')
     'no-package-opt-out'  = @('attributes\.set\(PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, &packages_policy\)\?;', 'let _ = &packages_policy;')

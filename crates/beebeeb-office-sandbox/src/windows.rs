@@ -9,10 +9,12 @@
 //!
 //! **The container profile exists only while the helper is suspended.** Windows refuses to create an AppContainer
 //! process for an identity that has no registered profile (system code 2, measured), and a registered profile comes
-//! with a folder its process may write to. So each helper gets a profile of its own under a random name; the
-//! helper is created suspended; the profile, its folder and its registry entries are deleted; the deletion is
-//! checked; only then does the helper run. It never executes while a place it could write to exists, two helpers
-//! never share an identity (so one cannot open the other), and nothing of the profile outlives the spawn call. If
+//! with a folder and registry entries of its own, meant for its process. So each helper gets a profile of its own
+//! under a random name; the helper is created suspended; the profile, its folder and its registry entries are
+//! deleted; the deletion is checked; only then does the helper run. The helper never executes while its profile
+//! exists, two helpers never share an identity (so one cannot open the other), and nothing of the profile
+//! outlives the spawn call. (Measured, for the record: the confined helper could not write to that folder even
+//! in a build that kept the profile; deleting it is not what the "no writable folder" test rests on.) If
 //! the parent is killed inside that window (a few system calls long), one empty profile under the name prefix
 //! `beebeeb.office.` stays behind and the helper, still suspended, is ended by its job. The next `Sandbox::new`
 //! deletes such a left-over: it lists this user's registered profiles, and deletes those whose name has exactly
