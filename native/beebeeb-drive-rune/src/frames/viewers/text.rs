@@ -4,7 +4,7 @@
 use rune::{Align, Color, El, Icon, Span, col, el, row, text_input};
 
 use super::chrome::{Dot, Status};
-use super::source::{Ink, OpenFile, Run, TextDoc, count_words};
+use super::source::{Cut, Ink, OpenFile, Run, TextDoc, count_words};
 use super::{Intent, icons, style, ui};
 use crate::State;
 use crate::theme::tokens::Theme;
@@ -116,7 +116,10 @@ pub fn body(doc: &TextDoc, wrap: bool, t: &Theme) -> El {
         .h_full()
         .py(12.0)
         .fill(t.bg)
-        .clip_rounded(0.0);
+        .clip_rounded(0.0)
+        // A file longer than the window is read by scrolling (the wheel, a touchpad).
+        .min_h(0.0)
+        .scroll(rune::ScrollSpec { stick_bottom: false });
     for (i, runs) in doc.lines.iter().enumerate() {
         lines = lines.child(if wrap {
             wrapped_line(i, runs, t)
@@ -371,13 +374,13 @@ pub fn newer_banner(file: &OpenFile, t: &Theme) -> Option<El> {
 
 /// The note over a file that opened read-only (DW-1527).
 pub fn banner(doc: &TextDoc, t: &Theme) -> Option<El> {
-    doc.truncated?;
-    Some(banner_el(
-        &icons::INFO,
-        "Read-only: this file is larger than 2 MB. Open it with another app to edit it.",
-        None,
-        t,
-    ))
+    let words = match doc.truncated?.why {
+        Cut::OverTwoMb => "Read-only: this file is larger than 2 MB. Open it with another app to edit it.",
+        Cut::TooLong => {
+            "Read-only: this file is too long to show whole here. Open it with another app to see all of it."
+        }
+    };
+    Some(banner_el(&icons::INFO, words, None, t))
 }
 
 /// A banner under the toolbar (`.mk-banner`): an icon, a sentence, and a button if given.

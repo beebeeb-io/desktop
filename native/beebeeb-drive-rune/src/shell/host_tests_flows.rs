@@ -436,3 +436,56 @@ fn a_links_password_field_excludes_the_window_from_capture_while_it_shows() {
     assert_eq!(exclusions(), vec![true, false, true, false]);
     assert!(!rt.state.shell.capture_excluded);
 }
+
+/// A session on a computer that holds no key of the account (the gate `NeedsRecoveryPhrase`, from a sign-in or
+/// at a start): the window is the sign-in window on its twelve words (DW-A23), never the "not built" frame, and it
+/// is excluded from capture from the form to the words without a gap.
+#[test]
+fn a_session_without_a_key_here_shows_the_twelve_words_in_the_sign_in_window_excluded_from_capture() {
+    use crate::frames::signin::Screen;
+    use crate::frames::signin::steps::WORD_KEYS;
+    let engine = Arc::new(FixtureEngine::signed_out());
+    let platform = Arc::new(FakePlatform::default());
+    let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform.clone())));
+    rt.update(|s, _| s.signin = crate::frames::signin::scene("DW-A02"));
+    rt.frame(1.0);
+    assert_eq!(rt.state.shell.window_kind, surfaces::WindowKind::FirstRun);
+
+    engine.set_gate(GateState::NeedsRecoveryPhrase);
+    rt.frame(2.0);
+    settle(&mut rt);
+    assert_eq!(
+        registry::group_for(&rt.state.shell.app),
+        FrameGroup::RecoveryPhrase,
+        "the gate holds"
+    );
+    assert_eq!(rt.state.signin.as_ref().unwrap().screen, Screen::Phrase);
+    assert!(rt.find(WORD_KEYS[0]).is_some(), "the twelve words are drawn");
+    assert!(rt.find(WORD_KEYS[11]).is_some());
+    assert!(rt.find("not-built").is_none(), "not the placeholder");
+    assert!(
+        rt.state.signin.as_ref().unwrap().password.text.is_empty(),
+        "the password is not kept behind the words"
+    );
+    assert_eq!(
+        rt.state.shell.window_kind,
+        surfaces::WindowKind::FirstRun,
+        "the same window, not the main one"
+    );
+    assert!(registry::route_shows_secret(&rt.state.shell.app));
+    assert!(rt.state.shell.capture_excluded, "the words can be captured");
+    assert_eq!(
+        platform.capture_exclusions.lock().unwrap().clone(),
+        vec![true],
+        "excluded once, at the start, and never lifted on the way to the words"
+    );
+
+    // Escape (Back) on the words: the form, and it stays the form on the next frames while the gate has not
+    // moved yet (the engine's sign-out is a round trip). The window is still excluded from capture.
+    press(&mut rt, Key::Escape, Mods::default());
+    rt.frame(3.0);
+    settle(&mut rt);
+    assert_eq!(rt.state.signin.as_ref().unwrap().screen, Screen::SignIn);
+    assert!(rt.find(WORD_KEYS[0]).is_none(), "the words are gone");
+    assert!(rt.state.shell.capture_excluded);
+}
