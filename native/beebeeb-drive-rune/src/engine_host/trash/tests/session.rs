@@ -90,16 +90,17 @@ fn a_restore_pressed_before_a_lock_is_not_sent_and_the_one_who_pressed_is_told_a
         "nothing is said while locked"
     );
 
-    // The same account, unlocked: told once, without a name, and the item is still in its Trash.
+    // The same account, unlocked: told once its Trash is listed again (the window is open on it), without a name,
+    // and the item is still in its Trash.
     unlock(&engine, &fake.first_phrase);
+    assert_eq!(settle(&mut source), [], "not before the Trash is listed again");
     assert_eq!(
         restore_requests(&fake.fake).len(),
         0,
         "and not sent after the unlock either"
     );
-    assert_eq!(settle(&mut source), [Notice::RestoreNotDone]);
+    assert_eq!(opened(&mut source), [Notice::RestoreNotDone]);
     assert_eq!(settle(&mut source), [], "said once");
-    assert_eq!(opened(&mut source), []);
     assert_eq!(names(&source), ALL_THREE);
 }
 
@@ -186,4 +187,72 @@ fn the_answer_of_an_earlier_session_does_not_take_out_a_row_a_later_press_put_in
     );
     assert_eq!(names(&source), ALL_THREE);
     assert_eq!(restore_requests(&fake.fake).len(), 1, "only the second press was sent");
+}
+
+#[test]
+fn a_restore_taken_late_while_the_new_sessions_first_read_is_on_its_way_is_read_again() {
+    let fake = fake("taken-mid-read");
+    let engine = signed_in(&fake);
+    let mut source = EngineTrashSource::new(engine.clone());
+    opened(&mut source);
+    let (release, ended) = hold_next_restore(&mut source);
+    release.send(()).expect("the hook is set");
+    let (reached, let_go) = hold_next_restore_request(&fake);
+    assert!(source.restore(CONTRACT));
+    reached.recv_timeout(WAIT).expect("the request reached the fake");
+
+    let _ = engine.lock();
+    assert!(source.pump().changed, "the lock drops the list");
+    unlock(&engine, &fake.first_phrase);
+    // The new session's first read is slow, and saw the item still in Trash; no list is held yet.
+    let read_before = listings(&fake.fake);
+    fake.list_delay_ms.store(600, Ordering::SeqCst);
+    source.opened();
+    let began = Instant::now();
+    while listings(&fake.fake) == read_before {
+        assert!(began.elapsed() < WAIT, "the read did not reach the fake");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    fake.list_delay_ms.store(0, Ordering::SeqCst);
+    let_go.send(()).expect("the fake holds the request");
+    ended.recv_timeout(WAIT).expect("the engine's call ended");
+    assert_eq!(settle(&mut source), []);
+    assert_eq!(names(&source), ["IMG_0001.HEIC", "Invented old invoices"]);
+    assert_eq!(
+        listings(&fake.fake),
+        read_before + 2,
+        "read once more after the slow read"
+    );
+}
+
+#[test]
+fn a_refusal_that_lands_after_the_session_moved_on_is_not_called_not_sent_and_the_list_is_read_again() {
+    let fake = fake("refused-late");
+    let engine = signed_in(&fake);
+    let mut source = EngineTrashSource::new(engine.clone());
+    opened(&mut source);
+    let (release, ended) = hold_next_restore(&mut source);
+    release.send(()).expect("the hook is set");
+    fake.restore_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    let (reached, let_go) = hold_next_restore_request(&fake);
+    assert!(source.restore(CONTRACT));
+    reached.recv_timeout(WAIT).expect("the request reached the fake");
+
+    let _ = engine.lock();
+    unlock(&engine, &fake.first_phrase);
+    assert_eq!(opened(&mut source), []);
+    let read_before = listings(&fake.fake);
+    let_go.send(()).expect("the fake holds the request");
+    ended.recv_timeout(WAIT).expect("the engine's call ended");
+    assert_eq!(
+        settle(&mut source),
+        [],
+        "it was sent: what happened to it is what the list says"
+    );
+    assert_eq!(
+        listings(&fake.fake),
+        read_before + 1,
+        "the list on screen was read again"
+    );
+    assert_eq!(names(&source), ALL_THREE);
 }

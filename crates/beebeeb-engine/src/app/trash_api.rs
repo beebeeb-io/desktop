@@ -86,21 +86,28 @@ impl<C: CredentialStores> Engine<C> {
     /// while the session in memory is still that one, asked with no session change half done
     /// (`AccountRuntime::while_session_is`); a session that moved on since (a lock, a sign-out, another sign-in,
     /// even back to the same account): [`AccountCallError::NotSignedIn`], and nothing (more) is sent. Stops at the
-    /// first item that fails: the ones before it are restored. A host with a window uses this form, never
-    /// [`Engine::restore_items`], which sends under whatever session is in memory when it runs: an id chosen in one
-    /// account's Trash is never sent with another session's token.
+    /// first item that fails: the ones before it are restored. The Trash window uses this form:
+    /// [`Engine::restore_items`] sends under whatever session is in memory when it runs, and an id chosen in one
+    /// account's Trash must never be sent with another session's token.
     ///
     /// BLOCKS on the handle's runtime: call it from a worker thread.
     pub fn restore_items_for(&self, session: SessionGeneration, file_ids: &[&str]) -> Result<(), AccountCallError> {
+        let mut restored = false;
+        let mut outcome = Ok(());
         for id in file_ids {
             let id = id.to_string();
-            self.account_call_for(session, move |api| async move { api.restore_file_sent(&id).await })?;
+            outcome = self.account_call_for(session, move |api| async move { api.restore_file_sent(&id).await });
+            if outcome.is_err() {
+                break;
+            }
+            restored = true;
         }
-        if !file_ids.is_empty() {
-            // Ask the sync engine to take the server's list again (the signed-in account's local state only).
+        if restored {
+            // Ask the sync engine to take the server's list again (the signed-in account's local state only; asks
+            // nothing of a state that is not the session's), also when a later item failed.
             self.request_resnapshot();
         }
-        Ok(())
+        outcome
     }
 
     /// Whether the session in memory is, now, the very one `generation` and `key` were copied from: asked with no
