@@ -104,7 +104,16 @@ pub struct Ui {
     /// to go even when the route machine remembers a place.
     pub first_place: bool,
     intents: Vec<Intent>,
+    /// A change the source refused, and when: the window's toast says it for [`REFUSAL_FOR`].
+    pub refusal: Option<(&'static str, std::time::Instant)>,
+    /// A section of this group was on screen at the last poll: the next arrival is an opening.
+    was_open: bool,
 }
+
+/// How long a refusal's toast stays.
+pub const REFUSAL_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+/// How soon the window looks again while an answer is out or a toast shows.
+pub const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl Ui {
     pub fn new(source: Box<dyn ThisPcSource>) -> Ui {
@@ -116,6 +125,8 @@ impl Ui {
             menu: None,
             first_place: false,
             intents: Vec::new(),
+            refusal: None,
+            was_open: false,
         }
     }
 
@@ -134,7 +145,7 @@ impl Ui {
     }
 
     pub fn kept_count(&self) -> usize {
-        self.source.kept().len()
+        self.source.kept_count()
     }
 
     pub fn kept(&self) -> Vec<Kept> {
@@ -277,6 +288,35 @@ impl Ui {
     }
 }
 
+/// What the source's workers answered since the last frame, for the shell's poll: `true` when the window must draw
+/// again. A refusal becomes the window's toast. Never calls the engine, never waits.
+pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    let open = matches!(
+        s.shell.app.route().section,
+        Section::SyncHistory | Section::AvailableOffline
+    );
+    let ui = &mut s.this_pc;
+    // A section that just opened: the source reads again when what it holds is old.
+    if open && !ui.was_open {
+        ui.source.opened();
+    }
+    ui.was_open = open;
+    let pumped = ui.source.pump();
+    let mut changed = pumped.changed;
+    if let Some(words) = pumped.refusal {
+        ui.refusal = Some((words, std::time::Instant::now()));
+        changed = true;
+    }
+    if ui.refusal.is_some_and(|(_, at)| at.elapsed() >= REFUSAL_FOR) {
+        ui.refusal = None;
+        changed = true;
+    }
+    if pumped.busy || ui.refusal.is_some() {
+        tx.wake_after(POLL_EVERY);
+    }
+    changed
+}
+
 /// The two sections' keys. The shell's own shortcuts ran first (`host::on_key`); Esc arrives
 /// here when the shell had nothing to close.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
@@ -351,6 +391,16 @@ fn window(s: &State, cx: &mut Cx<State>, here: Section, main: El) -> El {
                 .min_h(0.0)
                 .w_full()
                 .child(chrome::sidebar(s, &s.this_pc, here, &t))
-                .child(main),
+                .child(match s.this_pc.refusal {
+                    // A refused change: said over the section, never only in a log line.
+                    Some((words, _)) => main.child(crate::ui::toast::layer(crate::ui::toast::toast(
+                        &crate::theme::icons_files::ALERT,
+                        crate::ui::toast::Tone::Failed,
+                        words,
+                        None,
+                        &t,
+                    ))),
+                    None => main,
+                }),
         )
 }
