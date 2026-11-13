@@ -56,6 +56,7 @@ pub mod drive_settings;
 pub mod open;
 pub mod search;
 pub mod settings;
+pub mod shared;
 pub mod sync;
 #[cfg(test)]
 pub(crate) mod tests;

@@ -175,7 +175,8 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
         engine.clone(),
     )));
     s.storage_split = None;
-    s.frames.shared.source = Box::new(crate::frames::shared::source::Unwired);
+    // Shared reads the engine (`engine_host::shared`): from Beebeeb only, for the session in memory.
+    s.frames.shared.source = Box::new(crate::engine_host::shared::EngineSharedSource::new(engine.clone()));
     // Trash reads the engine (`engine_host::trash`); Search only when `SEARCH_ON_ENGINE` (task 2488).
     s.frames.trash.source = Box::new(crate::engine_host::trash::EngineTrashSource::new(engine.clone()));
     s.frames.find = crate::frames::search::SearchUi::default();
