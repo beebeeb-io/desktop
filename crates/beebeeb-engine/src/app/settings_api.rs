@@ -10,8 +10,8 @@
 //! address, a token or reqwest's own text.
 //!
 //! Writes account state: [`Engine::set_storage_region`], [`Engine::set_notification_preferences`] and
-//! [`Engine::mark_notifications_read`] (and the two `_for` forms of the last two, which refuse when the session is
-//! no longer the one the host names). The others only read. Must not: log anything a call sends or receives.
+//! [`Engine::mark_notifications_read`] (and the `_for` form of each, which refuses when the session is no longer
+//! the one the host names). The others only read. Must not: log anything a call sends or receives.
 
 use std::future::Future;
 
@@ -68,7 +68,8 @@ impl<C: CredentialStores> Engine<C> {
 
     /// WRITES: store where new files go (`PUT /api/v1/me/region`): `preferred_region` is a choice's id as the list
     /// names it (`europe`, a country), `region_strict` is "only store in this country". The server replaces the
-    /// whole choice, so a caller sends both.
+    /// whole choice, so a caller sends both. Sent under whatever session is in memory when it runs: a host that
+    /// acts on a person's press uses [`Engine::set_storage_region_for`].
     pub fn set_storage_region(
         &self,
         preferred_region: Option<&str>,
@@ -76,6 +77,24 @@ impl<C: CredentialStores> Engine<C> {
     ) -> Result<SetPreferredRegionResponse, AccountCallError> {
         let preferred_region = preferred_region.map(str::to_string);
         self.account_call(move |api| async move {
+            api.set_preferred_region(preferred_region.as_deref(), region_strict)
+                .await
+        })
+    }
+
+    /// WRITES: [`Engine::set_storage_region`], for the session a person chose under and no other. `session` is
+    /// [`Engine::session_turn`] as the host read it AT THE PRESS (on its window's thread, before any worker
+    /// started). A session that moved on since (a lock, a sign-out, another sign-in, even back to the same
+    /// account): [`AccountCallError::NotSignedIn`], and nothing is sent. A host with a window uses this form: where
+    /// an account's files are stored is never changed by a choice made under another session.
+    pub fn set_storage_region_for(
+        &self,
+        session: SessionGeneration,
+        preferred_region: Option<&str>,
+        region_strict: Option<bool>,
+    ) -> Result<SetPreferredRegionResponse, AccountCallError> {
+        let preferred_region = preferred_region.map(str::to_string);
+        self.account_call_for(session, move |api| async move {
             api.set_preferred_region(preferred_region.as_deref(), region_strict)
                 .await
         })

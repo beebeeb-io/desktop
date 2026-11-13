@@ -298,6 +298,79 @@ fn a_new_storage_location_is_sent_with_its_strict_rule() {
     assert_eq!(set(&engine).expect_err("no answer"), AccountCallError::Offline);
 }
 
+/// A choice of where files are stored is sent only under the session it was made in: after a lock and an unlock
+/// (the same account, its token still good), after a sign-out and a sign-in, and while a sign-out is ending the
+/// session, nothing is sent; under the session that is still there it is sent once.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_storage_location_chosen_under_one_session_is_never_sent_under_another() {
+    let account = account("region-turn@example.eu");
+    let engine = Arc::new(signed_in(&account));
+    let puts = || account.writes.lock().unwrap().len();
+
+    let chosen_under = engine.session_turn();
+    let _ = engine.lock();
+    engine
+        .unlock_with_phrase(Zeroizing::new(account.phrase.clone()))
+        .expect("the phrase unlocks");
+    assert_eq!(
+        engine
+            .set_storage_region_for(chosen_under, Some("de"), Some(true))
+            .expect_err("the session moved on"),
+        AccountCallError::NotSignedIn,
+        "a lock and an unlock in between"
+    );
+    assert_eq!(puts(), 0, "nothing was sent after the unlock");
+
+    let chosen_under = engine.session_turn();
+    engine.sign_out_keeping_local_data().expect("signed out");
+    engine
+        .sign_in_password(&account.email, Zeroizing::new(PASSWORD.into()))
+        .expect("the fake accepts the password");
+    engine
+        .unlock_with_phrase(Zeroizing::new(account.phrase.clone()))
+        .expect("the phrase unlocks");
+    assert_eq!(
+        engine
+            .set_storage_region_for(chosen_under, Some("de"), Some(true))
+            .expect_err("the session moved on"),
+        AccountCallError::NotSignedIn,
+        "a sign-out and a sign-in in between"
+    );
+    assert_eq!(puts(), 0, "nothing was sent after the sign-in");
+
+    // Under the session that is still there: sent once, with what was chosen.
+    let now = engine.session_turn();
+    let stored = engine
+        .set_storage_region_for(now, Some("de"), Some(true))
+        .expect("the session is the one of the choice");
+    assert_eq!(
+        (stored.preferred_region.as_deref(), stored.region_strict),
+        (Some("de"), true)
+    );
+    assert_eq!(
+        account.writes.lock().unwrap().clone(),
+        [(
+            "PUT /api/v1/me/region".to_string(),
+            json!({ "preferred_region": "de", "region_strict": true })
+        )]
+    );
+
+    // While a sign-out is ending the session (it is not yet gone from memory): nothing is sent.
+    let (during, said) = (engine.clone(), Arc::new(Mutex::new(None)));
+    let heard = said.clone();
+    engine.during_next_forget_for_test(Box::new(move || {
+        *heard.lock().unwrap() = Some(during.set_storage_region_for(now, Some("europe"), Some(false)));
+    }));
+    engine.sign_out_keeping_local_data().expect("signed out");
+    assert_eq!(
+        said.lock().unwrap().take().expect("the hook ran").expect_err("ending"),
+        AccountCallError::NotSignedIn,
+        "a session that is ending"
+    );
+    assert_eq!(puts(), 1, "and nothing more was sent");
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn the_accounts_notifications_are_read_with_the_unread_count() {
