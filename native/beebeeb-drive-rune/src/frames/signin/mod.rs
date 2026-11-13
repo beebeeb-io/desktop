@@ -389,6 +389,24 @@ impl Ui {
         any
     }
 
+    /// The session's gate says the account is signed in and this computer holds no key of it (a sign-in that
+    /// just finished, or a start with such a session): the twelve words are in front (DW-A23). Whatever screen
+    /// was up is left WITHOUT discarding the session (the session is why this screen shows); what was typed on
+    /// it is forgotten. `true`: the screen changed.
+    pub fn follow_gate(&mut self, gate: GateState) -> bool {
+        if gate != GateState::NeedsRecoveryPhrase || matches!(self.screen, Screen::Phrase | Screen::NoPhrase) {
+            return false;
+        }
+        self.busy = false;
+        self.verifying = false;
+        self.problem = None;
+        self.password.clear();
+        self.code.clear();
+        self.backup_code.clear();
+        self.proceed(NextAfterSignIn::RecoveryPhrase);
+        true
+    }
+
     /// Hand the focus this change asked for to Rune.
     fn settle(&mut self, tx: &mut Tx) {
         if let Some(key) = self.focus.take() {
@@ -553,8 +571,10 @@ pub fn frame(s: &State, cx: &mut Cx<State>) -> El {
 /// sign-in that took a second). `true`: the view must run again. For `shell::host::poll`.
 #[cfg_attr(not(test), allow(dead_code))] // waits for its one line in `shell/host.rs` (PR body)
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    let gate = s.shell.app.gate();
     let Some(ui) = ui(s) else { return false };
-    let changed = ui.pump();
+    let mut changed = ui.pump();
+    changed |= ui.follow_gate(gate);
     ui.settle(tx);
     changed
 }

@@ -254,6 +254,14 @@ pub const FRAMES: &[Frame] = &[
         on_key: Some(crate::frames::signin::on_key),
         feedback: FeedbackPolicy::Denied("sign-in shows your email and takes your password"),
     },
+    // Signed in on a computer that holds no key of the account: the sign-in window's twelve words (DW-A23), which
+    // `frames::signin::poll` puts in front while this gate holds.
+    Frame {
+        group: FrameGroup::RecoveryPhrase,
+        view: crate::frames::signin::frame,
+        on_key: Some(crate::frames::signin::on_key),
+        feedback: FeedbackPolicy::Denied("it takes your recovery phrase"),
+    },
     Frame {
         group: FrameGroup::FirstRun,
         view: crate::frames::signin::setup::frame,

@@ -71,7 +71,8 @@ impl WindowKind {
 /// Which window a screen of the route machine is drawn in.
 pub fn kind_for(screen: &Screen) -> WindowKind {
     match screen {
-        Screen::SignIn | Screen::Gate(GateState::FirstRun) => WindowKind::FirstRun,
+        // The twelve words on a computer without the key are a screen of the sign-in window (DW-A23).
+        Screen::SignIn | Screen::Gate(GateState::FirstRun | GateState::NeedsRecoveryPhrase) => WindowKind::FirstRun,
         Screen::Gate(_) | Screen::Drive(_) | Screen::Settings(_) => WindowKind::Main,
     }
 }
@@ -155,10 +156,14 @@ mod tests {
         assert_eq!(WindowKind::FirstRun.key(), "first-run");
         assert_eq!(kind_for(&Screen::SignIn), WindowKind::FirstRun);
         assert_eq!(kind_for(&Screen::Gate(GateState::FirstRun)), WindowKind::FirstRun);
+        // The twelve words on a computer without the key: a screen of the sign-in window.
+        assert_eq!(
+            kind_for(&Screen::Gate(GateState::NeedsRecoveryPhrase)),
+            WindowKind::FirstRun
+        );
         for screen in [
             Screen::Gate(GateState::Locked),
             Screen::Gate(GateState::NoPlan),
-            Screen::Gate(GateState::NeedsRecoveryPhrase),
             Screen::Gate(GateState::KeyStoreUnavailable),
             Screen::Drive(Route::section(Section::Files)),
             Screen::Settings(SettingsPane::General),
