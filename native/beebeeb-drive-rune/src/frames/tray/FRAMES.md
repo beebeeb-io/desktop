@@ -46,6 +46,12 @@ DW-1232 light geometry 12, pixels 19, frame tiles 44, dark 12, 20, 12; DW-1233 l
 (text, icons, fills 0). That is more than the two rows above say; the dialog is over the window, which other
 lanes have changed since. The 19 flyout frames are at 0 in both themes, both times.
 
+Measured again on 2026-11-12 on the Linux build VM, after the board's b4ffef881 goldens (the toolbar's Open in File
+Explorer; a 22nd File command, Free up space, which has no home on the board) and with the one window toolbar:
+DW-1232 light geometry 0, pixels 0, frame tiles 2, dark 0, 4 (`Files-row`, `row-5`, `row-5-tile`, `row-6-tile`: edges
+under the scrim), 2; DW-1233 light geometry 3 (`sc-1-0-home`, `sc-1-1-home`, `sc-2-1-home`), pixels 9, frame tiles 18,
+dark 3, 13, 11 (text, icons, fills 0).
+
 ## DW-1201 and DW-1234: what is left
 
 **DW-1201.** Nothing of it is Beebeeb's to draw beyond DW-1202 and DW-0401, so it has no gated scene.

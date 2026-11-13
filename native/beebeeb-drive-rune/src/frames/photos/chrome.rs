@@ -1,18 +1,15 @@
 //! The Photos window (`.mk-win` with Photos on): caption, sidebar, the section's toolbar, the
 //! body, the status line, and what lies in front (a menu, a dialog on its scrim).
 //!
-//! The toolbar's right half (the list/grid switch, Sort, the details panel, New, search) is
-//! `ui::toolbar::toolbar`'s, which draws the Files folder and cannot be given another title or
-//! other buttons: its pieces are repeated here from the same components (the PR asks the
-//! design-system lane to split it).
+//! The toolbar is the one window toolbar (`ui::toolbar::bar`) with this section's title, its
+//! controls in the slot and its states for the standard ones.
 
 use rune::{Color, El, Icon, TextStyle, col, el, row, text_input};
 
 use super::Intent;
 use crate::State;
-use crate::theme::icons as shared;
 use crate::theme::tokens::{Theme, radius, type_};
-use crate::ui::toolbar::{ToolState, kbd, segment, segmented, tool_button};
+use crate::ui::toolbar as tb;
 use crate::ui::{caption, kit, sidebar};
 
 /// The group's own type styles, by the board's class.
@@ -112,25 +109,6 @@ pub fn tbtn(key: &str, name: &str, ic: &'static Icon, size: f32, on: bool, t: &T
 }
 
 pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
-    let nav = row()
-        .key("nav")
-        .child(
-            tool_button(
-                "back",
-                "Back",
-                &shared::CHEVRON_LEFT,
-                16.0,
-                if bar.back { ToolState::Idle } else { ToolState::Off },
-                t,
-            )
-            .shortcut_hint("Alt+Left")
-            .on_press(|s: &mut State| s.photos.close_viewer()),
-        )
-        .child(
-            tool_button("forward", "Forward", &shared::CHEVRON_RIGHT, 16.0, ToolState::Off, t)
-                .shortcut_hint("Alt+Right"),
-        );
-
     let title = col()
         .key("folder-info")
         .px(4.0)
@@ -141,121 +119,58 @@ pub fn toolbar(s: &State, bar: Bar, t: &Theme) -> El {
         .child(kit::label("folder-title", bar.title, type_::TITLE, t.text).w_full())
         .child(kit::label("item-count", bar.sub, type_::TITLE_SUB, t.text_tertiary).w_full());
 
-    // Photos has one layout: the list/grid switch and Sort show, dimmed, and take nothing.
-    let view_toggle = segmented(
-        "view-toggle",
-        "View",
-        vec![
-            segment("view-list", "as List", &shared::VIEW_LIST, false, t)
-                .disabled(true)
-                .focusable(false),
-            segment("view-grid", "as Grid", &shared::VIEW_GRID, false, t)
-                .disabled(true)
-                .focusable(false),
-        ],
-        t,
-    )
-    .disabled(true)
-    .opacity(0.45);
-    let sort_btn = tool_button("sort-btn", "Sort", &shared::SORT, 15.0, ToolState::Off, t).child(kit::glyph(
-        "sort-caret",
-        &shared::CHEVRON_DOWN,
-        11.0,
-        t.text_quaternary,
-    ));
-    let panel_btn = tool_button(
-        "panel-toggle-btn",
-        "Details panel",
-        &shared::PANEL_TOGGLE,
-        16.0,
-        if bar.details { ToolState::Idle } else { ToolState::Off },
-        t,
-    )
-    .shortcut_hint("Alt+Shift+P")
-    .on_press(|s: &mut State| s.photos.open_details());
-    let sep = el().key("toolbar-sep").w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
-
-    // "New here adds to Files" (DW-0601): the menu is the Files lane's; this asks for it.
-    let new_btn = row()
-        .key("new-btn")
-        .role("button")
-        .label("New")
-        .h(28.0)
-        .pl(8.0)
-        .pr(9.0)
-        .gap(5.0)
-        .center_y()
-        .radius(radius::CONTROL)
-        .fill(t.accent)
-        .hover(t.press)
-        .press(t.press)
-        .focusable(true)
-        .on_press(|s: &mut State| s.photos.ask(Intent::NewInFiles))
-        .child(kit::glyph("plus-icon", &shared::PLUS, 14.0, t.accent_text_on))
-        .child(kit::label("new-label", "New", type_::LABEL, t.accent_text_on))
-        .child(kit::glyph("new-caret", &shared::CHEVRON_DOWN, 11.0, t.accent_text_on));
-
     const SEARCH_PLACEHOLDER: &str = "Search names";
-    kit::note_text(
-        "search-placeholder",
+    let search = tb::search_box(
         "search-input",
         SEARCH_PLACEHOLDER,
-        type_::SEARCH,
-        t.text_tertiary,
+        text_input(&s.search, type_::SEARCH)
+            .key("search-input")
+            .label("Search names")
+            .shortcut_hint("Ctrl+F")
+            .single_line()
+            .color(t.text)
+            .placeholder(SEARCH_PLACEHOLDER, t.text_tertiary)
+            .on_edit(|s: &mut State| &mut s.search)
+            .on_submit(|s: &mut State, _| {
+                let words = s.search.text.to_string();
+                s.photos.ask(Intent::Search(words));
+            })
+            .grow(1.0),
+        t,
     );
-    let search_field = row()
-        .key("search-box")
-        .role("search")
-        .w(210.0)
-        .h(28.0)
-        .gap(6.0)
-        .pl(9.0)
-        .pr(6.0)
-        .radius(8.0)
-        .fill(t.field)
-        .box_shadow(kit::ring_inset(t.separator))
-        .center_y()
-        .child(kit::glyph("search-icon", &shared::SEARCH, 13.0, t.text_tertiary))
-        .child(
-            text_input(&s.search, type_::SEARCH)
-                .key("search-input")
-                .label("Search names")
-                .shortcut_hint("Ctrl+F")
-                .single_line()
-                .color(t.text)
-                .placeholder(SEARCH_PLACEHOLDER, t.text_tertiary)
-                .on_edit(|s: &mut State| &mut s.search)
-                .on_submit(|s: &mut State, _| {
-                    let words = s.search.text.to_string();
-                    s.photos.ask(Intent::Search(words));
-                })
-                .grow(1.0),
-        )
-        .child(kbd("kbd-hint", "Ctrl+F", t));
 
-    row()
-        .key("toolbar")
-        .role("toolbar")
-        .label("Photos")
-        .h(46.0)
-        .w_full()
-        .fill(t.toolbar_bg)
-        .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
-        .border_layout()
-        .pl(10.0)
-        .pr(12.0)
-        .center_y()
-        .gap(8.0)
-        .child(nav)
-        .child(title)
-        .child(el().key("toolbar-spacer").grow(1.0))
-        .child(bar.middle)
-        .child(view_toggle)
-        .child(sort_btn)
-        .child(panel_btn)
-        .child(sep)
-        .child(new_btn)
-        .child(search_field)
+    tb::bar(
+        tb::Bar {
+            name: "Photos".into(),
+            // Back leaves an open photo; in the grid there is nowhere to go back to.
+            back: (bar.back, tb::press(|s, _| s.photos.close_viewer())),
+            forward: (false, None),
+            title,
+            slot: Some(bar.middle),
+            slot_sep: false,
+            // Photos has one layout: the list/grid switch and Sort show, dimmed, and take nothing.
+            view: tb::View::NotHere,
+            on_view: None,
+            sort: tb::Sort::NotHere,
+            on_sort: None,
+            // Live over an open photo: it opens Details.
+            details: if bar.details {
+                tb::Details::Closed
+            } else {
+                tb::Details::NotHere
+            },
+            on_details: tb::press(|s, _| s.photos.open_details()),
+            inert: false,
+            // Photos shows no folder: the Beebeeb location.
+            on_explorer: Box::new(tb::open_beebeeb_location),
+            // "New here adds to Files" (DW-0601): the menu is the Files lane's; this asks for it.
+            new: tb::New::Idle,
+            on_new: tb::press(|s, _| s.photos.ask(Intent::NewInFiles)),
+            search,
+            trailing_inset: 0.0,
+        },
+        t,
+    )
 }
 
 /// The status line (`.mk-foot`): the PC's sync state at the left, this view's words at the right.
