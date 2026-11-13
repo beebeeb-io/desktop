@@ -1,7 +1,7 @@
 //! Search on the real engine: [`EngineSearchSource`]. NOT in the running app: `shell::state::SEARCH_ON_ENGINE` is
-//! still false, so the shell hands Search the `Unwired` source and none of this runs. The index is tagged with the
-//! signed-in account and built only through the engine's account-bound handle (`Engine::local_state`, task 2488):
-//! a local state that is not the session's (a sign-out keeps the data) builds no index.
+//! still false, so the shell hands Search the `Unwired` source and none of this runs. The index is built only
+//! through the engine's account-bound handle (`Engine::local_state`, task 2488): a local state that is not the
+//! session's (a sign-out keeps the data) builds no index.
 //!
 //! What it answers, and from where:
 //! - `search`: names in this computer's copy of the list (`desktop_search::build_local_index` over the local state,
@@ -11,15 +11,29 @@
 //! - Not bound: `recent`, `clear_recent`, `remember`. A search term is the person's content and there is no store
 //!   for it yet; nothing is kept, in memory or on disk, until the lead rules where it lives.
 //!
+//! Whose answer (review of desktop#378): an index and a result belong to one SESSION, the engine's own turn
+//! (`Engine::session_turn`: it moves on at every sign-in, unlock, lock and sign-out) together with the account. A
+//! worker says the session it began in and ended in; the window takes an answer in only when that is the session
+//! it sees now. An account's name alone is not enough: it stays the same across a lock.
+//!
+//! What is kept, and until when: the index and the last result, in memory, only while their session is the
+//! current one. `pump` drops them the moment it is not (the window's side, no worker asked), `forget` drops them
+//! when the window says so, and every reader hands out nothing of a session that is gone even before either ran.
+//!
+//! When it works (never from a draw): the index is built when Search opens (`opened`) and what is held is older
+//! than [`FRESH_FOR`]; a query runs when the window says the words or the pill changed (`ask`), or when the index
+//! it waited for lands (`pump`). `wired`, `search` and `details` only read what is held.
+//!
 //! Thread rule: the index is built on a worker and kept in memory. A query runs on a worker too, with a limit; its
 //! result answers only the query that asked (the words, the pill and the index it ran on), and `search` says
 //! `Searching` until it lands. The window is woken when either lands.
 //!
-//! Must not: log a query, a name or a path.
+//! Must not: log a query, a name or a path; keep a name of a session that ended.
 
-use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::app::{CredentialStores, Engine};
 use beebeeb_engine::desktop_search::{LocalSearchIndex, LocalSearchRecord, build_local_index, query_local_index};
 use beebeeb_engine::drive_v2::model::{ROOT_NAME, mime_for_name};
@@ -28,31 +42,47 @@ use chrono::Local;
 use super::log;
 use super::trash::{kind_of, when};
 use crate::frames::files::source::Details;
-use crate::frames::search::source::{Answer, Hit, Narrow, SearchSource};
+use crate::frames::search::source::{Answer, Hit, Narrow, Pumped, SearchSource};
 use crate::ui::file_list::PcState;
 
 #[cfg(test)]
 mod tests;
 
-/// An index this recent is not built again when a search asks.
+/// An index this recent is not built again when Search opens.
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
 
 /// At most this many results are shown.
 pub const SHOWN: usize = 100;
 
-/// What Search needs of the engine: whose computer it is, the local index (disk work: a worker calls it), and a way
+/// What Search needs of the engine: whose session it is, the local index (disk work: a worker calls it), and a way
 /// to wake the window. The running app's is the engine handle; a test's reads a state database of its own.
 pub trait SearchHost: Send + Sync + 'static {
+    /// The engine's session turn: it moves on at every sign-in, unlock, lock and sign-out.
+    type Turn: Copy + Eq + Send + 'static;
     /// The signed-in account (in memory, never waits); `None`: signed out.
     fn account(&self) -> Option<String>;
+    /// The session's turn now. In memory, never waits.
+    fn turn(&self) -> Self::Turn;
+    /// A session is in memory (signed in and unlocked). Never waits.
+    fn unlocked(&self) -> bool;
     /// The index of this computer's local state. `Err`: there is none (nothing synced yet) or it cannot be read.
     fn index(&self) -> Result<LocalSearchIndex, ()>;
     fn wake(&self);
 }
 
 impl<C: CredentialStores> SearchHost for Engine<C> {
+    type Turn = SessionGeneration;
+
     fn account(&self) -> Option<String> {
         self.account_email().or_else(|| self.user_id())
+    }
+
+    fn turn(&self) -> SessionGeneration {
+        self.session_turn()
+    }
+
+    fn unlocked(&self) -> bool {
+        self.has_session()
     }
 
     fn index(&self) -> Result<LocalSearchIndex, ()> {
@@ -66,31 +96,62 @@ impl<C: CredentialStores> SearchHost for Engine<C> {
     }
 }
 
-/// Search on the real engine. See the module's doc.
-pub struct EngineSearchSource<H: SearchHost> {
-    host: Arc<H>,
-    state: Mutex<Inner>,
-    answers: mpsc::Sender<Built>,
-    inbox: Mutex<mpsc::Receiver<Built>>,
-    found_tx: mpsc::Sender<(Asked, Vec<Hit>)>,
-    found_rx: Mutex<mpsc::Receiver<(Asked, Vec<Hit>)>>,
+/// One session: the engine's turn and the account signed in with the vault open.
+#[derive(Clone, PartialEq, Eq)]
+struct Session<T> {
+    turn: T,
+    account: String,
+}
+
+/// The session `host` is in now; `None`: no one is signed in with the vault open.
+fn session_of<H: SearchHost>(host: &H) -> Option<Session<H::Turn>> {
+    if !host.unlocked() {
+        return None;
+    }
+    let account = host.account()?;
+    Some(Session {
+        turn: host.turn(),
+        account,
+    })
 }
 
 /// A query as it was asked: the words, the pill, and the index it ran on (by number). A result answers only the
 /// query that asked for it, on the index it ran on.
 type Asked = (String, Narrow, u64);
 
-#[derive(Default)]
-struct Inner {
-    /// The last index built, and whose account's computer it is.
-    index: Option<(String, Arc<LocalSearchIndex>)>,
+/// The index held, the session it was built in and its number among the indexes installed.
+struct Held<T> {
+    of: Session<T>,
+    index: Arc<LocalSearchIndex>,
+    number: u64,
+}
+
+/// A worker's answer, with the number of the job that asked.
+enum Landed<T> {
+    /// The index, and the session it was built in (`None`: the session was not the same after the build as before).
+    Built(u64, Option<Session<T>>, Result<LocalSearchIndex, ()>),
+    /// A query's results, and the session whose index it ran on.
+    Found(u64, Session<T>, Asked, Vec<Hit>),
+}
+
+/// Search on the real engine. See the module's doc.
+pub struct EngineSearchSource<H: SearchHost> {
+    host: Arc<H>,
+    answers: mpsc::Sender<Landed<H::Turn>>,
+    inbox: mpsc::Receiver<Landed<H::Turn>>,
+    held: Option<Held<H::Turn>>,
     /// Numbers the indexes installed.
-    generation: u64,
+    installed: u64,
+    /// Numbers the jobs sent: an answer counts only for the job that is still waited for.
+    jobs: u64,
     /// When the last build was answered (a failure too).
     built_at: Option<Instant>,
-    building: bool,
+    /// The build on its way.
+    building: Option<u64>,
+    /// What the window asked for last: run again when a new index lands.
+    wanted: Option<(String, Narrow)>,
     /// The query on its way.
-    asked: Option<Asked>,
+    asked: Option<(u64, Asked)>,
     /// The last result, and the query it answers.
     found: Option<(Asked, Vec<Hit>)>,
 }
@@ -107,99 +168,90 @@ pub(crate) fn made_here() -> usize {
     MADE_HERE.with(std::cell::Cell::get)
 }
 
-/// A worker's answer: the account it was built for (`None`: it changed during the build) and the index, or none.
-struct Built(Option<String>, Result<LocalSearchIndex, ()>);
-
 impl<H: SearchHost> EngineSearchSource<H> {
-    /// The first index is built on a worker now, when someone is signed in.
+    /// Nothing is read until Search opens.
     pub fn new(host: Arc<H>) -> Self {
         #[cfg(test)]
         MADE_HERE.with(|made| made.set(made.get() + 1));
         let (answers, inbox) = mpsc::channel();
-        let (found_tx, found_rx) = mpsc::channel();
-        let source = Self {
+        Self {
             host,
-            state: Mutex::new(Inner::default()),
             answers,
-            inbox: Mutex::new(inbox),
-            found_tx,
-            found_rx: Mutex::new(found_rx),
-        };
-        drop(source.sync());
-        source
+            inbox,
+            held: None,
+            installed: 0,
+            jobs: 0,
+            built_at: None,
+            building: None,
+            wanted: None,
+            asked: None,
+            found: None,
+        }
     }
 
-    /// Take in a built index, then build again when there is none for this account, or it is old.
-    fn sync(&self) -> std::sync::MutexGuard<'_, Inner> {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let inbox = self.inbox.lock().unwrap_or_else(PoisonError::into_inner);
-        while let Ok(Built(whose, result)) = inbox.try_recv() {
-            state.building = false;
-            state.built_at = Some(Instant::now());
-            match (whose, result) {
-                (Some(whose), Ok(index)) => {
-                    state.index = Some((whose, Arc::new(index)));
-                    state.generation += 1;
-                }
-                (None, Ok(_)) => state.index = None,
-                // Kept: the index before still answers. None before: not wired.
-                (_, Err(())) => log("search: the list on this PC could not be read"),
-            }
-        }
-        drop(inbox);
-        let found = self.found_rx.lock().unwrap_or_else(PoisonError::into_inner);
-        while let Ok((asked, hits)) = found.try_recv() {
-            if state.asked.as_ref() == Some(&asked) {
-                state.asked = None;
-                state.found = Some((asked, hits));
-            }
-        }
-        drop(found);
-        let whose = self.host.account();
-        let stale = state.built_at.is_none_or(|at| at.elapsed() >= FRESH_FOR);
-        let other = state.index.as_ref().is_some_and(|(of, _)| Some(of) != whose.as_ref());
-        if whose.is_some() && !state.building && (stale || other) {
-            self.build(&mut state);
-        }
-        state
+    /// The index, while the session it was built in is the current one. Asked on every reader: an index of a
+    /// session that ended is never handed out, even before the next `pump` drops it.
+    fn current(&self) -> Option<&Held<H::Turn>> {
+        let now = session_of(&*self.host)?;
+        self.held.as_ref().filter(|held| held.of == now)
     }
 
-    fn build(&self, state: &mut Inner) {
-        let (host, answers) = (self.host.clone(), self.answers.clone());
+    /// Something of a session that is not the current one is still here.
+    fn holds_another_sessions(&self) -> bool {
+        let anything = self.held.is_some() || self.found.is_some() || self.asked.is_some() || self.wanted.is_some();
+        anything && self.current().is_none() && (self.held.is_some() || session_of(&*self.host).is_none())
+    }
+
+    /// Build the index on a worker, for the session of the moment.
+    fn build(&mut self) {
+        if self.building.is_some() || session_of(&*self.host).is_none() {
+            return;
+        }
+        self.jobs += 1;
+        let (host, answers, job) = (self.host.clone(), self.answers.clone(), self.jobs);
         let started = std::thread::Builder::new().name("search-index".into()).spawn(move || {
             let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let before = host.account();
+                let before = session_of(&*host);
                 let index = host.index();
-                (before.filter(|whose| host.account().as_ref() == Some(whose)), index)
+                // The same session after the work as before it, or the index is nobody's.
+                (
+                    before.filter(|before| session_of(&*host).as_ref() == Some(before)),
+                    index,
+                )
             }));
-            let built = built.unwrap_or((None, Err(())));
-            let _ = answers.send(Built(built.0, built.1));
+            let (of, index) = built.unwrap_or((None, Err(())));
+            let _ = answers.send(Landed::Built(job, of, index));
             host.wake();
         });
-        state.building = started.is_ok();
-        if started.is_err() {
+        if started.is_ok() {
+            self.building = Some(job);
+        } else {
             log("search: could not start a thread for the index");
-            state.built_at = Some(Instant::now());
+            self.built_at = Some(Instant::now());
         }
     }
 
-    /// The signed-in account's index.
-    fn index(&self) -> Option<Arc<LocalSearchIndex>> {
-        let state = self.sync();
-        let whose = self.host.account()?;
-        state
-            .index
-            .as_ref()
-            .filter(|(of, _)| *of == whose)
-            .map(|(_, index)| index.clone())
-    }
-
-    /// Run `asked` on a worker: at most [`SHOWN`] results of the pill's kind, sent back with the query they answer.
-    fn ask(&self, state: &mut Inner, index: Arc<LocalSearchIndex>, asked: Asked) {
-        let (host, found) = (self.host.clone(), self.found_tx.clone());
-        let job = asked.clone();
+    /// Run what the window asked for on a worker, on the current session's index: at most [`SHOWN`] results of the
+    /// pill's kind, sent back with the query they answer. Nothing while no index of this session is held, or the
+    /// answer to this very query is here or on its way.
+    fn run_wanted(&mut self) {
+        let Some((query, narrow)) = self.wanted.clone() else {
+            return;
+        };
+        let Some(held) = self.current() else {
+            return;
+        };
+        let asked: Asked = (query, narrow, held.number);
+        let here = self.found.as_ref().is_some_and(|(of, _)| *of == asked);
+        let coming = self.asked.as_ref().is_some_and(|(_, of)| *of == asked);
+        if here || coming {
+            return;
+        }
+        let (index, of) = (held.index.clone(), held.of.clone());
+        self.jobs += 1;
+        let (host, answers, job, sent) = (self.host.clone(), self.answers.clone(), self.jobs, asked.clone());
         let started = std::thread::Builder::new().name("search-query".into()).spawn(move || {
-            let (query, narrow, _) = &job;
+            let (query, narrow, _) = &sent;
             // A pill narrows after the engine's limit: ask for more, keep SHOWN.
             let limit = if *narrow == Narrow::All { SHOWN } else { SHOWN * 10 };
             let hits = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -213,20 +265,67 @@ impl<H: SearchHost> EngineSearchSource<H> {
                     .collect::<Vec<_>>()
             }))
             .unwrap_or_default();
-            let _ = found.send((job, hits));
+            drop(index);
+            let _ = answers.send(Landed::Found(job, of, sent, hits));
             host.wake();
         });
         if started.is_ok() {
-            state.asked = Some(asked);
+            self.asked = Some((job, asked));
         } else {
             log("search: could not start a thread for a query");
+        }
+    }
+
+    fn take_in(&mut self, landed: Landed<H::Turn>) {
+        let now = session_of(&*self.host);
+        match landed {
+            Landed::Built(job, of, result) => {
+                if self.building != Some(job) {
+                    // A build asked before a forget: nobody waits for it.
+                    return;
+                }
+                self.building = None;
+                if of.is_none() || of != now {
+                    // Built for a session that is gone, or across a change of session: dropped, never held. The
+                    // session of the moment builds its own when Search opens.
+                    self.built_at = None;
+                    return;
+                }
+                self.built_at = Some(Instant::now());
+                match (of, result) {
+                    (Some(of), Ok(index)) => {
+                        self.installed += 1;
+                        self.held = Some(Held {
+                            of,
+                            index: Arc::new(index),
+                            number: self.installed,
+                        });
+                        self.found = None;
+                        self.asked = None;
+                        self.run_wanted();
+                    }
+                    // Kept: the index before still answers its own session. None before: not wired.
+                    _ => log("search: the list on this PC could not be read"),
+                }
+            }
+            Landed::Found(job, of, asked, hits) => {
+                if self.asked.as_ref().map(|(waited, _)| *waited) != Some(job) {
+                    return;
+                }
+                self.asked = None;
+                let mine = Some(&of) == now.as_ref() && self.current().is_some_and(|held| held.number == asked.2);
+                if mine {
+                    self.found = Some((asked, hits));
+                }
+            }
         }
     }
 }
 
 impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
+    /// An index of the current session is held. Reads only.
     fn wired(&self) -> bool {
-        self.index().is_some()
+        self.current().is_some()
     }
 
     /// Not bound: no store for search terms yet.
@@ -240,10 +339,60 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
     /// Not bound: the term is not kept.
     fn remember(&mut self, _query: &str) {}
 
-    /// Answered on a worker: the result of THIS query on the current index, else `Searching` while it runs. Never
-    /// on the window's thread.
+    /// Search opened: the index is built when none of this session is held, or what is held is old.
+    fn opened(&mut self) {
+        if self.holds_another_sessions() {
+            self.forget();
+        }
+        let fresh = self.built_at.is_some_and(|at| at.elapsed() < FRESH_FOR);
+        if !fresh {
+            self.build();
+        }
+    }
+
+    /// The words or the pill changed: the query runs on a worker (now, or when the index lands).
+    fn ask(&mut self, query: &str, narrow: Narrow) {
+        let query = query.trim();
+        if query.is_empty() {
+            self.wanted = None;
+            return;
+        }
+        self.wanted = Some((query.to_string(), narrow));
+        self.run_wanted();
+    }
+
+    /// The session moved on: everything held goes now, on the window's side. Then what the workers sent, each only
+    /// for the session the window sees.
+    fn pump(&mut self) -> Pumped {
+        let mut changed = false;
+        if self.holds_another_sessions() {
+            self.forget();
+            changed = true;
+        }
+        while let Ok(landed) = self.inbox.try_recv() {
+            self.take_in(landed);
+            changed = true;
+        }
+        Pumped {
+            changed,
+            busy: self.building.is_some() || self.asked.is_some(),
+        }
+    }
+
+    /// Every name goes: the index, the last result and what was asked. A worker still out answers nobody.
+    fn forget(&mut self) {
+        self.held = None;
+        self.found = None;
+        self.asked = None;
+        self.wanted = None;
+        self.building = None;
+        self.built_at = None;
+    }
+
+    /// The result of THIS query on the current session's index, else `Searching` while it runs. Reads only: the
+    /// query is started by `ask`, never here.
     fn search(&self, query: &str, narrow: Narrow) -> Answer {
-        let Some(index) = self.index() else {
+        let Some(held) = self.current() else {
             return Answer::Unavailable;
         };
         let query = query.trim();
@@ -253,25 +402,20 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
                 loading: None,
             };
         }
-        let mut state = self.sync();
-        let asked: Asked = (query.to_string(), narrow, state.generation);
-        if let Some((of, hits)) = &state.found
-            && *of == asked
-        {
-            return Answer::Found {
-                hits: hits.clone(),
-                loading: None,
-            };
+        match &self.found {
+            Some(((words, pill, number), hits)) if words == query && *pill == narrow && *number == held.number => {
+                Answer::Found {
+                    hits: hits.clone(),
+                    loading: None,
+                }
+            }
+            _ => Answer::Searching,
         }
-        if state.asked.as_ref() != Some(&asked) {
-            self.ask(&mut state, index, asked);
-        }
-        Answer::Searching
     }
 
     fn details(&self, id: &str) -> Option<Details> {
-        let index = self.index()?;
-        let record = index.records.get(id).filter(|record| !record.shared_with_me)?;
+        let held = self.current()?;
+        let record = held.index.records.get(id).filter(|record| !record.shared_with_me)?;
         Some(details_of(record))
     }
 }
