@@ -191,6 +191,10 @@ fn account(email: &str) -> Account {
             let hold = put_hold_in.lock().unwrap().take();
             if let Some(hold) = hold {
                 let _ = hold.recv();
+                // A held answer follows the mode of the moment it is let go: stored, then not readable.
+                if put_mode_in.load(Ordering::SeqCst) == UNREADABLE {
+                    return Reply::ok(json!("not the expected shape"));
+                }
             }
             return Reply::ok(now);
         }
@@ -469,6 +473,7 @@ fn a_choice_made_under_one_account_is_never_sent_under_the_next() {
     // Another account signs in between the press and the worker's call.
     let release = source.hold_next_write();
     source.choose_location(0);
+    assert!(source.writing, "the press started its worker");
     engine.sign_out_keeping_local_data().expect("signed out");
     sign_in(&engine, &account.second.email, &account.second_phrase);
     release.send(()).expect("the worker is waiting");
@@ -487,6 +492,7 @@ fn a_choice_made_under_one_account_is_never_sent_under_the_next() {
     // The same with a lock and an unlock of the same account in between: not sent, and said.
     let release = source.hold_next_write();
     source.choose_location(1);
+    assert!(source.writing, "the press started its worker");
     let _ = engine.lock();
     engine
         .unlock_with_phrase(Zeroizing::new(account.second_phrase.clone()))
@@ -508,6 +514,7 @@ fn a_choice_made_under_one_account_is_never_sent_under_the_next() {
     settle(&mut source);
     let release = source.hold_next_write();
     source.set_only_here(true);
+    assert!(source.writing, "the switch started its worker");
     engine.sign_out_keeping_local_data().expect("signed out");
     sign_in(&engine, &account.email, &account.phrase);
     release.send(()).expect("the worker is waiting");
@@ -515,20 +522,21 @@ fn a_choice_made_under_one_account_is_never_sent_under_the_next() {
     assert_eq!(account.puts(), [0usize; 0], "the switch reached no account");
 
     // A press under the session that is still there is sent once, under that account, held or not.
-    sign_in_again_as_second(&engine, &account);
+    sign_in_again_as(&engine, &account.second.email, &account.second_phrase);
     source.opened(Pane::StorageLocation);
     settle(&mut source);
     let release = source.hold_next_write();
     source.choose_location(1);
+    assert!(source.writing, "the press started its worker");
     release.send(()).expect("the worker is waiting");
     assert_eq!(settle(&mut source), [CHOSEN]);
     assert_eq!(account.puts(), [1], "once, with the second account's token");
     assert_eq!(source.general().storage_location, "Germany");
 }
 
-fn sign_in_again_as_second(engine: &Engine<MemoryCredentials>, account: &Account) {
+fn sign_in_again_as(engine: &Engine<MemoryCredentials>, email: &str, phrase: &str) {
     engine.sign_out_keeping_local_data().expect("signed out");
-    sign_in(engine, &account.second.email, &account.second_phrase);
+    sign_in(engine, email, phrase);
 }
 
 /// Task 2494: a change Beebeeb took, answered after the session moved on, is never drawn under the next session:
@@ -578,6 +586,115 @@ fn a_late_answer_is_never_drawn_under_another_session() {
         "the pane shows what Beebeeb holds now"
     );
     assert_eq!(account.puts(), [0, 1]);
+
+    // The same, and the late answer cannot be read: the change may have landed, which is said, and the pane reads
+    // what Beebeeb holds (it did land).
+    let release = account.hold_next_put();
+    source.choose_location(2);
+    pump_until(&mut source, "the change reaches the fake", |_| {
+        account.puts() == [0, 1, 1]
+    });
+    let _ = engine.lock();
+    engine
+        .unlock_with_phrase(Zeroizing::new(account.second_phrase.clone()))
+        .expect("the phrase unlocks");
+    account.put_mode.store(UNREADABLE, Ordering::SeqCst);
+    release.send(()).expect("the fake is waiting");
+    assert_eq!(settle(&mut source), [UNKNOWN_CHANGE]);
+    account.put_mode.store(ANSWER, Ordering::SeqCst);
+    assert_eq!(
+        source.locations().expect("read afresh").chosen,
+        2,
+        "Finland: it had landed"
+    );
+
+    // The first account's late answer lands while the second account's first read is still out: that read is
+    // the second account's own and is taken.
+    sign_in_again_as(&engine, &account.email, &account.phrase);
+    source.opened(Pane::StorageLocation);
+    settle(&mut source);
+    let release = account.hold_next_put();
+    source.choose_location(1);
+    pump_until(&mut source, "the change reaches the fake", |_| {
+        account.puts().len() == 4
+    });
+    sign_in_again_as(&engine, &account.second.email, &account.second_phrase);
+    let (reads, release_read) = (account.gets(), account.hold_next_get());
+    source.opened(Pane::StorageLocation);
+    pump_until(&mut source, "the second account's read reaches the fake", |_| {
+        account.gets() == reads + 1
+    });
+    release.send(()).expect("the fake is waiting");
+    pump_until(&mut source, "the first account's answer is taken in", |source| {
+        !source.writing
+    });
+    release_read.send(()).expect("the fake is waiting");
+    assert_eq!(settle(&mut source), [""; 0]);
+    assert_eq!(
+        source.locations().expect("the second account's list").chosen,
+        2,
+        "its own read was not dropped for the first account's change"
+    );
+    assert_eq!(account.gets(), reads + 1, "and was the only one asked");
+}
+
+/// Answers that are taken in while the vault is locked: nothing of them is lost by the time it is unlocked. A
+/// refusal is said then; a change Beebeeb took, and a read, are asked for afresh.
+#[test]
+fn answers_taken_in_while_locked_are_made_good_after_the_unlock() {
+    let account = account("settings-locked-pump@example.eu");
+    let engine = signed_in(&account);
+    let mut source = EngineSettingsSource::for_identity(engine.clone(), &TEST);
+    settle(&mut source);
+    let unlock = || {
+        engine
+            .unlock_with_phrase(Zeroizing::new(account.phrase.clone()))
+            .expect("the phrase unlocks")
+    };
+
+    // A press the engine refuses (the vault locked before its worker ran), answered while still locked.
+    let release = source.hold_next_write();
+    source.choose_location(2);
+    assert!(source.writing, "the press started its worker");
+    let _ = engine.lock();
+    release.send(()).expect("the worker is waiting");
+    let toasts = pump_until(&mut source, "the refusal is taken in", |source| !source.writing);
+    assert_eq!(toasts, [""; 0], "nothing is said to a locked vault");
+    unlock();
+    assert_eq!(settle(&mut source), [NOT_CHOSEN], "said once the person is back");
+    assert_eq!(account.puts(), [0usize; 0]);
+    assert_eq!(source.locations().unwrap().chosen, 1, "Germany, as it was");
+
+    // A change Beebeeb took, answered while locked: after the unlock the pane shows it, never the choice before.
+    let release = account.hold_next_put();
+    source.choose_location(2);
+    pump_until(&mut source, "the change reaches the fake", |_| account.puts() == [0]);
+    let _ = engine.lock();
+    release.send(()).expect("the fake is waiting");
+    pump_until(&mut source, "the answer is taken in", |source| !source.writing);
+    unlock();
+    let toasts = settle(&mut source);
+    assert!(!toasts.contains(&CHOSEN), "{toasts:?}");
+    assert_eq!(
+        source.locations().expect("read afresh").chosen,
+        2,
+        "Finland: what Beebeeb holds"
+    );
+
+    // A read answered while locked: asked again after the unlock.
+    let (reads, release) = (account.gets(), account.hold_next_get());
+    source.reload_locations();
+    pump_until(&mut source, "the read reaches the fake", |_| {
+        account.gets() == reads + 1
+    });
+    let _ = engine.lock();
+    release.send(()).expect("the fake is waiting");
+    pump_until(&mut source, "the answer is taken in", |source| !source.reading);
+    assert!(source.locations().is_none(), "locked: no list");
+    unlock();
+    settle(&mut source);
+    assert_eq!(account.gets(), reads + 2, "asked once more");
+    assert_eq!(source.locations().expect("read afresh").chosen, 2);
 }
 
 /// A read asked under one session and answered after a lock and an unlock is not taken as the new session's: the

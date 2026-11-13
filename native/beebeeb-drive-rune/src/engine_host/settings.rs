@@ -53,9 +53,10 @@ const FRESH_FOR: Duration = Duration::from_secs(30);
 /// The id the account's default carries in Beebeeb's list (`account_dto::region`).
 const DEFAULT_ID: &str = "europe";
 
-/// What the toasts say. `NOT_CHOSEN` may be said ONLY after an HTTP refusal (a status code the
-/// server returned): the old choice stands. `UNKNOWN_CHANGE` is for a timeout, a transport error
-/// mid-flight, or a 2xx with an unreadable body: the change may have landed.
+/// What the toasts say. `NOT_CHOSEN` may be said ONLY when the old choice stands for certain: after an HTTP
+/// refusal (a status code the server returned), or when nothing was sent (the session of the press was gone).
+/// `UNKNOWN_CHANGE` is for a timeout, a transport error mid-flight, or a 2xx with an unreadable body: the change
+/// may have landed.
 pub const CHOSEN: &str = "Storage location updated";
 pub const NOT_CHOSEN: &str = "Couldn't change the storage location. Nothing changed.";
 pub const UNKNOWN_CHANGE: &str = "Couldn't confirm the change. Checking what the server has.";
@@ -83,8 +84,12 @@ pub struct EngineSettingsSource<C: CredentialStores> {
     /// When the region was last answered.
     read_at: Option<Instant>,
     reading: bool,
-    /// A read is wanted once the one under way has landed (what it says may be older than a change).
-    read_again: bool,
+    /// What is held may not be what Beebeeb holds (or nothing is held for whoever is here): a read is started by
+    /// the next poll that finds a session in memory and no read under way.
+    read_wanted: bool,
+    /// Words for the account that pressed, said by the first poll that finds its session in memory (a lock may be
+    /// in between); dropped when another account, or none, is here.
+    told_later: Option<(Option<String>, &'static str)>,
     /// A change of the storage location is on its way: no second one starts until it is answered.
     writing: bool,
     /// Counts the changes Beebeeb took: a read that began before one of them is stale when it lands.
@@ -119,8 +124,6 @@ enum Answer {
     Region {
         /// The session and account it was asked under.
         asked: Stamp,
-        /// Whether they were still the engine's when the call ended.
-        held: bool,
         /// The generation the read began in.
         generation: u64,
         result: Result<UserRegionResponse, AccountCallError>,
@@ -129,8 +132,6 @@ enum Answer {
     Chosen {
         /// The session and account of the press.
         pressed: Stamp,
-        /// Whether they were still the engine's when the call ended.
-        held: bool,
         /// What Beebeeb stored, or why not.
         result: Result<(Option<String>, bool), AccountCallError>,
     },
@@ -228,7 +229,8 @@ fn stamp<C: CredentialStores>(engine: &Engine<C>) -> Stamp {
     (engine.session_turn(), account_of(engine))
 }
 
-/// Whether a stamp is the engine's session and account now, with a session in memory.
+/// Whether a stamp is the engine's session and account now, with a session in memory. The session's turn only
+/// moves forward, so a stamp that is current when an answer is taken was current for the whole call.
 fn is_now<C: CredentialStores>(engine: &Engine<C>, stamp: &Stamp) -> bool {
     engine.has_session() && stamp.1.is_some() && *stamp == self::stamp(engine)
 }
@@ -263,7 +265,8 @@ impl<C: CredentialStores + 'static> EngineSettingsSource<C> {
             listing: None,
             read_at: None,
             reading: false,
-            read_again: false,
+            read_wanted: false,
+            told_later: None,
             writing: false,
             generation: 0,
             toast_next: None,
@@ -294,14 +297,10 @@ impl<C: CredentialStores + 'static> EngineSettingsSource<C> {
             .name("settings-region".into())
             .spawn(move || {
                 // A panic in this worker must not leave `reading` set for good: send an error.
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let answer = engine.storage_region();
-                    (is_now(&engine, &asked), answer)
-                }));
-                let (held, result) = result.unwrap_or((false, Err(AccountCallError::Offline)));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.storage_region()))
+                    .unwrap_or(Err(AccountCallError::Offline));
                 let _ = answers.send(Answer::Region {
                     asked,
-                    held,
                     generation,
                     result,
                 });
@@ -331,15 +330,14 @@ impl<C: CredentialStores + 'static> EngineSettingsSource<C> {
                 if let Some(hold) = hold {
                     let _ = hold.recv();
                 }
-                let (session, at_press) = (pressed.0, pressed.clone());
+                let session = pressed.0;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let stored = engine
+                    engine
                         .set_storage_region_for(session, Some(&id), Some(strict))
-                        .map(|answer| (answer.preferred_region, answer.region_strict));
-                    (is_now(&engine, &at_press), stored)
-                }));
-                let (held, result) = result.unwrap_or((false, Err(AccountCallError::Offline)));
-                let _ = answers.send(Answer::Chosen { pressed, held, result });
+                        .map(|answer| (answer.preferred_region, answer.region_strict))
+                }))
+                .unwrap_or(Err(AccountCallError::Offline));
+                let _ = answers.send(Answer::Chosen { pressed, result });
             });
         self.writing = started.is_ok();
         if started.is_err() {
@@ -353,6 +351,30 @@ impl<C: CredentialStores + 'static> EngineSettingsSource<C> {
     fn listing(&self) -> Option<&(Locations, Vec<String>)> {
         let mine = self.engine.has_session() && self.region_of.is_some() && self.region_of == account_of(&self.engine);
         self.listing.as_ref().filter(|_| mine)
+    }
+
+    /// Drop what is held about the storage location: nothing of it is drawn, and it does not count as read.
+    fn forget_region(&mut self) {
+        self.region = Region::Unknown;
+        self.region_of = None;
+        self.read_at = None;
+        self.relist();
+    }
+
+    /// What Beebeeb holds for `account` may no longer be what is held here (a change of theirs was, or may have
+    /// been, taken and its answer is not drawn): what is held of that account is dropped, and when it is the
+    /// account here now, a read under way is made stale and a fresh one is wanted.
+    fn outdated(&mut self, account: &Option<String>) {
+        if account.is_none() {
+            return;
+        }
+        if self.region_of == *account {
+            self.forget_region();
+        }
+        if *account == account_of(&self.engine) {
+            self.generation += 1;
+            self.read_wanted = true;
+        }
     }
 
     fn relist(&mut self) {
@@ -427,55 +449,47 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
             match answer {
                 Answer::Region {
                     asked,
-                    held,
                     generation,
                     result,
                 } => {
                     self.reading = false;
-                    let again = std::mem::take(&mut self.read_again);
                     // A change Beebeeb took after this read began is newer than what the read says.
                     if generation != self.generation {
-                        if again {
-                            self.read_region();
+                        continue;
+                    }
+                    // Asked under a session or an account that is not the current one (or answered while the vault
+                    // is locked): never drawn, and not counted as a read. When the session or the account moved on
+                    // since it was asked, whoever is here is asked for afresh: once per move, by a poll that finds
+                    // a session in memory.
+                    if !is_now(&self.engine, &asked) {
+                        self.forget_region();
+                        if stamp(&self.engine) != asked {
+                            self.read_wanted = true;
                         }
                         continue;
                     }
-                    // Asked under a session or an account that is not the current one: never drawn, and not
-                    // counted as a read. Whoever is here now is asked for afresh.
-                    if !(held && is_now(&self.engine, &asked)) {
-                        self.region = Region::Unknown;
-                        self.region_of = None;
-                        self.read_at = None;
-                        self.relist();
-                        // Only when the session really moved on since (so at most once per session change).
-                        if self.engine.has_session() && stamp(&self.engine) != asked {
-                            self.read_region();
-                        }
-                        continue;
-                    }
-                    let account = asked.1;
                     match result {
                         Ok(region) => {
                             self.read_at = Some(Instant::now());
                             self.region = Region::Known(region);
-                            self.region_of = account;
+                            self.region_of = asked.1;
+                            self.relist();
                         }
                         Err(kind) => {
                             if kind != AccountCallError::NotSignedIn {
                                 log(format!("settings: the storage location did not load ({kind})"));
                             }
                             // A read that failed is not a read: the next opening asks again.
-                            self.read_at = None;
-                            self.region = Region::Unknown;
-                            self.region_of = None;
+                            self.forget_region();
                         }
                     }
-                    self.relist();
                 }
-                Answer::Chosen { pressed, held, result } => {
+                Answer::Chosen { pressed, result } => {
                     self.writing = false;
                     // Drawn only for the session AND the account of the press, and only onto that account's list.
-                    let mine = held && is_now(&self.engine, &pressed) && pressed.1 == self.region_of;
+                    let mine = is_now(&self.engine, &pressed) && pressed.1 == self.region_of;
+                    // The account that pressed is the one this engine names now (its vault may be locked).
+                    let theirs = pressed.1.is_some() && pressed.1 == account_of(&self.engine);
                     match (result, &mut self.region) {
                         (Ok((preferred, strict)), Region::Known(region)) if mine => {
                             region.preferred_region = preferred;
@@ -484,43 +498,33 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
                             self.relist();
                             pumped.toast = Some(CHOSEN);
                         }
-                        // Taken, and the answer is not for the session shown now: it is never drawn. When the account
-                        // that pressed is the one here again (a lock and an unlock in between), what Beebeeb now
-                        // holds is read afresh, so the pane does not keep an older answer.
-                        (Ok(_), _) => {
-                            self.generation += 1;
-                            if self.engine.has_session() && pressed.1.is_some() && pressed.1 == account_of(&self.engine)
-                            {
-                                self.read_again = self.reading;
-                                self.read_region();
-                            }
-                        }
-                        // The engine sent nothing: the session of the press is gone (a lock, a sign-out, another
-                        // sign-in). Said only to the account that pressed, when it is the one here again; under
-                        // another account, or signed out, nothing is said and nothing changes.
-                        (Err(AccountCallError::NotSignedIn), _) => {
-                            log("settings: the storage location was not changed (the session of the press is gone)");
-                            let same_person = self.engine.has_session()
-                                && pressed.1.is_some()
-                                && pressed.1 == account_of(&self.engine);
-                            if same_person {
-                                pumped.toast = Some(NOT_CHOSEN);
-                            }
-                        }
+                        // Taken, and the answer is not for the session shown now: it is never drawn, and what is
+                        // held of that account is out of date.
+                        (Ok(_), _) => self.outdated(&pressed.1),
                         (Err(kind), _) => {
                             log(format!("settings: the storage location was not changed ({kind})"));
-                            if mine {
-                                // "Nothing changed" only after an HTTP refusal (the server answered
-                                // and said no). A timeout, a transport error mid-flight, or an
-                                // unreadable 2xx: the change may have landed, so say the result is
-                                // unknown and re-read what the server has (P2-1, task 2473).
-                                match kind {
-                                    AccountCallError::ServerError | AccountCallError::SessionEnded => {
-                                        pumped.toast = Some(NOT_CHOSEN);
+                            match kind {
+                                // The old choice stands for certain: the engine sent nothing (the session of the
+                                // press is gone: a lock, a sign-out, another sign-in), or Beebeeb answered and said
+                                // no. Said only to the account that pressed.
+                                AccountCallError::NotSignedIn
+                                | AccountCallError::ServerError
+                                | AccountCallError::SessionEnded => {
+                                    if theirs {
+                                        self.told_later = Some((pressed.1, NOT_CHOSEN));
                                     }
-                                    _ => {
-                                        pumped.toast = Some(UNKNOWN_CHANGE);
-                                        self.read_region();
+                                }
+                                // A timeout, a transport error mid-flight, or an unreadable 2xx: the change may
+                                // have landed, so say the result is unknown and re-read what the server has
+                                // (P2-1, task 2473).
+                                _ => {
+                                    if mine {
+                                        self.read_wanted = true;
+                                    } else {
+                                        self.outdated(&pressed.1);
+                                    }
+                                    if theirs {
+                                        self.told_later = Some((pressed.1, UNKNOWN_CHANGE));
                                     }
                                 }
                             }
@@ -539,10 +543,27 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
                 }
             }
         }
+        // Words for the account that pressed: said once its session is in memory (after an unlock the engine wakes
+        // the window, which polls); never to another account.
+        if let Some((account, words)) = self.told_later.take() {
+            if account == account_of(&self.engine) {
+                if self.engine.has_session() && pumped.toast.is_none() {
+                    pumped.toast = Some(words);
+                    pumped.changed = true;
+                } else {
+                    self.told_later = Some((account, words));
+                }
+            }
+        }
+        if self.read_wanted && !self.reading && self.engine.has_session() {
+            self.read_wanted = false;
+            self.read_region();
+        }
+        let waiting_to_say = self.told_later.is_some() && self.engine.has_session();
         let (changed, toast, busy) = self.alerts.pump();
         pumped.changed |= changed;
         pumped.toast = pumped.toast.or(toast);
-        pumped.busy = self.reading || self.writing || self.saving > 0 || busy;
+        pumped.busy = self.reading || self.writing || self.saving > 0 || waiting_to_say || busy;
         pumped
     }
 

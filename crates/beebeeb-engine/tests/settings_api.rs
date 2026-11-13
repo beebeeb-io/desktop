@@ -371,6 +371,23 @@ fn a_storage_location_chosen_under_one_session_is_never_sent_under_another() {
     assert_eq!(puts(), 1, "and nothing more was sent");
 }
 
+/// The session-bound change against the fake on every other answer: a server error and a refused session each
+/// their own kind (never the body), a handle with no session asks nothing, and Beebeeb gone is offline.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_session_bound_storage_location_change_fails_by_kind() {
+    let account = account("region-turn-kinds@example.eu");
+    let engine = signed_in(&account);
+    let set = |engine: &Engine<MemoryCredentials>| {
+        engine.set_storage_region_for(engine.session_turn(), Some("fi"), Some(false))
+    };
+    refusals("set_storage_region_for", &account, &engine, set);
+    not_signed_in("set_storage_region_for", &account, set);
+    assert!(account.writes.lock().unwrap().is_empty(), "none of them was stored");
+    gone(account);
+    assert_eq!(set(&engine).expect_err("no answer"), AccountCallError::Offline);
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn the_accounts_notifications_are_read_with_the_unread_count() {

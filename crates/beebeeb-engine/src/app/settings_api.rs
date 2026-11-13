@@ -9,9 +9,10 @@
 //! calls decrypts anything. A failure is an [`AccountCallError`], a kind with fixed words: never a server's body, an
 //! address, a token or reqwest's own text.
 //!
-//! Writes account state: [`Engine::set_storage_region`], [`Engine::set_notification_preferences`] and
-//! [`Engine::mark_notifications_read`] (and the `_for` form of each, which refuses when the session is no longer
-//! the one the host names). The others only read. Must not: log anything a call sends or receives.
+//! Writes account state: [`Engine::set_storage_region_for`], [`Engine::set_notification_preferences_for`] and
+//! [`Engine::mark_notifications_read_for`], each for the session the host names (the session of the press) and no
+//! other: a session that moved on sends nothing. Their forms without a session exist in test builds only. The
+//! others only read. Must not: log anything a call sends or receives.
 
 use std::future::Future;
 
@@ -68,8 +69,9 @@ impl<C: CredentialStores> Engine<C> {
 
     /// WRITES: store where new files go (`PUT /api/v1/me/region`): `preferred_region` is a choice's id as the list
     /// names it (`europe`, a country), `region_strict` is "only store in this country". The server replaces the
-    /// whole choice, so a caller sends both. Sent under whatever session is in memory when it runs: a host that
-    /// acts on a person's press uses [`Engine::set_storage_region_for`].
+    /// whole choice, so a caller sends both. Sent under whatever session is in memory when it runs, so it is in
+    /// test builds only: a host uses [`Engine::set_storage_region_for`].
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_storage_region(
         &self,
         preferred_region: Option<&str>,
@@ -111,7 +113,10 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// WRITES: change some of the account's alert switches (`PUT /api/v1/notifications/preferences`); a switch
-    /// `update` leaves out keeps its value. The answer is the server's whole set after the change.
+    /// `update` leaves out keeps its value. The answer is the server's whole set after the change. Sent under
+    /// whatever session is in memory when it runs, so it is in test builds only: a host uses
+    /// [`Engine::set_notification_preferences_for`].
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_notification_preferences(
         &self,
         update: &NotificationPreferencesUpdate,
@@ -152,7 +157,10 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// WRITES: these notifications have been seen (`PATCH /api/v1/notifications/{id}`, one call each, in order); one
-    /// the server no longer has counts as seen. Stops at the first that fails: the ones before it are marked.
+    /// the server no longer has counts as seen. Stops at the first that fails: the ones before it are marked. Sent
+    /// under whatever session is in memory when it runs, so it is in test builds only: a host uses
+    /// [`Engine::mark_notifications_read_for`].
+    #[cfg(any(test, feature = "test-support"))]
     pub fn mark_notifications_read(&self, ids: &[String]) -> Result<(), AccountCallError> {
         let ids = ids.to_vec();
         self.account_call(move |api| async move {
@@ -187,6 +195,10 @@ impl<C: CredentialStores> Engine<C> {
         F: FnOnce(ApiClient) -> Fut,
         Fut: Future<Output = anyhow::Result<T>>,
     {
+        // A session mutex a panic poisoned: nothing is sent (as before the helper, which reads through poison).
+        if self.acct.session.is_poisoned() {
+            return Err(AccountCallError::NotSignedIn);
+        }
         let token = self
             .acct
             .while_session_is(&self.writes, session, |current| current.token.clone())
