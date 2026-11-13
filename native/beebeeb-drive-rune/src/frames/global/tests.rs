@@ -455,7 +455,9 @@ fn try_again_checks_the_connection_and_esc_closes() {
     press(&mut rt, Key::Escape);
     assert!(find(&rt, "preview-card").is_none());
     assert!(find(&rt, "banner").is_some(), "the offline banner is still there");
-    assert_ne!(info(&rt, "row-6-date").text.as_deref(), Some("Needs a connection"));
+    // Still offline: the row keeps saying why it cannot be opened, with or without the panel
+    // (DW-1108; before that frame was built the words left with the panel).
+    assert_eq!(info(&rt, "row-6-date").text.as_deref(), Some("Needs a connection"));
 
     let (mut rt, checks) = blocked(true);
     press(&mut rt, Key::Enter);
