@@ -601,7 +601,7 @@ mod windows {
     #[test]
     fn diag() {
         let _serial = serial();
-        for bits in [0u32, 1, 2, 4, 8, 16, 32, 3, 9, 24, 27, 63] {
+        for bits in [0u32, 64, 65, 66, 68, 72, 91] {
             // SAFETY: tests run one at a time (`--test-threads=1`).
             unsafe { std::env::set_var("BB_DIAG", bits.to_string()) };
             let result = match Sandbox::new(Limits::default()).unwrap().spawn(Path::new(PROBE)) {

@@ -480,6 +480,31 @@ pub(crate) fn spawn(helper_exe: &Path, limits: Limits) -> Result<(ChildInner, Pi
     let job = job(limits)?;
     let token = restricted_token()?;
     let container = ContainerSid::random()?;
+    let diag_name: Vec<u16> = "beebeeb.office.diag".encode_utf16().chain([0]).collect();
+    let diag0: u32 = std::env::var("BB_DIAG").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let container = if diag0 & 64 != 0 {
+        let mut sid: PSID = null_mut();
+        let hr = unsafe {
+            windows_sys::Win32::Security::Isolation::CreateAppContainerProfile(
+                diag_name.as_ptr(),
+                diag_name.as_ptr(),
+                diag_name.as_ptr(),
+                null(),
+                0,
+                &mut sid,
+            )
+        };
+        println!("DIAG create profile hr={:#x}", hr as u32);
+        if hr != 0 {
+            return Err(SandboxError::Os {
+                step: "diag profile",
+                code: hr as u32,
+            });
+        }
+        ContainerSid(sid)
+    } else {
+        container
+    };
 
     let capabilities = [SECURITY_CAPABILITIES {
         AppContainerSid: container.0,
@@ -550,6 +575,10 @@ pub(crate) fn spawn(helper_exe: &Path, limits: Limits) -> Result<(ChildInner, Pi
         )
     };
     let failure = if ok == 0 { Some(os("create process")) } else { None };
+    if diag0 & 64 != 0 {
+        let hr = unsafe { windows_sys::Win32::Security::Isolation::DeleteAppContainerProfile(diag_name.as_ptr()) };
+        println!("DIAG delete profile hr={:#x}", hr as u32);
+    }
     // The helper's ends are closed in the parent whatever happened: after this, only the helper holds them, so a
     // read from a dead helper ends instead of waiting for ever.
     drop(helper_stdin);
