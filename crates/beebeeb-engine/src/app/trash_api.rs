@@ -124,7 +124,7 @@ impl<C: CredentialStores> Engine<C> {
     /// [`Engine::session_turn`] as the host read it AT THE PRESS; the rule is [`Engine::restore_items_for`]'s:
     /// before EACH item the token is copied only while the session in memory is still that one, and a session that
     /// moved on since is [`AccountCallError::NotSignedIn`] with nothing (more) sent. Stops at the first item that
-    /// fails: the ones before it are in Trash. A 2xx whose body does not read is a trash that was made.
+    /// fails: the ones before it are in Trash. Any 2xx is a trash that was made: the body is not read.
     ///
     /// BLOCKS on the handle's runtime: call it from a worker thread.
     pub fn trash_items_for(&self, session: SessionGeneration, file_ids: &[&str]) -> Result<(), NotTrashed> {
@@ -133,15 +133,14 @@ impl<C: CredentialStores> Engine<C> {
         for id in file_ids {
             let id = id.to_string();
             let sent = self.account_call_for(session, move |api| async move {
-                match api.trash_file(&id).await {
-                    Ok(_) => Ok(true),
+                match api.trash_file_sent(&id).await {
+                    Ok(()) => Ok(true),
                     Err(error) if error.chain().any(|cause| cause.is::<ProtectedFolderRefused>()) => Ok(false),
                     Err(error) => Err(error),
                 }
             });
             outcome = match sent {
-                // Beebeeb answered 2xx: the item is in Trash, whatever its body reads as.
-                Ok(true) | Err(AccountCallError::Unreadable) => Ok(()),
+                Ok(true) => Ok(()),
                 Ok(false) => Err(NotTrashed::Protected),
                 Err(kind) => Err(NotTrashed::Call(kind)),
             };

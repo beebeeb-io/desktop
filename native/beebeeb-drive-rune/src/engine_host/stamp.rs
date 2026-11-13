@@ -1,6 +1,6 @@
 //! The session and the account something is asked under: taken on the window's thread at the press, before a worker
-//! starts, handed to the engine with the call, and compared again when the answer lands. One definition for every
-//! adapter that binds a call to its press.
+//! starts, handed to the engine with the call, and compared again when the answer lands. The Files source's moves to and
+//! from Trash use it; the older adapters still carry their own copies of the same three items.
 
 use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::app::{CredentialStores, Engine};

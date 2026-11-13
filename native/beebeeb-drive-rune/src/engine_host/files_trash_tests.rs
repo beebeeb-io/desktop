@@ -518,3 +518,17 @@ fn undo_held_across_a_switch_or_a_lock_is_sent_under_no_token() {
     );
     assert_eq!(changes(&mut source), []);
 }
+
+#[test]
+fn undo_is_for_every_item_moved_in_this_session_not_only_the_last_move() {
+    let fake = fake("two-moves");
+    let (_engine, mut source) = signed_in(&fake);
+    trash_now(&mut source, &[NOTES]);
+    trash_now(&mut source, &[PLAN]);
+    assert_eq!(changes(&mut source).len(), 2);
+    // The window may hold rows of both for Undo (an Undo that failed keeps its rows).
+    let ended = watch_next_call(&mut source);
+    assert_eq!(source.restore(&rows(&[NOTES, PLAN])), Ok(()));
+    ended.recv_timeout(WAIT).expect("the call ended");
+    assert_eq!(changes(&mut source), [(Action::Restore, vec![done(NOTES), done(PLAN)])]);
+}

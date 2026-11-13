@@ -197,12 +197,13 @@ fn moved_is_said_with_undo_and_undo_puts_back_only_when_the_source_said_so() {
 fn a_move_refused_at_the_press_is_said_and_try_again_asks_for_the_same_items() {
     let (mut rt, spy, ids, other) = window();
     let rows = rt.state.listing.items.len();
-    *spy.refuse.lock().unwrap() = Some(ActionError::InFlight);
+    *spy.refuse.lock().unwrap() = Some(ActionError::Offline);
     rt.update(|s, tx| assert!(s.trash_selection(tx)));
     assert_eq!(
         rt.state.actions.toast,
-        Some(Toast::Failed(Action::Trash, ActionError::InFlight))
+        Some(Toast::Failed(Action::Trash, ActionError::Offline))
     );
+    assert!(rt.state.offers_try_again(Action::Trash, ActionError::Offline));
     assert_eq!(rt.state.listing.items.len(), rows);
     rt.update(|s, tx| {
         let at = s.listing.items.iter().position(|item| item.id == other).unwrap();
@@ -231,4 +232,80 @@ fn an_undo_answered_after_the_session_ended_puts_nothing_back() {
     );
     assert_eq!(rt.state.listing.items.len(), rows);
     assert!(rt.state.actions.undo.is_empty(), "and nothing of it is Undo's");
+}
+
+#[test]
+fn a_second_press_while_the_first_is_on_its_way_offers_no_try_again_and_the_answer_is_still_said() {
+    let (mut rt, spy, ids, _) = window();
+    rt.update(|s, tx| assert!(s.trash_selection(tx)));
+    // The source refuses the second press: the first is on its way.
+    *spy.refuse.lock().unwrap() = Some(ActionError::InFlight);
+    rt.update(|s, tx| assert!(s.trash_selection(tx)));
+    assert_eq!(
+        rt.state.actions.toast,
+        Some(Toast::Failed(Action::Trash, ActionError::InFlight))
+    );
+    assert!(
+        !rt.state.offers_try_again(Action::Trash, ActionError::InFlight),
+        "nothing to ask again: the first press's answer says what was moved"
+    );
+    spy.answer(Action::Trash, &[(&ids[0], None), (&ids[1], None)]);
+    assert!(frame(&mut rt));
+    assert_eq!(rt.state.actions.toast, Some(Toast::Trashed), "moved, with Undo");
+}
+
+#[test]
+fn what_was_selected_since_the_press_stays_selected_when_the_answer_moves_the_rows() {
+    let (mut rt, spy, ids, other) = window();
+    rt.update(|s, tx| assert!(s.trash_selection(tx)));
+    // Since the press: another row is selected, and its name is being typed.
+    rt.update(|s, _| {
+        let at = s.listing.items.iter().position(|item| item.id == other).unwrap();
+        s.select_only(at);
+        s.actions.rename = Some(super::super::rename::Rename {
+            row: at,
+            id: other.clone(),
+        });
+    });
+    spy.answer(Action::Trash, &[(&ids[0], None), (&ids[1], None)]);
+    assert!(frame(&mut rt));
+    let at = rt.state.listing.items.iter().position(|item| item.id == other).unwrap();
+    assert_eq!(at, 0, "the two rows above it left");
+    let selected: Vec<String> = rt.state.selected_items().into_iter().map(|item| item.id).collect();
+    assert_eq!(selected, [other.clone()], "the same item, at its new place");
+    assert_eq!(rt.state.actions.rename.as_ref().map(|r| r.row), Some(0));
+
+    // Undo: the rows come back above it, and it is still the one selected.
+    rt.update(|s, tx| assert!(s.undo(tx)));
+    spy.answer(Action::Restore, &[(&ids[0], None), (&ids[1], None)]);
+    assert!(frame(&mut rt));
+    let selected: Vec<String> = rt.state.selected_items().into_iter().map(|item| item.id).collect();
+    assert_eq!(selected, [other.clone()]);
+    let at = rt.state.listing.items.iter().position(|item| item.id == other).unwrap();
+    assert_eq!(rt.state.actions.rename.as_ref().map(|r| r.row), Some(at));
+}
+
+#[test]
+fn try_again_is_not_offered_when_nothing_can_be_asked_again() {
+    let (mut rt, spy, ids, _) = window();
+    rt.update(|s, tx| assert!(s.trash_selection(tx)));
+    // Beebeeb moved one and refuses the other for what it is.
+    spy.answer(
+        Action::Trash,
+        &[(&ids[0], None), (&ids[1], Some(ActionError::Protected))],
+    );
+    assert!(frame(&mut rt));
+    assert!(!rt.state.offers_try_again(Action::Trash, ActionError::NotAll));
+
+    // An Undo that failed can be asked again while its rows are held, and not after.
+    rt.update(|s, tx| assert!(s.undo(tx)));
+    spy.answer(Action::Restore, &[(&ids[0], Some(ActionError::Failed))]);
+    assert!(frame(&mut rt));
+    assert_eq!(
+        rt.state.actions.toast,
+        Some(Toast::Failed(Action::Restore, ActionError::Failed))
+    );
+    assert!(rt.state.offers_try_again(Action::Restore, ActionError::Failed));
+    rt.update(|s, _| s.forget_undo());
+    assert!(!rt.state.offers_try_again(Action::Restore, ActionError::Failed));
 }

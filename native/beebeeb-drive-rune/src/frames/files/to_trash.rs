@@ -14,6 +14,7 @@ use super::source::{Action, ActionError, TrashOutcome};
 use crate::State;
 use crate::source::DriveItem;
 use rune::Tx;
+use std::collections::HashSet;
 
 /// What the window keeps of moves to and from Trash beside `Actions::undo`. All of it is the session's
 /// (`reset::end_session`).
@@ -53,9 +54,13 @@ impl State {
         };
         let ids: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
         if let Err(why) = asked {
-            if why != ActionError::Protected {
-                self.actions.trash.again = Some(ids);
-            }
+            self.actions.trash.again = match why {
+                // Asking again changes nothing for a protected item: as before, Try again is the selection's.
+                ActionError::Protected => None,
+                // The first press is still on its way, and its answer says what was moved: nothing to ask again.
+                ActionError::InFlight => Some(Vec::new()),
+                _ => Some(ids),
+            };
             if let Some(stay) = self.failed_of(Action::Trash, why, &items) {
                 tx.wake_after(stay);
             }
@@ -107,30 +112,47 @@ impl State {
             self.actions.trash.restoring.extend(rows);
             return true;
         }
+        let ids: Vec<String> = rows.iter().map(|(_, item)| item.id.clone()).collect();
         self.put_back(rows);
+        self.select_ids(&ids);
         true
     }
 
     /// The rows with these ids leave the list. What left, with the places they had: what Undo puts back.
     fn take_out(&mut self, ids: &[String]) -> Vec<(usize, DriveItem)> {
+        let ids: HashSet<&str> = ids.iter().map(String::as_str).collect();
         let rows: Vec<usize> = (0..self.listing.items.len())
-            .filter(|&i| ids.contains(&self.listing.items[i].id))
+            .filter(|&i| ids.contains(self.listing.items[i].id.as_str()))
             .collect();
         let mut out: Vec<(usize, DriveItem)> = rows.iter().rev().map(|&i| (i, self.listing.items.remove(i))).collect();
         out.reverse();
         out
     }
 
-    /// Rows that were taken out stand in the list again, selected.
+    /// Rows that were taken out stand in the list again, in the order the folder has now.
     fn put_back(&mut self, rows: Vec<(usize, DriveItem)>) {
-        let ids: Vec<String> = rows.iter().map(|(_, item)| item.id.clone()).collect();
         for (i, item) in rows {
             let at = i.min(self.listing.items.len());
             self.listing.items.insert(at, item);
         }
-        self.select_ids(&ids);
         // The rows may have been put in another order since: the old places mean nothing then.
         self.apply_sort();
+    }
+
+    /// After rows left or came back between presses: the selection is the same ITEMS as before (the ones still
+    /// shown), and a name being typed stays on its row, so an open menu or a key acts on what it was opened for.
+    fn same_rows(&mut self, chosen: &[String]) {
+        self.select_ids(chosen);
+        let at = self
+            .actions
+            .rename
+            .as_ref()
+            .map(|rename| self.listing.items.iter().position(|item| item.id == rename.id));
+        match (at, &mut self.actions.rename) {
+            (Some(Some(at)), Some(rename)) => rename.row = at,
+            (Some(None), _) => self.actions.rename = None,
+            _ => {}
+        }
     }
 
     /// A source that answers later said what a move to Trash or its Undo did (`Change::Trash`), per item: the rows
@@ -142,30 +164,45 @@ impl State {
             .map(|item| item.id.clone())
             .collect();
         let left: Vec<&TrashOutcome> = items.iter().filter(|item| item.left.is_some()).collect();
-        if action == Action::Trash {
+        // What is selected now, by id: it may have been chosen since the press, and stays.
+        let chosen: Vec<String> = self.selected_items().into_iter().map(|item| item.id).collect();
+        let changed = if action == Action::Trash {
             // By id: a row that is no longer shown (another folder since) is simply not here to leave.
             let rows = self.take_out(&done);
-            if !rows.is_empty() {
+            let any = !rows.is_empty();
+            if any {
                 self.actions.undo = rows;
-                self.clear_selection();
-                self.actions.local.unsaid.push(Late::Done(Action::Trash));
             }
+            any
         } else {
-            let (answered, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.actions.trash.restoring)
-                .into_iter()
-                .partition(|(_, item)| items.iter().any(|outcome| outcome.id == item.id));
-            self.actions.trash.restoring = waiting;
-            let (back, kept): (Vec<_>, Vec<_>) = answered.into_iter().partition(|(_, item)| done.contains(&item.id));
+            let answered: HashSet<&str> = items.iter().map(|outcome| outcome.id.as_str()).collect();
+            let put_back: HashSet<&str> = done.iter().map(String::as_str).collect();
+            let (mut back, mut kept) = (Vec::new(), Vec::new());
+            for row in std::mem::take(&mut self.actions.trash.restoring) {
+                if !answered.contains(row.1.id.as_str()) {
+                    self.actions.trash.restoring.push(row);
+                } else if put_back.contains(row.1.id.as_str()) {
+                    back.push(row);
+                } else {
+                    kept.push(row);
+                }
+            }
             // Not put back: still in Trash, and still what Undo is for.
             self.actions.undo.extend(kept);
-            if !back.is_empty() {
-                self.put_back(back);
-                self.actions.local.unsaid.push(Late::Done(Action::Restore));
-            }
+            let any = !back.is_empty();
+            self.put_back(back);
+            any
+        };
+        if changed {
+            self.same_rows(&chosen);
         }
         let Some(first) = left.first().and_then(|outcome| outcome.left) else {
+            if changed {
+                self.actions.local.unsaid.push(Late::Done(action));
+            }
             return;
         };
+        // One message per answer: where some were left, that is the one (Ctrl+Z still undoes the rest).
         let why = if !done.is_empty() {
             ActionError::NotAll
         } else if left.iter().any(|outcome| outcome.left == Some(ActionError::Protected)) {
@@ -184,6 +221,21 @@ impl State {
                 .map(|outcome| outcome.id.clone())
                 .collect(),
         });
+    }
+
+    /// Is there something Try again of a failed move to Trash would ask for? The items it was left for, still
+    /// shown. Nothing held (`None`: a board scene set the message, a protected item): as before, the selection.
+    pub(super) fn trash_can_retry(&self) -> bool {
+        match &self.actions.trash.again {
+            Some(ids) => self.listing.items.iter().any(|item| ids.contains(&item.id)),
+            None => true,
+        }
+    }
+
+    /// Is there something Try again of a failed Undo would put back? For a source that answers in the call, as
+    /// before, always.
+    pub(super) fn undo_can_retry(&self) -> bool {
+        !self.actions.source.answers_later() || !self.actions.undo.is_empty()
     }
 }
 

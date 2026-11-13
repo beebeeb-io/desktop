@@ -52,7 +52,8 @@ pub struct TrashCalls<C: CredentialStores> {
     seen: Option<Stamp>,
     /// The items a change is on its way for, each with the session of its press.
     in_flight: HashMap<String, SessionGeneration>,
-    /// What Undo may put back: the items of the last move to Trash that was made, and the stamp of its press.
+    /// What Undo may put back: the items this source moved to Trash in the session that is here, and the stamp of
+    /// those presses (one stamp: everything held goes when it moves).
     undo: Option<(Stamp, HashSet<String>)>,
     /// What Beebeeb answered and the window has not taken yet.
     changes: Vec<Change>,
@@ -184,8 +185,12 @@ impl<C: CredentialStores> TrashCalls<C> {
             match answer.action {
                 Action::Trash => {
                     let done: HashSet<String> = done.map(|item| item.id.clone()).collect();
-                    if !done.is_empty() {
-                        self.undo = Some((answer.pressed, done));
+                    // Added to what is held (the window may still hold rows of an earlier move for Undo); all of
+                    // it is this session's, or `look` would have dropped it.
+                    match &mut self.undo {
+                        Some((_, held)) => held.extend(done),
+                        None if !done.is_empty() => self.undo = Some((answer.pressed, done)),
+                        None => {}
                     }
                 }
                 _ => {

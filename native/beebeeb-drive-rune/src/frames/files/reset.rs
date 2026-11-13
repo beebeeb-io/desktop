@@ -206,5 +206,6 @@ pub fn poll(s: &mut State) -> bool {
     s.actions.retry_share = None;
     s.actions.retry_upload = None;
     s.actions.local.retry = None;
+    s.actions.trash.again = None;
     true
 }
