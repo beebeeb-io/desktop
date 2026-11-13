@@ -330,6 +330,10 @@ impl<C: CredentialStores + 'static> EngineSettingsSource<C> {
                 if let Some(hold) = hold {
                     let _ = hold.recv();
                 }
+                // The guard is the engine's: it copies the token only while the session in memory is still the one
+                // of the press, asked under its session-write lock, and sends nothing otherwise. A check here
+                // before the call could not be atomic with the send (the lock is the engine's), so there is none
+                // to rely on: the session of the press is handed over and the engine decides.
                 let session = pressed.0;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     engine
