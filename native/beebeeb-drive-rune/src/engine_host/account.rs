@@ -264,11 +264,12 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         self.dirty = true;
     }
 
-    /// The toast that shows, when it was said in the session that is the engine's now.
+    /// The toast that shows, when it was said in the session that is the engine's now and that session is not
+    /// held as ended (nothing is said over "your session ended").
     fn said(&self) -> Option<&Said> {
         self.notices
             .front()
-            .filter(|(session, _)| self.engine.has_session() && *session == self.engine.session_turn())
+            .filter(|(session, _)| self.open() && *session == self.engine.session_turn())
             .map(|(_, said)| said)
     }
 
@@ -279,19 +280,30 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     fn words_follow(&mut self, list: &[Row]) {
         let turn = self.engine.session_turn();
         let others = list.iter().any(|row| !row.current);
-        for (session, said) in self.notices.iter_mut().chain(self.later.iter_mut()) {
-            let Some(about) = said.about.clone().filter(|_| *session == turn) else {
-                continue;
+        let follow = |said: Said| {
+            let Some(about) = said.about.clone() else {
+                return said;
             };
             if !about.listed_in(list) {
-                *said = Said::done(match (about.elsewhere(), others) {
+                Said::done(match (about.elsewhere(), others) {
                     (false, _) => IS_SIGNED_OUT,
                     // The list has sessions that were not confirmed (made since): not "everywhere else".
                     (true, true) => SIGNED_OUT_THOSE,
                     (true, false) => SIGNED_OUT_ELSEWHERE,
-                });
+                })
             } else if said.words == UNKNOWN_SIGN_OUT || said.words == UNCONFIRMED_SIGN_OUT {
-                *said = Said::failed(about.not_signed_out(), Some(about), true);
+                Said::failed(about.not_signed_out(), Some(about), true)
+            } else {
+                said
+            }
+        };
+        // Each toast goes through the line again, so its rules hold for the new words too (what was not done
+        // first, the same sentence once).
+        for line in [&mut self.notices, &mut self.later] {
+            for (session, said) in std::mem::take(line) {
+                if session == turn {
+                    line_up(line, session, follow(said));
+                }
             }
         }
         // Only what was not done is said on return.
@@ -505,7 +517,14 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                         self.sessions_reads.read_at = Some(Instant::now());
                         self.sessions_reads.failed_for = None;
                     }
-                    Err(error) => self.read_failed(Kind::Sessions, made_for, error),
+                    Err(error) => {
+                        self.read_failed(Kind::Sessions, made_for, error);
+                        // A sign-out was answered while this read was out: the read after that answer has
+                        // not been made yet (the Ok arm above makes it the same way).
+                        if changes != self.changes && self.showing == Some(Kind::Sessions) {
+                            self.read(Kind::Sessions);
+                        }
+                    }
                 }
             }
             Answer::SignedOut {
@@ -531,8 +550,8 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                     }
                     return;
                 }
-                // What a press said before anything was sent ("still signing out") is over with the answer.
-                self.notices.retain(|(_, said)| said.about.is_some() || !said.failed);
+                // "Still signing out" is over with the answer.
+                self.notices.retain(|(_, said)| said.words != STILL_SIGNING_OUT);
                 // Not sent (a session step held the lock for a moment): nothing changed at Beebeeb.
                 let sent = ended > 0 || result != Err(AccountCallError::NotSignedIn);
                 let said = match result {
@@ -676,12 +695,12 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                 } else {
                     // Each is checked against the session by the engine as it is sent; each has its own
                     // outcome. After a refusal that holds for the rest (no session, a 401) nothing more is sent.
-                    let (mut ended, mut left, mut first) = (0, Vec::new(), None);
+                    let (mut ended, mut gone, mut left, mut first) = (0, false, Vec::new(), None);
                     let mut ids = about.ids.iter();
                     for id in ids.by_ref() {
                         match engine.end_account_session(session, id) {
                             Ok(SessionEnd::Ended) => ended += 1,
-                            Ok(SessionEnd::AlreadyGone) => {}
+                            Ok(SessionEnd::AlreadyGone) => gone = true,
                             Err(error) => {
                                 left.push(id.clone());
                                 first.get_or_insert(error);
@@ -697,6 +716,8 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                             about.ids = left;
                             (Err(error), ended)
                         }
+                        // A 404 for one of them: as for one session, the list has the last word.
+                        None if gone => (Ok(SessionEnd::AlreadyGone), ended),
                         None => (Ok(SessionEnd::Ended), ended),
                     }
                 };
@@ -827,7 +848,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
                 .changing
                 .iter()
                 .any(|(session, _)| *session != self.engine.session_turn())
-            || (refused && !(self.changing.is_empty() && self.notices.is_empty() && self.later.is_empty()))
+            || (refused && !(self.notices.is_empty() && self.later.is_empty()))
         {
             self.forget();
             changed = true;
@@ -867,10 +888,13 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         while let Some((_, said)) = self.notices.front_mut() {
             let shown_at = *said.shown_at.get_or_insert(now);
             let left = said.stays().saturating_sub(now.saturating_duration_since(shown_at));
-            if left.is_zero() {
+            // "Checking what Beebeeb has" stays while the check is out: the list's answer has the last word,
+            // and it must find the toast to give it to.
+            let checking = said.words == UNKNOWN_SIGN_OUT && self.sessions_reads.reading.is_some();
+            if left.is_zero() && !checking {
                 self.notices.pop_front();
             } else {
-                wake_in = Some(left);
+                wake_in = (!left.is_zero()).then_some(left);
                 break;
             }
         }

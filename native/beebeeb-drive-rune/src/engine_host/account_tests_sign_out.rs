@@ -451,6 +451,114 @@ fn the_line_puts_what_was_not_done_first_and_never_drops_it_for_what_worked() {
     assert_eq!(line.len(), 4);
 }
 
+/// A toast is never said over "your session ended", also when nothing else of the account is held.
+#[test]
+fn no_toast_is_said_once_the_engine_holds_the_session_as_ended() {
+    let server = server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    assert!(source.sign_out_device("s-web"));
+    settle(&mut source);
+    assert!(
+        source.sessions().is_empty(),
+        "taken, and not read after it: no list is held"
+    );
+    assert_eq!(source.notice(), Some(SIGNED_OUT));
+    for _ in 0..3 {
+        source.engine.note_call_for_test(true);
+    }
+    assert_eq!(source.notice(), None, "before any poll");
+    assert_eq!(source.notice_action(), None);
+    assert!(source.pump().changed, "and the poll drops it");
+    source.engine.note_call_for_test(false);
+    source.pump();
+    settle(&mut source);
+    assert_eq!(source.notice(), None, "it does not come back with the session");
+}
+
+/// A sign-out whose result is not known says "checking" for as long as the check is out, however long: the
+/// list's answer must find the toast to put its word in. And every 404 of a Try again for "everywhere else" is
+/// not known either, until the list says so.
+#[test]
+fn checking_stays_until_the_list_answered_and_a_404_one_by_one_is_not_a_yes() {
+    let server = server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    server.change_mode.store(DROP_CONNECTION, Ordering::SeqCst);
+    server.read_delay_ms.store(600, Ordering::SeqCst);
+    assert!(source.sign_out_device("s-phone"));
+    let began = Instant::now();
+    while source.notice() != Some(UNKNOWN_SIGN_OUT) {
+        assert!(began.elapsed() < Duration::from_secs(10), "the answer never came");
+        std::thread::sleep(Duration::from_millis(5));
+        source.pump();
+    }
+    // Far past the toast's time, with the list still out.
+    assert!(
+        later(&mut source, STAYS_FAILED * 3).busy,
+        "precondition: the list is still out"
+    );
+    assert_eq!(source.notice(), Some(UNKNOWN_SIGN_OUT), "still checking");
+    settle(&mut source);
+    assert_eq!(
+        source.notice(),
+        Some(NOT_SIGNED_OUT),
+        "the list's word reached the toast"
+    );
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN));
+    server.read_delay_ms.store(0, Ordering::SeqCst);
+
+    // "Everywhere else" refused, then its Try again is answered 404 for every session while they all stand.
+    server.change_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    source.sign_out_everywhere_else();
+    settle(&mut source);
+    server.change_mode.store(A_404_THAT_ENDED_NOTHING, Ordering::SeqCst);
+    source.run_notice_action();
+    settle(&mut source);
+    assert_eq!(ids(&source).len(), 3, "Beebeeb still lists them");
+    assert_eq!(
+        source.notice(),
+        Some(NOT_SIGNED_OUT_ELSEWHERE),
+        "never \"signed out\" beside rows that stand"
+    );
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN));
+    // And with the list failing after it: the rows that were drawn stay (nothing was taken for certain).
+    server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    source.run_notice_action();
+    settle(&mut source);
+    assert_eq!(source.notice(), Some(UNCONFIRMED_SIGN_OUT));
+    assert_eq!(ids(&source).len(), 3);
+}
+
+/// A list read that was out when a sign-out was answered, and then fails: the list is still read once for
+/// that answer (as it is when that earlier read answers).
+#[test]
+fn a_read_that_fails_after_an_answered_sign_out_is_followed_by_the_read_for_that_answer() {
+    let server = server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    // The read is asked first and dropped by the fake 400 ms later; the sign-out is answered in between.
+    server.read_mode.store(DROP_CONNECTION, Ordering::SeqCst);
+    *server.during_failed_read.lock().unwrap() = Some(Box::new(|| std::thread::sleep(Duration::from_millis(400))));
+    source.reload(Pane::Sessions);
+    let began = Instant::now();
+    while server.asked("GET /api/v1/account/sessions") < 2 {
+        assert!(began.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    server.read_mode.store(ANSWER, Ordering::SeqCst);
+    assert!(source.sign_out_device("s-phone"));
+    settle(&mut source);
+    assert_eq!(
+        server.asked("GET /api/v1/account/sessions"),
+        3,
+        "the first, the one that failed, and the one after the answer"
+    );
+    assert_eq!(ids(&source), ["s-this", "s-web"]);
+    assert_eq!(source.notice(), Some(SIGNED_OUT));
+}
+
 /// A refusal's Try again when there is no list to send against (another sign-out was taken, and the list could
 /// not be read after it): nothing is sent, the toast keeps its button, and it works once the list is read.
 #[test]

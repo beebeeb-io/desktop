@@ -78,6 +78,8 @@ struct Server {
     revoked_all: Arc<AtomicU64>,
     /// Runs once, while the next sessions list is being answered (the call is under way).
     during_read: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    /// Runs once, before the next sessions list that is asked to fail is answered.
+    during_failed_read: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
 }
 
 fn sessions_of_the_first() -> Vec<Value> {
@@ -152,6 +154,8 @@ fn server() -> Server {
     );
     let during_read: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>> = Arc::new(Mutex::new(None));
     let during_read_in = during_read.clone();
+    let during_failed_read: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>> = Arc::new(Mutex::new(None));
+    let during_failed_in = during_failed_read.clone();
     let signing_in_second = Mutex::new(false);
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
         let who = match req.bearer() {
@@ -198,6 +202,13 @@ fn server() -> Server {
                     "used_bytes": if first { 240_000_000_000_i64 } else { 1_500_000_000 },
                 }))
             }),
+            "GET /api/v1/account/sessions" if failed(read).is_some() => {
+                let hook = during_failed_in.lock().unwrap().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+                failed(read).expect("checked")
+            }
             "GET /api/v1/account/sessions" => failed(read).unwrap_or_else(|| {
                 if !authed {
                     return Reply::json(401, json!({}));
@@ -266,6 +277,7 @@ fn server() -> Server {
         deleted,
         revoked_all,
         during_read,
+        during_failed_read,
     }
 }
 
@@ -601,6 +613,16 @@ fn one_401_is_a_read_that_failed_and_only_a_run_of_them_ends_the_session() {
     assert_eq!(source.notice(), Some(NOT_SIGNED_OUT));
     assert_eq!(source.notice_action(), Some(TRY_AGAIN));
     assert_eq!(ids(&source).len(), 3);
+    // A 401 is a no for certain: it is "couldn't", with the way back, also when the list cannot be read after it
+    // (never "couldn't confirm").
+    engine.note_call_for_test(false);
+    server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    source.run_notice_action();
+    settle(&mut source);
+    assert_eq!(source.notice(), Some(NOT_SIGNED_OUT));
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN));
+    server.read_mode.store(ANSWER, Ordering::SeqCst);
+    engine.note_call_for_test(false);
     server.change_mode.store(ANSWER, Ordering::SeqCst);
     source.run_notice_action();
     settle(&mut source);

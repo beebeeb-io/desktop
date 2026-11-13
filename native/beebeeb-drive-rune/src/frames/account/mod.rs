@@ -465,7 +465,9 @@ fn state_pane(pane: Pane, state: source::PaneState, t: &Theme) -> El {
         ),
         _ => (
             "Couldn't load this",
-            "Beebeeb didn't answer. Nothing was changed.",
+            // Not "nothing was changed": this state also follows a sign-out Beebeeb took, when the list
+            // could not be read after it.
+            "Beebeeb didn't answer.",
             true,
         ),
     };
