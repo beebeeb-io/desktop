@@ -39,7 +39,6 @@ before those two additions (at `1b2da021`). The 32 truth lines at the PR's head 
 | `DW-0480` | Files | Upload a whole folder, with everything in it, keeping its structure. | OS-drawn, verified by a real-window capture (Windows' folder picker): title "Upload a folder to Files", button "Upload", no filter, bound by the same test; Upload a folder… asks for it |
 | `DW-0481` | Files | Drag files from File Explorer into the list to upload them. | built (lane files-actions; the truth lines are in the PR body). A folder under the drag is outlined and the tip says where a drop goes; Backups and files do not light up; a drop uploads (`Intent::Upload` as before). The count on the badge shows only when the system gives one (Rune's hover event carries none) |
 | `DW-0420` | Folders | The same view one level deeper. | not built: golden captured; the fixture lists the folder's 7 rows and the path title is drawn; the four photo thumbnails and the video mark are not |
-| `DW-0420b` | Folders | Long content: a folder of 212 items scrolled two-thirds down, and names longer than a row. | not built |
 | `DW-0421` | Folders | The grid: thumbnails first, the way the iPhone's grid shows them. | not built |
 | `DW-0422` | Folders | Every device's backup and every Beebeeb service, in one protected folder. | not built |
 | `DW-0423` | Folders | What one device backed up: this PC's folders, contacts and calendar. | not built |
@@ -53,8 +52,6 @@ before those two additions (at `1b2da021`). The 32 truth lines at the PR's head 
 | `DW-0423` | Folders | What one device backed up: this PC's folders, contacts and calendar. | built (`protected.rs`): Enter or a double-click on Anna-Laptop; read-only, Delete is Delete this backup (DW-0742). Gate not at 0: as DW-0422, and `status-details` (the board repeats DW-0401's sentence; the app counts the 5 rows) |
 | `DW-0424` | Folders | A folder a Beebeeb service manages: open and download only. | built (`protected.rs`): the note with Settings; the service's order is kept; New dimmed, drops refused. Gate not at 0: as DW-0423 |
 | `DW-0425` | Folders | Say why a protected folder can't change, in the core's words. | built (`protected.rs`): the message, in the source's words, on every way to rename, move or delete there (menu, Delete, F2, Ctrl+D, Move, several selected). Gate not at 0: as DW-0423 |
-| `DW-0426` | Folders | Uploads in progress, in their folder and in the status line. | not built |
-| `DW-0427` | Folders | Every upload with its state: what needs attention, what is moving, what waits. | not built |
 | `DW-0429` | Folders | A file changed in two places at once: nothing is overwritten until Anna picks. | built (lane files-actions): the shell's dialog route (`Dialog::Conflict`), this group's card (`conflict.rs`). The flyout's Review… opens it, and so does opening the row whose date reads "Two versions". Each Keep asks `FilesSource::keep_version` once; Cancel and Esc ask nothing. Not built: a double-click on a card (Preview of that version) |
 | `DW-1101` | Browse | The first screen of the window: folders first, then files; New is the one amber thing. | built (light and dark: 0 failing on all six) |
 | `DW-1102` | Browse | A folder remembers its own view: here, a grid with the details panel on a photo. | not built |
