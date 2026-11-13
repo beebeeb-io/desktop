@@ -38,6 +38,12 @@ use crate::frames::this_pc::source::{Change, Contains, Kept, KeptStatus, Kind, O
 #[path = "this_pc_tests.rs"]
 mod tests;
 
+/// Whether the section draws this source in a real build. `false` until the window around it is honest: the This
+/// PC chrome (`frames/this_pc/chrome.rs`) still draws the board's sample account name, email, initials and a fixed
+/// Files/Photos split, which would sit beside a real account (PR body). Flip it with that fix; every method below
+/// answers from the engine already.
+pub const TURNED_ON: bool = false;
+
 /// An answer read this recently is not read again when the window asks.
 pub const FRESH_FOR: Duration = Duration::from_secs(5);
 /// How far back the history goes (the board: "kept on this PC only", 30 days).
@@ -428,6 +434,10 @@ fn kept(db: &StateDb, backups: &BackupsTree) -> Result<Vec<Kept>, String> {
 }
 
 impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
+    fn wired(&self) -> bool {
+        TURNED_ON
+    }
+
     fn today(&self) -> NaiveDate {
         chrono::Local::now().date_naive()
     }

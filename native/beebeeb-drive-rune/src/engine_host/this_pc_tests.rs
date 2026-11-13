@@ -199,7 +199,7 @@ fn history_lists_transfers_trash_and_problems_newest_first() {
     let fake = busy_pc();
     let source = EngineThisPcSource::new(fake.clone());
     settle(&source);
-    assert!(source.wired());
+    assert_eq!(source.wired(), TURNED_ON);
     let history = source.history();
     assert_eq!(
         names(&history),
@@ -325,7 +325,7 @@ fn an_empty_pc_has_empty_lists() {
     let fake = Fake::new();
     let source = EngineThisPcSource::new(fake);
     settle(&source);
-    assert!(source.wired());
+    assert_eq!(source.wired(), TURNED_ON);
     assert!(source.history().is_empty() && source.problems().is_empty() && source.kept().is_empty());
 }
 
