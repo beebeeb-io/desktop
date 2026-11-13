@@ -8,9 +8,10 @@
 //! - General › Storage location (DW-0788, b, c, d): the account's choice and the list, by country, from Beebeeb. A
 //!   choice and "only store in this country" are sent once ([`Engine::set_storage_region`], the one call here that
 //!   writes account state) and shown only after Beebeeb took them; a refusal leaves the old choice and says so.
+//! - Notifications (DW-0750) and Recent notifications (DW-0791): [`notifications`], its own part (the account's
+//!   alert switches and notifications from Beebeeb, this PC's switches from its settings file).
 //! - Not wired here (the shell's "not built yet" frame in their place): About and the release notes (no updater
-//!   yet), Notifications and Recent notifications (what Windows allows for this app is not read yet, so the pane
-//!   could not say when nothing arrives), Report a problem (no support bundle is built here yet).
+//!   yet), Report a problem (no support bundle is built here yet).
 //!
 //! Thread rule (task 2470 W5): nothing here waits for Beebeeb or for the settings file's write lock on the window's
 //! thread. Each call and each write runs on a worker thread of its own and sends its answer down one channel, which
@@ -35,8 +36,11 @@ use crate::frames::settings::source::{
     Unwired, Update,
 };
 
+mod notifications;
 #[cfg(test)]
 mod tests;
+
+use notifications::NotificationsPart;
 
 /// A list read this recently is not asked for again when its pane opens.
 const FRESH_FOR: Duration = Duration::from_secs(30);
@@ -83,6 +87,8 @@ pub struct EngineSettingsSource<C: CredentialStores> {
     version: String,
     answers: mpsc::Sender<Answer>,
     inbox: mpsc::Receiver<Answer>,
+    /// Notifications and Recent notifications.
+    alerts: NotificationsPart<C>,
     /// The panes this source does not answer for.
     rest: Unwired,
 }
@@ -195,7 +201,7 @@ fn same_account<C: CredentialStores>(engine: &Engine<C>, before: Option<String>)
     before.filter(|whose| account_of(engine).as_ref() == Some(whose))
 }
 
-impl<C: CredentialStores> EngineSettingsSource<C> {
+impl<C: CredentialStores + 'static> EngineSettingsSource<C> {
     /// The source of the running app. Reads this PC's settings file now (local and small: the first paint is
     /// local) and, when someone is signed in, asks Beebeeb for the storage location on a worker.
     pub fn new(engine: Arc<Engine<C>>) -> Self {
@@ -203,13 +209,15 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
     }
 
     pub(crate) fn for_identity(engine: Arc<Engine<C>>, identity: &'static EngineIdentity) -> Self {
-        let theme = match DesktopConfig::load_for(identity) {
-            Ok(config) => theme_of(config.theme),
-            Err(_) => {
+        let config = DesktopConfig::load_for(identity).ok();
+        let theme = match &config {
+            Some(config) => theme_of(config.theme),
+            None => {
                 log("settings: the settings file could not be read; the theme follows Windows");
                 ThemeChoice::System
             }
         };
+        let alerts = NotificationsPart::new(engine.clone(), identity, config.as_ref());
         let (answers, inbox) = mpsc::channel();
         let mut source = Self {
             engine,
@@ -229,6 +237,7 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
             version: version_words(),
             answers,
             inbox,
+            alerts,
             rest: Unwired,
         };
         if account_of(&source.engine).is_some() {
@@ -319,7 +328,7 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
 
     /// The panes of this source that draw only what it has read.
     fn answers_for(pane: Pane) -> bool {
-        matches!(pane, Pane::General | Pane::StorageLocation)
+        matches!(pane, Pane::General | Pane::StorageLocation) || NotificationsPart::<C>::answers_for(pane)
     }
 
     /// The one writer of the theme: each change in the order chosen, merge-only (the theme alone).
@@ -350,7 +359,7 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
     }
 }
 
-impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
+impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
     fn wired(&self, pane: Pane) -> bool {
         Self::answers_for(pane)
     }
@@ -361,6 +370,10 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
     }
 
     fn opened(&mut self, pane: Pane) {
+        self.alerts.opened(pane);
+        if NotificationsPart::<C>::answers_for(pane) {
+            return;
+        }
         let fresh = self.read_at.is_some_and(|at| at.elapsed() < FRESH_FOR) && self.listing().is_some();
         if Self::answers_for(pane) && !fresh {
             self.read_region();
@@ -443,7 +456,10 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
                 }
             }
         }
-        pumped.busy = self.reading || self.writing || self.saving > 0;
+        let (changed, toast, busy) = self.alerts.pump();
+        pumped.changed |= changed;
+        pumped.toast = pumped.toast.or(toast);
+        pumped.busy = self.reading || self.writing || self.saving > 0 || busy;
         pumped
     }
 
@@ -456,22 +472,22 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
     }
 
     fn mark_recent_seen(&mut self) {
-        self.rest.mark_recent_seen();
+        self.alerts.mark_recent_seen();
     }
     fn check_for_updates(&mut self) {
         self.rest.check_for_updates();
     }
     fn recent_alerts(&self) -> Vec<(String, Vec<RecentAlert>)> {
-        self.rest.recent_alerts()
+        self.alerts.recent_alerts()
     }
     fn notifications(&self) -> Notifications {
-        self.rest.notifications()
+        self.alerts.notifications()
     }
     fn set_allow_notifications(&mut self, on: bool) {
-        self.rest.set_allow_notifications(on);
+        self.alerts.set_allow_notifications(on);
     }
     fn set_alert(&mut self, group: usize, index: usize, on: bool) {
-        self.rest.set_alert(group, index, on);
+        self.alerts.set_alert(group, index, on);
     }
 
     fn locations(&self) -> Option<Locations> {

@@ -9,8 +9,8 @@
 //! calls decrypts anything. A failure is an [`AccountCallError`], a kind with fixed words: never a server's body, an
 //! address, a token or reqwest's own text.
 //!
-//! Writes account state: [`Engine::set_storage_region`] and [`Engine::set_notification_preferences`]. The others
-//! only read. Must not: log anything a call sends or receives.
+//! Writes account state: [`Engine::set_storage_region`], [`Engine::set_notification_preferences`] and
+//! [`Engine::mark_notifications_read`]. The others only read. Must not: log anything a call sends or receives.
 
 use std::future::Future;
 
@@ -97,6 +97,18 @@ impl<C: CredentialStores> Engine<C> {
     ) -> Result<NotificationPreferences, AccountCallError> {
         let update = update.clone();
         self.account_call(move |api| async move { api.update_notification_preferences(&update).await })
+    }
+
+    /// WRITES: these notifications have been seen (`PATCH /api/v1/notifications/{id}`, one call each, in order); one
+    /// the server no longer has counts as seen. Stops at the first that fails: the ones before it are marked.
+    pub fn mark_notifications_read(&self, ids: &[String]) -> Result<(), AccountCallError> {
+        let ids = ids.to_vec();
+        self.account_call(move |api| async move {
+            for id in &ids {
+                api.mark_notification_read(id).await?;
+            }
+            Ok(())
+        })
     }
 
     /// The one path of this file's calls: the session's token into a client of its own (wiped when the client is

@@ -218,6 +218,18 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// `PATCH /api/v1/notifications/{id}` with `{ "read": true }`: one notification seen. One the server no longer
+    /// has (404: removed meanwhile) counts as seen.
+    pub async fn mark_notification_read(&self, id: &str) -> anyhow::Result<()> {
+        let url = self.url(&format!("/api/v1/notifications/{}", encode(id)));
+        let body = serde_json::json!({ "read": true });
+        match self.send_with_retry(|| self.client.patch(&url).json(&body)).await {
+            Ok(_) => Ok(()),
+            Err(DesktopApiError::HttpStatus { status, .. }) if status == reqwest::StatusCode::NOT_FOUND => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     // ── Speedtest endpoints (P2 — task 0810) ─────────────────────────────────
     //
     // Mirrors the CLI (`repos/cli/src/commands/speedtest.rs`) and iOS
