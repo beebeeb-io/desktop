@@ -45,6 +45,7 @@ use crate::sync_root_port::{OsSyncRoots, SyncRootPort};
 use crate::sync_view::{Explorer, Start, SyncView, ViewCell, ViewHost};
 use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
 
+pub mod account_api;
 pub mod backups_api;
 // Explorer's "Free up space" command asks this handle, and a stop removes its binding (task 2490).
 mod explorer_api;

@@ -169,7 +169,11 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     // Every area not yet backed by the engine: the shell's "not built yet" frame, never sample
     // data beside a real account. This depends ONLY on "is this the live engine path", never on
     // the identity or a dev flag.
-    s.account.source = None;
+    // Account and Devices and sessions read the engine; every other account pane is the shell's frame
+    // (`engine_host::account`).
+    s.account.source = Some(Box::new(crate::engine_host::account::EngineAccountSource::new(
+        engine.clone(),
+    )));
     s.storage_split = None;
     s.frames.shared.source = Box::new(crate::frames::shared::source::Unwired);
     // Trash reads the engine (`engine_host::trash`); Search only when `SEARCH_ON_ENGINE` (task 2488).
