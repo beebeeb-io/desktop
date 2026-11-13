@@ -32,11 +32,13 @@ pub struct Ui {
 pub enum Late {
     /// Done for every item asked.
     Done(Action),
-    /// Not done for these (for an action that names no items: empty), and why.
+    /// Not done for `ids` (for an action that names no items: empty), and why. `again`: the ones of them that
+    /// asking again could change (Try again is for those alone).
     Left {
         action: Action,
         why: ActionError,
         ids: Vec<String>,
+        again: Vec<String>,
     },
 }
 
@@ -207,10 +209,15 @@ impl State {
                 Late::Done(Action::KeepOffline) => Some(self.set_toast(Toast::Keeping)),
                 Late::Done(Action::FreeUpSpace) => Some(self.set_toast(Toast::FreedUp)),
                 Late::Done(_) => None,
-                Late::Left { action, why, ids } => {
+                Late::Left {
+                    action,
+                    why,
+                    ids,
+                    again,
+                } => {
                     let items = self.rows_of(&ids);
                     if is_local(action) {
-                        self.actions.local.retry = Some((action, ids));
+                        self.actions.local.retry = Some((action, again));
                     }
                     // The path an immediate refusal takes, for the items it was about (not the selection).
                     let stay = self.failed_of(action, why, &items);

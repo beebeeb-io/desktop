@@ -52,9 +52,10 @@ impl State {
                             } else {
                                 first
                             },
+                            ids: left.iter().map(|o| o.id.clone()).collect(),
                             // Try again is for what asking again can change: not a protected item, not a
                             // folder that holds something kept.
-                            ids: left
+                            again: left
                                 .iter()
                                 .filter(|o| !matches!(o.left, Some(ActionError::Protected | ActionError::HoldsKept)))
                                 .map(|o| o.id.clone())
@@ -86,6 +87,7 @@ impl State {
                     action,
                     why,
                     ids: Vec::new(),
+                    again: Vec::new(),
                 });
             }
         }
