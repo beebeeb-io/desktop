@@ -334,6 +334,12 @@ fn a_pdfs_pages_leave_with_its_session_and_a_page_on_its_way_is_never_shown() {
         "the kept page is not handed out"
     );
     assert_eq!(source.poll("f-pdf"), Some(Body::Stopped(Stopped::SessionChanged)));
+    // The kept pages and the asker's end are let go with the session: with nobody to ask, the worker ends and
+    // the document (and the decrypted bytes it reads from) is dropped, not held until the file is closed.
+    assert!(
+        source.open.as_ref().is_some_and(|opening| opening.pages.is_none()),
+        "the pages outlived their session"
+    );
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
         source.poll("f-pdf"),
