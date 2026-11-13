@@ -39,6 +39,18 @@ export function safetyState(m: Pick<Member, 'compared' | 'mismatch' | 'markUnrea
   return m.mismatch ? 'Didn’t match' : m.compared ? 'Compared' : 'Not compared'
 }
 
+/** What a person's row says, and what to do, when Rust answers that the earlier comparison cannot be read. */
+export const MARK_UNREADABLE = 'Your earlier comparison with this person can’t be read. Compare again to share.'
+
+/** The person after They match / They don’t match answered: only a successful comparison replaces the row; a refusal
+ * (failed, mark_unreadable) changes nothing, so an unreadable mark is never cleared silently. */
+export function afterMarkCompared(m: Member, answer: { ok: boolean }, matched: boolean): Member {
+  if (!answer.ok) return m
+  return matched
+    ? { ...m, compared: true, mismatch: false, keyChanged: false, markUnreadable: false }
+    : { ...m, compared: false, mismatch: true, markUnreadable: false }
+}
+
 export const peopleLabel = (people: string[]) => (people.length <= 2 ? people.join(', ') : `${people[0]}, ${people[1]} and ${people.length - 2} more`)
 export const initialsOf = (name: string) => name.split(/\s+/).filter(Boolean).map((p) => p[0]).filter((c) => c === c.toUpperCase()).slice(0, 2).join('')
 

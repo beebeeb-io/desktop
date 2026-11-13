@@ -13,7 +13,7 @@ import {
   InviteDialog, KeyChangedAlert, LeaveAlert, LinkPasswordDialog, MismatchDialog, NewRequestDialog, PeopleDialog, PersonDialog, RemoveAccessAlert, SafetyNumberDialog,
   type NewRequestInput,
 } from './Dialogs'
-import { byMeMenu, EXPIRY_CHOICES, linkExpiry, requestLine, requestMenu, withMeMenu, type Member } from './model'
+import { afterMarkCompared, byMeMenu, EXPIRY_CHOICES, linkExpiry, requestLine, requestMenu, withMeMenu, type Member } from './model'
 import * as api from './api'
 import { seed } from '../../seed'
 import type { ShareLists } from './api'
@@ -354,9 +354,9 @@ export default function Section({ nav }: SectionProps) {
           // A refused invite is not shared yet: They match seals it now, to the key just compared.
           if (d.refused) return r.ok ? void invite(d.itemId, d.refused.email, d.refused.canEdit, true, d.member.id) : toast(r)
           // Rust wrote They match to every mark of the person: no earlier state of theirs stands.
-          toast(r, 'Marked as compared'); setDialog({ kind: 'person', itemId: d.itemId, member: r.ok ? { ...d.member, compared: true, mismatch: false, keyChanged: false, markUnreadable: false } : d.member })
+          toast(r, 'Marked as compared'); setDialog({ kind: 'person', itemId: d.itemId, member: afterMarkCompared(d.member, r, true) })
         }}
-        onNoMatch={async () => { const r = await api.shareMarkCompared(d.member.id, false); if (!r.ok) return toast(r); setDialog({ kind: 'mismatch', itemId: d.itemId, member: d.member, groups: d.groups, refused: d.refused }) }}
+        onNoMatch={async () => { const r = await api.shareMarkCompared(d.member.id, false); if (!r.ok) return toast(r); setDialog({ kind: 'mismatch', itemId: d.itemId, member: afterMarkCompared(d.member, r, false), groups: d.groups, refused: d.refused }) }}
         // A refused invite holds no key: every way out of its comparison but They match withdraws it (as DW-0515 Cancel).
         onClose={() => (d.refused ? void withdraw(d.itemId, d.member) : setDialog({ kind: 'person', itemId: d.itemId, member: d.member }))} />}
       {d?.kind === 'mismatch' && <MismatchDialog member={d.member} groups={d.groups}

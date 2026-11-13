@@ -6,6 +6,8 @@ import { SCENARIOS } from '../tray/fixtures'
 import { menuItem } from './driver'
 
 const JONAS = LISBON_PEOPLE[1]
+/** Jonas with a comparison this PC cannot read (DW-0512u). */
+const UNREADABLE_PEOPLE = LISBON_PEOPLE.map((m) => (m.id === 'm-jonas' ? { ...m, markUnreadable: true } : m))
 const NO_LISTS = { share_list: { invitations: [], links: [], requests: [], pending: [] } }
 const peopleOf = (): Recipe['steps'] => [{ context: 'row:sb-lisbon' }, { click: menuItem('people') }, { wait: '[data-people]' }]
 const SEARCH = 'field:Search names'
@@ -27,6 +29,15 @@ export const DRIVE_STATES: Record<string, Recipe> = {
   'DW-0510': { q: 'section=shared&sub=requests&scenario=no-shares', reads: NO_LISTS },
   'DW-0511': { q: 'section=shared&sub=by-me', steps: peopleOf() },
   'DW-0512': { q: 'section=shared&sub=by-me', steps: [...peopleOf()!, { click: '[data-person="m-jonas"]' }] },
+  // The row for a comparison this PC cannot read (2440 item 2): a seeded mark, so the words and Compare again are live.
+  // The by-me fixture rows carry no `item.shared` people on this base, so the People dialog is reached through a link
+  // row (the same share_people answer) rather than sb-lisbon.
+  'DW-0512u': {
+    q: 'section=shared&sub=by-me',
+    reads: { share_people: UNREADABLE_PEOPLE },
+    seeds: { 'shared.members': UNREADABLE_PEOPLE },
+    steps: [{ context: 'row:sl-budget' }, { click: menuItem('people') }, { wait: '[data-people]' }, { click: '[data-person="m-jonas"]' }],
+  },
   'DW-0512b': { q: 'section=shared&sub=by-me', steps: [...peopleOf()!, { click: '[data-person="m-jonas"]' }, { click: 'btn:Remove access' }] },
   'DW-0513': { q: 'section=shared&sub=by-me', steps: [...peopleOf()!, { click: '[data-person="m-jonas"]' }, { click: 'btn:Safety number' }] },
   // "They don't match" is a host write (share_mark_compared): the live state opens on its answer.
