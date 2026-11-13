@@ -411,8 +411,17 @@ fn an_index_landing_after_a_lock_is_never_held() {
     host.hold_the_next_build();
     let mut source = EngineSearchSource::new(host.clone());
     source.opened();
+    source.ask("draft", Narrow::All);
+    assert!(source.wired(), "the first index is on its way");
+    assert_eq!(
+        source.search("draft", Narrow::All),
+        Answer::Searching,
+        "loading, never \"not available\" and never \"no results\""
+    );
     host.build_is_held();
     host.lock();
+    assert!(!source.wired(), "at once");
+    assert_eq!(source.search("draft", Narrow::All), Answer::Unavailable);
     source.pump();
     let woken = host.woken.load(Ordering::SeqCst);
     host.let_the_build_go();
@@ -420,6 +429,10 @@ fn an_index_landing_after_a_lock_is_never_held() {
     // The one pump that takes the answer in: it is dropped there, not held until a later pump.
     source.pump();
     assert!(source.held.is_none(), "an index of a session that ended is in memory");
+    assert!(
+        source.wanted.is_none(),
+        "what was asked in a session that ended is in memory"
+    );
     settle(&mut source);
     assert!(source.held.is_none());
     assert!(source.found.is_none());
@@ -450,6 +463,7 @@ fn an_index_landing_after_another_account_signed_in_is_never_held() {
     host.woken_past(woken);
     source.pump();
     assert!(source.held.is_none(), "the first account's index is in memory");
+    assert!(source.wanted.is_none(), "what the first account asked is in memory");
     settle(&mut source);
     assert!(source.held.is_none());
     assert!(source.found.is_none());
@@ -707,4 +721,83 @@ fn a_real_build_shell_gets_the_unwired_search_and_runs_no_part_of_the_adapter() 
         s.frames.find.shows("contract"),
         crate::frames::search::Shows::Unavailable
     );
+}
+
+/// The window's own forget (`frames::search::poll`): the WINDOW's account changes while the source's host still
+/// says the session it had. The window tells the source to forget, so nothing the source held is drawn; what is
+/// read next is held back here, so nothing has replaced it.
+#[test]
+fn the_window_tells_the_source_to_forget_when_its_account_changes() {
+    use crate::shell::app::{Event, GateState, Session};
+    let host = host(Some(ME));
+    let mut state = crate::init();
+    state.frames.find.source = Box::new(EngineSearchSource::new(host.clone()));
+    state.frames.find.open = true;
+    state.search = TextEdit::new("contract");
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, crate::view, (958.0, 1100.0), env);
+    rt.on_key = Some(crate::shell::host::on_key);
+    rt.poll = Some(crate::shell::host::poll);
+    frames(&mut rt);
+    assert!(
+        texts(&rt).iter().any(|t| t.contains("Contract draft.pdf")),
+        "the control: the result is drawn"
+    );
+
+    host.hold_the_next_build();
+    rt.state
+        .shell
+        .app
+        .apply(Event::Session(Session::of(GateState::Ready, "window-other@example.eu")));
+    rt.state.frames.find.open = true;
+    rt.state.search = TextEdit::new("contract");
+    for _ in 0..3 {
+        rt.frame(0.016);
+        rt.settle_all();
+    }
+    let drawn = texts(&rt);
+    for theirs in ["Contract", "contract costs", "CONTRACT scan", "Legal"] {
+        assert!(
+            !drawn.iter().any(|t| t.contains(theirs) && t != "contract"),
+            "{theirs} is drawn after the window's account changed"
+        );
+    }
+    assert_eq!(
+        rt.state.frames.find.source.search("contract", Narrow::All),
+        Answer::Searching,
+        "forgotten, and read again"
+    );
+    host.build_is_held();
+    host.let_the_build_go();
+    frames(&mut rt);
+}
+
+/// A `{:?}` of a result, of the index or of one of its records prints no name, no place and no id.
+#[test]
+fn a_result_and_the_index_print_no_name() {
+    let host = host(Some(ME));
+    let mut source = opened(&host);
+    let hits = found(&mut source, "contract", Narrow::All);
+    let index = SearchHost::index(&*host).expect("the index");
+    let record = index.records.get("f-signed").expect("a record");
+    assert_eq!(record.name, "Contract signed 2025.pdf");
+    let printed = format!(
+        "{hits:?} {index:?} {record:?} {:?}",
+        source.search("contract", Narrow::All)
+    );
+    for secret in [
+        "Contract",
+        "contract",
+        "CONTRACT",
+        "Legal",
+        "Documents",
+        "f-signed",
+        "f-draft",
+    ] {
+        assert!(!printed.contains(secret), "{secret} is printed: {printed}");
+    }
+    assert!(printed.contains("Hit") && printed.contains("records: 5"), "{printed}");
 }

@@ -908,10 +908,14 @@ impl<C: CredentialStores> Engine<C> {
 
     /// Whether the session in memory is, now, the very one `generation` and `key` were copied from: asked with no
     /// session change half done (the session-write lock is held for the question), so an answer made for a session
-    /// that a lock or a sign-out is ending is never taken for the current one. May wait for a session change to
-    /// finish: a worker's, as every call that asks it.
+    /// that a lock or a sign-out is ending is never taken for the current one. Never waits: while a session change
+    /// is under way the answer is no.
     pub(super) fn session_is_still(&self, generation: SessionGeneration, key: &[u8; 32]) -> bool {
-        let _writes = self.writes.lock().unwrap_or_else(|p| p.into_inner());
+        let _writes = match self.writes.try_lock() {
+            Ok(writes) => writes,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return false,
+        };
         if !self.acct.session_unchanged_since(generation) {
             return false;
         }

@@ -16,9 +16,10 @@
 //! worker says the session it began in and ended in; the window takes an answer in only when that is the session
 //! it sees now. An account's name alone is not enough: it stays the same across a lock.
 //!
-//! What is kept, and until when: the index and the last result, in memory, only while their session is the
-//! current one. `pump` drops them the moment it is not (the window's side, no worker asked), `forget` drops them
-//! when the window says so, and every reader hands out nothing of a session that is gone even before either ran.
+//! What is kept, and until when: everything this source holds (the index, the last result, the query asked, the
+//! work on its way) belongs to ONE session. `opened`, `ask` and `pump` first look whether that is still the
+//! session of the moment and drop all of it when it is not (the window's side, no worker asked); `forget` drops it
+//! when the window says so; and every reader hands out nothing of a session that is gone even before either ran.
 //!
 //! When it works (never from a draw): the index is built when Search opens (`opened`) and what is held is older
 //! than [`FRESH_FOR`]; a query runs when the window says the words or the pill changed (`ask`), or when the index
@@ -139,6 +140,8 @@ pub struct EngineSearchSource<H: SearchHost> {
     host: Arc<H>,
     answers: mpsc::Sender<Landed<H::Turn>>,
     inbox: mpsc::Receiver<Landed<H::Turn>>,
+    /// The session everything below belongs to (`None`: no one signed in with the vault open, and nothing held).
+    of: Option<Session<H::Turn>>,
     held: Option<Held<H::Turn>>,
     /// Numbers the indexes installed.
     installed: u64,
@@ -178,6 +181,7 @@ impl<H: SearchHost> EngineSearchSource<H> {
             host,
             answers,
             inbox,
+            of: None,
             held: None,
             installed: 0,
             jobs: 0,
@@ -196,15 +200,27 @@ impl<H: SearchHost> EngineSearchSource<H> {
         self.held.as_ref().filter(|held| held.of == now)
     }
 
-    /// Something of a session that is not the current one is still here.
-    fn holds_another_sessions(&self) -> bool {
-        let anything = self.held.is_some() || self.found.is_some() || self.asked.is_some() || self.wanted.is_some();
-        anything && self.current().is_none() && (self.held.is_some() || session_of(&*self.host).is_none())
+    /// Follow the session of the moment: when it is not the one this source's state belongs to, all of that state
+    /// goes now. `true`: something a draw reads went.
+    fn follow(&mut self) -> bool {
+        let now = session_of(&*self.host);
+        if self.of == now {
+            return false;
+        }
+        let held = self.held.is_some() || self.found.is_some() || self.building.is_some() || self.asked.is_some();
+        self.forget();
+        self.of = now;
+        held
+    }
+
+    /// A build for the session of the moment is on its way.
+    fn building_now(&self) -> bool {
+        self.building.is_some() && self.of.is_some() && self.of == session_of(&*self.host)
     }
 
     /// Build the index on a worker, for the session of the moment.
     fn build(&mut self) {
-        if self.building.is_some() || session_of(&*self.host).is_none() {
+        if self.building.is_some() || self.of.is_none() {
             return;
         }
         self.jobs += 1;
@@ -277,7 +293,6 @@ impl<H: SearchHost> EngineSearchSource<H> {
     }
 
     fn take_in(&mut self, landed: Landed<H::Turn>) {
-        let now = session_of(&*self.host);
         match landed {
             Landed::Built(job, of, result) => {
                 if self.building != Some(job) {
@@ -285,7 +300,7 @@ impl<H: SearchHost> EngineSearchSource<H> {
                     return;
                 }
                 self.building = None;
-                if of.is_none() || of != now {
+                if of.is_none() || of != self.of {
                     // Built for a session that is gone, or across a change of session: dropped, never held. The
                     // session of the moment builds its own when Search opens.
                     self.built_at = None;
@@ -313,7 +328,7 @@ impl<H: SearchHost> EngineSearchSource<H> {
                     return;
                 }
                 self.asked = None;
-                let mine = Some(&of) == now.as_ref() && self.current().is_some_and(|held| held.number == asked.2);
+                let mine = Some(&of) == self.of.as_ref() && self.current().is_some_and(|held| held.number == asked.2);
                 if mine {
                     self.found = Some((asked, hits));
                 }
@@ -323,9 +338,9 @@ impl<H: SearchHost> EngineSearchSource<H> {
 }
 
 impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
-    /// An index of the current session is held. Reads only.
+    /// An index of the current session is held, or is being built (a query then reads `Searching`). Reads only.
     fn wired(&self) -> bool {
-        self.current().is_some()
+        self.current().is_some() || self.building_now()
     }
 
     /// Not bound: no store for search terms yet.
@@ -341,9 +356,7 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
 
     /// Search opened: the index is built when none of this session is held, or what is held is old.
     fn opened(&mut self) {
-        if self.holds_another_sessions() {
-            self.forget();
-        }
+        self.follow();
         let fresh = self.built_at.is_some_and(|at| at.elapsed() < FRESH_FOR);
         if !fresh {
             self.build();
@@ -352,6 +365,7 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
 
     /// The words or the pill changed: the query runs on a worker (now, or when the index lands).
     fn ask(&mut self, query: &str, narrow: Narrow) {
+        self.follow();
         let query = query.trim();
         if query.is_empty() {
             self.wanted = None;
@@ -364,11 +378,7 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
     /// The session moved on: everything held goes now, on the window's side. Then what the workers sent, each only
     /// for the session the window sees.
     fn pump(&mut self) -> Pumped {
-        let mut changed = false;
-        if self.holds_another_sessions() {
-            self.forget();
-            changed = true;
-        }
+        let mut changed = self.follow();
         while let Ok(landed) = self.inbox.try_recv() {
             self.take_in(landed);
             changed = true;
@@ -393,7 +403,12 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
     /// query is started by `ask`, never here.
     fn search(&self, query: &str, narrow: Narrow) -> Answer {
         let Some(held) = self.current() else {
-            return Answer::Unavailable;
+            // The first index of this session is being built: the query is answered when it lands.
+            return if self.building_now() {
+                Answer::Searching
+            } else {
+                Answer::Unavailable
+            };
         };
         let query = query.trim();
         if query.is_empty() {

@@ -121,11 +121,15 @@ impl OwnedState<'_> {
     }
 
     /// Whether the handle would still answer: no session change since it was made, and a session in memory, asked
-    /// with no session change half done (it may wait for one to finish). A handle made while a lock or a sign-out
-    /// was ending its session answers nothing once that is done.
+    /// with no session change half done. Never waits: while a session change is under way the handle answers
+    /// nothing. A handle made while a lock or a sign-out was ending its session answers nothing, then and after.
     pub fn still_this_session(&self) -> Result<(), LocalStateRefused> {
         {
-            let _writes = self.writes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _writes = match self.writes.try_lock() {
+                Ok(writes) => writes,
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return Err(LocalStateRefused::SessionChanged),
+            };
             if !self.acct.session_unchanged_since(self.generation) {
                 return Err(LocalStateRefused::SessionChanged);
             }
