@@ -175,8 +175,21 @@ pub fn files_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> Option<bool> {
     Some(on_key(s, ev, tx))
 }
 
+/// Search reads the account's file names: not while the shell's session gate is closed. `true`:
+/// refused; the keyboard goes to the banner's Sign in, as the Files window's refusals do.
+fn refused(s: &mut State, tx: &mut Tx) -> bool {
+    if !crate::shell::session_gate::refuse(s) {
+        return false;
+    }
+    tx.focus("banner-action", true);
+    true
+}
+
 /// Open search with the field focused (DW-0801).
 pub fn open(s: &mut State, tx: &mut Tx) {
+    if refused(s, tx) {
+        return;
+    }
     s.frames.find.open = true;
     tx.focus(SEARCH_KEY, true);
 }
@@ -194,6 +207,9 @@ pub fn close(s: &mut State, tx: &mut Tx) {
 
 /// Run a recent search: its words in the field, the results under it (DW-0801 to DW-0802).
 pub fn run(s: &mut State, query: &str, tx: &mut Tx) {
+    if refused(s, tx) {
+        return;
+    }
     s.search = TextEdit::new(query);
     s.frames.find.selected = None;
     s.frames.find.source.remember(query);
@@ -224,6 +240,9 @@ fn select(s: &mut State, hits: &[Hit], i: usize, tx: &mut Tx) {
 /// Open result `i` (Enter, a double-click): the search is kept as a recent one.
 fn open_result(s: &mut State, hits: &[Hit], i: usize) -> bool {
     let Some(hit) = hits.get(i) else { return false };
+    if crate::shell::session_gate::refuse(s) {
+        return true;
+    }
     s.frames.find.selected = Some(hit.id.clone());
     let query = s.search.text.trim().to_string();
     s.frames.find.source.remember(&query);
@@ -246,6 +265,10 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     s.frames.find.pictured = false;
     if ev.key == Key::Escape && frames::plain(ev) {
         close(s, tx);
+        return true;
+    }
+    // Every other key of Search reads or opens something of the account.
+    if refused(s, tx) {
         return true;
     }
     if ev.is_command('f') {

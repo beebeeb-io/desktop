@@ -63,11 +63,9 @@ impl State {
 
     /// [`State::needs_session`], where no keyboard focus can be moved.
     pub(super) fn refused_without_session(&mut self) -> bool {
-        if !self.session_ended() {
-            return false;
-        }
-        self.actions.session.asked += 1;
-        true
+        // The shell's session gate is the one authority: the session ended, the gate is not
+        // Ready, or the engine's session is no longer the one this window was drawn for.
+        crate::shell::session_gate::refuse(self)
     }
 
     /// May this frame be asked for now? Not while the session ended, unless it needs none.

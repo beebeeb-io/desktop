@@ -460,6 +460,10 @@ pub fn open_item(s: &mut State, item: &crate::source::DriveItem) -> bool {
 
 /// [`open`] with the source to read from (the engine's, once it is wired).
 pub fn open_from(s: &mut State, source: Box<dyn ViewerSource>, file_id: &str) -> bool {
+    // Not while the shell's session gate is closed: the source is not asked for the file.
+    if crate::shell::session_gate::refuse(s) {
+        return false;
+    }
     let Ok(ui) = Ui::open(source, file_id) else {
         return false;
     };
@@ -514,6 +518,20 @@ pub fn sync(s: &mut State) {
     }
 }
 
+/// The session ended under the window (`shell::host`'s poll, with the Files window's reset). The
+/// account left (a sign-out, another account): the open file is dropped whatever it holds, also
+/// unsaved changes and an open question, and so is a New file dialog with its typed name; nothing
+/// of it is drawn or asked for again under the next account. A lock is the same account coming
+/// back: [`sync`] decides, as for any route that left the file.
+pub fn end_session(s: &mut State, account_left: bool) {
+    if !account_left {
+        return;
+    }
+    close_stale(s);
+    s.viewer.new_file = None;
+    s.viewer.refocus_list = false;
+}
+
 /// The text field the editor's keys go to. (With no editor open no key reaches this; the
 /// window's search field is what the type asks for.)
 pub fn editor_edit(s: &mut State) -> &mut rune::TextEdit {
@@ -546,7 +564,8 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     sync(s);
     // The route names a file that is not open yet (Files dispatched `Event::OpenItem`): ask the
     // window's source for it. No source, or a file it does not have: the shell's placeholder.
-    if let (None, Some(id)) = (&s.viewer.ui, route_item(s)) {
+    // Never while the shell's session gate is closed: the route may name a file, nothing reads it.
+    if let (None, Some(id), true) = (&s.viewer.ui, route_item(s), crate::shell::session_gate::open(s)) {
         if let Some(Ok(ui)) = route_source(s).map(|source| Ui::open(source, &id)) {
             s.viewer.ui = Some(ui);
             return true;
