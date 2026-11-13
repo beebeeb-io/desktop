@@ -5,6 +5,7 @@
 //! the link is invented.
 
 use super::super::Toast;
+use super::super::dialogs::Dialog;
 use super::super::protected;
 use super::super::source::{
     Account, Action, ActionError, Change, Counts, Details, FilesSource, NoEngine, StorageSplit,
@@ -112,7 +113,7 @@ fn copied(clipboard: &rune::clipboard::MemoryClipboard) -> String {
     clipboard.text().map(|text| text.to_string()).unwrap_or_default()
 }
 
-/// One frame's look at the source, as the shell's poll takes it: what it did, then a link for the clipboard.
+/// One frame's look at the source: what it did, then a link for the clipboard.
 fn frame(rt: &mut Runtime<State>) -> bool {
     let mut changed = false;
     rt.update(|s, tx| {
@@ -121,6 +122,14 @@ fn frame(rt: &mut Runtime<State>) -> bool {
     });
     settle(rt);
     changed
+}
+
+/// The same through the shell's own poll, as a running app takes it.
+fn shell_frame(rt: &mut Runtime<State>) {
+    rt.update(|s, tx| {
+        crate::shell::host::poll(s, 0.0, tx);
+    });
+    settle(rt);
 }
 
 fn select_only(rt: &mut Runtime<State>, row: usize) {
@@ -151,6 +160,98 @@ fn nothing_is_said_or_copied_before_the_source_answered_and_then_the_link_is_on_
     // Held for that one step only.
     assert!(rt.state.actions.link.landed.is_empty());
     assert_eq!(rt.state.actions.link.asked, None);
+}
+
+#[test]
+fn a_password_of_spaces_is_no_password_and_no_link_is_asked_for() {
+    let (mut rt, spy, _, _) = window();
+    rt.update(|s, tx| {
+        assert!(s.begin_share());
+        if let Some(Dialog::Share(share)) = &mut s.actions.dialog {
+            share.password_on = true;
+        }
+        s.actions.share_password = rune::TextEdit::new("   ").secure();
+        s.share_copy_link(tx);
+    });
+    assert_eq!(
+        spy.asked(),
+        [],
+        "a link that should ask for a password was asked for without one"
+    );
+    assert!(
+        matches!(&rt.state.actions.dialog, Some(Dialog::Share(share)) if share.password_missing),
+        "the dialog stays and says a password is missing"
+    );
+}
+
+#[test]
+fn the_shells_poll_puts_a_landed_link_on_the_clipboard() {
+    let (mut rt, spy, clipboard, _) = window();
+    rt.update(|s, tx| assert!(s.copy_link(tx)));
+    shell_frame(&mut rt);
+    assert_eq!(copied(&clipboard), BEFORE);
+    spy.answer(Action::CopyLink, Ok(LINK));
+    shell_frame(&mut rt);
+    assert_eq!(copied(&clipboard), LINK);
+    assert_eq!(rt.state.actions.toast, Some(Toast::LinkCopied));
+}
+
+#[test]
+fn while_a_link_is_on_its_way_no_second_one_is_asked_for_and_its_answer_is_the_first_ones() {
+    let (mut rt, spy, clipboard, ids) = window();
+    rt.update(|s, tx| assert!(s.copy_link(tx)));
+    assert_eq!(spy.asked(), [(Action::CopyLink, vec![ids[0].clone()])]);
+
+    // Another file, while the first link is on its way: said, with no Try again, and the source is not asked.
+    select_only(&mut rt, 1);
+    rt.update(|s, tx| assert!(s.copy_link(tx)));
+    assert_eq!(spy.asked(), [], "a second link was asked for");
+    assert_eq!(
+        rt.state.actions.toast,
+        Some(Toast::Failed(Action::CopyLink, ActionError::InFlight))
+    );
+    assert!(!rt.state.offers_try_again(Action::CopyLink, ActionError::InFlight));
+    // The Share dialog's link is not asked for either.
+    rt.update(|s, tx| {
+        assert!(s.begin_share());
+        s.share_copy_link(tx);
+    });
+    assert_eq!(spy.asked(), [], "a second link was asked for");
+
+    // The one answer there is, is the first press's: it cannot be taken for another file's.
+    spy.answer(Action::CopyLink, Ok(LINK));
+    assert!(frame(&mut rt));
+    assert_eq!(copied(&clipboard), LINK);
+    // Answered: the next press asks again.
+    rt.update(|s, tx| assert!(s.copy_link(tx)));
+    assert_eq!(spy.asked(), [(Action::CopyLink, vec![ids[1].clone()])]);
+}
+
+#[test]
+fn a_failure_with_nothing_held_and_a_message_that_went_leave_nothing_to_try_again() {
+    let (mut rt, spy, _, _) = window();
+    // An answer nobody here pressed for (nothing is held of its press): Try again is not "the selection".
+    spy.answer(Action::CopyLink, Err(ActionError::Failed));
+    assert!(frame(&mut rt));
+    assert_eq!(
+        rt.state.actions.toast,
+        Some(Toast::Failed(Action::CopyLink, ActionError::Failed))
+    );
+    assert!(!rt.state.offers_try_again(Action::CopyLink, ActionError::Failed));
+    rt.update(|s, tx| s.retry(tx));
+    assert_eq!(spy.asked(), [], "Try again asked for the selection");
+
+    // A message whose time is over takes what its Try again held with it.
+    rt.update(|s, tx| assert!(s.copy_link(tx)));
+    spy.asked();
+    spy.answer(Action::CopyLink, Err(ActionError::Offline));
+    assert!(frame(&mut rt));
+    assert!(rt.state.actions.link.again.is_some());
+    rt.update(|s, _| {
+        s.actions.toast_until = Some(std::time::Instant::now() - Duration::from_secs(1));
+        assert!(super::super::reset::poll(s));
+    });
+    assert_eq!(rt.state.actions.link.again, None);
 }
 
 #[test]

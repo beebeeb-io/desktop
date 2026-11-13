@@ -30,6 +30,8 @@ const NOT_ON_SERVER: &str = "a0000000-0000-4000-8000-000000000604";
 const UNKNOWN: &str = "a0000000-0000-4000-8000-000000000605";
 /// An id of the class whose key is never derived, with no key record here.
 const NO_KEY_HERE: &str = "a0000000-0000-8000-8000-000000000606";
+/// A row this computer is moving to Trash.
+const TRASHING: &str = "a0000000-0000-4000-8000-000000000607";
 /// The second account's file; a row of it stands in the first's local state, as a stale one would.
 const THEIRS: &str = "a0000000-0000-4000-8000-000000000701";
 
@@ -101,6 +103,7 @@ fn fake(tag: &str) -> Fake {
     first.add_item(PLAN, None, "Invented plan.txt", false, 10);
     first.add_item(FOLDER, None, "Invented folder", true, 0);
     first.add_item(NO_KEY_HERE, None, "Invented adopted.txt", false, 10);
+    first.add_item(TRASHING, None, "Invented leaving.txt", false, 10);
     second.add_item(THEIRS, None, "Second account plan.txt", false, 10);
     let (one, two): (Handler, Handler) = (account_handler(first.clone()), account_handler(second.clone()));
     let second_token = second.session_token.clone();
@@ -110,6 +113,10 @@ fn fake(tag: &str) -> Fake {
         let route = req.route();
         hold_in.wait(&route);
         let status = status_in.load(Ordering::SeqCst);
+        if route == LIST && status == 200 {
+            // It answers, and not with a list of links.
+            return Reply::ok(serde_json::json!({ "items": [] }));
+        }
         if route == LIST && status != 0 {
             return Reply::json(status, serde_json::json!({ "error": "a server body" }));
         }
@@ -155,10 +162,14 @@ fn signed_in(engine: &TestEngine, account: &FakeAccount) {
 }
 
 fn row(db: &StateDb, id: &str, path: &str, folder: bool) {
+    row_in(db, id, path, folder, FileStatus::CloudOnly);
+}
+
+fn row_in(db: &StateDb, id: &str, path: &str, folder: bool, status: FileStatus) {
     let entry = FileEntry {
         file_id: id.into(),
         path: path.into(),
-        status: FileStatus::CloudOnly,
+        status,
         size_bytes: 10,
         modified_at: 1_794_000_000,
         content_hash: None,
@@ -181,6 +192,7 @@ fn local_state(engine: &TestEngine, owner: &FakeAccount) -> (tempfile::TempDir, 
     row(&db, NOT_ON_SERVER, "Invented gone.txt", false);
     row(&db, NO_KEY_HERE, "Invented adopted.txt", false);
     row(&db, THEIRS, "Second account plan.txt", false);
+    row_in(&db, TRASHING, "Invented leaving.txt", false, FileStatus::Trashing);
     db.set_owner(&Identity::new(Some(&owner.user_id), Some(&owner.email)))
         .unwrap();
     engine.use_local_state_for_test(path);
@@ -308,6 +320,29 @@ fn a_file_that_has_a_live_link_never_gets_a_second_one_behind_it() {
 }
 
 #[test]
+fn a_link_past_its_expiry_or_with_its_opens_used_up_is_not_live() {
+    let (fake, engine, _state, turn) = ready("dead");
+    engine.share_link_for(turn, NOTE, None).expect("the first link");
+    // Past its expiry: Copy link makes a new one.
+    fake.first.expire_links();
+    engine
+        .share_link_for(turn, NOTE, None)
+        .expect("a link after the first expired");
+    assert_eq!(fake.count(POST), 2);
+    // The new one is live.
+    assert_eq!(
+        refusal(engine.share_link_for(turn, NOTE, None)),
+        ShareLinkError::HasLink
+    );
+    // Opened as often as it may be: not live either.
+    fake.first.use_up_links();
+    engine
+        .share_link_for(turn, NOTE, None)
+        .expect("a link after the opens were used up");
+    assert_eq!(fake.count(POST), 3);
+}
+
+#[test]
 fn a_listed_link_that_is_another_files_is_never_handed_out_for_this_file() {
     let (fake, engine, _state, turn) = ready("mislabelled");
     let plans = engine.share_link_for(turn, PLAN, None).expect("the other file's link");
@@ -342,7 +377,13 @@ fn when_the_links_cannot_be_read_no_link_is_made() {
         refusal(engine.share_link_for(turn, NOTE, None)),
         ShareLinkError::SessionEnded
     );
-    assert_eq!(fake.count(LIST), 2);
+    // It answers 200 with something that is not a list of links: not "no links", a read that failed.
+    fake.list_status.store(200, Ordering::SeqCst);
+    assert_eq!(
+        refusal(engine.share_link_for(turn, NOTE, None)),
+        ShareLinkError::Refused
+    );
+    assert_eq!(fake.count(LIST), 3);
     assert_eq!(fake.count(POST), 0, "nothing was made");
 
     // Nothing answers at all: offline, by its kind.
@@ -391,6 +432,15 @@ fn the_dialogs_choices_are_sent_and_each_asks_for_a_new_link() {
         refusal(engine.share_link_for(turn, NOTE, Some(&short))),
         ShareLinkError::Invalid
     );
+    // A password of spaces only would be dropped by core, and the link would ask for none: never made.
+    let blank = LinkChoices {
+        expires_in_hours: None,
+        passphrase: Some(Zeroizing::new("   ".into())),
+    };
+    assert_eq!(
+        refusal(engine.share_link_for(turn, NOTE, Some(&blank))),
+        ShareLinkError::Invalid
+    );
     let long = LinkChoices {
         expires_in_hours: Some(24 * 366),
         passphrase: None,
@@ -415,6 +465,8 @@ fn what_is_not_a_file_of_this_accounts_local_state_is_refused_with_nothing_sent(
     assert_eq!(link(FOLDER), ShareLinkError::NotAFile);
     // An id whose key is never derived, with no key record on this computer.
     assert_eq!(link(NO_KEY_HERE), ShareLinkError::KeyUnavailable);
+    // A file on its way to Trash is not shared.
+    assert_eq!(link(TRASHING), ShareLinkError::NotFound);
     assert_eq!(fake.api.requests().len(), 0, "nothing was asked of Beebeeb");
 }
 

@@ -285,6 +285,21 @@ impl FakeAccount {
         *self.links_listed_as.lock().expect("links") = Some(file_id.to_string());
     }
 
+    /// Every link of the account is listed as past its expiry.
+    pub fn expire_links(&self) {
+        for link in self.links.lock().expect("links").iter_mut() {
+            link["listed_expires_at"] = json!("2020-01-01T00:00:00Z");
+        }
+    }
+
+    /// Every link of the account is listed as opened as often as it may be (once).
+    pub fn use_up_links(&self) {
+        for link in self.links.lock().expect("links").iter_mut() {
+            link["max_opens"] = json!(1);
+            link["open_count"] = json!(1);
+        }
+    }
+
     /// Every link of the account is revoked.
     pub fn revoke_links(&self) {
         for link in self.links.lock().expect("links").iter_mut() {
@@ -330,7 +345,9 @@ impl FakeAccount {
                     "id": link["id"],
                     "file_id": link["file_id"],
                     "share_type": "file",
-                    "expires_at": Value::Null,
+                    "expires_at": link.get("listed_expires_at").cloned().unwrap_or(Value::Null),
+                    "max_opens": link.get("max_opens").cloned().unwrap_or(Value::Null),
+                    "open_count": link.get("open_count").cloned().unwrap_or(json!(0)),
                     "has_passphrase": link.get("passphrase").is_some(),
                     "revoked": link["revoked"],
                     "owner_wrapped_key": link["owner_wrapped_key"],

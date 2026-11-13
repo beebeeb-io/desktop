@@ -109,7 +109,8 @@ pub enum ShareLinkError {
     /// The file has a live link that cannot be rebuilt and checked here (the account's link list does not carry
     /// what the check needs yet). No second link was made.
     HasLink,
-    /// A choice core refuses (a password that is too short, an expiry that is too long). Nothing was sent.
+    /// A choice that is refused (a password of spaces only or too short, an expiry that is too long). Nothing
+    /// was sent.
     Invalid,
     /// Beebeeb refused or failed.
     Refused,
@@ -149,6 +150,12 @@ impl<C: CredentialStores> Engine<C> {
         choices: Option<&LinkChoices>,
     ) -> Result<MadeLink, ShareLinkError> {
         let id = canonical(file_id)?;
+        // A password that was asked for and is only spaces: core would drop it and make a link that asks for
+        // none. Such a link is never made.
+        let blank = |c: &LinkChoices| c.passphrase.as_ref().is_some_and(|typed| typed.trim().is_empty());
+        if choices.is_some_and(blank) {
+            return Err(ShareLinkError::Invalid);
+        }
         // A session mutex a panic poisoned: nothing is sent.
         if self.acct.session.is_poisoned() {
             return Err(ShareLinkError::NotSignedIn);
@@ -184,7 +191,7 @@ impl<C: CredentialStores> Engine<C> {
 
         let mut link = None;
         if choices.is_none() {
-            let mine = answered(send(get(format!("{MINE}?file_id={id}")))?)?;
+            let mine = listed(send(get(format!("{MINE}?file_id={id}")))?)?;
             let live = live_links(&mine, id);
             link = live.iter().find_map(|share| rebuilt(&master, &file_key, share));
             // A live link that cannot be checked is not handed out, and no second one is made.
@@ -269,31 +276,36 @@ fn get(path: String) -> HttpRequest {
     req
 }
 
-fn answered(resp: HttpResponse) -> Result<Value, ShareLinkError> {
+/// The account's links as Beebeeb listed them. An answer that is not a list of links is a read that failed: it
+/// is never taken for "no links" (a link would be made on top of ones that were not seen).
+fn listed(resp: HttpResponse) -> Result<Vec<Value>, ShareLinkError> {
     match resp.status {
-        200..=299 if resp.body.is_object() => Ok(resp.body),
+        200..=299 => match resp.body.get("shares").and_then(Value::as_array) {
+            Some(shares) => Ok(shares.clone()),
+            None => Err(ShareLinkError::Refused),
+        },
         401 => Err(ShareLinkError::SessionEnded),
         _ => Err(ShareLinkError::Refused),
     }
 }
 
 /// The live links to the file `id` in the account's link list: named for this file (asked of each row here, not
-/// left to the server's filter), a file link, not revoked, not past its expiry.
-fn live_links<'a>(mine: &'a Value, id: &str) -> Vec<&'a Value> {
+/// left to the server's filter), a file link, not revoked, not past its expiry, its opens not used up.
+fn live_links<'a>(mine: &'a [Value], id: &str) -> Vec<&'a Value> {
     let now = chrono::Utc::now();
     let text = |share: &'a Value, field: &str| share.get(field).and_then(Value::as_str);
-    mine.get("shares")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
+    let count = |share: &Value, field: &str| share.get(field).and_then(Value::as_i64);
+    mine.iter()
         .filter(|share| {
             let expired = text(share, "expires_at")
                 .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
                 .is_some_and(|at| at <= now);
+            let used_up = count(share, "max_opens").is_some_and(|most| count(share, "open_count").unwrap_or(0) >= most);
             text(share, "file_id") == Some(id)
                 && share.get("revoked").and_then(Value::as_bool) != Some(true)
                 && text(share, "share_type").unwrap_or("file") == "file"
                 && !expired
+                && !used_up
         })
         .collect()
 }

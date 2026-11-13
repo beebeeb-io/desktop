@@ -13,7 +13,7 @@
 
 use super::actions_data::{LinkAccess, LinkExpiry, ShareOptions};
 use super::dialogs::{self, Dialog};
-use super::source::Action;
+use super::source::{Action, ActionError};
 use super::{Intent, Toast};
 use crate::State;
 use crate::source::{DriveItem, format_size};
@@ -138,7 +138,8 @@ impl State {
             return;
         }
         let typed = self.actions.share_password.text.clone();
-        if share.password_on && typed.is_empty() {
+        // Spaces are not a password: a link made with them would ask for none.
+        if share.password_on && typed.trim().is_empty() {
             if let Some(share) = self.share_mut() {
                 share.password_missing = true;
             }
@@ -151,7 +152,12 @@ impl State {
             password: share.password_on.then_some(typed),
         };
         self.forget_undo();
-        let answer = self.actions.source.share_link(&share.items, &options);
+        // One link at a time (`link.rs`): while one is on its way, a second is not asked for.
+        let answer = if self.link_on_its_way() {
+            Err(ActionError::InFlight)
+        } else {
+            self.actions.source.share_link(&share.items, &options)
+        };
         drop(options);
         // The dialog closes either way; a failure says so, with Try again (DW-0109).
         self.close_dialog(tx);

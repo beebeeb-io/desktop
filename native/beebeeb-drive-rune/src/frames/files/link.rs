@@ -41,8 +41,8 @@ impl std::fmt::Debug for LinkText {
 /// What the window keeps of links that were asked for. All of it is the session's (`reset::end_session`).
 #[derive(Default)]
 pub struct Ui {
-    /// What the source answered and this frame's `Tx` has not been given yet: a link for the clipboard, or why
-    /// there is none. Emptied by [`poll`] in the same frame it was filled.
+    /// What the source answered and a `Tx` has not been given yet: a link for the clipboard, or why there is
+    /// none. Emptied by the next [`poll`] (the same frame, or the next one when a handler took the changes in).
     pub landed: Vec<(Action, Result<LinkText, ActionError>)>,
     /// The items of a Copy link that was accepted and is not answered yet.
     pub asked: Option<Vec<String>>,
@@ -77,7 +77,14 @@ impl State {
         }
         self.forget_undo();
         let ids: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
-        match self.actions.source.copy_link(&items) {
+        // One link at a time: an answer names no item, so while one is on its way a second is not asked for
+        // (its link could be taken for the first's).
+        let asked = if self.link_on_its_way() {
+            Err(ActionError::InFlight)
+        } else {
+            self.actions.source.copy_link(&items)
+        };
+        match asked {
             // Accepted, not made: said, and copied, when the source answered ([`poll`]).
             Ok(()) if self.actions.source.answers_later() => self.actions.link.asked = Some(ids),
             Ok(()) => self.show_toast(Toast::LinkCopied, tx),
@@ -107,6 +114,11 @@ impl State {
                 self.copy_link(tx);
             }
         }
+    }
+
+    /// Is a link that was accepted still not answered (a source that answers later)?
+    pub(super) fn link_on_its_way(&self) -> bool {
+        self.actions.link.asked.is_some() || self.actions.link.share.is_some()
     }
 
     /// Is there something Try again of a failed Copy link would ask for? The items of that press, still shown.
@@ -145,7 +157,8 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
                     // What Try again opens: the same items and choices, without the password.
                     s.actions.retry_share = share;
                 } else {
-                    s.actions.link.again = asked;
+                    // Nothing held is "nothing to ask again", never "what is selected now".
+                    s.actions.link.again = Some(asked.unwrap_or_default());
                 }
                 s.failed(action, why, tx);
             }

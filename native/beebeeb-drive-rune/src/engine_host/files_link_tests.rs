@@ -51,8 +51,14 @@ fn links(req: &Request) -> bool {
 
 fn fake(tag: &str) -> Fake {
     let (first, first_phrase) = FakeAccount::register(&format!("{tag}-one@example.eu"), PASSWORD, TEST_PHRASE);
-    let (second, second_phrase) = FakeAccount::register(&format!("{tag}-two@example.eu"), PASSWORD, TEST_PHRASE);
+    // Another phrase: another vault key, so nothing of the first account opens under the second.
+    let (second, second_phrase) = FakeAccount::register(
+        &format!("{tag}-two@example.eu"),
+        PASSWORD,
+        "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    );
     let (first, second) = (Arc::new(first), Arc::new(second));
+    assert_ne!(first.master_key, second.master_key);
     let (one, two): (Handler, Handler) = (account_handler(first.clone()), account_handler(second.clone()));
     let (second_email, second_token) = (second.email.clone(), second.session_token.clone());
     let refuse = Arc::new(AtomicBool::new(false));
