@@ -91,7 +91,7 @@ A coach card over the main window with a ring around the real control each tip e
 control's key: the ring follows it). State: `State::guide`. It starts when the first run ends ("Open my Beebeeb",
 `guide::poll`) and from Settings › General › "Show the guide again" (`settings::go("DW-0380")`). Got it, Next and Done
 step; Skip and Esc end it; the window under a tip takes every press, and whatever the section has in front (a menu,
-a dialog, an opened photo) hides the tip and gets Esc first. The keyboard is the card's while a tip shows (focus on
+a dialog, the New file dialog, an opened photo) hides the tip and gets Esc first. The keyboard is the card's while a tip shows (focus on
 its button, Tab stays in the card, Enter presses). It ends when the account locks, signs out or changes. "Once per
 PC" is `SetupSource::guide_shown` / `mark_guide_shown` (not wired: the guide follows each first run). Tests:
 `setup/guide_tests.rs`. Not built: the second way back the board names ("and Help"); the card's 22 pt button is
@@ -99,15 +99,19 @@ drawn here, not by the kit (a design-system need).
 
 | Frame | What | State |
 | --- | --- | --- |
-| DW-0380 | Where the b is: "Beebeeb lives in the notification area", Got it | built in the main window (its lower right corner, clear of the details panel's buttons); the board draws it as its own window by the tray: follow-up task 2479. Its arrow points at nothing in the window until then. Gate state in the PR body |
-| DW-0301 | Tip 1: New | built; geometry, text, icons, fills, frame tiles 0; pixel lines open: `coach-ring`, `coach-dot-0`, `coach-dots` |
-| DW-0302 | Tip 2: a file's row (left out when the folder shows no file) | built; 1 pixel line open (`coach-dot-1`) |
-| DW-0303 | Tip 3: Shared, on the Shared view | built; the guide's own keys: 1 pixel line open (`coach-dot-2`). Also red: the Shared toolbar (the board gained a button there) and `btn-skip` / `btn-next`, which the golden keys a second time for the card's two buttons |
-| DW-0304 | Tip 4: Photos, on the Photos view | built; the guide's own keys: 1 pixel line open (`coach-dot-3`). Also red: the Photos toolbar (the same button) |
-| DW-0305 | Tip 5: the gear | built; 2 pixel lines open (`coach-dot-4`, `coach-dots`) |
+| DW-0380 | Where the b is: "Beebeeb lives in the notification area", Got it | built in the main window (its lower right corner, clear of the details panel's buttons). Red on every dimension but text, icons and fills (225 of 225 geometry keys): the board composes a desktop with the window at 0.72 scale at (18, 18), the taskbar and the card by the tray; the app draws its window at full size. Follow-up task 2479 (the card in a window of its own by the notification area) |
+| DW-0301 | Tip 1: New | built; geometry, text, icons, fills, frame tiles 0; 3 pixel keys open: `coach-ring` (New's top edge at 40.75 pt: the board paints it from device row 81, Rune from 82, a 1 px step inside the ring), `coach-dot-0`, `coach-dots` |
+| DW-0302 | Tip 2: a file's row (left out when the folder shows no file) | built; 1 pixel key open (`coach-dot-1`) |
+| DW-0303 | Tip 3: Shared, on the Shared view | built; 2 pixel keys open: `coach-dot-2`, and `card-0-tile` (under the card: the card stands 0.54 low with the sidebar's rows, and in dark a glyph row of the tip's words differs) |
+| DW-0304 | Tip 4: Photos, on the Photos view | built; 1 pixel key open (`coach-dot-3`) |
+| DW-0305 | Tip 5: the gear | built; 2 pixel keys open (`coach-dot-4`, `coach-dots`) |
 
-The open `coach-dot-*` lines are the 6 pt dot's edge (as `status-dot` in DW-A07). The words of DW-0380 are the board
-drawing's (`guide::TRAY_TEXT`); the frame's note in `frames.json` has other words (decision 2478).
+Measured on the Linux build VM, light and dark the same keys (2026-11-13). The open `coach-dot-*` keys (and
+`coach-dots`, whose end is the lit dot) are the 6 pt dot's anti-aliased edge: the board's edge pixels are lighter
+(86 / 121 / 186 against Rune's 74 / 107 / 169 at 2x), as `status-dot` in DW-A07; Rune's drawing, not this group's. The
+sidebar's rows stand 0.5 pt low in every Files-window frame (`drive-label` is 12 high, the board's 11.5: `ui/sidebar.rs`),
+and the ring and card of tips 3 and 4 follow them. The words of DW-0380 are the board drawing's (`guide::TRAY_TEXT`); the
+frame's note in `frames.json` has other words (decision 2478).
 
 States with a rule and no drawing, built from the rule's words (tests only): the compare view's Stacked and Hold to
 flip; "You're set up" after Not now or Skip setup ("Not added", "Off"); Turn on backup with no folder on (disabled).
