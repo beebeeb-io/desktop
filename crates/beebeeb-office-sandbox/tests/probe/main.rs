@@ -5,6 +5,7 @@
 //!   ping                 -> pong
 //!   connect <ip:port>    -> ok | err <system code>
 //!   write <path>         -> ok | err <system code>      (creates a new file and writes 5 bytes)
+//!   writetemp <name>    -> ok | err <system code>      (the same, in the folder its own TEMP variable names)
 //!   read <path>          -> ok <bytes read> | err <system code>
 //!   spawn <program>      -> ok | err <system code>      (starts it with `/c exit`, waits for it)
 //!   alloc <mebibytes>    -> ok | err alloc              (reserves and touches every page)
@@ -192,6 +193,7 @@ fn main() {
             "ping" => "pong".to_string(),
             "connect" => connect(rest),
             "write" => write(rest),
+            "writetemp" => write(&std::env::temp_dir().join(rest).to_string_lossy()),
             "read" => read(rest),
             "spawn" => spawn(rest),
             "alloc" => alloc(rest),

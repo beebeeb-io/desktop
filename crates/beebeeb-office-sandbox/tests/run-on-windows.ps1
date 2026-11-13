@@ -17,6 +17,7 @@ function Count-State {
 }
 
 "session: $((Get-Process -Id $PID).SessionId)"
+"session: $((Get-Process -Id $PID).SessionId)"
 $before = Count-State
 $log = Join-Path $env:TEMP ("beebeeb-sandbox-run-{0}.log" -f $PID)
 & cargo test --locked @args -- --nocapture --test-threads=1 *> $log

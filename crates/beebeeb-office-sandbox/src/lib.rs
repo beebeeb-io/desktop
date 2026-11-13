@@ -234,6 +234,42 @@ mod tests {
         assert!(!ExitStatus { code: 1 }.was_killed());
     }
 
+    /// No runtime input may weaken or skip a part of the confinement. The spawn path therefore reads nothing
+    /// from the parent's environment, its arguments or a file: this pins that in the source of every module.
+    #[test]
+    fn the_spawn_path_reads_no_environment_variable_argument_or_switch() {
+        let sources = [
+            ("lib", include_str!("lib.rs")),
+            ("block", include_str!("block.rs")),
+            ("windows", include_str!("windows.rs")),
+            ("unsupported", include_str!("unsupported.rs")),
+        ];
+        // Built from pieces so this test's own text does not match.
+        let forbidden = [
+            ["env", "::var"].concat(),
+            ["env", "::args"].concat(),
+            ["env!", "("].concat(),
+            ["option_env", "!"].concat(),
+            ["BB_", "DIAG"].concat(),
+            ["BB_", "ENV"].concat(),
+            ["cfg(", "feature"].concat(),
+            ["GetEnvironment", "Variable"].concat(),
+            ["Reg", "OpenKey"].concat(),
+        ];
+        let mut checked = 0;
+        for (module, source) in sources {
+            assert!(source.len() > 500, "{module} was read");
+            for word in &forbidden {
+                assert!(
+                    !source.contains(word.as_str()),
+                    "module {module} holds a runtime or build switch: {word}"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 36);
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn without_a_sandbox_module_nothing_is_started() {

@@ -48,6 +48,7 @@ mod windows {
 
     /// The codes the confined probe gets, as measured on the Windows build VM (the PR body has the run).
     const ACCESS_DENIED: &str = "err 5";
+    const PATH_NOT_FOUND: &str = "err 3";
     const SOCKET_ACCESS_DENIED: &str = "err 10013";
     const PROCESS_QUOTA: &str = "err 1816";
     const INVALID_HANDLE: &str = "err 6";
@@ -353,6 +354,24 @@ mod windows {
         assert!(count >= 4);
     }
 
+    #[test]
+    fn a_confined_helper_has_no_folder_of_its_own_to_write_to() {
+        let _serial = serial();
+        // The folder a container process is given by the system (its TEMP) is gone before the helper runs.
+        let control = Scratch::in_dir(&std::env::temp_dir());
+        let name = control.0.file_name().unwrap().to_str().unwrap().to_string();
+        let mut plain = Probe::plain();
+        assert_eq!(
+            plain.attempt(&format!("writetemp {name}")),
+            "ok",
+            "the instrument can fail: a plain probe writes to its TEMP"
+        );
+        assert!(control.0.exists());
+
+        let mut confined = Probe::confined();
+        assert_eq!(confined.attempt(&format!("writetemp {name}-confined")), PATH_NOT_FOUND);
+    }
+
     // ── 3. no child process ─────────────────────────────────────────────────────────────────────────────────
 
     #[test]
@@ -484,6 +503,15 @@ mod windows {
     }
 
     #[test]
+    fn starting_a_helper_leaves_it_answering_and_reports_the_time() {
+        let _serial = serial();
+        let start = Instant::now();
+        let mut probe = Probe::confined();
+        assert_eq!(probe.ask("ping"), "pong");
+        println!("start-to-first-answer: {} ms", start.elapsed().as_millis());
+    }
+
+    #[test]
     fn a_helper_that_ends_by_itself_is_noticed_with_its_exit_code() {
         let _serial = serial();
         let mut probe = Probe::confined();
@@ -538,7 +566,7 @@ mod windows {
     // ── 6. nothing else is handed over ──────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn a_confined_helper_gets_one_environment_variable() {
+    fn a_confined_helper_gets_four_environment_variables_and_none_of_the_parents() {
         let _serial = serial();
         let mut plain = Probe::plain();
         let inherited = plain.attempt("env");
@@ -553,7 +581,7 @@ mod windows {
             confined.attempt("env"),
             format!("env {}", helper_environment_names().join(","))
         );
-        assert_eq!(helper_environment_names().len(), 1);
+        assert_eq!(helper_environment_names().len(), 4);
     }
 
     #[test]
@@ -577,6 +605,51 @@ mod windows {
         assert!(!signalled_within(&event, Duration::ZERO), "the event was not touched");
     }
 
+    /// A diagnostic switch (`BB_DIAG`, `BB_ENV`) existed on this branch while the spawn was bisected; it could
+    /// leave out the container, the job and the restricted token. It is gone. This test fails if it, or anything
+    /// like it, comes back: with those variables set to their "everything off" values in the parent, the helper
+    /// is confined exactly as without them.
+    #[test]
+    fn no_environment_variable_of_the_parent_weakens_the_confinement() {
+        let _serial = serial();
+        let switches = [
+            ("BB_DIAG", "127"),
+            ("BB_ENV", "USERPROFILE,APPDATA,PATH"),
+            ("BEEBEEB_SANDBOX", "off"),
+            ("BEEBEEB_NO_SANDBOX", "1"),
+        ];
+        for (name, value) in switches {
+            // SAFETY: every test of this file holds `SERIAL` while it runs, so no other thread of this process
+            // reads or writes the environment now.
+            unsafe { std::env::set_var(name, value) };
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let target = Scratch::in_dir(&std::env::temp_dir());
+        let shell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("cmd.exe");
+
+        let mut confined = Probe::confined();
+        let answers = [
+            confined.attempt(&format!("connect {}", listener.local_addr().unwrap())),
+            confined.attempt(&format!("write {}", target.text())),
+            confined.attempt(&format!("spawn {}", shell.to_str().unwrap())),
+            confined.attempt("env"),
+        ];
+        for (name, _) in switches {
+            // SAFETY: as above.
+            unsafe { std::env::remove_var(name) };
+        }
+        let names = format!("env {}", helper_environment_names().join(","));
+        assert_eq!(
+            answers,
+            [SOCKET_ACCESS_DENIED, ACCESS_DENIED, PROCESS_QUOTA, names.as_str()]
+        );
+        assert_eq!(accepted(&listener), 0);
+        assert!(!target.0.exists());
+    }
+
     // ── 7. refusals before anything starts ──────────────────────────────────────────────────────────────────
 
     #[test]
@@ -596,45 +669,5 @@ mod windows {
             sandbox.spawn(&std::env::temp_dir()).unwrap_err(),
             SandboxError::HelperPath("not a file")
         );
-    }
-
-    #[test]
-    fn diag() {
-        let _serial = serial();
-        for (bits, names) in [
-            (64u32, "LOCALAPPDATA"),
-            (64, "TEMP"),
-            (64, "TMP"),
-            (64, "USERPROFILE"),
-            (64, "TEMP,TMP"),
-            (64, "LOCALAPPDATA,TEMP,TMP"),
-            (64, "LOCALAPPDATA,TEMP,TMP,USERPROFILE,APPDATA"),
-        ] {
-            unsafe { std::env::set_var("BB_ENV", names) };
-            // SAFETY: tests run one at a time (`--test-threads=1`).
-            unsafe { std::env::set_var("BB_DIAG", bits.to_string()) };
-            let result = match Sandbox::new(Limits::default()).unwrap().spawn(Path::new(PROBE)) {
-                Ok(mut child) => {
-                    let pipes = child.take_pipes().unwrap();
-                    let mut to = pipes.to_helper;
-                    let _ = writeln!(to, "env");
-                    let mut line = String::new();
-                    let read = BufReader::new(pipes.from_helper).read_line(&mut line);
-                    format!(
-                        "started, answer {:?} {:?}, exit {:?}",
-                        read.ok(),
-                        line.trim(),
-                        child
-                            .wait_timeout(Duration::from_millis(300))
-                            .ok()
-                            .flatten()
-                            .map(|s| s.code())
-                    )
-                }
-                Err(error) => format!("{error}"),
-            };
-            println!("DIAG {bits} [{names}]: {result}");
-        }
-        unsafe { std::env::remove_var("BB_DIAG") };
     }
 }

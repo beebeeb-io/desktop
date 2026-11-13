@@ -7,10 +7,17 @@
 //! | Restricted token: privileges removed, Administrators deny-only | whatever an elevated parent's token would add |
 //! | Handle list | every handle of the parent except the two pipe ends |
 //!
-//! The AppContainer identity is derived from a random name per helper and is never registered as a profile, so
-//! there is no profile folder the helper could write to, nothing in the registry, and two helpers cannot open each
-//! other. The job handle is held by the parent only and is not inheritable: when the parent ends, for any reason,
-//! the handle closes and the system ends the helper.
+//! **The container profile exists only while the helper is suspended.** Windows refuses to create an AppContainer
+//! process for an identity that has no registered profile (system code 2, measured), and a registered profile comes
+//! with a folder its process may write to. So each helper gets a profile of its own under a random name; the
+//! helper is created suspended; the profile, its folder and its registry entries are deleted; the deletion is
+//! checked; only then does the helper run. It never executes while a place it could write to exists, two helpers
+//! never share an identity (so one cannot open the other), and nothing of the profile outlives the spawn call. If
+//! the parent is killed inside that window (a few system calls long), one empty profile under the name prefix
+//! `beebeeb.office.` stays behind and the helper, still suspended, is ended by its job.
+//!
+//! The job handle is held by the parent only and is not inheritable: when the parent ends, for any reason, the
+//! handle closes and the system ends the helper.
 //!
 //! This is the only module with `unsafe`. Every block is one call into the system, with its invariant stated.
 #![allow(unsafe_code)]
@@ -29,7 +36,7 @@ use windows_sys::Win32::Foundation::{
     GetLastError, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
-use windows_sys::Win32::Security::Isolation::DeriveAppContainerSidFromAppContainerName;
+use windows_sys::Win32::Security::Isolation::{CreateAppContainerProfile, DeleteAppContainerProfile};
 use windows_sys::Win32::Security::{
     CreateRestrictedToken, CreateWellKnownSid, DISABLE_MAX_PRIVILEGE, FreeSid, GetTokenInformation, PSID,
     SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY,
@@ -203,12 +210,17 @@ impl Drop for AttributeList<'_> {
     }
 }
 
-/// An AppContainer identity derived from a name; freed on drop.
-struct ContainerSid(PSID);
+/// One helper's AppContainer profile. Registered by `register`, deleted by `unregister`; `drop` deletes it if an
+/// early return skipped that, and frees the identity.
+struct Container {
+    name: Vec<u16>,
+    sid: PSID,
+    registered: bool,
+}
 
-impl ContainerSid {
-    /// A new identity from 128 random bits. It is never registered as a profile.
-    fn random() -> Result<Self, SandboxError> {
+impl Container {
+    /// Registers a profile with no capabilities under a name made of 128 random bits.
+    fn register() -> Result<Self, SandboxError> {
         let mut bytes = [0u8; 16];
         // SAFETY: `bytes` is valid for 16 bytes; a null algorithm with this flag selects the system generator.
         let status = unsafe { BCryptGenRandom(null_mut(), bytes.as_mut_ptr(), 16, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
@@ -218,28 +230,51 @@ impl ContainerSid {
                 code: status as u32,
             });
         }
-        let mut name = String::from("beebeeb.office.");
+        let mut text = String::from("beebeeb.office.");
         for byte in bytes {
-            name.push_str(&format!("{byte:02x}"));
+            text.push_str(&format!("{byte:02x}"));
         }
-        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        let name: Vec<u16> = text.encode_utf16().chain([0]).collect();
         let mut sid: PSID = null_mut();
-        // SAFETY: `wide` is a terminated UTF-16 string; `sid` receives an allocation freed in `drop`.
-        let result = unsafe { DeriveAppContainerSidFromAppContainerName(wide.as_ptr(), &mut sid) };
+        // SAFETY: `name` is a terminated UTF-16 string, used as name, display name and description; the
+        // capability list is empty; `sid` receives an allocation freed in `drop`.
+        let result =
+            unsafe { CreateAppContainerProfile(name.as_ptr(), name.as_ptr(), name.as_ptr(), null(), 0, &mut sid) };
         if result != 0 || sid.is_null() {
             return Err(SandboxError::Os {
-                step: "container identity",
+                step: "container profile",
                 code: result as u32,
             });
         }
-        Ok(Self(sid))
+        Ok(Self {
+            name,
+            sid,
+            registered: true,
+        })
+    }
+
+    /// Deletes the profile: its folder and its registry entries.
+    fn unregister(&mut self) -> Result<(), SandboxError> {
+        // SAFETY: `name` is the terminated UTF-16 name the profile was registered under.
+        let result = unsafe { DeleteAppContainerProfile(self.name.as_ptr()) };
+        if result != 0 {
+            return Err(SandboxError::Os {
+                step: "container profile removal",
+                code: result as u32,
+            });
+        }
+        self.registered = false;
+        Ok(())
     }
 }
 
-impl Drop for ContainerSid {
+impl Drop for Container {
     fn drop(&mut self) {
-        // SAFETY: the pointer came from `DeriveAppContainerSidFromAppContainerName` and is freed once.
-        unsafe { FreeSid(self.0) };
+        if self.registered {
+            let _ = self.unregister();
+        }
+        // SAFETY: the pointer came from `CreateAppContainerProfile` and is freed once.
+        unsafe { FreeSid(self.sid) };
     }
 }
 
@@ -472,16 +507,6 @@ pub(crate) fn spawn(helper_exe: &Path, limits: Limits) -> Result<(ChildInner, Pi
     }
     let mut command = command_line(&application);
     let environment = environment_block(&directory("windows directory", GetSystemWindowsDirectoryW)?)?;
-    let mut environment = environment;
-    if let Ok(names) = std::env::var("BB_ENV") {
-        environment.pop();
-        for name in names.split(',').filter(|n| !n.is_empty()) {
-            let value = std::env::var(name).unwrap_or_else(|_| "x".into());
-            environment.extend(format!("{name}={value}").encode_utf16());
-            environment.push(0);
-        }
-        environment.push(0);
-    }
     let mut current = directory("system directory", GetSystemDirectoryW)?;
     current.push(0);
 
@@ -489,35 +514,10 @@ pub(crate) fn spawn(helper_exe: &Path, limits: Limits) -> Result<(ChildInner, Pi
     let (from_helper, helper_stdout) = pipe()?;
     let job = job(limits)?;
     let token = restricted_token()?;
-    let container = ContainerSid::random()?;
-    let diag_name: Vec<u16> = "beebeeb.office.diag".encode_utf16().chain([0]).collect();
-    let diag0: u32 = std::env::var("BB_DIAG").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-    let container = if diag0 & 64 != 0 {
-        let mut sid: PSID = null_mut();
-        let hr = unsafe {
-            windows_sys::Win32::Security::Isolation::CreateAppContainerProfile(
-                diag_name.as_ptr(),
-                diag_name.as_ptr(),
-                diag_name.as_ptr(),
-                null(),
-                0,
-                &mut sid,
-            )
-        };
-        println!("DIAG create profile hr={:#x}", hr as u32);
-        if hr != 0 {
-            return Err(SandboxError::Os {
-                step: "diag profile",
-                code: hr as u32,
-            });
-        }
-        ContainerSid(sid)
-    } else {
-        container
-    };
+    let mut container = Container::register()?;
 
     let capabilities = [SECURITY_CAPABILITIES {
-        AppContainerSid: container.0,
+        AppContainerSid: container.sid,
         Capabilities: null_mut(),
         CapabilityCount: 0,
         Reserved: 0,
@@ -526,18 +526,11 @@ pub(crate) fn spawn(helper_exe: &Path, limits: Limits) -> Result<(ChildInner, Pi
     let inherited: [HANDLE; 2] = [helper_stdin.as_raw_handle(), helper_stdout.as_raw_handle()];
     let jobs: [HANDLE; 1] = [job.as_raw_handle()];
 
-    let diag: u32 = std::env::var("BB_DIAG").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     let mut attributes = AttributeList::new(4)?;
-    if diag & 32 == 0 {
-        attributes.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities)?;
-    }
-    if diag & 33 == 0 {
-        attributes.set(PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, &packages_policy)?;
-    }
+    attributes.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities)?;
+    attributes.set(PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, &packages_policy)?;
     attributes.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &inherited)?;
-    if diag & 4 == 0 {
-        attributes.set(PROC_THREAD_ATTRIBUTE_JOB_LIST, &jobs)?;
-    }
+    attributes.set(PROC_THREAD_ATTRIBUTE_JOB_LIST, &jobs)?;
 
     let mut startup = STARTUPINFOEXW::default();
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
@@ -563,32 +556,20 @@ pub(crate) fn spawn(helper_exe: &Path, limits: Limits) -> Result<(ChildInner, Pi
     // `created` receives the new handles. Handles are inherited, but only the two in the handle list.
     let ok = unsafe {
         CreateProcessAsUserW(
-            if diag & 2 == 0 {
-                token.as_raw_handle()
-            } else {
-                null_mut()
-            },
+            token.as_raw_handle(),
             application.as_ptr(),
             command.as_mut_ptr(),
             null(),
             null(),
             1,
             flags,
-            if diag & 8 == 0 {
-                environment.as_ptr().cast()
-            } else {
-                null()
-            },
-            if diag & 16 == 0 { current.as_ptr() } else { null() },
+            environment.as_ptr().cast(),
+            current.as_ptr(),
             &raw const startup.StartupInfo,
             &mut created,
         )
     };
     let failure = if ok == 0 { Some(os("create process")) } else { None };
-    if diag0 & 64 != 0 {
-        let hr = unsafe { windows_sys::Win32::Security::Isolation::DeleteAppContainerProfile(diag_name.as_ptr()) };
-        println!("DIAG delete profile hr={:#x}", hr as u32);
-    }
     // The helper's ends are closed in the parent whatever happened: after this, only the helper holds them, so a
     // read from a dead helper ends instead of waiting for ever.
     drop(helper_stdin);
@@ -605,6 +586,8 @@ pub(crate) fn spawn(helper_exe: &Path, limits: Limits) -> Result<(ChildInner, Pi
         pid: created.dwProcessId,
     };
     let thread = owned(created.hThread);
+    // The helper has not run yet. Its profile folder goes now; if it cannot be removed, the helper never runs.
+    container.unregister()?;
     confirm_confined(&child.process, &child.job)?;
     // SAFETY: `thread` is the open handle of the helper's suspended first thread.
     if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {

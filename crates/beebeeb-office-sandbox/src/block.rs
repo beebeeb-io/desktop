@@ -4,9 +4,13 @@
 
 use crate::SandboxError;
 
-/// The helper's whole environment. `SystemRoot` is needed by the system libraries a process loads at start; its
-/// value is asked from the system, never copied from the parent's environment.
-pub(crate) const ENVIRONMENT_NAMES: &[&str] = &["SystemRoot"];
+/// The helper's whole environment, by name. Nothing is copied from the parent's environment.
+///
+/// - `SystemRoot` is needed by the system libraries a process loads at start; its value is asked from the system.
+/// - `LOCALAPPDATA` has to be present or Windows refuses to create an AppContainer process (system code 203,
+///   measured). Windows then overwrites it and adds `TEMP` and `TMP`, all three pointing into the container's
+///   own folder, which no longer exists when the helper runs (see the Windows module).
+pub(crate) const ENVIRONMENT_NAMES: &[&str] = &["LOCALAPPDATA", "SystemRoot", "TEMP", "TMP"];
 
 /// Checks a helper path (as UTF-16 units, no terminator) and returns it with a terminator.
 ///
@@ -42,7 +46,8 @@ pub(crate) fn command_line(path: &[u16]) -> Vec<u16> {
     out
 }
 
-/// The environment block: `SystemRoot=<system_root>` and the block terminator. `system_root` has no terminator.
+/// The environment block handed to process creation: `LOCALAPPDATA` (a placeholder Windows replaces) and
+/// `SystemRoot`, both `<system_root>`, and the block terminator. `system_root` has no terminator.
 pub(crate) fn environment_block(system_root: &[u16]) -> Result<Vec<u16>, SandboxError> {
     if system_root.is_empty() || system_root.iter().any(|&u| u == 0 || u == b'=' as u16) {
         return Err(SandboxError::Os {
@@ -50,9 +55,13 @@ pub(crate) fn environment_block(system_root: &[u16]) -> Result<Vec<u16>, Sandbox
             code: 0,
         });
     }
-    let mut out: Vec<u16> = "SystemRoot=".encode_utf16().collect();
-    out.extend_from_slice(system_root);
-    out.extend_from_slice(&[0, 0]);
+    let mut out = Vec::new();
+    for name in ["LOCALAPPDATA=", "SystemRoot="] {
+        out.extend(name.encode_utf16());
+        out.extend_from_slice(system_root);
+        out.push(0);
+    }
+    out.push(0);
     Ok(out)
 }
 
@@ -116,15 +125,18 @@ mod tests {
     }
 
     #[test]
-    fn the_environment_is_one_variable() {
+    fn the_environment_block_holds_two_variables_and_nothing_of_the_parent() {
         let block = environment_block(&w(r"C:\Windows")).unwrap();
-        assert_eq!(String::from_utf16(&block).unwrap(), "SystemRoot=C:\\Windows\0\0");
-        assert_eq!(ENVIRONMENT_NAMES, ["SystemRoot"]);
+        assert_eq!(
+            String::from_utf16(&block).unwrap(),
+            "LOCALAPPDATA=C:\\Windows\0SystemRoot=C:\\Windows\0\0"
+        );
         assert_eq!(
             block.iter().filter(|&&u| u == 0).count(),
-            2,
-            "one entry, then the end of the block"
+            3,
+            "two entries, then the end of the block"
         );
+        assert_eq!(ENVIRONMENT_NAMES, ["LOCALAPPDATA", "SystemRoot", "TEMP", "TMP"]);
     }
 
     #[test]
