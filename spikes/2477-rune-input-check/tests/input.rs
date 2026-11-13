@@ -403,9 +403,15 @@ fn the_canvas_takes_the_keyboard_on_a_press_and_loses_it_to_tab_and_to_a_click_e
         !focused(&rt, "canvas") && !rt.state.has_keyboard && rect(&rt, "caret").is_none(),
         "Tab moved on"
     );
-    assert_eq!(rt.ime_area, None, "and the input method went with the caret");
+    // Tab goes round to the Rune text field, whose own caret has the input method now.
+    assert!(focused(&rt, "field"));
+    assert!(
+        rt.ime_area.is_some_and(|a| a[1] < rect(&rt, "canvas").unwrap()[1]),
+        "{:?}",
+        rt.ime_area
+    );
     type_text(&mut rt, "z");
-    assert_eq!(rt.state.text(), "a");
+    assert_eq!((rt.state.text(), rt.state.field.text.as_str()), ("a".to_string(), "z"));
 
     click_cell(&mut rt, 1);
     assert!(rt.state.has_keyboard);
@@ -414,6 +420,7 @@ fn the_canvas_takes_the_keyboard_on_a_press_and_loses_it_to_tab_and_to_a_click_e
         focused(&rt, "other") && !rt.state.has_keyboard && rect(&rt, "caret").is_none(),
         "another control took focus"
     );
+    assert_eq!(rt.ime_area, None, "no caret anywhere: the input method is off");
     assert_eq!(
         lines(&rt, "focus "),
         [

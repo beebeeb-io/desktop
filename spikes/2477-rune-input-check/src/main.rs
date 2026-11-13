@@ -2,7 +2,7 @@
 //! OS clipboard, and what the platform was told about the candidate window.
 //!
 //! `RUNE_INPUT_CHECK_LOG=<file>`: every event the probe hears is appended to that file, one per line. On Windows
-//! each change of the caret also writes an `imm` line: the composition and candidate forms read back from the
+//! each change also writes an `imm` line: the composition and candidate forms read back from the
 //! window's input context (`ImmGetCompositionWindow`, `ImmGetCandidateWindow`), which is what an input method
 //! reads to place its popup.
 
@@ -19,8 +19,22 @@ static WRITTEN: Mutex<(usize, String)> = Mutex::new((0, String::new()));
 fn poll(s: &mut Probe, t: f64, tx: &mut Tx) -> bool {
     let changed = probe::poll(s, t, tx);
     let mut written = WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(line) = platform::input_context(s.caret_drawn).filter(|line| *line != written.1) {
-        s.log.push(line.clone());
+    // What the script checks against: the model and where things were drawn, then what the platform holds.
+    let mut line = format!(
+        "state text={:?} caret={} selection={:?} preedit={:?} keyboard={} canvas={:?} caret_drawn={:?}",
+        s.text(),
+        s.caret,
+        s.selection(),
+        s.preedit,
+        s.has_keyboard,
+        s.canvas_drawn,
+        s.caret_drawn
+    );
+    if let Some(platform) = platform::input_context() {
+        line = format!("{line}\n{platform}");
+    }
+    if line != written.1 {
+        s.log.extend(line.lines().map(str::to_owned));
         written.1 = line;
     }
     if let Some(path) = std::env::var_os("RUNE_INPUT_CHECK_LOG") {
@@ -96,8 +110,8 @@ mod platform {
         fn GetKeyboardLayout(thread: u32) -> *mut c_void;
     }
 
-    /// One line: the caret the app drew (window points) beside the forms the platform holds (client pixels).
-    pub fn input_context(caret: Option<[f32; 4]>) -> Option<String> {
+    /// One line: the forms the platform holds for the focused window (client pixels), and its DPI.
+    pub fn input_context() -> Option<String> {
         // SAFETY: plain Win32 getters on this thread's focused window; every out-pointer is a live local of the
         // exact struct the call fills, and the context is released before returning.
         unsafe {
@@ -120,7 +134,7 @@ mod platform {
                 ImmReleaseContext(hwnd, himc);
             }
             Some(format!(
-                "imm caret={caret:?} dpi={} context={} open={open} layout={:#x} candidate ok={got_candidate} style={:#x} pos=({},{}) area=({},{},{},{}) composition ok={got_composition} style={:#x} pos=({},{}) area=({},{},{},{})",
+                "imm dpi={} context={} open={open} layout={:#x} candidate ok={got_candidate} style={:#x} pos=({},{}) area=({},{},{},{}) composition ok={got_composition} style={:#x} pos=({},{}) area=({},{},{},{})",
                 GetDpiForWindow(hwnd),
                 !himc.is_null(),
                 GetKeyboardLayout(0) as usize & 0xffff,
@@ -145,7 +159,7 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    pub fn input_context(_: Option<[f32; 4]>) -> Option<String> {
+    pub fn input_context() -> Option<String> {
         None
     }
 }

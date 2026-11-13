@@ -42,6 +42,8 @@ pub struct Probe {
     pub window_focused: bool,
     /// The caret's drawn rectangle in window points (`on_drawn_layout`), for the real-window check.
     pub caret_drawn: Option<[f32; 4]>,
+    /// The canvas's drawn rectangle in window points: where the real-window script aims its pointer.
+    pub canvas_drawn: Option<[f32; 4]>,
     /// Every event the probe heard, in order. The tests and the real-window script read this.
     pub log: Vec<String>,
     /// A Rune text field beside the canvas: a focused field must win the input method.
@@ -99,6 +101,9 @@ impl Probe {
 
 /// `El::on_key` of the canvas: typing, movement, selection and the clipboard chords.
 pub fn on_key(s: &mut Probe, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    // Rune animates the layout change of a key, input-method or press commit unless the handler says otherwise:
+    // a caret that glides takes the candidate window with it. Every handler of an editor says `instant`.
+    tx.instant();
     s.log
         .push(format!("key {:?} shift={} cmd={}", ev.key, ev.mods.shift, ev.mods.cmd));
     let shift = ev.mods.shift;
@@ -133,7 +138,8 @@ pub fn on_key(s: &mut Probe, ev: &KeyEvent, tx: &mut Tx) -> bool {
                 s.delete_selection();
             }
         }
-        Key::Command('v') => tx.read_clipboard(|s: &mut Probe, content: &ClipboardContent, _| {
+        Key::Command('v') => tx.read_clipboard(|s: &mut Probe, content: &ClipboardContent, tx| {
+            tx.instant();
             s.log.push(format!(
                 "paste text={:?} html={} rtf={} image={} files={}",
                 content.text(),
@@ -153,7 +159,8 @@ pub fn on_key(s: &mut Probe, ev: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 /// `App::on_ime`: the composition of the app-drawn editor.
-pub fn on_ime(s: &mut Probe, ev: &Ime, _: &mut Tx) -> bool {
+pub fn on_ime(s: &mut Probe, ev: &Ime, tx: &mut Tx) -> bool {
+    tx.instant();
     s.log.push(format!("ime {ev:?}"));
     match ev {
         Ime::Preedit(t, cursor) => {
@@ -177,6 +184,7 @@ pub fn on_ime(s: &mut Probe, ev: &Ime, _: &mut Tx) -> bool {
 /// `El::on_drag` of the canvas: press places the caret, a drag extends the selection, Shift extends on press,
 /// a second click of a run selects everything.
 pub fn on_drag(s: &mut Probe, d: &mut Drag, tx: &mut Tx) {
+    tx.instant();
     s.log.push(format!(
         "pointer {:?} x={:.0} y={:.0} clicks={} shift={}",
         d.phase,
@@ -202,6 +210,7 @@ pub fn poll(s: &mut Probe, _: f64, tx: &mut Tx) -> bool {
         return false;
     }
     s.has_keyboard = now;
+    tx.instant();
     s.log.push(format!("focus canvas={now}"));
     true
 }
@@ -248,6 +257,7 @@ pub fn view(s: &Probe, _: &mut Cx<Probe>) -> El {
         .focusable(true)
         .on_key(on_key)
         .on_drag(on_drag);
+    canvas = canvas.on_drawn_layout(|s: &mut Probe, r| s.canvas_drawn = Some(r));
     let (a, b) = s.selection();
     if a != b {
         canvas = canvas.child(
