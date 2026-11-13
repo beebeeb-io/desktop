@@ -298,6 +298,24 @@ pub trait FilesSource: Send + 'static {
     fn pause_uploads(&mut self, _pause: bool) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
     }
+    /// The id of the Backups folder, which the sidebar's Backups shows (DW-0422). `None`: this
+    /// source knows none, and the section stays on the shell's "not built yet" frame.
+    fn backups_root(&self) -> Option<String> {
+        None
+    }
+    /// Why `item` (with no item: anything in `folder`) cannot be moved, renamed or deleted, with
+    /// the core's words for it (DW-0425). `None`: it can.
+    fn protection(&self, _folder: Option<&str>, _item: Option<&DriveItem>) -> Option<super::protected::Protection> {
+        None
+    }
+    /// What a row of a protected folder is beyond a folder: a device, a service (DW-0422).
+    fn backup_entry(&self, _item: &DriveItem) -> Option<super::protected::BackupEntry> {
+        None
+    }
+    /// The note over a folder a service manages (DW-0424).
+    fn folder_notice(&self, _folder: Option<&str>) -> Option<super::protected::FolderNotice> {
+        None
+    }
 }
 
 fn ids(items: &[DriveItem]) -> Vec<String> {
@@ -479,6 +497,9 @@ pub struct FilesFixture {
     pub edits: SharedEdits,
     /// What the action dialogs changed: versions, the files that wait for a choice.
     pub more: super::actions_data::More,
+    /// A source that would accept a change of a protected item: so a test can show that the
+    /// WINDOW refuses it before it asks (`protected_tests.rs`).
+    pub lenient: bool,
 }
 
 /// What the fixture's actions changed in the board's folders.
@@ -526,7 +547,22 @@ impl FilesFixture {
                 | Action::Move
                 | Action::FreeUpSpace
         );
+        if self.lenient {
+            return Ok(());
+        }
         if changes && items.iter().any(|i| i.is_protected) {
+            return Err(ActionError::Protected);
+        }
+        // Nothing in the protected tree is moved, renamed, deleted, copied or shared (DW-0425).
+        let alters = matches!(
+            action,
+            Action::Trash | Action::Duplicate | Action::CopyLink | Action::Rename | Action::Move
+        );
+        if alters
+            && items
+                .iter()
+                .any(|i| super::protected_fixture::protection(None, Some(i)).is_some())
+        {
             return Err(ActionError::Protected);
         }
         Ok(())
@@ -594,7 +630,23 @@ impl FilesSource for FilesFixture {
     }
 
     fn can_add(&self, folder: Option<&str>) -> bool {
-        folder != Some(BACKUPS_ID)
+        folder != Some(BACKUPS_ID) && !super::protected_fixture::holds(folder)
+    }
+
+    fn backups_root(&self) -> Option<String> {
+        Some(BACKUPS_ID.to_string())
+    }
+
+    fn protection(&self, folder: Option<&str>, item: Option<&DriveItem>) -> Option<super::protected::Protection> {
+        super::protected_fixture::protection(folder, item)
+    }
+
+    fn backup_entry(&self, item: &DriveItem) -> Option<super::protected::BackupEntry> {
+        super::protected_fixture::entry(item)
+    }
+
+    fn folder_notice(&self, folder: Option<&str>) -> Option<super::protected::FolderNotice> {
+        super::protected_fixture::notice(folder)
     }
 
     fn sort_of(&self, folder: Option<&str>) -> Option<super::Sort> {
@@ -918,7 +970,8 @@ impl BoardDrive {
                 .ok()
                 .map(|listing| listing.items),
             Some("f-lisbon") => Some(lisbon_trip("f-lisbon")),
-            _ => None,
+            // Backups, this PC's backup and the mail service's folder (DW-0422 to DW-0424).
+            Some(id) => super::protected_fixture::rows(id),
         }
     }
 }
@@ -992,6 +1045,7 @@ impl crate::source::DriveSource for BoardDrive {
         // Every item this fixture knows, where the board drew it.
         let mut known: Vec<DriveItem> = root.items.clone();
         known.extend(lisbon_trip("f-lisbon"));
+        known.extend(super::protected_fixture::all());
         known.extend(edits.made.iter().cloned());
         for item in &mut known {
             if let Some(name) = edits.names.get(&item.id) {
@@ -1049,6 +1103,10 @@ impl crate::source::DriveSource for BoardDrive {
             at = parent;
         }
         path.reverse();
+        // Backups is a section of its own: inside it the path starts at Backups (DW-0423).
+        if let Some(at) = path.iter().position(|crumb| crumb.id.as_deref() == Some(BACKUPS_ID)) {
+            path.drain(..at);
+        }
         Ok(Listing { path, folder, items })
     }
 

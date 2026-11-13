@@ -119,7 +119,7 @@ fn asked(rt: &Runtime<State>) -> Vec<Intent> {
 
 #[test]
 fn every_built_frame_renders_and_names_no_city_and_no_provider() {
-    assert_eq!(super::FRAMES.len(), 32, "the frames this lane built");
+    assert_eq!(super::FRAMES.len(), 38, "the frames this lane built");
     for (frame, _) in super::FRAMES {
         let rt = runtime(frame);
         assert!(find(&rt, "caption-bar").is_some(), "{frame}: the same window");
@@ -232,7 +232,11 @@ fn every_row_of_sign_in_and_security_goes_where_it_points() {
             assert_eq!(rt.state.account.pane, Pane::Security, "{row}: Esc goes back");
         }
     }
-    for (row, frame) in [("item-2-1", "DW-A12")] {
+    // Both rows that only asked the shell have their own pages now: App lock's delay (item-0-0-pop-button,
+    // DW-0716: `app_lock.rs`) and "Approve a sign-in" (item-2-1, DW-A12: `approve_tests.rs`). No row of this
+    // pane is left that only asks; a new one goes in this list.
+    let asks: [(&str, &str); 0] = [];
+    for (row, frame) in asks {
         let mut rt = runtime("DW-A52");
         tab_to(&mut rt, row);
         key(&mut rt, Key::Enter);

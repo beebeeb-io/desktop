@@ -84,7 +84,7 @@ fn the_three_contents_hold_the_boards_lists_and_counts() {
     assert_eq!(capitals(APP), ["BEEBEEB", "FILE", "EDIT"]);
     assert_eq!(capitals(WINDOW), ["VIEW", "GO", "WINDOW", "HELP"]);
     assert_eq!(capitals(EDITOR), ["EDIT", "VIEW", "FORMAT", "INSERT"]);
-    assert_eq!(APP.iter().map(|l| l.commands.len()).collect::<Vec<_>>(), [8, 21, 7]);
+    assert_eq!(APP.iter().map(|l| l.commands.len()).collect::<Vec<_>>(), [8, 22, 7]);
     assert_eq!(
         WINDOW.iter().map(|l| l.commands.len()).collect::<Vec<_>>(),
         [8, 10, 4, 6]
@@ -93,14 +93,17 @@ fn the_three_contents_hold_the_boards_lists_and_counts() {
         EDITOR.iter().map(|l| l.commands.len()).collect::<Vec<_>>(),
         [11, 7, 16, 6]
     );
-    assert_eq!((count(APP), count(WINDOW), count(EDITOR)), (36, 28, 40));
+    assert_eq!((count(APP), count(WINDOW), count(EDITOR)), (37, 28, 40));
     // No command without its key or its home, and no Ctrl+Alt key (AltGr types characters).
     for (name, home) in [APP, WINDOW, EDITOR]
         .iter()
         .flat_map(|p| p.iter())
         .flat_map(|l| l.commands)
     {
-        assert!(!name.is_empty() && !home.is_empty(), "{name}: {home}");
+        // ONE row has no home on the board: Free up space (board b4ffef881; golden DW-1232,
+        // `sc-1-13-home` empty). It is drawn as the board draws it and named to the board's owner.
+        let homeless = *name == "Free up space";
+        assert!(!name.is_empty() && (home.is_empty() == homeless), "{name}: {home}");
         assert!(!home.contains("Ctrl+Alt"), "{name}: {home}");
     }
 }
@@ -224,8 +227,15 @@ fn names_and_roles_are_a_dialog_with_one_list_per_menu() {
         assert_eq!((column.role, column.label.as_deref()), ("list", Some(list.name)));
     }
     // Narrator reads each command with its key or its home.
-    let rename = info(&rt, "sc-1-15");
+    let rename = info(&rt, "sc-1-16");
     assert_eq!((rename.role, rename.label.as_deref()), ("listitem", Some("Rename: F2")));
+    // The board's 22nd File command (b4ffef881) has no home: its name alone.
+    let free_up = info(&rt, "sc-1-13");
+    assert_eq!(
+        (free_up.role, free_up.label.as_deref()),
+        ("listitem", Some("Free up space"))
+    );
+    assert_eq!(info(&rt, "sc-1-13-name").text.as_deref(), Some("Free up space"));
     let close = info(&rt, CLOSE_KEY);
     assert_eq!((close.role, close.label.as_deref()), ("button", Some("Close")));
 }
@@ -249,4 +259,55 @@ fn in_the_smallest_window_the_card_stays_inside_it_and_the_lists_scroll() {
         body[3] < 536.0,
         "the lists' viewport is lower than their content: {body:?}"
     );
+}
+
+/// DW-1234 has no golden (the document editor behind it is not built), so its scene is held by
+/// this test instead of the frame gate: a document open, the dialog in front, the editor's four
+/// lists in the board's order with the board's first and last commands, and Close and Esc go
+/// back to the document.
+#[test]
+fn the_scene_of_dw_1234_is_the_editors_four_lists_over_an_open_document() {
+    let scene = super::FRAMES
+        .iter()
+        .find(|(id, _)| *id == "DW-1234")
+        .expect("DW-1234 is a scene of the tray group")
+        .1;
+    let mut rt = runtime();
+    rt.update(|s, _| scene(s));
+    rt.frame(0.0);
+    assert_eq!(registry::group_for(&rt.state.shell.app), FrameGroup::Viewer);
+    assert!(is_open(&rt), "the dialog is in front");
+    assert_eq!(drawn(&rt), ["EDIT", "VIEW", "FORMAT", "INSERT"]);
+    assert_eq!(drawn(&rt), capitals(EDITOR));
+    assert_eq!(info(&rt, "sc-title").text.as_deref(), Some(shortcuts::TITLE));
+    for (c, list) in EDITOR.iter().enumerate() {
+        let last = list.commands.len() - 1;
+        for r in [0, last] {
+            let (name, home) = list.commands[r];
+            assert_eq!(info(&rt, &format!("sc-{c}-{r}-name")).text.as_deref(), Some(name));
+            assert_eq!(info(&rt, &format!("sc-{c}-{r}-home")).text.as_deref(), Some(home));
+        }
+        assert!(
+            !has(&rt, &format!("sc-{c}-{}", last + 1)),
+            "{}: no row past the last",
+            list.name
+        );
+    }
+    assert!(!has(&rt, "sc-4"), "four lists");
+    let dialog = info(&rt, "sc-dlg");
+    assert_eq!(dialog.role, "dialog");
+    assert_eq!(
+        dialog.label.as_deref(),
+        Some("Commands and keyboard shortcuts: Edit, View, Format, Insert")
+    );
+    press(&mut rt, Key::Escape);
+    assert!(!is_open(&rt), "Esc closes it");
+    assert_eq!(
+        registry::group_for(&rt.state.shell.app),
+        FrameGroup::Viewer,
+        "and the document is still open"
+    );
+    // Ctrl+/ from the document opens the same lists again.
+    open(&mut rt);
+    assert_eq!(drawn(&rt), capitals(EDITOR));
 }

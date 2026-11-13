@@ -99,6 +99,9 @@ pub(super) fn focus_list(s: &State, tx: &mut Tx) {
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     // A dialog takes every key; so does a name being typed in a row (its field has the keyboard,
     // and what the field does not use is nobody's).
+    if let Some(handled) = super::protected::key(s, ev, tx) {
+        return handled;
+    }
     if s.actions.dialog.is_some() {
         return s.dialog_key(ev, tx);
     }
@@ -114,7 +117,8 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let m = ev.mods;
     // The window's shortcuts, wherever focus is.
     if ev.is_command('f') {
-        tx.focus(SEARCH_KEY, true);
+        // Search opens with its recent searches (DW-0801), wherever focus was.
+        crate::frames::search::open(s, tx);
         return true;
     }
     if let Key::Command(c) = ev.key {
@@ -221,6 +225,8 @@ fn list_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             s.clear_selection();
             true
         }
+        // Letters jump to the first name that starts with them (DW-0420b).
+        Key::Text(ref typed) if !m.cmd && !m.ctrl && !m.alt => s.type_to(typed, tx),
         _ => false,
     }
 }

@@ -1,0 +1,11 @@
+headers: 4 of 4 match their pinned SHA-256 (tag branch libreoffice-26-2-7)
+cargo:     Finished `release` profile [optimized] target(s) in 0.81s
+spike exe bytes=421888
+RED diag-1thread spike.xlsx: no exit within 40 s, killed pid 8776; last stderr line: stage load +1743ms
+RED diag-1thread spike.pptx: no exit within 40 s, killed pid 7892; last stderr line: No language allowlisted, turning off the language support.
+RED diag-batch spike.xlsx: no exit within 40 s, killed pid 2508; last stderr line: stage load +1838ms
+RED diag-batch spike.pptx: no exit within 40 s, killed pid 8700; last stderr line: No language allowlisted, turning off the language support.
+RED diag-thread spike.xlsx: no exit within 40 s, killed pid 9892; last stderr line: stage load +1755ms
+RED diag-thread spike.pptx: no exit within 40 s, killed pid 1120; last stderr line: No language allowlisted, turning off the language support.
+exit=0 diag-thread spike.docx :: {"label":"diag-thread","file":"spike.docx","doc_type":0,"parts":3,"pages_found":3,"pages_rendered_non_blank":3,"tile_mode":1,"scale":1,"dims":["794x1123","794x1123","794x1123"],"distinct_colours":[350, 362, 374],"part_names":[],"init_ms":1630,"load_ms":487,"init_render_ms":2,"page_ms":[94,5,5],"total_to_last_page_ms":2479,"peak_working_set_mb":327,"peak_commit_mb":273,"listener_hits":0,"version":{ "ProductName": "LibreOffice", "ProductVersion": "26.2", "ProductExtension": ".7.3", "BuildId": "08dfbf04dcac895fc3a8d30dbf5a00de1b9dda5e" }}
+firewall rules left: 0

@@ -35,6 +35,23 @@ pub enum Thumb {
     Plain,
     /// The thumbnail arrived.
     Picture,
+    /// The thumbnail arrived and a FIXTURE source says which of the board's six stand-in pictures
+    /// it is (1 to 6). An engine hands over pixels; only a board fixture names a sample.
+    Sample(u8),
+}
+
+/// One of the board's six stand-in pictures (`.mk-ph1` to `.mk-ph6`) as the fill of `tile`.
+pub fn sample(tile: El, n: u8) -> El {
+    let c = |hex: &str| rune::color::hex(hex).unwrap_or(Color::BLACK);
+    let (degrees, stops): (f32, [(f32, &str); 3]) = match n {
+        1 => (160.0, [(0.0, "#e9c9a0"), (0.55, "#b97a50"), (1.0, "#5e4a4a")]),
+        2 => (170.0, [(0.0, "#9cc4dc"), (0.6, "#e9e2cf"), (1.0, "#8d9a78")]),
+        3 => (150.0, [(0.0, "#33435c"), (0.55, "#7a7f96"), (1.0, "#e3b58c")]),
+        4 => (200.0, [(0.0, "#c7d6b0"), (0.6, "#6c8d62"), (1.0, "#2f4634")]),
+        6 => (120.0, [(0.0, "#d9dfe4"), (0.6, "#8ea4b4"), (1.0, "#4a5866")]),
+        _ => return file_list::thumbnail(tile),
+    };
+    tile.linear_gradient(degrees.to_radians(), stops.map(|(at, hex)| (at, c(hex))))
 }
 
 /// One item of the grid.
@@ -72,6 +89,7 @@ pub fn tile(i: usize, item: &Tile, t: &Theme) -> El {
         }
         Thumb::Plain => thumb.fill(t.text.alpha(0.08)),
         Thumb::Picture => file_list::thumbnail(thumb),
+        Thumb::Sample(n) => sample(thumb, n),
     };
     if let Some(length) = item.length {
         thumb = thumb.child(

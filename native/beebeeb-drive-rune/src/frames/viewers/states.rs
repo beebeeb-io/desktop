@@ -77,7 +77,8 @@ pub fn status(body: &Body) -> Option<Status> {
             text: "Not decrypted: nothing changed".into(),
             details: "The copy in Beebeeb is unchanged".into(),
         },
-        Body::Text(_) | Body::Markdown(_) => return None,
+        // Each has its own view (`text.rs`, `markdown.rs`, `photo.rs`, …).
+        _ => return None,
     })
 }
 
@@ -196,6 +197,7 @@ pub fn body(file: &OpenFile, t: &Theme) -> Option<El> {
         Body::Decrypting { done, total } => decrypting(file, *done, *total, t),
         Body::TooLarge { size, free } => too_large(file, *size, *free, t),
         Body::Failed => failed(t),
-        Body::Text(_) | Body::Markdown(_) => return None,
+        // Each has its own view (`text.rs`, `markdown.rs`, `photo.rs`, …).
+        _ => return None,
     })
 }

@@ -11,6 +11,7 @@
 pub mod grid;
 pub mod samples;
 pub mod source;
+pub mod sync_off;
 #[cfg(test)]
 mod tests;
 mod view;

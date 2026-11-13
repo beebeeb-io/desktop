@@ -201,6 +201,8 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         Some(Dialog::Repair) => Some(repair_question(n, t)),
         Some(Dialog::FreeUp) => Some(super::storage::free_up(ui, n, t)),
         Some(Dialog::Limit(which)) => Some(super::storage::limit(ui, which, n, t)),
+        Some(Dialog::Keep) => Some(super::keep::dialog(ui, n, t)),
+        Some(Dialog::KeepConfirm) => Some(super::keep::question(ui, n, t)),
         _ => ui.toast.map(|words| notices::toast(0, words, t)),
     };
     (shell::pane(children, t), overlay)

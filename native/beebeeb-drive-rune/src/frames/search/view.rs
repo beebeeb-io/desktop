@@ -124,7 +124,7 @@ fn status(s: &State, t: &Theme) -> El {
         .label(name)
         .description("Shows sync status")
         .focusable(true)
-        .on_press(push(Intent::Frame("DW-1201")))
+        .on_press(crate::frames::tray::show_from_window)
 }
 
 /// The toolbar (`.mk-tb`) while searching: "Search" and what was found, the Files window's
@@ -171,6 +171,19 @@ fn toolbar(s: &State, sub: &str, focused: bool, t: &Theme) -> El {
     .shortcut_hint("Alt+Shift+P")
     .checked(s.show_detail_pane)
     .on_press(|s: &mut State| s.show_detail_pane = !s.show_detail_pane);
+    // "Open in File Explorer", between the panel toggle and the separator (the Files toolbar's,
+    // DW-0401): the b's menu item (`host::on_menu`).
+    let explorer = tool_button(
+        "open-explorer",
+        "Open in File Explorer",
+        &icons::FILES,
+        16.0,
+        ToolState::Idle,
+        t,
+    )
+    .on_press_tx(|s: &mut State, tx: &mut Tx| {
+        crate::shell::host::on_menu(s, crate::shell::tray::MenuAction::OpenInFileExplorer, tx);
+    });
     let sep = el().key("toolbar-sep").w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
     let new_btn = row()
         .key("new-btn")
@@ -209,6 +222,7 @@ fn toolbar(s: &State, sub: &str, focused: bool, t: &Theme) -> El {
         .child(view_toggle)
         .child(sort)
         .child(panel)
+        .child(explorer)
         .child(sep)
         .child(new_btn)
         .child(search_field(s, focused, t))
@@ -685,16 +699,20 @@ fn nothing(s: &State, narrow: Narrow, loading: Option<Loading>, t: &Theme) -> El
         .w_full()
         .child(narrow_row(narrow, false, t))
         .children(loading.map(|l| loading_note(l, t)))
+        // The Files window's empty state (`ui::empty`), under the names the Files keymap gives
+        // it on the board: `empty`, `empty-tile`, `empty-icon`, `empty-title`, `empty-text`.
         .child(
-            empty(
-                &icons::SEARCH,
-                &format!("No results for \u{201C}{query}\u{201D}"),
-                NO_MATCH,
-                None,
-                t,
-            )
-            .grow(1.0)
-            .w_full(),
+            el().key("empty-area")
+                .center()
+                .grow(1.0)
+                .w_full()
+                .child(crate::ui::empty::empty_state(
+                    "empty",
+                    &icons::SEARCH,
+                    &format!("No results for \u{201C}{query}\u{201D}"),
+                    NO_MATCH,
+                    t,
+                )),
         )
 }
 

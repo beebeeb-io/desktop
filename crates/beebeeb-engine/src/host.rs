@@ -243,6 +243,14 @@ pub trait EngineHost: Send + Sync + 'static {
     fn now(&self) -> std::time::SystemTime {
         std::time::SystemTime::now()
     }
+
+    /// The engine task's report of its own start (connected, refused, ended). The engine handle keeps it in its view
+    /// (`crate::sync_view`); a host without a view has nothing to do with it.
+    fn start_report(&self, _report: crate::sync_view::StartReport) {}
+
+    /// What a window reads without waiting changed (the handle's view): wake the window's loop to read it. Nothing
+    /// is queued. A host without a loop has nothing to wake.
+    fn wake(&self) {}
 }
 
 /// What a [`ChannelHost`] queues for the UI thread.
@@ -352,6 +360,10 @@ impl EngineHost for ChannelHost {
 
     fn transfer_board(&self) -> Option<Arc<TransferBoard>> {
         Some(self.transfers.clone())
+    }
+
+    fn wake(&self) {
+        (self.wake)();
     }
 }
 

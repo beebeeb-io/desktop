@@ -43,7 +43,8 @@ pub struct SearchUi {
 }
 
 impl Default for SearchUi {
-    /// What every window starts on: nothing to search with until the engine lane wires Search.
+    /// What a window on the engine starts on: nothing to search with until the engine lane wires
+    /// Search.
     fn default() -> Self {
         SearchUi {
             source: Box::new(Unwired),
@@ -51,6 +52,16 @@ impl Default for SearchUi {
             narrow: Narrow::All,
             selected: None,
             pictured: false,
+        }
+    }
+}
+
+impl SearchUi {
+    /// What a window without an engine starts on (`source::first`).
+    pub fn first(dev_build: bool) -> Self {
+        SearchUi {
+            source: source::first(dev_build),
+            ..SearchUi::default()
         }
     }
 }
@@ -123,6 +134,16 @@ pub fn is_open(s: &State) -> bool {
 /// being typed in a row) keeps it: search does not open over it.
 fn files_busy(s: &State) -> bool {
     s.actions.menu.is_some() || s.actions.dialog.is_some() || s.actions.rename.is_some()
+}
+
+/// While search shows, Alt+Left and Alt+Right are not the window's Back and Forward: the board
+/// draws both off ("Esc: ends search"), and a route change would leave search open over the
+/// place it arrives at. The shell asks before it takes the two keys (`host::shell_keys`).
+pub fn holds_back(s: &State) -> bool {
+    crate::shell::registry::group_for(&s.shell.app) == crate::shell::registry::FrameGroup::Section(Section::Files)
+        && s.shell.app.dialog().is_none()
+        && is_open(s)
+        && !files_busy(s)
 }
 
 /// The Files window's view while search is open (the registry's Files line asks first).
@@ -202,7 +223,12 @@ fn open_result(s: &mut State, hits: &[Hit], i: usize) -> bool {
     s.frames.find.selected = Some(hit.id.clone());
     let query = s.search.text.trim().to_string();
     s.frames.find.source.remember(&query);
-    s.frames.intents.push(Intent::OpenItem(hit.id.clone()));
+    // "Double-click a result: opens it" (DW-0408). The search stays as it is behind the open
+    // item, so Back shows the same results again.
+    // THE ONE OPENING PATH: this is Search's single call site. When the viewers lane's router
+    // (`viewers::open_item(state, &DriveItem) -> bool`, by file type) is on the branch, this
+    // line becomes that call, with today's dispatch as what it falls back to.
+    crate::shell::host::dispatch(s, crate::shell::app::Event::OpenItem(hit.id.clone()));
     true
 }
 
@@ -219,6 +245,8 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     if ev.is_command('f') {
+        // Asked for by name: search now stays open over an emptied field too (DW-0801).
+        s.frames.find.open = true;
         tx.focus(SEARCH_KEY, true);
         return true;
     }

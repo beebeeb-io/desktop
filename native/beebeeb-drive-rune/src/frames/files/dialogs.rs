@@ -132,7 +132,7 @@ impl State {
         if items.is_empty() {
             return false;
         }
-        if items.iter().any(|i| i.is_protected) {
+        if self.protects(&items) {
             self.failed(Action::Move, ActionError::Protected, tx);
             return true;
         }
@@ -326,8 +326,10 @@ impl State {
             None => {}
         }
         self.actions.name_error = None;
-        // A link's password does not outlive its dialog.
+        // A link's password does not outlive its dialog: cleared, and the old edit dropped
+        // (it zeroizes on drop too).
         super::share::wipe(self);
+        self.actions.share_password = rune::TextEdit::new("").secure();
     }
 
     /// Create (DW-0417): make the folder, then show it (DW-1106), or go back to the Move dialog
