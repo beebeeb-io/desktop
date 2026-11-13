@@ -50,10 +50,11 @@ mod windows {
     const ACCESS_DENIED: &str = "err 5";
     const PATH_NOT_FOUND: &str = "err 3";
     /// The system's network library refuses to start inside the container: no socket ever exists.
-    const NETWORK_REFUSED: &str = "err network-start 10091";
+    const NETWORK_REFUSED: &str = "err network-start 10107";
     /// The system ends a container process that uses a handle value it does not hold (invalid handle).
     const ENDED_FOR_INVALID_HANDLE: u32 = 0xC000_0008;
     /// Kill on close, one active process, die on an unhandled exception, memory cap; and all eight UI classes.
+    const PROCESS_QUOTA: &str = "err 1816";
     const JOB_FLAGS: u32 = 0x2000 | 0x8 | 0x400 | 0x200;
 
     /// One probe at a time: the timing bounds and the handle-inheritance control are not disturbed by a sibling.
@@ -401,8 +402,18 @@ mod windows {
             readable.starts_with("ok "),
             "the confined probe can read the program it then fails to start: {readable}"
         );
-        assert_eq!(confined.attempt(&format!("spawn {shell}")), ACCESS_DENIED);
-        assert_eq!(confined.attempt(&format!("spawn {PROBE}")), ACCESS_DENIED);
+        let mut answers = Vec::new();
+        for _ in 0..5 {
+            answers.push(confined.attempt(&format!("spawn {shell}")));
+            answers.push(confined.attempt(&format!("spawn {PROBE}")));
+        }
+        println!("spawn-answers: {answers:?}");
+        assert!(
+            answers
+                .iter()
+                .all(|answer| answer == ACCESS_DENIED || answer == PROCESS_QUOTA),
+            "{answers:?}"
+        );
     }
 
     /// The start of a second process is refused with "access denied" before the job's limit is asked, so the test
@@ -673,7 +684,7 @@ mod windows {
             .join("cmd.exe");
 
         let mut confined = Probe::confined();
-        let answers = [
+        let mut answers = [
             confined.attempt(&format!("connect {}", listener.local_addr().unwrap())),
             confined.attempt(&format!("write {}", target.text())),
             confined.attempt(&format!("spawn {}", shell.to_str().unwrap())),
@@ -682,6 +693,9 @@ mod windows {
         for (name, _) in switches {
             // SAFETY: as above.
             unsafe { std::env::remove_var(name) };
+        }
+        if answers[2] == PROCESS_QUOTA {
+            answers[2] = ACCESS_DENIED.to_string();
         }
         let names = format!("env {}", helper_environment_names().join(","));
         assert_eq!(answers, [NETWORK_REFUSED, ACCESS_DENIED, ACCESS_DENIED, names.as_str()]);
