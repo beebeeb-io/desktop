@@ -50,6 +50,10 @@ pub enum ActionError {
     Failed,
     /// The folder already has an item with this name (DW-0410b): the source saw it, the window did not.
     NameTaken,
+    /// A change of one of these is still on its way: nothing was sent a second time.
+    InFlight,
+    /// Some of the items changed, some did not (the rows show which).
+    NotAll,
 }
 
 /// What a person asked for, in the words the failure message uses (DW-0109: "Couldn't rename.").
@@ -177,6 +181,13 @@ pub enum Change {
     Made { item: Box<DriveItem> },
     /// An accepted action did not work after all.
     Failed(Action, ActionError),
+    /// What this PC holds of these items changed (`KeepOffline`, `RemoveOffline`, `FreeUpSpace`): the ids the
+    /// engine changed, and how many of the ones asked it did not.
+    Local {
+        action: Action,
+        done: Vec<String>,
+        failed: usize,
+    },
 }
 
 /// The counts beside the sidebar's sections.
@@ -248,6 +259,17 @@ pub trait FilesSource: Send + 'static {
     fn open_in_file_explorer(&mut self, folder: Option<&str>) -> Result<(), ActionError>;
     /// What accepted actions changed since the last call, oldest first.
     fn changes(&mut self) -> Vec<Change>;
+    /// Does this source answer `keep_offline` and `free_up_space` LATER (`Ok` is "accepted", what happened
+    /// arrives through [`FilesSource::changes`] as `Change::Local` or `Change::Failed`)? Then the window draws
+    /// nothing of the change before that, and asks `changes` every frame. Default: answered in the call.
+    fn answers_later(&self) -> bool {
+        false
+    }
+    /// After an `upload` that was refused: the files of it that were NOT copied in, so Try again sends those
+    /// alone. `None`: nothing of it was copied (or the source cannot say).
+    fn upload_left(&mut self) -> Option<Vec<std::path::PathBuf>> {
+        None
+    }
 
     // ---- The action dialogs (lane files-actions). Each has a default for a source that knows
     // nothing: no sample data in a build that ships, and every action refused. ----

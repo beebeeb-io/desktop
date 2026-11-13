@@ -488,3 +488,111 @@ fn after_a_restart_the_stored_user_id_decides_not_the_email() {
         assert_eq!(every_door(&engine), [handed_out; 3], "stored user id {stored_user_id}");
     }
 }
+
+fn local(db: &StateDb, id: &str, path: &str, kind: ItemKind) {
+    let entry = FileEntry {
+        file_id: id.into(),
+        path: path.into(),
+        status: FileStatus::Local,
+        size_bytes: 10,
+        modified_at: 1,
+        content_hash: None,
+        remote_updated_at: 1,
+        parent_id: None,
+        item_kind: kind,
+    };
+    db.upsert_file_with_contract(&entry, |contract| contract.item_kind = entry.item_kind.clone())
+        .unwrap();
+}
+
+/// A selection names its own files alone, a folder everything in it (never a neighbour whose name starts the same),
+/// and each selected id gets its own answer.
+#[test]
+fn a_selection_reclaims_its_own_files_and_answers_per_item() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    local(&db, "d-a", "/A", ItemKind::Folder);
+    local(&db, "f-1", "/A/one.txt", ItemKind::File);
+    local(&db, "f-2", "/A/two.txt", ItemKind::File);
+    local(&db, "f-3", "/AB.txt", ItemKind::File);
+    local(&db, "f-4", "/other.txt", ItemKind::File);
+    let candidates = || -> Vec<(String, String, i64)> {
+        [
+            ("d-a", "/A"),
+            ("f-1", "/A/one.txt"),
+            ("f-2", "/A/two.txt"),
+            ("f-3", "/AB.txt"),
+            ("f-4", "/other.txt"),
+        ]
+        .iter()
+        .map(|(id, path)| (id.to_string(), path.to_string(), 10))
+        .collect()
+    };
+    let ids = |ids: &[&str]| -> Vec<String> { ids.iter().map(|id| id.to_string()).collect() };
+    let mut handed = Vec::new();
+    // The folder, one file outside it and an id no row has; the reclaim frees one of the folder's two files.
+    let answer = crate::free_up_space::free_selection(&db, &ids(&["d-a", "f-4", "f-gone"]), candidates(), |wanted| {
+        handed = wanted.iter().map(|(id, _, _)| id.clone()).collect();
+        vec!["f-1".to_string(), "f-4".to_string()]
+    });
+    assert_eq!(
+        handed,
+        ["f-1", "f-2", "f-4"],
+        "the folder's row, a neighbour or an unselected file was handed over"
+    );
+    assert_eq!(
+        answer,
+        [
+            ("d-a".to_string(), false),
+            ("f-4".to_string(), true),
+            ("f-gone".to_string(), false)
+        ]
+    );
+    // Everything of the folder freed: the folder is done. Nothing to free under an id: done, and nothing is asked.
+    let answer = crate::free_up_space::free_selection(&db, &ids(&["d-a"]), candidates(), |wanted| {
+        wanted.into_iter().map(|(id, _, _)| id).collect()
+    });
+    assert_eq!(answer, [("d-a".to_string(), true)]);
+    let answer =
+        crate::free_up_space::free_selection(&db, &ids(&["f-4"]), Vec::new(), |_| panic!("nothing to reclaim"));
+    assert_eq!(answer, [("f-4".to_string(), true)]);
+}
+
+/// `Engine::free_up_space_of` asks who is signed in and whose the local state is before anything is touched.
+#[test]
+fn free_up_space_for_a_selection_is_the_owners_alone() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    engine.use_local_state_for_test(state(dir.path(), Some((Some("user-a"), Some("a@example.eu"))), true));
+    engine.use_sync_root_for_test(root.path().to_path_buf());
+    let ids = vec!["f-1".to_string()];
+    // Signed out. (The gate is the view's: it is `Ready` only after a real sign-in, so this refusal stands for every
+    // session these tests put in memory; the handle's own answers are the cases below it.)
+    assert_eq!(
+        engine.free_up_space_of(&ids).err().as_deref(),
+        Some(crate::app::kept_api::NOT_SIGNED_IN)
+    );
+    // The handle for changes, as `free_up_space_of` takes it: the owner's reaches the selection's reclaim; another
+    // account's is refused before it.
+    signed_in(&engine, Some("user-a"), Some("a@example.eu"));
+    let mine = engine.local_state_for_changes().expect("the owner's handle");
+    let answer =
+        mine.with_while(|db, go_on| crate::free_up_space::free_up_space_of(&REAL, db, root.path(), &ids, go_on));
+    #[cfg(not(target_os = "windows"))]
+    assert_eq!(
+        answer,
+        Ok(Err(crate::free_up_space::NO_SELECTION_RECLAIM.to_string())),
+        "no reclaim for a selection off Windows"
+    );
+    // The row is online only: nothing to free, so it is done.
+    #[cfg(target_os = "windows")]
+    assert_eq!(answer, Ok(Ok(vec![("f-1".to_string(), true)])));
+    signed_out(&engine);
+    signed_in(&engine, Some("user-b"), Some("b@example.eu"));
+    assert!(
+        engine.local_state_for_changes().is_err(),
+        "another account was handed the state"
+    );
+    signed_out(&engine);
+}
