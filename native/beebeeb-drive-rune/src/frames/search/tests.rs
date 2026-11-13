@@ -17,6 +17,7 @@ const NONE: Mods = Mods {
     ctrl: false,
     logo: false,
 };
+const ALT: Mods = Mods { alt: true, ..NONE };
 const CTRL: Mods = Mods {
     cmd: true,
     ctrl: true,
@@ -216,23 +217,52 @@ fn names_and_roles_of_dw_0803_no_results() {
     assert_eq!(text(&rt, "item-count"), "No results");
     assert_eq!(text(&rt, "empty-title"), "No results for \u{201C}harbr\u{201D}");
     assert_eq!(
-        text(&rt, "empty-sub"),
+        text(&rt, "empty-text"),
         "Check the spelling, or try fewer letters. Search only looks at names, not inside files."
     );
     assert!(has(&rt, "seg-0") && !has(&rt, "rows") && !has(&rt, "search-scope"));
 }
 
-/// The live path: every window starts on `SearchUi::default()` (`frames::Ui::default`, which
-/// `state::init_on_engine` keeps): it answers no query, and the window says search is not
+/// A window on the engine (`state::init_on_engine` sets `SearchUi::default()`), and every window
+/// of a build that ships (`first(false)`): it answers no query, and the window says search is not
 /// available yet, also when what is typed would match the board's sample.
 #[test]
-fn a_window_that_is_not_a_board_frame_never_shows_the_sample_as_results() {
+fn a_window_that_ships_or_runs_on_the_engine_never_shows_the_sample_as_results() {
     assert!(!SearchUi::default().source.wired());
-    assert!(!crate::frames::Ui::default().find.source.wired());
+    assert!(!SearchUi::first(false).source.wired(), "a build that ships");
     assert!(
-        !init().frames.find.source.wired(),
-        "even the snapshot path: only a board frame's scene sets the sample"
+        SearchUi::first(true).source.wired(),
+        "a development build without an engine"
     );
+    // The engine path resets Search with the other areas that are not wired, whatever the build.
+    let state_rs = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/shell/state.rs"))
+        .expect("shell/state.rs");
+    let on_engine = state_rs.split("pub fn init_on_engine").nth(1).expect("init_on_engine");
+    assert!(
+        on_engine.contains("s.frames.find = crate::frames::search::SearchUi::default();"),
+        "a window on the engine starts unwired"
+    );
+    // A source that says nothing about itself is not wired (task 2468).
+    struct Silent;
+    impl SearchSource for Silent {
+        fn recent(&self) -> Vec<String> {
+            vec!["contract".into()]
+        }
+        fn clear_recent(&mut self) {}
+        fn remember(&mut self, _: &str) {}
+        fn search(&self, _: &str, _: Narrow) -> Answer {
+            BoardSearch::new().search("Contr", Narrow::All)
+        }
+        fn details(&self, _: &str) -> Option<crate::frames::files::source::Details> {
+            None
+        }
+    }
+    let silent = SearchUi {
+        source: Box::new(Silent),
+        ..SearchUi::default()
+    };
+    assert_eq!(silent.shows("Contr"), Shows::Unavailable);
+    assert_eq!(silent.shows(""), Shows::Unavailable);
     for query in ["Contr", "contract", "lisbon", "a", ""] {
         for narrow in Narrow::ALL {
             assert_eq!(
@@ -245,7 +275,9 @@ fn a_window_that_is_not_a_board_frame_never_shows_the_sample_as_results() {
     assert!(Unwired.recent().is_empty() && Unwired.details("board-search-1").is_none());
 
     // From Files, as the person does it: Ctrl+F, then the words.
-    let mut rt = window(init());
+    let mut state = init();
+    state.frames.find = SearchUi::first(false);
+    let mut rt = window(state);
     press(&mut rt, Key::Command('f'), CTRL);
     assert!(rt.state.frames.find.open, "Ctrl+F opens search");
     assert_eq!(focused(&rt).as_deref(), Some(SEARCH_KEY));
@@ -358,7 +390,16 @@ fn down_moves_into_the_results_and_enter_opens_the_selected_one() {
     assert_eq!(rt.state.frames.find.selected.as_deref(), Some("board-search-2"));
     assert_eq!(text(&rt, "detail-name"), "Contract signed 2025.pdf");
     press(&mut rt, Key::Enter, NONE);
-    assert_eq!(rt.state.frames.intents, vec![Intent::OpenItem("board-search-2".into())]);
+    assert_eq!(
+        rt.state.shell.app.route().item.as_deref(),
+        Some("board-search-2"),
+        "Enter opens the selected result (DW-0408)"
+    );
+    assert!(!has(&rt, "results"), "the open item shows, not the results");
+    press(&mut rt, Key::Left, ALT);
+    assert_eq!(rt.state.shell.app.route().item, None, "Back leaves the item");
+    assert_eq!(text(&rt, "item-count"), "3 results", "and the results are as they were");
+    assert_eq!(rt.state.search.text, "Contr");
     assert_eq!(
         rt.state.frames.find.source.recent().first().map(String::as_str),
         Some("Contr"),
@@ -510,4 +551,128 @@ fn the_toolbar_says_what_was_found() {
     assert_eq!(words(Shows::Nothing { loading }), "No results so far");
     assert_eq!(words(Shows::Recent(Vec::new())), "Files");
     assert_eq!(words(Shows::Unavailable), "Not available yet");
+}
+
+/// The link, in a window nobody set up (a development build without an engine): a word typed in
+/// the Files field shows DW-0802, a word with no match DW-0803, the emptied field DW-0801, and
+/// Esc Files again.
+#[test]
+fn typing_in_a_window_goes_through_results_no_results_recent_and_back_to_files() {
+    let mut rt = window(init());
+    click(&mut rt, SEARCH_KEY);
+    type_text(&mut rt, "Contr");
+    assert_eq!(text(&rt, "folder-title"), "Search");
+    assert_eq!(text(&rt, "item-count"), "3 results");
+    assert_eq!(text(&rt, "row-0-name"), "Contract draft.pdf");
+    assert_eq!(
+        text(&rt, "row-1-dash"),
+        "Documents \u{203A} Legal",
+        "each row says where it is"
+    );
+    assert!(has(&rt, "seg-0-all") && !has(&rt, "empty-title"));
+    // No match (DW-0803).
+    for _ in 0.."Contr".len() {
+        press(&mut rt, Key::Backspace, NONE);
+    }
+    assert_eq!(rt.state.search.text, "");
+    // The field emptied by hand closes search, as before it was typed in: Files is back.
+    assert!(has(&rt, "file-list-col"));
+    type_text(&mut rt, "harbr");
+    assert_eq!(text(&rt, "item-count"), "No results");
+    assert_eq!(text(&rt, "empty-title"), "No results for \u{201C}harbr\u{201D}");
+    assert!(!has(&rt, "row-0"));
+    // Ctrl+F keeps search open over an empty field: the recent searches (DW-0801).
+    press(&mut rt, Key::Command('f'), CTRL);
+    for _ in 0.."harbr".len() {
+        press(&mut rt, Key::Backspace, NONE);
+    }
+    assert_eq!(text(&rt, "item-count"), "Files");
+    assert_eq!(text(&rt, "item-0-0-title"), "contract");
+    press(&mut rt, Key::Escape, NONE);
+    assert!(has(&rt, "file-list-col") && !super::is_open(&rt.state));
+}
+
+/// A double-click opens the result (DW-0802: "Double-click a result: opens it").
+#[test]
+fn a_double_click_opens_the_result() {
+    let mut rt = scene(dw_0802);
+    let r = info(&rt, "row-2").rect;
+    let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    for _ in 0..2 {
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+    }
+    settle(&mut rt);
+    assert_eq!(rt.state.shell.app.route().item.as_deref(), Some("board-search-3"));
+}
+
+/// The board draws Back and Forward off while searching: Alt+Left is not the window's Back, with
+/// focus in the field, on a result or nowhere. Once a result is open, Back is Back again (the
+/// test of Enter above).
+#[test]
+fn alt_left_while_searching_does_not_leave_the_place_behind_the_results() {
+    use crate::shell::app::{Event, Section};
+    let mut state = init();
+    crate::shell::host::dispatch(
+        &mut state,
+        Event::Navigate(crate::shell::app::Route::section(Section::Trash)),
+    );
+    crate::shell::host::dispatch(
+        &mut state,
+        Event::Navigate(crate::shell::app::Route::section(Section::Files)),
+    );
+    assert!(state.shell.app.can_go_back());
+    let mut rt = window(state);
+    let before = rt.state.shell.app.route().clone();
+    press(&mut rt, Key::Command('f'), CTRL);
+    type_text(&mut rt, "Contr");
+    for step in ["in the field", "on a result"] {
+        press(&mut rt, Key::Left, ALT);
+        assert_eq!(rt.state.shell.app.route(), &before, "{step}: Alt+Left");
+        assert!(rt.state.shell.app.can_go_back(), "{step}: the history is untouched");
+        assert!(!rt.state.shell.app.can_go_forward(), "{step}: nothing went back");
+        press(&mut rt, Key::Right, ALT);
+        assert_eq!(rt.state.shell.app.route(), &before, "{step}: Alt+Right");
+        assert_eq!(text(&rt, "item-count"), "3 results", "{step}");
+        press(&mut rt, Key::Down, NONE);
+    }
+    // Esc ends search, and Back is the window's again.
+    press(&mut rt, Key::Escape, NONE);
+    assert!(!super::is_open(&rt.state), "Esc ended search");
+    // (The field keeps the keyboard after Esc, and Alt+Left in a field is the field's own.)
+    click(&mut rt, "row-2");
+    press(&mut rt, Key::Left, ALT);
+    assert_eq!(rt.state.shell.app.route().section, Section::Trash);
+}
+
+/// Ctrl+F with focus inside the Files list opens search with its recent searches (DW-0801), not
+/// only the cursor in the field.
+#[test]
+fn ctrl_f_from_inside_the_files_list_opens_search() {
+    let mut rt = window(init());
+    click(&mut rt, "row-2");
+    assert!(focused(&rt).is_some_and(|k| k != SEARCH_KEY), "focus is in the list");
+    press(&mut rt, Key::Command('f'), CTRL);
+    assert!(rt.state.frames.find.open);
+    assert_eq!(focused(&rt).as_deref(), Some(SEARCH_KEY));
+    assert_eq!(text(&rt, "folder-title"), "Search");
+    assert_eq!(text(&rt, "item-0-0-title"), "contract");
+}
+
+/// The toolbar's Open in File Explorer (the Files toolbar's button, DW-0401) asks the shell for
+/// what the b's menu item does.
+#[test]
+fn the_toolbars_open_in_file_explorer_asks_the_shell() {
+    use crate::shell::actions::{FixtureCall, FixtureEngine};
+    let engine = std::sync::Arc::new(FixtureEngine::ready());
+    let shell = crate::shell::host::Shell::fixture_on(engine.clone(), crate::shell::platform::current());
+    let mut state = crate::shell::state::init_with(shell);
+    dw_0802(&mut state);
+    let mut rt = window(state);
+    let button = info(&rt, "open-explorer");
+    assert_eq!(button.role, "button");
+    assert_eq!(button.label.as_deref(), Some("Open in File Explorer"));
+    let before = engine.calls().len();
+    click(&mut rt, "open-explorer");
+    assert_eq!(&engine.calls()[before..], [FixtureCall::OpenInFileExplorer]);
 }

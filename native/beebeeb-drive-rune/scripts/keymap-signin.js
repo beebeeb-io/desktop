@@ -175,3 +175,63 @@ if (auMac) {
     text(`next-${i}-title`, q('.t-head', c));
   });
 }
+
+// ==== Approving a sign-in (DW-A11 to DW-A17) and the two states before Files (DW-0009 locked, DW-0014 no plan yet) ====
+// These nine frames are not `.au-mac` windows: DW-A11 is Windows' own toast on the desktop, DW-A12 to
+// DW-A17 are the account view inside settings (`.au-set`, keyed in keymap-account.js) and DW-0009 and
+// DW-0014 are the main window (keyed in keymap.js). What those keymaps leave unkeyed in these frames is
+// keyed here, by class name, and ONLY in these frames (the frame's id, as keymap.js does for an open
+// file), so no other frame's golden gains or loses a key.
+{
+  const frame = (win.closest('[id^="DW-"]') || {}).id || '';
+  const shown = (el) => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+  const radius = (el) => ({ css: { radius: getComputedStyle(el).borderRadius, shadow: getComputedStyle(el).boxShadow, pad: getComputedStyle(el).padding, gap: getComputedStyle(el).gap } });
+  const box = (key, el) => { if (shown(el)) api.box(key, el, radius(el)); };
+  const text = (key, el) => { if (shown(el) && el.textContent.trim()) api.text(key, el, { lh: getComputedStyle(el).lineHeight, align: getComputedStyle(el).textAlign }); };
+  const icon = (key, el, extra) => { if (shown(el)) api.icon(key, el, extra); };
+
+  // DW-A11: the toast is Windows' (`.kit-os`); the app's part is its content: the app's mark and name, the
+  // title and the body. No code and no key is in it (the board's rule), so every string is exported.
+  if (frame === 'DW-A11') {
+    const toast = q('.wn-toast');
+    box('os-toast', toast);
+    icon('os-toast-mark', q('.wn-toast-head .mk-bi svg', toast), { mark: true });
+    text('os-toast-app', q('.wn-toast-head > .flex-1', toast));
+    text('os-toast-title', q(':scope > .t-head', toast));
+    text('os-toast-body', q(':scope > .t-sub', toast));
+  }
+
+  // DW-A12 to DW-A17: the words beside Continue, and the tile at the head of a result dialog.
+  if (/^DW-A1[2-7]$/.test(frame)) {
+    const col = q('.au-set .au-set-col');
+    text('row-note', q(':scope > .au-row > span.t-sub', col));
+    const hero = q('.wn-dlg .au-hero');
+    if (hero) {
+      box('dlg-hero', hero);
+      const tile = q('.kit-tile', hero);
+      box('dlg-tile', tile);
+      icon('dlg-tile-icon', tile && q('svg', tile));
+    }
+  }
+
+  // DW-0009 and DW-0014: what the main window says instead of the files (a tile, a heading, a sentence,
+  // its buttons), and the sidebar's line under an empty storage meter.
+  if (frame === 'DW-0009' || frame === 'DW-0014') {
+    const body = q('.mk-main .mk-body');
+    const tile = q('.kit-tile', body);
+    const gate = tile && tile.parentElement;
+    if (gate) {
+      box('gate', gate);
+      box('gate-tile', tile);
+      icon('gate-icon', q('svg', tile));
+      text('gate-title', q(':scope > .t-title', gate));
+      text('gate-text', q(':scope > p.t-sub', gate));
+      qa('.kit-btn', gate).forEach((b, i) => {
+        box(`gate-btn-${i}`, b);
+        icon(`gate-btn-${i}-icon`, q('svg', b));
+        text(`gate-btn-${i}-label`, q('span', b));
+      });
+    }
+    text('storage-hint', q('.mk-side .mk-store > div.t-cap:last-child:not(.flex)'));
+  }
+}

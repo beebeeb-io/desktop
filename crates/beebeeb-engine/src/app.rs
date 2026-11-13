@@ -39,7 +39,12 @@ use crate::signin::password::{self, PasswordLegs};
 use crate::signin::{recovery, start, store};
 use crate::state_db::StateDb;
 use crate::state_paths;
+use crate::sync_root_owner::Registration;
+use crate::sync_root_port::{OsSyncRoots, SyncRootPort};
+use crate::sync_view::{Explorer, Start, SyncView, ViewCell, ViewHost};
 use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
+
+pub mod settings_api;
 
 /// Where the handle keeps an account's session token and vault key. The handle names the app on every call
 /// (`identity` is the one [`Engine::open`] was given): a store has no identity of its own to disagree with it.
@@ -88,6 +93,89 @@ pub enum SyncStart {
     NoSession,
 }
 
+/// Why a start made no engine (contract §4.2). Nothing was synced, uploaded, deleted or registered for it. No
+/// variant carries a path, a file's name, an email, an id, a key or a token: a window names the folder itself (it
+/// knows which one it asked for).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncStartRefused {
+    /// Windows has the folder registered as another sync provider's folder.
+    FolderOfAnotherProvider,
+    /// Windows could not say whose sync folder the folder is (never read as nobody's).
+    FolderUnreadable,
+    /// The folder is gone while this PC holds the account's local data for it: it is not made again, empty.
+    FolderMissing,
+    /// Windows refused to register the folder, or to connect it; its code when it gave one.
+    RegistrationFailed { code: Option<i32> },
+    /// This PC's local data could not be proven the signed-in account's (`account_binding`).
+    OtherAccountsData,
+    /// Whose this PC's local data is, or whose the session is, could not be confirmed.
+    IdentityUnknown,
+    /// An earlier engine did not confirm it stopped: only a restart of the app helps.
+    StopUnconfirmed,
+    /// A live process holds this app's engine lock (another copy of the app, or `bb watch`).
+    StateInUse,
+    /// The local state could not be read or written, or an engine ended by itself.
+    Other,
+}
+
+impl SyncStartRefused {
+    /// The refusal's name, for a log line: the kind only, never a path or a sentence with a name in it.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::FolderOfAnotherProvider => "folder_of_another_provider",
+            Self::FolderUnreadable => "folder_unreadable",
+            Self::FolderMissing => "folder_missing",
+            Self::RegistrationFailed { .. } => "registration_failed",
+            Self::OtherAccountsData => "other_accounts_data",
+            Self::IdentityUnknown => "identity_unknown",
+            Self::StopUnconfirmed => "stop_unconfirmed",
+            Self::StateInUse => "state_in_use",
+            Self::Other => "other",
+        }
+    }
+
+    /// The refusal a binding error is: the two binding sentences by their exact words, anything else `Other`.
+    fn of_binding(error: &str) -> Self {
+        match account_binding::Refusal::of(error) {
+            Some(account_binding::Refusal::OtherAccountOnWindows) => Self::OtherAccountsData,
+            Some(account_binding::Refusal::IdentityUnknown) => Self::IdentityUnknown,
+            Some(account_binding::Refusal::EngineStopUnconfirmed) => Self::StopUnconfirmed,
+            None => Self::Other,
+        }
+    }
+}
+
+impl std::fmt::Display for SyncStartRefused {
+    /// The engine's sentence: what happened, and that nothing was changed. A folder is "the sync folder", never a
+    /// path and never its name.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FolderOfAnotherProvider => {
+                f.write_str("The sync folder is already another app's sync folder. Nothing was changed.")
+            }
+            Self::FolderUnreadable => f.write_str("The sync folder's owner could not be read. Nothing was changed."),
+            Self::FolderMissing => f.write_str(
+                "The sync folder is gone. Nothing was changed, and sync does not start in a new, empty folder.",
+            ),
+            Self::RegistrationFailed { code: Some(code) } => write!(
+                f,
+                "Windows did not register the sync folder (error 0x{:08X}). Nothing was changed.",
+                *code as u32
+            ),
+            Self::RegistrationFailed { code: None } => {
+                f.write_str("Windows did not register the sync folder. Nothing was changed.")
+            }
+            Self::OtherAccountsData => f.write_str(account_binding::OTHER_ACCOUNT_ON_WINDOWS),
+            Self::IdentityUnknown => f.write_str(account_binding::IDENTITY_UNKNOWN),
+            Self::StopUnconfirmed => f.write_str(account_binding::ENGINE_STOP_UNCONFIRMED),
+            Self::StateInUse => {
+                f.write_str("Another program is syncing with this app's local state. Nothing was changed.")
+            }
+            Self::Other => f.write_str("Sync didn\u{2019}t start. Nothing was changed."),
+        }
+    }
+}
+
 /// The last word of [`Engine::stop`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncStop {
@@ -119,6 +207,8 @@ pub struct Engine<C: CredentialStores> {
     pending_2fa: Mutex<Option<(PendingSecondFactor, Zeroizing<String>)>>,
     /// Wrong passwords in a row, for the lock hint.
     failures: AtomicU32,
+    /// What a window reads without waiting ([`Engine::view`]); `host` writes the engine's reports into it.
+    view: Arc<ViewCell>,
 }
 
 impl<C: CredentialStores> Engine<C> {
@@ -147,6 +237,9 @@ impl<C: CredentialStores> Engine<C> {
         let accounts = Accounts::default();
         crate::account::synthesize_single_account(&accounts, AccountId(config.account_id.clone()));
         let acct = accounts.active_account()?;
+        // Every engine started from here reports through the view's host, which goes on to the host given here.
+        let view = Arc::new(ViewCell::default());
+        let host: Arc<dyn EngineHost> = Arc::new(ViewHost::new(host, view.clone()));
         Ok(Self {
             identity,
             config,
@@ -161,7 +254,31 @@ impl<C: CredentialStores> Engine<C> {
             auth_present: Mutex::new(false),
             pending_2fa: Mutex::new(None),
             failures: AtomicU32::new(0),
+            view,
         })
+    }
+
+    /// What a window may read of sync without waiting (`crate::sync_view`): a copy, from any thread. It takes no
+    /// lock that a transition, the engine slot or the credential store holds; the pause switch and the session's
+    /// health are read from their atomics.
+    pub fn view(&self) -> SyncView {
+        let mut view = self.view.read();
+        view.paused = self.acct.sync_paused.load(Ordering::SeqCst);
+        view.session_ended = self.acct.auth_health.is_expired();
+        view
+    }
+
+    /// Test builds only: the view as a start or a stop leaves it, for a test that fills the engine slot itself.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_view_for_test(&self, change: impl FnOnce(&mut SyncView)) {
+        self.view.write(change);
+    }
+
+    /// The end of a transition: the view's gate is the gate now, and the window is woken to read it.
+    fn publish(&self) {
+        let gate = self.gate();
+        self.view.write(|view| view.gate = gate);
+        self.host.wake();
     }
 
     fn vault(&self) -> AuthVault<C::Store> {
@@ -225,7 +342,8 @@ impl<C: CredentialStores> Engine<C> {
                 }
             }
         });
-        self.gate()
+        self.publish();
+        self.view.read().gate
     }
 
     /// Which screen the window shows (`gate::decide_gate`). The plan check is not made here: a signed-in, unlocked
@@ -267,6 +385,16 @@ impl<C: CredentialStores> Engine<C> {
     /// Password sign-in (OPAQUE in core's `auth_flow`). `TwoFactor`: call [`Engine::two_factor`] next.
     /// `RecoveryPhrase`: signed in, this computer holds no key of the account. `Drive`: signed in and unlocked.
     pub fn sign_in_password(&self, email: &str, password: Zeroizing<String>) -> Result<NextAfterSignIn, SignInProblem> {
+        let result = self.sign_in_password_step(email, password);
+        self.publish();
+        result
+    }
+
+    fn sign_in_password_step(
+        &self,
+        email: &str,
+        password: Zeroizing<String>,
+    ) -> Result<NextAfterSignIn, SignInProblem> {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             let turn = self.acct.session_generation();
@@ -303,6 +431,12 @@ impl<C: CredentialStores> Engine<C> {
     /// The second factor of a password sign-in: a 6-digit code or a backup code. A wrong code keeps the challenge.
     /// `Err` is the sentence to show (`gate::two_factor_error`).
     pub fn two_factor(&self, code: Zeroizing<String>) -> Result<NextAfterSignIn, &'static str> {
+        let result = self.two_factor_step(code);
+        self.publish();
+        result
+    }
+
+    fn two_factor_step(&self, code: Zeroizing<String>) -> Result<NextAfterSignIn, &'static str> {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             let turn = self.acct.session_generation();
@@ -416,6 +550,12 @@ impl<C: CredentialStores> Engine<C> {
     /// server's recorded check (`recovery::verify_vault_key_from_phrase`), and only then stored and put in memory.
     /// `Err` is the sentence to show (`gate::phrase_error`).
     pub fn unlock_with_phrase(&self, phrase: Zeroizing<String>) -> Result<(), &'static str> {
+        let result = self.unlock_with_phrase_step(phrase);
+        self.publish();
+        result
+    }
+
+    fn unlock_with_phrase_step(&self, phrase: Zeroizing<String>) -> Result<(), &'static str> {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             let turn = self.acct.session_generation();
@@ -471,20 +611,114 @@ impl<C: CredentialStores> Engine<C> {
         start::keys_for_engine_start(&self.acct).map(|(_keys, identity)| identity)
     }
 
-    /// Start syncing into `sync_root`. Under the engine slot: the keys and their identity are read together, the
-    /// local data is bound to that account (another account's data, or an owner that cannot be compared, refuses
-    /// the start and deletes nothing), and only then does an engine exist.
-    pub fn start_sync(&self, sync_root: PathBuf) -> Result<SyncStart, String> {
+    /// Start syncing into `sync_root` (contract §4.2): the folder is registered (Windows) and the local data bound to
+    /// the session's account before any engine exists, and a refused start changes nothing in the folder and makes
+    /// no request. `Ok(NoSession)`: nothing on disk was touched. The view says where the start is
+    /// ([`Engine::view`]).
+    pub fn start_sync(&self, sync_root: PathBuf) -> Result<SyncStart, SyncStartRefused> {
+        self.start_on(sync_root, &OsSyncRoots::new(self.identity))
+    }
+
+    /// [`Engine::start_sync`] with the OS's answers from `port`, so a test can make each one on any OS.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn start_sync_with(&self, sync_root: PathBuf, port: &dyn SyncRootPort) -> Result<SyncStart, SyncStartRefused> {
+        self.start_on(sync_root, port)
+    }
+
+    fn start_on(&self, sync_root: PathBuf, port: &dyn SyncRootPort) -> Result<SyncStart, SyncStartRefused> {
+        let outcome = self.start_holding_step(sync_root, port);
+        if let Err(refused) = outcome {
+            tracing::warn!(kind = refused.kind(), "sync did not start");
+            self.view.write(|view| {
+                view.start = Start::Refused(refused);
+                view.attempt += 1;
+                view.explorer = Explorer::Unknown;
+            });
+        } else if outcome == Ok(SyncStart::NoSession) {
+            self.view.write(|view| view.start = Start::NotAsked);
+        }
+        self.publish();
+        outcome
+    }
+
+    /// The start's ten steps, in their order, under the transition lock and the engine slot. Steps 1 to 7 only
+    /// read, bind `state.db` or refuse; nothing is created, registered or asked of the server before step 8.
+    fn start_holding_step(&self, sync_root: PathBuf, port: &dyn SyncRootPort) -> Result<SyncStart, SyncStartRefused> {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
-            #[cfg(target_os = "windows")]
-            crate::windows_cf::ensure_reactivation_allowed()?;
-            crate::sync_root_owner::check(self.identity, &sync_root)?;
             let mut slot = self.acct.engine.lock().await;
-            if slot.is_some() {
-                return Ok(SyncStart::AlreadyRunning);
+            // (1) No engine of an earlier lock is still connected to Cloud Files.
+            #[cfg(target_os = "windows")]
+            if crate::windows_cf::ensure_reactivation_allowed().is_err() {
+                return Err(SyncStartRefused::StopUnconfirmed);
             }
-            // A restart while paused stays paused: the flag follows the file, under the config-write lock.
+            // (2) One engine at a time. One that ended by itself (its folder could not be connected, its lock was
+            // taken) does not run: its end is confirmed and it leaves the slot, so a new start can make one.
+            if let Some(runner) = slot.take() {
+                if runner.is_running() {
+                    *slot = Some(runner);
+                    return Ok(SyncStart::AlreadyRunning);
+                }
+                if !runner.abort().await.is_stopped() {
+                    self.acct.engine_stop_unconfirmed.store(true, Ordering::SeqCst);
+                    return Err(SyncStartRefused::StopUnconfirmed);
+                }
+            }
+            // (3) The keys and whose they are, read together. Without a session nothing on disk was touched.
+            let (keys, identity) = match start::keys_for_engine_start(&self.acct) {
+                Ok(read) => read,
+                Err(start::EngineStartBlocked::NoSession) => return Ok(SyncStart::NoSession),
+                Err(start::EngineStartBlocked::Refused(sentence)) if sentence == start::ENGINE_START_REFUSED_ERROR => {
+                    return Err(SyncStartRefused::StopUnconfirmed);
+                }
+                Err(start::EngineStartBlocked::Refused(_)) => return Err(SyncStartRefused::Other),
+            };
+            if !identity.is_known() {
+                return Err(SyncStartRefused::IdentityUnknown);
+            }
+            self.view.write(|view| {
+                view.start = Start::Starting;
+                view.explorer = if cfg!(target_os = "windows") {
+                    Explorer::Adding
+                } else {
+                    Explorer::Unknown
+                };
+            });
+            self.host.wake();
+            // (4) No other live process syncs with this state, before `state.db` is opened.
+            if port.engine_lock_held(&self.config.state_dir) {
+                return Err(SyncStartRefused::StateInUse);
+            }
+            // (5) Never another provider's folder, nor one whose registration cannot be read.
+            let registered = port.registration(&sync_root);
+            if crate::sync_root_owner::refusal(self.identity, &registered, &sync_root).is_some() {
+                return Err(match registered {
+                    Registration::Unreadable => SyncStartRefused::FolderUnreadable,
+                    _ => SyncStartRefused::FolderOfAnotherProvider,
+                });
+            }
+            // (6) A folder that is gone while the account's data is recorded is not made again, empty.
+            let folder_missing = match std::fs::symlink_metadata(&sync_root) {
+                Ok(_) => false,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Err(_) => return Err(SyncStartRefused::Other),
+            };
+            if folder_missing && LocalState::holds_account_data(&self.config.state_dir)? {
+                return Err(SyncStartRefused::FolderMissing);
+            }
+            // (7) The local data is bound to the session's account (another account's data refuses, nothing reset).
+            let data = LocalState::for_engine_start(&self.config.state_dir, &sync_root)
+                .map_err(|_| SyncStartRefused::Other)?;
+            account_binding::bind_before_engine_start(&data, &identity, false)
+                .map_err(|error| SyncStartRefused::of_binding(&error))?;
+            drop(data);
+            // (8) The folder exists.
+            crate::config::ensure_directory(&sync_root).map_err(|_| SyncStartRefused::Other)?;
+            // (9) Registered as this app's sync root (Windows; nothing to do elsewhere), with Windows' code if not.
+            port.register(&sync_root)
+                .map_err(|code| SyncStartRefused::RegistrationFailed { code })?;
+            // (10) The engine. A restart while paused stays paused: the flag follows the file, under the
+            // config-write lock.
             {
                 let flag = &self.acct.sync_paused;
                 let _ = crate::config::DesktopConfig::path_for(self.identity).and_then(|path| {
@@ -495,17 +729,15 @@ impl<C: CredentialStores> Engine<C> {
                     )
                 });
             }
-            let (keys, identity) = match start::keys_for_engine_start(&self.acct) {
-                Ok(read) => read,
-                Err(start::EngineStartBlocked::NoSession) => return Ok(SyncStart::NoSession),
-                Err(refused) => return Err(refused.to_string()),
-            };
-            if !identity.is_known() {
-                return Err(account_binding::IDENTITY_UNKNOWN.to_string());
-            }
-            let data = LocalState::for_engine_start(&self.config.state_dir, &sync_root)?;
-            account_binding::bind_before_engine_start(&data, &identity, false)?;
-            drop(data);
+            // Before the task exists: its first report must find the view saying it runs, and nothing an earlier
+            // engine said is taken for this one's.
+            self.view.write(|view| {
+                view.start = Start::Running;
+                view.attempt += 1;
+                view.offline = false;
+                view.reported = None;
+                view.last_check_at = None;
+            });
             let (token, key) = keys;
             *slot = Some(EngineRunner::spawn(
                 self.identity,
@@ -575,10 +807,12 @@ impl<C: CredentialStores> Engine<C> {
 
     /// Stop the engine and wait until its task has ended.
     pub fn stop(&self) -> SyncStop {
-        self.runtime.block_on(async {
+        let stopped = self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             self.stop_holding_step().await
-        })
+        });
+        self.publish();
+        stopped
     }
 
     async fn stop_holding_step(&self) -> SyncStop {
@@ -586,6 +820,11 @@ impl<C: CredentialStores> Engine<C> {
         let Some(runner) = slot.take() else {
             return SyncStop::WasNotRunning;
         };
+        // The view stops saying sync runs before the task is told to end: the task's own end then changes nothing.
+        self.view.write(|view| {
+            view.start = Start::NotAsked;
+            view.explorer = Explorer::Unknown;
+        });
         if runner.abort().await.is_stopped() {
             SyncStop::Stopped
         } else {
@@ -597,12 +836,14 @@ impl<C: CredentialStores> Engine<C> {
     /// Lock: stop the engine, then forget the keys in memory (the stored token and key stay). Every sign-in step
     /// that began before this is refused at its write.
     pub fn lock(&self) -> SyncStop {
-        self.runtime.block_on(async {
+        let stopped = self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             let stopped = self.stop_holding_step().await;
             self.forget_session(SessionTransition::Lock);
             stopped
-        })
+        });
+        self.publish();
+        stopped
     }
 
     fn forget_session(&self, by: SessionTransition) {
@@ -620,6 +861,12 @@ impl<C: CredentialStores> Engine<C> {
     /// on disk is deleted; the state stays bound to this account, so another account cannot sync into it.
     /// `Err`: the engine did not confirm its stop, or the credential store could not be cleared; still signed in.
     pub fn sign_out_keeping_local_data(&self) -> Result<(), String> {
+        let result = self.sign_out_keeping_local_data_step();
+        self.publish();
+        result
+    }
+
+    fn sign_out_keeping_local_data_step(&self) -> Result<(), String> {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             if self.stop_holding_step().await == SyncStop::Unconfirmed {
@@ -808,6 +1055,17 @@ struct LocalState {
 }
 
 impl LocalState {
+    /// Whether this PC's local state holds the account's data (step 6 of a start). No `state.db` holds none; one
+    /// that cannot be opened or read refuses the start rather than being read as empty.
+    fn holds_account_data(state_dir: &std::path::Path) -> Result<bool, SyncStartRefused> {
+        let path = state_paths::state_db_path_from_state_dir(state_dir);
+        if !path.exists() {
+            return Ok(false);
+        }
+        let db = StateDb::open(&path).map_err(|_| SyncStartRefused::Other)?;
+        db.has_account_data().map_err(|_| SyncStartRefused::Other)
+    }
+
     fn for_engine_start(state_dir: &std::path::Path, sync_root: &std::path::Path) -> Result<Self, String> {
         let path = state_paths::state_db_path_from_state_dir(state_dir);
         if !path.exists() {
@@ -846,3 +1104,7 @@ impl account_binding::LocalData for LocalState {
             .map_err(|e| format!("adopt the local data owner: {e}"))
     }
 }
+
+#[cfg(test)]
+#[path = "sync_start_tests.rs"]
+mod sync_start_tests;

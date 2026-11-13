@@ -616,9 +616,17 @@ fn backups_has_no_source_on_a_live_engine() {
 
 #[test]
 fn settings_is_unwired_on_a_live_engine() {
+    use crate::frames::settings::Pane;
     let s = engine_state();
-    assert!(!s.settings.source.wired());
-    assert!(!s.settings.drive.wired());
+    // Task 2473: General and Storage location answer from the engine; every other pane is the shell's frame.
+    assert!(s.settings.source.wired(Pane::General) && s.settings.source.wired(Pane::StorageLocation));
+    for pane in [Pane::About, Pane::Notifications, Pane::Recent] {
+        assert!(!s.settings.source.wired(pane), "{pane:?}");
+    }
+    for pane in [Pane::Storage, Pane::Insights, Pane::Sync] {
+        assert!(!s.settings.drive.wired(pane), "{pane:?}");
+    }
+    assert!(!s.settings.source.sample());
 }
 
 #[test]
@@ -665,8 +673,8 @@ fn the_snapshot_path_keeps_every_groups_fixtures() {
     assert!(s.this_pc.wired());
     assert!(s.this_pc.changes().len() > 0);
     assert!(s.this_pc.kept_count() > 0);
-    assert!(s.settings.source.wired());
-    assert!(s.settings.drive.wired());
+    assert!(s.settings.source.wired(crate::frames::settings::Pane::About));
+    assert!(s.settings.drive.wired(crate::frames::settings::Pane::Storage));
     assert!(s.account.source.is_some());
     assert!(s.backups.has_source());
     assert!(!s.frames.pc.sync_words().is_empty());
