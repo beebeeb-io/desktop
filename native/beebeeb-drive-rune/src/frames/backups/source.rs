@@ -104,7 +104,57 @@ pub enum FileKind {
     Image,
 }
 
+/// One part of the section a source may or may not answer for (an engine-backed source binds part of it).
+#[cfg_attr(not(test), allow(dead_code))] // read by the view lane that draws the unbound parts (PR body)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Part {
+    Root,
+    Folders,
+    Status,
+    Devices,
+    NotBackedUp,
+    MailBackup,
+    BackUpNow,
+    AddFolder,
+    RemoveFolder,
+    Retry,
+    DeleteDevice,
+}
+
+/// What [`BackupsSource::pump`] found.
+#[cfg_attr(not(test), allow(dead_code))] // read by the view lane's poll (PR body)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Pumped {
+    /// Something the section draws changed: draw again.
+    pub changed: bool,
+    /// An answer is still out: look again soon.
+    pub busy: bool,
+    /// A change the person asked for was refused: the window says so (a fixed sentence).
+    pub refusal: Option<&'static str>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))] // the defaulted methods are for the view lane's poll (PR body)
 pub trait BackupsSource {
+    /// Whether this source answers for `part` (`false`: the view draws that part's "not built yet" state, never a
+    /// value). The fixture answers for everything.
+    fn wired(&self, _part: Part) -> bool {
+        true
+    }
+    /// Drain what a source that answers late has received. The window calls it on its poll.
+    fn pump(&mut self) -> Pumped {
+        Pumped::default()
+    }
+    /// The section opened: a source that reads late reads again when what it holds is old.
+    fn opened(&mut self) {}
+    /// Nothing is held yet and a read is out: the section's loading state.
+    fn loading(&self) -> bool {
+        false
+    }
+    /// Why the section shows nothing of this PC (another account's data on it, or it could not be read), in a
+    /// fixed sentence the view draws. `None`: nothing to say.
+    fn refusal(&self) -> Option<&'static str> {
+        None
+    }
     fn root(&self) -> BackupsRoot;
     fn status(&self) -> Status;
     fn folders(&self) -> Vec<Folder>;

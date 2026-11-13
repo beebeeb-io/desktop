@@ -164,7 +164,8 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     s.signin = Some(crate::frames::signin::Ui::new(Box::new(
         crate::engine_host::EngineSignInSource::new(engine.clone()),
     )));
-    s.backups = crate::frames::backups::BackupsUi::new(None);
+    // Backups: no source while its constant is off (nothing of the adapter runs then; `engine_host::backups`).
+    s.backups = crate::frames::backups::BackupsUi::new(crate::engine_host::backups::source_for(engine.clone()));
     // Every area not yet backed by the engine: the shell's "not built yet" frame, never sample
     // data beside a real account. This depends ONLY on "is this the live engine path", never on
     // the identity or a dev flag.
