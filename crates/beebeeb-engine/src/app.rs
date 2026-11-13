@@ -44,7 +44,10 @@ use crate::sync_root_port::{OsSyncRoots, SyncRootPort};
 use crate::sync_view::{Explorer, Start, SyncView, ViewCell, ViewHost};
 use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
 
+pub mod kept_api;
 pub mod settings_api;
+// Is the local state the signed-in account's (task 2488): a read-only check for windows that show it.
+pub mod state_owner;
 
 /// Where the handle keeps an account's session token and vault key. The handle names the app on every call
 /// (`identity` is the one [`Engine::open`] was given): a store has no identity of its own to disagree with it.

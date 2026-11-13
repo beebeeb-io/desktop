@@ -183,6 +183,14 @@ pub trait DriveSettings {
         let _ = pane;
         true
     }
+    /// A pane of these was opened (the route moved to it): a source that reads late reads again when what it holds
+    /// is old.
+    fn opened(&mut self, _pane: super::Pane) {}
+    /// A change the person asked for was refused since the last frame: the settings window's toast says it (a fixed
+    /// sentence). Taken once.
+    fn take_toast(&mut self) -> Option<&'static str> {
+        None
+    }
     /// The account's use and what this PC keeps. Engine: account usage by kind, the Trash
     /// size, the two caches' sizes and limits, the pinned (available offline) size.
     fn storage(&self) -> Storage;

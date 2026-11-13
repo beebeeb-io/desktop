@@ -604,6 +604,9 @@ mod cf_streaming;
 pub use cf_streaming::RecordedIdentity;
 mod custody;
 mod files;
+// What this PC keeps, one query each (the native This PC and Sync pane).
+mod kept;
+pub use kept::KeptSummary;
 mod landing;
 mod ops;
 mod removals;

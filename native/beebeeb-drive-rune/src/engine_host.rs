@@ -50,11 +50,13 @@ use crate::source::{DriveItem, DriveSource, Listing, SourceError, StorageSummary
 pub mod backups;
 #[cfg(test)]
 mod binding_tests;
+pub mod drive_settings;
 pub mod open;
 pub mod settings;
 pub mod sync;
 #[cfg(test)]
 mod tests;
+pub mod this_pc;
 pub mod tray;
 
 pub use sync::EngineGlobalSource;
