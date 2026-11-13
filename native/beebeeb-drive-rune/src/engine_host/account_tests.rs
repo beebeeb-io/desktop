@@ -498,7 +498,6 @@ fn devices_and_sessions_lists_one_row_per_session_by_country() {
                 s.name.as_str(),
                 s.kind,
                 s.apps.as_str(),
-                s.last_active.as_str(),
                 s.country.as_str(),
                 s.this_device,
             )
@@ -507,28 +506,25 @@ fn devices_and_sessions_lists_one_row_per_session_by_country() {
     assert_eq!(
         brief,
         [
-            ("s-this", THIS_PC, DeviceKind::Laptop, "Desktop app", "now", "NL", true),
-            (
-                "s-phone",
-                PHONE,
-                DeviceKind::Phone,
-                "Mobile app",
-                "12 min ago",
-                "DE",
-                false
-            ),
-            // Not two letters: never shown (a city can not reach the pane). No time: said so.
-            (
-                "s-web",
-                BROWSER,
-                DeviceKind::Browser,
-                "Web browser",
-                "last active not known",
-                "",
-                false
-            ),
+            ("s-this", THIS_PC, DeviceKind::Laptop, "Desktop app", "NL", true),
+            // `ios` is a phone's app or its browser: the words name the system only.
+            ("s-phone", PHONE, DeviceKind::Phone, "iPhone or iPad", "DE", false),
+            // Not two letters: never shown (a city can not reach the pane).
+            ("s-web", BROWSER, DeviceKind::Browser, "Web browser", "", false),
         ]
     );
+    // How long ago, on this computer's clock (the words themselves: the test of `ago`); no time is said so.
+    assert!(rows[1].last_active.ends_with(" min ago"), "{}", rows[1].last_active);
+    assert_eq!(rows[2].last_active, "not recorded");
+    assert_eq!(
+        kind_of("an-unknown-kind"),
+        (DeviceKind::Browser, "Other client"),
+        "never a guess"
+    );
+    assert_eq!(kind_of("api").1, "Other client");
+    assert_eq!(kind_of("app"), (DeviceKind::Laptop, "Beebeeb app"));
+    assert_eq!(kind_of("android"), (DeviceKind::Phone, "Android"));
+    assert_eq!(kind_of("cli"), (DeviceKind::CommandLine, "Command line"));
     for row in &rows {
         assert!(!row.apps_sentence.contains(" and "), "no product list is claimed");
     }
@@ -639,6 +635,31 @@ fn a_refused_sign_out_changes_nothing_and_an_unconfirmed_one_reads_again() {
     assert!(source.sessions().is_empty(), "never the list from before the change");
 }
 
+/// A list that was asked before a sign-out and answers after it is older than the change: never drawn.
+#[test]
+fn a_list_read_before_a_sign_out_is_not_drawn_after_it() {
+    let server = server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    // The fake takes the list when it is asked and answers 1.5 s later: this read holds three rows.
+    server.read_delay_ms.store(1_500, Ordering::SeqCst);
+    source.reload(Pane::Sessions);
+    let began = Instant::now();
+    while server.asked("GET /api/v1/account/sessions") < 2 {
+        assert!(began.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(source.sign_out_device("s-phone"));
+    settle(&mut source);
+    assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone"]);
+    assert_eq!(
+        ids(&source),
+        ["s-this", "s-web"],
+        "the list from before the sign-out is dropped and read again"
+    );
+    assert_eq!(server.asked("GET /api/v1/account/sessions"), 3);
+}
+
 #[test]
 fn sign_out_everywhere_else_is_sent_once_and_leaves_this_session() {
     let server = server();
@@ -678,7 +699,19 @@ fn a_session_that_changes_while_a_sign_out_is_on_its_way_says_nothing_to_the_nex
     );
     settle(&mut source);
     assert_eq!(source.notice(), None, "the answer of the session before is not said");
-    assert_eq!(ids(&source), ["s-this", "s-web"], "the new session read its own list");
+    // Whether the sign-out left before the lock or was refused by the engine after it: the new session draws
+    // the list Beebeeb has now, read by itself.
+    let has_now: Vec<String> = server.people[0]
+        .sessions
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_str().unwrap().to_string())
+        .collect();
+    source.reload(Pane::Sessions);
+    settle(&mut source);
+    assert_eq!(ids(&source), has_now, "the new session read its own list");
+    assert_eq!(source.notice(), None);
     assert_eq!(source.pump(), Pumped::default(), "no mark of the old change is left");
 }
 
@@ -832,7 +865,9 @@ fn sizes_initials_and_times_read_as_the_board_writes_them() {
     assert_eq!(initials_of("solo"), "S");
     assert_eq!(initials_of(""), "");
     let now = 1_000_000;
+    assert_eq!(ago(None, now), "not recorded");
     assert_eq!(ago(Some(now - 59), now), "now");
+    assert_eq!(ago(Some(now - 12 * 60 - 30), now), "12 min ago");
     assert_eq!(ago(Some(now + 30), now), "now", "a clock ahead is not the future");
     assert_eq!(ago(Some(now - 3_600), now), "1 hour ago");
     assert_eq!(ago(Some(now - 7_200), now), "2 hours ago");

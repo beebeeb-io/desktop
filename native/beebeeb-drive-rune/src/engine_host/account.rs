@@ -68,6 +68,8 @@ const ELSEWHERE: &str = "*";
 struct Row {
     id: String,
     kind: DeviceKind,
+    /// The kind of client, in the row's words (`kind_of`).
+    client: &'static str,
     name: String,
     /// Unix seconds of the last activity, when Beebeeb named one that reads.
     at: Option<i64>,
@@ -183,10 +185,10 @@ pub(crate) fn initials_of(name: &str) -> String {
     first.into_iter().chain(last).flat_map(char::to_uppercase).collect()
 }
 
-/// "now", "12 min ago", "3 hours ago", "5 days ago"; "not known" when Beebeeb named no time.
+/// "now", "12 min ago", "3 hours ago", "5 days ago"; "not recorded" when Beebeeb named no time.
 pub(crate) fn ago(at: Option<i64>, now: i64) -> String {
     let Some(at) = at else {
-        return "last active not known".into();
+        return "not recorded".into();
     };
     let seconds = (now - at).max(0);
     match seconds {
@@ -199,23 +201,19 @@ pub(crate) fn ago(at: Option<i64>, now: i64) -> String {
     }
 }
 
-/// The kind of device a session's `device_kind` names, and how the row says it. Beebeeb names no product per
-/// session, so the row says the kind of client, never a product's name.
+/// The icon and the words for a session's `device_kind`, as Beebeeb stores it (web, desktop, cli, ios, android,
+/// app, api). Beebeeb names no product per session, so the row says the kind of client, never a product's name;
+/// `ios` and `android` are a phone's app or its browser, so the words name the system only. A kind this list
+/// does not know is "Other client": never a guess.
 fn kind_of(device_kind: &str) -> (DeviceKind, &'static str) {
-    match device_kind.to_ascii_lowercase().as_str() {
-        "desktop" | "windows" | "macos" | "linux" => (DeviceKind::Laptop, "Desktop app"),
-        "mobile" | "ios" | "android" | "phone" | "tablet" => (DeviceKind::Phone, "Mobile app"),
+    match device_kind {
+        "web" => (DeviceKind::Browser, "Web browser"),
+        "desktop" => (DeviceKind::Laptop, "Desktop app"),
         "cli" => (DeviceKind::CommandLine, "Command line"),
-        _ => (DeviceKind::Browser, "Web browser"),
-    }
-}
-
-fn kind_words(kind: DeviceKind) -> &'static str {
-    match kind {
-        DeviceKind::Laptop => "Desktop app",
-        DeviceKind::Phone => "Mobile app",
-        DeviceKind::CommandLine => "Command line",
-        DeviceKind::Browser => "Web browser",
+        "ios" => (DeviceKind::Phone, "iPhone or iPad"),
+        "android" => (DeviceKind::Phone, "Android"),
+        "app" => (DeviceKind::Laptop, "Beebeeb app"),
+        _ => (DeviceKind::Browser, "Other client"),
     }
 }
 
@@ -226,9 +224,11 @@ fn row_of(session: AccountSession) -> Row {
         // Two letters: a country, never anything longer (a city can never reach the pane).
         .filter(|code| code.len() == 2 && code.chars().all(|c| c.is_ascii_alphabetic()))
         .unwrap_or_default();
+    let (kind, client) = kind_of(&session.device_kind);
     Row {
         id: session.id,
-        kind: kind_of(&session.device_kind).0,
+        kind,
+        client,
         name: session.device_name,
         at: session
             .last_active_at
@@ -787,8 +787,8 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
                         id: row.id.clone(),
                         kind: row.kind,
                         name: row.name.clone(),
-                        apps: kind_words(row.kind).into(),
-                        apps_sentence: kind_words(row.kind).into(),
+                        apps: row.client.into(),
+                        apps_sentence: row.client.into(),
                         last_active: ago(row.at, now),
                         country: row.country.clone(),
                         this_device: row.current,
