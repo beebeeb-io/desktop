@@ -1,8 +1,7 @@
 //! Search on the real engine: [`EngineSearchSource`]. NOT in the running app: `shell::state::SEARCH_ON_ENGINE` is
-//! false until task 2488 lands. The index is tagged with the signed-in account but built from this computer's local
-//! state, which can still belong to the PREVIOUS account (a sign-out keeps the data; nothing here checks the data's
-//! recorded owner against the session). Until the engine refuses a read of local state that is not the session's,
-//! the shell hands Search the `Unwired` source and none of this runs.
+//! still false, so the shell hands Search the `Unwired` source and none of this runs. The index is tagged with the
+//! signed-in account and built only through the engine's account-bound handle (`Engine::local_state`, task 2488):
+//! a local state that is not the session's (a sign-out keeps the data) builds no index.
 //!
 //! What it answers, and from where:
 //! - `search`: names in this computer's copy of the list (`desktop_search::build_local_index` over the local state,
@@ -57,8 +56,9 @@ impl<C: CredentialStores> SearchHost for Engine<C> {
     }
 
     fn index(&self) -> Result<LocalSearchIndex, ()> {
-        let db = self.state_db().map_err(|_| ())?;
-        build_local_index(&db).map_err(|_| ())
+        // Task 2488: the signed-in account's local state only; any refusal builds nothing.
+        let state = self.local_state().map_err(|_| ())?;
+        state.with(|db| build_local_index(db)).map_err(|_| ())?.map_err(|_| ())
     }
 
     fn wake(&self) {
