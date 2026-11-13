@@ -33,12 +33,15 @@ pub(crate) enum Writes {
     Japanese,
     /// A line in a font the file names and does not carry, written by glyph number (no script is named).
     ByGlyphNumber,
+    /// A line in a Japanese font the file names and does not carry, whose NAME holds "Sans": the renderer asks
+    /// for it as it asks for Helvetica.
+    JapaneseSans,
 }
 
 /// A Letter PDF with one page per entry of `pages`. Every page lists the same four fonts (none is in the file):
 /// what differs is which one its content uses.
 pub(crate) fn fonts_pdf(pages: &[Writes]) -> Vec<u8> {
-    const FIRST_PAGE: usize = 11;
+    const FIRST_PAGE: usize = 13;
     let kids: Vec<String> = (0..pages.len())
         .map(|i| format!("{} 0 R", FIRST_PAGE + 2 * i))
         .collect();
@@ -67,17 +70,24 @@ pub(crate) fn fonts_pdf(pages: &[Writes]) -> Vec<u8> {
         "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Invented-Grotesk \
          /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 8 0 R >>"
             .into(),
+        "<< /Type /Font /Subtype /Type0 /BaseFont /NotoSansCJKjp-Regular /Encoding /UniJIS-UCS2-H \
+         /DescendantFonts [12 0 R] >>"
+            .into(),
+        "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /NotoSansCJKjp-Regular \
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >> /FontDescriptor 5 0 R >>"
+            .into(),
     ];
     for (i, writes) in pages.iter().enumerate() {
         objects.push(format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
-             /Resources << /Font << /F1 3 0 R /F2 6 0 R /F3 7 0 R /F4 9 0 R >> >> /Contents {} 0 R >>",
+             /Resources << /Font << /F1 3 0 R /F2 6 0 R /F3 7 0 R /F4 9 0 R /F5 11 0 R >> >> /Contents {} 0 R >>",
             FIRST_PAGE + 2 * i + 1
         ));
         let content = match writes {
             Writes::Nothing => "0 0 0 rg\n0 0 306 396 re\nf\n".to_string(),
             Writes::Latin => "BT /F2 24 Tf 40 600 Td (Invented) Tj /F3 24 Tf 0 -40 Td (words) Tj ET\n".to_string(),
             Writes::Japanese => "BT /F1 24 Tf 40 600 Td <65E5672C8A9E> Tj ET\n".to_string(),
+            Writes::JapaneseSans => "BT /F5 24 Tf 40 600 Td <65E5672C8A9E> Tj ET\n".to_string(),
             Writes::ByGlyphNumber => "BT /F4 24 Tf 40 600 Td <002B004800580059> Tj ET\n".to_string(),
         };
         objects.push(format!("<< /Length {} >>\nstream\n{content}endstream", content.len()));
@@ -283,6 +293,19 @@ fn a_page_whose_text_is_in_a_font_the_file_does_not_carry_says_so_and_no_other_p
     // A font written by glyph number has none, whatever its script: said, and the Latin page after it is not.
     let numbered = open(fonts_pdf(&[Writes::ByGlyphNumber, Latin])).expect("it opens");
     assert_eq!(served_in_turn(&numbered, &[1, 2]), [(1, true, true), (2, true, false)]);
+    // A Japanese font named "…Sans…": the renderer asks for it as for Helvetica, and the page's own content
+    // says it. The Latin pages around it, which really ask for Helvetica, say nothing.
+    let sans = open(fonts_pdf(&[Latin, Writes::JapaneseSans, Latin, Nothing])).expect("it opens");
+    assert_eq!(
+        served_in_turn(&sans, &[1, 2, 3, 4, 2]),
+        [
+            (1, true, false),
+            (2, true, true),
+            (3, true, false),
+            (4, true, false),
+            (2, true, true)
+        ]
+    );
     // A page that is not there lacks no text: it is not rendered.
     assert_eq!(served_in_turn(&document, &[2, 9]), [(2, true, true), (9, false, false)]);
 }

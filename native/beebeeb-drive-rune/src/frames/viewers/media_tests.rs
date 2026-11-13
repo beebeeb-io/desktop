@@ -240,16 +240,22 @@ fn a_file_of_each_type_opens_its_viewer_through_the_router() {
         assert_eq!(viewer(&rt).file.name, name);
         assert!(has(&rt, key), "{name}: its viewer draws {key}");
     }
-    // A type with no viewer, a folder, and a file the source does not have: not this group's.
+    // A type with no viewer and a folder: not this group's.
     let mut state = init();
     assert!(!open_item(&mut state, &item("q4plan", "Q4 plan.key")));
-    assert!(!open_item(&mut state, &item("nowhere", "Nowhere.pdf")));
     let folder = DriveItem {
         is_folder: true,
         ..item(board::PDF, "Studio plan.pdf")
     };
     assert!(!open_item(&mut state, &folder));
     assert!(state.viewer.ui.is_none());
+    // A file of a type this group reads that the source does not have IS this group's: the window says it is
+    // gone, and the caller does not hand it to another app instead.
+    assert!(open_item(&mut state, &item("nowhere", "Nowhere.pdf")));
+    assert!(matches!(
+        state.viewer.ui.as_ref().map(|ui| &ui.file.body),
+        Some(Body::Stopped(super::source::Stopped::Gone))
+    ));
 }
 
 #[test]

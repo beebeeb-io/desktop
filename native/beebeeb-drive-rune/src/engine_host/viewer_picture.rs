@@ -202,24 +202,86 @@ fn gif(bytes: &[u8]) -> Option<Declared> {
     })
 }
 
-/// The extended header's canvas and one frame per `ANMF` chunk, or the size in a plain file's one bitstream.
+/// The size a lossy bitstream states: a 3-byte frame tag, the start code, then 14 bits of width and of height.
+/// `at`: where the chunk's data begins. `None`: not a key frame's header, or cut short.
+fn vp8(bytes: &[u8], at: usize) -> Option<(u32, u32)> {
+    if bytes.get(at + 3..at + 6)? != [0x9D, 0x01, 0x2A] {
+        return None;
+    }
+    Some((le16(bytes, at + 6)? & 0x3FFF, le16(bytes, at + 8)? & 0x3FFF))
+}
+
+/// The size a lossless bitstream states: a signature byte, then 14 bits of width - 1 and 14 of height - 1.
+fn vp8l(bytes: &[u8], at: usize) -> Option<(u32, u32)> {
+    if *bytes.get(at)? != 0x2F {
+        return None;
+    }
+    let packed = le32(bytes, at + 1)?;
+    Some(((packed & 0x3FFF) + 1, ((packed >> 14) & 0x3FFF) + 1))
+}
+
+/// The RIFF chunks in `bytes[from..to]`: for each, its name and where its data begins and ends (cut at `to`).
+/// A chunk is a name, a length, and the data padded to an even length.
+fn chunks(bytes: &[u8], from: usize, to: usize) -> Vec<([u8; 4], usize, usize)> {
+    let mut found = Vec::new();
+    let mut at = from;
+    while let (Some(name), Some(length)) = (bytes.get(at..at + 4), le32(bytes, at + 4)) {
+        if at + 8 > to {
+            break;
+        }
+        let Some(end) = usize::try_from(length)
+            .ok()
+            .and_then(|length| (at + 8).checked_add(length))
+        else {
+            break;
+        };
+        found.push(([name[0], name[1], name[2], name[3]], at + 8, end.min(to)));
+        match end.checked_add(end & 1) {
+            Some(next) if next > at => at = next,
+            _ => break,
+        }
+    }
+    found
+}
+
+/// A plain file: the size in its one bitstream. An extended file (`VP8X`): the LARGEST of the canvas and of
+/// every size stated inside it, because a decoder decodes each bitstream at the size that bitstream states and
+/// compares it with the canvas only afterwards. Counted: the canvas, every animation frame's own size (`ANMF`),
+/// and every lossy or lossless bitstream, at the top level and inside a frame. A bitstream whose header cannot
+/// be read makes the file not a picture: nothing whose size is unknown reaches a decoder.
 fn webp(bytes: &[u8]) -> Option<Declared> {
     let data = 20usize;
+    let still = |(width, height)| Declared {
+        width,
+        height,
+        frames: 1,
+    };
     match bytes.get(12..16)? {
         b"VP8X" => {
             let three = |at: usize| Some(le32(bytes, at)? & 0x00FF_FFFF);
-            let (width, height) = (three(data + 4)? + 1, three(data + 7)? + 1);
+            let (mut width, mut height) = (three(data + 4)? + 1, three(data + 7)? + 1);
             let mut frames = 0u32;
-            let mut at = 12usize;
-            // RIFF chunks: a name, a length, the data padded to an even length.
-            while let (Some(name), Some(length)) = (bytes.get(at..at + 4), le32(bytes, at + 4)) {
-                if name == b"ANMF" {
+            let mut widen = |(w, h): (u32, u32)| {
+                width = width.max(w);
+                height = height.max(h);
+            };
+            let stated = |name: &[u8; 4], at: usize| match name {
+                b"VP8 " => Some(vp8(bytes, at)),
+                b"VP8L" => Some(vp8l(bytes, at)),
+                _ => None,
+            };
+            for (name, at, end) in chunks(bytes, 12, bytes.len()) {
+                if let Some(size) = stated(&name, at) {
+                    widen(size?);
+                } else if &name == b"ANMF" {
                     frames = frames.saturating_add(1);
-                }
-                let length = usize::try_from(length).ok()?;
-                match at.checked_add(8).and_then(|at| at.checked_add(length + (length & 1))) {
-                    Some(next) => at = next,
-                    None => break,
+                    // The frame's own size (after its offset), then its chunks: alpha, and a bitstream.
+                    widen((three(at + 6)? + 1, three(at + 9)? + 1));
+                    for (inner, inner_at, _) in chunks(bytes, at + 16, end) {
+                        if let Some(size) = stated(&inner, inner_at) {
+                            widen(size?);
+                        }
+                    }
                 }
             }
             Some(Declared {
@@ -228,29 +290,8 @@ fn webp(bytes: &[u8]) -> Option<Declared> {
                 frames: frames.max(1),
             })
         }
-        // Lossy: a 3-byte frame tag, the start code, then 14 bits of width and of height.
-        b"VP8 " => {
-            if bytes.get(data + 3..data + 6)? != [0x9D, 0x01, 0x2A] {
-                return None;
-            }
-            Some(Declared {
-                width: le16(bytes, data + 6)? & 0x3FFF,
-                height: le16(bytes, data + 8)? & 0x3FFF,
-                frames: 1,
-            })
-        }
-        // Lossless: a signature byte, then 14 bits of width - 1 and 14 of height - 1.
-        b"VP8L" => {
-            if *bytes.get(data)? != 0x2F {
-                return None;
-            }
-            let packed = le32(bytes, data + 1)?;
-            Some(Declared {
-                width: (packed & 0x3FFF) + 1,
-                height: ((packed >> 14) & 0x3FFF) + 1,
-                frames: 1,
-            })
-        }
+        b"VP8 " => vp8(bytes, data).map(still),
+        b"VP8L" => vp8l(bytes, data).map(still),
         _ => None,
     }
 }

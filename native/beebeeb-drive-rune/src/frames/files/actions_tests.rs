@@ -960,3 +960,120 @@ fn review_with_nothing_waiting_says_so_and_closes() {
     assert_eq!(conflict_file(&rt), None);
     assert!(asked(&calls).is_empty());
 }
+
+// ── Open, and the files the window only ever reads ──────────────────────────────────────────────────
+
+use crate::frames::viewers::source::{Body, OpenError, OpenFile, ViewerSource};
+
+/// A viewer source that cannot open anything: every ask is refused with `0`.
+struct Refusing(OpenError);
+
+impl ViewerSource for Refusing {
+    fn open(&mut self, _: &str) -> Result<OpenFile, OpenError> {
+        Err(self.0)
+    }
+    fn poll(&mut self, _: &str) -> Option<Body> {
+        None
+    }
+    fn cancel(&mut self, _: &str) {}
+    fn retry(&mut self, _: &str) -> Result<OpenFile, OpenError> {
+        Err(self.0)
+    }
+}
+
+/// The Files window over the spy, with a viewer that refuses every open with `why`, and rows 6 and 7 named
+/// `names`.
+fn with_refusing_viewer(why: OpenError, names: [&str; 2]) -> (Runtime<State>, Calls) {
+    let mut state = init();
+    crate::frames::viewers::wire(&mut state, Box::new(move || Box::new(Refusing(why))));
+    let (mut rt, calls, _) = spied_on(state);
+    rt.update(|s, _| {
+        s.listing.items[6].name = names[0].into();
+        s.listing.items[7].name = names[1].into();
+        s.select_only(6);
+    });
+    settle(&mut rt);
+    (rt, calls)
+}
+
+fn all_words(rt: &Runtime<State>) -> String {
+    rt.elements()
+        .into_iter()
+        .filter(|e| !e.exiting)
+        .flat_map(|e| [e.text, e.label].into_iter().flatten())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn enter_on_a_script_the_viewer_cannot_open_says_why_and_never_hands_it_to_another_app() {
+    for (why, words, again) in [
+        (OpenError::NotNow, "Couldn't open this file right now", true),
+        (OpenError::NotFound, "This file is no longer here", false),
+        (OpenError::SessionEnded, "Your session ended", false),
+    ] {
+        for name in ["Invented deploy.py", "Invented page.html", "Invented run.sh"] {
+            let (mut rt, calls) = with_refusing_viewer(why, [name, "Invented notes.txt"]);
+            let id = rt.state.listing.items[6].id.clone();
+            press(&mut rt, Key::Enter, NONE);
+            settle(&mut rt);
+            // The system was not asked to open it: not when the viewer could not, not ever.
+            assert!(asked(&calls).is_empty(), "{why:?} {name}: {:?}", asked(&calls));
+            // The window says why, on the file's own route.
+            assert!(
+                matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some(id.as_str())),
+                "{why:?} {name}"
+            );
+            let drawn = all_words(&rt);
+            assert!(drawn.contains(words), "{why:?} {name}: {drawn}");
+            assert_eq!(drawn.contains("Try again"), again, "{why:?} {name}: {drawn}");
+        }
+    }
+    // No session in memory: nothing of the file is drawn (the shell's gate says it), and still no hand-over.
+    let (mut rt, calls) = with_refusing_viewer(OpenError::SignedOut, ["Invented deploy.py", "Invented notes.txt"]);
+    press(&mut rt, Key::Enter, NONE);
+    settle(&mut rt);
+    assert!(asked(&calls).is_empty());
+    assert!(rt.state.viewer.ui.is_none());
+}
+
+#[test]
+fn enter_on_several_files_never_hands_a_script_or_a_web_page_to_another_app() {
+    // A script and a text file selected: the text file goes to its own app, the script does not, and the window
+    // says so.
+    let (mut rt, calls) = with_refusing_viewer(OpenError::NotNow, ["Invented deploy.py", "Invented notes.txt"]);
+    let text = rt.state.listing.items[7].id.clone();
+    rt.update(|s, _| {
+        s.actions.selection.insert(7);
+    });
+    press(&mut rt, Key::Enter, NONE);
+    settle(&mut rt);
+    assert_eq!(asked(&calls), [Call::Open(vec![text])]);
+    assert_eq!(rt.state.live_toast(), Some(Toast::ReadOneAtATime));
+    assert!(all_words(&rt).contains(Toast::READ_ONE_AT_A_TIME));
+    assert!(matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.is_none()));
+
+    // Only scripts and web pages selected: nothing is handed over at all.
+    let (mut rt, calls) = with_refusing_viewer(OpenError::NotNow, ["Invented deploy.py", "Invented page.html"]);
+    rt.update(|s, _| {
+        s.actions.selection.insert(7);
+    });
+    press(&mut rt, Key::Enter, NONE);
+    settle(&mut rt);
+    assert!(asked(&calls).is_empty(), "{:?}", asked(&calls));
+    assert_eq!(rt.state.live_toast(), Some(Toast::ReadOneAtATime));
+
+    // Two documents: both go to their own apps, as before, and nothing is said.
+    let (mut rt, calls) = with_refusing_viewer(OpenError::NotNow, ["Invented letter.txt", "Invented notes.md"]);
+    let both = vec![
+        rt.state.listing.items[6].id.clone(),
+        rt.state.listing.items[7].id.clone(),
+    ];
+    rt.update(|s, _| {
+        s.actions.selection.insert(7);
+    });
+    press(&mut rt, Key::Enter, NONE);
+    settle(&mut rt);
+    assert_eq!(asked(&calls), [Call::Open(both)]);
+    assert_eq!(rt.state.live_toast(), None);
+}

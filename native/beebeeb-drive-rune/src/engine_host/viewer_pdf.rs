@@ -35,6 +35,9 @@ use std::sync::mpsc;
 
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_interpret::font::FontQuery;
+use hayro::hayro_syntax::content::ops::TypedInstruction;
+use hayro::hayro_syntax::object::{Array, Dict, Name};
+use hayro::hayro_syntax::page::Page;
 use hayro::hayro_syntax::{DecryptionError, LoadPdfError, Pdf};
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{PixmapSettings, RenderCache, RenderSettings};
@@ -103,6 +106,47 @@ pub fn scale_for(width: f32, height: f32) -> Option<f32> {
     let by_pixels = (PAGE_PIXELS_MAX / (width * height)).sqrt();
     let by_side = PAGE_SIDE_MAX / width.max(height);
     Some(by_width.min(by_pixels).min(by_side))
+}
+
+/// Whether the page's own content writes in a font that is addressed by character or glyph numbers (a
+/// composite font) and is not in the file. Asked of the page itself, because the renderer does not always ask
+/// its resolver in a way that tells: when such a font's NAME holds a word like "Sans" or "Serif" (most
+/// Chinese, Japanese and Korean fonts' names do), it asks for a standard Latin font by name, exactly as it
+/// does for a real Helvetica. Not seen by this: text inside a form the page draws (its fonts are that form's);
+/// there the resolver's own note ([`has_no_stand_in`]) is the only one.
+fn writes_in_a_numbered_font_not_in_the_file(page: &Page<'_>) -> bool {
+    let resources = page.resources();
+    let mut operations = page.typed_operations();
+    while let Some(operation) = operations.next() {
+        if let TypedInstruction::TextFont(chosen) = operation {
+            if resources
+                .get_font(chosen.0)
+                .is_some_and(|font| is_numbered_and_not_in_the_file(&font))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_numbered_and_not_in_the_file(font: &Dict<'_>) -> bool {
+    if !font
+        .get::<Name<'_>>("Subtype")
+        .is_some_and(|kind| kind.as_str() == "Type0")
+    {
+        return false;
+    }
+    let Some(descendant) = font
+        .get::<Array<'_>>("DescendantFonts")
+        .and_then(|fonts| fonts.iter::<Dict<'_>>().next())
+    else {
+        return false;
+    };
+    let descriptor = descendant.get::<Dict<'_>>("FontDescriptor").unwrap_or_default();
+    !["FontFile", "FontFile2", "FontFile3"]
+        .iter()
+        .any(|program| descriptor.contains_key(program))
 }
 
 /// Whether `query` asks for a font the renderer's own fonts cannot stand in for. The renderer asks for one of
@@ -185,7 +229,11 @@ impl Document {
             let lacks_text = lacking.load(Ordering::SeqCst);
             ask_each_page |= lacks_text;
             let rendered = match rendered {
-                Ok(rendered) => rendered.map(|rendered| Rendered { lacks_text, ..rendered }),
+                // Either note says it: the resolver's, or the page's own content.
+                Ok(rendered) => rendered.map(|rendered| Rendered {
+                    lacks_text: lacks_text || rendered.lacks_text,
+                    ..rendered
+                }),
                 Err(_) => {
                     // What the cache held half-made goes with the page that broke.
                     cache = RenderCache::new();
@@ -210,6 +258,7 @@ impl Document {
         let page = pages.get(usize::try_from(page.checked_sub(1)?).ok()?)?;
         let (width, height) = page.render_dimensions();
         let scale = scale_for(width, height)?;
+        let lacks_text = writes_in_a_numbered_font_not_in_the_file(page);
         #[cfg(test)]
         self.renders.fetch_add(1, Ordering::SeqCst);
         let pixmap = hayro::render(
@@ -232,7 +281,7 @@ impl Document {
             width,
             height,
             rgba: pixmap.data_as_u8_slice().to_vec(),
-            lacks_text: false,
+            lacks_text,
         })
     }
 }

@@ -183,6 +183,27 @@ fn a_picture_that_declares_more_than_the_viewer_decodes_is_refused_from_its_head
         );
         assert!(source.picture(id, Picture::Photo).is_none(), "{id}");
     }
+    // An extended WebP with a 1 x 1 canvas in front of a 16383 x 16383 frame: judged by the frame, so it never
+    // reaches the decoder (which would decode the frame before it looked at the canvas).
+    let mut inner = b"WEBPVP8X".to_vec();
+    inner.extend_from_slice(&10u32.to_le_bytes());
+    inner.extend_from_slice(&[0; 10]);
+    inner.extend_from_slice(b"VP8 ");
+    inner.extend_from_slice(&10u32.to_le_bytes());
+    inner.extend_from_slice(&[0, 0, 0, 0x9D, 0x01, 0x2A, 0xFF, 0x3F, 0xFF, 0x3F]);
+    let mut webp = b"RIFF".to_vec();
+    webp.extend_from_slice(&(inner.len() as u32).to_le_bytes());
+    webp.extend_from_slice(&inner);
+    fake.put("f-inner", "Invented inner.webp", &webp);
+    let (source, _, body) = opened(&fake, "f-inner");
+    assert_eq!(
+        body,
+        Body::NotPreviewable(NoPreview::PictureTooBig {
+            width: 16_383,
+            height: 16_383
+        })
+    );
+    assert!(source.picture("f-inner", Picture::Photo).is_none());
     // Within the limits it is decoded, as before.
     fake.put("f-fits", "Invented fits.png", &png_bytes(40, 30));
     let (source, _, body) = opened(&fake, "f-fits");

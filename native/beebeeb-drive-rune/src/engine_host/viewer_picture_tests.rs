@@ -226,3 +226,99 @@ fn a_side_a_pixel_count_and_an_animations_total_each_have_their_own_limit() {
     // A still of the same canvas as one animation frame is not held to the animation's budget.
     assert!(check(&png_header(8_000, 6_000, None)).is_ok());
 }
+
+/// A lossy bitstream's first bytes, stating `width` x `height`.
+fn lossy(width: u16, height: u16) -> Vec<u8> {
+    let mut out = vec![0, 0, 0, 0x9D, 0x01, 0x2A];
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&height.to_le_bytes());
+    out
+}
+
+/// A lossless bitstream's first bytes, stating `width` x `height`.
+fn lossless(width: u32, height: u32) -> Vec<u8> {
+    let mut out = vec![0x2F];
+    out.extend_from_slice(&((width - 1) | ((height - 1) << 14)).to_le_bytes());
+    out
+}
+
+/// The extended header of a `width` x `height` canvas.
+fn canvas(width: u32, height: u32) -> Vec<u8> {
+    let mut header = vec![0, 0, 0, 0];
+    header.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
+    header.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
+    header
+}
+
+/// One animation frame of `width` x `height` holding `inner` chunks.
+fn frame(width: u32, height: u32, inner: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+    let mut out = vec![0; 6];
+    out.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
+    out.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
+    out.extend_from_slice(&[0; 4]);
+    // The chunks of `riff`, without its 12 bytes of file header.
+    out.extend_from_slice(&riff(inner)[12..]);
+    out
+}
+
+#[test]
+fn an_extended_webp_is_as_large_as_the_largest_size_stated_anywhere_inside_it() {
+    // A decoder decodes each bitstream at the size that bitstream states, and looks at the canvas afterwards: a
+    // 1 x 1 canvas in front of a 16383 x 16383 frame is a 16383 x 16383 decode.
+    let huge = Declared {
+        width: 16_383,
+        height: 16_383,
+        frames: 1,
+    };
+    let lossy_inside = riff(&[(b"VP8X", canvas(1, 1)), (b"VP8 ", lossy(16_383, 16_383))]);
+    assert_eq!(declared(&lossy_inside), Some(huge));
+    assert_eq!(check(&lossy_inside), Err(Refused::TooBig(huge)));
+    let lossless_inside = riff(&[
+        (b"VP8X", canvas(1, 1)),
+        (b"ALPH", vec![0; 3]),
+        (b"VP8L", lossless(16_383, 16_383)),
+    ]);
+    assert_eq!(check(&lossless_inside), Err(Refused::TooBig(huge)));
+    // An animation: a frame's own size, and the bitstream inside a frame (after its alpha), each count; so does
+    // the one in the third frame, not only the first.
+    let small = || (b"ANMF", frame(1, 1, &[(b"VP8 ", lossy(1, 1))]));
+    for big in [
+        frame(16_383, 16_383, &[(b"VP8 ", lossy(1, 1))]),
+        frame(1, 1, &[(b"VP8 ", lossy(16_383, 16_383))]),
+        frame(1, 1, &[(b"ALPH", vec![0; 5]), (b"VP8L", lossless(16_383, 16_383))]),
+    ] {
+        let file = riff(&[
+            (b"VP8X", canvas(1, 1)),
+            (b"ANIM", vec![0; 6]),
+            small(),
+            small(),
+            (b"ANMF", big),
+        ]);
+        let declared = declared(&file).expect("a size");
+        assert_eq!((declared.width, declared.height, declared.frames), (16_383, 16_383, 3));
+        assert!(matches!(check(&file), Err(Refused::TooBig(_))));
+    }
+    // A bitstream whose header cannot be read: no size is known, so it is not a picture to decode.
+    for unreadable in [
+        riff(&[(b"VP8X", canvas(64, 48)), (b"VP8 ", vec![0; 10])]),
+        riff(&[(b"VP8X", canvas(64, 48)), (b"VP8L", vec![0x2F, 0])]),
+        riff(&[
+            (b"VP8X", canvas(64, 48)),
+            (b"ANMF", frame(64, 48, &[(b"VP8 ", vec![0; 4])])),
+        ]),
+    ] {
+        assert_eq!(check(&unreadable), Err(Refused::NotAPicture));
+    }
+    // What agrees with its canvas is that canvas, and passes.
+    let agrees = riff(&[(b"VP8X", canvas(640, 480)), (b"VP8 ", lossy(640, 480))]);
+    assert_eq!(check(&agrees), Ok(still(640, 480)));
+    let animated = riff(&[
+        (b"VP8X", canvas(640, 480)),
+        (b"ANMF", frame(640, 480, &[(b"VP8L", lossless(640, 480))])),
+        (b"ANMF", frame(320, 240, &[(b"VP8 ", lossy(320, 240))])),
+    ]);
+    assert_eq!(
+        check(&animated).map(|d| (d.width, d.height, d.frames)),
+        Ok((640, 480, 2))
+    );
+}

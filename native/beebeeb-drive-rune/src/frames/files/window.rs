@@ -113,6 +113,13 @@ fn toast_of(kind: Toast, again: bool, t: &Theme) -> El {
             t,
         ),
         Toast::LinkCopied => toast::toast(&icons_files::CHECK, toast::Tone::Done, "Link copied", None, t),
+        Toast::ReadOneAtATime => toast::toast(
+            &icons_files::ALERT,
+            toast::Tone::Neutral,
+            Toast::READ_ONE_AT_A_TIME,
+            None,
+            t,
+        ),
         Toast::FreedUp => toast::toast(
             &icons_files::CHECK,
             toast::Tone::Done,
