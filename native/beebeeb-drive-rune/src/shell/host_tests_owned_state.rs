@@ -12,7 +12,6 @@ use std::sync::Mutex;
 use beebeeb_engine::account_binding::Identity;
 use beebeeb_engine::app::{Engine, EngineConfig, LocalStateRefused, SyncStartRefused};
 use beebeeb_engine::host::ChannelHost;
-use beebeeb_engine::identity::TEST;
 use beebeeb_engine::signin::gate::GateState as EngineGate;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb, TransferActivityInput};
@@ -28,6 +27,7 @@ use crate::frames::global::sync_off::Refused;
 use crate::frames::tray::source::TraySource;
 use crate::shell::actions::{ActionError, EngineActions, HostActions};
 use crate::shell::app::{Dialog, Session};
+use crate::shell::identity::engine_identity;
 use crate::shell::instance::ProfileHolder;
 use crate::source::{DriveSource, SourceError};
 
@@ -166,7 +166,9 @@ fn another_accounts_local_state_is_refused_and_nothing_of_it_is_shown() {
         state_dir: crate::engine_host::tests::process_state_dir(),
         api_base: fake.base.clone(),
     };
-    let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the engine opens"));
+    let engine = Arc::new(
+        Engine::open(engine_identity(), config, host, MemoryCredentials::default()).expect("the engine opens"),
+    );
     engine.restore();
 
     // The first account's local state, as its sync left it: rows, a finished transfer, and the owner's record.
@@ -199,7 +201,7 @@ fn another_accounts_local_state_is_refused_and_nothing_of_it_is_shown() {
 
     let opened = Opened {
         engine: engine.clone(),
-        identity: &TEST,
+        identity: engine_identity(),
         gate: engine.gate(),
     };
     let live = Arc::new(LiveEngine::new(&opened, messages));
