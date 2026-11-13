@@ -16,6 +16,7 @@ pub fn state_db_for_config(
 
 /// The state database for a configuration, opened WITHOUT asking whose it is: for the engine's own device-level
 /// reads (`backup::stop`) and the Tauri shell's door above.
+#[cfg(any(test, feature = "direct-state-db"))]
 pub(crate) fn state_db_for_config_unbound(
     identity: &'static crate::identity::EngineIdentity,
     cfg: &crate::config::DesktopConfig,
