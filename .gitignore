@@ -33,6 +33,9 @@ token.json
 # Local data
 data/
 *.db
+# The upgrade fixture: state databases that release 0.8.25 wrote, invented rows only (the engine's
+# `upgrade_from_0_8_25` test opens them). Tracked on purpose.
+!crates/beebeeb-engine/tests/fixtures/state-db-0.8.25/**/state.db
 *.sqlite
 *.sqlite3
 
