@@ -146,6 +146,22 @@ jobs:
           cargo check --locked --features net --target x86_64-pc-windows-msvc
           test "$(cargo tree --locked -e normal --features net | grep -c tauri)" -eq 0
 
+      # The Office sandbox crate away from Windows: it must compile, lint clean for both targets, and refuse to
+      # start anything (no sandbox module, no helper). Counted like the Windows run.
+      - name: Office sandbox crate (fail closed, lint, Windows cross-check)
+        working-directory: crates/beebeeb-office-sandbox
+        shell: bash
+        run: |
+          set -uo pipefail
+          cargo_exit=0
+          CARGO_TERM_COLOR=never cargo test --locked > "$RUNNER_TEMP/office-sandbox-test.log" 2>&1 || cargo_exit=$?
+          cat "$RUNNER_TEMP/office-sandbox-test.log"
+          python3 ../../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/office-sandbox-test.log" --cargo-exit-code "$cargo_exit" --expect deps/beebeeb_office_sandbox- --expect deps/sandbox-
+          set -e
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+          test "$(cargo tree --locked -e normal --prefix none --target x86_64-pc-windows-msvc | sort -u | wc -l)" -eq 3
+
       - name: Release script self-tests
         run: |
           set -euo pipefail
@@ -180,6 +196,22 @@ jobs:
             'machine_tests::the_staged_file_cannot_be_replaced_between_the_check_and_the_start'; do
             grep -Fxq "test $name ... ok" "$RUNNER_TEMP/updater-test-windows.log" || { echo "::error::$name did not run"; exit 1; }
           done
+
+      # The Office helper's sandbox (crates/beebeeb-office-sandbox). Each claim runs the same probe plainly (must
+      # succeed) and confined (must be refused with the pinned code). Counted: the library and the native test
+      # binary must both be in the log, at or above their floors (scripts/cargo-test-floors.txt); the crate
+      # links itself and the two `windows-sys` packages, nothing else.
+      - name: Office sandbox tests on Windows
+        working-directory: crates/beebeeb-office-sandbox
+        shell: bash
+        run: |
+          set -uo pipefail
+          cargo_exit=0
+          CARGO_TERM_COLOR=never cargo test --locked -- --test-threads=1 > "$RUNNER_TEMP/office-sandbox-test.log" 2>&1 || cargo_exit=$?
+          cat "$RUNNER_TEMP/office-sandbox-test.log"
+          set -e
+          python ../../scripts/assert-cargo-test-counts.py "$RUNNER_TEMP/office-sandbox-test.log" --cargo-exit-code "$cargo_exit" --expect deps/beebeeb_office_sandbox- --expect deps/sandbox-
+          test "$(cargo tree --locked -e normal --prefix none | sort -u | wc -l)" -eq 3
 
   # Windows and macOS are two jobs, not a matrix: a skipped matrix job reports under its unexpanded name and would
   # leave the required "Rust check (Windows)" / "Rust check (macOS)" checks waiting for ever.
