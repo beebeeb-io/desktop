@@ -197,8 +197,27 @@ pub struct Kept {
     pub status: KeptStatus,
 }
 
+/// What a source's workers answered since the last frame ([`ThisPcSource::pump`]).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Pumped {
+    /// Something the sections draw changed: draw again.
+    pub changed: bool,
+    /// An answer is still out: look again soon.
+    pub busy: bool,
+    /// A change the person asked for was refused: the window says so (a fixed sentence).
+    pub refusal: Option<&'static str>,
+}
+
 /// What the two This PC sections read and ask. Engine calls: see the PR body.
 pub trait ThisPcSource {
+    /// Called at the start of every frame (`frames::this_pc::poll`): what arrived from the source's workers.
+    /// A source that answers at once has nothing to say.
+    fn pump(&mut self) -> Pumped {
+        Pumped::default()
+    }
+    /// One of the two sections opened (`frames::this_pc::poll` saw the route arrive): a source that reads late reads
+    /// again when what it holds is old.
+    fn opened(&mut self) {}
     /// `false`: nothing answers yet (`Unwired`), and the view draws the shell's "not built yet"
     /// frame instead of sample sync history.
     fn wired(&self) -> bool {
@@ -216,6 +235,11 @@ pub trait ThisPcSource {
     fn retry_all(&mut self);
     /// What is kept on this PC.
     fn kept(&self) -> Vec<Kept>;
+    /// How many items [`Self::kept`] lists (the sidebar's count, every frame): a source may answer it without a
+    /// copy of the list.
+    fn kept_count(&self) -> usize {
+        self.kept().len()
+    }
     /// Stop keeping one item here; it stays in Beebeeb and becomes online only.
     fn remove_from_pc(&mut self, id: &str);
     /// Stop keeping every item here.

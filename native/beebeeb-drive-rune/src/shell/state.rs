@@ -169,6 +169,7 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     s.frames.find = crate::frames::search::SearchUi::default();
     s.frames.pc = Box::new(crate::frames::UnwiredPc);
     s.photos = crate::frames::photos::Ui::new(Box::new(crate::frames::photos::source::Unwired));
-    s.this_pc = crate::frames::this_pc::Ui::new(Box::new(crate::engine_host::this_pc::EngineThisPcSource::new(engine)));
+    // This PC: the `Unwired` source while its constant is off (nothing of the adapter runs then).
+    s.this_pc = crate::frames::this_pc::Ui::new(crate::engine_host::this_pc::source_for(engine));
     s
 }

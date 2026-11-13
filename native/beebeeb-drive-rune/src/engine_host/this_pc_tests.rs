@@ -1,13 +1,15 @@
 //! This PC on the real engine (`EngineThisPcSource`), against the engine's own state database in a folder of each
 //! test's own: the history (transfers, Trash, the changes that did not sync), the problems with the engine's words
 //! and Try again through the queue, the kept items with an honest status, Remove from this PC through the pin change,
-//! no local state, a read that fails, and no name while the vault is locked. Every name is invented.
+//! no local state, a read that fails, no name while the vault is locked, the account on every answer, and nothing of
+//! another account's local state (task 2488). Every name is invented.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use beebeeb_engine::account_binding::Identity;
 use beebeeb_engine::state_db::{
     FileEntry, FileStatus, ItemKind, LocalActivityEventInput, LocalActivityKind, OperationKind, PendingOperation,
     StateDb, TransferActivityInput,
@@ -23,21 +25,30 @@ struct Fake {
     syncing: AtomicBool,
     /// The state database cannot be opened (an engine error).
     broken: AtomicBool,
+    /// The signed-in account (None: signed out).
+    account: Mutex<Option<String>>,
     /// What `set_kept` was asked, in order.
     kept_calls: Mutex<Vec<(String, bool)>>,
 }
 
 impl Fake {
     fn new() -> Arc<Fake> {
+        Self::with_account("invented@beebeeb.io")
+    }
+
+    fn with_account(email: &str) -> Arc<Fake> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
-        StateDb::open(&path).unwrap();
+        let db = StateDb::open(&path).unwrap();
+        // Record the owner so `owns` can compare it.
+        db.set_owner(&Identity::new(None, Some(email))).unwrap();
         Arc::new(Fake {
             _dir: dir,
             path,
             unlocked: AtomicBool::new(true),
             syncing: AtomicBool::new(true),
             broken: AtomicBool::new(false),
+            account: Mutex::new(Some(email.to_string())),
             kept_calls: Mutex::new(Vec::new()),
         })
     }
@@ -51,11 +62,19 @@ impl ThisPcEngine for Fake {
     fn unlocked(&self) -> bool {
         self.unlocked.load(Ordering::SeqCst)
     }
+    fn account(&self) -> Option<String> {
+        self.account.lock().unwrap().clone()
+    }
     fn state_db(&self) -> Result<StateDb, String> {
         if self.broken.load(Ordering::SeqCst) {
             return Err("could not open the local state".into());
         }
         StateDb::open(&self.path).map_err(|_| "could not open the local state".to_string())
+    }
+    fn owns(&self, db: &StateDb) -> bool {
+        let account = self.account.lock().unwrap();
+        let session = Identity::new(None, account.as_deref());
+        beebeeb_engine::app::state_owner::owned_by(db, &session)
     }
     fn syncing(&self) -> bool {
         self.syncing.load(Ordering::SeqCst)
@@ -129,9 +148,15 @@ fn gave_up(db: &StateDb, op: &str, file_id: &str, at: i64) {
     .unwrap();
 }
 
-fn settle<E: ThisPcEngine>(source: &EngineThisPcSource<E>) {
+/// Let the worker finish, then pump all answers into the source.
+fn settle<E: ThisPcEngine>(source: &mut EngineThisPcSource<E>) {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !source.idle() {
+    loop {
+        source.pump();
+        if source.idle() {
+            source.pump();
+            return;
+        }
         assert!(Instant::now() < deadline, "the worker did not finish");
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -197,8 +222,8 @@ fn busy_pc() -> Arc<Fake> {
 #[test]
 fn history_lists_transfers_trash_and_problems_newest_first() {
     let fake = busy_pc();
-    let source = EngineThisPcSource::new(fake.clone());
-    settle(&source);
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
     assert_eq!(source.wired(), TURNED_ON);
     let history = source.history();
     assert_eq!(
@@ -230,7 +255,7 @@ fn history_lists_transfers_trash_and_problems_newest_first() {
 fn problems_carry_the_engines_words_and_try_again_reaches_the_queue() {
     let fake = busy_pc();
     let mut source = EngineThisPcSource::new(fake.clone());
-    settle(&source);
+    settle(&mut source);
     let problems = source.problems();
     assert_eq!(names(&problems), ["Loose note.md"]);
     let What::Failed { problem, reason } = &problems[0].what else {
@@ -241,7 +266,7 @@ fn problems_carry_the_engines_words_and_try_again_reaches_the_queue() {
     assert_eq!(reason.line(), "Stopped after 5 tries.");
 
     source.retry("not-in-the-list");
-    settle(&source);
+    settle(&mut source);
     assert_eq!(
         source.problems().len(),
         1,
@@ -249,7 +274,7 @@ fn problems_carry_the_engines_words_and_try_again_reaches_the_queue() {
     );
 
     source.retry("op-1");
-    settle(&source);
+    settle(&mut source);
     assert!(source.problems().is_empty(), "made due: no longer a problem");
     let op = fake.db().get_operation("op-1").unwrap().expect("still queued, now due");
     assert_eq!(op.attempts, 0);
@@ -262,10 +287,10 @@ fn retry_all_reaches_every_problem() {
     let fake = busy_pc();
     gave_up(&fake.db(), "op-2", "f-report", now() - 10);
     let mut source = EngineThisPcSource::new(fake.clone());
-    settle(&source);
+    settle(&mut source);
     assert_eq!(source.problems().len(), 2);
     source.retry_all();
-    settle(&source);
+    settle(&mut source);
     assert!(source.problems().is_empty());
 }
 
@@ -274,8 +299,8 @@ fn retry_all_reaches_every_problem() {
 #[test]
 fn kept_lists_the_top_most_kept_items_with_an_honest_status() {
     let fake = busy_pc();
-    let source = EngineThisPcSource::new(fake.clone());
-    settle(&source);
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
     let kept = source.kept();
     assert_eq!(kept.len(), 2, "{kept:?}");
     assert_eq!(kept[0].name, "Shoot");
@@ -286,6 +311,7 @@ fn kept_lists_the_top_most_kept_items_with_an_honest_status() {
     assert_eq!(kept[1].name, "Rates.xlsx");
     assert_eq!(kept[1].contains, Contains::In("Files".into()));
     assert_eq!(kept[1].status, KeptStatus::UpToDate);
+    assert_eq!(source.kept_count(), 2);
 }
 
 /// Remove from this PC: the pin change, only while sync runs, only for an item the list holds; Remove all reaches
@@ -294,24 +320,24 @@ fn kept_lists_the_top_most_kept_items_with_an_honest_status() {
 fn remove_from_pc_unpins_only_while_sync_runs() {
     let fake = busy_pc();
     let mut source = EngineThisPcSource::new(fake.clone());
-    settle(&source);
+    settle(&mut source);
     fake.syncing.store(false, Ordering::SeqCst);
     source.remove_from_pc("f-sheet");
-    settle(&source);
+    settle(&mut source);
     assert_eq!(source.kept().len(), 2, "sync does not run: nothing changes");
     assert!(fake.kept_calls.lock().unwrap().is_empty());
 
     fake.syncing.store(true, Ordering::SeqCst);
     source.remove_from_pc("f-loose");
-    settle(&source);
+    settle(&mut source);
     assert!(fake.kept_calls.lock().unwrap().is_empty(), "not in the list: not sent");
     source.remove_from_pc("f-sheet");
-    settle(&source);
+    settle(&mut source);
     assert_eq!(names_of(&source.kept()), ["Shoot"]);
     assert_eq!(*fake.kept_calls.lock().unwrap(), [("f-sheet".to_string(), false)]);
 
     source.remove_all_from_pc();
-    settle(&source);
+    settle(&mut source);
     assert!(source.kept().is_empty());
 }
 
@@ -323,8 +349,8 @@ fn names_of(kept: &[Kept]) -> Vec<&str> {
 #[test]
 fn an_empty_pc_has_empty_lists() {
     let fake = Fake::new();
-    let source = EngineThisPcSource::new(fake);
-    settle(&source);
+    let mut source = EngineThisPcSource::new(fake);
+    settle(&mut source);
     assert_eq!(source.wired(), TURNED_ON);
     assert!(source.history().is_empty() && source.problems().is_empty() && source.kept().is_empty());
 }
@@ -334,8 +360,8 @@ fn an_empty_pc_has_empty_lists() {
 fn a_read_that_fails_keeps_the_last_answer() {
     let fake = busy_pc();
     fake.broken.store(true, Ordering::SeqCst);
-    let source = EngineThisPcSource::new(fake.clone());
-    settle(&source);
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
     assert!(
         source.history().is_empty() && source.kept().is_empty(),
         "no answer yet: nothing"
@@ -343,32 +369,146 @@ fn a_read_that_fails_keeps_the_last_answer() {
 
     fake.broken.store(false, Ordering::SeqCst);
     source.ask_read();
-    settle(&source);
+    settle(&mut source);
     assert_eq!(source.history().len(), 4);
 
     fake.broken.store(true, Ordering::SeqCst);
     source.ask_read();
-    settle(&source);
+    settle(&mut source);
     assert_eq!(source.history().len(), 4, "the last answer stays");
     assert_eq!(source.kept().len(), 2);
 }
 
-/// Locked or signed out: no name at all, at once (before the worker cleared its answer) and after.
+/// Locked or signed out: no name at all, at once (the readers filter) and after (the held data is dropped by pump).
 #[test]
 fn a_locked_vault_shows_no_name() {
     let fake = busy_pc();
-    let source = EngineThisPcSource::new(fake.clone());
-    settle(&source);
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
     assert!(!source.history().is_empty());
     fake.unlocked.store(false, Ordering::SeqCst);
+    // At once: the readers filter by `unlocked`.
     assert!(source.history().is_empty() && source.problems().is_empty() && source.kept().is_empty());
-    source.ask_read();
-    settle(&source);
-    assert_eq!(
-        *source.shared.snapshot.lock().unwrap(),
-        Snapshot::default(),
-        "cleared in memory too"
-    );
+    assert_eq!(source.kept_count(), 0);
+    // After pump: the held data is dropped.
+    settle(&mut source);
+    assert!(source.held.is_none(), "cleared in memory by pump");
+}
+
+/// A change of account clears what was held (P1: nothing of account A shows under account B).
+#[test]
+fn a_change_of_account_clears_the_held_answer() {
+    let fake = busy_pc();
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
+    assert_eq!(source.kept_count(), 2, "A's data");
+
+    // Switch to account B.
+    *fake.account.lock().unwrap() = Some("other@beebeeb.io".into());
+    source.pump();
+    assert_eq!(source.kept_count(), 0, "A's answer is gone at once");
+    assert!(source.history().is_empty());
+
+    // The source asked for a new read; account B's state DB is not theirs, so nothing shows.
+    settle(&mut source);
+    assert!(source.kept().is_empty(), "B owns no local state of A's DB");
+}
+
+/// Task 2488: a local state database owned by another account reads as nothing.
+#[test]
+fn another_accounts_local_state_reads_as_nothing() {
+    // Account B's fake: owns the DB.
+    let fake_b = Fake::with_account("other@beebeeb.io");
+    let db = fake_b.db();
+    file(&db, "f-secret", "Secret.pdf", FileStatus::Local, 1_000, false);
+    db.set_recursive_pin("f-secret", true, now()).unwrap();
+
+    // Sign in as account A: the DB is B's.
+    *fake_b.account.lock().unwrap() = Some("invented@beebeeb.io".into());
+    let mut source = EngineThisPcSource::new(fake_b.clone());
+    settle(&mut source);
+    assert!(source.kept().is_empty(), "A never sees B's kept items");
+    assert!(source.history().is_empty(), "A never sees B's history");
+    assert_eq!(source.kept_count(), 0);
+}
+
+/// A refused Remove from this PC (sync not running) sends a refusal the window can draw (P2-6).
+#[test]
+fn a_refused_remove_sends_a_refusal_through_pump() {
+    let fake = busy_pc();
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
+    fake.syncing.store(false, Ordering::SeqCst);
+    source.remove_from_pc("f-sheet");
+    // Wait for the worker, then pump once: the refusal must be in the first drain.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let pumped = source.pump();
+        if pumped.refusal.is_some() {
+            assert_eq!(pumped.refusal, Some(NOT_SYNCING), "the refusal reaches the window");
+            break;
+        }
+        assert!(Instant::now() < deadline, "no refusal arrived");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // Taken once: the next pump has no refusal.
+    let pumped2 = source.pump();
+    assert_eq!(pumped2.refusal, None);
+}
+
+/// A refused Retry sends a refusal when the local state is not this account's (task 2488).
+#[test]
+fn a_refused_retry_sends_a_refusal() {
+    let fake = busy_pc();
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
+    assert!(!source.problems().is_empty());
+
+    // Break the DB ownership: the DB is now someone else's.
+    fake.db()
+        .set_owner(&Identity::new(None, Some("someone-else@beebeeb.io")))
+        .unwrap();
+    source.retry("op-1");
+    // Wait for the worker to refuse, then pump.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let pumped = source.pump();
+        if pumped.refusal.is_some() {
+            assert_eq!(pumped.refusal, Some(NOT_RETRIED));
+            break;
+        }
+        assert!(Instant::now() < deadline, "no refusal arrived");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// `opened()` asks for a fresh read when the held answer is older than `FRESH_FOR`.
+#[test]
+fn opened_reads_again_when_the_answer_is_stale() {
+    let fake = busy_pc();
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
+    assert_eq!(source.kept_count(), 2);
+
+    // The answer is fresh: opened does not ask again.
+    source.opened();
+    assert!(!source.reading, "fresh: no new read");
+
+    // Make the answer stale.
+    source.read_at = Some(Instant::now() - FRESH_FOR - Duration::from_secs(1));
+    source.opened();
+    assert!(source.reading, "stale: a new read is asked");
+}
+
+/// `source_for` with `TURNED_ON = false` gives `Unwired`: no worker, no read, no sidebar count (P2-1).
+#[test]
+fn source_for_gives_unwired_when_the_constant_is_off() {
+    let fake = busy_pc();
+    let source = source_for(fake);
+    // TURNED_ON is false, so the source is Unwired.
+    assert!(!source.wired());
+    assert!(source.kept().is_empty());
+    assert_eq!(source.kept_count(), 0);
 }
 
 /// The words for where a path is, and the glyph for a name: a picture is a document (never the sample picture).
