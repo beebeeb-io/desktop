@@ -27,11 +27,11 @@ use crate::ui::toolbar::{self, Closed};
 use crate::ui::{caption, kit};
 use rune::{Align, Color, Cx, El, Icon, TextStyle, col, el, row};
 
-/// The action each button names, for tests and the log.
+/// The action each button names, for tests and the log. None of these is wired to an engine
+/// action yet: each button shows [`NOT_AVAILABLE`].
 pub const UNLOCK: &str = "unlock";
 pub const OPEN_PLANS: &str = "open-plans";
 pub const CHECK_PLAN: &str = "check-plan";
-/// Sign out is the shared confirm (DW-A57).
 pub const SIGN_OUT: &str = "sign-out";
 
 /// `.kit-btn-lg`'s words: 13px/500 on 19.5px.
