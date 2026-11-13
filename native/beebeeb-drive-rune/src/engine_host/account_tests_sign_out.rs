@@ -565,6 +565,25 @@ fn a_read_that_fails_after_an_answered_sign_out_is_followed_by_the_read_for_that
     assert_eq!(source.notice(), Some(SIGNED_OUT));
 }
 
+/// Two sign-outs that were taken behind an error, and one list read that shows both gone: the same sentence
+/// is said once, not once per toast.
+#[test]
+fn the_list_rewriting_two_toasts_to_the_same_words_says_them_once() {
+    let server = server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    server.change_mode.store(TAKEN_BEHIND_A_502, Ordering::SeqCst);
+    server.read_delay_ms.store(300, Ordering::SeqCst);
+    assert!(source.sign_out_device("s-phone"));
+    assert!(source.sign_out_device("s-web"));
+    settle(&mut source);
+    assert_eq!(ids(&source), ["s-this"]);
+    assert_eq!(source.notice(), Some(IS_SIGNED_OUT));
+    assert!(!source.notice_failed());
+    later(&mut source, STAYS_DONE);
+    assert_eq!(source.notice(), None, "said once");
+}
+
 /// A refusal's Try again when there is no list to send against (another sign-out was taken, and the list could
 /// not be read after it): nothing is sent, the toast keeps its button, and it works once the list is read.
 #[test]
