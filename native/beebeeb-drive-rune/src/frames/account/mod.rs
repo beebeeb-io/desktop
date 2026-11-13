@@ -27,6 +27,7 @@ mod passkeys;
 mod plan;
 mod request;
 mod security;
+mod security_proto;
 mod sessions;
 pub mod source;
 #[cfg(test)]
@@ -275,6 +276,8 @@ pub struct AccountUi {
     pub source: Option<Box<dyn AccountSource>>,
     /// The pane the source was last told is showing (`None`: no account section shows).
     told_open: Option<Pane>,
+    /// RENDER-ONLY PROTOTYPE: which Security option is drawn.
+    pub proto: Option<u8>,
 }
 
 impl Default for AccountUi {
@@ -286,6 +289,7 @@ impl Default for AccountUi {
             approve: approve::Approve::default(),
             source: source::first(instance::DEV_BUILD),
             told_open: None,
+            proto: None,
         }
     }
 }
@@ -704,6 +708,19 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
             source.set_app_lock(false);
         }
     }),
+    ("SEC-OPT-A", |s| {
+        open_on(s, "DW-A52");
+        s.account.proto = Some(0);
+    }),
+    ("SEC-OPT-B", |s| {
+        open_on(s, "DW-A52");
+        s.account.proto = Some(1);
+    }),
+    ("SEC-OPT-C", |s| {
+        open_on(s, "DW-A52");
+        s.account.source = Some(Box::new(source::BoardAccount::new().without_passkeys()));
+        s.account.proto = Some(2);
+    }),
     ("DW-A12", |s| approve::scene(s, "DW-A12")),
     ("DW-A13", |s| approve::scene(s, "DW-A13")),
     ("DW-A14", |s| approve::scene(s, "DW-A14")),
@@ -829,6 +846,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .and_then(|_| source.plan_details())
                 .map(|plan| plan::overlay(&plan, &t)),
         ),
+        Pane::Security if ui.proto.is_some() => (security_proto::pane(source, ui.proto.unwrap_or(0), &t), None),
         Pane::Security => security::pane(source, dialog, &t),
         Pane::Checkup => (security::checkup(source, &t), None),
         Pane::Sessions => sessions::pane(source, dialog, &t),
