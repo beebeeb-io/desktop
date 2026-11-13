@@ -135,7 +135,8 @@ pub struct SecurityFacts {
     pub backup_codes: Option<(usize, usize)>,
     pub passkeys: Option<usize>,
     pub sessions: Option<usize>,
-    /// The last few sign-ins and security changes, newest first. `Some(None)`: security logging is off.
+    /// Sign-ins and security changes, newest first (the page shows the first `RECENT_EVENTS`). `Some(None)`:
+    /// security logging is off.
     pub activity: Option<Option<Vec<Event>>>,
     /// The checkup's factors. `None` or empty: there is no score, and the page says so.
     pub factors: Option<Vec<Factor>>,
@@ -720,13 +721,11 @@ pub fn all_known<S: AccountSource + ?Sized>(source: &S) -> SecurityFacts {
         two_factor: Some(sec.two_factor),
         passkeys: Some(sec.passkeys),
         sessions: Some(sec.sessions),
-        activity: Some(source.activity().map(|periods| {
-            periods
-                .into_iter()
-                .flat_map(|(_, events)| events)
-                .take(RECENT_EVENTS)
-                .collect()
-        })),
+        activity: Some(
+            source
+                .activity()
+                .map(|periods| periods.into_iter().flat_map(|(_, events)| events).collect()),
+        ),
         factors: Some(source.factors()),
         can_sign_out: true,
     }

@@ -79,12 +79,13 @@ fn done(facts: &SecurityFacts, kind: FactorKind) -> bool {
 /// The score card: the ring and the count, then what is left to do, each with the button that fixes it.
 /// With no factors: no fill, no count, and a sentence that says there is no score.
 fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
-    let ring = |fraction: f32, inside: String| {
+    // `ink`: the fill's colour. With no score it is the track's own, so no part of the ring reads as done.
+    let ring = |fraction: f32, inside: String, ink: rune::Color| {
         el().key("ring-box")
             .a11y_hidden()
             .size(56.0, 56.0)
             .center()
-            .child(set::ring("ring", 56.0, 4.0, fraction, t.text, t).absolute(0.0, 0.0))
+            .child(set::ring("ring", 56.0, 4.0, fraction, ink, t).absolute(0.0, 0.0))
             .child(kit::label("ring-label", inside, set::RING_COUNT, t.text))
     };
     let words = |head: String, sub: String| {
@@ -113,7 +114,7 @@ fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> E
         .box_shadow(kit::drop(1.0, 2.0, rune::Color::BLACK.alpha(0.04)));
     let line = row().key("score").w_full().center_y().gap(14.0);
     let Some(factors) = scored(facts) else {
-        return card.child(line.child(ring(0.0, "?".into())).child(words(
+        return card.child(line.child(ring(0.0, "?".into(), t.separator)).child(words(
             "Security score not known yet".into(),
             "Beebeeb can't say yet which steps are done. Nothing on this page is a guess.".into(),
         )));
@@ -125,7 +126,7 @@ fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> E
         n => format!("{n} things left to do."),
     };
     let mut card = card.child(
-        line.child(ring(ok as f32 / of as f32, ok.to_string()))
+        line.child(ring(ok as f32 / of as f32, ok.to_string(), t.text))
             .child(words(format!("{ok} of {of} security steps done"), says)),
     );
     for (i, f) in factors.iter().filter(|f| !f.done).enumerate() {

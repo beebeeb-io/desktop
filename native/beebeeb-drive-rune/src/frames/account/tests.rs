@@ -255,7 +255,9 @@ fn signing_out_of_all_apps_is_its_own_confirm() {
     click(&mut rt, "btn-2");
     assert_eq!(rt.state.account.dialog, None, "Cancel");
     assert!(asked(&rt).is_empty());
-    click(&mut rt, "item-3-1");
+    // The row is below the window's edge on the one page: the keys reach it (and scroll to it).
+    tab_to(&mut rt, "item-3-1");
+    key(&mut rt, Key::Enter);
     click(&mut rt, "btn-1");
     assert_eq!(asked(&rt), vec![Intent::Show("DW-A03")]);
     assert!(source(&rt).products().iter().all(|p| p.1 == ProductState::NotSignedIn));

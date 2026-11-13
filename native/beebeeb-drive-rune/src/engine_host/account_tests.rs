@@ -448,13 +448,17 @@ fn a_profile_without_the_two_factor_mark_is_not_known_never_off() {
 fn a_sessions_list_that_fails_leaves_the_device_count_not_known_and_the_page_up() {
     let server = server();
     server.two_factor.lock().unwrap()[0] = Some(true);
-    server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
-    // The profile is the accounts' own route here (it answers); the sessions list fails.
     let mut source = Source::new(signed_in(&server));
-    server.name_mode.store(ANSWER, Ordering::SeqCst);
     opened(&mut source, Pane::Security);
+    assert_eq!(source.security_facts().sessions, Some(3));
+    // The list is read again and fails: the count is not known (never 0, never the old one), the page stays.
+    server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    source.reload(Pane::Sessions);
+    settle(&mut source);
     let facts = source.security_facts();
     assert_eq!(facts.sessions, None, "never 0 for a list that was not read");
+    assert_eq!(facts.two_factor, Some(true), "what the page's own read said stands");
+    assert_eq!(source.pane_state(Pane::Security), PaneState::Ready);
 }
 
 #[test]
