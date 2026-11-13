@@ -452,6 +452,10 @@ pub use types::RemovedKind;
 #[cfg(all(any(test, feature = "test-support"), target_os = "windows"))]
 pub(crate) use types::engine_remove;
 
+// The native app's open file: the whole file in memory, nothing recorded (`app::viewer_api`).
+mod open_in_memory;
+pub(crate) use open_in_memory::InMemoryOpen;
+
 mod errors;
 use errors::*;
 pub use errors::{
