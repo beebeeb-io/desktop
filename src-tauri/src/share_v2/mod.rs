@@ -41,6 +41,8 @@ pub(crate) mod safety;
 mod safety_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod withdraw_tests;
 
 /// The unlocked session's bearer token, copied into a wiped buffer. Locked: `locked`.
 fn session_token(state: &AppState) -> Answer<Zeroizing<String>> {

@@ -343,24 +343,92 @@ pub(super) async fn drive_link(
     }
 }
 
+/// What one withdrawal's answer says (the rule `safety::send_withdrawal` already keeps: 200 and
+/// 404 are answers, everything else is not). Only a no-answer is worth remembering and retrying:
+/// a refusal is the server's answer and is reported, never queued.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Withdrawal {
+    /// The server answered: gone (2xx), or already gone (404).
+    Answered,
+    /// No answer (5xx, or a transport error): keep a record and retry on the next refresh.
+    Retry,
+    /// The server answered with a refusal (any other status): report it, do not queue it.
+    Refused,
+}
+
+pub(super) fn withdrawal_answer(status: u16) -> Withdrawal {
+    match status {
+        200..=299 | 404 => Withdrawal::Answered,
+        500..=599 => Withdrawal::Retry,
+        _ => Withdrawal::Refused,
+    }
+}
+
+/// The decision for one attempt, transport error included. Shared by the command and the refresh so
+/// there is one rule, never a second reading of a status.
+pub(super) fn withdrawal_outcome(result: &Answer<HttpResponse>) -> Withdrawal {
+    match result {
+        Ok(resp) => withdrawal_answer(resp.status),
+        Err(_) => Withdrawal::Retry,
+    }
+}
+
+/// Remember a cancellation the server did not answer, so the next share-list refresh retries it.
+/// A record that cannot be written is logged: the person still hears the failure, and a revocation
+/// is never reported as gone.
+pub(super) fn note_withdrawal_pending(db: Option<&crate::state_db::StateDb>, account: Option<&str>, invite: &str) {
+    let written = db
+        .zip(account)
+        .is_some_and(|(db, account)| db.set_share_withdraw_pending(account, invite).is_ok());
+    if !written {
+        tracing::warn!("share: the pending withdrawal was not recorded; the invite may still stand");
+    }
+}
+
+/// The server answered: drop the record. A row that cannot be cleared is logged; the next refresh
+/// clears it with the same answer.
+pub(super) fn clear_withdrawal_pending(db: Option<&crate::state_db::StateDb>, account: Option<&str>, invite: &str) {
+    if db
+        .zip(account)
+        .is_some_and(|(db, account)| db.clear_share_withdraw_pending(account, invite).is_err())
+    {
+        tracing::warn!("share: the answered withdrawal record was not cleared");
+    }
+}
+
 /// Stop sharing: one person (`member_id`, the invite id: the server's `DELETE /shares/invites/{id}`
 /// takes the invite id) or, with none, every live link of the item (a folder's folder links too)
 /// and every invite the owner sent for it.
+///
+/// An invite cancellation the server does not answer (transport error or 5xx) is recorded in the
+/// state DB and retried on the next `share_list`; the command still answers its honest failure, so
+/// a dropped revocation never pretends the invite is gone.
 #[tauri::command]
 pub(crate) async fn share_revoke(state: State<'_, AppState>, item_id: String, member_id: Option<String>) -> Answer<()> {
     let id = self::item_id(&item_id)?;
     let u = unlocked(&state)?;
     let client = transport::client()?;
-    let mut requests = Vec::new();
+    let mut requests: Vec<(Option<String>, HttpRequest)> = Vec::new();
     match member_id {
-        Some(member) => requests.push(sf::cancel_invite_request(&self::item_id(&member)?).map_err(flow_reason)?),
+        Some(member) => {
+            let invite = self::item_id(&member)?;
+            requests.push((
+                Some(invite.clone()),
+                sf::cancel_invite_request(&invite).map_err(flow_reason)?,
+            ));
+        }
         None => {
             if is_folder(&id)? {
-                requests.extend(super::folder_flows::folder_link_revokes(&client, &u, &id).await?);
+                requests.extend(
+                    super::folder_flows::folder_link_revokes(&client, &u, &id)
+                        .await?
+                        .into_iter()
+                        .map(|req| (None, req)),
+                );
             }
             for share in my_links(&client, &u, &id).await? {
                 let sid = share.get("id").and_then(Value::as_str).unwrap_or_default();
-                requests.push(sf::revoke_link_request(sid).map_err(flow_reason)?);
+                requests.push((None, sf::revoke_link_request(sid).map_err(flow_reason)?));
             }
             let sent = send(&client, &u, get(super::reads::SENT.into())).await?;
             if !sent.ok() {
@@ -369,14 +437,44 @@ pub(crate) async fn share_revoke(state: State<'_, AppState>, item_id: String, me
             for invite in list(&sent.body, "invites").filter(|i| i.get("file_id").and_then(Value::as_str) == Some(&id))
             {
                 let iid = invite.get("id").and_then(Value::as_str).unwrap_or_default();
-                requests.push(sf::cancel_invite_request(iid).map_err(flow_reason)?);
+                requests.push((
+                    Some(iid.to_owned()),
+                    sf::cancel_invite_request(iid).map_err(flow_reason)?,
+                ));
             }
         }
     }
-    for req in requests {
-        let resp = send(&client, &u, req).await?;
-        if !resp.ok() && resp.status != 404 {
-            return Err(flow_reason(ShareFlowError::from_status(&resp)));
+    // Only an invite cancellation can be retried later; a link revoke has no record to keep.
+    let needs_record = requests.iter().any(|(invite, _)| invite.is_some());
+    let own = if needs_record {
+        super::safety::own_id(&u).await.ok()
+    } else {
+        None
+    };
+    let db = if needs_record { state_db().ok() } else { None };
+    for (invite, req) in requests {
+        let result = send(&client, &u, req).await;
+        match withdrawal_outcome(&result) {
+            Withdrawal::Answered => {
+                if let Some(invite) = invite.as_deref() {
+                    clear_withdrawal_pending(db.as_ref(), own.as_deref(), invite);
+                }
+            }
+            Withdrawal::Retry => {
+                if let Some(invite) = invite.as_deref() {
+                    note_withdrawal_pending(db.as_ref(), own.as_deref(), invite);
+                }
+                return Err(match &result {
+                    Ok(resp) => flow_reason(ShareFlowError::from_status(resp)),
+                    Err(e) => e.clone(),
+                });
+            }
+            Withdrawal::Refused => {
+                return Err(match &result {
+                    Ok(resp) => flow_reason(ShareFlowError::from_status(resp)),
+                    Err(_) => "failed".into(),
+                });
+            }
         }
     }
     Ok(())

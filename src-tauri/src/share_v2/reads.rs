@@ -6,15 +6,18 @@
 //! link's expiry or passphrase) and `file_request_remove` (no server route). The safety number, the
 //! "compared" mark and the access PATCH through core are B05e (`super::safety`).
 use base64::Engine as _;
-use beebeeb_core::auth_flow::{HttpRequest, Method};
-use beebeeb_core::share_flow::{ShareFlowError, request::FILE_REQUESTS_PATH};
+use beebeeb_core::auth_flow::{HttpRequest, HttpResponse, Method};
+use beebeeb_core::share_flow::{self as sf, ShareFlowError, request::FILE_REQUESTS_PATH};
 use serde_json::{Value, json};
 use tauri::State;
 
-use super::flows::{Unlocked, flow_reason, get, item_id, list, send, state_db, unlocked};
+use super::flows::{
+    Unlocked, Withdrawal, flow_reason, get, item_id, list, send, state_db, unlocked, withdrawal_answer,
+};
 use super::{Answer, NOT_YET, ShareLists};
 use crate::AppState;
 use crate::auth_v2::transport;
+use crate::state_db::StateDb;
 
 const INCOMING: &str = "/api/v1/shares/invites/incoming";
 pub(super) const SENT: &str = "/api/v1/shares/invites/sent";
@@ -132,9 +135,45 @@ async fn act(u: &Unlocked, req: HttpRequest) -> Answer<()> {
     }
 }
 
+/// Retry every pending cancellation once, before the lists are fetched (task 2440 item 4). The
+/// server's answer (2xx/404) drops the record; anything else keeps it for the next refresh. This
+/// never fails the list: a retry that cannot be sent, or that gets no answer, is simply kept.
+pub(super) async fn retry_pending_withdrawals<F, Fut>(db: &StateDb, own: &str, mut send: F)
+where
+    F: FnMut(HttpRequest) -> Fut,
+    Fut: std::future::Future<Output = Answer<HttpResponse>>,
+{
+    let pending = match db.share_withdraw_pending(own) {
+        Ok(pending) => pending,
+        Err(_) => return,
+    };
+    for invite in pending {
+        let req = match item_id(&invite).and_then(|id| sf::cancel_invite_request(&id).map_err(flow_reason)) {
+            Ok(req) => req,
+            Err(_) => {
+                // A record that is not a canonical invite id can never be sent: drop it.
+                let _ = db.clear_share_withdraw_pending(own, &invite);
+                continue;
+            }
+        };
+        let answer = match send(req).await {
+            Ok(resp) => withdrawal_answer(resp.status),
+            Err(_) => Withdrawal::Retry,
+        };
+        if answer == Withdrawal::Answered {
+            let _ = db.clear_share_withdraw_pending(own, &invite);
+        }
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn share_list(state: State<'_, AppState>) -> Answer<ShareLists> {
     let u = unlocked(&state)?;
+    if let (Ok(own), Ok(db)) = (super::safety::own_id(&u).await, state_db()) {
+        if let Ok(client) = transport::client() {
+            retry_pending_withdrawals(&db, &own, |req| send(&client, &u, req)).await;
+        }
+    }
     let (incoming, sent, mine, requests) = (
         fetch(&u, INCOMING).await?,
         fetch(&u, SENT).await?,

@@ -236,6 +236,9 @@ const OFFERED: &str = "share_offered";
 /// DW-0515 over People, "Share anyway": the fingerprint (hex) of the sealed key the person accepted
 /// for THIS share. The person's mark is left as it was, so later seals stay guarded.
 const ACCEPTED: &str = "share_accepted";
+/// A cancellation the server never answered (task 2440 item 4): `share_withdraw_pending:{account}:{invite}`,
+/// value empty. Retried once per share-list refresh until the server answers.
+const WITHDRAW_PENDING: &str = "share_withdraw_pending";
 
 impl StateDb {
     fn share_key_get(&self, kind: &str, account_id: &str, invite_id: &str) -> Result<Option<String>> {
@@ -280,6 +283,40 @@ impl StateDb {
 
     pub fn share_accepted_fingerprint(&self, account_id: &str, invite_id: &str) -> Result<Option<String>> {
         self.share_key_get(ACCEPTED, account_id, invite_id)
+    }
+
+    /// A withdrawal the server never answered (task 2440 item 4): the key is the whole record and
+    /// the value is empty. It survives a restart and is keyed by account, so the next share-list
+    /// refresh of that account retries exactly its own cancellations.
+    pub fn set_share_withdraw_pending(&self, account_id: &str, invite_id: &str) -> Result<()> {
+        self.share_key_set(WITHDRAW_PENDING, account_id, invite_id, Some(""))
+    }
+
+    /// The server answered for this invite (gone, or already gone): the record has done its job.
+    pub fn clear_share_withdraw_pending(&self, account_id: &str, invite_id: &str) -> Result<()> {
+        self.share_key_set(WITHDRAW_PENDING, account_id, invite_id, None)
+    }
+
+    /// Every invite id waiting for an answer in this account, in key order. A row that is not under
+    /// this account's exact prefix is not ours; an empty invite id is never a record.
+    pub fn share_withdraw_pending(&self, account_id: &str) -> Result<Vec<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let prefix = format!("{WITHDRAW_PENDING}:{account_id}:");
+        let mut stmt = conn.prepare("SELECT key FROM sync_state WHERE key LIKE ?1 ORDER BY key")?;
+        let rows = stmt.query_map(params![format!("{prefix}%")], |row| row.get::<_, String>(0))?;
+        let mut invites = Vec::new();
+        for row in rows {
+            let key = row?;
+            if let Some(invite) = key.strip_prefix(&prefix).filter(|invite| !invite.is_empty()) {
+                invites.push(invite.to_owned());
+            }
+        }
+        Ok(invites)
+    }
+
+    /// Test hook: whether one cancellation waits for an answer.
+    pub fn is_share_withdraw_pending(&self, account_id: &str, invite_id: &str) -> Result<bool> {
+        Ok(self.share_key_get(WITHDRAW_PENDING, account_id, invite_id)?.is_some())
     }
 
     pub fn set_share_accepted_fingerprint(
