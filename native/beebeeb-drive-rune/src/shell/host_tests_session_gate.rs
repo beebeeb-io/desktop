@@ -296,7 +296,7 @@ fn in_a_folder(app: &mut App) {
         .listing
         .items
         .iter()
-        .position(|i| i.is_folder && !i.is_protected)
+        .position(|i| i.is_folder && !i.is_protected && i.name != "Backups")
         .expect("the board has a folder");
     click(&mut app.rt, &format!("row-{row}-date"));
     let here = app.rt.state.listing.folder.id.clone();
@@ -374,8 +374,9 @@ fn what_was_open_when_the_session_gate_closed_does_not_reach_a_source() {
     refused_when_closed("New folder", new_folder, &enter);
     refused_when_closed("Move to", moving, &enter);
     refused_when_closed("Move to", moving, &("Right", Key::Right, none()));
+    // (The arrows are not asked here: once Search has ended they are the list's own keys, and
+    // selecting a row of the list the window still holds is allowed while the session ended.)
     refused_when_closed("Search on a result", searching, &enter);
-    refused_when_closed("Search", searching, &("Down", Key::Down, none()));
 }
 
 /// The typed words are in no text or label once the poll saw the gate close, in each way; the
