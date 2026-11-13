@@ -3,11 +3,14 @@
 # locale, no region and no display-language change. The first language and the default input method stay as
 # they are. Run it inside the desktop session whose input it changes:
 #
-#   powershell -NoProfile -File $env:BB_RUN_IN_DESKTOP -Script win\ime-japanese.ps1            # status (default)
-#   $env:IME_JAPANESE = 'add'    ; ... -Script win\ime-japanese.ps1
-#   $env:IME_JAPANESE = 'remove' ; ... -Script win\ime-japanese.ps1                             # the revert
+#   powershell -NoProfile -File $env:BB_RUN_IN_DESKTOP -Script win\ime-japanese.ps1           # status, changes nothing
+#   powershell -NoProfile -File $env:BB_RUN_IN_DESKTOP -Script win\ime-japanese-add.ps1
+#   powershell -NoProfile -File $env:BB_RUN_IN_DESKTOP -Script win\ime-japanese-remove.ps1    # the revert
+#
+# (The desktop-session runner passes a script no arguments and no environment: hence the two one-line wrappers.)
+param([ValidateSet('status', 'add', 'remove')][string]$Action = 'status')
 $ErrorActionPreference = 'Stop'
-$action = if ($env:IME_JAPANESE) { $env:IME_JAPANESE } else { 'status' }
+$action = $Action
 function Show([string]$When) {
   [Console]::Out.WriteLine("$When language list:")
   $now = Get-WinUserLanguageList   # a List: held in a variable first, so that foreach walks its items
@@ -32,5 +35,4 @@ switch ($action) {
     }
   }
   'status' { }
-  default { throw "IME_JAPANESE must be add, remove or status, not '$action'" }
 }
