@@ -246,8 +246,8 @@ async fn a_save_sends_a_parent_only_when_it_moved_the_file() {
     );
     assert_eq!(
         patched_parents(&state, "89ea34e4-1bd4-5c43-87a5-3479bccfadfa"),
-        vec![None, Some(serde_json::Value::Null)],
-        "no parent for the save in place; null for the move to the top level"
+        vec![Some(serde_json::Value::Null)],
+        "no metadata update for the save in place (the name travels with `complete`); null for the move to the top level"
     );
 }
 

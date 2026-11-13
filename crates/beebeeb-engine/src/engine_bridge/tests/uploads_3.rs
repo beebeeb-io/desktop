@@ -274,11 +274,15 @@ pub(super) enum ResumeMockMode {
     HangOnceThenSessionGone,
     /// Nothing hangs: every session accepts every chunk.
     Plain,
+    /// Nothing hangs. The first `complete` completes the upload and loses its answer (500); every
+    /// later one answers as the server's idempotent repeat does (`already_completed`, no name).
+    CompleteLostOnce,
 }
 
 struct ResumeMockState {
     inits: usize,
     hung: bool,
+    completed: bool,
 }
 
 impl ResumableUploadMock {
@@ -287,7 +291,11 @@ impl ResumableUploadMock {
         listener.set_nonblocking(true).unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let state = Arc::new(Mutex::new(ResumeMockState { inits: 0, hung: false }));
+        let state = Arc::new(Mutex::new(ResumeMockState {
+            inits: 0,
+            hung: false,
+            completed: false,
+        }));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let server_requests = Arc::clone(&requests);
         let server_stop = Arc::clone(&stop);
@@ -391,7 +399,10 @@ fn resumable_mock_response(
         }
         if method == "PUT" && action == "chunks" {
             let index: u32 = parts.next().unwrap_or("0").parse().unwrap();
-            if index == 1 && session == "session-1" && mode != ResumeMockMode::Plain {
+            if index == 1
+                && session == "session-1"
+                && matches!(mode, ResumeMockMode::HangOnce | ResumeMockMode::HangOnceThenSessionGone)
+            {
                 let mut s = state.lock().unwrap();
                 if !s.hung {
                     s.hung = true;
@@ -406,6 +417,26 @@ fn resumable_mock_response(
                 http_json(
                     "200 OK",
                     serde_json::json!({ "index": index, "size": request.body.len() as i64, "skipped": false }),
+                ),
+            );
+        }
+        if method == "POST" && action == "complete" && mode == ResumeMockMode::CompleteLostOnce {
+            let mut s = state.lock().unwrap();
+            if !s.completed {
+                s.completed = true;
+                return (
+                    None,
+                    http_json(
+                        "500 Internal Server Error",
+                        serde_json::json!({ "error": "reply lost" }),
+                    ),
+                );
+            }
+            return (
+                None,
+                http_json(
+                    "200 OK",
+                    serde_json::json!({ "id": "completed-file", "status": "completed", "already_completed": true }),
                 ),
             );
         }
@@ -845,7 +876,22 @@ async fn l13_a_replace_whose_init_echoes_another_id_aborts() {
     );
     assert!(bridge.db.get_upload_resume("op-l13").unwrap().is_none());
     let requests = server.finish();
-    assert_eq!(requests.len(), 1, "only the init may be sent: {:?}", requests);
+    // A replacement reads the row first (its current record, as the server holds it), then inits.
+    assert_eq!(
+        requests
+            .iter()
+            .map(|r| (
+                r.method.as_str(),
+                r.path.split('/').take(4).collect::<Vec<_>>().join("/")
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("GET", "/api/v1/files".to_string()),
+            ("POST", "/api/v1/uploads".to_string())
+        ],
+        "after the read of the row, only the init may be sent: {:?}",
+        requests
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -91,20 +91,16 @@ impl EngineBridge {
             .map_err(|e| failed(e.into()))?;
         let record = recorded_content_format(&name_key, &meta).map_err(|e| failed(e.into()))?;
         // The record is the CURRENT version's. A session that continues the placeholder's older minted
-        // version reads that version's frames, so it is committed to the version id the earlier session
-        // authenticated and recorded for this placeholder (I3, I4), never to the current one's (whose
-        // frame 0 the older version does not have). The counter binds no frame; the current one is kept.
-        let version = match (
+        // version reads that version's frames, so it is never committed to the current one's version id
+        // (whose frame 0 the older version does not have): it takes the id the earlier session
+        // authenticated and recorded for this placeholder (I3, I4), and none when none was recorded
+        // (the minted version is v1). The counter binds no frame; the current one is kept.
+        let version = crate::cf_range::session_commitment(
             continues_minted,
             record.version,
             recorded.as_ref().and_then(|r| r.version_id),
-        ) {
-            (true, Some(current), Some(minted_id)) => Some(
-                beebeeb_core::chunk_stream::VersionCommitment::new(minted_id, current.counter)
-                    .map_err(|e| failed(e.into()))?,
-            ),
-            _ => record.version,
-        };
+        )
+        .map_err(|e| failed(e.into()))?;
         let config = crate::config::DesktopConfig::load_for(self.identity).ok();
         let kbps_limit = config.as_ref().map(|c| c.download_kbps_limit).unwrap_or(0);
         let transport = self.download_transport(config.as_ref().and_then(|c| c.transport.as_deref()));

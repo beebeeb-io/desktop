@@ -117,6 +117,10 @@ pub const STALE_BASE_MESSAGE: &str = "stale base version for replacement upload"
 
 pub const IN_PROGRESS_MESSAGE: &str = "upload is already in progress for this file";
 
+/// The server's code when `complete` carries a completion name and the file was renamed since the
+/// session's init (server `routes/uploads/complete.rs`).
+pub const FILE_CHANGED_DURING_UPLOAD: &str = "file_changed_during_upload";
+
 /// Why `init` answered 409 (spec §8.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitConflictClass {
@@ -196,6 +200,11 @@ impl UploadRefusalCode {
 #[derive(Debug)]
 pub struct UploadRefused {
     pub code: Option<UploadRefusalCode>,
+    /// `complete` answered `409 {"error": "file_changed_during_upload"}`: the file's name changed
+    /// between this session's init and its `complete` (a rename elsewhere), so the completion name
+    /// sealed for the old one is refused. The session is over; the upload starts again from the
+    /// row as it is now.
+    pub file_changed: bool,
     pub(super) status_error: reqwest::Error,
 }
 
@@ -225,11 +234,15 @@ pub(super) async fn upload_response(resp: reqwest::Response) -> ApiResult<reqwes
         return Ok(resp);
     };
     let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
-    let code = body
-        .get("error")
-        .and_then(|value| value.as_str())
-        .and_then(UploadRefusalCode::from_code);
-    Err(DesktopApiError::UploadRefused(UploadRefused { code, status_error }))
+    let error = body.get("error").and_then(|value| value.as_str());
+    let code = error.and_then(UploadRefusalCode::from_code);
+    let file_changed =
+        status_error.status() == Some(reqwest::StatusCode::CONFLICT) && error == Some(FILE_CHANGED_DURING_UPLOAD);
+    Err(DesktopApiError::UploadRefused(UploadRefused {
+        code,
+        file_changed,
+        status_error,
+    }))
 }
 
 /// LD-0113 (spec §5.3): a change the server refused because its item is a protected folder (the

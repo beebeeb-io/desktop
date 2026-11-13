@@ -202,19 +202,19 @@ async fn a_v1_file_is_still_read_and_its_next_version_is_v2_under_the_kept_pin()
 /// `complete` committed on the server and its answer was lost. The retry finds every chunk
 /// acknowledged and sends `complete` again with the name it stored before the first chunk: no second
 /// init, no chunk sent twice, and never an abandon (which would be aimed at a version that is now
-/// the file's current one). The repeat's answer names nothing, so the name is published by a
-/// metadata update before the upload lands.
-/// Mutant: a retry that restarts whenever a session row exists (a second init, an abandon).
+/// the file's current one). The repeat's answer names nothing, so the row is read: it holds this
+/// upload's name, and nothing is written.
+/// Mutants: a retry that restarts whenever a session row exists (a second init, an abandon); a
+/// repeat that writes its stored name whatever the row holds (a metadata update).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lost_complete_answer_is_completed_again_and_never_abandoned() {
     let master_key = [174u8; 32];
     let (dir, sync_root, server, bridge) = rule3_setup(master_key);
-    server
-        .state
-        .lock()
-        .unwrap()
-        .complete_reply_lost_once
-        .insert("session-1".into());
+    {
+        let mut state = server.state.lock().unwrap();
+        state.serve_downloads = true;
+        state.complete_reply_lost_once.insert("session-1".into());
+    }
     let bytes = b"completed on the server, answer lost on the way";
     let id = created(&bridge, &server, dir.path(), &sync_root, bytes).await;
 
@@ -247,20 +247,265 @@ async fn a_lost_complete_answer_is_completed_again_and_never_abandoned() {
     );
     assert_eq!(state.files[&id].versions.len(), 1, "one version, not two");
     assert_eq!(state.latest_plaintext(&id, master_key), bytes);
-    // The repeat answered `already_completed` with no name, so the stored completion name went
-    // out as a metadata update: exactly the name the server already holds from the first complete.
-    let published: Vec<&serde_json::Value> = state
+    assert_eq!(
+        count("GET", &format!("/api/v1/files/{id}")),
+        1,
+        "the row is read once, after the repeat"
+    );
+    assert!(
+        state
+            .patches
+            .iter()
+            .all(|(_, body)| body.get("name_encrypted").is_none()),
+        "the row already holds the name: {:?}",
+        state.patches
+    );
+    assert_eq!(bridge.db.highest_file_version(&id).unwrap(), Some(1));
+    assert_eq!(
+        bridge.db.published_name(&id).unwrap().as_deref(),
+        Some(state.authenticated_names[&id].as_str()),
+        "the name the server holds is remembered"
+    );
+}
+
+/// The decision after `complete`, as pure rules. A fresh answer naming what was sent: held. A fresh
+/// answer naming another name (a server that ignored the completion name): this upload's commitment
+/// is written onto THAT name. A repeat is decided from the row as it is now: another object version,
+/// or another upload's commitment under a counter not below this one's, and nothing is written.
+/// Mutant: a repeat that always writes the stored name (it would put an old commitment over a newer
+/// version, whose content then opens nowhere).
+#[test]
+fn a_repeated_complete_never_writes_over_a_newer_version() {
+    use upload_v2::{PublishStep, after_fresh_complete, after_repeated_complete};
+    let master = [179u8; 32];
+    let id = "7c4e9a10-2b6d-4f3a-9d21-5e8f0a1b2c3d";
+    let key = key_of(master, id);
+    let seal = |name: &str, tag: u8, counter: u64| {
+        ContentRecord::pin_only(beebeeb_core::chunk_stream::ExpectedChunkFormat::V2)
+            .seal_name_for_version(
+                &key,
+                name,
+                Some("text/plain"),
+                beebeeb_core::chunk_stream::VersionCommitment::new([tag; 12], counter).unwrap(),
+            )
+            .unwrap()
+    };
+    let opened = |sealed: &str| {
+        let opened = beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, sealed).unwrap();
+        (opened.name.clone(), opened.version.map(|v| (v.version_id, v.counter)))
+    };
+    let unprotected = |name: &str| ContentRecord::UNRECORDED.seal_name(&key, name, None).unwrap();
+    let sent = seal("notes.txt", 2, 2);
+    let row = |object: &str, name: &str| serde_json::json!({ "name_encrypted": name, "download_version": { "object_version_id": object } });
+
+    // Fresh answers.
+    assert_eq!(
+        after_fresh_complete(&key, &sent, &sent),
+        PublishStep::Held(sent.clone())
+    );
+    let PublishStep::Write(written) = after_fresh_complete(&key, &sent, &unprotected("renamed elsewhere.txt")) else {
+        panic!("a server that ignored the completion name gets the commitment written");
+    };
+    assert_eq!(
+        opened(&written),
+        ("renamed elsewhere.txt".to_string(), Some(([2; 12], 2)))
+    );
+
+    // Repeats, from the row.
+    assert_eq!(
+        after_repeated_complete(&key, &sent, "object-ours", &row("object-ours", &sent)),
+        PublishStep::Held(sent.clone())
+    );
+    // Renamed since, on a server that carried the commitment: held under the new name.
+    let renamed = seal("renamed.txt", 2, 2);
+    assert_eq!(
+        after_repeated_complete(&key, &sent, "object-ours", &row("object-ours", &renamed)),
+        PublishStep::Held(renamed)
+    );
+    // Another upload or a restore followed: the row's object version is not this session's.
+    let newer = seal("notes.txt", 3, 3);
+    assert_eq!(
+        after_repeated_complete(&key, &sent, "object-ours", &row("object-newer", &newer)),
+        PublishStep::Superseded
+    );
+    // The same, on a row that names no object version: the newer commitment decides.
+    assert_eq!(
+        after_repeated_complete(
+            &key,
+            &sent,
+            "object-ours",
+            &serde_json::json!({ "name_encrypted": newer })
+        ),
+        PublishStep::Superseded
+    );
+    // The server took no commitment for this upload (version metadata off): written, onto the
+    // row's current name.
+    for stale in [unprotected("kept name.txt"), seal("kept name.txt", 1, 1)] {
+        let PublishStep::Write(written) =
+            after_repeated_complete(&key, &sent, "object-ours", &row("object-ours", &stale))
+        else {
+            panic!("the commitment must be written");
+        };
+        assert_eq!(opened(&written), ("kept name.txt".to_string(), Some(([2; 12], 2))));
+    }
+}
+
+/// A server without version metadata ignores the completion name. The upload still ends with the
+/// commitment in the file's name (one metadata update, onto the name the server answered with), and
+/// the content reads back.
+/// Mutant: no metadata update after a fresh answer that names another name (the v2 content then
+/// sits under a name with no commitment and opens nowhere).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_that_ignores_the_completion_name_gets_the_commitment_written() {
+    let master_key = [180u8; 32];
+    let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+    {
+        let mut state = server.state.lock().unwrap();
+        state.serve_downloads = true;
+        state.version_metadata_off = true;
+    }
+    let bytes = b"uploaded to a server that keeps no version metadata";
+    let id = created(&bridge, &server, dir.path(), &sync_root, bytes).await;
+
+    let record = record_on_server(&server, master_key, &id);
+    assert_eq!(record.version.map(|version| version.counter), Some(1));
+    assert_eq!(
+        &**bridge.hydrate_file_to_memory_metered(&id, None).await.unwrap().bytes,
+        bytes
+    );
+    let state = server.finish();
+    let named: Vec<&serde_json::Value> = state
         .patches
         .iter()
         .filter(|(file, body)| file == &id && body.get("name_encrypted").is_some())
         .map(|(_, body)| body)
         .collect();
-    assert_eq!(published.len(), 1, "{:?}", state.patches);
     assert_eq!(
-        published[0]["name_encrypted"],
-        serde_json::json!(state.authenticated_names[&id])
+        named.len(),
+        1,
+        "one metadata update carries the commitment: {:?}",
+        state.patches
     );
     assert_eq!(bridge.db.highest_file_version(&id).unwrap(), Some(1));
+}
+
+/// The file was renamed on another device while this one uploaded a new version: `complete` refuses
+/// the completion name sealed for the old name (409 `file_changed_during_upload`). The session is
+/// over: it is abandoned (it just answered, so it is this device's and live), and the next attempt
+/// opens a fresh one. It is never completed again with the same name.
+/// Mutant: without the rule, the row keeps every chunk acknowledged and each retry sends the same
+/// refused `complete` (one init for the replacement, never a second).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_complete_refused_for_a_rename_starts_the_upload_again() {
+    let master_key = [181u8; 32];
+    let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+    server.state.lock().unwrap().serve_downloads = true;
+    let id = created(&bridge, &server, dir.path(), &sync_root, b"version one").await;
+
+    server
+        .state
+        .lock()
+        .unwrap()
+        .renamed_since_init
+        .insert("session-2".into());
+    let second = b"version two, uploaded while the file was renamed elsewhere";
+    fp_save(
+        &bridge,
+        dir.path(),
+        &id,
+        "notes.txt",
+        second,
+        &held_content_version(&bridge, &id),
+    );
+    drain_upload_queue(&bridge, &sync_root).await;
+
+    let state = server.finish();
+    let count = |method: &str, path: &str| state.requests.iter().filter(|(m, p)| m == method && p == path).count();
+    assert_eq!(
+        count("POST", "/api/v1/uploads/init"),
+        3,
+        "the create, the refused session, a fresh one"
+    );
+    assert_eq!(
+        count("POST", "/api/v1/uploads/session-2/complete"),
+        1,
+        "the refused complete is not repeated"
+    );
+    assert_eq!(
+        count("POST", "/api/v1/uploads/session-2/heartbeat"),
+        1,
+        "the session is asked whether it lives"
+    );
+    assert_eq!(
+        count("POST", &format!("/api/v1/files/{id}/upload/abandon")),
+        1,
+        "and, being live and this device's, abandoned"
+    );
+    assert_eq!(count("POST", "/api/v1/uploads/session-3/complete"), 1);
+    assert_eq!(state.files[&id].versions.len(), 2);
+    assert_eq!(state.latest_plaintext(&id, master_key), second);
+}
+
+/// A replacement and a rename are built on the record the SERVER holds, as in core's client: another
+/// device may have published a newer version than this one has seen. Here the row's name carries
+/// counter 5 while this device last published counter 1. The new version's init names the served
+/// name and its commitment takes counter 6; a queued rename is sealed on the served record.
+/// Mutant: the local record alone (the init would name the stale name, and the new counter be 2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_version_and_a_rename_follow_the_record_the_server_holds() {
+    let master_key = [182u8; 32];
+    let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+    server.state.lock().unwrap().serve_downloads = true;
+    let id = created(&bridge, &server, dir.path(), &sync_root, b"version one").await;
+    let key = key_of(master_key, &id);
+    let first = record_on_server(&server, master_key, &id);
+    assert_eq!(first.version.map(|version| version.counter), Some(1));
+
+    // Another device re-published the same version under counter 5 (a restore of it, say).
+    let elsewhere = ContentRecord::pin_only(first.format)
+        .seal_name_for_version(
+            &key,
+            "notes.txt",
+            Some("text/plain"),
+            beebeeb_core::chunk_stream::VersionCommitment::new(first.version.unwrap().version_id, 5).unwrap(),
+        )
+        .unwrap();
+    server
+        .state
+        .lock()
+        .unwrap()
+        .authenticated_names
+        .insert(id.clone(), elsewhere.clone());
+
+    // A rename queued on the local record (counter 1) is sent on the served one.
+    let queued = first.seal_name(&key, "renamed.txt", Some("text/plain")).unwrap();
+    let sent = bridge.queued_name_on_the_served_record(&id, &queued).await.unwrap();
+    let sent = beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, &sent).unwrap();
+    assert_eq!(sent.name, "renamed.txt");
+    assert_eq!(sent.version.map(|version| version.counter), Some(5));
+
+    fp_save(
+        &bridge,
+        dir.path(),
+        &id,
+        "notes.txt",
+        b"version two",
+        &held_content_version(&bridge, &id),
+    );
+    drain_upload_queue(&bridge, &sync_root).await;
+    let second = record_on_server(&server, master_key, &id);
+    assert_eq!(
+        second.version.map(|version| version.counter),
+        Some(6),
+        "above the counter the server held, not above the one this device last wrote"
+    );
+    let state = server.finish();
+    assert_eq!(
+        state.inits[1].0["version_metadata_encrypted"].as_str(),
+        Some(elsewhere.as_str()),
+        "the init names the file's current name as the server holds it"
+    );
+    assert_eq!(state.latest_plaintext(&id, master_key), b"version two");
 }
 
 /// `X-Beebeeb-Capabilities` goes on the requests whose server behaviour it gates, with the value
@@ -346,9 +591,7 @@ async fn the_upload_session_and_the_metadata_update_declare_their_capabilities()
 /// Mutant: sending the queued name unchanged (its record is the old one).
 #[test]
 fn a_queued_name_is_sealed_again_when_the_items_record_moved_on() {
-    let dir = tempfile::tempdir().unwrap();
     let master = [177u8; 32];
-    let bridge = test_bridge(&dir.path().join("state.db"));
     let id = "5b1f7d0e-6a39-4f6e-8a57-2d9b6f0c4e11";
     let key = key_of(master, id);
     let seal = |name: &str, counter: u64| {
@@ -368,30 +611,23 @@ fn a_queued_name_is_sealed_again_when_the_items_record_moved_on() {
     // Version 1 is current when the rename is queued; version 2 lands before it is sent.
     let queued = seal("renamed.txt", 1);
     let published = seal("notes.txt", 2);
-    bridge.db.observe_file_version(id, 2, Some(&published)).unwrap();
+    let current = record_of(&published).0;
 
-    let sent = upload_v2::queued_name_for_sending(&bridge.db, &master, id, &queued);
+    let sent = upload_v2::reseal_queued_name(&key, current, &queued);
     assert_ne!(
         sent, queued,
         "the queued name carries the previous version's commitment"
     );
     let (record, name, mime) = record_of(&sent);
-    assert_eq!(
-        record,
-        record_of(&published).0,
-        "the sent name carries the current record"
-    );
+    assert_eq!(record, current, "the sent name carries the current record");
     assert_eq!((name.as_str(), mime.as_deref()), ("renamed.txt", Some("text/plain")));
 
     // A name queued after the upload landed already carries the current record: sent as queued.
-    let current = record_of(&published).0.seal_name(&key, "again.txt", None).unwrap();
-    assert_eq!(
-        upload_v2::queued_name_for_sending(&bridge.db, &master, id, &current),
-        current
-    );
+    let again = current.seal_name(&key, "again.txt", None).unwrap();
+    assert_eq!(upload_v2::reseal_queued_name(&key, current, &again), again);
     // A name this device cannot open under the item's key is sent as queued, never dropped.
     assert_eq!(
-        upload_v2::queued_name_for_sending(&bridge.db, &master, id, "not a sealed name"),
+        upload_v2::reseal_queued_name(&key, current, "not a sealed name"),
         "not a sealed name"
     );
 }
@@ -531,4 +767,133 @@ fn the_remembered_counter_and_name_only_move_forward() {
         None,
         "a fresh session never completes with the name of the one before it"
     );
+}
+
+/// A replacement's cut session is not continued. Whether it is abandoned on the server depends on
+/// whose upload is in flight for the file: the abandon is keyed by FILE, so it is sent only when the
+/// server just answered that THIS session is live. A session the server reaped is not abandoned: the
+/// file's in-flight upload, if any, is then another device's.
+/// Mutant: an abandon sent without the liveness answer (the reaped half counts one abandon).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replacements_cut_session_is_abandoned_only_while_it_is_live() {
+    for (reaped, abandons) in [(false, 1), (true, 0)] {
+        let master_key = [183u8; 32];
+        let (dir, sync_root, server, bridge) = rule3_setup(master_key);
+        server.state.lock().unwrap().serve_downloads = true;
+        let id = created(&bridge, &server, dir.path(), &sync_root, b"version one").await;
+
+        // The replacement's first chunk fails once: the session row stays, nothing acknowledged.
+        server
+            .state
+            .lock()
+            .unwrap()
+            .fail_first_chunk_once
+            .insert("session-2".into());
+        let second = b"version two";
+        fp_save(
+            &bridge,
+            dir.path(),
+            &id,
+            "notes.txt",
+            second,
+            &held_content_version(&bridge, &id),
+        );
+        bridge.process_due_operations(&sync_root, now_secs()).await.unwrap();
+        assert!(
+            server.state.lock().unwrap().sessions.contains_key("session-2"),
+            "precondition: the cut session is open on the server"
+        );
+        if reaped {
+            // The server's lease sweep took it while this device was away.
+            server.state.lock().unwrap().sessions.remove("session-2");
+        }
+        drain_upload_queue(&bridge, &sync_root).await;
+
+        let state = server.finish();
+        let count = |method: &str, path: &str| state.requests.iter().filter(|(m, p)| m == method && p == path).count();
+        assert_eq!(
+            count("POST", "/api/v1/uploads/session-2/heartbeat"),
+            1,
+            "reaped {reaped}"
+        );
+        assert_eq!(
+            count("POST", &format!("/api/v1/files/{id}/upload/abandon")),
+            abandons,
+            "reaped {reaped}: {:?}",
+            state.requests
+        );
+        assert_eq!(
+            count("POST", "/api/v1/uploads/session-3/complete"),
+            1,
+            "reaped {reaped}"
+        );
+        assert_eq!(
+            count("POST", "/api/v1/uploads/session-2/complete"),
+            0,
+            "never the cut session"
+        );
+        assert_eq!(state.latest_plaintext(&id, master_key), second, "reaped {reaped}");
+    }
+}
+
+/// A restore of a version-protected file publishes its fresh metadata WITH the restore (the
+/// restored version's own id, under a counter above every one in sight) and sends nothing after it,
+/// as core's client does: each restore mints a version, so no later request may fail the op and run
+/// it again.
+/// Mutant: a metadata update after the restore (one more request, whose failure restores twice).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restore_sends_its_metadata_with_the_restore_and_nothing_after() {
+    let master_key = [184u8; 32];
+    let file = "9a3f1c52-7e0b-4d86-b1a4-6c2e8f0d4b17";
+    let (_dir, sync_root, server, bridge) = rule3_setup(master_key);
+    seed_uploaded_row(&bridge, &server, file);
+    protect_seeded_row(&bridge, &server, file, "object-kept");
+    // A second version, by another device: the row's name carries its commitment (counter 2).
+    let key = key_of(master_key, file);
+    let second = ContentRecord::pin_only(beebeeb_core::chunk_stream::ExpectedChunkFormat::V2)
+        .seal_name_for_version(
+            &key,
+            "renamed since.txt",
+            Some("text/plain"),
+            beebeeb_core::chunk_stream::VersionCommitment::new([2; 12], 2).unwrap(),
+        )
+        .unwrap();
+    {
+        let mut state = server.state.lock().unwrap();
+        state.files.get_mut(file).unwrap().versions.push(Vec::new());
+        state.version_metadata.insert((file.into(), 2), second.clone());
+        state.authenticated_names.insert(file.into(), second);
+    }
+
+    bridge.queue_restore_version(file, "object-kept-v1", None).unwrap();
+    drain_upload_queue(&bridge, &sync_root).await;
+
+    let restored = record_on_server(&server, master_key, file);
+    let state = server.finish();
+    assert_eq!(
+        state.restores,
+        vec![(file.to_string(), "object-kept-v1".to_string())],
+        "one restore"
+    );
+    assert_eq!(
+        restored.version.map(|version| (version.version_id, version.counter)),
+        Some(([1; 12], 3)),
+        "version 1's own id, above the counter of version 2"
+    );
+    let name = beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, &state.authenticated_names[file]).unwrap();
+    assert_eq!(name.name, "renamed since.txt", "the file keeps its current name");
+    let after_restore: Vec<&(String, String)> = state
+        .requests
+        .iter()
+        .skip_while(|(_, path)| !path.ends_with("/restore"))
+        .skip(1)
+        .filter(|(method, _)| method != "GET")
+        .collect();
+    assert!(
+        after_restore.is_empty(),
+        "nothing is written after the restore: {after_restore:?}"
+    );
+    assert!(state.patches.is_empty(), "{:?}", state.patches);
+    assert_eq!(bridge.db.highest_file_version(file).unwrap(), Some(3));
+    assert!(bridge.db.list_due_operations(i64::MAX).unwrap().is_empty());
 }

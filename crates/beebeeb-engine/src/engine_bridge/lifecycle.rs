@@ -714,11 +714,12 @@ impl EngineBridge {
                     )
                     .await?;
                 }
-                // The queued name, sealed again when the item's record moved on since it was queued
-                // (`upload_v2::queued_name_for_sending`).
-                let name = metadata["name_encrypted"]
-                    .as_str()
-                    .map(|queued| upload_v2::queued_name_for_sending(&self.db, self.api.master_key(), file_id, queued));
+                // The queued name, sealed again when the item's record moved on since it was queued:
+                // on the record the server holds now, which another device may have moved.
+                let name = match metadata["name_encrypted"].as_str() {
+                    Some(queued) => Some(self.queued_name_on_the_served_record(file_id, queued).await?),
+                    None => None,
+                };
                 let name = name.as_deref();
                 // Spec §7.2 (final review): a rename leaves the parent alone; a move names its
                 // target, the top level (no parent) included.

@@ -57,10 +57,13 @@ pub(super) fn versioned_server_answer(request: &RecordedRequest, s: &mut Version
         s.next_session += 1;
         let session = format!("session-{}", s.next_session);
         s.sessions.insert(session.clone(), (file_id.clone(), Vec::new()));
+        // As on the server: the session's object version is the one `complete` makes current, and
+        // the one the file's row then names (`download_version.object_version_id`).
+        let next_version = s.files.get(&file_id).map_or(0, |file| file.versions.len()) + 1;
         let response = serde_json::json!({
             "file_id": file_id,
             "tenant_id": "tenant-1",
-            "object_version_id": format!("object-init-{}", s.next_session),
+            "object_version_id": mock_object_version_id(&file_id, next_version),
             "upload_session_id": session,
             "chunk_size_bytes": body["chunk_size_bytes"],
             "chunk_count": body["chunk_count"],
@@ -89,6 +92,15 @@ pub(super) fn versioned_server_answer(request: &RecordedRequest, s: &mut Version
         let chunks = file.versions.get(index).cloned().unwrap_or_default();
         file.versions.push(chunks);
         let version = file.versions.len();
+        // With version metadata on, the restore's name becomes the file's name and the new
+        // version's metadata in the same step.
+        if let Some(name) = serde_json::from_slice::<serde_json::Value>(&request.body)
+            .ok()
+            .and_then(|body| body["name_encrypted"].as_str().map(str::to_string))
+        {
+            s.authenticated_names.insert(file_id.clone(), name.clone());
+            s.version_metadata.insert((file_id.clone(), version), name);
+        }
         s.restores.push((file_id.clone(), object));
         return http_json(
             "200 OK",
@@ -99,6 +111,30 @@ pub(super) fn versioned_server_answer(request: &RecordedRequest, s: &mut Version
             }),
         );
     }
+    // `GET /files/{id}/versions`: every version, newest first, with the metadata it was made with.
+    if method == "GET"
+        && let Some(id) = path
+            .strip_prefix("/api/v1/files/")
+            .and_then(|rest| rest.strip_suffix("/versions"))
+        && let Some(file) = s.files.get(id)
+    {
+        let prefix = s
+            .version_id_prefix
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| format!("object-{id}"));
+        let versions: Vec<serde_json::Value> = (1..=file.versions.len())
+            .rev()
+            .map(|n| {
+                serde_json::json!({
+                    "id": format!("{prefix}-v{n}"),
+                    "version_number": n,
+                    "version_metadata_encrypted": s.version_metadata.get(&(id.to_string(), n)),
+                })
+            })
+            .collect();
+        return http_json("200 OK", serde_json::json!({ "file_id": id, "versions": versions }));
+    }
     if method == "DELETE"
         && let Some(id) = path.strip_prefix("/api/v1/files/")
     {
@@ -108,9 +144,25 @@ pub(super) fn versioned_server_answer(request: &RecordedRequest, s: &mut Version
     if method == "PATCH"
         && let Some(id) = path.strip_prefix("/api/v1/files/")
     {
-        let body = serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null);
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null);
+        // A server without version metadata has one name per file: the last one written.
+        if s.version_metadata_off
+            && let Some(name) = body["name_encrypted"].as_str()
+        {
+            s.authenticated_names.insert(id.to_string(), name.to_string());
+        }
         s.patches.push((id.to_string(), body));
         return http_json("200 OK", serde_json::json!({ "ok": true }));
+    }
+    // `POST /files/{id}/upload/abandon`: keyed by FILE, as on the server. Every open session of the
+    // file goes, whoever opened it.
+    if method == "POST"
+        && let Some(id) = path
+            .strip_prefix("/api/v1/files/")
+            .and_then(|rest| rest.strip_suffix("/upload/abandon"))
+    {
+        s.sessions.retain(|_, (file_id, _)| file_id != id);
+        return http_json("200 OK", serde_json::json!({ "id": id, "status": "abandoned" }));
     }
     if let Some(rest) = path.strip_prefix("/api/v1/uploads/") {
         let mut parts = rest.split('/');
@@ -141,6 +193,14 @@ pub(super) fn versioned_server_answer(request: &RecordedRequest, s: &mut Version
                 serde_json::json!({ "index": index, "size": request.body.len(), "skipped": false }),
             );
         }
+        // The lease renewal: 200 while the session is open, 404 once it is gone.
+        if method == "POST" && action == "heartbeat" {
+            return if s.sessions.contains_key(&session) {
+                http_json("200 OK", serde_json::json!({ "upload_session_id": session }))
+            } else {
+                http_json("404 Not Found", serde_json::json!({ "error": "no session" }))
+            };
+        }
         if method == "POST" && action == "complete" {
             if s.fail_complete_once.remove(&session) {
                 return http_json("500 Internal Server Error", serde_json::json!({ "error": "boom" }));
@@ -152,6 +212,17 @@ pub(super) fn versioned_server_answer(request: &RecordedRequest, s: &mut Version
                 .cloned()
             {
                 return http_json(status, refusal);
+            }
+            // The server's rule with version metadata on: a completion name is refused when the
+            // file's name is no longer the one the session's init saw (a rename in between).
+            if s.renamed_since_init.remove(&session) {
+                return http_json(
+                    "409 Conflict",
+                    serde_json::json!({
+                        "error": "file_changed_during_upload",
+                        "message": "the file was renamed while this upload was in progress"
+                    }),
+                );
             }
             if let Some(file_id) = s.completed_reply_lost.get(&session).cloned() {
                 return http_json(
@@ -170,9 +241,24 @@ pub(super) fn versioned_server_answer(request: &RecordedRequest, s: &mut Version
             // As the server does with version metadata on: the completion name (the upload's sealed
             // name with its version commitment) becomes the file's name in the same step, and the
             // answer carries the name the file now has.
-            let completed_name = completion_name(request);
+            // Version metadata off: the completion name is ignored, and the answer names the row
+            // as it was (the name of the file's last init when nothing else named it).
+            let completed_name = if s.version_metadata_off {
+                s.authenticated_names.get(&file_id).cloned().or_else(|| {
+                    s.inits
+                        .iter()
+                        .rev()
+                        .find(|(body, _)| body["file_id"].as_str() == Some(file_id.as_str()))
+                        .and_then(|(body, _)| body["file_name"].as_str().map(str::to_string))
+                })
+            } else {
+                completion_name(request)
+            };
             if let Some(name) = completed_name.clone() {
-                s.authenticated_names.insert(file_id.clone(), name);
+                s.authenticated_names.insert(file_id.clone(), name.clone());
+                if !s.version_metadata_off {
+                    s.version_metadata.insert((file_id.clone(), version), name);
+                }
             }
             if s.complete_reply_lost_once.remove(&session) {
                 s.completed_reply_lost.insert(session, file_id);

@@ -195,8 +195,15 @@ impl EngineBridge {
             .backup_api()
             .complete_upload_session(&upload.upload_session_id, Some(&completion_name))
             .await?;
-        self.publish_completion_name(self.backup_api(), &id, &name_key, &completion_name, &completed)
-            .await?;
+        self.publish_completion_name(
+            self.backup_api(),
+            &id,
+            &name_key,
+            &completion_name,
+            &upload.object_version_id,
+            &completed,
+        )
+        .await?;
         tracing::info!(file_id = %id, bytes = size, "backup: small file written");
         Ok(id)
     }

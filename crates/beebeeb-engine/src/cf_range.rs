@@ -507,6 +507,24 @@ pub fn format_word(format: beebeeb_core::chunk_stream::ChunkFormat) -> &'static 
     }
 }
 
+/// The commitment a range session opens its frames against (chunk format v2). A session that reads
+/// the file's current version takes the current record's. One that continues the placeholder's older
+/// minted version never does: it takes the version id recorded for that version (under the current
+/// counter, which binds no frame), and none when none was recorded, so a v1 version's frames are
+/// opened as v1 and never against the current version's commitment.
+pub fn session_commitment(
+    continues_minted: bool,
+    current: Option<beebeeb_core::chunk_stream::VersionCommitment>,
+    minted_version_id: Option<[u8; beebeeb_core::chunk_stream::VERSION_ID_LEN]>,
+) -> Result<Option<beebeeb_core::chunk_stream::VersionCommitment>, beebeeb_core::CoreError> {
+    if !continues_minted {
+        return Ok(current);
+    }
+    minted_version_id
+        .map(|id| beebeeb_core::chunk_stream::VersionCommitment::new(id, current.map_or(1, |current| current.counter)))
+        .transpose()
+}
+
 /// The identity a range session compares with (`RangeRequest::recorded`), from what state.db holds.
 /// A record whose format word or version id cannot be read is no identity (so bytes on disk are a
 /// mismatch: never trusted).
@@ -1009,6 +1027,9 @@ pub fn file_streams(recorded_version: bool, forced_api: bool, direct_offered: bo
     recorded_version && !forced_api && direct_offered
 }
 
+#[cfg(test)]
+#[path = "cf_range_commitment_tests.rs"]
+mod commitment_tests;
 #[cfg(test)]
 #[path = "cf_range_tests.rs"]
 mod tests;

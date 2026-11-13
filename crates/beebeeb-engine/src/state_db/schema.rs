@@ -627,6 +627,8 @@ impl StateDb {
                  updated_at INTEGER NOT NULL DEFAULT 0
              );",
         )?;
+        // Chunk format v2: as `upload_resume.completion_name_encrypted`, for a backup's session.
+        ensure_column(conn, "backup_upload_resume", "completion_name_encrypted", "TEXT")?;
         // LD-0113 Task D4: where this account's backup lives on the server (resolved once, then cached), the
         // category folders it created or adopted, and the backups that were turned off with why (rule 11).
         conn.execute_batch(

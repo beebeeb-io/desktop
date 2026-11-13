@@ -189,6 +189,18 @@ pub(super) struct VersionedServerState {
     pub(super) serve_downloads: bool,
     /// The metadata names no `download_version` (a legacy file, an older server).
     pub(super) legacy_downloads: bool,
+    /// The server runs without version metadata (`BB_VERSION_METADATA` off): `complete` ignores the
+    /// completion name and answers with the row's name as it was.
+    pub(super) version_metadata_off: bool,
+    /// Sessions whose next `complete` is refused with `409 file_changed_during_upload`, once; the
+    /// session stays open.
+    pub(super) renamed_since_init: HashSet<String>,
+    /// (file id, version number) -> that version's metadata (`version_metadata_encrypted`): the
+    /// completion name of the upload, or the name of the restore, that made it.
+    pub(super) version_metadata: HashMap<(String, usize), String>,
+    /// file id -> the prefix of its object version ids in `GET /files/{id}/versions`
+    /// (`{prefix}-v{n}`, the form the restore route reads); unset: `object-{file id}`.
+    pub(super) version_id_prefix: HashMap<String, String>,
 }
 
 /// Upload mock that behaves like the server's version check: a replace
@@ -304,7 +316,7 @@ impl VersionedServerState {
 }
 
 /// The UUID the mock names version `n` (1-based) of `file_id` by in a download manifest.
-fn mock_object_version_id(file_id: &str, n: usize) -> String {
+pub(super) fn mock_object_version_id(file_id: &str, n: usize) -> String {
     let tag = file_id
         .bytes()
         .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(u32::from(b)));

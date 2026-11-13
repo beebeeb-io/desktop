@@ -206,38 +206,49 @@ impl EngineBridge {
         };
         let writing = beebeeb_core::chunk_stream::chunk_format_for_pin(record.format);
 
-        // A resume continues only onto the same bytes, only in the session this op's item opened, and only where
-        // core's `resume_policy` allows it (spec §4.3). Anything else abandons the old session and the op.
+        // A persisted session and the retry (spec §4.3, chunk format v2). A v2 writer never continues a stream it did
+        // not start (core's `resume_policy` continues only v1 onto v1, and this core writes v2), so a session with
+        // chunks still to send is abandoned with its op and the next pass plans the file again. One the server holds
+        // EVERY chunk of, for the same bytes, with its completion name stored, is completed again and nothing else:
+        // its `complete` may already have been sent, and dropping it would back the file up a second time under a
+        // new id (`upload_v2::resume_step`).
         let resumed = match previous {
             Some(previous) => {
-                let stored = beebeeb_core::chunk_stream::ChunkFormat::from_u8(previous.chunk_format).ok();
-                let continues = beebeeb_core::chunk_stream::resume_policy(stored, writing)
-                    == beebeeb_core::chunk_stream::SessionResume::ContinueSession;
-                let plan_ok = previous.chunk_size_bytes > 0
-                    && previous.chunk_count > 0
-                    && (0..=previous.chunk_count).contains(&previous.acked_chunks);
                 if previous.fingerprint != before {
                     return self
                         .drop_backup(claimed, Some(&previous), BackupDrop::SourceChanged)
                         .await;
                 }
-                if previous.server_file_id != op.file_id || !continues || !plan_ok {
-                    return self
-                        .drop_backup(claimed, Some(&previous), BackupDrop::SessionNotResumable)
-                        .await;
+                let plan_ok = previous.chunk_size_bytes > 0
+                    && previous.chunk_count > 0
+                    && (0..=previous.chunk_count).contains(&previous.acked_chunks);
+                let complete_only = previous.server_file_id == op.file_id
+                    && plan_ok
+                    && upload_v2::resume_step(true, previous.acked_chunks, previous.chunk_count)
+                        == upload_v2::ResumeStep::CompleteOnly;
+                match self.db.backup_upload_completion_name(op_id)? {
+                    Some(name) if complete_only => {
+                        tracing::info!(
+                            op_id = %op_id,
+                            file_id = %op.file_id,
+                            chunk_count = previous.chunk_count,
+                            "backup: the server holds every chunk of the persisted session — completing it"
+                        );
+                        Some((previous, name))
+                    }
+                    _ => {
+                        return self
+                            .drop_backup(claimed, Some(&previous), BackupDrop::SessionNotResumable)
+                            .await;
+                    }
                 }
-                tracing::info!(
-                    op_id = %op_id,
-                    file_id = %op.file_id,
-                    acked_chunks = previous.acked_chunks,
-                    chunk_count = previous.chunk_count,
-                    "backup: resuming persisted upload session"
-                );
-                Some(previous)
             }
             None => None,
         };
-        let was_resumed = resumed.is_some();
+        let (resumed, stored_completion_name) = match resumed {
+            Some((session, name)) => (Some(session), Some(name)),
+            None => (None, None),
+        };
         let session = match resumed {
             Some(session) => session,
             None => {
@@ -292,22 +303,20 @@ impl EngineBridge {
         };
 
         let name_key = beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes());
-        let (progress, completion_name) = match self.send_backup_chunks(&op, &session, file_key, record, source).await {
-            Ok(sent) => sent,
-            Err(error) => {
-                let error = land_error_to_anyhow(error);
-                // A session the server no longer accepts is abandoned; the op starts over next pass.
-                if was_resumed && upload_session_is_gone(&error) && matches!(error_http_status(&error), Some(404 | 410))
-                {
-                    return self
-                        .drop_backup(claimed, Some(&session), BackupDrop::SessionNotResumable)
-                        .await;
+        let (progress, completion_name) = match stored_completion_name {
+            // Every chunk is on the server: nothing is read or sent again.
+            Some(name) => (None, name),
+            None => match self.send_backup_chunks(&op, &session, file_key, record, source).await {
+                Ok((progress, name)) => (Some(progress), name),
+                Err(error) => {
+                    let error = land_error_to_anyhow(error);
+                    // A session the server no longer accepts is abandoned; the retry opens a fresh one.
+                    if upload_session_is_gone(&error) {
+                        self.abandon_backup_session(&session).await?;
+                    }
+                    return Err(error.into());
                 }
-                if upload_session_is_gone(&error) {
-                    self.abandon_backup_session(&session).await?;
-                }
-                return Err(error.into());
-            }
+            },
         };
 
         // Spec §4.3: the fingerprint after the last chunk. Any change abandons the session before `complete`, so the
@@ -325,24 +334,34 @@ impl EngineBridge {
         {
             Ok(completed) => completed,
             Err(error) => {
+                // The remote file was renamed while this version uploaded: the completion name sealed for the old
+                // name is refused. The session and the op go; the next pass plans the file from the row as it is.
+                if upload_file_changed(&error) {
+                    return self
+                        .drop_backup(claimed, Some(&session), BackupDrop::RemoteRefused)
+                        .await;
+                }
                 if upload_session_is_gone(&error) {
                     self.abandon_backup_session(&session).await?;
                 }
                 return Err(error.into());
             }
         };
-        // Recorded only once the server holds the name with the commitment (`publish_completion_name`): without it
-        // the new version opens nowhere. A failure here is the queue's retry; the session is then not resumable
-        // (`resume_policy`), so the op is dropped and the next pass plans the file again.
+        // Recorded only once the server holds this upload's commitment in the file's name
+        // (`publish_completion_name`): without it the new version opens nowhere. A failure here is the queue's retry,
+        // which finds every chunk acknowledged and completes again (the server answers `already_completed`).
         self.publish_completion_name(
             self.backup_api(),
             &session.server_file_id,
             &name_key,
             &completion_name,
+            &session.object_version_id,
             &completed,
         )
         .await?;
-        progress.finish();
+        if let Some(progress) = progress {
+            progress.finish();
+        }
         let remote_id = uuid::Uuid::parse_str(&session.server_file_id)
             .map_err(|_| anyhow::anyhow!("a backup upload's item id is not a uuid"))?;
         let record = beebeeb_core::backup::BackupRecord {
@@ -447,7 +466,7 @@ impl EngineBridge {
             if chunk_index == 0 {
                 let (name, mime) =
                     upload_v2::completion_plain_name(&name_key, &op.name_encrypted, None, op.content_type.as_deref())?;
-                completion_name = Some(upload_v2::seal_completion_name(
+                let sealed = upload_v2::seal_completion_name(
                     &self.db,
                     &session.server_file_id,
                     &writer,
@@ -456,7 +475,11 @@ impl EngineBridge {
                     !op.replace,
                     &name,
                     mime.as_deref(),
-                )?);
+                )?;
+                // Stored BEFORE the first chunk is sent: a retry that finds every chunk acknowledged completes
+                // with it, without the writer.
+                self.db.set_backup_upload_completion_name(&op.op_id, &sealed)?;
+                completion_name = Some(sealed);
             }
             let read = encrypted.data.len().saturating_sub(28);
             let chunk_start = std::time::Instant::now();

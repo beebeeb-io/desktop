@@ -72,7 +72,24 @@ fn sf2237d_t5_whole_and_range_open() {
             } else {
                 vec![[hexbytes(&v["nonce_hex"]), hexbytes(&v["ciphertext_hex"])].concat()]
             };
-            w.meta = json!({"id":id,"name_encrypted":if v2 {get("metadata_v2_name")["name_encrypted"].as_str().unwrap().to_string()}else{named(&key,"legacy.txt",ExpectedChunkFormat::Unrecorded)},"chunk_count":w.frames.len(),"chunk_size_bytes":if v2 {32}else{expected.len()},"size_bytes":expected.len()});
+            // The published v2 frames open only against their version id (core 0.3.0), so the name is
+            // sealed here with the commitment to the vector's `version_id_hex`. The published name
+            // vector records the v2 pin and no commitment: it still opens as a name, and v2 content
+            // never opens under it (the second half of the loop body below).
+            let name = if v2 {
+                let version_id: [u8; 12] = hexbytes(&v["version_id_hex"]).try_into().unwrap();
+                beebeeb_core::encrypt::encrypt_name_for_version(
+                    &key,
+                    "vector.bin",
+                    None,
+                    ExpectedChunkFormat::V2,
+                    beebeeb_core::chunk_stream::VersionCommitment::new(version_id, 1).unwrap(),
+                )
+                .unwrap()
+            } else {
+                named(&key, "legacy.txt", ExpectedChunkFormat::Unrecorded)
+            };
+            w.meta = json!({"id":id,"name_encrypted":name,"chunk_count":w.frames.len(),"chunk_size_bytes":if v2 {32}else{expected.len()},"size_bytes":expected.len()});
         }
         let temp = tempfile::tempdir().unwrap();
         let b = test_bridge_with_api(&temp.path().join("db"), s.base.clone(), master.try_into().unwrap());
@@ -80,6 +97,22 @@ fn sf2237d_t5_whole_and_range_open() {
             sha256_hex(&runtime().block_on(b.do_hydrate(&id, None)).unwrap()),
             sha256_hex(&expected)
         );
+        if v2 {
+            let published = get("metadata_v2_name");
+            let sealed = published["name_encrypted"].as_str().unwrap();
+            let opened = beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, sealed).unwrap();
+            assert_eq!(opened.name, published["expected_name"].as_str().unwrap());
+            assert_eq!(opened.chunk_format, ExpectedChunkFormat::V2);
+            assert!(
+                opened.version.is_none(),
+                "the published name predates version commitments"
+            );
+            s.state.lock().unwrap().meta["name_encrypted"] = json!(sealed);
+            assert!(
+                runtime().block_on(b.do_hydrate(&id, None)).is_err(),
+                "v2 frames never open under a name without their commitment"
+            );
+        }
     }
 
     // Exercise the direct transport with the same recorded pins and random keys.
@@ -211,14 +244,16 @@ fn sf2237d_t5_rename_and_replacement_keep_key() {
             Some("text/plain".into()),
             &payload,
             &session,
+            None,
         ))
         .unwrap();
     let wire = s.state.lock().unwrap().uploads.clone();
     assert_eq!(wire.len(), 3);
-    assert_eq!(
-        opened(&random_key(), ID, &wire, ExpectedChunkFormat::V2),
-        b"replacement!"
-    );
+    let sealed =
+        b.db.upload_completion_name(&op.op_id)
+            .unwrap()
+            .expect("the session stored the name `complete` publishes");
+    assert_eq!(opened_as(&random_key(), ID, &wire, &sealed), b"replacement!");
     let queued = owned_metadata_for_name(&b.db, &[7; 32], ID, "moved.txt", Some("text/plain")).unwrap();
     assert_eq!(
         beebeeb_core::encrypt::decrypt_file_metadata_with_key(&random_key(), &queued)

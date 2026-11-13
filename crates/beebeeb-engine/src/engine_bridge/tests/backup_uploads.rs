@@ -183,6 +183,78 @@ async fn backup_upload_leaves_source_byte_identical() {
     assert_eq!(checked, ["completed", "cancelled", "restarted", "sign-out", "turn-off"]);
 }
 
+/// A backup upload whose `complete` committed on the server and whose answer was lost: the retry finds every chunk
+/// acknowledged and the completion name stored, and sends `complete` again. Nothing else: no second session, no
+/// chunk twice, no abandon, and the file is recorded once. Dropping the op here (as a cut session is) would leave
+/// the completed file unrecorded, and the next pass would back it up a second time under a new id.
+/// Mutant: the backup path without the complete-only rule (the op is dropped; nothing is recorded).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_backup_whose_complete_answer_was_lost_is_completed_again_and_recorded_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = person_file(dir.path(), "lost-answer.bin", b"0123456789abcdefghij");
+    let before = source_state(&source);
+    let server = ResumableUploadMock::start(ResumeMockMode::CompleteLostOnce);
+    let (bridge, sync_root) = backup_bridge(dir.path(), server.base_url.clone(), ALICE);
+    let op_id = enqueue(&bridge, &source);
+
+    let outcome = bridge.process_due_operations(&sync_root, 200).await.unwrap();
+    assert_eq!(
+        outcome.retried_op_ids,
+        vec![op_id.clone()],
+        "the lost answer is a retry"
+    );
+    let session = bridge
+        .db
+        .backup_upload_resume(&op_id)
+        .unwrap()
+        .expect("the session is kept");
+    assert_eq!((session.acked_chunks, session.chunk_count), (3, 3));
+    let stored = bridge
+        .db
+        .backup_upload_completion_name(&op_id)
+        .unwrap()
+        .expect("the completion name was stored before the first chunk");
+    assert!(bridge.db.backup_records("pictures").unwrap().is_empty());
+
+    let outcome = bridge.process_due_operations(&sync_root, 10_000).await.unwrap();
+    assert_eq!(outcome.completed_op_ids, vec![op_id.clone()], "completed by the retry");
+    assert_eq!(bridge.db.backup_records("pictures").unwrap().len(), 1, "recorded once");
+    assert!(bridge.db.backup_upload_resume(&op_id).unwrap().is_none());
+    assert_eq!(backup_ops(&bridge), 0);
+
+    let requests = server.finish();
+    assert_eq!(
+        count_requests(&requests, "POST", "/api/v1/uploads/init"),
+        1,
+        "one session"
+    );
+    for index in 0..3 {
+        assert_eq!(
+            count_requests(&requests, "PUT", &format!("/api/v1/uploads/session-1/chunks/{index}")),
+            1,
+            "chunk {index} is sent once"
+        );
+    }
+    let completes: Vec<&RecordedRequest> = requests
+        .iter()
+        .filter(|r| r.method == "POST" && r.path == "/api/v1/uploads/session-1/complete")
+        .collect();
+    assert_eq!(completes.len(), 2, "complete, and complete again");
+    for complete in &completes {
+        assert_eq!(
+            completion_name(complete).as_deref(),
+            Some(stored.as_str()),
+            "both carry the name stored before the first chunk"
+        );
+    }
+    assert_eq!(
+        requests.iter().filter(|r| r.path.ends_with("/upload/abandon")).count(),
+        0,
+        "a session whose complete may have committed is never abandoned"
+    );
+    assert_eq!(source_state(&source), before, "the source changed");
+}
+
 /// Serves a 3-chunk plan (8 + 8 + 4 bytes) and, while chunk 1 of the first session is in flight, changes the
 /// source the way another program saving it would: new bytes, the same length, a later mtime.
 struct ChangingSourceMock {
@@ -203,6 +275,7 @@ impl ChangingSourceMock {
         let handle = thread::spawn(move || {
             let mut inits = 0;
             let mut changed = false;
+            let mut row_name = serde_json::Value::Null;
             let started = std::time::Instant::now();
             while !server_stop.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(20) {
                 let mut stream = match listener.accept() {
@@ -219,10 +292,9 @@ impl ChangingSourceMock {
                 let (method, path) = (request.method.as_str(), request.path.as_str());
                 let response = if method == "POST" && path == "/api/v1/uploads/init" {
                     inits += 1;
-                    let file_id = serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["file_id"]
-                        .as_str()
-                        .unwrap()
-                        .to_string();
+                    let init: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                    row_name = init["file_name"].clone();
+                    let file_id = init["file_id"].as_str().unwrap().to_string();
                     http_json(
                         "201 Created",
                         serde_json::json!({
@@ -252,8 +324,12 @@ impl ChangingSourceMock {
                     )
                 } else if method == "POST" && path.ends_with("/complete") {
                     // A server that does not publish the completion name (version metadata off): its
-                    // answer names no `name_encrypted`, so the client publishes the name itself.
-                    http_json("200 OK", serde_json::json!({ "version_number": 1, "size_bytes": 20 }))
+                    // answer names the row as it was, here the name the init carried, so the client
+                    // publishes the commitment itself.
+                    http_json(
+                        "200 OK",
+                        serde_json::json!({ "version_number": 1, "size_bytes": 20, "name_encrypted": row_name }),
+                    )
                 } else if method == "PATCH" && path.starts_with("/api/v1/files/") {
                     http_json("200 OK", serde_json::json!({ "ok": true }))
                 } else if method == "POST" && path.ends_with("/upload/abandon") {
@@ -347,10 +423,11 @@ async fn backup_upload_source_changed_midway_abandons_and_retries() {
         0,
         "never trashed"
     );
-    // This server's `complete` does not publish the completion name (its answer names none), so the
-    // client publishes it itself, before the upload is recorded: one metadata update carrying exactly
-    // the name `complete` was sent. Without it the new version's v2 content would sit under a name
-    // with no commitment and open nowhere. Mutant: no update after `complete` (the count is 0).
+    // This server's `complete` does not publish the completion name (its answer names the row as it
+    // was), so the client publishes the commitment itself, before the upload is recorded: one
+    // metadata update whose name carries the record of the name `complete` was sent. Without it the
+    // new version's v2 content would sit under a name with no commitment and open nowhere.
+    // Mutant: no update after `complete` (the count is 0).
     let sent = requests
         .iter()
         .filter(|r| r.method == "POST" && r.path == "/api/v1/uploads/session-2/complete")
@@ -362,7 +439,21 @@ async fn backup_upload_source_changed_midway_abandons_and_retries() {
         .map(|r| serde_json::from_slice(&r.body).unwrap())
         .collect();
     assert_eq!(published.len(), 1, "one metadata update after complete: {published:?}");
-    assert_eq!(published[0]["name_encrypted"], serde_json::json!(sent));
+    let key = hydration_test_key([31u8; 32], &inits[1]);
+    let opened = |sealed: &str| {
+        let opened = beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, sealed).unwrap();
+        (ContentRecord::of(&opened), opened.name)
+    };
+    let (sent_record, sent_name) = opened(&sent);
+    assert!(
+        sent_record.version.is_some(),
+        "the completion name carries a commitment"
+    );
+    assert_eq!(
+        opened(published[0]["name_encrypted"].as_str().unwrap()),
+        (sent_record, sent_name),
+        "the update carries this upload's commitment, under the row's name"
+    );
     assert!(published[0].get("parent_id").is_none(), "the update moves nothing");
     let records = bridge.db.backup_records("pictures").unwrap();
     let now = beebeeb_backup::fingerprint(&source).unwrap();

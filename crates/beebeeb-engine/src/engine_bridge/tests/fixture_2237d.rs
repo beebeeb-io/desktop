@@ -11,10 +11,42 @@ const OBJECT: &str = "90000000-0000-4000-8000-000000000009";
 fn random_key() -> FileKey {
     FileKey::from_bytes([66; 32])
 }
-fn named(key: &FileKey, text: &str, pin: ExpectedChunkFormat) -> String {
-    beebeeb_core::encrypt::encrypt_name_for(key, text, Some("text/plain"), pin).unwrap()
+thread_local! {
+    /// The commitments of the v2 uploads [`frames`] made on this test's thread, per key, oldest
+    /// first. A v2 version opens only against the commitment in its file's name, so the names this
+    /// fixture seals ([`named`]) carry the commitment of the newest upload under their key, as a
+    /// writer's completion name does. Per thread: every test here builds its world on its own.
+    static COMMITMENTS: std::cell::RefCell<Vec<([u8; 32], beebeeb_core::chunk_stream::VersionCommitment)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
+fn commitments(key: &FileKey) -> Vec<beebeeb_core::chunk_stream::VersionCommitment> {
+    COMMITMENTS.with(|all| {
+        all.borrow()
+            .iter()
+            .filter(|(of, _)| of == key.as_bytes())
+            .map(|(_, version)| *version)
+            .collect()
+    })
+}
+/// A sealed name. Under a v2 pin it carries the commitment of the newest v2 upload [`frames`] made
+/// under `key` on this thread (none was made: none, as on a row whose content is not uploaded yet).
+fn named(key: &FileKey, text: &str, pin: ExpectedChunkFormat) -> String {
+    match (pin, commitments(key).last()) {
+        (ExpectedChunkFormat::V2, Some(version)) => {
+            beebeeb_core::encrypt::encrypt_name_for_version(key, text, Some("text/plain"), pin, *version).unwrap()
+        }
+        _ => beebeeb_core::encrypt::encrypt_name_for(key, text, Some("text/plain"), pin).unwrap(),
+    }
+}
+/// A file's content in 4-byte chunks. No pin: v1 frames, as every build before chunk format v2 wrote
+/// them (a file with v1 history). A v2 pin: a v2 upload, whose commitment the next [`named`] carries.
 fn frames(key: &FileKey, id: &str, plain: &[u8], pin: ExpectedChunkFormat) -> Vec<Vec<u8>> {
+    if pin == ExpectedChunkFormat::Unrecorded {
+        return plain
+            .chunks(4)
+            .map(|bytes| beebeeb_core::encrypt::encrypt_chunk_raw(key, bytes).unwrap())
+            .collect();
+    }
     let mut enc =
         ChunkEncryptor::for_push_with_file_key(FileKey::from_bytes(*key.as_bytes()), id, plain.len() as u64, 4)
             .unwrap()
@@ -24,11 +56,40 @@ fn frames(key: &FileKey, id: &str, plain: &[u8], pin: ExpectedChunkFormat) -> Ve
     for bytes in plain.chunks(4) {
         result.push(enc.push_chunk(bytes).unwrap().data);
     }
+    let previous = commitments(key).last().map(|version| version.counter);
+    let version = enc.version_commitment_after(previous).unwrap();
     enc.finish().unwrap();
+    COMMITMENTS.with(|all| all.borrow_mut().push((*key.as_bytes(), version)));
     result
 }
+/// The plaintext of frames [`frames`] made: v1 frames under no pin, a v2 upload against the one of
+/// this thread's commitments under `key` that opens it.
 fn opened(key: &FileKey, id: &str, wire: &[Vec<u8>], pin: ExpectedChunkFormat) -> Vec<u8> {
-    let mut dec = ChunkDecryptor::for_push_with_file_key(FileKey::from_bytes(*key.as_bytes()), id, pin);
+    let read = |version| {
+        let mut dec = ChunkDecryptor::for_version_with_file_key(FileKey::from_bytes(*key.as_bytes()), id, pin, version);
+        let mut bytes = Vec::new();
+        for frame in wire {
+            bytes.extend(dec.push_frame(frame).ok()?.data);
+        }
+        dec.finish().ok()?;
+        Some(bytes)
+    };
+    if pin == ExpectedChunkFormat::Unrecorded {
+        return read(None).expect("v1 frames open under no pin");
+    }
+    commitments(key)
+        .into_iter()
+        .rev()
+        .find_map(|version| read(Some(version)))
+        .expect("one of this thread's uploads under the key is these frames")
+}
+/// The plaintext of frames the ENGINE uploaded, read against the record of the name it sealed for
+/// them.
+fn opened_as(key: &FileKey, id: &str, wire: &[Vec<u8>], sealed_name: &str) -> Vec<u8> {
+    let record = crate::content_record::ContentRecord::of(
+        &beebeeb_core::encrypt::decrypt_file_metadata_with_key(key, sealed_name).unwrap(),
+    );
+    let mut dec = record.decryptor(FileKey::from_bytes(*key.as_bytes()), id);
     let mut bytes = Vec::new();
     for frame in wire {
         bytes.extend(dec.push_frame(frame).unwrap().data);
@@ -68,6 +129,8 @@ impl ContentServer {
     }
     fn start_as(id: &str, key: &FileKey, pin: ExpectedChunkFormat) -> Self {
         let plain = b"guest bytes!";
+        // The content first: the name carries the commitment of its upload.
+        let content = frames(key, id, plain, pin);
         let state = Arc::new(Mutex::new(ContentState {
             rv_routes: Default::default(),
             nodes: vec![],
@@ -75,7 +138,7 @@ impl ContentServer {
             seq: 0,
             invites: json!({"invites":[]}),
             meta: json!({"id":id,"name_encrypted":named(key,"guest.txt",pin),"size_bytes":plain.len(),"chunk_count":3,"chunk_size_bytes":4,"version_number":1}),
-            frames: frames(key, id, plain, pin),
+            frames: content,
             requests: vec![],
             uploads: vec![],
             gone: 0,

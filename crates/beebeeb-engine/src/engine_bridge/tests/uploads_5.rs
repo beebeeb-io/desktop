@@ -282,6 +282,45 @@ pub(super) fn seed_uploaded_row(bridge: &EngineBridge, server: &VersionedServerM
     seed_uploaded_db_row(bridge, file_id);
 }
 
+/// Make the seeded version 1 of `file_id` a version-protected one, as a build on chunk format v2
+/// uploaded it: the row's name and the version's metadata carry a commitment (version id `[1; 12]`,
+/// counter 1). The server then serves the row and lists its versions as `{id_prefix}-v{n}`, which a
+/// restore needs (core's rule: a version without a commitment is never restored over a protected
+/// file, and a restore of a protected file publishes fresh metadata).
+pub(super) fn protect_seeded_row(bridge: &EngineBridge, server: &VersionedServerMock, file_id: &str, id_prefix: &str) {
+    let name = list_seeded_version_as_protected(bridge, server, file_id, id_prefix);
+    server
+        .state
+        .lock()
+        .unwrap()
+        .authenticated_names
+        .insert(file_id.into(), name);
+}
+
+/// The listing half of [`protect_seeded_row`], for a file whose current name a later upload already
+/// made: version 1 is listed with a commitment. Returns that version's metadata.
+pub(super) fn list_seeded_version_as_protected(
+    bridge: &EngineBridge,
+    server: &VersionedServerMock,
+    file_id: &str,
+    id_prefix: &str,
+) -> String {
+    let key = hydration_test_key(*bridge.api.master_key(), file_id);
+    let name = ContentRecord::pin_only(beebeeb_core::chunk_stream::ExpectedChunkFormat::V2)
+        .seal_name_for_version(
+            &key,
+            "notes.txt",
+            Some("text/plain"),
+            beebeeb_core::chunk_stream::VersionCommitment::new([1; 12], 1).unwrap(),
+        )
+        .unwrap();
+    let mut state = server.state.lock().unwrap();
+    state.serve_downloads = true;
+    state.version_metadata.insert((file_id.into(), 1), name.clone());
+    state.version_id_prefix.insert(file_id.into(), id_prefix.into());
+    name
+}
+
 /// The local half of [`seed_uploaded_row`]: the row at version 1, for a test that starts its
 /// server later.
 pub(super) fn seed_uploaded_db_row(bridge: &EngineBridge, file_id: &str) {

@@ -95,6 +95,30 @@ impl ApiClient {
         Ok(upload_response(resp).await?.json().await?)
     }
 
+    /// Whether the server still holds `upload_session_id` open under a live lease
+    /// (`POST /api/v1/uploads/{session}/heartbeat`, which also renews it). `false` for every refusal
+    /// (reaped, completed, not this account's): the caller asks only to decide whether the file's
+    /// in-flight upload is its own. A request that did not arrive, and a server error, is an error.
+    pub async fn upload_session_is_live(&self, upload_session_id: &str) -> anyhow::Result<bool> {
+        let url = format!(
+            "{}/heartbeat",
+            self.upload_complete_url(UploadSessionId::new(upload_session_id))
+                .trim_end_matches("/complete")
+        );
+        let resp = self
+            .client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header(CAPABILITIES_HEADER_NAME, WRITE_CAPABILITIES)
+            .send()
+            .await?;
+        if resp.status().is_client_error() {
+            return Ok(false);
+        }
+        resp.error_for_status()?;
+        Ok(true)
+    }
+
     /// SF-0001 (L13): abandon an in-progress upload session's server row.
     ///
     /// `POST /api/v1/files/{id}/upload/abandon` with no body. This is the
