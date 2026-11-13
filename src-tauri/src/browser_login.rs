@@ -95,7 +95,9 @@ tokio::task_local! {
 /// The attempt id the window sent, if it is one that is safe to echo: 1 to 64 ASCII letters, digits, `-` or `_`. Anything
 /// else is treated as no id at all (the events then carry none, and the window ignores them as nobody's).
 fn attempt_id(raw: Option<String>) -> Option<String> {
-    raw.filter(|id| (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+    raw.filter(|id| {
+        (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    })
 }
 
 /// One `browser-login` event's body: the payload, its `phase`, and the attempt it belongs to when there is one.
@@ -163,7 +165,9 @@ fn init_frame(pub_key_b64: &str, hostname: Option<String>) -> serde_json::Value 
 /// `IntoClientRequest` is the seam that lets a caller add headers before the
 /// connect. A free function (not inlined into `run_handoff`) so the test below
 /// exercises the IDENTICAL code path `run_handoff` calls, not a re-implementation.
-pub(crate) fn build_ws_request(url: &str) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
+pub(crate) fn build_ws_request(
+    url: &str,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
     let mut request = url
         .into_client_request()
         .map_err(|e| format!("build WS request: {e}"))?;
@@ -532,7 +536,11 @@ async fn run_handoff(
                 unsent_error,
             }) => {
                 let _ = crate::revoke_desktop_session(&client, &base_url, &creds.session_token).await;
-                return Ok(crate::LoginOutcome::account_mismatch(pending_changes, unsent, unsent_error));
+                return Ok(crate::LoginOutcome::account_mismatch(
+                    pending_changes,
+                    unsent,
+                    unsent_error,
+                ));
             }
             Some(crate::SignInSettlement::Unconfirmed) => {
                 let _ = crate::revoke_desktop_session(&client, &base_url, &creds.session_token).await;
@@ -689,11 +697,19 @@ mod tests {
     fn the_browser_handoff_returns_a_login_outcome() {
         let source = include_str!("browser_login.rs").replace("\r\n", "\n");
         let production = &source[..source.find("#[cfg(test)]").expect("the tests module")];
-        let command = &production[production.find("pub async fn start_browser_login(").expect("the command")..];
-        assert!(command.contains(") -> Result<crate::LoginOutcome, String> {"), "the command answers with the outcome");
+        let command = &production[production
+            .find("pub async fn start_browser_login(")
+            .expect("the command")..];
+        assert!(
+            command.contains(") -> Result<crate::LoginOutcome, String> {"),
+            "the command answers with the outcome"
+        );
         let handoff = &production[production.find("async fn run_handoff(").expect("the handoff")..];
         let signature = &handoff[..handoff.find("{\n").unwrap()];
-        assert!(signature.contains("-> Result<crate::LoginOutcome, String>"), "{signature}");
+        assert!(
+            signature.contains("-> Result<crate::LoginOutcome, String>"),
+            "{signature}"
+        );
     }
 
     /// The answer's `reauthenticated` follows the settlement on both ways out of the handoff: the same account whose key is
@@ -704,12 +720,18 @@ mod tests {
         let source = include_str!("browser_login.rs").replace("\r\n", "\n");
         let production = &source[..source.find("#[cfg(test)]").expect("the tests module")];
         let handoff = &production[production.find("async fn run_handoff(").expect("the handoff")..];
-        assert!(handoff.contains("return Ok(browser_installed_outcome(true));"), "the key is here: a re-sign-in at once");
+        assert!(
+            handoff.contains("return Ok(browser_installed_outcome(true));"),
+            "the key is here: a re-sign-in at once"
+        );
         assert!(
             handoff.contains("vault_unlocked: false, ..\n            }) => reauthenticated = true,"),
             "no usable key: the same account all the same"
         );
-        assert!(handoff.contains("Ok(browser_installed_outcome(reauthenticated))"), "and the install answers with it");
+        assert!(
+            handoff.contains("Ok(browser_installed_outcome(reauthenticated))"),
+            "and the install answers with it"
+        );
     }
 
     /// C-S1: no raw code reaches a screen. The handoff's events are progress only, and a different account is no event and no
@@ -718,7 +740,10 @@ mod tests {
     fn no_raw_account_mismatch_code_leaves_the_browser_handoff() {
         let source = include_str!("browser_login.rs").replace("\r\n", "\n");
         let production = &source[..source.find("#[cfg(test)]").expect("the tests module")];
-        assert!(!production.contains(concat!("\"account", "_mismatch\"")), "no raw code in the handoff");
+        assert!(
+            !production.contains(concat!("\"account", "_mismatch\"")),
+            "no raw code in the handoff"
+        );
         let mut phases = std::collections::BTreeSet::new();
         for call in production.split("emit(").skip(1) {
             // `emit(&app, "error", …)`, `emit(app, "waiting", …)`, or `emit(\n    app,\n    "done", …)`.
@@ -728,10 +753,14 @@ mod tests {
                 phases.insert(phase.to_string());
             }
         }
-        let allowed: std::collections::BTreeSet<String> =
-            ["authorized", "connecting", "done", "error", "waiting"].map(String::from).into();
+        let allowed: std::collections::BTreeSet<String> = ["authorized", "connecting", "done", "error", "waiting"]
+            .map(String::from)
+            .into();
         assert!(!phases.is_empty(), "the scan found the emits");
-        assert!(phases.is_subset(&allowed), "the handoff's events are progress only: {phases:?}");
+        assert!(
+            phases.is_subset(&allowed),
+            "the handoff's events are progress only: {phases:?}"
+        );
     }
 
     /// An account that could not be confirmed is the retryable sentence, as an error: a different account is not the only
@@ -740,21 +769,36 @@ mod tests {
     fn an_unconfirmed_browser_sign_in_stays_a_retryable_error() {
         let source = include_str!("browser_login.rs").replace("\r\n", "\n");
         let production = &source[..source.find("#[cfg(test)]").expect("the tests module")];
-        let arm = &production[production.find("Some(crate::SignInSettlement::Unconfirmed) => {").expect("the arm")..];
+        let arm = &production[production
+            .find("Some(crate::SignInSettlement::Unconfirmed) => {")
+            .expect("the arm")..];
         let arm = &arm[..arm.find("\n            }\n").unwrap()];
         assert!(arm.contains("revoke_desktop_session("), "{arm}");
-        assert!(arm.contains("return Err(crate::SIGN_IN_ACCOUNT_UNKNOWN.to_string());"), "{arm}");
+        assert!(
+            arm.contains("return Err(crate::SIGN_IN_ACCOUNT_UNKNOWN.to_string());"),
+            "{arm}"
+        );
         // The command's error arm still tells the window (the `error` event) before it returns the same `Err`.
         let command = &production[production.find("pub async fn start_browser_login(").unwrap()..];
-        assert!(command.contains("emit(&app, \"error\", serde_json::json!({ \"message\": e }));"), "{command}");
+        assert!(
+            command.contains("emit(&app, \"error\", serde_json::json!({ \"message\": e }));"),
+            "{command}"
+        );
     }
 
     /// Review P3-2: every event of an attempt carries the attempt id the window gave it, and a window that sent none (or
     /// one that is not an id) gets events with none, which the window ignores as nobody's.
     #[test]
     fn an_event_carries_the_attempt_it_belongs_to() {
-        let body = event_body(serde_json::json!({ "user_code": "KQ7M-4TXP" }), "waiting", Some("lq3x-1"));
-        assert_eq!(body, serde_json::json!({ "user_code": "KQ7M-4TXP", "phase": "waiting", "attempt": "lq3x-1" }));
+        let body = event_body(
+            serde_json::json!({ "user_code": "KQ7M-4TXP" }),
+            "waiting",
+            Some("lq3x-1"),
+        );
+        assert_eq!(
+            body,
+            serde_json::json!({ "user_code": "KQ7M-4TXP", "phase": "waiting", "attempt": "lq3x-1" })
+        );
         let none = event_body(serde_json::json!({}), "connecting", None);
         assert_eq!(none, serde_json::json!({ "phase": "connecting" }));
     }
@@ -763,7 +807,14 @@ mod tests {
     fn only_a_plain_id_is_echoed() {
         assert_eq!(attempt_id(Some("lq3x-1_A".to_string())), Some("lq3x-1_A".to_string()));
         assert_eq!(attempt_id(Some("a".repeat(64))), Some("a".repeat(64)));
-        for refused in [Some(String::new()), Some("a".repeat(65)), Some("a b".to_string()), Some("a\nb".to_string()), Some("é".to_string()), None] {
+        for refused in [
+            Some(String::new()),
+            Some("a".repeat(65)),
+            Some("a b".to_string()),
+            Some("a\nb".to_string()),
+            Some("é".to_string()),
+            None,
+        ] {
             assert_eq!(attempt_id(refused.clone()), None, "{refused:?}");
         }
     }
@@ -774,7 +825,9 @@ mod tests {
     async fn the_attempt_is_visible_to_emit_inside_the_command_and_nowhere_else() {
         assert_eq!(ATTEMPT.try_with(|attempt| attempt.clone()).ok().flatten(), None);
         let inside = ATTEMPT
-            .scope(Some("lq3x-2".to_string()), async { ATTEMPT.try_with(|attempt| attempt.clone()).ok().flatten() })
+            .scope(Some("lq3x-2".to_string()), async {
+                ATTEMPT.try_with(|attempt| attempt.clone()).ok().flatten()
+            })
             .await;
         assert_eq!(inside.as_deref(), Some("lq3x-2"));
     }
@@ -784,13 +837,22 @@ mod tests {
         let source = include_str!("browser_login.rs").replace("\r\n", "\n");
         let command = &source[source.find("pub async fn start_browser_login(").expect("the command")..];
         let command = &command[..command.find("\n}\n").expect("its end")];
-        assert!(command.contains("attempt_id: Option<String>"), "the window names the attempt:\n{command}");
-        assert!(command.contains("ATTEMPT\n        .scope(self::attempt_id(attempt_id), async {"), "{command}");
+        assert!(
+            command.contains("attempt_id: Option<String>"),
+            "the window names the attempt:\n{command}"
+        );
+        assert!(
+            command.contains("ATTEMPT\n        .scope(self::attempt_id(attempt_id), async {"),
+            "{command}"
+        );
         // The error event of a failed handoff is inside the scope too, so a timed-out attempt's `error` carries its id.
         assert!(command.find("ATTEMPT").unwrap() < command.find("emit(&app, \"error\"").unwrap());
         let emit = &source[source.find("fn emit(app: &tauri::AppHandle").expect("emit")..];
         let emit = &emit[..emit.find("\n}\n").unwrap()];
-        assert!(emit.contains("ATTEMPT.try_with(") && emit.contains("event_body("), "{emit}");
+        assert!(
+            emit.contains("ATTEMPT.try_with(") && emit.contains("event_body("),
+            "{emit}"
+        );
     }
 
     /// Task 1436 (Codex review on PR #39): `build_ws_request` — the function
@@ -994,10 +1056,15 @@ mod tests {
             assert_eq!(got, plaintext);
         }
 
+        /// Core 0.3.0: CLI-auth decryption accepts only the HKDF-derived key. A payload sealed under
+        /// the raw shared secret (what web sent before v0.4) is refused, not opened by a fallback.
         #[test]
-        fn a_legacy_payload_under_the_raw_secret_still_decrypts() {
+        fn a_legacy_payload_under_the_raw_secret_is_refused() {
             let (nonce, ct) = browser_frame(EXPECTED_SHARED_HEX, [0xCD; 12], b"legacy-v0.4");
             let browser_pub = B64.encode(unhex(EXPECTED_BROWSER_PUB_HEX));
+            assert!(decrypt_payload(&cli_key(), &browser_pub, &nonce, &ct).is_err());
+            // The control: the same frame under the HKDF key opens, so the refusal is the key's.
+            let (nonce, ct) = browser_frame(EXPECTED_AES_KEY_HEX, [0xCD; 12], b"legacy-v0.4");
             assert_eq!(
                 decrypt_payload(&cli_key(), &browser_pub, &nonce, &ct).unwrap(),
                 b"legacy-v0.4"

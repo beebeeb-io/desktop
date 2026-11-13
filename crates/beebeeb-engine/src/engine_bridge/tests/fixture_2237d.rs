@@ -86,10 +86,13 @@ fn opened(key: &FileKey, id: &str, wire: &[Vec<u8>], pin: ExpectedChunkFormat) -
 /// The plaintext of frames the ENGINE uploaded, read against the record of the name it sealed for
 /// them.
 fn opened_as(key: &FileKey, id: &str, wire: &[Vec<u8>], sealed_name: &str) -> Vec<u8> {
-    let record = crate::content_record::ContentRecord::of(
-        &beebeeb_core::encrypt::decrypt_file_metadata_with_key(key, sealed_name).unwrap(),
+    let record = beebeeb_core::encrypt::decrypt_file_metadata_with_key(key, sealed_name).unwrap();
+    let mut dec = ChunkDecryptor::for_version_with_file_key(
+        FileKey::from_bytes(*key.as_bytes()),
+        id,
+        record.chunk_format,
+        record.version,
     );
-    let mut dec = record.decryptor(FileKey::from_bytes(*key.as_bytes()), id);
     let mut bytes = Vec::new();
     for frame in wire {
         bytes.extend(dec.push_frame(frame).unwrap().data);

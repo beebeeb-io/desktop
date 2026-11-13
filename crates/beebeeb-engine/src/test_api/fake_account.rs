@@ -175,9 +175,24 @@ impl FakeAccount {
             .into_iter()
             .map(|chunk| encryptor.push_chunk(chunk).expect("an encrypted chunk").data)
             .collect();
+        // The name an upload publishes with `complete` (core 0.3.0, chunk format v2): the item's name
+        // with the commitment to this upload. Content opens only against it.
+        let version = encryptor
+            .version_commitment_after(None)
+            .expect("the upload's commitment");
         encryptor.finish().expect("the last chunk");
+        let name_key = beebeeb_core::kdf::derive_file_key(&master, id.as_bytes());
+        let name_encrypted = beebeeb_core::encrypt::encrypt_name_for_version(
+            &name_key,
+            name,
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            version,
+        )
+        .expect("the completion name");
         if let Some(item) = self.items.lock().expect("vault items").get_mut(id) {
             item.content_frames = Some(frames);
+            item.name_encrypted = name_encrypted;
         }
     }
 
