@@ -189,8 +189,8 @@ impl<C: CredentialStores> Engine<C> {
     /// one `session` names, asked with no session change half done (`AccountRuntime::while_session_is`: the
     /// session-write lock is held for the question and the copy), so the token of a later session never carries a
     /// change chosen under an earlier one. Never waits on a session change: while one is under way the answer is
-    /// `NotSignedIn`, and nothing is sent.
-    fn account_call_for<T, F, Fut>(&self, session: SessionGeneration, call: F) -> Result<T, AccountCallError>
+    /// `NotSignedIn`, and nothing is sent. Also the Trash's restore (`app::trash_api`).
+    pub(super) fn account_call_for<T, F, Fut>(&self, session: SessionGeneration, call: F) -> Result<T, AccountCallError>
     where
         F: FnOnce(ApiClient) -> Fut,
         Fut: Future<Output = anyhow::Result<T>>,
