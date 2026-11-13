@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use beebeeb_core::account_flows::{
-    AccountBinding, AccountFlow, AccountFlowError, AccountOutcome, ApiResponse, Method, Step, TotpEnrollment,
+    AccountBinding, AccountFlow, AccountFlowError, AccountOutcome, ApiResponse, Method, PATH_CHANGE_PASSWORD_FINISH,
+    Step, TotpEnrollment,
 };
 use beebeeb_core::kdf::MasterKey;
 use beebeeb_core::onboarding::{BreachCheck, BreachResponse};
@@ -235,16 +236,13 @@ async fn read_body(resp: reqwest::Response) -> String {
 
 /// Perform each step of `flow` against the API with `token` (none for the public delete-link routes), to the end.
 ///
-/// A `commit` (a password change) drives every step inside [`detached`]: the server has ended the old token by the time
-/// it answers, so the body read and the store of the token it issued in its place must survive a Lock or a sign-out
-/// that drops the command.
+/// The flow, its binding and every request stay in the command's own future. Only a password change's last answer is
+/// handed to [`detached`]: the server has ended the old token by the time it answers, so the body read and the store of
+/// the token it issued in its place must survive a Lock or a sign-out that drops the command. The flow (and the
+/// master-key/password-derived state it holds) is dropped before that task is spawned; the task carries only the
+/// pending response and the turn the change captured.
 async fn drive(flow: AccountFlow, token: Option<&str>, commit: Option<SessionCommit>) -> Result<Driven, String> {
-    let Some(commit) = commit else {
-        return drive_steps(flow, token, None).await;
-    };
-    // A zeroizing copy travels into the task; the caller's token never leaves this frame.
-    let token = token.map(|t| Zeroizing::new(t.to_string()));
-    detached(async move { drive_steps(flow, token.as_ref().map(|t| t.as_str()), Some(commit)).await }).await
+    drive_steps(flow, token, commit).await
 }
 
 async fn drive_steps(
@@ -282,28 +280,60 @@ async fn drive_steps(
                         .header(reqwest::header::CONTENT_TYPE, "application/json")
                         .body(req.body_json());
                 }
+                // The password change's last request is the one whose answer carries the rotated token. The request
+                // itself is sent here, in the command's future, so a Lock or a sign-out before the server commits
+                // still cancels it; only the answer is handed on.
+                let final_commit = commit.is_some() && req.path == PATH_CHANGE_PASSWORD_FINISH;
                 drop(req);
                 let resp = rb.send().await.map_err(|_| "network".to_string())?;
+                if final_commit {
+                    // The server has rotated the token. Drop the flow (and the master-key/password-derived state it
+                    // holds) here, in the command's future; only the pending response and the turn travel into the
+                    // task that reads the body and stores the token.
+                    drop(flow);
+                    let commit = commit.take().expect("checked above");
+                    return detached(async move { commit_rotated_session(resp, commit).await }).await;
+                }
                 let status = resp.status().as_u16();
                 let mut text = read_body(resp).await;
                 let parsed = ApiResponse::from_text(status, &text);
                 text.zeroize();
-                let next = flow.resume(parsed).map_err(code)?;
-                if let Step::Done(AccountOutcome::PasswordChanged { session_token }) = &next
-                    && let Some(commit) = commit.take()
-                {
-                    // The server has rotated the token; this task (not the command's future) stores it.
-                    let SessionCommit { app, acct, turn } = commit;
-                    let state = app.state::<AppState>();
-                    let mut turn = turn;
-                    let dto =
-                        install_rotated_session(app.clone(), &state, &acct, &mut turn, session_token.as_str()).await;
-                    return Ok(Driven::Rotated(dto));
-                }
-                step = next;
+                step = flow.resume(parsed).map_err(code)?;
             }
         }
     }
+}
+
+/// The detached half of a password change: read the answer the server sent after it rotated the token, then store the
+/// token in the turn the change captured. It runs in a task of its own ([`detached`]) so a Lock or a sign-out that
+/// drops the command cannot drop it; it takes no `SessionCommands` lease, and the turn claim before the store is its
+/// guard. A non-2xx answer is the same error the flow would have mapped; a 2xx answer without a token is `protocol`.
+async fn commit_rotated_session(resp: reqwest::Response, commit: SessionCommit) -> Result<Driven, String> {
+    let status = resp.status().as_u16();
+    let mut text = read_body(resp).await;
+    let parsed = ApiResponse::from_text(status, &text);
+    text.zeroize();
+    if !(200..300).contains(&status) {
+        let err = match status {
+            401 => AccountFlowError::Unauthorized,
+            429 => AccountFlowError::RateLimited,
+            s => AccountFlowError::Server(s),
+        };
+        return Err(code(err));
+    }
+    let session_token = Zeroizing::new(
+        parsed
+            .body
+            .get("session_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "protocol".to_string())?
+            .to_string(),
+    );
+    let SessionCommit { app, acct, turn } = commit;
+    let state = app.state::<AppState>();
+    let mut turn = turn;
+    let dto = install_rotated_session(app.clone(), &state, &acct, &mut turn, session_token.as_str()).await;
+    Ok(Driven::Rotated(dto))
 }
 
 async fn run_simple(
@@ -360,13 +390,15 @@ pub struct PasswordChangedDto {
     pub restart: &'static str,
 }
 
-/// The server ends every other session and mints a new one for this device. Once its answer arrives, the body read
-/// and the store of that token run in a task of their own that the command awaits: a Lock or a sign-out may drop the
-/// command's future at an await after the server already rotated the token, and that task must not go with it. The
-/// task takes no callback lease (`SessionCommands::bind`), only the turn the change captured; it claims that turn
-/// before it stores, so a turn a Lock or another sign-in spent writes nothing and the person signs in again. The engine
-/// then restarts with the new token. No master-key wrap (the key stays in the credential store). Once the server has
-/// committed, a failure to store or restart is reported in the DTO, never as a failed change: the password did change.
+/// The server ends every other session and mints a new one for this device. The flow, its binding and every request
+/// stay in the command's own future, so a Lock or a sign-out before the server commits still cancels the change. Once
+/// the last answer arrives, the body read and the store of the token it carries run in a task of their own that the
+/// command awaits: a Lock or a sign-out may drop the command's future at an await after the server already rotated the
+/// token, and that task must not go with it. The flow is dropped before that task is spawned; the task takes no
+/// callback lease (`SessionCommands::bind`), only the turn the change captured. It claims that turn before it stores,
+/// so a turn a Lock or another sign-in spent writes nothing and the person signs in again. The engine then restarts
+/// with the new token. No master-key wrap (the key stays in the credential store). Once the server has committed, a
+/// failure to store or restart is reported in the DTO, never as a failed change: the password did change.
 #[tauri::command]
 pub(super) async fn account_change_password(
     app: tauri::AppHandle,
@@ -490,9 +522,11 @@ fn store_rotated_session_with<S: RotatedSessionStore>(
 /// every platform; the engine holds the ended token. macOS and Linux stop the engine first and start it as after a
 /// naming (`start_engine_unless_running`).
 ///
-/// The store and swap happen before any await on Windows: the server has already ended the old token, so nothing may
-/// come between its answer and [`store_rotated_session`]. (The body read and this store also run in [`detached`], so a
-/// Lock or a sign-out that drops the command cannot drop them.) The engine then comes back under the
+/// This runs in the detached task [`commit_rotated_session`] spawns, so the body read and the store outlive a Lock or a
+/// sign-out that drops the command. The store claims the captured turn first ([`store_rotated_session`] →
+/// `claim_session_write_for_commit`): a turn a Lock or another sign-in spent writes nothing and never resurrects an
+/// ended session. The store and swap happen before any await on Windows: the server has already ended the old token,
+/// so nothing may come between its answer and [`store_rotated_session`]. The engine then comes back under the
 /// session-transition lock through `start_engine_if_possible`, which starts with the session gate, its generation and
 /// the binding's Windows rules, like every other Windows start. The old engine is stopped under that lock first (task
 /// 2439 item 1): the start begins with `if let Ok(cfg) = DesktopConfig::load()`, so a config read failure would

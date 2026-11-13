@@ -373,12 +373,12 @@ fn the_password_change_restarts_the_engine_on_every_platform() {
         command.contains(&squeeze("drive(flow, Some(&token), Some(commit)).await")),
         "{command}"
     );
-    let steps = squeeze(body_between(&source, "async fn drive_steps(", "\n}\n"));
+    let commit = squeeze(body_between(&source, "async fn commit_rotated_session(", "\n}\n"));
     assert!(
-        steps.contains(&squeeze(
+        commit.contains(&squeeze(
             "install_rotated_session(app.clone(), &state, &acct, &mut turn, session_token.as_str()).await"
         )),
-        "{steps}"
+        "{commit}"
     );
 }
 
@@ -571,8 +571,9 @@ async fn session_commit_refuses_a_stale_turn() {
     );
 }
 
-/// Source guard: the command's future (`drive`) reads no response body itself; the one read is the helper, and behind
-/// a commit it runs inside the detached task. The store claims the captured turn before it writes anything.
+/// Source guard: the command's future (`drive`/`drive_steps`) reads no response body itself; the one read is the
+/// helper, and for a password change's last answer it runs inside the detached task. The store claims the captured
+/// turn before it writes anything.
 #[test]
 fn session_commit_is_the_only_body_reader() {
     use crate::finder_setup_command_tests::body_between;
@@ -584,6 +585,10 @@ fn session_commit_is_the_only_body_reader() {
     assert!(
         !drive.contains(".text().await"),
         "the command future reads no body: {drive}"
+    );
+    assert!(
+        !drive.contains("detached("),
+        "the command's future does not move the flow into a detached task: {drive}"
     );
     assert!(
         !steps.contains(".text().await"),
@@ -598,12 +603,28 @@ fn session_commit_is_the_only_body_reader() {
         "every step reads through the helper: {steps}"
     );
     assert!(
-        drive.contains("detached(") && drive.contains("drive_steps("),
-        "a commit drives every step in the detached task: {drive}"
+        steps.contains("detached(") && steps.contains("commit_rotated_session("),
+        "the final commit's body read and store run in the detached task: {steps}"
     );
     assert!(
-        steps.contains("install_rotated_session("),
-        "the detached task stores the rotated token: {steps}"
+        steps.contains("drop(flow)"),
+        "the flow is dropped in the command's future, not moved into the detached task: {steps}"
+    );
+    let send = steps
+        .find("rb.send().await")
+        .unwrap_or_else(|| panic!("the request is sent in the command's future: {steps}"));
+    let detach = steps
+        .find("detached(")
+        .unwrap_or_else(|| panic!("the answer is handed to the detached task: {steps}"));
+    assert!(
+        send < detach,
+        "the request is sent before the answer is detached: {steps}"
+    );
+    let commit = squeeze(body_between(&source, "async fn commit_rotated_session(", "\n}\n"));
+    assert!(!commit.contains("flow"), "the detached task carries no flow: {commit}");
+    assert!(
+        commit.contains("install_rotated_session("),
+        "the detached task stores the rotated token: {commit}"
     );
     let store = squeeze(body_between(&source, "fn store_rotated_session_with", "\n}\n"));
     let claim = store
