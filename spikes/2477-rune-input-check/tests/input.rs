@@ -262,6 +262,34 @@ fn a_cancelled_composition_leaves_the_text_alone_and_return_is_the_input_methods
     );
 }
 
+/// The sequence a real Japanese input method produced on Windows when Escape cancelled "か" (win/run.ps1):
+/// the pre-edit emptied twice, then a commit of NOTHING, then `Disabled`.
+#[test]
+fn a_cancel_as_windows_sends_it_ends_with_an_empty_commit_that_inserts_nothing() {
+    let (mut rt, _) = runtime();
+    click_cell(&mut rt, 0);
+    type_text(&mut rt, "x");
+    ime(&mut rt, Ime::Enabled);
+    ime(&mut rt, Ime::Preedit("か".into(), Some((3, 3))));
+    assert_eq!(rect(&rt, "preedit").map(|r| r[2]), Some(CELL));
+    rt.ime(Ime::Preedit(String::new(), None));
+    rt.ime(Ime::Preedit(String::new(), None));
+    rt.ime(Ime::Commit(String::new()));
+    ime(&mut rt, Ime::Disabled);
+    assert_eq!(
+        (rt.state.text(), rt.state.caret, rt.state.preedit.as_str()),
+        ("x".to_string(), 1, "")
+    );
+    assert_eq!(lines(&rt, "ime ").len(), 6, "{:?}", rt.state.log);
+    let keys = lines(&rt, "key ").len();
+    press(&mut rt, Key::Enter);
+    assert_eq!(
+        lines(&rt, "key ").len(),
+        keys + 1,
+        "the composition is over: Return is a key again"
+    );
+}
+
 #[test]
 fn a_composition_replaces_the_selection_and_losing_the_window_ends_it() {
     let (mut rt, _) = runtime();

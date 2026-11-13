@@ -280,9 +280,11 @@ try {
     $textBefore = $s.Text
     $e = Mark
     TypeKeys 'ka'; Wait 400
-    Tap 0x1B; Tap 0x1B; Wait 600      # Escape (twice: some input methods first revert the conversion)
+    Tap 0x1B; Wait 600                 # Escape
     $s = State
-    Check 'Escape cancels without touching the text' ($s.Preedit -eq '' -and $s.Text -eq $textBefore -and (Since $e '^ime Commit').Count -eq 0) ("text='$($s.Text)' preedit='$($s.Preedit)'; " + ((Since $e '^(ime|key) ') -join ' | '))
+    # Windows ends a cancelled composition with an EMPTY commit: only a commit that carries text would be wrong.
+    Check 'Escape cancels without touching the text' ($s.Preedit -eq '' -and $s.Text -eq $textBefore -and (Since $e '^ime Commit\("[^"]').Count -eq 0 -and (Since $e '^ime Preedit\(""').Count -ge 1) ("text='$($s.Text)' preedit='$($s.Preedit)'; " + ((Since $e '^(ime|key) ') -join ' | '))
+    Check 'the Escape that cancels does not reach on_key' ((Since $e '^key ').Count -eq 0) ((Since $e '^key ') -join ' | ')
     Tap 0x1A; Wait 300                # VK_IME_OFF
     $en = [Win]::LoadKeyboardLayout('00000409', 0x1)
     [void][Win]::PostMessage($hwnd, 0x50, [IntPtr]::Zero, $en)
