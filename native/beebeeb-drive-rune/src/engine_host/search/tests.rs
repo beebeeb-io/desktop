@@ -350,10 +350,27 @@ fn the_engine_handle_is_a_search_host() {
     let before = woken.load(Ordering::SeqCst);
     SearchHost::wake(&engine);
     assert_eq!(woken.load(Ordering::SeqCst), before + 1, "the host's loop is woken");
-    // The index is the engine's own, over the handle's local state (or none before the first sync).
-    match (SearchHost::index(&engine), engine.state_db()) {
-        (Ok(index), Ok(db)) => assert_eq!(index.records, build_local_index(&db).expect("the index").records),
-        (Err(()), Err(_)) => {}
+    // The index goes through the glue: it agrees with a direct build from the same state DB. When both fail
+    // (no state DB on this test process), the state DB must genuinely be missing — a stubbed `Err(())` would
+    // survive the `(Err, Err)` arm silently, so we guard it by trying the DB independently.
+    let db_result = engine.state_db();
+    let index_result = SearchHost::index(&engine);
+    match (index_result, &db_result) {
+        (Ok(index), Ok(db)) => {
+            let direct = build_local_index(db).expect("the index from the DB");
+            assert_eq!(
+                index.records.len(),
+                direct.records.len(),
+                "the host's index matches a direct build"
+            );
+        }
+        (Err(()), Err(_)) => {
+            // The state DB must genuinely not exist: a state_db() that works means the glue is wrong.
+            assert!(
+                db_result.is_err(),
+                "index returned Err but state_db works: the glue is broken"
+            );
+        }
         (index, db) => panic!("the host and the handle disagree: {} {}", index.is_ok(), db.is_ok()),
     }
 }

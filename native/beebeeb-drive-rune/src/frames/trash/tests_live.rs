@@ -23,6 +23,8 @@ struct Held {
     restored: Vec<String>,
     /// How often the window told the source to forget.
     forgot: usize,
+    /// How often the window told the source the section opened.
+    opened: usize,
 }
 
 struct Stub(Rc<RefCell<Held>>);
@@ -64,6 +66,9 @@ impl TrashSource for Stub {
         let mut held = self.0.borrow_mut();
         held.forgot += 1;
         held.rows.clear();
+    }
+    fn opened(&mut self) {
+        self.0.borrow_mut().opened += 1;
     }
     fn actions_available(&self) -> bool {
         false
@@ -276,6 +281,7 @@ fn a_gate_or_account_change_makes_the_window_drop_every_name() {
     assert!(!drawn(&rt));
 
     held.borrow_mut().rows = three();
+    held.borrow_mut().loaded = Loaded::Ready;
     engine.set_gate(GateState::Ready);
     engine.set_account("another-account");
     rt.update(|s, _| {
@@ -283,4 +289,20 @@ fn a_gate_or_account_change_makes_the_window_drop_every_name() {
     });
     poll(&mut rt);
     assert!(held.borrow().forgot >= 2, "another account: forgotten again");
+
+    // An account change while the gate stays Ready (no lock in between): the section must re-open so the new
+    // account's list is read. Without the `was_open = false` in the forget branch, "Loading" stays forever.
+    let opened_before = held.borrow().opened;
+    held.borrow_mut().rows = three();
+    held.borrow_mut().loaded = Loaded::Ready;
+    engine.set_account("a-third-account");
+    rt.update(|s, _| {
+        s.shell.refresh();
+    });
+    poll(&mut rt);
+    assert!(held.borrow().forgot >= 3, "a third account: forgotten");
+    assert!(
+        held.borrow().opened > opened_before,
+        "the section re-opens after an account change while the gate stays Ready"
+    );
 }

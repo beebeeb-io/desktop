@@ -62,6 +62,9 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
             ui.selected_item = None;
             ui.menu = None;
             ui.notice = None;
+            // The section must re-open (`opened`) on the next poll so a new read starts: without this,
+            // an account change while the gate stays Ready would show "Loading" forever.
+            ui.was_open = false;
             changed = true;
         }
         ui.seen = Some(gate);
