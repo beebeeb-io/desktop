@@ -419,14 +419,77 @@ fn a_read_that_failed_beside_a_write_is_read_again_when_the_write_answers() {
     assert_eq!(
         settle(&mut source),
         [ALERT_SAVED, NOT_LOADED],
-        "saved, and then the read failed"
+        "saved, and then the read the person asked for failed"
     );
-    assert_eq!(source.recent_state(), ReadState::Failed, "the list was not read");
     assert_eq!(
         source.notifications().groups[0].1[1].on,
-        None,
-        "and nothing of the account is drawn after a failed read nobody was told about before"
+        Some(!on),
+        "the switch Beebeeb just took is not dropped by that read"
     );
+    assert_eq!(source.recent_state(), ReadState::Ready, "nor the list that was held");
+    assert!(
+        source.notifications_unconfirmed(),
+        "it is said to be possibly out of date"
+    );
+}
+
+/// A refused mark, with the opening's read still out: that read answers, and the read asked for after the mark
+/// fails. What was said about the mark stands for the read after it, although one landed whole in between.
+#[test]
+fn a_read_that_lands_whole_before_the_read_after_a_refused_mark_does_not_unsay_it() {
+    let fake = fake("order-whole");
+    let mut source = Source::new(signed_in(&fake));
+    opened(&mut source, Pane::Recent);
+    let held = seen_of(&source);
+    source.alerts.expire();
+    fake.mark_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    let first = source.alerts.hold_next_read();
+    source.opened(Pane::Notifications);
+    let reads = source.alerts.reads;
+    // The read after the mark is held too, before it calls the engine.
+    let second = source.alerts.hold_next_read();
+    source.mark_recent_seen();
+    let mut toasts = pump_until(&mut source, |s| s.alerts.marking == 0);
+    assert!(
+        source.alerts.again,
+        "a read was asked for after the mark, behind the one on its way"
+    );
+    first.send(()).expect("the first read's worker is waiting");
+    toasts.extend(pump_until(&mut source, |s| s.alerts.reads == reads + 1));
+    fake.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    second.send(()).expect("the second read's worker is waiting");
+    toasts.extend(settle(&mut source));
+    assert_eq!(toasts, [NOT_MARKED], "one toast, the mark's");
+    let now = seen_of(&source);
+    assert_eq!((&now.0, now.1, now.2), (&held.0, held.1, held.2), "what was held stays");
+    assert!(now.3, "said to be possibly out of date");
+}
+
+/// A write of the session before, still on its way, does not hold up the verdict of the new session's read.
+#[test]
+fn a_write_of_the_session_before_does_not_defer_the_next_sessions_failed_read() {
+    let fake = fake("old-write");
+    let engine = signed_in(&fake);
+    let mut source = Source::new(engine.clone());
+    opened(&mut source, Pane::Notifications);
+    let held_write = source.alerts.hold_next_write();
+    source.set_alert(0, 1, true);
+    assert!(source.alerts.switching);
+    let _ = engine.lock();
+    engine
+        .unlock_with_phrase(Zeroizing::new(fake.first_phrase.clone()))
+        .expect("the phrase unlocks");
+    fake.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    let toasts = pump_until(&mut source, |s| s.alerts.reading.is_none() && s.alerts.reads >= 2);
+    assert!(source.alerts.switching, "the old session's change is still out");
+    assert_eq!(toasts, [NOT_LOADED], "the new session's failed read is said at once");
+    assert_eq!(
+        source.alerts_state(0),
+        ReadState::Failed,
+        "and drawn as failed, with its way to try again"
+    );
+    drop(held_write);
+    settle(&mut source);
 }
 
 /// No connection, and a switch is pressed: its result is unknown, and the read that asks Beebeeb fails too. What
@@ -617,7 +680,7 @@ fn the_pane_offers_try_again_below_the_groups_and_no_row_moves() {
     assert!(!seen.contains("Couldn't load"), "nothing was dropped: {seen}");
     assert!(find(&rt, "item-3-1-switch").is_some(), "the switches stay drawn");
     assert_eq!(row_rects(&rt), rows, "no row moved when the notice came");
-    // Recent says the same above its list, which stays.
+    // Recent says the same below its list, which stays.
     rt.update(|s, _| crate::frames::settings::go(s, "DW-0791"));
     draw(&mut rt);
     let seen = words(&rt);

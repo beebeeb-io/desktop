@@ -19,7 +19,7 @@ pub const UNCONFIRMED: (&str, &str) = ("Couldn't check with Beebeeb.", "What's s
 /// The account's switches could not be read: the rows say so, and this offers the way to ask again.
 pub const NOT_READ: (&str, &str) = (
     "Couldn't load your account's alerts.",
-    "Nothing was changed. The switches on this PC still work.",
+    "The switches on this PC still work.",
 );
 /// The index of the "Try again" button (`btn-1`; `btn-0` is "Open Windows Settings").
 const AGAIN: usize = 1;

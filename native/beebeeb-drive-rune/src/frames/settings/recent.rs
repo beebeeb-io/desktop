@@ -21,19 +21,6 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     ];
     // Not read: an empty list would be a statement about the account that nobody checked.
     match ui.source.recent_state() {
-        // Read, but a later change could not be confirmed: the list stays, said to be possibly out of date.
-        ReadState::Ready if ui.source.notifications_unconfirmed() => {
-            let (strong, words) = super::notifications::UNCONFIRMED;
-            children.push(notices::note_with(
-                0,
-                Tone::Warn,
-                &ic::WARN_CIRCLE,
-                strong,
-                words,
-                Some(super::notifications::try_again(0, t)),
-                t,
-            ));
-        }
         ReadState::Ready => {}
         ReadState::Loading => {
             children.push(notices::note(
@@ -68,6 +55,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             "When something needs your attention, a new device sign-in, a share or a storage warning, it shows up here.",
             t,
         ));
+        children.extend(unconfirmed(ui, t));
         return (shell::pane(children, t), None);
     }
     let mut pills = 0;
@@ -111,5 +99,23 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             .collect();
         children.push(lists::list(l, Some(day), rows, None, t));
     }
+    children.extend(unconfirmed(ui, t));
     (shell::pane(children, t), None)
+}
+
+/// Read, but a later change could not be confirmed: the list stays, and below it (so no row moves under the
+/// pointer when this comes or goes) the page says it may be out of date, with "Try again".
+fn unconfirmed(ui: &SettingsUi, t: &Theme) -> Option<El> {
+    let (strong, words) = super::notifications::UNCONFIRMED;
+    ui.source.notifications_unconfirmed().then(|| {
+        notices::note_with(
+            0,
+            Tone::Warn,
+            &ic::WARN_CIRCLE,
+            strong,
+            words,
+            Some(super::notifications::try_again(0, t)),
+            t,
+        )
+    })
 }

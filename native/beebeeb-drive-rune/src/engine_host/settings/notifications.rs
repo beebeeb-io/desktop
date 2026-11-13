@@ -27,8 +27,9 @@
 //!     connection is the usual reason for both): what was held stays drawn, the write's toast is the only one,
 //!     [`NotificationsPart::unconfirmed`] says it may be out of date and both panes draw that with "Try again".
 //!     It is not stamped fresh, so the next opening reads again.
-//!   - Another answer is still on its way (a write, or a read asked after this one began): it is not judged; the
-//!     read after that answer is.
+//!   - Another answer is still on its way (a write of this session, or a read asked after this one began): it is
+//!     not judged and drops nothing; the read after that answer is judged, and if it fails too what was kept stays,
+//!     said to be possibly out of date.
 //!   - Any other: nothing of the account stays drawn, the toast says so, and
 //!     [`NotificationsPart::recent_state`] / [`NotificationsPart::alerts_state`] say failed (both panes offer "Try
 //!     again"): the page never says "No notifications" for a list that was not read.
@@ -416,6 +417,9 @@ pub(super) struct NotificationsPart<C: CredentialStores> {
     loud: bool,
     /// A read failed while a write was on its way and was not judged: read again when no write is out.
     recheck: bool,
+    /// The session the writes on their way were sent under (`marking`, `switching` count answers still to come,
+    /// whichever session asked): only a write of the read's own session defers that read's verdict.
+    writes_of: Option<SessionGeneration>,
     /// Test builds: the next write's worker waits for a word down this before it calls the engine.
     #[cfg(test)]
     hold_next_write: Option<mpsc::Receiver<()>>,
@@ -464,6 +468,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             stale: false,
             loud: false,
             recheck: false,
+            writes_of: None,
             #[cfg(test)]
             hold_next_write: None,
             #[cfg(test)]
@@ -691,6 +696,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             return;
         }
         let update = switch.update(on);
+        let session = before.0;
         #[cfg(test)]
         let hold = self.hold_next_write.take();
         let started = spawn(
@@ -716,6 +722,9 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             },
         );
         self.switching = started;
+        if started {
+            self.writes_of = Some(session);
+        }
         if !started {
             log("settings: could not start a thread for a notification setting");
             self.toast_next = Some(ALERT_NOT_SAVED);
@@ -762,7 +771,8 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                 let failed = kinds.iter().flatten().next().copied();
                 // Another answer is on its way (a write, or a read asked after this one began): a failure here is
                 // not judged, so the outcome does not depend on which answer lands first.
-                let later = self.again || self.marking > 0 || self.switching;
+                let write_out = (self.marking > 0 || self.switching) && self.writes_of == Some(session);
+                let later = self.again || write_out;
                 // After a write that failed and said so, under the session of that write.
                 let unconfirmed = self.unconfirmed == Some(session);
                 let keeps = later || unconfirmed;
@@ -798,9 +808,13 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                 match failed {
                     None => {
                         self.read_at = Some(Instant::now());
-                        self.unconfirmed = None;
-                        self.stale = false;
-                        self.loud = false;
+                        // With a read still to come (asked for after this one began, by a write that failed), that
+                        // one is the read after the write: what was said stands until it lands.
+                        if !self.again {
+                            self.unconfirmed = None;
+                            self.stale = false;
+                            self.loud = false;
+                        }
                     }
                     // Never stamped fresh: the next opening reads again (what was kept may be stale).
                     Some(kind) => {
@@ -808,7 +822,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                         log(format!("settings: the notifications did not load ({kind})"));
                         if later {
                             // The write's answer reads again (a read asked for meanwhile does so by itself).
-                            self.recheck = self.marking > 0 || self.switching;
+                            self.recheck = write_out;
                         } else {
                             // Kept after a failed write: that write's words stand, and the panes say "may be out
                             // of date"; only a read the person asked for says it failed too.
@@ -837,6 +851,10 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                                 value,
                             });
                             *toast = Some(ALERT_SAVED);
+                            // The switches are Beebeeb's own again; what else was unsure is asked for now.
+                            if self.stale {
+                                self.read();
+                            }
                         }
                     }
                     Err(kind) => {
@@ -899,7 +917,10 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
     /// A read failed while a write was on its way and was not judged: with no write out any more, read again (the
     /// read whose failure is judged).
     fn read_unjudged(&mut self) {
-        if self.recheck && self.marking == 0 && !self.switching {
+        if self.recheck && self.marking == 0 && !self.switching && self.engine.has_session() {
+            // What was kept while the write was out stays if this read fails too, said to be possibly out of
+            // date: a failure that was not judged then is not a reason to drop what a write has just confirmed.
+            self.unconfirmed = Some(self.engine.session_turn());
             self.read();
         }
     }
@@ -1042,6 +1063,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             return;
         }
         let sent = ids.clone();
+        let session = before.0;
         #[cfg(test)]
         let hold = self.hold_next_write.take();
         let started = spawn(
@@ -1067,6 +1089,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             },
         );
         if started {
+            self.writes_of = Some(session);
             self.marking += 1;
             self.seen.extend(ids);
             self.dirty = true;

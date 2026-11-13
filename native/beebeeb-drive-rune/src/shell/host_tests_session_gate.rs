@@ -233,10 +233,10 @@ fn closed_run(setup: Step, closing: Closing, seen: bool, input: Option<(&Key, Mo
 }
 
 /// The runs WITHOUT an input, one per (setup, closing, seen): the record every input of that setup must leave
-/// the window equal to. Keyed by the setup's own function, so two setups never share a run.
+/// the window equal to. Keyed by the setup's name (one name, one setup).
 #[derive(Default)]
 struct Baselines {
-    without: std::collections::HashMap<(usize, Closing, bool), String>,
+    without: std::collections::HashMap<(String, Closing, bool), String>,
     /// Windows compared with their run without the input.
     compared: usize,
 }
@@ -245,6 +245,7 @@ struct Baselines {
 /// way, seen by the poll or not yet, the window is exactly what it is without the input.
 fn refused_when_closed(runs: &mut Baselines, name: &str, setup: Step, input: &Input) {
     let (what, key, mods) = input.clone();
+    let setup_name = name.to_string();
     let name = format!("{name}, {what}");
     // The control: the input does something while the session is open.
     let mut with = app();
@@ -261,7 +262,7 @@ fn refused_when_closed(runs: &mut Baselines, name: &str, setup: Step, input: &In
         for seen in [false, true] {
             let without = runs
                 .without
-                .entry((setup as usize, closing, seen))
+                .entry((setup_name.clone(), closing, seen))
                 .or_insert_with(|| closed_run(setup, closing, seen, None).0)
                 .clone();
             let (with, app) = closed_run(setup, closing, seen, Some((&key, mods)));
