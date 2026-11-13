@@ -13,15 +13,18 @@
 //! [`AccountCallError`], a kind with fixed words. Must not: log anything a call sends or receives (an email, a
 //! device's name, an id).
 //!
-//! Writes account state: [`Engine::revoke_account_session`] and [`Engine::revoke_other_account_sessions`].
+//! Writes account state: [`Engine::revoke_account_session`], [`Engine::end_account_session`] and
+//! [`Engine::revoke_other_account_sessions`].
 
 use std::future::Future;
+
+use zeroize::Zeroizing;
 
 use super::settings_api::{AccountCallError, kind_of};
 use super::{CredentialStores, Engine};
 use crate::account::SessionGeneration;
 use crate::account_dto::{AccountProfile, AccountSessionList, Subscription};
-use crate::api_client::ApiClient;
+use crate::api_client::{ApiClient, DesktopApiError};
 
 /// An answer, and the session it was made for.
 #[derive(Clone)]
@@ -39,7 +42,85 @@ impl<T> std::fmt::Debug for Stamped<T> {
     }
 }
 
+/// What Account draws, read in one call ([`Engine::account_basics`]). The profile is the answer itself; the name
+/// and the plan each carry their own failure, so a host can draw the rest without them. No `Debug`: it holds the
+/// email and the name.
+#[derive(Clone)]
+pub struct AccountBasics {
+    pub profile: AccountProfile,
+    /// `Ok(None)`: no name was set.
+    pub display_name: Result<Option<String>, AccountCallError>,
+    pub subscription: Result<Subscription, AccountCallError>,
+}
+
+/// How a sign-out of one session ended ([`Engine::end_account_session`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEnd {
+    /// Beebeeb ended the session.
+    Ended,
+    /// Beebeeb has no such session of this account (it answered 404): it had ended before.
+    AlreadyGone,
+}
+
+/// Whether `error` is Beebeeb answering 404.
+fn is_not_found(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<DesktopApiError>(),
+            Some(DesktopApiError::HttpStatus { status, .. }) if status.as_u16() == 404
+        )
+    })
+}
+
 impl<C: CredentialStores> Engine<C> {
+    /// Everything Account draws, asked at the same time on ONE client under one session check: who is signed in
+    /// (`GET /api/v1/auth/me`), the name the account shows (`GET /api/v1/me/profile`) and the plan
+    /// (`GET /api/v1/billing/subscription`). A profile that does not answer fails the call; the other two fail
+    /// alone, each with its kind.
+    pub fn account_basics(&self) -> Result<Stamped<AccountBasics>, AccountCallError> {
+        self.account_read(|api| async move {
+            let (profile, display_name, subscription) =
+                futures_util::future::join3(api.account_profile(), api.account_display_name(), api.subscription())
+                    .await;
+            Ok(AccountBasics {
+                profile: profile?,
+                display_name: display_name.map_err(|error| kind_of(&error)),
+                subscription: subscription.map_err(|error| kind_of(&error)),
+            })
+        })
+    }
+
+    /// Whether the engine holds this session as one Beebeeb no longer accepts (its calls were answered 401 again
+    /// and again). It is cleared by the engine's next call that works. In memory: a window may ask on every poll.
+    pub fn account_session_refused(&self) -> bool {
+        self.acct.auth_health.is_expired()
+    }
+
+    /// Test builds only: record how one of the engine's own calls ended, as its sync loop does. `refused`: Beebeeb
+    /// answered it 401 (three in a row and the session is held as ended); else it worked, which clears that.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn note_call_for_test(&self, refused: bool) {
+        let refusal = anyhow::anyhow!("401 Unauthorized");
+        self.acct.auth_health.note_result(refused.then_some(&refusal));
+    }
+
+    /// WRITES: end one session of the account, the one path of [`Engine::revoke_account_session`], with a 404
+    /// told apart: the session had ended before, so there is nothing left to end ([`SessionEnd::AlreadyGone`]).
+    pub fn end_account_session(
+        &self,
+        listed_under: SessionGeneration,
+        id: &str,
+    ) -> Result<SessionEnd, AccountCallError> {
+        let id = id.to_string();
+        self.account_change(listed_under, move |api| async move {
+            match api.revoke_account_session(&id).await {
+                Ok(()) => Ok(SessionEnd::Ended),
+                Err(error) if is_not_found(&error) => Ok(SessionEnd::AlreadyGone),
+                Err(error) => Err(error),
+            }
+        })
+    }
+
     /// Who is signed in (`GET /api/v1/auth/me`): the email, whether it is verified, whether two-factor is on.
     pub fn account_profile(&self) -> Result<Stamped<AccountProfile>, AccountCallError> {
         self.account_read(|api| async move { api.account_profile().await })
@@ -62,13 +143,11 @@ impl<C: CredentialStores> Engine<C> {
 
     /// WRITES: end one session of the account (`DELETE /api/v1/account/sessions/{id}`). `listed_under`: the
     /// session the host read its list under ([`Stamped::session`]); when it is not the session in memory now,
-    /// nothing is sent ([`AccountCallError::NotSignedIn`]). A caller never passes this session's own id.
+    /// nothing is sent ([`AccountCallError::NotSignedIn`]). A caller never passes this session's own id. A
+    /// session that had ended before (404) is `Ok`: there is nothing left to end; [`Engine::end_account_session`]
+    /// tells the two apart.
     pub fn revoke_account_session(&self, listed_under: SessionGeneration, id: &str) -> Result<(), AccountCallError> {
-        let id = id.to_string();
-        self.account_change(
-            listed_under,
-            move |api| async move { api.revoke_account_session(&id).await },
-        )
+        self.end_account_session(listed_under, id).map(|_| ())
     }
 
     /// WRITES: end every session of the account but this one
@@ -81,12 +160,13 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// The token and the generation of the session in memory, taken under one lock. No session: `NotSignedIn`.
-    /// A session Beebeeb no longer accepts: `SessionEnded`, and nothing is asked.
-    fn token_of_this_session(&self) -> Result<(String, SessionGeneration), AccountCallError> {
+    /// A session Beebeeb no longer accepts: `SessionEnded`, and nothing is asked. The copy of the token wipes
+    /// itself when it is dropped: a refusal after this point leaves none behind.
+    fn token_of_this_session(&self) -> Result<(Zeroizing<String>, SessionGeneration), AccountCallError> {
         let stamped = {
             let guard = self.acct.session.lock().map_err(|_| AccountCallError::NotSignedIn)?;
             let current = guard.as_ref().ok_or(AccountCallError::NotSignedIn)?;
-            (current.token.clone(), self.acct.session_generation())
+            (Zeroizing::new(current.token.clone()), self.acct.session_generation())
         };
         if self.acct.auth_health.is_expired() {
             return Err(AccountCallError::SessionEnded);
@@ -106,9 +186,10 @@ impl<C: CredentialStores> Engine<C> {
         F: FnOnce(ApiClient) -> Fut,
         Fut: Future<Output = anyhow::Result<T>>,
     {
-        let (token, session) = self.token_of_this_session()?;
-        // No vault key: these calls decrypt nothing. The client wipes the token when it is dropped.
-        let api = ApiClient::new(self.config.api_base.clone(), token, [0; 32]);
+        let (mut token, session) = self.token_of_this_session()?;
+        // No vault key: these calls decrypt nothing. The token is moved (not copied) into the client, which wipes
+        // it when it is dropped.
+        let api = ApiClient::new(self.config.api_base.clone(), std::mem::take(&mut *token), [0; 32]);
         let value = self.runtime.block_on(call(api)).map_err(|error| kind_of(&error))?;
         if !self.account_session_is_still(session) {
             return Err(AccountCallError::NotSignedIn);
@@ -122,11 +203,11 @@ impl<C: CredentialStores> Engine<C> {
         F: FnOnce(ApiClient) -> Fut,
         Fut: Future<Output = anyhow::Result<T>>,
     {
-        let (token, session) = self.token_of_this_session()?;
+        let (mut token, session) = self.token_of_this_session()?;
         if session != listed_under || !self.account_session_is_still(listed_under) {
             return Err(AccountCallError::NotSignedIn);
         }
-        let api = ApiClient::new(self.config.api_base.clone(), token, [0; 32]);
+        let api = ApiClient::new(self.config.api_base.clone(), std::mem::take(&mut *token), [0; 32]);
         self.runtime.block_on(call(api)).map_err(|error| kind_of(&error))
     }
 }
