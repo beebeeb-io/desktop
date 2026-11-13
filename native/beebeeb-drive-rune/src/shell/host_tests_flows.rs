@@ -479,4 +479,13 @@ fn a_session_without_a_key_here_shows_the_twelve_words_in_the_sign_in_window_exc
         vec![true],
         "excluded once, at the start, and never lifted on the way to the words"
     );
+
+    // Escape (Back) on the words: the form, and it stays the form on the next frames while the gate has not
+    // moved yet (the engine's sign-out is a round trip). The window is still excluded from capture.
+    press(&mut rt, Key::Escape, Mods::default());
+    rt.frame(3.0);
+    settle(&mut rt);
+    assert_eq!(rt.state.signin.as_ref().unwrap().screen, Screen::SignIn);
+    assert!(rt.find(WORD_KEYS[0]).is_none(), "the words are gone");
+    assert!(rt.state.shell.capture_excluded);
 }

@@ -337,6 +337,30 @@ fn a_wrong_password_and_an_address_nobody_has_get_the_same_answer_and_store_noth
 }
 
 #[test]
+fn the_fifth_wrong_password_in_a_row_is_answered_with_the_lock_hint() {
+    let fake = fake("hint");
+    let (_engine, mut source) = source(&fake);
+    for attempt in 1..=4 {
+        source.begin_sign_in(&fake.first.email, "not the password");
+        assert_eq!(
+            next(&mut source),
+            SignInEvent::SignedIn(Err(SignInProblem::Invalid)),
+            "attempt {attempt}"
+        );
+    }
+    source.begin_sign_in(&fake.first.email, "not the password");
+    assert_eq!(next(&mut source), SignInEvent::SignedIn(Err(SignInProblem::LockedHint)));
+    assert_eq!(source.gate(), GateState::SignedOut);
+    // The right password still signs in (the hint is this app's count, not the server's verdict), and the count
+    // starts again.
+    source.begin_sign_in(&fake.first.email, PASSWORD);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::SignedIn(Ok(NextAfterSignIn::RecoveryPhrase))
+    );
+}
+
+#[test]
 fn a_server_that_does_not_answer_is_offline_at_every_step() {
     let fake = fake("offline");
     fake.two_factor.store(true, Ordering::SeqCst);

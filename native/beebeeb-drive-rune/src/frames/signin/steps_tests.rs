@@ -756,3 +756,28 @@ fn the_gate_that_needs_the_phrase_puts_the_twelve_words_in_front_and_discards_no
     assert!(!ui(&mut rt).follow_gate(GateState::NeedsRecoveryPhrase));
     assert_eq!(ui(&mut rt).screen, Screen::NoPhrase);
 }
+
+/// Back from the twelve words asks the engine to end the session, which takes a round trip: while the gate still
+/// says "needs the phrase" the form stays in front (the words are not forced back), and a later arrival at that
+/// gate (the next sign-in) shows the words again.
+#[test]
+fn going_back_from_the_words_stays_on_the_form_while_the_gate_has_not_moved_yet() {
+    use crate::shell::app::GateState;
+    let (mut rt, calls) = form(Script::default());
+    assert!(ui(&mut rt).follow_gate(GateState::NeedsRecoveryPhrase));
+    ui(&mut rt).open_sign_in();
+    assert_eq!(ui(&mut rt).screen, Screen::SignIn);
+    assert_eq!(
+        *calls.borrow(),
+        ["discard_partial_sign_in"],
+        "the engine is asked to end it"
+    );
+    for _ in 0..3 {
+        assert!(!ui(&mut rt).follow_gate(GateState::NeedsRecoveryPhrase));
+        assert_eq!(ui(&mut rt).screen, Screen::SignIn, "not bounced back to the words");
+    }
+    // The sign-out landed; the next sign-in arrives at the same gate: the words again.
+    assert!(!ui(&mut rt).follow_gate(GateState::SignedOut));
+    assert!(ui(&mut rt).follow_gate(GateState::NeedsRecoveryPhrase));
+    assert_eq!(ui(&mut rt).screen, Screen::Phrase);
+}

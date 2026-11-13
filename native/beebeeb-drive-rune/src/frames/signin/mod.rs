@@ -187,6 +187,8 @@ pub struct Ui {
     set_problem: Option<SignInProblem>,
     /// Sign-up's own state (DW-A31 to DW-A44), made ONCE here with its secure fields.
     pub(super) create: create::Create,
+    /// The session's gate as the last poll saw it (`follow_gate`).
+    gate_seen: Option<GateState>,
 }
 
 impl Ui {
@@ -232,6 +234,7 @@ impl Ui {
             setting: false,
             set_problem: None,
             create: create::Create::new(),
+            gate_seen: None,
         }
     }
 
@@ -393,8 +396,15 @@ impl Ui {
     /// just finished, or a start with such a session): the twelve words are in front (DW-A23). Whatever screen
     /// was up is left WITHOUT discarding the session (the session is why this screen shows); what was typed on
     /// it is forgotten. `true`: the screen changed.
+    ///
+    /// Only when the gate ARRIVES there (also the first gate seen, at a start): while it holds, the person may go
+    /// back to the form (which asks the engine to end that session), and the words are not put in front again.
     pub fn follow_gate(&mut self, gate: GateState) -> bool {
-        if gate != GateState::NeedsRecoveryPhrase || matches!(self.screen, Screen::Phrase | Screen::NoPhrase) {
+        let arrived = self.gate_seen.replace(gate) != Some(gate);
+        if !arrived
+            || gate != GateState::NeedsRecoveryPhrase
+            || matches!(self.screen, Screen::Phrase | Screen::NoPhrase)
+        {
             return false;
         }
         self.busy = false;
