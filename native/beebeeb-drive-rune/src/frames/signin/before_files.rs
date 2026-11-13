@@ -6,15 +6,16 @@
 //! and where the files would be the window says what is the matter and what to do.
 //!
 //! Which of the two shows is the session's gate (`shell::app::GateState`), which is the
-//! engine's: nothing here opens the gate. A button asks for something through the lane's one
-//! queue of requests (`frames::Intent`, `State::frames.intents`); the window moves on when the
-//! engine's gate does (Windows Hello recognised the person, a plan arrived).
+//! engine's: nothing here opens the gate. A button whose engine action is not built yet says
+//! "Not available yet" (a [`GateNotice`], drawn under the buttons, cleared by a gate change).
+//! The window moves on when the engine's gate does (Windows Hello recognised the person, a plan
+//! arrived).
 //!
 //! DW-0009 shows no file name anywhere, and it is in the capture-exclusion decision as a whole
 //! (`FrameGroup::Locked`, `shell::registry`).
 
 use crate::State;
-use crate::frames::Intent;
+use crate::frames::GateNotice;
 use crate::shell::app::{Event, GateState, Screen};
 use crate::shell::host;
 use crate::shell::registry::{FeedbackPolicy, Frame, FrameGroup};
@@ -26,12 +27,12 @@ use crate::ui::toolbar::{self, Closed};
 use crate::ui::{caption, kit};
 use rune::{Align, Color, Cx, El, Icon, TextStyle, col, el, row};
 
-/// What a button of these two screens asks for (`Intent::Do`'s first word).
+/// The action each button names, for tests and the log.
 pub const UNLOCK: &str = "unlock";
 pub const OPEN_PLANS: &str = "open-plans";
 pub const CHECK_PLAN: &str = "check-plan";
 /// Sign out is the shared confirm (DW-A57).
-pub const SIGN_OUT_FRAME: &str = "DW-A57";
+pub const SIGN_OUT: &str = "sign-out";
 
 /// `.kit-btn-lg`'s words: 13px/500 on 19.5px.
 const BUTTON_LG: TextStyle = TextStyle::new(13.0, 500.0).lh(19.5).tracking(-0.065);
@@ -64,8 +65,21 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     }),
 ];
 
-fn ask(what: &'static str) -> impl Fn(&mut State) + 'static {
-    move |s: &mut State| s.frames.intents.push(Intent::Do(what, String::new()))
+/// The message every gate button shows today: none of the four engine actions exists yet.
+const NOT_AVAILABLE: &str = "Not available yet";
+
+/// Set the gate notice and log the attempt. The engine actions these buttons need (unlock via
+/// Windows Hello, opening the plans page in the browser, re-checking the plan with the server,
+/// and sign-out while the gate is closed) are phase 2: this file does not edit `engine_host.rs`.
+fn not_built(what: &'static str) -> impl Fn(&mut State) + 'static {
+    move |s: &mut State| {
+        let gate = s.shell.app.gate();
+        s.frames.gate_notice = Some(GateNotice {
+            message: NOT_AVAILABLE,
+            gate,
+        });
+        eprintln!("beebeeb gate: NotBuilt({what})");
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -150,7 +164,7 @@ fn locked(t: &Theme) -> El {
             )
             .default_button()
             .autofocus()
-            .on_press(ask(UNLOCK)),
+            .on_press(not_built(UNLOCK)),
         ),
     )
 }
@@ -185,13 +199,10 @@ fn no_plan(t: &Theme) -> El {
                 .label("Choose a plan on beebeeb.io, opens in your browser")
                 .default_button()
                 .autofocus()
-                .on_press(ask(OPEN_PLANS)),
+                .on_press(not_built(OPEN_PLANS)),
             )
-            .child(wide("gate-btn-1", "Check again", None, Look::Plain).on_press(ask(CHECK_PLAN)))
-            .child(
-                wide("gate-btn-2", "Sign out", None, Look::Quiet)
-                    .on_press(|s: &mut State| s.frames.intents.push(Intent::Frame(SIGN_OUT_FRAME))),
-            ),
+            .child(wide("gate-btn-1", "Check again", None, Look::Plain).on_press(not_built(CHECK_PLAN)))
+            .child(wide("gate-btn-2", "Sign out", None, Look::Quiet).on_press(not_built(SIGN_OUT))),
     )
 }
 
@@ -226,6 +237,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let t = tokens::theme(cx.system_dark());
     cx.web_focus();
     let is_locked = s.shell.app.screen() == Screen::Gate(GateState::Locked);
+    let current_gate = s.shell.app.gate();
     let (standing, closed, block, words, dot) = if is_locked {
         (
             Standing::Locked,
@@ -249,6 +261,28 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             t.text_quaternary,
         )
     };
+    // The notice a button raised: drawn under the buttons, shown only while the gate that
+    // raised it still holds (a gate change is the engine's answer to the person's action).
+    let notice_text = s
+        .frames
+        .gate_notice
+        .as_ref()
+        .filter(|n| n.gate == current_gate)
+        .map(|n| n.message);
+    let mut gate_block = col()
+        .key("gate-area")
+        .grow(1.0)
+        .min_h(0.0)
+        .w_full()
+        .center()
+        .child(block);
+    if let Some(notice) = notice_text {
+        gate_block = gate_block.child(
+            kit::label("gate-notice", notice, SUB, t.text_tertiary)
+                .mt(12.0)
+                .role("status"),
+        );
+    }
     let main = col()
         .key("content-area")
         .role("main")
@@ -257,15 +291,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .h_full()
         .fill(t.bg)
         .child(toolbar::toolbar_in(s, &t, 0.0, Some(&closed)))
-        .child(
-            col()
-                .key("gate-area")
-                .grow(1.0)
-                .min_h(0.0)
-                .w_full()
-                .center()
-                .child(block),
-        )
+        .child(gate_block)
         .child(status(words, dot, &t));
     col()
         .key("window")
