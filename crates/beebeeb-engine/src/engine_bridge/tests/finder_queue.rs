@@ -331,8 +331,15 @@ async fn round7_completed_upload_retry(signout_retry: bool) {
 
     let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
     let file_key = beebeeb_core::kdf::derive_file_key(&master_key, item_id.as_bytes());
+    // Chunk format v2: the frame is not a v1 frame; it opens against the commitment the
+    // completion name carries.
+    assert!(beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &requests[2].body).is_err());
+    let (record, name) = uploaded_record(&requests, &file_key);
+    assert_eq!(record.format, beebeeb_core::chunk_stream::ExpectedChunkFormat::V2);
+    assert_eq!(record.version.map(|version| version.counter), Some(1));
+    assert_eq!(name, "report.txt");
     assert_eq!(
-        beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &requests[2].body).unwrap(),
+        uploaded_plaintext(&requests, &file_key, &item_id),
         b"live upload payload"
     );
     assert_eq!(requests[3].method, "POST");

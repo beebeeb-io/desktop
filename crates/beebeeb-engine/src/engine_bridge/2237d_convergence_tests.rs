@@ -291,7 +291,10 @@ async fn sf2237d_t6_guest_overwrite_new_version() {
     let replacement = frames(&random_key(), ID, b"replacement!", ExpectedChunkFormat::V2);
     f.prior_versions.push(replacement.clone());
     f.server.state.lock().unwrap().frames = replacement;
-    f.change(ID, json!({"version_number":2,"size_bytes":12}));
+    // A new version comes with its name: the one that carries the new upload's commitment.
+    let renamed = named(&random_key(), "guest.txt", ExpectedChunkFormat::V2);
+    f.server.state.lock().unwrap().meta["name_encrypted"] = json!(renamed);
+    f.change(ID, json!({"version_number":2,"size_bytes":12,"name_encrypted":renamed}));
     f.event(
         "file_update",
         json!({"id":ID,"size_bytes":12,"version_number":2,"storage_pool_id":"pool"}),
@@ -375,7 +378,9 @@ async fn sf2237d_t6_local_dirty_is_held() {
     let local_edits = b"saved on this PC";
     std::fs::write(&path, local_edits).unwrap();
     f.server.state.lock().unwrap().frames = frames(&random_key(), ID, b"guest saved!", ExpectedChunkFormat::V2);
-    f.change(ID, json!({"version_number":2,"size_bytes":12}));
+    let renamed = named(&random_key(), "guest.txt", ExpectedChunkFormat::V2);
+    f.server.state.lock().unwrap().meta["name_encrypted"] = json!(renamed);
+    f.change(ID, json!({"version_number":2,"size_bytes":12,"name_encrypted":renamed}));
     f.event(
         "file_update",
         json!({"id":ID,"size_bytes":12,"version_number":2,"storage_pool_id":"pool"}),

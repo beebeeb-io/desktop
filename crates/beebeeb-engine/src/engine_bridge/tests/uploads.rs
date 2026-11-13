@@ -108,9 +108,10 @@ pub(super) fn hydration_test_key(master_key: [u8; 32], file_id: &str) -> beebeeb
 
 /// A multi-chunk file: request a range that spans exactly ONE interior
 /// chunk. `hydrate_file_range` must download+decrypt ONLY that chunk — the
-/// mock server accepts exactly 3 requests (the metadata GET + the one
+/// mock server accepts exactly 2 requests (the metadata GET + the one
 /// covering chunk GET) and would hang/fail on a third, so this test fails
-/// loudly if the whole file were downloaded instead.
+/// loudly if the whole file were downloaded instead. The chunk opens against
+/// the file's authenticated record, so no frame zero is fetched first.
 #[test]
 fn hydrate_file_range_downloads_only_covering_chunk() {
     let dir = tempfile::tempdir().unwrap();
@@ -120,8 +121,8 @@ fn hydrate_file_range_downloads_only_covering_chunk() {
     // 3 chunks of 10 bytes each (uniform, no remainder) — chunk 1 is the
     // interior chunk under test.
     let chunks: Vec<Vec<u8>> = vec![b"AAAAAAAAAA".to_vec(), b"BBBBBBBBBB".to_vec(), b"CCCCCCCCCC".to_vec()];
-    // Metadata, authenticated frame zero, and the requested interior frame.
-    let server = HydrationMockServer::start(file_key, chunks, 3);
+    // Metadata and the requested interior frame.
+    let server = HydrationMockServer::start(file_key, chunks, 2);
 
     let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
     seed_bridge_row(&bridge, TEST_FILE_ID, "/range.bin", None, FileStatus::CloudOnly, 30);
@@ -160,7 +161,7 @@ fn hydrate_file_range_uses_server_chunk_size_for_short_last_chunk_boundary() {
     let mut last = vec![b'C'; MIB];
     last[123..127].copy_from_slice(b"LAST");
     let chunks: Vec<Vec<u8>> = vec![vec![b'A'; 4 * MIB], vec![b'B'; 4 * MIB], last];
-    let server = HydrationMockServer::start(file_key, chunks, 3);
+    let server = HydrationMockServer::start(file_key, chunks, 2);
 
     let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
     seed_bridge_row(

@@ -596,6 +596,7 @@ impl StateDb {
                 metadata_applied = excluded.metadata_applied,
                 is_create = excluded.is_create,
                 self_minted = excluded.self_minted,
+                completion_name_encrypted = NULL,
                 updated_at = excluded.updated_at",
             params![
                 resume.op_id,
@@ -717,6 +718,7 @@ impl StateDb {
                 metadata_applied = excluded.metadata_applied,
                 is_create = excluded.is_create,
                 self_minted = excluded.self_minted,
+                completion_name_encrypted = NULL,
                 updated_at = excluded.updated_at",
             params![
                 resume.op_id,
@@ -787,6 +789,72 @@ impl StateDb {
             params![op_id],
         )?;
         Ok(())
+    }
+    /// The sealed name `complete` publishes for this session's upload (chunk format v2: it carries the version
+    /// commitment). Stored before the first chunk is sent, so a session with a chunk on the server and no name
+    /// here was opened by a build that wrote v1.
+    pub fn set_upload_completion_name(&self, op_id: &str, name_encrypted: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE upload_resume SET completion_name_encrypted = ?2, updated_at = strftime('%s','now') WHERE op_id = ?1",
+            params![op_id, name_encrypted],
+        )?;
+        Ok(())
+    }
+    pub fn upload_completion_name(&self, op_id: &str) -> Result<Option<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT completion_name_encrypted FROM upload_resume WHERE op_id = ?1",
+                params![op_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+    /// The highest version counter this device wrote or authenticated for `file_id` (chunk format v2).
+    pub fn highest_file_version(&self, file_id: &str) -> Result<Option<u64>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let highest: Option<i64> = conn
+            .query_row(
+                "SELECT highest FROM file_version_counters WHERE file_id = ?1",
+                params![file_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(highest.and_then(|value| u64::try_from(value).ok()))
+    }
+    /// Remember `counter` for `file_id`, and with `published_name` the sealed name this device published
+    /// under it (the server holds it as the file's name). Monotonic: a lower counter never replaces a
+    /// higher one, and its name never replaces the higher one's.
+    pub fn observe_file_version(&self, file_id: &str, counter: u64, published_name: Option<&str>) -> Result<()> {
+        // Core caps a counter at 2^53 - 1, so it always fits an INTEGER.
+        let counter = i64::try_from(counter).unwrap_or(i64::MAX);
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "INSERT INTO file_version_counters (file_id, highest, published_name) VALUES (?1, ?2, ?3)
+             ON CONFLICT(file_id) DO UPDATE SET
+                published_name = CASE
+                    WHEN excluded.highest > highest THEN excluded.published_name
+                    WHEN excluded.highest = highest AND excluded.published_name IS NOT NULL THEN excluded.published_name
+                    ELSE published_name
+                END,
+                highest = MAX(highest, excluded.highest)",
+            params![file_id, counter, published_name],
+        )?;
+        Ok(())
+    }
+    /// The sealed name this device last published for `file_id` (under its highest counter), if any.
+    pub fn published_name(&self, file_id: &str) -> Result<Option<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT published_name FROM file_version_counters WHERE file_id = ?1",
+                params![file_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
     }
     pub fn clear_upload_resume(&self, op_id: &str) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");

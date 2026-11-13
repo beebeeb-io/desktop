@@ -166,7 +166,7 @@ fn test_prepare_thumbnail_uploads_encrypts_medium_and_large_with_blurhash() {
 
     for upload in &uploads {
         assert!(upload.encrypted.len() <= upload.variant.encrypted_max_bytes());
-        let plaintext = beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &upload.encrypted).unwrap();
+        let plaintext = beebeeb_core::encrypt::decrypt_thumbnail(&file_key, &upload.encrypted).unwrap();
         assert!(plaintext.starts_with(b"RIFF"), "thumbnail plaintext must be WebP");
         assert_ne!(&*upload.encrypted, plaintext.as_slice());
     }
@@ -212,7 +212,7 @@ fn test_prepare_thumbnail_uploads_extracts_video_frame_when_ffmpeg_available() {
     assert!(uploads[1].blurhash.is_none());
 
     for upload in &uploads {
-        let plaintext = beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &upload.encrypted).unwrap();
+        let plaintext = beebeeb_core::encrypt::decrypt_thumbnail(&file_key, &upload.encrypted).unwrap();
         assert!(plaintext.starts_with(b"RIFF"), "video thumbnail plaintext must be WebP");
     }
 }

@@ -13,7 +13,8 @@ pub struct Request<'a> {
     pub file_key: &'a beebeeb_core::kdf::FileKey,
     /// The metadata's chunk count; the grant manifest must agree.
     pub chunk_count: u32,
-    pub expected_format: beebeeb_core::chunk_stream::ExpectedChunkFormat,
+    /// The content record of the file's authenticated metadata: the pin and the version commitment.
+    pub record: crate::content_record::ContentRecord,
     /// The user's download ceiling in KB/s (`0`: none), as on the API path.
     pub download_kbps_limit: u64,
     /// Sizes the plaintext buffer only.

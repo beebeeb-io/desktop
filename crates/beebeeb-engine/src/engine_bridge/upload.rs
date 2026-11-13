@@ -110,6 +110,13 @@ impl EngineBridge {
                 .as_deref()
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
                 .and_then(|metadata| metadata["content_type"].as_str().map(str::to_string));
+            // Decision (lane, 2026-11-13): chunk format v2 adds one step before this landing. A
+            // completion whose name the server was not yet seen to hold (the first attempt failed
+            // between `complete` and that check) asks the server first, because a version whose
+            // commitment is not in the file's name opens on no device. Once held it is remembered,
+            // and this path is local again. The op still never parks and never uploads again.
+            self.publish_after_complete(op, &previous, &serde_json::Value::Null)
+                .await?;
             return self
                 .land(LandRequest {
                     local_file_id,
@@ -170,11 +177,14 @@ impl EngineBridge {
         let payload_path_str = payload_path.to_string_lossy().into_owned();
         let payload_mtime_ns = payload_mtime_ns(payload_path);
 
-        // Flow 7: resume the persisted upload session when the retry is for the
-        // SAME staged bytes. Re-running `init` would mint a second server file
-        // row (the first left behind as a broken `is_uploading` duplicate) and
-        // re-send every chunk from zero.
+        // A persisted session and the retry (chunk format v2). The server holds every chunk and the
+        // bytes are the same: `complete` is sent (again) and nothing else, so an answer lost on the
+        // way never uploads the file twice. Anything else is abandoned and restarted from chunk 0 in
+        // a fresh session: a new writer has a new version id, and its frames never join an older
+        // stream's, v1 (a session a build before v2 opened) or v2 (`upload_v2::resume_step`).
         let mut session: Option<UploadResume> = None;
+        // A fresh replacement's record, as the server holds it (set at its init, below).
+        let mut served_record: Option<crate::content_record::ContentRecord> = None;
         if let Some(previous) = self.db.get_upload_resume(&op.op_id)? {
             if previous.is_create && !previous.self_minted {
                 // SF-0001 (L13): an older version let the server mint a create's id.
@@ -194,27 +204,25 @@ impl EngineBridge {
                     && previous.chunk_count > 0
                     && previous.acked_chunks >= 0
                     && previous.acked_chunks <= previous.chunk_count;
-                let v2 = owned_key_and_pin(&self.db, self.api.master_key(), &previous.server_file_id)?.1
-                    == beebeeb_core::chunk_stream::ExpectedChunkFormat::V2;
-                if same_payload && v2 {
-                    // A fresh core writer has a fresh stream identity. Never append it to an old v2 stream.
-                    // Fresh init can refuse a live lease; preserve the old resume record until it succeeds.
-                } else if same_payload {
-                    tracing::info!(
-                        op_id = %op.op_id,
-                        file_id = %previous.server_file_id,
-                        acked_chunks = previous.acked_chunks,
-                        chunk_count = previous.chunk_count,
-                        "upload: resuming persisted upload session"
-                    );
-                    session = Some(previous);
-                } else {
-                    tracing::info!(
-                        op_id = %op.op_id,
-                        file_id = %previous.server_file_id,
-                        "upload: staged payload changed since the persisted session — abandoning it"
-                    );
-                    self.abandon_upload_session(&previous).await?;
+                match upload_v2::resume_step(same_payload, previous.acked_chunks, previous.chunk_count) {
+                    upload_v2::ResumeStep::CompleteOnly => {
+                        tracing::info!(
+                            op_id = %op.op_id,
+                            file_id = %previous.server_file_id,
+                            chunk_count = previous.chunk_count,
+                            "upload: the server holds every chunk of the persisted session — completing it"
+                        );
+                        session = Some(previous);
+                    }
+                    upload_v2::ResumeStep::Restart => {
+                        tracing::info!(
+                            op_id = %op.op_id,
+                            file_id = %previous.server_file_id,
+                            same_payload,
+                            "upload: the persisted session is not continued — abandoning it; this attempt uploads from the first chunk in a new one"
+                        );
+                        self.abandon_own_session(&previous).await?;
+                    }
                 }
             }
         }
@@ -241,14 +249,47 @@ impl EngineBridge {
                 } else {
                     local_file_id.as_str().to_string()
                 };
-                let init_request = upload_init_request_for_operation(
+                // The name init carries. A create's is the row's name until `complete` publishes the
+                // one with the version commitment: sealed for the id this init proposes (the queued
+                // name was sealed for the local id). A replacement's is not stored by the server,
+                // which keeps the file's name until `complete`; it wants the file's CURRENT sealed
+                // name as the version metadata instead, when that version is protected.
+                let init_name = if is_create && proposed_id != local_file_id.as_str() {
+                    owned_metadata_for_name(
+                        &self.db,
+                        self.api.master_key(),
+                        &proposed_id,
+                        metadata_display_name(&metadata, op).as_deref().unwrap_or(&proposed_id),
+                        content_type.as_deref(),
+                    )?
+                } else {
+                    name_encrypted.to_string()
+                };
+                let mut init_request = upload_init_request_for_operation(
                     &proposed_id,
-                    name_encrypted,
+                    &init_name,
                     content_type.clone(),
                     op.parent_id.clone(),
                     plaintext_size,
                     op.base_version,
                 );
+                if !is_create {
+                    // From the row as the server holds it now, as core's client does: the counter
+                    // of the new version must follow the SERVED one (`row_material` remembers it),
+                    // and the server compares this name with the row's at `complete`.
+                    match self.row_material(&self.api, &proposed_id, true).await {
+                        Ok((_, current, current_name)) => {
+                            init_request.version_metadata_encrypted =
+                                current_name.filter(|_| current.version.is_some());
+                            served_record = Some(current);
+                        }
+                        // The item's key is not on this device yet (an item added by someone else,
+                        // before the adoption the metadata step below performs): there is no record
+                        // to read now. The session body reads it once the key is there.
+                        Err(_) if owned_material(&self.db, self.api.master_key(), &proposed_id).is_err() => {}
+                        Err(error) => return Err(error),
+                    }
+                }
                 let upload = self.api.init_upload(&init_request).await?;
                 if upload.chunk_size_bytes <= 0 || upload.chunk_count <= 0 {
                     return Err(anyhow::anyhow!("upload init returned invalid chunk plan").into());
@@ -310,6 +351,7 @@ impl EngineBridge {
                 content_type.clone(),
                 payload_path,
                 &session,
+                served_record,
             )
             .await;
         match body {
@@ -348,6 +390,7 @@ impl EngineBridge {
                     log_queue_state_moved(&op.op_id, "completion");
                     return Err(anyhow::Error::new(QueueStateMoved).into());
                 }
+                self.publish_after_complete(op, &session, &completed).await?;
                 let size = completed["size_bytes"].as_u64().unwrap_or(plaintext_size);
                 ensure_session_item_id(&session, local_file_id)?;
                 self.land(LandRequest {
@@ -372,6 +415,19 @@ impl EngineBridge {
                 // does; `land_error_to_anyhow` hands them the error itself, so a marker it
                 // carries stays findable.
                 let error = land_error_to_anyhow(error);
+                if upload_file_changed(&error) {
+                    // `complete` refused the completion name: the file was renamed since this
+                    // session's init. The session just answered, so it is this device's and live:
+                    // it is abandoned, and the next attempt opens a fresh one from the row as it is
+                    // now (the init reads the served name). A counted failure, like any refusal.
+                    tracing::warn!(
+                        op_id = %op.op_id,
+                        file_id = %session.server_file_id,
+                        "upload: the file was renamed while it was uploading — abandoning the session; the next attempt starts from the renamed row"
+                    );
+                    self.abandon_own_session(&session).await?;
+                    return Err(error.into());
+                }
                 if upload_session_is_gone(&error) {
                     let status = error_http_status(&error);
                     // The status and a category only: the error's text carries the request URL
@@ -466,8 +522,10 @@ impl EngineBridge {
             _ => None,
         };
         let master_key = self.api.master_key();
+        // The item's key and CURRENT record (the completed upload's commitment included): a queued
+        // successor's name is sealed again with them.
         let landing_material =
-            owned_key_and_pin(&self.db, master_key, server_file_id.as_str()).map_err(EngineError::from)?;
+            owned_key_and_record(&self.db, master_key, server_file_id.as_str()).map_err(EngineError::from)?;
         let landed = self.db.apply_landing(
             &crate::state_db::LandingInput {
                 op_id: &op.op_id,
@@ -572,25 +630,16 @@ impl EngineBridge {
         content_type: Option<String>,
         payload_path: &Path,
         session: &UploadResume,
+        served_record: Option<crate::content_record::ContentRecord>,
     ) -> Result<serde_json::Value, EngineError> {
         // SF-0001 (L13): never seal a name or send a chunk under an id this device
         // did not choose, even when the session was read back from disk.
         ensure_session_item_id(session, local_file_id)?;
         let server_file_id = session.server_file_id.clone();
         if !session.metadata_applied {
-            let effective_name_encrypted = if server_file_id != local_file_id.as_str() {
-                owned_metadata_for_name(
-                    &self.db,
-                    self.api.master_key(),
-                    &server_file_id,
-                    metadata_display_name(metadata, op)
-                        .as_deref()
-                        .unwrap_or(&server_file_id),
-                    content_type.as_deref(),
-                )?
-            } else {
-                name_encrypted.to_string()
-            };
+            // The move this upload carries (never the name: `complete` publishes the name together
+            // with the new version's commitment, and the server refuses a completion name for a file
+            // renamed since init).
             // A19 (P2-7): an upload whose metadata step moves the item out of a
             // shared folder takes the same adoption guard as a queued move.
             // P2-3: only a recorded move with a recorded source is one. A
@@ -607,35 +656,24 @@ impl EngineBridge {
                 self.adopt_foreign_subtree(&server_file_id, Some(from_parent), op.parent_id.as_deref())
                     .await?;
             }
-            self.api
-                .update_metadata(&server_file_id, Some(&effective_name_encrypted), parent_change)
-                .await?;
+            if parent_change != crate::api_client::ParentChange::Unchanged {
+                self.api.update_metadata(&server_file_id, None, parent_change).await?;
+            }
             self.db.set_upload_resume_metadata_applied(&op.op_id)?;
         }
 
-        let (file_key, pin) = owned_key_and_pin(&self.db, self.api.master_key(), &server_file_id)?;
+        let (file_key, local_record) = owned_key_and_record(&self.db, self.api.master_key(), &server_file_id)?;
+        // A replacement writes under the pin and above the counter of the record the server holds
+        // (read at this session's init); a create has only the local one.
+        let record = served_record.unwrap_or(local_record);
+        // The name is sealed under the item's own key; the writer takes the other copy.
+        let name_key = beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes());
 
-        let file = std::fs::File::open(payload_path)?;
         let chunk_size = session.chunk_size_bytes as usize;
         let chunk_count = session.chunk_count as u64;
         if chunk_size == 0 || chunk_count == 0 {
             return Err(anyhow::anyhow!("upload init returned invalid chunk plan").into());
         }
-        let first_chunk = session.acked_chunks.max(0) as u64;
-        if !(first_chunk == 0 || pin != beebeeb_core::chunk_stream::ExpectedChunkFormat::V2) {
-            return Err(anyhow::anyhow!("a v2 upload must restart in a fresh session").into());
-        };
-        let mut writer = beebeeb_core::chunk_stream::ChunkEncryptor::from_reader_with_file_key(
-            file_key,
-            &server_file_id,
-            session.payload_size as u64,
-            chunk_size as u64,
-            file,
-        )?
-        .with_recorded_pin(pin)?;
-        // Task 1683 slice 2: per-file bytes for the popover. Keyed by the LOCAL file
-        // id (the `files` row the activity list reads); a resumed session starts at
-        // its acknowledged watermark, not at 0.
         let payload_total = u64::try_from(session.payload_size).unwrap_or(0);
         // LD-0105 U1: named by the file's vault path (else the op's), never failing the upload.
         let path = self
@@ -646,65 +684,142 @@ impl EngineBridge {
             .map(|entry| entry.path)
             .or_else(|| op.target_path.clone())
             .unwrap_or_default();
+        // Task 1683 slice 2: per-file bytes for the popover. Keyed by the LOCAL file
+        // id (the `files` row the activity list reads).
         let progress = self.transfers.begin_named(
             local_file_id.as_str(),
             &path,
             crate::transfer_progress::Direction::Up,
             payload_total,
         );
-        progress.update(crate::transfer_progress::uploaded_bytes(
-            first_chunk,
-            chunk_size as u64,
-            payload_total,
-        ));
-        // Rate-limit ceiling: read once per file, not per chunk (config is on
-        // disk but the file is fast to parse; at most one read per upload op).
-        let upload_kbps_limit = crate::config::DesktopConfig::load_for(self.identity)
-            .map(|c| c.upload_kbps_limit)
-            .unwrap_or(0);
 
-        for chunk_index in 0..chunk_count {
-            let encrypted = writer
-                .next_chunk()?
-                .ok_or_else(|| anyhow::anyhow!("staged upload ended early"))?;
-            if chunk_index < first_chunk {
-                continue;
+        // The server holds every chunk (`upload_v2::resume_step`): `complete` again, with the name
+        // this session stored before its first chunk. A session with no stored name was opened by a
+        // build that wrote v1: its frames are v1 and its name is the row's, so it completes bare.
+        let acked = session.acked_chunks.max(0) as u64;
+        let completion_name = if acked == chunk_count {
+            progress.update(payload_total);
+            self.db.upload_completion_name(&op.op_id)?
+        } else {
+            // A v2 writer never continues a stream it did not start: this session is a fresh one.
+            if acked != 0 {
+                return Err(anyhow::anyhow!("an upload never continues a persisted session").into());
             }
-            let read = encrypted.data.len().saturating_sub(28);
-            let chunk_start = std::time::Instant::now();
-            self.api
-                .upload_session_chunk(&session.upload_session_id, chunk_index as u32, &encrypted.data)
-                .await?;
-            self.db.set_upload_resume_acked(&op.op_id, chunk_index as i64 + 1)?;
-            progress.update(crate::transfer_progress::uploaded_bytes(
-                chunk_index + 1,
+            let file = std::fs::File::open(payload_path)?;
+            let mut writer = beebeeb_core::chunk_stream::ChunkEncryptor::from_reader_with_file_key(
+                file_key,
+                &server_file_id,
+                session.payload_size as u64,
                 chunk_size as u64,
-                payload_total,
-            ));
+                file,
+            )?
+            .with_recorded_pin(record.format)?;
+            progress.update(0);
+            // Rate-limit ceiling: read once per file, not per chunk (config is on
+            // disk but the file is fast to parse; at most one read per upload op).
+            let upload_kbps_limit = crate::config::DesktopConfig::load_for(self.identity)
+                .map(|c| c.upload_kbps_limit)
+                .unwrap_or(0);
 
-            // P1 — wire-byte counter: count plaintext bytes (the user-data rate).
-            self.wire.upload_bytes.fetch_add(read as u64, Ordering::Relaxed);
+            let mut completion_name = None;
+            for chunk_index in 0..chunk_count {
+                let encrypted = writer
+                    .next_chunk()?
+                    .ok_or_else(|| anyhow::anyhow!("staged upload ended early"))?;
+                if chunk_index == 0 {
+                    // Frame 0 is sealed, so the version id exists: seal the name `complete` will
+                    // publish and store it BEFORE the first chunk is sent. From here on a retry
+                    // that finds every chunk acknowledged can complete without the writer.
+                    let (name, mime) = upload_v2::completion_plain_name(
+                        &name_key,
+                        name_encrypted,
+                        metadata_display_name(metadata, op),
+                        content_type.as_deref(),
+                    )?;
+                    let sealed = upload_v2::seal_completion_name(
+                        &self.db,
+                        &server_file_id,
+                        &writer,
+                        &name_key,
+                        record,
+                        session.is_create,
+                        &name,
+                        mime.as_deref(),
+                    )?;
+                    self.db.set_upload_completion_name(&op.op_id, &sealed)?;
+                    completion_name = Some(sealed);
+                }
+                let read = encrypted.data.len().saturating_sub(28);
+                let chunk_start = std::time::Instant::now();
+                self.api
+                    .upload_session_chunk(&session.upload_session_id, chunk_index as u32, &encrypted.data)
+                    .await?;
+                self.db.set_upload_resume_acked(&op.op_id, chunk_index as i64 + 1)?;
+                progress.update(crate::transfer_progress::uploaded_bytes(
+                    chunk_index + 1,
+                    chunk_size as u64,
+                    payload_total,
+                ));
 
-            // E — token-bucket pacing: if a limit is set and the chunk transferred
-            // faster than the budget allows, sleep the remainder.
-            if upload_kbps_limit > 0 {
-                let budget_secs = read as f64 / (upload_kbps_limit as f64 * 1024.0);
-                let elapsed_secs = chunk_start.elapsed().as_secs_f64();
-                if budget_secs > elapsed_secs {
-                    let sleep_ms = ((budget_secs - elapsed_secs) * 1000.0) as u64;
-                    if sleep_ms > 0 {
-                        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                // P1 — wire-byte counter: count plaintext bytes (the user-data rate).
+                self.wire.upload_bytes.fetch_add(read as u64, Ordering::Relaxed);
+
+                // E — token-bucket pacing: if a limit is set and the chunk transferred
+                // faster than the budget allows, sleep the remainder.
+                if upload_kbps_limit > 0 {
+                    let budget_secs = read as f64 / (upload_kbps_limit as f64 * 1024.0);
+                    let elapsed_secs = chunk_start.elapsed().as_secs_f64();
+                    if budget_secs > elapsed_secs {
+                        let sleep_ms = ((budget_secs - elapsed_secs) * 1000.0) as u64;
+                        if sleep_ms > 0 {
+                            tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                        }
                     }
                 }
             }
-        }
+            writer.finish()?;
+            completion_name
+        };
 
-        writer.finish()?;
-        let completed = self.api.complete_upload_session(&session.upload_session_id).await;
-        if completed.is_ok() {
-            progress.finish();
+        let completed = self
+            .api
+            .complete_upload_session(&session.upload_session_id, completion_name.as_deref())
+            .await
+            .map_err(EngineError::from)?;
+        progress.finish();
+        Ok(completed)
+    }
+
+    /// The step between `complete` and the landing: the server must hold this upload's commitment in
+    /// the file's name (`publish_completion_name`), or the new version's content opens nowhere. Run
+    /// only AFTER a File Provider write's completion is recorded, and never through the handling of
+    /// a dead session: `complete` has answered, so nothing here may abandon or restart the upload.
+    /// A failure fails the attempt; the retry comes back here (by `complete` again, or from the
+    /// recorded completion) until the name is held. A session with no stored completion name (one a
+    /// build before chunk format v2 opened) has nothing to publish.
+    async fn publish_after_complete(
+        &self,
+        op: &PendingOperation,
+        session: &UploadResume,
+        answer: &serde_json::Value,
+    ) -> Result<(), EngineError> {
+        let Some(sent) = self.db.upload_completion_name(&op.op_id)? else {
+            return Ok(());
+        };
+        // The durable marker: this device already saw the server hold exactly this name.
+        if self.db.published_name(&session.server_file_id)?.as_deref() == Some(sent.as_str()) {
+            return Ok(());
         }
-        completed.map_err(EngineError::from)
+        let (name_key, _) = owned_key_and_record(&self.db, self.api.master_key(), &session.server_file_id)?;
+        self.publish_completion_name(
+            &self.api,
+            &session.server_file_id,
+            &name_key,
+            &sent,
+            &session.object_version_id,
+            answer,
+        )
+        .await
     }
 
     /// Post-`complete` best-effort work: thumbnails, staged-payload cleanup and
@@ -870,6 +985,32 @@ impl EngineBridge {
     /// days if this fails). A REPLACE targets the user's existing file and its
     /// session is only dropped locally. The resume row is always dropped so the
     /// next attempt starts a fresh session.
+    /// Abandon a session this attempt will not continue, so the fresh init is not refused as "in
+    /// progress" for the rest of the old session's lease (an hour by default). The server's abandon
+    /// is keyed by FILE, not by session: for a replacement it would discard whatever upload of the
+    /// file is in flight, which may be another device's once this session was reaped. So a
+    /// replacement's is sent only when the server just answered that THIS session is live (a file
+    /// has one upload in flight). A create's row is this device's own.
+    pub(super) async fn abandon_own_session(&self, session: &UploadResume) -> Result<(), EngineError> {
+        // A liveness question that got no answer fails the attempt and keeps the row for the next.
+        if !session.is_create && self.api.upload_session_is_live(&session.upload_session_id).await? {
+            match self.api.abandon_upload(&session.server_file_id).await {
+                Ok(()) => tracing::info!(
+                    op_id = %session.op_id,
+                    file_id = %session.server_file_id,
+                    "upload: abandoned this device's live replacement session"
+                ),
+                Err(e) => tracing::warn!(
+                    op_id = %session.op_id,
+                    file_id = %session.server_file_id,
+                    reason = error_category(e.as_ref()),
+                    "upload: could not abandon the live replacement session; the new init waits for its lease"
+                ),
+            }
+        }
+        self.abandon_upload_session(session).await
+    }
+
     async fn abandon_upload_session(&self, session: &UploadResume) -> Result<(), EngineError> {
         if session.is_create {
             match self.api.abandon_upload(&session.server_file_id).await {
