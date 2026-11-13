@@ -21,9 +21,10 @@ fn poll(s: &mut Probe, t: f64, tx: &mut Tx) -> bool {
     let mut written = WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
     // What the script checks against: the model and where things were drawn, then what the platform holds.
     let mut line = format!(
-        "state text={:?} caret={} selection={:?} preedit={:?} keyboard={} canvas={:?} caret_drawn={:?}",
+        "state text={:?} caret={} caret_cell={} selection={:?} preedit={:?} keyboard={} canvas={:?} caret_drawn={:?}",
         s.text(),
         s.caret,
+        s.caret_cell(),
         s.selection(),
         s.preedit,
         s.has_keyboard,

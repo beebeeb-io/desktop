@@ -71,6 +71,8 @@ function Wait([int]$Ms = 250) { Start-Sleep -Milliseconds $Ms }
 function Since([int]$From, [string]$Pattern) { $l = Lines; if ($l.Count -le $From) { @() } else { @($l[$From..($l.Count - 1)] | Where-Object { $_ -match $Pattern }) } }
 function Last([string]$Pattern) { Lines | Where-Object { $_ -match $Pattern } | Select-Object -Last 1 }
 function Mark { (Lines).Count }
+# Polls until the condition holds, at most $Ms: a slow first frame must not read as a missing event.
+function Until([scriptblock]$Cond, [int]$Ms = 3000) { $end = (Get-Date).AddMilliseconds($Ms); while ((Get-Date) -lt $end) { if (& $Cond) { return }; Start-Sleep -Milliseconds 100 }; }
 function Tap([int]$Vk) { [Win]::Key($Vk, $true); [Win]::Key($Vk, $false); Start-Sleep -Milliseconds 60 }
 function Chord([int]$Mod, [int]$Vk) { [Win]::Key($Mod, $true); Tap $Vk; [Win]::Key($Mod, $false); Start-Sleep -Milliseconds 60 }
 function TypeKeys([string]$Letters) { foreach ($c in $Letters.ToUpper().ToCharArray()) { Tap ([int]$c) } }
@@ -83,13 +85,14 @@ function Shot([string]$Name) {
 }
 function State {
   $line = Last '^state '
-  if ($line -notmatch '^state text="(?<text>.*)" caret=(?<caret>\d+) selection=\((?<a>\d+), (?<b>\d+)\) preedit="(?<pre>.*)" keyboard=(?<kb>true|false) canvas=(?<canvas>None|Some\(\[[^\]]*\]\)) caret_drawn=(?<drawn>None|Some\(\[[^\]]*\]\))$') { return $null }
+  if ($line -notmatch '^state text="(?<text>.*)" caret=(?<caret>\d+) caret_cell=(?<cell>\d+) selection=\((?<a>\d+), (?<b>\d+)\) preedit="(?<pre>.*)" keyboard=(?<kb>true|false) canvas=(?<canvas>None|Some\(\[[^\]]*\]\)) caret_drawn=(?<drawn>None|Some\(\[[^\]]*\]\))$') { return $null }
   $nums = { param($s) if ($s -eq 'None') { $null } else { @([regex]::Matches($s, '-?\d+(\.\d+)?') | ForEach-Object { [double]::Parse($_.Value, [Globalization.CultureInfo]::InvariantCulture) }) } }
-  [pscustomobject]@{ Text = $Matches.text; Caret = [int]$Matches.caret; A = [int]$Matches.a; B = [int]$Matches.b; Preedit = $Matches.pre
+  [pscustomobject]@{ Text = $Matches.text; Caret = [int]$Matches.caret; Cell = [int]$Matches.cell; A = [int]$Matches.a; B = [int]$Matches.b; Preedit = $Matches.pre
     Keyboard = ($Matches.kb -eq 'true'); Canvas = (& $nums $Matches.canvas); Drawn = (& $nums $Matches.drawn) }
 }
 
-$CELL = 16; $PAD = 16; $LINE = 24   # src/lib.rs
+# src/lib.rs. PowerShell names ignore case: these must not collide with a parameter called $Cell.
+$CellW = 16; $Pad = 16; $LineH = 24
 $env:RUNE_INPUT_CHECK_LOG = $log
 $proc = Start-Process -FilePath $Exe -PassThru
 $hwnd = [IntPtr]::Zero
@@ -110,7 +113,7 @@ try {
   $canvas = $s.Canvas
   # The screen pixel in front of `cell` on the canvas's line.
   function CellAt([int]$Cell) {
-    @([int]($origin.X + ($canvas[0] + $PAD + $Cell * $CELL) * $scale), [int]($origin.Y + ($canvas[1] + $PAD + $LINE / 2) * $scale))
+    @([int]($origin.X + ($canvas[0] + $Pad + $Cell * $CellW) * $scale), [int]($origin.Y + ($canvas[1] + $Pad + $LineH / 2) * $scale))
   }
   function MoveTo([int]$Cell) { $p = CellAt $Cell; [void][Win]::SetCursorPos($p[0], $p[1]); [Win]::Mouse(0x1); Start-Sleep -Milliseconds 60 }
   function Click([int]$Cell) { MoveTo $Cell; [Win]::Mouse(0x2); Start-Sleep -Milliseconds 40; [Win]::Mouse(0x4); Wait }
@@ -120,13 +123,13 @@ try {
   Click 0
   $s = State
   Check 'a press focuses the canvas (focus line, caret drawn)' ((Since $m '^focus canvas=true$').Count -eq 1 -and $s.Keyboard -and $null -ne $s.Drawn) ("state: " + (Last '^state '))
-  Check 'the press arrives with canvas-local coordinates' ((Since $m "^pointer Down x=$PAD y=$($PAD + $LINE / 2) clicks=1").Count -eq 1) ((Since $m '^pointer ') -join ' | ')
+  Check 'the press arrives with canvas-local coordinates' ((Since $m "^pointer Down x=$Pad y=$($Pad + $LineH / 2) clicks=1").Count -eq 1) ((Since $m '^pointer ') -join ' | ')
   Check 'the probe window is the foreground window' ([Win]::GetForegroundWindow() -eq $hwnd)
 
   # --- 1. keys and typed text ------------------------------------------------------------------------------
   $m = Mark
   TypeKeys 'hello'
-  Wait
+  Until { (State).Text -eq 'hello' }
   $s = State
   Check 'five typed letters arrive as five keys, once each' ((Since $m '^key Text\(').Count -eq 5 -and $s.Text -eq 'hello') ("text=$($s.Text); " + ((Since $m '^key ') -join ' | '))
   Check 'typing sends no input-method commit' ((Since $m '^ime Commit').Count -eq 0) ((Since $m '^ime ') -join ' | ')
@@ -138,23 +141,25 @@ try {
   Shot '1-typed'
 
   # --- 3. the candidate position the platform holds ---------------------------------------------------------
-  $s = State
-  $imm = Last '^imm '
-  $okImm = $false; $detail = "imm: $imm; caret_drawn: $($s.Drawn -join ',') scale=$scale"
-  if ($imm -match 'context=true .*candidate ok=(?<cok>\d+) style=(?<cs>0x[0-9a-f]+) pos=\((?<cx>-?\d+),(?<cy>-?\d+)\) area=\((?<l>-?\d+),(?<t>-?\d+),(?<r>-?\d+),(?<b>-?\d+)\) composition ok=(?<pok>\d+) style=(?<ps>0x[0-9a-f]+) pos=\((?<px>-?\d+),(?<py>-?\d+)\)') {
-    $x = $s.Drawn[0] * $scale; $y = $s.Drawn[1] * $scale; $h = $s.Drawn[3] * $scale
+  # Expected from the probe's MODEL (the cell the caret is in front of), not from what it was told was drawn.
+  function CaretPx($st) { @((($canvas[0] + $Pad + $st.Cell * $CellW) * $scale), (($canvas[1] + $Pad) * $scale), ($LineH * $scale)) }
+  function ImmAt($st) {
+    $imm = Last '^imm '
+    if ($imm -notmatch 'context=true .*candidate ok=(?<cok>\d+) style=(?<cs>0x[0-9a-f]+) pos=\((?<cx>-?\d+),(?<cy>-?\d+)\) area=\((?<l>-?\d+),(?<t>-?\d+),(?<r>-?\d+),(?<b>-?\d+)\) composition ok=(?<pok>\d+) style=(?<ps>0x[0-9a-f]+) pos=\((?<px>-?\d+),(?<py>-?\d+)\)') { return $false }
+    $e = CaretPx $st; $x = $e[0]; $y = $e[1]; $h = $e[2]
     $near = { param($a, $b) [math]::Abs($a - $b) -le 1 }
-    $okImm = ($Matches.cok -ne '0') -and ($Matches.pok -ne '0') -and (& $near ([int]$Matches.cx) $x) -and (& $near ([int]$Matches.cy) $y) -and
-      (& $near ([int]$Matches.l) $x) -and (& $near ([int]$Matches.t) $y) -and (& $near ([int]$Matches.b) ($y + $h)) -and
-      (& $near ([int]$Matches.px) $x) -and (& $near ([int]$Matches.py) ($y + $h))
+    ($Matches.cok -ne '0') -and ($Matches.pok -ne '0') -and ($Matches.cs -eq '0x80') -and ($Matches.ps -eq '0x2') -and
+      (& $near ([int]$Matches.cx) $x) -and (& $near ([int]$Matches.cy) $y) -and (& $near ([int]$Matches.l) $x) -and (& $near ([int]$Matches.t) $y) -and
+      (& $near ([int]$Matches.b) ($y + $h)) -and (& $near ([int]$Matches.px) $x) -and (& $near ([int]$Matches.py) ($y + $h))
   }
-  Check 'the input context holds the caret rectangle (candidate and composition forms)' $okImm $detail
-  $before = $imm
-  Tap 0x24; Wait                      # Home: the caret moves five cells left
   $s = State
-  $imm = Last '^imm '
-  $moved = ($imm -ne $before) -and ($imm -match 'candidate ok=\d+ style=0x[0-9a-f]+ pos=\((?<cx>-?\d+),') -and ([math]::Abs([int]$Matches.cx - $s.Drawn[0] * $scale) -le 1)
-  Check 'the forms follow the caret when it moves' $moved "imm: $imm; caret_drawn: $($s.Drawn -join ',')"
+  Check 'the input context holds the caret rectangle (candidate and composition forms)' ($s.Cell -eq 5 -and (ImmAt $s)) ("caret cell $($s.Cell), expected px $((CaretPx $s) -join ','); " + (Last '^imm '))
+  $moves = 0; $right = 0
+  foreach ($vk in 0x24, 0x27, 0x27, 0x23, 0x25) {   # Home, Right, Right, End, Left
+    $was = (State).Cell; Tap $vk; Until { (State).Cell -ne $was } 1500; Wait 150
+    $moves++; if (ImmAt (State)) { $right++ }
+  }
+  Check 'the forms follow the caret on every move' ($right -eq $moves) "$right of $moves moves; last: $(Last '^imm ')"
   Tap 0x23; Wait
 
   # --- 4. the OS clipboard ---------------------------------------------------------------------------------
