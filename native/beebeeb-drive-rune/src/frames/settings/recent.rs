@@ -4,14 +4,15 @@
 use crate::State;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{Theme, type_};
+use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_list::{self as lists, Item, Role};
-use crate::ui::settings_notice as notices;
+use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::{kit, settings_shell as shell};
 use rune::tok::Family;
 use rune::{El, row};
 
 use super::SettingsUi;
-use super::source::AlertKind;
+use super::source::{AlertKind, ReadState};
 
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let days = ui.source.recent_alerts();
@@ -19,6 +20,34 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         shell::crumb("Notifications", t, |s: &mut State| super::go(s, "DW-0750")),
         shell::heading("Recent notifications", Some("Recent alerts from your account."), t),
     ];
+    // Not read: an empty list would be a statement about the account that nobody checked.
+    match ui.source.recent_state() {
+        ReadState::Ready => {}
+        ReadState::Loading => {
+            children.push(notices::note(
+                0,
+                Tone::Neutral,
+                &ic::INBOX,
+                "Loading your notifications\u{2026}",
+                "Asking Beebeeb for the list.",
+                t,
+            ));
+            return (shell::pane(children, t), None);
+        }
+        ReadState::Failed => {
+            let again = controls::button(0, "Try again", None, Emphasis::Plain, t)
+                .on_press(|s: &mut State| s.settings.source.reload_notifications());
+            children.push(notices::problem(
+                0,
+                0,
+                "Couldn't load your notifications",
+                "Nothing was changed. There may be alerts that aren't shown here.",
+                Some(again),
+                t,
+            ));
+            return (shell::pane(children, t), None);
+        }
+    }
     if days.is_empty() {
         children.push(notices::empty(
             0,

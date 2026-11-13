@@ -10,11 +10,13 @@
 //! address, a token or reqwest's own text.
 //!
 //! Writes account state: [`Engine::set_storage_region`], [`Engine::set_notification_preferences`] and
-//! [`Engine::mark_notifications_read`]. The others only read. Must not: log anything a call sends or receives.
+//! [`Engine::mark_notifications_read`] (and the two `_for` forms of the last two, which refuse when the session is
+//! no longer the one the host names). The others only read. Must not: log anything a call sends or receives.
 
 use std::future::Future;
 
 use super::{CredentialStores, Engine};
+use crate::account::SessionGeneration;
 use crate::account_dto::{
     NotificationList, NotificationPreferences, NotificationPreferencesUpdate, SetPreferredRegionResponse,
     UserRegionResponse,
@@ -99,6 +101,37 @@ impl<C: CredentialStores> Engine<C> {
         self.account_call(move |api| async move { api.update_notification_preferences(&update).await })
     }
 
+    /// WRITES: [`Engine::set_notification_preferences`], for the session a person pressed under and no other.
+    /// `session` is [`Engine::session_turn`] as the host read it AT THE PRESS (on its window's thread, before any
+    /// worker started). A session that moved on since (a lock, a sign-out, another sign-in, even back to the same
+    /// account): [`AccountCallError::NotSignedIn`], and nothing is sent.
+    pub fn set_notification_preferences_for(
+        &self,
+        session: SessionGeneration,
+        update: &NotificationPreferencesUpdate,
+    ) -> Result<NotificationPreferences, AccountCallError> {
+        let update = update.clone();
+        self.account_call_for(session, move |api| async move {
+            api.update_notification_preferences(&update).await
+        })
+    }
+
+    /// WRITES: [`Engine::mark_notifications_read`], for the session whose page showed these ids and no other
+    /// (`session` as in [`Engine::set_notification_preferences_for`]).
+    pub fn mark_notifications_read_for(
+        &self,
+        session: SessionGeneration,
+        ids: &[String],
+    ) -> Result<(), AccountCallError> {
+        let ids = ids.to_vec();
+        self.account_call_for(session, move |api| async move {
+            for id in &ids {
+                api.mark_notification_read(id).await?;
+            }
+            Ok(())
+        })
+    }
+
     /// WRITES: these notifications have been seen (`PATCH /api/v1/notifications/{id}`, one call each, in order); one
     /// the server no longer has counts as seen. Stops at the first that fails: the ones before it are marked.
     pub fn mark_notifications_read(&self, ids: &[String]) -> Result<(), AccountCallError> {
@@ -121,6 +154,31 @@ impl<C: CredentialStores> Engine<C> {
     {
         let token = self.session_token().map_err(|_| AccountCallError::NotSignedIn)?;
         // No vault key: these calls decrypt nothing, so the client is given none.
+        let api = ApiClient::new(self.config.api_base.clone(), token, [0; 32]);
+        self.runtime.block_on(call(api)).map_err(|error| kind_of(&error))
+    }
+
+    /// [`Engine::account_call`] for one session only: the token is copied only while the session in memory is the
+    /// one `session` names, asked with no session change half done (the session-write lock is held for the question
+    /// and the copy, as `session_is_still` in `trash_api` holds it), so the token of a later session never carries a
+    /// change chosen under an earlier one. Never waits on a session change: while one is under way the answer is
+    /// `NotSignedIn`, and nothing is sent.
+    fn account_call_for<T, F, Fut>(&self, session: SessionGeneration, call: F) -> Result<T, AccountCallError>
+    where
+        F: FnOnce(ApiClient) -> Fut,
+        Fut: Future<Output = anyhow::Result<T>>,
+    {
+        let token = {
+            let _writes = match self.writes.try_read() {
+                Ok(writes) => writes,
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return Err(AccountCallError::NotSignedIn),
+            };
+            if !self.acct.session_unchanged_since(session) {
+                return Err(AccountCallError::NotSignedIn);
+            }
+            self.session_token().map_err(|_| AccountCallError::NotSignedIn)?
+        };
         let api = ApiClient::new(self.config.api_base.clone(), token, [0; 32]);
         self.runtime.block_on(call(api)).map_err(|error| kind_of(&error))
     }

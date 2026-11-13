@@ -52,7 +52,7 @@ mod activity;
 pub use activity::{AccountActivity, SecurityScore};
 
 mod sessions;
-pub use sessions::{AccountSessionList, ClientDeviceList, ClientSyncSessionList, RevokeAllResult};
+pub use sessions::{AccountSession, AccountSessionList, ClientDeviceList, ClientSyncSessionList, RevokeAllResult};
 
 mod notifications;
 pub use notifications::{
