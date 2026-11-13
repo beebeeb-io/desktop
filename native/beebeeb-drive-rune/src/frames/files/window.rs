@@ -89,7 +89,8 @@ fn menu_layer(s: &State, t: &Theme) -> Option<El> {
     })
 }
 
-fn toast_of(kind: Toast, t: &Theme) -> El {
+/// `again`: does a failure's message offer Try again (`State::offers_try_again`)?
+fn toast_of(kind: Toast, again: bool, t: &Theme) -> El {
     match kind {
         Toast::Trashed => toast::toast(
             &icons::TRASH,
@@ -123,8 +124,8 @@ fn toast_of(kind: Toast, t: &Theme) -> El {
             &icons_files::ALERT,
             toast::Tone::Failed,
             &Toast::failure(action, why),
-            // Only where Try again repeats something (`retry::offers_try_again`).
-            super::retry::offers_try_again(action).then_some(toast::ToastAction {
+            // Only where Try again repeats something (`State::offers_try_again`).
+            again.then_some(toast::ToastAction {
                 text: "Try again",
                 name: "Try again",
                 shortcut: None,
@@ -265,7 +266,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .on_press(|s: &mut State| s.status_pressed())
         });
     if let Some(kind) = s.live_toast() {
-        main = main.child(toast::layer(toast_of(kind, &t)));
+        let again = matches!(kind, Toast::Failed(action, why) if s.offers_try_again(action, why));
+        main = main.child(toast::layer(toast_of(kind, again, &t)));
     }
 
     let crop = s.actions.board_crop_top;

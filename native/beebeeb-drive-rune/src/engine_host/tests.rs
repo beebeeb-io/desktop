@@ -981,3 +981,15 @@ fn trash_and_restore_are_not_gated_by_the_sync_guard() {
         "restore goes to the API, not through the sync folder"
     );
 }
+
+/// After a drop that was refused part-way, Try again gets the files that are not in the folder yet, alone. Every
+/// file in and still a refusal (the session changed during the last copy): an empty list, never "all of it again".
+#[test]
+fn what_is_left_of_a_refused_drop_is_the_files_that_did_not_go_in() {
+    let files: Vec<PathBuf> = ["one.pdf", "two.pdf", "three.pdf"].iter().map(PathBuf::from).collect();
+    assert_eq!(upload_rest(&files, 1, true), Some(files[1..].to_vec()));
+    assert_eq!(upload_rest(&files, 3, true), Some(Vec::new()));
+    // Nothing went in: the window sends all of it again. Not refused: nothing is left.
+    assert_eq!(upload_rest(&files, 0, true), None);
+    assert_eq!(upload_rest(&files, 3, false), None);
+}
