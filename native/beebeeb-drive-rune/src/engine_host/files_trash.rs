@@ -106,7 +106,8 @@ impl<C: CredentialStores> TrashCalls<C> {
     pub fn restore(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
         let now = stamp(&self.engine);
         self.look(&now);
-        // The stamp of the move to Trash, never one taken at this press.
+        // The stamp of the move to Trash, never one taken at this press. (`look` just dropped what was held if the
+        // stamp moved, so the two are equal here; the held one is sent so that does not rest on `look` alone.)
         let Some((moved_under, held)) = &self.undo else {
             return Err(ActionError::Unavailable);
         };
