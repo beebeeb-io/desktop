@@ -2,10 +2,17 @@
 //! `EngineFilesSource` behind `keep_offline`, `free_up_space`, `changes` and `backups_root`.
 //!
 //! - Keep on this PC / Remove from this PC: the pin change (`Engine::set_kept`), one item at a time.
-//! - Free up space: for a SELECTION (`Engine::free_up_space_of`), never the whole account. An item that was kept
-//!   is released first (the window says "no longer kept"). A file with a change that is not sent is never touched
-//!   (the engine's `local_bytes_agreed` guard, inside the reclaim).
-//! - `changes`: what those two did, per item, once the engine answered. It is NOT an activity feed.
+//! - Free up space: for a SELECTION (`Engine::free_up_space_of`), never the whole account. Where this system has
+//!   no reclaim for a selection, it is refused at once in its own words and NOTHING is changed. An item that was
+//!   kept is released for the reclaim (which never touches a kept file) and KEPT AGAIN when the reclaim freed
+//!   nothing of it: a Free up space that did nothing does not cost the pin. A folder that was freed IN PART stays
+//!   released (keeping it again would download what was just freed) and is said as left, with the reason. Not kept
+//!   again: when the vault locked in between (no session to do it in; logged). A file with a change that is not
+//!   sent is never touched (the engine's guards, inside the reclaim).
+//! - `changes`: what those two did, per item, once the engine answered: whether it was done, and what the engine
+//!   says the item is NOW (read after the work, the way a listing reads it). It is NOT an activity feed.
+//! - A job that ended early (a caught panic, a lock and an unlock in between) is never dropped and never trusted:
+//!   one read of what the engine says of its items now decides, per item, whether the change is there.
 //! - The Backups folder's id, from this PC's local state (`StateDb::backups_roots`), read once per session.
 //!
 //! Thread rule: both changes block (the state database, a Cloud Files call), so one worker does them in the order
@@ -24,15 +31,16 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use beebeeb_engine::app::{CredentialStores, Engine, LocalStateRefused};
 use beebeeb_engine::backup_protect::BackupsTree;
+use beebeeb_engine::free_up_space::{Reclaimed, SelectionAnswer};
 use beebeeb_engine::signin::gate::GateState;
 use beebeeb_engine::sync_view::Start;
 
 use super::log;
-use crate::frames::files::source::{Action, ActionError, Change};
+use crate::frames::files::source::{Action, ActionError, Change, LocalOutcome};
 
 #[cfg(test)]
 #[path = "files_tests.rs"]
@@ -43,9 +51,6 @@ mod tests;
 /// plain folder, with no device rows and no words for why nothing in it can change. While it is `false` nothing is
 /// read for it either.
 pub const BACKUPS_SECTION_ON: bool = false;
-
-/// How long a message of the window stays at most: the window is woken once more after it, so it goes.
-const MESSAGE_STAYS: Duration = Duration::from_millis(8_100);
 
 /// What the adapter asks of the engine handle. The app's is `Engine`; a test's is its own.
 pub trait FilesEngine: Send + Sync + 'static {
@@ -59,8 +64,13 @@ pub trait FilesEngine: Send + Sync + 'static {
     fn in_backups(&self, ids: &[String]) -> Result<Vec<Option<bool>>, LocalStateRefused>;
     /// Keep an item on this PC, or stop keeping it. Blocks: a worker's.
     fn set_kept(&self, id: &str, kept: bool) -> Result<(), String>;
-    /// The copies of these on this PC go; per id, whether nothing is left of it here. Blocks: a worker's.
-    fn free_up_space_of(&self, ids: &[String]) -> Result<Vec<(String, bool)>, String>;
+    /// Can this system free up space for a selection at all? Never waits.
+    fn can_free_selection(&self) -> bool;
+    /// The copies of these on this PC go; per id, what the engine says of it afterwards. Blocks: a worker's.
+    fn free_up_space_of(&self, ids: &[String]) -> Result<Vec<SelectionAnswer>, String>;
+    /// Per id: the row's mark of what this PC holds, as a listing reads it now (`Some(None)`: no mark). `None`: no
+    /// such row, or it could not be read. Blocks: a worker's.
+    fn states_of(&self, ids: &[String]) -> Result<Vec<Option<Option<String>>>, LocalStateRefused>;
     /// The id of the Backups folder (`None`: this account has none here). Blocks: a worker's.
     fn backups_root(&self) -> Result<Option<String>, LocalStateRefused>;
     /// Redraw the window: an answer is there.
@@ -91,8 +101,14 @@ impl<C: CredentialStores> FilesEngine for Engine<C> {
     fn set_kept(&self, id: &str, kept: bool) -> Result<(), String> {
         Engine::set_kept(self, id, kept)
     }
-    fn free_up_space_of(&self, ids: &[String]) -> Result<Vec<(String, bool)>, String> {
+    fn can_free_selection(&self) -> bool {
+        beebeeb_engine::free_up_space::SELECTION_RECLAIM
+    }
+    fn free_up_space_of(&self, ids: &[String]) -> Result<Vec<SelectionAnswer>, String> {
         Engine::free_up_space_of(self, ids)
+    }
+    fn states_of(&self, ids: &[String]) -> Result<Vec<Option<Option<String>>>, LocalStateRefused> {
+        Engine::local_state(self)?.with(|db| marks_in(db, ids))
     }
     fn backups_root(&self) -> Result<Option<String>, LocalStateRefused> {
         Engine::local_state(self)?.with(|db| {
@@ -106,9 +122,46 @@ impl<C: CredentialStores> FilesEngine for Engine<C> {
     }
 }
 
+/// Per id, the row's mark of what this PC holds as the rows say now, by the listing's own two steps (the engine's
+/// row model, then the window's mark of it), with one difference: a file that is KEPT reads "available_offline"
+/// also while its download has not finished. The listing's model has no word for that and says "online only",
+/// which would leave the menu offering Keep on this PC for an item that is kept, and never Remove from this PC.
+/// `None`: no such row, or it could not be read.
+fn marks_in(db: &beebeeb_engine::state_db::StateDb, ids: &[String]) -> Vec<Option<Option<String>>> {
+    use beebeeb_engine::state_db::PinState;
+    ids.iter()
+        .map(|id| {
+            let entry = db.get_file(id).ok().flatten()?;
+            let contract = db.get_file_contract_state(id).ok()?;
+            let kept = contract
+                .as_ref()
+                .is_some_and(|contract| contract.effective_pin_state() == PinState::Pinned);
+            if kept && !entry.is_dir() {
+                return Some(Some("available_offline".to_string()));
+            }
+            let row = beebeeb_engine::drive_v2::model::item_from(&entry, contract.as_ref(), None);
+            Some(crate::source_engine::item(row).pc_status)
+        })
+        .collect()
+}
+
+/// Is what the action asked for there, by the mark the engine gives the item now? For a job whose own word is not
+/// trusted (it ended early). A folder's mark does not say whether its copies are gone: Free up space of it is not
+/// called done from here.
+fn reached(action: Action, now: &Option<Option<String>>) -> bool {
+    let Some(mark) = now else { return false };
+    match action {
+        Action::KeepOffline => mark.as_deref() == Some("available_offline"),
+        Action::RemoveOffline => mark.as_deref() != Some("available_offline"),
+        _ => mark.as_deref() == Some("online_only"),
+    }
+}
+
 enum Ask {
     /// These items (`true`: the row said it is kept), and what to do with them.
     Change(Action, Vec<(String, bool)>),
+    /// After a change that ended early: what the engine says of these now. Nothing is changed.
+    Look(Action, Vec<String>),
     BackupsRoot,
 }
 
@@ -119,15 +172,18 @@ struct Job {
 }
 
 enum Answer {
-    /// A change: every id asked, the ones the engine changed, how many it did not and why (the last reason).
+    /// A change, per item asked: what the engine says of it now, and why it was left if it was.
     Changed {
         generation: u64,
-        whose: Option<String>,
+        /// The account it was asked for (not "the account at the end": that is `ended`).
+        account: String,
+        /// The job did not end the way it began: a panic was caught, or the vault was not open for this account
+        /// when it finished. What it says of the items is not trusted.
+        ended: bool,
+        /// The answer of a [`Ask::Look`].
+        looked: bool,
         action: Action,
-        asked: Vec<String>,
-        done: Vec<String>,
-        failed: usize,
-        why: ActionError,
+        items: Vec<LocalOutcome>,
     },
     BackupsRoot {
         generation: u64,
@@ -152,6 +208,8 @@ pub struct LocalCopies<E: FilesEngine> {
     changes: Vec<Change>,
     /// The Backups folder's id, read for `seen`'s account. The outer `None`: not read (or not readable).
     root: Option<Option<String>>,
+    /// The one timer that wakes the window when a message's time is over ([`Self::wake_after`]).
+    wakes: Option<mpsc::Sender<Instant>>,
 }
 
 impl<E: FilesEngine> LocalCopies<E> {
@@ -169,6 +227,25 @@ impl<E: FilesEngine> LocalCopies<E> {
             in_flight: HashSet::new(),
             changes: Vec::new(),
             root: None,
+            wakes: None,
+        }
+    }
+
+    /// Wake the window once more after this long (a message set between presses goes at its own time). One
+    /// thread for all of them, started at the first; it ends with the source.
+    pub fn wake_after(&mut self, after: Duration) {
+        if self.wakes.is_none() {
+            let (tx, rx) = mpsc::channel::<Instant>();
+            let engine = self.engine.clone();
+            let started = std::thread::Builder::new()
+                .name("files-wake".into())
+                .spawn(move || wake_when_due(&rx, || engine.wake()));
+            if started.is_ok() {
+                self.wakes = Some(tx);
+            }
+        }
+        if let Some(wakes) = &self.wakes {
+            let _ = wakes.send(Instant::now() + after);
         }
     }
 
@@ -238,11 +315,16 @@ impl<E: FilesEngine> LocalCopies<E> {
     }
 
     /// Ask for a change of these items. `Ok`: accepted; what it did arrives through [`Self::take`]. Refused, with
-    /// nothing sent: no open vault, no engine on the folder, or a change of one of them is still on its way.
+    /// nothing sent: no open vault, no engine on the folder, a change of one of them is still on its way, or (Free
+    /// up space) this system has no reclaim for a selection.
     pub fn ask(&mut self, action: Action, items: Vec<(String, bool)>) -> Result<(), ActionError> {
         self.look();
         if !self.seen.0 || self.seen.1.is_none() || !self.engine.running() {
             return Err(ActionError::Unavailable);
+        }
+        // Before anything is released for it: a reclaim that cannot run here must not cost a pin.
+        if action == Action::FreeUpSpace && !self.engine.can_free_selection() {
+            return Err(ActionError::NotOnThisSystem);
         }
         if items.iter().any(|(id, _)| self.in_flight.contains(id)) {
             return Err(ActionError::InFlight);
@@ -262,35 +344,31 @@ impl<E: FilesEngine> LocalCopies<E> {
             match answer {
                 Answer::Changed {
                     generation,
-                    whose,
+                    account,
+                    ended,
+                    looked,
                     action,
-                    asked,
-                    done,
-                    failed,
-                    why,
+                    items,
                 } => {
                     // An answer of an earlier session: its marks went with that session, and it is not said.
-                    if generation != self.generation {
+                    if generation != self.generation || Some(&account) != self.seen.1.as_ref() {
                         continue;
                     }
-                    for id in &asked {
-                        self.in_flight.remove(id);
+                    if !looked {
+                        for item in &items {
+                            self.in_flight.remove(&item.id);
+                        }
                     }
-                    if whose.is_none() || whose != self.seen.1 {
-                        continue;
+                    // It was accepted in THIS session and ended early: never dropped, and its own word is not trusted.
+                    // One read of what the engine says of the items now decides per item.
+                    if ended && !looked {
+                        let ids = items.iter().map(|item| item.id.clone()).collect();
+                        if self.send(Ask::Look(action, ids)) {
+                            continue;
+                        }
                     }
                     changed = true;
-                    self.changes.push(if done.is_empty() {
-                        Change::Failed(action, why)
-                    } else {
-                        Change::Local { action, done, failed }
-                    });
-                    // The window's message about it goes after its time, also when nothing else wakes the window.
-                    let engine = self.engine.clone();
-                    let _ = std::thread::Builder::new().name("files-wake".into()).spawn(move || {
-                        std::thread::sleep(MESSAGE_STAYS);
-                        engine.wake();
-                    });
+                    self.changes.push(Change::Local { action, items });
                 }
                 Answer::BackupsRoot {
                     generation,
@@ -330,24 +408,68 @@ fn still_for<E: FilesEngine>(engine: &E, account: &str) -> bool {
     engine.unlocked() && engine.account().as_deref() == Some(account)
 }
 
+/// The timer behind [`LocalCopies::wake_after`]: `wake` at each moment sent, until the sender is gone.
+fn wake_when_due(due: &mpsc::Receiver<Instant>, wake: impl Fn()) {
+    let mut waiting: Vec<Instant> = Vec::new();
+    loop {
+        let got = match waiting.iter().min() {
+            None => due.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+            Some(next) => due.recv_timeout(next.saturating_duration_since(Instant::now())),
+        };
+        match got {
+            Ok(at) => waiting.push(at),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let now = Instant::now();
+                waiting.retain(|at| *at > now);
+                wake();
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
+/// Every item of a job as "not done, and nothing known of it".
+fn all_left(ids: impl Iterator<Item = String>) -> Vec<LocalOutcome> {
+    ids.map(|id| LocalOutcome {
+        id,
+        now: None,
+        left: Some(ActionError::Failed),
+    })
+    .collect()
+}
+
 /// The answer of a job that ended early: nothing is claimed.
 fn gave_up(job: &Job) -> Answer {
-    match &job.ask {
-        Ask::Change(action, items) => Answer::Changed {
-            generation: job.generation,
-            whose: None,
-            action: *action,
-            asked: items.iter().map(|(id, _)| id.clone()).collect(),
-            done: Vec::new(),
-            failed: items.len(),
-            why: ActionError::Failed,
-        },
-        Ask::BackupsRoot => Answer::BackupsRoot {
-            generation: job.generation,
-            whose: None,
-            root: None,
-        },
+    let (action, ids, looked): (Action, Vec<String>, bool) = match &job.ask {
+        Ask::Change(action, items) => (*action, items.iter().map(|(id, _)| id.clone()).collect(), false),
+        Ask::Look(action, ids) => (*action, ids.clone(), true),
+        Ask::BackupsRoot => {
+            return Answer::BackupsRoot {
+                generation: job.generation,
+                whose: None,
+                root: None,
+            };
+        }
+    };
+    Answer::Changed {
+        generation: job.generation,
+        account: job.account.clone(),
+        ended: true,
+        looked,
+        action,
+        items: all_left(ids.into_iter()),
     }
+}
+
+/// What the engine says of these now, for this account alone. `None` per id: not known.
+fn states<E: FilesEngine>(engine: &E, account: &str, ids: &[String]) -> Vec<Option<Option<String>>> {
+    let read = if still_for(engine, account) {
+        engine.states_of(ids).ok()
+    } else {
+        None
+    };
+    read.filter(|read| read.len() == ids.len())
+        .unwrap_or_else(|| vec![None; ids.len()])
 }
 
 /// One job, on the worker: for the account it was asked for alone, asked again before each item.
@@ -369,21 +491,44 @@ fn run<E: FilesEngine>(engine: &E, job: &Job) -> Answer {
                 None => gave_up(job),
             };
         }
+        // A change ended early: per item, done only where what the engine says of it now is what was asked.
+        Ask::Look(action, ids) => {
+            let now = states(engine, account, ids);
+            let mut items = all_left(ids.iter().cloned());
+            for (item, now) in items.iter_mut().zip(now) {
+                if reached(*action, &now) {
+                    item.left = None;
+                }
+                item.now = now;
+            }
+            return Answer::Changed {
+                generation,
+                account: account.to_string(),
+                ended: !still_for(engine, account),
+                looked: true,
+                action: *action,
+                items,
+            };
+        }
         Ask::Change(action, items) => (*action, items),
     };
     let asked: Vec<String> = items.iter().map(|(id, _)| id.clone()).collect();
-    let mut done = Vec::new();
-    let mut why = ActionError::Failed;
+    // Per item: why it was left. Not done until the engine said so.
+    let mut left: Vec<Option<ActionError>> = vec![Some(ActionError::Failed); asked.len()];
     // Nothing in the Backups tree is changed from here; an id no row has is not changed either.
     let places = if still_for(engine, account) {
         engine.in_backups(&asked).ok()
     } else {
         None
     };
-    let mut free = Vec::new();
-    for ((id, kept), place) in items.iter().zip(places.unwrap_or_default()) {
+    let places = places
+        .filter(|places| places.len() == asked.len())
+        .unwrap_or_else(|| vec![None; asked.len()]);
+    // Free up space: the items to reclaim, and the ones of them that were released for it.
+    let (mut free, mut released) = (Vec::new(), Vec::new());
+    for (at, ((id, kept), place)) in items.iter().zip(places).enumerate() {
         if place == Some(true) {
-            why = ActionError::Protected;
+            left[at] = Some(ActionError::Protected);
         }
         if place != Some(false) || !still_for(engine, account) {
             continue;
@@ -391,35 +536,82 @@ fn run<E: FilesEngine>(engine: &E, job: &Job) -> Answer {
         match action {
             Action::KeepOffline | Action::RemoveOffline => {
                 if engine.set_kept(id, action == Action::KeepOffline).is_ok() {
-                    done.push(id.clone());
+                    left[at] = None;
                 }
             }
-            // What was kept is no longer kept (the window's words); then its copies may go.
+            // The reclaim never touches a kept file: what was kept is released for it, and kept again below
+            // when the reclaim did not free it.
             _ => {
-                if !*kept || engine.set_kept(id, false).is_ok() {
-                    free.push(id.clone());
+                if *kept {
+                    if engine.set_kept(id, false).is_err() {
+                        continue;
+                    }
+                    released.push(at);
                 }
+                free.push(at);
             }
         }
     }
+    // Per item: did the reclaim free something of it? What was freed in part is not kept again.
+    let mut freed_some = vec![false; asked.len()];
+    // The reclaim panicked: what it did is not known, so the answer is not trusted (`ended`).
+    let mut reclaim_ended = false;
     if !free.is_empty() && still_for(engine, account) {
-        match engine.free_up_space_of(&free) {
-            Ok(per_item) => done.extend(per_item.into_iter().filter(|(_, freed)| *freed).map(|(id, _)| id)),
-            Err(_) => log("files: the selection's copies were not removed from this PC"),
+        let ids: Vec<String> = free.iter().map(|&at| asked[at].clone()).collect();
+        // Caught here, not only around the job: the pins released above are still to be put back.
+        let reclaim = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.free_up_space_of(&ids)));
+        match reclaim {
+            Ok(Ok(per_item)) => {
+                for answer in per_item {
+                    let Some(at) = free.iter().copied().find(|&at| asked[at] == answer.id) else {
+                        continue;
+                    };
+                    freed_some[at] = answer.freed_some;
+                    left[at] = match answer.what {
+                        Reclaimed::Freed => None,
+                        Reclaimed::Unsent => Some(ActionError::NotSent),
+                        Reclaimed::Kept => Some(ActionError::HoldsKept),
+                        Reclaimed::NoSuchItem | Reclaimed::Left => Some(ActionError::Failed),
+                    };
+                }
+            }
+            Ok(Err(_)) => log("files: the selection's copies were not removed from this PC"),
+            Err(_) => {
+                log("files: the reclaim of a selection ended early");
+                reclaim_ended = true;
+            }
         }
     }
-    let failed = asked.len() - done.len();
+    // A Free up space that freed nothing of an item does not cost its pin: it is kept again. Not what was freed in
+    // part: keeping a folder again would download what was just freed.
+    for at in released {
+        if left[at].is_none() || freed_some[at] {
+            continue;
+        }
+        if !still_for(engine, account) {
+            log("files: an item released for Free up space was not kept again (the vault is no longer open)");
+        } else if engine.set_kept(&asked[at], true).is_err() {
+            log("files: an item released for Free up space could not be kept again");
+        }
+    }
+    let failed = left.iter().filter(|left| left.is_some()).count();
     if failed > 0 {
         log(format!("files: {failed} of {} items were not changed", asked.len()));
     }
+    // What the rows read now comes from the engine, after the work: changed or left, never from the action.
+    let now = states(engine, account, &asked);
     Answer::Changed {
         generation,
+        account: account.to_string(),
         // The account must be the same after the work as before it.
-        whose: still_for(engine, account).then(|| account.to_string()),
+        ended: reclaim_ended || !still_for(engine, account),
+        looked: false,
         action,
-        asked,
-        done,
-        failed,
-        why,
+        items: asked
+            .into_iter()
+            .zip(now)
+            .zip(left)
+            .map(|((id, now), left)| LocalOutcome { id, now, left })
+            .collect(),
     }
 }

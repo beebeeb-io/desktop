@@ -45,6 +45,7 @@ use crate::sync_root_port::{OsSyncRoots, SyncRootPort};
 use crate::sync_view::{Explorer, Start, SyncView, ViewCell, ViewHost};
 use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
 
+pub mod account_api;
 pub mod backups_api;
 // Explorer's "Free up space" command asks this handle, and a stop removes its binding (task 2490).
 mod explorer_api;
@@ -53,6 +54,7 @@ pub mod owned_state;
 pub mod settings_api;
 // What the account shares and what is shared with it, for the native Shared window.
 pub mod shares_api;
+pub mod signin_api;
 // Is the local state the signed-in account's (task 2488): a read-only check for windows that show it.
 pub mod state_owner;
 pub mod trash_api;
@@ -939,6 +941,14 @@ impl<C: CredentialStores> Engine<C> {
     fn sign_out_keeping_local_data_step(&self) -> Result<(), String> {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
+            self.sign_out_holding_step().await
+        })
+    }
+
+    /// The sign-out itself, for a caller that holds the step (`transition`) already: a step that decides to sign
+    /// out and does it in the same hold (`signin_api::discard_partial_sign_in`).
+    async fn sign_out_holding_step(&self) -> Result<(), String> {
+        {
             if self.stop_holding_step().await == SyncStop::Unconfirmed {
                 return Err(account_binding::ENGINE_STOP_UNCONFIRMED.to_string());
             }
@@ -965,7 +975,7 @@ impl<C: CredentialStores> Engine<C> {
                 revoke(&self.client, &self.config.api_base, &token).await;
             }
             Ok(())
-        })
+        }
     }
 
     /// One page of a folder's rows (`None`: the root), as the Files window lists them: the Backups root first, each

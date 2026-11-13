@@ -20,6 +20,7 @@ use beebeeb_engine::{signin::gate, state_paths};
 use super::backups::may_back_up;
 use super::open::{self, ApiBase, Opened, Refused};
 use super::*;
+use crate::frames::signin::source::SignInSource;
 use crate::shell::app::GateState as Shell;
 use crate::shell::identity::engine_identity;
 use crate::shell::instance;
@@ -658,9 +659,16 @@ fn settings_is_unwired_on_a_live_engine() {
 }
 
 #[test]
-fn account_has_no_source_on_a_live_engine() {
+fn account_is_the_engines_source_on_a_live_engine_and_unbound_panes_are_unwired() {
+    use crate::frames::account::Pane as AccountPane;
+    use crate::frames::account::source::PaneState;
     let s = engine_state();
-    assert!(s.account.source.is_none());
+    let source = s.account.source.as_deref().expect("the engine's account source");
+    // Account and Devices and sessions answer (`engine_host::account`); Security does not.
+    assert_ne!(source.pane_state(AccountPane::Account), PaneState::Unwired);
+    assert_ne!(source.pane_state(AccountPane::Sessions), PaneState::Unwired);
+    assert_eq!(source.pane_state(AccountPane::Security), PaneState::Unwired);
+    assert!(source.identity().email.is_empty() && source.sessions().is_empty());
 }
 
 #[test]
@@ -973,4 +981,16 @@ fn trash_and_restore_are_not_gated_by_the_sync_guard() {
         !restore_fn.contains("self.local("),
         "restore goes to the API, not through the sync folder"
     );
+}
+
+/// After a drop that was refused part-way, Try again gets the files that are not in the folder yet, alone. Every
+/// file in and still a refusal (the session changed during the last copy): an empty list, never "all of it again".
+#[test]
+fn what_is_left_of_a_refused_drop_is_the_files_that_did_not_go_in() {
+    let files: Vec<PathBuf> = ["one.pdf", "two.pdf", "three.pdf"].iter().map(PathBuf::from).collect();
+    assert_eq!(upload_rest(&files, 1, true), Some(files[1..].to_vec()));
+    assert_eq!(upload_rest(&files, 3, true), Some(Vec::new()));
+    // Nothing went in: the window sends all of it again. Not refused: nothing is left.
+    assert_eq!(upload_rest(&files, 0, true), None);
+    assert_eq!(upload_rest(&files, 3, false), None);
 }

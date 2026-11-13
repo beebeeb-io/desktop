@@ -335,7 +335,7 @@ impl Ui {
 
     /// "Forgot password?": the three honest options.
     pub fn forgot(&mut self) {
-        if self.busy || self.passkey_waiting {
+        if self.step_running() || self.passkey_waiting {
             return;
         }
         self.drop_waits();

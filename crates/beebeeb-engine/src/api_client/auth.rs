@@ -25,6 +25,20 @@ impl ApiClient {
         Ok(self.get_typed("/api/v1/auth/me").await?)
     }
 
+    /// GET /api/v1/me/profile: the name the account shows. `None`: none was set (or only spaces).
+    pub async fn account_display_name(&self) -> anyhow::Result<Option<String>> {
+        #[derive(serde::Deserialize)]
+        struct Profile {
+            #[serde(default)]
+            display_name: Option<String>,
+        }
+        let profile: Profile = self.get_typed("/api/v1/me/profile").await?;
+        Ok(profile
+            .display_name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty()))
+    }
+
     /// `GET /api/v1/billing/subscription` — plan + quota + lifecycle.
     pub async fn subscription(&self) -> anyhow::Result<crate::account_dto::Subscription> {
         Ok(self.get_typed("/api/v1/billing/subscription").await?)
