@@ -1,0 +1,42 @@
+[package]
+name = "beebeeb-office-sandbox"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Starts the Office helper process confined: no network, no file access, no child process, gone with its parent. No office engine, no network crate."
+license = "AGPL-3.0-or-later"
+# `tests/probe/main.rs` is the helper binary below, not a test of its own.
+autotests = false
+
+# Design: docs/superpowers/specs/2026-11-12-native-office-viewer.md (§5.3) and
+# docs/superpowers/specs/2026-11-12-native-office-editor.md (§5, §7 row 2).
+# Rules:
+#   - this crate links no office engine and no network crate (`cargo tree -e normal` lists this crate and the
+#     `windows-sys` family, nothing else);
+#   - there is no way to start the helper unconfined through this crate: no feature, no `cfg`, no hidden function.
+#     On an operating system without a sandbox module `Sandbox::spawn` returns `SandboxError::Unsupported`.
+
+[target.'cfg(windows)'.dependencies]
+# The version the engine and updater lockfiles already hold (0.61.2); raw bindings, no code of its own.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Isolation",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
+# The test helper: it TRIES what the sandbox forbids and reports the result. Built only so the integration tests
+# can start it; it is not part of any installer and has no tests of its own.
+[[bin]]
+name = "beebeeb-sandbox-probe"
+path = "tests/probe/main.rs"
+test = false
+doc = false
+
+[[test]]
+name = "sandbox"
+path = "tests/sandbox.rs"
