@@ -29,6 +29,14 @@ pub const NAME_INPUT: &str = "new-folder-name";
 pub enum Dialog {
     NewFolder(NewFolder),
     Move(MoveTo),
+    /// Share (DW-0407).
+    Share(super::share::Share),
+    /// Details of one item (DW-0411).
+    Details(Box<DriveItem>),
+    /// Version history of one file (DW-0413).
+    Versions(Box<DriveItem>),
+    /// Preview in the window (DW-0408, DW-0408b).
+    Preview(Box<super::preview::Panel>),
 }
 
 /// New folder (DW-0417): where it goes. The name is `Actions::name_edit`.
@@ -95,6 +103,12 @@ fn item_count(folder: &DriveItem) -> String {
         Some(n) => format!("{n} items"),
         None => String::new(),
     }
+}
+
+/// Enter with no modifier: what a focused control in a dialog hears itself, so that Return
+/// never goes on to the dialog's default button from another control.
+pub(super) fn plain_enter(ev: &KeyEvent) -> bool {
+    ev.key == rune::Key::Enter && !(ev.mods.shift || ev.mods.cmd || ev.mods.alt || ev.mods.ctrl)
 }
 
 impl State {
@@ -312,6 +326,10 @@ impl State {
             None => {}
         }
         self.actions.name_error = None;
+        // A link's password does not outlive its dialog: cleared, and the old edit dropped
+        // (it zeroizes on drop too).
+        super::share::wipe(self);
+        self.actions.share_password = rune::TextEdit::new("").secure();
     }
 
     /// Create (DW-0417): make the folder, then show it (DW-1106), or go back to the Move dialog
@@ -446,7 +464,7 @@ const PATH_HERE: TextStyle = TextStyle::new(12.0, 500.0).lh(15.0);
 /// A dialog on the Files window's scrim. `foot`: the buttons, the amber one first; `stack`:
 /// one under the other, each as wide as the dialog (`.wn-dlg-foot.is-stack`).
 /// Keys: `scrim`, `dlg`, `dlg-title`, `dlg-sub`, `dlg-body`, `dlg-foot`.
-fn shell(name: &str, width: f32, title: &str, sub: Option<&str>, body: Vec<El>, foot: El, t: &Theme) -> El {
+pub(super) fn shell(name: &str, width: f32, title: &str, sub: Option<&str>, body: Vec<El>, foot: El, t: &Theme) -> El {
     // The card is `ui::dialog`'s, the one `settings_dialog::dialog` draws; a file's name under
     // the title stays on one line. Under the caption: the window can still be moved and closed
     // (`.mk-scrim`).
@@ -673,5 +691,9 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
     Some(match s.actions.dialog.as_ref()? {
         Dialog::NewFolder(new) => new_folder(s, new, t),
         Dialog::Move(m) => move_to(m, t),
+        Dialog::Share(share) => super::share::view(s, share, t),
+        Dialog::Details(item) => super::facts::details(s, item, t),
+        Dialog::Versions(item) => super::facts::versions(s, item, t),
+        Dialog::Preview(panel) => super::preview::view(s, panel, t),
     })
 }

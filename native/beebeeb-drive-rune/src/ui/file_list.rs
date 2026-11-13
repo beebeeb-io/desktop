@@ -141,6 +141,8 @@ pub fn file_type_icon(item: &DriveItem) -> &'static Icon {
             &icons::DOC_MINIMAL
         }
         Some(m) if m.starts_with("image/") || m.starts_with("video/") || m.starts_with("audio/") => &icons::DOC_MINIMAL,
+        // A file of no known kind: the plain sheet (the board's `file`, DW-0408b).
+        Some("application/octet-stream") => &crate::theme::icons_files::DOC_BLANK,
         _ => &icons::DOC_GENERIC,
     }
 }
