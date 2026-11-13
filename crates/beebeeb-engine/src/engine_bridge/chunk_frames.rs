@@ -110,15 +110,12 @@ impl EngineBridge {
         let mut reader = record.decryptor(beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes()), file_id);
         for i in range {
             let chunk_start = std::time::Instant::now();
-            // What is left of the limit, plus room for a chunk's own framing: a longer body is given up as it
+            // What a chunk of the plaintext still allowed may be on the wire: a longer body is given up as it
             // streams, and the limit is the answer.
-            let cap = limit.map(|limit| limit.saturating_sub(acc.len() as u64) + CAPPED_FRAME_ROOM);
+            let cap = limit.map(|limit| capped_body_len(limit, acc.len() as u64));
             let chunk_bytes = match self.download_content_frame(file_id, i, pin, meter, cap).await {
                 Err(e) if e.is_caused_by::<crate::api_client::ChunkOverLimit>() => {
-                    return Err(anyhow::Error::new(OverInMemoryLimit {
-                        at_least: (acc.len() as u64).saturating_add(cap.unwrap_or(0)),
-                    })
-                    .into());
+                    return Err(anyhow::Error::new(OverInMemoryLimit { held: acc.len() as u64 }).into());
                 }
                 other => other?,
             };
@@ -135,10 +132,7 @@ impl EngineBridge {
             acc.extend_from_slice(&decrypted);
             decrypted.zeroize();
             if limit.is_some_and(|limit| acc.len() as u64 > limit) {
-                return Err(anyhow::Error::new(OverInMemoryLimit {
-                    at_least: acc.len() as u64,
-                })
-                .into());
+                return Err(anyhow::Error::new(OverInMemoryLimit { held: acc.len() as u64 }).into());
             }
             self.transfers.report(file_id, acc.len() as u64, total);
             if let Some(report) = progress {

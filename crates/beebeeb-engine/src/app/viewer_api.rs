@@ -64,6 +64,10 @@ pub struct OpenFileFacts {
     /// its way down, or in a state that is not a copy to show). What is really on disk is asked again when the
     /// copy is read ([`Engine::open_local_copy_in_memory`]).
     pub on_this_pc: Option<OnThisPc>,
+    /// The local state says this computer's copy and Beebeeb's version are not settled with each other (two
+    /// versions to choose from, or a sync of this file that failed). Such a copy is not read as the file; a
+    /// download shows the version Beebeeb has, and a host says that it may not be what is on this computer.
+    pub unsettled_here: bool,
 }
 
 /// A file's bytes are on this computer, as the local state has it.
@@ -88,6 +92,10 @@ fn on_this_pc(status: &FileStatus) -> Option<OnThisPc> {
     }
 }
 
+fn unsettled_here(status: &FileStatus) -> bool {
+    matches!(status, FileStatus::Conflict | FileStatus::Error)
+}
+
 /// The session and the size, never the name or a folder: a `{:?}` must not print one.
 impl std::fmt::Debug for OpenFileFacts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -95,6 +103,7 @@ impl std::fmt::Debug for OpenFileFacts {
             .field("session", &self.session)
             .field("size", &self.size)
             .field("on_this_pc", &self.on_this_pc)
+            .field("unsettled_here", &self.unsettled_here)
             .finish_non_exhaustive()
     }
 }
@@ -157,8 +166,17 @@ pub enum OpenFileError {
     NotYours,
     /// No such file: not in the local state, a folder, or gone from Beebeeb.
     NotFound,
-    /// The file is larger than the caller holds in memory; nothing of it was downloaded.
+    /// The file is larger than the caller holds in memory, by its stated size or the copy's own length:
+    /// `size`. Nothing of it was downloaded or read.
     TooLarge { size: u64 },
+    /// The file passed the caller's limit while it was downloaded or read, although its stated size (or the
+    /// copy's length when it was asked) was within it. It was given up and what was held was wiped. How large
+    /// it is, is not known.
+    OverLimit,
+    /// This computer holds a change to the file that is not in Beebeeb yet, and the copy could not be read
+    /// just now (another program holds it, it is being written, or it is not where the local state says). The
+    /// version Beebeeb has is NOT handed over in its place.
+    CopyNotReadable,
     /// The caller stopped the download; nothing of it is kept.
     Cancelled,
     /// Beebeeb could not be reached.
@@ -176,6 +194,8 @@ impl OpenFileError {
             Self::NotYours => "not_this_accounts",
             Self::NotFound => "not_found",
             Self::TooLarge { .. } => "too_large",
+            Self::OverLimit => "over_limit",
+            Self::CopyNotReadable => "copy_not_readable",
             Self::Cancelled => "cancelled",
             Self::Offline => "offline",
             Self::Failed => "failed",
@@ -254,6 +274,7 @@ impl<C: CredentialStores> Engine<C> {
             folders: parts,
             size: u64::try_from(entry.size_bytes).unwrap_or(0),
             on_this_pc: on_this_pc(&entry.status),
+            unsettled_here: unsettled_here(&entry.status),
         })
     }
 
@@ -267,9 +288,13 @@ impl<C: CredentialStores> Engine<C> {
     /// length of the read as well). A name that leads to a different file on this computer is `NotHere` too.
     ///
     /// A copy over `max_bytes` is [`OpenFileError::TooLarge`] from its length alone; the read itself is bounded
-    /// too (a file that grows meanwhile is `TooLarge`, never more than `max_bytes` + 1 in memory). `cancel` and
-    /// the session are asked between pieces. The hand-over is the same as a download's: only while the session
-    /// in memory is still the one the read began for.
+    /// too (a file that grows past the limit meanwhile is [`OpenFileError::OverLimit`], never more than
+    /// `max_bytes` + 1 in memory). `cancel` and the session are asked between pieces. The hand-over is the same
+    /// as a download's: only while the session in memory is still the one the read began for.
+    ///
+    /// A copy the local state says holds a change that is not sent yet, and that cannot be read now, is
+    /// [`OpenFileError::CopyNotReadable`], never `NotHere`: the caller must not show the older version Beebeeb
+    /// has as if it were the file.
     pub fn open_local_copy_in_memory(
         &self,
         file_id: &str,
@@ -299,8 +324,14 @@ impl<C: CredentialStores> Engine<C> {
             }
             Zeroizing::new(current.master_key)
         };
+        // A copy that is the version Beebeeb has may be downloaded instead; one with a change that is not sent
+        // may not.
+        let not_read = || match recorded {
+            OnThisPc::InSync => Ok(LocalCopy::NotHere),
+            OnThisPc::NotSentYet => Err(OpenFileError::CopyNotReadable),
+        };
         let Some(path) = self.local_copy_path(&entry.path) else {
-            return Ok(LocalCopy::NotHere);
+            return not_read();
         };
         // This process's own fetch of the file is refused until the read is over: a file that stops being
         // wholly on disk between the check and the open is not downloaded by the open.
@@ -309,7 +340,7 @@ impl<C: CredentialStores> Engine<C> {
         let mut tries = 0;
         let bytes = loop {
             let Some(length) = wholly_here(&path) else {
-                return Ok(LocalCopy::NotHere);
+                return not_read();
             };
             if length > max_bytes {
                 return Err(OpenFileError::TooLarge { size: length });
@@ -317,12 +348,13 @@ impl<C: CredentialStores> Engine<C> {
             match read_bounded(&path, length, max_bytes, cancel, &still) {
                 Ok(bytes) => break bytes,
                 Err(ReadStopped::Refused(error)) => return Err(error),
-                // It went away, or cannot be read, between the check and the read: the download is the way.
-                Err(ReadStopped::Unreadable) => return Ok(LocalCopy::NotHere),
-                // It is being written: its length is asked again, a few times. Then the open failed for now
-                // (never the version Beebeeb has in its place: this copy is the newer one).
+                // It went away, or cannot be read, between the check and the read: the download is the way
+                // for a copy in sync.
+                Err(ReadStopped::Unreadable) => return not_read(),
+                // It is being written: its length is asked again, a few times. Then it could not be read for
+                // now (never the version Beebeeb has in its place: this copy is the newer one).
                 Err(ReadStopped::Grew) if tries < GREW_TRIES => tries += 1,
-                Err(ReadStopped::Grew) => return Err(OpenFileError::Failed),
+                Err(ReadStopped::Grew) => return Err(OpenFileError::CopyNotReadable),
             }
         };
         if !self.session_is_still(turn, &key) {
@@ -441,9 +473,7 @@ fn read_bounded(
         }
     }
     if bytes.len() as u64 > max_bytes {
-        return Err(ReadStopped::Refused(OpenFileError::TooLarge {
-            size: bytes.len() as u64,
-        }));
+        return Err(ReadStopped::Refused(OpenFileError::OverLimit));
     }
     // The file ended where its length said, or the buffer is full: one more byte means it grew.
     if bytes.len() as u64 > length {
@@ -456,7 +486,8 @@ impl<C: CredentialStores> Engine<C> {
     /// The content of the file `file_id`, downloaded and decrypted in memory for the session in memory, by the
     /// download path every hydrate uses. See the module's doc for what is (not) written and the session rule.
     ///
-    /// A file over `max_bytes` is [`OpenFileError::TooLarge`] before a chunk is asked for. `progress` is
+    /// A file over `max_bytes` by its stated size is [`OpenFileError::TooLarge`] before a chunk is asked for;
+    /// one that passes it while it downloads is [`OpenFileError::OverLimit`]. `progress` is
     /// `(decrypted bytes, bytes in all)`, called from the download as it goes: it must be cheap. Once `cancel` is
     /// set, or the session changes, the download is dropped within [`ASK_EVERY`]: what was decrypted until then
     /// is wiped, and the answer is [`OpenFileError::Cancelled`] or [`OpenFileError::NotSignedIn`].
@@ -505,6 +536,7 @@ impl<C: CredentialStores> Engine<C> {
         let bytes = match fetched.map_err(failure)? {
             InMemoryOpen::Opened(bytes) => bytes,
             InMemoryOpen::TooLarge { size } => return Err(OpenFileError::TooLarge { size }),
+            InMemoryOpen::OverLimit { .. } => return Err(OpenFileError::OverLimit),
         };
         if cancel.load(Ordering::SeqCst) {
             return Err(OpenFileError::Cancelled);

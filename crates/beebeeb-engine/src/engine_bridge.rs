@@ -467,7 +467,7 @@ pub(crate) use types::engine_remove;
 // The native app's open file: the whole file in memory, nothing recorded (`app::viewer_api`).
 mod open_in_memory;
 pub(crate) use open_in_memory::InMemoryOpen;
-use open_in_memory::{CAPPED_FRAME_ROOM, OverInMemoryLimit};
+use open_in_memory::{OverInMemoryLimit, capped_body_len};
 
 mod errors;
 use errors::*;

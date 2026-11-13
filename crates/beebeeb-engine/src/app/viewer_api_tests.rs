@@ -280,11 +280,9 @@ fn a_row_that_names_no_size_is_held_to_the_limit_once_its_bytes_are_counted() {
     signed_in(&engine, &fake.first);
     let _state = local_state(&engine, &fake.first);
     fake.no_size.store(true, Ordering::SeqCst);
-    // Nothing says how large it is before it is downloaded: it is, and then it is not handed over.
-    assert_eq!(
-        kind(open(&engine, NOTE, 3_499)),
-        OpenFileError::TooLarge { size: 3_500 }
-    );
+    // Nothing says how large it is before it is downloaded: it is, and then it is not handed over. No size is
+    // claimed for it.
+    assert_eq!(kind(open(&engine, NOTE, 3_499)), OpenFileError::OverLimit);
     assert_eq!(chunk_requests(&fake), 4);
     assert_eq!(open(&engine, NOTE, 3_500).unwrap().bytes.len(), 3_500);
 }
@@ -546,7 +544,14 @@ fn a_file_that_is_not_wholly_here_is_not_read_and_nothing_is_fetched() {
         FileStatus::Trashing,
     ] {
         let _kept = with_folder(&engine, &fake.first, status.clone(), Some(&note_text()));
-        assert_eq!(engine.open_file_facts(NOTE).unwrap().on_this_pc, None, "{status:?}");
+        let facts = engine.open_file_facts(NOTE).unwrap();
+        assert_eq!(facts.on_this_pc, None, "{status:?}");
+        // Two versions, or a sync that failed: the facts say this computer's copy is not settled with Beebeeb's.
+        assert_eq!(
+            facts.unsettled_here,
+            matches!(status, FileStatus::Conflict | FileStatus::Error),
+            "{status:?}"
+        );
         assert!(
             matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::NotHere)),
             "{status:?}"
@@ -574,6 +579,38 @@ fn a_link_where_the_file_should_be_is_never_followed() {
     std::fs::create_dir_all(&folder).unwrap();
     std::os::unix::fs::symlink(elsewhere.path().join("other.txt"), folder.join("Invented note.txt")).unwrap();
     assert!(matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::NotHere)));
+    // The check of the file itself, without the check of its name before it: a link and a folder are not a plain
+    // file, the file the link leads to is.
+    assert_eq!(wholly_here(&folder.join("Invented note.txt")), None);
+    assert_eq!(wholly_here(&folder), None);
+    assert_eq!(wholly_here(&elsewhere.path().join("other.txt")), Some(20));
+}
+
+#[test]
+fn a_copy_with_a_change_that_is_not_sent_and_cannot_be_read_is_never_answered_as_not_here() {
+    let fake = fake("unsentunread");
+    let engine = engine_at(&fake.api.base);
+    signed_in(&engine, &fake.first);
+    // The row says a change made here is on its way, and no file is where it says: "not here" would send the
+    // caller to the older version Beebeeb has.
+    let _kept = with_folder(&engine, &fake.first, FileStatus::Uploading, None);
+    assert_eq!(
+        local(&engine, NOTE, NO_LIMIT).map(|_| ()).unwrap_err(),
+        OpenFileError::CopyNotReadable
+    );
+    // A folder where the file should be: the same.
+    let (_dir, root, _db) = with_folder(&engine, &fake.first, FileStatus::Uploading, None);
+    std::fs::create_dir_all(root.path().join("Invented folder/Deeper/Invented note.txt")).unwrap();
+    assert_eq!(
+        local(&engine, NOTE, NO_LIMIT).map(|_| ()).unwrap_err(),
+        OpenFileError::CopyNotReadable
+    );
+    // The same row for a copy in sync is "not here": Beebeeb has that version, the download is the way.
+    let _kept = with_folder(&engine, &fake.first, FileStatus::Local, None);
+    assert!(matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::NotHere)));
+    assert_eq!(fake.api.requests().len(), 0, "nothing was asked of Beebeeb");
+    // In sync, the facts do not call the copy unsettled.
+    assert!(!engine.open_file_facts(NOTE).unwrap().unsettled_here);
 }
 
 #[test]
@@ -612,7 +649,7 @@ fn the_read_is_bounded_by_itself_when_the_file_grows_after_its_length_was_asked(
     let Err(ReadStopped::Refused(error)) = read_bounded(&path, 1_000, 1_000, &never, &always) else {
         panic!("a file that grew past the limit was read");
     };
-    assert_eq!(error, OpenFileError::TooLarge { size: 1_001 });
+    assert_eq!(error, OpenFileError::OverLimit);
     // As long as it said: read whole. Shorter by now: what is there.
     assert_eq!(
         read_bounded(&path, 5_000, 5_000, &never, &always).ok().map(|b| b.len()),

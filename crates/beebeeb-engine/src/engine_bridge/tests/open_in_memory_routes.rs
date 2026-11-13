@@ -16,7 +16,7 @@ use crate::direct_download::Transport;
 use crate::direct_download::test_support::{
     ApiScript, GrantScript, Mock, Pair, Reply, Seen, StorageScript, Version, content, file_key,
 };
-use crate::engine_bridge::open_in_memory::CAPPED_FRAME_ROOM;
+use crate::engine_bridge::open_in_memory::{CAPPED_FRAME_ROOM, capped_body_len};
 
 const KEY: [u8; 32] = [43; 32];
 const STRIDE: u64 = 1024;
@@ -43,6 +43,8 @@ fn bridge_on(dir: &Path, base: &str, transport: Transport) -> EngineBridge {
 enum Came {
     Opened(Vec<u8>),
     TooLarge(u64),
+    /// Given up while it downloaded, with this much plaintext held.
+    OverLimit(u64),
     Refused(OpenFileError),
 }
 
@@ -50,6 +52,7 @@ async fn open(bridge: &EngineBridge, max: u64) -> Came {
     match bridge.open_in_memory(TEST_FILE_ID, max, None).await {
         Ok(InMemoryOpen::Opened(bytes)) => Came::Opened(bytes.to_vec()),
         Ok(InMemoryOpen::TooLarge { size }) => Came::TooLarge(size),
+        Ok(InMemoryOpen::OverLimit { held }) => Came::OverLimit(held),
         Err(error) => Came::Refused(failure(error)),
     }
 }
@@ -342,14 +345,15 @@ async fn with_no_version_an_understated_size_is_stopped_by_the_running_total() {
     );
     let dir = tempfile::tempdir().unwrap();
     let bridge = bridge_on(dir.path(), &api.base, Transport::Auto);
-    // Two chunks fit (2,048 bytes); the third passes 3,000.
-    assert_eq!(open(&bridge, 3_000).await, Came::TooLarge(3 * 1024));
+    // Two chunks fit (2,048 bytes); the third passes 3,000. No size is claimed for the file: only that it
+    // passed the limit, with three chunks held.
+    assert_eq!(open(&bridge, 3_000).await, Came::OverLimit(3 * 1024));
     assert_eq!(chunk_requests(&api), 3, "the other eight chunks were never asked for");
 }
 
 /// One chunk far longer than the limit, behind metadata that says 10 bytes: its body is given up while it streams.
-/// The answer is the cap's own figure (the limit and a chunk's framing), which only the streaming cap gives; had the
-/// body been read whole and decrypted, the total's check would have said 400,000.
+/// Nothing of it was decrypted when it was given up, which only the streaming cap gives; had the body been read
+/// whole and decrypted, the total's check would have held 400,000 bytes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn with_no_version_one_oversized_chunk_body_is_given_up_while_it_streams() {
     let version = version_of(400_000, 400_000);
@@ -363,7 +367,7 @@ async fn with_no_version_one_oversized_chunk_body_is_given_up_while_it_streams()
     );
     let dir = tempfile::tempdir().unwrap();
     let bridge = bridge_on(dir.path(), &api.base, Transport::Auto);
-    assert_eq!(open(&bridge, 1_000).await, Came::TooLarge(1_000 + CAPPED_FRAME_ROOM));
+    assert_eq!(open(&bridge, 1_000).await, Came::OverLimit(0));
     assert_eq!(chunk_requests(&api), 1);
     // Under the limit the same file opens: the cap is not a refusal of long chunks.
     assert_eq!(open(&bridge, 400_000).await, Came::Opened(version.plain.clone()));
@@ -399,4 +403,23 @@ async fn the_pinned_api_route_says_offline_when_a_chunk_body_breaks_off() {
         4,
         "after the route's own tries"
     );
+}
+
+/// A chunk of a file with no version may be the old JSON envelope, which writes every byte as a number and a comma:
+/// the cap on a body leaves room for the plaintext still allowed in that form, and for nothing like the file.
+#[test]
+fn the_cap_on_a_chunk_body_leaves_room_for_the_old_envelope_of_what_is_still_allowed() {
+    const LEFT: usize = 1_000_000;
+    // The longest way a byte is written: "255,".
+    let envelope =
+        serde_json::to_vec(&json!({ "nonce": vec![255u8; 12], "ciphertext": vec![255u8; LEFT + 16] })).unwrap();
+    let cap = capped_body_len(LEFT as u64, 0);
+    assert!(envelope.len() as u64 <= cap, "{} > {cap}", envelope.len());
+    // And it is a bound: not twice that envelope.
+    assert!(cap < 2 * envelope.len() as u64);
+    // What is held counts against it; at or past the limit only a chunk's own framing is left.
+    assert_eq!(capped_body_len(5_000, 4_000), capped_body_len(1_000, 0));
+    assert_eq!(capped_body_len(1_000, 1_000), CAPPED_FRAME_ROOM);
+    assert_eq!(capped_body_len(1_000, 9_000), CAPPED_FRAME_ROOM);
+    assert_eq!(capped_body_len(u64::MAX, 0), u64::MAX);
 }

@@ -6,16 +6,21 @@ use super::*;
 pub(crate) enum InMemoryOpen {
     /// The whole file, decrypted. Wiped when dropped.
     Opened(Zeroizing<Vec<u8>>),
-    /// The file is larger than the caller holds in memory. `size` is what is known of it: the size its metadata
-    /// states, or how much there was at least when the download was given up.
+    /// The file is larger than the caller holds in memory, by the size its metadata states: `size`. Nothing of
+    /// it was downloaded.
     TooLarge { size: u64 },
+    /// The download passed the caller's limit although the metadata said it would not: it was given up, and
+    /// what had been decrypted was wiped. The file's size is not known. `held`: how much plaintext was in
+    /// memory when it was given up.
+    OverLimit { held: u64 },
 }
 
-/// A limited download passed its limit ([`EngineBridge::hydrate_whole_file_within`]): the file is at least
-/// `at_least` bytes. What was decrypted until then is wiped with the download.
+/// A limited download passed its limit ([`EngineBridge::hydrate_whole_file_within`]). What was decrypted until
+/// then (`held` bytes) is wiped with the download. How large the file is, is not known: no size is made up
+/// here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct OverInMemoryLimit {
-    pub(super) at_least: u64,
+    pub(super) held: u64,
 }
 
 impl std::fmt::Display for OverInMemoryLimit {
@@ -29,6 +34,21 @@ impl std::error::Error for OverInMemoryLimit {}
 /// What a chunk's body may be longer than its plaintext: the chunk's own framing (header, nonce, tag), with
 /// room to spare for a later chunk format. The plaintext total is held to the limit exactly, after decryption.
 pub(super) const CAPPED_FRAME_ROOM: u64 = 64 * 1024;
+
+/// The longest body a chunk with no manifest may have while `held` bytes of plaintext are in memory under
+/// `limit`: what is left of the limit, times [`ENVELOPE_BYTES_PER_BYTE`], plus [`CAPPED_FRAME_ROOM`]. A file
+/// with no version named is an old one, and an old chunk may be the JSON envelope (`content_frame`), which
+/// writes every byte as a decimal number and a comma: a cap of the plaintext's own length would refuse a file
+/// that is within the limit.
+pub(super) fn capped_body_len(limit: u64, held: u64) -> u64 {
+    limit
+        .saturating_sub(held)
+        .saturating_mul(ENVELOPE_BYTES_PER_BYTE)
+        .saturating_add(CAPPED_FRAME_ROOM)
+}
+
+/// The most bytes the JSON envelope spends on one byte of a chunk: "255,".
+const ENVELOPE_BYTES_PER_BYTE: u64 = 4;
 
 /// What the metadata of a file with no `download_version` says about its size, before a chunk is asked for:
 /// the size it states and the size its chunk count implies (every chunk but the last is a full stride; with no
@@ -64,9 +84,10 @@ impl EngineBridge {
     /// - a pinned version (`download_version`): its manifest's size is checked BEFORE a chunk is asked for, and
     ///   the download path holds every chunk body and the total to that manifest;
     /// - no version named: the size the metadata states, and the size its chunk count implies, are checked
-    ///   before a chunk is asked for; then every chunk body is given up while it streams once it passes what is
-    ///   left of the limit, and the plaintext total is checked after every chunk. A file that understates its
-    ///   size costs at most the limit (and one chunk's framing) in memory, never the file.
+    ///   before a chunk is asked for; then every chunk body is given up while it streams once it passes what a
+    ///   chunk of the plaintext still allowed may be on the wire ([`capped_body_len`]), and the plaintext total
+    ///   is checked after every chunk. A file that understates its size costs at most the limit in plaintext
+    ///   and one capped body in memory, never the file, and answers [`InMemoryOpen::OverLimit`].
     ///
     /// `progress` is `(decrypted bytes, bytes in all)`, called from the download loop.
     pub(crate) async fn open_in_memory(
@@ -93,7 +114,7 @@ impl EngineBridge {
             {
                 Ok((plaintext, _)) => Ok(InMemoryOpen::Opened(plaintext)),
                 Err(e) => match e.caused_by::<OverInMemoryLimit>() {
-                    Some(over) => Ok(InMemoryOpen::TooLarge { size: over.at_least }),
+                    Some(over) => Ok(InMemoryOpen::OverLimit { held: over.held }),
                     None => Err(e),
                 },
             }
