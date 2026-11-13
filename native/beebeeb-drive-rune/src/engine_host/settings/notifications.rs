@@ -4,8 +4,10 @@
 //! What each value is, and where it comes from:
 //! - "Your account" (Shared with you, File updates, Storage warnings): the account's own alert switches on Beebeeb
 //!   ([`Engine::notification_preferences`]; `share_received`, `file_updated`, `storage_warning`). A change is sent
-//!   once ([`Engine::set_notification_preferences`], only the one switch) and shown only after Beebeeb took it. Until
-//!   the switches are read (or when the read failed) the group is not drawn: never a value that was not read.
+//!   once ([`Engine::set_notification_preferences`], only the one switch) and shown only after Beebeeb took it. The
+//!   group is always drawn in its place (so no row moves under the pointer when an answer lands); until the switches
+//!   are read (or when the read failed) it has no rows: never a value that was not read. A press finds its row by
+//!   its fixed place in the group table, never by what is drawn at that position now.
 //!   `new_device_login` is never sent from here: the pane says security alerts cannot be turned off.
 //! - "Allow notifications", "Sync on this PC" and "Backups on this PC": this PC's settings file (`DesktopConfig`'s
 //!   `notify_*` switches), read when the window starts and written merge-only by one writer, the switch alone. A
@@ -14,7 +16,8 @@
 //!   ([`Engine::notifications`]), newest first, grouped by day on this computer's clock. A type the pane has no
 //!   place for (a welcome, a storage-location notice, a backup pass's notices) is left out, so the count is the
 //!   count of the "New" alerts the page shows. Leaving the page marks those seen ([`Engine::mark_notifications_read`],
-//!   only the ones shown as new); a refusal brings "New" back and says so.
+//!   only the ones shown as new, one call each); a refusal says so and reads again, so "New" comes back on exactly
+//!   the ones Beebeeb still holds unread (the engine stops at the first that fails; the ones before it are marked).
 //! - What Windows allows for this app is not read here: `allowed_in_windows` is always `true` (see the PR record).
 //!
 //! When it reads: when Notifications or Recent notifications opens and what it holds is missing or older than
@@ -370,6 +373,8 @@ pub(super) struct NotificationsPart<C: CredentialStores> {
     showing: bool,
     /// The session the last read was asked for: a new session while the pane is showing is read once.
     asked_for: Option<SessionGeneration>,
+    /// A read was asked for while one was on its way: start it when that one lands.
+    again: bool,
     /// The read on its way, by number.
     reading: Option<u64>,
     reads: u64,
@@ -410,6 +415,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             seen: HashSet::new(),
             read_at: None,
             showing: false,
+            again: false,
             asked_for: None,
             reading: None,
             reads: 0,
@@ -446,37 +452,44 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             .unwrap_or_default()
     }
 
-    /// The rows the pane draws now, by group: the account's group only once its switches are read.
-    fn rows(&self) -> Vec<(&'static str, Vec<(Stored, Alert)>)> {
-        let switches = self.current(&self.switches);
+    /// A row's switch now. `None`: an account switch that is not read (or not the current session's).
+    fn value_of(&self, stored: Stored) -> Option<bool> {
+        match stored {
+            Stored::Account(switch) => self.current(&self.switches).map(|values| switch.of(values)),
+            Stored::Pc(switch) => Some(self.pc[switch.slot()]),
+        }
+    }
+
+    /// The groups the pane draws now: every group of [`GROUPS`], always in its place, so a row never moves under
+    /// the pointer when an answer lands. The account's group has no rows until its switches are read (never a
+    /// guessed switch), and loses them again when a read fails or the session moves on.
+    fn rows(&self) -> Vec<(&'static str, Vec<Alert>)> {
         GROUPS
             .iter()
-            .filter_map(|(title, rows)| {
-                let rows: Option<Vec<_>> = rows
+            .map(|(title, rows)| {
+                let rows = rows
                     .iter()
-                    .map(|&(name, says, stored)| {
-                        let on = match stored {
-                            Stored::Account(switch) => switch.of(switches?),
-                            Stored::Pc(switch) => self.pc[switch.slot()],
-                        };
-                        Some((
-                            stored,
-                            Alert {
-                                title: name.into(),
-                                says: says.into(),
-                                on,
-                            },
-                        ))
+                    .filter_map(|&(name, says, stored)| {
+                        self.value_of(stored).map(|on| Alert {
+                            title: name.into(),
+                            says: says.into(),
+                            on,
+                        })
                     })
                     .collect();
-                rows.map(|rows| (*title, rows))
+                (*title, rows)
             })
             .collect()
     }
 
     /// Ask Beebeeb for the switches and the list on a worker, unless a read is on its way.
     fn read(&mut self) {
-        if self.reading.is_some() || !self.engine.has_session() {
+        if !self.engine.has_session() {
+            return;
+        }
+        if self.reading.is_some() {
+            // What is on its way may have been answered before what asks now: read again when it lands.
+            self.again = true;
             return;
         }
         self.reads += 1;
@@ -593,6 +606,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
 
     /// Drop everything of the account: its switches, its notifications, what was seen.
     fn forget(&mut self) {
+        self.again = false;
         self.switches = None;
         self.recent = None;
         self.seen.clear();
@@ -697,10 +711,12 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                 }
                 if let Err(kind) = result {
                     log(format!("settings: notifications were not marked seen ({kind})"));
-                    // Beebeeb still says they are new: so does the page.
+                    // The engine stops at the first that fails, so the ones before it ARE marked on Beebeeb. "New"
+                    // comes back on all of them until a read (asked now) says which ones Beebeeb still holds unread.
                     for id in &ids {
                         self.seen.remove(id);
                     }
+                    self.read();
                     if !matches!(kind, AccountCallError::NotSignedIn | AccountCallError::SessionEnded) {
                         *toast = Some(NOT_MARKED);
                     }
@@ -756,6 +772,10 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             self.take_in(answer, &mut toast);
             changed = true;
         }
+        if self.again && self.reading.is_none() {
+            self.again = false;
+            self.read();
+        }
         // Another sign-in while the pane shows: its own values are read once, without a reopening.
         if self.showing
             && self.reading.is_none()
@@ -803,7 +823,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             groups: self
                 .rows()
                 .into_iter()
-                .map(|(title, rows)| (title.to_string(), rows.into_iter().map(|(_, alert)| alert).collect()))
+                .map(|(title, rows)| (title.to_string(), rows))
                 .collect(),
         }
     }
@@ -812,13 +832,15 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
         self.set_pc(PcSwitch::Allow, on);
     }
 
-    /// `group`, `index` as in `notifications().groups` now.
+    /// `group`, `index` as in `notifications().groups`. The row is found by its fixed place in [`GROUPS`] (every
+    /// group is drawn in its place, and a group's rows are all there or none), never by what sits at that position
+    /// now: a press can only change the switch that was drawn there. An account switch that is not read is not
+    /// changed.
     pub(super) fn set_alert(&mut self, group: usize, index: usize, on: bool) {
-        let rows = self.rows();
-        let Some(&(stored, ref alert)) = rows.get(group).and_then(|(_, rows)| rows.get(index)) else {
+        let Some(&(_, _, stored)) = GROUPS.get(group).and_then(|(_, rows)| rows.get(index)) else {
             return;
         };
-        if alert.on == on {
+        if self.value_of(stored).is_none_or(|now| now == on) {
             return;
         }
         match stored {
@@ -828,7 +850,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
     }
 
     /// The page was left: what it showed as new is seen. Sent once, on a worker; the page stops saying "New" at
-    /// once, and says it again (with a toast) only if Beebeeb refuses.
+    /// once; a refusal is a toast and a read, after which only what Beebeeb still holds unread says "New" again.
     pub(super) fn mark_recent_seen(&mut self) {
         let ids: Vec<String> = self
             .shown()

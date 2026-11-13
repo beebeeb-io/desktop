@@ -70,6 +70,8 @@ struct Fake {
     put_delay_ms: Arc<AtomicU64>,
     /// The writes the fake received: the route and its body.
     writes: Arc<Mutex<Vec<(String, Value)>>>,
+    /// A mark of this id is refused (500); the others are taken.
+    refuse_mark: Arc<Mutex<Option<String>>>,
 }
 
 /// Seconds before now, as the server writes a time.
@@ -98,6 +100,11 @@ fn mode_reply(mode: u8) -> Option<Reply> {
 }
 
 fn fake(tag: &str) -> Fake {
+    fake_with(tag, Vec::new())
+}
+
+/// `fake`, with `extra` added to the first account's list.
+fn fake_with(tag: &str, extra: Vec<Value>) -> Fake {
     let (first, first_phrase) = FakeAccount::register(&format!("{tag}-one@example.eu"), PASSWORD, TEST_PHRASE);
     let (second, second_phrase) = FakeAccount::register(&format!("{tag}-two@example.eu"), PASSWORD, TEST_PHRASE);
     let (first, second) = (Arc::new(first), Arc::new(second));
@@ -124,7 +131,10 @@ fn fake(tag: &str) -> Fake {
                     true,
                     &ago(3 * 86_400),
                 ),
-            ],
+            ]
+            .into_iter()
+            .chain(extra)
+            .collect(),
             switches: json!({ "file_updated": false, "share_received": true, "storage_warning": true, "new_device_login": true, "backup_complete": false }),
         },
         Held {
@@ -148,6 +158,8 @@ fn fake(tag: &str) -> Fake {
         put_delay_ms.clone(),
         writes.clone(),
     );
+    let refuse_mark: Arc<Mutex<Option<String>>> = Arc::default();
+    let refuse_in = refuse_mark.clone();
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
         let route = req.route();
         let sign_in = route.starts_with("POST /api/v1/opaque/");
@@ -165,11 +177,13 @@ fn fake(tag: &str) -> Fake {
                 if let Some(reply) = mode_reply(read_in.load(Ordering::SeqCst)) {
                     return reply;
                 }
-                let list = if read_in.load(Ordering::SeqCst) == EMPTY {
+                let mut list = if read_in.load(Ordering::SeqCst) == EMPTY {
                     Vec::new()
                 } else {
                     held.lock().unwrap()[who].list.clone()
                 };
+                // Newest first, as the server orders it.
+                list.sort_by(|a, b| b["created_at"].as_str().cmp(&a["created_at"].as_str()));
                 std::thread::sleep(Duration::from_millis(delay_in.load(Ordering::SeqCst)));
                 let unread = list.iter().filter(|n| n["read"] == false).count();
                 Reply::ok(json!({ "notifications": list, "unread_count": unread }))
@@ -206,8 +220,11 @@ fn fake(tag: &str) -> Fake {
                 if let Some(reply) = mode_reply(mark_in.load(Ordering::SeqCst)) {
                     return reply;
                 }
-                writes_in.lock().unwrap().push((route.clone(), req.json()));
                 let id = patch.rsplit('/').next().unwrap_or_default();
+                if refuse_in.lock().unwrap().as_deref() == Some(id) {
+                    return Reply::json(500, json!({ "error": "a server body" }));
+                }
+                writes_in.lock().unwrap().push((route.clone(), req.json()));
                 let mut held = held.lock().unwrap();
                 match held[who].list.iter_mut().find(|n| n["id"] == id) {
                     Some(n) => {
@@ -232,6 +249,7 @@ fn fake(tag: &str) -> Fake {
         delay_ms,
         put_delay_ms,
         writes,
+        refuse_mark,
     }
 }
 
@@ -300,11 +318,13 @@ fn titles(source: &Source) -> Vec<(String, bool)> {
         .collect()
 }
 
+/// The groups that have rows (every group is drawn in its place; the account's has none until it is read).
 fn group_titles(source: &Source) -> Vec<String> {
     source
         .notifications()
         .groups
         .into_iter()
+        .filter(|(_, rows)| !rows.is_empty())
         .map(|(title, _)| title)
         .collect()
 }
@@ -725,4 +745,95 @@ fn a_day_reads_as_today_yesterday_or_its_date() {
     assert_eq!(day_of(at(11, 3, 9), now), "3 Nov");
     let new_year = Local.with_ymd_and_hms(2027, 1, 2, 9, 0, 0).single().unwrap();
     assert_eq!(day_of(at(12, 30, 9), new_year), "30 Dec 2026");
+}
+
+#[test]
+fn a_press_while_the_read_lands_changes_only_the_switch_drawn_there() {
+    let fake = fake("press");
+    // The read is out long enough to press while it is.
+    fake.delay_ms.store(800, Ordering::SeqCst);
+    let mut source = Source::new(signed_in(&fake));
+    source.opened(Pane::Notifications);
+    let groups = source.notifications().groups;
+    let places: Vec<_> = groups
+        .iter()
+        .map(|(title, rows)| (title.as_str(), rows.len()))
+        .collect();
+    assert_eq!(
+        places,
+        [("Your account", 0), ("Sync on this PC", 4), ("Backups on this PC", 2)],
+        "every group in its place before the read lands; the account's has no rows (never a guess)"
+    );
+    let stopped = switch(&source, 1, 0);
+    // A press on the account's group before it is read changes nothing; one on "Sync stopped" changes that one.
+    source.set_alert(0, 0, false);
+    source.set_alert(1, 0, !stopped);
+    assert!(settle(&mut source).is_empty());
+    let places: Vec<_> = source
+        .notifications()
+        .groups
+        .iter()
+        .map(|(title, rows)| (title.clone(), rows.len()))
+        .collect();
+    assert_eq!(
+        places,
+        [
+            ("Your account".to_string(), 3),
+            ("Sync on this PC".to_string(), 4),
+            ("Backups on this PC".to_string(), 2)
+        ],
+        "the read landed: nothing moved"
+    );
+    assert_eq!(switch(&source, 1, 0), !stopped, "the switch drawn there changed");
+    assert!(switch(&source, 0, 0), "Shared with you is as Beebeeb holds it");
+    // The same press after the read lands still means the same switch.
+    source.set_alert(1, 0, stopped);
+    assert!(settle(&mut source).is_empty());
+    assert_eq!(switch(&source, 1, 0), stopped);
+    assert!(
+        fake.writes.lock().unwrap().is_empty(),
+        "no account setting was sent: every press was on this PC's switch"
+    );
+}
+
+#[test]
+fn a_mark_that_fails_part_way_brings_new_back_only_on_what_beebeeb_holds_unread() {
+    const SECOND_SHARE: &str = "Invented Colleague shared Invented plans with you";
+    let fake = fake_with(
+        "mark-part",
+        vec![row("n-5", "share_received", SECOND_SHARE, None, false, &ago(90))],
+    );
+    let mut source = Source::new(signed_in(&fake));
+    opened(&mut source, Pane::Recent);
+    assert_eq!(source.notifications().new_recent, 2);
+    // The newest is marked, the second is refused: the engine stops there.
+    *fake.refuse_mark.lock().unwrap() = Some("n-5".into());
+    source.mark_recent_seen();
+    assert_eq!(settle(&mut source), [NOT_MARKED], "the refusal is drawn");
+    assert_eq!(
+        titles(&source),
+        [
+            (FIRST_SHARE.to_string(), false),
+            (SECOND_SHARE.to_string(), true),
+            (FIRST_SIGN_IN.to_string(), false)
+        ],
+        "read again: New only on the one Beebeeb still holds unread"
+    );
+    assert_eq!(source.notifications().new_recent, 1);
+
+    *fake.refuse_mark.lock().unwrap() = None;
+    source.mark_recent_seen();
+    assert!(settle(&mut source).is_empty());
+    let marked: Vec<_> = fake
+        .writes
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(route, _)| route.clone())
+        .collect();
+    assert_eq!(
+        marked,
+        ["PATCH /api/v1/notifications/n-1", "PATCH /api/v1/notifications/n-5"],
+        "the one already marked is not sent again"
+    );
 }

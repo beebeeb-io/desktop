@@ -183,6 +183,20 @@ impl FakeAccount {
         false
     }
 
+    /// `name` encrypted as this account's own item `id` holds it (the envelope a share row carries as
+    /// `file_name_encrypted`), for a test that answers a route in the server's shape.
+    pub fn encrypted_name(&self, id: &str, name: &str) -> String {
+        let master = beebeeb_core::kdf::MasterKey::from_bytes(self.master_key);
+        let file_key = beebeeb_core::kdf::derive_file_key(&master, id.as_bytes());
+        beebeeb_core::encrypt::encrypt_name_for(
+            &file_key,
+            name,
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .expect("encrypt name")
+    }
+
     /// Whether a name is an encrypted ciphertext (not plaintext). This checks that the text does NOT match any
     /// known plaintext name in the vault: a client that sends a plaintext name instead of the encrypted one is
     /// caught.

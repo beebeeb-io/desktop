@@ -82,7 +82,7 @@ impl<C: CredentialStores> Engine<C> {
     /// session change half done (the session-write lock is held for the question), so an answer made for a session
     /// that a lock or a sign-out is ending is never taken for the current one. Never waits: while a session change
     /// is under way the answer is no.
-    fn session_is_still(&self, generation: SessionGeneration, key: &[u8; 32]) -> bool {
+    pub(super) fn session_is_still(&self, generation: SessionGeneration, key: &[u8; 32]) -> bool {
         let _writes = match self.writes.try_read() {
             Ok(writes) => writes,
             Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
