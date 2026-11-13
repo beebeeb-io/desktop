@@ -220,6 +220,7 @@ fn a_tile_is_plain_until_its_thumbnail_arrives() {
         Thumb::Glyph(_, size) => format!("glyph {size}"),
         Thumb::Plain => "plain".to_string(),
         Thumb::Picture => "picture".to_string(),
+        Thumb::Sample(n) => format!("sample {n}"),
     };
     let none = BoardThumbs::default();
     let all: Vec<String> = (0..7).map(|i| kind(&none, i)).collect();

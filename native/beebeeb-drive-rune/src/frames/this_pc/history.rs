@@ -24,16 +24,14 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let ui = &s.this_pc;
     let focused = chrome::search_focused(cx);
 
-    let mut right = vec![filter(ui, &t)];
-    right.extend(chrome::files_controls(FilesControls::AsFiles, &t));
-    right.push(chrome::search_field(ui, focused, SEARCH_PLACEHOLDER, &t));
     let toolbar = chrome::toolbar(
+        s,
+        ui,
         "Sync history",
-        vec![
-            chrome::nav(s, ui, &t),
-            chrome::title("Sync history", "Last 30 days".into(), &t),
-        ],
-        right,
+        "Last 30 days".into(),
+        vec![filter(ui, &t)],
+        FilesControls::AsFiles,
+        chrome::search_field(ui, focused, SEARCH_PLACEHOLDER, &t),
         &t,
     );
 

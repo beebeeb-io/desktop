@@ -213,7 +213,8 @@ fn a_device_opens_what_it_backed_up_read_only() {
     press(&mut rt, Key::Command('d'), CTRL);
     assert_eq!(rt.state.listing.items.len(), 5);
     assert!(asked(&calls).is_empty(), "{:?}", asked(&calls));
-    // Delete there is Delete this backup, of this device, behind its code (DW-0742).
+    // Delete there leads to Settings' Backups, where this PC's backup is managed (it is not one
+    // of the other devices the section lists, so no dialog of theirs opens for it).
     press(&mut rt, Key::Delete, NONE);
     settle(&mut rt);
     assert_eq!(
@@ -221,10 +222,8 @@ fn a_device_opens_what_it_backed_up_read_only() {
         Screen::Settings(SettingsPane::Backups),
         "Settings' Backups"
     );
-    assert_eq!(
-        rt.state.backups.dialog,
-        Some(crate::frames::backups::Dialog::DeleteDevice(LAPTOP_ID.into()))
-    );
+    assert_eq!(rt.state.backups.dialog, None);
+    assert!(find(&rt, "dlg").is_none(), "no dialog that is not drawn takes the keys");
     assert!(rt.state.actions.intents.contains(&Intent::Frame("DW-0742")));
     assert!(asked(&calls).is_empty(), "{:?}", asked(&calls));
 }
@@ -423,9 +422,16 @@ fn a_devices_backup_is_deleted_only_through_delete_this_backup() {
     press(&mut rt, Key::Delete, NONE);
     settle(&mut rt);
     assert_eq!(rt.state.shell.app.screen(), Screen::Settings(SettingsPane::Backups));
+    // The Backups section's own dialog for that device is DRAWN (its id is the section's).
     assert_eq!(
         rt.state.backups.dialog,
-        Some(crate::frames::backups::Dialog::DeleteDevice("b-iphone".into()))
+        Some(crate::frames::backups::Dialog::DeleteDevice("iphone".into()))
+    );
+    assert!(find(&rt, "dlg").is_some(), "the dialog is drawn");
+    let said: Vec<String> = rt.elements().into_iter().filter_map(|e| e.text).collect();
+    assert!(
+        said.iter().any(|t| t.contains("Anna's iPhone")),
+        "the dialog names the device: {said:?}"
     );
     assert!(asked(&calls).is_empty(), "{:?}", asked(&calls));
 }
@@ -466,7 +472,7 @@ fn the_fixture_carries_the_boards_two_sentences_and_none_for_the_backups_row() {
     );
     assert_eq!(
         rt.state.actions.source.protection(Some(LAPTOP_ID), None),
-        Some(Protection::DeviceBackup(LAPTOP_ID.into()))
+        Some(Protection::DeviceBackup("this-pc".into()))
     );
     assert_eq!(
         rt.state.actions.source.protection(Some(BACKUPS_ID), None),
@@ -531,4 +537,134 @@ fn each_scene_is_the_state_its_controls_reach() {
     press(&mut rt, Key::Delete, NONE);
     assert_eq!(of(&rt), scene("DW-1110"));
     assert_eq!(super::protected::SCENES.len(), 5);
+}
+
+// ---- the review of PR 365 ----
+
+#[test]
+fn the_backups_row_in_files_is_refused_by_the_window_too() {
+    type Try = fn(&mut Runtime<State>);
+    let ways: [(&str, Try); 5] = [
+        ("Delete", |rt| press(rt, Key::Delete, NONE)),
+        ("Ctrl+D", |rt| press(rt, Key::Command('d'), CTRL)),
+        ("F2", |rt| press(rt, Key::Function(2), NONE)),
+        ("Copy link", |rt| {
+            let mut tx = rune::Tx::default();
+            rt.state.copy_link(&mut tx);
+        }),
+        ("Move", |rt| {
+            let mut tx = rune::Tx::default();
+            rt.state.begin_move(&mut tx);
+        }),
+    ];
+    for (name, way) in ways {
+        let (mut rt, calls) = app(true);
+        click(&mut rt, "row-0-date");
+        assert!(rt.state.listing.items[0].is_protected, "the Backups row");
+        way(&mut rt);
+        settle(&mut rt);
+        assert!(asked(&calls).is_empty(), "{name}: {:?}", asked(&calls));
+        assert_eq!(rt.state.listing.items.len(), 11, "{name}");
+        assert!(
+            rt.state.actions.dialog.is_none() && rt.state.actions.rename.is_none(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn enter_space_and_tab_work_in_the_message() {
+    let (mut rt, calls) = in_mail_backup(true);
+    click(&mut rt, "row-1-date");
+    press(&mut rt, Key::Delete, NONE);
+    assert!(find(&rt, "dlg").is_some());
+    // Enter presses OK, the default button.
+    press(&mut rt, Key::Enter, NONE);
+    assert!(rt.state.actions.protected.alert.is_none(), "Enter pressed OK");
+    assert_eq!(rt.state.listing.folder.id.as_deref(), Some(MAIL_ID));
+    // Tab goes from OK to Open Settings and stays inside the dialog; Space presses it.
+    press(&mut rt, Key::Delete, NONE);
+    let mut stops = Vec::new();
+    for _ in 0..3 {
+        press(&mut rt, Key::Tab, NONE);
+        stops.extend(focused(&rt));
+    }
+    assert!(
+        stops.iter().all(|k| k == "btn-0" || k == "btn-1") && stops.contains(&"btn-1".to_string()),
+        "Tab stays on the two buttons: {stops:?}"
+    );
+    while focused(&rt).as_deref() != Some("btn-1") {
+        press(&mut rt, Key::Tab, NONE);
+    }
+    press(&mut rt, Key::Text(" ".into()), NONE);
+    settle(&mut rt);
+    assert_eq!(rt.state.shell.app.screen(), Screen::Settings(SettingsPane::Backups));
+    assert!(asked(&calls).is_empty());
+}
+
+#[test]
+fn the_window_s_shortcuts_do_not_run_under_the_message() {
+    let (mut rt, _) = in_mail_backup(true);
+    click(&mut rt, "row-1-date");
+    press(&mut rt, Key::Delete, NONE);
+    for (name, key, mods) in [
+        ("Ctrl+1", Key::Command('1'), CTRL),
+        ("Ctrl+F", Key::Command('f'), CTRL),
+        ("Backspace", Key::Backspace, NONE),
+        ("Delete", Key::Delete, NONE),
+    ] {
+        press(&mut rt, key, mods);
+        assert!(
+            rt.state.actions.protected.alert.is_some(),
+            "{name} left the message open"
+        );
+    }
+    assert!(find(&rt, "dlg").is_some(), "the message is still open");
+    assert_eq!(rt.state.listing.folder.id.as_deref(), Some(MAIL_ID));
+    assert_eq!(section(&rt), Some(Section::Backups));
+    // The shell's own Back (Alt+Left) is heard before any frame: the message goes with the folder.
+    press(&mut rt, Key::Left, ALT);
+    settle(&mut rt);
+    assert!(
+        rt.state.actions.protected.alert.is_none(),
+        "no message over another folder"
+    );
+    assert!(find(&rt, "dlg").is_none());
+}
+
+#[test]
+fn the_sidebar_still_changes_the_folder_after_one_that_could_not_be_read() {
+    let (mut rt, _) = in_backups(false);
+    // Anna's iPhone is not drawn on the board: it cannot be read here.
+    click(&mut rt, "row-0-date");
+    press(&mut rt, Key::Enter, NONE);
+    settle(&mut rt);
+    assert!(rt.state.list_error.is_some());
+    assert_eq!(
+        section(&rt),
+        Some(Section::Backups),
+        "the section does not follow an unread folder"
+    );
+    click(&mut rt, "Files-row");
+    settle(&mut rt);
+    assert_eq!(section(&rt), Some(Section::Files));
+    assert!(rt.state.list_error.is_none());
+    assert_eq!(names(&rt).len(), 11, "Files shows Files");
+    click(&mut rt, "Backups-row");
+    settle(&mut rt);
+    assert_eq!(names(&rt).len(), 5, "and Backups shows Backups");
+}
+
+#[test]
+fn the_sort_menu_changes_nothing_in_a_protected_folder() {
+    let (mut rt, calls) = in_mail_backup(false);
+    let before = rt.state.actions.sort;
+    click(&mut rt, "sort-btn");
+    let entries = rt.state.menu_entries(super::MenuKind::Sort);
+    let size = entries.iter().position(|e| e.id() == Some("sort-size")).unwrap();
+    let mut tx = rune::Tx::default();
+    rt.state.pick_menu(size, &mut tx);
+    assert!(rt.state.actions.sort == before, "the tick does not move");
+    assert_eq!(names(&rt), ["2026", "2025", "2024"]);
+    assert!(asked(&calls).is_empty(), "{:?}", asked(&calls));
 }
