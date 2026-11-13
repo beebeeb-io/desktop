@@ -188,6 +188,10 @@ pub enum SignInEvent {
     PasswordSet(Result<(), SignInProblem>),
     /// Added by lane signin-create: an answer of sign-up (DW-A31 to DW-A44).
     SignUp(SignUpEvent),
+    /// Added by lane bind-signin: the person left a step (`discard_partial_sign_in`) and the session that step
+    /// belonged to could NOT be ended: this computer is still signed in. The window shows the screen the
+    /// session's gate asks for again, never a form that can only refuse.
+    StillSignedIn,
 }
 
 pub trait SignInSource {

@@ -171,6 +171,15 @@ fn fake(tag: &str) -> Fake {
                     Reply::error(401, "invalid_credentials")
                 }
             }
+            "POST /api/v1/auth/verify-recovery-check" => {
+                // The phrase's proof waits at the same door as the code step.
+                door_in.pass();
+                if req.bearer() == Some(second_in.session_token.as_str()) {
+                    two(req)
+                } else {
+                    one(req)
+                }
+            }
             _ if req.bearer() == Some(second_in.session_token.as_str()) => two(req),
             _ => one(req),
         }
@@ -188,15 +197,21 @@ fn fake(tag: &str) -> Fake {
 }
 
 fn engine_at(base: &str) -> Arc<Engine<MemoryCredentials>> {
+    engine_and_store(base).0
+}
+
+/// A signed-out handle and the credential store it writes.
+fn engine_and_store(base: &str) -> (Arc<Engine<MemoryCredentials>>, MemoryCredentials) {
+    let store = MemoryCredentials::default();
     let (host, _messages) = ChannelHost::new(|| {});
     let config = EngineConfig {
         account_id: "signin-test-slot".into(),
         state_dir: crate::engine_host::tests::process_state_dir(),
         api_base: base.to_string(),
     };
-    let engine = Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the engine opens");
+    let engine = Engine::open(&TEST, config, host, store.clone()).expect("the engine opens");
     engine.restore();
-    Arc::new(engine)
+    (Arc::new(engine), store)
 }
 
 /// A source on a fresh signed-out handle, counting its wait down fast.
@@ -560,6 +575,64 @@ fn a_code_that_was_waiting_behind_another_when_the_person_left_is_never_sent() {
     );
     assert_eq!(requests(&fake, "/auth/logout"), 0, "so nobody was signed in by it");
     assert_eq!(engine.user_id().as_deref(), Some(fake.second.user_id.as_str()));
+}
+
+/// Back wins over a restore that is on its way: the twelve words are right and their proof is at the server when
+/// the person goes back. The restore finishes (it holds the engine's turn), and its result is undone before
+/// anything else runs: no key stays in the credential store, no vault is open, the session is ended at the server.
+#[test]
+fn going_back_while_the_twelve_words_are_being_proven_leaves_no_key_and_no_open_vault() {
+    let fake = fake("undo");
+    let (engine, store) = engine_and_store(&fake.fake.base);
+    let mut source = EngineSignInSource::with_tick(engine.clone(), Duration::from_millis(2));
+    source.begin_sign_in(&fake.first.email, PASSWORD);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::SignedIn(Ok(NextAfterSignIn::RecoveryPhrase))
+    );
+    assert!(!store.is_empty(), "the session is stored");
+
+    fake.code_door.shut();
+    source.begin_restore(&words(TEST_PHRASE));
+    wait_until("the proof to be at the server", || {
+        requests(&fake, "/auth/verify-recovery-check") == 1
+    });
+    source.discard_partial_sign_in();
+    // The next thing asked runs after all of it: its answer says the earlier jobs are done.
+    source.begin_sign_in(&fake.second.email, "not the password");
+    fake.code_door.open();
+    assert_eq!(next(&mut source), SignInEvent::SignedIn(Err(SignInProblem::Invalid)));
+
+    assert_eq!(source.gate(), GateState::SignedOut, "not signed in, not open");
+    assert!(store.is_empty(), "no token and no key stay on this computer");
+    assert!(engine.keys_for_engine_start().is_err());
+    assert_eq!(engine.account_email(), None);
+    assert_eq!(
+        requests(&fake, "/auth/logout"),
+        1,
+        "the session was ended at the server"
+    );
+    assert_eq!(source.poll(), None, "the restore's answer never reaches a screen");
+}
+
+/// A session that could not be ended is said to the window, in the channel, whatever step is current.
+#[test]
+fn a_session_that_could_not_be_ended_is_said_to_the_window() {
+    let fake = fake("still");
+    let (_engine, mut source) = source(&fake);
+    still_signed_in(&source.answers);
+    source.discard_partial_sign_in();
+    assert_eq!(source.poll(), Some(SignInEvent::StillSignedIn));
+}
+
+/// A wait of no seconds is ended at once (the form must not stay off for "0 seconds").
+#[test]
+fn a_wait_of_no_seconds_is_over_at_once() {
+    let fake = fake("zero");
+    let (engine, mut source) = source(&fake);
+    count_down(&engine, &source.answers, &source.attempts, 0, source.tick);
+    assert_eq!(source.poll(), Some(SignInEvent::RetryAfter { seconds: 0 }));
+    assert_eq!(source.poll(), None);
 }
 
 #[test]

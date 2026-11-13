@@ -314,8 +314,8 @@ fn the_other_device_and_the_lost_phrase_are_reachable_from_the_keyboard() {
     assert_eq!(ui(&mut rt).screen, Screen::Device { expired: false });
     assert_eq!(
         *calls.borrow(),
-        ["sign_in", "discard_partial_sign_in", "device_request"],
-        "the other device signs in by itself"
+        ["sign_in", "device_request"],
+        "the session that waits behind the words is kept: the other device hands its keys to it"
     );
 
     let (mut rt, _) = signed_in(phrase_script());
@@ -719,13 +719,9 @@ fn a_phrase_that_does_not_verify_changes_nothing_and_offers_the_dead_end() {
 fn the_gate_that_needs_the_phrase_puts_the_twelve_words_in_front_and_discards_nothing() {
     use crate::shell::app::GateState;
     let (mut rt, calls) = form(Script::default());
-    for gate in [
-        GateState::SignedOut,
-        GateState::Ready,
-        GateState::Locked,
-        GateState::NoPlan,
-    ] {
-        assert!(!ui(&mut rt).follow_gate(gate), "{gate:?}");
+    // The first gate seen, signed out, and the same gate again: a window that is on its form stays as it is.
+    for _ in 0..2 {
+        assert!(!ui(&mut rt).follow_gate(GateState::SignedOut));
     }
     assert_eq!(ui(&mut rt).screen, Screen::SignIn);
     assert!(!ui(&mut rt).password.text.is_empty(), "the form is as it was");
@@ -780,4 +776,165 @@ fn going_back_from_the_words_stays_on_the_form_while_the_gate_has_not_moved_yet(
     assert!(!ui(&mut rt).follow_gate(GateState::SignedOut));
     assert!(ui(&mut rt).follow_gate(GateState::NeedsRecoveryPhrase));
     assert_eq!(ui(&mut rt).screen, Screen::Phrase);
+}
+
+/// On the twelve words, with the session's gate at "needs the phrase", as after a password on a new computer.
+fn on_the_words() -> (Runtime<State>, Calls) {
+    use crate::shell::app::GateState;
+    let (mut rt, calls) = form(Script::default());
+    assert!(ui(&mut rt).follow_gate(GateState::NeedsRecoveryPhrase));
+    assert_eq!(ui(&mut rt).screen, Screen::Phrase);
+    (rt, calls)
+}
+
+fn discards(calls: &Calls) -> usize {
+    calls
+        .borrow()
+        .iter()
+        .filter(|call| **call == "discard_partial_sign_in")
+        .count()
+}
+
+/// Back must win over a step that is on its way, so while one runs there is no way off its screen (as during the
+/// password check): not Back, not "Forgot password?", not the other device. Nothing is discarded under a running
+/// step; once it answered, Back works and discards.
+#[test]
+fn a_running_step_cannot_be_left_and_nothing_is_discarded_under_it() {
+    // The twelve words being restored.
+    let (mut rt, calls) = on_the_words();
+    ui(&mut rt).restoring = true;
+    press(&mut rt, Key::Escape);
+    ui(&mut rt).ask_other_device();
+    ui(&mut rt).forgot();
+    assert_eq!(
+        ui(&mut rt).screen,
+        Screen::Phrase,
+        "the restore is on its way: its screen stays"
+    );
+    assert_eq!(discards(&calls), 0);
+    ui(&mut rt).restoring = false;
+    press(&mut rt, Key::Escape);
+    assert_eq!(ui(&mut rt).screen, Screen::SignIn);
+    assert_eq!(discards(&calls), 1, "left with nothing running: discarded");
+
+    // A code being checked, and a vault password being proven.
+    for (screen, running) in [
+        (Screen::TwoFactor { backup: false }, 0),
+        (Screen::TwoFactor { backup: true }, 0),
+        (Screen::UnlockVault, 1),
+    ] {
+        let (mut rt, calls) = form(Script::default());
+        ui(&mut rt).screen = screen.clone();
+        match running {
+            0 => ui(&mut rt).verifying = true,
+            _ => ui(&mut rt).unlocking = true,
+        }
+        assert!(ui(&mut rt).step_running());
+        press(&mut rt, Key::Escape);
+        ui(&mut rt).open_sign_in();
+        assert_eq!(ui(&mut rt).screen, screen, "{screen:?}");
+        assert_eq!(discards(&calls), 0, "{screen:?}");
+    }
+}
+
+/// "approve from another device" on the twelve words keeps the session that waits behind them (the other device
+/// hands its keys to THAT session): no discard on the way in, on the way back, or when the request is refused.
+#[test]
+fn the_other_device_link_on_the_words_keeps_the_session_and_comes_back_to_the_words() {
+    use super::source::{SignInEvent, SignInProblem};
+    let (mut rt, calls) = on_the_words();
+    ui(&mut rt).words[0].replace_text("harbor");
+    ui(&mut rt).ask_other_device();
+    assert_eq!(ui(&mut rt).screen, Screen::Device { expired: false });
+    assert!(ui(&mut rt).request().is_some(), "the request is shown");
+    assert!(
+        ui(&mut rt).words[0].text.is_empty(),
+        "the words typed so far are forgotten"
+    );
+    // "Get a new code" closes the old request and keeps the session too.
+    ui(&mut rt).ask_other_device();
+    assert_eq!(ui(&mut rt).screen, Screen::Device { expired: false });
+    // Back: the words again, the request closed.
+    press(&mut rt, Key::Escape);
+    assert_eq!(ui(&mut rt).screen, Screen::Phrase);
+    assert!(ui(&mut rt).request().is_none());
+    assert_eq!(discards(&calls), 0, "the session was never discarded");
+    assert!(calls.borrow().contains(&"cancel_device_request"));
+
+    // A request that is refused (a source that cannot ask one): back on the words, and said there.
+    ui(&mut rt).ask_other_device();
+    ui(&mut rt).request = None;
+    ui(&mut rt).apply(SignInEvent::DeviceRequested(Err(SignInProblem::Other)));
+    assert_eq!(ui(&mut rt).screen, Screen::Phrase);
+    assert_eq!(ui(&mut rt).phrase_problem(), Some(&PhraseProblem::Other));
+    assert_eq!(discards(&calls), 0);
+    // From the words, Back still discards (the one way to sign in as someone else).
+    press(&mut rt, Key::Escape);
+    assert_eq!(ui(&mut rt).screen, Screen::SignIn);
+    assert_eq!(discards(&calls), 1);
+}
+
+/// The gate is followed whenever it moves, not only when it arrives at the words: a session that ended under the
+/// words leaves the form (never the words of a session that is gone), and a session that opened or locked ends
+/// every step, so the window starts from its form the next time it shows. The engine is told nothing.
+#[test]
+fn the_window_follows_the_gate_whenever_it_moves() {
+    use crate::shell::app::GateState;
+    // The words, then the session is gone (signed out elsewhere, or by the engine).
+    let (mut rt, calls) = on_the_words();
+    ui(&mut rt).words[3].replace_text("lantern");
+    assert!(ui(&mut rt).follow_gate(GateState::SignedOut));
+    assert_eq!(ui(&mut rt).screen, Screen::SignIn);
+    assert!(ui(&mut rt).words[3].text.is_empty(), "no word stays behind");
+    assert_eq!(discards(&calls), 0);
+
+    // Back from the words, a new password being typed, then the sign-out lands: the form is not touched.
+    let (mut rt, _) = on_the_words();
+    press(&mut rt, Key::Escape);
+    ui(&mut rt).password.replace_text("being typed");
+    assert!(!ui(&mut rt).follow_gate(GateState::SignedOut));
+    assert_eq!(ui(&mut rt).password.text, "being typed");
+
+    // The vault opened (the words were right) or locked: the steps are over.
+    for gate in [GateState::Ready, GateState::Locked, GateState::NoPlan] {
+        let (mut rt, calls) = on_the_words();
+        ui(&mut rt).words[0].replace_text("harbor");
+        ui(&mut rt).restoring = true;
+        assert!(ui(&mut rt).follow_gate(gate), "{gate:?}");
+        assert_eq!(ui(&mut rt).screen, Screen::SignIn, "{gate:?}");
+        assert!(ui(&mut rt).words[0].text.is_empty(), "{gate:?}");
+        assert!(!ui(&mut rt).step_running(), "{gate:?}");
+        assert_eq!(discards(&calls), 0, "{gate:?}");
+    }
+
+    // A window that opens on a step under a signed-out gate (the first gate seen) is left alone.
+    let (mut rt, _) = form(Script::default());
+    ui(&mut rt).screen = Screen::Phrase;
+    assert!(!ui(&mut rt).follow_gate(GateState::SignedOut));
+    assert_eq!(ui(&mut rt).screen, Screen::Phrase);
+}
+
+/// Leaving the words did not end the session (the engine could not sign out): the words come back in front on
+/// the next poll, because that is the state; the form that could only refuse does not stay.
+#[test]
+fn a_sign_out_that_did_not_finish_brings_the_words_back() {
+    use super::source::SignInEvent;
+    use crate::shell::app::GateState;
+    let (mut rt, calls) = on_the_words();
+    press(&mut rt, Key::Escape);
+    assert_eq!(ui(&mut rt).screen, Screen::SignIn);
+    assert!(
+        !ui(&mut rt).follow_gate(GateState::NeedsRecoveryPhrase),
+        "the form stays while it is not known"
+    );
+    ui(&mut rt).apply(SignInEvent::StillSignedIn);
+    assert!(ui(&mut rt).follow_gate(GateState::NeedsRecoveryPhrase));
+    assert_eq!(ui(&mut rt).screen, Screen::Phrase, "still signed in: the words");
+    // Back tries again.
+    press(&mut rt, Key::Escape);
+    assert_eq!(discards(&calls), 2);
+    // Had the sign-out worked after all, the same event changes nothing.
+    ui(&mut rt).apply(SignInEvent::StillSignedIn);
+    assert!(!ui(&mut rt).follow_gate(GateState::SignedOut));
+    assert_eq!(ui(&mut rt).screen, Screen::SignIn);
 }

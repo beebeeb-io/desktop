@@ -121,13 +121,28 @@ impl<C: CredentialStores> EngineSignInSource<C> {
         work: impl FnOnce(&Arc<Engine<C>>) -> SignInEvent + Send + 'static,
     ) {
         let attempt = self.next_attempt(wait);
-        let (answers, attempts) = (self.answers.clone(), self.attempts.clone());
+        let (answers, attempts, tick) = (self.answers.clone(), self.attempts.clone(), self.tick);
         let job: Job<C> = Box::new(move |engine| {
             if attempts[wait as usize].load(Ordering::SeqCst) != attempt {
                 return;
             }
             let event = work(engine);
+            // The person left this step while it ran (`discard_partial_sign_in` moved the attempt on): its answer
+            // is dropped by `poll`, and what it did is undone here, before the next job. Back wins.
+            if attempts[wait as usize].load(Ordering::SeqCst) != attempt {
+                undo_left_step(engine, &answers, &event);
+                engine.wake_host();
+                return;
+            }
+            let wait_seconds = match &event {
+                SignInEvent::SignedIn(Err(SignInProblem::RateLimited { seconds })) => Some(*seconds),
+                _ => None,
+            };
             let _ = answers.send(Answer { wait, attempt, event });
+            // After the answer is in the channel: no tick can come before the problem it counts down.
+            if let Some(seconds) = wait_seconds {
+                count_down(engine, &answers, &attempts, seconds, tick);
+            }
             engine.wake_host();
         });
         let queued = self.jobs.as_ref().is_some_and(|jobs| jobs.send(job).is_ok());
@@ -171,9 +186,38 @@ fn phrase_of(words: &[&str]) -> Zeroizing<String> {
     phrase
 }
 
+/// A step the person left finished anyway (it held the engine's turn): undo what it did. A sign-in that the code
+/// or the twelve words completed is signed out (the local files and state stay); a vault the password opened is
+/// locked again. A step that was refused did nothing. A sign-out that does not finish is said to the window
+/// (`StillSignedIn`), never only logged.
+fn undo_left_step<C: CredentialStores>(engine: &Arc<Engine<C>>, answers: &mpsc::Sender<Answer>, event: &SignInEvent) {
+    match event {
+        SignInEvent::TwoFactor(Ok(_)) | SignInEvent::PhraseRestored(Ok(_)) => {
+            if engine.sign_out_keeping_local_data().is_err() {
+                still_signed_in(answers);
+            }
+        }
+        SignInEvent::VaultUnlocked(Ok(_)) => {
+            let _ = engine.lock();
+        }
+        _ => {}
+    }
+}
+
+/// Tell the window that leaving a step did not end its session.
+fn still_signed_in(answers: &mpsc::Sender<Answer>) {
+    log("sign-in: leaving the step did not sign out; still signed in");
+    let _ = answers.send(Answer {
+        wait: Wait::Unbound,
+        attempt: 0,
+        event: SignInEvent::StillSignedIn,
+    });
+}
+
 /// Count the wait down: `RetryAfter` once a `tick`, `0` when it is over (DW-A21). It stops when a newer countdown
-/// began or the source is gone. A thread that cannot start ends the wait at once: the form works again, and the
-/// server answers the next try as it sees fit.
+/// began or the source is gone. A wait of no seconds, and a thread that cannot start, end the wait at once: the
+/// form works again, and the server answers the next try as it sees fit. Called AFTER the answer it counts down
+/// is in the channel.
 fn count_down<C: CredentialStores>(
     engine: &Arc<Engine<C>>,
     answers: &mpsc::Sender<Answer>,
@@ -182,6 +226,16 @@ fn count_down<C: CredentialStores>(
     tick: Duration,
 ) {
     let attempt = attempts[Wait::Retry as usize].fetch_add(1, Ordering::SeqCst) + 1;
+    let over = || {
+        let _ = answers.send(Answer {
+            wait: Wait::Retry,
+            attempt,
+            event: SignInEvent::RetryAfter { seconds: 0 },
+        });
+    };
+    if seconds == 0 {
+        return over();
+    }
     let (engine_in, answers_in, attempts_in) = (engine.clone(), answers.clone(), attempts.clone());
     let started = thread::Builder::new().name("signin-wait".into()).spawn(move || {
         let mut left = seconds;
@@ -204,11 +258,7 @@ fn count_down<C: CredentialStores>(
         }
     });
     if started.is_err() {
-        let _ = answers.send(Answer {
-            wait: Wait::Retry,
-            attempt,
-            event: SignInEvent::RetryAfter { seconds: 0 },
-        });
+        over();
     }
 }
 
@@ -226,19 +276,13 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
 
     fn begin_sign_in(&mut self, email: &str, password: &str) {
         let (email, password) = (email.to_string(), secret(password));
-        let (answers, attempts, tick) = (self.answers.clone(), self.attempts.clone(), self.tick);
+        // A wait the server names is counted down by `ask`, after this answer is in the channel.
         self.ask(
             Wait::SignIn,
             SignInEvent::SignedIn(Err(SignInProblem::Other)),
             move |engine| match engine.sign_in_password(&email, password) {
                 Ok(next) => SignInEvent::SignedIn(Ok(map_next(next))),
-                Err(problem) => {
-                    let problem = map_problem(problem);
-                    if let SignInProblem::RateLimited { seconds } = problem {
-                        count_down(engine, &answers, &attempts, seconds, tick);
-                    }
-                    SignInEvent::SignedIn(Err(problem))
-                }
+                Err(problem) => SignInEvent::SignedIn(Err(map_problem(problem))),
             },
         );
     }
@@ -331,15 +375,18 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
     }
 
     /// The person went back from the code, the twelve words or the vault password. From this call on no answer of
-    /// those steps is handed out, and a step of them that has not started does not start. The engine then forgets
-    /// what was half done, in its turn on the worker ([`Engine::discard_partial_sign_in`]).
+    /// those steps is handed out, a step of them that has not started does not start, and one that is running
+    /// has its result undone when it ends (`undo_left_step`). The engine then forgets what was half done, in its
+    /// turn on the worker ([`Engine::discard_partial_sign_in`]). A session that could not be ended is said to the
+    /// window (`SignInEvent::StillSignedIn`).
     fn discard_partial_sign_in(&mut self) {
         for wait in [Wait::TwoFactor, Wait::Restore, Wait::Unlock] {
             self.next_attempt(wait);
         }
-        let job: Job<C> = Box::new(|engine| {
+        let answers = self.answers.clone();
+        let job: Job<C> = Box::new(move |engine| {
             if engine.discard_partial_sign_in().is_err() {
-                log("sign-in: leaving the step did not sign out; still signed in");
+                still_signed_in(&answers);
             }
             engine.wake_host();
         });

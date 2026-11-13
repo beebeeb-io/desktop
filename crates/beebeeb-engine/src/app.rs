@@ -941,6 +941,14 @@ impl<C: CredentialStores> Engine<C> {
     fn sign_out_keeping_local_data_step(&self) -> Result<(), String> {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
+            self.sign_out_holding_step().await
+        })
+    }
+
+    /// The sign-out itself, for a caller that holds the step (`transition`) already: a step that decides to sign
+    /// out and does it in the same hold (`signin_api::discard_partial_sign_in`).
+    async fn sign_out_holding_step(&self) -> Result<(), String> {
+        {
             if self.stop_holding_step().await == SyncStop::Unconfirmed {
                 return Err(account_binding::ENGINE_STOP_UNCONFIRMED.to_string());
             }
@@ -967,7 +975,7 @@ impl<C: CredentialStores> Engine<C> {
                 revoke(&self.client, &self.config.api_base, &token).await;
             }
             Ok(())
-        })
+        }
     }
 
     /// One page of a folder's rows (`None`: the root), as the Files window lists them: the Backups root first, each

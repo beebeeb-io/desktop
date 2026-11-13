@@ -26,6 +26,10 @@ use crate::signin::{flow_code, store};
 const SESSION_NOT_ACCEPTED: &str = "session_not_accepted";
 
 impl<C: CredentialStores> Engine<C> {
+    /// REPLACED BY DECISION 2495 (owner, 2026-11-13): the lock becomes two levels whose rules live in core (a
+    /// screen lock: Windows Hello or an offline password check; "Lock vault": core's `unlock_known_device`). No
+    /// screen calls this step; it is not to be bound to one, and it goes when the engine moves to that core.
+    ///
     /// Open a locked vault (signed in, the key is in this computer's credential store, not in memory) with the
     /// account's password. The server proves the password for the stored session; only then is the stored key
     /// loaded, in this step's turn. Needs the network: a proof that cannot be made unlocks nothing.
@@ -102,26 +106,30 @@ impl<C: CredentialStores> Engine<C> {
         }
     }
 
-    /// The person left a sign-in that was half done. A proven password that waits for its code is forgotten (a
-    /// code check that is still on its way then ends in "expired", and nothing is stored). An account that is
-    /// signed in on a computer that holds no key of it (the twelve words were being asked) is signed out, so
-    /// another sign-in can start; the local files and the local state stay. A locked vault (its key is here) and
-    /// an open one are left as they are.
+    /// The person left a sign-in that was half done. A proven password that waits for its code is forgotten, so
+    /// no later code completes it. An account that is signed in on a computer that holds no key of it (the twelve
+    /// words were being asked) is signed out, so another sign-in can start; the local files and the local state
+    /// stay. A locked vault (its key is here) and an open one are left as they are.
     ///
-    /// Takes its turn after a step that is on its way: what that step finished stands, and the gate says so.
+    /// One hold of the step lock: the question "is this a keyless session?" and the sign-out are not separated, so
+    /// no other step lands between them. A step that is already on its way is NOT interrupted: this waits for it,
+    /// and what it finished stands as far as this method goes (a code check that was on its way signs in first;
+    /// if that leaves a keyless session, it is signed out here). A host that lets a person leave a running step
+    /// undoes that step's result itself (the native adapter does).
     /// `Err`: the sign-out did not finish (`Engine::sign_out_keeping_local_data`); still signed in.
     pub fn discard_partial_sign_in(&self) -> Result<(), String> {
-        let sign_out = self.runtime.block_on(async {
+        let result = self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             if let Ok(mut pending) = self.pending_2fa.lock() {
                 *pending = None;
             }
-            self.gate() == GateState::NeedsRecoveryPhrase
+            if self.gate() == GateState::NeedsRecoveryPhrase {
+                self.sign_out_holding_step().await
+            } else {
+                Ok(())
+            }
         });
-        if sign_out {
-            return self.sign_out_keeping_local_data();
-        }
         self.publish();
-        Ok(())
+        result
     }
 }
