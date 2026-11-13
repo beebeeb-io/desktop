@@ -160,7 +160,13 @@ pub fn skip(s: &mut State) {
 /// being typed in a row, an opened photo. It gets the keys (Esc closes it), not the tip.
 fn in_front(s: &State, place: Section) -> bool {
     match place {
-        Section::Files => s.actions.menu.is_some() || s.actions.dialog.is_some() || s.actions.rename.is_some(),
+        // The New file dialog (DW-1521) is the Files window's too, drawn by `viewers::new_file`.
+        Section::Files => {
+            s.actions.menu.is_some()
+                || s.actions.dialog.is_some()
+                || s.actions.rename.is_some()
+                || s.viewer.new_file.is_some()
+        }
         Section::Shared => s.frames.shared.menu.is_some() || s.frames.shared.dialog.is_some(),
         Section::Photos => s.photos.menu.is_some() || s.photos.dialog.is_some() || s.photos.viewer.is_some(),
         _ => false,
@@ -266,9 +272,11 @@ struct Spot {
 
 fn spot(n: u8, s: &State) -> Option<Spot> {
     Some(match n {
+        // The board places the ring at whole points (left 964, top 37, 88 x 36) around New
+        // (967.73, 40.75, 80.27 x 28): 3.73 left of it, 3.75 over it, 4 right of it, 4.25 under it.
         1 => Spot {
             target: "new-btn".into(),
-            out: [4.0; 4],
+            out: [3.73, 3.75, 4.0, 4.25],
             radius: 10.0,
             arrow: Arrow::Up(202.0),
         },
