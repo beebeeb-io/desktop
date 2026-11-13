@@ -53,6 +53,10 @@ struct Account {
     puts: Arc<Mutex<Vec<(usize, Value)>>>,
     /// The next change is stored and then waits here before it is answered.
     put_hold: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
+    /// The next read waits here before it is answered (with what the fake holds when it is let go).
+    get_hold: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
+    /// How many reads reached the fake.
+    gets: Arc<AtomicU64>,
     email: String,
     phrase: String,
     /// Another account on the same fake (its storage location: Finland, not strict).
@@ -66,6 +70,17 @@ impl Account {
         let (release, held) = mpsc::channel();
         *self.put_hold.lock().unwrap() = Some(held);
         release
+    }
+
+    /// The next read waits at the fake, unanswered, until the returned sender is sent to.
+    fn hold_next_get(&self) -> mpsc::Sender<()> {
+        let (release, held) = mpsc::channel();
+        *self.get_hold.lock().unwrap() = Some(held);
+        release
+    }
+
+    fn gets(&self) -> u64 {
+        self.gets.load(Ordering::SeqCst)
     }
 
     /// How many changes reached the fake, under any token, and whose token each carried.
@@ -102,6 +117,9 @@ fn account(email: &str) -> Account {
     let (puts, put_hold) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(None)));
     let (puts_in, put_hold_in): (Arc<Mutex<Vec<(usize, Value)>>>, Arc<Mutex<Option<mpsc::Receiver<()>>>>) =
         (puts.clone(), put_hold.clone());
+    let (get_hold, gets) = (Arc::new(Mutex::new(None)), Arc::new(AtomicU64::new(0)));
+    let (get_hold_in, gets_in): (Arc<Mutex<Option<mpsc::Receiver<()>>>>, Arc<AtomicU64>) =
+        (get_hold.clone(), gets.clone());
     let (get_mode, put_mode, delay_ms, put_delay_ms, writes) = (
         Arc::new(AtomicU8::new(ANSWER)),
         Arc::new(AtomicU8::new(ANSWER)),
@@ -138,6 +156,12 @@ fn account(email: &str) -> Account {
         };
         if is_put {
             puts_in.lock().unwrap().push((who, req.json()));
+        } else {
+            gets_in.fetch_add(1, Ordering::SeqCst);
+            let hold = get_hold_in.lock().unwrap().take();
+            if let Some(hold) = hold {
+                let _ = hold.recv();
+            }
         }
         let mode = if is_put {
             put_mode_in.load(Ordering::SeqCst)
@@ -199,6 +223,8 @@ fn account(email: &str) -> Account {
         writes,
         puts,
         put_hold,
+        get_hold,
+        gets,
         email: email.to_string(),
         phrase,
         second,
@@ -552,6 +578,35 @@ fn a_late_answer_is_never_drawn_under_another_session() {
         "the pane shows what Beebeeb holds now"
     );
     assert_eq!(account.puts(), [0, 1]);
+}
+
+/// A read asked under one session and answered after a lock and an unlock is not taken as the new session's: the
+/// storage location is asked for again, once.
+#[test]
+fn a_read_answered_after_the_session_moved_on_is_asked_again() {
+    let account = account("settings-late-read@example.eu");
+    let engine = signed_in(&account);
+    let mut source = EngineSettingsSource::for_identity(engine.clone(), &TEST);
+    settle(&mut source);
+    let before = account.gets();
+    let release = account.hold_next_get();
+    source.reload_locations();
+    pump_until(&mut source, "the read reaches the fake", |_| {
+        account.gets() == before + 1
+    });
+    let _ = engine.lock();
+    assert!(source.locations().is_none(), "locked: no list");
+    engine
+        .unlock_with_phrase(Zeroizing::new(account.phrase.clone()))
+        .expect("the phrase unlocks");
+    release.send(()).expect("the fake is waiting");
+    settle(&mut source);
+    assert_eq!(
+        account.gets(),
+        before + 2,
+        "the answer of the session before the lock is not taken: asked once more"
+    );
+    assert_eq!(source.general().storage_location, "Germany");
 }
 
 /// P2-1 (task 2473): "Nothing changed" is said only after an HTTP refusal. A timeout after the request left, a
