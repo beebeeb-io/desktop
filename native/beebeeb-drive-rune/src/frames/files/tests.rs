@@ -270,6 +270,8 @@ fn enter_on_a_file_asks_to_open_it_and_space_asks_for_the_preview() {
     press(&mut rt, Key::Enter, NONE);
     click(&mut rt, "row-6-date");
     press(&mut rt, Key::Text(" ".into()), NONE);
+    // The preview is over the window (DW-0408; `actions_tests.rs`): Esc closes it.
+    press(&mut rt, Key::Escape, NONE);
     // F2 renames in the row (DW-0410; `rest_tests.rs`), Esc leaves it.
     press(&mut rt, Key::Function(2), NONE);
     assert!(rt.state.actions.rename.is_some());
@@ -279,6 +281,7 @@ fn enter_on_a_file_asks_to_open_it_and_space_asks_for_the_preview() {
         rt.state.actions.intents,
         [Intent::Frame("DW-0408"), Intent::Frame("DW-0411")]
     );
+    assert!(rt.state.actions.dialog.is_some(), "Details is open (DW-0411)");
     assert_eq!(asked(&calls), [Call::Open(ids(&["q4plan"]))]);
 }
 
@@ -457,6 +460,11 @@ fn menu_entries_pick_with_a_click_and_go_where_the_board_sends_them() {
         click(&mut rt, &key);
         assert!(rt.state.actions.menu.is_none(), "{label} closes the menu");
         assert_eq!(rt.state.actions.intents.last(), Some(&intent), "{label}");
+        // Share, Preview, Details and Version history are dialogs over the window now
+        // (`actions_tests.rs`): Esc closes each before the next pick.
+        if rt.state.actions.dialog.is_some() {
+            press(&mut rt, Key::Escape, NONE);
+        }
     }
     assert_eq!(
         asked(&calls),

@@ -5,21 +5,30 @@
 //! Data: the listing comes from `crate::source::DriveSource`, everything else from `source::FilesSource`
 //! (counts, the account, the sync state; every action is a call on it, answered in a toast).
 
+pub mod action_scenes;
+pub mod actions_data;
+pub mod conflict;
 pub mod details;
 pub mod dialogs;
+pub mod facts;
 pub mod keys;
 pub mod list;
 pub mod long_list;
 pub mod menus;
 pub mod names;
+pub mod preview;
 pub mod protected;
 pub mod protected_fixture;
 pub mod rename;
+pub mod reset;
+pub mod share;
 pub mod sidebar;
 pub mod source;
 pub mod toolbar;
 pub mod window;
 
+#[cfg(test)]
+mod actions_tests;
 #[cfg(test)]
 mod long_list_tests;
 #[cfg(test)]
@@ -156,6 +165,9 @@ pub struct Actions {
     pub intents: Vec<Intent>,
     /// An upload that failed: what Try again uploads.
     pub retry_upload: Option<(Option<String>, Vec<std::path::PathBuf>)>,
+    /// A link that could not be made: the dialog Try again opens again, with the same items
+    /// and choices. Never the password: that is typed again.
+    pub retry_share: Option<share::Share>,
     /// The window's size, for keeping a menu inside it.
     pub window: (f32, f32),
     /// A board frame that draws only the lower part of the window (DW-0107, DW-0108): how many
@@ -175,6 +187,10 @@ pub struct Actions {
     pub made: Vec<DriveItem>,
     /// Whose disk a typed name has to fit on: this computer's (a test names the other one).
     pub host: names::Host,
+    /// The password of a link being made (DW-0407): secure, wiped when the dialog closes.
+    pub share_password: rune::TextEdit,
+    /// Files answered since Two versions opened (DW-0429): the second reads "2 of 2".
+    pub conflicts_done: usize,
     /// The protected folders: the open message, the section last seen (`protected.rs`).
     pub protected: protected::Ui,
     /// The letters typed in the list, which jump to a name (`long_list.rs`).
@@ -199,6 +215,7 @@ impl Actions {
             undo: Vec::new(),
             intents: Vec::new(),
             retry_upload: None,
+            retry_share: None,
             window: (1278.0, 798.0),
             board_crop_top: 0.0,
             forward: Vec::new(),
@@ -208,6 +225,8 @@ impl Actions {
             name_error: None,
             made: Vec::new(),
             host: names::Host::this(),
+            share_password: rune::TextEdit::new("").secure(),
+            conflicts_done: 0,
             protected: protected::Ui::default(),
             typed: long_list::Typed::default(),
             board_first_row: 0,
@@ -379,9 +398,10 @@ impl State {
     pub(super) fn intent(&mut self, intent: Intent) {
         use crate::shell::app::{Event, Route, Section, SettingsPane};
         let Intent::Frame(frame) = &intent;
+        let frame: &'static str = frame;
         // The status line shows the b's flyout (DW-0401 to DW-1201): a second surface, no route.
-        let flyout = *frame == "DW-1201";
-        let event = match *frame {
+        let flyout = frame == "DW-1201";
+        let event = match frame {
             "DW-0701" => Some(Event::OpenSettings(SettingsPane::General)),
             "DW-1301" => Some(Event::Navigate(Route::section(Section::SyncHistory))),
             "DW-0715" => Some(Event::Navigate(Route::section(Section::AvailableOffline))),
@@ -391,6 +411,19 @@ impl State {
             self.actions.intents.remove(0);
         }
         self.actions.intents.push(intent);
+        // The frames this group draws itself (lane files-actions): the dialog opens here.
+        match frame {
+            "DW-0407" => {
+                self.begin_share();
+            }
+            "DW-0411" => {
+                self.begin_details();
+            }
+            "DW-0413" => {
+                self.begin_versions();
+            }
+            _ => {}
+        }
         if flyout {
             crate::frames::tray::show_from_window(self);
         }
@@ -559,6 +592,10 @@ impl State {
     /// Open the selection: one folder opens in place; files go to their apps, all of them.
     /// Returns whether the folder shown changed.
     pub fn open_selection(&mut self, tx: &mut Tx) -> bool {
+        // A file that changed in two places: the choice first (DW-0429).
+        if self.review_selected_conflict() {
+            return false;
+        }
         let items = self.selected_items();
         let lead = self.selected.and_then(|i| self.listing.items.get(i)).cloned();
         let files: Vec<DriveItem> = items.iter().filter(|i| !i.is_folder).cloned().collect();
@@ -611,6 +648,9 @@ impl State {
             return true;
         }
         self.intent(Intent::Frame("DW-0408"));
+        if let Some(item) = self.selected.and_then(|i| self.listing.items.get(i)).cloned() {
+            self.open_preview(item);
+        }
         true
     }
 
@@ -836,6 +876,9 @@ impl State {
             Action::CopyLink => {
                 self.copy_link(tx);
             }
+            // The Share dialog again, with the items and the choices it had. No link is made
+            // here: a plain link would drop the password, the access and the end date.
+            Action::ShareLink => self.share_again(tx),
             Action::Open => {
                 self.open_selection(tx);
             }
@@ -862,6 +905,8 @@ impl State {
             Action::OpenInFileExplorer => {
                 self.open_in_file_explorer(tx);
             }
+            // These are asked again from their own dialog: the message goes, nothing is repeated blind.
+            Action::RestoreVersion | Action::OpenWith | Action::KeepVersion | Action::Invite => {}
         }
     }
 
@@ -1145,4 +1190,11 @@ pub const SCENES: &[crate::ui::gate::Scene<State>] = &[
             s.check_rename();
         }
     }),
+    // The action dialogs and the preview (lane files-actions): `action_scenes.rs`.
+    ("DW-0407", action_scenes::share),
+    ("DW-0411", action_scenes::details),
+    ("DW-0413", action_scenes::versions),
+    ("DW-0408", action_scenes::preview),
+    ("DW-0408b", action_scenes::no_preview),
+    ("DW-0429", action_scenes::two_versions),
 ];

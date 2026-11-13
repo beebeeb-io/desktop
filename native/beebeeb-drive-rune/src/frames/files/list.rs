@@ -79,6 +79,12 @@ pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
                             } else {
                                 s.actions.source.changed_label(item)
                             };
+                            // A file that changed in two places says so where its date stands (DW-0429).
+                            let date = if super::conflict::waits(s, &item.id) {
+                                Some(super::conflict::ROW_WORDS.to_string())
+                            } else {
+                                date
+                            };
                             // The row being renamed shows its name as a field (DW-0410).
                             let renaming = s.actions.rename.as_ref().is_some_and(|r| r.row == i && r.id == item.id);
                             let field = renaming.then(|| super::rename::name_field(s, &t));
@@ -224,6 +230,9 @@ pub fn column_headers(sort: super::Sort, t: &Theme) -> El {
 
 /// One row (`.mk-row`). `date`: the source's own words for the date, else the list's.
 /// `renaming`: the field that stands where the name is while it is being typed (DW-0410).
+/// "Two versions" where a date stands (`.mk-row` with `modSans`): 12/400 on a 14.5 pt line.
+const TWO_VERSIONS: rune::TextStyle = rune::TextStyle::new(12.0, 400.0).lh(14.5);
+
 pub fn file_row(
     i: usize,
     item: &DriveItem,
@@ -297,9 +306,19 @@ pub fn file_row_with(
         .press(t.press)
         .child(name)
         .child(
-            kit::label(format!("{k}-date"), date, type_::META_MONO, meta)
-                .w(COL_DATE_W)
-                .truncate(),
+            kit::label(
+                format!("{k}-date"),
+                date.clone(),
+                // Words in place of a date are words: Inter, as the board sets them (DW-0429).
+                if date == super::conflict::ROW_WORDS {
+                    TWO_VERSIONS
+                } else {
+                    type_::META_MONO
+                },
+                meta,
+            )
+            .w(COL_DATE_W)
+            .truncate(),
         )
         .child(
             kit::label(format!("{k}-size"), size_text, type_::META_MONO, meta)

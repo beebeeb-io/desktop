@@ -226,6 +226,8 @@ fn the_view_switch_shows_lisbon_trip_as_a_grid_with_its_pictures() {
     assert_eq!(rt.state.selected, Some(2));
     press(&mut rt, Key::Text(" ".into()), NONE);
     assert_eq!(rt.state.actions.intents.last(), Some(&Intent::Frame("DW-0408")));
+    // The preview is over the window (DW-0408; `actions_tests.rs`): Esc closes it.
+    press(&mut rt, Key::Escape, NONE);
     right_click(&mut rt, "grid-4");
     assert!(rt.state.actions.menu.is_some(), "the file menu");
     press(&mut rt, Key::Escape, NONE);

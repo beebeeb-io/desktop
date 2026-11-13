@@ -2,6 +2,7 @@
 //! the account row.
 
 use crate::State;
+use crate::frames::files::source::Account;
 use crate::theme::icons;
 use crate::theme::tokens::{Theme, radius, type_};
 use rune::{Color, El, Span, col, el, row};
@@ -213,14 +214,19 @@ pub enum Standing {
     NoPlan,
 }
 
+/// Whether the locked window blanks the account's details (decision 2483 is open; the
+/// recommendation is "blank when locked" and showing less is the safe side until ruled).
+pub const LOCKED_BLANKS_ACCOUNT: bool = true;
+
 impl Standing {
     /// Whether the account's email, its storage block and the items' counts are drawn in this
-    /// standing. The ONE switch for them: today every standing draws them, as the board does
-    /// (DW-0009 shows all three while locked). A ruling that a locked window shows less is this
-    /// line, the board's frame first.
+    /// standing. When `LOCKED_BLANKS_ACCOUNT` is true the locked window draws the sidebar's shape
+    /// but no email, no storage figure and no section counts — neutral placeholders that keep the
+    /// layout. The board's golden for DW-0009 then goes red on those keys; that red is expected.
     pub fn shows_account_details(self) -> bool {
         match self {
-            Standing::Open | Standing::Locked | Standing::NoPlan => true,
+            Standing::Open | Standing::NoPlan => true,
+            Standing::Locked => !LOCKED_BLANKS_ACCOUNT,
         }
     }
 }
@@ -299,8 +305,13 @@ pub fn sidebar_in(s: &State, t: &Theme, standing: Standing) -> El {
     // Storage meter (`.mk-store`). The split (Files / Photos) is from `storage_split` when
     // the engine provides it; the board's snapshot path passes `Some((files, photos))` from
     // the fixture; a live window without a wired split shows one plain segment.
+    // When details are blanked (Locked, LOCKED_BLANKS_ACCOUNT) the meter keeps its shape but
+    // shows no figure and no fill.
+    let blanked = !details && standing != Standing::NoPlan;
     let track_w = SIDEBAR_W - 2.0 * (10.0 + 6.0 + 4.0) - kit::HAIR;
-    let storage_value = if no_plan {
+    let storage_value = if blanked {
+        String::new()
+    } else if no_plan {
         "No plan".to_string()
     } else if s.storage_known {
         format!(
@@ -316,7 +327,7 @@ pub fn sidebar_in(s: &State, t: &Theme, standing: Standing) -> El {
     // The split: the board's snapshot path holds a fixture split in `storage_split`; a live
     // window shows one segment (total used) until the engine wires the category breakdown.
     let (seg_0, seg_1) = match s.storage_split {
-        _ if no_plan => (0.0, 0.0),
+        _ if no_plan || blanked => (0.0, 0.0),
         Some((files, _photos)) => {
             let files_frac = (files.min(storage.used_bytes) as f64 / quota) as f32;
             let photos_frac = ((storage.used_bytes - files).max(0) as f64 / quota) as f32;
@@ -341,8 +352,8 @@ pub fn sidebar_in(s: &State, t: &Theme, standing: Standing) -> El {
                 .child(kit::label(
                     "storage-value",
                     storage_value.clone(),
-                    // A figure is set in mono; "No plan" is words.
-                    if no_plan { type_::CAPTION } else { type_::KBD },
+                    // A figure is set in mono; "No plan" and blank are words.
+                    if no_plan || blanked { type_::CAPTION } else { type_::KBD },
                     t.text_tertiary,
                 )),
         )
@@ -400,53 +411,60 @@ pub fn sidebar_in(s: &State, t: &Theme, standing: Standing) -> El {
         }
     }
 
-    let account = row()
-        .key("account-row")
-        .center_y()
-        .gap(8.0)
-        .pt(2.0)
-        .px(2.0)
-        .child(kit::avatar(
-            "avatar",
-            "AV",
-            26.0,
-            rune::oklch(0.88, 0.05, 250.0),
-            t.card,
-            t,
-        ))
-        .child(
+    // Whose account: the source's own answer (the engine path reads the real email from the
+    // session; the fixture path gives the board's sample, which is correct in dev-build scenes).
+    // With none known the row holds the settings gear only, keeping its place in the layout.
+    let who: Option<Account> = if details {
+        s.actions.source.account()
+    } else {
+        // Locked (LOCKED_BLANKS_ACCOUNT): no account data shown, the row keeps its shape.
+        None
+    };
+    let mut account = row().key("account-row").center_y().gap(8.0).pt(2.0).px(2.0);
+    account = match &who {
+        Some(who) => account
+            .child(kit::avatar(
+                "avatar",
+                &who.initials,
+                26.0,
+                rune::oklch(0.88, 0.05, 250.0),
+                t.card,
+                t,
+            ))
+            .child(
+                col()
+                    .key("account-info")
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .child(kit::label("account-name", &who.name, type_::BODY_SEMI, t.text).truncate())
+                    .child(kit::label("account-email", &who.email, type_::BODY_SM, t.text_tertiary).truncate()),
+            ),
+        None => account.child(
+            // No account known (engine not connected) or blanked (locked): a placeholder that
+            // keeps the row's height. The avatar spot is left empty to match the settled layout.
             col()
                 .key("account-info")
                 .grow(1.0)
                 .min_w(0.0)
-                .child(kit::label("account-name", "Anna Visser", type_::BODY_SEMI, t.text).truncate())
-                .child(if details {
-                    kit::label(
-                        "account-email",
-                        "anna@northwind.studio",
-                        type_::BODY_SM,
-                        t.text_tertiary,
-                    )
-                    .truncate()
-                } else {
-                    el().key("account-email-off")
-                }),
-        )
-        .child(
-            el().key("settings-btn")
-                .role("button")
-                .label("Settings")
-                .shortcut_hint("Ctrl+,")
-                .help("Settings  Ctrl+,")
-                .size(26.0, 26.0)
-                .radius(radius::CONTROL)
-                .center()
-                .hover(t.selection)
-                .press(t.press)
-                .focusable(open)
-                .disabled(!open)
-                .child(kit::glyph("settings-icon", &icons::SETTINGS, 15.0, t.text_secondary)),
-        );
+                .child(kit::label("account-name", "", type_::BODY_SEMI, t.text).truncate())
+                .child(el().key("account-email-off")),
+        ),
+    };
+    let account = account.child(
+        el().key("settings-btn")
+            .role("button")
+            .label("Settings")
+            .shortcut_hint("Ctrl+,")
+            .help("Settings  Ctrl+,")
+            .size(26.0, 26.0)
+            .radius(radius::CONTROL)
+            .center()
+            .hover(t.selection)
+            .press(t.press)
+            .focusable(open)
+            .disabled(!open)
+            .child(kit::glyph("settings-icon", &icons::SETTINGS, 15.0, t.text_secondary)),
+    );
 
     let foot = col()
         .key("sidebar-foot")
@@ -455,7 +473,10 @@ pub fn sidebar_in(s: &State, t: &Theme, standing: Standing) -> El {
         .px(6.0)
         .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
         .border_layout();
-    let foot = if details { foot.child(meter) } else { foot };
+    // The meter keeps its place in the layout for every standing (blank when locked/blanked,
+    // "No plan" when NoPlan, the figure when Open). Only truly hidden when the foot has no
+    // purpose at all, which today it always does (the account row is always there).
+    let foot = if details || blanked { foot.child(meter) } else { foot };
     let foot = foot.child(account);
 
     let side = col()

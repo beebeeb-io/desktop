@@ -1058,5 +1058,7 @@ fn dispatching_gate_ready_does_not_override_the_engines_authority() {
     }
 }
 
+#[path = "host_tests_files.rs"]
+mod files;
 #[path = "host_tests_flows.rs"]
 mod flows;
