@@ -27,6 +27,8 @@ struct Drive {
 
 const FIRST_ACCOUNT: &str = "fixture-account";
 const SECOND_ACCOUNT_FILE: &str = "Second account only.txt";
+/// A row of the board's sample (the first account's).
+const A_FILE_OF_THE_ACCOUNT: &str = "Contract draft.pdf";
 
 impl DriveSource for Drive {
     fn list(&self, folder: Option<&str>) -> Result<Listing, SourceError> {
@@ -166,10 +168,16 @@ fn words(rt: &Runtime<State>) -> Vec<String> {
 /// Everything observable of the window: what each source was asked, where the route is, what
 /// is open, and every word drawn.
 fn record(app: &App) -> String {
+    format!("{} | {:?}", record_without_words(app), words(&app.rt))
+}
+
+/// [`record`] without the words drawn: the lock screen and sign-in take keys themselves (Enter
+/// presses their own button), so there the words may differ; no file name is among them.
+fn record_without_words(app: &App) -> String {
     let s = &app.rt.state;
     format!(
         "calls {:?} | reads {} | searches {} | opened {} | screen {:?} | dialog {} rename {} menu {} picker {} \
-         find {} typed {:?} viewer {} new-file {} | {:?}",
+         find {} typed {:?} viewer {} new-file {}",
         app.calls.lock().unwrap(),
         app.reads.load(Ordering::SeqCst),
         app.searches.load(Ordering::SeqCst),
@@ -183,7 +191,6 @@ fn record(app: &App) -> String {
         s.search.text,
         s.viewer.ui.is_some(),
         s.viewer.new_file.is_some(),
-        words(&app.rt),
     )
 }
 
@@ -247,7 +254,18 @@ fn refused_when_closed(name: &str, setup: Step, input: &Input) {
                 }
                 settle(&mut app.rt);
                 settle(&mut app.rt);
-                (record(&app), app)
+                // The gate's own screen (locked, sign-in) answers keys itself.
+                let own_screen = matches!(closing, Closing::Lock | Closing::SignOut);
+                let record = if own_screen {
+                    assert!(
+                        words(&app.rt).iter().all(|w| !w.contains(A_FILE_OF_THE_ACCOUNT)),
+                        "{closing:?}: a file name is drawn"
+                    );
+                    record_without_words(&app)
+                } else {
+                    record(&app)
+                };
+                (record, app)
             };
             let (without, _) = run(false);
             let (with, app) = run(true);
@@ -419,7 +437,10 @@ fn the_next_account_sees_nothing_of_the_earlier_one_and_undo_restores_nothing() 
         let names: Vec<String> = app.rt.state.listing.items.iter().map(|i| i.name.clone()).collect();
         assert_eq!(names, [SECOND_ACCOUNT_FILE], "{through:?}");
         let drawn = words(&app.rt);
-        for name in &earlier {
+        assert!(earlier.iter().any(|name| name == A_FILE_OF_THE_ACCOUNT));
+        // A folder named like a section of the sidebar is a word of the window itself.
+        let sections = ["Files", "Shared", "Photos", "Backups", "Trash"];
+        for name in earlier.iter().filter(|name| !sections.contains(&name.as_str())) {
             assert!(
                 drawn.iter().all(|w| !w.contains(name.as_str())),
                 "{through:?}: {name} of the earlier account is drawn"
