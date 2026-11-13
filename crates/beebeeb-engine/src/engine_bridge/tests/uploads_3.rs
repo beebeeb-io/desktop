@@ -58,10 +58,14 @@ async fn test_process_due_operations_preserves_payload_when_upload_chunk_fails()
 
     let requests = server.finish();
     let item_id = init_item_id(&requests);
-    assert_eq!(requests.len(), 3);
+    // No metadata update: this create moves nothing, and its name travels with `complete`.
+    assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].path, "/api/v1/uploads/init");
-    assert_eq!(requests[1].path, format!("/api/v1/files/{item_id}"));
-    assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
+    assert_eq!(
+        count_requests(&requests, "PATCH", &format!("/api/v1/files/{item_id}")),
+        0
+    );
+    assert_eq!(requests[1].path, "/api/v1/uploads/upload-session-1/chunks/0");
 }
 
 // ── Transfer progress + activity (task 1683 slice 2) ─────────────────────
@@ -268,6 +272,8 @@ pub(super) enum ResumeMockMode {
     /// Chunk 1 hangs once, and afterwards session 1 is gone server-side
     /// (404 on every further chunk/complete) — e.g. reaped.
     HangOnceThenSessionGone,
+    /// Nothing hangs: every session accepts every chunk.
+    Plain,
 }
 
 struct ResumeMockState {
@@ -385,7 +391,7 @@ fn resumable_mock_response(
         }
         if method == "PUT" && action == "chunks" {
             let index: u32 = parts.next().unwrap_or("0").parse().unwrap();
-            if index == 1 && session == "session-1" {
+            if index == 1 && session == "session-1" && mode != ResumeMockMode::Plain {
                 let mut s = state.lock().unwrap();
                 if !s.hung {
                     s.hung = true;
@@ -405,19 +411,18 @@ fn resumable_mock_response(
         }
         if method == "POST" && action == "complete" {
             let n = session.trim_start_matches("session-");
-            return (
-                None,
-                http_json(
-                    "200 OK",
-                    serde_json::json!({
-                        "file_id": format!("server-file-{n}"),
-                        "version_number": 1,
-                        "current_object_version_id": format!("object-complete-{n}"),
-                        "size_bytes": 20,
-                        "mime_type": "text/plain"
-                    }),
-                ),
-            );
+            let mut answer = serde_json::json!({
+                "file_id": format!("server-file-{n}"),
+                "version_number": 1,
+                "current_object_version_id": format!("object-complete-{n}"),
+                "size_bytes": 20,
+                "mime_type": "text/plain"
+            });
+            // As the server does with version metadata on: the answer carries the name the file now has.
+            if let Some(name) = completion_name(request) {
+                answer["name_encrypted"] = serde_json::json!(name);
+            }
+            return (None, http_json("200 OK", answer));
         }
     }
     (
@@ -1094,13 +1099,18 @@ async fn round5_lock_during_keep_mine_restores_conflict_and_removes_staging() {
     assert_eq!(staged.iter().filter(|p| std::path::Path::new(p).exists()).count(), 0);
 }
 
+/// Chunk format v2: a cut upload is never continued. The retry abandons the session on the server
+/// and uploads from the first chunk in a fresh one: a new writer has a new version id, and its
+/// frames next to the old session's would make a file that completes and never opens (core's
+/// `resume_policy`). Mutant: a retry that goes on in the old session sends its chunk 2 there.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flow7_cancelled_upload_resumes_session_instead_of_reinit() {
+async fn flow7_a_cut_upload_restarts_in_a_fresh_session_and_never_continues_the_old_one() {
     let dir = tempfile::tempdir().unwrap();
     let payload = dir.path().join("resume.bin");
     std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
     let server = ResumableUploadMock::start(ResumeMockMode::HangOnce);
-    let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [21u8; 32]);
+    let master_key = [21u8; 32];
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
     bridge.db.enqueue_operation(&resumable_create_op(&payload)).unwrap();
 
     // The cut: chunk 1's response hangs; the transfer loop is cancelled
@@ -1111,39 +1121,74 @@ async fn flow7_cancelled_upload_resumes_session_instead_of_reinit() {
     )
     .await;
     assert!(cut.is_err(), "the first pass must be cut mid-upload");
+    assert!(
+        bridge.db.upload_completion_name("op-upload-resume").unwrap().is_some(),
+        "the completion name is stored before the first chunk is sent"
+    );
 
     let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
     assert_eq!(outcome.completed_op_ids, vec!["op-upload-resume".to_string()]);
 
     let requests = server.finish();
-    let item_id = init_item_id(&requests);
-    let inits = count_requests(&requests, "POST", "/api/v1/uploads/init");
+    let first_id = init_item_id(&requests);
     assert_eq!(
-        inits, 1,
-        "retry must resume the persisted session, not init a second file row"
+        count_requests(&requests, "POST", "/api/v1/uploads/init"),
+        2,
+        "the retry opens a fresh session"
     );
     assert_eq!(
-        count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/0"),
+        count_requests(&requests, "POST", &format!("/api/v1/files/{first_id}/upload/abandon")),
         1,
-        "chunk 0 was acknowledged before the cut and must not be re-sent"
+        "the cut session is abandoned on the server before the fresh init"
     );
-    assert_eq!(
-        count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/1"),
-        2
-    );
-    assert_eq!(
-        count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/2"),
-        1
-    );
+    for (path, sent) in [
+        ("/api/v1/uploads/session-1/chunks/0", 1),
+        ("/api/v1/uploads/session-1/chunks/1", 1),
+        ("/api/v1/uploads/session-1/chunks/2", 0),
+        ("/api/v1/uploads/session-2/chunks/0", 1),
+        ("/api/v1/uploads/session-2/chunks/1", 1),
+        ("/api/v1/uploads/session-2/chunks/2", 1),
+    ] {
+        assert_eq!(count_requests(&requests, "PUT", path), sent, "{path}");
+    }
     assert_eq!(
         count_requests(&requests, "POST", "/api/v1/uploads/session-1/complete"),
+        0,
+        "the old session is never completed"
+    );
+    assert_eq!(
+        count_requests(&requests, "POST", "/api/v1/uploads/session-2/complete"),
         1
     );
     assert_eq!(
         requests.iter().filter(|r| r.method == "DELETE").count(),
         0,
-        "a resumable session must not be trashed"
+        "an abandoned session is never a trashed item"
     );
+    // The fresh session's frames are one whole upload: they open, in order, against the
+    // commitment its `complete` published.
+    let second_id = requests
+        .iter()
+        .filter(|r| r.method == "POST" && r.path == "/api/v1/uploads/init")
+        .nth(1)
+        .map(|r| {
+            serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["file_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .unwrap();
+    let fresh: Vec<RecordedRequest> = requests
+        .iter()
+        .filter(|r| r.path.contains("/session-2/"))
+        .cloned()
+        .collect();
+    let file_key = hydration_test_key(master_key, &second_id);
+    assert_eq!(
+        uploaded_plaintext(&fresh, &file_key, &second_id),
+        b"0123456789abcdefghij"
+    );
+    let item_id = second_id;
 
     let entry = bridge.db.get_file(&item_id).unwrap().unwrap();
     assert_eq!(entry.status, FileStatus::Local);

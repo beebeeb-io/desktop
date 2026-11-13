@@ -108,16 +108,21 @@ pub(super) fn upload_mock_response(request: &RecordedRequest, fail_chunk: bool, 
             "200 OK",
             serde_json::json!({ "index": 0, "size": request.body.len() as i64, "skipped": false }),
         ),
-        ("POST", "/api/v1/uploads/upload-session-1/complete") => http_json(
-            "200 OK",
-            serde_json::json!({
+        ("POST", "/api/v1/uploads/upload-session-1/complete") => {
+            // As the server does with version metadata on: the completion name becomes the file's
+            // name, and the answer carries the name the file now has.
+            let mut answer = serde_json::json!({
                 "file_id": "server-file-1",
                 "version_number": 1,
                 "current_object_version_id": "object-complete-1",
                 "size_bytes": 19,
                 "mime_type": "text/plain"
-            }),
-        ),
+            });
+            if let Some(name) = completion_name(request) {
+                answer["name_encrypted"] = serde_json::json!(name);
+            }
+            http_json("200 OK", answer)
+        }
         ("POST", path) if path.ends_with("/upload/abandon") => {
             http_json("200 OK", serde_json::json!({ "abandoned": true }))
         }
@@ -144,3 +149,59 @@ pub(super) fn upload_mock_response(request: &RecordedRequest, fail_chunk: bool, 
 /// hydration test needs a real one — this is an arbitrary fixed value, not
 /// tied to any real file.
 pub(super) const TEST_FILE_ID: &str = "d6c090b4-69c8-437e-a61b-2023ea99ef89";
+
+/// The completion name a `complete` request carries (chunk format v2: the upload's sealed name with
+/// its version commitment), `None` for a bare `complete`.
+pub(super) fn completion_name(request: &RecordedRequest) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(&request.body)
+        .ok()
+        .and_then(|body| body["name_encrypted"].as_str().map(str::to_string))
+}
+
+/// The plaintext of the upload `requests` carried, read the way every reader reads it: the content
+/// record from the completion name `complete` published, then the chunk PUTs in index order through
+/// core's reader for that record. Panics when the upload sent no completion name, when the name
+/// does not open under `file_key`, or when a frame does not open against its commitment.
+pub(super) fn uploaded_plaintext(
+    requests: &[RecordedRequest],
+    file_key: &beebeeb_core::kdf::FileKey,
+    file_id: &str,
+) -> Vec<u8> {
+    let (record, _) = uploaded_record(requests, file_key);
+    let mut frames: Vec<(u32, &[u8])> = requests
+        .iter()
+        .filter(|request| request.method == "PUT" && request.path.contains("/chunks/"))
+        .map(|request| {
+            let index = request.path.rsplit('/').next().unwrap().parse().unwrap();
+            (index, request.body.as_slice())
+        })
+        .collect();
+    frames.sort_by_key(|(index, _)| *index);
+    let mut reader = record.decryptor(beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes()), file_id);
+    let mut plain = Vec::new();
+    for (_, frame) in frames {
+        plain.extend_from_slice(&reader.push_frame(frame).expect("an uploaded frame opens").data);
+    }
+    reader.finish().expect("the upload is whole");
+    plain
+}
+
+/// The content record and the name of the completion name the LAST `complete` in `requests` sent.
+pub(super) fn uploaded_record(
+    requests: &[RecordedRequest],
+    file_key: &beebeeb_core::kdf::FileKey,
+) -> (crate::content_record::ContentRecord, String) {
+    let sealed = requests
+        .iter()
+        .rev()
+        .filter(|request| request.method == "POST" && request.path.ends_with("/complete"))
+        .find_map(completion_name)
+        .expect("complete carried a completion name");
+    let opened = beebeeb_core::encrypt::decrypt_file_metadata_with_key(file_key, &sealed)
+        .expect("the completion name opens under the item's key");
+    assert!(
+        opened.version.is_some(),
+        "a completion name carries the upload's version commitment"
+    );
+    (crate::content_record::ContentRecord::of(&opened), opened.name)
+}

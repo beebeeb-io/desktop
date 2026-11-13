@@ -86,7 +86,7 @@ impl FakeAccount {
             let check = beebeeb_core::opaque::compute_recovery_check(&master_key_struct);
             base64::engine::general_purpose::STANDARD.encode(&*check)
         };
-        let master_key = master_key_struct.to_bytes();
+        let master_key = *master_key_struct.to_bytes();
         let session_token = format!("fake-session-{}", uuid::Uuid::new_v4());
         let account = Self {
             opaque,

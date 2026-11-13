@@ -90,6 +90,10 @@ pub struct DesktopUploadInitRequest {
     pub chunk_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_version_number: Option<i32>,
+    /// A replacement of a version-protected file: the file's CURRENT sealed name (it carries the current
+    /// version commitment), which the server requires before it opens the session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_metadata_encrypted: Option<String>,
 }
 
 // The wire shape stays whole: tenant, pool, format version and region describe

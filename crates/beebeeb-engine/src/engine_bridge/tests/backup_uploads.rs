@@ -33,7 +33,9 @@ async fn backup_upload_leaves_source_byte_identical() {
         checked.push("completed");
     }
 
-    // 2. Cancelled mid-upload (the pass is cut while chunk 1 hangs), then 3. resumed from the watermark.
+    // 2. Cancelled mid-upload (the pass is cut while chunk 1 hangs), then 3. restarted: a cut session is never
+    //    continued (core's `resume_policy`: this build writes v2), so the retry abandons it and drops the op, and
+    //    the next pass uploads the file whole in a new session.
     {
         let dir = tempfile::tempdir().unwrap();
         let source = person_file(dir.path(), "resume.bin", b"0123456789abcdefghij");
@@ -57,25 +59,58 @@ async fn backup_upload_leaves_source_byte_identical() {
         checked.push("cancelled");
 
         let outcome = bridge.process_due_operations(&sync_root, 200).await.unwrap();
-        assert_eq!(outcome.completed_op_ids, vec![op_id.clone()], "the retry completed");
+        assert!(outcome.completed_op_ids.is_empty(), "the cut session is not completed");
+        assert_eq!(
+            backup_ops(&bridge),
+            0,
+            "the op is dropped; the next pass queues the file again"
+        );
+        assert!(bridge.db.backup_upload_resume(&op_id).unwrap().is_none());
+        assert!(bridge.db.backup_records("pictures").unwrap().is_empty());
+        let next_op = enqueue(&bridge, &source);
+        let outcome = bridge.process_due_operations(&sync_root, 300).await.unwrap();
+        assert_eq!(
+            outcome.completed_op_ids,
+            vec![next_op.clone()],
+            "the next pass completed"
+        );
         let requests = server.finish();
         assert_eq!(
             count_requests(&requests, "POST", "/api/v1/uploads/init"),
-            1,
-            "resumed, not re-initialised"
+            2,
+            "a new session, never the cut one"
         );
         assert_eq!(
-            count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/0"),
+            requests
+                .iter()
+                .filter(|r| r.method == "POST" && r.path.ends_with("/upload/abandon"))
+                .count(),
             1,
-            "chunk 0 is not sent again"
+            "the cut session is abandoned on the server"
+        );
+        assert_eq!(
+            count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/2"),
+            0,
+            "nothing more is sent into the cut session"
         );
         assert_eq!(
             count_requests(&requests, "POST", "/api/v1/uploads/session-1/complete"),
+            0
+        );
+        for index in 0..3 {
+            assert_eq!(
+                count_requests(&requests, "PUT", &format!("/api/v1/uploads/session-2/chunks/{index}")),
+                1,
+                "chunk {index} of the new session"
+            );
+        }
+        assert_eq!(
+            count_requests(&requests, "POST", "/api/v1/uploads/session-2/complete"),
             1
         );
-        assert!(bridge.db.backup_upload_resume(&op_id).unwrap().is_none());
-        assert_eq!(source_state(&source), before, "resumed: the source changed");
-        checked.push("resumed");
+        assert!(bridge.db.backup_upload_resume(&next_op).unwrap().is_none());
+        assert_eq!(source_state(&source), before, "restarted: the source changed");
+        checked.push("restarted");
     }
 
     // 4. Sign-out with backup ops queued, one with an open session: the keep step's read does not list them, and
@@ -145,7 +180,7 @@ async fn backup_upload_leaves_source_byte_identical() {
         checked.push("turn-off");
     }
 
-    assert_eq!(checked, ["completed", "cancelled", "resumed", "sign-out", "turn-off"]);
+    assert_eq!(checked, ["completed", "cancelled", "restarted", "sign-out", "turn-off"]);
 }
 
 /// Serves a 3-chunk plan (8 + 8 + 4 bytes) and, while chunk 1 of the first session is in flight, changes the
@@ -216,7 +251,11 @@ impl ChangingSourceMock {
                         serde_json::json!({ "index": index, "size": request.body.len(), "skipped": false }),
                     )
                 } else if method == "POST" && path.ends_with("/complete") {
+                    // A server that does not publish the completion name (version metadata off): its
+                    // answer names no `name_encrypted`, so the client publishes the name itself.
                     http_json("200 OK", serde_json::json!({ "version_number": 1, "size_bytes": 20 }))
+                } else if method == "PATCH" && path.starts_with("/api/v1/files/") {
+                    http_json("200 OK", serde_json::json!({ "ok": true }))
                 } else if method == "POST" && path.ends_with("/upload/abandon") {
                     http_json("200 OK", serde_json::json!({ "abandoned": true }))
                 } else {
@@ -308,6 +347,23 @@ async fn backup_upload_source_changed_midway_abandons_and_retries() {
         0,
         "never trashed"
     );
+    // This server's `complete` does not publish the completion name (its answer names none), so the
+    // client publishes it itself, before the upload is recorded: one metadata update carrying exactly
+    // the name `complete` was sent. Without it the new version's v2 content would sit under a name
+    // with no commitment and open nowhere. Mutant: no update after `complete` (the count is 0).
+    let sent = requests
+        .iter()
+        .filter(|r| r.method == "POST" && r.path == "/api/v1/uploads/session-2/complete")
+        .find_map(completion_name)
+        .expect("complete carried the completion name");
+    let published: Vec<serde_json::Value> = requests
+        .iter()
+        .filter(|r| r.method == "PATCH" && r.path == format!("/api/v1/files/{}", inits[1]))
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(published.len(), 1, "one metadata update after complete: {published:?}");
+    assert_eq!(published[0]["name_encrypted"], serde_json::json!(sent));
+    assert!(published[0].get("parent_id").is_none(), "the update moves nothing");
     let records = bridge.db.backup_records("pictures").unwrap();
     let now = beebeeb_backup::fingerprint(&source).unwrap();
     assert_eq!(records.len(), 1);

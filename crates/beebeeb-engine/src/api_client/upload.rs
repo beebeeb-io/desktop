@@ -36,6 +36,7 @@ impl ApiClient {
             .client
             .post(self.upload_init_url())
             .header("Authorization", format!("Bearer {}", self.token))
+            .header(CAPABILITIES_HEADER_NAME, WRITE_CAPABILITIES)
             .json(body)
             .send()
             .await?;
@@ -62,6 +63,7 @@ impl ApiClient {
             .client
             .put(self.upload_chunk_url(UploadSessionId::new(upload_session_id), chunk_idx))
             .header("Authorization", format!("Bearer {}", self.token))
+            .header(CAPABILITIES_HEADER_NAME, WRITE_CAPABILITIES)
             .header("Content-Type", "application/octet-stream")
             .body(data.to_vec())
             .send()
@@ -69,12 +71,25 @@ impl ApiClient {
         Ok(upload_response(resp).await?.json().await?)
     }
 
-    pub async fn complete_upload_session(&self, upload_session_id: &str) -> anyhow::Result<serde_json::Value> {
+    /// `POST /api/v1/uploads/{session}/complete`. `completion_name` is the upload's sealed name with its
+    /// version commitment (chunk format v2): the server publishes it as the file's name and as the new
+    /// version's metadata in the same transaction that makes the version current, as core's client sends
+    /// it. `None` only for a session a build before chunk format v2 opened (its frames are v1).
+    pub async fn complete_upload_session(
+        &self,
+        upload_session_id: &str,
+        completion_name: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let body = match completion_name {
+            Some(name) => serde_json::json!({ "name_encrypted": name, "version_metadata_encrypted": name }),
+            None => serde_json::json!({}),
+        };
         let resp = self
             .client
             .post(self.upload_complete_url(UploadSessionId::new(upload_session_id)))
             .header("Authorization", format!("Bearer {}", self.token))
-            .json(&serde_json::json!({}))
+            .header(CAPABILITIES_HEADER_NAME, WRITE_CAPABILITIES)
+            .json(&body)
             .send()
             .await?;
         Ok(upload_response(resp).await?.json().await?)

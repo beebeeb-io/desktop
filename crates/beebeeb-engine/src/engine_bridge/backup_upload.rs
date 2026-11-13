@@ -185,8 +185,26 @@ impl EngineBridge {
                     .await;
             }
         };
-        let (file_key, pin) = owned_key_and_pin(&self.db, self.api.master_key(), &op.file_id)?;
-        let writing = beebeeb_core::chunk_stream::chunk_format_for_pin(pin);
+        // The item's key and current record. A new version of a remote file takes them from the server's row (the
+        // backup's rows have no key record on this device): its pin, its counter and its current sealed name.
+        let (file_key, record, current_name) = if op.replace {
+            match self.backup_row_material(&op.file_id).await {
+                Ok(material) => material,
+                Err(error) => {
+                    let error = land_error_to_anyhow(error);
+                    // The remote file is gone: the next pass decides (a new file, or nothing).
+                    if matches!(error_http_status(&error), Some(404 | 410)) {
+                        return self
+                            .drop_backup(claimed, previous.as_ref(), BackupDrop::RemoteRefused)
+                            .await;
+                    }
+                    return Err(error.into());
+                }
+            }
+        } else {
+            owned_material(&self.db, self.api.master_key(), &op.file_id)?
+        };
+        let writing = beebeeb_core::chunk_stream::chunk_format_for_pin(record.format);
 
         // A resume continues only onto the same bytes, only in the session this op's item opened, and only where
         // core's `resume_policy` allows it (spec §4.3). Anything else abandons the old session and the op.
@@ -223,7 +241,7 @@ impl EngineBridge {
         let session = match resumed {
             Some(session) => session,
             None => {
-                let init_request = upload_init_request_for_operation(
+                let mut init_request = upload_init_request_for_operation(
                     &op.file_id,
                     &op.name_encrypted,
                     op.content_type.clone(),
@@ -231,6 +249,10 @@ impl EngineBridge {
                     before.size,
                     None,
                 );
+                // A new version of a version-protected file: the server wants its current sealed name.
+                if op.replace && record.version.is_some() {
+                    init_request.version_metadata_encrypted = current_name.clone();
+                }
                 let upload = match self.backup_api().init_upload(&init_request).await {
                     Ok(upload) => upload,
                     // A new version of a remote file the server will not add one to now: the next pass decides.
@@ -269,8 +291,9 @@ impl EngineBridge {
             }
         };
 
-        let progress = match self.send_backup_chunks(&op, &session, file_key, pin, source).await {
-            Ok(progress) => progress,
+        let name_key = beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes());
+        let (progress, completion_name) = match self.send_backup_chunks(&op, &session, file_key, record, source).await {
+            Ok(sent) => sent,
             Err(error) => {
                 let error = land_error_to_anyhow(error);
                 // A session the server no longer accepts is abandoned; the op starts over next pass.
@@ -297,13 +320,10 @@ impl EngineBridge {
         }
         let completed = match self
             .backup_api()
-            .complete_upload_session(&session.upload_session_id)
+            .complete_upload_session(&session.upload_session_id, Some(&completion_name))
             .await
         {
-            Ok(completed) => {
-                progress.finish();
-                completed
-            }
+            Ok(completed) => completed,
             Err(error) => {
                 if upload_session_is_gone(&error) {
                     self.abandon_backup_session(&session).await?;
@@ -311,6 +331,18 @@ impl EngineBridge {
                 return Err(error.into());
             }
         };
+        // Recorded only once the server holds the name with the commitment (`publish_completion_name`): without it
+        // the new version opens nowhere. A failure here is the queue's retry; the session is then not resumable
+        // (`resume_policy`), so the op is dropped and the next pass plans the file again.
+        self.publish_completion_name(
+            self.backup_api(),
+            &session.server_file_id,
+            &name_key,
+            &completion_name,
+            &completed,
+        )
+        .await?;
+        progress.finish();
         let remote_id = uuid::Uuid::parse_str(&session.server_file_id)
             .map_err(|_| anyhow::anyhow!("a backup upload's item id is not a uuid"))?;
         let record = beebeeb_core::backup::BackupRecord {
@@ -369,19 +401,25 @@ impl EngineBridge {
         Ok(())
     }
 
-    /// The chunk PUTs from the acknowledged watermark on, read from the source in place. Every acknowledgement is
-    /// persisted before the next await, so a cut resumes where the server's acknowledgements stop.
+    /// The chunk PUTs of a fresh session, read from the source in place, and the sealed name `complete` publishes
+    /// for them (the item's name with this upload's version commitment, sealed once frame 0 is). Every
+    /// acknowledgement is persisted before the next await. A session an earlier attempt left is never continued
+    /// here: core's `resume_policy` continues only v1 onto v1, and this writer writes v2.
     async fn send_backup_chunks(
         &self,
         op: &BackupUploadOp,
         session: &BackupUploadResume,
         file_key: beebeeb_core::kdf::FileKey,
-        pin: beebeeb_core::chunk_stream::ExpectedChunkFormat,
+        record: crate::content_record::ContentRecord,
         file: std::fs::File,
-    ) -> Result<crate::transfer_progress::TransferGuard, EngineError> {
+    ) -> Result<(crate::transfer_progress::TransferGuard, String), EngineError> {
         let chunk_size = u64::try_from(session.chunk_size_bytes).unwrap_or(0);
         let chunk_count = u64::try_from(session.chunk_count).unwrap_or(0);
         let first_chunk = u64::try_from(session.acked_chunks).unwrap_or(0);
+        if first_chunk != 0 {
+            return Err(anyhow::anyhow!("a backup upload never continues a persisted session").into());
+        }
+        let name_key = beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes());
         let mut writer = beebeeb_core::chunk_stream::ChunkEncryptor::from_reader_with_file_key(
             file_key,
             &session.server_file_id,
@@ -389,7 +427,8 @@ impl EngineBridge {
             chunk_size,
             file,
         )?
-        .with_recorded_pin(pin)?;
+        .with_recorded_pin(record.format)?;
+        let mut completion_name = None;
         let total = session.fingerprint.size;
         let label = beebeeb_types::backup::Category::from_key(&op.category)
             .map(|category| format!("{}/{}", category.display_name(), op.key))
@@ -405,8 +444,19 @@ impl EngineBridge {
             let encrypted = writer
                 .next_chunk()?
                 .ok_or_else(|| anyhow::anyhow!("backup source ended early"))?;
-            if chunk_index < first_chunk {
-                continue;
+            if chunk_index == 0 {
+                let (name, mime) =
+                    upload_v2::completion_plain_name(&name_key, &op.name_encrypted, None, op.content_type.as_deref())?;
+                completion_name = Some(upload_v2::seal_completion_name(
+                    &self.db,
+                    &session.server_file_id,
+                    &writer,
+                    &name_key,
+                    record,
+                    !op.replace,
+                    &name,
+                    mime.as_deref(),
+                )?);
             }
             let read = encrypted.data.len().saturating_sub(28);
             let chunk_start = std::time::Instant::now();
@@ -433,7 +483,9 @@ impl EngineBridge {
             }
         }
         writer.finish()?;
-        Ok(progress)
+        let completion_name =
+            completion_name.ok_or_else(|| anyhow::anyhow!("a backup upload sealed no chunk and so no name"))?;
+        Ok((progress, completion_name))
     }
 
     /// Drop the claimed op with no record, abandoning its server session first (core's never-break rule: an

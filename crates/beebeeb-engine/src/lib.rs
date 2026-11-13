@@ -32,6 +32,7 @@ pub mod cf_range;
 pub mod clipboard;
 pub mod config;
 pub mod conflict;
+pub mod content_record;
 pub mod desktop_capabilities;
 pub mod desktop_search;
 pub mod diagnostic_redaction;

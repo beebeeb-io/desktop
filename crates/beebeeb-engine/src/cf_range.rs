@@ -478,6 +478,8 @@ fn reason_word(cause: &RangeSessionError) -> &'static str {
         RangeSessionError::SizeMismatch => "size_mismatch",
         RangeSessionError::Sink(_) => "transfer",
         RangeSessionError::Incomplete => "incomplete",
+        // Refused before any request: the record says v2 and carries no version commitment.
+        RangeSessionError::MissingVersionCommitment => "corrupt",
         RangeSessionError::Unauthorized | RangeSessionError::Forbidden => "auth",
         RangeSessionError::DirectFailedAfterWrite { cause, .. } => reason_word(cause),
     }

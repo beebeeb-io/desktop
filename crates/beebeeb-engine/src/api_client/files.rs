@@ -175,14 +175,27 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
-    pub async fn restore_version(&self, file_id: &str, version_id: &str) -> anyhow::Result<serde_json::Value> {
-        let resp = self
+    /// `POST /api/v1/files/{id}/versions/{version}/restore`. `sealed_name` is the fresh current metadata a
+    /// restore of a version-protected file publishes (the restored version's id under a counter above every
+    /// one seen); `None` restores a file no version of which is protected, with no body, as before.
+    pub async fn restore_version(
+        &self,
+        file_id: &str,
+        version_id: &str,
+        sealed_name: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let request = self
             .client
             .post(self.version_restore_url(FileId::new(file_id), VersionId::new(version_id)))
-            .header("Authorization", format!("Bearer {}", self.token))
-            .send()
-            .await?
-            .error_for_status()?;
+            .header("Authorization", format!("Bearer {}", self.token));
+        let request = match sealed_name {
+            Some(name) => request.json(&serde_json::json!({
+                "name_encrypted": name,
+                "version_metadata_encrypted": name,
+            })),
+            None => request,
+        };
+        let resp = request.send().await?.error_for_status()?;
         Ok(resp.json().await?)
     }
 
@@ -231,6 +244,7 @@ impl ApiClient {
             .client
             .patch(self.file_url(FileId::new(file_id)))
             .header("Authorization", format!("Bearer {}", self.token))
+            .header(CAPABILITIES_HEADER_NAME, WRITE_CAPABILITIES)
             .json(&body)
             .send()
             .await?;

@@ -167,6 +167,13 @@ pub(super) fn versioned_server_answer(request: &RecordedRequest, s: &mut Version
             let file = s.files.entry(file_id.clone()).or_default();
             file.versions.push(chunks);
             let version = file.versions.len();
+            // As the server does with version metadata on: the completion name (the upload's sealed
+            // name with its version commitment) becomes the file's name in the same step, and the
+            // answer carries the name the file now has.
+            let completed_name = completion_name(request);
+            if let Some(name) = completed_name.clone() {
+                s.authenticated_names.insert(file_id.clone(), name);
+            }
             if s.complete_reply_lost_once.remove(&session) {
                 s.completed_reply_lost.insert(session, file_id);
                 return http_json(
@@ -174,16 +181,17 @@ pub(super) fn versioned_server_answer(request: &RecordedRequest, s: &mut Version
                     serde_json::json!({ "error": "reply lost" }),
                 );
             }
-            return http_json(
-                "200 OK",
-                serde_json::json!({
-                    "file_id": file_id,
-                    "version_number": version,
-                    "current_object_version_id": format!("object-{file_id}-v{version}"),
-                    "size_bytes": size,
-                    "mime_type": "text/plain"
-                }),
-            );
+            let mut answer = serde_json::json!({
+                "file_id": file_id,
+                "version_number": version,
+                "current_object_version_id": format!("object-{file_id}-v{version}"),
+                "size_bytes": size,
+                "mime_type": "text/plain"
+            });
+            if let Some(name) = completed_name {
+                answer["name_encrypted"] = serde_json::json!(name);
+            }
+            return http_json("200 OK", answer);
         }
     }
     if method == "GET" && path == "/api/v1/shares/invites/incoming" {

@@ -284,10 +284,22 @@ impl VersionedServerState {
             .unwrap_or_else(|| panic!("{file_id} has no version"));
         let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
         let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes());
-        chunks
-            .iter()
-            .flat_map(|chunk| beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, chunk).unwrap())
-            .collect()
+        // Read as a reader does: against the record of the name the server holds for the file (the
+        // completion name of its latest upload). A file with no such name is a v1 file.
+        let record = self
+            .authenticated_names
+            .get(file_id)
+            .and_then(|name| beebeeb_core::encrypt::decrypt_file_metadata_with_key(&file_key, name).ok())
+            .map_or(crate::content_record::ContentRecord::UNRECORDED, |opened| {
+                crate::content_record::ContentRecord::of(&opened)
+            });
+        let mut reader = record.decryptor(file_key, file_id);
+        let mut plain = Vec::new();
+        for chunk in chunks {
+            plain.extend_from_slice(&reader.push_frame(chunk).expect("a stored frame opens").data);
+        }
+        reader.finish().expect("the stored version is whole");
+        plain
     }
 }
 

@@ -89,7 +89,22 @@ impl EngineBridge {
             .file_keys_for_download(file_id)
             .await
             .map_err(|e| failed(e.into()))?;
-        let expected = recorded_content_format(&name_key, &meta).map_err(|e| failed(e.into()))?;
+        let record = recorded_content_format(&name_key, &meta).map_err(|e| failed(e.into()))?;
+        // The record is the CURRENT version's. A session that continues the placeholder's older minted
+        // version reads that version's frames, so it is committed to the version id the earlier session
+        // authenticated and recorded for this placeholder (I3, I4), never to the current one's (whose
+        // frame 0 the older version does not have). The counter binds no frame; the current one is kept.
+        let version = match (
+            continues_minted,
+            record.version,
+            recorded.as_ref().and_then(|r| r.version_id),
+        ) {
+            (true, Some(current), Some(minted_id)) => Some(
+                beebeeb_core::chunk_stream::VersionCommitment::new(minted_id, current.counter)
+                    .map_err(|e| failed(e.into()))?,
+            ),
+            _ => record.version,
+        };
         let config = crate::config::DesktopConfig::load_for(self.identity).ok();
         let kbps_limit = config.as_ref().map(|c| c.download_kbps_limit).unwrap_or(0);
         let transport = self.download_transport(config.as_ref().and_then(|c| c.transport.as_deref()));
@@ -103,7 +118,11 @@ impl EngineBridge {
                 file_id: file_id.to_string(),
                 object_version_id,
                 file_size,
-                pin: expected,
+                pin: record.format,
+                // The commitment from the same authenticated record: frame 0 must be that upload.
+                version,
+                // The sealed name carries no chunk stride; the session takes it from the grant.
+                authenticated_chunk_size: None,
                 geometry,
                 recorded,
                 on_disk_bytes,

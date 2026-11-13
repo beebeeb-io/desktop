@@ -714,7 +714,12 @@ impl EngineBridge {
                     )
                     .await?;
                 }
-                let name = metadata["name_encrypted"].as_str();
+                // The queued name, sealed again when the item's record moved on since it was queued
+                // (`upload_v2::queued_name_for_sending`).
+                let name = metadata["name_encrypted"]
+                    .as_str()
+                    .map(|queued| upload_v2::queued_name_for_sending(&self.db, self.api.master_key(), file_id, queued));
+                let name = name.as_deref();
                 // Spec §7.2 (final review): a rename leaves the parent alone; a move names its
                 // target, the top level (no parent) included.
                 let parent = match op.kind {
@@ -785,7 +790,7 @@ impl EngineBridge {
                 // system re-downloads the restored bytes instead of keeping a token.
                 #[cfg(target_os = "macos")]
                 {
-                    let response = self.api.restore_version(file_id, version_id).await?;
+                    let response = self.restore_version_checked(file_id, version_id).await?;
                     self.seam("restore:after_server");
                     // The server has restored, and each restore mints a version: a
                     // retry would make another. A local failure is left to a snapshot
@@ -816,7 +821,7 @@ impl EngineBridge {
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    self.api.restore_version(file_id, version_id).await?;
+                    self.restore_version_checked(file_id, version_id).await?;
                 }
                 Ok(OpDone::Remove { release: None })
             }

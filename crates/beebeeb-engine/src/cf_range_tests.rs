@@ -155,6 +155,8 @@ fn request(fx: &Fx, on_disk: u64, recorded: Option<RangeIdentity>) -> RangeReque
         object_version_id: VERSION.into(),
         file_size: fx.geometry.original_size,
         pin: ExpectedChunkFormat::Unrecorded,
+        version: None,
+        authenticated_chunk_size: None,
         geometry: Some(fx.geometry),
         recorded,
         on_disk_bytes: on_disk,

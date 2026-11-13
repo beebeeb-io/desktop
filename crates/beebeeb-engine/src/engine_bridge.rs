@@ -102,6 +102,8 @@ pub struct EngineBridge {
 /// stay in this facade, and inherent impls may span modules.
 mod lifecycle;
 mod upload;
+// Chunk format v2 on the upload path: the resume rule and the completion name.
+mod upload_v2;
 // LD-0113: the backup uploader (a file read in place from a backed-up folder).
 mod backup_tree;
 mod backup_upload;
@@ -301,8 +303,8 @@ mod tests {
     use sync_5::{landed_create, rule3_setup, thumbnail_blob};
     use trash_markers::{MockServerFile, VersionedServerMock, VersionedServerState};
     use uploads::{
-        HydrationMockServer, TEST_FILE_ID, encrypt_chunk_wire, http_bytes, http_json, http_json_dated,
-        hydration_test_key, read_http_request, upload_mock_response,
+        HydrationMockServer, TEST_FILE_ID, completion_name, encrypt_chunk_wire, http_bytes, http_json, http_json_dated,
+        hydration_test_key, read_http_request, upload_mock_response, uploaded_plaintext, uploaded_record,
     };
     #[cfg(unix)]
     use uploads::{MockResponse, hydration_mock_response};

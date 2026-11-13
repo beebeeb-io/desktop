@@ -75,6 +75,66 @@ pub(super) fn owned_key_and_pin(
     ),
     EngineError,
 > {
+    owned_key_and_record(db, master, id).map(|(key, record)| (key, record.format))
+}
+
+/// The item's key and the content record of its current sealed name: the format pin AND the version
+/// commitment. Every re-seal of an existing item's name carries both (`ContentRecord::seal_name`): a
+/// name sealed from the pin alone would drop the commitment, and a v2 version opens only against it.
+/// An id with no stored record answers `ContentRecord::UNRECORDED`: right for an item this device is
+/// creating, never for an existing row it holds no record of (the backup's rows: see
+/// `EngineBridge::backup_row_material`).
+pub(super) fn owned_key_and_record(
+    db: &StateDb,
+    master: &[u8; 32],
+    id: &str,
+) -> Result<(beebeeb_core::kdf::FileKey, crate::content_record::ContentRecord), EngineError> {
+    owned_material(db, master, id).map(|(key, record, _)| (key, record))
+}
+
+/// [`owned_key_and_record`] with the sealed name the record was read from (`None` when the item has
+/// none on this device): what a replacement's init sends as the file's current version metadata.
+///
+/// Two places can hold the item's sealed name: the key record a sync pass stored from the server's
+/// row, and the name this device itself published with its last upload (`file_version_counters`).
+/// The upload's is newer until the next pass serves the row, so the one with the higher version
+/// counter wins; a name without a commitment never beats one with.
+pub(super) fn owned_material(
+    db: &StateDb,
+    master: &[u8; 32],
+    id: &str,
+) -> Result<
+    (
+        beebeeb_core::kdf::FileKey,
+        crate::content_record::ContentRecord,
+        Option<String>,
+    ),
+    EngineError,
+> {
+    use crate::content_record::ContentRecord;
+    let (key, stored, stored_name) = stored_material(db, master, id)?;
+    if let Some(published) = db.published_name(id)?
+        && let Ok(opened) = beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, &published)
+        && let Some(version) = opened.version
+        && stored.version.is_none_or(|current| version.counter > current.counter)
+    {
+        return Ok((key, ContentRecord::of(&opened), Some(published)));
+    }
+    Ok((key, stored, stored_name))
+}
+
+fn stored_material(
+    db: &StateDb,
+    master: &[u8; 32],
+    id: &str,
+) -> Result<
+    (
+        beebeeb_core::kdf::FileKey,
+        crate::content_record::ContentRecord,
+        Option<String>,
+    ),
+    EngineError,
+> {
     if let Some(record) = db.get_owned_key_record(id)? {
         // P3-5: a request row has no content key — its content is the sealed
         // request key `C` and its rename material comes from the rename call
@@ -92,7 +152,11 @@ pub(super) fn owned_key_and_pin(
             &record,
             crate::owner_keys::kind_in_db(db, id),
         )?;
-        return Ok((key, metadata.chunk_format));
+        return Ok((
+            key,
+            crate::content_record::ContentRecord::of(&metadata),
+            Some(record.name_encrypted),
+        ));
     }
     // P2-8/P2-1: a foreign id has no derived key, and neither has text that is
     // not a canonical id at all — whatever row the server planted under it.
@@ -105,7 +169,8 @@ pub(super) fn owned_key_and_pin(
     }
     Ok((
         file_key_for(master, id),
-        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        crate::content_record::ContentRecord::UNRECORDED,
+        None,
     ))
 }
 
@@ -116,8 +181,8 @@ pub(super) fn owned_metadata_for_name(
     name: &str,
     mime: Option<&str>,
 ) -> Result<String, EngineError> {
-    let (key, pin) = owned_key_and_pin(db, master, id)?;
-    Ok(beebeeb_core::encrypt::encrypt_name_for(&key, name, mime, pin)?)
+    let (key, record) = owned_key_and_record(db, master, id)?;
+    Ok(record.seal_name(&key, name, mime)?)
 }
 
 /// The name a rename of `id` seals (P2-2, P3-5): a request row takes the
@@ -140,13 +205,17 @@ pub(super) fn owned_metadata_for_rename(
     {
         return Err(EngineError::from(anyhow::anyhow!("item key is unavailable")));
     }
-    let (key, pin) = match record {
+    let (key, record) = match record {
+        // A request row's content is the anonymous uploader's (sealed under `C`), so its name
+        // record carries the pin core read and no commitment of the owner's.
         Some(record) if record.request_row => {
-            crate::owner_keys::rename_material(&beebeeb_core::kdf::MasterKey::from_bytes(*master), id, &record)?
+            let (key, pin) =
+                crate::owner_keys::rename_material(&beebeeb_core::kdf::MasterKey::from_bytes(*master), id, &record)?;
+            (key, crate::content_record::ContentRecord::pin_only(pin))
         }
-        _ => owned_key_and_pin(db, master, id)?,
+        _ => owned_key_and_record(db, master, id)?,
     };
-    Ok(beebeeb_core::encrypt::encrypt_name_for(&key, name, mime, pin)?)
+    Ok(record.seal_name(&key, name, mime)?)
 }
 
 pub(super) fn encrypted_metadata_for_name(
@@ -247,6 +316,8 @@ pub(super) fn upload_init_request_for_operation(
         chunk_size_bytes: Some(plan.chunk_size_bytes),
         chunk_count: Some(plan.chunk_count),
         base_version_number: base_version.and_then(|version| i32::try_from(version).ok()),
+        // Set by the caller for a replacement of a version-protected file.
+        version_metadata_encrypted: None,
     }
 }
 
@@ -262,10 +333,7 @@ pub(super) fn metadata_rekeyed_with_material(
     master_key: &[u8; 32],
     op: &PendingOperation,
     file_id: &str,
-    material: Option<(
-        &beebeeb_core::kdf::FileKey,
-        beebeeb_core::chunk_stream::ExpectedChunkFormat,
-    )>,
+    material: Option<(&beebeeb_core::kdf::FileKey, crate::content_record::ContentRecord)>,
 ) -> Result<Option<String>, EngineError> {
     let Some(raw) = op.metadata_json.as_deref() else {
         return Ok(None);
@@ -286,7 +354,7 @@ pub(super) fn metadata_rekeyed_with_material(
         .map(str::to_string)
         .or_else(|| beebeeb_core::media::guess_mime_type(&name).map(str::to_string));
     metadata["name_encrypted"] = serde_json::json!(match material {
-        Some((key, pin)) => beebeeb_core::encrypt::encrypt_name_for(key, &name, mime.as_deref(), pin)?,
+        Some((key, record)) => record.seal_name(key, &name, mime.as_deref())?,
         None => encrypted_metadata_for_name(master_key, file_id, &name, mime.as_deref())?,
     });
     Ok(Some(serde_json::to_string(&metadata)?))
