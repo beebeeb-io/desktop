@@ -120,7 +120,10 @@ impl State {
             (self.actions.source.keep_offline(&items, keep), action)
         };
         if let Err(why) = asked {
-            self.actions.local.retry = Some((action, ids));
+            // Try again asks for these again, in this direction, whatever is selected then. Not for a protected
+            // item: asking again changes nothing.
+            let again = if why == ActionError::Protected { Vec::new() } else { ids };
+            self.actions.local.retry = Some((said, again));
             if let Some(stay) = self.failed_of(said, why, &items) {
                 tx.wake_after(stay);
             }
@@ -161,7 +164,7 @@ impl State {
     /// Nothing held (`None`: a board scene set the message): as before, the selection.
     pub(super) fn local_can_retry(&self, action: Action) -> bool {
         match &self.actions.local.retry {
-            Some((held, ids)) => *held == action && !self.rows_of(ids).is_empty(),
+            Some((held, ids)) => *held == action && self.listing.items.iter().any(|item| ids.contains(&item.id)),
             None => true,
         }
     }
@@ -210,7 +213,12 @@ impl State {
                         self.actions.local.retry = Some((action, ids));
                     }
                     // The path an immediate refusal takes, for the items it was about (not the selection).
-                    self.failed_of(action, why, &items)
+                    let stay = self.failed_of(action, why, &items);
+                    // Never silence after "accepted": where that path has no words for a protected item (a
+                    // source without them) and opened no message, the plain one.
+                    let silent =
+                        stay.is_none() && why == ActionError::Protected && self.actions.protected.alert.is_none();
+                    stay.or_else(|| silent.then(|| self.set_toast(Toast::Failed(action, why))))
                 }
             };
             if let Some(stay) = stay {

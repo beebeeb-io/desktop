@@ -52,7 +52,13 @@ impl State {
                             } else {
                                 first
                             },
-                            ids: left.iter().map(|o| o.id.clone()).collect(),
+                            // Try again is for what asking again can change: not a protected item, not a
+                            // folder that holds something kept.
+                            ids: left
+                                .iter()
+                                .filter(|o| !matches!(o.left, Some(ActionError::Protected | ActionError::HoldsKept)))
+                                .map(|o| o.id.clone())
+                                .collect(),
                         },
                     };
                     self.actions.local.unsaid.push(late);

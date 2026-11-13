@@ -54,6 +54,10 @@ pub enum ActionError {
     InFlight,
     /// Some of the items changed, some did not (the rows show which).
     NotAll,
+    /// Free up space left it: it has a change that is not uploaded yet (its bytes here are the only copy).
+    NotSent,
+    /// Free up space left it: something in it is kept on this PC. Asking again changes nothing.
+    HoldsKept,
     /// This system cannot do it at all (Free up space for a selection, off Windows): nothing was changed, and
     /// Try again would change nothing either.
     NotOnThisSystem,

@@ -76,11 +76,11 @@ impl State {
     }
 
     /// Does the message of this failure offer Try again, as the window is now? [`offers_try_again`], and
-    /// something to repeat: not what this system cannot do at all, not an upload with every file in, not a
-    /// change of what this PC holds with no item left to ask for.
+    /// something to repeat: not what this system cannot do at all or what asking again cannot change, not an
+    /// upload with every file in, not a change of what this PC holds with no item left to ask for.
     pub fn offers_try_again(&self, action: Action, why: ActionError) -> bool {
         offers_try_again(action)
-            && why != ActionError::NotOnThisSystem
+            && !matches!(why, ActionError::NotOnThisSystem | ActionError::HoldsKept)
             && match action {
                 Action::Upload => !matches!(&self.actions.retry_upload, Some((_, files)) if files.is_empty()),
                 Action::KeepOffline | Action::RemoveOffline | Action::FreeUpSpace => self.local_can_retry(action),

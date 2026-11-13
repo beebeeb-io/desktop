@@ -157,6 +157,8 @@ impl Toast {
             ActionError::InFlight => " The last change is still on its way.",
             ActionError::NotAll => " Some items were left as they were.",
             ActionError::NotOnThisSystem => " It is not available on this computer yet.",
+            ActionError::NotSent => " It has changes that are not uploaded yet.",
+            ActionError::HoldsKept => " Something in it is kept on this PC.",
             _ => "",
         };
         format!("Couldn't {}.{fix}", action.words())

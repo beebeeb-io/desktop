@@ -4,13 +4,15 @@
 //! - Keep on this PC / Remove from this PC: the pin change (`Engine::set_kept`), one item at a time.
 //! - Free up space: for a SELECTION (`Engine::free_up_space_of`), never the whole account. Where this system has
 //!   no reclaim for a selection, it is refused at once in its own words and NOTHING is changed. An item that was
-//!   kept is released for the reclaim (which never touches a kept file) and KEPT AGAIN when the reclaim did not
-//!   free it: a failed Free up space does not cost the pin. A file with a change that is not sent is never touched
-//!   (the engine's guards, inside the reclaim).
+//!   kept is released for the reclaim (which never touches a kept file) and KEPT AGAIN when the reclaim freed
+//!   nothing of it: a Free up space that did nothing does not cost the pin. A folder that was freed IN PART stays
+//!   released (keeping it again would download what was just freed) and is said as left, with the reason. Not kept
+//!   again: when the vault locked in between (no session to do it in; logged). A file with a change that is not
+//!   sent is never touched (the engine's guards, inside the reclaim).
 //! - `changes`: what those two did, per item, once the engine answered: whether it was done, and what the engine
 //!   says the item is NOW (read after the work, the way a listing reads it). It is NOT an activity feed.
-//! - A job that ended early (a caught panic, a lock and an unlock in between) is reported as failed for every
-//!   item, after one read of what the engine says of them now. Never silence after "accepted".
+//! - A job that ended early (a caught panic, a lock and an unlock in between) is never dropped and never trusted:
+//!   one read of what the engine says of its items now decides, per item, whether the change is there.
 //! - The Backups folder's id, from this PC's local state (`StateDb::backups_roots`), read once per session.
 //!
 //! Thread rule: both changes block (the state database, a Cloud Files call), so one worker does them in the order
@@ -33,7 +35,7 @@ use std::time::{Duration, Instant};
 
 use beebeeb_engine::app::{CredentialStores, Engine, LocalStateRefused};
 use beebeeb_engine::backup_protect::BackupsTree;
-use beebeeb_engine::free_up_space::Reclaimed;
+use beebeeb_engine::free_up_space::{Reclaimed, SelectionAnswer};
 use beebeeb_engine::signin::gate::GateState;
 use beebeeb_engine::sync_view::Start;
 
@@ -65,7 +67,7 @@ pub trait FilesEngine: Send + Sync + 'static {
     /// Can this system free up space for a selection at all? Never waits.
     fn can_free_selection(&self) -> bool;
     /// The copies of these on this PC go; per id, what the engine says of it afterwards. Blocks: a worker's.
-    fn free_up_space_of(&self, ids: &[String]) -> Result<Vec<(String, Reclaimed)>, String>;
+    fn free_up_space_of(&self, ids: &[String]) -> Result<Vec<SelectionAnswer>, String>;
     /// Per id: the row's mark of what this PC holds, as a listing reads it now (`Some(None)`: no mark). `None`: no
     /// such row, or it could not be read. Blocks: a worker's.
     fn states_of(&self, ids: &[String]) -> Result<Vec<Option<Option<String>>>, LocalStateRefused>;
@@ -102,7 +104,7 @@ impl<C: CredentialStores> FilesEngine for Engine<C> {
     fn can_free_selection(&self) -> bool {
         beebeeb_engine::free_up_space::SELECTION_RECLAIM
     }
-    fn free_up_space_of(&self, ids: &[String]) -> Result<Vec<(String, Reclaimed)>, String> {
+    fn free_up_space_of(&self, ids: &[String]) -> Result<Vec<SelectionAnswer>, String> {
         Engine::free_up_space_of(self, ids)
     }
     fn states_of(&self, ids: &[String]) -> Result<Vec<Option<Option<String>>>, LocalStateRefused> {
@@ -121,17 +123,38 @@ impl<C: CredentialStores> FilesEngine for Engine<C> {
 }
 
 /// Per id, the row's mark of what this PC holds as the rows say now, by the listing's own two steps (the engine's
-/// row model, then the window's mark of it): a row reads here exactly what it reads when its folder is read again.
+/// row model, then the window's mark of it), with one difference: a file that is KEPT reads "available_offline"
+/// also while its download has not finished. The listing's model has no word for that and says "online only",
+/// which would leave the menu offering Keep on this PC for an item that is kept, and never Remove from this PC.
 /// `None`: no such row, or it could not be read.
 fn marks_in(db: &beebeeb_engine::state_db::StateDb, ids: &[String]) -> Vec<Option<Option<String>>> {
+    use beebeeb_engine::state_db::PinState;
     ids.iter()
         .map(|id| {
             let entry = db.get_file(id).ok().flatten()?;
             let contract = db.get_file_contract_state(id).ok()?;
+            let kept = contract
+                .as_ref()
+                .is_some_and(|contract| contract.effective_pin_state() == PinState::Pinned);
+            if kept && !entry.is_dir() {
+                return Some(Some("available_offline".to_string()));
+            }
             let row = beebeeb_engine::drive_v2::model::item_from(&entry, contract.as_ref(), None);
             Some(crate::source_engine::item(row).pc_status)
         })
         .collect()
+}
+
+/// Is what the action asked for there, by the mark the engine gives the item now? For a job whose own word is not
+/// trusted (it ended early). A folder's mark does not say whether its copies are gone: Free up space of it is not
+/// called done from here.
+fn reached(action: Action, now: &Option<Option<String>>) -> bool {
+    let Some(mark) = now else { return false };
+    match action {
+        Action::KeepOffline => mark.as_deref() == Some("available_offline"),
+        Action::RemoveOffline => mark.as_deref() != Some("available_offline"),
+        _ => mark.as_deref() == Some("online_only"),
+    }
 }
 
 enum Ask {
@@ -336,8 +359,8 @@ impl<E: FilesEngine> LocalCopies<E> {
                             self.in_flight.remove(&item.id);
                         }
                     }
-                    // It was accepted in THIS session and ended early: it is said as failed, never dropped. First
-                    // one read of what the engine says of the items now (some of it may have been done).
+                    // It was accepted in THIS session and ended early: never dropped, and its own word is not trusted.
+                    // One read of what the engine says of the items now decides per item.
                     if ended && !looked {
                         let ids = items.iter().map(|item| item.id.clone()).collect();
                         if self.send(Ask::Look(action, ids)) {
@@ -468,11 +491,14 @@ fn run<E: FilesEngine>(engine: &E, job: &Job) -> Answer {
                 None => gave_up(job),
             };
         }
-        // A change ended early: every item is said as not done, with what the engine says of it now.
+        // A change ended early: per item, done only where what the engine says of it now is what was asked.
         Ask::Look(action, ids) => {
             let now = states(engine, account, ids);
             let mut items = all_left(ids.iter().cloned());
             for (item, now) in items.iter_mut().zip(now) {
+                if reached(*action, &now) {
+                    item.left = None;
+                }
                 item.now = now;
             }
             return Answer::Changed {
@@ -526,23 +552,45 @@ fn run<E: FilesEngine>(engine: &E, job: &Job) -> Answer {
             }
         }
     }
+    // Per item: did the reclaim free something of it? What was freed in part is not kept again.
+    let mut freed_some = vec![false; asked.len()];
+    // The reclaim panicked: what it did is not known, so the answer is not trusted (`ended`).
+    let mut reclaim_ended = false;
     if !free.is_empty() && still_for(engine, account) {
         let ids: Vec<String> = free.iter().map(|&at| asked[at].clone()).collect();
-        match engine.free_up_space_of(&ids) {
-            Ok(per_item) => {
-                for (id, what) in per_item {
-                    let at = free.iter().copied().find(|&at| asked[at] == id);
-                    if let (Some(at), Reclaimed::Freed) = (at, what) {
-                        left[at] = None;
-                    }
+        // Caught here, not only around the job: the pins released above are still to be put back.
+        let reclaim = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.free_up_space_of(&ids)));
+        match reclaim {
+            Ok(Ok(per_item)) => {
+                for answer in per_item {
+                    let Some(at) = free.iter().copied().find(|&at| asked[at] == answer.id) else {
+                        continue;
+                    };
+                    freed_some[at] = answer.freed_some;
+                    left[at] = match answer.what {
+                        Reclaimed::Freed => None,
+                        Reclaimed::Unsent => Some(ActionError::NotSent),
+                        Reclaimed::Kept => Some(ActionError::HoldsKept),
+                        Reclaimed::NoSuchItem | Reclaimed::Left => Some(ActionError::Failed),
+                    };
                 }
             }
-            Err(_) => log("files: the selection's copies were not removed from this PC"),
+            Ok(Err(_)) => log("files: the selection's copies were not removed from this PC"),
+            Err(_) => {
+                log("files: the reclaim of a selection ended early");
+                reclaim_ended = true;
+            }
         }
     }
-    // A failed Free up space does not cost the pin: what was released and not freed is kept again.
+    // A Free up space that freed nothing of an item does not cost its pin: it is kept again. Not what was freed in
+    // part: keeping a folder again would download what was just freed.
     for at in released {
-        if left[at].is_some() && still_for(engine, account) && engine.set_kept(&asked[at], true).is_err() {
+        if left[at].is_none() || freed_some[at] {
+            continue;
+        }
+        if !still_for(engine, account) {
+            log("files: an item released for Free up space was not kept again (the vault is no longer open)");
+        } else if engine.set_kept(&asked[at], true).is_err() {
             log("files: an item released for Free up space could not be kept again");
         }
     }
@@ -556,7 +604,7 @@ fn run<E: FilesEngine>(engine: &E, job: &Job) -> Answer {
         generation,
         account: account.to_string(),
         // The account must be the same after the work as before it.
-        ended: !still_for(engine, account),
+        ended: reclaim_ended || !still_for(engine, account),
         looked: false,
         action,
         items: asked

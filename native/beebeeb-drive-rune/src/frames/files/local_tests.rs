@@ -380,28 +380,108 @@ fn try_again_is_not_drawn_where_it_would_repeat_nothing() {
 }
 
 #[test]
-fn a_refusal_of_a_protected_item_that_comes_later_takes_the_path_of_one_that_comes_at_once() {
+fn a_refusal_of_a_protected_item_that_comes_later_takes_the_path_of_one_at_once_and_is_never_silent() {
     use super::super::Intent;
-    // At once.
+    // At once: the frame that says why is asked for (DW-1110). This source has no words of its own.
     let (mut rt, spy, _, _) = window(None, 1, "on_this_pc");
     *spy.refuse.lock().unwrap() = Some(ActionError::Protected);
     rt.update(|s, tx| assert!(s.toggle_keep_offline(tx)));
-    let at_once = (rt.state.actions.intents.last().cloned(), rt.state.actions.toast);
-    // The frame that says why is asked for (DW-1110); this source has no words of its own, so no message.
-    assert_eq!(at_once, (Some(Intent::Frame("DW-1110")), None));
-    // Later: accepted, and the engine found the item in the Backups tree.
-    let (mut rt, spy, ids, _) = window(None, 1, "on_this_pc");
+    assert_eq!(rt.state.actions.intents.last(), Some(&Intent::Frame("DW-1110")));
+    // An item the window itself knows as protected, kept: the switch says "keep" (as it always did), and
+    // nothing is held for a Try again in either direction: asking again changes nothing.
+    let (mut rt, spy, ids, _) = window(None, 1, "available_offline");
+    rt.update(|s, tx| {
+        s.listing.items[0].is_protected = true;
+        assert!(s.toggle_keep_offline(tx));
+        assert_eq!(s.actions.local.retry, Some((Action::KeepOffline, Vec::new())));
+        assert!(!s.offers_try_again(Action::KeepOffline, ActionError::Protected));
+    });
+    assert!(
+        spy.asked().is_empty(),
+        "the source was asked for a protected item: {ids:?}"
+    );
+    // Later: accepted, and the engine found the item in the Backups tree. The same frame is asked for, and
+    // since nothing else says it after "accepted", the plain message does. Asking again changes nothing.
+    let (mut rt, spy, ids, _) = window(None, 2, "on_this_pc");
     rt.update(|s, tx| assert!(s.toggle_keep_offline(tx)));
     assert_eq!(rt.state.actions.intents.last(), None);
     spy.answer(
         Action::KeepOffline,
-        &[(&ids[0], Some("on_this_pc"), Some(ActionError::Protected))],
+        &[
+            (&ids[0], Some("on_this_pc"), Some(ActionError::Protected)),
+            (&ids[1], Some("on_this_pc"), Some(ActionError::Protected)),
+        ],
+    );
+    assert!(frame(&mut rt));
+    assert_eq!(rt.state.actions.intents.last(), Some(&Intent::Frame("DW-1110")));
+    assert_eq!(
+        rt.state.live_toast(),
+        Some(Toast::Failed(Action::KeepOffline, ActionError::Protected))
+    );
+    assert!(
+        find(&rt, "toast-action").is_none(),
+        "Try again for an item that cannot change"
+    );
+    assert_eq!(*spy.wakes.lock().unwrap(), [Duration::from_secs(8)]);
+}
+
+#[test]
+fn what_free_up_space_left_is_said_with_the_engines_reason() {
+    // A file with a change that is not uploaded: said, and worth asking again later.
+    let (mut rt, spy, ids, _) = window(None, 2, "on_this_pc");
+    rt.update(|s, tx| assert!(s.free_up_space(tx)));
+    spy.answer(
+        Action::FreeUpSpace,
+        &[
+            (&ids[0], Some("on_this_pc"), Some(ActionError::NotSent)),
+            (&ids[1], Some("on_this_pc"), Some(ActionError::NotSent)),
+        ],
     );
     assert!(frame(&mut rt));
     assert_eq!(
-        (rt.state.actions.intents.last().cloned(), rt.state.actions.toast),
-        at_once
+        rt.state.live_toast(),
+        Some(Toast::Failed(Action::FreeUpSpace, ActionError::NotSent))
     );
+    assert_eq!(
+        Toast::failure(Action::FreeUpSpace, ActionError::NotSent),
+        "Couldn't free up space. It has changes that are not uploaded yet."
+    );
+    assert!(find(&rt, "toast-action").is_some());
+    rt.update(|s, tx| s.retry(tx));
+    assert_eq!(spy.asked().last(), Some(&(Action::FreeUpSpace, ids.clone())));
+    // A folder that holds something kept: said, and no Try again (asking again changes nothing).
+    spy.answer(
+        Action::FreeUpSpace,
+        &[
+            (&ids[0], None, Some(ActionError::HoldsKept)),
+            (&ids[1], Some("online_only"), None),
+        ],
+    );
+    assert!(frame(&mut rt));
+    assert_eq!(marks(&rt, 2), [None, mark("online_only")]);
+    assert_eq!(
+        rt.state.live_toast(),
+        Some(Toast::Failed(Action::FreeUpSpace, ActionError::NotAll))
+    );
+    assert!(
+        find(&rt, "toast-action").is_none(),
+        "Try again with nothing it could change"
+    );
+    rt.update(|s, _| {
+        s.actions.toast_until = Some(std::time::Instant::now());
+        super::super::reset::poll(s);
+    });
+    spy.answer(Action::FreeUpSpace, &[(&ids[0], None, Some(ActionError::HoldsKept))]);
+    assert!(frame(&mut rt));
+    assert_eq!(
+        rt.state.live_toast(),
+        Some(Toast::Failed(Action::FreeUpSpace, ActionError::HoldsKept))
+    );
+    assert_eq!(
+        Toast::failure(Action::FreeUpSpace, ActionError::HoldsKept),
+        "Couldn't free up space. Something in it is kept on this PC."
+    );
+    assert!(find(&rt, "toast-action").is_none());
 }
 
 #[test]

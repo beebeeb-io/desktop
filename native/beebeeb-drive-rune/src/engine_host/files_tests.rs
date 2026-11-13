@@ -23,6 +23,10 @@ struct Inner {
     fails: Vec<String>,
     /// Ids the reclaim leaves (open in an app); their pin change works.
     stuck: Vec<String>,
+    /// Folders the reclaim frees in part, and why the rest stays.
+    part: Vec<(String, Reclaimed)>,
+    /// The reclaim frees these, then panics.
+    panic_reclaim: Option<Vec<String>>,
     /// Ids that cannot be kept (again): only `set_kept(id, true)` fails.
     fails_keep: Vec<String>,
     /// What is kept and what was freed, as the engine's rows would say (`states_of`).
@@ -56,6 +60,8 @@ impl Default for Inner {
             unknown: vec!["gone".into()],
             fails: Vec::new(),
             stuck: Vec::new(),
+            part: Vec::new(),
+            panic_reclaim: None,
             fails_keep: Vec::new(),
             kept: Vec::new(),
             freed: Vec::new(),
@@ -125,25 +131,37 @@ impl FilesEngine for Fake {
     fn can_free_selection(&self) -> bool {
         self.s().can_free
     }
-    fn free_up_space_of(&self, ids: &[String]) -> Result<Vec<(String, Reclaimed)>, String> {
+    fn free_up_space_of(&self, ids: &[String]) -> Result<Vec<SelectionAnswer>, String> {
         let mut s = self.s();
         s.freed_calls.push(ids.to_vec());
+        if let Some(first) = s.panic_reclaim.take() {
+            s.freed.extend(first);
+            drop(s);
+            panic!("an invented panic in the reclaim");
+        }
         if s.reclaim_fails {
             return Err("refused".into());
         }
         Ok(ids
             .iter()
             .map(|id| {
+                let part = s.part.iter().find(|(part, _)| part == id).map(|(_, why)| *why);
                 // As the engine's reclaim: a kept file is never touched.
-                let what = if s.kept.contains(id) {
-                    Reclaimed::Kept
+                let (what, freed_some) = if s.kept.contains(id) {
+                    (Reclaimed::Kept, false)
+                } else if let Some(why) = part {
+                    (why, true)
                 } else if s.fails.contains(id) || s.stuck.contains(id) {
-                    Reclaimed::Left
+                    (Reclaimed::Left, false)
                 } else {
                     s.freed.push(id.clone());
-                    Reclaimed::Freed
+                    (Reclaimed::Freed, true)
                 };
-                (id.clone(), what)
+                SelectionAnswer {
+                    id: id.clone(),
+                    what,
+                    freed_some,
+                }
             })
             .collect())
     }
@@ -356,6 +374,55 @@ fn a_free_up_space_that_did_not_free_does_not_cost_the_pin() {
         "what was released for a reclaim that failed was not kept again (or something else was)"
     );
 
+    // A folder that was kept and is freed IN PART is not kept again (that would download what was just freed):
+    // it stays released, is said as left with the engine's reason, and its row reads what the engine says.
+    let fake = Arc::new(Fake::default());
+    {
+        let mut s = fake.s();
+        s.kept = vec!["d-unsent".into(), "d-kept".into()];
+        s.part = vec![
+            ("d-unsent".into(), Reclaimed::Unsent),
+            ("d-kept".into(), Reclaimed::Kept),
+        ];
+    }
+    let mut copies = LocalCopies::new(fake.clone());
+    copies
+        .ask(Action::FreeUpSpace, items(&[("d-unsent", true), ("d-kept", true)]))
+        .unwrap();
+    assert_eq!(
+        said(&settled(&mut copies)),
+        ["FreeUpSpace d-unsent:on_this_pc:NotSent d-kept:on_this_pc:HoldsKept"]
+    );
+    assert_eq!(
+        fake.s().kept_calls,
+        [("d-unsent".to_string(), false), ("d-kept".to_string(), false)],
+        "a folder freed in part was kept again"
+    );
+
+    // The reclaim frees one file and panics, after the pin of another was released: that pin is put back, and
+    // what the engine says now decides per item (the file that was freed is not called failed).
+    let fake = Arc::new(Fake::default());
+    {
+        let mut s = fake.s();
+        s.kept = vec!["f-1".into()];
+        s.panic_reclaim = Some(vec!["f-2".into()]);
+    }
+    let mut copies = LocalCopies::new(fake.clone());
+    copies
+        .ask(
+            Action::FreeUpSpace,
+            items(&[("f-1", true), ("f-2", false), ("f-3", false)]),
+        )
+        .unwrap();
+    assert_eq!(
+        said(&settled(&mut copies)),
+        ["FreeUpSpace f-1:available_offline:Failed f-2:online_only:done f-3:on_this_pc:Failed"]
+    );
+    assert_eq!(
+        fake.s().kept_calls,
+        [("f-1".to_string(), false), ("f-1".to_string(), true)]
+    );
+
     // Kept again fails too: the row is not said to be kept. It reads what the engine says: on this PC.
     let fake = Arc::new(Fake::default());
     {
@@ -407,10 +474,11 @@ fn an_accepted_change_whose_job_ended_early_is_said_as_failed() {
             items(&[("f-1", false), ("f-2", false), ("f-3", false)]),
         )
         .unwrap();
-    // Every item is said as not done (the job is not trusted), and each row reads what the engine says now.
+    // The job's own word is not trusted: what the engine says of each item now decides. Never all failed, never
+    // all done.
     assert_eq!(
         said(&settled(&mut copies)),
-        ["KeepOffline f-1:available_offline:Failed f-2:on_this_pc:Failed f-3:on_this_pc:Failed"]
+        ["KeepOffline f-1:available_offline:done f-2:on_this_pc:Failed f-3:on_this_pc:Failed"]
     );
     // Its marks are gone: the items can be asked again.
     fake.s().panic_on = None;
@@ -434,10 +502,19 @@ fn an_accepted_change_whose_job_ended_early_is_said_as_failed() {
     }
     assert_eq!(
         said(&settled(&mut copies)),
-        ["KeepOffline f-1:available_offline:Failed f-2:on_this_pc:Failed"]
+        ["KeepOffline f-1:available_offline:done f-2:on_this_pc:Failed"]
     );
     assert_eq!(copies.ask(Action::KeepOffline, items(&[("f-2", false)])), Ok(()));
     settled(&mut copies);
+
+    // The same for the other two changes: Remove is there when the item is no longer kept, Free up space when the
+    // file is online only. An item the engine cannot read is not called done.
+    let now = |mark: &str| Some(Some(mark.to_string()));
+    assert!(reached(Action::RemoveOffline, &now("on_this_pc")) && reached(Action::RemoveOffline, &Some(None)));
+    assert!(!reached(Action::RemoveOffline, &now("available_offline")));
+    assert!(reached(Action::FreeUpSpace, &now("online_only")));
+    assert!(!reached(Action::FreeUpSpace, &now("on_this_pc")) && !reached(Action::FreeUpSpace, &Some(None)));
+    assert!(!reached(Action::KeepOffline, &None) && !reached(Action::RemoveOffline, &None));
 
     // Still locked when the window looks: that is another session, and nothing of it is said.
     let fake = Arc::new(Fake::default());
@@ -457,26 +534,24 @@ fn the_window_is_woken_when_a_message_is_due_and_not_before() {
     let seen = woke.clone();
     let timer = std::thread::spawn(move || wake_when_due(&rx, || seen.lock().unwrap().push(Instant::now())));
     let start = Instant::now();
-    // The later one first: each is woken at its own time.
-    let (late, soon) = (start + Duration::from_millis(800), start + Duration::from_millis(40));
-    tx.send(late).unwrap();
+    // A far one first, then a near one: the near one is woken at its own time, not behind the far one. (The far
+    // one never comes in this test: no assertion here rests on how fast a thread is scheduled.)
+    let (far, soon) = (start + Duration::from_secs(3_600), start + Duration::from_millis(40));
+    tx.send(far).unwrap();
     tx.send(soon).unwrap();
-    for _ in 0..2_000 {
-        if woke.lock().unwrap().len() >= 2 {
+    for _ in 0..10_000 {
+        if !woke.lock().unwrap().is_empty() {
             break;
         }
         std::thread::sleep(Duration::from_millis(1));
     }
     let at = woke.lock().unwrap().clone();
-    assert_eq!(at.len(), 2, "one wake per message");
-    assert!(
-        at[0] >= soon && at[0] < late,
-        "the short message was not woken at its own time"
-    );
-    assert!(at[1] >= late, "woken before the message was due");
-    // The source is dropped: the timer ends.
+    assert_eq!(at.len(), 1, "woken for the near message alone");
+    assert!(at[0] >= soon, "woken before the message was due");
+    // The source is dropped: the timer ends, with no wake for what was still waiting.
     drop(tx);
     timer.join().unwrap();
+    assert_eq!(woke.lock().unwrap().len(), 1);
 
     // Through the adapter: the engine's wake, once, after the time asked.
     let fake = Arc::new(Fake::default());
@@ -659,7 +734,8 @@ fn the_mark_of_a_row_is_read_the_way_a_listing_reads_it() {
     put("here", FileStatus::Local, ItemKind::File, false);
     put("kept", FileStatus::Local, ItemKind::File, true);
     put("online", FileStatus::CloudOnly, ItemKind::File, false);
-    // Kept, and not downloaded yet: the engine's model says online only until it is.
+    // Kept, and not downloaded yet: the listing's model says online only; here the pin decides (the menu must
+    // offer Remove from this PC for it).
     put("kept-not-here", FileStatus::CloudOnly, ItemKind::File, true);
     put("folder", FileStatus::Local, ItemKind::Folder, false);
     put("kept-folder", FileStatus::Local, ItemKind::Folder, true);
@@ -682,7 +758,7 @@ fn the_mark_of_a_row_is_read_the_way_a_listing_reads_it() {
             mark("on_this_pc"),
             mark("available_offline"),
             mark("online_only"),
-            mark("online_only"),
+            mark("available_offline"),
             Some(None),
             mark("available_offline"),
             None

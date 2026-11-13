@@ -519,6 +519,14 @@ fn ids(ids: &[&str]) -> Vec<String> {
     ids.iter().map(|id| id.to_string()).collect()
 }
 
+/// An answer in words a test compares: `id:what`, and `+` where something under it was freed by the call.
+fn told(answer: &[crate::free_up_space::SelectionAnswer]) -> Vec<String> {
+    answer
+        .iter()
+        .map(|a| format!("{}:{:?}{}", a.id, a.what, if a.freed_some { "+" } else { "" }))
+        .collect()
+}
+
 /// A reclaim as the real one records it: these files are online only in the rows afterwards.
 fn frees<'a>(db: &'a StateDb, these: &'a [&'a str]) -> impl FnOnce(Vec<(String, String, i64)>) + 'a {
     move |wanted| {
@@ -535,7 +543,7 @@ fn frees<'a>(db: &'a StateDb, these: &'a [&'a str]) -> impl FnOnce(Vec<(String, 
 /// and each selected id gets its own answer, read from the rows after the reclaim.
 #[test]
 fn a_selection_reclaims_its_own_files_and_answers_per_item() {
-    use crate::free_up_space::{Reclaimed, free_selection};
+    use crate::free_up_space::free_selection;
     let dir = tempfile::tempdir().unwrap();
     let db = StateDb::open(&dir.path().join("state.db")).unwrap();
     local(&db, "d-a", "/A", ItemKind::Folder);
@@ -566,29 +574,28 @@ fn a_selection_reclaims_its_own_files_and_answers_per_item() {
         ["f-1", "f-2", "f-4"],
         "the folder's row, a neighbour or an unselected file was handed over"
     );
-    assert_eq!(
-        answer,
-        [
-            ("d-a".to_string(), Reclaimed::Left),
-            ("f-4".to_string(), Reclaimed::Freed),
-            ("f-gone".to_string(), Reclaimed::NoSuchItem)
-        ]
-    );
+    // The folder was freed in part (`+`): a host does not keep it again, or its freed file would come back.
+    assert_eq!(told(&answer), ["d-a:Left+", "f-4:Freed+", "f-gone:NoSuchItem"]);
     // The neighbour whose name starts the same was not touched.
     assert_eq!(db.get_file("f-3").unwrap().unwrap().status, FileStatus::Local);
     // Everything of the folder freed: the folder is done.
     let answer = free_selection(&db, &ids(&["d-a"]), candidates(), frees(&db, &["f-1", "f-2"]));
-    assert_eq!(answer, [("d-a".to_string(), Reclaimed::Freed)]);
+    assert_eq!(told(&answer), ["d-a:Freed+"]);
     // A file that is online only already: nothing is asked, and nothing of it is here.
     let answer = free_selection(&db, &ids(&["f-4"]), Vec::new(), |_| panic!("nothing to reclaim"));
-    assert_eq!(answer, [("f-4".to_string(), Reclaimed::Freed)]);
+    assert_eq!(told(&answer), ["f-4:Freed"], "freed before this call, not by it");
+    // Files alone are selected: only their own rows are read, and the answer is the same as beside a folder.
+    local(&db, "f-5", "/five.txt", ItemKind::File);
+    let one = vec![("f-5".to_string(), "/five.txt".to_string(), 10)];
+    let answer = free_selection(&db, &ids(&["f-5", "f-3", "f-gone"]), one, frees(&db, &["f-5"]));
+    assert_eq!(told(&answer), ["f-5:Freed+", "f-3:Left", "f-gone:NoSuchItem"]);
 }
 
 /// An id with nothing to hand to the reclaim is not "freed" while its bytes are on this computer: the answer is what
 /// the rows say afterwards, with the reason. (It was `true` for every one of these: "all of nothing was freed".)
 #[test]
 fn what_could_not_be_freed_is_never_answered_as_freed() {
-    use crate::free_up_space::{Reclaimed, free_selection};
+    use crate::free_up_space::free_selection;
     let dir = tempfile::tempdir().unwrap();
     let db = StateDb::open(&dir.path().join("state.db")).unwrap();
     held(&db, "f-up", "/up.txt", ItemKind::File, FileStatus::Uploading, false);
@@ -613,29 +620,35 @@ fn what_could_not_be_freed_is_never_answered_as_freed() {
         ("f-k1", "/K/one.txt"),
         ("d-m", "/M"),
         ("f-m2", "/M/two.txt"),
+        ("d-t", "/T"),
+        ("f-t1", "/T/one.txt"),
     ]
     .iter()
     .map(|(id, path)| (id.to_string(), path.to_string(), 10))
     .collect();
     let mut handed = Vec::new();
-    let selection = ids(&["f-up", "f-conf", "f-err", "f-kept", "f-open", "d-k", "d-m"]);
+    // A folder: one file is freed, one was deleted here and waits for the server's trash (no bytes here).
+    local(&db, "d-t", "/T", ItemKind::Folder);
+    local(&db, "f-t1", "/T/one.txt", ItemKind::File);
+    held(&db, "f-t2", "/T/two.txt", ItemKind::File, FileStatus::Trashing, false);
+    let selection = ids(&["f-up", "f-conf", "f-err", "f-kept", "f-open", "d-k", "d-m", "d-t"]);
     let answer = free_selection(&db, &selection, candidates, |wanted| {
         handed = wanted.iter().map(|(id, _, _)| id.clone()).collect();
         handed.sort();
-        frees(&db, &["f-k1"])(wanted);
+        frees(&db, &["f-k1", "f-t1"])(wanted);
     });
-    assert_eq!(handed, ["f-k1", "f-m2", "f-open"]);
-    let said: Vec<(&str, Reclaimed)> = answer.iter().map(|(id, what)| (id.as_str(), *what)).collect();
+    assert_eq!(handed, ["f-k1", "f-m2", "f-open", "f-t1"]);
     assert_eq!(
-        said,
+        told(&answer),
         [
-            ("f-up", Reclaimed::Unsent),
-            ("f-conf", Reclaimed::Unsent),
-            ("f-err", Reclaimed::Unsent),
-            ("f-kept", Reclaimed::Kept),
-            ("f-open", Reclaimed::Left),
-            ("d-k", Reclaimed::Unsent),
-            ("d-m", Reclaimed::Kept),
+            "f-up:Unsent",
+            "f-conf:Unsent",
+            "f-err:Unsent",
+            "f-kept:Kept",
+            "f-open:Left",
+            "d-k:Unsent+",
+            "d-m:Kept",
+            "d-t:Freed+"
         ]
     );
     // Nothing but the one file the reclaim freed changed.
@@ -674,7 +687,11 @@ fn free_up_space_for_a_selection_is_the_owners_alone() {
     #[cfg(target_os = "windows")]
     assert_eq!(
         answer,
-        Ok(Ok(vec![("f-1".to_string(), crate::free_up_space::Reclaimed::Freed)]))
+        Ok(Ok(vec![crate::free_up_space::SelectionAnswer {
+            id: "f-1".to_string(),
+            what: crate::free_up_space::Reclaimed::Freed,
+            freed_some: false,
+        }]))
     );
     signed_out(&engine);
     signed_in(&engine, Some("user-b"), Some("b@example.eu"));
