@@ -275,7 +275,9 @@ pub fn show_backups(s: &mut State) -> bool {
 /// sidebar's Backups (Ctrl+4) shows the Backups folder, opening the Backups row in Files moves
 /// the sidebar to Backups, and Back out of it moves it to Files again.
 pub fn poll(s: &mut State) -> bool {
-    if super::session::poll(s) {
+    // What a source that answers later did since the last frame (`State::late_changes`).
+    let late = s.late_changes();
+    if super::session::poll(s) || late {
         return true;
     }
     let Some(root) = s.actions.source.backups_root() else {

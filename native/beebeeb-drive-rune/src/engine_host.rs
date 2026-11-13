@@ -45,6 +45,7 @@ pub mod backups;
 #[cfg(test)]
 mod binding_tests;
 pub mod drive_settings;
+pub mod files;
 pub mod open;
 pub mod search;
 pub mod settings;
@@ -450,16 +451,33 @@ impl<C: CredentialStores> DriveSource for EngineDriveSource<C> {
 // EngineFilesSource: FilesSource (most actions not wired)
 // ---------------------------------------------------------------------------
 
-/// `FilesSource` on the real engine. Actions call through the `Engine` handle; Cloud Files actions
-/// (`keep_offline`, `free_up_space`) stay `not_wired` (they need a registered sync root).
+/// `FilesSource` on the real engine. Actions call through the `Engine` handle; what this PC holds of an item
+/// (`keep_offline`, `free_up_space`) changes on a worker and is answered later ([`files::LocalCopies`]).
 pub struct EngineFilesSource<C: CredentialStores> {
     engine: Arc<Engine<C>>,
+    /// Keep on this PC, Free up space, what they did, and the Backups folder's id.
+    copies: files::LocalCopies<Engine<C>>,
+    /// After a refused upload: the files of it that were not copied in.
+    upload_left: Option<Vec<PathBuf>>,
 }
 
 impl<C: CredentialStores> EngineFilesSource<C> {
+    /// Starts no thread and reads nothing.
     pub fn new(engine: Arc<Engine<C>>) -> Self {
-        Self { engine }
+        Self {
+            copies: files::LocalCopies::new(engine.clone()),
+            engine,
+            upload_left: None,
+        }
     }
+}
+
+/// The rows as the worker is asked for them: the id, and whether the row says it is kept on this PC.
+fn local_items(items: &[DriveItem]) -> Vec<(String, bool)> {
+    items
+        .iter()
+        .map(|item| (item.id.clone(), item.pc_status.as_deref() == Some("available_offline")))
+        .collect()
 }
 
 fn not_wired(what: &str) -> ActionError {
@@ -580,8 +598,13 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         })
     }
 
-    fn keep_offline(&mut self, _: &[DriveItem], _: bool) -> Result<(), ActionError> {
-        Err(not_wired("keep_offline"))
+    fn keep_offline(&mut self, items: &[DriveItem], keep: bool) -> Result<(), ActionError> {
+        let action = if keep {
+            files_source::Action::KeepOffline
+        } else {
+            files_source::Action::RemoveOffline
+        };
+        self.copies.ask(action, local_items(items))
     }
 
     fn copy_link(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
@@ -618,11 +641,36 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     }
 
     fn upload(&mut self, folder: Option<&str>, files: &[std::path::PathBuf]) -> Result<(), ActionError> {
-        self.local(|db, sync_root| {
+        // One file at a time, so a refusal part-way knows what is already in the folder: Try again sends the rest
+        // alone (`upload_left`), never a second copy of a file that went in.
+        self.upload_left = None;
+        let mut left = files.to_vec();
+        let result = self.local(|db, sync_root| {
             let parent = file_ops::resolve_folder(db, folder).map_err(map_drive_err)?;
-            file_ops::copy_in(db, sync_root, parent.as_ref(), files).map_err(map_drive_err)?;
+            for file in files {
+                file_ops::copy_in(db, sync_root, parent.as_ref(), std::slice::from_ref(file)).map_err(map_drive_err)?;
+                if let Some(at) = left.iter().position(|path| path == file) {
+                    left.remove(at);
+                }
+            }
             Ok(())
-        })
+        });
+        if result.is_err() && left.len() < files.len() {
+            self.upload_left = Some(left);
+        }
+        result
+    }
+
+    fn upload_left(&mut self) -> Option<Vec<PathBuf>> {
+        self.upload_left.take()
+    }
+
+    fn answers_later(&self) -> bool {
+        true
+    }
+
+    fn backups_root(&self) -> Option<String> {
+        self.copies.backups_root()
     }
 
     fn new_folder(&mut self, parent: Option<&str>, name: &str) -> Result<(), ActionError> {
@@ -654,8 +702,8 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         })
     }
 
-    fn free_up_space(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
-        Err(not_wired("free_up_space"))
+    fn free_up_space(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
+        self.copies.ask(files_source::Action::FreeUpSpace, local_items(items))
     }
 
     fn open_in_file_explorer(&mut self, folder: Option<&str>) -> Result<(), ActionError> {
@@ -669,7 +717,8 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         open_path(&path)
     }
 
+    /// What Keep on this PC and Free up space did, once the engine answered (not an activity feed).
     fn changes(&mut self) -> Vec<Change> {
-        Vec::new()
+        self.copies.take()
     }
 }
