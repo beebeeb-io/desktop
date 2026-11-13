@@ -339,3 +339,74 @@ pub fn matched(name: &str, query: &str) -> Option<(usize, usize)> {
     }
     None
 }
+
+/// The board's sample, counting every time it is asked or told something, and (apart) every
+/// time it is told to forget: for a test outside this group that proves Search was not asked
+/// (the shell's session gate).
+#[cfg(test)]
+pub struct Counted {
+    board: BoardSearch,
+    asked: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    forgotten: std::sync::Arc<std::sync::atomic::AtomicU32>,
+}
+
+#[cfg(test)]
+impl Counted {
+    pub fn board(
+        asked: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        forgotten: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    ) -> Counted {
+        Counted {
+            board: BoardSearch::new(),
+            asked,
+            forgotten,
+        }
+    }
+
+    fn asked(&self) {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+impl SearchSource for Counted {
+    fn wired(&self) -> bool {
+        self.board.wired()
+    }
+    fn recent(&self) -> Vec<String> {
+        self.asked();
+        self.board.recent()
+    }
+    fn clear_recent(&mut self) {
+        self.asked();
+        self.board.clear_recent()
+    }
+    fn remember(&mut self, query: &str) {
+        self.asked();
+        self.board.remember(query)
+    }
+    fn search(&self, query: &str, narrow: Narrow) -> Answer {
+        self.asked();
+        self.board.search(query, narrow)
+    }
+    fn details(&self, id: &str) -> Option<Details> {
+        self.asked();
+        self.board.details(id)
+    }
+    fn opened(&mut self) {
+        self.asked();
+        self.board.opened()
+    }
+    fn ask(&mut self, query: &str, narrow: Narrow) {
+        self.asked();
+        self.board.ask(query, narrow)
+    }
+    fn pump(&mut self) -> Pumped {
+        self.asked();
+        self.board.pump()
+    }
+    fn forget(&mut self) {
+        self.forgotten.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.board.forget()
+    }
+}

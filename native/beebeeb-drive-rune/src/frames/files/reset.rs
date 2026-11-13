@@ -135,16 +135,33 @@ pub fn end_session(s: &mut State, account_left: bool) {
     s.files.back.clear();
     // Search over the window: what was typed, what was narrowed to and the result that was
     // selected are the earlier session's. Its source stays: that is wiring, not session state.
+    close_search(s);
+    // Two versions (DW-0429) is the SHELL's dialog (`shell::app`): the route machine drops it
+    // on a sign-out and for another account, and keeps it across a lock ("unlock returns to the
+    // same place"). It holds no secret and is not closed from here.
+    forget_session_ended_rows(s);
+}
+
+/// The shell's session gate closed under the window (`shell::session_gate`), in any way: also
+/// the session that ended while the gate stayed Ready, where the rows stay (`session.rs`). What
+/// could still act goes: every dialog through the wiping path, a name being typed in a row, an
+/// open menu, a picker that was asked for, and Search over the window. No source is asked.
+pub fn session_closed(s: &mut State) {
+    close_dialogs(s);
+    s.actions.picker = None;
+    s.actions.drop_hover = None;
+    s.actions.upload_menu = None;
+    close_search(s);
+}
+
+/// Search over the window ends: what was typed, what was narrowed to, the selected result.
+fn close_search(s: &mut State) {
     s.search = rune::TextEdit::new("");
     let find = &mut s.frames.find;
     find.open = false;
     find.selected = None;
     find.narrow = crate::frames::search::source::Narrow::All;
     find.pictured = false;
-    // Two versions (DW-0429) is the SHELL's dialog (`shell::app`): the route machine drops it
-    // on a sign-out and for another account, and keeps it across a lock ("unlock returns to the
-    // same place"). It holds no secret and is not closed from here.
-    forget_session_ended_rows(s);
 }
 
 /// The session-ended window (`frames/files/session.rs`, PR 372) holds rows it took out of the

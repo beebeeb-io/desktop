@@ -6,6 +6,10 @@ use rune::{Cx, El, KeyEvent, Tx};
 use crate::State;
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
+    // Search asks its source on every draw: not while the session gate is closed.
+    if !super::session_gate::open(s) {
+        return crate::frames::files::view(s, cx);
+    }
     crate::frames::search::over_files(s, cx).unwrap_or_else(|| crate::frames::files::view(s, cx))
 }
 
@@ -15,6 +19,11 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     // The protected-folder message is modal: no key reaches search or the list under it.
     if let Some(handled) = crate::frames::files::protected::key(s, ev, tx) {
         return handled;
+    }
+    // With the session gate closed Search gets no key (it would open, query or open a result);
+    // the Files window's own keys each ask the gate themselves.
+    if !super::session_gate::open(s) {
+        return crate::frames::files::keys::on_key(s, ev, tx);
     }
     crate::frames::search::files_key(s, ev, tx).unwrap_or_else(|| crate::frames::files::keys::on_key(s, ev, tx))
 }

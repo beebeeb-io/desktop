@@ -193,8 +193,21 @@ impl State {
         }
     }
 
+    /// A dialog that was open when the shell's session gate closed (New folder, Move to): it
+    /// closes through the wiping path and its source is not asked. `true`: refused.
+    fn refused_in_a_dialog(&mut self) -> bool {
+        if !self.refused_without_session() {
+            return false;
+        }
+        super::reset::close_dialogs(self);
+        true
+    }
+
     /// A double-click on a folder of the Move dialog (or Right): go into it.
     pub fn move_into(&mut self, index: usize) {
+        if self.refused_in_a_dialog() {
+            return;
+        }
         let Some(m) = self.move_dialog() else { return };
         let Some(folder) = m.choices.get(index).cloned() else {
             return;
@@ -214,6 +227,9 @@ impl State {
 
     /// A click on a folder of the Move dialog's path (or Left, Backspace: one up).
     pub fn move_up_to(&mut self, depth: usize) {
+        if self.refused_in_a_dialog() {
+            return;
+        }
         let Some(m) = self.move_dialog() else { return };
         if depth + 1 >= m.path.len() {
             return;
@@ -235,6 +251,9 @@ impl State {
     /// target keeps the dialog open and says so (DW-0410b's rule).
     pub fn commit_move(&mut self, tx: &mut Tx) {
         if !matches!(self.actions.dialog, Some(Dialog::Move(_))) {
+            return;
+        }
+        if self.refused_in_a_dialog() {
             return;
         }
         // The dialog is taken out while the source is asked (no copy of its folders and items),
@@ -296,6 +315,9 @@ impl State {
 
     /// New folder, asked from the Move dialog: in the folder that dialog shows.
     pub fn begin_new_folder_in_move(&mut self, tx: &mut Tx) {
+        if self.refused_in_a_dialog() {
+            return;
+        }
         tx.focus(NAME_INPUT, false);
         let Some(Dialog::Move(m)) = self.actions.dialog.clone() else {
             return;
@@ -344,6 +366,9 @@ impl State {
         let Some(Dialog::NewFolder(new)) = self.actions.dialog.clone() else {
             return;
         };
+        if self.refused_in_a_dialog() {
+            return;
+        }
         let typed = self.actions.name_edit.text.clone();
         let there = self.source.list(new.parent.as_deref()).ok();
         let others = there
