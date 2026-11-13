@@ -74,6 +74,7 @@ pub fn end_session(s: &mut State, account_left: bool) {
         anchor,
         sort,
         undo,
+        trash,
         // Stays: the ids of board frames that were asked for, no name of a file.
         intents: _,
         retry_upload,
@@ -117,6 +118,8 @@ pub fn end_session(s: &mut State, account_left: bool) {
     *local = super::local::Ui::default();
     // What Undo would put back: the earlier session's rows.
     undo.clear();
+    // An Undo that was not answered, and the ids Try again of a move to Trash would ask for.
+    *trash = super::to_trash::Ui::default();
     *toast = None;
     *toast_until = None;
     selection.clear();

@@ -191,6 +191,16 @@ pub enum Change {
     /// A change of what this PC holds (`KeepOffline`, `RemoveOffline`, `FreeUpSpace`) was tried: per item asked,
     /// what the engine says of it now and whether the change was made. Never inferred from the action.
     Local { action: Action, items: Vec<LocalOutcome> },
+    /// A move to Trash (`Action::Trash`) or its Undo (`Action::Restore`) was tried: per item asked, whether
+    /// Beebeeb made it. Only from a source that answers later.
+    Trash { action: Action, items: Vec<TrashOutcome> },
+}
+
+/// One item of a [`Change::Trash`]. `left`: `None`: it was made; otherwise why this item was left as it was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrashOutcome {
+    pub id: String,
+    pub left: Option<ActionError>,
 }
 
 /// One item of a [`Change::Local`].
@@ -273,9 +283,10 @@ pub trait FilesSource: Send + 'static {
     fn open_in_file_explorer(&mut self, folder: Option<&str>) -> Result<(), ActionError>;
     /// What accepted actions changed since the last call, oldest first.
     fn changes(&mut self) -> Vec<Change>;
-    /// Does this source answer `keep_offline` and `free_up_space` LATER (`Ok` is "accepted", what happened
-    /// arrives through [`FilesSource::changes`] as `Change::Local` or `Change::Failed`)? Then the window draws
-    /// nothing of the change before that, and asks `changes` every frame. Default: answered in the call.
+    /// Does this source answer `keep_offline`, `free_up_space`, `trash` and `restore` LATER (`Ok` is "accepted",
+    /// what happened arrives through [`FilesSource::changes`] as `Change::Local`, `Change::Trash` or
+    /// `Change::Failed`)? Then the window draws nothing of the change before that, and asks `changes` every
+    /// frame. Default: answered in the call.
     fn answers_later(&self) -> bool {
         false
     }

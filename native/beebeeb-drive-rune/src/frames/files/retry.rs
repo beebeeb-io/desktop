@@ -22,9 +22,8 @@ impl State {
             return;
         }
         match action {
-            Action::Trash => {
-                self.trash_selection(tx);
-            }
+            // Exactly the items that were left (`to_trash.rs`).
+            Action::Trash => self.trash_again(tx),
             Action::Restore => {
                 self.undo(tx);
             }

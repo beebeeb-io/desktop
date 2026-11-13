@@ -47,11 +47,13 @@ pub mod backups;
 mod binding_tests;
 pub mod drive_settings;
 pub mod files;
+mod files_trash;
 pub mod open;
 pub mod search;
 pub mod settings;
 pub mod shared;
 pub mod signin;
+mod stamp;
 pub mod sync;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -455,11 +457,14 @@ impl<C: CredentialStores> DriveSource for EngineDriveSource<C> {
 // ---------------------------------------------------------------------------
 
 /// `FilesSource` on the real engine. Actions call through the `Engine` handle; what this PC holds of an item
-/// (`keep_offline`, `free_up_space`) changes on a worker and is answered later ([`files::LocalCopies`]).
+/// (`keep_offline`, `free_up_space`) changes on a worker and is answered later ([`files::LocalCopies`]), and so
+/// do Move to Trash and its Undo, each bound to the session of its press ([`files_trash::TrashCalls`]).
 pub struct EngineFilesSource<C: CredentialStores> {
     engine: Arc<Engine<C>>,
     /// Keep on this PC, Free up space, what they did, and the Backups folder's id.
     copies: files::LocalCopies<Engine<C>>,
+    /// Move to Trash and its Undo.
+    trash: files_trash::TrashCalls<C>,
     /// After a refused upload: the files of it that were not copied in.
     upload_left: Option<Vec<PathBuf>>,
 }
@@ -469,6 +474,7 @@ impl<C: CredentialStores> EngineFilesSource<C> {
     pub fn new(engine: Arc<Engine<C>>) -> Self {
         Self {
             copies: files::LocalCopies::new(engine.clone()),
+            trash: files_trash::TrashCalls::new(engine.clone()),
             engine,
             upload_left: None,
         }
@@ -570,31 +576,15 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         log("NotWired(set_sort)");
     }
 
+    /// An API call, not a sync-folder operation: not gated by `is_syncing()`. Accepted here, sent on a worker for
+    /// the session of this press, answered through `changes`.
     fn trash(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
-        // Trash is an API call, not a sync-folder operation: it is NOT gated by is_syncing().
-        // Validate against the state database when it is available (a best-effort guard against
-        // trashing an uploading or protected item); when the database is not available, the
-        // server's own checks are the backstop.
-        if let Ok(state) = self.engine.local_state() {
-            let checked = state.with(|db| {
-                for item in items {
-                    if let Ok(entry) = file_ops::resolve(db, &item.id) {
-                        file_ops::check_trashable(db, &entry).map_err(map_drive_err)?;
-                    }
-                }
-                Ok(())
-            });
-            if let Ok(refused @ Err(_)) = checked {
-                return refused;
-            }
-        }
-        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
-        self.engine.trash_items(&ids).map_err(|_| ActionError::Failed)
+        self.trash.trash(items)
     }
 
+    /// Undo of a move to Trash, under the session of that move.
     fn restore(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
-        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
-        self.engine.restore_items(&ids).map_err(|_| ActionError::Failed)
+        self.trash.restore(items)
     }
 
     fn duplicate(&mut self, items: &[DriveItem], _taken: &[&str]) -> Result<(), ActionError> {
@@ -729,8 +719,11 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         open_path(&path)
     }
 
-    /// What Keep on this PC and Free up space did, once the engine answered (not an activity feed).
+    /// What Move to Trash, its Undo, Keep on this PC and Free up space did, once the engine answered (not an
+    /// activity feed).
     fn changes(&mut self) -> Vec<Change> {
-        self.copies.take()
+        let mut changes = self.trash.take();
+        changes.extend(self.copies.take());
+        changes
     }
 }
