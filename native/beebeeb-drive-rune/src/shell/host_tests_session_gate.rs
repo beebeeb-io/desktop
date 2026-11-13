@@ -288,20 +288,12 @@ fn trashed(app: &mut App) {
     press(&mut app.rt, Key::Delete, none());
 }
 
-/// Inside the first folder that can be opened: Back has somewhere to go.
+/// Inside a folder of the board's sample: Back has somewhere to go.
 fn in_a_folder(app: &mut App) {
-    let row = app
-        .rt
-        .state
-        .listing
-        .items
-        .iter()
-        .position(|i| i.is_folder && !i.is_protected && i.name != "Backups")
-        .expect("the board has a folder");
-    click(&mut app.rt, &format!("row-{row}-date"));
-    let here = app.rt.state.listing.folder.id.clone();
+    click(&mut app.rt, "row-3-date");
+    assert_eq!(app.rt.state.listing.items[3].name, "Lisbon trip");
     press(&mut app.rt, Key::Enter, none());
-    assert_ne!(app.rt.state.listing.folder.id, here, "the folder opened");
+    assert_eq!(app.rt.state.listing.items[0].name, "Day 1", "the folder opened");
 }
 
 #[test]
