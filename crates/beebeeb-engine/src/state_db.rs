@@ -153,10 +153,12 @@ mod tests {
 
     /// Task 2240: runs `measure` in a fresh copy of this test binary that runs only the test `name`.
     ///
-    /// The bundled SQLite is built with `SQLITE_ENABLE_MEMORY_MANAGEMENT` (libsqlite3-sys), so all the connections of
-    /// a process share one page-cache LRU: a connection that reads more than its own cache takes the oldest pages of
-    /// the others. A test that counts page reads in this binary would count the reads of every test running beside
-    /// it. The parent passes only when the child ran exactly one test, passed, and printed what it measured.
+    /// A page-read count must not depend on the tests running beside it. The SQLite that rusqlite 0.32 bundled was
+    /// built with `SQLITE_ENABLE_MEMORY_MANAGEMENT`, so all the connections of a process shared one page-cache LRU
+    /// and a connection that read more than its own cache took the oldest pages of the others; the one rusqlite
+    /// 0.41 bundles is built without it. The own process is kept: the measurement then holds whichever way the
+    /// library is built. The parent passes only when the child ran exactly one test, passed, and printed what it
+    /// measured.
     fn task_2240_in_own_process(name: &str, measure: impl FnOnce() -> String) {
         const CHILD: &str = "BB_TASK_2240_PAGE_CACHE_CHILD";
         if std::env::var_os(CHILD).is_some() {

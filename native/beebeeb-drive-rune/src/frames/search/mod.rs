@@ -40,6 +40,14 @@ pub struct SearchUi {
     /// A board frame's focused field: the board draws the field focused, with its caret, and a
     /// headless render has no focus to draw either. Only a scene sets it; the first key clears it.
     pub pictured: bool,
+    /// The gate and account the last poll saw: a change drops every name the source holds at once.
+    seen: Option<(crate::shell::app::GateState, Option<String>)>,
+    /// Whether search was open at the last poll.
+    was_open: bool,
+    /// The words and the pill the source was last asked for.
+    asked: Option<(String, Narrow)>,
+    /// The shell's session gate was open at the last poll (`shell::session_gate`).
+    gate_open: bool,
 }
 
 impl Default for SearchUi {
@@ -52,8 +60,73 @@ impl Default for SearchUi {
             narrow: Narrow::All,
             selected: None,
             pictured: false,
+            seen: None,
+            was_open: false,
+            asked: None,
+            gate_open: false,
         }
     }
+}
+
+/// How often the poll runs again while an answer is on its way.
+const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The window's poll (`shell::host::poll`), for a source that answers late: a gate or account change drops the
+/// source's names at once, on the window's side; search opening lets the source read; the words or the pill
+/// changing asks the source for that query; what arrived is taken in. Nothing of this happens in a draw.
+/// `true`: something drawn changed.
+pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    let gate = (s.shell.app.gate(), s.shell.app.account().map(str::to_owned));
+    // The shell's session gate, read from the engine as it is now: it is also closed for a session
+    // that ended under a Ready gate and for a change this poll's refresh has not applied yet.
+    let gate_open = crate::shell::session_gate::open(s);
+    let open = is_open(s) && !files_busy(s) && gate_open;
+    let typed = s.search.text.trim().to_string();
+    let ui = &mut s.frames.find;
+    let mut changed = false;
+    if ui.seen.as_ref() != Some(&gate) {
+        if ui.seen.is_some() {
+            ui.source.forget();
+            ui.selected = None;
+            ui.was_open = false;
+            ui.asked = None;
+            changed = true;
+        }
+        ui.seen = Some(gate);
+    }
+    // The session gate closed in any way: the source's names go at once, as for a gate change.
+    if std::mem::replace(&mut ui.gate_open, gate_open) && !gate_open {
+        ui.source.forget();
+        ui.selected = None;
+        ui.was_open = false;
+        ui.asked = None;
+        changed = true;
+    }
+    // While it is closed the source is not told search opened, not asked and not pumped: an
+    // answer that was on its way is not taken in.
+    if !gate_open {
+        return changed;
+    }
+    if open && !ui.was_open {
+        ui.source.opened();
+        changed = true;
+    }
+    ui.was_open = open;
+    if open {
+        let now = (typed, ui.narrow);
+        if ui.asked.as_ref() != Some(&now) {
+            ui.source.ask(&now.0, now.1);
+            ui.asked = Some(now);
+            changed = true;
+        }
+    } else {
+        ui.asked = None;
+    }
+    let pumped = ui.source.pump();
+    if pumped.busy {
+        tx.wake_after(POLL_EVERY);
+    }
+    changed | pumped.changed
 }
 
 impl SearchUi {
@@ -175,8 +248,21 @@ pub fn files_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> Option<bool> {
     Some(on_key(s, ev, tx))
 }
 
+/// Search reads the account's file names: not while the shell's session gate is closed. `true`:
+/// refused; the keyboard goes to the banner's Sign in, as the Files window's refusals do.
+fn refused(s: &mut State, tx: &mut Tx) -> bool {
+    if !crate::shell::session_gate::refuse(s) {
+        return false;
+    }
+    tx.focus("banner-action", true);
+    true
+}
+
 /// Open search with the field focused (DW-0801).
 pub fn open(s: &mut State, tx: &mut Tx) {
+    if refused(s, tx) {
+        return;
+    }
     s.frames.find.open = true;
     tx.focus(SEARCH_KEY, true);
 }
@@ -194,6 +280,9 @@ pub fn close(s: &mut State, tx: &mut Tx) {
 
 /// Run a recent search: its words in the field, the results under it (DW-0801 to DW-0802).
 pub fn run(s: &mut State, query: &str, tx: &mut Tx) {
+    if refused(s, tx) {
+        return;
+    }
     s.search = TextEdit::new(query);
     s.frames.find.selected = None;
     s.frames.find.source.remember(query);
@@ -224,6 +313,9 @@ fn select(s: &mut State, hits: &[Hit], i: usize, tx: &mut Tx) {
 /// Open result `i` (Enter, a double-click): the search is kept as a recent one.
 fn open_result(s: &mut State, hits: &[Hit], i: usize) -> bool {
     let Some(hit) = hits.get(i) else { return false };
+    if crate::shell::session_gate::refuse(s) {
+        return true;
+    }
     s.frames.find.selected = Some(hit.id.clone());
     let query = s.search.text.trim().to_string();
     s.frames.find.source.remember(&query);
@@ -246,6 +338,10 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     s.frames.find.pictured = false;
     if ev.key == Key::Escape && frames::plain(ev) {
         close(s, tx);
+        return true;
+    }
+    // Every other key of Search reads or opens something of the account.
+    if refused(s, tx) {
         return true;
     }
     if ev.is_command('f') {
@@ -406,6 +502,7 @@ fn scene(s: &mut State, typed: &str, source: BoardSearch) {
         narrow: Narrow::All,
         selected: None,
         pictured: true,
+        ..SearchUi::default()
     };
 }
 

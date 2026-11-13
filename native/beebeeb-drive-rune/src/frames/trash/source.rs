@@ -40,6 +40,9 @@ pub enum Loaded {
 pub enum Notice {
     /// Beebeeb refused to put this item back; it is still in Trash (the item's name).
     RestoreRefused(String),
+    /// A restore pressed before Beebeeb was locked or signed out was not made; the item is still in Trash. No name:
+    /// none is held across a lock.
+    RestoreNotDone,
     /// A newer list could not be read; the one shown may be out of date.
     RefreshFailed,
     /// The control needs something this version does not have yet.

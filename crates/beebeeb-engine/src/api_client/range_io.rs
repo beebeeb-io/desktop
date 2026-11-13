@@ -92,6 +92,7 @@ impl DirectIo for RangeIo<'_> {
             let mut request = match call.method {
                 ApiMethod::Get => self.api.client.get(url),
                 ApiMethod::Post => self.api.client.post(url),
+                ApiMethod::Put => self.api.client.put(url),
             }
             .header("Authorization", format!("Bearer {}", self.api.token))
             .timeout(call.timeout);

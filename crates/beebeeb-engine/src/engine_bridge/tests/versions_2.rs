@@ -244,12 +244,15 @@ async fn a_landing_keeps_the_name_and_parent_of_a_later_queued_save() {
         state.latest_plaintext("cba7146f-3770-5f4d-a1de-fc379ad3c342", master_key),
         b"second"
     );
-    let parents: Vec<_> = state
+    // The second save's first attempt is cut after its chunk was sent; its retry uploads in a fresh
+    // session (chunk format v2 never continues a cut one) and so sends its parent again.
+    let mut parents: Vec<_> = state
         .patches
         .iter()
         .filter(|(id, _)| id == "cba7146f-3770-5f4d-a1de-fc379ad3c342")
         .map(|(_, body)| body["parent_id"].clone())
         .collect();
+    parents.dedup();
     assert_eq!(
         parents,
         vec![

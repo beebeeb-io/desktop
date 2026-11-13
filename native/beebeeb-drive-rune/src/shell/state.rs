@@ -164,13 +164,29 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     s.signin = Some(crate::frames::signin::Ui::new(Box::new(
         crate::engine_host::EngineSignInSource::new(engine.clone()),
     )));
-    s.backups = crate::frames::backups::BackupsUi::new(None);
+    // An open file: read from the engine, decrypted in memory (`engine_host::viewer`); one source per opened file.
+    let viewer_engine = engine.clone();
+    crate::frames::viewers::wire(
+        &mut s,
+        Box::new(move || {
+            Box::new(crate::engine_host::viewer::EngineViewerSource::new(
+                viewer_engine.clone(),
+            ))
+        }),
+    );
+    // Backups: no source while its constant is off (nothing of the adapter runs then; `engine_host::backups`).
+    s.backups = crate::frames::backups::BackupsUi::new(crate::engine_host::backups::source_for(engine.clone()));
     // Every area not yet backed by the engine: the shell's "not built yet" frame, never sample
     // data beside a real account. This depends ONLY on "is this the live engine path", never on
     // the identity or a dev flag.
-    s.account.source = None;
+    // Account and Devices and sessions read the engine; every other account pane is the shell's frame
+    // (`engine_host::account`).
+    s.account.source = Some(Box::new(crate::engine_host::account::EngineAccountSource::new(
+        engine.clone(),
+    )));
     s.storage_split = None;
-    s.frames.shared.source = Box::new(crate::frames::shared::source::Unwired);
+    // Shared reads the engine (`engine_host::shared`): from Beebeeb only, for the session in memory.
+    s.frames.shared.source = Box::new(crate::engine_host::shared::EngineSharedSource::new(engine.clone()));
     // Trash reads the engine (`engine_host::trash`); Search only when `SEARCH_ON_ENGINE` (task 2488).
     s.frames.trash.source = Box::new(crate::engine_host::trash::EngineTrashSource::new(engine.clone()));
     s.frames.find = crate::frames::search::SearchUi::default();

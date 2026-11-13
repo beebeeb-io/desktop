@@ -22,7 +22,9 @@ fn intent(intent: Intent) -> impl Fn(&mut State) + 'static {
     }
 }
 
-pub fn panel(file: &OpenFile, t: &Theme) -> El {
+/// `offline_known`: the source read whether the file is kept on this PC (`ViewerSource::knows_offline`).
+/// When it did not, the panel draws no Available offline switch: a state that was not read is not shown.
+pub fn panel(file: &OpenFile, offline_known: bool, t: &Theme) -> El {
     let d = &file.details;
     let kind_line = if d.size.is_empty() {
         file.facts.clone()
@@ -66,14 +68,16 @@ pub fn panel(file: &OpenFile, t: &Theme) -> El {
     if !d.facts.is_empty() {
         pane = pane.child(meta);
     }
+    if offline_known {
+        pane = pane.child(
+            switch_card("offline", "Available offline", &sub, d.offline, t).on_press(|s: &mut State| {
+                if let Some(ui) = ui(s) {
+                    ui.toggle_offline();
+                }
+            }),
+        );
+    }
     pane.child(
-        switch_card("offline", "Available offline", &sub, d.offline, t).on_press(|s: &mut State| {
-            if let Some(ui) = ui(s) {
-                ui.toggle_offline();
-            }
-        }),
-    )
-    .child(
         row()
             .key("detail-actions")
             .gap(8.0)

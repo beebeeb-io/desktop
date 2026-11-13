@@ -50,7 +50,8 @@ use crate::shell::host;
 use crate::shell::registry::FrameGroup;
 use crate::theme::tokens;
 use source::{
-    Body, Conflict, FixtureViewerSource, Keep, OpenError, OpenFile, SaveOutcome, TextDoc, ViewerSource, board,
+    Body, Conflict, Elsewhere, FixtureViewerSource, Keep, OpenError, OpenFile, SaveOutcome, TextDoc, ViewerSource,
+    board,
 };
 
 /// Where the person goes when an action leaves this group. The shell opens it.
@@ -60,6 +61,13 @@ pub enum Intent {
     FreeUpSpace,
     /// A save panel that lists only disks with room; the decrypted copy goes there.
     DownloadTo,
+    /// "Save a copy…" of a file that is not shown here: a save panel, and the decrypted copy goes where the
+    /// person says.
+    SaveCopy,
+    /// Edit, where the source cannot save an edit.
+    Edit,
+    /// Available offline, where the source cannot change it.
+    KeepOffline,
     /// DW-0782: the report dialog. The report carries the code, never the file's name.
     ReportProblem,
     /// DW-1520: New's menu.
@@ -88,6 +96,16 @@ pub enum Intent {
 /// What a control whose target is not built yet says (the shell's words for it).
 pub const NOT_BUILT: &str = "Not built yet";
 
+/// What Try again says when the file could not even be asked for again (signed out, gone from this PC's list).
+pub const NOT_REOPENED: &str = "Couldn't open this file again. Go back to Files and open it from there.";
+
+/// What "Open in another app…" says when the account's folder on this PC is not in sync now.
+pub const NEEDS_SYNC_ELSEWHERE: &str =
+    "Couldn't open it in another app. It opens from your Beebeeb folder, so sync has to be on for this PC.";
+
+/// What "Open in another app…" says when the file could not be opened there for another reason.
+pub const NOT_OPENED_ELSEWHERE: &str = "Couldn't open this file in another app.";
+
 impl Intent {
     /// The name of where this intent goes, while nothing there answers it yet.
     fn not_built(&self) -> Option<&'static str> {
@@ -95,6 +113,9 @@ impl Intent {
             Intent::Share => "Share",
             Intent::Trash => "Move to Trash",
             Intent::OpenInAnotherApp => "Open in another app",
+            Intent::SaveCopy => "Save a copy",
+            Intent::Edit => "Edit and save from here",
+            Intent::KeepOffline => "Available offline from here",
             Intent::EditInSheets => "Edit in Sheets",
             Intent::VersionHistory => "Version history",
             _ => return None,
@@ -192,12 +213,22 @@ impl Ui {
         self.show_details = !self.show_details;
     }
 
-    /// Available offline, on or off: the engine keeps or releases the copy on this PC.
+    /// Available offline, on or off: the engine keeps or releases the copy on this PC. A source that cannot
+    /// change it says so (never a press that does nothing).
     pub fn toggle_offline(&mut self) {
+        if !self.source.knows_offline() {
+            self.intent(Intent::KeepOffline);
+            return;
+        }
         let on = !self.file.details.offline;
         if self.source.set_offline(&self.file.id, on) {
             self.file.details.offline = on;
         }
+    }
+
+    /// Whether the details panel shows the Available offline switch: only a state that was read.
+    pub(crate) fn knows_offline(&self) -> bool {
+        self.source.knows_offline()
     }
 
     /// A link in a note: to the web in the browser, else a file in Drive.
@@ -210,6 +241,25 @@ impl Ui {
     }
 
     pub fn intent(&mut self, intent: Intent) {
+        // "Open in another app…" is the source's when it has a way there: the system opens the file from
+        // the place the engine keeps the account's files on this PC. A refusal says so.
+        if intent == Intent::OpenInAnotherApp {
+            match self.source.open_elsewhere(&self.file.id) {
+                Elsewhere::Opened => {
+                    self.toast = None;
+                    return;
+                }
+                Elsewhere::NeedsSync => {
+                    self.toast = Some(NEEDS_SYNC_ELSEWHERE.to_string());
+                    return;
+                }
+                Elsewhere::Refused => {
+                    self.toast = Some(NOT_OPENED_ELSEWHERE.to_string());
+                    return;
+                }
+                Elsewhere::NotBound => {}
+            }
+        }
         // Nothing takes these yet (the shell's drain of this group's intents comes with the
         // engine's wiring): the press says so, in the shell's own words, never nothing.
         if let Some(what) = intent.not_built() {
@@ -231,15 +281,32 @@ impl Ui {
         }
     }
 
-    /// DW-1518's Try again: download and decrypt again (DW-1516).
+    /// DW-1518's Try again: download and decrypt again (DW-1516). Also after a stop that trying again may
+    /// get past (offline, a lock that ended).
     pub fn retry(&mut self) {
-        if self.file.body != Body::Failed {
+        let may = match &self.file.body {
+            Body::Failed => true,
+            Body::Stopped(why) => why.can_retry(),
+            _ => false,
+        };
+        if !may {
             return;
         }
-        if let Ok(file) = self.source.retry(&self.file.id) {
-            self.file = file;
-            self.focus = Some(states::TITLE_KEY);
+        match self.source.retry(&self.file.id) {
+            Ok(file) => {
+                self.replace(file);
+                self.toast = None;
+                self.focus = Some(states::TITLE_KEY);
+            }
+            // Never a press that does nothing: the file is not there to open now.
+            Err(_) => self.toast = Some(NOT_REOPENED.to_string()),
         }
+    }
+
+    /// Put `file` in place of the open one, whose decrypted text is overwritten first.
+    fn replace(&mut self, file: OpenFile) {
+        self.file.wipe();
+        self.file = file;
     }
 
     /// Edit (Ctrl+E): the editor on this file (DW-1523). A file over the editor's limit stays
@@ -251,6 +318,11 @@ impl Ui {
             _ => return,
         };
         if self.editor.is_some() {
+            return;
+        }
+        // An edit that cannot be saved is not offered: the press says so.
+        if !self.source.can_save() {
+            self.intent(Intent::Edit);
             return;
         }
         let mut edit = rune::TextEdit::new(text.clone());
@@ -289,7 +361,7 @@ impl Ui {
 
     /// Leave the editor for the reader on `file`.
     fn show(&mut self, file: OpenFile) {
-        self.file = file;
+        self.replace(file);
         self.editor = None;
         self.dialog = None;
         self.md_source = false;
@@ -338,7 +410,7 @@ impl Ui {
             return;
         }
         if let Ok(file) = self.source.newer(&self.file.id) {
-            self.file = file;
+            self.replace(file);
             self.focus = Some("tb-btn-0");
         }
     }
@@ -371,10 +443,25 @@ impl Ui {
                 if std::mem::discriminant(&body) != std::mem::discriminant(&self.file.body) {
                     self.focus = Some(states::TITLE_KEY);
                 }
+                // What was shown until now leaves memory overwritten (a session that ended takes the text).
+                self.file.body.wipe();
                 self.file.body = body;
                 true
             }
             None => false,
+        }
+    }
+}
+
+/// The open file is left (closed, the route moved on, the account left): the decrypted text it holds is
+/// overwritten, not only freed, and so is an edit of it. The source drops what it holds itself.
+impl Drop for Ui {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.file.wipe();
+        if let Some(editor) = self.editor.as_mut() {
+            editor.base.zeroize();
+            editor.edit.text.zeroize();
         }
     }
 }
@@ -402,6 +489,9 @@ pub struct Slot {
     /// route shows the shell's placeholder. The board's fixture is here only in the board's
     /// sample window ([`board_fixture`]), never as a fallback.
     route: Option<RouteSource>,
+    /// The file the route names that the source could not open: it is not asked for again on every poll, only
+    /// once the route names another file or the session gate closed and opened again.
+    unopened: Option<String>,
     /// The New file dialog over the Files window (DW-1521, DW-1522), while it is open.
     pub(crate) new_file: Option<new_file::NewFile>,
     /// What the New file dialog asked of the shell, oldest first ([`take_asked`]).
@@ -412,6 +502,14 @@ pub struct Slot {
     /// Where a key goes that reaches a text field of this group after the field's owner closed
     /// (two keys in one frame): a field nobody shows, never the Files window's search.
     pub(crate) stray: rune::TextEdit,
+}
+
+#[cfg(test)]
+impl Slot {
+    /// The file the route names that did not open (tests).
+    pub(crate) fn unopened_for_test(&self) -> Option<String> {
+        self.unopened.clone()
+    }
 }
 
 /// What the New file dialog asked for that is outside this group (make a file, New document),
@@ -455,11 +553,19 @@ pub fn open(s: &mut State, file_id: &str) -> bool {
 /// (`Event::OpenItem`, through [`open`]). `false`: not a file for this group; the caller opens
 /// it as it did before (its own app).
 pub fn open_item(s: &mut State, item: &crate::source::DriveItem) -> bool {
-    !item.is_folder && kinds::viewer_of(&item.name).is_some() && open(s, &item.id)
+    !item.is_folder
+        && kinds::viewer_of(&item.name).is_some()
+        // A kind the window's source does not show here stays its own app's.
+        && route_source(s).is_some_and(|source| source.previews(&item.name))
+        && open(s, &item.id)
 }
 
 /// [`open`] with the source to read from (the engine's, once it is wired).
 pub fn open_from(s: &mut State, source: Box<dyn ViewerSource>, file_id: &str) -> bool {
+    // Not while the shell's session gate is closed: the source is not asked for the file.
+    if crate::shell::session_gate::refuse(s) {
+        return false;
+    }
     let Ok(ui) = Ui::open(source, file_id) else {
         return false;
     };
@@ -514,6 +620,20 @@ pub fn sync(s: &mut State) {
     }
 }
 
+/// The session ended under the window (`shell::host`'s poll, with the Files window's reset). The
+/// account left (a sign-out, another account): the open file is dropped whatever it holds, also
+/// unsaved changes and an open question, and so is a New file dialog with its typed name; nothing
+/// of it is drawn or asked for again under the next account. A lock is the same account coming
+/// back: [`sync`] decides, as for any route that left the file.
+pub fn end_session(s: &mut State, account_left: bool) {
+    if !account_left {
+        return;
+    }
+    close_stale(s);
+    s.viewer.new_file = None;
+    s.viewer.refocus_list = false;
+}
+
 /// The text field the editor's keys go to. (With no editor open no key reaches this; the
 /// window's search field is what the type asks for.)
 pub fn editor_edit(s: &mut State) -> &mut rune::TextEdit {
@@ -546,10 +666,22 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     sync(s);
     // The route names a file that is not open yet (Files dispatched `Event::OpenItem`): ask the
     // window's source for it. No source, or a file it does not have: the shell's placeholder.
-    if let (None, Some(id)) = (&s.viewer.ui, route_item(s)) {
-        if let Some(Ok(ui)) = route_source(s).map(|source| Ui::open(source, &id)) {
-            s.viewer.ui = Some(ui);
-            return true;
+    // Never while the shell's session gate is closed: the route may name a file, nothing reads it.
+    let (here, gate_open) = (route_item(s), crate::shell::session_gate::open(s));
+    // A file that did not open is asked for again only for another route or another session.
+    if s.viewer.unopened.is_some() && (s.viewer.unopened != here || !gate_open) {
+        s.viewer.unopened = None;
+    }
+    if let (None, Some(id), true) = (&s.viewer.ui, here, gate_open) {
+        if s.viewer.unopened.as_deref() != Some(id.as_str()) {
+            match route_source(s).map(|source| Ui::open(source, &id)) {
+                Some(Ok(ui)) => {
+                    s.viewer.ui = Some(ui);
+                    return true;
+                }
+                Some(Err(_)) => s.viewer.unopened = Some(id),
+                None => {}
+            }
         }
     }
     let Some(ui) = ui(s) else { return had || new_file };

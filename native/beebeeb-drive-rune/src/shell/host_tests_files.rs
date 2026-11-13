@@ -296,7 +296,9 @@ const PIECES: &[Piece] = &[
                 "session-ended state not set up"
             );
         },
-        held: |s| s.actions.session.asked > 0 || s.listing.items.is_empty(),
+        // What the window keeps of that state (`session::Ui`). An empty list no longer says
+        // so: a gate that closed reads no folder, so the list is empty until it opens again.
+        held: |s| s.actions.session.asked > 0 || s.actions.session.keep_the_list.is_some(),
     },
     Piece {
         shell_keeps_it_across_a_lock: true,

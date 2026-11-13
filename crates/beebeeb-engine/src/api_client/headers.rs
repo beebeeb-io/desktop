@@ -33,6 +33,19 @@ pub(super) const CLIENT_VERSION_HEADER_VALUE: &str = match option_env!("BEEBEEB_
     None => env!("CARGO_PKG_VERSION"),
 };
 
+// ── Capability declaration (core 0.3.0, chunk format v2) ───────────────────────
+//
+// Core's rule (its `CLAUDE.md`, "Transfers"): `X-Beebeeb-Capabilities` goes only on the requests whose
+// server behaviour it gates, never globally. For this client those are the upload session (init, chunk,
+// complete) and the metadata update (`PATCH /api/v1/files/{id}`): the server refuses a v2-protocol write
+// without `file-write-v2` once v1 writes end, and a new name for a version-protected file without
+// `version-metadata-v1`. The value is the one core's own client sends (`beebeeb-client`
+// `NATIVE_CAPABILITIES`, `beebeeb-transfer` `V2_WRITE_CAPABILITIES`); neither constant is public, so it
+// is spelled here and pinned by a test.
+pub(super) const CAPABILITIES_HEADER_NAME: &str = beebeeb_core::direct_transfer::CAPABILITIES_HEADER;
+
+pub(super) const WRITE_CAPABILITIES: &str = "file-write-v2, version-metadata-v1";
+
 /// Builds a `HeaderMap` carrying the writer-provenance headers, for
 /// `reqwest::ClientBuilder::default_headers`. Shared by [`ApiClient::new`] and
 /// every ad-hoc `reqwest::Client` the Tauri commands in `lib.rs` build for

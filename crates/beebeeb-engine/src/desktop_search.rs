@@ -47,7 +47,7 @@ impl SearchShardStore for ApiClient {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct LocalSearchRecord {
     pub file_id: String,
     pub name: String,
@@ -60,10 +60,30 @@ pub struct LocalSearchRecord {
     pub shared_with_me: bool,
 }
 
-#[derive(Debug, Clone)]
+/// Never the name, the path or the id: a record is a decrypted file name, and a `{:?}` must not print one.
+impl std::fmt::Debug for LocalSearchRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalSearchRecord")
+            .field("status", &self.status)
+            .field("size_bytes", &self.size_bytes)
+            .field("shared_with_me", &self.shared_with_me)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone)]
 pub struct LocalSearchIndex {
     pub index: SearchIndex,
     pub records: BTreeMap<String, LocalSearchRecord>,
+}
+
+/// How many records, never one of them (the index holds every decrypted name on this computer).
+impl std::fmt::Debug for LocalSearchIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalSearchIndex")
+            .field("records", &self.records.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -73,7 +93,7 @@ pub enum DesktopSearchIndexState {
     Syncing,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, PartialEq, Eq)]
 pub struct DesktopSearchResult {
     pub file_id: String,
     pub name: String,
@@ -84,12 +104,34 @@ pub struct DesktopSearchResult {
     pub shared_with_me: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+/// Never the name, the path or the id (a result is a decrypted file name).
+impl std::fmt::Debug for DesktopSearchResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DesktopSearchResult")
+            .field("status", &self.status)
+            .field("size_bytes", &self.size_bytes)
+            .field("shared_with_me", &self.shared_with_me)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Serialize, PartialEq, Eq)]
 pub struct DesktopSearchResponse {
     pub query: String,
     pub index_state: DesktopSearchIndexState,
     pub indexed_file_count: usize,
     pub results: Vec<DesktopSearchResult>,
+}
+
+/// Never the query (the person's own words) or a result: how many there are.
+impl std::fmt::Debug for DesktopSearchResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DesktopSearchResponse")
+            .field("index_state", &self.index_state)
+            .field("indexed_file_count", &self.indexed_file_count)
+            .field("results", &self.results.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

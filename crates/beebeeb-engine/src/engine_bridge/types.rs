@@ -636,11 +636,13 @@ pub(super) fn is_create_file_operation(metadata: &serde_json::Value) -> bool {
 pub(super) fn recorded_content_format(
     key: &beebeeb_core::kdf::FileKey,
     meta: &serde_json::Value,
-) -> Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, EngineError> {
+) -> Result<crate::content_record::ContentRecord, EngineError> {
     let name = meta["name_encrypted"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("missing authenticated file metadata"))?;
-    Ok(beebeeb_core::encrypt::decrypt_file_metadata_with_key(key, name)?.chunk_format)
+    Ok(crate::content_record::ContentRecord::of(
+        &beebeeb_core::encrypt::decrypt_file_metadata_with_key(key, name)?,
+    ))
 }
 
 /// Restores a row's status if [`EngineBridge::hydrate_file_with_progress`] is

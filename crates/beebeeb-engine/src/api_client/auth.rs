@@ -25,6 +25,20 @@ impl ApiClient {
         Ok(self.get_typed("/api/v1/auth/me").await?)
     }
 
+    /// GET /api/v1/me/profile: the name the account shows. `None`: none was set (or only spaces).
+    pub async fn account_display_name(&self) -> anyhow::Result<Option<String>> {
+        #[derive(serde::Deserialize)]
+        struct Profile {
+            #[serde(default)]
+            display_name: Option<String>,
+        }
+        let profile: Profile = self.get_typed("/api/v1/me/profile").await?;
+        Ok(profile
+            .display_name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty()))
+    }
+
     /// `GET /api/v1/billing/subscription` — plan + quota + lifecycle.
     pub async fn subscription(&self) -> anyhow::Result<crate::account_dto::Subscription> {
         Ok(self.get_typed("/api/v1/billing/subscription").await?)
@@ -216,6 +230,18 @@ impl ApiClient {
         let url = self.url("/api/v1/notifications/preferences");
         let resp = self.send_with_retry(|| self.client.put(&url).json(update)).await?;
         Ok(resp.json().await?)
+    }
+
+    /// `PATCH /api/v1/notifications/{id}` with `{ "read": true }`: one notification seen. One the server no longer
+    /// has (404: removed meanwhile) counts as seen.
+    pub async fn mark_notification_read(&self, id: &str) -> anyhow::Result<()> {
+        let url = self.url(&format!("/api/v1/notifications/{}", encode(id)));
+        let body = serde_json::json!({ "read": true });
+        match self.send_with_retry(|| self.client.patch(&url).json(&body)).await {
+            Ok(_) => Ok(()),
+            Err(DesktopApiError::HttpStatus { status, .. }) if status == reqwest::StatusCode::NOT_FOUND => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     // ── Speedtest endpoints (P2 — task 0810) ─────────────────────────────────

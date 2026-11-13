@@ -98,6 +98,11 @@ impl State {
         let Some(rename) = self.actions.rename.clone() else {
             return true;
         };
+        // A field that was open when the session gate closed: it closes, nothing is saved.
+        if self.refused_without_session() {
+            self.cancel_rename(tx);
+            return true;
+        }
         let Some(row) = self.listing.items.iter().position(|i| i.id == rename.id) else {
             // The row went away under the field (a change from another device).
             self.actions.rename = None;

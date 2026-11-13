@@ -95,6 +95,7 @@ pub fn end_session(s: &mut State, account_left: bool) {
         session_no,
         // Dropped by `forget_session_ended_rows` below (PR 372's held rows and its count).
         session: _,
+        local,
         first_load_strip,
     } = &mut s.actions;
     // Another session of this window: an answer asked for under the one that ended is dropped.
@@ -112,6 +113,8 @@ pub fn end_session(s: &mut State, account_left: bool) {
     // What Try again would repeat: a share names a file, an upload names paths on this PC.
     *retry_share = None;
     *retry_upload = None;
+    // The ids a change of what this PC holds was left for, and an answer of it not said yet.
+    *local = super::local::Ui::default();
     // What Undo would put back: the earlier session's rows.
     undo.clear();
     *toast = None;
@@ -135,16 +138,33 @@ pub fn end_session(s: &mut State, account_left: bool) {
     s.files.back.clear();
     // Search over the window: what was typed, what was narrowed to and the result that was
     // selected are the earlier session's. Its source stays: that is wiring, not session state.
+    close_search(s);
+    // Two versions (DW-0429) is the SHELL's dialog (`shell::app`): the route machine drops it
+    // on a sign-out and for another account, and keeps it across a lock ("unlock returns to the
+    // same place"). It holds no secret and is not closed from here.
+    forget_session_ended_rows(s);
+}
+
+/// The shell's session gate closed under the window (`shell::session_gate`), in any way: also
+/// the session that ended while the gate stayed Ready, where the rows stay (`session.rs`). What
+/// could still act goes: every dialog through the wiping path, a name being typed in a row, an
+/// open menu, a picker that was asked for, and Search over the window. No source is asked.
+pub fn session_closed(s: &mut State) {
+    close_dialogs(s);
+    s.actions.picker = None;
+    s.actions.drop_hover = None;
+    s.actions.upload_menu = None;
+    close_search(s);
+}
+
+/// Search over the window ends: what was typed, what was narrowed to, the selected result.
+fn close_search(s: &mut State) {
     s.search = rune::TextEdit::new("");
     let find = &mut s.frames.find;
     find.open = false;
     find.selected = None;
     find.narrow = crate::frames::search::source::Narrow::All;
     find.pictured = false;
-    // Two versions (DW-0429) is the SHELL's dialog (`shell::app`): the route machine drops it
-    // on a sign-out and for another account, and keeps it across a lock ("unlock returns to the
-    // same place"). It holds no secret and is not closed from here.
-    forget_session_ended_rows(s);
 }
 
 /// The session-ended window (`frames/files/session.rs`, PR 372) holds rows it took out of the
@@ -168,7 +188,8 @@ pub fn read_the_root_again(s: &mut State) {
 }
 
 /// A message whose time is over goes from the state too, and what its Try again held goes with
-/// it: the share's items and choices, the upload's paths. `true`: one went.
+/// it: the share's items and choices, the upload's paths, the ids a change of what this PC holds was left
+/// for. `true`: one went.
 pub fn poll(s: &mut State) -> bool {
     let over = s
         .actions
@@ -181,5 +202,6 @@ pub fn poll(s: &mut State) -> bool {
     s.actions.toast_until = None;
     s.actions.retry_share = None;
     s.actions.retry_upload = None;
+    s.actions.local.retry = None;
     true
 }

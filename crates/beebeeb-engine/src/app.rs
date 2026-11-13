@@ -45,12 +45,21 @@ use crate::sync_root_port::{OsSyncRoots, SyncRootPort};
 use crate::sync_view::{Explorer, Start, SyncView, ViewCell, ViewHost};
 use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
 
+pub mod account_api;
+pub mod backups_api;
+// Explorer's "Free up space" command asks this handle, and a stop removes its binding (task 2490).
+mod explorer_api;
 pub mod kept_api;
 pub mod owned_state;
 pub mod settings_api;
+// What the account shares and what is shared with it, for the native Shared window.
+pub mod shares_api;
+pub mod signin_api;
 // Is the local state the signed-in account's (task 2488): a read-only check for windows that show it.
 pub mod state_owner;
 pub mod trash_api;
+// An open file for the native viewer: its facts, and its content decrypted in memory.
+pub mod viewer_api;
 
 pub use owned_state::{LocalStateRefused, OwnedState};
 
@@ -207,7 +216,9 @@ pub struct Engine<C: CredentialStores> {
     /// One session step at a time (a sign-in step, a lock, a sign-out, an engine start or stop).
     transition: tokio::sync::Mutex<()>,
     /// The order of the credential-store writes and the session generation.
-    writes: Mutex<()>,
+    /// Session changes take it for writing; a reader that asks whether its session is still there takes it for
+    /// reading without waiting, so readers never refuse each other, only yield to a session change.
+    writes: std::sync::RwLock<()>,
     /// A token is stored: someone is signed in, unlocked or not.
     auth_present: Mutex<bool>,
     /// A proven password waiting for its second factor (core holds the partial token, wiped on drop).
@@ -221,9 +232,14 @@ pub struct Engine<C: CredentialStores> {
     /// session at a restart. Cleared by a sign-out. Read by `owned_state` and the sync start, so an email alone
     /// never decides whose the local state is while the id is known.
     session_user_id: Mutex<Option<String>>,
+    /// Explorer's command: the binding a stop removes, and the folder an engine started in (`explorer_api`).
+    explorer: Mutex<explorer_api::ExplorerSeat>,
     /// Test builds only: where the account-bound handle reads (`Engine::use_local_state_for_test`).
     #[cfg(any(test, feature = "test-support"))]
     local_state_for_test: Mutex<Option<PathBuf>>,
+    /// Test builds only: run once in the middle of the next lock or sign-out (`Engine::during_next_forget_for_test`).
+    #[cfg(any(test, feature = "test-support"))]
+    forget_hook_for_test: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl<C: CredentialStores> Engine<C> {
@@ -265,14 +281,17 @@ impl<C: CredentialStores> Engine<C> {
             runtime,
             client,
             transition: tokio::sync::Mutex::new(()),
-            writes: Mutex::new(()),
+            writes: std::sync::RwLock::new(()),
             auth_present: Mutex::new(false),
             pending_2fa: Mutex::new(None),
             failures: AtomicU32::new(0),
             view,
             session_user_id: Mutex::new(None),
+            explorer: Mutex::new(explorer_api::ExplorerSeat::new(identity)),
             #[cfg(any(test, feature = "test-support"))]
             local_state_for_test: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            forget_hook_for_test: Mutex::new(None),
         })
     }
 
@@ -324,8 +343,8 @@ impl<C: CredentialStores> Engine<C> {
 
     /// Take this step's turn: the write lock, and a refusal when another session transition happened since `turn`
     /// was captured. On success the generation moves on.
-    fn claim(&self, turn: SessionGeneration) -> Result<std::sync::MutexGuard<'_, ()>, String> {
-        let writes = self.writes.lock().unwrap_or_else(|p| p.into_inner());
+    fn claim(&self, turn: SessionGeneration) -> Result<std::sync::RwLockWriteGuard<'_, ()>, String> {
+        let writes = self.writes.write().unwrap_or_else(|p| p.into_inner());
         if !self.acct.session_unchanged_since(turn) {
             return Err(
                 "Something changed on this computer while Beebeeb was working; nothing was saved. Try again."
@@ -751,6 +770,7 @@ impl<C: CredentialStores> Engine<C> {
             // (9) Registered as this app's sync root (Windows; nothing to do elsewhere), with Windows' code if not.
             port.register(&sync_root)
                 .map_err(|code| SyncStartRefused::RegistrationFailed { code })?;
+            self.note_explorer_root(&sync_root);
             // (10) The engine. A restart while paused stays paused: the flag follows the file, under the
             // config-write lock.
             {
@@ -849,7 +869,16 @@ impl<C: CredentialStores> Engine<C> {
         stopped
     }
 
+    /// The engine's stop, then Explorer's "Free up space" binding is removed (task 2490), whether an engine ran or
+    /// not and whether its end was confirmed: the binding outlives a restart of the app. A lock and a sign-out stop
+    /// through here.
     async fn stop_holding_step(&self) -> SyncStop {
+        let stopped = self.stop_runner().await;
+        self.remove_explorer_command();
+        stopped
+    }
+
+    async fn stop_runner(&self) -> SyncStop {
         let mut slot = self.acct.engine.lock().await;
         let Some(runner) = slot.take() else {
             return SyncStop::WasNotRunning;
@@ -881,8 +910,19 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     fn forget_session(&self, by: SessionTransition) {
-        let _writes = self.writes.lock().unwrap_or_else(|p| p.into_inner());
+        let _writes = self.writes.write().unwrap_or_else(|p| p.into_inner());
         self.acct.advance_session_generation_holding_session_write_lock(by);
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let hook = self
+                .forget_hook_for_test
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         let mut guard = self.acct.session.lock().unwrap_or_else(|p| p.into_inner());
         *guard = None;
         if let Ok(mut pending) = self.pending_2fa.lock() {
@@ -903,6 +943,14 @@ impl<C: CredentialStores> Engine<C> {
     fn sign_out_keeping_local_data_step(&self) -> Result<(), String> {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
+            self.sign_out_holding_step().await
+        })
+    }
+
+    /// The sign-out itself, for a caller that holds the step (`transition`) already: a step that decides to sign
+    /// out and does it in the same hold (`signin_api::discard_partial_sign_in`).
+    async fn sign_out_holding_step(&self) -> Result<(), String> {
+        {
             if self.stop_holding_step().await == SyncStop::Unconfirmed {
                 return Err(account_binding::ENGINE_STOP_UNCONFIRMED.to_string());
             }
@@ -929,7 +977,7 @@ impl<C: CredentialStores> Engine<C> {
                 revoke(&self.client, &self.config.api_base, &token).await;
             }
             Ok(())
-        })
+        }
     }
 
     /// One page of a folder's rows (`None`: the root), as the Files window lists them: the Backups root first, each

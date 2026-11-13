@@ -158,6 +158,20 @@ fn a_refused_restore_is_drawn() {
 }
 
 #[test]
+fn a_restore_that_was_not_made_is_drawn_without_a_name() {
+    let (mut rt, held) = window(Held {
+        rows: three(),
+        ..Held::default()
+    });
+    held.borrow_mut().notice = Some(Notice::RestoreNotDone);
+    poll(&mut rt);
+    assert_eq!(
+        info(&rt, "notice-words").text.as_deref(),
+        Some("A restore didn\u{2019}t go through before Beebeeb was locked or signed out. The item is still in Trash.")
+    );
+}
+
+#[test]
 fn controls_with_no_engine_call_say_not_available_yet_and_push_nothing() {
     let (mut rt, _) = window(Held {
         rows: three(),

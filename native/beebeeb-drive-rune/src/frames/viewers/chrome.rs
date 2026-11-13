@@ -326,7 +326,7 @@ pub fn window(
         .child({
             let mut content = row().key("viewer-row").grow(1.0).min_h(0.0).w_full().child(body);
             if ui.show_details {
-                content = content.child(super::details::panel(&ui.file, t));
+                content = content.child(super::details::panel(&ui.file, ui.knows_offline(), t));
             }
             content
         })

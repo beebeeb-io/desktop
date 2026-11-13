@@ -6,22 +6,28 @@
 //!   ([`Engine::storage_region`]); the version this binary was built as. No updater runs in this app yet, so
 //!   General never says a newer version exists.
 //! - General › Storage location (DW-0788, b, c, d): the account's choice and the list, by country, from Beebeeb. A
-//!   choice and "only store in this country" are sent once ([`Engine::set_storage_region`], the one call here that
-//!   writes account state) and shown only after Beebeeb took them; a refusal leaves the old choice and says so.
+//!   choice and "only store in this country" are sent once ([`Engine::set_storage_region_for`], the one call here
+//!   that writes account state) and shown only after Beebeeb took them; a refusal leaves the old choice and says so.
+//! - Notifications (DW-0750) and Recent notifications (DW-0791): [`notifications`], its own part (the account's
+//!   alert switches and notifications from Beebeeb, this PC's switches from its settings file).
 //! - Not wired here (the shell's "not built yet" frame in their place): About and the release notes (no updater
-//!   yet), Notifications and Recent notifications (what Windows allows for this app is not read yet, so the pane
-//!   could not say when nothing arrives), Report a problem (no support bundle is built here yet).
+//!   yet), Report a problem (no support bundle is built here yet).
 //!
 //! Thread rule (task 2470 W5): nothing here waits for Beebeeb or for the settings file's write lock on the window's
 //! thread. Each call and each write runs on a worker thread of its own and sends its answer down one channel, which
 //! [`SettingsSource::pump`] drains (`frames::settings::poll`); a read is not started while one is under way, and a
 //! write is not started while one is.
 //!
+//! Session rule: a read and a change each carry the session ([`Engine::session_turn`]) and the account they were
+//! asked under, taken on the window's thread at the press (never on the worker). The engine sends a change only
+//! under that very session; an answer that lands under another session or account is never drawn.
+//!
 //! Must not: log a name, a path, a token or a server's words; show a city; draw a value it has not read.
 
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::account_dto::UserRegionResponse;
 use beebeeb_engine::app::settings_api::AccountCallError;
 use beebeeb_engine::app::{CredentialStores, Engine};
@@ -31,12 +37,15 @@ use beebeeb_engine::identity::EngineIdentity;
 use super::log;
 use crate::frames::settings::Pane;
 use crate::frames::settings::source::{
-    About, Channel, General, Location, Locations, Notifications, Pumped, RecentAlert, SettingsSource, ThemeChoice,
-    Unwired, Update,
+    About, Channel, General, Location, Locations, Notifications, Pumped, ReadState, RecentAlert, SettingsSource,
+    ThemeChoice, Unwired, Update,
 };
 
+mod notifications;
 #[cfg(test)]
 mod tests;
+
+use notifications::NotificationsPart;
 
 /// A list read this recently is not asked for again when its pane opens.
 const FRESH_FOR: Duration = Duration::from_secs(30);
@@ -44,9 +53,10 @@ const FRESH_FOR: Duration = Duration::from_secs(30);
 /// The id the account's default carries in Beebeeb's list (`account_dto::region`).
 const DEFAULT_ID: &str = "europe";
 
-/// What the toasts say. `NOT_CHOSEN` may be said ONLY after an HTTP refusal (a status code the
-/// server returned): the old choice stands. `UNKNOWN_CHANGE` is for a timeout, a transport error
-/// mid-flight, or a 2xx with an unreadable body: the change may have landed.
+/// What the toasts say. `NOT_CHOSEN` may be said ONLY when the old choice stands for certain: after an HTTP
+/// refusal (a status code the server returned), or when nothing was sent (the session of the press was gone).
+/// `UNKNOWN_CHANGE` is for a timeout, a transport error mid-flight, or a 2xx with an unreadable body: the change
+/// may have landed.
 pub const CHOSEN: &str = "Storage location updated";
 pub const NOT_CHOSEN: &str = "Couldn't change the storage location. Nothing changed.";
 pub const UNKNOWN_CHANGE: &str = "Couldn't confirm the change. Checking what the server has.";
@@ -74,15 +84,26 @@ pub struct EngineSettingsSource<C: CredentialStores> {
     /// When the region was last answered.
     read_at: Option<Instant>,
     reading: bool,
+    /// What is held may not be what Beebeeb holds (or nothing is held for whoever is here): a read is started by
+    /// the next poll that finds a session in memory and no read under way.
+    read_wanted: bool,
+    /// Words for the account that pressed, said by the first poll that finds its session in memory (a lock may be
+    /// in between); dropped when another account, or none, is here.
+    told_later: Option<(Option<String>, &'static str)>,
     /// A change of the storage location is on its way: no second one starts until it is answered.
     writing: bool,
     /// Counts the changes Beebeeb took: a read that began before one of them is stale when it lands.
     generation: u64,
     /// A toast for the next poll (a change that has to wait).
     toast_next: Option<&'static str>,
+    /// Tests only: the next change waits here, on its worker, before it calls the engine.
+    #[cfg(test)]
+    hold_next_write: Option<mpsc::Receiver<()>>,
     version: String,
     answers: mpsc::Sender<Answer>,
     inbox: mpsc::Receiver<Answer>,
+    /// Notifications and Recent notifications.
+    alerts: NotificationsPart<C>,
     /// The panes this source does not answer for.
     rest: Unwired,
 }
@@ -94,13 +115,26 @@ enum Region {
     Known(UserRegionResponse),
 }
 
+/// The session and the account something was asked under.
+type Stamp = (SessionGeneration, Option<String>);
+
 /// What a worker sends back.
 enum Answer {
-    /// What Beebeeb said, the account it was asked for (`None`: it changed during the call), and the generation
-    /// the read began in.
-    Region(Option<String>, u64, Result<UserRegionResponse, AccountCallError>),
-    /// A change of the storage location: the account it was sent for, and what Beebeeb stored, or why not.
-    Chosen(Option<String>, Result<(Option<String>, bool), AccountCallError>),
+    /// A read of the storage location.
+    Region {
+        /// The session and account it was asked under.
+        asked: Stamp,
+        /// The generation the read began in.
+        generation: u64,
+        result: Result<UserRegionResponse, AccountCallError>,
+    },
+    /// A change of the storage location.
+    Chosen {
+        /// The session and account of the press.
+        pressed: Stamp,
+        /// What Beebeeb stored, or why not.
+        result: Result<(Option<String>, bool), AccountCallError>,
+    },
     /// A theme write: the theme it wrote, and whether the file took it.
     Theme { wanted: ThemeChoice, saved: bool },
 }
@@ -190,12 +224,18 @@ fn account_of<C: CredentialStores>(engine: &Engine<C>) -> Option<String> {
     engine.account_email().or_else(|| engine.user_id())
 }
 
-/// The account a call was for, when it was the same one before and after it: else `None` (never shown).
-fn same_account<C: CredentialStores>(engine: &Engine<C>, before: Option<String>) -> Option<String> {
-    before.filter(|whose| account_of(engine).as_ref() == Some(whose))
+/// The session and account a call on `engine` is made under. Taken on the window's thread, before a worker starts.
+fn stamp<C: CredentialStores>(engine: &Engine<C>) -> Stamp {
+    (engine.session_turn(), account_of(engine))
 }
 
-impl<C: CredentialStores> EngineSettingsSource<C> {
+/// Whether a stamp is the engine's session and account now, with a session in memory. The session's turn only
+/// moves forward, so a stamp that is current when an answer is taken was current for the whole call.
+fn is_now<C: CredentialStores>(engine: &Engine<C>, stamp: &Stamp) -> bool {
+    engine.has_session() && stamp.1.is_some() && *stamp == self::stamp(engine)
+}
+
+impl<C: CredentialStores + 'static> EngineSettingsSource<C> {
     /// The source of the running app. Reads this PC's settings file now (local and small: the first paint is
     /// local) and, when someone is signed in, asks Beebeeb for the storage location on a worker.
     pub fn new(engine: Arc<Engine<C>>) -> Self {
@@ -203,13 +243,15 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
     }
 
     pub(crate) fn for_identity(engine: Arc<Engine<C>>, identity: &'static EngineIdentity) -> Self {
-        let theme = match DesktopConfig::load_for(identity) {
-            Ok(config) => theme_of(config.theme),
-            Err(_) => {
+        let config = DesktopConfig::load_for(identity).ok();
+        let theme = match &config {
+            Some(config) => theme_of(config.theme),
+            None => {
                 log("settings: the settings file could not be read; the theme follows Windows");
                 ThemeChoice::System
             }
         };
+        let alerts = NotificationsPart::new(engine.clone(), identity, config.as_ref());
         let (answers, inbox) = mpsc::channel();
         let mut source = Self {
             engine,
@@ -223,12 +265,17 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
             listing: None,
             read_at: None,
             reading: false,
+            read_wanted: false,
+            told_later: None,
             writing: false,
             generation: 0,
             toast_next: None,
+            #[cfg(test)]
+            hold_next_write: None,
             version: version_words(),
             answers,
             inbox,
+            alerts,
             rest: Unwired,
         };
         if account_of(&source.engine).is_some() {
@@ -237,30 +284,26 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
         source
     }
 
-    /// Ask Beebeeb for the storage location, on a worker, unless a read is under way.
+    /// Ask Beebeeb for the storage location, on a worker, unless a read is under way. The answer is taken only
+    /// while the session is the one of this moment (no session change between here and the answer, so the token
+    /// the engine used was this session's).
     fn read_region(&mut self) {
         if self.reading {
             return;
         }
+        let asked = stamp(&self.engine);
         let (engine, answers, generation) = (self.engine.clone(), self.answers.clone(), self.generation);
         let started = std::thread::Builder::new()
             .name("settings-region".into())
             .spawn(move || {
                 // A panic in this worker must not leave `reading` set for good: send an error.
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let before = account_of(&engine);
-                    let answer = engine.storage_region();
-                    let whose = same_account(&engine, before);
-                    (whose, answer)
-                }));
-                match result {
-                    Ok((whose, answer)) => {
-                        let _ = answers.send(Answer::Region(whose, generation, answer));
-                    }
-                    Err(_) => {
-                        let _ = answers.send(Answer::Region(None, generation, Err(AccountCallError::Offline)));
-                    }
-                }
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.storage_region()))
+                    .unwrap_or(Err(AccountCallError::Offline));
+                let _ = answers.send(Answer::Region {
+                    asked,
+                    generation,
+                    result,
+                });
             });
         self.reading = started.is_ok();
         if started.is_err() {
@@ -269,33 +312,36 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
     }
 
     /// Send a change of the storage location, on a worker. One at a time: a change while one is on its way waits,
-    /// and the toast says so.
-    fn send_choice(&mut self, id: String, strict: bool) {
+    /// and the toast says so. `pressed` is the session and account of the press, read on the window's thread
+    /// BEFORE the list the choice came from was looked at: the engine sends nothing under another session.
+    fn send_choice(&mut self, pressed: Stamp, id: String, strict: bool) {
         if self.writing {
             self.toast_next = Some(STILL_SAVING);
             return;
         }
         let (engine, answers) = (self.engine.clone(), self.answers.clone());
+        #[cfg(test)]
+        let hold = self.hold_next_write.take();
         let started = std::thread::Builder::new()
             .name("settings-region-set".into())
             .spawn(move || {
                 // A panic in this worker must not leave `writing` set for good: send an error.
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let before = account_of(&engine);
-                    let stored = engine
-                        .set_storage_region(Some(&id), Some(strict))
-                        .map(|answer| (answer.preferred_region, answer.region_strict));
-                    let whose = same_account(&engine, before);
-                    (whose, stored)
-                }));
-                match result {
-                    Ok((whose, stored)) => {
-                        let _ = answers.send(Answer::Chosen(whose, stored));
-                    }
-                    Err(_) => {
-                        let _ = answers.send(Answer::Chosen(None, Err(AccountCallError::Offline)));
-                    }
+                #[cfg(test)]
+                if let Some(hold) = hold {
+                    let _ = hold.recv();
                 }
+                // The guard is the engine's: it copies the token only while the session in memory is still the one
+                // of the press, asked under its session-write lock, and sends nothing otherwise. A check here
+                // before the call could not be atomic with the send (the lock is the engine's), so there is none
+                // to rely on: the session of the press is handed over and the engine decides.
+                let session = pressed.0;
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    engine
+                        .set_storage_region_for(session, Some(&id), Some(strict))
+                        .map(|answer| (answer.preferred_region, answer.region_strict))
+                }))
+                .unwrap_or(Err(AccountCallError::Offline));
+                let _ = answers.send(Answer::Chosen { pressed, result });
             });
         self.writing = started.is_ok();
         if started.is_err() {
@@ -304,10 +350,35 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
         }
     }
 
-    /// The list and its ids, while what was read is the signed-in account's.
+    /// The list and its ids, while what was read is the signed-in account's and its session is in memory (a locked
+    /// vault shows no list, so nothing can be chosen from one).
     fn listing(&self) -> Option<&(Locations, Vec<String>)> {
-        let mine = self.region_of.is_some() && self.region_of == account_of(&self.engine);
+        let mine = self.engine.has_session() && self.region_of.is_some() && self.region_of == account_of(&self.engine);
         self.listing.as_ref().filter(|_| mine)
+    }
+
+    /// Drop what is held about the storage location: nothing of it is drawn, and it does not count as read.
+    fn forget_region(&mut self) {
+        self.region = Region::Unknown;
+        self.region_of = None;
+        self.read_at = None;
+        self.relist();
+    }
+
+    /// What Beebeeb holds for `account` may no longer be what is held here (a change of theirs was, or may have
+    /// been, taken and its answer is not drawn): what is held of that account is dropped, and when it is the
+    /// account here now, a read under way is made stale and a fresh one is wanted.
+    fn outdated(&mut self, account: &Option<String>) {
+        if account.is_none() {
+            return;
+        }
+        if self.region_of == *account {
+            self.forget_region();
+        }
+        if *account == account_of(&self.engine) {
+            self.generation += 1;
+            self.read_wanted = true;
+        }
     }
 
     fn relist(&mut self) {
@@ -319,7 +390,7 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
 
     /// The panes of this source that draw only what it has read.
     fn answers_for(pane: Pane) -> bool {
-        matches!(pane, Pane::General | Pane::StorageLocation)
+        matches!(pane, Pane::General | Pane::StorageLocation) || NotificationsPart::<C>::answers_for(pane)
     }
 
     /// The one writer of the theme: each change in the order chosen, merge-only (the theme alone).
@@ -350,7 +421,7 @@ impl<C: CredentialStores> EngineSettingsSource<C> {
     }
 }
 
-impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
+impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
     fn wired(&self, pane: Pane) -> bool {
         Self::answers_for(pane)
     }
@@ -361,6 +432,10 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
     }
 
     fn opened(&mut self, pane: Pane) {
+        self.alerts.opened(pane);
+        if NotificationsPart::<C>::answers_for(pane) {
+            return;
+        }
         let fresh = self.read_at.is_some_and(|at| at.elapsed() < FRESH_FOR) && self.listing().is_some();
         if Self::answers_for(pane) && !fresh {
             self.read_region();
@@ -376,31 +451,49 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
         while let Ok(answer) = self.inbox.try_recv() {
             pumped.changed = true;
             match answer {
-                Answer::Region(whose, generation, result) => {
+                Answer::Region {
+                    asked,
+                    generation,
+                    result,
+                } => {
                     self.reading = false;
                     // A change Beebeeb took after this read began is newer than what the read says.
                     if generation != self.generation {
                         continue;
                     }
-                    self.read_at = Some(Instant::now());
+                    // Asked under a session or an account that is not the current one (or answered while the vault
+                    // is locked): never drawn, and not counted as a read. When the session or the account moved on
+                    // since it was asked, whoever is here is asked for afresh: once per move, by a poll that finds
+                    // a session in memory.
+                    if !is_now(&self.engine, &asked) {
+                        self.forget_region();
+                        if stamp(&self.engine) != asked {
+                            self.read_wanted = true;
+                        }
+                        continue;
+                    }
                     match result {
                         Ok(region) => {
+                            self.read_at = Some(Instant::now());
                             self.region = Region::Known(region);
-                            self.region_of = whose;
+                            self.region_of = asked.1;
+                            self.relist();
                         }
                         Err(kind) => {
                             if kind != AccountCallError::NotSignedIn {
                                 log(format!("settings: the storage location did not load ({kind})"));
                             }
-                            self.region = Region::Unknown;
-                            self.region_of = None;
+                            // A read that failed is not a read: the next opening asks again.
+                            self.forget_region();
                         }
                     }
-                    self.relist();
                 }
-                Answer::Chosen(whose, result) => {
+                Answer::Chosen { pressed, result } => {
                     self.writing = false;
-                    let mine = whose.is_some() && whose == self.region_of;
+                    // Drawn only for the session AND the account of the press, and only onto that account's list.
+                    let mine = is_now(&self.engine, &pressed) && pressed.1 == self.region_of;
+                    // The account that pressed is the one this engine names now (its vault may be locked).
+                    let theirs = pressed.1.is_some() && pressed.1 == account_of(&self.engine);
                     match (result, &mut self.region) {
                         (Ok((preferred, strict)), Region::Known(region)) if mine => {
                             region.preferred_region = preferred;
@@ -409,22 +502,33 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
                             self.relist();
                             pumped.toast = Some(CHOSEN);
                         }
-                        // Taken for an account that is not the one shown now: nothing on screen changes.
-                        (Ok(_), _) => self.generation += 1,
+                        // Taken, and the answer is not for the session shown now: it is never drawn, and what is
+                        // held of that account is out of date.
+                        (Ok(_), _) => self.outdated(&pressed.1),
                         (Err(kind), _) => {
                             log(format!("settings: the storage location was not changed ({kind})"));
-                            if mine {
-                                // "Nothing changed" only after an HTTP refusal (the server answered
-                                // and said no). A timeout, a transport error mid-flight, or an
-                                // unreadable 2xx: the change may have landed, so say the result is
-                                // unknown and re-read what the server has (P2-1, task 2473).
-                                match kind {
-                                    AccountCallError::ServerError | AccountCallError::SessionEnded => {
-                                        pumped.toast = Some(NOT_CHOSEN);
+                            match kind {
+                                // The old choice stands for certain: the engine sent nothing (the session of the
+                                // press is gone: a lock, a sign-out, another sign-in), or Beebeeb answered and said
+                                // no. Said only to the account that pressed.
+                                AccountCallError::NotSignedIn
+                                | AccountCallError::ServerError
+                                | AccountCallError::SessionEnded => {
+                                    if theirs {
+                                        self.told_later = Some((pressed.1, NOT_CHOSEN));
                                     }
-                                    _ => {
-                                        pumped.toast = Some(UNKNOWN_CHANGE);
-                                        self.read_region();
+                                }
+                                // A timeout, a transport error mid-flight, or an unreadable 2xx: the change may
+                                // have landed, so say the result is unknown and re-read what the server has
+                                // (P2-1, task 2473).
+                                _ => {
+                                    if mine {
+                                        self.read_wanted = true;
+                                    } else {
+                                        self.outdated(&pressed.1);
+                                    }
+                                    if theirs {
+                                        self.told_later = Some((pressed.1, UNKNOWN_CHANGE));
                                     }
                                 }
                             }
@@ -443,7 +547,27 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
                 }
             }
         }
-        pumped.busy = self.reading || self.writing || self.saving > 0;
+        // Words for the account that pressed: said once its session is in memory (after an unlock the engine wakes
+        // the window, which polls); never to another account.
+        if let Some((account, words)) = self.told_later.take() {
+            if account == account_of(&self.engine) {
+                if self.engine.has_session() && pumped.toast.is_none() {
+                    pumped.toast = Some(words);
+                    pumped.changed = true;
+                } else {
+                    self.told_later = Some((account, words));
+                }
+            }
+        }
+        if self.read_wanted && !self.reading && self.engine.has_session() {
+            self.read_wanted = false;
+            self.read_region();
+        }
+        let waiting_to_say = self.told_later.is_some() && self.engine.has_session();
+        let (changed, toast, busy) = self.alerts.pump();
+        pumped.changed |= changed;
+        pumped.toast = pumped.toast.or(toast);
+        pumped.busy = self.reading || self.writing || self.saving > 0 || waiting_to_say || busy;
         pumped
     }
 
@@ -456,22 +580,31 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
     }
 
     fn mark_recent_seen(&mut self) {
-        self.rest.mark_recent_seen();
+        self.alerts.mark_recent_seen();
     }
     fn check_for_updates(&mut self) {
         self.rest.check_for_updates();
     }
     fn recent_alerts(&self) -> Vec<(String, Vec<RecentAlert>)> {
-        self.rest.recent_alerts()
+        self.alerts.recent_alerts()
     }
     fn notifications(&self) -> Notifications {
-        self.rest.notifications()
+        self.alerts.notifications()
     }
     fn set_allow_notifications(&mut self, on: bool) {
-        self.rest.set_allow_notifications(on);
+        self.alerts.set_allow_notifications(on);
     }
     fn set_alert(&mut self, group: usize, index: usize, on: bool) {
-        self.rest.set_alert(group, index, on);
+        self.alerts.set_alert(group, index, on);
+    }
+    fn recent_state(&self) -> ReadState {
+        self.alerts.recent_state()
+    }
+    fn alerts_state(&self, group: usize) -> ReadState {
+        self.alerts.alerts_state(group)
+    }
+    fn reload_notifications(&mut self) {
+        self.alerts.reload();
     }
 
     fn locations(&self) -> Option<Locations> {
@@ -481,6 +614,8 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
     /// Sent once; the pane shows the new choice, and the toast says so, only after Beebeeb took it. Never a place
     /// that is not live. `false` always: nothing is taken yet when this returns.
     fn choose_location(&mut self, index: usize) -> bool {
+        // The session of the press, before the list is looked at (see `send_choice`).
+        let pressed = stamp(&self.engine);
         let Some((locations, ids)) = self.listing() else {
             return false;
         };
@@ -491,11 +626,12 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
             return false;
         }
         let (id, strict) = (ids[index].clone(), !place.default && locations.only_here);
-        self.send_choice(id, strict);
+        self.send_choice(pressed, id, strict);
         false
     }
 
     fn set_only_here(&mut self, on: bool) {
+        let pressed = stamp(&self.engine);
         let Some((locations, ids)) = self.listing() else {
             return;
         };
@@ -503,7 +639,7 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
             return;
         }
         let id = ids[locations.chosen].clone();
-        self.send_choice(id, on);
+        self.send_choice(pressed, id, on);
     }
 
     fn reload_locations(&mut self) {
@@ -552,5 +688,16 @@ impl<C: CredentialStores> SettingsSource for EngineSettingsSource<C> {
             log("settings: the theme could not be saved (no writer)");
             self.toast_next = Some(THEME_NOT_SAVED);
         }
+    }
+}
+
+#[cfg(test)]
+impl<C: CredentialStores + 'static> EngineSettingsSource<C> {
+    /// The next change of the storage location waits on its worker, before it calls the engine, until the returned
+    /// sender is sent to or dropped.
+    pub(super) fn hold_next_write(&mut self) -> mpsc::Sender<()> {
+        let (release, held) = mpsc::channel();
+        self.hold_next_write = Some(held);
+        release
     }
 }

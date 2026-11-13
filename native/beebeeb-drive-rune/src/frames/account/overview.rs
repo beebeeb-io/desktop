@@ -9,11 +9,22 @@ use crate::ui::kit;
 use crate::ui::settings_list as lists;
 use rune::{El, col, row};
 
-use super::icons;
-use super::source::{AccountSource, Plan, ProductKind, ProductState};
+use super::source::{AccountSource, PaneState, Plan, ProductKind, ProductState};
+use super::{Pane, icons};
 
 /// The hue of the account's avatar tint (`.kit-avatar.hue-a`).
 const AVATAR_HUE: f32 = 250.0;
+
+/// A row of who is signed in. It is a link to the page that changes it only while something answers for that
+/// page: else it is the value alone, with no press and no chevron (never a row that leads to a page that is
+/// not there).
+fn who_row(index: usize, row: Row, to: (Pane, &'static str), source: &dyn AccountSource, t: &Theme) -> El {
+    let (page, frame) = to;
+    if source.pane_state(page) == PaneState::Unwired {
+        return set::item(0, index, &row, Vec::new(), t);
+    }
+    set::item(0, index, &row.link(true), Vec::new(), t).on_press(move |s: &mut State| super::go(s, frame))
+}
 
 pub fn pane(source: &dyn AccountSource, t: &Theme) -> El {
     let who = source.identity();
@@ -21,32 +32,27 @@ pub fn pane(source: &dyn AccountSource, t: &Theme) -> El {
         0,
         None,
         vec![
-            set::item(
+            who_row(
                 0,
-                0,
-                &Row::new(
+                Row::new(
                     Lead::Avatar {
                         initials: who.initials.clone(),
                         hue: AVATAR_HUE,
                     },
                     who.name.clone(),
                 )
-                .name(format!("Name, {}", who.name))
-                .link(true),
-                Vec::new(),
+                .name(format!("Name, {}", who.name)),
+                (Pane::Name, "DW-A64"),
+                source,
                 t,
-            )
-            .on_press(|s: &mut State| super::go(s, "DW-A64")),
-            set::item(
-                0,
+            ),
+            who_row(
                 1,
-                &Row::new(Lead::Icon(&icons::MAIL), who.email.clone())
-                    .name(format!("Sign-in email, {}", who.email))
-                    .link(true),
-                Vec::new(),
+                Row::new(Lead::Icon(&icons::MAIL), who.email.clone()).name(format!("Sign-in email, {}", who.email)),
+                (Pane::Email, "DW-A65"),
+                source,
                 t,
-            )
-            .on_press(|s: &mut State| super::go(s, "DW-A65")),
+            ),
         ],
         None,
         t,

@@ -5,6 +5,7 @@
 //! One process, one fake server, invented accounts. `BB_API_BASE` is set once, before anything reads it.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -44,7 +45,7 @@ const APPLE: &str = "a0000000-0000-4000-8000-000000000002";
 fn master_key() -> beebeeb_core::kdf::MasterKey {
     static KEY: OnceLock<[u8; 32]> = OnceLock::new();
     beebeeb_core::kdf::MasterKey::from_bytes(
-        *KEY.get_or_init(|| beebeeb_core::recovery::recover_from_phrase(PHRASE).unwrap().to_bytes()),
+        *KEY.get_or_init(|| *beebeeb_core::recovery::recover_from_phrase(PHRASE).unwrap().to_bytes()),
     )
 }
 
@@ -98,6 +99,21 @@ struct World {
     sessions: Vec<(String, &'static str, &'static str)>,
     partials: Vec<String>,
     revoked: Vec<String>,
+}
+
+/// How the fake answers the step-up's two legs.
+static STEP_UP: AtomicU8 = AtomicU8::new(STEP_UP_ANSWERS);
+const STEP_UP_ANSWERS: u8 = 0;
+const STEP_UP_RATE_LIMITED: u8 = 1;
+const STEP_UP_NO_ANSWER: u8 = 2;
+const STEP_UP_SESSION_ENDED: u8 = 3;
+
+fn step_up_requests() -> usize {
+    fake_api()
+        .routes()
+        .iter()
+        .filter(|route| route.contains("/auth/confirm-opaque-"))
+        .count()
 }
 
 fn account_of(email: &str) -> Option<(&'static str, &'static str)> {
@@ -183,6 +199,28 @@ fn fake_api() -> &'static FakeApi {
                         Reply::ok(json!({ "valid": true }))
                     } else {
                         Reply::error(400, "invalid_recovery_phrase")
+                    }
+                }
+                // The step-up (core's `auth_flow::step_up`), answered as `STEP_UP` says.
+                "POST /api/v1/auth/confirm-opaque-start" | "POST /api/v1/auth/confirm-opaque-finish"
+                    if STEP_UP.load(Ordering::SeqCst) == STEP_UP_RATE_LIMITED =>
+                {
+                    Reply::error(429, "rate_limited")
+                }
+                "POST /api/v1/auth/confirm-opaque-start" | "POST /api/v1/auth/confirm-opaque-finish"
+                    if STEP_UP.load(Ordering::SeqCst) == STEP_UP_NO_ANSWER =>
+                {
+                    Reply::hang_up()
+                }
+                "POST /api/v1/auth/confirm-opaque-start" if STEP_UP.load(Ordering::SeqCst) == STEP_UP_SESSION_ENDED => {
+                    Reply::error(401, "unauthorized")
+                }
+                "POST /api/v1/auth/confirm-opaque-start" => opaque.login_start(&body),
+                "POST /api/v1/auth/confirm-opaque-finish" => {
+                    if opaque.login_finish(&body) {
+                        Reply::ok(json!({ "confirmation_token": "a-grant", "expires_at": "2026-01-01T00:05:00Z" }))
+                    } else {
+                        Reply::error(401, "invalid_credentials")
                     }
                 }
                 "POST /api/v1/auth/logout" => {
@@ -526,5 +564,160 @@ fn another_accounts_stored_key_is_refused_and_removed() {
     );
     assert_eq!(host.engine.keys_for_engine_start(), Err(EngineStartBlocked::NoSession));
     assert_eq!(gate::problem_from(FOREIGN_KEY_NOT_REMOVED, 0), SignInProblem::StaleKey);
+    assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
+}
+
+/// Signed in as `EMAIL` and unlocked with the phrase, then locked: the key is in the store, not in memory.
+fn locked(credentials: &MemoryCredentials) -> Host {
+    let host = open(credentials);
+    assert_eq!(host.engine.restore(), GateState::SignedOut);
+    assert_eq!(
+        host.engine.sign_in_password(EMAIL, secret(PASSWORD)),
+        Ok(NextAfterSignIn::RecoveryPhrase)
+    );
+    assert_eq!(host.engine.unlock_with_phrase(secret(PHRASE)), Ok(()));
+    assert_eq!(host.engine.lock(), SyncStop::WasNotRunning);
+    assert_eq!(host.engine.gate(), GateState::Locked);
+    host
+}
+
+#[test]
+fn a_locked_vault_opens_with_the_accounts_password_proven_by_the_server() {
+    let _serial = serial();
+    STEP_UP.store(STEP_UP_ANSWERS, Ordering::SeqCst);
+    let credentials = MemoryCredentials::default();
+    let host = locked(&credentials);
+    let wakes = host.wakes.load(Ordering::SeqCst);
+
+    // Not the password: refused in the sign-in form's one sentence, and the vault stays locked.
+    assert_eq!(
+        host.engine.unlock_with_password(secret("not the password")),
+        Err(SignInProblem::Invalid)
+    );
+    assert_eq!(host.engine.gate(), GateState::Locked);
+    assert_eq!(host.engine.keys_for_engine_start(), Err(EngineStartBlocked::NoSession));
+    assert!(
+        host.wakes.load(Ordering::SeqCst) > wakes,
+        "a refusal wakes the window too"
+    );
+
+    // The server says wait: said as it is. No answer at all: offline. Neither unlocks.
+    STEP_UP.store(STEP_UP_RATE_LIMITED, Ordering::SeqCst);
+    assert_eq!(
+        host.engine.unlock_with_password(secret(PASSWORD)),
+        Err(SignInProblem::RateLimited { seconds: 30 })
+    );
+    STEP_UP.store(STEP_UP_NO_ANSWER, Ordering::SeqCst);
+    assert_eq!(
+        host.engine.unlock_with_password(secret(PASSWORD)),
+        Err(SignInProblem::Offline)
+    );
+    assert_eq!(host.engine.gate(), GateState::Locked);
+    STEP_UP.store(STEP_UP_ANSWERS, Ordering::SeqCst);
+
+    // The password: the stored key is in memory again, for the same account.
+    assert_eq!(host.engine.unlock_with_password(secret(PASSWORD)), Ok(()));
+    assert_eq!(host.engine.gate(), GateState::Ready);
+    assert_eq!(
+        host.engine.keys_for_engine_start().map(|identity| identity.user_id),
+        Ok(Some(USER.to_string()))
+    );
+    // Already open: nothing is asked of the server.
+    let asked = step_up_requests();
+    assert_eq!(host.engine.unlock_with_password(secret("anything")), Ok(()));
+    assert_eq!(step_up_requests(), asked);
+
+    // A session the server no longer accepts: no password is judged, and nothing unlocks.
+    assert_eq!(host.engine.lock(), SyncStop::WasNotRunning);
+    STEP_UP.store(STEP_UP_SESSION_ENDED, Ordering::SeqCst);
+    assert_eq!(
+        host.engine.unlock_with_password(secret(PASSWORD)),
+        Err(SignInProblem::Other)
+    );
+    assert_eq!(host.engine.gate(), GateState::Locked);
+    STEP_UP.store(STEP_UP_ANSWERS, Ordering::SeqCst);
+    // It was not counted as a wrong password: the next wrong one is the second of this handle, not a lock hint.
+    assert_eq!(
+        host.engine.unlock_with_password(secret("not the password")),
+        Err(SignInProblem::Invalid)
+    );
+    assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
+}
+
+#[test]
+fn a_password_unlocks_only_a_key_that_is_here_and_only_when_signed_in() {
+    let _serial = serial();
+    STEP_UP.store(STEP_UP_ANSWERS, Ordering::SeqCst);
+    let credentials = MemoryCredentials::default();
+    let host = open(&credentials);
+    assert_eq!(host.engine.restore(), GateState::SignedOut);
+    let asked = step_up_requests();
+    // Signed out: nothing to unlock.
+    assert_eq!(
+        host.engine.unlock_with_password(secret(PASSWORD)),
+        Err(SignInProblem::Other)
+    );
+    // Signed in on a computer without the key: the twelve words are the way, the password opens nothing.
+    assert_eq!(
+        host.engine.sign_in_password(EMAIL, secret(PASSWORD)),
+        Ok(NextAfterSignIn::RecoveryPhrase)
+    );
+    assert_eq!(
+        host.engine.unlock_with_password(secret(PASSWORD)),
+        Err(SignInProblem::Other)
+    );
+    assert_eq!(host.engine.gate(), GateState::NeedsRecoveryPhrase);
+    assert_eq!(
+        step_up_requests(),
+        asked,
+        "no proof is asked when there is no key to load"
+    );
+    assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
+}
+
+#[test]
+fn leaving_a_half_done_sign_in_forgets_the_code_step_and_signs_a_keyless_session_out() {
+    let _serial = serial();
+    let credentials = MemoryCredentials::default();
+    let host = open(&credentials);
+    assert_eq!(host.engine.restore(), GateState::SignedOut);
+
+    // A proven password that waits for its code: forgotten, so the right code no longer signs in.
+    assert_eq!(
+        host.engine.sign_in_password(EMAIL_2FA, secret(PASSWORD)),
+        Ok(NextAfterSignIn::TwoFactor)
+    );
+    assert_eq!(host.engine.discard_partial_sign_in(), Ok(()));
+    assert_eq!(host.engine.two_factor(secret(TOTP)), Err(gate::TWO_FACTOR_EXPIRED));
+    assert_eq!(host.engine.gate(), GateState::SignedOut);
+    assert!(credentials.is_empty(), "nothing was stored");
+
+    // Signed in without a key here (the twelve words were asked): signed out, so another account can sign in.
+    assert_eq!(
+        host.engine.sign_in_password(EMAIL, secret(PASSWORD)),
+        Ok(NextAfterSignIn::RecoveryPhrase)
+    );
+    assert_eq!(host.engine.discard_partial_sign_in(), Ok(()));
+    assert_eq!(host.engine.gate(), GateState::SignedOut);
+    assert!(credentials.is_empty(), "the token left the store");
+    assert_eq!(host.engine.account_email(), None);
+    assert_eq!(
+        host.engine.sign_in_password(EMAIL_2FA, secret(PASSWORD)),
+        Ok(NextAfterSignIn::TwoFactor)
+    );
+    assert_eq!(
+        host.engine.two_factor(secret(TOTP)),
+        Ok(NextAfterSignIn::RecoveryPhrase)
+    );
+    assert_eq!(host.engine.user_id().as_deref(), Some(USER_2FA));
+    assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
+    drop(host);
+
+    // A locked vault keeps its session and its key: leaving a screen never signs it out.
+    let credentials = MemoryCredentials::default();
+    let host = locked(&credentials);
+    assert_eq!(host.engine.discard_partial_sign_in(), Ok(()));
+    assert_eq!(host.engine.gate(), GateState::Locked);
+    assert!(!credentials.is_empty());
     assert_eq!(host.engine.sign_out_keeping_local_data(), Ok(()));
 }

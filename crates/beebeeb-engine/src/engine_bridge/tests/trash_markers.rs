@@ -189,6 +189,22 @@ pub(super) struct VersionedServerState {
     pub(super) serve_downloads: bool,
     /// The metadata names no `download_version` (a legacy file, an older server).
     pub(super) legacy_downloads: bool,
+    /// The server runs without version metadata (`BB_VERSION_METADATA` off): `complete` ignores the
+    /// completion name and answers with the row's name as it was.
+    pub(super) version_metadata_off: bool,
+    /// Sessions whose next `complete` is refused with `409 file_changed_during_upload`, once; the
+    /// session stays open.
+    pub(super) renamed_since_init: HashSet<String>,
+    /// (file id, version number) -> that version's metadata (`version_metadata_encrypted`): the
+    /// completion name of the upload, or the name of the restore, that made it.
+    pub(super) version_metadata: HashMap<(String, usize), String>,
+    /// The next `GET /files/{id}` (the row) answers this status line.
+    pub(super) refuse_row_read_once: Option<&'static str>,
+    /// The next `PATCH /files/{id}` that carries a name answers this status line and writes nothing.
+    pub(super) refuse_name_patch_once: Option<&'static str>,
+    /// file id -> the prefix of its object version ids in `GET /files/{id}/versions`
+    /// (`{prefix}-v{n}`, the form the restore route reads); unset: `object-{file id}`.
+    pub(super) version_id_prefix: HashMap<String, String>,
 }
 
 /// Upload mock that behaves like the server's version check: a replace
@@ -284,15 +300,27 @@ impl VersionedServerState {
             .unwrap_or_else(|| panic!("{file_id} has no version"));
         let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
         let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes());
-        chunks
-            .iter()
-            .flat_map(|chunk| beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, chunk).unwrap())
-            .collect()
+        // Read as a reader does: against the record of the name the server holds for the file (the
+        // completion name of its latest upload). A file with no such name is a v1 file.
+        let record = self
+            .authenticated_names
+            .get(file_id)
+            .and_then(|name| beebeeb_core::encrypt::decrypt_file_metadata_with_key(&file_key, name).ok())
+            .map_or(crate::content_record::ContentRecord::UNRECORDED, |opened| {
+                crate::content_record::ContentRecord::of(&opened)
+            });
+        let mut reader = record.decryptor(file_key, file_id);
+        let mut plain = Vec::new();
+        for chunk in chunks {
+            plain.extend_from_slice(&reader.push_frame(chunk).expect("a stored frame opens").data);
+        }
+        reader.finish().expect("the stored version is whole");
+        plain
     }
 }
 
 /// The UUID the mock names version `n` (1-based) of `file_id` by in a download manifest.
-fn mock_object_version_id(file_id: &str, n: usize) -> String {
+pub(super) fn mock_object_version_id(file_id: &str, n: usize) -> String {
     let tag = file_id
         .bytes()
         .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(u32::from(b)));
@@ -355,6 +383,14 @@ fn versioned_server_response(
             Some((file_id, index)) => (file_id.to_string(), index.parse::<usize>().ok()),
             None => (rest.to_string(), None),
         };
+        if chunk.is_none()
+            && let Some(status) = s.refuse_row_read_once.take()
+        {
+            return (
+                None,
+                http_json(status, serde_json::json!({ "error": "refused" })).into_bytes(),
+            );
+        }
         let selected = s.files.get(&file_id).and_then(|file| match &pinned {
             Some(pin) => (1..=file.versions.len())
                 .find(|n| mock_object_version_id(&file_id, *n) == *pin)

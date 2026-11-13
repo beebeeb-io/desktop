@@ -39,7 +39,7 @@ const SLOT: &str = "an-invented-slot";
 
 /// A session in memory, as a sign-in and an unlock leave it: the email, and the user id recorded for it.
 fn signed_in(engine: &TestEngine, user_id: Option<&str>, email: Option<&str>) {
-    let _writes = engine.writes.lock().unwrap();
+    let _writes = engine.writes.write().unwrap();
     engine
         .acct
         .advance_session_generation_holding_session_write_lock(SessionTransition::Write);
@@ -254,6 +254,94 @@ fn a_handle_does_not_outlive_its_session() {
     signed_out(&engine);
 }
 
+/// A handle made while a lock is ending its session (the turn has moved on, the session is not yet gone from memory)
+/// answers nothing once the lock is done.
+#[test]
+fn a_handle_made_while_its_session_is_ending_answers_nothing_after() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    engine.use_local_state_for_test(state(dir.path(), Some((Some("user-a"), Some("a@example.eu"))), true));
+    signed_in(&engine, Some("user-a"), Some("a@example.eu"));
+
+    // The first half of a lock, as `forget_session` does it.
+    {
+        let _writes = engine.writes.write().unwrap();
+        engine
+            .acct
+            .advance_session_generation_holding_session_write_lock(SessionTransition::Lock);
+    }
+    let handle = engine.local_state().expect("the session is still in memory");
+    // The second half: the session leaves memory.
+    *engine.acct.session.lock().unwrap() = None;
+    assert_eq!(
+        handle.with(|db| db.list_files().map(|files| files.len()).unwrap_or(0)),
+        Err(LocalStateRefused::SessionChanged)
+    );
+    signed_out(&engine);
+}
+
+/// An operation of many steps stops at the step after a lock: the steps before it ran, none after it does.
+#[test]
+fn an_operation_of_many_steps_takes_no_step_after_a_lock() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    engine.use_local_state_for_test(state(dir.path(), Some((Some("user-a"), Some("a@example.eu"))), true));
+    signed_in(&engine, Some("user-a"), Some("a@example.eu"));
+    let handle = engine.local_state_for_changes().expect("the owner's handle");
+    let mut reached = Vec::new();
+    let answer = handle.with_while(|_db, go_on| {
+        crate::free_up_space::each_while(["first", "second", "third"], go_on, |file| {
+            reached.push(file);
+            if file == "first" {
+                // Between two files: the vault is locked.
+                engine.forget_session(SessionTransition::Lock);
+            }
+        })
+    });
+    assert_eq!(reached, ["first"], "a file was reached after the lock");
+    assert_eq!(answer, Err(LocalStateRefused::SessionChanged));
+    signed_out(&engine);
+
+    // The control: with no lock every file is reached.
+    signed_in(&engine, Some("user-a"), Some("a@example.eu"));
+    let handle = engine.local_state_for_changes().expect("the owner's handle");
+    let mut reached = Vec::new();
+    let all = handle.with_while(|_db, go_on| {
+        crate::free_up_space::each_while(["first", "second", "third"], go_on, |file| reached.push(file))
+    });
+    assert_eq!((all, reached.len()), (Ok(true), 3));
+    signed_out(&engine);
+}
+
+/// Readers do not refuse each other: while another reader asks whether its session is still there, this one is
+/// answered. Only a session change makes a reader yield.
+#[test]
+fn a_reader_is_not_refused_because_another_reader_is_asking() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    engine.use_local_state_for_test(state(dir.path(), Some((Some("user-a"), Some("a@example.eu"))), true));
+    signed_in(&engine, Some("user-a"), Some("a@example.eu"));
+    let handle = engine.local_state().expect("the owner's handle");
+    {
+        // As another reader holds it, in the middle of its own question.
+        let _another_reader = engine.writes.read().unwrap();
+        assert_eq!(
+            handle.with(|db| db.list_files().map(|files| files.len()).unwrap_or(0)),
+            Ok(1)
+        );
+        assert!(engine.local_state().is_ok());
+    }
+    {
+        // A session change under way: the reader yields.
+        let _change = engine.writes.write().unwrap();
+        assert_eq!(
+            handle.with(|db| db.list_files().map(|files| files.len()).unwrap_or(0)),
+            Err(LocalStateRefused::SessionChanged)
+        );
+    }
+    signed_out(&engine);
+}
+
 /// An answer that was read while the session changed is dropped, not returned.
 #[test]
 fn an_answer_read_across_a_session_change_is_dropped() {
@@ -384,7 +472,7 @@ fn after_a_restart_the_stored_user_id_decides_not_the_email() {
         let engine = engine_on(credentials);
         engine.restore();
         {
-            let _writes = engine.writes.lock().unwrap();
+            let _writes = engine.writes.write().unwrap();
             engine
                 .acct
                 .advance_session_generation_holding_session_write_lock(SessionTransition::Write);
@@ -399,4 +487,217 @@ fn after_a_restart_the_stored_user_id_decides_not_the_email() {
         let handed_out = expected.is_none();
         assert_eq!(every_door(&engine), [handed_out; 3], "stored user id {stored_user_id}");
     }
+}
+
+fn local(db: &StateDb, id: &str, path: &str, kind: ItemKind) {
+    held(db, id, path, kind, FileStatus::Local, false);
+}
+
+/// A row with this status, kept on this computer or not.
+fn held(db: &StateDb, id: &str, path: &str, kind: ItemKind, status: FileStatus, kept: bool) {
+    let entry = FileEntry {
+        file_id: id.into(),
+        path: path.into(),
+        status,
+        size_bytes: 10,
+        modified_at: 1,
+        content_hash: None,
+        remote_updated_at: 1,
+        parent_id: None,
+        item_kind: kind,
+    };
+    db.upsert_file_with_contract(&entry, |contract| {
+        contract.item_kind = entry.item_kind.clone();
+        if kept {
+            contract.pin_state = crate::state_db::PinState::Pinned;
+        }
+    })
+    .unwrap();
+}
+
+fn ids(ids: &[&str]) -> Vec<String> {
+    ids.iter().map(|id| id.to_string()).collect()
+}
+
+/// An answer in words a test compares: `id:what`, and `+` where something under it was freed by the call.
+fn told(answer: &[crate::free_up_space::SelectionAnswer]) -> Vec<String> {
+    answer
+        .iter()
+        .map(|a| format!("{}:{:?}{}", a.id, a.what, if a.freed_some { "+" } else { "" }))
+        .collect()
+}
+
+/// A reclaim as the real one records it: these files are online only in the rows afterwards.
+fn frees<'a>(db: &'a StateDb, these: &'a [&'a str]) -> impl FnOnce(Vec<(String, String, i64)>) + 'a {
+    move |wanted| {
+        let freed: Vec<String> = wanted
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .filter(|id| these.contains(&id.as_str()))
+            .collect();
+        db.mark_cloud_only_after_dehydrate(&freed, 2).unwrap();
+    }
+}
+
+/// A selection names its own files alone, a folder everything in it (never a neighbour whose name starts the same),
+/// and each selected id gets its own answer, read from the rows after the reclaim.
+#[test]
+fn a_selection_reclaims_its_own_files_and_answers_per_item() {
+    use crate::free_up_space::free_selection;
+    let dir = tempfile::tempdir().unwrap();
+    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    local(&db, "d-a", "/A", ItemKind::Folder);
+    local(&db, "f-1", "/A/one.txt", ItemKind::File);
+    local(&db, "f-2", "/A/two.txt", ItemKind::File);
+    local(&db, "f-3", "/AB.txt", ItemKind::File);
+    local(&db, "f-4", "/other.txt", ItemKind::File);
+    let candidates = || -> Vec<(String, String, i64)> {
+        [
+            ("d-a", "/A"),
+            ("f-1", "/A/one.txt"),
+            ("f-2", "/A/two.txt"),
+            ("f-3", "/AB.txt"),
+            ("f-4", "/other.txt"),
+        ]
+        .iter()
+        .map(|(id, path)| (id.to_string(), path.to_string(), 10))
+        .collect()
+    };
+    let mut handed = Vec::new();
+    // The folder, one file outside it and an id no row has; the reclaim frees one of the folder's two files.
+    let answer = free_selection(&db, &ids(&["d-a", "f-4", "f-gone"]), candidates(), |wanted| {
+        handed = wanted.iter().map(|(id, _, _)| id.clone()).collect();
+        frees(&db, &["f-1", "f-4"])(wanted);
+    });
+    assert_eq!(
+        handed,
+        ["f-1", "f-2", "f-4"],
+        "the folder's row, a neighbour or an unselected file was handed over"
+    );
+    // The folder was freed in part (`+`): a host does not keep it again, or its freed file would come back.
+    assert_eq!(told(&answer), ["d-a:Left+", "f-4:Freed+", "f-gone:NoSuchItem"]);
+    // The neighbour whose name starts the same was not touched.
+    assert_eq!(db.get_file("f-3").unwrap().unwrap().status, FileStatus::Local);
+    // Everything of the folder freed: the folder is done.
+    let answer = free_selection(&db, &ids(&["d-a"]), candidates(), frees(&db, &["f-1", "f-2"]));
+    assert_eq!(told(&answer), ["d-a:Freed+"]);
+    // A file that is online only already: nothing is asked, and nothing of it is here.
+    let answer = free_selection(&db, &ids(&["f-4"]), Vec::new(), |_| panic!("nothing to reclaim"));
+    assert_eq!(told(&answer), ["f-4:Freed"], "freed before this call, not by it");
+    // Files alone are selected: only their own rows are read, and the answer is the same as beside a folder.
+    local(&db, "f-5", "/five.txt", ItemKind::File);
+    let one = vec![("f-5".to_string(), "/five.txt".to_string(), 10)];
+    let answer = free_selection(&db, &ids(&["f-5", "f-3", "f-gone"]), one, frees(&db, &["f-5"]));
+    assert_eq!(told(&answer), ["f-5:Freed+", "f-3:Left", "f-gone:NoSuchItem"]);
+}
+
+/// An id with nothing to hand to the reclaim is not "freed" while its bytes are on this computer: the answer is what
+/// the rows say afterwards, with the reason. (It was `true` for every one of these: "all of nothing was freed".)
+#[test]
+fn what_could_not_be_freed_is_never_answered_as_freed() {
+    use crate::free_up_space::free_selection;
+    let dir = tempfile::tempdir().unwrap();
+    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    held(&db, "f-up", "/up.txt", ItemKind::File, FileStatus::Uploading, false);
+    held(&db, "f-conf", "/conf.txt", ItemKind::File, FileStatus::Conflict, false);
+    held(&db, "f-err", "/err.txt", ItemKind::File, FileStatus::Error, false);
+    // Kept after the selection was read: the candidates no longer hold it.
+    held(&db, "f-kept", "/kept.txt", ItemKind::File, FileStatus::Local, true);
+    // A candidate the reclaim could not free (open in an app).
+    local(&db, "f-open", "/open.txt", ItemKind::File);
+    // A folder: one file is freed, one is uploading.
+    local(&db, "d-k", "/K", ItemKind::Folder);
+    local(&db, "f-k1", "/K/one.txt", ItemKind::File);
+    held(&db, "f-k2", "/K/two.txt", ItemKind::File, FileStatus::Uploading, false);
+    // A folder: one file is kept, one could not be freed.
+    local(&db, "d-m", "/M", ItemKind::Folder);
+    held(&db, "f-m1", "/M/one.txt", ItemKind::File, FileStatus::Local, true);
+    local(&db, "f-m2", "/M/two.txt", ItemKind::File);
+    // As the engine's query answers: downloaded and not kept.
+    let candidates: Vec<(String, String, i64)> = [
+        ("f-open", "/open.txt"),
+        ("d-k", "/K"),
+        ("f-k1", "/K/one.txt"),
+        ("d-m", "/M"),
+        ("f-m2", "/M/two.txt"),
+        ("d-t", "/T"),
+        ("f-t1", "/T/one.txt"),
+    ]
+    .iter()
+    .map(|(id, path)| (id.to_string(), path.to_string(), 10))
+    .collect();
+    let mut handed = Vec::new();
+    // A folder: one file is freed, one was deleted here and waits for the server's trash (no bytes here).
+    local(&db, "d-t", "/T", ItemKind::Folder);
+    local(&db, "f-t1", "/T/one.txt", ItemKind::File);
+    held(&db, "f-t2", "/T/two.txt", ItemKind::File, FileStatus::Trashing, false);
+    let selection = ids(&["f-up", "f-conf", "f-err", "f-kept", "f-open", "d-k", "d-m", "d-t"]);
+    let answer = free_selection(&db, &selection, candidates, |wanted| {
+        handed = wanted.iter().map(|(id, _, _)| id.clone()).collect();
+        handed.sort();
+        frees(&db, &["f-k1", "f-t1"])(wanted);
+    });
+    assert_eq!(handed, ["f-k1", "f-m2", "f-open", "f-t1"]);
+    assert_eq!(
+        told(&answer),
+        [
+            "f-up:Unsent",
+            "f-conf:Unsent",
+            "f-err:Unsent",
+            "f-kept:Kept",
+            "f-open:Left",
+            "d-k:Unsent+",
+            "d-m:Kept",
+            "d-t:Freed+"
+        ]
+    );
+    // Nothing but the one file the reclaim freed changed.
+    assert_eq!(db.get_file("f-k1").unwrap().unwrap().status, FileStatus::CloudOnly);
+    assert_eq!(db.get_file("f-up").unwrap().unwrap().status, FileStatus::Uploading);
+}
+
+/// `Engine::free_up_space_of` asks who is signed in and whose the local state is before anything is touched.
+#[test]
+fn free_up_space_for_a_selection_is_the_owners_alone() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    engine.use_local_state_for_test(state(dir.path(), Some((Some("user-a"), Some("a@example.eu"))), true));
+    engine.use_sync_root_for_test(root.path().to_path_buf());
+    let ids = vec!["f-1".to_string()];
+    // Signed out. (The gate is the view's: it is `Ready` only after a real sign-in, so this refusal stands for every
+    // session these tests put in memory; the handle's own answers are the cases below it.)
+    assert_eq!(
+        engine.free_up_space_of(&ids).err().as_deref(),
+        Some(crate::app::kept_api::NOT_SIGNED_IN)
+    );
+    // The handle for changes, as `free_up_space_of` takes it: the owner's reaches the selection's reclaim; another
+    // account's is refused before it.
+    signed_in(&engine, Some("user-a"), Some("a@example.eu"));
+    let mine = engine.local_state_for_changes().expect("the owner's handle");
+    let answer =
+        mine.with_while(|db, go_on| crate::free_up_space::free_up_space_of(&REAL, db, root.path(), &ids, go_on));
+    #[cfg(not(target_os = "windows"))]
+    assert_eq!(
+        answer,
+        Ok(Err(crate::free_up_space::NO_SELECTION_RECLAIM.to_string())),
+        "no reclaim for a selection off Windows"
+    );
+    // The row is online only: nothing to free, so it is done.
+    #[cfg(target_os = "windows")]
+    assert_eq!(
+        answer,
+        Ok(Ok(vec![crate::free_up_space::SelectionAnswer {
+            id: "f-1".to_string(),
+            what: crate::free_up_space::Reclaimed::Freed,
+            freed_some: false,
+        }]))
+    );
+    signed_out(&engine);
+    signed_in(&engine, Some("user-b"), Some("b@example.eu"));
+    assert!(
+        engine.local_state_for_changes().is_err(),
+        "another account was handed the state"
+    );
+    signed_out(&engine);
 }

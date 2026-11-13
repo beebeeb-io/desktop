@@ -239,6 +239,7 @@ impl StateDb {
                 source_size = excluded.source_size,
                 source_modified_ms = excluded.source_modified_ms,
                 source_file_id = excluded.source_file_id,
+                completion_name_encrypted = NULL,
                 updated_at = excluded.updated_at",
             params![
                 resume.op_id,
@@ -266,6 +267,30 @@ impl StateDb {
             params![op_id, acked],
         )?;
         Ok(())
+    }
+
+    /// The sealed name `complete` publishes for this backup session's upload, stored before its first chunk is
+    /// sent (`StateDb::set_upload_completion_name`).
+    pub fn set_backup_upload_completion_name(&self, op_id: &str, name_encrypted: &str) -> Result<()> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        conn.execute(
+            "UPDATE backup_upload_resume SET completion_name_encrypted = ?2, updated_at = strftime('%s','now')
+             WHERE op_id = ?1",
+            params![op_id, name_encrypted],
+        )?;
+        Ok(())
+    }
+
+    pub fn backup_upload_completion_name(&self, op_id: &str) -> Result<Option<String>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT completion_name_encrypted FROM backup_upload_resume WHERE op_id = ?1",
+                params![op_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     pub fn clear_backup_upload_resume(&self, op_id: &str) -> Result<()> {

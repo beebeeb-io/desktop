@@ -987,7 +987,9 @@ mod direct_download_engine {
             .unwrap();
         assert_eq!(&*range.data, &pair.plain()[1024..2048]);
         assert_eq!(pair.discovery_requests(), 0, "a range read never asks for windows");
-        assert_eq!(pair.api_chunk_requests().len(), 2);
+        // One chunk, the one the range is in: the version id comes from the file's authenticated
+        // record, so frame 0 is no longer fetched to learn it.
+        assert_eq!(pair.api_chunk_requests().len(), 1);
         assert_eq!(pair.storage_requests(), 0);
     }
 

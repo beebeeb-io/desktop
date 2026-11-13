@@ -211,6 +211,10 @@ fn notice_words(notice: &Notice) -> String {
         Notice::RestoreRefused(name) => {
             format!("Couldn\u{2019}t restore \u{201C}{name}\u{201D}. It\u{2019}s still in Trash.")
         }
+        Notice::RestoreNotDone => {
+            "A restore didn\u{2019}t go through before Beebeeb was locked or signed out. The item is still in Trash."
+                .into()
+        }
         Notice::RefreshFailed => "Couldn\u{2019}t refresh Trash. What\u{2019}s shown may be out of date.".into(),
         Notice::NotAvailable => "Not available yet in this version.".into(),
     }

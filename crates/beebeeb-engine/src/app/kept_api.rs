@@ -51,8 +51,7 @@ impl<C: CredentialStores> Engine<C> {
     /// (the account-bound handle, task 2488): the bytes freed. Nothing is touched for a state that is not handed
     /// out. BLOCKS: a worker's.
     pub fn free_up_space(&self) -> Result<u64, String> {
-        let config = crate::config::DesktopConfig::load_for(self.identity)?;
-        let Some(sync_root) = config.sync_root else {
+        let Some(sync_root) = self.configured_sync_root()? else {
             return Ok(0);
         };
         let state = match self.local_state_for_changes() {
@@ -62,12 +61,52 @@ impl<C: CredentialStores> Engine<C> {
             Err(refused) if refused.not_this_accounts() => return Err(NOT_YOURS.to_string()),
             Err(_) => return Err(NO_LOCAL_STATE.to_string()),
         };
-        state
-            .with(|db| crate::free_up_space::free_up_space_in(self.identity, db, &sync_root))
-            .map_err(|_| NOT_SIGNED_IN.to_string())?
-            .map(|freed| freed.bytes_freed)
+        // The session is asked again before each file: a lock or a sign-out while this runs ends it there. What was
+        // freed until then was freed, and is the answer.
+        let mut reclaimed = None;
+        let whole = state.with_while(|db, go_on| {
+            reclaimed = Some(crate::free_up_space::free_up_space_in(
+                self.identity,
+                db,
+                &sync_root,
+                go_on,
+            ));
+        });
+        match (whole, reclaimed) {
+            (_, Some(reclaimed)) => reclaimed.map(|freed| freed.bytes_freed),
+            (_, None) => Err(NOT_SIGNED_IN.to_string()),
+        }
     }
 }
+
+impl<C: CredentialStores> Engine<C> {
+    /// Free up space for a selection: the downloaded copies of `ids` (each a file, or a folder with everything in
+    /// it) become online only, in the signed-in account's local state (the account-bound handle, task 2488). Per
+    /// id, in the order asked: what the rows say of it after the reclaim (`free_up_space::SelectionAnswer`). A kept file
+    /// and a file with a change that is not sent are never touched.
+    /// The session is asked again before each file; an answer read across a session change is dropped (`Err`).
+    /// BLOCKS: a worker's.
+    pub fn free_up_space_of(&self, ids: &[String]) -> Result<Vec<crate::free_up_space::SelectionAnswer>, String> {
+        if self.view().gate != GateState::Ready {
+            return Err(NOT_SIGNED_IN.to_string());
+        }
+        let Some(sync_root) = self.configured_sync_root()? else {
+            return Err(NO_SYNC_FOLDER.to_string());
+        };
+        let state = self.local_state_for_changes().map_err(|refused| {
+            if refused.not_this_accounts() {
+                NOT_YOURS.to_string()
+            } else {
+                NO_LOCAL_STATE.to_string()
+            }
+        })?;
+        state
+            .with_while(|db, go_on| crate::free_up_space::free_up_space_of(self.identity, db, &sync_root, ids, go_on))
+            .map_err(|_| NOT_SIGNED_IN.to_string())?
+    }
+}
+
+pub const NO_SYNC_FOLDER: &str = "no sync folder is set on this computer";
 
 /// `set_kept`'s refusals before anything is read or written.
 pub const NOT_SIGNED_IN: &str = "not signed in";

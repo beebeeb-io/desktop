@@ -39,7 +39,7 @@ use crate::shell::app::{Event, Screen, SettingsPane};
 use crate::shell::{host, instance, placeholder, registry};
 use crate::theme::tokens::{self, Theme};
 use crate::ui::{account_set as set, caption};
-use rune::{Cx, El, Icon, Key, KeyEvent, Tx, col, row};
+use rune::{Cx, El, Icon, Key, KeyEvent, Tx, col, el, row};
 
 use source::AccountSource;
 
@@ -151,8 +151,9 @@ impl Pane {
     }
 }
 
-/// A confirm over a pane. A destructive choice is confirmed, never one press.
-#[derive(Clone, PartialEq, Eq, Debug)]
+/// A confirm over a pane. A destructive choice is confirmed, never one press. `Debug` is written by hand
+/// (below): three of them hold the server's id of a device or a passkey.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Dialog {
     /// Sign out one device (DW-A56): the server's id of the device.
     SignOutDevice(String),
@@ -190,6 +191,31 @@ pub enum Dialog {
     },
     /// No board frame: Deny came after this PC's own approval had gone through.
     ApproveTooLate,
+}
+
+// By hand: which confirm it is, never the id it holds.
+impl std::fmt::Debug for Dialog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Dialog::SignOutDevice(_) => f.write_str("SignOutDevice(..)"),
+            Dialog::SignOutElsewhere => f.write_str("SignOutElsewhere"),
+            Dialog::SignOutApp => f.write_str("SignOutApp"),
+            Dialog::SignOutAllApps => f.write_str("SignOutAllApps"),
+            Dialog::Code(what) => write!(f, "Code({what:?})"),
+            Dialog::PasskeyMenu(_) => f.write_str("PasskeyMenu(..)"),
+            Dialog::RemovePasskey(_) => f.write_str("RemovePasskey(..)"),
+            Dialog::LeaveCodes => f.write_str("LeaveCodes"),
+            Dialog::Plan => f.write_str("Plan"),
+            Dialog::LockDelay(hot) => write!(f, "LockDelay({hot:?})"),
+            Dialog::ApproveReview => f.write_str("ApproveReview"),
+            Dialog::ApproveHello => f.write_str("ApproveHello"),
+            Dialog::ApproveApproved => f.write_str("ApproveApproved"),
+            Dialog::ApproveDenied => f.write_str("ApproveDenied"),
+            Dialog::ApproveExpired { handled } => write!(f, "ApproveExpired {{ handled: {handled} }}"),
+            Dialog::ApproveUnsure { denying } => write!(f, "ApproveUnsure {{ denying: {denying} }}"),
+            Dialog::ApproveTooLate => f.write_str("ApproveTooLate"),
+        }
+    }
 }
 
 impl Dialog {
@@ -247,6 +273,8 @@ pub struct AccountUi {
     /// `None`: nothing answers yet (a build that ships before the engine lane wires it); the
     /// view then draws the shell's "not built yet" frame, never sample values.
     pub source: Option<Box<dyn AccountSource>>,
+    /// The pane the source was last told is showing (`None`: no account section shows).
+    told_open: Option<Pane>,
 }
 
 impl Default for AccountUi {
@@ -257,6 +285,7 @@ impl Default for AccountUi {
             form: form::Form::default(),
             approve: approve::Approve::default(),
             source: source::first(instance::DEV_BUILD),
+            told_open: None,
         }
     }
 }
@@ -306,6 +335,161 @@ pub fn end_flows(s: &mut State) {
     ui.show(Pane::root(ui.pane.section()).unwrap_or(Pane::Account));
 }
 
+/// The pane the window shows now, when the route is on one of this lane's sections.
+fn showing(s: &State) -> Option<Pane> {
+    let section = routed(s)?;
+    if s.account.pane.section() == section {
+        Some(s.account.pane)
+    } else {
+        Pane::root(section)
+    }
+}
+
+/// The window's poll for the account sections: tells the source which pane shows when that changed (it reads
+/// then, never from a draw), and takes in what its workers answered. `true`: something a pane draws changed.
+pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    let now = showing(s);
+    let ui = &mut s.account;
+    let Some(source) = ui.source.as_mut() else {
+        ui.told_open = None;
+        return false;
+    };
+    if ui.told_open != now {
+        ui.told_open = now;
+        // A toast belongs to the pane it was said over.
+        source.clear_notice();
+        match now {
+            Some(pane) => source.opened(pane),
+            // No account pane shows: the source reads nothing more until one opens.
+            None => source.closed(),
+        }
+    }
+    let pumped = source.pump();
+    if pumped.busy || pumped.watch {
+        tx.wake_after(POLL_EVERY);
+    }
+    pumped.changed
+}
+
+/// The toast over a pane. Something that worked is the settings toast, as before. Something that was not done
+/// is the failure toast (`ui::toast`: its own mark, read at once), laid where the settings toast sits, with its
+/// button when it can be tried again.
+fn notice_toast(source: &dyn AccountSource, t: &Theme) -> Option<El> {
+    let words = source.notice()?;
+    let action = source.notice_action();
+    if !source.notice_failed() && action.is_none() {
+        return Some(crate::ui::settings_notice::toast(0, words, t));
+    }
+    let again = action.map(|action| crate::ui::toast::ToastAction {
+        text: action,
+        name: action,
+        shortcut: None,
+        run: |s: &mut State, _: &mut Tx| {
+            if let Some(source) = s.account.source.as_mut() {
+                source.run_notice_action();
+            }
+        },
+    });
+    Some(
+        row()
+            .key("toast-0-line")
+            .pin(Some(set::SIDEBAR_W), None, Some(0.0), Some(42.0))
+            .justify_center()
+            .child(crate::ui::toast::toast(
+                &crate::theme::icons_settings::WARN_CIRCLE,
+                crate::ui::toast::Tone::Failed,
+                words,
+                again,
+                t,
+            )),
+    )
+}
+
+/// How soon the window looks again while an answer is out (the worker also wakes it).
+const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The heading of the section a pane belongs to.
+fn title_of(pane: Pane) -> &'static str {
+    match pane.section() {
+        SettingsPane::DevicesAndSessions => "Devices and sessions",
+        SettingsPane::Security => "Sign-in and security",
+        _ => "Account",
+    }
+}
+
+/// A pane the source does not answer for yet, INSIDE the settings shell: the sidebar stays, so there is always
+/// a way back (the shell's full-window frame has none outside Drive). Honest as that frame is: what it is, one
+/// sentence, nothing that could be read as the account's data. Keyed as the shell's notice is.
+fn unbuilt_pane(pane: Pane, t: &Theme) -> El {
+    let title = title_of(pane);
+    let notice = col()
+        .key("not-built")
+        .role("group")
+        .label(format!("{title}: not built yet"))
+        .gap(4.0)
+        .child(crate::ui::kit::label(
+            "not-built-label",
+            "NOT BUILT YET",
+            set::SUB_MONO,
+            t.text_tertiary,
+        ))
+        .child(crate::ui::kit::label(
+            "not-built-line",
+            "This part of Beebeeb Drive has no screen yet. Nothing here is your data.",
+            set::SUB,
+            t.text_tertiary,
+        ));
+    set::pane(vec![set::heading(title, None, None, t), notice], t)
+}
+
+/// The pane in a state that is not its content: asked and not answered, nobody signed in, the session ended,
+/// or the read failed. Nothing of an account is in it.
+fn state_pane(pane: Pane, state: source::PaneState, t: &Theme) -> El {
+    use crate::ui::settings_notice as notices;
+    let title = title_of(pane);
+    let (head, words, again) = match state {
+        source::PaneState::Loading => ("Loading", "Asking Beebeeb for your account.", false),
+        source::PaneState::SignedOut => (
+            "Not signed in",
+            "Sign in and unlock Beebeeb to see your account.",
+            false,
+        ),
+        source::PaneState::SessionEnded => (
+            "Your session ended",
+            "Sign in again to see your account. Nothing was changed.",
+            false,
+        ),
+        _ => (
+            "Couldn't load this",
+            "Beebeeb didn't answer. Nothing was changed.",
+            true,
+        ),
+    };
+    let body = if state == source::PaneState::Loading {
+        el().key("account-loading")
+            .role("status")
+            .label(format!("{head}. {words}"))
+            .child(crate::ui::kit::label(
+                "account-loading-text",
+                words,
+                set::SUB,
+                t.text_tertiary,
+            ))
+    } else {
+        let action = again.then(|| {
+            set::button("btn-0", "Try again", None, set::Look::Plain, set::Size::Small, false, t).on_press(
+                move |s: &mut State| {
+                    if let Some(source) = s.account.source.as_mut() {
+                        source.reload(pane);
+                    }
+                },
+            )
+        });
+        notices::problem(0, 0, head, words, action, t)
+    };
+    set::pane(vec![set::heading(title, None, None, t), body], t)
+}
+
 /// A board frame of this lane's as a state of it: the pane, and the confirm over it.
 fn local(frame: &str) -> Option<(Pane, Option<Dialog>)> {
     Some(match frame {
@@ -351,6 +535,17 @@ pub fn go(s: &mut State, frame: &'static str) {
         return;
     };
     let want = pane.section();
+    // A page under a section opens only when something answers for it. When the section itself is answered
+    // for and the page is not, the person stays where they are. (A section nothing answers for says so inside
+    // the settings shell, `unbuilt_pane`.)
+    if let Some(source) = s.account.source.as_deref()
+        && let Some(root) = Pane::root(want)
+        && pane != root
+        && source.pane_state(pane) == source::PaneState::Unwired
+        && source.pane_state(root) != source::PaneState::Unwired
+    {
+        return;
+    }
     if s.shell.app.screen() != Screen::Settings(want) {
         host::dispatch(s, Event::OpenSettings(want));
     }
@@ -615,13 +810,18 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         Pane::root(section).unwrap_or(Pane::Account)
     };
     let dialog = ui.dialog.as_ref().filter(|_| inside);
-    if pane == Pane::DeleteUndone {
+    // A source that does not answer for this pane (or not yet): its state, never the pane on empty values.
+    let state = source.pane_state(pane);
+    if pane == Pane::DeleteUndone && state != source::PaneState::Unwired {
         // The result of undoing a deletion is a screen of its own (the account window's
         // layout, DW-A83), not a pane of settings.
         return delete::undone(s.identity.product_name(), &t, cx);
     }
     let form = &ui.form;
     let (pane_el, overlay) = match pane {
+        // Nothing answers for it: said inside the settings shell, where the sidebar leads back.
+        _ if state == source::PaneState::Unwired => (unbuilt_pane(pane, &t), None),
+        _ if state != source::PaneState::Ready => (state_pane(pane, state, &t), None),
         Pane::Account => (
             overview::pane(source, &t),
             dialog
@@ -654,6 +854,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .child(pane_el);
     if let Some(overlay) = overlay {
         body = body.child(overlay);
+    }
+    if let Some(toast) = notice_toast(source, &t) {
+        body = body.child(toast);
     }
     col()
         .key("window")

@@ -24,11 +24,18 @@ use std::fmt;
 use super::approve::{Approval, Denial, Lookup, SignInRequest};
 
 /// Who is signed in (DW-A51).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Identity {
     pub name: String,
     pub initials: String,
     pub email: String,
+}
+
+// By hand: the name and the email must not reach a log or a failed assertion's output through `{:?}`.
+impl fmt::Debug for Identity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Identity").finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,7 +98,10 @@ pub struct PlanDetails {
     pub used: String,
     /// The meter: what is used, as a share of the plan (0 to 1).
     pub share: f32,
-    /// "14 Mar 2027".
+    /// What the day is, as the dialog's row names it: "Renews", "Cancels on", "Trial ends". Never "Renews"
+    /// for a plan that does not.
+    pub day_label: &'static str,
+    /// The day itself: "14 Mar 2027".
     pub renews: String,
     /// "Yearly".
     pub billing: String,
@@ -181,7 +191,7 @@ pub enum DeviceKind {
 }
 
 /// One device's sessions, grouped (DW-A55).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Session {
     /// The server's id of the device: what a sign-out names. Never shown.
     pub id: String,
@@ -196,6 +206,16 @@ pub struct Session {
     /// Two letters: a country, never a city.
     pub country: String,
     pub this_device: bool,
+}
+
+// By hand: a device's name and the server's id of it must not reach a log through `{:?}`.
+impl fmt::Debug for Session {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Session")
+            .field("kind", &self.kind)
+            .field("this_device", &self.this_device)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A password on its way into a step-up: borrowed from the secure field for one call.
@@ -428,7 +448,69 @@ pub enum EmailRefused {
     Offline,
 }
 
+/// Where a pane's content stands. A source that answers at once (the board's fixture) is always `Ready`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneState {
+    /// What the pane draws is the signed-in account's, read from Beebeeb.
+    Ready,
+    /// Nothing answers for this pane yet: it says "not built yet" inside the settings shell (the sidebar stays),
+    /// and a page under a section that IS answered for does not open at all.
+    Unwired,
+    /// Asked, not answered yet.
+    Loading,
+    /// Nobody is signed in, or the app is locked: nothing of an account is drawn.
+    SignedOut,
+    /// Beebeeb no longer accepts the session: nothing is asked until the person signs in again.
+    SessionEnded,
+    /// The read failed: nothing of the account is drawn, and the pane offers to try again.
+    Failed,
+}
+
+/// What a poll of the source found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pumped {
+    /// Something a pane draws changed: the window draws again.
+    pub changed: bool,
+    /// An answer is still out.
+    pub busy: bool,
+    /// Nothing is out, but something outside the source can change what a pane says (the engine finds the
+    /// session works again): the window looks again soon.
+    pub watch: bool,
+}
+
 pub trait AccountSource {
+    /// Where `pane` stands. Anything but `Ready`: the pane's own accessors are not asked; the view draws the
+    /// state instead (`frames::account::state_pane`, or `unbuilt_pane` for `Unwired`).
+    fn pane_state(&self, _pane: super::Pane) -> PaneState {
+        PaneState::Ready
+    }
+    /// The window shows `pane` now: a source that reads from Beebeeb asks here, when what it holds is missing
+    /// or old. Never called from a draw.
+    fn opened(&mut self, _pane: super::Pane) {}
+    /// The window shows no account pane any more: nothing is read again until one opens.
+    fn closed(&mut self) {}
+    /// "Try again" on a pane that failed to load.
+    fn reload(&mut self, _pane: super::Pane) {}
+    /// The window's poll: take in what arrived, drop what belongs to a session that is over.
+    fn pump(&mut self) -> Pumped {
+        Pumped::default()
+    }
+    /// What the toast over the pane says: how the last change ended (taken, refused, not known).
+    fn notice(&self) -> Option<&'static str> {
+        None
+    }
+    /// The toast says something was NOT done: it is drawn as a failure, never with the mark of a thing that worked.
+    fn notice_failed(&self) -> bool {
+        false
+    }
+    /// The toast's button, when what it says can be tried again ("Try again"): `None` draws the words alone.
+    fn notice_action(&self) -> Option<&'static str> {
+        None
+    }
+    /// The toast's button was pressed: do again what the toast says was not done.
+    fn run_notice_action(&mut self) {}
+    /// The person did something else: the toast goes.
+    fn clear_notice(&mut self) {}
     /// Engine: the signed-in account (`session.account`).
     fn identity(&self) -> Identity;
     /// Engine: which Beebeeb products hold a session on this PC (the shared credential store).

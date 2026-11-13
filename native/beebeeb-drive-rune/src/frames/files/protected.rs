@@ -187,16 +187,16 @@ impl State {
             && self.actions.source.protection(self.listing.folder.id.as_deref(), None) == Some(Protection::BackupsRoot)
     }
 
-    /// A change of the selection was refused: say why, the way the board does for what it is.
+    /// A change of these items was refused: say why, the way the board does for what it is.
     /// A service's folder: the message (DW-0425, DW-1110). A device's backup: moving it to Trash
     /// is Delete this backup, behind its code (DW-0742); anything else there says that it did
-    /// not happen. `false`: the source has no words for it, and nothing was shown here.
-    pub(super) fn say_protected(&mut self, action: Action, tx: &mut Tx) -> bool {
-        match self.protection_of(&self.selected_items()) {
+    /// not happen. No wake is asked for here: `Some` is how long the message that was set stays.
+    pub(super) fn say_protected(&mut self, action: Action, items: &[DriveItem]) -> Option<std::time::Duration> {
+        match self.protection_of(items) {
             Some(Protection::Managed(words)) => {
                 self.actions.menu = None;
                 self.actions.protected.alert = Some(words);
-                true
+                None
             }
             Some(Protection::DeviceBackup(device)) if action == Action::Trash => {
                 self.intent(Intent::Frame("DW-0742"));
@@ -210,13 +210,13 @@ impl State {
                 if listed {
                     self.backups.ask_delete_device(&device);
                 }
-                true
+                None
             }
             Some(Protection::DeviceBackup(_) | Protection::BackupsRoot) => {
-                self.show_toast(Toast::Failed(action, ActionError::Protected), tx);
-                true
+                Some(self.set_toast(Toast::Failed(action, ActionError::Protected)))
             }
-            None => false,
+            // The source has no words for it: nothing is shown here (the frame asked for is DW-1110's).
+            None => None,
         }
     }
 
@@ -275,7 +275,9 @@ pub fn show_backups(s: &mut State) -> bool {
 /// sidebar's Backups (Ctrl+4) shows the Backups folder, opening the Backups row in Files moves
 /// the sidebar to Backups, and Back out of it moves it to Files again.
 pub fn poll(s: &mut State) -> bool {
-    if super::session::poll(s) {
+    // What a source that answers later did since the last frame (`State::late_changes`).
+    let late = s.late_changes();
+    if super::session::poll(s) || late {
         return true;
     }
     let Some(root) = s.actions.source.backups_root() else {

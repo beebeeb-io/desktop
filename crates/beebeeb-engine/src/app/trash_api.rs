@@ -4,6 +4,8 @@
 //! (`src-tauri/src/account_commands.rs`) so the native app needs no shell code for it; the Tauri command is left
 //! as it was.
 //!
+//! [`Engine::restore_items_for`] puts items back, bound to the session of the press (nothing is sent under another).
+//!
 //! [`Engine::trash_listing`] BLOCKS on the handle's runtime, as every method of the handle does: call it from a worker
 //! thread, never from the UI thread. A failure is an [`AccountCallError`] (fixed words, never a server's body).
 //!
@@ -20,12 +22,22 @@ use crate::api_client::ApiClient;
 use crate::owner_keys;
 
 /// The account's Trash as the server listed it, and the session it was listed for.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TrashListing {
     /// The session the listing belongs to: a host compares it with [`Engine::session_turn`] and drops a listing
     /// whose session is gone (a lock, a sign-out, another account's sign-in), before it draws a name of it.
     pub session: SessionGeneration,
     pub items: Vec<DesktopTrashItem>,
+}
+
+/// How many items, never one of them: a listing holds decrypted names, and a `{:?}` must not print one.
+impl std::fmt::Debug for TrashListing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrashListing")
+            .field("session", &self.session)
+            .field("items", &self.items.len())
+            .finish()
+    }
 }
 
 impl<C: CredentialStores> Engine<C> {
@@ -60,10 +72,67 @@ impl<C: CredentialStores> Engine<C> {
             return Err(AccountCallError::NotSignedIn);
         }
         let items = raw.iter().filter_map(|meta| trash_item_from_meta(meta, &key)).collect();
-        if !self.acct.session_unchanged_since(session) {
+        // The hand-over: only while the session in memory is the one the token and the key were copied from, asked
+        // with no session change half done. A listing made for a session that is ending is dropped here.
+        if !self.session_is_still(session, &key) {
             return Err(AccountCallError::NotSignedIn);
         }
         Ok(TrashListing { session, items })
+    }
+
+    /// WRITES: put items back from Trash (`POST /api/v1/files/{id}/restore`, one call each, in order), for the
+    /// session a person pressed under and no other. `session` is [`Engine::session_turn`] as the host read it AT
+    /// THE PRESS (on its window's thread, before any worker started). Before EACH item the token is copied only
+    /// while the session in memory is still that one, asked with no session change half done
+    /// (`AccountRuntime::while_session_is`); a session that moved on since (a lock, a sign-out, another sign-in,
+    /// even back to the same account): [`AccountCallError::NotSignedIn`], and nothing (more) is sent. Stops at the
+    /// first item that fails: the ones before it are restored. The Trash window uses this form:
+    /// [`Engine::restore_items`] sends under whatever session is in memory when it runs, and an id chosen in one
+    /// account's Trash must never be sent with another session's token.
+    ///
+    /// BLOCKS on the handle's runtime: call it from a worker thread.
+    pub fn restore_items_for(&self, session: SessionGeneration, file_ids: &[&str]) -> Result<(), AccountCallError> {
+        let mut restored = false;
+        let mut outcome = Ok(());
+        for id in file_ids {
+            let id = id.to_string();
+            outcome = self.account_call_for(session, move |api| async move { api.restore_file_sent(&id).await });
+            if outcome.is_err() {
+                break;
+            }
+            restored = true;
+        }
+        if restored {
+            // Ask the sync engine to take the server's list again (the signed-in account's local state only; asks
+            // nothing of a state that is not the session's), also when a later item failed.
+            self.request_resnapshot();
+        }
+        outcome
+    }
+
+    /// Whether the session in memory is, now, the very one `generation` and `key` were copied from: asked with no
+    /// session change half done (the session-write lock is held for the question), so an answer made for a session
+    /// that a lock or a sign-out is ending is never taken for the current one. Never waits: while a session change
+    /// is under way the answer is no.
+    pub(super) fn session_is_still(&self, generation: SessionGeneration, key: &[u8; 32]) -> bool {
+        self.acct
+            .while_session_is(&self.writes, generation, |session| {
+                // Every byte is compared, whatever the first difference.
+                session
+                    .master_key
+                    .iter()
+                    .zip(key.iter())
+                    .fold(0u8, |differs, (a, b)| differs | (a ^ b))
+                    == 0
+            })
+            .unwrap_or(false)
+    }
+
+    /// Test builds only: `hook` runs once, in the middle of the next lock or sign-out (the session is ending and
+    /// not yet gone from memory), on the thread that locks.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn during_next_forget_for_test(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.forget_hook_for_test.lock().unwrap_or_else(|p| p.into_inner()) = Some(hook);
     }
 
     /// The session's generation now: it moves on at every sign-in, unlock, lock and sign-out. In memory, never

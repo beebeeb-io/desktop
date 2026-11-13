@@ -229,7 +229,7 @@ fn the_ui_thread_reads_the_view_only() {
         body(&host, "    fn session(&self) -> Session {"),
         body(&host, "    fn tray_inputs(&self) -> TrayInputs {"),
         body(&host, "    fn start_sync(&self) -> Result<(), actions::ActionError> {"),
-        body(&host, "    fn gate(&self) -> GateState {"),
+        body(&read("engine_host/signin.rs"), "    fn gate(&self) -> GateState {"),
         body(&host, "    fn sync_state(&self) -> Option<String> {"),
         body(&host, "    fn can_add(&self, _folder: Option<&str>) -> bool {"),
         body(&tray, "    pub fn facts(&self) -> Facts {"),

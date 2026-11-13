@@ -2,9 +2,8 @@
 //!
 //! [`open::open`] is the start path: it makes the one engine handle of this process, for the identity this
 //! binary was built as (`shell::identity::engine_identity`, the only place the native app asks for it).
-//! `LiveEngine` wraps that handle and implements `EngineActions`. `EngineSignInSource` implements
-//! `SignInSource` by spawning worker threads for each blocking engine call and delivering results through a
-//! channel. `EngineDriveSource` implements `DriveSource` on the handle's local state, with the engine's own
+//! `LiveEngine` wraps that handle and implements `EngineActions`. `EngineSignInSource` ([`signin`]) implements
+//! `SignInSource`: one worker runs the blocking engine calls and delivers results through a channel. `EngineDriveSource` implements `DriveSource` on the handle's local state, with the engine's own
 //! view models. `EngineTraySource` ([`tray`]) is the flyout's. Every type is generic over the credential
 //! stores, so a test runs the same code on stores in memory; the app uses the platform's.
 //!
@@ -18,9 +17,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
-use std::thread;
-
-use zeroize::Zeroizing;
 
 use beebeeb_engine::app::{CredentialStores, Engine, LocalStateRefused};
 use beebeeb_engine::drive_v2::DriveError;
@@ -38,30 +34,34 @@ use beebeeb_engine::sync_view::Start;
 use crate::frames::files::source::{
     self as files_source, Account, ActionError, Change, Counts, Details, FilesSource, StorageSplit,
 };
-use crate::frames::signin::source::{
-    CodeKind, GateState, HelloOutcome, NextAfterSignIn, PhraseProblem, SharedSession, SignInEvent, SignInProblem,
-    SignInSource, TwoFactorProblem,
-};
+use crate::frames::signin::source::{GateState, NextAfterSignIn, PhraseProblem, SignInProblem, TwoFactorProblem};
 use crate::shell::actions::{self, EngineActions};
 use crate::shell::app::{GateState as ShellGate, Session};
 use crate::shell::instance::ProfileHolder;
 use crate::shell::tray::TrayInputs;
 use crate::source::{DriveItem, DriveSource, Listing, SourceError, StorageSummary};
 
+pub mod account;
 pub mod backups;
 #[cfg(test)]
 mod binding_tests;
 pub mod drive_settings;
+pub mod files;
 pub mod open;
 pub mod search;
 pub mod settings;
+pub mod shared;
+pub mod signin;
 pub mod sync;
 #[cfg(test)]
 pub(crate) mod tests;
 pub mod this_pc;
 pub mod trash;
 pub mod tray;
+// An open file: its facts from the local state, its content decrypted in memory (`viewer`).
+pub mod viewer;
 
+pub use signin::EngineSignInSource;
 pub use sync::EngineGlobalSource;
 pub use tray::EngineTraySource;
 
@@ -385,126 +385,6 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
 }
 
 // ---------------------------------------------------------------------------
-// EngineSignInSource: SignInSource on the real engine
-// ---------------------------------------------------------------------------
-
-/// `SignInSource` backed by the real engine. Each `begin_*` spawns a named thread that calls the
-/// blocking engine method and sends the result through a channel; `poll` drains it. Secrets go
-/// from the `&str` argument into `Zeroizing<String>` for the thread and nowhere else.
-pub struct EngineSignInSource<C: CredentialStores> {
-    engine: Arc<Engine<C>>,
-    tx: mpsc::Sender<SignInEvent>,
-    rx: mpsc::Receiver<SignInEvent>,
-}
-
-impl<C: CredentialStores> EngineSignInSource<C> {
-    pub fn new(engine: Arc<Engine<C>>) -> Self {
-        let (tx, rx) = mpsc::channel();
-        Self { engine, tx, rx }
-    }
-}
-
-impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
-    /// The gate from the handle's view: read without waiting, on every frame.
-    fn gate(&self) -> GateState {
-        map_gate_signin(self.engine.view().gate)
-    }
-
-    fn shared_session(&self) -> Option<SharedSession> {
-        None // Windows Hello / shared session not wired
-    }
-
-    fn begin_sign_in(&mut self, email: &str, password: &str) {
-        let engine = self.engine.clone();
-        let email = email.to_string();
-        let password = Zeroizing::new(password.to_string());
-        let tx = self.tx.clone();
-        thread::Builder::new()
-            .name("signin".into())
-            .spawn(move || {
-                let result = engine.sign_in_password(&email, password);
-                let event = match result {
-                    Ok(next) => SignInEvent::SignedIn(Ok(map_next(next))),
-                    Err(problem) => SignInEvent::SignedIn(Err(map_problem(problem))),
-                };
-                let _ = tx.send(event);
-            })
-            .expect("spawn sign-in thread");
-    }
-
-    fn begin_hello(&mut self) {
-        log("NotWired(begin_hello)");
-        let _ = self.tx.send(SignInEvent::Hello(HelloOutcome::Cancelled));
-    }
-
-    fn cancel_hello(&mut self) {
-        log("NotWired(cancel_hello)");
-    }
-
-    fn begin_device_request(&mut self) {
-        log("NotWired(begin_device_request)");
-    }
-
-    fn cancel_device_request(&mut self) {
-        log("NotWired(cancel_device_request)");
-    }
-
-    fn begin_two_factor(&mut self, code: &str, _kind: CodeKind) {
-        let engine = self.engine.clone();
-        let code = Zeroizing::new(code.to_string());
-        let tx = self.tx.clone();
-        thread::Builder::new()
-            .name("2fa".into())
-            .spawn(move || {
-                let result = engine.two_factor(code);
-                let event = match result {
-                    Ok(next) => SignInEvent::TwoFactor(Ok(map_next(next))),
-                    Err(words) => SignInEvent::TwoFactor(Err(two_factor_problem(words))),
-                };
-                let _ = tx.send(event);
-            })
-            .expect("spawn 2fa thread");
-    }
-
-    fn begin_restore(&mut self, words: &[&str]) {
-        let engine = self.engine.clone();
-        let phrase = Zeroizing::new(words.join(" "));
-        let tx = self.tx.clone();
-        thread::Builder::new()
-            .name("restore".into())
-            .spawn(move || {
-                let result = engine.unlock_with_phrase(phrase);
-                let event = match result {
-                    Ok(()) => SignInEvent::PhraseRestored(Ok(NextAfterSignIn::Drive)),
-                    Err(words) => SignInEvent::PhraseRestored(Err(phrase_problem(words))),
-                };
-                let _ = tx.send(event);
-            })
-            .expect("spawn restore thread");
-    }
-
-    fn begin_passkey(&mut self) {
-        log("NotWired(begin_passkey)");
-    }
-
-    fn begin_unlock(&mut self, _password: &str) {
-        log("NotWired(begin_unlock)");
-    }
-
-    fn begin_recovery_verify(&mut self, _email: &str, _words: &[&str]) {
-        log("NotWired(begin_recovery_verify)");
-    }
-
-    fn begin_set_password(&mut self, _password: &str) {
-        log("NotWired(begin_set_password)");
-    }
-
-    fn poll(&mut self) -> Option<SignInEvent> {
-        self.rx.try_recv().ok()
-    }
-}
-
-// ---------------------------------------------------------------------------
 // EngineDriveSource: DriveSource on the handle's local state
 // ---------------------------------------------------------------------------
 
@@ -574,16 +454,39 @@ impl<C: CredentialStores> DriveSource for EngineDriveSource<C> {
 // EngineFilesSource: FilesSource (most actions not wired)
 // ---------------------------------------------------------------------------
 
-/// `FilesSource` on the real engine. Actions call through the `Engine` handle; Cloud Files actions
-/// (`keep_offline`, `free_up_space`) stay `not_wired` (they need a registered sync root).
+/// `FilesSource` on the real engine. Actions call through the `Engine` handle; what this PC holds of an item
+/// (`keep_offline`, `free_up_space`) changes on a worker and is answered later ([`files::LocalCopies`]).
 pub struct EngineFilesSource<C: CredentialStores> {
     engine: Arc<Engine<C>>,
+    /// Keep on this PC, Free up space, what they did, and the Backups folder's id.
+    copies: files::LocalCopies<Engine<C>>,
+    /// After a refused upload: the files of it that were not copied in.
+    upload_left: Option<Vec<PathBuf>>,
 }
 
 impl<C: CredentialStores> EngineFilesSource<C> {
+    /// Starts no thread and reads nothing.
     pub fn new(engine: Arc<Engine<C>>) -> Self {
-        Self { engine }
+        Self {
+            copies: files::LocalCopies::new(engine.clone()),
+            engine,
+            upload_left: None,
+        }
     }
+}
+
+/// The rows as the worker is asked for them: the id, and whether the row says it is kept on this PC.
+fn local_items(items: &[DriveItem]) -> Vec<(String, bool)> {
+    items
+        .iter()
+        .map(|item| (item.id.clone(), item.pc_status.as_deref() == Some("available_offline")))
+        .collect()
+}
+
+/// What `upload_left` answers after a drop of which `copied` files went in, in the order dropped: the files that
+/// are NOT in the folder yet. `None`: it was not refused, or nothing went in (Try again sends all of it).
+fn upload_rest(files: &[PathBuf], copied: usize, refused: bool) -> Option<Vec<PathBuf>> {
+    (refused && copied > 0).then(|| files.iter().skip(copied).cloned().collect())
 }
 
 fn not_wired(what: &str) -> ActionError {
@@ -704,8 +607,13 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         })
     }
 
-    fn keep_offline(&mut self, _: &[DriveItem], _: bool) -> Result<(), ActionError> {
-        Err(not_wired("keep_offline"))
+    fn keep_offline(&mut self, items: &[DriveItem], keep: bool) -> Result<(), ActionError> {
+        let action = if keep {
+            files_source::Action::KeepOffline
+        } else {
+            files_source::Action::RemoveOffline
+        };
+        self.copies.ask(action, local_items(items))
     }
 
     fn copy_link(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
@@ -742,11 +650,39 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     }
 
     fn upload(&mut self, folder: Option<&str>, files: &[std::path::PathBuf]) -> Result<(), ActionError> {
-        self.local(|db, sync_root| {
+        // One file at a time, so a refusal part-way knows what is already in the folder: Try again sends the rest
+        // alone (`upload_left`), never a second copy of a file that went in.
+        self.upload_left = None;
+        // How many files are in: the copies stop at the first refusal, so what is left is the files from there on.
+        let mut copied = 0;
+        let result = self.local(|db, sync_root| {
             let parent = file_ops::resolve_folder(db, folder).map_err(map_drive_err)?;
-            file_ops::copy_in(db, sync_root, parent.as_ref(), files).map_err(map_drive_err)?;
+            for file in files {
+                file_ops::copy_in(db, sync_root, parent.as_ref(), std::slice::from_ref(file)).map_err(map_drive_err)?;
+                copied += 1;
+            }
             Ok(())
-        })
+        });
+        // Also when every file is in and the answer was still refused (the session changed during the last
+        // copy): an EMPTY list, which the window reads as "nothing to try again" (`None` would send all again).
+        self.upload_left = upload_rest(files, copied, result.is_err());
+        result
+    }
+
+    fn upload_left(&mut self) -> Option<Vec<PathBuf>> {
+        self.upload_left.take()
+    }
+
+    fn answers_later(&self) -> bool {
+        true
+    }
+
+    fn wake_after(&mut self, after: std::time::Duration) {
+        self.copies.wake_after(after);
+    }
+
+    fn backups_root(&self) -> Option<String> {
+        self.copies.backups_root()
     }
 
     fn new_folder(&mut self, parent: Option<&str>, name: &str) -> Result<(), ActionError> {
@@ -778,8 +714,8 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         })
     }
 
-    fn free_up_space(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
-        Err(not_wired("free_up_space"))
+    fn free_up_space(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
+        self.copies.ask(files_source::Action::FreeUpSpace, local_items(items))
     }
 
     fn open_in_file_explorer(&mut self, folder: Option<&str>) -> Result<(), ActionError> {
@@ -793,7 +729,8 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         open_path(&path)
     }
 
+    /// What Keep on this PC and Free up space did, once the engine answered (not an activity feed).
     fn changes(&mut self) -> Vec<Change> {
-        Vec::new()
+        self.copies.take()
     }
 }

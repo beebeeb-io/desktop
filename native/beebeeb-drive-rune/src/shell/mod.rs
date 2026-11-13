@@ -34,6 +34,7 @@ pub mod instance;
 pub mod placeholder;
 pub mod platform;
 pub mod registry;
+pub mod session_gate;
 #[cfg(test)]
 mod start_refusal_tests;
 pub mod state;

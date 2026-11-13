@@ -20,6 +20,7 @@ use beebeeb_engine::{signin::gate, state_paths};
 use super::backups::may_back_up;
 use super::open::{self, ApiBase, Opened, Refused};
 use super::*;
+use crate::frames::signin::source::SignInSource;
 use crate::shell::app::GateState as Shell;
 use crate::shell::identity::engine_identity;
 use crate::shell::instance;
@@ -149,9 +150,11 @@ fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() 
     // Shared, Photos: unwired on a real engine, never sample data. Trash reads the engine
     // (`engine_host::trash`): this handle has no session in memory, so it draws the signed-out state, no row.
     // This PC reads the engine (`engine_host::this_pc`) but is held off until its chrome is honest.
-    assert!(
-        !state.frames.shared.source.wired(),
-        "Shared is unwired on a real engine"
+    // Shared reads the engine (`engine_host::shared`): no session in memory here, so no row.
+    assert!(state.frames.shared.source.wired(), "Shared is on the engine");
+    assert_eq!(
+        state.frames.shared.source.loaded(),
+        crate::frames::shared::source::Loaded::SignedOut
     );
     assert_eq!(
         (
@@ -588,7 +591,7 @@ fn snap_state() -> crate::shell::state::State {
 #[test]
 fn shared_shows_0_fixture_rows_on_a_live_engine() {
     let s = engine_state();
-    assert!(!s.frames.shared.source.wired());
+    assert!(s.frames.shared.source.wired());
     assert_eq!(s.frames.shared.source.with_me().len(), 0);
     assert_eq!(s.frames.shared.source.people_shares().len(), 0);
     assert_eq!(s.frames.shared.source.invitations().len(), 0);
@@ -634,9 +637,11 @@ fn backups_has_no_source_on_a_live_engine() {
 fn settings_is_unwired_on_a_live_engine() {
     use crate::frames::settings::Pane;
     let s = engine_state();
-    // Task 2473: General and Storage location answer from the engine; every other pane is the shell's frame.
+    // Task 2473: General and Storage location answer from the engine; so do Notifications and Recent
+    // notifications (`engine_host::settings::notifications`); every other pane is the shell's frame.
     assert!(s.settings.source.wired(Pane::General) && s.settings.source.wired(Pane::StorageLocation));
-    for pane in [Pane::About, Pane::Notifications, Pane::Recent] {
+    assert!(s.settings.source.wired(Pane::Notifications) && s.settings.source.wired(Pane::Recent));
+    for pane in [Pane::About] {
         assert!(!s.settings.source.wired(pane), "{pane:?}");
     }
     // Drive's panes (`engine_host::drive_settings`): Storage insights answers; the rest is the shell's frame.
@@ -654,9 +659,16 @@ fn settings_is_unwired_on_a_live_engine() {
 }
 
 #[test]
-fn account_has_no_source_on_a_live_engine() {
+fn account_is_the_engines_source_on_a_live_engine_and_unbound_panes_are_unwired() {
+    use crate::frames::account::Pane as AccountPane;
+    use crate::frames::account::source::PaneState;
     let s = engine_state();
-    assert!(s.account.source.is_none());
+    let source = s.account.source.as_deref().expect("the engine's account source");
+    // Account and Devices and sessions answer (`engine_host::account`); Security does not.
+    assert_ne!(source.pane_state(AccountPane::Account), PaneState::Unwired);
+    assert_ne!(source.pane_state(AccountPane::Sessions), PaneState::Unwired);
+    assert_eq!(source.pane_state(AccountPane::Security), PaneState::Unwired);
+    assert!(source.identity().email.is_empty() && source.sessions().is_empty());
 }
 
 #[test]
@@ -969,4 +981,16 @@ fn trash_and_restore_are_not_gated_by_the_sync_guard() {
         !restore_fn.contains("self.local("),
         "restore goes to the API, not through the sync folder"
     );
+}
+
+/// After a drop that was refused part-way, Try again gets the files that are not in the folder yet, alone. Every
+/// file in and still a refusal (the session changed during the last copy): an empty list, never "all of it again".
+#[test]
+fn what_is_left_of_a_refused_drop_is_the_files_that_did_not_go_in() {
+    let files: Vec<PathBuf> = ["one.pdf", "two.pdf", "three.pdf"].iter().map(PathBuf::from).collect();
+    assert_eq!(upload_rest(&files, 1, true), Some(files[1..].to_vec()));
+    assert_eq!(upload_rest(&files, 3, true), Some(Vec::new()));
+    // Nothing went in: the window sends all of it again. Not refused: nothing is left.
+    assert_eq!(upload_rest(&files, 0, true), None);
+    assert_eq!(upload_rest(&files, 3, false), None);
 }

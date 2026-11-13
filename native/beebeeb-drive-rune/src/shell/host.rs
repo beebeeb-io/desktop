@@ -68,6 +68,8 @@ pub struct Shell {
     /// The gate and the account the last poll saw (`poll` ends the account lane's flows when
     /// the session ends under them).
     session_seen: Option<(super::app::GateState, Option<String>)>,
+    /// The last poll saw the session gate open (`session_gate::open`).
+    gate_open_seen: bool,
     /// The last poll saw a screen with a secret (`poll_capture` drops exclusion one poll late).
     secret_seen: bool,
     /// Consecutive failures of the capture-exclusion platform call. Reset on success or when
@@ -113,6 +115,7 @@ impl Shell {
             // route (or any route, if a window handle exists) will apply it.
             capture_excluded: false,
             session_seen: None,
+            gate_open_seen: false,
             secret_seen: false,
             capture_exclusion_retries: 0,
             flyout_behind: false,
@@ -400,6 +403,10 @@ pub fn dispatch(s: &mut State, event: Event) -> Outcome {
     if let Event::Gate(gate) = &event {
         s.shell.actions.set_gate_for_scene(*gate);
     }
+    // The session gate, before the route machine or any window sees the event.
+    if super::session_gate::refuses_event(s, &event) {
+        return Outcome::Refused;
+    }
     let outcome = s.shell.app.apply(event);
     sync_sidebar(s);
     crate::frames::settings::sync(s); // what was open inside settings is forgotten when the route leaves it
@@ -434,8 +441,14 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // The engine's answers that arrive between presses (a sign-in that took a second, the other device).
     changed |= crate::frames::signin::poll(s, tx);
     changed |= crate::frames::settings::poll(s, tx);
+    // The account sections: the pane that shows is read when it opens; answers come in (`engine_host::account`).
+    changed |= crate::frames::account::poll(s, tx);
     // Trash: a gate or account change drops its names; the section opening reads the list; answers come in.
     changed |= crate::frames::trash::poll(s, tx);
+    // Shared: the same rule (`frames::shared::poll`).
+    changed |= crate::frames::shared::poll(s, tx);
+    // Search: a gate or account change drops its names; opening it and a new query ask the source; answers come in.
+    changed |= crate::frames::search::poll(s, tx);
     // This PC's answers and refusals (`frames::this_pc::poll`).
     changed |= crate::frames::this_pc::poll(s, tx);
     // The speed test's steps (Settings, Bandwidth).
@@ -469,6 +482,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
             // The same for the Files window: its dialogs (a link's password among them), what
             // Undo and Try again hold, the selection and where Back and Forward go.
             crate::frames::files::reset::end_session(s, now.1 != account);
+            // An open file: its decrypted content goes with the account that leaves.
+            crate::frames::viewers::end_session(s, now.1 != account);
             changed = true;
         }
         // The rows are the session's too. `on_gate_change` reads them again when THIS poll's
@@ -479,6 +494,14 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
             crate::frames::files::reset::read_the_root_again(s);
             changed = true;
         }
+    }
+    // The session gate closed under the window in any way (the above, or the session ended
+    // while the gate stayed Ready): what was open in the Files window closes, wiped, and Search
+    // over it ends. The rows are not touched here.
+    let open_now = super::session_gate::open(s);
+    if std::mem::replace(&mut s.shell.gate_open_seen, open_now) && !open_now {
+        crate::frames::files::reset::session_closed(s);
+        changed = true;
     }
     // Windows Hello's answer to an approval of another device's sign-in (DW-A14). Read after the
     // session: an answer that comes with a lock or a sign-out finds its wait already ended.
@@ -494,10 +517,15 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         changed = true;
     }
     if s.sidebar_section != s.shell.sidebar_seen {
-        let outcome = s
-            .shell
-            .app
-            .apply(Event::Navigate(Route::section(section_for(s.sidebar_section))));
+        let event = Event::Navigate(Route::section(section_for(s.sidebar_section)));
+        // The same session gate as `dispatch`: a refused section leaves the route (and the
+        // sidebar's highlight, which `sync_sidebar` points back at it) where it was.
+        let outcome = if super::session_gate::refuses_event(s, &event) {
+            changed = true;
+            Outcome::Refused
+        } else {
+            s.shell.app.apply(event)
+        };
         sync_sidebar(s);
         // The sidebar's route event does not go through `dispatch`: the Files window still
         // closes what was open in it (a name being typed in a row is not modal).
@@ -575,10 +603,25 @@ pub fn drain_signin_intents(s: &mut State) -> bool {
 
 /// The session's gate changed (a sign-in finished, the vault was locked, the account signed out). The
 /// folder the window holds was read under the old gate: read it again from the root, so a sign-in shows the
-/// account's files and a sign-out shows none of them. A gate that opened also starts sync (refused, and
+/// account's files and a sign-out shows none of them. A gate that closed asks the source for
+/// nothing. A gate that opened also starts sync (refused, and
 /// logged, while another agent holds the profile).
 fn on_gate_change(s: &mut State) {
-    let (listing, list_error) = super::state::load(s.source.as_ref(), None);
+    // A gate that closed reads nothing: the window holds the empty root until it opens again.
+    let (listing, list_error) = if s.shell.app.gate() == super::app::GateState::Ready {
+        super::state::load(s.source.as_ref(), None)
+    } else {
+        let root = crate::source::Crumb {
+            id: None,
+            name: "Files".into(),
+        };
+        let nothing = crate::source::Listing {
+            folder: root.clone(),
+            path: vec![root],
+            items: Vec::new(),
+        };
+        (nothing, None)
+    };
     s.listing = listing;
     s.list_error = list_error;
     s.selected = None;

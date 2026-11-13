@@ -1,6 +1,7 @@
-//! Free up space: make unpinned local files online-only again. One implementation, two callers: the shell's
-//! command and the Windows Explorer flyout (`windows_cf::status_ui`). Must not touch a pinned file, an unsent
-//! change, or a path outside the allowed roots.
+//! Free up space: make unpinned local files online-only again. One implementation ([`free_up_space_in`]); the
+//! native shell and the Windows Explorer flyout reach it through the engine handle (`app::Engine::free_up_space`,
+//! the account-bound handle; the flyout by `crate::explorer_command`, task 2490). Must not touch a pinned file, an
+//! unsent change, or a path outside the allowed roots.
 
 use std::path::PathBuf;
 
@@ -70,24 +71,13 @@ pub fn remove_linux_freedesktop_thumbnails_for_evicted_files(
     }
 }
 
-// `pub(crate)` so the Windows Explorer status-flyout command
-// (`windows_cf::status_ui::FreeUpSpaceCommand::Invoke`) can reuse the exact same
-// reclaim path the `free_up_space` IPC uses — one implementation, two callers
-// (the WebView IPC and the shell flyout button). It is a synchronous blocking fn
-// (DB + filesystem work), so the COM `Invoke` can call it directly off the
-// arbitrary thread Windows delivers the command on, without a tokio runtime.
+/// The Tauri shell's reclaim (its `free_up_space` IPC). A synchronous blocking fn (DB + filesystem work).
 ///
 /// Task 2488: `pub` only with the `direct-state-db` feature (the Tauri shell): it opens the state database itself,
-/// asking nobody whose it is. Inside the crate it is the Explorer command's ([`free_up_space_unbound`]).
+/// asking nobody whose it is. Task 2490: Explorer's command no longer calls it; it asks the engine handle
+/// (`crate::explorer_command`), whose reclaim runs through the account-bound handle.
 #[cfg(any(test, feature = "direct-state-db"))]
 pub fn free_up_space_blocking(identity: &'static crate::identity::EngineIdentity) -> Result<FreeUpSpaceResult, String> {
-    free_up_space_unbound(identity)
-}
-
-#[cfg_attr(not(any(test, feature = "direct-state-db", target_os = "windows")), allow(dead_code))]
-pub(crate) fn free_up_space_unbound(
-    identity: &'static crate::identity::EngineIdentity,
-) -> Result<FreeUpSpaceResult, String> {
     let cfg = crate::config::DesktopConfig::load_for(identity)?;
     let Some(sync_root) = cfg.sync_root.clone() else {
         return Ok(FreeUpSpaceResult { bytes_freed: 0 });
@@ -97,22 +87,47 @@ pub(crate) fn free_up_space_unbound(
         return Ok(FreeUpSpaceResult { bytes_freed: 0 });
     }
     let db = crate::state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
-    free_up_space_in(identity, &db, &sync_root)
+    free_up_space_in(identity, &db, &sync_root, &|| true)
+}
+
+/// `each` for every item, in order, asking `go_on` before each: the first no ends it, and the items after it are
+/// left alone. `true`: every item was reached.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn each_while<T>(
+    items: impl IntoIterator<Item = T>,
+    go_on: &dyn Fn() -> bool,
+    mut each: impl FnMut(T),
+) -> bool {
+    for item in items {
+        if !go_on() {
+            return false;
+        }
+        each(item);
+    }
+    true
 }
 
 /// The reclaim itself, in a state database the caller already holds: the engine handle's is the signed-in
 /// account's (`app::Engine::free_up_space`, through the account-bound handle).
+///
+/// `go_on` is asked before each file: once it says no (the session that asked is gone: a lock, a sign-out), no
+/// further file is made online only, and what was freed until then is the answer.
 pub(crate) fn free_up_space_in(
     identity: &'static crate::identity::EngineIdentity,
     db: &crate::state_db::StateDb,
     sync_root: &std::path::Path,
+    go_on: &dyn Fn() -> bool,
 ) -> Result<FreeUpSpaceResult, String> {
     #[cfg(target_os = "windows")]
     {
-        free_up_space_windows(identity, db, sync_root)
+        free_up_space_windows_while(identity, db, sync_root, go_on)
     }
     #[cfg(not(target_os = "windows"))]
     {
+        // The whole choice of what leaves this computer is ONE query here (`free_up_space_unix`), made right after
+        // the handle's own check; the loop after it only removes the copies of rows that query already made online
+        // only, and is not cut short (a copy left behind would be a file no row knows of).
+        let _ = go_on;
         // Snapshot the on-disk cache paths of every UNPINNED, LOCAL file BEFORE
         // any DB transition (eviction nulls `cache_path`). Pinned files are
         // excluded by the query, so they are always kept.
@@ -121,6 +136,178 @@ pub(crate) fn free_up_space_in(
             .map_err(|e| format!("list cache paths: {e}"))?;
         free_up_space_unix(identity, db, sync_root, paths)
     }
+}
+
+/// Free up space for a SELECTION: the downloaded copies of `ids` (a file, or a folder with everything in it) become
+/// online only; nothing else on this computer is touched. Answers per id, in the order asked, from the rows as they
+/// are AFTER the reclaim ([`Reclaimed`]): freed only when every file at or under it is online only.
+///
+/// The same per-file guards as the whole reclaim (`dehydrate_these`): a kept file, a file with a change that is not
+/// sent and a path outside the allowed roots are never touched. `go_on` is asked before each file.
+/// Windows only today ([`SELECTION_RECLAIM`]): elsewhere the engine has no reclaim for a selection, and says so
+/// before anything is read.
+pub(crate) fn free_up_space_of(
+    identity: &'static crate::identity::EngineIdentity,
+    db: &crate::state_db::StateDb,
+    sync_root: &std::path::Path,
+    ids: &[String],
+    go_on: &dyn Fn() -> bool,
+) -> Result<Vec<SelectionAnswer>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let candidates = db
+            .unpinned_local_files_for_dehydration()
+            .map_err(|e| format!("list dehydration candidates: {e}"))?;
+        Ok(free_selection(db, ids, candidates, |wanted| {
+            dehydrate_these(identity, db, sync_root, wanted, go_on);
+        }))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (identity, db, sync_root, ids, go_on);
+        Err(NO_SELECTION_RECLAIM.to_string())
+    }
+}
+
+/// Can a selection be reclaimed on this system ([`free_up_space_of`])? A host asks BEFORE it changes anything for a
+/// Free up space (a kept item is released first): where this is `false`, nothing is released and nothing is asked.
+pub const SELECTION_RECLAIM: bool = cfg!(target_os = "windows");
+
+/// What [`free_up_space_of`] answers where a selection cannot be reclaimed (not Windows).
+pub const NO_SELECTION_RECLAIM: &str = "freeing up space for a selection is not available on this system";
+
+/// One selected id's answer of [`free_up_space_of`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectionAnswer {
+    pub id: String,
+    pub what: Reclaimed,
+    /// At least one file at or under it was made online only by THIS call. Also `true` beside a `what` that is
+    /// not `Freed`: a folder that was freed in part. A host that released a pin for the reclaim keeps the item
+    /// again only where this is `false` (keeping a folder again downloads what was just freed).
+    pub freed_some: bool,
+}
+
+/// What a selection's reclaim did for ONE selected id, read from the rows after it ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reclaimed {
+    /// Every file at or under it is online only now (also when it already was, or when it holds no file). A file
+    /// that was deleted here and waits for the server's trash has no bytes here and does not count.
+    Freed,
+    /// No row has this id.
+    NoSuchItem,
+    /// A file at or under it holds a change that is not sent (uploading, a conflict, an error): its bytes are the
+    /// only copy and stay.
+    Unsent,
+    /// A file at or under it is kept on this computer (also one that was kept after the selection was read).
+    Kept,
+    /// A file at or under it is still downloaded: the reclaim did not reach it or could not free it (open in an
+    /// app, the session ended first, a call that failed), or the rows could not be read to prove otherwise.
+    Left,
+}
+
+/// Which of `candidates` (id, path, size) a selection names, handed to `reclaim` (which makes them online only and
+/// records that in the rows), and the answer per selected id. The answer is decided from the rows AFTER `reclaim`,
+/// never from what was handed over: an id with nothing to hand over (a file that is uploading, in conflict, in
+/// error, or kept since) is not "freed" while its bytes are here. A folder ROW is not a file to free: it never
+/// counts against its folder.
+///
+/// Reads: a selection of files alone reads its own rows (one per id, before and after). Only a selected FOLDER
+/// reads every row once before and once after, to find what is under it (the state database has no query for the
+/// files under a path in any status yet).
+#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+pub(crate) fn free_selection(
+    db: &crate::state_db::StateDb,
+    ids: &[String],
+    candidates: Vec<(String, String, i64)>,
+    reclaim: impl FnOnce(Vec<(String, String, i64)>),
+) -> Vec<SelectionAnswer> {
+    use crate::state_db::{FileEntry, FileStatus, PinState};
+    // Each selected id's place: its path, without slashes at the ends, and whether it is a folder. `None`: no row.
+    let places: Vec<Option<(String, bool)>> = ids
+        .iter()
+        .map(|id| match db.get_file(id) {
+            Ok(Some(entry)) => Some((entry.path.trim_matches('/').to_string(), entry.is_dir())),
+            _ => None,
+        })
+        .collect();
+    let under = |path: &str, place: &str| {
+        let path = path.trim_matches('/');
+        path == place || (path.len() > place.len() && path.starts_with(place) && path.as_bytes()[place.len()] == b'/')
+    };
+    let a_folder_is_selected = places.iter().flatten().any(|(_, is_dir)| *is_dir);
+    // The files (never a folder's row) at or under a selected place, as the rows say now.
+    let selected_files = || -> Option<Vec<FileEntry>> {
+        if a_folder_is_selected {
+            let rows = db.list_files().ok()?;
+            return Some(
+                rows.into_iter()
+                    .filter(|row| !row.is_dir() && places.iter().flatten().any(|(place, _)| under(&row.path, place)))
+                    .collect(),
+            );
+        }
+        let mut rows = Vec::new();
+        for (id, place) in ids.iter().zip(&places) {
+            if place.is_some() {
+                rows.extend(db.get_file(id).ok()?);
+            }
+        }
+        Some(rows)
+    };
+    let files: std::collections::HashSet<String> = selected_files()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| row.file_id)
+        .collect();
+    let wanted: Vec<(String, String, i64)> = candidates.into_iter().filter(|(id, _, _)| files.contains(id)).collect();
+    let handed: std::collections::HashSet<String> = wanted.iter().map(|(id, _, _)| id.clone()).collect();
+    if !wanted.is_empty() {
+        reclaim(wanted);
+    }
+    // What is there now decides. Rows that cannot be read prove nothing: nothing is called freed.
+    let after = selected_files();
+    let kept = |id: &str| matches!(db.get_file_contract_state(id), Ok(Some(contract)) if contract.effective_pin_state() == PinState::Pinned);
+    ids.iter()
+        .zip(&places)
+        .map(|(id, place)| {
+            let (Some((place, _)), Some(after)) = (place, &after) else {
+                let what = if place.is_none() {
+                    Reclaimed::NoSuchItem
+                } else {
+                    Reclaimed::Left
+                };
+                return SelectionAnswer {
+                    id: id.clone(),
+                    what,
+                    freed_some: false,
+                };
+            };
+            let (mut what, mut freed_some) = (Reclaimed::Freed, false);
+            for row in after.iter().filter(|row| under(&row.path, place)) {
+                let this = match row.status {
+                    FileStatus::CloudOnly => {
+                        freed_some |= handed.contains(&row.file_id);
+                        continue;
+                    }
+                    // Deleted here, waiting for the server's trash: its placeholder is gone, nothing to free.
+                    FileStatus::Trashing => continue,
+                    FileStatus::Uploading | FileStatus::Conflict | FileStatus::Error => Reclaimed::Unsent,
+                    FileStatus::Local if kept(&row.file_id) => Reclaimed::Kept,
+                    FileStatus::Local | FileStatus::Downloading => Reclaimed::Left,
+                };
+                // The reason that says most: an unsent change before a kept file before a file merely left.
+                what = match (what, this) {
+                    (Reclaimed::Unsent, _) | (_, Reclaimed::Unsent) => Reclaimed::Unsent,
+                    (Reclaimed::Kept, _) | (_, Reclaimed::Kept) => Reclaimed::Kept,
+                    _ => Reclaimed::Left,
+                };
+            }
+            SelectionAnswer {
+                id: id.clone(),
+                what,
+                freed_some,
+            }
+        })
+        .collect()
 }
 
 /// Windows reclaim path (task 0781). On Cloud Files the hydrated bytes live
@@ -140,25 +327,50 @@ pub fn free_up_space_windows(
     db: &crate::state_db::StateDb,
     sync_root: &std::path::Path,
 ) -> Result<FreeUpSpaceResult, String> {
+    free_up_space_windows_while(identity, db, sync_root, &|| true)
+}
+
+/// [`free_up_space_windows`], asking `go_on` before each file: after the first no, no further file is made online
+/// only; the files already made online only are recorded as such, and their bytes are the answer.
+#[cfg(target_os = "windows")]
+pub(crate) fn free_up_space_windows_while(
+    identity: &crate::identity::EngineIdentity,
+    db: &crate::state_db::StateDb,
+    sync_root: &std::path::Path,
+    go_on: &dyn Fn() -> bool,
+) -> Result<FreeUpSpaceResult, String> {
+    let candidates = db
+        .unpinned_local_files_for_dehydration()
+        .map_err(|e| format!("list dehydration candidates: {e}"))?;
+    Ok(dehydrate_these(identity, db, sync_root, candidates, go_on).0)
+}
+
+/// The reclaim of `candidates` (rows of `StateDb::unpinned_local_files_for_dehydration`, all of them or the ones a
+/// selection names): the bytes freed, and the ids of the files that are online only now. Every guard is here, once,
+/// for both callers.
+#[cfg(target_os = "windows")]
+fn dehydrate_these(
+    identity: &crate::identity::EngineIdentity,
+    db: &crate::state_db::StateDb,
+    sync_root: &std::path::Path,
+    candidates: Vec<(String, String, i64)>,
+    go_on: &dyn Fn() -> bool,
+) -> (FreeUpSpaceResult, Vec<String>) {
     // Reclaim targets are the UNPINNED, LOCAL files — addressed by their
     // server-relative path, NOT by `cache_path`. On Windows CF the bytes live
     // inside the placeholder in the sync root, and `cache_path` records the
     // already-deleted `%TEMP%` decrypt path from the fetch callback, so it is
     // useless as a dehydration target. We reconstruct the real placeholder path
     // exactly as `windows_cf::populate_placeholders` does.
-    let candidates = db
-        .unpinned_local_files_for_dehydration()
-        .map_err(|e| format!("list dehydration candidates: {e}"))?;
-
     let allowed_roots = free_up_space_allowed_roots(identity, sync_root);
     let mut bytes_freed: u64 = 0;
     let mut dehydrated_ids: Vec<String> = Vec::new();
 
-    for (file_id, rel_path, _size_bytes) in candidates {
+    let finished = each_while(candidates, go_on, |(file_id, rel_path, _size_bytes)| {
         // Task 2407 (core 2404): never another file this name reaches (an 8.3 short name; `canonicalize` below would
         // follow it to that file's long name). A check that cannot finish keeps the file local.
         let Some(local_path) = crate::name_alias::reclaim_place(sync_root, &rel_path) else {
-            continue;
+            return;
         };
         // Path-safety: only dehydrate placeholders that actually resolve under
         // an allowed engine root (the sync root). A corrupt `path` row can
@@ -166,10 +378,10 @@ pub fn free_up_space_windows(
         let Ok(canonical) = local_path.canonicalize() else {
             // Placeholder missing on disk — nothing to reclaim; leave the row
             // for the next reconcile to re-seed.
-            continue;
+            return;
         };
         if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
-            continue;
+            return;
         }
         // Pin TOCTOU re-check: `unpinned_local_files_for_dehydration()` filtered
         // on pin state at query time, but the user could have PINNED this file in
@@ -185,7 +397,7 @@ pub fn free_up_space_windows(
         if let Ok(Some(contract)) = db.get_file_contract_state(&file_id) {
             if contract.effective_pin_state() == crate::state_db::PinState::Pinned {
                 tracing::debug!(file_id = %file_id, "free_up_space: file pinned after enumeration; keeping local");
-                continue;
+                return;
             }
         }
         // Task 2240 (spec D2, the lead's ruling on self-review #1): confirm before evict. A pin made in Explorer
@@ -199,7 +411,7 @@ pub fn free_up_space_windows(
         };
         if direct.is_none_or(pinned_on_disk) {
             tracing::info!(file_id = %file_id, "free_up_space: the file is pinned on disk (or unreadable); keeping it local");
-            continue;
+            return;
         }
         // OS-level unpin BEFORE dehydrating. This file passed both pin checks
         // above, so it is MEANT to be reclaimed — but its placeholder may still
@@ -214,7 +426,7 @@ pub fn free_up_space_windows(
         // queued upload) or are not known to be the agreed content: they are the only copy.
         if !crate::windows_cf::placeholders::local_bytes_agreed(db, &file_id, &canonical) {
             tracing::warn!(file_id = %file_id, "free_up_space: the file holds a change that is not sent; keeping it local");
-            continue;
+            return;
         }
         if let Err(error) = crate::windows_cf::placeholders::set_pin_state(&canonical, false, false) {
             tracing::warn!(file_id = %file_id, error = %error, "free_up_space: OS unpin before dehydrate failed; attempting dehydrate anyway");
@@ -235,6 +447,9 @@ pub fn free_up_space_windows(
                 tracing::warn!(file_id = %file_id, error = %error, "free_up_space: CfDehydratePlaceholder failed; keeping file local");
             }
         }
+    });
+    if !finished {
+        tracing::info!("free_up_space: stopped before the last file (the session that asked is gone)");
     }
 
     // Mark cloud_only ONLY for the files we actually dehydrated.
@@ -244,7 +459,7 @@ pub fn free_up_space_windows(
     }
 
     tracing::info!(bytes_freed, "free_up_space dehydrated unpinned placeholders");
-    Ok(FreeUpSpaceResult { bytes_freed })
+    (FreeUpSpaceResult { bytes_freed }, dehydrated_ids)
 }
 
 /// Unix reclaim path (macOS File Provider / Linux FUSE). Unchanged from the

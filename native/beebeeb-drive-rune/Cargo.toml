@@ -48,6 +48,9 @@ feedback = ["dep:wgpu"]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 # Names the Win32 window handle Rune's `WindowHandle::with_raw_handle` lends.
 raw-window-handle = "0.6"
+# Windows Hello's prompt is a WinRT API (`shell/platform/windows_hello.rs`), which windows-sys does not have. The
+# same `windows` the engine already builds: no new crate is compiled.
+windows = { version = "0.58", features = ["Foundation", "Security_Credentials_UI", "Win32_Foundation", "Win32_System_WinRT"] }
 
 [dev-dependencies]
 # `engine_host` tests open the engine on credential stores in memory, with the settings file in the engine's test
@@ -57,10 +60,87 @@ beebeeb-engine = { path = "../../crates/beebeeb-engine", default-features = fals
 # `source_engine` tests build a state.db with the engine's own writers.
 tempfile = "3"
 # The timing test asks SQLite for its query plan; same version the engine links.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", default-features = false, features = ["bundled", "cache"] }
 tokio = { version = "1", features = ["rt"] } # the tray tests hold a task in the engine's slot (`hold_running`)
 # For headless golden-PNG tests.
 
 [[bin]]
 name = "beebeeb-drive"
 path = "src/main.rs"
+
+# The Linux test job crept toward its 45-minute limit: with a warm cache the build is about 40 s, the one test binary
+# was the rest (985 tests in 678 s, then 1,076 tests in 1,779 s on 2026-11-13). The tests under `engine_host/` and
+# `shell/` each sign an invented account in and unlock it through the engine, with core's production Argon2id
+# parameters, and at opt-level 0 that is minutes per test (51 tests ran for over 60 s each). This crate is its own
+# workspace root, so the same list in `crates/beebeeb-engine/Cargo.toml` and `src-tauri/Cargo.toml` does not reach it
+# (docs/ci/2026-11-11-rust-ci-speed.md): these third-party crypto, KDF, hash and SQLite crates are compiled optimised
+# in the dev and test profiles. No KDF parameter, no crypto code, no release setting changes; Cargo.lock is unchanged.
+# A name that matches no package is a cargo warning.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.blake3]
+opt-level = 3
+[profile.dev.package.password-hash]
+opt-level = 3
+[profile.dev.package.opaque-ke]
+opt-level = 3
+[profile.dev.package.voprf]
+opt-level = 3
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+[profile.dev.package.fiat-crypto]
+opt-level = 3
+[profile.dev.package.subtle]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.sha1]
+opt-level = 3
+[profile.dev.package.hkdf]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3
+[profile.dev.package.digest]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3
+[profile.dev.package.aes-gcm]
+opt-level = 3
+[profile.dev.package.ghash]
+opt-level = 3
+[profile.dev.package.polyval]
+opt-level = 3
+[profile.dev.package.cipher]
+opt-level = 3
+[profile.dev.package.universal-hash]
+opt-level = 3
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.p256]
+opt-level = 3
+[profile.dev.package.primeorder]
+opt-level = 3
+[profile.dev.package.elliptic-curve]
+opt-level = 3
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+[profile.dev.package.ff]
+opt-level = 3
+[profile.dev.package.group]
+opt-level = 3
+[profile.dev.package.bip39]
+opt-level = 3
+[profile.dev.package.generic-array]
+opt-level = 3
+[profile.dev.package.hybrid-array]
+opt-level = 3
+[profile.dev.package.block-buffer]
+opt-level = 3
+[profile.dev.package.crypto-common]
+opt-level = 3
+[profile.dev.package.zeroize]
+opt-level = 3
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3

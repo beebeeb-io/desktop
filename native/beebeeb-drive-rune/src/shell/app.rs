@@ -372,6 +372,21 @@ impl AppMachine {
         }
     }
 
+    /// Is Settings in front of the Drive route? (Back then closes it.)
+    pub fn in_settings(&self) -> bool {
+        self.settings.is_some()
+    }
+
+    /// Where Back would go, when it is a step in the history.
+    pub fn back_target(&self) -> Option<&Route> {
+        self.back.last()
+    }
+
+    /// Where Forward would go.
+    pub fn forward_target(&self) -> Option<&Route> {
+        self.forward.last()
+    }
+
     pub fn pending(&self) -> Option<&Intent> {
         self.pending.as_ref()
     }
