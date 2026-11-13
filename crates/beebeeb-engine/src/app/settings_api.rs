@@ -114,8 +114,9 @@ impl<C: CredentialStores> Engine<C> {
     }
 }
 
-/// The kind of a failed call, read from the error's chain (never its text).
-fn kind_of(error: &anyhow::Error) -> AccountCallError {
+/// The kind of a failed call, read from the error's chain (never its text). Also the Trash listing's
+/// (`app::trash_api`).
+pub(super) fn kind_of(error: &anyhow::Error) -> AccountCallError {
     for cause in error.chain() {
         if let Some(api) = cause.downcast_ref::<DesktopApiError>() {
             return match api {

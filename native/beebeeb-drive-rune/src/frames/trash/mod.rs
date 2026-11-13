@@ -5,6 +5,8 @@ pub mod scenes;
 pub mod source;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_live;
 
 use crate::State;
 use crate::frames::shared::parts::controls::{ButtonKind, button};
@@ -16,7 +18,7 @@ use crate::frames::{self, Intent};
 use crate::theme::{icons, tokens};
 use crate::ui::kit;
 use rune::{Cx, El, Key, KeyEvent, Tx, col, el};
-use source::{BoardTrash, TrashSource};
+use source::{BoardTrash, Loaded, Notice, TrashSource};
 
 const COLUMNS: Columns = Columns {
     names: ["Name", "Deleted", "Size", "Where it was", ""],
@@ -26,9 +28,65 @@ const COLUMNS: Columns = Columns {
 
 pub struct TrashUi {
     pub source: Box<dyn TrashSource>,
+    /// The selected row's place in the list as drawn.
     pub selected: Option<usize>,
+    /// The selected ITEM: what every action acts on. The list re-reads and re-sorts under it, so `selected` is
+    /// worked out again from this id on each poll (`resync`).
+    pub selected_item: Option<String>,
     /// The selected item's menu, while it is open (DW-0748).
     pub menu: Option<Open>,
+    /// What the view says over the list (a refused restore, a control not available yet).
+    pub notice: Option<Notice>,
+    /// The gate and account the last poll saw: a change drops every name at once.
+    seen: Option<(crate::shell::app::GateState, Option<String>)>,
+    /// Whether the Trash section was open at the last poll.
+    was_open: bool,
+}
+
+/// How often the poll runs again while a read or a restore is on its way.
+const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The window's poll (`shell::host::poll`): a gate or account change drops the source's names at once, on the
+/// window's side; opening the Trash section asks for the list (the source decides whether it is old); what arrived
+/// is taken in, and the selection follows its item. `true`: something drawn changed.
+pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    let gate = (s.shell.app.gate(), s.shell.app.account().map(str::to_owned));
+    let open =
+        s.sidebar_section == crate::ui::sidebar::SidebarSection::Trash && gate.0 == crate::shell::app::GateState::Ready;
+    let ui = &mut s.frames.trash;
+    let mut changed = false;
+    if ui.seen.as_ref() != Some(&gate) {
+        if ui.seen.is_some() {
+            ui.source.forget();
+            ui.selected = None;
+            ui.selected_item = None;
+            ui.menu = None;
+            ui.notice = None;
+            // The section must re-open (`opened`) on the next poll so a new read starts: without this,
+            // an account change while the gate stays Ready would show "Loading" forever.
+            ui.was_open = false;
+            changed = true;
+        }
+        ui.seen = Some(gate);
+    }
+    if open && !ui.was_open {
+        ui.notice = None;
+        ui.source.opened();
+        changed = true;
+    }
+    ui.was_open = open;
+    let pumped = ui.source.pump();
+    if let Some(notice) = pumped.notice {
+        ui.notice = Some(notice);
+    }
+    if pumped.busy {
+        tx.wake_after(POLL_EVERY);
+    }
+    changed |= pumped.changed;
+    if pumped.changed {
+        ui.resync();
+    }
+    changed
 }
 
 const MENU: &[Entry] = &[
@@ -45,6 +103,9 @@ fn pick(s: &mut State, n: usize, tx: &mut Tx) {
     match (n, id) {
         (0, _) => {
             s.frames.trash.restore_selected();
+        }
+        (1 | 2, Some(_)) if !s.frames.trash.source.actions_available() => {
+            s.frames.trash.notice = Some(Notice::NotAvailable);
         }
         (1, Some(id)) => s.frames.intents.push(Intent::About("DW-0411", id)),
         // The warning for THIS item (DW-0748: "the same big warning as Empty Trash, for this item").
@@ -77,36 +138,124 @@ impl Default for TrashUi {
         TrashUi {
             source: Box::new(BoardTrash::new()),
             selected: None,
+            selected_item: None,
             menu: None,
+            notice: None,
+            seen: None,
+            was_open: false,
         }
     }
 }
 
 impl TrashUi {
-    /// The id of the selected item.
-    pub fn selected_id(&self) -> Option<String> {
-        self.source.items().get(self.selected?).map(|item| item.id.clone())
+    /// A Trash on `source`, nothing selected.
+    pub fn on(source: Box<dyn TrashSource>) -> Self {
+        TrashUi {
+            source,
+            ..TrashUi::default()
+        }
     }
 
-    /// Move the selection to row `i`; focus goes with it.
+    /// The id of the selected item: the item chosen, else (a scene that set only the row) the row's.
+    pub fn selected_id(&self) -> Option<String> {
+        self.selected_item
+            .clone()
+            .or_else(|| self.source.items().get(self.selected?).map(|item| item.id.clone()))
+    }
+
+    /// Move the selection to row `i` and its item; focus goes with it.
     fn select(&mut self, i: usize, tx: &mut Tx) {
-        self.selected = Some(i);
+        self.pick_row(i);
         tx.focus(format!("row-{i}"), true);
     }
 
-    /// Restore the selected item; the selection stays on the row that takes its place.
+    /// Select row `i` and the item on it.
+    pub fn pick_row(&mut self, i: usize) {
+        self.selected = Some(i);
+        self.selected_item = self.source.items().get(i).map(|item| item.id.clone());
+    }
+
+    /// The list changed: the selection stays on its ITEM (its row may have moved), or ends when the item is gone.
+    pub fn resync(&mut self) {
+        let Some(id) = self.selected_item.as_deref() else {
+            return;
+        };
+        match self.source.items().iter().position(|item| item.id == id) {
+            Some(i) => self.selected = Some(i),
+            None => {
+                self.selected = None;
+                self.selected_item = None;
+                self.menu = None;
+            }
+        }
+    }
+
+    /// Restore the selected ITEM; the selection moves to the row that takes its place.
     pub fn restore_selected(&mut self) -> bool {
-        let items = self.source.items();
-        let Some(item) = self.selected.and_then(|i| items.get(i)) else {
+        let Some(id) = self.selected_id() else {
             return false;
         };
-        let done = self.source.restore(&item.id);
-        let left = self.source.items().len();
-        self.selected = self
-            .selected
-            .filter(|_| left > 0)
-            .map(|i| i.min(left.saturating_sub(1)));
+        let at = self.source.items().iter().position(|item| item.id == id);
+        let done = self.source.restore(&id);
+        let items = self.source.items();
+        let left = items.len();
+        self.selected = at.or(self.selected).filter(|_| left > 0).map(|i| i.min(left - 1));
+        self.selected_item = self.selected.and_then(|i| items.get(i)).map(|item| item.id.clone());
         done
+    }
+}
+
+/// The words of a notice.
+fn notice_words(notice: &Notice) -> String {
+    match notice {
+        Notice::RestoreRefused(name) => {
+            format!("Couldn\u{2019}t restore \u{201C}{name}\u{201D}. It\u{2019}s still in Trash.")
+        }
+        Notice::RefreshFailed => "Couldn\u{2019}t refresh Trash. What\u{2019}s shown may be out of date.".into(),
+        Notice::NotAvailable => "Not available yet in this version.".into(),
+    }
+}
+
+/// The notice over the list (`.mk-banner` without a bar). Keys: `notice`, `notice-words`.
+fn notice_note(notice: &Notice, t: &tokens::Theme) -> El {
+    const WORDS: rune::TextStyle = rune::TextStyle::new(12.5, 400.0).lh(17.0);
+    el().key("notice-wrap").w_full().px(14.0).pt(10.0).child(
+        col()
+            .key("notice")
+            .role("status")
+            .label(notice_words(notice))
+            .w_full()
+            .pt(9.0)
+            .pb(9.0)
+            .pl(12.0)
+            .pr(10.0)
+            .radius(10.0)
+            .fill(t.text.alpha(0.06))
+            .child(
+                rune::rich(notice_words(notice), Vec::new())
+                    .key("notice-words")
+                    .font(WORDS)
+                    .color(t.text_secondary)
+                    .w_full(),
+            ),
+    )
+}
+
+/// The words of a list that is not here (`None`: it is, draw it).
+fn not_here(loaded: Loaded) -> Option<(&'static str, &'static str)> {
+    match loaded {
+        Loaded::Ready => None,
+        Loaded::Loading => Some(("Loading Trash\u{2026}", "Getting the list from Beebeeb.")),
+        Loaded::Offline => Some((
+            "Can\u{2019}t reach Beebeeb",
+            "Trash shows again once you\u{2019}re online.",
+        )),
+        Loaded::Failed => Some((
+            "Couldn\u{2019}t load Trash",
+            "Open Trash again in a moment to try again.",
+        )),
+        Loaded::SessionEnded => Some(("Your session ended", "Sign in again to see Trash.")),
+        Loaded::SignedOut => Some(("Signed out", "Sign in to see Trash.")),
     }
 }
 
@@ -181,9 +330,17 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let items = ui.source.items();
     let totals = ui.source.totals();
     let is_empty = totals.items == 0;
+    // A list that is not here yet (loading, offline, signed out…) says so; never "Trash is empty" for it.
+    let missing = if items.is_empty() {
+        not_here(ui.source.loaded())
+    } else {
+        None
+    };
 
     let emptying = ui.source.emptying();
-    let sub = if is_empty {
+    let sub = if missing.is_some() {
+        String::new()
+    } else if is_empty {
         plural(0, "item", "items")
     } else if emptying.is_some() {
         format!("{} left", plural(totals.items, "item", "items"))
@@ -195,15 +352,20 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         )
     };
     // Empty Trash… is hidden when there is nothing to empty (DW-0117).
-    let slot = if is_empty {
+    let slot = if is_empty || missing.is_some() {
         Vec::new()
     } else if emptying.is_some() {
         // Already emptying (DW-0749b): the button waits.
         vec![button("Empty Trash\u{2026}", ButtonKind::GhostOff, None, &t)]
     } else {
         vec![
-            button("Empty Trash\u{2026}", ButtonKind::GhostDanger, None, &t)
-                .on_press(|s: &mut State| s.frames.intents.push(Intent::Frame("DW-0749"))),
+            button("Empty Trash\u{2026}", ButtonKind::GhostDanger, None, &t).on_press(|s: &mut State| {
+                if s.frames.trash.source.actions_available() {
+                    s.frames.intents.push(Intent::Frame("DW-0749"));
+                } else {
+                    s.frames.trash.notice = Some(Notice::NotAvailable);
+                }
+            }),
         ]
     };
     let bar = toolbar(
@@ -218,7 +380,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         &t,
     );
 
-    let body = if is_empty {
+    let body = if let Some((title, words)) = missing {
+        empty::empty(&icons::TRASH, title, words, None, &t)
+    } else if is_empty {
         empty::empty(
             &icons::TRASH,
             "Trash is empty",
@@ -234,9 +398,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 table_row(i, r, ui.selected == Some(i), &COLUMNS, &t)
                     // The list is one Tab stop: the selected row, or the first.
                     .tab_index(if ui.selected.unwrap_or(0) == i { 0 } else { -1 })
-                    .on_press(move |s: &mut State| s.frames.trash.selected = Some(i))
+                    .on_press(move |s: &mut State| s.frames.trash.pick_row(i))
                     .on_secondary_press(move |s: &mut State, press, _| {
-                        s.frames.trash.selected = Some(i);
+                        s.frames.trash.pick_row(i);
                         s.frames.trash.menu = Some(Open::at(press.x, press.y));
                     })
             })
@@ -246,6 +410,15 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             body = body.child(emptying_note(e, &t));
         }
         body.child(header(&COLUMNS, &t)).child(rows("Trash", list))
+    };
+    let body = match &ui.notice {
+        Some(notice) => col()
+            .key("notice-body")
+            .w_full()
+            .grow(1.0)
+            .child(notice_note(notice, &t))
+            .child(body),
+        None => body,
     };
     let window = cx.layout_size("window");
     chrome::window(
@@ -316,6 +489,10 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         let Some(id) = ui.selected_id() else {
             return false;
         };
+        if !ui.source.actions_available() {
+            ui.notice = Some(Notice::NotAvailable);
+            return true;
+        }
         s.frames.intents.push(if frames::is_space(ev) {
             Intent::Do("preview", id)
         } else {
@@ -332,6 +509,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Home => ui.select(0, tx),
         Key::End => ui.select(count - 1, tx),
         Key::Delete => match ui.selected_id() {
+            Some(_) if !ui.source.actions_available() => ui.notice = Some(Notice::NotAvailable),
             Some(id) => s.frames.intents.push(Intent::Do("delete-permanently", id)),
             None => return false,
         },
