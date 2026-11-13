@@ -406,6 +406,7 @@ pub fn dispatch(s: &mut State, event: Event) -> Outcome {
     crate::frames::backups::sync(s); // the same for Backups, and its one-time code is wiped
     crate::frames::account::sync(s); // and what was open inside the account sections
     crate::frames::tray::shortcuts::sync(s); // a closed shortcuts list forgets its page
+    crate::frames::files::reset::sync(s); // a route that left the Files window closes its dialogs, wiped
     outcome
 }
 
@@ -444,7 +445,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // The session and the tray: the engine may have changed since the last frame.
     let gate_before = s.shell.app.gate();
     changed |= s.shell.refresh();
-    if s.shell.app.gate() != gate_before {
+    let read_by_the_gate = s.shell.app.gate() != gate_before;
+    if read_by_the_gate {
         on_gate_change(s);
         changed = true;
     }
@@ -462,6 +464,17 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         let other_account = account.is_some() && now.1 != account;
         if left_ready || other_account {
             crate::frames::account::end_flows(s);
+            // The same for the Files window: its dialogs (a link's password among them), what
+            // Undo and Try again hold, the selection and where Back and Forward go.
+            crate::frames::files::reset::end_session(s, now.1 != account);
+            changed = true;
+        }
+        // The rows are the session's too. `on_gate_change` reads them again when THIS poll's
+        // refresh moved the gate; another account under a gate that stays Ready, and a change
+        // first seen by a refresh between polls, come by here only: the rows are dropped and
+        // the root is read again, so no name of the earlier account stays on screen.
+        if (gate, account) != now && !read_by_the_gate {
+            crate::frames::files::reset::read_the_root_again(s);
             changed = true;
         }
     }
@@ -484,8 +497,13 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
             .app
             .apply(Event::Navigate(Route::section(section_for(s.sidebar_section))));
         sync_sidebar(s);
+        // The sidebar's route event does not go through `dispatch`: the Files window still
+        // closes what was open in it (a name being typed in a row is not modal).
+        crate::frames::files::reset::sync(s);
         changed |= outcome == Outcome::Changed;
     }
+    // A message that went takes what its Try again held with it.
+    changed |= crate::frames::files::reset::poll(s);
     // Backups shows its own folder in the Files window (`frames::files::protected`, DW-0422).
     changed |= crate::frames::files::protected::poll(s);
     changed
@@ -510,7 +528,10 @@ fn poll_capture(s: &mut State, tx: &mut Tx) -> bool {
             group,
             registry::FrameGroup::Settings(pane) if crate::frames::account::Pane::root(pane).is_some()
         ) && s.account.shows_secret()
-    };
+    }
+    // A link's password being typed in the Files window's Share dialog (DW-0407).
+    || (matches!(registry::group_for(&s.shell.app), registry::FrameGroup::Section(_))
+        && crate::frames::files::share::shows_secret(s));
     let leaving = std::mem::replace(&mut s.shell.secret_seen, secret) && !secret;
     if leaving {
         tx.settle();

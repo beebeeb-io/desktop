@@ -386,3 +386,53 @@ fn capture_exclusion_drops_only_after_the_code_is_out_of_the_tree() {
         assert!(frames_with_the_code <= 1, "{way}: {frames_with_the_code} frames");
     }
 }
+
+/// The Share dialog's password field (DW-0407) is a secret on a route that is not one: the
+/// window is excluded from capture exactly while the field shows. The link itself is never
+/// drawn, so the dialog without the field leaves the window capturable.
+#[test]
+fn a_links_password_field_excludes_the_window_from_capture_while_it_shows() {
+    let (_engine, platform, mut rt) = fixture();
+    let exclusions = || platform.capture_exclusions.lock().unwrap().clone();
+    let centre_of = |rt: &Runtime<State>, key: &str| {
+        let e = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
+            .unwrap_or_else(|| panic!("no element keyed {key}"));
+        (e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0)
+    };
+    let click = |rt: &mut Runtime<State>, key: &str| {
+        let (x, y) = centre_of(rt, key);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        for i in 0..3 {
+            rt.frame(10.0 + f64::from(i));
+        }
+    };
+    // Share…, from the details panel's button: the dialog alone shows no secret.
+    click(&mut rt, "share-box");
+    assert!(matches!(
+        rt.state.actions.dialog,
+        Some(crate::frames::files::dialogs::Dialog::Share(_))
+    ));
+    assert!(
+        exclusions().is_empty(),
+        "the dialog without a password field is capturable"
+    );
+    // Password on: the field shows, and the platform is told to exclude the window.
+    click(&mut rt, "item-0-2-switch");
+    assert!(crate::frames::files::share::shows_secret(&rt.state));
+    assert_eq!(exclusions(), vec![true]);
+    assert!(rt.state.shell.capture_excluded);
+    // Password off again: capturable again.
+    click(&mut rt, "item-0-2-switch");
+    assert_eq!(exclusions(), vec![true, false]);
+    // On, then Cancel: the dialog and the field are gone, and so is the exclusion.
+    click(&mut rt, "item-0-2-switch");
+    assert_eq!(exclusions(), vec![true, false, true]);
+    click(&mut rt, "btn-2");
+    assert!(rt.state.actions.dialog.is_none());
+    assert_eq!(exclusions(), vec![true, false, true, false]);
+    assert!(!rt.state.shell.capture_excluded);
+}

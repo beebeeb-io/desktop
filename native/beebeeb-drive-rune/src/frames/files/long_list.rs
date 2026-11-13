@@ -119,7 +119,12 @@ impl State {
             return true;
         };
         self.select_only(row);
-        tx.scroll_into_view(format!("row-{}", row.wrapping_sub(self.actions.board_first_row)));
+        // A grid's tiles have their own keys.
+        if crate::frames::global::grid::on(self) {
+            tx.scroll_into_view(format!("grid-{row}"));
+        } else {
+            tx.scroll_into_view(format!("row-{}", row.wrapping_sub(self.actions.board_first_row)));
+        }
         true
     }
 }

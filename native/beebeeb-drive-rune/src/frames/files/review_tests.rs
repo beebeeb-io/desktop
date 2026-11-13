@@ -60,7 +60,10 @@ fn the_details_panels_buttons_and_switch_act_with_the_pointer_and_the_keyboard()
         assert_eq!((e.role, e.focusable), (role, true), "{key}");
     }
     click(&mut rt, "share-box");
+    // Each opens its dialog (`actions_tests.rs`): Esc closes it.
+    press(&mut rt, Key::Escape, NONE);
     click(&mut rt, "versions-box");
+    press(&mut rt, Key::Escape, NONE);
     assert_eq!(
         rt.state.actions.intents,
         [Intent::Frame("DW-0407"), Intent::Frame("DW-0413")]
@@ -80,6 +83,10 @@ fn the_details_panels_buttons_and_switch_act_with_the_pointer_and_the_keyboard()
         settle(&mut rt);
         assert_eq!(focused(&rt).as_deref(), Some(key));
         press(&mut rt, Key::Text(" ".into()), NONE);
+        // Share and Version history are dialogs now: Esc closes each.
+        if rt.state.actions.dialog.is_some() {
+            press(&mut rt, Key::Escape, NONE);
+        }
     }
     assert_eq!(
         rt.state.actions.intents,

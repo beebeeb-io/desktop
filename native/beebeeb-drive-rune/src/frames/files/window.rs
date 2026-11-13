@@ -1,7 +1,7 @@
 //! The Files window with what the Files frames add: several selected rows, the menus, the toasts,
 //! the selected item's own details.
 
-use super::{Intent, MenuKind, Toast, details, dialogs, list, menus, rename};
+use super::{MenuKind, Toast, details, dialogs, list, menus, rename};
 use super::{sidebar, toolbar};
 use crate::State;
 use crate::theme::tokens::{self, Theme};
@@ -123,7 +123,8 @@ fn toast_of(kind: Toast, t: &Theme) -> El {
             &icons_files::ALERT,
             toast::Tone::Failed,
             &Toast::failure(action, why),
-            Some(toast::ToastAction {
+            // Only where Try again repeats something (`retry::offers_try_again`).
+            super::retry::offers_try_again(action).then_some(toast::ToastAction {
                 text: "Try again",
                 name: "Try again",
                 shortcut: None,
@@ -188,7 +189,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     // (Backups, a service folder) shows its headers over no rows.
     let empty = s.listing.items.is_empty() && s.can_add();
     let mut body = row().key("list-body").grow(1.0).min_h(0.0).w_full();
-    if empty {
+    if super::session::blanks(s) {
+        // The session ended and the rows are not to be shown (`session::KEEP_THE_LIST`): only the banner's ask.
+        body = body.child(el().key("list-blank").grow(1.0).h_full());
+    } else if empty {
         // Nothing in the folder: no headers, no panel, one way forward (DW-1106).
         body = body.child(empty_folder(s.listing.folder.id.is_none(), &t));
     } else {
@@ -225,12 +229,17 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .fill(t.bg)
         .child(toolbar::toolbar(s, &t, 0.0))
         // The one banner of the whole window, or the loading strip (`frames::global`).
-        .children(crate::frames::global::under_toolbar(s, &t).or_else(|| super::protected::notice(s, &t)))
+        .children(
+            super::browse_states::card(s, &t)
+                .or_else(|| crate::frames::global::under_toolbar(s, &t))
+                .or_else(|| super::protected::notice(s, &t)),
+        )
         .child(body)
         .child({
             // The sync state is the source's; a click shows the b's flyout (DW-0401 to DW-1201).
             let state = s.actions.source.sync_state();
             let details = crate::frames::global::status_words(s)
+                .or_else(|| super::browse_states::status_words(s))
                 .or_else(|| super::protected::status_words(s))
                 .unwrap_or_else(|| pc_summary(s));
             let name = match &state {
@@ -238,13 +247,22 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 None => details.clone(),
             };
             // Without a connection the line says so (`frames::global`, DW-0121).
-            crate::frames::global::status_line(state.as_deref(), &details, &t)
+            // While something uploads the line says so, and opens Uploads (DW-0426, DW-0427).
+            let uploading = super::uploads::status(s, &details, &t);
+            let name = match &uploading {
+                Some((_, words)) => format!("{words}. {details}"),
+                None => name,
+            };
+            super::session::status_line(s, &t)
+                .or_else(|| super::browse_states::status_line(s, &details, &t))
+                .or_else(|| crate::frames::global::status_line(state.as_deref(), &details, &t))
+                .or(uploading.map(|(line, _)| line))
                 .unwrap_or_else(|| status_line::status_line(state.as_deref(), &details, &t))
                 .role("button")
                 .label(name)
                 .description("Shows sync status")
                 .focusable(true)
-                .on_press(|s: &mut State| s.intent(Intent::Frame("DW-1201")))
+                .on_press(|s: &mut State| s.status_pressed())
         });
     if let Some(kind) = s.live_toast() {
         main = main.child(toast::layer(toast_of(kind, &t)));
@@ -293,6 +311,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let layers: Vec<El> = [
         menu_layer(s, &t),
         rename::tip_layer(s, &t),
+        super::uploads::drop_layer(s, &t),
+        super::uploads::layer(s, &t),
         dialogs::layer(s, &t),
         super::protected::layer(s, &t),
     ]
