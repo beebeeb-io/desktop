@@ -99,6 +99,8 @@ mod tests {
     struct Later {
         later: Arc<Mutex<Vec<Change>>>,
         left: Option<Vec<PathBuf>>,
+        /// How many items Free up space was asked for.
+        asked: Arc<Mutex<usize>>,
     }
 
     #[rustfmt::skip]
@@ -126,7 +128,7 @@ mod tests {
         fn new_folder(&mut self, _: Option<&str>, _: &str) -> R { Ok(()) }
         fn rename(&mut self, _: &DriveItem, _: &str) -> R { Ok(()) }
         fn move_to(&mut self, _: &[DriveItem], _: Option<&str>) -> R { Ok(()) }
-        fn free_up_space(&mut self, _: &[DriveItem]) -> R { Ok(()) }
+        fn free_up_space(&mut self, items: &[DriveItem]) -> R { *self.asked.lock().unwrap() += items.len(); Ok(()) }
         fn open_in_file_explorer(&mut self, _: Option<&str>) -> R { Ok(()) }
         fn changes(&mut self) -> Vec<Change> { std::mem::take(&mut self.later.lock().unwrap()) }
         fn answers_later(&self) -> bool { true }
@@ -135,15 +137,26 @@ mod tests {
     #[test]
     fn nothing_of_a_change_is_drawn_before_the_source_said_what_it_did_and_then_per_item() {
         let later = Arc::new(Mutex::new(Vec::new()));
+        let asked = Arc::new(Mutex::new(0));
         let mut state = crate::init();
         state.actions.source = Box::new(Later {
             later: later.clone(),
             left: None,
+            asked: asked.clone(),
         });
         let mut rt = runtime_of(state);
         let seen = Arc::new(Mutex::new(Vec::new()));
         let out = seen.clone();
         rt.update(move |s, tx| {
+            // Two rows that can change (not Backups).
+            let rows: Vec<usize> = (0..s.listing.items.len())
+                .filter(|&row| !s.listing.items[row].is_protected && !s.listing.items[row].is_folder)
+                .take(2)
+                .collect();
+            assert_eq!(rows.len(), 2);
+            s.listing.items.swap(0, rows[0]);
+            s.listing.items.swap(1, rows[1]);
+            s.selected = Some(0);
             for row in 0..2 {
                 s.listing.items[row].pc_status = Some("on_this_pc".into());
                 s.actions.selection.insert(row);
@@ -152,6 +165,7 @@ mod tests {
             *out.lock().unwrap() = vec![s.listing.items[0].id.clone(), s.listing.items[1].id.clone()];
         });
         let ids = seen.lock().unwrap().clone();
+        assert_eq!(*asked.lock().unwrap(), 2, "the source was not asked for the two rows");
         rt.update(|s, _| {
             assert!(
                 !super::super::protected::poll(s),
@@ -203,6 +217,7 @@ mod tests {
         state.actions.source = Box::new(Later {
             later: Arc::default(),
             left: Some(files[1..].to_vec()),
+            asked: Arc::default(),
         });
         let mut rt = runtime_of(state);
         rt.update(|s, tx| {
@@ -212,7 +227,7 @@ mod tests {
                 Some((None, files[1..].to_vec())),
                 "Try again would copy a file twice"
             );
-            // Try again goes in (the source refuses once): nothing is left to repeat.
+            // Try again sends those alone, and it goes in.
             s.retry(tx);
             assert_eq!(s.actions.retry_upload, None);
         });

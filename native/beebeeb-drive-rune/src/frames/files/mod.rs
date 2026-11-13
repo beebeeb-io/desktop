@@ -941,8 +941,6 @@ impl State {
             self.failed(Action::Upload, why, tx);
             return false;
         }
-        // It went: nothing of an earlier drop is left to try again.
-        self.actions.retry_upload = None;
         self.actions.drop_hover = None;
         true
     }

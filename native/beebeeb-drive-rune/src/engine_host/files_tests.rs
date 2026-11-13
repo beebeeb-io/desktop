@@ -27,6 +27,8 @@ struct Inner {
     /// A sign-out, then this account, the moment a change is made.
     switch_to: Option<String>,
     wakes: usize,
+    /// How many pin changes reached the door.
+    at_door: usize,
 }
 
 impl Default for Inner {
@@ -43,6 +45,7 @@ impl Default for Inner {
             root: Some("b-root".into()),
             switch_to: None,
             wakes: 0,
+            at_door: 0,
         }
     }
 }
@@ -71,6 +74,7 @@ impl FilesEngine for Fake {
             .collect())
     }
     fn set_kept(&self, id: &str, kept: bool) -> Result<(), String> {
+        self.s().at_door += 1;
         let _door = self.door.lock().unwrap();
         let mut s = self.s();
         s.kept_calls.push((id.to_string(), kept));
@@ -257,23 +261,30 @@ fn an_answer_that_outlived_its_account_is_never_reported() {
     );
     settled(&mut copies);
 
-    // A lock, then an unlock, while an answer waits to be taken: it is not said after the unlock.
+    // A lock, then an unlock, while the change is still being made: the answer is the same account's, and of a
+    // session that is over. It is not said, and its mark does not hold the item.
     let fake = Arc::new(Fake::default());
     let mut copies = LocalCopies::new(fake.clone());
+    let door = fake.door.lock().unwrap();
     copies.ask(Action::KeepOffline, items(&[("f-1", false)])).unwrap();
     for _ in 0..2_000 {
-        if copies.idle() {
+        if fake.s().at_door > 0 {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
+    assert_eq!(fake.s().at_door, 1, "the change never started");
     fake.s().unlocked = false;
     assert!(copies.pump());
     fake.s().unlocked = true;
+    assert!(copies.pump());
+    drop(door);
     assert!(
-        copies.take().is_empty(),
+        settled(&mut copies).is_empty(),
         "an answer of the session before the lock was said after it"
     );
+    assert_eq!(copies.ask(Action::KeepOffline, items(&[("f-1", false)])), Ok(()));
+    settled(&mut copies);
 }
 
 #[test]
