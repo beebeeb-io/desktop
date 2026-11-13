@@ -235,12 +235,13 @@ fn refused_when_closed(name: &str, setup: Step, input: &Input) {
     settle(&mut with.rt);
     assert_ne!(record(&with), before, "{name}: under an open session it does nothing");
 
-    for closing in CLOSINGS {
+    // Another account is an open session again once the poll has seen it, and the poll runs
+    // before a frame's input: that window is the next account's own (the test of the next
+    // account below).
+    for closing in [Closing::Lock, Closing::SignOut, Closing::Ended] {
+        // `seen`: frames ran between the change and the input. Not seen: the input is in the
+        // same frame as the poll that sees the change, sent to the tree drawn before it.
         for seen in [false, true] {
-            // Another account that the poll has seen is an open session again: its own window.
-            if seen && closing == Closing::OtherAccount {
-                continue;
-            }
             let run = |input: bool| {
                 let mut app = app();
                 setup(&mut app);
