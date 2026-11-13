@@ -198,7 +198,7 @@ pub(super) fn uploaded_plaintext(
 pub(super) fn uploaded_record(
     requests: &[RecordedRequest],
     file_key: &beebeeb_core::kdf::FileKey,
-) -> (crate::content_record::ContentRecord, String) {
+) -> (ContentRecord, String) {
     let sealed = requests
         .iter()
         .rev()
@@ -211,5 +211,5 @@ pub(super) fn uploaded_record(
         opened.version.is_some(),
         "a completion name carries the upload's version commitment"
     );
-    (crate::content_record::ContentRecord::of(&opened), opened.name)
+    (ContentRecord::of(&opened), opened.name)
 }

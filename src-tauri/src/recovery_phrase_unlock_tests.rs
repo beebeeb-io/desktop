@@ -169,7 +169,7 @@ async fn account_phrase_is_verified_with_session_then_persisted() {
     .expect("the account's own phrase must unlock");
 
     let expected = *beebeeb_core::recovery::recover_from_phrase(&p1).unwrap().to_bytes();
-    assert_eq!(*key, expected);
+    assert_eq!(key, expected);
     assert_eq!(*persisted.lock().unwrap(), Some(expected));
     let requests = server.requests();
     assert_eq!(requests.len(), 1, "exactly one verify call: {requests:?}");

@@ -57,7 +57,7 @@ impl UploadMockServer {
             // What a server remembers of a completed upload: the file's name is the completion name
             // of its last upload (chunk format v2). `GET /api/v1/files/{id}` serves it.
             let mut last_init_file: Option<String> = None;
-            let mut names: HashMap<String, String> = HashMap::new();
+            let mut names = std::collections::HashMap::<String, String>::new();
             loop {
                 // Task 1700: shutdown is owned by `finish()`, not by an
                 // idle timer. The old heuristic — stop 300ms after the

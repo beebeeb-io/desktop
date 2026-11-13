@@ -305,6 +305,8 @@ mod tests {
     use shared_2::{enqueue_test_operation, seed_bridge_entry, seed_bridge_row};
     use sync::{SyncMockServer, enc_name, snap_node};
     use sync_5::{landed_create, rule3_setup, thumbnail_blob};
+    // The shared fixtures (`fixture_http.rs`, also built by the desktop shell's tests) name it bare.
+    use crate::content_record::ContentRecord;
     use trash_markers::{MockServerFile, VersionedServerMock, VersionedServerState};
     use uploads::{
         HydrationMockServer, TEST_FILE_ID, completion_name, encrypt_chunk_wire, http_bytes, http_json, http_json_dated,
