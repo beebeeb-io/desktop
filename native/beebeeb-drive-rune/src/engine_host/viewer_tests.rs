@@ -627,6 +627,11 @@ fn a_lock_takes_the_shown_content_and_the_picture_on_the_windows_side() {
     assert_eq!(source.poll("f-png"), Some(Body::Stopped(Stopped::SessionChanged)));
     assert_eq!(source.poll("f-png"), None);
     assert!(source.picture("f-png", Picture::Photo).is_none());
+    // Released, not only hidden: decoded pixels cannot be overwritten, so letting go of them is all there is.
+    assert!(
+        source.open.as_ref().is_some_and(|opening| opening.picture.is_none()),
+        "the ended opening still holds the picture"
+    );
     // Open it again: the new session's download.
     let again = source.retry("f-png").expect("the retry starts");
     assert!(matches!(again.body, Body::Decrypting { .. }));
