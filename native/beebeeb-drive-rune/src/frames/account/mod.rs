@@ -368,6 +368,10 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if pumped.busy || pumped.watch {
         tx.wake_after(POLL_EVERY);
     }
+    // A toast that goes by itself: look again when its time is up.
+    if let Some(stay) = pumped.wake_in {
+        tx.wake_after(stay);
+    }
     pumped.changed
 }
 
@@ -461,7 +465,9 @@ fn state_pane(pane: Pane, state: source::PaneState, t: &Theme) -> El {
         ),
         _ => (
             "Couldn't load this",
-            "Beebeeb didn't answer. Nothing was changed.",
+            // Not "nothing was changed": this state also follows a sign-out Beebeeb took, when the list
+            // could not be read after it.
+            "Beebeeb didn't answer.",
             true,
         ),
     };
