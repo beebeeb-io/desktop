@@ -1,8 +1,8 @@
 //! The account sections on the real engine (`EngineAccountSource`), against the engine's fake accounts on
 //! loopback with the account routes added here (the display name, the plan, the sessions and their sign-outs):
-//! what Account and Devices and sessions draw, every way a read can fail, a sign-out sent once and shown only
-//! after Beebeeb's list no longer has the session, a session that changes on the way, another account, and the
-//! running app's window. Every name is invented.
+//! the fake and its helpers, what Account and Devices and sessions draw, every way a read can fail, a session
+//! Beebeeb or the engine ended, another account, and the engine's own calls. The sign-outs are in
+//! `account_tests_sign_out.rs`, the running app's window in `account_tests_window.rs`. Every name is invented.
 
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,14 +14,15 @@ use beebeeb_engine::identity::TEST;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
 use beebeeb_engine::test_api::{FakeApi, Handler, Reply, Request};
-use rune::{Env, Runtime, Tx};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use super::*;
-use crate::State;
-use crate::shell::app::{Event as ShellEvent, SettingsPane};
-use crate::shell::host;
+
+#[path = "account_tests_sign_out.rs"]
+mod sign_out;
+#[path = "account_tests_window.rs"]
+mod window;
 
 const PASSWORD: &str = "an invented password for the account";
 const FIRST: &str = "account-first@example.eu";
@@ -37,6 +38,10 @@ const SESSION_ENDED: u8 = 2;
 const EMPTY: u8 = 3;
 const UNREADABLE: u8 = 4;
 const DROP_CONNECTION: u8 = 5;
+/// A sign-out only: Beebeeb takes it, and a gateway in front answers 502.
+const TAKEN_BEHIND_A_502: u8 = 6;
+/// A sign-out only: something in front of Beebeeb answers 404, and the session stands.
+const A_404_THAT_ENDED_NOTHING: u8 = 7;
 
 struct Person {
     account: Arc<FakeAccount>,
@@ -51,7 +56,11 @@ struct Server {
     people: [Arc<Person>; 2],
     /// How the display name and the sessions list answer.
     read_mode: Arc<AtomicU8>,
+    /// How the display name alone answers (when `read_mode` answers).
+    name_mode: Arc<AtomicU8>,
     plan_mode: Arc<AtomicU8>,
+    /// The plan's `status`, as Beebeeb names it.
+    plan_status: Arc<Mutex<&'static str>>,
     /// How a sign-out answers.
     change_mode: Arc<AtomicU8>,
     read_delay_ms: Arc<AtomicU64>,
@@ -117,6 +126,8 @@ fn server() -> Server {
         Arc::new(AtomicU8::new(ANSWER)),
     );
     let (read_delay_ms, change_delay_ms) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let (name_mode, plan_status) = (Arc::new(AtomicU8::new(ANSWER)), Arc::new(Mutex::new("active")));
+    let (name_in, status_in) = (name_mode.clone(), plan_status.clone());
     let (deleted, revoked_all) = (Arc::new(Mutex::new(Vec::new())), Arc::new(AtomicU64::new(0)));
     let (people_in, read_in, plan_in, change_in, read_delay_in, change_delay_in, deleted_in, revoked_in) = (
         people.clone(),
@@ -151,19 +162,24 @@ fn server() -> Server {
         );
         let authed = req.bearer() == Some(person.account.session_token.as_str());
         match route.as_str() {
-            "GET /api/v1/me/profile" => failed(read).unwrap_or_else(|| {
-                if !authed {
-                    return Reply::json(401, json!({}));
-                }
-                Reply::ok(json!({ "username": null, "display_name": person.name }))
-            }),
+            // Who is signed in: the accounts' own handler answers it, unless a read is asked to fail.
+            "GET /api/v1/auth/me" if authed && failed(read).is_some() => failed(read).expect("checked"),
+            "GET /api/v1/me/profile" => failed(read)
+                .or_else(|| failed(name_in.load(Ordering::SeqCst)))
+                .unwrap_or_else(|| {
+                    if !authed {
+                        return Reply::json(401, json!({}));
+                    }
+                    Reply::ok(json!({ "username": null, "display_name": person.name }))
+                }),
             "GET /api/v1/billing/subscription" if authed => failed(plan).unwrap_or_else(|| {
                 let first = who == 0;
                 Reply::ok(json!({
                     // What the sign-in gate reads.
                     "plan_name": "Pro", "storage_limit_bytes": person.account.quota_bytes,
                     // What the Account pane reads.
-                    "plan": "personal", "billing_cycle": "yearly", "status": "active", "seats": 1, "region": "eu",
+                    "plan": "personal", "billing_cycle": "yearly", "status": *status_in.lock().unwrap(), "seats": 1,
+                    "region": "eu",
                     "created_at": "2025-01-01T00:00:00Z",
                     "current_period_end": if first { json!("2027-03-14T12:00:00Z") } else { Value::Null },
                     "quota_bytes": if plan == EMPTY { 0 } else { 1_000_000_000_000_i64 },
@@ -201,8 +217,20 @@ fn server() -> Server {
                     if !authed {
                         return Reply::json(401, json!({}));
                     }
-                    person.sessions.lock().unwrap().retain(|s| s["id"] != json!(id));
-                    Reply::ok(json!({}))
+                    if change == A_404_THAT_ENDED_NOTHING {
+                        return Reply::json(404, json!({ "error": "a proxy's body" }));
+                    }
+                    let mut sessions = person.sessions.lock().unwrap();
+                    let before = sessions.len();
+                    sessions.retain(|s| s["id"] != json!(id));
+                    if sessions.len() == before {
+                        // As Beebeeb does: no such session of this account.
+                        return Reply::json(404, json!({ "error": "a server body" }));
+                    }
+                    if change == TAKEN_BEHIND_A_502 {
+                        return Reply::json(502, json!({ "error": "a gateway's body" }));
+                    }
+                    Reply::ok(json!({ "revoked": true }))
                 })
             }
             _ => rest[who](req),
@@ -212,7 +240,9 @@ fn server() -> Server {
         fake,
         people,
         read_mode,
+        name_mode,
         plan_mode,
+        plan_status,
         change_mode,
         read_delay_ms,
         change_delay_ms,
@@ -373,7 +403,10 @@ fn an_account_without_a_name_or_a_plan_draws_the_email_and_no_card() {
         (SECOND, SECOND),
         "no name set: the email"
     );
-    assert_eq!(who.initials, "AE");
+    assert_eq!(
+        who.initials, "AS",
+        "from the part before the @: never a letter of the domain"
+    );
     let plan = source.plan().expect("a plan with a size");
     assert_eq!(
         (plan.used.as_str(), plan.rest.as_str()),
@@ -537,182 +570,232 @@ fn devices_and_sessions_lists_one_row_per_session_by_country() {
     assert!(source.sessions().is_empty());
 }
 
+/// The engine held the session as ended (its own calls were answered 401 again and again): nothing is asked, the
+/// pane says so, and once a later call of the engine works the pane reads again by itself.
 #[test]
-fn a_sign_out_is_sent_once_by_id_and_the_row_goes_only_when_beebeeb_says_so() {
-    let server = server();
-    let mut source = Source::new(signed_in(&server));
-    opened(&mut source, Pane::Sessions);
-
-    // Never this session, never an id the list does not have, never the plural through an id.
-    for id in ["s-this", "s-unknown", "", "*"] {
-        assert!(!source.sign_out_device(id), "{id:?}");
-    }
-    settle(&mut source);
-    assert!(server.deleted.lock().unwrap().is_empty());
-    assert_eq!(server.revoked_all.load(Ordering::SeqCst), 0);
-    assert_eq!(source.notice(), None);
-
-    server.change_delay_ms.store(300, Ordering::SeqCst);
-    assert!(source.sign_out_device("s-phone"));
-    assert!(
-        !source.sign_out_device("s-phone"),
-        "a second press while it is on its way sends nothing"
-    );
-    assert_eq!(source.notice(), Some(STILL_SIGNING_OUT));
-    assert_eq!(
-        ids(&source),
-        ["s-this", "s-phone", "s-web"],
-        "the row stays until Beebeeb answered"
-    );
-    settle(&mut source);
-    assert_eq!(
-        server.deleted.lock().unwrap().clone(),
-        ["s-phone"],
-        "sent once, by its id"
-    );
-    assert_eq!(source.notice(), Some(SIGNED_OUT));
-    assert_eq!(ids(&source), ["s-this", "s-web"], "read again after the answer");
-
-    // The mark is cleared: another session can be signed out, and the same press works again later.
-    server.change_delay_ms.store(0, Ordering::SeqCst);
-    assert!(source.sign_out_device("s-web"));
-    assert_eq!(source.notice(), None, "the old toast goes with the next press");
-    settle(&mut source);
-    assert_eq!(ids(&source), ["s-this"]);
-    assert_eq!(server.deleted.lock().unwrap().len(), 2);
-    source.clear_notice();
-    assert_eq!(source.notice(), None);
-}
-
-#[test]
-fn a_refused_sign_out_changes_nothing_and_an_unconfirmed_one_reads_again() {
-    let server = server();
-    let mut source = Source::new(signed_in(&server));
-    opened(&mut source, Pane::Sessions);
-
-    server.change_mode.store(SERVER_ERROR, Ordering::SeqCst);
-    assert!(source.sign_out_device("s-phone"));
-    let reads = server.asked("GET /api/v1/account/sessions");
-    settle(&mut source);
-    assert_eq!(source.notice(), Some(NOT_SIGNED_OUT));
-    assert_eq!(ids(&source).len(), 3, "the row stands");
-    assert_eq!(
-        server.asked("GET /api/v1/account/sessions"),
-        reads,
-        "a refusal needs no re-read"
-    );
-    // Refused, not stuck: the press works again.
-    source.sign_out_everywhere_else();
-    settle(&mut source);
-    assert_eq!(source.notice(), Some(NOT_SIGNED_OUT));
-    assert_eq!(server.revoked_all.load(Ordering::SeqCst), 0);
-
-    // The connection broke: not known, so the list is read again; and when that read fails too, the words stay.
-    server.change_mode.store(DROP_CONNECTION, Ordering::SeqCst);
-    assert!(source.sign_out_device("s-phone"));
-    settle(&mut source);
-    assert_eq!(source.notice(), Some(UNKNOWN_SIGN_OUT));
-    assert_eq!(server.asked("GET /api/v1/account/sessions"), reads + 1);
-    server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
-    assert!(source.sign_out_device("s-phone"));
-    settle(&mut source);
-    assert_eq!(
-        source.notice(),
-        Some(UNKNOWN_SIGN_OUT),
-        "the re-read failed: the words stay"
-    );
-    assert_eq!(source.pane_state(Pane::Sessions), PaneState::Failed);
-
-    // Made, then the re-read fails: said as made, and the list is not drawn from before the change.
-    server.read_mode.store(ANSWER, Ordering::SeqCst);
-    source.reload(Pane::Sessions);
-    settle(&mut source);
-    server.change_mode.store(ANSWER, Ordering::SeqCst);
-    assert!(source.sign_out_device("s-phone"));
-    server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
-    settle(&mut source);
-    assert_eq!(source.notice(), Some(SIGNED_OUT));
-    assert!(source.sessions().is_empty(), "never the list from before the change");
-}
-
-/// A list that was asked before a sign-out and answers after it is older than the change: never drawn.
-#[test]
-fn a_list_read_before_a_sign_out_is_not_drawn_after_it() {
-    let server = server();
-    let mut source = Source::new(signed_in(&server));
-    opened(&mut source, Pane::Sessions);
-    // The fake takes the list when it is asked and answers 1.5 s later: this read holds three rows.
-    server.read_delay_ms.store(1_500, Ordering::SeqCst);
-    source.reload(Pane::Sessions);
-    let began = Instant::now();
-    while server.asked("GET /api/v1/account/sessions") < 2 {
-        assert!(began.elapsed() < Duration::from_secs(10));
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    assert!(source.sign_out_device("s-phone"));
-    settle(&mut source);
-    assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone"]);
-    assert_eq!(
-        ids(&source),
-        ["s-this", "s-web"],
-        "the list from before the sign-out is dropped and read again"
-    );
-    assert_eq!(server.asked("GET /api/v1/account/sessions"), 3);
-}
-
-#[test]
-fn sign_out_everywhere_else_is_sent_once_and_leaves_this_session() {
-    let server = server();
-    let mut source = Source::new(signed_in(&server));
-    opened(&mut source, Pane::Sessions);
-    server.change_delay_ms.store(200, Ordering::SeqCst);
-    source.sign_out_everywhere_else();
-    source.sign_out_everywhere_else();
-    assert_eq!(source.notice(), Some(STILL_SIGNING_OUT));
-    settle(&mut source);
-    assert_eq!(server.revoked_all.load(Ordering::SeqCst), 1, "sent once");
-    assert!(server.deleted.lock().unwrap().is_empty());
-    assert_eq!(source.notice(), Some(SIGNED_OUT_ELSEWHERE));
-    assert_eq!(ids(&source), ["s-this"]);
-    // Nobody else is signed in: nothing to send.
-    source.sign_out_everywhere_else();
-    settle(&mut source);
-    assert_eq!(server.revoked_all.load(Ordering::SeqCst), 1);
-}
-
-#[test]
-fn a_session_that_changes_while_a_sign_out_is_on_its_way_says_nothing_to_the_next_one() {
+fn a_session_the_engine_held_as_ended_is_asked_again_once_a_later_call_works() {
     let server = server();
     let engine = signed_in(&server);
     let mut source = Source::new(engine.clone());
-    opened(&mut source, Pane::Sessions);
-    server.change_delay_ms.store(300, Ordering::SeqCst);
-    assert!(source.sign_out_device("s-phone"));
-    // Lock, then unlock: another session of the same account.
-    engine.lock();
-    engine
-        .unlock_with_phrase(Zeroizing::new(server.people[0].phrase.clone()))
-        .expect("the phrase unlocks");
+    for _ in 0..3 {
+        engine.note_call_for_test(true);
+    }
     assert!(
-        source.sessions().is_empty(),
-        "the list of the session before is not handed out"
+        engine.account_session_refused(),
+        "precondition: the engine's 401 streak"
+    );
+    let asked = server.fake.routes().len();
+    source.opened(Pane::Account);
+    let pumped = source.pump();
+    assert_eq!(source.pane_state(Pane::Account), PaneState::SessionEnded);
+    assert_eq!(source.pane_state(Pane::Sessions), PaneState::SessionEnded);
+    assert!(!pumped.busy, "nothing is out");
+    assert!(
+        pumped.watch,
+        "the window looks again: nothing else wakes it when the engine's flag clears"
+    );
+    source.reload(Pane::Account);
+    assert_eq!(
+        server.fake.routes().len(),
+        asked,
+        "nothing is asked while the engine refuses the session"
+    );
+
+    // The engine's next call works.
+    engine.note_call_for_test(false);
+    assert!(source.pump().changed);
+    assert_eq!(
+        source.pane_state(Pane::Account),
+        PaneState::Loading,
+        "asked again, without a reopening"
     );
     settle(&mut source);
-    assert_eq!(source.notice(), None, "the answer of the session before is not said");
-    // Whether the sign-out left before the lock or was refused by the engine after it: the new session draws
-    // the list Beebeeb has now, read by itself.
-    let has_now: Vec<String> = server.people[0]
-        .sessions
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|s| s["id"].as_str().unwrap().to_string())
-        .collect();
+    assert_eq!(source.pane_state(Pane::Account), PaneState::Ready);
+    assert_eq!(source.identity().email, FIRST);
+    assert!(!source.pump().watch);
+
+    // No pane on screen: nothing is watched, and nothing is read when the flag clears.
+    for _ in 0..3 {
+        engine.note_call_for_test(true);
+    }
+    source.reload(Pane::Account);
+    source.closed();
+    assert!(!source.pump().watch);
+    let asked = server.fake.routes().len();
+    engine.note_call_for_test(false);
+    source.pump();
+    settle(&mut source);
+    assert_eq!(server.fake.routes().len(), asked);
+
+    // A 401 one of the account's own calls got is not the engine's finding: it stays for the session.
+    source.opened(Pane::Sessions);
+    settle(&mut source);
+    assert_eq!(source.pane_state(Pane::Sessions), PaneState::Ready);
+    server.read_mode.store(SESSION_ENDED, Ordering::SeqCst);
     source.reload(Pane::Sessions);
     settle(&mut source);
-    assert_eq!(ids(&source), has_now, "the new session read its own list");
-    assert_eq!(source.notice(), None);
-    assert_eq!(source.pump(), Pumped::default(), "no mark of the old change is left");
+    assert_eq!(source.pane_state(Pane::Sessions), PaneState::SessionEnded);
+    server.read_mode.store(ANSWER, Ordering::SeqCst);
+    let asked = server.fake.routes().len();
+    engine.note_call_for_test(false);
+    let pumped = source.pump();
+    assert!(!pumped.watch && !pumped.busy);
+    assert_eq!(source.pane_state(Pane::Sessions), PaneState::SessionEnded);
+    assert_eq!(server.fake.routes().len(), asked);
+}
+
+/// A pane that is not on screen is not read again for a new session.
+#[test]
+fn nothing_is_read_again_for_a_pane_that_is_no_longer_on_screen() {
+    let server = server();
+    let engine = signed_in(&server);
+    let mut source = Source::new(engine.clone());
+    opened(&mut source, Pane::Account);
+    let again = |engine: &TestEngine| {
+        engine.lock();
+        engine
+            .unlock_with_phrase(Zeroizing::new(server.people[0].phrase.clone()))
+            .expect("the phrase unlocks");
+    };
+    // On screen: a new session is read once, without a reopening.
+    again(&engine);
+    source.pump();
+    settle(&mut source);
+    assert_eq!(server.asked("GET /api/v1/me/profile"), 2);
+    assert_eq!(source.pane_state(Pane::Account), PaneState::Ready);
+
+    source.closed();
+    again(&engine);
+    for _ in 0..3 {
+        source.pump();
+    }
+    settle(&mut source);
+    assert_eq!(
+        server.asked("GET /api/v1/me/profile"),
+        2,
+        "no pane shows: nothing is asked"
+    );
+    assert_eq!(
+        source.identity().email,
+        "",
+        "and the old session's answer is not handed out"
+    );
+    opened(&mut source, Pane::Account);
+    assert_eq!(server.asked("GET /api/v1/me/profile"), 3);
+    assert_eq!(source.identity().email, FIRST);
+}
+
+/// The name could not be read: the email stands in, as for an account with no name, and the rest draws.
+#[test]
+fn a_name_that_cannot_be_read_is_the_email_and_not_a_failed_pane() {
+    let server = server();
+    let mut source = Source::new(signed_in(&server));
+    for mode in [SERVER_ERROR, UNREADABLE] {
+        server.name_mode.store(mode, Ordering::SeqCst);
+        source.reload(Pane::Account);
+        settle(&mut source);
+        assert_eq!(source.pane_state(Pane::Account), PaneState::Ready, "mode {mode}");
+        let who = source.identity();
+        assert_eq!((who.name.as_str(), who.email.as_str()), (FIRST, FIRST), "mode {mode}");
+        assert_eq!(who.initials, "AF", "mode {mode}");
+        assert!(source.plan().is_some(), "mode {mode}: the plan still draws");
+        // Drawn, but not fresh: the next opening asks again (a read that answered whole does not).
+        let asked = server.asked("GET /api/v1/me/profile");
+        opened(&mut source, Pane::Account);
+        assert_eq!(server.asked("GET /api/v1/me/profile"), asked + 1, "mode {mode}");
+    }
+    // The plan alone failing is the same: drawn without the card, and asked again at the next opening.
+    server.name_mode.store(ANSWER, Ordering::SeqCst);
+    server.plan_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    opened(&mut source, Pane::Account);
+    assert_eq!(source.identity().name, FIRST_NAME);
+    let asked = server.asked("GET /api/v1/me/profile");
+    opened(&mut source, Pane::Account);
+    assert_eq!(server.asked("GET /api/v1/me/profile"), asked + 1);
+    server.plan_mode.store(ANSWER, Ordering::SeqCst);
+    opened(&mut source, Pane::Account);
+    opened(&mut source, Pane::Account);
+    assert_eq!(server.asked("GET /api/v1/me/profile"), asked + 2, "whole: fresh");
+    // A 401 on the name is a 401.
+    server.name_mode.store(SESSION_ENDED, Ordering::SeqCst);
+    source.reload(Pane::Account);
+    settle(&mut source);
+    assert_eq!(source.pane_state(Pane::Account), PaneState::SessionEnded);
+}
+
+fn plan_with(status: &str, ends: Option<&str>) -> Subscription {
+    serde_json::from_value(json!({
+        "plan": "personal", "billing_cycle": "yearly", "status": status, "seats": 1, "region": "eu",
+        "current_period_end": ends, "quota_bytes": 1_000_000_000_000_i64, "used_bytes": 239_960_000_000_i64,
+    }))
+    .expect("the plan reads")
+}
+
+/// How the plan's period ends is said from the plan's status: "renews" only for a plan that renews.
+#[test]
+fn the_plan_says_how_its_period_ends_and_never_renews_for_a_plan_that_does_not() {
+    const DAY: Option<&str> = Some("2027-03-14T12:00:00Z");
+    let said = |status: &str, ends: Option<&str>| {
+        let (card, details) = plan_of(&plan_with(status, ends)).expect("a plan with a size");
+        (card.rest, details.map(|d| (d.day_label, d.renews)))
+    };
+    let on = |label: &'static str| Some((label, "14 Mar 2027".to_string()));
+    assert_eq!(
+        said("active", DAY),
+        ("used \u{b7} renews 14 Mar 2027".into(), on("Renews"))
+    );
+    assert_eq!(
+        said("cancelling", DAY),
+        ("used \u{b7} cancels on 14 Mar 2027".into(), on("Cancels on"))
+    );
+    assert_eq!(
+        said("trialing", DAY),
+        ("used \u{b7} trial ends 14 Mar 2027".into(), on("Trial ends"))
+    );
+    assert_eq!(said("paused", DAY), ("used \u{b7} paused".into(), None));
+    assert_eq!(said("paused", None), ("used \u{b7} paused".into(), None));
+    // A status with no words here, or one this app does not know: less is said, never more.
+    for status in ["past_due", "cancelled", "a-status-from-next-year", "", "Active"] {
+        assert_eq!(said(status, DAY), ("used".into(), None), "{status:?}");
+    }
+    for status in ["active", "cancelling", "trialing"] {
+        assert_eq!(said(status, None), ("used".into(), None), "{status:?} without a day");
+    }
+    // The size is the storage figure's own formatter: it truncates, so the same bytes read the same everywhere.
+    let (card, _) = plan_of(&plan_with("active", DAY)).expect("a plan with a size");
+    assert_eq!(card.used, "239 GB");
+    assert_eq!(card.used, crate::frames::global::source::size_words(239_960_000_000));
+}
+
+/// Nothing personal reaches a log through `{:?}`.
+#[test]
+fn the_types_that_hold_personal_values_do_not_print_them() {
+    let who = Identity {
+        name: FIRST_NAME.into(),
+        initials: "IP".into(),
+        email: FIRST.into(),
+    };
+    let printed = format!("{who:?}");
+    assert!(
+        !printed.contains(FIRST) && !printed.contains(FIRST_NAME) && !printed.contains("IP"),
+        "{printed}"
+    );
+    let server = server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    let printed = format!("{:?}", source.sessions());
+    for words in [PHONE, BROWSER, THIS_PC, "s-phone", "s-web", "s-this"] {
+        assert!(!printed.contains(words), "{words}: {printed}");
+    }
+    let printed = format!(
+        "{:?}",
+        [
+            crate::frames::account::Dialog::SignOutDevice("s-phone".into()),
+            crate::frames::account::Dialog::PasskeyMenu("s-phone".into()),
+            crate::frames::account::Dialog::RemovePasskey("s-phone".into()),
+        ]
+    );
+    assert!(!printed.contains("s-phone"), "{printed}");
 }
 
 #[test]
@@ -770,6 +853,32 @@ fn the_engines_account_calls_answer_for_their_session_and_send_only_for_it() {
     assert_eq!((plan.session, plan.value.quota_bytes), (turn, 1_000_000_000_000));
     let list = engine.account_sessions().expect("answers");
     assert_eq!((list.session, list.value.sessions.len()), (turn, 3));
+
+    // The one read Account makes: the three answers, for this session, each part with its own failure.
+    let asked = server.fake.routes().len();
+    let basics = engine.account_basics().expect("answers");
+    assert_eq!(server.fake.routes().len(), asked + 3, "three requests");
+    assert_eq!((basics.session, basics.value.profile.email.as_str()), (turn, FIRST));
+    assert_eq!(basics.value.display_name, Ok(Some(FIRST_NAME.to_string())));
+    assert_eq!(
+        basics.value.subscription.as_ref().map(|plan| plan.quota_bytes),
+        Ok(1_000_000_000_000)
+    );
+    assert!(
+        !format!("{basics:?}").contains(FIRST),
+        "an answer's Debug names no email"
+    );
+    server.name_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    server.plan_mode.store(UNREADABLE, Ordering::SeqCst);
+    let basics = engine.account_basics().expect("the profile answered").value;
+    assert_eq!(basics.profile.email, FIRST);
+    assert_eq!(basics.display_name, Err(AccountCallError::ServerError));
+    assert_eq!(basics.subscription.err(), Some(AccountCallError::Unreadable));
+    server.name_mode.store(SESSION_ENDED, Ordering::SeqCst);
+    server.plan_mode.store(ANSWER, Ordering::SeqCst);
+    let basics = engine.account_basics().expect("the profile answered").value;
+    assert_eq!(basics.display_name, Err(AccountCallError::SessionEnded));
+    server.name_mode.store(ANSWER, Ordering::SeqCst);
     server.read_mode.store(EMPTY, Ordering::SeqCst);
     assert!(engine.account_sessions().expect("answers").value.sessions.is_empty());
     server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
@@ -788,9 +897,35 @@ fn the_engines_account_calls_answer_for_their_session_and_send_only_for_it() {
         engine.revoke_other_account_sessions(turn).err(),
         Some(AccountCallError::ServerError)
     );
+    assert_eq!(
+        engine.end_account_session(turn, "s-web").err(),
+        Some(AccountCallError::ServerError),
+        "a 500 is not a 404"
+    );
     server.change_mode.store(ANSWER, Ordering::SeqCst);
     assert_eq!(engine.revoke_account_session(turn, "s-web"), Ok(()));
-    assert_eq!(server.deleted.lock().unwrap().clone(), ["s-web", "s-web"]);
+    assert_eq!(server.deleted.lock().unwrap().clone(), ["s-web", "s-web", "s-web"]);
+    // Ended before: Beebeeb answers 404, told apart from every other refusal. For the plain call there is
+    // nothing left to end either.
+    assert_eq!(engine.end_account_session(turn, "s-web"), Ok(SessionEnd::AlreadyGone));
+    assert_eq!(engine.revoke_account_session(turn, "s-web"), Ok(()));
+    assert_eq!(engine.end_account_session(turn, "s-phone"), Ok(SessionEnd::Ended));
+    assert_eq!(server.deleted.lock().unwrap().len(), 6);
+
+    // The engine holds the session as ended: nothing is asked and nothing is sent.
+    for _ in 0..3 {
+        engine.note_call_for_test(true);
+    }
+    assert!(engine.account_session_refused());
+    let asked = server.fake.routes().len();
+    assert_eq!(engine.account_basics().err(), Some(AccountCallError::SessionEnded));
+    assert_eq!(
+        engine.end_account_session(turn, "s-this").err(),
+        Some(AccountCallError::SessionEnded)
+    );
+    assert_eq!(server.fake.routes().len(), asked);
+    engine.note_call_for_test(false);
+    assert!(!engine.account_session_refused());
 
     // Another session (a lock and an unlock), then another account: a change stamped with the old session sends
     // nothing, and a read answers for the account that is signed in.
@@ -817,10 +952,20 @@ fn the_engines_account_calls_answer_for_their_session_and_send_only_for_it() {
         engine.revoke_account_session(turn, "t-this").err(),
         Some(AccountCallError::NotSignedIn)
     );
-    assert_eq!(server.deleted.lock().unwrap().len(), 2, "nothing more was sent");
+    assert_eq!(
+        engine.end_account_session(turn, "t-this").err(),
+        Some(AccountCallError::NotSignedIn)
+    );
+    assert_eq!(server.deleted.lock().unwrap().len(), 6, "nothing more was sent");
     assert_eq!(server.revoked_all.load(Ordering::SeqCst), 0);
     assert_eq!(engine.account_profile().expect("answers").value.email, SECOND);
     assert_eq!(engine.account_display_name().expect("answers").value, None);
+    let basics = engine.account_basics().expect("answers");
+    assert_eq!(basics.session, engine.session_turn());
+    assert_eq!(
+        (basics.value.profile.email.as_str(), &basics.value.display_name),
+        (SECOND, &Ok(None))
+    );
     assert_eq!(engine.revoke_other_account_sessions(engine.session_turn()), Ok(0));
 }
 
@@ -855,13 +1000,13 @@ fn an_answer_that_lands_after_a_lock_is_handed_to_nobody() {
 }
 
 #[test]
-fn sizes_initials_and_times_read_as_the_board_writes_them() {
-    assert_eq!(size_words(1_000_000_000_000), "1 TB");
-    assert_eq!(size_words(240_000_000_000), "240 GB");
-    assert_eq!(size_words(1_500_000_000), "1.5 GB");
-    assert_eq!(size_words(999), "999 B");
-    assert_eq!(size_words(-5), "0 B");
+fn initials_and_times_read_as_the_board_writes_them() {
     assert_eq!(initials_of("Invented Middle Person"), "IP");
+    assert_eq!(
+        initials_of("Invented @ Northwind"),
+        "IN",
+        "a name that was set is taken whole"
+    );
     assert_eq!(initials_of("solo"), "S");
     assert_eq!(initials_of(""), "");
     let now = 1_000_000;
@@ -873,157 +1018,4 @@ fn sizes_initials_and_times_read_as_the_board_writes_them() {
     assert_eq!(ago(Some(now - 7_200), now), "2 hours ago");
     assert_eq!(ago(Some(now - 86_400), now), "1 day ago");
     assert_eq!(ago(Some(now - 3 * 86_400), now), "3 days ago");
-}
-
-// ---- The running app's window.
-
-fn window_on(engine: TestEngine, section: SettingsPane) -> Runtime<State> {
-    let state = crate::shell::state::init_on_engine(crate::shell::host::Shell::fixture(), engine);
-    let env = Env {
-        system_dark: false,
-        scale: 2.0,
-    };
-    let mut rt = Runtime::new(state, crate::view, (958.0, 638.0), env);
-    rt.on_key = Some(host::on_key);
-    rt.poll = Some(|s: &mut State, _: f64, tx: &mut Tx| crate::frames::account::poll(s, tx));
-    rt.frame(0.0);
-    rt.update(move |s, _| {
-        host::dispatch(s, ShellEvent::OpenSettings(section));
-    });
-    rt.frame(0.016);
-    rt
-}
-
-fn shows(rt: &Runtime<State>, words: &str) -> bool {
-    rt.elements().iter().any(|e| {
-        !e.exiting && (e.text.as_deref() == Some(words) || e.label.as_deref().is_some_and(|l| l.contains(words)))
-    })
-}
-
-fn says_anywhere(rt: &Runtime<State>, words: &str) -> bool {
-    rt.elements().iter().any(|e| {
-        e.text.as_deref().is_some_and(|t| t.contains(words)) || e.label.as_deref().is_some_and(|l| l.contains(words))
-    })
-}
-
-fn has(rt: &Runtime<State>, key: &str) -> bool {
-    rt.elements()
-        .iter()
-        .any(|e| !e.exiting && e.key.as_deref() == Some(key))
-}
-
-fn wait_for(rt: &mut Runtime<State>, what: &str, done: impl Fn(&Runtime<State>) -> bool) {
-    let began = Instant::now();
-    while !done(rt) {
-        assert!(began.elapsed() < Duration::from_secs(10), "never: {what}");
-        std::thread::sleep(Duration::from_millis(20));
-        rt.frame(0.1);
-    }
-}
-
-fn click(rt: &mut Runtime<State>, key: &str) {
-    let rect = rt
-        .elements()
-        .into_iter()
-        .find(|e| !e.exiting && e.key.as_deref() == Some(key))
-        .unwrap_or_else(|| panic!("no element keyed {key}"))
-        .rect;
-    let (x, y) = (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0);
-    rt.pointer_down(x, y);
-    rt.pointer_up(x, y);
-    rt.frame(0.016);
-    rt.frame(0.4);
-}
-
-#[test]
-fn the_running_apps_account_draws_loading_then_the_account_and_never_a_sample() {
-    let server = server();
-    server.read_delay_ms.store(0, Ordering::SeqCst);
-    let mut rt = window_on(signed_in(&server), SettingsPane::Account);
-    wait_for(&mut rt, "the account", |rt| shows(rt, FIRST));
-    assert!(shows(&rt, FIRST_NAME) && shows(&rt, "240 GB"));
-    assert!(!has(&rt, "not-built"));
-    for sample in ["Anna", "northwind", "Pass", "VPN", "Chat", "Mail"] {
-        assert!(!says_anywhere(&rt, sample), "a sample value shows: {sample}");
-    }
-    // A pane nothing answers for: the shell's frame, with nothing of the account's panes in it.
-    for section in [SettingsPane::Security] {
-        rt.update(move |s, _| {
-            host::dispatch(s, ShellEvent::OpenSettings(section));
-        });
-        rt.frame(0.016);
-        rt.frame(0.4);
-        assert!(has(&rt, "not-built"), "{section:?}");
-        assert!(!says_anywhere(&rt, "Two-factor") && !says_anywhere(&rt, "anyone using this PC"));
-    }
-    rt.update(|s, _| crate::frames::account::go(s, "DW-A64"));
-    rt.frame(0.016);
-    assert!(has(&rt, "not-built"), "Name is not bound");
-}
-
-#[test]
-fn the_window_drops_the_first_account_when_another_signs_in() {
-    let server = server();
-    let engine = signed_in(&server);
-    let mut rt = window_on(engine.clone(), SettingsPane::DevicesAndSessions);
-    wait_for(&mut rt, "the sessions", |rt| shows(rt, PHONE));
-    engine.sign_out_keeping_local_data().expect("signs out");
-    // Before any poll of the source: a draw alone shows nothing of the account.
-    rt.poll = None;
-    rt.update(|_, _| {});
-    rt.frame(0.016);
-    rt.frame(1.0);
-    for words in [PHONE, BROWSER, THIS_PC, FIRST, FIRST_NAME] {
-        assert!(!says_anywhere(&rt, words), "signed out, still shows {words}");
-    }
-    assert!(shows(&rt, "Not signed in"));
-    sign_in(&engine, &server.people[1]);
-    rt.poll = Some(|s: &mut State, _: f64, tx: &mut Tx| crate::frames::account::poll(s, tx));
-    wait_for(&mut rt, "the second account's list", |rt| {
-        shows(rt, "Another invented PC")
-    });
-    for words in [PHONE, BROWSER, THIS_PC, FIRST, FIRST_NAME] {
-        assert!(!says_anywhere(&rt, words), "the second account sees {words}");
-    }
-}
-
-#[test]
-fn a_sign_out_in_the_window_is_confirmed_sent_once_and_said() {
-    let server = server();
-    let mut rt = window_on(signed_in(&server), SettingsPane::DevicesAndSessions);
-    wait_for(&mut rt, "the sessions", |rt| shows(rt, PHONE));
-    // The first row's button: nothing is sent before the confirm.
-    click(&mut rt, "btn-0");
-    assert!(shows(&rt, &format!("Sign out {PHONE}?")), "the confirm (DW-A56)");
-    assert!(server.deleted.lock().unwrap().is_empty());
-    // The confirm's own button, numbered after the rows' two.
-    click(&mut rt, "btn-2");
-    wait_for(&mut rt, "the toast", |rt| shows(rt, SIGNED_OUT));
-    assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone"]);
-    wait_for(&mut rt, "the row goes", |rt| !says_anywhere(rt, PHONE));
-    assert!(shows(&rt, BROWSER));
-
-    // A refusal is drawn, and the row stands.
-    server.change_mode.store(SERVER_ERROR, Ordering::SeqCst);
-    click(&mut rt, "btn-0");
-    click(&mut rt, "btn-1");
-    wait_for(&mut rt, "the refusal", |rt| shows(rt, NOT_SIGNED_OUT));
-    assert!(shows(&rt, BROWSER));
-    // The toast goes when the pane is left.
-    rt.update(|s, _| crate::frames::account::go(s, "DW-A51"));
-    wait_for(&mut rt, "the account", |rt| shows(rt, FIRST));
-    assert!(!says_anywhere(&rt, NOT_SIGNED_OUT));
-}
-
-#[test]
-fn a_failed_read_is_drawn_with_a_way_to_try_again() {
-    let server = server();
-    server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
-    let mut rt = window_on(signed_in(&server), SettingsPane::DevicesAndSessions);
-    wait_for(&mut rt, "the failure", |rt| shows(rt, "Couldn't load this"));
-    assert!(!says_anywhere(&rt, PHONE));
-    server.read_mode.store(ANSWER, Ordering::SeqCst);
-    click(&mut rt, "btn-0");
-    wait_for(&mut rt, "the sessions", |rt| shows(rt, PHONE));
-    assert!(!says_anywhere(&rt, "Couldn't load this"));
 }

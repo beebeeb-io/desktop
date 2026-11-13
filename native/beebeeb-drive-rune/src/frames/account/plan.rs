@@ -54,7 +54,7 @@ pub fn overlay(plan: &PlanDetails, t: &Theme) -> El {
         lists::item(
             3,
             0,
-            &Item::new(None, "Renews").trailing(Trailing::Mono(plan.renews.clone())),
+            &Item::new(None, plan.day_label).trailing(Trailing::Mono(plan.renews.clone())),
             t,
         ),
         lists::item(
