@@ -41,7 +41,8 @@ of DW-A52 (a list of rows) and the security checkup DW-A84 / DW-A84a (a second s
 Every row still opens its existing page. The page is drawn from `SecurityFacts`, where each part is known or not:
 "Not known" for a part nobody read, "Not available yet" (and no link, switch or button) for what a build has not
 bound; no score, no ring fill and no mark from a value that was not read. On the real engine today the page knows
-two-factor (the profile's own mark; absent: not known) and the number of devices; the rest says so.
+two-factor (the profile's own mark; absent: not known) and how many are signed in (one per session: "N signed
+in", never "devices"); the rest says so.
 
 Decision (lane, 2026-11-13): DW-A52 and DW-A84 / DW-A84a are replaced by this one page (the product owner's ruling
 of 2026-11-13 21:58, option C of three rendered options), because the two screens listed the same subjects twice
