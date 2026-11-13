@@ -254,6 +254,32 @@ fn a_handle_does_not_outlive_its_session() {
     signed_out(&engine);
 }
 
+/// A handle made while a lock is ending its session (the turn has moved on, the session is not yet gone from memory)
+/// answers nothing once the lock is done.
+#[test]
+fn a_handle_made_while_its_session_is_ending_answers_nothing_after() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    engine.use_local_state_for_test(state(dir.path(), Some((Some("user-a"), Some("a@example.eu"))), true));
+    signed_in(&engine, Some("user-a"), Some("a@example.eu"));
+
+    // The first half of a lock, as `forget_session` does it.
+    {
+        let _writes = engine.writes.lock().unwrap();
+        engine
+            .acct
+            .advance_session_generation_holding_session_write_lock(SessionTransition::Lock);
+    }
+    let handle = engine.local_state().expect("the session is still in memory");
+    // The second half: the session leaves memory.
+    *engine.acct.session.lock().unwrap() = None;
+    assert_eq!(
+        handle.with(|db| db.list_files().map(|files| files.len()).unwrap_or(0)),
+        Err(LocalStateRefused::SessionChanged)
+    );
+    signed_out(&engine);
+}
+
 /// An answer that was read while the session changed is dropped, not returned.
 #[test]
 fn an_answer_read_across_a_session_change_is_dropped() {

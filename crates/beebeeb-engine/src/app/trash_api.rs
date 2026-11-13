@@ -20,12 +20,22 @@ use crate::api_client::ApiClient;
 use crate::owner_keys;
 
 /// The account's Trash as the server listed it, and the session it was listed for.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TrashListing {
     /// The session the listing belongs to: a host compares it with [`Engine::session_turn`] and drops a listing
     /// whose session is gone (a lock, a sign-out, another account's sign-in), before it draws a name of it.
     pub session: SessionGeneration,
     pub items: Vec<DesktopTrashItem>,
+}
+
+/// How many items, never one of them: a listing holds decrypted names, and a `{:?}` must not print one.
+impl std::fmt::Debug for TrashListing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrashListing")
+            .field("session", &self.session)
+            .field("items", &self.items.len())
+            .finish()
+    }
 }
 
 impl<C: CredentialStores> Engine<C> {
@@ -60,7 +70,9 @@ impl<C: CredentialStores> Engine<C> {
             return Err(AccountCallError::NotSignedIn);
         }
         let items = raw.iter().filter_map(|meta| trash_item_from_meta(meta, &key)).collect();
-        if !self.acct.session_unchanged_since(session) {
+        // The hand-over: only while the session in memory is the one the token and the key were copied from, asked
+        // with no session change half done. A listing made for a session that is ending is dropped here.
+        if !self.session_is_still(session, &key) {
             return Err(AccountCallError::NotSignedIn);
         }
         Ok(TrashListing { session, items })

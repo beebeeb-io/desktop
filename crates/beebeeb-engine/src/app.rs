@@ -224,6 +224,9 @@ pub struct Engine<C: CredentialStores> {
     /// Test builds only: where the account-bound handle reads (`Engine::use_local_state_for_test`).
     #[cfg(any(test, feature = "test-support"))]
     local_state_for_test: Mutex<Option<PathBuf>>,
+    /// Test builds only: run once in the middle of the next lock or sign-out (`Engine::during_next_forget_for_test`).
+    #[cfg(any(test, feature = "test-support"))]
+    forget_hook_for_test: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl<C: CredentialStores> Engine<C> {
@@ -273,6 +276,8 @@ impl<C: CredentialStores> Engine<C> {
             session_user_id: Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]
             local_state_for_test: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            forget_hook_for_test: Mutex::new(None),
         })
     }
 
@@ -883,11 +888,50 @@ impl<C: CredentialStores> Engine<C> {
     fn forget_session(&self, by: SessionTransition) {
         let _writes = self.writes.lock().unwrap_or_else(|p| p.into_inner());
         self.acct.advance_session_generation_holding_session_write_lock(by);
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let hook = self
+                .forget_hook_for_test
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         let mut guard = self.acct.session.lock().unwrap_or_else(|p| p.into_inner());
         *guard = None;
         if let Ok(mut pending) = self.pending_2fa.lock() {
             *pending = None;
         }
+    }
+
+    /// Whether the session in memory is, now, the very one `generation` and `key` were copied from: asked with no
+    /// session change half done (the session-write lock is held for the question), so an answer made for a session
+    /// that a lock or a sign-out is ending is never taken for the current one. May wait for a session change to
+    /// finish: a worker's, as every call that asks it.
+    pub(super) fn session_is_still(&self, generation: SessionGeneration, key: &[u8; 32]) -> bool {
+        let _writes = self.writes.lock().unwrap_or_else(|p| p.into_inner());
+        if !self.acct.session_unchanged_since(generation) {
+            return false;
+        }
+        let guard = self.acct.session.lock().unwrap_or_else(|p| p.into_inner());
+        guard.as_ref().is_some_and(|session| {
+            // Every byte is compared, whatever the first difference.
+            session
+                .master_key
+                .iter()
+                .zip(key.iter())
+                .fold(0u8, |differs, (a, b)| differs | (a ^ b))
+                == 0
+        })
+    }
+
+    /// Test builds only: `hook` runs once, in the middle of the next lock or sign-out (the session is ending and
+    /// not yet gone from memory), on the thread that locks.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn during_next_forget_for_test(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.forget_hook_for_test.lock().unwrap_or_else(|p| p.into_inner()) = Some(hook);
     }
 
     /// Sign out and KEEP the local files and the local state: the engine stops, the session is ended on the server
