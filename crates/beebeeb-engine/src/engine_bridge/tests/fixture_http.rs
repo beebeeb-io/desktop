@@ -41,11 +41,19 @@ pub(super) fn read_http_request(stream: &mut std::net::TcpStream) -> RecordedReq
             .then(|| value.trim().to_string())
     });
 
+    let capabilities = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case(beebeeb_core::direct_transfer::CAPABILITIES_HEADER)
+            .then(|| value.trim().to_string())
+    });
+
     RecordedRequest {
         method,
         path,
         body,
         origin,
+        capabilities,
     }
 }
 

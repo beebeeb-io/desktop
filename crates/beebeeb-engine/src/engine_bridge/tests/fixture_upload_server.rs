@@ -21,6 +21,8 @@ pub(super) struct RecordedRequest {
     pub(super) body: Vec<u8>,
     /// LD-0113: the `X-Beebeeb-Origin` header, when the request carried one.
     pub(super) origin: Option<String>,
+    /// The `X-Beebeeb-Capabilities` header, when the request carried one.
+    pub(super) capabilities: Option<String>,
 }
 
 pub(super) struct UploadMockServer {
@@ -176,5 +178,6 @@ pub(super) fn read_http_request_or_hangup(stream: &mut std::net::TcpStream) -> O
         path,
         body: Vec::new(),
         origin: None,
+        capabilities: None,
     })
 }

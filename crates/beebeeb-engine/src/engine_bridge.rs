@@ -269,6 +269,10 @@ mod tests {
     mod versions;
     mod versions_2;
     mod versions_3;
+    // Chunk format v2 (core 0.3.0): write then read, the completion name, resume, capabilities.
+    mod format_v2;
+    // rusqlite 0.41: a state database and a file of release 0.8.25, read by this build.
+    mod upgrade_from_0_8_25;
     // Task 2407 (core 2404): each sync-folder site takes its conflict path on an 8.3 alias (stubbed check; Windows: real names).
     mod name_alias_2407;
     #[cfg(windows)]
