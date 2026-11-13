@@ -206,6 +206,18 @@ pub struct Alert {
     pub on: bool,
 }
 
+/// How far a source is with something it reads from the account: what a pane draws in its place.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ReadState {
+    /// Asked for, no answer yet.
+    Loading,
+    /// The answer did not come, or did not read: nothing of the account is known.
+    Failed,
+    /// Read: what the source hands out is what the account holds.
+    #[default]
+    Ready,
+}
+
 /// The Notifications pane's values.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Notifications {
@@ -296,6 +308,19 @@ pub trait SettingsSource {
     fn locations_loading(&self) -> bool {
         false
     }
+    /// Whether `recent_alerts` is what the account holds. Not `Ready`: its empty answer means "not known", and the
+    /// page says loading or couldn't load, never "No notifications".
+    fn recent_state(&self) -> ReadState {
+        ReadState::Ready
+    }
+    /// Whether the switches of `Notifications::groups[group]` are read. Not `Ready`: its rows are there (so nothing
+    /// below them moves when the answer lands) but each `Alert::on` is a filler, never drawn and never pressed.
+    fn alerts_state(&self, group: usize) -> ReadState {
+        let _ = group;
+        ReadState::Ready
+    }
+    /// Ask again for what `recent_state` and `alerts_state` speak of. Never waits.
+    fn reload_notifications(&mut self) {}
     /// The theme preference alone (every window reads it on every frame).
     fn theme(&self) -> ThemeChoice {
         self.general().theme
