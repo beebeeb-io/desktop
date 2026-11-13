@@ -225,6 +225,8 @@ fn list_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             s.clear_selection();
             true
         }
+        // Letters jump to the first name that starts with them (DW-0420b).
+        Key::Text(ref typed) if !m.cmd && !m.ctrl && !m.alt => s.type_to(typed, tx),
         _ => false,
     }
 }

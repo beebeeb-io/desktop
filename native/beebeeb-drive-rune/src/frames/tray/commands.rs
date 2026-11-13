@@ -35,6 +35,8 @@ pub const APP: &[List] = &[
             ("Share\u{2026}", "right-click, details panel"),
             ("Copy link", "right-click"),
             ("Make available offline", "right-click, details panel"),
+            // Board b4ffef881: the row has no place yet (the golden's `sc-1-13-home` is empty).
+            ("Free up space", ""),
             ("Show in File Explorer", "right-click"),
             ("Details", "Alt+Enter"),
             ("Rename", "F2"),
