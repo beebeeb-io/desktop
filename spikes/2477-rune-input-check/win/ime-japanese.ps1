@@ -1,5 +1,6 @@
 # Adds or removes Japanese (with the Microsoft IME) in THIS account's language list, for the composition leg of
-# win\run.ps1. User scope only (HKCU, Set-WinUserLanguageList): no language pack, no capability, no system
+# win\run.ps1. User scope only (HKCU, Set-WinUserLanguageList): this script installs no language pack and no
+# capability (the IME also needs `Language.Basic~~~ja-JP~0.0.1.0`, a machine-wide install done separately), no system
 # locale, no region and no display-language change. The first language and the default input method stay as
 # they are. Set-WinUserLanguageList also resets the account's regional FORMAT to the first language (seen: en-GB
 # became en-US); the format is read before and written back after. Run it inside the desktop session whose input it changes:

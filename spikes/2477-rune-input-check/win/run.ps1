@@ -98,6 +98,17 @@ $CellW = 16; $Pad = 16; $LineH = 24
 $env:RUNE_INPUT_CHECK_LOG = $log
 $proc = Start-Process -FilePath $Exe -PassThru
 $hwnd = [IntPtr]::Zero
+$script:inputChanged = $false
+# Input method off and the probe's window back on the first layout. Also from `finally`: the desktop session is
+# shared, and a run that stopped half-way must not leave it typing Japanese.
+function RestoreInput {
+  if (-not $script:inputChanged -or $hwnd -eq [IntPtr]::Zero) { return }
+  Tap 0x1A; Start-Sleep -Milliseconds 300   # VK_IME_OFF
+  $en = [Win]::LoadKeyboardLayout('00000409', 0x1)
+  [void][Win]::PostMessage($hwnd, 0x50, [IntPtr]::Zero, $en)
+  Start-Sleep -Milliseconds 800
+  $script:inputChanged = $false
+}
 try {
   # By title: once an input method is installed the process owns other (hidden) top-level windows too.
   # [NullString]: PowerShell would pass $null to a string parameter as "", a class name nothing has.
@@ -235,6 +246,7 @@ try {
   } else {
     Tap 0x23; Wait
     # Ask the probe's window to switch to the Japanese layout, then turn the input method on (hiragana).
+    $script:inputChanged = $true
     $hkl = [Win]::LoadKeyboardLayout('00000411', 0x1)
     [void][Win]::PostMessage($hwnd, 0x50, [IntPtr]::Zero, $hkl)
     Wait 1500
@@ -285,10 +297,7 @@ try {
     # Windows ends a cancelled composition with an EMPTY commit: only a commit that carries text would be wrong.
     Check 'Escape cancels without touching the text' ($s.Preedit -eq '' -and $s.Text -eq $textBefore -and (Since $e '^ime Commit\("[^"]').Count -eq 0 -and (Since $e '^ime Preedit\(""').Count -ge 1) ("text='$($s.Text)' preedit='$($s.Preedit)'; " + ((Since $e '^(ime|key) ') -join ' | '))
     Check 'the Escape that cancels does not reach on_key' ((Since $e '^key ').Count -eq 0) ((Since $e '^key ') -join ' | ')
-    Tap 0x1A; Wait 300                # VK_IME_OFF
-    $en = [Win]::LoadKeyboardLayout('00000409', 0x1)
-    [void][Win]::PostMessage($hwnd, 0x50, [IntPtr]::Zero, $en)
-    Wait 800
+    RestoreInput
     $m = Mark
     TypeKeys 'z'; Wait
     Check 'after the input method is off, a letter is a key again' ((Since $m '^key Text\("z"\)').Count -eq 1) ((Since $m '^(ime|key) ') -join ' | ')
@@ -299,6 +308,7 @@ catch {
   Check 'the run completed' $false $_.Exception.Message
 }
 finally {
+  try { RestoreInput } catch { }
   if ($hwnd -ne [IntPtr]::Zero) { [void][Win]::PostMessage($hwnd, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) }   # WM_CLOSE
   if (-not $proc.WaitForExit(5000)) { Stop-Process -Id $proc.Id -Force }
 }

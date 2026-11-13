@@ -29,6 +29,7 @@ MUTANTS = [
     ("no App::on_focus", ".on_focus(on_window_focus)", ""),
     ("text field without on_edit", "                .on_edit(|s: &mut Probe| &mut s.field),\n", ""),
     ("on_key without Tx::instant", "    tx.instant();\n    s.log\n        .push(format!(\"key", "    s.log\n        .push(format!(\"key"),
+    ("on_ime without Tx::instant", "tx: &mut Tx) -> bool {\n    tx.instant();\n    s.log.push(format!(\"ime", "tx: &mut Tx) -> bool {\n    let _ = &tx;\n    s.log.push(format!(\"ime"),
     ("pre-edit cursor ignored", "else { *cursor };", "else { None };"),
     ("click count ignored", "d.clicks >= 2", "d.clicks >= 99"),
     ("no El::on_drawn_layout", ".on_drawn_layout(|s: &mut Probe, r| s.caret_drawn = Some(r))", ""),
