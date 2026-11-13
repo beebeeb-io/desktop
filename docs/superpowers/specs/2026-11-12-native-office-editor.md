@@ -418,6 +418,8 @@ side; (g) `desktop-office` and the corpus, PRs 1, 15. PR 0 and PR 8 touch the sh
    editing surface with an input method is unverified. It is most of the 22 editor days and the part an estimate is
    worst at. Rune at the revision the app pins has 56 source files that mention input-method events, among them tests
    named `canvas_input`, `caret` and `caret_follow`: the plumbing exists; none of it was run for an editing canvas.
+   **Result of PR 0 (2026-11-13): it can be built; 5 of 5 points yes on Windows with a real input method, 7 limits:
+   `2026-11-12-native-office-editor-input-check.md`.**
 2. **Losing content on save.** Found on our own small set: macros (2 of 3 engines), transitions (7 of 7), linked
    images, chart styles; 0 real Microsoft Office files tested. The loss check turns silent loss into "read-only for
    this file", which is safe, but it may turn out that many real files open read-only.
