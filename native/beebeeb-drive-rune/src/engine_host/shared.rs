@@ -9,7 +9,8 @@
 //! - `Member::compared` is always `false`: the safety-number marks are not in the engine crate yet (see the PR).
 //!
 //! Bound changes ([`Engine::share_change`], by id, for the session the row was drawn under): `accept`, `set_access`,
-//! `remove_access` (the view confirms it, DW-0512b). NOT bound, each answers `false` and a notice the view draws
+//! `remove_access` (the view confirms it, DW-0512b). A change is never drawn before Beebeeb confirmed it: the rows
+//! are the server's, read again after the answer; one change per id at a time. NOT bound, each answers `false` and a notice the view draws
 //! ("Not available yet"): `decline`, `stop_sharing`, `close_request` (the view asks no confirmation), `invite` (needs
 //! the safety marks and the key flows), `keep_offline`, `remove_request` (no server route).
 //!
@@ -26,7 +27,7 @@
 //!
 //! Must not: log a name, an address, an id or a server's words. Holds no token, key, link or link secret.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -74,9 +75,11 @@ pub struct EngineSharedSource<C: CredentialStores> {
     reads: u64,
     /// A read was asked for while one was on its way: start it when that one lands.
     again: bool,
-    /// Changes on their way.
-    changing: usize,
+    /// The ids (an invitation's, a person's) with a change on its way: one change per id at a time.
+    changing: HashSet<String>,
     notice: Option<Notice>,
+    /// A change was refused and no read has answered since: a failed read keeps saying the change was not made.
+    unmade: bool,
     /// Something changed outside an answer: the next pump says so.
     dirty: bool,
 }
@@ -95,7 +98,8 @@ pub(crate) struct Held {
 
 enum Answer {
     Read(u64, Result<SharesOverview, AccountCallError>),
-    Changed(SessionGeneration, Result<(), ShareChangeError>),
+    /// The change for this id, the session it was sent for, and what Beebeeb said.
+    Changed(String, SessionGeneration, Result<(), ShareChangeError>),
 }
 
 impl<C: CredentialStores> EngineSharedSource<C> {
@@ -112,8 +116,9 @@ impl<C: CredentialStores> EngineSharedSource<C> {
             reading: None,
             reads: 0,
             again: false,
-            changing: 0,
+            changing: HashSet::new(),
             notice: None,
+            unmade: false,
             dirty: false,
         }
     }
@@ -124,11 +129,6 @@ impl<C: CredentialStores> EngineSharedSource<C> {
         self.held
             .as_ref()
             .filter(|held| held.session == now && self.engine.has_session())
-    }
-
-    fn current_mut(&mut self) -> Option<&mut Held> {
-        self.current()?;
-        self.held.as_mut()
     }
 
     fn read(&mut self) {
@@ -155,26 +155,30 @@ impl<C: CredentialStores> EngineSharedSource<C> {
             }
             Err(_) => {
                 log("shared: could not start a thread for the lists");
-                self.read_at = Some(Instant::now());
                 self.loaded = Loaded::Failed;
             }
         }
     }
 
-    /// Send one change on a worker, for the session the lists were read for. `false`: no worker could start.
-    fn change(&mut self, session: SessionGeneration, change: ShareChange) -> bool {
-        let (engine, answers) = (self.engine.clone(), self.answers.clone());
+    /// Send one change on a worker, for the session the lists were read for. Nothing in the lists is edited here:
+    /// they change only when Beebeeb's answer was read back. `false`: a change for `id` is already on its way (a
+    /// second press sends nothing), or no worker could start.
+    fn change(&mut self, session: SessionGeneration, id: &str, change: ShareChange) -> bool {
+        if self.changing.contains(id) {
+            return false;
+        }
+        let (engine, answers, sent_for) = (self.engine.clone(), self.answers.clone(), id.to_string());
         let started = std::thread::Builder::new().name("shared-change".into()).spawn(move || {
             let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.share_change(session, &change)))
                 .unwrap_or(Err(ShareChangeError::Refused));
-            let _ = answers.send(Answer::Changed(session, done));
+            let _ = answers.send(Answer::Changed(sent_for, session, done));
             engine.wake_host();
         });
         if started.is_err() {
             log("shared: could not start a thread for a change");
             return self.refuse(Notice::ChangeRefused);
         }
-        self.changing += 1;
+        self.changing.insert(id.to_string());
         self.dirty = true;
         true
     }
@@ -194,12 +198,15 @@ impl<C: CredentialStores> EngineSharedSource<C> {
                     self.reading = None;
                 }
                 let again = std::mem::take(&mut self.again);
-                self.read_at = Some(Instant::now());
+                // Only an answer makes the lists fresh: after a failed read they are old, and the next opening reads
+                // again.
+                self.read_at = result.is_ok().then(Instant::now);
                 match result {
                     // Read for a session that is gone: dropped, never drawn.
                     Ok(overview) if overview.session != now => {}
                     Ok(overview) => {
                         self.held = Some(held_of(overview, Local::now()));
+                        self.unmade = false;
                         self.loaded = Loaded::Ready;
                     }
                     Err(kind) => {
@@ -217,7 +224,15 @@ impl<C: CredentialStores> EngineSharedSource<C> {
                                 self.loaded = Loaded::SessionEnded;
                             }
                             // Lists are shown: they stay, and the view says they may be old.
-                            _ if have => self.notice = Some(Notice::RefreshFailed),
+                            // A change Beebeeb refused keeps its own words.
+                            _ if have => {
+                                let words = if self.unmade {
+                                    Notice::ChangeRefused
+                                } else {
+                                    Notice::RefreshFailed
+                                };
+                                self.notice.get_or_insert(words);
+                            }
                             AccountCallError::Offline => self.loaded = Loaded::Offline,
                             _ => self.loaded = Loaded::Failed,
                         }
@@ -227,16 +242,17 @@ impl<C: CredentialStores> EngineSharedSource<C> {
                     self.read();
                 }
             }
-            Answer::Changed(session, done) => {
-                self.changing = self.changing.saturating_sub(1);
+            Answer::Changed(id, session, done) => {
+                self.changing.remove(&id);
                 if session != now {
                     return;
                 }
                 if let Err(kind) = done {
                     log(format!("shared: a change was not made ({kind})"));
                     self.notice = Some(Notice::ChangeRefused);
+                    self.unmade = true;
                 }
-                // What Beebeeb has now is the truth, whatever was drawn ahead of it.
+                // Nothing was drawn ahead of the answer: the lists change when Beebeeb's are read again.
                 self.read();
             }
         }
@@ -256,7 +272,7 @@ impl<C: CredentialStores> EngineSharedSource<C> {
 #[cfg(test)]
 impl<C: CredentialStores> EngineSharedSource<C> {
     fn busy(&self) -> bool {
-        self.reading.is_some() || self.changing > 0
+        self.reading.is_some() || !self.changing.is_empty()
     }
 }
 
@@ -282,33 +298,29 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
             .unwrap_or_default()
     }
 
-    /// Sent once, for an invitation of the current session's lists; its card goes at once. Once the owner approves,
-    /// the item is listed under Shared with you.
+    /// Sent once per press, for an invitation of the current session's lists. Nothing is drawn as accepted before
+    /// Beebeeb answered: the card goes when the lists are read again after it. `false`: no such invitation, or its
+    /// answer is still on its way.
     fn accept(&mut self, id: &str) -> bool {
-        let Some(held) = self.current_mut() else { return false };
-        let Some(at) = held.invitations.iter().position(|i| i.id == id) else {
+        let Some(session) = self
+            .current()
+            .filter(|held| held.invitations.iter().any(|i| i.id == id))
+            .map(|held| held.session)
+        else {
             return false;
         };
-        held.invitations.remove(at);
-        let session = held.session;
-        self.change(session, ShareChange::Accept { invite_id: id.into() })
+        self.change(session, id, ShareChange::Accept { invite_id: id.into() })
     }
 
-    /// Sent once, for a person (never the owner) of a share in the current session's lists.
+    /// Sent once per press, for a person (never the owner) of a share in the current session's lists. The row keeps
+    /// what Beebeeb last said until Beebeeb confirmed the change and the lists were read again.
     fn set_access(&mut self, share: &str, person: &str, access: Access) -> bool {
         let Some(session) = self.person_at(share, person) else {
             return false;
         };
-        if let Some(m) = self
-            .held
-            .as_mut()
-            .and_then(|h| h.members.get_mut(share))
-            .and_then(|people| people.iter_mut().find(|m| m.id == person))
-        {
-            m.access = Some(access);
-        }
         self.change(
             session,
+            person,
             ShareChange::SetAccess {
                 invite_id: person.into(),
                 can_edit: access == Access::Edit,
@@ -316,25 +328,16 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         )
     }
 
-    /// Sent once (the view confirmed it, DW-0512b), for a person (never the owner) of a share in the current
-    /// session's lists; the person leaves the share's rows at once.
+    /// Sent once per press (the view confirmed it, DW-0512b), for a person (never the owner) of a share in the
+    /// current session's lists. The person stays in the rows until Beebeeb confirmed it and the lists were read
+    /// again: access Beebeeb did not take away is never drawn as taken away.
     fn remove_access(&mut self, share: &str, person: &str) -> bool {
         let Some(session) = self.person_at(share, person) else {
             return false;
         };
-        if let Some(held) = self.held.as_mut() {
-            let people = held.members.entry(share.to_string()).or_default();
-            people.retain(|m| m.id != person);
-            let others: Vec<Member> = people.iter().filter(|m| m.access.is_some()).cloned().collect();
-            if others.is_empty() {
-                held.people.retain(|p| p.id != share);
-                held.members.remove(share);
-            } else if let Some(row) = held.people.iter_mut().find(|p| p.id == share) {
-                (row.names, row.people, row.pending) = people_line(&others);
-            }
-        }
         self.change(
             session,
+            person,
             ShareChange::RemoveMember {
                 invite_id: person.into(),
             },
@@ -396,7 +399,7 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         let notice = self.notice.take();
         Pumped {
             changed: changed || notice.is_some(),
-            busy: self.reading.is_some() || self.changing > 0,
+            busy: self.reading.is_some() || !self.changing.is_empty(),
             notice,
         }
     }
@@ -404,6 +407,8 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
     fn forget(&mut self) {
         self.held = None;
         self.again = false;
+        self.changing.clear();
+        self.unmade = false;
         self.read_at = None;
         self.notice = None;
         self.loaded = Loaded::Loading;

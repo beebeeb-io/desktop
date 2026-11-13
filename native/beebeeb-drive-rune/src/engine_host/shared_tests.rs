@@ -321,6 +321,7 @@ fn an_account_that_shares_nothing_and_every_way_the_lists_do_not_come() {
     source.read_at = None;
     fake.status.store(500, Ordering::SeqCst);
     assert_eq!(opened(&mut source), [Notice::RefreshFailed]);
+    assert!(source.read_at.is_none(), "a failed read leaves the lists old");
     assert_eq!(source.people_shares().len(), 1);
 
     // Beebeeb cannot be reached at all.
@@ -335,12 +336,13 @@ fn an_account_that_shares_nothing_and_every_way_the_lists_do_not_come() {
 }
 
 #[test]
-fn the_three_bound_changes_go_out_once_by_id_and_a_refusal_is_said() {
+fn the_three_bound_changes_go_out_once_by_id_and_nothing_is_drawn_before_beebeeb_answered() {
     let fake = fake("changes");
     let mut source = EngineSharedSource::new(signed_in(&fake));
     // Before the lists are here nothing can be changed.
     assert!(!source.accept(INV_IN) && !source.remove_access(TRIP, INV_A));
     opened(&mut source);
+    let before = source.held.clone();
 
     // Not an invitation, the owner, a person of another share, an unknown share: nothing is sent.
     assert!(!source.accept(INV_A));
@@ -351,14 +353,17 @@ fn the_three_bound_changes_go_out_once_by_id_and_a_refusal_is_said() {
     assert!(settle(&mut source).is_empty());
     assert!(changes(&fake.fake).is_empty());
 
+    // One press, one request; a second press while the answer is on its way sends nothing. Until Beebeeb answered,
+    // every row is what Beebeeb last said.
+    fake.delay_ms.store(150, Ordering::SeqCst);
     assert!(source.accept(INV_IN));
-    assert!(source.invitations().is_empty(), "the card goes at once");
     assert!(source.set_access(TRIP, INV_B, Access::Edit));
-    assert_eq!(source.members(TRIP)[2].access, Some(Access::Edit));
     assert!(source.remove_access(TRIP, INV_A));
-    assert_eq!(source.members(TRIP).len(), 2);
-    assert_eq!(source.people_shares()[0].names, "two@example.eu");
-    assert!(source.people_shares()[0].pending, "only an invited person is left");
+    assert!(!source.accept(INV_IN), "an answer is on its way");
+    assert!(!source.set_access(TRIP, INV_B, Access::View));
+    assert!(!source.set_access(TRIP, INV_B, Access::Edit));
+    assert!(!source.remove_access(TRIP, INV_A));
+    assert_eq!(source.held, before, "nothing is drawn as made before Beebeeb said so");
     assert!(settle(&mut source).is_empty());
     let mut sent = changes(&fake.fake);
     sent.sort();
@@ -370,14 +375,71 @@ fn the_three_bound_changes_go_out_once_by_id_and_a_refusal_is_said() {
             format!("POST /api/v1/shares/invites/{INV_IN}/claim"),
         ]
     );
-    // What Beebeeb has now is read again (this fake still lists everything).
-    assert_eq!(source.members(TRIP).len(), 3);
+    // The lists were read again after the answers: they are Beebeeb's (this fake still lists everything).
+    assert!(asked(&fake.fake).len() >= 4 + 3 + 4);
+    assert_eq!(source.held, before);
+    // Answered: the same person can be changed again.
+    fake.delay_ms.store(0, Ordering::SeqCst);
+    assert!(source.set_access(TRIP, INV_B, Access::Edit));
+    assert!(settle(&mut source).is_empty());
+    assert_eq!(changes(&fake.fake).len(), 4);
+}
 
-    // Beebeeb refuses: said once, and the lists are Beebeeb's again.
+#[test]
+fn a_change_beebeeb_never_made_is_never_drawn_as_made_also_when_the_refresh_fails() {
+    let fake = fake("refused");
+    let mut source = EngineSharedSource::new(signed_in(&fake));
+    opened(&mut source);
+    let servers = source.held.clone();
+    assert!(servers.is_some());
+
+    // Beebeeb refuses every change, and the read after it fails too.
     fake.status.store(500, Ordering::SeqCst);
-    assert!(source.set_access(TRIP, INV_A, Access::View));
+    assert!(source.remove_access(TRIP, INV_A));
+    assert!(source.set_access(TRIP, INV_B, Access::Edit));
+    assert!(source.accept(INV_IN));
+    let notices = settle(&mut source);
+    assert!(
+        !notices.is_empty() && notices.iter().all(|n| *n == Notice::ChangeRefused),
+        "the refusal keeps its own words, never only \"couldn't refresh\": {notices:?}"
+    );
+    assert_eq!(
+        source.held, servers,
+        "the rows are the server's: nobody was removed, nothing changed"
+    );
+    let people: Vec<_> = source.members(TRIP).into_iter().map(|m| (m.id, m.access)).collect();
+    assert_eq!(
+        people,
+        [
+            (OWNER.to_string(), None),
+            (INV_A.to_string(), Some(Access::Edit)),
+            (INV_B.to_string(), Some(Access::View))
+        ]
+    );
+    assert_eq!(source.people_shares()[0].names, "one@example.eu, two@example.eu");
+    assert_eq!(source.invitations().len(), 1);
+
+    // The failed read did not make the lists fresh: the next opening reads again at once.
+    fake.status.store(200, Ordering::SeqCst);
+    let reads = asked(&fake.fake)
+        .iter()
+        .filter(|route| route.as_str() == PATHS[0])
+        .count();
+    assert!(opened(&mut source).is_empty());
+    assert_eq!(
+        asked(&fake.fake)
+            .iter()
+            .filter(|route| route.as_str() == PATHS[0])
+            .count(),
+        reads + 1
+    );
+
+    // Beebeeb cannot be reached at all (the change and the read both get no answer).
+    drop(fake);
+    assert!(source.remove_access(TRIP, INV_A));
     let notices = settle(&mut source);
     assert!(notices.contains(&Notice::ChangeRefused), "{notices:?}");
+    assert_eq!(source.held, servers);
 }
 
 #[test]
