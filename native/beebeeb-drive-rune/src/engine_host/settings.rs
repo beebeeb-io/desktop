@@ -348,9 +348,10 @@ impl<C: CredentialStores + 'static> EngineSettingsSource<C> {
         }
     }
 
-    /// The list and its ids, while what was read is the signed-in account's.
+    /// The list and its ids, while what was read is the signed-in account's and its session is in memory (a locked
+    /// vault shows no list, so nothing can be chosen from one).
     fn listing(&self) -> Option<&(Locations, Vec<String>)> {
-        let mine = self.region_of.is_some() && self.region_of == account_of(&self.engine);
+        let mine = self.engine.has_session() && self.region_of.is_some() && self.region_of == account_of(&self.engine);
         self.listing.as_ref().filter(|_| mine)
     }
 
