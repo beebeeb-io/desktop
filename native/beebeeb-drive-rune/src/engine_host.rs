@@ -734,8 +734,8 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         open_path(&path)
     }
 
-    /// What Move to Trash, its Undo, Keep on this PC and Free up space did, once the engine answered (not an
-    /// activity feed).
+    /// What Move to Trash, its Undo, a link that was asked for, Keep on this PC and Free up space did, once the
+    /// engine answered (not an activity feed).
     fn changes(&mut self) -> Vec<Change> {
         let mut changes = self.trash.take();
         changes.extend(self.links.take());
