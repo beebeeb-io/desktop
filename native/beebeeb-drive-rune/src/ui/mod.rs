@@ -35,6 +35,8 @@ pub mod status_line;
 pub mod status_offline;
 pub mod toast;
 pub mod toolbar;
+#[cfg(test)]
+mod toolbar_tests;
 pub mod window;
 
 #[cfg(test)]

@@ -1,0 +1,12 @@
+# The timing lines of an earlier run of the same binaries on the same VM (branch head below), kept because the
+# final run's timings are 5 to 50 times slower: the VM is shared with other builds.
+[remote-build] branch head = c5657ddb067f97d8a0890c01c91d670f3be9e926
+network proof zz-bb-wc-edit: open: [probe 127.0.0.1:47811: CONNECTED] [probe github.com:443: CONNECTED]  blocked: [probe 127.0.0.1:47811: NO CONNECTION] [probe github.com:443: NO CONNECTION]
+network proof zz-bb-wc-engine: open: [probe 127.0.0.1:47811: CONNECTED] [probe github.com:443: CONNECTED]  blocked: [probe 127.0.0.1:47811: NO CONNECTION] [probe github.com:443: NO CONNECTION]
+network proof zz-bb-gc-edit: open: [probe 127.0.0.1:47811: CONNECTED] [probe github.com:443: CONNECTED]  blocked: [probe 127.0.0.1:47811: NO CONNECTION] [probe github.com:443: NO CONNECTION]
+network proof zz-bb-dc-edit: open: [probe 127.0.0.1:47811: CONNECTED] [probe github.com:443: CONNECTED]  blocked: [probe 127.0.0.1:47811: NO CONNECTION] [probe github.com:443: NO CONNECTION]
+{"engine":"wordcraft","test":"keystroke","pages":60,"keystrokes":200,"first_full_layout_ms":21.7,"snapshot_clone_ms":0.01,"edit_ms_p50":0.003,"relayout_ms_p50":0.85,"relayout_ms_p95":0.89,"relayout_ms_max":1.64,"strip_render_ms_p50":0.30,"strip_render_ms_p95":0.39,"strip_px":"794x160","full_page_render_ms":2.3,"full_page_px":"794x1123","hit_test_round_trips_ok":200,"selection_rects_nonempty":200}
+{"engine":"wordcraft-engine (patched)","test":"text.insert of one character, 200 times","body_blocks":299,"ms_p50":0.009,"ms_p95":0.010,"ms_max":0.165,"undo_depth":0,"one_undo_ms":0.002,"undone":true}
+{"engine":"wordcraft","test":"latency_through_a_helper_process","keystrokes":200,"helper_start_to_ready_ms":25,"round_trip_ms_p50":1.54,"round_trip_ms_p95":1.70,"round_trip_ms_max":2.98,"reply_bytes":508160,"killed_helper_pid":1318246,"host_saw_the_dead_helper":true}
+{"engine":"gridcraft","test":"cell edit with 1000 dependent formulas","build_ms":30,"edit_and_recalc_ms_p50":0.86,"edit_and_recalc_ms_p95":1.25,"edit_and_recalc_ms_max":1.47,"last_cell":{"range":"B1000","sheet":"Sheet1","values":[["1001296"]]}}
+{"engine":"gridcraft","test":"cell edit with 20000 dependent formulas","build_ms":838,"edit_and_recalc_ms_p50":33.43,"edit_and_recalc_ms_p95":39.05,"edit_and_recalc_ms_max":43.65,"last_cell":{"range":"B20000","sheet":"Sheet1","values":[["400020296"]]}}

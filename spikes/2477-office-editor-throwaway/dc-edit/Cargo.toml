@@ -1,0 +1,11 @@
+# THROWAWAY (task 2477 editor spike). Copied into <deckcraft>/crates/zz-bb-dc-edit and built inside the upstream
+# workspace. Links deckcraft-engine (commands, undo, the .pptx reader and writer, render).
+[package]
+name = "zz-bb-dc-edit"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+deckcraft-engine = { workspace = true }
+serde_json = { workspace = true }
