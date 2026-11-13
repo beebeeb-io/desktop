@@ -54,6 +54,9 @@ pub enum ActionError {
     InFlight,
     /// Some of the items changed, some did not (the rows show which).
     NotAll,
+    /// This system cannot do it at all (Free up space for a selection, off Windows): nothing was changed, and
+    /// Try again would change nothing either.
+    NotOnThisSystem,
 }
 
 /// What a person asked for, in the words the failure message uses (DW-0109: "Couldn't rename.").
@@ -181,13 +184,20 @@ pub enum Change {
     Made { item: Box<DriveItem> },
     /// An accepted action did not work after all.
     Failed(Action, ActionError),
-    /// What this PC holds of these items changed (`KeepOffline`, `RemoveOffline`, `FreeUpSpace`): the ids the
-    /// engine changed, and how many of the ones asked it did not.
-    Local {
-        action: Action,
-        done: Vec<String>,
-        failed: usize,
-    },
+    /// A change of what this PC holds (`KeepOffline`, `RemoveOffline`, `FreeUpSpace`) was tried: per item asked,
+    /// what the engine says of it now and whether the change was made. Never inferred from the action.
+    Local { action: Action, items: Vec<LocalOutcome> },
+}
+
+/// One item of a [`Change::Local`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalOutcome {
+    pub id: String,
+    /// The row's `pc_status` as the engine reports it AFTER the work (`Some(None)`: no mark, a folder that is
+    /// not kept). `None`: the engine could not say, and the row stays as it is drawn.
+    pub now: Option<Option<String>>,
+    /// `None`: the change was made. Otherwise why this item was left; Try again is for these alone.
+    pub left: Option<ActionError>,
 }
 
 /// The counts beside the sidebar's sections.
@@ -265,8 +275,12 @@ pub trait FilesSource: Send + 'static {
     fn answers_later(&self) -> bool {
         false
     }
+    /// Wake the window once more after this long: a message set between presses goes at its own time. Only a
+    /// source that answers later needs it (the window has no other wake then).
+    fn wake_after(&mut self, _after: std::time::Duration) {}
     /// After an `upload` that was refused: the files of it that were NOT copied in, so Try again sends those
-    /// alone. `None`: nothing of it was copied (or the source cannot say).
+    /// alone (an empty list: every file is in, there is nothing to try again). `None`: nothing of it was copied
+    /// (or the source cannot say).
     fn upload_left(&mut self) -> Option<Vec<std::path::PathBuf>> {
         None
     }

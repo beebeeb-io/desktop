@@ -15,6 +15,7 @@ pub mod dialogs;
 pub mod facts;
 pub mod keys;
 pub mod list;
+pub mod local;
 pub mod long_list;
 pub mod menus;
 pub mod names;
@@ -53,6 +54,7 @@ mod tests;
 mod uploads_tests;
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use crate::State;
 use crate::source::DriveItem;
@@ -154,6 +156,7 @@ impl Toast {
             ActionError::Offline => " Check your connection.",
             ActionError::InFlight => " The last change is still on its way.",
             ActionError::NotAll => " Some items were left as they were.",
+            ActionError::NotOnThisSystem => " It is not available on this computer yet.",
             _ => "",
         };
         format!("Couldn't {}.{fix}", action.words())
@@ -221,6 +224,8 @@ pub struct Actions {
     pub typed: long_list::Typed,
     /// The session ended: what was refused (`session.rs`).
     pub session: session::Ui,
+    /// A change of what this PC holds: what Try again repeats, what is still to be said (`local.rs`).
+    pub local: local::Ui,
     /// During the first download: something was opened, so the card gave way to the strip (DW-1107).
     pub first_load_strip: bool,
     /// A board frame that draws a long list from this row on (DW-0420b: the gate draws one frame
@@ -263,6 +268,7 @@ impl Actions {
             protected: protected::Ui::default(),
             typed: long_list::Typed::default(),
             session: session::Ui::default(),
+            local: local::Ui::default(),
             first_load_strip: false,
             board_first_row: 0,
         }
@@ -496,21 +502,36 @@ impl State {
 
     /// An action did not happen: say so (DW-0109). A protected folder says why in its own frame (DW-1110).
     pub(super) fn failed(&mut self, action: Action, why: ActionError, tx: &mut Tx) {
+        let items = self.selected_items();
+        if let Some(stay) = self.failed_of(action, why, &items) {
+            tx.wake_after(stay);
+        }
+    }
+
+    /// [`State::failed`] of these items (not always the selection: an answer that came later, Try again),
+    /// without a wake: how long the message it set stays, for the caller to wake the window after.
+    pub(super) fn failed_of(&mut self, action: Action, why: ActionError, items: &[DriveItem]) -> Option<Duration> {
         if why == ActionError::Protected {
             self.intent(Intent::Frame("DW-1110"));
             // Where the source has words for it, they are said here (`protected.rs`).
-            self.say_protected(action, tx);
+            self.say_protected(action, items)
         } else {
-            self.show_toast(Toast::Failed(action, why), tx);
+            Some(self.set_toast(Toast::Failed(action, why)))
         }
     }
 
     /// Show a toast, and take it away again after its time.
     pub(super) fn show_toast(&mut self, toast: Toast, tx: &mut Tx) {
+        let stay = self.set_toast(toast);
+        tx.wake_after(stay);
+    }
+
+    /// The toast, without a wake: how long it stays.
+    pub(super) fn set_toast(&mut self, toast: Toast) -> Duration {
         let stay = toast.stays();
         self.actions.toast = Some(toast);
         self.actions.toast_until = Some(std::time::Instant::now() + stay);
-        tx.wake_after(stay);
+        stay
     }
 
     /// [`State::take_changes`], with its messages: "Duplicated", or what failed. The engine lane
@@ -773,54 +794,6 @@ impl State {
         true
     }
 
-    /// Does Make available offline read Remove from this PC? When everything selected already is kept.
-    pub fn selection_is_kept(&self) -> bool {
-        let items = self.selected_items();
-        !items.is_empty()
-            && items
-                .iter()
-                .all(|i| i.pc_status.as_deref() == Some("available_offline"))
-    }
-
-    /// Make the selection available offline, or Remove from this PC when all of it already is.
-    pub fn toggle_keep_offline(&mut self, tx: &mut Tx) -> bool {
-        if self.needs_session(tx) {
-            return true;
-        }
-        let rows = self.selected_rows();
-        let items = self.selected_items();
-        if items.is_empty() {
-            return false;
-        }
-        // Refused before the source is asked (`protected.rs`): the panel's switch and the menu.
-        if self.protects(&items) {
-            self.failed(Action::KeepOffline, ActionError::Protected, tx);
-            return true;
-        }
-        let keep = !self.selection_is_kept();
-        if let Err(why) = self.actions.source.keep_offline(&items, keep) {
-            let action = if keep {
-                Action::KeepOffline
-            } else {
-                Action::RemoveOffline
-            };
-            self.failed(action, why, tx);
-            return true;
-        }
-        self.forget_undo();
-        // Accepted, not done: the rows change when the source says what it did (`late_changes`).
-        if self.actions.source.answers_later() {
-            return true;
-        }
-        for i in rows {
-            self.listing.items[i].pc_status = Some(if keep { "available_offline" } else { "online_only" }.into());
-        }
-        if keep {
-            self.show_toast(Toast::Keeping, tx);
-        }
-        true
-    }
-
     /// Copy the selection's share link. "Link copied" is said once it is on the clipboard, not before.
     pub fn copy_link(&mut self, tx: &mut Tx) -> bool {
         if self.needs_session(tx) {
@@ -853,52 +826,6 @@ impl State {
         if let Err(why) = self.actions.source.show_in_file_explorer(&items) {
             self.failed(Action::ShowInFileExplorer, why, tx);
         }
-        true
-    }
-
-    /// Does anything selected have a copy on this PC (downloaded, or kept)? Then Free up space
-    /// has something to remove.
-    pub fn selection_is_on_this_pc(&self) -> bool {
-        self.selected_items()
-            .iter()
-            .any(|i| matches!(i.pc_status.as_deref(), Some("on_this_pc" | "available_offline")))
-    }
-
-    /// Free up space: the copies of the selection on this PC go; the items stay in Beebeeb and
-    /// download again when opened. What was kept on this PC is no longer kept.
-    pub fn free_up_space(&mut self, tx: &mut Tx) -> bool {
-        if self.needs_session(tx) {
-            return true;
-        }
-        let rows = self.selected_rows();
-        let items: Vec<DriveItem> = self
-            .selected_items()
-            .into_iter()
-            .filter(|i| matches!(i.pc_status.as_deref(), Some("on_this_pc" | "available_offline")))
-            .collect();
-        if items.is_empty() {
-            return false;
-        }
-        // Refused before the source is asked (`protected.rs`).
-        if self.protects(&items) {
-            self.failed(Action::FreeUpSpace, ActionError::Protected, tx);
-            return true;
-        }
-        if let Err(why) = self.actions.source.free_up_space(&items) {
-            self.failed(Action::FreeUpSpace, why, tx);
-            return true;
-        }
-        self.forget_undo();
-        // Accepted, not done: the rows change when the source says what it did (`late_changes`).
-        if self.actions.source.answers_later() {
-            return true;
-        }
-        for i in rows {
-            if items.iter().any(|item| item.id == self.listing.items[i].id) {
-                self.listing.items[i].pc_status = Some("online_only".into());
-            }
-        }
-        self.show_toast(Toast::FreedUp, tx);
         true
     }
 
@@ -935,7 +862,7 @@ impl State {
         self.forget_undo();
         if let Err(why) = self.actions.source.upload(folder.as_deref(), files) {
             // Try again sends what was NOT copied in alone: a file already in the folder would get a second
-            // copy under another name.
+            // copy under another name. Nothing left (every file is in): no Try again (`retry.rs`).
             let left = self.actions.source.upload_left().unwrap_or_else(|| files.to_vec());
             self.actions.retry_upload = Some((folder, left));
             self.failed(Action::Upload, why, tx);
