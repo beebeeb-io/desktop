@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use beebeeb_engine::account_binding::Identity;
 use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
 use beebeeb_engine::sync_view::{Explorer, Start, SyncView};
 use rune::{Env, Runtime};
@@ -29,13 +30,19 @@ struct Fake {
     paused: Mutex<Vec<bool>>,
     kept_calls: Mutex<Vec<(String, bool)>>,
     freed: Mutex<u32>,
+    account: Mutex<Option<String>>,
 }
 
 impl Fake {
     fn new() -> Arc<Fake> {
+        Self::with_account("invented@beebeeb.io")
+    }
+
+    fn with_account(email: &str) -> Arc<Fake> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
-        StateDb::open(&path).unwrap();
+        let db = StateDb::open(&path).unwrap();
+        db.set_owner(&Identity::new(None, Some(email))).unwrap();
         Arc::new(Fake {
             _dir: dir,
             path,
@@ -51,6 +58,7 @@ impl Fake {
             paused: Mutex::new(Vec::new()),
             kept_calls: Mutex::new(Vec::new()),
             freed: Mutex::new(0),
+            account: Mutex::new(Some(email.to_string())),
         })
     }
 
@@ -67,11 +75,19 @@ impl DriveEngine for Fake {
     fn view(&self) -> SyncView {
         self.view.lock().unwrap().clone()
     }
+    fn account(&self) -> Option<String> {
+        self.account.lock().unwrap().clone()
+    }
     fn state_db(&self) -> Result<StateDb, String> {
         if self.broken.load(Ordering::SeqCst) {
             return Err("could not open the local state".into());
         }
         StateDb::open(&self.path).map_err(|_| "could not open the local state".to_string())
+    }
+    fn owns(&self, db: &StateDb) -> bool {
+        let account = self.account.lock().unwrap();
+        let session = Identity::new(None, account.as_deref());
+        beebeeb_engine::app::state_owner::owned_by(db, &session)
     }
     fn storage_info(&self) -> Result<(i64, i64), String> {
         self.usage.lock().unwrap().clone()
@@ -403,6 +419,73 @@ fn has(rt: &Runtime<State>, key: &str) -> bool {
 
 fn texts(rt: &Runtime<State>) -> Vec<String> {
     rt.elements().into_iter().filter_map(|e| e.text).collect()
+}
+
+/// A change of account clears what was held (P2-5: nothing of account A shows under account B).
+#[test]
+fn a_change_of_account_clears_the_held_answer() {
+    let fake = account();
+    let mut source = source(&fake, Arc::default());
+    assert!(matches!(source.keep(), Keep::Ready { .. }));
+    assert!(source.usage.is_some());
+
+    // Switch to account B.
+    *fake.account.lock().unwrap() = Some("other@beebeeb.io".into());
+    source.pump(0.0);
+    assert_eq!(source.keep(), Keep::Failed, "A's tree is gone");
+    assert!(source.usage.is_none(), "A's usage is gone");
+    assert!(source.on_pc.is_none(), "A's local sizes are gone");
+
+    // The source asked a new read; B's state DB is A's, so nothing shows (task 2488).
+    settle(&mut source);
+    assert!(source.on_pc.is_none(), "B owns no local state");
+}
+
+/// Task 2488: a local state database owned by another account reads as nothing for insights and the folder tree.
+#[test]
+fn another_accounts_local_state_reads_as_nothing() {
+    // Account B's fake.
+    let fake = Fake::with_account("other@beebeeb.io");
+    let db = fake.db();
+    file(&db, "d-papers", "Papers", 0, true);
+    file(&db, "f-tax", "Papers/Taxes 2025.pdf", 212_000_000, false);
+    db.set_recursive_pin("d-papers", true, 1_794_000_000).unwrap();
+
+    // Sign in as account A.
+    *fake.account.lock().unwrap() = Some("invented@beebeeb.io".into());
+    let mut source = source(&fake, Arc::default());
+    assert_eq!(source.keep(), Keep::Failed, "A never sees B's folders");
+    assert!(source.on_pc.is_none(), "A never sees B's local sizes");
+}
+
+/// A refused Apply (sync not running) sends a refusal the window can draw (P2-6).
+#[test]
+fn a_refused_apply_sends_a_toast() {
+    let fake = account();
+    let mut source = source(&fake, Arc::default());
+    fake.syncing.store(false, Ordering::SeqCst);
+    source.apply_keep(&["d-shoot".into()], &[]);
+    settle(&mut source);
+    assert_eq!(source.take_toast(), Some(KEEP_NOT_SYNCING));
+    // Taken once.
+    assert_eq!(source.take_toast(), None);
+}
+
+/// `opened(Insights)` reads again when what is held is older than `INSIGHTS_FRESH_FOR` (P2-3).
+#[test]
+fn opened_insights_reads_again_when_stale() {
+    let fake = account();
+    let mut source = source(&fake, Arc::default());
+    assert!(matches!(source.insights(), Insights::Ready(_)));
+
+    // Fresh: opened does not ask again.
+    source.opened(Pane::Insights);
+    assert!(!source.insights_reading, "fresh: no new read");
+
+    // Make stale.
+    source.insights_at = Some(Instant::now() - INSIGHTS_FRESH_FOR - Duration::from_secs(1));
+    source.opened(Pane::Insights);
+    assert!(source.insights_reading, "stale: a new read is asked");
 }
 
 /// The words a page shows for sizes, counts and long paths.

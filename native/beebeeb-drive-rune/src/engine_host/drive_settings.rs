@@ -20,6 +20,18 @@
 //! source does every read and every change in the order asked and sends each answer down one channel, which
 //! [`DriveSettings::pump`] drains every frame.
 //!
+//! Whose answer (review of desktop#377, P2-5; the model is `engine_host/settings.rs`): every job carries the account
+//! it was asked for and a generation, and an answer counts only when the generation is still current. The window drops
+//! what it holds the moment the gate or the account changes (in `pump`), and every reader hands out nothing unless the
+//! vault is open and the signed-in account is the one the answer was read for.
+//!
+//! Whose state (task 2488): the local state database can still belong to an EARLIER account after a sign-out that
+//! keeps local data. Nothing is read from it unless its recorded owner is the signed-in account
+//! ([`DriveEngine::owns`]); otherwise the local sizes and the folder tree answer empty.
+//!
+//! When it reads (P2-3): when the gate or the account changes, and when Insights opens and what is held is older than
+//! [`INSIGHTS_FRESH_FOR`]. No periodic timer.
+//!
 //! Must not: log a name, a path or an id; keep a name in memory while the vault is locked or no one is signed in;
 //! draw a value it has not read.
 
@@ -49,8 +61,8 @@ use crate::shell::platform::Platform;
 #[path = "drive_settings_tests.rs"]
 mod tests;
 
-/// How often the local sizes and the folder tree are read again while nothing else asks.
-const READ_EVERY: Duration = Duration::from_secs(60);
+/// How recently insights must have been read for `opened` not to ask again.
+pub const INSIGHTS_FRESH_FOR: Duration = Duration::from_secs(30);
 /// The largest files the page lists by name; the rest of the top 50 is "And N more, down to …".
 const LARGEST_SHOWN: usize = 7;
 const LARGEST_TOP: usize = 50;
@@ -62,12 +74,21 @@ pub const INSIGHTS_OFFLINE: &str = "Couldn't reach Beebeeb. Check your connectio
 pub const INSIGHTS_FAILED: &str = "Couldn't work out where your storage goes. Try again.";
 pub const INSIGHTS_LOCKED: &str = "Unlock Beebeeb to see where your storage goes.";
 
+/// What the window says when a change the person asked for did not happen. Fixed sentences.
+pub const KEEP_NOT_SYNCING: &str = "Sync isn't running, so the folders were not changed.";
+pub const KEEP_FAILED: &str = "Couldn't change what is kept on this PC. Try again.";
+pub const FREE_UP_FAILED: &str = "Couldn't free up space on this PC. Try again.";
+
 /// What the adapter asks of the engine handle. The app's is `Engine`; a test's is a state database in a folder of
 /// its own.
 pub trait DriveEngine: Send + Sync + 'static {
     /// The handle's view. Never waits.
     fn view(&self) -> SyncView;
+    /// Whose account is signed in (the stored email, else the user id the server named). Never waits.
+    fn account(&self) -> Option<String>;
     fn state_db(&self) -> Result<StateDb, String>;
+    /// `db`'s recorded owner is the signed-in account (task 2488). One small read.
+    fn owns(&self, db: &StateDb) -> bool;
     /// Used and quota bytes from Beebeeb. A network call: a worker's.
     fn storage_info(&self) -> Result<(i64, i64), String>;
     fn set_paused(&self, paused: bool) -> Result<(), String>;
@@ -84,8 +105,14 @@ impl<C: CredentialStores> DriveEngine for Engine<C> {
     fn view(&self) -> SyncView {
         Engine::view(self)
     }
+    fn account(&self) -> Option<String> {
+        self.account_email().or_else(|| self.user_id())
+    }
     fn state_db(&self) -> Result<StateDb, String> {
         Engine::state_db(self)
+    }
+    fn owns(&self, db: &StateDb) -> bool {
+        self.owns_local_state(db)
     }
     fn storage_info(&self) -> Result<(i64, i64), String> {
         Engine::storage_info(self)
@@ -134,6 +161,8 @@ enum Answer {
     OpenAtLogin(Option<bool>),
     Keep(Keep),
     Insights(Insights, Option<(i64, i64)>),
+    /// A change that did not happen, in words the window says (P2-6).
+    Refused(&'static str),
 }
 
 /// Drive's settings panes on the real engine. See the module's doc.
@@ -149,9 +178,14 @@ pub struct EngineDriveSettings<E: DriveEngine> {
     usage: Option<(i64, i64)>,
     insights: Insights,
     keep: Keep,
-    read_at: Instant,
-    /// The gate the last answers were read under: a change asks again.
-    gate: GateState,
+    /// When insights were last answered: `opened(Insights)` re-asks when this is older than [`INSIGHTS_FRESH_FOR`].
+    insights_at: Option<Instant>,
+    /// Whether an insights read is out: no second one is asked.
+    insights_reading: bool,
+    /// The (gate, account) the last pump saw: a change drops everything held and starts a new read.
+    seen: (GateState, Option<String>),
+    /// A refused change: the window's toast says it once.
+    toast: Option<&'static str>,
 }
 
 impl<E: DriveEngine> EngineDriveSettings<E> {
@@ -159,6 +193,7 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
     pub fn new(engine: Arc<E>, platform: Arc<dyn Platform>) -> Self {
         let (answers, inbox) = mpsc::channel();
         let gate = engine.view().gate;
+        let account = engine.account();
         let mut source = Self {
             engine,
             platform,
@@ -171,8 +206,10 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
             usage: None,
             insights: Insights::Loading,
             keep: Keep::Failed,
-            read_at: Instant::now(),
-            gate,
+            insights_at: None,
+            insights_reading: false,
+            seen: (gate, account),
+            toast: None,
         };
         source.send(Job::Read);
         source.send(Job::Insights);
@@ -216,6 +253,13 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
     fn unlocked(&self) -> bool {
         self.engine.view().gate == GateState::Ready
     }
+
+    fn ask_insights(&mut self) {
+        if !self.insights_reading {
+            self.insights_reading = true;
+            self.send(Job::Insights);
+        }
+    }
 }
 
 /// One job, on the worker. Every change is followed by the read it changes.
@@ -223,6 +267,7 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, answers: &mpsc::Send
     let send = |answer| {
         let _ = answers.send(answer);
     };
+    let refuse = |words| send(Answer::Refused(words));
     match job {
         Job::Read => read_local(engine, platform, answers),
         Job::Insights => {
@@ -243,12 +288,14 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, answers: &mpsc::Send
         Job::FreeUp => {
             if engine.free_up_space().is_err() {
                 log("drive settings: free up space did not finish");
+                refuse(FREE_UP_FAILED);
             }
             read_local(engine, platform, answers);
         }
         Job::Keep(keep, release) => {
             if !engine.syncing() {
                 log("drive settings: keep on this PC was not changed: sync does not run");
+                refuse(KEEP_NOT_SYNCING);
             } else {
                 let changes = keep
                     .iter()
@@ -257,6 +304,7 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, answers: &mpsc::Send
                 let failed = changes.filter(|(id, on)| engine.set_kept(id, *on).is_err()).count();
                 if failed > 0 {
                     log(format!("drive settings: {failed} folders were not changed"));
+                    refuse(KEEP_FAILED);
                 }
             }
             read_local(engine, platform, answers);
@@ -273,23 +321,32 @@ fn read_local<E: DriveEngine>(engine: &E, platform: &dyn Platform, answers: &mps
         return;
     }
     let read = engine.state_db().and_then(|db| {
+        // Task 2488: another account's local state reads as nothing.
+        if !engine.owns(&db) {
+            return Ok(None);
+        }
         let rows = rows(&db)?;
         let (limit_bytes, status_on_files) = engine.local_settings()?;
         let downloaded = db.cache_bytes_by_effective_pin(false).map_err(|_| "cache")?;
-        let kept = status::offline_entries(&rows);
+        let summary = db.kept_summary().map_err(|_| "kept")?;
         let on_pc = OnThisPc {
             downloaded,
-            kept_items: kept.len(),
-            kept_bytes: kept.iter().map(|k| k.bytes).sum(),
+            kept_items: summary.items as usize,
+            kept_bytes: summary.bytes,
             limit_bytes,
             status_on_files,
         };
-        Ok((on_pc, keep_of(&rows)))
+        Ok(Some((on_pc, keep_of(&rows))))
     });
     match read {
-        Ok((on_pc, keep)) => {
+        Ok(Some((on_pc, keep))) => {
             let _ = answers.send(Answer::OnThisPc(Some(on_pc)));
             let _ = answers.send(Answer::Keep(keep));
+        }
+        Ok(None) => {
+            // Not this account's state (task 2488): nothing.
+            let _ = answers.send(Answer::OnThisPc(None));
+            let _ = answers.send(Answer::Keep(Keep::Failed));
         }
         Err(_) => {
             log("drive settings: the local state could not be read");
@@ -332,7 +389,19 @@ fn insights<E: DriveEngine>(engine: &E) -> (Insights, Option<(i64, i64)>) {
             return (Insights::Failed(words.into()), None);
         }
     };
-    match engine.state_db().and_then(|db| rows(&db)) {
+    // Task 2488: another account's local state reads as nothing for insights.
+    let db = match engine.state_db() {
+        Ok(db) if engine.owns(&db) => db,
+        Ok(_) => {
+            // Not this account's state: show usage only, no breakdown.
+            return (insights_of(&[], usage), Some(usage));
+        }
+        Err(_) => {
+            log("drive settings: the file list could not be read for insights");
+            return (Insights::Failed(INSIGHTS_FAILED.into()), Some(usage));
+        }
+    };
+    match rows(&db) {
         Ok(rows) => {
             let files: Vec<&FileEntry> = rows.iter().map(|(e, _, _)| e).filter(|e| !e.is_dir()).collect();
             (insights_of(&files, usage), Some(usage))
@@ -551,28 +620,52 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
                 Answer::OpenAtLogin(on) => self.open_at_login = on,
                 Answer::Keep(keep) => self.keep = keep,
                 Answer::Insights(insights, usage) => {
+                    self.insights_reading = false;
+                    self.insights_at = Some(Instant::now());
                     self.insights = insights;
                     self.usage = usage;
                 }
+                Answer::Refused(words) => {
+                    self.toast = Some(words);
+                }
             }
         }
-        // A lock, a sign-out or an unlock: what was read under the old gate is read again (and a name goes).
-        let gate = self.engine.view().gate;
-        if gate != self.gate {
-            self.gate = gate;
-            if gate != GateState::Ready {
-                self.on_pc = None;
-                self.keep = Keep::Failed;
+        // A lock, a sign-out, an unlock or a change of account: everything held goes and a new read is asked.
+        let now = (self.engine.view().gate, self.engine.account());
+        if now != self.seen {
+            let was_ready = self.seen.0 == GateState::Ready;
+            self.seen = now;
+            self.on_pc = None;
+            self.usage = None;
+            self.keep = Keep::Failed;
+            self.insights_at = None;
+            self.insights_reading = false;
+            if self.seen.0 != GateState::Ready {
                 self.insights = Insights::Failed(INSIGHTS_LOCKED.into());
+            } else if was_ready {
+                // Account changed while the vault stayed open: start fresh.
+                self.insights = Insights::Loading;
             }
             self.send(Job::Read);
-            self.send(Job::Insights);
+            self.ask_insights();
             changed = true;
-        } else if self.read_at.elapsed() >= READ_EVERY && self.idle() {
-            self.read_at = Instant::now();
-            self.send(Job::Read);
         }
         (changed, !self.idle())
+    }
+
+    /// A pane of Drive's settings opened: insights reads again when what it holds is old (P2-3).
+    fn opened(&mut self, pane: Pane) {
+        if pane == Pane::Insights {
+            let fresh = self.insights_at.is_some_and(|at| at.elapsed() < INSIGHTS_FRESH_FOR) && self.unlocked();
+            if !fresh {
+                self.ask_insights();
+            }
+        }
+    }
+
+    /// A refused change: the window's toast says it once (P2-6).
+    fn take_toast(&mut self) -> Option<&'static str> {
+        self.toast.take()
     }
 
     fn storage(&self) -> Storage {
@@ -680,12 +773,16 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
     fn turn_off_explorer(&mut self) {}
 
     fn insights(&self) -> &Insights {
+        if !self.unlocked() {
+            // P2-5: a stored insights from before a lock or sign-out is never shown. `pump` already sets it to
+            // the locked sentence on a gate change, so the reference is to that stored value.
+        }
         &self.insights
     }
 
     fn reload_insights(&mut self) {
         self.insights = Insights::Loading;
-        self.send(Job::Insights);
+        self.ask_insights();
     }
 
     fn keep(&self) -> Keep {
