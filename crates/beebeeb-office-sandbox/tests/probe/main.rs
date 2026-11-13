@@ -7,7 +7,8 @@
 //!   job                  -> job flags=<hex> processes=<n> memory=<bytes> ui=<hex> | err <system code>
 //!   write <path>         -> ok | err <system code>      (creates a new file and writes 5 bytes)
 //!   writeown <name>      -> own ok=<n> codes=<...>       (the same, as <name>.0/.1/.2 in the folders its own
-//!                                                         LOCALAPPDATA, TEMP and TMP variables name)
+//!                                                         LOCALAPPDATA, TEMP and TMP variables name, after
+//!                                                         trying to create those folders)
 //!   read <path>          -> ok <bytes read> | err <system code>
 //!   spawn <program>      -> ok | err <system code>      (starts it with `/c exit`, waits for it)
 //!   alloc <mebibytes>    -> ok | err alloc              (reserves and touches every page)
@@ -84,11 +85,15 @@ fn write_own(name: &str) -> String {
     let mut codes = Vec::new();
     for (index, variable) in ["LOCALAPPDATA", "TEMP", "TMP"].into_iter().enumerate() {
         let answer = match std::env::var_os(variable) {
-            Some(folder) => write(
-                &std::path::Path::new(&folder)
-                    .join(format!("{name}.{index}"))
-                    .to_string_lossy(),
-            ),
+            Some(folder) => {
+                // A helper that wants to write would first make the folder if it is missing.
+                let _ = std::fs::create_dir_all(&folder);
+                write(
+                    &std::path::Path::new(&folder)
+                        .join(format!("{name}.{index}"))
+                        .to_string_lossy(),
+                )
+            }
             None => "err unset".to_string(),
         };
         if answer == "ok" {
