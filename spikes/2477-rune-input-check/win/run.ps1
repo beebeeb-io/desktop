@@ -34,6 +34,8 @@ public static class Win
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
+    [DllImport("imm32.dll")] public static extern IntPtr ImmGetDefaultIMEWnd(IntPtr hwnd);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr LoadKeyboardLayout(string id, uint flags);
 
     public static void Key(ushort vk, bool down) {
@@ -236,7 +238,20 @@ try {
     $hkl = [Win]::LoadKeyboardLayout('00000411', 0x1)
     [void][Win]::PostMessage($hwnd, 0x50, [IntPtr]::Zero, $hkl)
     Wait 1500
-    Tap 0x16; Wait 500                # VK_IME_ON
+    # Turn the input method on (hiragana). Three ways, stopping at the first the probe's own read-back confirms
+    # (`open=1` in its imm line): the IME-on key, the open-status request to the window's IME window
+    # (WM_IME_CONTROL, IMC_SETOPENSTATUS), the Hankaku/Zenkaku key.
+    $opened = 'not opened'
+    foreach ($way in 'VK_IME_ON', 'IMC_SETOPENSTATUS', 'VK_KANJI') {
+      switch ($way) {
+        'VK_IME_ON' { Tap 0x16 }
+        'IMC_SETOPENSTATUS' { [void][Win]::SendMessage([Win]::ImmGetDefaultIMEWnd($hwnd), 0x283, [IntPtr]6, [IntPtr]1) }
+        'VK_KANJI' { Tap 0x19 }
+      }
+      Until { (Last '^imm ') -match ' open=1 ' } 1500
+      if ((Last '^imm ') -match ' open=1 ') { $opened = $way; break }
+    }
+    $results.Add("INFO input method turned on by: $opened; $(Last '^imm ')")
     $immLine = Last '^imm '
     $m = Mark
     TypeKeys 'ka'; Wait 500
