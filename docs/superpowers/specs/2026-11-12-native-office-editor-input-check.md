@@ -5,7 +5,7 @@ support for a custom editing surface with an input method is unverified".
 
 **Verdict: the editor's interaction layer CAN be built on Rune as pinned.** 5 of 5 points are yes on Windows, in
 a real window, with a real Japanese input method. There is no "no". There are 7 limits (§4); none stops the
-editor, 2 are worth an upstream issue.
+editor; 2 are worth an upstream issue and 1 more may be, after a reproduction.
 
 Not covered: macOS and Linux windows (nothing was run in a window there), input methods other than the Microsoft
 Japanese one, a display scale other than 100 % in a real window, touch and pen, accessibility of the surface.
@@ -26,7 +26,7 @@ It types, moves and selects, shows the pre-edit string underlined at the caret, 
 | `src/lib.rs` | the model, the view and the handlers |
 | `src/main.rs` | the same app in a real window; writes every event it hears to a log; on Windows reads back the window's input-context forms |
 | `tests/input.rs` | 15 tests through Rune's headless `Runtime` |
-| `mutants.py` | 15 mutants, each removing one piece of Rune wiring; counts which tests go red |
+| `mutants.py` | 16 mutants, each removing one piece of Rune wiring; counts which tests go red |
 | `win/run.ps1` | drives the real window with OS input (`SendInput`) and checks the probe's log: 28 checks |
 | `win/ime-japanese*.ps1` | adds or removes Japanese in the test account's language list |
 
@@ -40,7 +40,7 @@ It types, moves and selects, shows the pre-edit string underlined at the caret, 
 | 4 | Clipboard | **yes**: text and HTML both ways; limits in §4 | 2 tests | 4 checks against another process |
 | 5 | Focus, pointer press, drag, release | **yes**; focus LOSS has no callback (§4.1) | 4 tests | 9 checks |
 
-Counts: headless 15 of 15 pass on the Linux and on the Windows build machine; mutants 15 applied, 15 killed, 15 of
+Counts: headless 15 of 15 pass on the Linux and on the Windows build machine; mutants 16 applied, 16 killed, 15 of
 15 tests red on at least one; real window 28 checks, 28 passed, 0 failing, 0 skipped.
 
 What each tier proves. Headless: Rune delivers the event to an app-drawn surface (the tests only feed the
@@ -98,15 +98,18 @@ points (also under a scale or scroll), `Drag::clicks` for double and triple clic
 
 ## 4. Limits found
 
-| # | Limit | What the editor does | Upstream issue? |
-|---|---|---|---|
-| 1 | **No per-element focus callback.** An app-drawn focusable element is not told when it gains or loses keyboard focus. Only `Tx::focused()` says who has it, inside a handler or `AppSpec::poll` | Reads `Tx::focused()` in `poll` (runs at the start of each frame) and keeps "has the keyboard" in its own state. Without a frame after the change, the caret would be stale: the real-window probe wakes itself every 50 ms for it | **Yes.** "A focusable element that draws its own caret needs a focus-change callback (gained, lost), as text fields have internally" |
-| 2 | **Key, input-method and press commits animate layout by default.** A caret moved in `on_key` glides, and the candidate rectangle glides with it (3 tests were red on it; one mutant puts 2 of them back to red) | Every handler calls `Tx::instant()` | No: documented behaviour, one line per handler |
-| 3 | **`El::on_drawn_layout` is not a reliable position report after instant moves in a real window:** it reported 16 of 29 caret positions in one run, while the input context was right on every one. Headless it reported all | Takes the caret rectangle from its own model, never from this callback | **Maybe.** Cause not established (could be the probe's use of it); worth a minimal reproduction before filing |
-| 4 | **The pre-edit has no clause styling.** One byte range comes with it; which clause is converted and which is plain is not distinguishable beyond that range (the window layer passes no attributes) | Underlines the whole pre-edit and marks the given range | No for 0.9.0; a known limit of the window layer |
-| 5 | **Clipboard on Windows writes ONE form per copy:** files, else an image, else HTML beside the text, else text. RTF is neither written nor read on Windows. There is no custom format | Formatted copy and paste between Office apps goes through HTML. Lossless copy between two of our own editor windows cannot ride the clipboard in a private format; it needs HTML that round-trips or an in-app side channel | **Yes**, if we want it: "write several forms at once on Windows, and a named custom format". Not needed for plain text and HTML |
-| 6 | **`App::on_ime` is one function pointer per window**, and `El::on_paste` is root-only | PR 8 adds one `on_ime` line to the shell's window spec and routes to the open editor; pastes are read in the editor's own `on_key`, which needs no root handler | No |
-| 7 | **Only the first `ime_cursor` element counts, and a focused Rune text field wins** (tested) | One caret per window; a cell editor or search field built from a Rune text field takes the input method by itself | No |
+"Run" means the limit showed in a test or a real-window run of this check; "read" means it comes from reading the
+pinned source and was not exercised.
+
+| # | Limit | Basis | What the editor does | Upstream issue? |
+|---|---|---|---|---|
+| 1 | **No per-element focus callback.** An app-drawn focusable element is not told when it gains or loses keyboard focus. Only `Tx::focused()` says who has it, inside a handler or `AppSpec::poll` | read (no such item in the source); the workaround is run | Reads `Tx::focused()` in `poll` (runs at the start of each frame) and keeps "has the keyboard" in its own state. The real-window probe also wakes itself every 50 ms, so every real-window focus check ran WITH that wake; how stale the state gets without it was not measured | **Yes.** "A focusable element that draws its own caret needs a focus-change callback (gained, lost), as text fields have internally" |
+| 2 | **Key, input-method and press commits animate layout by default.** A caret moved in `on_key` or `on_ime` glides, and the candidate rectangle glides with it | run: 3 tests were red on it; the 2 mutants that drop `Tx::instant` from `on_key` and from `on_ime` each put 2 tests back to red. Press handlers: read (the doc comment of `Tx::instant`) | Every handler calls `Tx::instant()` | No: documented behaviour, one line per handler |
+| 3 | **`El::on_drawn_layout` is not a reliable position report after instant moves in a real window:** it reported 16 of 29 caret positions in one run, while the input context was right on every one | run (one real-window run; headless, the one assertion that compares it with `ime_area` holds) | Takes the caret rectangle from its own model, never from this callback | **Maybe.** Cause not established (could be the probe's use of it); worth a minimal reproduction before filing |
+| 4 | **The pre-edit has no clause styling.** One byte range comes with it; which clause is converted and which is plain is not distinguishable beyond that range (the window layer passes no attributes) | read; the real composition showed the range change from a caret to the converted clause | Underlines the whole pre-edit and marks the given range | No for 0.9.0; a known limit of the window layer |
+| 5 | **Clipboard on Windows writes ONE form per copy:** files, else an image, else HTML beside the text, else text. RTF is neither written nor read on Windows. There is no custom format | read (`clipboard/native.rs`). Run: text and HTML both ways. RTF on Windows was NOT exercised: no run put RTF on the OS clipboard | Formatted copy and paste between Office apps goes through HTML. Lossless copy between two of our own editor windows cannot ride the clipboard in a private format; it needs HTML that round-trips or an in-app side channel | **Yes**, if we want it: "write several forms at once on Windows, and a named custom format". Not needed for plain text and HTML |
+| 6 | **`App::on_ime` is one function pointer per window**, and `El::on_paste` is root-only | read | PR 8 adds one `on_ime` line to the shell's window spec and routes to the open editor; pastes are read in the editor's own `on_key`, which needs no root handler | No |
+| 7 | **Only the first `ime_cursor` element counts, and a focused Rune text field wins** | run (1 headless test) for the text field; "only the first" is read | One caret per window; a cell editor or search field built from a Rune text field takes the input method by itself | No |
 
 Also observed, not a limit: Rune intercepts Ctrl+V itself only when the window's root has a paste handler;
 without one the chord reaches `on_key`, which is what the probe uses.
@@ -116,7 +119,7 @@ without one the chord reaches `on_key`, which is what the probe uses.
 ```sh
 # headless tests and mutants (any machine with the toolchain; the mutants rewrite src/lib.rs and restore it)
 cargo test --locked
-python3 mutants.py        # last line: mutants: 15 applied, 15 killed; tests: 15, 15 red on at least one
+python3 mutants.py        # last line: mutants: 16 applied, 16 killed; tests: 15, 15 red on at least one
 # real window, inside a logged-in Windows desktop session with BB_OUT and CARGO_TARGET_DIR set
 cargo build --locked
 powershell -NoProfile -File win\run.ps1     # last line: real-window: 28 checks, 28 passed, 0 failing, 0 skipped
@@ -136,6 +139,9 @@ Three instrument faults were found and fixed on the way, each first read as a pr
    there is none.
 3. The script compared the input context with the rectangle `on_drawn_layout` reported, which lags (limit 3). It
    now compares with the model.
+
+Not run: a real composition interrupted by a click or by another window taking the foreground (headless only:
+`Runtime::cancel_composition`); the mutants against the real window (they ran against the headless tests).
 
 ## 6. For PR 7 and PR 8
 
