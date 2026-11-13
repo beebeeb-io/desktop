@@ -280,6 +280,39 @@ fn a_handle_made_while_its_session_is_ending_answers_nothing_after() {
     signed_out(&engine);
 }
 
+/// An operation of many steps stops at the step after a lock: the steps before it ran, none after it does.
+#[test]
+fn an_operation_of_many_steps_takes_no_step_after_a_lock() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    engine.use_local_state_for_test(state(dir.path(), Some((Some("user-a"), Some("a@example.eu"))), true));
+    signed_in(&engine, Some("user-a"), Some("a@example.eu"));
+    let handle = engine.local_state_for_changes().expect("the owner's handle");
+    let mut reached = Vec::new();
+    let answer = handle.with_while(|_db, go_on| {
+        crate::free_up_space::each_while(["first", "second", "third"], go_on, |file| {
+            reached.push(file);
+            if file == "first" {
+                // Between two files: the vault is locked.
+                engine.forget_session(SessionTransition::Lock);
+            }
+        })
+    });
+    assert_eq!(reached, ["first"], "a file was reached after the lock");
+    assert_eq!(answer, Err(LocalStateRefused::SessionChanged));
+    signed_out(&engine);
+
+    // The control: with no lock every file is reached.
+    signed_in(&engine, Some("user-a"), Some("a@example.eu"));
+    let handle = engine.local_state_for_changes().expect("the owner's handle");
+    let mut reached = Vec::new();
+    let all = handle.with_while(|_db, go_on| {
+        crate::free_up_space::each_while(["first", "second", "third"], go_on, |file| reached.push(file))
+    });
+    assert_eq!((all, reached.len()), (Ok(true), 3));
+    signed_out(&engine);
+}
+
 /// An answer that was read while the session changed is dropped, not returned.
 #[test]
 fn an_answer_read_across_a_session_change_is_dropped() {

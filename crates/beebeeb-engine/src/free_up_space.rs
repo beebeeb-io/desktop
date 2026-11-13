@@ -87,22 +87,47 @@ pub fn free_up_space_blocking(identity: &'static crate::identity::EngineIdentity
         return Ok(FreeUpSpaceResult { bytes_freed: 0 });
     }
     let db = crate::state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
-    free_up_space_in(identity, &db, &sync_root)
+    free_up_space_in(identity, &db, &sync_root, &|| true)
+}
+
+/// `each` for every item, in order, asking `go_on` before each: the first no ends it, and the items after it are
+/// left alone. `true`: every item was reached.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn each_while<T>(
+    items: impl IntoIterator<Item = T>,
+    go_on: &dyn Fn() -> bool,
+    mut each: impl FnMut(T),
+) -> bool {
+    for item in items {
+        if !go_on() {
+            return false;
+        }
+        each(item);
+    }
+    true
 }
 
 /// The reclaim itself, in a state database the caller already holds: the engine handle's is the signed-in
 /// account's (`app::Engine::free_up_space`, through the account-bound handle).
+///
+/// `go_on` is asked before each file: once it says no (the session that asked is gone: a lock, a sign-out), no
+/// further file is made online only, and what was freed until then is the answer.
 pub(crate) fn free_up_space_in(
     identity: &'static crate::identity::EngineIdentity,
     db: &crate::state_db::StateDb,
     sync_root: &std::path::Path,
+    go_on: &dyn Fn() -> bool,
 ) -> Result<FreeUpSpaceResult, String> {
     #[cfg(target_os = "windows")]
     {
-        free_up_space_windows(identity, db, sync_root)
+        free_up_space_windows_while(identity, db, sync_root, go_on)
     }
     #[cfg(not(target_os = "windows"))]
     {
+        // The whole choice of what leaves this computer is ONE query here (`free_up_space_unix`), made right after
+        // the handle's own check; the loop after it only removes the copies of rows that query already made online
+        // only, and is not cut short (a copy left behind would be a file no row knows of).
+        let _ = go_on;
         // Snapshot the on-disk cache paths of every UNPINNED, LOCAL file BEFORE
         // any DB transition (eviction nulls `cache_path`). Pinned files are
         // excluded by the query, so they are always kept.
@@ -130,6 +155,18 @@ pub fn free_up_space_windows(
     db: &crate::state_db::StateDb,
     sync_root: &std::path::Path,
 ) -> Result<FreeUpSpaceResult, String> {
+    free_up_space_windows_while(identity, db, sync_root, &|| true)
+}
+
+/// [`free_up_space_windows`], asking `go_on` before each file: after the first no, no further file is made online
+/// only; the files already made online only are recorded as such, and their bytes are the answer.
+#[cfg(target_os = "windows")]
+pub(crate) fn free_up_space_windows_while(
+    identity: &crate::identity::EngineIdentity,
+    db: &crate::state_db::StateDb,
+    sync_root: &std::path::Path,
+    go_on: &dyn Fn() -> bool,
+) -> Result<FreeUpSpaceResult, String> {
     // Reclaim targets are the UNPINNED, LOCAL files — addressed by their
     // server-relative path, NOT by `cache_path`. On Windows CF the bytes live
     // inside the placeholder in the sync root, and `cache_path` records the
@@ -144,11 +181,11 @@ pub fn free_up_space_windows(
     let mut bytes_freed: u64 = 0;
     let mut dehydrated_ids: Vec<String> = Vec::new();
 
-    for (file_id, rel_path, _size_bytes) in candidates {
+    let finished = each_while(candidates, go_on, |(file_id, rel_path, _size_bytes)| {
         // Task 2407 (core 2404): never another file this name reaches (an 8.3 short name; `canonicalize` below would
         // follow it to that file's long name). A check that cannot finish keeps the file local.
         let Some(local_path) = crate::name_alias::reclaim_place(sync_root, &rel_path) else {
-            continue;
+            return;
         };
         // Path-safety: only dehydrate placeholders that actually resolve under
         // an allowed engine root (the sync root). A corrupt `path` row can
@@ -156,10 +193,10 @@ pub fn free_up_space_windows(
         let Ok(canonical) = local_path.canonicalize() else {
             // Placeholder missing on disk — nothing to reclaim; leave the row
             // for the next reconcile to re-seed.
-            continue;
+            return;
         };
         if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
-            continue;
+            return;
         }
         // Pin TOCTOU re-check: `unpinned_local_files_for_dehydration()` filtered
         // on pin state at query time, but the user could have PINNED this file in
@@ -175,7 +212,7 @@ pub fn free_up_space_windows(
         if let Ok(Some(contract)) = db.get_file_contract_state(&file_id) {
             if contract.effective_pin_state() == crate::state_db::PinState::Pinned {
                 tracing::debug!(file_id = %file_id, "free_up_space: file pinned after enumeration; keeping local");
-                continue;
+                return;
             }
         }
         // Task 2240 (spec D2, the lead's ruling on self-review #1): confirm before evict. A pin made in Explorer
@@ -189,7 +226,7 @@ pub fn free_up_space_windows(
         };
         if direct.is_none_or(pinned_on_disk) {
             tracing::info!(file_id = %file_id, "free_up_space: the file is pinned on disk (or unreadable); keeping it local");
-            continue;
+            return;
         }
         // OS-level unpin BEFORE dehydrating. This file passed both pin checks
         // above, so it is MEANT to be reclaimed — but its placeholder may still
@@ -204,7 +241,7 @@ pub fn free_up_space_windows(
         // queued upload) or are not known to be the agreed content: they are the only copy.
         if !crate::windows_cf::placeholders::local_bytes_agreed(db, &file_id, &canonical) {
             tracing::warn!(file_id = %file_id, "free_up_space: the file holds a change that is not sent; keeping it local");
-            continue;
+            return;
         }
         if let Err(error) = crate::windows_cf::placeholders::set_pin_state(&canonical, false, false) {
             tracing::warn!(file_id = %file_id, error = %error, "free_up_space: OS unpin before dehydrate failed; attempting dehydrate anyway");
@@ -225,6 +262,9 @@ pub fn free_up_space_windows(
                 tracing::warn!(file_id = %file_id, error = %error, "free_up_space: CfDehydratePlaceholder failed; keeping file local");
             }
         }
+    });
+    if !finished {
+        tracing::info!("free_up_space: stopped before the last file (the session that asked is gone)");
     }
 
     // Mark cloud_only ONLY for the files we actually dehydrated.

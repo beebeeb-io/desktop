@@ -108,6 +108,18 @@ impl OwnedState<'_> {
         Ok(answer)
     }
 
+    /// [`Self::with`] for an operation of many steps: `operation` is also handed a question to ask before each step,
+    /// "is this still the session the handle was made for?". Once the answer is no, it must take no further step.
+    pub(crate) fn with_while<T>(
+        &self,
+        operation: impl FnOnce(&StateDb, &dyn Fn() -> bool) -> T,
+    ) -> Result<T, LocalStateRefused> {
+        self.still_this_session()?;
+        let answer = operation(&self.db, &|| self.still_this_session().is_ok());
+        self.still_this_session()?;
+        Ok(answer)
+    }
+
     /// [`Self::with`] for the engine's own operations that need the database shared (the sync bridge takes an
     /// `Arc`). The same checks, before and after; the engine's alone, so a shell cannot keep the `Arc`.
     pub(crate) fn with_shared<T>(
