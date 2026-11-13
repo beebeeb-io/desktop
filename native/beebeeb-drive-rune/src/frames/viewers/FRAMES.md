@@ -65,19 +65,20 @@ yet (task 2445, B23): its 10 keys (`view-toggle`, `view-list`, `view-grid` and t
 
 - **The running app's source** is `engine_host::viewer::EngineViewerSource` (wired in `shell::state::init_on_engine`):
   the name and size from the local state, the content downloaded and decrypted in memory by the engine's own
-  download path. Shown: text, Markdown, CSV / TSV (as text), PNG / JPEG / GIF / WebP. A file over 2 MB of text is
-  DW-1527 (its first 500 lines, read-only).
+  download path. Shown: text, Markdown, CSV / TSV (as text), PNG / JPEG / GIF / WebP.
+- **A list's Open asks the source first** (`ViewerSource::previews`, in `open_item`): a kind the source does not
+  show here (on the engine: PDF, audio, archives, RAW and HEIC pictures) stays its own app's, as before. A route
+  that names such a file anyway (Search's Open, a link) gets `Body::NotPreviewable`, and nothing is downloaded.
 - **Two states are the engine's, not the board's** (no golden, drawn with the parts of DW-1516 to DW-1518):
   `Body::Stopped` (Beebeeb can't be reached, the session ended, the file was closed by a lock or an account
   change, the file is gone) and `Body::NotPreviewable` (no viewer for this kind yet, over the preview's memory
-  limit, content that is not what the name says), the latter with "Open in another app…" and "Save a copy…".
-- **Not previewable on the engine today, said so and never downloaded:** PDF (no PDF renderer is linked), audio,
-  archives, RAW and HEIC pictures, Office documents (`kinds::Viewer::Office`: no Office viewer entry point is on
-  the branch).
+  limit, content this app cannot read), the latter with "Open in another app…" and "Save a copy…".
+- **A text read in part** is DW-1527's state: over 2 MB (the board's words), or under 2 MB with more lines or longer
+  lines than the reader holds whole (`Cut::TooLong`, its own banner). Text and notes scroll.
 - **"Open in another app…"** is the source's (`ViewerSource::open_elsewhere`): the system opens the file from the
-  account's folder on this PC, so it needs sync on; a refusal is said in the toast. The fixture has no way there
-  and keeps "Not built yet".
-- **Not bound on the engine, and said so on the press:** Edit and save (`ViewerSource::can_save`), Available
-  offline (`knows_offline`: the details panel draws no switch for a state that was not read), Save a copy.
+  account's folder on this PC, so it needs sync on; each refusal has its sentence in the toast. The fixture has no
+  way there and keeps "Not built yet".
+- **Not bound on the engine, and said so on the press:** Edit and save (`ViewerSource::can_save`), Save a copy.
+  Available offline is not read (`knows_offline`): the details panel draws no switch and the photo no action for it.
 - **Leaving a file** overwrites the decrypted text it held (`OpenFile::wipe`, `Ui`'s drop); a `{:?}` of an open
   file prints kinds and counts, never a name or a word of it.

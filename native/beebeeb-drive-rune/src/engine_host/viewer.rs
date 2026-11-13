@@ -7,8 +7,10 @@
 //! - the content: downloaded and decrypted IN MEMORY by the engine's own download path
 //!   ([`Engine::open_file_in_memory`]: the path every hydrate uses, no crypto here), on a worker, with the
 //!   engine's progress. Text, Markdown, CSV / TSV (as text) and PNG / JPEG / GIF / WebP pictures are shown.
-//! - not shown, honestly (`Body::NotPreviewable`, nothing downloaded): PDF (this app links no PDF renderer),
-//!   audio, archives, RAW and HEIC pictures, Office documents, any file over [`IN_MEMORY_MAX`].
+//! - not shown here: PDF (this app links no PDF renderer), audio, archives, RAW and HEIC pictures, Office
+//!   documents. A list's Open leaves those to their own app, as before ([`ViewerSource::previews`]); a route that
+//!   names one anyway (Search, a link) gets the honest state, `Body::NotPreviewable`, and nothing is downloaded.
+//!   The same state, with its own words, for any file over [`IN_MEMORY_MAX`].
 //! - "Open in another app…": the Files window's own open ([`EngineFilesSource`]): the system opens the file from
 //!   the account's folder on this PC, where the engine already puts opened files. No copy is made here.
 //! - not bound: saving an edit, Available offline, a newer version's banner, find, play, a photo's strip.
@@ -40,10 +42,10 @@ use beebeeb_engine::app::{CredentialStores, Engine};
 use zeroize::Zeroize;
 
 use super::{EngineFilesSource, log};
-use crate::frames::files::source::FilesSource;
+use crate::frames::files::source::{ActionError, FilesSource};
 use crate::frames::viewers::kinds::{self, PhotoDoc, Picture, Viewer};
 use crate::frames::viewers::source::{
-    Body, Details, Elsewhere, MdDoc, NoPreview, OpenError, OpenFile, Stopped, TextDoc, Truncated, ViewerSource,
+    Body, Cut, Details, Elsewhere, MdDoc, NoPreview, OpenError, OpenFile, Stopped, TextDoc, Truncated, ViewerSource,
     plain_lines,
 };
 use crate::source::DriveItem;
@@ -59,9 +61,17 @@ mod window_tests;
 /// downloaded for a preview at all.
 pub const IN_MEMORY_MAX: u64 = 64 * 1024 * 1024;
 
-/// A text over this is shown read-only, its first [`SHOWN_LINES`] lines only (the board's DW-1527).
+/// A text over this is shown read-only, its first lines only (the board's DW-1527).
 pub const READ_WHOLE_MAX: usize = 2_000_000;
+/// A text under [`READ_WHOLE_MAX`] with more lines than this, or a line longer than [`LINE_BYTES_MAX`], is shown
+/// the same way: the reader draws every line it holds.
+pub const WHOLE_LINES_MAX: usize = 5_000;
+pub const LINE_BYTES_MAX: usize = 20_000;
+/// What a text shown in part holds: its first lines, at most this many and at most [`SHOWN_BYTES`] of them.
 pub const SHOWN_LINES: usize = 500;
+pub const SHOWN_BYTES: usize = 64_000;
+/// A Markdown note over this is shown as its text, not rendered (the note is parsed whenever it is drawn).
+pub const MARKDOWN_RENDER_MAX: usize = 256_000;
 
 /// What the adapter asks of the engine. The running app's is [`LiveViewerEngine`]; the tests' is a double with
 /// hooks, so each rule here is tested without a network.
@@ -82,8 +92,9 @@ pub trait ViewerEngine: Send + Sync + 'static {
         progress: &(dyn Fn(u64, u64) + Send + Sync + 'static),
         cancel: &AtomicBool,
     ) -> Result<OpenedFile, OpenFileError>;
-    /// Ask the system to open the file with its own app, from the account's folder on this PC. `false`: refused.
-    fn open_elsewhere(&self, file_id: &str) -> bool;
+    /// Ask the system to open the file with its own app, from the account's folder on this PC. Never
+    /// `Elsewhere::NotBound`.
+    fn open_elsewhere(&self, file_id: &str) -> Elsewhere;
     /// Wake the window's loop: an answer or progress is waiting.
     fn wake(&self);
 }
@@ -122,7 +133,7 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
 
     /// The Files window's own open, for this one file: the path is resolved under the account-bound handle, the
     /// sync guard and the executable check apply, and the system is asked without a shell.
-    fn open_elsewhere(&self, file_id: &str) -> bool {
+    fn open_elsewhere(&self, file_id: &str) -> Elsewhere {
         let item = DriveItem {
             id: file_id.to_string(),
             parent_id: None,
@@ -138,7 +149,12 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
             pc_status: None,
             is_protected: false,
         };
-        EngineFilesSource::new(self.engine.clone()).open(&[item]).is_ok()
+        match EngineFilesSource::new(self.engine.clone()).open(&[item]) {
+            Ok(()) => Elsewhere::Opened,
+            // No sync runs for this handle, or the local state is not handed out.
+            Err(ActionError::Unavailable) => Elsewhere::NeedsSync,
+            Err(_) => Elsewhere::Refused,
+        }
     }
 
     fn wake(&self) {
@@ -240,34 +256,51 @@ fn kind_word(name: &str) -> &'static str {
         Some(Viewer::Pdf) => "PDF",
         Some(Viewer::Audio) => "Audio",
         Some(Viewer::Archive) => "Archive",
-        Some(Viewer::Office) => "Document",
         None => "File",
     }
 }
 
 /// The decrypted bytes as text the view draws, or `None` when they are not text (not UTF-8, or a NUL in them).
-/// Over [`READ_WHOLE_MAX`]: the first [`SHOWN_LINES`] lines, read-only.
+/// A text the reader cannot hold whole (over [`READ_WHOLE_MAX`], more than [`WHOLE_LINES_MAX`] lines, or a line
+/// over [`LINE_BYTES_MAX`]) is its first lines, read-only: at most [`SHOWN_LINES`] and [`SHOWN_BYTES`].
 fn text_body(bytes: &[u8], markdown: bool) -> Option<Body> {
     let text = std::str::from_utf8(bytes).ok()?;
     let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     if text.contains('\0') {
         return None;
     }
-    if bytes.len() > READ_WHOLE_MAX {
-        let total = text.lines().count();
-        let end = text
+    let (mut total, mut longest) = (0usize, 0usize);
+    for line in text.lines() {
+        total += 1;
+        longest = longest.max(line.len());
+    }
+    let why = if bytes.len() > READ_WHOLE_MAX {
+        Some(Cut::OverTwoMb)
+    } else if total > WHOLE_LINES_MAX || longest > LINE_BYTES_MAX {
+        Some(Cut::TooLong)
+    } else {
+        None
+    };
+    if let Some(why) = why {
+        let mut end = text
             .match_indices('\n')
             .nth(SHOWN_LINES - 1)
-            .map_or(text.len(), |(at, _)| at);
+            .map_or(text.len(), |(at, _)| at)
+            .min(SHOWN_BYTES);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let lines = plain_lines(&text[..end]);
         return Some(Body::Text(TextDoc {
-            lines: plain_lines(&text[..end]),
             truncated: Some(Truncated {
-                shown: total.min(SHOWN_LINES) as u32,
+                shown: u32::try_from(lines.len()).unwrap_or(u32::MAX),
                 total: u32::try_from(total).unwrap_or(u32::MAX),
+                why,
             }),
+            lines,
         }));
     }
-    Some(if markdown {
+    Some(if markdown && bytes.len() <= MARKDOWN_RENDER_MAX {
         Body::Markdown(MdDoc {
             source: text.to_string(),
         })
@@ -279,20 +312,32 @@ fn text_body(bytes: &[u8], markdown: bool) -> Option<Body> {
     })
 }
 
-/// The decrypted bytes as a picture: decoded by the toolkit's decoders, on this (the worker's) thread. `None`: it
-/// does not decode. The copy the decoder read is overwritten once the decoder let go of it.
+/// The toolkit's decoders, one set for the app (started with the first picture). Its waker does nothing: the
+/// worker waits for its own picture.
+fn decoders() -> &'static rune::ImageCache {
+    static DECODERS: std::sync::OnceLock<rune::ImageCache> = std::sync::OnceLock::new();
+    DECODERS.get_or_init(|| rune::ImageCache::new(Arc::new(|| {})))
+}
+
+/// The decrypted bytes as a picture: decoded by the toolkit's decoders, waited for on this (the worker's) thread.
+/// `None`: it does not decode. The decoder reads a copy of the bytes; that copy is overwritten here once the
+/// decoder let go of it, and a line is logged if it never did.
 fn picture(bytes: &[u8]) -> Option<rune::Pixels> {
     let mut encoded: Arc<[u8]> = Arc::from(bytes);
-    let cache = rune::ImageCache::new(Arc::new(|| {}));
-    let image = cache.load(encoded.clone());
+    let image = decoders().load(encoded.clone());
     let decoded = image.wait().is_ok();
     // The decoder's job holds the other handle for a moment after it answered.
-    for _ in 0..200 {
+    let mut wiped = false;
+    for _ in 0..2_000 {
         if let Some(copy) = Arc::get_mut(&mut encoded) {
             copy.zeroize();
+            wiped = true;
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    if !wiped {
+        log("viewer: the picture decoder kept its copy of an open file; it was released, not overwritten");
     }
     decoded.then(|| image.pixels().clone())
 }
@@ -449,7 +494,14 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                     Ok((opened.session, content_of(shows, &opened.bytes)))
                 }))
                 .unwrap_or(Err(OpenFileError::Failed));
-                // Nobody waits for it any more (the file was closed): the answer is dropped, its text overwritten.
+                // Nobody waits for the content any more (the file was closed, its session moved on, Cancel): it is
+                // dropped here, its text overwritten, and never queued. What is sent says only "cancelled".
+                let answer = if cancel.load(Ordering::SeqCst) {
+                    drop(answer);
+                    Err(OpenFileError::Cancelled)
+                } else {
+                    answer
+                };
                 let _ = answers.send(answer);
                 engine.wake();
             })
@@ -491,11 +543,19 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     fn poll(&mut self, file_id: &str) -> Option<Body> {
         let opening = self.open.as_mut().filter(|opening| opening.file_id == file_id)?;
         if opening.ended {
+            // An answer that slipped past the worker's own check is dropped here (its text overwritten).
+            while opening.inbox.try_recv().is_ok() {}
             return None;
         }
         // The session is not the one the file was opened for: everything of it goes NOW, on the window's side.
         if !Self::is_current(&self.engine, opening) {
             let had = opening.fetching || opening.holds;
+            // Nothing of the earlier session is held or on its way, and the account is the same (a lock and an
+            // unlock): what is on screen says nothing a session decrypted, so the opening is this session's now.
+            if !had && self.engine.has_session() && self.engine.account() == opening.account {
+                opening.session = self.engine.session_turn();
+                return None;
+            }
             opening.end();
             return had.then_some(Body::Stopped(Stopped::SessionChanged));
         }
@@ -561,11 +621,11 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
         if self.current(file_id).is_none() {
             return Elsewhere::Refused;
         }
-        if self.engine.open_elsewhere(file_id) {
-            Elsewhere::Opened
-        } else {
-            Elsewhere::Refused
-        }
+        self.engine.open_elsewhere(file_id)
+    }
+
+    fn previews(&self, name: &str) -> bool {
+        shows(name) != Shows::Nothing
     }
 
     /// Saving an edit is not bound: the editor does not open.

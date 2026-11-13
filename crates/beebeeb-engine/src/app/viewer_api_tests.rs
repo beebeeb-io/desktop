@@ -75,6 +75,8 @@ struct Fake {
     /// How a chunk request answers.
     chunk_mode: Arc<AtomicU8>,
     hold: Arc<Hold>,
+    /// A file's row names no size (a legacy row).
+    no_size: Arc<AtomicBool>,
 }
 
 fn is_chunk(req: &Request) -> bool {
@@ -97,7 +99,8 @@ fn fake(tag: &str) -> Fake {
     let (one, two): (Handler, Handler) = (account_handler(first.clone()), account_handler(second.clone()));
     let second_token = second.session_token.clone();
     let (chunk_mode, hold) = (Arc::new(AtomicU8::new(ANSWER)), Arc::new(Hold::default()));
-    let (mode_in, hold_in) = (chunk_mode.clone(), hold.clone());
+    let no_size = Arc::new(AtomicBool::new(false));
+    let (mode_in, hold_in, no_size_in) = (chunk_mode.clone(), hold.clone(), no_size.clone());
     let api = FakeApi::start(Arc::new(move |req: &Request| {
         let rest = if req.bearer() == Some(second_token.as_str()) {
             &two
@@ -112,7 +115,13 @@ fn fake(tag: &str) -> Fake {
                 _ => {}
             }
         }
-        rest(req)
+        let reply = rest(req);
+        if no_size_in.load(Ordering::SeqCst) && req.route() == format!("GET /api/v1/files/{NOTE}") {
+            let mut row: serde_json::Value = serde_json::from_slice(&reply.body).expect("the fake's row");
+            row.as_object_mut().expect("a row").remove("size_bytes");
+            return Reply::ok(row);
+        }
+        reply
     }));
     Fake {
         api,
@@ -120,6 +129,7 @@ fn fake(tag: &str) -> Fake {
         second,
         chunk_mode,
         hold,
+        no_size,
     }
 }
 
@@ -260,6 +270,22 @@ fn a_file_over_the_limit_is_refused_before_a_chunk_is_asked_for() {
     );
     assert_eq!(chunk_requests(&fake), 0);
     // At the limit it opens.
+    assert_eq!(open(&engine, NOTE, 3_500).unwrap().bytes.len(), 3_500);
+}
+
+#[test]
+fn a_row_that_names_no_size_is_held_to_the_limit_once_its_bytes_are_counted() {
+    let fake = fake("legacy");
+    let engine = engine_at(&fake.api.base);
+    signed_in(&engine, &fake.first);
+    let _state = local_state(&engine, &fake.first);
+    fake.no_size.store(true, Ordering::SeqCst);
+    // Nothing says how large it is before it is downloaded: it is, and then it is not handed over.
+    assert_eq!(
+        kind(open(&engine, NOTE, 3_499)),
+        OpenFileError::TooLarge { size: 3_500 }
+    );
+    assert_eq!(chunk_requests(&fake), 4);
     assert_eq!(open(&engine, NOTE, 3_500).unwrap().bytes.len(), 3_500);
 }
 

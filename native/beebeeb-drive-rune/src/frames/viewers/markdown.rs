@@ -368,5 +368,8 @@ pub fn body(blocks: &[Block], t: &Theme) -> El {
         .py(32.0)
         .fill(t.bg)
         .clip_rounded(0.0)
+        // A note longer than the window is read by scrolling.
+        .min_h(0.0)
+        .scroll(rune::ScrollSpec { stick_bottom: false })
         .child(md)
 }

@@ -267,6 +267,18 @@ pub struct Truncated {
     pub shown: u32,
     /// Lines in the file.
     pub total: u32,
+    /// Why only the first lines are held: the banner says so.
+    pub why: Cut,
+}
+
+/// Why a text is shown read-only, its first lines only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Cut {
+    /// DW-1527: the file is over the editor's limit (2 MB).
+    #[default]
+    OverTwoMb,
+    /// Under 2 MB, and too many lines, or lines too long, for the reader to hold whole.
+    TooLong,
 }
 
 impl TextDoc {
@@ -321,7 +333,9 @@ pub enum OpenError {
 pub enum Elsewhere {
     /// The system was asked to open the file with its own app.
     Opened,
-    /// It could not be opened there (sync is off on this PC, the file is gone, the system refused).
+    /// The file opens from the account's folder on this PC, and that folder is not in sync now.
+    NeedsSync,
+    /// It could not be opened there (the file is gone, the system refused, the kind is not opened for safety).
     Refused,
     /// This source has no way to another app: the shell is asked instead (`Intent::OpenInAnotherApp`).
     NotBound,
@@ -367,6 +381,11 @@ pub trait ViewerSource {
     /// this PC (never a decrypted copy made for the occasion).
     fn open_elsewhere(&mut self, _file_id: &str) -> Elsewhere {
         Elsewhere::NotBound
+    }
+    /// Whether a file of this name is shown HERE (decrypted and drawn). `false`: a list's Open leaves it to its
+    /// own app, as before (`viewers::open_item`); a route that names it anyway gets the source's honest state.
+    fn previews(&self, _name: &str) -> bool {
+        true
     }
     /// Whether [`ViewerSource::save`] can store an edit. `false`: the editor does not open (an edit that cannot
     /// be saved is not offered), and the press says so.
@@ -526,6 +545,7 @@ impl FixtureViewerSource {
                     truncated: Some(Truncated {
                         shown: 500,
                         total: 41_206,
+                        why: Cut::OverTwoMb,
                     }),
                 }),
             ),

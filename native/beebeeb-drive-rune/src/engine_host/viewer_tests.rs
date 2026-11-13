@@ -42,8 +42,13 @@ struct Inner {
     /// Downloads that found themselves cancelled when the door opened.
     cancelled: usize,
     wakes: usize,
-    elsewhere_answers: bool,
+    elsewhere_answers: Elsewhere,
     elsewhere_calls: Vec<String>,
+    /// The next downloads hand over content even when they were cancelled (a cancel that came too late for the
+    /// engine).
+    late: bool,
+    /// Downloads that returned.
+    returned: usize,
 }
 
 struct Fake {
@@ -68,8 +73,10 @@ impl Fake {
                 at_door: 0,
                 cancelled: 0,
                 wakes: 0,
-                elsewhere_answers: true,
+                elsewhere_answers: Elsewhere::Opened,
                 elsewhere_calls: Vec::new(),
+                late: false,
+                returned: 0,
             }),
             door: Mutex::new(()),
         };
@@ -149,7 +156,8 @@ impl ViewerEngine for Fake {
         drop(self.door.lock().unwrap());
         let answers_for = {
             let mut s = self.s();
-            if cancel.load(Ordering::SeqCst) {
+            s.returned += 1;
+            if cancel.load(Ordering::SeqCst) && !s.late {
                 s.cancelled += 1;
                 return Err(OpenFileError::Cancelled);
             }
@@ -169,7 +177,7 @@ impl ViewerEngine for Fake {
         })
     }
 
-    fn open_elsewhere(&self, file_id: &str) -> bool {
+    fn open_elsewhere(&self, file_id: &str) -> Elsewhere {
         let mut s = self.s();
         s.elsewhere_calls.push(file_id.to_string());
         s.elsewhere_answers
@@ -224,7 +232,7 @@ fn words(body: &Body) -> String {
 }
 
 /// A small PNG, encoded here.
-fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+pub(super) fn png_bytes(width: u32, height: u32) -> Vec<u8> {
     let mut out = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut out, width, height);
@@ -325,11 +333,98 @@ fn a_text_over_the_readers_limit_shows_its_first_lines_read_only() {
             doc.truncated,
             Some(Truncated {
                 shown: SHOWN_LINES as u32,
-                total: lines as u32
+                total: lines as u32,
+                why: Cut::OverTwoMb
             })
         );
         assert_eq!(doc.plain(), line.repeat(SHOWN_LINES));
     }
+}
+
+#[test]
+fn a_text_the_reader_cannot_hold_whole_is_cut_by_lines_and_by_bytes_and_says_why() {
+    let fake = Fake::new();
+    // Under 2 MB, too many lines.
+    let many = "short\n".repeat(WHOLE_LINES_MAX + 1);
+    fake.put("f-many", "Invented many.log", many.as_bytes());
+    // At the limit: whole.
+    fake.put("f-at", "Invented at.log", "short\n".repeat(WHOLE_LINES_MAX).as_bytes());
+    // Under 2 MB, one line over the line limit (and over what is held), after two short ones.
+    let long_line = format!("one\ntwo\n{}\nlast\n", "x".repeat(SHOWN_BYTES * 2));
+    fake.put("f-long-line", "Invented long line.json", long_line.as_bytes());
+    // Over 2 MB with no newline at all, in three-byte characters: cut by bytes, on a whole character.
+    let one_line = "\u{20AC}".repeat(READ_WHOLE_MAX / 3 + 10);
+    fake.put("f-one-line", "Invented one line.json", one_line.as_bytes());
+
+    let cut = |id: &str| match opened(&fake, id).2 {
+        Body::Text(doc) => doc,
+        other => panic!("{id}: {other:?}"),
+    };
+    let doc = cut("f-many");
+    assert_eq!(doc.lines.len(), SHOWN_LINES);
+    assert_eq!(
+        doc.truncated,
+        Some(Truncated {
+            shown: SHOWN_LINES as u32,
+            total: (WHOLE_LINES_MAX + 1) as u32,
+            why: Cut::TooLong
+        })
+    );
+    // A line exactly at the line limit is read whole; one byte more is not.
+    fake.put(
+        "f-line-at",
+        "Invented line at.txt",
+        "y".repeat(LINE_BYTES_MAX).as_bytes(),
+    );
+    fake.put(
+        "f-line-over",
+        "Invented line over.txt",
+        "y".repeat(LINE_BYTES_MAX + 1).as_bytes(),
+    );
+    assert_eq!(cut("f-line-at").truncated, None);
+    assert_eq!(cut("f-line-over").truncated.map(|cut| cut.why), Some(Cut::TooLong));
+    let whole = cut("f-at");
+    assert_eq!((whole.lines.len(), whole.truncated), (WHOLE_LINES_MAX, None));
+
+    let doc = cut("f-long-line");
+    assert_eq!(doc.truncated.map(|cut| (cut.total, cut.why)), Some((4, Cut::TooLong)));
+    assert_eq!(doc.lines.len(), 3, "the two short lines and the start of the long one");
+    assert_eq!(
+        doc.plain().len(),
+        SHOWN_BYTES + 1,
+        "held: the byte limit (and the last line's end)"
+    );
+
+    let doc = cut("f-one-line");
+    assert_eq!(
+        doc.truncated.map(|cut| (cut.shown, cut.total, cut.why)),
+        Some((1, 1, Cut::OverTwoMb))
+    );
+    let held = doc.plain();
+    let held = held.trim_end_matches('\n');
+    assert_eq!(held.len(), SHOWN_BYTES - SHOWN_BYTES % 3, "cut on a whole character");
+    assert!(held.chars().all(|c| c == '\u{20AC}'));
+}
+
+#[test]
+fn a_long_note_is_shown_as_its_text_not_rendered() {
+    let fake = Fake::new();
+    let line = format!("{}\n", "x".repeat(999));
+    // At the rendered note's limit: a note.
+    let at = line.repeat(MARKDOWN_RENDER_MAX / 1_000);
+    assert_eq!(at.len(), MARKDOWN_RENDER_MAX);
+    fake.put("f-at-md", "Invented at.md", at.as_bytes());
+    assert_eq!(opened(&fake, "f-at-md").2, Body::Markdown(MdDoc { source: at }));
+    // One line more: its text, whole (it is under every limit of the reader).
+    let over = line.repeat(MARKDOWN_RENDER_MAX / 1_000 + 1);
+    fake.put("f-over-md", "Invented over.md", over.as_bytes());
+    assert_eq!(
+        opened(&fake, "f-over-md").2,
+        Body::Text(TextDoc {
+            lines: plain_lines(&over),
+            truncated: None
+        })
+    );
 }
 
 #[test]
@@ -367,8 +462,8 @@ fn a_kind_without_a_viewer_here_is_said_so_and_nothing_is_downloaded() {
         ("Invented export.zip", "Archive"),
         ("Invented shot.arw", "Picture"),
         ("Invented shot.heic", "Picture"),
-        ("Invented letter.docx", "Document"),
-        ("Invented sheet.xlsx", "Document"),
+        ("Invented letter.docx", "File"),
+        ("Invented sheet.xlsx", "File"),
         ("Invented thing.xyz", "File"),
         ("Invented no extension", "File"),
     ];
@@ -380,8 +475,14 @@ fn a_kind_without_a_viewer_here_is_said_so_and_nothing_is_downloaded() {
         assert_eq!(file.body, Body::NotPreviewable(NoPreview::NoViewer), "{name}");
         assert_eq!(file.facts, format!("{kind} \u{00B7} 19 B"), "{name}");
         assert_eq!(source.poll(&id), None, "{name}");
+        // A list's Open leaves such a file to its own app.
+        assert!(!source.previews(name), "{name}");
     }
     assert!(fake.s().fetches.is_empty(), "nothing was downloaded");
+    let source = Source::on(fake.clone());
+    for shown in ["a.txt", "a.md", "a.csv", "a.PNG", "a.jpeg", "a.gif", "a.webp", "a.log"] {
+        assert!(source.previews(shown), "{shown}");
+    }
 }
 
 #[test]
@@ -525,13 +626,51 @@ fn another_account_with_the_same_generation_is_not_the_session_either() {
 }
 
 #[test]
-fn a_state_that_holds_nothing_stays_when_the_session_moves_on() {
+fn a_state_that_holds_nothing_stays_and_acts_for_the_same_account_after_a_lock() {
     let fake = Fake::new();
     fake.put("f-pdf", "Invented plan.pdf", b"%PDF invented");
     let (mut source, _, body) = opened(&fake, "f-pdf");
     assert_eq!(body, Body::NotPreviewable(NoPreview::NoViewer));
+    // A lock and an unlock of the same account: there was no content to take, the state stays, and its button
+    // still opens the file in another app, for the session that is there now.
     fake.new_session("a@example.eu");
-    assert_eq!(source.poll("f-pdf"), None, "there was no content to take");
+    assert_eq!(source.poll("f-pdf"), None);
+    assert_eq!(source.open_elsewhere("f-pdf"), Elsewhere::Opened);
+    assert_eq!(fake.s().elsewhere_calls, ["f-pdf"]);
+    // Another account: nothing is asked for the first account's file, before the poll and after it.
+    fake.new_session("b@example.eu");
+    assert_eq!(source.open_elsewhere("f-pdf"), Elsewhere::Refused);
+    assert_eq!(source.poll("f-pdf"), None);
+    assert_eq!(source.open_elsewhere("f-pdf"), Elsewhere::Refused);
+    // And not after the first account is back either: this opening is over (the window closed the file).
+    fake.new_session("a@example.eu");
+    assert_eq!(source.poll("f-pdf"), None);
+    assert_eq!(source.open_elsewhere("f-pdf"), Elsewhere::Refused);
+    assert_eq!(fake.s().elsewhere_calls.len(), 1);
+}
+
+#[test]
+fn content_that_arrives_after_its_session_moved_on_is_dropped_by_the_worker_not_queued() {
+    let fake = Fake::new();
+    // The cancel comes too late for the engine: it hands the worker the decrypted file anyway.
+    fake.s().late = true;
+    let mut source = Source::on(fake.clone());
+    let door = fake.door.lock().unwrap();
+    source.open(NOTE).expect("the file opens");
+    until("the download reaches the door", || fake.s().at_door == 1);
+    fake.new_session("a@example.eu");
+    assert_eq!(source.poll(NOTE), Some(Body::Stopped(Stopped::SessionChanged)));
+    let wakes = fake.s().wakes;
+    drop(door);
+    until("the download returned", || fake.s().returned == 1);
+    until("the worker finished", || fake.s().wakes > wakes);
+    // What the worker queued holds no content: it says "cancelled" and nothing else.
+    let queued = source.open.as_ref().unwrap().inbox.try_recv();
+    assert!(
+        matches!(queued, Ok(Err(OpenFileError::Cancelled))),
+        "decrypted content was queued for a session that is gone"
+    );
+    assert_eq!(source.poll(NOTE), None);
 }
 
 #[test]
@@ -577,11 +716,15 @@ fn open_in_another_app_asks_the_engine_and_says_when_it_was_refused() {
     let (mut source, _, _) = opened(&fake, NOTE);
     assert_eq!(source.open_elsewhere(NOTE), Elsewhere::Opened);
     assert_eq!(fake.s().elsewhere_calls, [NOTE]);
-    fake.s().elsewhere_answers = false;
-    assert_eq!(source.open_elsewhere(NOTE), Elsewhere::Refused);
+    // The engine's refusal keeps its kind: the view says a different sentence for each.
+    for refusal in [Elsewhere::NeedsSync, Elsewhere::Refused] {
+        fake.s().elsewhere_answers = refusal;
+        assert_eq!(source.open_elsewhere(NOTE), refusal);
+    }
     // A file this source does not have open is not opened anywhere.
+    fake.s().elsewhere_answers = Elsewhere::Opened;
     assert_eq!(source.open_elsewhere("another"), Elsewhere::Refused);
-    assert_eq!(fake.s().elsewhere_calls.len(), 2);
+    assert_eq!(fake.s().elsewhere_calls.len(), 3);
     // What is not bound says so to the view.
     assert!(!source.can_save());
     assert!(!source.knows_offline());
@@ -630,4 +773,140 @@ fn an_open_files_text_is_overwritten_when_it_is_let_go_and_never_printed() {
     });
     note.wipe();
     assert_eq!(note, Body::Markdown(MdDoc { source: String::new() }));
+}
+
+/// A source whose open file is in the state `body`, and that counts what Try again asks of it.
+struct InState {
+    body: Body,
+    retries: std::rc::Rc<std::cell::Cell<u32>>,
+    /// Whether a retry can start.
+    there: bool,
+}
+
+impl InState {
+    fn file(&self, file_id: &str, body: Body) -> OpenFile {
+        OpenFile {
+            id: file_id.to_string(),
+            path: vec!["Files".into()],
+            name: "Invented state.txt".into(),
+            facts: "Text".into(),
+            version: 0,
+            body,
+            details: Details::default(),
+            newer: None,
+        }
+    }
+}
+
+impl ViewerSource for InState {
+    fn open(&mut self, file_id: &str) -> Result<OpenFile, OpenError> {
+        Ok(self.file(file_id, self.body.clone()))
+    }
+    fn poll(&mut self, _: &str) -> Option<Body> {
+        None
+    }
+    fn cancel(&mut self, _: &str) {}
+    fn retry(&mut self, file_id: &str) -> Result<OpenFile, OpenError> {
+        self.retries.set(self.retries.get() + 1);
+        if self.there {
+            Ok(self.file(file_id, Body::Decrypting { done: 0, total: 10 }))
+        } else {
+            Err(OpenError::NotFound)
+        }
+    }
+}
+
+fn ui_in(body: Body, there: bool) -> (crate::frames::viewers::Ui, std::rc::Rc<std::cell::Cell<u32>>) {
+    let retries = std::rc::Rc::new(std::cell::Cell::new(0));
+    let source = InState {
+        body,
+        retries: retries.clone(),
+        there,
+    };
+    let ui = crate::frames::viewers::Ui::open(Box::new(source), "f-state").expect("it opened");
+    (ui, retries)
+}
+
+#[test]
+fn try_again_is_asked_only_from_a_state_it_can_get_past() {
+    let can = [
+        Body::Failed,
+        Body::Stopped(Stopped::Offline),
+        Body::Stopped(Stopped::SessionChanged),
+    ];
+    for body in can {
+        let (mut ui, retries) = ui_in(body.clone(), true);
+        ui.retry();
+        assert_eq!(retries.get(), 1, "{body:?}");
+        assert_eq!(ui.file.body, Body::Decrypting { done: 0, total: 10 }, "{body:?}");
+    }
+    let cannot = [
+        Body::Stopped(Stopped::SessionEnded),
+        Body::Stopped(Stopped::Gone),
+        Body::NotPreviewable(NoPreview::NoViewer),
+        Body::Decrypting { done: 1, total: 10 },
+    ];
+    for body in cannot {
+        let (mut ui, retries) = ui_in(body.clone(), true);
+        ui.retry();
+        assert_eq!(retries.get(), 0, "{body:?}");
+        assert_eq!(ui.file.body, body);
+    }
+}
+
+#[test]
+fn try_again_that_cannot_even_start_says_so() {
+    let (mut ui, retries) = ui_in(Body::Failed, false);
+    ui.retry();
+    assert_eq!(retries.get(), 1);
+    assert_eq!(ui.toast.as_deref(), Some(crate::frames::viewers::NOT_REOPENED));
+    assert_eq!(ui.file.body, Body::Failed, "what was on screen stays");
+}
+
+#[test]
+fn a_source_that_cannot_save_or_keep_offline_says_so_on_the_press() {
+    // The default source (the board's) can: the editor opens.
+    struct CannotSave(InState);
+    impl ViewerSource for CannotSave {
+        fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.0.open(id)
+        }
+        fn poll(&mut self, id: &str) -> Option<Body> {
+            self.0.poll(id)
+        }
+        fn cancel(&mut self, _: &str) {}
+        fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.0.retry(id)
+        }
+        fn can_save(&self) -> bool {
+            false
+        }
+        fn knows_offline(&self) -> bool {
+            false
+        }
+    }
+    let text = Body::Text(TextDoc {
+        lines: plain_lines("an invented line"),
+        truncated: None,
+    });
+    let (mut can, _) = ui_in(text.clone(), true);
+    can.edit();
+    assert!(can.editor.is_some(), "a source that saves opens the editor");
+
+    let inner = InState {
+        body: text,
+        retries: Default::default(),
+        there: true,
+    };
+    let mut cannot = crate::frames::viewers::Ui::open(Box::new(CannotSave(inner)), "f-state").expect("it opened");
+    cannot.edit();
+    assert!(cannot.editor.is_none());
+    assert_eq!(cannot.toast.as_deref(), Some("Not built yet: Edit and save from here"));
+    cannot.toggle_offline();
+    assert!(!cannot.file.details.offline, "nothing was switched");
+    assert_eq!(
+        cannot.toast.as_deref(),
+        Some("Not built yet: Available offline from here")
+    );
+    assert!(!cannot.knows_offline());
 }

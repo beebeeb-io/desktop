@@ -139,9 +139,6 @@ pub enum Viewer {
     Archive,
     Text,
     Markdown,
-    /// A Word, Excel or PowerPoint document (or its OpenDocument twin): no viewer in this group. The window's
-    /// source says so honestly; a source without the file leaves it to its own app, as before.
-    Office,
 }
 
 /// The router by file type.
@@ -155,7 +152,6 @@ pub fn viewer_of(name: &str) -> Option<Viewer> {
         "csv" | "tsv" => Viewer::Table,
         "zip" | "tar" | "gz" | "tgz" | "7z" | "rar" => Viewer::Archive,
         "md" | "markdown" => Viewer::Markdown,
-        "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp" => Viewer::Office,
         "txt" | "log" | "py" | "rs" | "js" | "ts" | "json" | "toml" | "yaml" | "yml" | "sh" | "css" | "html"
         | "xml" => Viewer::Text,
         _ => return None,

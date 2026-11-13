@@ -96,9 +96,15 @@ pub enum Intent {
 /// What a control whose target is not built yet says (the shell's words for it).
 pub const NOT_BUILT: &str = "Not built yet";
 
-/// What "Open in another app…" says when the file could not be opened there.
-pub const NOT_OPENED_ELSEWHERE: &str =
+/// What Try again says when the file could not even be asked for again (signed out, gone from this PC's list).
+pub const NOT_REOPENED: &str = "Couldn't open this file again. Go back to Files and open it from there.";
+
+/// What "Open in another app…" says when the account's folder on this PC is not in sync now.
+pub const NEEDS_SYNC_ELSEWHERE: &str =
     "Couldn't open it in another app. It opens from your Beebeeb folder, so sync has to be on for this PC.";
+
+/// What "Open in another app…" says when the file could not be opened there for another reason.
+pub const NOT_OPENED_ELSEWHERE: &str = "Couldn't open this file in another app.";
 
 impl Intent {
     /// The name of where this intent goes, while nothing there answers it yet.
@@ -243,6 +249,10 @@ impl Ui {
                     self.toast = None;
                     return;
                 }
+                Elsewhere::NeedsSync => {
+                    self.toast = Some(NEEDS_SYNC_ELSEWHERE.to_string());
+                    return;
+                }
                 Elsewhere::Refused => {
                     self.toast = Some(NOT_OPENED_ELSEWHERE.to_string());
                     return;
@@ -282,9 +292,14 @@ impl Ui {
         if !may {
             return;
         }
-        if let Ok(file) = self.source.retry(&self.file.id) {
-            self.replace(file);
-            self.focus = Some(states::TITLE_KEY);
+        match self.source.retry(&self.file.id) {
+            Ok(file) => {
+                self.replace(file);
+                self.toast = None;
+                self.focus = Some(states::TITLE_KEY);
+            }
+            // Never a press that does nothing: the file is not there to open now.
+            Err(_) => self.toast = Some(NOT_REOPENED.to_string()),
         }
     }
 
@@ -474,6 +489,9 @@ pub struct Slot {
     /// route shows the shell's placeholder. The board's fixture is here only in the board's
     /// sample window ([`board_fixture`]), never as a fallback.
     route: Option<RouteSource>,
+    /// The file the route names that the source could not open: it is not asked for again on every poll, only
+    /// once the route names another file or the session gate closed and opened again.
+    unopened: Option<String>,
     /// The New file dialog over the Files window (DW-1521, DW-1522), while it is open.
     pub(crate) new_file: Option<new_file::NewFile>,
     /// What the New file dialog asked of the shell, oldest first ([`take_asked`]).
@@ -484,6 +502,14 @@ pub struct Slot {
     /// Where a key goes that reaches a text field of this group after the field's owner closed
     /// (two keys in one frame): a field nobody shows, never the Files window's search.
     pub(crate) stray: rune::TextEdit,
+}
+
+#[cfg(test)]
+impl Slot {
+    /// The file the route names that did not open (tests).
+    pub(crate) fn unopened_for_test(&self) -> Option<String> {
+        self.unopened.clone()
+    }
 }
 
 /// What the New file dialog asked for that is outside this group (make a file, New document),
@@ -527,7 +553,11 @@ pub fn open(s: &mut State, file_id: &str) -> bool {
 /// (`Event::OpenItem`, through [`open`]). `false`: not a file for this group; the caller opens
 /// it as it did before (its own app).
 pub fn open_item(s: &mut State, item: &crate::source::DriveItem) -> bool {
-    !item.is_folder && kinds::viewer_of(&item.name).is_some() && open(s, &item.id)
+    !item.is_folder
+        && kinds::viewer_of(&item.name).is_some()
+        // A kind the window's source does not show here stays its own app's.
+        && route_source(s).is_some_and(|source| source.previews(&item.name))
+        && open(s, &item.id)
 }
 
 /// [`open`] with the source to read from (the engine's, once it is wired).
@@ -637,10 +667,21 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     // The route names a file that is not open yet (Files dispatched `Event::OpenItem`): ask the
     // window's source for it. No source, or a file it does not have: the shell's placeholder.
     // Never while the shell's session gate is closed: the route may name a file, nothing reads it.
-    if let (None, Some(id), true) = (&s.viewer.ui, route_item(s), crate::shell::session_gate::open(s)) {
-        if let Some(Ok(ui)) = route_source(s).map(|source| Ui::open(source, &id)) {
-            s.viewer.ui = Some(ui);
-            return true;
+    let (here, gate_open) = (route_item(s), crate::shell::session_gate::open(s));
+    // A file that did not open is asked for again only for another route or another session.
+    if s.viewer.unopened.is_some() && (s.viewer.unopened != here || !gate_open) {
+        s.viewer.unopened = None;
+    }
+    if let (None, Some(id), true) = (&s.viewer.ui, here, gate_open) {
+        if s.viewer.unopened.as_deref() != Some(id.as_str()) {
+            match route_source(s).map(|source| Ui::open(source, &id)) {
+                Some(Ok(ui)) => {
+                    s.viewer.ui = Some(ui);
+                    return true;
+                }
+                Some(Err(_)) => s.viewer.unopened = Some(id),
+                None => {}
+            }
         }
     }
     let Some(ui) = ui(s) else { return had || new_file };

@@ -187,6 +187,17 @@ fn too_large(file: &OpenFile, size: u64, free: u64, t: &Theme) -> El {
     stage(content, t)
 }
 
+/// Try again / Open it again: asked of the source only while the shell's session gate is open (a window still
+/// on screen when its session ended does not act; the refusal is counted).
+fn retry(s: &mut State) {
+    if crate::shell::session_gate::refuse(s) {
+        return;
+    }
+    if let Some(ui) = ui(s) {
+        ui.retry();
+    }
+}
+
 /// DW-1518.
 fn failed(t: &Theme) -> El {
     let content = col()
@@ -201,11 +212,7 @@ fn failed(t: &Theme) -> El {
             t,
         ))
         .child(actions(vec![
-            button("state-btn-0", "Try again", ButtonKind::Outline, false, t).on_press(|s: &mut State| {
-                if let Some(ui) = ui(s) {
-                    ui.retry();
-                }
-            }),
+            button("state-btn-0", "Try again", ButtonKind::Outline, false, t).on_press(retry),
             button("state-btn-1", "Report a problem", ButtonKind::Ghost, false, t).on_press(|s: &mut State| {
                 if let Some(ui) = ui(s) {
                     ui.intent(Intent::ReportProblem);
@@ -241,11 +248,7 @@ fn stopped(why: Stopped, t: &Theme) -> El {
         } else {
             "Open it again"
         };
-        button("state-btn-0", label, ButtonKind::Outline, false, t).on_press(|s: &mut State| {
-            if let Some(ui) = ui(s) {
-                ui.retry();
-            }
-        })
+        button("state-btn-0", label, ButtonKind::Outline, false, t).on_press(retry)
     } else {
         button("state-btn-0", "Close", ButtonKind::Outline, false, t).on_press(super::close)
     };
@@ -282,7 +285,9 @@ fn not_previewable(file: &OpenFile, why: NoPreview, t: &Theme) -> El {
         ),
         NoPreview::Unreadable => (
             "Can't show this file",
-            "It was decrypted on this PC, but its content isn't what its name says. Nothing was kept.".to_string(),
+            "It was decrypted on this PC, but this app can't read its content: text that isn't UTF-8, or a picture \
+             it can't decode. Nothing was kept."
+                .to_string(),
         ),
     };
     let content = col()

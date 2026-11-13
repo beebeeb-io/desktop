@@ -16,16 +16,18 @@ use beebeeb_engine::signin::gate::GateState as EngineGate;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
 use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
-use beebeeb_engine::test_api::{FakeApi, Handler, Request};
+use beebeeb_engine::test_api::{FakeApi, Handler, Reply, Request};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use zeroize::Zeroizing;
 
 use crate::State;
 use crate::engine_host::LiveEngine;
 use crate::engine_host::open::Opened;
+use crate::frames::global::source::{GlobalFixture, board};
 use crate::frames::viewers;
+use crate::frames::viewers::source::Body;
 use crate::shell::actions::{ActionError, EngineActions, HostActions};
-use crate::shell::app::{Screen, Session};
+use crate::shell::app::{Event, Screen, Session};
 use crate::shell::host::{Shell, Wiring};
 use crate::shell::identity::engine_identity;
 use crate::shell::instance::ProfileHolder;
@@ -39,7 +41,13 @@ const OTHER_PHRASE: &str = "legal winner thank year wave sausage worth useful le
 
 const NOTE: &str = "b0000000-0000-4000-8000-000000000601";
 const PLAN: &str = "b0000000-0000-4000-8000-000000000602";
+const LONG: &str = "b0000000-0000-4000-8000-000000000603";
+const PICTURE: &str = "b0000000-0000-4000-8000-000000000604";
 const NOTE_NAME: &str = "note-of-the-first-account-viewer.txt";
+const LONG_NAME: &str = "long-of-the-first-account-viewer.txt";
+const PICTURE_NAME: &str = "harbour-of-the-first-account-viewer.png";
+/// The last line of the long file, far below one window of lines.
+const LONG_END: &str = "the-very-last-line-of-the-long-file";
 const PLAN_NAME: &str = "plan-of-the-first-account-viewer.pdf";
 /// Words found nowhere else in the app.
 const NOTE_WORDS: &str = "harbourlight-words-of-the-first-account";
@@ -49,9 +57,21 @@ fn note_text() -> String {
     format!("{NOTE_WORDS} line one\n{}\nthe last line\n", "filler ".repeat(600))
 }
 
-/// Holds every chunk request while it is on.
+/// 300 numbered lines and a last one: more than a window shows at once, well under what the reader holds whole.
+fn long_text() -> String {
+    let mut text: String = (1..=300)
+        .map(|n| format!("invented line {n} of the long file\n"))
+        .collect();
+    text.push_str(LONG_END);
+    text.push('\n');
+    text
+}
+
+/// Holds every chunk request while it is on, or fails it.
 #[derive(Default)]
 struct Hold {
+    /// Every chunk request is answered 500.
+    fails: AtomicBool,
     on: AtomicBool,
     released: Mutex<bool>,
     wake: Condvar,
@@ -92,6 +112,9 @@ fn two_accounts(first: Arc<FakeAccount>, second: Arc<FakeAccount>, hold: Arc<Hol
     let handler: Handler = Arc::new(move |request: &Request| {
         if is_chunk(request) {
             hold.wait();
+            if hold.fails.load(Ordering::SeqCst) {
+                return Reply::json(500, serde_json::json!({ "error": "a server body" }));
+            }
         }
         let second_asked = match request.bearer() {
             Some(token) => token == second.session_token,
@@ -191,6 +214,8 @@ fn window(tag: &str) -> Window {
     let (first, second) = (Arc::new(first), Arc::new(second));
     first.add_file_with_content(NOTE, None, NOTE_NAME, note_text().as_bytes());
     first.add_file_with_content(PLAN, None, PLAN_NAME, b"%PDF-1.7 invented");
+    first.add_file_with_content(LONG, None, LONG_NAME, long_text().as_bytes());
+    first.add_file_with_content(PICTURE, None, PICTURE_NAME, &super::tests::png_bytes(8, 6));
     let hold = Arc::new(Hold::default());
     let fake = two_accounts(first.clone(), second.clone(), hold.clone());
 
@@ -211,6 +236,8 @@ fn window(tag: &str) -> Window {
     let db = StateDb::open(&db_path).unwrap();
     put(&db, NOTE, NOTE_NAME, note_text().len() as i64);
     put(&db, PLAN, PLAN_NAME, 17);
+    put(&db, LONG, LONG_NAME, long_text().len() as i64);
+    put(&db, PICTURE, PICTURE_NAME, super::tests::png_bytes(8, 6).len() as i64);
     db.set_owner(&Identity::new(Some(&first.user_id), Some(&first.email)))
         .unwrap();
     drop(db);
@@ -341,7 +368,14 @@ impl Window {
     /// Nothing of the first account's open file is in the window.
     fn assert_nothing_of_the_file(&self, when: &str) {
         let drawn = self.drawn();
-        for needle in [NOTE_WORDS, NOTE_NAME, PLAN_NAME, "the last line"] {
+        for needle in [
+            NOTE_WORDS,
+            NOTE_NAME,
+            PLAN_NAME,
+            LONG_NAME,
+            PICTURE_NAME,
+            "the last line",
+        ] {
             assert!(!drawn.contains(needle), "{when}: the window draws {needle:?}");
         }
         assert!(
@@ -380,6 +414,24 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
     assert!(drawn.contains("the last line"), "the whole text is there");
     assert!(!drawn.contains("Decrypting on this PC"));
     assert!(w.chunk_requests() >= 2, "the content came chunk by chunk from Beebeeb");
+
+    // The details panel (Alt+Shift+P): where the file is, and no Available offline switch, whose state was not
+    // read.
+    w.press(
+        Key::Text("p".into()),
+        Mods {
+            alt: true,
+            shift: true,
+            ..Mods::default()
+        },
+    );
+    let drawn = w.drawn();
+    assert!(drawn.contains("Where: Files"), "{drawn}");
+    assert!(!drawn.contains("Online only now"), "{drawn}");
+    assert!(
+        !w.rt.elements().iter().any(|e| e.key.as_deref() == Some("offline")),
+        "no switch for a state that was not read"
+    );
 
     // Edit is not offered where an edit cannot be saved: the press says so, no editor opens.
     w.press(
@@ -454,11 +506,26 @@ fn a_lock_closes_the_open_file_and_a_download_on_its_way_shows_nothing_later() {
 }
 
 #[test]
-fn a_file_with_no_viewer_says_so_downloads_nothing_and_its_two_buttons_answer() {
+fn a_kind_with_no_viewer_stays_its_own_apps_and_a_route_to_it_says_so_with_two_buttons_that_answer() {
     let mut w = window("pdf");
     sign_in(&w.engine, &w.first, TEST_PHRASE);
     w.settle();
+    // The Files window's Open on a PDF: not this viewer's (the Files window opens it in its own app, as before;
+    // with no sync running here that is refused by the Files window itself).
     w.open_row(PLAN_NAME);
+    assert_eq!(
+        w.route_item(),
+        None,
+        "the route does not go to a file the viewer cannot show"
+    );
+    assert!(w.rt.state.viewer.ui.is_none());
+    assert!(!w.drawn().contains("No preview for this kind of file yet"));
+
+    // A route that names it anyway (as Search's Open and a link do): the honest state, and nothing downloaded.
+    w.rt.update(|s, _| {
+        host::dispatch(s, Event::OpenItem(PLAN.to_string()));
+    });
+    w.settle();
     assert_eq!(w.route_item().as_deref(), Some(PLAN));
     let drawn = w.drawn();
     assert!(drawn.contains("No preview for this kind of file yet"), "{drawn}");
@@ -468,13 +535,38 @@ fn a_file_with_no_viewer_says_so_downloads_nothing_and_its_two_buttons_answer() 
     assert_eq!(w.chunk_requests(), 0, "nothing was downloaded");
 
     // Open in another app: asked of the engine. No sync runs here, so the file is not on this PC to open: the
-    // refusal is said, in words, on screen.
+    // refusal is said, in its own words, on screen.
     w.click("state-btn-0");
-    assert!(w.drawn().contains(viewers::NOT_OPENED_ELSEWHERE), "{}", w.drawn());
+    assert!(w.drawn().contains(viewers::NEEDS_SYNC_ELSEWHERE), "{}", w.drawn());
     // Save a copy is not built: the press says so.
     w.click("state-btn-1");
     assert!(w.drawn().contains("Not built yet: Save a copy"), "{}", w.drawn());
     assert_eq!(w.chunk_requests(), 0);
+}
+
+#[test]
+fn a_route_to_a_file_that_is_not_there_is_asked_of_the_local_state_once_not_on_every_frame() {
+    let mut w = window("gone");
+    sign_in(&w.engine, &w.first, TEST_PHRASE);
+    w.settle();
+    w.rt.update(|s, _| {
+        host::dispatch(s, Event::OpenItem("b0000000-0000-4000-8000-00000000ffff".to_string()));
+    });
+    for _ in 0..10 {
+        w.settle();
+    }
+    assert!(w.rt.state.viewer.ui.is_none());
+    assert_eq!(
+        w.rt.state.viewer.unopened_for_test().as_deref(),
+        Some("b0000000-0000-4000-8000-00000000ffff"),
+        "the window remembers what did not open instead of asking again"
+    );
+    // Another route: forgotten, and a file that is there opens.
+    w.press(Key::Escape, Mods::default());
+    w.settle();
+    assert_eq!(w.rt.state.viewer.unopened_for_test(), None);
+    w.open_row(NOTE_NAME);
+    w.until_drawn(NOTE_WORDS);
 }
 
 #[test]
@@ -498,4 +590,111 @@ fn the_boards_sample_window_still_leaves_an_office_file_to_its_own_app() {
     };
     assert!(!viewers::open_item(&mut s, &item));
     assert!(s.viewer.ui.is_none());
+}
+
+#[test]
+fn a_failed_download_says_so_and_try_again_downloads_again_while_the_session_is_open() {
+    let mut w = window("retry");
+    sign_in(&w.engine, &w.first, TEST_PHRASE);
+    w.settle();
+    w.hold.fails.store(true, Ordering::SeqCst);
+    w.open_row(NOTE_NAME);
+    w.until_drawn("Couldn't decrypt this file");
+    let drawn = w.drawn();
+    assert!(drawn.contains("Try again") && !drawn.contains(NOTE_WORDS), "{drawn}");
+
+    // The session ended under the window (as the window reads the engine's status): the press is refused by the
+    // shell's session gate, counted, and nothing is asked of Beebeeb.
+    w.rt.update(|s, _| {
+        s.global = crate::frames::global::Ui::new(Box::new(GlobalFixture::of(board::signed_out())));
+    });
+    w.settle();
+    assert!(w.rt.state.viewer.ui.is_some(), "the window keeps what it shows");
+    let (asked, requests) = (w.rt.state.actions.session.asked, w.fake.requests().len());
+    w.click("state-btn-0");
+    assert_eq!(w.rt.state.actions.session.asked, asked + 1, "the refusal is counted");
+    assert_eq!(w.fake.requests().len(), requests, "nothing was asked of Beebeeb");
+    assert!(w.drawn().contains("Couldn't decrypt this file"));
+
+    // The session is open again and Beebeeb answers: Try again downloads and shows the file.
+    let engine = w.engine.clone();
+    w.rt.update(move |s, _| {
+        s.global = crate::frames::global::Ui::new(Box::new(crate::engine_host::EngineGlobalSource::new(engine)));
+    });
+    w.settle();
+    w.hold.fails.store(false, Ordering::SeqCst);
+    w.click("state-btn-0");
+    w.until_drawn(NOTE_WORDS);
+    assert!(!w.drawn().contains("Couldn't decrypt this file"));
+}
+
+#[test]
+fn a_text_longer_than_the_window_is_read_to_its_end_by_scrolling() {
+    let mut w = window("scroll");
+    sign_in(&w.engine, &w.first, TEST_PHRASE);
+    w.settle();
+    w.open_row(LONG_NAME);
+    w.until_drawn("invented line 1 of the long file");
+    // Where the last line is drawn, if it is inside the window at all.
+    let last_line_top = |w: &Window| {
+        w.rt.elements()
+            .into_iter()
+            .find(|e| !e.exiting && e.text.as_deref() == Some(LONG_END))
+            .map(|e| e.rect[1])
+    };
+    let body =
+        w.rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("viewer-body"))
+            .expect("the text's body")
+            .rect;
+    let (x, y, bottom) = (body[0] + body[2] / 2.0, body[1] + body[3] / 2.0, body[1] + body[3]);
+    assert!(
+        last_line_top(&w).is_none_or(|top| top >= bottom),
+        "before scrolling the last line is below the window"
+    );
+    // The wheel over the text, far enough for 300 lines (either sign of the toolkit's wheel).
+    for dy in [100_000.0, -200_000.0] {
+        if last_line_top(&w).is_some_and(|top| top < bottom) {
+            break;
+        }
+        w.rt.wheel(x, y, dy);
+        w.settle();
+    }
+    let top = last_line_top(&w).expect("the last line is drawn after scrolling");
+    assert!(
+        top >= body[1] && top < bottom,
+        "the last line is inside the text's viewport: {top}"
+    );
+}
+
+#[test]
+fn a_picture_is_shown_and_no_action_claims_a_state_that_was_not_read() {
+    let mut w = window("picture");
+    sign_in(&w.engine, &w.first, TEST_PHRASE);
+    w.settle();
+    w.open_row(PICTURE_NAME);
+    assert_eq!(w.route_item().as_deref(), Some(PICTURE));
+    // The photo's stage replaces "Decrypting" once the picture is decoded.
+    let began = Instant::now();
+    while !w.rt.elements().iter().any(|e| e.key.as_deref() == Some("photo")) {
+        assert!(began.elapsed() < Duration::from_secs(15), "the photo was never shown");
+        std::thread::sleep(Duration::from_millis(10));
+        w.settle();
+    }
+    let keys: Vec<String> = w.rt.elements().into_iter().filter_map(|e| e.key).collect();
+    assert!(
+        keys.iter().any(|k| k == "action-0") && keys.iter().any(|k| k == "action-2"),
+        "{keys:?}"
+    );
+    assert!(
+        !keys.iter().any(|k| k == "action-1"),
+        "no Offline / On this PC action for a state that was not read"
+    );
+    // The decoded picture is the source's, for this session.
+    let ui = w.rt.state.viewer.ui.as_ref().expect("the open file");
+    assert!(matches!(ui.file.body, Body::Photo(_)));
+    w.engine.lock();
+    w.settle();
+    w.assert_nothing_of_the_file("locked, the picture was shown");
 }

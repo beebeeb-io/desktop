@@ -190,10 +190,7 @@ impl<C: CredentialStores> Engine<C> {
         cancel: &AtomicBool,
     ) -> Result<OpenedFile, OpenFileError> {
         let turn = self.acct.session_generation();
-        if self.acct.auth_health.is_expired() {
-            return Err(OpenFileError::SessionEnded);
-        }
-        // The account-bound handle first, then the token and the key of the SAME session: copied under the
+        // The account-bound handle first (it answers nothing for a session the server ended), then the token and the key of the SAME session: copied under the
         // session's lock, and only while no session change happened since `turn` (the handle is that turn's or it
         // answers nothing). Both are copies of their own, wiped when this call ends (inside the call's client; the
         // key also in a `Zeroizing`).
@@ -224,8 +221,9 @@ impl<C: CredentialStores> Engine<C> {
                     }
                 })
             })
-            // The session changed while the download ran: what it answered was dropped (and wiped) in the handle.
-            .map_err(|_| OpenFileError::NotSignedIn)??;
+            // The session changed or ended while the download ran: what it answered was dropped (and wiped) in the
+            // handle, and the refusal keeps its kind.
+            .map_err(refused)??;
         let bytes = match fetched.map_err(failure)? {
             InMemoryOpen::Opened(bytes) => bytes,
             InMemoryOpen::TooLarge { size } => return Err(OpenFileError::TooLarge { size }),
