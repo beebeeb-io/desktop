@@ -579,6 +579,8 @@ fn the_backups_row_in_files_is_refused_by_the_window_too() {
             rt.state.toggle_keep_offline(&mut tx);
         }),
         ("Free up space", |rt| {
+            // No protected row of the fixture is on this PC; an engine's may be.
+            rt.state.listing.items[0].pc_status = Some("on_this_pc".into());
             let mut tx = rune::Tx::default();
             rt.state.free_up_space(&mut tx);
         }),
