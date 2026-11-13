@@ -222,6 +222,18 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// [`ApiClient::restore_file`] without reading the answer: `Ok` is any 2xx (200, or 202 for a group the server
+    /// restores in batches), whatever its body says. For a caller that only needs to know the restore was taken.
+    pub async fn restore_file_sent(&self, file_id: &str) -> anyhow::Result<()> {
+        self.client
+            .post(self.restore_file_url(FileId::new(file_id)))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     pub async fn permanent_delete_file(&self, file_id: &str, confirm_token: &str) -> anyhow::Result<()> {
         self.client
             .delete(self.permanent_file_url(FileId::new(file_id)))
