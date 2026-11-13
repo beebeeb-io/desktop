@@ -86,6 +86,9 @@ impl State {
         let Some(Dialog::Preview(panel)) = self.actions.dialog.clone() else {
             return;
         };
+        if self.needs_session(tx) {
+            return;
+        }
         self.close_dialog(tx);
         if let Err(why) = self.actions.source.open_with(&panel.item) {
             self.failed(Action::OpenWith, why, tx);

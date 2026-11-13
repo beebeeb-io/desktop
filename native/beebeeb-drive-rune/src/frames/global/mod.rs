@@ -292,6 +292,11 @@ impl State {
             return false;
         };
         self.global.ask(Intent::Frame(frame));
+        // The session ended: Sign in asks for the password (`frames::files::session`, DW-1109).
+        if frame == "DW-1109" {
+            self.sign_in_again();
+            return true;
+        }
         let event = match frame {
             "DW-0712" => Some(Event::OpenSettings(SettingsPane::Storage)),
             "DW-0741" => Some(Event::OpenSettings(SettingsPane::Backups)),
@@ -382,7 +387,11 @@ pub const FRAMES: &[Scene<State>] = &[
     ("DW-0104", |s| scene(s, source::board::storage_full())),
     ("DW-0105", |s| scene(s, source::board::signed_out())),
     ("DW-0106", |s| scene(s, source::board::backup_problem())),
-    ("DW-0118", |s| scene(s, source::board::loading())),
+    ("DW-0118", |s| {
+        scene(s, source::board::loading());
+        // The slim strip: what the first download's card (DW-1107) gives way to.
+        s.actions.first_load_strip = true;
+    }),
     // DW-0119: Lisbon trip as a grid, its thumbnails still to arrive.
     ("DW-0119", grid::scene),
     // DW-0121: offline, and Contract draft.pdf (online only) was opened.

@@ -7,6 +7,7 @@
 
 pub mod action_scenes;
 pub mod actions_data;
+pub mod browse_states;
 pub mod conflict;
 pub mod details;
 pub mod dialogs;
@@ -21,14 +22,20 @@ pub mod protected;
 pub mod protected_fixture;
 pub mod rename;
 pub mod reset;
+pub mod retry;
+pub mod session;
 pub mod share;
 pub mod sidebar;
+pub mod sorting;
 pub mod source;
 pub mod toolbar;
+pub mod uploads;
 pub mod window;
 
 #[cfg(test)]
 mod actions_tests;
+#[cfg(test)]
+mod browse_states_tests;
 #[cfg(test)]
 mod long_list_tests;
 #[cfg(test)]
@@ -38,7 +45,11 @@ mod rest_tests;
 #[cfg(test)]
 mod review_tests;
 #[cfg(test)]
+mod session_tests;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod uploads_tests;
 
 use std::collections::BTreeSet;
 
@@ -191,10 +202,24 @@ pub struct Actions {
     pub share_password: rune::TextEdit,
     /// Files answered since Two versions opened (DW-0429): the second reads "2 of 2".
     pub conflicts_done: usize,
+    /// Windows' picker to open (DW-0415, DW-0480): the shell takes it (`State::take_picker`).
+    pub picker: Option<uploads::PickerAsk>,
+    /// Files dragged over the list (DW-0481).
+    pub drop_hover: Option<uploads::DropHover>,
+    /// Uploads is open over the status line (DW-0427), and the row whose menu is open in it.
+    pub uploads_open: bool,
+    pub upload_menu: Option<String>,
+    /// Which session of this window this is: one more at each session's end (`reset.rs`). An
+    /// answer that was asked for under an earlier one (a picker that comes back late) is dropped.
+    pub session_no: u64,
     /// The protected folders: the open message, the section last seen (`protected.rs`).
     pub protected: protected::Ui,
     /// The letters typed in the list, which jump to a name (`long_list.rs`).
     pub typed: long_list::Typed,
+    /// The session ended: what was refused (`session.rs`).
+    pub session: session::Ui,
+    /// During the first download: something was opened, so the card gave way to the strip (DW-1107).
+    pub first_load_strip: bool,
     /// A board frame that draws a long list from this row on (DW-0420b: the gate draws one frame
     /// and cannot scroll). 0 in the app.
     pub board_first_row: usize,
@@ -227,8 +252,15 @@ impl Actions {
             host: names::Host::this(),
             share_password: rune::TextEdit::new("").secure(),
             conflicts_done: 0,
+            picker: None,
+            drop_hover: None,
+            uploads_open: false,
+            upload_menu: None,
+            session_no: 0,
             protected: protected::Ui::default(),
             typed: long_list::Typed::default(),
+            session: session::Ui::default(),
+            first_load_strip: false,
             board_first_row: 0,
         }
     }
@@ -398,6 +430,9 @@ impl State {
     pub(super) fn intent(&mut self, intent: Intent) {
         use crate::shell::app::{Event, Route, Section, SettingsPane};
         let Intent::Frame(frame) = &intent;
+        if self.refuses_frame(frame) {
+            return;
+        }
         let frame: &'static str = frame;
         // The status line shows the b's flyout (DW-0401 to DW-1201): a second surface, no route.
         let flyout = frame == "DW-1201";
@@ -422,6 +457,9 @@ impl State {
             "DW-0413" => {
                 self.begin_versions();
             }
+            // Windows draws these two: the request for its picker, with our words on it.
+            "DW-0415" => self.ask_picker(uploads::PickerKind::Files),
+            "DW-0480" => self.ask_picker(uploads::PickerKind::Folder),
             _ => {}
         }
         if flyout {
@@ -435,7 +473,10 @@ impl State {
     /// May things be added to the folder shown? Not when it could not be read, and not to a
     /// folder the source protects (DW-0414: "New is dimmed in Backups, service folders, Trash…").
     pub fn can_add(&self) -> bool {
-        self.list_error.is_none() && self.actions.source.can_add(self.listing.folder.id.as_deref())
+        // A protected folder takes nothing new, whatever the source would accept (`protected.rs`).
+        self.list_error.is_none()
+            && !self.in_protected_folder()
+            && self.actions.source.can_add(self.listing.folder.id.as_deref())
     }
 
     pub(super) fn selected_items(&self) -> Vec<DriveItem> {
@@ -547,6 +588,10 @@ impl State {
 
     /// Show the folder with this id (`None`: the root), leaving the one shown to Back.
     pub fn open_folder(&mut self, id: Option<String>) {
+        // A folder is read from the source: not while the session ended (`session.rs`).
+        if self.refused_without_session() {
+            return;
+        }
         self.files.back.push(self.listing.folder.id.clone());
         self.actions.forward.clear();
         (self.listing, self.list_error) = crate::load(self.source.as_ref(), id.as_deref());
@@ -555,6 +600,9 @@ impl State {
 
     /// Back, leaving the folder shown to Forward.
     pub fn back(&mut self) -> bool {
+        if self.refused_without_session() {
+            return false;
+        }
         let here = self.listing.folder.id.clone();
         if !self.go_back() {
             return false;
@@ -570,6 +618,9 @@ impl State {
 
     /// Forward: the folder Back left.
     pub fn forward(&mut self) -> bool {
+        if self.refused_without_session() {
+            return false;
+        }
         let Some(id) = self.actions.forward.pop() else {
             return false;
         };
@@ -592,11 +643,22 @@ impl State {
     /// Open the selection: one folder opens in place; files go to their apps, all of them.
     /// Returns whether the folder shown changed.
     pub fn open_selection(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return false;
+        }
         // A file that changed in two places: the choice first (DW-0429).
         if self.review_selected_conflict() {
             return false;
         }
         let items = self.selected_items();
+        // Opening something ends the first download's card (DW-1107: "shrinks to a strip").
+        self.actions.first_load_strip |= !items.is_empty();
+        // Without a connection a file that is not on this PC says so, and is not asked for (DW-1108).
+        if let Some(item) = items.iter().find(|item| browse_states::needs_connection(self, item)) {
+            let (id, name) = (item.id.clone(), item.name.clone());
+            self.block_preview(id, name);
+            return false;
+        }
         let lead = self.selected.and_then(|i| self.listing.items.get(i)).cloned();
         let files: Vec<DriveItem> = items.iter().filter(|i| !i.is_folder).cloned().collect();
         let folder = match (&items[..], &lead) {
@@ -643,6 +705,9 @@ impl State {
         if !self.can_preview() {
             return false;
         }
+        if self.refused_without_session() {
+            return true;
+        }
         // Without a connection a file that is not on this PC says so (`frames::global`, DW-0121).
         if crate::frames::global::preview_needs_connection(self) {
             return true;
@@ -657,6 +722,9 @@ impl State {
     /// Move the selection to Trash, without a question: Undo and Trash both bring it back.
     /// Like the other actions it answers whether anything is to be drawn: a change, or the message of a failure.
     pub fn trash_selection(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let rows = self.selected_rows();
         let items = self.selected_items();
         if items.is_empty() {
@@ -683,6 +751,9 @@ impl State {
 
     /// Undo the last Move to Trash: every row back where it was (in the order the folder has now).
     pub fn undo(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let rows = std::mem::take(&mut self.actions.undo);
         if rows.is_empty() {
             return false;
@@ -708,6 +779,9 @@ impl State {
 
     /// Duplicate the selection: each copy stands next to its original, selected (DW-0406).
     pub fn duplicate_selected(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let items = self.selected_items();
         if items.is_empty() {
             return false;
@@ -738,10 +812,18 @@ impl State {
 
     /// Make the selection available offline, or Remove from this PC when all of it already is.
     pub fn toggle_keep_offline(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let rows = self.selected_rows();
         let items = self.selected_items();
         if items.is_empty() {
             return false;
+        }
+        // Refused before the source is asked (`protected.rs`): the panel's switch and the menu.
+        if self.protects(&items) {
+            self.failed(Action::KeepOffline, ActionError::Protected, tx);
+            return true;
         }
         let keep = !self.selection_is_kept();
         if let Err(why) = self.actions.source.keep_offline(&items, keep) {
@@ -765,6 +847,9 @@ impl State {
 
     /// Copy the selection's share link. "Link copied" is said once it is on the clipboard, not before.
     pub fn copy_link(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let items = self.selected_items();
         if items.is_empty() {
             return false;
@@ -782,6 +867,9 @@ impl State {
     }
 
     pub fn show_in_file_explorer(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let items = self.selected_items();
         if items.is_empty() {
             return false;
@@ -803,6 +891,9 @@ impl State {
     /// Free up space: the copies of the selection on this PC go; the items stay in Beebeeb and
     /// download again when opened. What was kept on this PC is no longer kept.
     pub fn free_up_space(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let rows = self.selected_rows();
         let items: Vec<DriveItem> = self
             .selected_items()
@@ -811,6 +902,11 @@ impl State {
             .collect();
         if items.is_empty() {
             return false;
+        }
+        // Refused before the source is asked (`protected.rs`).
+        if self.protects(&items) {
+            self.failed(Action::FreeUpSpace, ActionError::Protected, tx);
+            return true;
         }
         if let Err(why) = self.actions.source.free_up_space(&items) {
             self.failed(Action::FreeUpSpace, why, tx);
@@ -828,6 +924,9 @@ impl State {
 
     /// The toolbar's Open in File Explorer: the folder shown, in Explorer.
     pub fn open_in_file_explorer(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let folder = self.listing.folder.id.clone();
         if let Err(why) = self.actions.source.open_in_file_explorer(folder.as_deref()) {
             self.failed(Action::OpenInFileExplorer, why, tx);
@@ -843,7 +942,14 @@ impl State {
     /// Files dropped from File Explorer: into `folder` (`None`: the root). A folder that takes
     /// nothing refuses the drop, silently (DW-0481: "the row does not light up").
     pub fn upload(&mut self, folder: Option<String>, files: &[std::path::PathBuf], tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return false;
+        }
         if files.is_empty() || self.list_error.is_some() || !self.actions.source.can_add(folder.as_deref()) {
+            return false;
+        }
+        // Nothing is dropped into a protected folder (the Backups row in Files, or inside it).
+        if self.actions.source.protection(folder.as_deref(), None).is_some() {
             return false;
         }
         self.forget_undo();
@@ -852,142 +958,22 @@ impl State {
             self.failed(Action::Upload, why, tx);
             return false;
         }
+        self.actions.drop_hover = None;
         true
-    }
-
-    /// Try again, on the message of a failure: the same action, on what is selected now.
-    pub fn retry(&mut self, tx: &mut Tx) {
-        let Some(Toast::Failed(action, _)) = self.actions.toast.take() else {
-            return;
-        };
-        match action {
-            Action::Trash => {
-                self.trash_selection(tx);
-            }
-            Action::Restore => {
-                self.undo(tx);
-            }
-            Action::Duplicate => {
-                self.duplicate_selected(tx);
-            }
-            Action::KeepOffline | Action::RemoveOffline => {
-                self.toggle_keep_offline(tx);
-            }
-            Action::CopyLink => {
-                self.copy_link(tx);
-            }
-            // The Share dialog again, with the items and the choices it had. No link is made
-            // here: a plain link would drop the password, the access and the end date.
-            Action::ShareLink => self.share_again(tx),
-            Action::Open => {
-                self.open_selection(tx);
-            }
-            Action::ShowInFileExplorer => {
-                self.show_in_file_explorer(tx);
-            }
-            Action::Upload => {
-                if let Some((folder, files)) = self.actions.retry_upload.take() {
-                    self.upload(folder, &files, tx);
-                }
-            }
-            Action::Rename => {
-                self.begin_rename(tx);
-            }
-            Action::NewFolder => {
-                self.begin_new_folder();
-            }
-            Action::Move => {
-                self.begin_move(tx);
-            }
-            Action::FreeUpSpace => {
-                self.free_up_space(tx);
-            }
-            Action::OpenInFileExplorer => {
-                self.open_in_file_explorer(tx);
-            }
-            // These are asked again from their own dialog: the message goes, nothing is repeated blind.
-            Action::RestoreVersion | Action::OpenWith | Action::KeepVersion | Action::Invite => {}
-        }
-    }
-
-    /// Change this folder's sort and put the rows in that order.
-    pub fn set_sort(&mut self, sort: Sort) {
-        // A protected folder keeps its owner's order: no choice of the Sort menu applies there.
-        if self.in_protected_folder() {
-            return;
-        }
-        self.actions.sort = sort;
-        self.actions.source.set_sort(self.listing.folder.id.as_deref(), sort);
-        self.forget_undo();
-        self.apply_sort();
-    }
-
-    /// A click on a column header: sort by it; a second click reverses the order (DW-0404).
-    pub fn sort_by_column(&mut self, by: SortBy) {
-        let sort = self.actions.sort;
-        self.set_sort(if sort.by == by {
-            Sort {
-                reversed: !sort.reversed,
-                ..sort
-            }
-        } else {
-            Sort {
-                by,
-                reversed: false,
-                ..sort
-            }
-        });
-    }
-
-    /// Put the rows in the folder's order; what was selected stays selected. Backups stays the
-    /// first row whatever the sort (DW-0404).
-    pub fn apply_sort(&mut self) {
-        // A protected folder stays in the order its owner gives it (devices, then services; the
-        // years newest first: DW-0422, DW-0424).
-        if self.in_protected_folder() {
-            return;
-        }
-        let sort = self.actions.sort;
-        let id_of = |s: &State, row: usize| s.listing.items.get(row).map(|i| i.id.clone());
-        let lead = self.selected.and_then(|i| id_of(self, i));
-        let anchor = self.actions.anchor.and_then(|i| id_of(self, i));
-        let selected: Vec<String> = self.actions.selection.iter().filter_map(|&i| id_of(self, i)).collect();
-        let kind = |i: &DriveItem| {
-            i.name
-                .rsplit_once('.')
-                .map(|(_, ext)| ext.to_lowercase())
-                .unwrap_or_default()
-        };
-        self.listing.items.sort_by(|a, b| {
-            use std::cmp::Ordering;
-            let pinned = b.is_protected.cmp(&a.is_protected);
-            let folders = if sort.folders_first {
-                b.is_folder.cmp(&a.is_folder)
-            } else {
-                Ordering::Equal
-            };
-            let name = long_list::sort_key(&a.name).cmp(&long_list::sort_key(&b.name));
-            let by = match sort.by {
-                SortBy::Name => name,
-                // Newest first, largest first: the board's first Order choice for these.
-                SortBy::DateChanged => b.modified_at.cmp(&a.modified_at),
-                SortBy::Size => b.size.unwrap_or(0).cmp(&a.size.unwrap_or(0)),
-                SortBy::Type => kind(a).cmp(&kind(b)),
-            };
-            let by = if sort.reversed { by.reverse() } else { by };
-            pinned.then(folders).then(by).then(name)
-        });
-        let row_of = |s: &State, id: &String| s.listing.items.iter().position(|i| &i.id == id);
-        self.selected = lead.and_then(|id| row_of(self, &id));
-        self.actions.anchor = anchor.and_then(|id| row_of(self, &id));
-        self.actions.selection = selected.iter().filter_map(|id| row_of(self, id)).collect();
     }
 
     /// The entries of the open menu.
     pub fn menu_entries(&self, kind: MenuKind) -> Vec<crate::ui::menu::Entry> {
         match kind {
             MenuKind::File => menus::file_menu(self),
-            MenuKind::Sort => menus::sort_menu(self.actions.sort),
+            // A protected folder keeps its owner's order: the choices are shown, dimmed.
+            MenuKind::Sort => {
+                let fixed = self.in_protected_folder();
+                menus::sort_menu(self.actions.sort)
+                    .into_iter()
+                    .map(|entry| entry.dimmed(fixed))
+                    .collect()
+            }
             MenuKind::New => menus::new_menu(),
         }
     }
@@ -1011,8 +997,7 @@ impl State {
             "preview" => {
                 self.preview();
             }
-            "share" if self.protects_selection() => self.failed(Action::CopyLink, ActionError::Protected, tx),
-            "share" => self.intent(Intent::Frame("DW-0407")),
+            "share" => self.ask_share(tx),
             "copy-link" => {
                 self.copy_link(tx);
             }
@@ -1197,4 +1182,8 @@ pub const SCENES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-0408", action_scenes::preview),
     ("DW-0408b", action_scenes::no_preview),
     ("DW-0429", action_scenes::two_versions),
+    // Uploads (lane files-actions): a drag over the list, uploads in their folder, the panel.
+    ("DW-0481", action_scenes::drag_over_documents),
+    ("DW-0426", action_scenes::uploading),
+    ("DW-0427", action_scenes::uploads_panel),
 ];
