@@ -135,10 +135,15 @@ mod windows {
                 .expect("reader")
                 .read_line(&mut line)
                 .expect("the probe's answer is readable");
-            assert!(
-                read > 0,
-                "the probe ended instead of answering: that is a broken instrument, not a block"
-            );
+            if read == 0 {
+                let code = match &self.process {
+                    Process::Confined(child) => child.wait_timeout(BOUND).ok().flatten().map(|status| status.code()),
+                    Process::Plain(_) => None,
+                };
+                panic!(
+                    "the probe ended instead of answering (exit code {code:x?}): that is a broken instrument, not a block"
+                );
+            }
             line.trim().to_string()
         }
 

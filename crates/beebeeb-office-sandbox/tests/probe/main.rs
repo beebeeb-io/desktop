@@ -59,14 +59,58 @@ fn read(path: &str) -> String {
     }
 }
 
+/// Starts `program` with `/c exit` and waits for it. On Windows through the system call itself, so the answer
+/// is the system's own code and nothing the standard library puts in front of it.
+#[cfg(windows)]
 fn spawn(program: &str) -> String {
-    let attempt = Command::new(program)
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, DETACHED_PROCESS, PROCESS_INFORMATION, STARTUPINFOW, WaitForSingleObject,
+    };
+    let application: Vec<u16> = program.encode_utf16().chain([0]).collect();
+    let mut command: Vec<u16> = format!("\"{program}\" /c exit").encode_utf16().chain([0]).collect();
+    let startup = STARTUPINFOW {
+        cb: size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut created = PROCESS_INFORMATION::default();
+    // SAFETY: `application` and `command` are terminated UTF-16 buffers (`command` writable, as the call
+    // requires); `startup` is initialised with its size; `created` receives the handles; no handle is inherited.
+    let ok = unsafe {
+        CreateProcessW(
+            application.as_ptr(),
+            command.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            DETACHED_PROCESS,
+            std::ptr::null(),
+            std::ptr::null(),
+            &startup,
+            &mut created,
+        )
+    };
+    if ok == 0 {
+        return code(&std::io::Error::last_os_error());
+    }
+    // SAFETY: both handles were just returned open by the call above and are closed once.
+    unsafe {
+        WaitForSingleObject(created.hProcess, 10_000);
+        CloseHandle(created.hThread);
+        CloseHandle(created.hProcess);
+    }
+    "ok".into()
+}
+
+#[cfg(not(windows))]
+fn spawn(program: &str) -> String {
+    match Command::new(program)
         .args(["/c", "exit"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
-    match attempt {
+        .spawn()
+    {
         Ok(mut child) => {
             let _ = child.wait();
             "ok".into()
