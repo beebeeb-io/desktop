@@ -128,6 +128,9 @@ impl State {
     /// Move… (DW-0409): the dialog on the root's folders, the first one chosen. Nothing that is
     /// protected moves (DW-0425 says why, in its own frame).
     pub fn begin_move(&mut self, tx: &mut Tx) -> bool {
+        if self.needs_session(tx) {
+            return true;
+        }
         let items = self.selected_items();
         if items.is_empty() {
             return false;
@@ -278,6 +281,9 @@ impl State {
 
     /// New folder (DW-0417), in the folder shown: the dialog, "Untitled folder" selected.
     pub fn begin_new_folder(&mut self) -> bool {
+        if self.refused_without_session() {
+            return true;
+        }
         if !self.can_add() {
             return false;
         }

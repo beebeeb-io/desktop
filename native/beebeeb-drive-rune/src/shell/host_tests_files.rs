@@ -280,6 +280,25 @@ const PIECES: &[Piece] = &[
         held: |s| s.frames.find.open || !s.search.text.is_empty() || s.frames.find.selected.is_some(),
     },
     Piece {
+        shell_keeps_it_across_a_lock: false,
+        name: "the session-ended rows and refusal count",
+        put: |rt| {
+            rt.update(|s, _| {
+                // The other answer: the rows are held out of the listing while the session ended.
+                s.actions.session.keep_the_list = Some(false);
+                s.actions.session.asked = 3;
+                // Take the listing into session::Ui::held as poll() would.
+                crate::frames::files::session::poll(s);
+            });
+            settle(rt);
+            assert!(
+                rt.state.actions.session.asked > 0 || rt.state.listing.items.is_empty(),
+                "session-ended state not set up"
+            );
+        },
+        held: |s| s.actions.session.asked > 0 || s.listing.items.is_empty(),
+    },
+    Piece {
         shell_keeps_it_across_a_lock: true,
         name: "the shell's Two versions dialog",
         put: |rt| {
@@ -333,7 +352,7 @@ fn every_ending_of_a_session_takes_every_piece_of_the_files_window_with_it() {
             cases += 1;
         }
     }
-    assert_eq!(cases, 3 * 20, "every ending × every piece ran");
+    assert_eq!(cases, 3 * 21, "every ending × every piece ran");
     assert_eq!(
         kept_by_the_shell, 1,
         "one case is the shell's rule, not this window's: Two versions across a lock"

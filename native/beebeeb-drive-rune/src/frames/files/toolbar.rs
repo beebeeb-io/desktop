@@ -27,6 +27,8 @@ pub fn toolbar(s: &State, t: &Theme, trailing_inset: f32) -> El {
         1 => "1 item".to_string(),
         n => format!("{n} items"),
     };
+    // While the list is still arriving in the root, the title says how far it is (DW-1107).
+    let count = super::browse_states::title_words(s).unwrap_or(count);
     let mut title = col().key("folder-info").px(4.0).min_w(0.0);
     title = if s.listing.path.len() > 1 {
         // Inside a folder the title is the path (`.mk-crumbs`): each folder above is a way up.

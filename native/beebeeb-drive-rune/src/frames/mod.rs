@@ -41,6 +41,8 @@ pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
             files::SCENES,
             files::protected::SCENES,
             files::long_list::SCENES,
+            files::session::SCENES,
+            files::browse_states::SCENES,
             search::FRAMES,
             global::FRAMES,
             settings::FRAMES,

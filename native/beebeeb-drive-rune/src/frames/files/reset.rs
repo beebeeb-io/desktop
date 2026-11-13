@@ -85,7 +85,9 @@ pub fn end_session(s: &mut State) {
     forget_session_ended_rows(s);
 }
 
-/// HOOK for the session-ended window (`frames/files/session.rs`, PR 372, not merged here): the
-/// rows it holds of the session that ended are dropped HERE when another session starts. Empty
-/// until that PR is in; its lane fills this body and nothing else has to change.
-fn forget_session_ended_rows(_s: &mut State) {}
+/// The session-ended window (`frames/files/session.rs`, PR 372) holds rows it took out of the
+/// listing while `KEEP_THE_LIST` was false. A sign-out or account switch drops them so they
+/// cannot replace a new listing when the next session starts. The refusal count resets too.
+fn forget_session_ended_rows(s: &mut State) {
+    s.actions.session = super::session::Ui::default();
+}

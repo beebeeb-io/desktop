@@ -275,9 +275,22 @@ pub fn show_backups(s: &mut State) -> bool {
 /// sidebar's Backups (Ctrl+4) shows the Backups folder, opening the Backups row in Files moves
 /// the sidebar to Backups, and Back out of it moves it to Files again.
 pub fn poll(s: &mut State) -> bool {
+    if super::session::poll(s) {
+        return true;
+    }
     let Some(root) = s.actions.source.backups_root() else {
         return false;
     };
+    // No folder is read while the session ended (`session.rs`): the sidebar's Backups is refused
+    // like every other ask, and the window stays on the list it has.
+    if s.session_ended() {
+        let asks_backups = matches!(s.shell.app.screen(), Screen::Drive(r) if r.section == Section::Backups);
+        if asks_backups && !inside(s, &root) && s.refused_without_session() {
+            crate::shell::host::dispatch(s, Event::Navigate(Route::section(Section::Files)));
+            return true;
+        }
+        return false;
+    }
     let Screen::Drive(route) = s.shell.app.screen() else {
         return false;
     };
@@ -292,8 +305,9 @@ pub fn poll(s: &mut State) -> bool {
     }
     let (target, load) = match (section, within, seen == Some(section)) {
         // Away from a folder that could not be read: the section's own folder, read again.
-        (Section::Backups, _, false) if unread => (Section::Backups, Some(Some(root))),
-        (Section::Files, _, false) if unread => (Section::Files, Some(None)),
+        // (Not on the first poll: nothing was left yet, and the folder was just asked for.)
+        (Section::Backups, _, false) if unread && seen.is_some() => (Section::Backups, Some(Some(root))),
+        (Section::Files, _, false) if unread && seen.is_some() => (Section::Files, Some(None)),
         // The section changed (the sidebar, a shortcut, the shell's back): the folder follows.
         (Section::Backups, false, false) => (Section::Backups, Some(Some(root))),
         (Section::Files, true, false) => (Section::Files, Some(None)),
