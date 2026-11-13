@@ -31,7 +31,8 @@ pulldown-cmark = { version = "0.13", default-features = false }
 # Renders a PDF's pages for the viewer (`engine_host/viewer_pdf.rs`): pure Rust (no C or C++ is compiled, no `-sys`
 # crate in its tree), Apache-2.0 OR MIT, from bytes in memory, no file or network access of its own. Pinned to the
 # exact version that was measured (a 0.x crate with breaking releases). Its default features bundle the 14 standard
-# Latin fonts and the CMap tables (both BSD-3-Clause; the attribution ships in `THIRD-PARTY-NOTICES` with the app).
+# Latin fonts and the CMap tables (both BSD-3-Clause; their notices are in `THIRD-PARTY-NOTICES.md`, which a
+# release has to carry with the app).
 hayro = "=0.9.0"
 # Decodes the bundled b glyph for the notification-area icons (`shell/tray_icon.rs`).
 png = "0.18"
