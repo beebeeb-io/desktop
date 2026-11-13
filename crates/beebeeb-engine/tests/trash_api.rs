@@ -32,6 +32,8 @@ const SERVER_ERROR: u8 = 1;
 const SESSION_ENDED: u8 = 2;
 /// A move to Trash is answered as Beebeeb answers for a protected folder.
 const PROTECTED: u8 = 3;
+/// A move to Trash is made and answered 204 with no body.
+const NO_BODY: u8 = 4;
 
 const DOCS: &str = "a0000000-0000-4000-8000-000000000101";
 const CONTRACT: &str = "a0000000-0000-4000-8000-000000000102";
@@ -80,6 +82,10 @@ fn account(email: &str) -> Account {
             SESSION_ENDED => return Reply::json(401, json!({ "error": BODY_MARKER })),
             PROTECTED if is_trash(req) => {
                 return Reply::json(409, json!({ "error": "protected_folder", "message": BODY_MARKER }));
+            }
+            NO_BODY if is_trash(req) => {
+                let made = rest(req);
+                return if made.status == 200 { Reply::empty(204) } else { made };
             }
             _ => {}
         }
@@ -709,6 +715,17 @@ fn a_session_bound_trash_fails_by_kind() {
     }
     account.mode.store(ANSWER, Ordering::SeqCst);
     assert_eq!(trashed(&engine), Vec::<String>::new(), "refused: nothing is in Trash");
+
+    // Made, and answered without a body to read: it is in Trash, and the next item is sent.
+    account.mode.store(NO_BODY, Ordering::SeqCst);
+    engine
+        .trash_items_for(now, &[CONTRACT, DOCS])
+        .expect("a 2xx is a trash that was made");
+    account.mode.store(ANSWER, Ordering::SeqCst);
+    assert_eq!(trashed(&engine), [DOCS, CONTRACT]);
+    for id in [DOCS, CONTRACT] {
+        assert!(account.vault.restore_item(id));
+    }
 
     assert_eq!(
         engine.trash_items_for(now, &[OLD]),

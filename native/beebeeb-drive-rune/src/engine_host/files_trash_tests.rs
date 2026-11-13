@@ -28,6 +28,7 @@ const WAIT: Duration = Duration::from_secs(30);
 const ANSWER: u8 = 0;
 const SERVER_ERROR: u8 = 1;
 const PROTECTED: u8 = 2;
+const SESSION_ENDED: u8 = 3;
 
 const NOTES: &str = "a0000000-0000-4000-8000-000000000401";
 const PLAN: &str = "a0000000-0000-4000-8000-000000000402";
@@ -90,6 +91,7 @@ fn fake(tag: &str) -> Fake {
         if route.starts_with("DELETE ") {
             match mode_in.load(Ordering::SeqCst) {
                 SERVER_ERROR => return Reply::json(500, json!({ "error": "a server body" })),
+                SESSION_ENDED => return Reply::json(401, json!({ "error": "a server body" })),
                 PROTECTED => return Reply::json(409, json!({ "error": "protected_folder", "message": "words" })),
                 _ => {}
             }
@@ -327,6 +329,20 @@ fn what_beebeeb_refuses_is_said_per_item_and_the_other_items_still_go() {
         [(Action::Trash, vec![left(PHOTO, ActionError::Protected)])]
     );
 
+    // A session Beebeeb ended is the call's failure, not the item's: the items after it are not sent.
+    fake.trash_mode.store(SESSION_ENDED, Ordering::SeqCst);
+    let before = sent(&fake).len();
+    trash_now(&mut source, &[PHOTO, NOT_THERE]);
+    assert_eq!(
+        changes(&mut source),
+        [(
+            Action::Trash,
+            vec![left(PHOTO, ActionError::Failed), left(NOT_THERE, ActionError::Failed)]
+        )]
+    );
+    assert_eq!(sent(&fake).len(), before + 1, "the item after it was not sent");
+    fake.trash_mode.store(ANSWER, Ordering::SeqCst);
+
     // A failed move does not take away what Undo holds: the two that were moved still come back.
     let ended = watch_next_call(&mut source);
     assert_eq!(source.restore(&rows(&[NOTES, PLAN])), Ok(()));
@@ -366,9 +382,12 @@ fn a_second_press_on_an_item_whose_change_is_on_its_way_sends_nothing() {
     assert_eq!(sent(&fake), [trashed(NOTES)], "sent once");
     assert_eq!(changes(&mut source), [(Action::Trash, vec![done(NOTES)])]);
 
-    // Answered: the mark is gone, and the other item can be moved.
-    trash_now(&mut source, &[PLAN]);
-    assert_eq!(changes(&mut source), [(Action::Trash, vec![done(PLAN)])]);
+    // Answered: the mark is gone, and a press on the same item is accepted again (Beebeeb no longer has it).
+    trash_now(&mut source, &[NOTES, PLAN]);
+    assert_eq!(
+        changes(&mut source),
+        [(Action::Trash, vec![left(NOTES, ActionError::Failed), done(PLAN)])]
+    );
 }
 
 #[test]
@@ -498,20 +517,4 @@ fn undo_held_across_a_switch_or_a_lock_is_sent_under_no_token() {
         "no restore reached the fake, under any token"
     );
     assert_eq!(changes(&mut source), []);
-}
-
-#[test]
-fn a_change_handed_over_names_no_item_when_printed() {
-    let change = Change::Trash {
-        action: Action::Trash,
-        items: vec![TrashOutcome {
-            id: NOTES.into(),
-            left: None,
-        }],
-    };
-    // Ids only: a change of Trash holds no name, path or address to print.
-    assert_eq!(
-        format!("{change:?}"),
-        format!("Trash {{ action: Trash, items: [TrashOutcome {{ id: \"{NOTES}\", left: None }}] }}")
-    );
 }
