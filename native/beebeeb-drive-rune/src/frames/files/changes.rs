@@ -81,3 +81,140 @@ impl State {
         (!copies.is_empty(), failures, local)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::source::{Account, Counts, Details, FilesSource, NoEngine, StorageSplit};
+    use super::super::tests::runtime_of;
+    use super::*;
+    use crate::source::DriveItem;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    type R = Result<(), ActionError>;
+
+    /// A source that answers later, as the engine's does: every action is accepted, and what it did is what
+    /// the test puts in `later`. An upload is refused when `left` says what was not copied.
+    #[derive(Default)]
+    struct Later {
+        later: Arc<Mutex<Vec<Change>>>,
+        left: Option<Vec<PathBuf>>,
+    }
+
+    #[rustfmt::skip]
+    impl FilesSource for Later {
+        fn counts(&self) -> Option<Counts> { None }
+        fn account(&self) -> Option<Account> { None }
+        fn storage_split(&self) -> Option<StorageSplit> { None }
+        fn sync_state(&self) -> Option<String> { None }
+        fn details(&self, item: &DriveItem, folder: &str) -> Details { NoEngine.details(item, folder) }
+        fn changed_label(&self, _: &DriveItem) -> Option<String> { None }
+        fn can_add(&self, _: Option<&str>) -> bool { true }
+        fn sort_of(&self, _: Option<&str>) -> Option<super::super::Sort> { None }
+        fn set_sort(&mut self, _: Option<&str>, _: super::super::Sort) {}
+        fn trash(&mut self, _: &[DriveItem]) -> R { Ok(()) }
+        fn restore(&mut self, _: &[DriveItem]) -> R { Ok(()) }
+        fn duplicate(&mut self, _: &[DriveItem], _: &[&str]) -> R { Ok(()) }
+        fn keep_offline(&mut self, _: &[DriveItem], _: bool) -> R { Ok(()) }
+        fn copy_link(&mut self, _: &[DriveItem]) -> R { Ok(()) }
+        fn open(&mut self, _: &[DriveItem]) -> R { Ok(()) }
+        fn show_in_file_explorer(&mut self, _: &[DriveItem]) -> R { Ok(()) }
+        fn upload(&mut self, _: Option<&str>, _: &[PathBuf]) -> R {
+            if self.left.is_some() { Err(ActionError::Failed) } else { Ok(()) }
+        }
+        fn upload_left(&mut self) -> Option<Vec<PathBuf>> { self.left.take() }
+        fn new_folder(&mut self, _: Option<&str>, _: &str) -> R { Ok(()) }
+        fn rename(&mut self, _: &DriveItem, _: &str) -> R { Ok(()) }
+        fn move_to(&mut self, _: &[DriveItem], _: Option<&str>) -> R { Ok(()) }
+        fn free_up_space(&mut self, _: &[DriveItem]) -> R { Ok(()) }
+        fn open_in_file_explorer(&mut self, _: Option<&str>) -> R { Ok(()) }
+        fn changes(&mut self) -> Vec<Change> { std::mem::take(&mut self.later.lock().unwrap()) }
+        fn answers_later(&self) -> bool { true }
+    }
+
+    #[test]
+    fn nothing_of_a_change_is_drawn_before_the_source_said_what_it_did_and_then_per_item() {
+        let later = Arc::new(Mutex::new(Vec::new()));
+        let mut state = crate::init();
+        state.actions.source = Box::new(Later {
+            later: later.clone(),
+            left: None,
+        });
+        let mut rt = runtime_of(state);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let out = seen.clone();
+        rt.update(move |s, tx| {
+            for row in 0..2 {
+                s.listing.items[row].pc_status = Some("on_this_pc".into());
+                s.actions.selection.insert(row);
+            }
+            assert!(s.free_up_space(tx));
+            *out.lock().unwrap() = vec![s.listing.items[0].id.clone(), s.listing.items[1].id.clone()];
+        });
+        let ids = seen.lock().unwrap().clone();
+        rt.update(|s, _| {
+            assert!(
+                !super::super::protected::poll(s),
+                "a frame with no answer changed something"
+            );
+            assert_eq!(
+                s.listing.items[0].pc_status.as_deref(),
+                Some("on_this_pc"),
+                "drawn before it was done"
+            );
+            assert_eq!(s.actions.toast, None, "said before it was done");
+        });
+        // The engine freed the first and left the second.
+        later.lock().unwrap().push(Change::Local {
+            action: Action::FreeUpSpace,
+            done: vec![ids[0].clone()],
+            failed: 1,
+        });
+        rt.update(|s, _| {
+            assert!(super::super::protected::poll(s));
+            assert_eq!(s.listing.items[0].pc_status.as_deref(), Some("online_only"));
+            assert_eq!(
+                s.listing.items[1].pc_status.as_deref(),
+                Some("on_this_pc"),
+                "the item left alone was drawn as freed"
+            );
+            assert_eq!(
+                s.actions.toast,
+                Some(Toast::Failed(Action::FreeUpSpace, ActionError::NotAll))
+            );
+        });
+        // All of it done: the plain message.
+        later.lock().unwrap().push(Change::Local {
+            action: Action::FreeUpSpace,
+            done: vec![ids[1].clone()],
+            failed: 0,
+        });
+        rt.update(|s, _| {
+            assert!(super::super::protected::poll(s));
+            assert_eq!(s.listing.items[1].pc_status.as_deref(), Some("online_only"));
+            assert_eq!(s.actions.toast, Some(Toast::FreedUp));
+        });
+    }
+
+    #[test]
+    fn try_again_after_a_drop_that_went_in_partly_holds_only_what_was_not_copied() {
+        let files: Vec<PathBuf> = ["one.pdf", "two.pdf", "three.pdf"].iter().map(PathBuf::from).collect();
+        let mut state = crate::init();
+        state.actions.source = Box::new(Later {
+            later: Arc::default(),
+            left: Some(files[1..].to_vec()),
+        });
+        let mut rt = runtime_of(state);
+        rt.update(|s, tx| {
+            assert!(!s.upload(None, &files, tx));
+            assert_eq!(
+                s.actions.retry_upload,
+                Some((None, files[1..].to_vec())),
+                "Try again would copy a file twice"
+            );
+            // Try again goes in (the source refuses once): nothing is left to repeat.
+            s.retry(tx);
+            assert_eq!(s.actions.retry_upload, None);
+        });
+    }
+}

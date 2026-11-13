@@ -57,7 +57,7 @@ use std::collections::BTreeSet;
 use crate::State;
 use crate::source::DriveItem;
 use rune::Tx;
-use source::{Action, ActionError, Change, FilesFixture, FilesSource, NoEngine};
+use source::{Action, ActionError, FilesFixture, FilesSource, NoEngine};
 
 pub use window::view;
 
