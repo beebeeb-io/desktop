@@ -79,6 +79,8 @@ pub enum Answer {
     /// The matches, in the order to show (none is an answer too: DW-0803), and while the list is
     /// still loading, how far it is: some matches may be missing (DW-0802b).
     Found { hits: Vec<Hit>, loading: Option<Loading> },
+    /// The query is being answered (off the window's thread); the view says so, never "no results".
+    Searching,
 }
 
 /// Search's data. Every call answers at once from what is on this PC.

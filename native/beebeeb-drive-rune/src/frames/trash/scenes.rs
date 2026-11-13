@@ -12,26 +12,18 @@ pub fn dw_0747(s: &mut State) {
 
 pub fn dw_0117(s: &mut State) {
     crate::frames::scene(s, Section::Trash);
-    s.frames.trash = TrashUi {
-        source: Box::new(BoardTrash::empty()),
-        selected: None,
-        menu: None,
-    };
+    s.frames.trash = TrashUi::on(Box::new(BoardTrash::empty()));
 }
 
 /// The menu on Contract old.pdf, Restore lit.
 pub fn dw_0748(s: &mut State) {
     dw_0747(s);
-    s.frames.trash.selected = Some(1);
+    s.frames.trash.pick_row(1);
     s.frames.trash.menu = Some(super::Open::at(420.0, 166.0));
 }
 
 /// Emptying: 5 of 12 deleted for good.
 pub fn dw_0749b(s: &mut State) {
     crate::frames::scene(s, Section::Trash);
-    s.frames.trash = TrashUi {
-        source: Box::new(BoardTrash::emptying()),
-        selected: None,
-        menu: None,
-    };
+    s.frames.trash = TrashUi::on(Box::new(BoardTrash::emptying()));
 }

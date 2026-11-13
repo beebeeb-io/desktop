@@ -77,6 +77,7 @@ pub fn window(s: &State, cx: &mut Cx<State>) -> El {
     let shows = ui.shows(&s.search.text);
     let content = match &shows {
         Shows::Unavailable => unavailable(&t),
+        Shows::Searching => searching(&t),
         Shows::Recent(recent) => recent_searches(recent, &t),
         Shows::Results { hits, loading } => results(s, hits, *loading, &t),
         Shows::Nothing { loading } => nothing(s, ui.narrow, *loading, &t),
@@ -310,6 +311,21 @@ fn unavailable(t: &Theme) -> El {
         empty(&icons::SEARCH, UNAVAILABLE_TITLE, UNAVAILABLE_TEXT, None, t)
             .grow(1.0)
             .w_full(),
+    )
+}
+
+/// A query on its way: it says so, never "no results" before the answer.
+fn searching(t: &Theme) -> El {
+    col().key("search-searching").w_full().child(
+        empty(
+            &icons::SEARCH,
+            "Searching\u{2026}",
+            "Looking through the names on this PC.",
+            None,
+            t,
+        )
+        .grow(1.0)
+        .w_full(),
     )
 }
 
