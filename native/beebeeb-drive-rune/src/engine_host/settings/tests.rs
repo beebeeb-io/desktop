@@ -5,7 +5,7 @@
 //! engine refuses another), which nothing here writes in. Every name is invented.
 
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::app::{Engine, EngineConfig};
@@ -48,8 +48,61 @@ struct Account {
     /// How long a change waits before the server stores it, in ms.
     put_delay_ms: Arc<AtomicU64>,
     writes: Arc<Mutex<Vec<Value>>>,
+    /// Every change that reached the fake, counted BEFORE any check of its token: which account's token it
+    /// carried (0 the first, 1 the second, 2 neither) and its body.
+    puts: Arc<Mutex<Vec<(usize, Value)>>>,
+    /// The next change is stored and then waits here before it is answered.
+    put_hold: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
+    /// The next read waits here before it is answered (with what the fake holds when it is let go).
+    get_hold: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
+    /// How many reads reached the fake.
+    gets: Arc<AtomicU64>,
     email: String,
     phrase: String,
+    /// Another account on the same fake (its storage location: Finland, not strict).
+    second: Arc<FakeAccount>,
+    second_phrase: String,
+}
+
+impl Account {
+    /// The next change is stored by the fake and then waits, unanswered, until the returned sender is sent to.
+    fn hold_next_put(&self) -> mpsc::Sender<()> {
+        let (release, held) = mpsc::channel();
+        *self.put_hold.lock().unwrap() = Some(held);
+        release
+    }
+
+    /// The next read waits at the fake, unanswered, until the returned sender is sent to.
+    fn hold_next_get(&self) -> mpsc::Sender<()> {
+        let (release, held) = mpsc::channel();
+        *self.get_hold.lock().unwrap() = Some(held);
+        release
+    }
+
+    fn gets(&self) -> u64 {
+        self.gets.load(Ordering::SeqCst)
+    }
+
+    /// How many changes reached the fake, under any token, and whose token each carried.
+    fn puts(&self) -> Vec<usize> {
+        self.puts.lock().unwrap().iter().map(|(who, _)| *who).collect()
+    }
+}
+
+fn names_email(req: &Request, email: &str) -> bool {
+    req.json()
+        .get("email")
+        .and_then(Value::as_str)
+        .is_some_and(|sent| sent.eq_ignore_ascii_case(email))
+}
+
+fn sign_in(engine: &Engine<MemoryCredentials>, email: &str, phrase: &str) {
+    engine
+        .sign_in_password(email, Zeroizing::new(PASSWORD.into()))
+        .expect("the fake accepts the password");
+    engine
+        .unlock_with_phrase(Zeroizing::new(phrase.to_string()))
+        .expect("the phrase unlocks");
 }
 
 fn account(email: &str) -> Account {
@@ -57,6 +110,16 @@ fn account(email: &str) -> Account {
     let account = Arc::new(account);
     let token = account.session_token.clone();
     let rest = account_handler(account);
+    let (second, second_phrase) = FakeAccount::register(&format!("second-{email}"), PASSWORD, TEST_PHRASE);
+    let second = Arc::new(second);
+    let (second_email, second_token) = (second.email.clone(), second.session_token.clone());
+    let rest_of_second = account_handler(second.clone());
+    let (puts, put_hold) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(None)));
+    let (puts_in, put_hold_in): (Arc<Mutex<Vec<(usize, Value)>>>, Arc<Mutex<Option<mpsc::Receiver<()>>>>) =
+        (puts.clone(), put_hold.clone());
+    let (get_hold, gets) = (Arc::new(Mutex::new(None)), Arc::new(AtomicU64::new(0)));
+    let (get_hold_in, gets_in): (Arc<Mutex<Option<mpsc::Receiver<()>>>>, Arc<AtomicU64>) =
+        (get_hold.clone(), gets.clone());
     let (get_mode, put_mode, delay_ms, put_delay_ms, writes) = (
         Arc::new(AtomicU8::new(ANSWER)),
         Arc::new(AtomicU8::new(ANSWER)),
@@ -71,13 +134,35 @@ fn account(email: &str) -> Account {
         put_delay_ms.clone(),
         writes.clone(),
     );
-    let stored = Arc::new(Mutex::new(json!({ "preferred_region": "de", "region_strict": true })));
+    let stored = Arc::new(Mutex::new([
+        json!({ "preferred_region": "de", "region_strict": true }),
+        json!({ "preferred_region": "fi", "region_strict": false }),
+    ]));
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
         let route = req.route();
         if !route.ends_with(" /api/v1/me/region") {
-            return rest(req);
+            let theirs = if route.starts_with("POST /api/v1/opaque/") {
+                names_email(req, &second_email)
+            } else {
+                req.bearer() == Some(second_token.as_str())
+            };
+            return if theirs { rest_of_second(req) } else { rest(req) };
         }
         let is_put = route.starts_with("PUT");
+        let who = match req.bearer() {
+            Some(bearer) if bearer == token.as_str() => 0,
+            Some(bearer) if bearer == second_token.as_str() => 1,
+            _ => 2,
+        };
+        if is_put {
+            puts_in.lock().unwrap().push((who, req.json()));
+        } else {
+            gets_in.fetch_add(1, Ordering::SeqCst);
+            let hold = get_hold_in.lock().unwrap().take();
+            if let Some(hold) = hold {
+                let _ = hold.recv();
+            }
+        }
         let mode = if is_put {
             put_mode_in.load(Ordering::SeqCst)
         } else {
@@ -90,18 +175,28 @@ fn account(email: &str) -> Account {
             DROP_CONNECTION => return Reply::empty(0),
             _ => {}
         }
-        if req.bearer() != Some(token.as_str()) {
+        if who > 1 {
             return Reply::json(401, json!({}));
         }
         if is_put {
             std::thread::sleep(Duration::from_millis(put_delay_in.load(Ordering::SeqCst)));
             let body = req.json();
             writes_in.lock().unwrap().push(body.clone());
-            *stored.lock().unwrap() = json!({
+            let now = json!({
                 "preferred_region": body["preferred_region"],
                 "region_strict": body["region_strict"].as_bool().unwrap_or(false),
             });
-            return Reply::ok(stored.lock().unwrap().clone());
+            stored.lock().unwrap()[who] = now.clone();
+            // Stored; the answer waits when a test holds it.
+            let hold = put_hold_in.lock().unwrap().take();
+            if let Some(hold) = hold {
+                let _ = hold.recv();
+                // A held answer follows the mode of the moment it is let go: stored, then not readable.
+                if put_mode_in.load(Ordering::SeqCst) == UNREADABLE {
+                    return Reply::ok(json!("not the expected shape"));
+                }
+            }
+            return Reply::ok(now);
         }
         let choices = if get_mode_in.load(Ordering::SeqCst) == EMPTY {
             json!([])
@@ -114,7 +209,7 @@ fn account(email: &str) -> Account {
                 { "id": "dc-1", "kind": "datacenter", "name": CITY, "status": "live", "selectable": true, "is_default": false },
             ])
         };
-        let now = stored.lock().unwrap().clone();
+        let now = stored.lock().unwrap()[who].clone();
         std::thread::sleep(Duration::from_millis(delay_in.load(Ordering::SeqCst)));
         Reply::ok(json!({
             "preferred_region": now["preferred_region"],
@@ -130,8 +225,14 @@ fn account(email: &str) -> Account {
         delay_ms,
         put_delay_ms,
         writes,
+        puts,
+        put_hold,
+        get_hold,
+        gets,
         email: email.to_string(),
         phrase,
+        second,
+        second_phrase,
     }
 }
 
@@ -339,6 +440,290 @@ fn a_session_that_ends_mid_change_shows_nothing_of_the_account() {
     settle(&mut source);
     assert!(source.locations().is_none(), "no list of an account that signed out");
     assert_eq!(source.general().storage_location, "", "and no place in General");
+}
+
+/// Pump until `done` (at most 10 s), whatever is still on its way.
+fn pump_until(
+    source: &mut EngineSettingsSource<MemoryCredentials>,
+    what: &str,
+    done: impl Fn(&EngineSettingsSource<MemoryCredentials>) -> bool,
+) -> Vec<&'static str> {
+    let began = Instant::now();
+    let mut toasts = Vec::new();
+    loop {
+        toasts.extend(source.pump().toast);
+        if done(source) {
+            return toasts;
+        }
+        assert!(began.elapsed() < Duration::from_secs(10), "never: {what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Task 2494: a choice made under one account is never sent under the next. The press is made; its worker has not
+/// called the engine yet when the session changes. Counted at the fake before any check of the token.
+#[test]
+fn a_choice_made_under_one_account_is_never_sent_under_the_next() {
+    let account = account("settings-press-turn@example.eu");
+    let engine = signed_in(&account);
+    let mut source = EngineSettingsSource::for_identity(engine.clone(), &TEST);
+    settle(&mut source);
+    assert_eq!(source.locations().unwrap().chosen, 1, "the first account: Germany");
+
+    // Another account signs in between the press and the worker's call.
+    let release = source.hold_next_write();
+    source.choose_location(0);
+    assert!(source.writing, "the press started its worker");
+    engine.sign_out_keeping_local_data().expect("signed out");
+    sign_in(&engine, &account.second.email, &account.second_phrase);
+    release.send(()).expect("the worker is waiting");
+    let toasts = settle(&mut source);
+    assert_eq!(
+        account.puts(),
+        [0usize; 0],
+        "the first account's choice reached no account"
+    );
+    assert_eq!(toasts, [""; 0], "nothing is said to the account that did not press");
+    source.opened(Pane::StorageLocation);
+    settle(&mut source);
+    let theirs = source.locations().expect("the second account's own list");
+    assert_eq!((theirs.chosen, theirs.only_here), (2, false), "Finland, as it was");
+
+    // The same with a lock and an unlock of the same account in between: not sent, and said.
+    let release = source.hold_next_write();
+    source.choose_location(1);
+    assert!(source.writing, "the press started its worker");
+    let _ = engine.lock();
+    engine
+        .unlock_with_phrase(Zeroizing::new(account.second_phrase.clone()))
+        .expect("the phrase unlocks");
+    release.send(()).expect("the worker is waiting");
+    assert_eq!(
+        settle(&mut source),
+        [NOT_CHOSEN],
+        "the person who pressed is told nothing changed"
+    );
+    assert_eq!(
+        account.puts(),
+        [0usize; 0],
+        "a press made before the lock is not sent after the unlock"
+    );
+
+    // "Only store in this country" goes the same way.
+    source.opened(Pane::StorageLocation);
+    settle(&mut source);
+    let release = source.hold_next_write();
+    source.set_only_here(true);
+    assert!(source.writing, "the switch started its worker");
+    engine.sign_out_keeping_local_data().expect("signed out");
+    sign_in(&engine, &account.email, &account.phrase);
+    release.send(()).expect("the worker is waiting");
+    settle(&mut source);
+    assert_eq!(account.puts(), [0usize; 0], "the switch reached no account");
+
+    // A press under the session that is still there is sent once, under that account, held or not.
+    sign_in_again_as(&engine, &account.second.email, &account.second_phrase);
+    source.opened(Pane::StorageLocation);
+    settle(&mut source);
+    let release = source.hold_next_write();
+    source.choose_location(1);
+    assert!(source.writing, "the press started its worker");
+    release.send(()).expect("the worker is waiting");
+    assert_eq!(settle(&mut source), [CHOSEN]);
+    assert_eq!(account.puts(), [1], "once, with the second account's token");
+    assert_eq!(source.general().storage_location, "Germany");
+}
+
+fn sign_in_again_as(engine: &Engine<MemoryCredentials>, email: &str, phrase: &str) {
+    engine.sign_out_keeping_local_data().expect("signed out");
+    sign_in(engine, email, phrase);
+}
+
+/// Task 2494: a change Beebeeb took, answered after the session moved on, is never drawn under the next session:
+/// not on another account's list, and not as "updated" after a lock and an unlock of the same account (the pane
+/// then reads what Beebeeb holds).
+#[test]
+fn a_late_answer_is_never_drawn_under_another_session() {
+    let account = account("settings-late-answer@example.eu");
+    let engine = signed_in(&account);
+    let mut source = EngineSettingsSource::for_identity(engine.clone(), &TEST);
+    settle(&mut source);
+
+    // The first account's change is with Beebeeb, unanswered, when the second account signs in.
+    let release = account.hold_next_put();
+    source.choose_location(0);
+    pump_until(&mut source, "the change reaches the fake", |_| account.puts() == [0]);
+    engine.sign_out_keeping_local_data().expect("signed out");
+    sign_in(&engine, &account.second.email, &account.second_phrase);
+    source.opened(Pane::StorageLocation);
+    pump_until(&mut source, "the second account's list", |source| {
+        source.locations().is_some()
+    });
+    release.send(()).expect("the fake is waiting");
+    let toasts = settle(&mut source);
+    assert_eq!(toasts, [""; 0], "the first account's answer says nothing here");
+    let theirs = source.locations().expect("the second account's own list");
+    assert_eq!((theirs.chosen, theirs.only_here), (2, false), "Finland, as it was");
+    assert_eq!(account.puts(), [0], "sent once, under the account that chose");
+
+    // The same account, a lock and an unlock while its change is unanswered.
+    let release = account.hold_next_put();
+    source.choose_location(1);
+    pump_until(&mut source, "the change reaches the fake", |_| account.puts() == [0, 1]);
+    let _ = engine.lock();
+    engine
+        .unlock_with_phrase(Zeroizing::new(account.second_phrase.clone()))
+        .expect("the phrase unlocks");
+    release.send(()).expect("the fake is waiting");
+    let toasts = settle(&mut source);
+    assert!(
+        !toasts.contains(&CHOSEN),
+        "an answer for the session before the lock is not drawn: {toasts:?}"
+    );
+    assert_eq!(
+        source.locations().expect("read afresh").chosen,
+        1,
+        "the pane shows what Beebeeb holds now"
+    );
+    assert_eq!(account.puts(), [0, 1]);
+
+    // The same, and the late answer cannot be read: the change may have landed, which is said, and the pane reads
+    // what Beebeeb holds (it did land).
+    let release = account.hold_next_put();
+    source.choose_location(2);
+    pump_until(&mut source, "the change reaches the fake", |_| {
+        account.puts() == [0, 1, 1]
+    });
+    let _ = engine.lock();
+    engine
+        .unlock_with_phrase(Zeroizing::new(account.second_phrase.clone()))
+        .expect("the phrase unlocks");
+    account.put_mode.store(UNREADABLE, Ordering::SeqCst);
+    release.send(()).expect("the fake is waiting");
+    assert_eq!(settle(&mut source), [UNKNOWN_CHANGE]);
+    account.put_mode.store(ANSWER, Ordering::SeqCst);
+    assert_eq!(
+        source.locations().expect("read afresh").chosen,
+        2,
+        "Finland: it had landed"
+    );
+
+    // The first account's late answer lands while the second account's first read is still out: that read is
+    // the second account's own and is taken.
+    sign_in_again_as(&engine, &account.email, &account.phrase);
+    source.opened(Pane::StorageLocation);
+    settle(&mut source);
+    let release = account.hold_next_put();
+    source.choose_location(1);
+    pump_until(&mut source, "the change reaches the fake", |_| {
+        account.puts().len() == 4
+    });
+    sign_in_again_as(&engine, &account.second.email, &account.second_phrase);
+    let (reads, release_read) = (account.gets(), account.hold_next_get());
+    source.opened(Pane::StorageLocation);
+    pump_until(&mut source, "the second account's read reaches the fake", |_| {
+        account.gets() == reads + 1
+    });
+    release.send(()).expect("the fake is waiting");
+    pump_until(&mut source, "the first account's answer is taken in", |source| {
+        !source.writing
+    });
+    release_read.send(()).expect("the fake is waiting");
+    assert_eq!(settle(&mut source), [""; 0]);
+    assert_eq!(
+        source.locations().expect("the second account's list").chosen,
+        2,
+        "its own read was not dropped for the first account's change"
+    );
+    assert_eq!(account.gets(), reads + 1, "and was the only one asked");
+}
+
+/// Answers that are taken in while the vault is locked: nothing of them is lost by the time it is unlocked. A
+/// refusal is said then; a change Beebeeb took, and a read, are asked for afresh.
+#[test]
+fn answers_taken_in_while_locked_are_made_good_after_the_unlock() {
+    let account = account("settings-locked-pump@example.eu");
+    let engine = signed_in(&account);
+    let mut source = EngineSettingsSource::for_identity(engine.clone(), &TEST);
+    settle(&mut source);
+    let unlock = || {
+        engine
+            .unlock_with_phrase(Zeroizing::new(account.phrase.clone()))
+            .expect("the phrase unlocks")
+    };
+
+    // A press the engine refuses (the vault locked before its worker ran), answered while still locked.
+    let release = source.hold_next_write();
+    source.choose_location(2);
+    assert!(source.writing, "the press started its worker");
+    let _ = engine.lock();
+    release.send(()).expect("the worker is waiting");
+    let toasts = pump_until(&mut source, "the refusal is taken in", |source| !source.writing);
+    assert_eq!(toasts, [""; 0], "nothing is said to a locked vault");
+    unlock();
+    assert_eq!(settle(&mut source), [NOT_CHOSEN], "said once the person is back");
+    assert_eq!(account.puts(), [0usize; 0]);
+    assert_eq!(source.locations().unwrap().chosen, 1, "Germany, as it was");
+
+    // A change Beebeeb took, answered while locked: after the unlock the pane shows it, never the choice before.
+    let release = account.hold_next_put();
+    source.choose_location(2);
+    pump_until(&mut source, "the change reaches the fake", |_| account.puts() == [0]);
+    let _ = engine.lock();
+    release.send(()).expect("the fake is waiting");
+    pump_until(&mut source, "the answer is taken in", |source| !source.writing);
+    unlock();
+    let toasts = settle(&mut source);
+    assert!(!toasts.contains(&CHOSEN), "{toasts:?}");
+    assert_eq!(
+        source.locations().expect("read afresh").chosen,
+        2,
+        "Finland: what Beebeeb holds"
+    );
+
+    // A read answered while locked: asked again after the unlock.
+    let (reads, release) = (account.gets(), account.hold_next_get());
+    source.reload_locations();
+    pump_until(&mut source, "the read reaches the fake", |_| {
+        account.gets() == reads + 1
+    });
+    let _ = engine.lock();
+    release.send(()).expect("the fake is waiting");
+    pump_until(&mut source, "the answer is taken in", |source| !source.reading);
+    assert!(source.locations().is_none(), "locked: no list");
+    unlock();
+    settle(&mut source);
+    assert_eq!(account.gets(), reads + 2, "asked once more");
+    assert_eq!(source.locations().expect("read afresh").chosen, 2);
+}
+
+/// A read asked under one session and answered after a lock and an unlock is not taken as the new session's: the
+/// storage location is asked for again, once.
+#[test]
+fn a_read_answered_after_the_session_moved_on_is_asked_again() {
+    let account = account("settings-late-read@example.eu");
+    let engine = signed_in(&account);
+    let mut source = EngineSettingsSource::for_identity(engine.clone(), &TEST);
+    settle(&mut source);
+    let before = account.gets();
+    let release = account.hold_next_get();
+    source.reload_locations();
+    pump_until(&mut source, "the read reaches the fake", |_| {
+        account.gets() == before + 1
+    });
+    let _ = engine.lock();
+    assert!(source.locations().is_none(), "locked: no list");
+    engine
+        .unlock_with_phrase(Zeroizing::new(account.phrase.clone()))
+        .expect("the phrase unlocks");
+    release.send(()).expect("the fake is waiting");
+    settle(&mut source);
+    assert_eq!(
+        account.gets(),
+        before + 2,
+        "the answer of the session before the lock is not taken: asked once more"
+    );
+    assert_eq!(source.general().storage_location, "Germany");
 }
 
 /// P2-1 (task 2473): "Nothing changed" is said only after an HTTP refusal. A timeout after the request left, a

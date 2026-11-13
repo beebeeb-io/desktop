@@ -195,6 +195,30 @@ impl AccountRuntime {
         self.session_generation() == generation
     }
 
+    /// The one question every hand-over of a session's work asks: is the session in memory, NOW, still the one
+    /// `generation` was captured in? `with` is handed that session only if so, and runs while the answer holds:
+    /// `writes` is the engine's session-write lock, held here for reading for the question and for `with`, so no
+    /// lock, sign-out or sign-in is half done in between. Never waits: while a session change is under way the
+    /// answer is `None`, as it is when the generation moved on or no session is in memory. `with` must not block
+    /// (copy or compare, then return): every session change waits for it.
+    pub(crate) fn while_session_is<T>(
+        &self,
+        writes: &std::sync::RwLock<()>,
+        generation: SessionGeneration,
+        with: impl FnOnce(&Session) -> T,
+    ) -> Option<T> {
+        let _writes = match writes.try_read() {
+            Ok(writes) => writes,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        if !self.session_unchanged_since(generation) {
+            return None;
+        }
+        let session = self.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        session.as_ref().map(with)
+    }
+
     /// Move the generation on: a session transition (`by`) happened. The long name is the contract: call it only while
     /// holding `lib.rs`'s session-write lock, so a check and the write that follows it can never be split by another
     /// transition.

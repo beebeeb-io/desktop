@@ -97,18 +97,7 @@ impl<C: CredentialStores> Engine<C> {
     /// Whether the session in memory is, now, the one `generation` names: asked with no session change half done
     /// (the session-write lock is held for the question). Never waits: during a session change the answer is no.
     fn account_session_is_still(&self, generation: SessionGeneration) -> bool {
-        let _writes = match self.writes.try_read() {
-            Ok(writes) => writes,
-            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return false,
-        };
-        self.acct.session_unchanged_since(generation)
-            && self
-                .acct
-                .session
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_some()
+        self.acct.while_session_is(&self.writes, generation, |_| ()).is_some()
     }
 
     /// The one path of this file's reads: the answer is handed over only for the session it was asked with.
