@@ -102,7 +102,7 @@ drawn here, not by the kit (a design-system need).
 | DW-0380 | Where the b is: "Beebeeb lives in the notification area", Got it | built in the main window (its lower right corner, clear of the details panel's buttons). Red on every dimension but text, icons and fills (225 of 225 geometry keys): the board composes a desktop with the window at 0.72 scale at (18, 18), the taskbar and the card by the tray; the app draws its window at full size. Follow-up task 2479 (the card in a window of its own by the notification area) |
 | DW-0301 | Tip 1: New | built; geometry, text, icons, fills, frame tiles 0; 3 pixel keys open: `coach-ring` (New's top edge at 40.75 pt: the board paints it from device row 81, Rune from 82, a 1 px step inside the ring), `coach-dot-0`, `coach-dots` |
 | DW-0302 | Tip 2: a file's row (left out when the folder shows no file) | built; 1 pixel key open (`coach-dot-1`) |
-| DW-0303 | Tip 3: Shared, on the Shared view | built; 2 pixel keys open: `coach-dot-2`, and `card-0-tile` (under the card: the card stands 0.54 low with the sidebar's rows, and in dark a glyph row of the tip's words differs) |
+| DW-0303 | Tip 3: Shared, on the Shared view | built; 2 pixel keys open: `coach-dot-2`, and `card-0-tile` (under the card: the card stands 0.54 low with the sidebar's rows; in dark also the tip's words, which Rune draws heavier light-on-dark than the board: 4,208 against 3,731 bright pixels in the crop's text rows) |
 | DW-0304 | Tip 4: Photos, on the Photos view | built; 1 pixel key open (`coach-dot-3`) |
 | DW-0305 | Tip 5: the gear | built; 2 pixel keys open (`coach-dot-4`, `coach-dots`) |
 
@@ -110,7 +110,10 @@ Measured on the Linux build VM, light and dark the same keys (2026-11-13). The o
 `coach-dots`, whose end is the lit dot) are the 6 pt dot's anti-aliased edge: the board's edge pixels are lighter
 (86 / 121 / 186 against Rune's 74 / 107 / 169 at 2x), as `status-dot` in DW-A07; Rune's drawing, not this group's. The
 sidebar's rows stand 0.5 pt low in every Files-window frame (`drive-label` is 12 high, the board's 11.5: `ui/sidebar.rs`),
-and the ring and card of tips 3 and 4 follow them. The words of DW-0380 are the board drawing's (`guide::TRAY_TEXT`); the
+and the ring and card of tips 3 and 4 follow them. Measured: with `drive-label` at 11.5 (an experiment in the VM's
+checkout, not committed) DW-0303 light has 1 pixel key open (`card-0-tile` passes), dark still 2 (the words above).
+`coach-ring` in DW-0301 is New's fill inside the ring (`viewers/chrome.rs` draws New; Rune rounds its 40.75 pt top
+edge to the next device row); the ring itself matches the board row for row. The words of DW-0380 are the board drawing's (`guide::TRAY_TEXT`); the
 frame's note in `frames.json` has other words (decision 2478).
 
 States with a rule and no drawing, built from the rule's words (tests only): the compare view's Stacked and Hold to
