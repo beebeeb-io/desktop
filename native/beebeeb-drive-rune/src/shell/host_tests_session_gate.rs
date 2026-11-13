@@ -7,6 +7,10 @@
 //! without, and everything observable must be equal (every source's call count, the route, what
 //! is open, every text and label in the element tree). Before that, the same input under an
 //! open session must change that record, or the comparison would prove nothing.
+//!
+//! The run without the input does not depend on the input: it is made once per (setup, way of closing, seen by
+//! the poll or not) and every input of that setup is compared with it ([`Baselines`]). Each test asserts how
+//! many windows it compared and how many runs without input it made.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -171,7 +175,7 @@ fn record_without_words(app: &App) -> String {
 }
 
 /// The ways the session gate closes under the window.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Closing {
     Lock,
     SignOut,
@@ -198,9 +202,48 @@ fn close(app: &mut App, closing: Closing) {
 type Step = fn(&mut App);
 type Input = (&'static str, Key, Mods);
 
+/// The window after `setup` and the gate closed by `closing`, with `input` sent or not: its record, and the
+/// window. `seen`: frames ran between the change and the input. Not seen: the input is in the same frame as the
+/// poll that sees the change, sent to the tree drawn before it.
+fn closed_run(setup: Step, closing: Closing, seen: bool, input: Option<(&Key, Mods)>) -> (String, App) {
+    let mut app = app();
+    setup(&mut app);
+    close(&mut app, closing);
+    if seen {
+        settle(&mut app.rt);
+        settle(&mut app.rt);
+    }
+    if let Some((key, mods)) = input {
+        app.rt.key(KeyEvent { key: key.clone(), mods });
+    }
+    settle(&mut app.rt);
+    settle(&mut app.rt);
+    // The gate's own screen (locked, sign-in) answers keys itself.
+    let own_screen = matches!(closing, Closing::Lock | Closing::SignOut);
+    let record = if own_screen {
+        assert!(
+            words(&app.rt).iter().all(|w| !w.contains(A_FILE_OF_THE_ACCOUNT)),
+            "{closing:?}: a file name is drawn"
+        );
+        record_without_words(&app)
+    } else {
+        record(&app)
+    };
+    (record, app)
+}
+
+/// The runs WITHOUT an input, one per (setup, closing, seen): the record every input of that setup must leave
+/// the window equal to. Keyed by the setup's own function, so two setups never share a run.
+#[derive(Default)]
+struct Baselines {
+    without: std::collections::HashMap<(usize, Closing, bool), String>,
+    /// Windows compared with their run without the input.
+    compared: usize,
+}
+
 /// `input` after `setup`: under an open session it does something; with the gate closed in each
 /// way, seen by the poll or not yet, the window is exactly what it is without the input.
-fn refused_when_closed(name: &str, setup: Step, input: &Input) {
+fn refused_when_closed(runs: &mut Baselines, name: &str, setup: Step, input: &Input) {
     let (what, key, mods) = input.clone();
     let name = format!("{name}, {what}");
     // The control: the input does something while the session is open.
@@ -215,38 +258,15 @@ fn refused_when_closed(name: &str, setup: Step, input: &Input) {
     // before a frame's input: that window is the next account's own (the test of the next
     // account below).
     for closing in [Closing::Lock, Closing::SignOut, Closing::Ended] {
-        // `seen`: frames ran between the change and the input. Not seen: the input is in the
-        // same frame as the poll that sees the change, sent to the tree drawn before it.
         for seen in [false, true] {
-            let run = |input: bool| {
-                let mut app = app();
-                setup(&mut app);
-                close(&mut app, closing);
-                if seen {
-                    settle(&mut app.rt);
-                    settle(&mut app.rt);
-                }
-                if input {
-                    app.rt.key(KeyEvent { key: key.clone(), mods });
-                }
-                settle(&mut app.rt);
-                settle(&mut app.rt);
-                // The gate's own screen (locked, sign-in) answers keys itself.
-                let own_screen = matches!(closing, Closing::Lock | Closing::SignOut);
-                let record = if own_screen {
-                    assert!(
-                        words(&app.rt).iter().all(|w| !w.contains(A_FILE_OF_THE_ACCOUNT)),
-                        "{closing:?}: a file name is drawn"
-                    );
-                    record_without_words(&app)
-                } else {
-                    record(&app)
-                };
-                (record, app)
-            };
-            let (without, _) = run(false);
-            let (with, app) = run(true);
+            let without = runs
+                .without
+                .entry((setup as usize, closing, seen))
+                .or_insert_with(|| closed_run(setup, closing, seen, None).0)
+                .clone();
+            let (with, app) = closed_run(setup, closing, seen, Some((&key, mods)));
             assert_eq!(with, without, "{name}: {closing:?}, seen by the poll: {seen}");
+            runs.compared += 1;
             let s = &app.rt.state;
             assert!(
                 s.actions.dialog.is_none() && s.actions.rename.is_none() && !s.frames.find.open,
@@ -290,12 +310,25 @@ fn with_the_session_gate_closed_no_shortcut_reaches_a_source_or_changes_the_wind
         ("Ctrl+4", Key::Command('4'), ctrl()),
         ("Ctrl+5", Key::Command('5'), ctrl()),
     ];
+    let mut runs = Baselines::default();
     for input in &on_a_row {
-        refused_when_closed("a row selected", nothing, input);
+        refused_when_closed(&mut runs, "a row selected", nothing, input);
     }
-    refused_when_closed("after a move to Trash", trashed, &("Ctrl+Z", Key::Command('z'), ctrl()));
-    refused_when_closed("in a folder", in_a_folder, &("Alt+Left", Key::Left, alt()));
-    refused_when_closed("in a folder", in_a_folder, &("Backspace", Key::Backspace, none()));
+    refused_when_closed(
+        &mut runs,
+        "after a move to Trash",
+        trashed,
+        &("Ctrl+Z", Key::Command('z'), ctrl()),
+    );
+    refused_when_closed(&mut runs, "in a folder", in_a_folder, &("Alt+Left", Key::Left, alt()));
+    refused_when_closed(
+        &mut runs,
+        "in a folder",
+        in_a_folder,
+        &("Backspace", Key::Backspace, none()),
+    );
+    // 17 inputs, each closed 3 ways, seen by the poll or not; 3 setups, each run once per way without an input.
+    assert_eq!((runs.compared, runs.without.len()), (17 * 6, 3 * 6));
 }
 
 /// A name being typed in a row.
@@ -338,13 +371,16 @@ fn searching(app: &mut App) {
 #[test]
 fn what_was_open_when_the_session_gate_closed_does_not_reach_a_source() {
     let enter: Input = ("Enter", Key::Enter, none());
-    refused_when_closed("a name being typed in a row", renaming, &enter);
-    refused_when_closed("New folder", new_folder, &enter);
-    refused_when_closed("Move to", moving, &enter);
-    refused_when_closed("Move to", moving, &("Right", Key::Right, none()));
+    let mut runs = Baselines::default();
+    refused_when_closed(&mut runs, "a name being typed in a row", renaming, &enter);
+    refused_when_closed(&mut runs, "New folder", new_folder, &enter);
+    refused_when_closed(&mut runs, "Move to", moving, &enter);
+    refused_when_closed(&mut runs, "Move to", moving, &("Right", Key::Right, none()));
     // (The arrows are not asked here: once Search has ended they are the list's own keys, and
     // selecting a row of the list the window still holds is allowed while the session ended.)
-    refused_when_closed("Search on a result", searching, &enter);
+    refused_when_closed(&mut runs, "Search on a result", searching, &enter);
+    // 5 inputs, each closed 3 ways, seen by the poll or not; 4 setups, each run once per way without an input.
+    assert_eq!((runs.compared, runs.without.len()), (5 * 6, 4 * 6));
 }
 
 /// The typed words are in no text or label once the poll saw the gate close, in each way; the

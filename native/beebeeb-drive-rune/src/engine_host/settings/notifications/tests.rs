@@ -39,6 +39,8 @@ const SERVER_ERROR: u8 = 1;
 const SESSION_ENDED: u8 = 2;
 const EMPTY: u8 = 3;
 const UNREADABLE: u8 = 4;
+/// The switches' read answers as the list's does.
+const AS_THE_LIST: u8 = 255;
 
 const FIRST_SHARE: &str = "Invented Person shared Invented holiday photos with you";
 const FIRST_SENDER: &str = "invented.sender@example.eu";
@@ -63,6 +65,10 @@ struct Fake {
     second_phrase: String,
     /// How the list and the switches' read answer.
     read_mode: Arc<AtomicU8>,
+    /// How the switches' read answers, when not as the list's ([`AS_THE_LIST`]).
+    switches_mode: Arc<AtomicU8>,
+    /// A switch change that reaches the fake waits here, before it is stored, until this is sent to or dropped.
+    put_gate: Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
     /// How a switch change answers.
     put_mode: Arc<AtomicU8>,
     /// How a mark answers.
@@ -163,6 +169,10 @@ fn fake_with(tag: &str, extra: Vec<Value>) -> Fake {
     );
     let refuse_mark: Arc<Mutex<Option<String>>> = Arc::default();
     let refuse_in = refuse_mark.clone();
+    let switches_mode = Arc::new(AtomicU8::new(AS_THE_LIST));
+    let switches_in = switches_mode.clone();
+    let put_gate: Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>> = Arc::default();
+    let gate_in = put_gate.clone();
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
         let route = req.route();
         let sign_in = route.starts_with("POST /api/v1/opaque/");
@@ -192,7 +202,11 @@ fn fake_with(tag: &str, extra: Vec<Value>) -> Fake {
                 Reply::ok(json!({ "notifications": list, "unread_count": unread }))
             }
             "GET /api/v1/notifications/preferences" => {
-                if let Some(reply) = mode_reply(read_in.load(Ordering::SeqCst)) {
+                let mode = match switches_in.load(Ordering::SeqCst) {
+                    AS_THE_LIST => read_in.load(Ordering::SeqCst),
+                    own => own,
+                };
+                if let Some(reply) = mode_reply(mode) {
                     return reply;
                 }
                 Reply::ok(json!({ "preferences": held.lock().unwrap()[who].switches.clone() }))
@@ -205,6 +219,10 @@ fn fake_with(tag: &str, extra: Vec<Value>) -> Fake {
                     return reply;
                 }
                 std::thread::sleep(Duration::from_millis(put_delay_in.load(Ordering::SeqCst)));
+                let gate = gate_in.lock().unwrap().take();
+                if let Some(gate) = gate {
+                    let _ = gate.recv();
+                }
                 let body = req.json();
                 writes_in.lock().unwrap().push((route.clone(), body.clone()));
                 let mut held = held.lock().unwrap();
@@ -247,6 +265,8 @@ fn fake_with(tag: &str, extra: Vec<Value>) -> Fake {
         second,
         second_phrase,
         read_mode,
+        switches_mode,
+        put_gate,
         put_mode,
         mark_mode,
         delay_ms,
@@ -297,6 +317,20 @@ fn settle(source: &mut Source) -> Vec<&'static str> {
         }
         assert!(began.elapsed() < Duration::from_secs(10), "an answer did not come back");
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Pump until `done` says so (at most 10 s); every toast on the way, in order.
+fn pump_until(source: &mut Source, done: impl Fn(&Source) -> bool) -> Vec<&'static str> {
+    let began = Instant::now();
+    let mut toasts = Vec::new();
+    loop {
+        toasts.extend(source.pump().toast);
+        if done(source) {
+            return toasts;
+        }
+        assert!(began.elapsed() < Duration::from_secs(10), "it did not come");
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -352,9 +386,11 @@ fn all_places() -> Vec<(String, usize)> {
     ]
 }
 
-/// The switch at `group`, `index` now.
+/// The switch at `group`, `index` now (it is read).
 fn switch(source: &Source, group: usize, index: usize) -> bool {
-    source.notifications().groups[group].1[index].on
+    source.notifications().groups[group].1[index]
+        .on
+        .expect("the switch is read")
 }
 
 #[test]
@@ -499,7 +535,7 @@ fn an_account_switch_is_sent_alone_and_shown_only_after_beebeeb_took_it() {
     let mut source = Source::new(signed_in(&fake));
     opened(&mut source, Pane::Notifications);
     let alerts = &source.notifications().groups[0].1;
-    let seen: Vec<_> = alerts.iter().map(|a| (a.title.as_str(), a.on)).collect();
+    let seen: Vec<_> = alerts.iter().map(|a| (a.title.as_str(), a.on.expect("read"))).collect();
     assert_eq!(
         seen,
         [
@@ -670,7 +706,11 @@ fn a_lock_drops_everything_at_once_and_another_account_never_sees_it() {
         (AlertKind::Request, AlertTarget::SharedRequests)
     );
     let mine: Vec<_> = source.notifications().groups[0].1.iter().map(|a| a.on).collect();
-    assert_eq!(mine, [false, true, false], "the second account's own switches");
+    assert_eq!(
+        mine,
+        [Some(false), Some(true), Some(false)],
+        "the second account's own switches"
+    );
 }
 
 #[test]

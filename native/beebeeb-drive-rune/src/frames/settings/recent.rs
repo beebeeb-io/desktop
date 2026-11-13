@@ -4,7 +4,6 @@
 use crate::State;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{Theme, type_};
-use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_list::{self as lists, Item, Role};
 use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::{kit, settings_shell as shell};
@@ -22,6 +21,19 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     ];
     // Not read: an empty list would be a statement about the account that nobody checked.
     match ui.source.recent_state() {
+        // Read, but a later change could not be confirmed: the list stays, said to be possibly out of date.
+        ReadState::Ready if ui.source.notifications_unconfirmed() => {
+            let (strong, words) = super::notifications::UNCONFIRMED;
+            children.push(notices::note_with(
+                0,
+                Tone::Warn,
+                &ic::WARN_CIRCLE,
+                strong,
+                words,
+                Some(super::notifications::try_again(0, t)),
+                t,
+            ));
+        }
         ReadState::Ready => {}
         ReadState::Loading => {
             children.push(notices::note(
@@ -35,8 +47,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             return (shell::pane(children, t), None);
         }
         ReadState::Failed => {
-            let again = controls::button(0, "Try again", None, Emphasis::Plain, t)
-                .on_press(|s: &mut State| s.settings.source.reload_notifications());
+            let again = super::notifications::try_again(0, t);
             children.push(notices::problem(
                 0,
                 0,

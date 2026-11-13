@@ -106,10 +106,21 @@ impl Default for PreviewsUi {
             draft: None,
             compare: fresh_compare(),
             // The sample that ships inside the app; the engine lane hands over the person's own.
-            original: decode(BUNDLED_SAMPLE_PNG),
-            preview: decode(BUNDLED_SAMPLE_PNG),
+            original: bundled_sample(),
+            preview: bundled_sample(),
         }
     }
+}
+
+/// The bundled sample as pixels of the caller's own. The PNG is decoded once per process (every window state
+/// holds two of these, and a decode is the slowest step of building one); each call copies the decoded bytes.
+fn bundled_sample() -> Pixels {
+    static DECODED: std::sync::OnceLock<Option<(u32, u32, Vec<u8>)>> = std::sync::OnceLock::new();
+    let pixels = Pixels::new();
+    if let Some((width, height, rgba)) = DECODED.get_or_init(|| decode_rgba(BUNDLED_SAMPLE_PNG)) {
+        pixels.set(*width, *height, rgba.clone());
+    }
+    pixels
 }
 
 fn fresh_compare() -> Compare {
@@ -120,29 +131,21 @@ fn fresh_compare() -> Compare {
     }
 }
 
-/// Decode a PNG into pixels Rune draws. A file that does not decode draws nothing.
-fn decode(png_bytes: &[u8]) -> Pixels {
-    let pixels = Pixels::new();
-    let Ok(mut reader) = png::Decoder::new(std::io::Cursor::new(png_bytes)).read_info() else {
-        return pixels;
-    };
-    let Some(size) = reader.output_buffer_size() else {
-        return pixels;
-    };
-    let mut buf = vec![0; size];
-    let Ok(info) = reader.next_frame(&mut buf) else {
-        return pixels;
-    };
+/// Decode a PNG into RGBA bytes Rune draws (width, height, bytes). `None`: a file that does not decode draws
+/// nothing.
+fn decode_rgba(png_bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    let mut reader = png::Decoder::new(std::io::Cursor::new(png_bytes)).read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut buf).ok()?;
     let bytes = &buf[..info.buffer_size()];
     let rgba: Vec<u8> = match (info.color_type, info.bit_depth) {
         (png::ColorType::Rgba, png::BitDepth::Eight) => bytes.to_vec(),
         (png::ColorType::Rgb, png::BitDepth::Eight) => {
             bytes.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect()
         }
-        _ => return pixels,
+        _ => return None,
     };
-    pixels.set(info.width, info.height, rgba);
-    pixels
+    Some((info.width, info.height, rgba))
 }
 
 impl SettingsUi {

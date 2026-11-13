@@ -203,7 +203,9 @@ impl Locations {
 pub struct Alert {
     pub title: String,
     pub says: String,
-    pub on: bool,
+    /// `None`: not read (on its way, or the read failed; `SettingsSource::alerts_state` says which). There is no
+    /// value to draw as a switch, and nothing to press.
+    pub on: Option<bool>,
 }
 
 /// How far a source is with something it reads from the account: what a pane draws in its place.
@@ -313,13 +315,19 @@ pub trait SettingsSource {
     fn recent_state(&self) -> ReadState {
         ReadState::Ready
     }
-    /// Whether the switches of `Notifications::groups[group]` are read. Not `Ready`: its rows are there (so nothing
-    /// below them moves when the answer lands) but each `Alert::on` is a filler, never drawn and never pressed.
+    /// Why a row of `Notifications::groups[group]` has no value (`Alert::on` is `None`): on its way, or failed. Only
+    /// the words beside such a row come from here; whether a switch is drawn is the row's own `on`, so a source
+    /// that does not answer this still never has an unread value drawn (`Ready` beside a `None` reads as failed).
     fn alerts_state(&self, group: usize) -> ReadState {
         let _ = group;
         ReadState::Ready
     }
-    /// Ask again for what `recent_state` and `alerts_state` speak of. Never waits.
+    /// What is drawn of the account's notifications (its switches, its recent alerts) could not be confirmed with
+    /// Beebeeb and may be out of date: the panes say so and offer "Try again" (`reload_notifications`).
+    fn notifications_unconfirmed(&self) -> bool {
+        false
+    }
+    /// Ask again for what `recent_state`, `alerts_state` and `notifications_unconfirmed` speak of. Never waits.
     fn reload_notifications(&mut self) {}
     /// The theme preference alone (every window reads it on every frame).
     fn theme(&self) -> ThemeChoice {
@@ -486,7 +494,7 @@ fn board_notifications() -> Notifications {
     let alert = |title: &str, says: &str, on: bool| Alert {
         title: title.into(),
         says: says.into(),
-        on,
+        on: Some(on),
     };
     Notifications {
         allowed_in_windows: true,
@@ -526,6 +534,16 @@ fn board_notifications() -> Notifications {
 }
 
 impl BoardSettings {
+    /// The account's switches without a value, from a source that says nothing about why (`alerts_state` is the
+    /// trait's default): the pane must still draw no switch.
+    #[cfg(test)]
+    pub fn with_account_alerts_not_read(mut self) -> Self {
+        for alert in &mut self.notifications.groups[0].1 {
+            alert.on = None;
+        }
+        self
+    }
+
     /// DW-0750b: notifications are off for Beebeeb in Windows Settings.
     pub fn with_notifications_off_in_windows(mut self) -> Self {
         self.notifications.allowed_in_windows = false;
@@ -630,7 +648,7 @@ impl SettingsSource for BoardSettings {
             .get_mut(group)
             .and_then(|g| g.1.get_mut(index))
         {
-            a.on = on;
+            a.on = Some(on);
         }
     }
     fn locations(&self) -> Option<Locations> {
