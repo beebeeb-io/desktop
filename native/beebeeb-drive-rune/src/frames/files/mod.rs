@@ -751,6 +751,11 @@ impl State {
         if items.is_empty() {
             return false;
         }
+        // Refused before the source is asked (`protected.rs`): the panel's switch and the menu.
+        if self.protects(&items) {
+            self.failed(Action::KeepOffline, ActionError::Protected, tx);
+            return true;
+        }
         let keep = !self.selection_is_kept();
         if let Err(why) = self.actions.source.keep_offline(&items, keep) {
             let action = if keep {
@@ -828,6 +833,11 @@ impl State {
             .collect();
         if items.is_empty() {
             return false;
+        }
+        // Refused before the source is asked (`protected.rs`).
+        if self.protects(&items) {
+            self.failed(Action::FreeUpSpace, ActionError::Protected, tx);
+            return true;
         }
         if let Err(why) = self.actions.source.free_up_space(&items) {
             self.failed(Action::FreeUpSpace, why, tx);
@@ -935,7 +945,14 @@ impl State {
     pub fn menu_entries(&self, kind: MenuKind) -> Vec<crate::ui::menu::Entry> {
         match kind {
             MenuKind::File => menus::file_menu(self),
-            MenuKind::Sort => menus::sort_menu(self.actions.sort),
+            // A protected folder keeps its owner's order: the choices are shown, dimmed.
+            MenuKind::Sort => {
+                let fixed = self.in_protected_folder();
+                menus::sort_menu(self.actions.sort)
+                    .into_iter()
+                    .map(|entry| entry.dimmed(fixed))
+                    .collect()
+            }
             MenuKind::New => menus::new_menu(),
         }
     }

@@ -199,6 +199,13 @@ fn everything_that_needs_the_session_is_refused_and_no_source_is_asked() {
         ("the sidebar's Backups (a folder to read)", |rt| {
             click(rt, "Backups-row")
         }),
+        ("a folder asked for directly", |rt| {
+            on_state(rt, |s, _| {
+                s.open_folder(Some("lisbon".into()));
+                true
+            })
+        }),
+        ("a preview asked for directly", |rt| on_state(rt, |s, _| s.preview())),
         ("back", |rt| on_state(rt, |s, _| s.back())),
         ("forward", |rt| on_state(rt, |s, _| s.forward())),
         ("retry", |rt| {
@@ -229,7 +236,7 @@ fn everything_that_needs_the_session_is_refused_and_no_source_is_asked() {
         );
         refused += 1;
     }
-    assert_eq!(refused, 34);
+    assert_eq!(refused, 36);
     // The same ways with a session: the first one does reach the source (the guard is what refuses).
     let mut with = app(false);
     press(&mut with.rt, Key::Enter, NONE);

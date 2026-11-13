@@ -193,5 +193,47 @@ fn no_card_when_nothing_loads_and_the_scenes_are_these_states() {
     assert!(first.global.source.status().loading.is_some());
     assert_eq!(first.listing.items.len(), 7);
     assert!(!first.actions.first_load_strip);
-    assert_eq!(super::browse_states::SCENES.len(), 2);
+    assert_eq!(super::browse_states::SCENES.len(), 3);
+}
+
+#[test]
+fn a_folder_keeps_its_own_view_and_the_panel_follows_the_selection() {
+    use crate::frames::global::grid;
+    let mut state = init();
+    let scene = super::browse_states::SCENES
+        .iter()
+        .find(|(id, _)| *id == "DW-1102")
+        .unwrap()
+        .1;
+    scene(&mut state);
+    let (mut rt, _, _) = spied_on(state);
+    // Lisbon trip: a grid, the panel on the selected photo.
+    assert_eq!(rt.state.listing.folder.name, "Lisbon trip");
+    assert!(grid::on(&rt.state) && rt.state.show_detail_pane);
+    assert!(find(&rt, "row-0-date").is_none(), "no list row in a grid");
+    let panel: Vec<String> = rt.elements().into_iter().filter_map(|e| e.text).collect();
+    assert_eq!(
+        panel.iter().filter(|t| t.as_str() == "Alfama.heic").count(),
+        2,
+        "the tile and the panel"
+    );
+    // Up to Files: that folder is still a list. The panel stays open, as the person left it.
+    rt.update(|s, _| {
+        s.back();
+    });
+    settle(&mut rt);
+    assert_eq!(rt.state.listing.folder.id, None);
+    assert!(!grid::on(&rt.state) && rt.state.show_detail_pane);
+    assert!(find(&rt, "row-0-date").is_some());
+    // Back in: the grid again, without asking.
+    rt.update(|s, _| {
+        s.forward();
+    });
+    settle(&mut rt);
+    assert!(grid::on(&rt.state));
+    assert!(find(&rt, "row-0-date").is_none());
+    // Switching this folder to a list leaves the other as it is, and the reverse.
+    rt.update(|s, _| grid::set(s, false));
+    settle(&mut rt);
+    assert!(find(&rt, "row-0-date").is_some());
 }

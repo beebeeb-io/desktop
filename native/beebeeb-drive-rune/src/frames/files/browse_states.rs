@@ -254,4 +254,12 @@ pub const SCENES: &[crate::ui::gate::Scene<State>] = &[
         s.show_detail_pane = false;
         s.global = Ui::new(Box::new(GlobalFixture::of(board::loading())));
     }),
+    // DW-1102: Lisbon trip keeps its own view (a grid), the details panel on Alfama.heic.
+    ("DW-1102", |s| {
+        let grid = super::long_list::SCENES.iter().find(|(id, _)| *id == "DW-0421");
+        if let Some((_, grid)) = grid {
+            grid(s);
+        }
+        s.show_detail_pane = true;
+    }),
 ];

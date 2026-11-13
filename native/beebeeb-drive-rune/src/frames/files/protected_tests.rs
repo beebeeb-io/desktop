@@ -428,10 +428,16 @@ fn a_devices_backup_is_deleted_only_through_delete_this_backup() {
         Some(crate::frames::backups::Dialog::DeleteDevice("iphone".into()))
     );
     assert!(find(&rt, "dlg").is_some(), "the dialog is drawn");
-    let said: Vec<String> = rt.elements().into_iter().filter_map(|e| e.text).collect();
+    // Inside the dialog (the section behind it lists the same name).
+    let said: Vec<String> = rt
+        .elements()
+        .into_iter()
+        .filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with("dlg")))
+        .filter_map(|e| e.text)
+        .collect();
     assert!(
-        said.iter().any(|t| t.contains("Anna's iPhone")),
-        "the dialog names the device: {said:?}"
+        said.iter().any(|t| t == "Delete this backup?") && said.iter().any(|t| t.starts_with("12,418 photos")),
+        "the dialog is that device's (its 12,418 photos): {said:?}"
     );
     assert!(asked(&calls).is_empty(), "{:?}", asked(&calls));
 }
@@ -544,7 +550,7 @@ fn each_scene_is_the_state_its_controls_reach() {
 #[test]
 fn the_backups_row_in_files_is_refused_by_the_window_too() {
     type Try = fn(&mut Runtime<State>);
-    let ways: [(&str, Try); 5] = [
+    let ways: [(&str, Try); 7] = [
         ("Delete", |rt| press(rt, Key::Delete, NONE)),
         ("Ctrl+D", |rt| press(rt, Key::Command('d'), CTRL)),
         ("F2", |rt| press(rt, Key::Function(2), NONE)),
@@ -555,6 +561,15 @@ fn the_backups_row_in_files_is_refused_by_the_window_too() {
         ("Move", |rt| {
             let mut tx = rune::Tx::default();
             rt.state.begin_move(&mut tx);
+        }),
+        // The details panel's switch and the file menu's entry both call these.
+        ("Available offline", |rt| {
+            let mut tx = rune::Tx::default();
+            rt.state.toggle_keep_offline(&mut tx);
+        }),
+        ("Free up space", |rt| {
+            let mut tx = rune::Tx::default();
+            rt.state.free_up_space(&mut tx);
         }),
     ];
     for (name, way) in ways {
@@ -662,9 +677,45 @@ fn the_sort_menu_changes_nothing_in_a_protected_folder() {
     click(&mut rt, "sort-btn");
     let entries = rt.state.menu_entries(super::MenuKind::Sort);
     let size = entries.iter().position(|e| e.id() == Some("sort-size")).unwrap();
+    // Every choice is shown dimmed there: none can be picked.
+    let choices: Vec<_> = entries.iter().filter(|e| e.id().is_some()).collect();
+    assert!(choices.len() >= 6 && choices.iter().all(|e| e.is_off()));
     let mut tx = rune::Tx::default();
     rt.state.pick_menu(size, &mut tx);
     assert!(rt.state.actions.sort == before, "the tick does not move");
     assert_eq!(names(&rt), ["2026", "2025", "2024"]);
     assert!(asked(&calls).is_empty(), "{:?}", asked(&calls));
+}
+
+#[test]
+fn a_folder_that_cannot_be_read_at_the_start_is_asked_for_once() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    struct Unreadable(Arc<AtomicU32>);
+    impl crate::source::DriveSource for Unreadable {
+        fn list(&self, _: Option<&str>) -> Result<crate::source::Listing, crate::source::SourceError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(crate::source::SourceError::Unreadable)
+        }
+        fn storage(&self) -> Option<crate::source::StorageSummary> {
+            None
+        }
+    }
+    let reads = Arc::new(AtomicU32::new(0));
+    let mut state = init();
+    state.actions.source = Box::new(FilesFixture::default());
+    state.source = Box::new(Unreadable(reads.clone()));
+    (state.listing, state.list_error) = crate::load(state.source.as_ref(), None);
+    assert!(state.list_error.is_some());
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, crate::view, (1278.0, 798.0), env);
+    rt.on_key = Some(host::on_key);
+    rt.poll = Some(host::poll);
+    rt.frame(0.0);
+    settle(&mut rt);
+    assert_eq!(reads.load(Ordering::SeqCst), 1, "the first poll reads nothing again");
+    assert!(!rt.state.can_go_back(), "and leaves no Back entry");
 }
