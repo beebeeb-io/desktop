@@ -317,18 +317,23 @@ fn the_password_change_restarts_the_engine_on_every_platform() {
         let started = rotate
             .find(&squeeze(expected))
             .unwrap_or_else(|| panic!("{platform}: the start is `{expected}`:\n{rotate}"));
+        // The store and the swap live in `store_rotated_session_with`; `install_rotated_session` claims the turn by
+        // calling `store_rotated_session` before the engine comes back.
+        let store = squeeze(body_between(&compiled, "fn store_rotated_session_with", "\n}\n"));
         let stored = rotate
-            .find(&squeeze(
-                "persist_session_token_to_keychain(&write, acct.id.as_str(), new_token,",
-            ))
+            .find(&squeeze("store_rotated_session(acct, turn, new_token)"))
             .unwrap_or_else(|| panic!("{platform}: the new token is stored:\n{rotate}"));
-        let swapped = rotate
+        let persisted = store
+            .find(&squeeze("store.store_token(&write, acct.id.as_str(), new_token,"))
+            .unwrap_or_else(|| panic!("{platform}: the new token is stored in the credential store:\n{store}"));
+        let swapped = store
             .find(&squeeze("std::mem::replace(&mut session.token, new_token.to_string())"))
-            .unwrap_or_else(|| panic!("{platform}: the new token is swapped into memory:\n{rotate}"));
+            .unwrap_or_else(|| panic!("{platform}: the new token is swapped into memory:\n{store}"));
         assert!(
-            stored < swapped && swapped < started,
-            "{platform}: store, swap, then start:\n{rotate}"
+            persisted < swapped,
+            "{platform}: store, then swap into memory:\n{store}"
         );
+        assert!(stored < started, "{platform}: store, then start:\n{rotate}");
         let stop = squeeze("stop_engine_in_slot(acct, engine).await");
         if platform == "Windows" {
             // Nothing awaits between the server's answer and the store: no await at all before it in this function.
@@ -349,8 +354,8 @@ fn the_password_change_restarts_the_engine_on_every_platform() {
                 .find("stop_own_data_proofs();")
                 .unwrap_or_else(|| panic!("Windows: the ownership proofs are stopped:\n{rotate}"));
             assert!(
-                swapped < transition && transition < proofs && proofs < stopped && stopped < started,
-                "Windows: swap, lock, stop the proofs, stop the old engine, then start:\n{rotate}"
+                stored < transition && transition < proofs && proofs < stopped && stopped < started,
+                "Windows: store, lock, stop the proofs, stop the old engine, then start:\n{rotate}"
             );
         } else {
             let stopped = rotate
@@ -362,13 +367,18 @@ fn the_password_change_restarts_the_engine_on_every_platform() {
             );
         }
     }
-    // The command reaches it.
+    // The command hands the turn to the detached commit; the task reaches `install_rotated_session`.
     let command = squeeze(body_between(&source, "async fn account_change_password(", "\n}\n"));
     assert!(
-        command.contains(&squeeze(
-            "install_rotated_session(app, &state, &acct, &mut turn, &session_token).await"
-        )),
+        command.contains(&squeeze("drive(flow, Some(&token), Some(commit)).await")),
         "{command}"
+    );
+    let commit = squeeze(body_between(&source, "async fn commit_rotated_session(", "\n}\n"));
+    assert!(
+        commit.contains(&squeeze(
+            "install_rotated_session(app.clone(), &state, &acct, &mut turn, session_token.as_str()).await"
+        )),
+        "{commit}"
     );
 }
 
@@ -402,5 +412,229 @@ fn the_password_change_stops_the_old_engine_before_a_config_failure() {
     assert!(
         stop < start,
         "Windows: the old engine stops before the start, so a config read failure cannot leave it on the ended token:\n{rotate}"
+    );
+}
+
+// ── Task 2439 item 5: the rotated token survives a cancelled command ──────────
+
+use crate::account::{AccountId, synthesize_single_account};
+
+/// A signed-in account with `token` in memory, for the commit tests.
+fn account_with_session(token: &str) -> (AppState, Arc<account::AccountRuntime>, String) {
+    let state = AppState::default();
+    synthesize_single_account(&state, AccountId::new_v4());
+    let acct = state.active_account().unwrap();
+    let id = acct.id.as_str().to_string();
+    *acct.session.lock().unwrap() = Some(Session {
+        token: token.to_string(),
+        master_key: [9u8; 32],
+        email: Some("a@b.eu".to_string()),
+    });
+    (state, acct, id)
+}
+
+/// Records what a rotated-session commit asked the credential store to keep; no OS vault is touched (Linux has none).
+#[derive(Default)]
+struct RecordingStore {
+    stored: std::sync::Mutex<Vec<String>>,
+    owners: std::sync::Mutex<Vec<String>>,
+}
+
+impl RecordingStore {
+    fn stored(&self) -> Vec<String> {
+        self.stored.lock().unwrap().clone()
+    }
+}
+
+impl RotatedSessionStore for RecordingStore {
+    fn store_token(
+        &self,
+        _write: &SessionWrite,
+        _account_id: &str,
+        token: &str,
+        _email: Option<&str>,
+    ) -> Result<(), String> {
+        self.stored.lock().unwrap().push(token.to_string());
+        Ok(())
+    }
+
+    fn carry_owner(&self, _write: &SessionWrite, _account_id: &str, owner: &str) {
+        self.owners.lock().unwrap().push(owner.to_string());
+    }
+}
+
+fn memory_token(acct: &account::AccountRuntime) -> Option<String> {
+    acct.session.lock().unwrap().as_ref().map(|s| s.token.clone())
+}
+
+/// The server has rotated the token, then a Lock or a sign-out drops the command's future while the response body is
+/// still in flight. The body read and the store run in a task of their own (`detached`), so they finish: the new token
+/// is in the credential store and in memory, and the turn is spent exactly once (the captured turn can never write
+/// again).
+#[tokio::test]
+async fn session_commit_survives_a_dropped_caller() {
+    let (_state, acct, _id) = account_with_session("old-token");
+    let turn = acct.session_generation();
+    let store = Arc::new(RecordingStore::default());
+
+    let (body_tx, body_rx) = tokio::sync::oneshot::channel::<String>();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Result<(), RotatedStoreError>>();
+    let task_acct = acct.clone();
+    let task_store = store.clone();
+    // The shape `drive` uses for a commit: the body read and the store in a task of its own, awaited by handle.
+    let commit = detached(async move {
+        started_tx.send(()).unwrap();
+        let body = body_rx.await.unwrap_or_default();
+        let mut turn = turn;
+        let result = store_rotated_session_with(&task_acct, &mut turn, &body, task_store.as_ref());
+        let _ = done_tx.send(result);
+        Ok(())
+    });
+    let caller = tokio::spawn(commit);
+    started_rx.await.expect("the commit task started");
+    // The command is cancelled: its future is dropped here (dropping a bare handle would only detach it).
+    caller.abort();
+    let _ = caller.await;
+    // Only now does the server's body arrive.
+    body_tx.send("new-token".to_string()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), done_rx)
+        .await
+        .expect("the dropped caller took the commit with it")
+        .expect("the commit task answered")
+        .expect("the new token was stored");
+
+    assert_eq!(store.stored(), ["new-token"], "the credential store has the new token");
+    assert_eq!(
+        memory_token(&acct).as_deref(),
+        Some("new-token"),
+        "the session in memory has the new token"
+    );
+    // Spent exactly once: the same captured turn writes nothing a second time, and the store was written once.
+    let mut replay = turn;
+    assert_eq!(
+        store_rotated_session_with(&acct, &mut replay, "third-token", store.as_ref()),
+        Err(RotatedStoreError::TurnSpent)
+    );
+    assert_eq!(store.stored(), ["new-token"]);
+    assert_eq!(memory_token(&acct).as_deref(), Some("new-token"));
+}
+
+/// A Lock (or another sign-in) moves the account's generation before the body arrives. The detached commit must write
+/// nothing, must not panic, and its answer must say the turn was spent; the next command sees a signed-out session, not
+/// a silent sign-in.
+#[tokio::test]
+async fn session_commit_refuses_a_stale_turn() {
+    let (_state, acct, _id) = account_with_session("old-token");
+    let turn = acct.session_generation();
+    let store = Arc::new(RecordingStore::default());
+
+    let (body_tx, body_rx) = tokio::sync::oneshot::channel::<String>();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+    let task_acct = acct.clone();
+    let task_store = store.clone();
+    let commit = detached(async move {
+        started_tx.send(()).unwrap();
+        let body = body_rx.await.unwrap_or_default();
+        let mut turn = turn;
+        Ok(store_rotated_session_with(
+            &task_acct,
+            &mut turn,
+            &body,
+            task_store.as_ref(),
+        ))
+    });
+    let task = tokio::spawn(commit);
+    started_rx.await.expect("the commit task started");
+    // The generation moves before the body arrives: a Lock, or another sign-in, happened.
+    {
+        let _lock = end_sessions_in_flight(&acct, account::SessionTransition::Lock);
+    }
+    let after_the_move = acct.session_generation();
+    body_tx.send("new-token".to_string()).unwrap();
+    let answer = task.await.unwrap().unwrap();
+    assert_eq!(
+        answer,
+        Err(RotatedStoreError::TurnSpent),
+        "the answer says the turn was spent"
+    );
+    assert_eq!(
+        acct.session_generation(),
+        after_the_move,
+        "the stale commit moved nothing"
+    );
+    assert!(store.stored().is_empty(), "the credential store was not written");
+    assert_eq!(
+        memory_token(&acct).as_deref(),
+        Some("old-token"),
+        "the session in memory was not written"
+    );
+}
+
+/// Source guard: the command's future (`drive`/`drive_steps`) reads no response body itself; the one read is the
+/// helper, and for a password change's last answer it runs inside the detached task. The store claims the captured
+/// turn before it writes anything.
+#[test]
+fn session_commit_is_the_only_body_reader() {
+    use crate::finder_setup_command_tests::body_between;
+    use crate::source_pin::squeeze;
+    let source = include_str!("mod.rs").replace("\r\n", "\n");
+    let drive = squeeze(body_between(&source, "async fn drive(", "\n}\n"));
+    let steps = squeeze(body_between(&source, "async fn drive_steps(", "\n}\n"));
+    let helper = squeeze(body_between(&source, "async fn read_body(", "\n}\n"));
+    assert!(
+        !drive.contains(".text().await"),
+        "the command future reads no body: {drive}"
+    );
+    assert!(
+        !drive.contains("detached("),
+        "the command's future does not move the flow into a detached task: {drive}"
+    );
+    assert!(
+        !steps.contains(".text().await"),
+        "the command future reads no body: {steps}"
+    );
+    assert!(
+        helper.contains("resp.text().await"),
+        "the one body read lives in the helper: {helper}"
+    );
+    assert!(
+        steps.contains("read_body(resp)"),
+        "every step reads through the helper: {steps}"
+    );
+    assert!(
+        steps.contains("detached(") && steps.contains("commit_rotated_session("),
+        "the final commit's body read and store run in the detached task: {steps}"
+    );
+    assert!(
+        steps.contains("drop(flow)"),
+        "the flow is dropped in the command's future, not moved into the detached task: {steps}"
+    );
+    let send = steps
+        .find("rb.send().await")
+        .unwrap_or_else(|| panic!("the request is sent in the command's future: {steps}"));
+    let detach = steps
+        .find("detached(")
+        .unwrap_or_else(|| panic!("the answer is handed to the detached task: {steps}"));
+    assert!(
+        send < detach,
+        "the request is sent before the answer is detached: {steps}"
+    );
+    let commit = squeeze(body_between(&source, "async fn commit_rotated_session(", "\n}\n"));
+    assert!(!commit.contains("flow"), "the detached task carries no flow: {commit}");
+    assert!(
+        commit.contains("install_rotated_session("),
+        "the detached task stores the rotated token: {commit}"
+    );
+    let store = squeeze(body_between(&source, "fn store_rotated_session_with", "\n}\n"));
+    let claim = store
+        .find("claim_session_write_for_commit(")
+        .unwrap_or_else(|| panic!("the store claims the turn first: {store}"));
+    let persist = store
+        .find("store_token(")
+        .unwrap_or_else(|| panic!("the store writes the token: {store}"));
+    assert!(
+        claim < persist,
+        "the turn is claimed before anything is stored: {store}"
     );
 }
