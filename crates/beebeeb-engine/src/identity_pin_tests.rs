@@ -85,6 +85,16 @@ const LITERALS_ALLOWED: &[(&str, &[&str], &str)] = &[
          stored or registered under",
     ),
     (
+        "native/beebeeb-drive-rune/src/frames/settings/more.rs",
+        &["%LOCALAPPDATA%\\io.beebeeb.app\\diagnostics\\"],
+        "board sample text of the dev fixture, never a path the app uses",
+    ),
+    (
+        "native/beebeeb-drive-rune/src/frames/settings/tests_more.rs",
+        &["%LOCALAPPDATA%\\io.beebeeb.app\\diagnostics\\"],
+        "board sample text of the dev fixture, never a path the app uses",
+    ),
+    (
         "native/beebeeb-drive-rune/build.rs",
         &["io.beebeeb.app", "io.beebeeb.app.test"],
         "the build script's two allowed identifiers",

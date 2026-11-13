@@ -133,7 +133,7 @@ pub struct Reported<'a> {
     pub unusual_place: bool,
 }
 
-/// The products a request can be for. Anything else is shown as "Beebeeb".
+/// The products a request can be for. Anything else is shown as the app's own name (the build's identity).
 const PRODUCTS: [&str; 5] = ["Drive", "Pass", "VPN", "Chat", "Mail"];
 pub const DEVICE_CHARS: usize = 40;
 const APP_CHARS: usize = 24;
@@ -150,7 +150,10 @@ impl SignInRequest {
         Self {
             // Never drawn: it is only compared and handed back to the source, so it stays as given.
             id: raw.id.to_owned(),
-            product: PRODUCTS.into_iter().find(|p| *p == raw.product).unwrap_or("Beebeeb"),
+            product: PRODUCTS
+                .into_iter()
+                .find(|p| *p == raw.product)
+                .unwrap_or(crate::shell::identity::AppIdentity::CURRENT.product_name()),
             device: or(one_line(raw.device, DEVICE_CHARS), "a device with no name"),
             app: or(one_line(raw.app, APP_CHARS), "not reported"),
             country: or(one_line(raw.country, COUNTRY_CHARS), "a place that is not known"),
@@ -308,7 +311,11 @@ mod tests {
             asked_at: "09:41:12 PM \u{202E}",
             unusual_place: true,
         });
-        assert_eq!(request.product(), "Beebeeb");
+        // An unknown product is shown as this build's own name (a TEST build says its own).
+        assert_eq!(
+            request.product(),
+            crate::shell::identity::AppIdentity::CURRENT.product_name()
+        );
         assert_eq!(request.id(), "req 1\n<b>", "the id is not drawn and stays as given");
         assert_eq!(request.device(), "a device with no name");
         assert_eq!(request.app(), "not reported");

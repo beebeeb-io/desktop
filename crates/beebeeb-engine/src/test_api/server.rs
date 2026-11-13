@@ -506,7 +506,21 @@ mod tests {
         // email to get a VALID server_state (OPAQUE 200), then send finish with that state but another email:
         // the email guard returns 401, while OPAQUE itself would return 200 (the state is valid for that session)
         // or 400 (bad_request). If the guard is removed, this line turns green at the wrong status.
-        let start_resp: Value = serde_json::from_slice(&handler(&start(FIXTURE_EMAIL)).body).unwrap();
+        // The start needs a message OPAQUE can read (`start` above sends one it cannot, and gets 400 with no state).
+        use base64::Engine as _;
+        let readable = beebeeb_core::opaque_protocol::client_login_start(b"any password")
+            .expect("client login start")
+            .message;
+        let real_start = post(
+            "/api/v1/opaque/login-start",
+            json!({ "email": FIXTURE_EMAIL, "client_message": base64::engine::general_purpose::STANDARD.encode(readable) }),
+        );
+        let started = handler(&real_start);
+        assert_eq!(
+            started.status, 200,
+            "a readable start for the fixture's email is answered by OPAQUE"
+        );
+        let start_resp: Value = serde_json::from_slice(&started.body).unwrap();
         let server_state = start_resp["server_state"].as_str().unwrap().to_string();
         let hijack = post(
             "/api/v1/opaque/login-finish",
