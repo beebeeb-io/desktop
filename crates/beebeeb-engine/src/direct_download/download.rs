@@ -50,10 +50,9 @@ pub async fn download(
     let mut tasks: FuturesUnordered<Task<'_>> = FuturesUnordered::new();
     let mut ready: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
     let mut plaintext: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(request.approx_size));
-    let mut reader = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(
+    let mut reader = request.record.decryptor(
         beebeeb_core::kdf::FileKey::from_bytes(*request.file_key.as_bytes()),
         request.file_id,
-        request.expected_format,
     );
     let mut geometry_checked = false;
     // Chunks that came through the pinned API route instead of storage.

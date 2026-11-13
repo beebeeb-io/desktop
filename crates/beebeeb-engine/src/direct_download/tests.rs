@@ -59,7 +59,7 @@ async fn run_with(
         Request {
             file_id: FILE_ID,
             file_key: &key,
-            expected_format: beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            record: crate::content_record::ContentRecord::UNRECORDED,
             chunk_count,
             download_kbps_limit: kbps,
             approx_size: SIZE,
@@ -269,7 +269,7 @@ async fn the_manifest_must_agree_with_the_metadata() {
         Request {
             file_id: FILE_ID,
             file_key: &key,
-            expected_format: beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            record: crate::content_record::ContentRecord::UNRECORDED,
             chunk_count: 12,
             download_kbps_limit: 0,
             approx_size: SIZE,
@@ -558,7 +558,7 @@ async fn run_pinned(pair: &Pair, pin: &crate::download_pin::PinnedVersion) -> Re
         Request {
             file_id: FILE_ID,
             file_key: &key,
-            expected_format: beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            record: crate::content_record::ContentRecord::UNRECORDED,
             chunk_count: pin.chunk_count,
             download_kbps_limit: 0,
             approx_size: SIZE,
@@ -686,7 +686,7 @@ async fn ld0105_s0_a_chunk_slower_than_a_minute_reports_its_bytes_as_they_arrive
         Request {
             file_id: FILE_ID,
             file_key: &key,
-            expected_format: beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            record: crate::content_record::ContentRecord::UNRECORDED,
             chunk_count: 1,
             download_kbps_limit: 0,
             approx_size: BIG as usize,

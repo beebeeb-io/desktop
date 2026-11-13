@@ -443,7 +443,11 @@ fn review_p2_3_a_parent_change_without_a_source_uploads() {
         !error.contains("move needs adoption"),
         "no move was recorded, so no adoption guard: {error}"
     );
-    assert_eq!(count(&seen, &format!("PATCH /api/v1/files/{GUEST}")), 1, "{seen:?}");
+    assert_eq!(
+        count(&seen, &format!("PATCH /api/v1/files/{GUEST}")),
+        1,
+        "{seen:?}; last error: {error}"
+    );
 }
 
 /// P2-3: the watcher's edit of an F item inside a shared folder (its upload

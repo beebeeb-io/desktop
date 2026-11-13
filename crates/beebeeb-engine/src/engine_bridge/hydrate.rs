@@ -737,7 +737,7 @@ impl EngineBridge {
         };
 
         let (file_key, name_key) = self.file_keys_for_download(file_id).await?;
-        let expected_format = recorded_content_format(&name_key, meta)?;
+        let record = recorded_content_format(&name_key, meta)?;
 
         // Rate-limit ceiling for downloads, and the transport (task 2173).
         let config = crate::config::DesktopConfig::load_for(self.identity).ok();
@@ -783,7 +783,7 @@ impl EngineBridge {
                 file_id,
                 file_key: &file_key,
                 chunk_count,
-                expected_format,
+                record,
                 download_kbps_limit,
                 approx_size,
                 pin: pin.as_ref(),
@@ -820,7 +820,7 @@ impl EngineBridge {
                         progress,
                         meter,
                         pin.as_ref(),
-                        expected_format,
+                        record,
                         chunk_count,
                         limit,
                     )
@@ -988,7 +988,7 @@ impl EngineBridge {
         self.db.set_status(file_id, FileStatus::Downloading)?;
 
         let (file_key, name_key) = self.file_keys_for_download(file_id).await?;
-        let expected_format = recorded_content_format(&name_key, meta)?;
+        let record = recorded_content_format(&name_key, meta)?;
         let download_kbps_limit = crate::config::DesktopConfig::load_for(self.identity)
             .map(|c| c.download_kbps_limit)
             .unwrap_or(0);
@@ -1004,7 +1004,7 @@ impl EngineBridge {
                 None,
                 None,
                 pin.as_ref(),
-                expected_format,
+                record,
                 chunk_count as u32,
                 None,
             )

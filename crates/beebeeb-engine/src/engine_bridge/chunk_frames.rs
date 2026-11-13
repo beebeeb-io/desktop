@@ -77,7 +77,7 @@ impl EngineBridge {
         progress: Option<&HydrateProgressFn>,
         meter: Option<&crate::transfer_progress::ReceiveMeter>,
         pin: Option<&crate::download_pin::PinnedVersion>,
-        expected: beebeeb_core::chunk_stream::ExpectedChunkFormat,
+        record: crate::content_record::ContentRecord,
         chunk_count: u32,
         // The most plaintext the caller holds ([`Self::hydrate_whole_file_within`]). `None`: no limit.
         limit: Option<u64>,
@@ -102,24 +102,12 @@ impl EngineBridge {
             report(0, total);
         }
 
-        // Public ChunkDecryptor delegates to core's StreamOpener; desktop owns no crypto.
+        // Core's readers, built from the file's authenticated record; desktop owns no crypto. A whole
+        // read is one sequential stream (order, last frame and `finish` are checked). A partial read
+        // opens each chunk at its own index against the record's version commitment, so it never
+        // trusts a served frame 0 to say which upload it is reading.
         let whole = range.start == 0 && range.end == chunk_count;
-        let mut reader = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(
-            beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes()),
-            file_id,
-            expected,
-        );
-        let context = if whole {
-            None
-        } else {
-            let first = self.download_content_frame(file_id, 0, pin, meter, None).await?;
-            let mut opened = reader.push_frame(&content_frame(&first)?)?;
-            opened.data.zeroize();
-            Some((
-                reader.format().ok_or_else(|| anyhow::anyhow!("missing chunk format"))?,
-                reader.version_id(),
-            ))
-        };
+        let mut reader = record.decryptor(beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes()), file_id);
         for i in range {
             let chunk_start = std::time::Instant::now();
             // What is left of the limit, plus room for a chunk's own framing: a longer body is given up as it
@@ -139,18 +127,10 @@ impl EngineBridge {
             // then zeroize the temporary. This limits live plaintext to
             // the accumulator + one chunk at any moment.
             let frame = content_frame(&chunk_bytes)?;
-            let mut decrypted = if let Some((format, version)) = context {
-                beebeeb_core::chunk_stream::open_chunk(
-                    file_key,
-                    file_id,
-                    version.as_ref().map(|v| v.as_slice()).unwrap_or(&[]),
-                    i,
-                    i + 1 == chunk_count,
-                    format,
-                    &frame,
-                )?
-            } else {
+            let mut decrypted = if whole {
                 reader.push_frame(&frame)?.data
+            } else {
+                record.open_chunk(file_key, file_id, i, i + 1 == chunk_count, &frame)?
             };
             acc.extend_from_slice(&decrypted);
             decrypted.zeroize();

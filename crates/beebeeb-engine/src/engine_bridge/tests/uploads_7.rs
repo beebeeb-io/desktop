@@ -443,6 +443,14 @@ async fn a_restore_from_this_mac_replaces_the_token() {
         "b1000000-0000-4000-8000-000000000002",
     )
     .await;
+    // Version 1 is listed with a commitment, as `object-restored-v1`: core never restores a version
+    // without one over a protected file, which the landed save made this one.
+    list_seeded_version_as_protected(
+        &bridge,
+        &server,
+        "b1000000-0000-4000-8000-000000000002",
+        "object-restored",
+    );
     bridge
         .queue_restore_version("b1000000-0000-4000-8000-000000000002", "object-restored-v1", None)
         .unwrap();

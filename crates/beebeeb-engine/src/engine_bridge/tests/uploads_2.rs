@@ -87,12 +87,23 @@ async fn test_process_due_operations_uploads_encrypted_payload_and_commits_state
 
     let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
     let file_key = beebeeb_core::kdf::derive_file_key(&master_key, item_id.as_bytes());
-    assert_eq!(
-        beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &requests[2].body).unwrap(),
-        b"live upload payload"
-    );
     assert_eq!(requests[3].method, "POST");
     assert_eq!(requests[3].path, "/api/v1/uploads/upload-session-1/complete");
+    // Chunk format v2: the frame is not a v1 frame, and it opens against the commitment the
+    // completion name carries. A new file records the format its content was written in.
+    assert!(beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &requests[2].body).is_err());
+    let (record, name) = uploaded_record(&requests, &file_key);
+    assert_eq!(record.format, beebeeb_core::chunk_stream::ExpectedChunkFormat::V2);
+    assert_eq!(record.version.map(|version| version.counter), Some(1));
+    assert_eq!(name, "report.txt");
+    assert_eq!(
+        uploaded_plaintext(&requests, &file_key, &item_id),
+        b"live upload payload"
+    );
+    // The move this create carries is sent on its own; the name travels with `complete` only.
+    let patch: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert!(patch.get("name_encrypted").is_none());
+    assert_eq!(patch["parent_id"], "846c7080-936d-5ffd-879c-39f630bfb30d");
 }
 
 /// Empty (0-byte) files — `.gitkeep`, `__init__.py`, `touch` placeholders —
@@ -162,12 +173,8 @@ async fn test_process_due_operations_uploads_empty_file_as_one_encrypted_empty_c
     assert_eq!(requests[2].body.len(), 28, "nonce + tag, no payload");
     let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
     let file_key = beebeeb_core::kdf::derive_file_key(&master_key, item_id.as_bytes());
-    assert!(
-        beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &requests[2].body)
-            .unwrap()
-            .is_empty()
-    );
     assert_eq!(requests[3].path, "/api/v1/uploads/upload-session-1/complete");
+    assert!(uploaded_plaintext(&requests, &file_key, &item_id).is_empty());
 }
 
 /// Device B side of the empty-file round trip: a server file with

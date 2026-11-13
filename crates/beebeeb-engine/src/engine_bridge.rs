@@ -102,6 +102,8 @@ pub struct EngineBridge {
 /// stay in this facade, and inherent impls may span modules.
 mod lifecycle;
 mod upload;
+// Chunk format v2 on the upload path: the resume rule and the completion name.
+mod upload_v2;
 // LD-0113: the backup uploader (a file read in place from a backed-up folder).
 mod backup_tree;
 mod backup_upload;
@@ -269,6 +271,10 @@ mod tests {
     mod versions;
     mod versions_2;
     mod versions_3;
+    // Chunk format v2 (core 0.3.0): write then read, the completion name, resume, capabilities.
+    mod format_v2;
+    // rusqlite 0.41: a state database and a file of release 0.8.25, read by this build.
+    mod upgrade_from_0_8_25;
     // Task 2407 (core 2404): each sync-folder site takes its conflict path on an 8.3 alias (stubbed check; Windows: real names).
     mod name_alias_2407;
     #[cfg(windows)]
@@ -301,15 +307,19 @@ mod tests {
     use shared_2::{enqueue_test_operation, seed_bridge_entry, seed_bridge_row};
     use sync::{SyncMockServer, enc_name, snap_node};
     use sync_5::{landed_create, rule3_setup, thumbnail_blob};
-    use trash_markers::{MockServerFile, VersionedServerMock, VersionedServerState};
+    // The shared fixtures (`fixture_http.rs`, also built by the desktop shell's tests) name it bare.
+    use crate::content_record::ContentRecord;
+    use trash_markers::{MockServerFile, VersionedServerMock, VersionedServerState, mock_object_version_id};
     use uploads::{
-        HydrationMockServer, TEST_FILE_ID, encrypt_chunk_wire, http_bytes, http_json, http_json_dated,
-        hydration_test_key, read_http_request, upload_mock_response,
+        HydrationMockServer, TEST_FILE_ID, completion_name, encrypt_chunk_wire, http_bytes, http_json, http_json_dated,
+        hydration_test_key, read_http_request, upload_mock_response, uploaded_plaintext, uploaded_record,
     };
     #[cfg(unix)]
     use uploads::{MockResponse, hydration_mock_response};
     use uploads_3::{ResumableUploadMock, ResumeMockMode, count_requests, init_item_id, resumable_create_op};
-    use uploads_5::{fp_save, queue_save, seed_uploaded_db_row, seed_uploaded_row};
+    #[cfg(target_os = "macos")] // the one test that restores over a landed save
+    use uploads_5::list_seeded_version_as_protected;
+    use uploads_5::{fp_save, protect_seeded_row, queue_save, seed_uploaded_db_row, seed_uploaded_row};
     #[cfg(unix)]
     use uploads_7::{land_one_save, remote_update};
     use uploads_8::{assert_kept_uploading, failing_passes};
