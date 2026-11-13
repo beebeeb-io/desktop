@@ -45,6 +45,7 @@ use crate::sync_view::{Explorer, Start, SyncView, ViewCell, ViewHost};
 use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
 
 pub mod settings_api;
+pub mod trash_api;
 
 /// Where the handle keeps an account's session token and vault key. The handle names the app on every call
 /// (`identity` is the one [`Engine::open`] was given): a store has no identity of its own to disagree with it.
