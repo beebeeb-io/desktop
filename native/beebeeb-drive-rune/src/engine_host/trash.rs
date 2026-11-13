@@ -11,7 +11,7 @@
 //!   belong to an earlier account, so that column is not bound.
 //! - the sidebar's count: none ([`TrashSource::count`] is `None`): the engine has no count call, and counting means
 //!   reading and decrypting the whole Trash, which the window must not do to draw a badge.
-//! - `restore`: [`Engine::restore_items`], one item. Not bound: `emptying`, and the actions behind Empty Trash,
+//! - `restore`: [`Engine::restore_items_for`], one item, for the session of the press. Not bound: `emptying`, and the actions behind Empty Trash,
 //!   Details, Preview and Delete permanently (no engine call; the view says "not available yet").
 //!
 //! When it reads: when the Trash section opens and the list is missing or older than [`FRESH_FOR`], and after a
@@ -22,6 +22,12 @@
 //! session moves on (a lock, a sign-out, another sign-in): each accessor compares the list's session with
 //! [`Engine::session_turn`] before it hands out a name, and `forget` (the window's poll, on a gate or account change)
 //! clears everything.
+//!
+//! A restore is bound to the session AND the account of the press: both are read on the window's thread before the
+//! list is looked at, the engine sends nothing unless the session in memory is still that one (asked under its
+//! session-write lock, with the token copy), and an answer that lands under another session or account touches no
+//! row. A press whose restore was not made because the session moved on is told to the account that pressed, once
+//! its session is in memory again, without a name (none is held across a lock); never to another account.
 //!
 //! Thread rule: the read and each restore run on a worker of their own and send their answer down one channel, taken
 //! in by [`TrashSource::pump`] (the window's poll); the worker wakes the window ([`Engine::wake_host`]).
@@ -66,13 +72,22 @@ pub struct EngineTrashSource<C: CredentialStores> {
     reads: u64,
     /// A read was asked for while one was on its way: start it when that one lands.
     again: bool,
-    /// Rows taken out of the list while their restore is on its way (put back if Beebeeb refuses).
-    restoring: HashMap<String, Listed>,
+    /// Rows taken out of the list while their restore is on its way (put back if Beebeeb refuses), each with the
+    /// session of its press: only that press's answer takes it out again.
+    restoring: HashMap<String, (SessionGeneration, Listed)>,
     /// Items Beebeeb restored, with the number of the last read that began before it answered: a read up to that
     /// number may still list them and must not bring them back.
     restored: HashMap<String, u64>,
     /// A notice for the next pump.
     notice: Option<Notice>,
+    /// The account whose restore was not made because its session moved on: told by the first poll that finds that
+    /// account's session in memory (a lock may be in between); dropped when another account, or none, is here.
+    /// Outlives `forget`, and holds no name of an item.
+    not_done_for: Option<String>,
+    /// Tests only: the next restore waits on the first, on its worker, before it calls the engine, and says on the
+    /// second that the engine's call ended.
+    #[cfg(test)]
+    next_restore: Option<(mpsc::Receiver<()>, mpsc::Sender<()>)>,
     /// Something changed outside an answer (a restore started, a forget): the next pump says so.
     dirty: bool,
 }
@@ -106,8 +121,22 @@ impl std::fmt::Debug for Listed {
 enum Answer {
     /// The read with this number, and the list with its session, or why not.
     Listed(u64, Result<(SessionGeneration, Vec<Listed>), AccountCallError>),
-    /// A restore of this item for this session, and whether Beebeeb took it.
-    Restored(String, SessionGeneration, bool),
+    /// A restore of this item, the session and account of its press, and whether Beebeeb took it.
+    Restored(String, Stamp, Result<(), AccountCallError>),
+}
+
+/// The session and the account a restore was pressed under.
+type Stamp = (SessionGeneration, Option<String>);
+
+/// Whose account is here: the stored email, else the user id the server named (as the Settings source names it).
+/// In memory only: never waits.
+fn account_of<C: CredentialStores>(engine: &Engine<C>) -> Option<String> {
+    engine.account_email().or_else(|| engine.user_id())
+}
+
+/// The session and account a press on `engine` is made under. Taken on the window's thread, before a worker starts.
+fn stamp<C: CredentialStores>(engine: &Engine<C>) -> Stamp {
+    (engine.session_turn(), account_of(engine))
 }
 
 impl<C: CredentialStores> EngineTrashSource<C> {
@@ -127,6 +156,9 @@ impl<C: CredentialStores> EngineTrashSource<C> {
             restoring: HashMap::new(),
             restored: HashMap::new(),
             notice: None,
+            not_done_for: None,
+            #[cfg(test)]
+            next_restore: None,
             dirty: false,
         }
     }
@@ -224,23 +256,65 @@ impl<C: CredentialStores> EngineTrashSource<C> {
                     self.read();
                 }
             }
-            Answer::Restored(id, session, taken) => {
-                let row = self.restoring.remove(&id);
-                if session != now {
+            Answer::Restored(id, pressed, result) => {
+                // The row in flight is this press's only when it left the list under the session of this press: an
+                // answer of an earlier session never takes out a row a later press put there.
+                let row = match self.restoring.get(&id) {
+                    Some((session, _)) if *session == pressed.0 => self.restoring.remove(&id).map(|(_, row)| row),
+                    _ => None,
+                };
+                // Drawn only for the session AND the account of the press. The session's turn only moves forward,
+                // so a stamp that is current now was current for the whole call.
+                if !(self.engine.has_session() && pressed == stamp(&self.engine)) {
+                    self.answered_late(pressed, result);
                     return;
                 }
-                if taken {
-                    self.restored.insert(id, self.reads);
-                } else {
-                    log("trash: an item was not restored");
-                    if let (Some(row), Some(listing)) = (row, self.listing.as_mut()) {
-                        self.notice = Some(Notice::RestoreRefused(row.row.name.clone()));
-                        listing.rows.push(row);
-                        listing.rows.sort_by_key(|listed| std::cmp::Reverse(listed.at));
+                match result {
+                    Ok(()) => {
+                        self.restored.insert(id, self.reads);
+                    }
+                    Err(kind) => {
+                        log(format!("trash: an item was not restored ({kind})"));
+                        if let (Some(row), Some(listing)) = (row, self.listing.as_mut()) {
+                            self.notice = Some(Notice::RestoreRefused(row.row.name.clone()));
+                            listing.rows.push(row);
+                            listing.rows.sort_by_key(|listed| std::cmp::Reverse(listed.at));
+                        }
                     }
                 }
                 // Read again what Beebeeb has now.
                 self.read();
+            }
+        }
+    }
+}
+
+impl<C: CredentialStores> EngineTrashSource<C> {
+    /// A restore answered under another session or account than its press: no row is touched and nothing of it is
+    /// drawn. The account that pressed is told when the restore was certainly not made; when it may have been, what
+    /// is listed for that account is read again.
+    fn answered_late(&mut self, pressed: Stamp, result: Result<(), AccountCallError>) {
+        // The account that pressed is the one this engine names now (its vault may be locked).
+        let theirs = pressed.1.is_some() && pressed.1 == account_of(&self.engine);
+        if let Err(kind) = &result {
+            log(format!("trash: an item was not restored ({kind})"));
+        }
+        if !theirs {
+            return;
+        }
+        match result {
+            // Still in Trash for certain: the engine sent nothing (the session of the press is gone: a lock, a
+            // sign-out, another sign-in), or Beebeeb answered and said no.
+            Err(AccountCallError::NotSignedIn | AccountCallError::ServerError | AccountCallError::SessionEnded) => {
+                self.not_done_for = pressed.1;
+            }
+            // Taken under the session of the press, or sent with an answer that never came: a list read since may
+            // be out of date. The next opening reads again, and a list on screen is read again now.
+            _ => {
+                self.read_at = None;
+                if self.current().is_some() {
+                    self.read();
+                }
             }
         }
     }
@@ -287,20 +361,40 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
     /// Sent once, on a worker; the row leaves the list at once and comes back only if Beebeeb refuses. `false`: no
     /// such row in the current session's list (or no worker could start).
     fn restore(&mut self, id: &str) -> bool {
-        let session = self.engine.session_turn();
+        // The session and account of the press, read BEFORE the list the item is chosen from is looked at: the
+        // item is sent for this session or not at all.
+        let pressed = stamp(&self.engine);
         let Some(at) = self
             .current()
+            .filter(|listing| listing.session == pressed.0 && pressed.1.is_some())
             .and_then(|listing| listing.rows.iter().position(|l| l.row.id == id))
         else {
             return false;
         };
         let (engine, answers, item) = (self.engine.clone(), self.answers.clone(), id.to_string());
+        let stamped = pressed.clone();
+        #[cfg(test)]
+        let hooks = self.next_restore.take();
         let started = std::thread::Builder::new().name("trash-restore".into()).spawn(move || {
-            let taken = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                engine.restore_items(&[item.as_str()]).is_ok()
+            #[cfg(test)]
+            if let Some((hold, _)) = &hooks {
+                let _ = hold.recv();
+            }
+            // The guard is the engine's: it copies the token only while the session in memory is still the one of
+            // the press, asked under its session-write lock, and sends nothing otherwise. A check here before the
+            // call could not be atomic with the send, so there is none to rely on: the session of the press is
+            // handed over and the engine decides. A panic in this worker must not leave the row in flight for
+            // good: it answers as an error.
+            let session = stamped.0;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                engine.restore_items_for(session, &[item.as_str()])
             }))
-            .unwrap_or(false);
-            let _ = answers.send(Answer::Restored(item, session, taken));
+            .unwrap_or(Err(AccountCallError::Offline));
+            #[cfg(test)]
+            if let Some((_, ended)) = &hooks {
+                let _ = ended.send(());
+            }
+            let _ = answers.send(Answer::Restored(item, stamped, result));
             engine.wake_host();
         });
         if started.is_err() {
@@ -309,7 +403,7 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
         }
         if let Some(listing) = self.listing.as_mut() {
             let row = listing.rows.remove(at);
-            self.restoring.insert(id.to_string(), row);
+            self.restoring.insert(id.to_string(), (pressed.0, row));
         }
         self.dirty = true;
         true
@@ -346,10 +440,22 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
             self.take_in(answer);
             changed = true;
         }
-        let notice = self.notice.take();
+        let mut notice = self.notice.take();
+        // Words for the account that pressed: said once its session is in memory (after an unlock the engine wakes
+        // the window, which polls); never to another account, and dropped when another, or none, is here.
+        if let Some(account) = self.not_done_for.take() {
+            if Some(&account) == account_of(&self.engine).as_ref() {
+                if self.engine.has_session() && notice.is_none() {
+                    notice = Some(Notice::RestoreNotDone);
+                } else {
+                    self.not_done_for = Some(account);
+                }
+            }
+        }
+        let waiting_to_say = self.not_done_for.is_some() && self.engine.has_session();
         Pumped {
             changed: changed || notice.is_some(),
-            busy: self.reading.is_some() || !self.restoring.is_empty(),
+            busy: self.reading.is_some() || !self.restoring.is_empty() || waiting_to_say,
             notice,
         }
     }
