@@ -9,6 +9,7 @@ use crate::ui::settings_list::{self as lists, Item, Trailing};
 use crate::ui::settings_shell as shell;
 use rune::El;
 
+use super::source::ReadState;
 use super::{Intent, SettingsUi};
 
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
@@ -84,10 +85,25 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     list += 1;
 
     for (g, (title, alerts)) in n.groups.iter().enumerate() {
+        // Not read yet (or the read failed): the rows hold their places, so nothing below them moves when the
+        // answer lands, but no switch is drawn: a value that was not read is never shown, and there is nothing
+        // to press.
+        let unread = match ui.source.alerts_state(g) {
+            ReadState::Ready => None,
+            ReadState::Loading => Some("Loading\u{2026}"),
+            ReadState::Failed => Some("Couldn't load"),
+        };
         let rows = alerts
             .iter()
             .enumerate()
             .map(|(i, alert)| {
+                let mut it = Item::new(None, alert.title.clone()).sub(alert.says.clone());
+                if i > 0 {
+                    it = it.ruled();
+                }
+                if let Some(words) = unread {
+                    return lists::item(list, i, &it.trailing(Trailing::Value(words.into())), t).disabled(true);
+                }
                 let key = format!("item-{list}-{i}");
                 let on = alert.on;
                 let mut switch = lists::switch(&key, &alert.title, on, t);
@@ -96,10 +112,6 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 } else {
                     switch.disabled(true).focusable(false)
                 };
-                let mut it = Item::new(None, alert.title.clone()).sub(alert.says.clone());
-                if i > 0 {
-                    it = it.ruled();
-                }
                 lists::item_with(list, i, &it, vec![switch], t)
             })
             .collect();

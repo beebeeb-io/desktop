@@ -4,10 +4,12 @@
 //! What each value is, and where it comes from:
 //! - "Your account" (Shared with you, File updates, Storage warnings): the account's own alert switches on Beebeeb
 //!   ([`Engine::notification_preferences`]; `share_received`, `file_updated`, `storage_warning`). A change is sent
-//!   once ([`Engine::set_notification_preferences`], only the one switch) and shown only after Beebeeb took it. The
-//!   group is always drawn in its place (so no row moves under the pointer when an answer lands); until the switches
-//!   are read (or when the read failed) it has no rows: never a value that was not read. A press finds its row by
-//!   its fixed place in the group table, never by what is drawn at that position now.
+//!   once ([`Engine::set_notification_preferences_for`], only the one switch, only under the session the press was
+//!   made in) and shown only after Beebeeb took it. The group and its three rows are always there, in their places
+//!   (so no row moves under the pointer when an answer lands); until the switches are read (or when the read failed)
+//!   [`NotificationsPart::alerts_state`] says so and the pane draws the rows without a switch: never a value that
+//!   was not read, and nothing to press. A press finds its row by its fixed place in the group table, never by what
+//!   is drawn at that position now.
 //!   `new_device_login` is never sent from here: the pane says security alerts cannot be turned off.
 //! - "Allow notifications", "Sync on this PC" and "Backups on this PC": this PC's settings file (`DesktopConfig`'s
 //!   `notify_*` switches), read when the window starts and written merge-only by one writer, the switch alone. A
@@ -15,9 +17,14 @@
 //! - Recent notifications and the "N new" on the Notifications row: the account's notifications from Beebeeb
 //!   ([`Engine::notifications`]), newest first, grouped by day on this computer's clock. A type the pane has no
 //!   place for (a welcome, a storage-location notice, a backup pass's notices) is left out, so the count is the
-//!   count of the "New" alerts the page shows. Leaving the page marks those seen ([`Engine::mark_notifications_read`],
-//!   only the ones shown as new, one call each); a refusal says so and reads again, so "New" comes back on exactly
-//!   the ones Beebeeb still holds unread (the engine stops at the first that fails; the ones before it are marked).
+//!   count of the "New" alerts the page shows. Leaving the page marks those seen
+//!   ([`Engine::mark_notifications_read_for`], only the ones shown as new, one call each); a refusal says so and reads
+//!   again, so "New" comes back on exactly the ones Beebeeb still holds unread (the engine stops at the first that
+//!   fails; the ones before it are marked). When that read fails too (no connection is the usual reason for both),
+//!   what was held stays drawn, possibly stale: it is not stamped fresh, so the next opening reads again, and the one
+//!   toast is the mark's. Any other failed read leaves nothing of the account drawn, and
+//!   [`NotificationsPart::recent_state`] says loading or failed: the page never says "No notifications" for a list
+//!   that was not read.
 //! - What Windows allows for this app is not read here: `allowed_in_windows` is always `true` (see the PR record).
 //!
 //! When it reads: when Notifications or Recent notifications opens and what it holds is missing or older than
@@ -25,6 +32,8 @@
 //!
 //! Session rule: every answer carries the session ([`Engine::session_turn`]) and the account it was made for; one
 //! that is not the current session's and account's is dropped, every accessor checks before it hands anything out,
+//! a write's session is read at the press, on the window's thread, and the engine sends nothing when the session
+//! has moved on since (the token is copied under that check, never apart from it),
 //! and the window's poll ([`NotificationsPart::pump`]) drops what it holds the moment the session moves on (a lock,
 //! a sign-out, another sign-in).
 //!
@@ -50,7 +59,7 @@ use chrono::{DateTime, Datelike, Local, TimeZone};
 use super::super::log;
 use super::super::trash::seconds_of;
 use crate::frames::settings::Pane;
-use crate::frames::settings::source::{Alert, AlertKind, AlertTarget, Notifications, RecentAlert};
+use crate::frames::settings::source::{Alert, AlertKind, AlertTarget, Notifications, ReadState, RecentAlert};
 
 #[cfg(test)]
 mod tests;
@@ -384,6 +393,12 @@ pub(super) struct NotificationsPart<C: CredentialStores> {
     changes: u64,
     /// Marks on their way.
     marking: usize,
+    /// A mark was refused under this session and what Beebeeb holds is being read again: if that read fails too,
+    /// what is held stays (possibly stale) and the mark's toast is the only one.
+    after_mark: Option<SessionGeneration>,
+    /// Test builds: the next write's worker waits for a word down this before it calls the engine.
+    #[cfg(test)]
+    hold_next_write: Option<mpsc::Receiver<()>>,
     toast_next: Option<&'static str>,
     dirty: bool,
     answers: mpsc::Sender<Answer>,
@@ -422,6 +437,9 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             switching: false,
             changes: 0,
             marking: 0,
+            after_mark: None,
+            #[cfg(test)]
+            hold_next_write: None,
             toast_next: None,
             dirty: false,
             answers,
@@ -460,26 +478,65 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
         }
     }
 
-    /// The groups the pane draws now: every group of [`GROUPS`], always in its place, so a row never moves under
-    /// the pointer when an answer lands. The account's group has no rows until its switches are read (never a
-    /// guessed switch), and loses them again when a read fails or the session moves on.
+    /// The groups the pane draws now: every group of [`GROUPS`] with every one of its rows, always in its place, so
+    /// a row never moves under the pointer when an answer lands. An account row whose switch is not read is there
+    /// with a filler `on` (`false`): [`Self::alerts_state`] says the group is not read, and the pane then draws no
+    /// switch for it (never a guessed switch).
     fn rows(&self) -> Vec<(&'static str, Vec<Alert>)> {
         GROUPS
             .iter()
             .map(|(title, rows)| {
                 let rows = rows
                     .iter()
-                    .filter_map(|&(name, says, stored)| {
-                        self.value_of(stored).map(|on| Alert {
-                            title: name.into(),
-                            says: says.into(),
-                            on,
-                        })
+                    .map(|&(name, says, stored)| Alert {
+                        title: name.into(),
+                        says: says.into(),
+                        on: self.value_of(stored).unwrap_or(false),
                     })
                     .collect();
                 (*title, rows)
             })
             .collect()
+    }
+
+    /// What stands in for something of the account that is not held for the current session: loading while an
+    /// answer is on its way (or about to be asked for), failed otherwise. Asked live, as every accessor.
+    fn unread_state(&self) -> ReadState {
+        let about_to_ask =
+            self.showing && self.engine.has_session() && self.asked_for != Some(self.engine.session_turn());
+        if self.reading.is_some() || self.again || about_to_ask {
+            ReadState::Loading
+        } else {
+            ReadState::Failed
+        }
+    }
+
+    /// Whether the switches of group `group` are read: always for this PC's groups; for the account's, only while
+    /// its switches are held for the current session.
+    pub(super) fn alerts_state(&self, group: usize) -> ReadState {
+        let of_account = GROUPS
+            .get(group)
+            .is_some_and(|(_, rows)| rows.iter().any(|(_, _, stored)| matches!(stored, Stored::Account(_))));
+        if !of_account || self.current(&self.switches).is_some() {
+            ReadState::Ready
+        } else {
+            self.unread_state()
+        }
+    }
+
+    /// Whether the list of recent notifications is held for the current session.
+    pub(super) fn recent_state(&self) -> ReadState {
+        if self.current(&self.recent).is_some() {
+            ReadState::Ready
+        } else {
+            self.unread_state()
+        }
+    }
+
+    /// "Try again": read now.
+    pub(super) fn reload(&mut self) {
+        self.read();
+        self.dirty = true;
     }
 
     /// Ask Beebeeb for the switches and the list on a worker, unless a read is on its way.
@@ -578,14 +635,21 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             return;
         }
         let update = switch.update(on);
+        // The session of the press, read here on the window's thread: the engine sends nothing under another.
+        let before = stamp(&self.engine);
+        #[cfg(test)]
+        let hold = self.hold_next_write.take();
         let started = spawn(
             "settings-notifications-set",
             &self.engine,
             &self.answers,
             move |engine| {
-                let before = stamp(engine);
+                #[cfg(test)]
+                if let Some(hold) = hold {
+                    let _ = hold.recv();
+                }
                 let result = engine
-                    .set_notification_preferences(&update)
+                    .set_notification_preferences_for(before.0, &update)
                     .map(|answer| answer.preferences);
                 Answer::Switched {
                     made_for: still(engine, before),
@@ -607,6 +671,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
     /// Drop everything of the account: its switches, its notifications, what was seen.
     fn forget(&mut self) {
         self.again = false;
+        self.after_mark = None;
         self.switches = None;
         self.recent = None;
         self.seen.clear();
@@ -631,6 +696,16 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                     return;
                 };
                 self.read_at = Some(Instant::now());
+                // The read after a refused mark, under the session of that mark: one that fails for want of an
+                // answer keeps what is held. (A session Beebeeb ended keeps nothing.) The read that `again` starts
+                // next is that read too.
+                let after_mark = self.after_mark == Some(session);
+                if !self.again {
+                    self.after_mark = None;
+                }
+                let keeps = |kind: AccountCallError| {
+                    after_mark && !matches!(kind, AccountCallError::NotSignedIn | AccountCallError::SessionEnded)
+                };
                 let mut failed = None;
                 match switches {
                     // A change Beebeeb took after this read began is newer than what the read says.
@@ -643,7 +718,9 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                         })
                     }
                     Err(kind) => {
-                        self.switches = None;
+                        if !keeps(kind) {
+                            self.switches = None;
+                        }
                         failed = Some(kind);
                     }
                 }
@@ -659,15 +736,21 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                         });
                     }
                     Err(kind) => {
-                        self.recent = None;
+                        if !keeps(kind) {
+                            self.recent = None;
+                        }
                         failed = failed.or(Some(kind));
                     }
                 }
                 if let Some(kind) = failed {
+                    // Never stamped fresh: the next opening reads again (what was kept may be stale).
                     self.read_at = None;
                     if !matches!(kind, AccountCallError::NotSignedIn | AccountCallError::SessionEnded) {
                         log(format!("settings: the notifications did not load ({kind})"));
-                        *toast = Some(NOT_LOADED);
+                        // After a refused mark the mark's words stand: one toast for the one thing that went wrong.
+                        if !after_mark {
+                            *toast = Some(NOT_LOADED);
+                        }
                     }
                 }
             }
@@ -706,7 +789,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             }
             Answer::Marked { made_for, ids, result } => {
                 self.marking = self.marking.saturating_sub(1);
-                if !made_for.is_some_and(|(s, a)| self.is_now(s, &a)) {
+                if !made_for.as_ref().is_some_and(|(s, a)| self.is_now(*s, a)) {
                     return;
                 }
                 if let Err(kind) = result {
@@ -716,6 +799,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                     for id in &ids {
                         self.seen.remove(id);
                     }
+                    self.after_mark = made_for.map(|(session, _)| session);
                     self.read();
                     if !matches!(kind, AccountCallError::NotSignedIn | AccountCallError::SessionEnded) {
                         *toast = Some(NOT_MARKED);
@@ -833,9 +917,8 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
     }
 
     /// `group`, `index` as in `notifications().groups`. The row is found by its fixed place in [`GROUPS`] (every
-    /// group is drawn in its place, and a group's rows are all there or none), never by what sits at that position
-    /// now: a press can only change the switch that was drawn there. An account switch that is not read is not
-    /// changed.
+    /// group and every row is always in its place), never by what sits at that position now: a press can only
+    /// change the switch that was drawn there. An account switch that is not read is not changed.
     pub(super) fn set_alert(&mut self, group: usize, index: usize, on: bool) {
         let Some(&(_, _, stored)) = GROUPS.get(group).and_then(|(_, rows)| rows.get(index)) else {
             return;
@@ -862,13 +945,20 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             return;
         }
         let sent = ids.clone();
+        // The session whose page showed these, read here on the window's thread (as a switch's press).
+        let before = stamp(&self.engine);
+        #[cfg(test)]
+        let hold = self.hold_next_write.take();
         let started = spawn(
             "settings-notifications-seen",
             &self.engine,
             &self.answers,
             move |engine| {
-                let before = stamp(engine);
-                let result = engine.mark_notifications_read(&sent);
+                #[cfg(test)]
+                if let Some(hold) = hold {
+                    let _ = hold.recv();
+                }
+                let result = engine.mark_notifications_read_for(before.0, &sent);
                 Answer::Marked {
                     made_for: still(engine, before),
                     ids: sent,
@@ -897,5 +987,13 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
     /// What it holds is old: the next opening reads again.
     pub(super) fn expire(&mut self) {
         self.read_at = None;
+    }
+
+    /// The next write (a switch's change, a mark) waits on its worker, before it calls the engine, until the
+    /// returned sender is sent to or dropped.
+    pub(super) fn hold_next_write(&mut self) -> mpsc::Sender<()> {
+        let (release, held) = mpsc::channel();
+        self.hold_next_write = Some(held);
+        release
     }
 }
