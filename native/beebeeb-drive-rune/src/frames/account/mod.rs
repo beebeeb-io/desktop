@@ -371,14 +371,16 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     pumped.changed
 }
 
-/// The toast over a pane. With a way to try again it is the failure toast with its button (`ui::toast`), laid
-/// where the settings toast sits; the words alone are the settings toast, as before.
+/// The toast over a pane. Something that worked is the settings toast, as before. Something that was not done
+/// is the failure toast (`ui::toast`: its own mark, read at once), laid where the settings toast sits, with its
+/// button when it can be tried again.
 fn notice_toast(source: &dyn AccountSource, t: &Theme) -> Option<El> {
     let words = source.notice()?;
-    let Some(action) = source.notice_action() else {
+    let action = source.notice_action();
+    if !source.notice_failed() && action.is_none() {
         return Some(crate::ui::settings_notice::toast(0, words, t));
-    };
-    let again = crate::ui::toast::ToastAction {
+    }
+    let again = action.map(|action| crate::ui::toast::ToastAction {
         text: action,
         name: action,
         shortcut: None,
@@ -387,7 +389,7 @@ fn notice_toast(source: &dyn AccountSource, t: &Theme) -> Option<El> {
                 source.run_notice_action();
             }
         },
-    };
+    });
     Some(
         row()
             .key("toast-0-line")
@@ -397,7 +399,7 @@ fn notice_toast(source: &dyn AccountSource, t: &Theme) -> Option<El> {
                 &crate::theme::icons_settings::WARN_CIRCLE,
                 crate::ui::toast::Tone::Failed,
                 words,
-                Some(again),
+                again,
                 t,
             )),
     )
@@ -406,15 +408,45 @@ fn notice_toast(source: &dyn AccountSource, t: &Theme) -> Option<El> {
 /// How soon the window looks again while an answer is out (the worker also wakes it).
 const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// The heading of the section a pane belongs to.
+fn title_of(pane: Pane) -> &'static str {
+    match pane.section() {
+        SettingsPane::DevicesAndSessions => "Devices and sessions",
+        SettingsPane::Security => "Sign-in and security",
+        _ => "Account",
+    }
+}
+
+/// A pane the source does not answer for yet, INSIDE the settings shell: the sidebar stays, so there is always
+/// a way back (the shell's full-window frame has none outside Drive). Honest as that frame is: what it is, one
+/// sentence, nothing that could be read as the account's data. Keyed as the shell's notice is.
+fn unbuilt_pane(pane: Pane, t: &Theme) -> El {
+    let title = title_of(pane);
+    let notice = col()
+        .key("not-built")
+        .role("group")
+        .label(format!("{title}: not built yet"))
+        .gap(4.0)
+        .child(crate::ui::kit::label(
+            "not-built-label",
+            "NOT BUILT YET",
+            set::SUB_MONO,
+            t.text_tertiary,
+        ))
+        .child(crate::ui::kit::label(
+            "not-built-line",
+            "This part of Beebeeb Drive has no screen yet. Nothing here is your data.",
+            set::SUB,
+            t.text_tertiary,
+        ));
+    set::pane(vec![set::heading(title, None, None, t), notice], t)
+}
+
 /// The pane in a state that is not its content: asked and not answered, nobody signed in, the session ended,
 /// or the read failed. Nothing of an account is in it.
 fn state_pane(pane: Pane, state: source::PaneState, t: &Theme) -> El {
     use crate::ui::settings_notice as notices;
-    let title = match pane.section() {
-        SettingsPane::DevicesAndSessions => "Devices and sessions",
-        SettingsPane::Security => "Sign-in and security",
-        _ => "Account",
-    };
+    let title = title_of(pane);
     let (head, words, again) = match state {
         source::PaneState::Loading => ("Loading", "Asking Beebeeb for your account.", false),
         source::PaneState::SignedOut => (
@@ -504,8 +536,8 @@ pub fn go(s: &mut State, frame: &'static str) {
     };
     let want = pane.section();
     // A page under a section opens only when something answers for it. When the section itself is answered
-    // for and the page is not, the person stays where they are: never the full-window "not built yet" frame,
-    // which has no way back to the section. (A section nothing answers for is still that frame, as before.)
+    // for and the page is not, the person stays where they are. (A section nothing answers for says so inside
+    // the settings shell, `unbuilt_pane`.)
     if let Some(source) = s.account.source.as_deref()
         && let Some(root) = Pane::root(want)
         && pane != root
@@ -780,16 +812,15 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let dialog = ui.dialog.as_ref().filter(|_| inside);
     // A source that does not answer for this pane (or not yet): its state, never the pane on empty values.
     let state = source.pane_state(pane);
-    if state == source::PaneState::Unwired {
-        return placeholder::window(s, cx, registry::group_for(&s.shell.app));
-    }
-    if pane == Pane::DeleteUndone {
+    if pane == Pane::DeleteUndone && state != source::PaneState::Unwired {
         // The result of undoing a deletion is a screen of its own (the account window's
         // layout, DW-A83), not a pane of settings.
         return delete::undone(s.identity.product_name(), &t, cx);
     }
     let form = &ui.form;
     let (pane_el, overlay) = match pane {
+        // Nothing answers for it: said inside the settings shell, where the sidebar leads back.
+        _ if state == source::PaneState::Unwired => (unbuilt_pane(pane, &t), None),
         _ if state != source::PaneState::Ready => (state_pane(pane, state, &t), None),
         Pane::Account => (
             overview::pane(source, &t),

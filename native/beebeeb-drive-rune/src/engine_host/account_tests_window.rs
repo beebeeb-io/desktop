@@ -136,6 +136,23 @@ fn no_route_from_a_live_pane_ends_on_the_not_built_frame() {
             "{frame}: Account still shows"
         );
     }
+    // A section nothing answers for (Security, and a page under it) says so INSIDE settings: the sidebar
+    // stays, and it leads back.
+    for frame in ["DW-A52", "DW-A67", "DW-A83"] {
+        rt.update(move |s, _| crate::frames::account::go(s, frame));
+        rt.frame(0.016);
+        rt.frame(0.4);
+        assert!(has(&rt, "not-built"), "{frame}");
+        assert!(
+            shows(&rt, "Back to Drive") && shows(&rt, "Devices and sessions"),
+            "{frame}: the sidebar"
+        );
+        assert!(!says_anywhere(&rt, FIRST) && !says_anywhere(&rt, "deletion"), "{frame}");
+    }
+    rt.update(|s, _| crate::frames::account::go(s, "DW-A51"));
+    wait_for(&mut rt, "back on Account", |rt| {
+        shows(rt, FIRST) && !has(rt, "not-built")
+    });
 }
 
 /// A plan that was cancelled: the card and the dialog say when it ends, and nowhere "renews".
@@ -222,6 +239,10 @@ fn a_sign_out_in_the_window_is_confirmed_sent_once_and_said() {
     // The confirm's own button, numbered after the rows' two.
     click(&mut rt, "btn-2");
     wait_for(&mut rt, "the toast", |rt| shows(rt, SIGNED_OUT));
+    assert!(
+        has(&rt, "toast-0") && !has(&rt, "toast"),
+        "something that worked: the settings toast"
+    );
     assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone"]);
     wait_for(&mut rt, "the row goes", |rt| !says_anywhere(rt, PHONE));
     assert!(shows(&rt, BROWSER));
@@ -233,6 +254,12 @@ fn a_sign_out_in_the_window_is_confirmed_sent_once_and_said() {
     wait_for(&mut rt, "the refusal", |rt| shows(rt, NOT_SIGNED_OUT));
     assert!(shows(&rt, BROWSER));
     assert!(shows(&rt, TRY_AGAIN) && has(&rt, "toast-action"));
+    assert!(
+        rt.elements()
+            .iter()
+            .any(|e| !e.exiting && e.key.as_deref() == Some("toast") && e.role == "alert"),
+        "something that was not done is drawn as a failure"
+    );
     assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone", "s-web"]);
     // "Try again" sends it once more; it still fails, and the toast still offers it (the list read after the
     // answer shows the answer was taken in).
@@ -265,4 +292,28 @@ fn a_failed_read_is_drawn_with_a_way_to_try_again() {
     click(&mut rt, "btn-0");
     wait_for(&mut rt, "the sessions", |rt| shows(rt, PHONE));
     assert!(!says_anywhere(&rt, "Couldn't load this"));
+}
+
+/// Something that was not done is drawn as a failure also when there is nothing to try again: a second press
+/// while the first sign-out is on its way.
+#[test]
+fn a_refusal_with_nothing_to_try_again_is_still_drawn_as_a_failure() {
+    let server = server();
+    let mut rt = window_on(signed_in(&server), SettingsPane::DevicesAndSessions);
+    wait_for(&mut rt, "the sessions", |rt| shows(rt, PHONE));
+    server.change_delay_ms.store(1_500, Ordering::SeqCst);
+    for _ in 0..2 {
+        click(&mut rt, "btn-0");
+        click(&mut rt, "btn-2");
+    }
+    assert!(shows(&rt, STILL_SIGNING_OUT));
+    assert!(
+        rt.elements()
+            .iter()
+            .any(|e| !e.exiting && e.key.as_deref() == Some("toast") && e.role == "alert"),
+        "drawn as a failure"
+    );
+    assert!(!has(&rt, "toast-action") && !has(&rt, "toast-0"));
+    wait_for(&mut rt, "the sign-out lands", |rt| shows(rt, SIGNED_OUT));
+    assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone"], "sent once");
 }

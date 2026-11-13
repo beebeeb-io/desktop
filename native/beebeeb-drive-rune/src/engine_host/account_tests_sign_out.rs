@@ -14,6 +14,7 @@ fn a_sign_out_is_sent_once_by_id_and_the_row_goes_only_when_beebeeb_says_so() {
     for id in ["s-this", "s-unknown", ""] {
         assert!(!source.sign_out_device(id), "{id:?}");
         assert_eq!(source.notice(), Some(NOT_SENT), "{id:?}");
+        assert!(source.notice_failed(), "{id:?}: said as a failure");
         assert_eq!(source.notice_action(), None, "{id:?}: nothing to send again");
         source.clear_notice();
     }
@@ -70,6 +71,7 @@ fn a_sign_out_beebeeb_did_not_take_is_said_read_again_and_can_be_sent_again() {
     assert!(source.sign_out_device("s-phone"));
     settle(&mut source);
     assert_eq!(source.notice(), Some(NOT_SIGNED_OUT));
+    assert!(source.notice_failed());
     assert_eq!(source.notice_action(), Some(TRY_AGAIN));
     assert_eq!(lists(&server), reads + 1, "the list is read again after the answer");
     assert_eq!(ids(&source).len(), 3, "Beebeeb still lists it: the row stands");
@@ -80,6 +82,7 @@ fn a_sign_out_beebeeb_did_not_take_is_said_read_again_and_can_be_sent_again() {
     settle(&mut source);
     assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone", "s-phone"]);
     assert_eq!(source.notice(), Some(SIGNED_OUT));
+    assert!(!source.notice_failed());
     assert_eq!(source.notice_action(), None);
     assert_eq!(ids(&source), ["s-this", "s-web"]);
     // Nothing left to send again.
@@ -146,10 +149,59 @@ fn a_session_that_was_already_signed_out_goes_when_the_list_is_read_again() {
     assert_eq!(ids(&source), ["s-this", "s-web"], "the row is gone after the re-read");
     assert_eq!(source.notice(), Some(IS_SIGNED_OUT));
     assert_eq!(source.notice_action(), None);
+    assert!(!source.notice_failed());
     // The row is gone: a late press for it is refused before anything is sent.
     assert!(!source.sign_out_device("s-phone"));
     assert_eq!(source.notice(), Some(NOT_SENT));
     assert_eq!(server.deleted.lock().unwrap().len(), 1);
+}
+
+/// A 404 that did not come from Beebeeb's list (something in front answered it): the list that is read after it
+/// still has the session, so the words are taken back and the sign-out can be sent again.
+#[test]
+fn a_404_for_a_session_the_list_still_has_is_not_said_as_signed_out() {
+    let server = server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    server.change_mode.store(A_404_THAT_ENDED_NOTHING, Ordering::SeqCst);
+    assert!(source.sign_out_device("s-phone"));
+    settle(&mut source);
+    assert_eq!(ids(&source).len(), 3, "Beebeeb still lists it");
+    assert_eq!(
+        source.notice(),
+        Some(NOT_SIGNED_OUT),
+        "never \"signed out\" beside a row that stands"
+    );
+    assert!(source.notice_failed());
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN));
+}
+
+/// A list that was asked before a sign-out, and answers after the person left the pane, is stale: it is not
+/// drawn, and nothing is read for it until the pane shows again.
+#[test]
+fn a_stale_list_is_not_read_again_while_the_pane_does_not_show() {
+    let server = server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    server.read_delay_ms.store(300, Ordering::SeqCst);
+    source.reload(Pane::Sessions);
+    assert!(source.sign_out_device("s-phone"));
+    source.opened(Pane::Account);
+    settle(&mut source);
+    assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone"]);
+    assert_eq!(
+        server.asked("GET /api/v1/account/sessions"),
+        2,
+        "the first read and the one that was out: none is started for a pane that does not show"
+    );
+    server.read_delay_ms.store(0, Ordering::SeqCst);
+    opened(&mut source, Pane::Sessions);
+    assert_eq!(
+        server.asked("GET /api/v1/account/sessions"),
+        3,
+        "read when it shows again"
+    );
+    assert_eq!(ids(&source), ["s-this", "s-web"]);
 }
 
 #[test]
@@ -163,9 +215,12 @@ fn an_unconfirmed_sign_out_reads_again_and_a_failed_re_read_keeps_the_words() {
     server.change_mode.store(DROP_CONNECTION, Ordering::SeqCst);
     assert!(source.sign_out_device("s-phone"));
     settle(&mut source);
-    assert_eq!(source.notice(), Some(UNKNOWN_SIGN_OUT));
-    assert_eq!(source.notice_action(), None, "not known is not \"send it again\"");
+    // The list answers and still has the session: it was not signed out, and that is what is said now (never
+    // "checking" after the check is done), with the way to send it again.
     assert_eq!(server.asked("GET /api/v1/account/sessions"), reads + 1);
+    assert_eq!(source.notice(), Some(NOT_SIGNED_OUT));
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN));
+    assert_eq!(ids(&source).len(), 3);
     server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
     assert!(source.sign_out_device("s-phone"));
     settle(&mut source);
@@ -174,6 +229,8 @@ fn an_unconfirmed_sign_out_reads_again_and_a_failed_re_read_keeps_the_words() {
         Some(UNKNOWN_SIGN_OUT),
         "the re-read failed: the words stay"
     );
+    assert!(source.notice_failed());
+    assert_eq!(source.notice_action(), None, "not known is not \"send it again\"");
     assert_eq!(source.pane_state(Pane::Sessions), PaneState::Failed);
 
     // Refused, then the re-read fails: the refusal's words stay too.
@@ -232,9 +289,13 @@ fn a_sign_out_answered_after_the_pane_was_left_says_nothing_and_is_read_on_retur
             reads,
             "mode {mode}: nothing is read"
         );
-        // Back within the freshness window: what is held is older than the answer, so it is read.
+        // Back within the freshness window: what is held is older than the answer, so it is read. A sign-out
+        // that was not done is said now, over its own pane, with the way to send it again.
         opened(&mut source, Pane::Sessions);
         assert_eq!(server.asked("GET /api/v1/account/sessions"), reads + 1, "mode {mode}");
+        let failed = mode == SERVER_ERROR;
+        assert_eq!(source.notice(), failed.then_some(NOT_SIGNED_OUT), "mode {mode}");
+        assert_eq!(source.notice_action(), failed.then_some(TRY_AGAIN), "mode {mode}");
     }
     assert_eq!(ids(&source), ["s-this", "s-web"]);
 }
@@ -258,12 +319,17 @@ fn a_worker_that_panics_ends_as_a_failed_read_and_an_unknown_sign_out() {
     assert!(source.sign_out_device("s-phone"));
     settle(&mut source);
     assert!(server.deleted.lock().unwrap().is_empty(), "the worker never asked");
-    assert_eq!(source.notice(), Some(UNKNOWN_SIGN_OUT));
     assert_eq!(
         server.asked("GET /api/v1/account/sessions"),
         reads + 1,
-        "and the list is read again"
+        "the list is read again"
     );
+    assert_eq!(
+        source.notice(),
+        Some(NOT_SIGNED_OUT),
+        "not known, then the list still has it"
+    );
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN));
     // The mark is cleared: the press works again.
     assert!(source.sign_out_device("s-phone"));
     settle(&mut source);

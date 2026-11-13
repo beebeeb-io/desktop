@@ -40,6 +40,8 @@ const UNREADABLE: u8 = 4;
 const DROP_CONNECTION: u8 = 5;
 /// A sign-out only: Beebeeb takes it, and a gateway in front answers 502.
 const TAKEN_BEHIND_A_502: u8 = 6;
+/// A sign-out only: something in front of Beebeeb answers 404, and the session stands.
+const A_404_THAT_ENDED_NOTHING: u8 = 7;
 
 struct Person {
     account: Arc<FakeAccount>,
@@ -214,6 +216,9 @@ fn server() -> Server {
                 failed(change).unwrap_or_else(|| {
                     if !authed {
                         return Reply::json(401, json!({}));
+                    }
+                    if change == A_404_THAT_ENDED_NOTHING {
+                        return Reply::json(404, json!({ "error": "a proxy's body" }));
                     }
                     let mut sessions = person.sessions.lock().unwrap();
                     let before = sessions.len();
@@ -694,7 +699,23 @@ fn a_name_that_cannot_be_read_is_the_email_and_not_a_failed_pane() {
         assert_eq!((who.name.as_str(), who.email.as_str()), (FIRST, FIRST), "mode {mode}");
         assert_eq!(who.initials, "AF", "mode {mode}");
         assert!(source.plan().is_some(), "mode {mode}: the plan still draws");
+        // Drawn, but not fresh: the next opening asks again (a read that answered whole does not).
+        let asked = server.asked("GET /api/v1/me/profile");
+        opened(&mut source, Pane::Account);
+        assert_eq!(server.asked("GET /api/v1/me/profile"), asked + 1, "mode {mode}");
     }
+    // The plan alone failing is the same: drawn without the card, and asked again at the next opening.
+    server.name_mode.store(ANSWER, Ordering::SeqCst);
+    server.plan_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    opened(&mut source, Pane::Account);
+    assert_eq!(source.identity().name, FIRST_NAME);
+    let asked = server.asked("GET /api/v1/me/profile");
+    opened(&mut source, Pane::Account);
+    assert_eq!(server.asked("GET /api/v1/me/profile"), asked + 1);
+    server.plan_mode.store(ANSWER, Ordering::SeqCst);
+    opened(&mut source, Pane::Account);
+    opened(&mut source, Pane::Account);
+    assert_eq!(server.asked("GET /api/v1/me/profile"), asked + 2, "whole: fresh");
     // A 401 on the name is a 401.
     server.name_mode.store(SESSION_ENDED, Ordering::SeqCst);
     source.reload(Pane::Account);
@@ -884,12 +905,10 @@ fn the_engines_account_calls_answer_for_their_session_and_send_only_for_it() {
     server.change_mode.store(ANSWER, Ordering::SeqCst);
     assert_eq!(engine.revoke_account_session(turn, "s-web"), Ok(()));
     assert_eq!(server.deleted.lock().unwrap().clone(), ["s-web", "s-web", "s-web"]);
-    // Ended before: Beebeeb answers 404, told apart from every other refusal. The plain call keeps it an error.
+    // Ended before: Beebeeb answers 404, told apart from every other refusal. For the plain call there is
+    // nothing left to end either.
     assert_eq!(engine.end_account_session(turn, "s-web"), Ok(SessionEnd::AlreadyGone));
-    assert_eq!(
-        engine.revoke_account_session(turn, "s-web").err(),
-        Some(AccountCallError::ServerError)
-    );
+    assert_eq!(engine.revoke_account_session(turn, "s-web"), Ok(()));
     assert_eq!(engine.end_account_session(turn, "s-phone"), Ok(SessionEnd::Ended));
     assert_eq!(server.deleted.lock().unwrap().len(), 6);
 
@@ -983,9 +1002,11 @@ fn an_answer_that_lands_after_a_lock_is_handed_to_nobody() {
 #[test]
 fn initials_and_times_read_as_the_board_writes_them() {
     assert_eq!(initials_of("Invented Middle Person"), "IP");
-    // An email: the part before the @ only.
-    assert_eq!(initials_of("invented@example.io"), "I");
-    assert_eq!(initials_of("invented.person@example.io"), "IP");
+    assert_eq!(
+        initials_of("Invented @ Northwind"),
+        "IN",
+        "a name that was set is taken whole"
+    );
     assert_eq!(initials_of("solo"), "S");
     assert_eq!(initials_of(""), "");
     let now = 1_000_000;

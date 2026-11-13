@@ -498,6 +498,10 @@ pub trait AccountSource {
     fn notice(&self) -> Option<&'static str> {
         None
     }
+    /// The toast says something was NOT done: it is drawn as a failure, never with the mark of a thing that worked.
+    fn notice_failed(&self) -> bool {
+        false
+    }
     /// The toast's button, when what it says can be tried again ("Try again"): `None` draws the words alone.
     fn notice_action(&self) -> Option<&'static str> {
         None

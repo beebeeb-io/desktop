@@ -104,8 +104,8 @@ impl<C: CredentialStores> Engine<C> {
         self.acct.auth_health.note_result(refused.then_some(&refusal));
     }
 
-    /// WRITES: [`Engine::revoke_account_session`], with a 404 told apart: the session had ended before, so there
-    /// is nothing left to end ([`SessionEnd::AlreadyGone`]).
+    /// WRITES: end one session of the account, the one path of [`Engine::revoke_account_session`], with a 404
+    /// told apart: the session had ended before, so there is nothing left to end ([`SessionEnd::AlreadyGone`]).
     pub fn end_account_session(
         &self,
         listed_under: SessionGeneration,
@@ -143,13 +143,11 @@ impl<C: CredentialStores> Engine<C> {
 
     /// WRITES: end one session of the account (`DELETE /api/v1/account/sessions/{id}`). `listed_under`: the
     /// session the host read its list under ([`Stamped::session`]); when it is not the session in memory now,
-    /// nothing is sent ([`AccountCallError::NotSignedIn`]). A caller never passes this session's own id.
+    /// nothing is sent ([`AccountCallError::NotSignedIn`]). A caller never passes this session's own id. A
+    /// session that had ended before (404) is `Ok`: there is nothing left to end; [`Engine::end_account_session`]
+    /// tells the two apart.
     pub fn revoke_account_session(&self, listed_under: SessionGeneration, id: &str) -> Result<(), AccountCallError> {
-        let id = id.to_string();
-        self.account_change(
-            listed_under,
-            move |api| async move { api.revoke_account_session(&id).await },
-        )
+        self.end_account_session(listed_under, id).map(|_| ())
     }
 
     /// WRITES: end every session of the account but this one
