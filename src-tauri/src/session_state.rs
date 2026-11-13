@@ -442,13 +442,15 @@ pub(super) fn claim_session_write_for_commit(
     acct: &AccountRuntime,
     turn: &mut account::SessionGeneration,
 ) -> Result<SessionWrite, SessionChanged> {
-    let writes = lock_session_keychain_writes();
+    // `check_session_turn` keeps the session-write lock in the guard it returns; the strict check runs under that same
+    // guard on every platform, so no transition can slip between it and the generation move below.
+    let write = check_session_turn(acct, turn)?;
     if !acct.session_unchanged_since(*turn) {
         tracing::info!("a detached session commit wrote nothing: another transition happened since it began");
         return Err(SessionChanged::of(acct));
     }
     *turn = acct.advance_session_generation_holding_session_write_lock(account::SessionTransition::Write);
-    Ok(SessionWrite { _writes: writes })
+    Ok(write)
 }
 
 /// The same check as [`claim_session_write`] without moving the generation on: for a write that changes nothing a
