@@ -12,6 +12,28 @@ use crate::SandboxError;
 ///   own folder, which no longer exists when the helper runs (see the Windows module).
 pub(crate) const ENVIRONMENT_NAMES: &[&str] = &["LOCALAPPDATA", "SystemRoot", "TEMP", "TMP"];
 
+/// Every container profile of ours is named this prefix plus 32 lowercase hexadecimal digits.
+pub(crate) const PROFILE_PREFIX: &str = "beebeeb.office.";
+
+/// The profile name for 128 random bits.
+pub(crate) fn profile_name(random: [u8; 16]) -> String {
+    let mut name = String::from(PROFILE_PREFIX);
+    for byte in random {
+        name.push_str(&format!("{byte:02x}"));
+    }
+    name
+}
+
+/// True only for a name [`profile_name`] can produce. The clean-up of left-over profiles deletes nothing else.
+pub(crate) fn is_our_profile_name(units: &[u16]) -> bool {
+    let prefix: Vec<u16> = PROFILE_PREFIX.encode_utf16().collect();
+    let Some(digits) = units.strip_prefix(prefix.as_slice()) else {
+        return false;
+    };
+    let hex = |u: &u16| (b'0' as u16..=b'9' as u16).contains(u) || (b'a' as u16..=b'f' as u16).contains(u);
+    digits.len() == 32 && digits.iter().all(hex)
+}
+
 /// Checks a helper path (as UTF-16 units, no terminator) and returns it with a terminator.
 ///
 /// Refused: an empty path, one that is not `X:\…` (so nothing is searched and no device or network path is
@@ -71,6 +93,29 @@ mod tests {
 
     fn w(s: &str) -> Vec<u16> {
         s.encode_utf16().collect()
+    }
+
+    #[test]
+    fn only_a_name_of_our_own_shape_is_ours() {
+        assert!(is_our_profile_name(&w(&profile_name([0xAB; 16]))));
+        assert!(is_our_profile_name(&w(&profile_name([0; 16]))));
+        let foreign = [
+            "",
+            "beebeeb.office.",
+            "beebeeb.office.abababababababababababababababab0",
+            "beebeeb.office.ababababababababababababababababab",
+            "beebeeb.office.ABABABABABABABABABABABABABABABAB",
+            "beebeeb.office.abababababababababababababababag",
+            "beebeeb.officex.abababababababababababababababab",
+            "xbeebeeb.office.abababababababababababababababab",
+            "Microsoft.Windows.Something_8wekyb3d8bbwe",
+        ];
+        let mut refused = 0;
+        for name in foreign {
+            assert!(!is_our_profile_name(&w(name)), "case {refused}");
+            refused += 1;
+        }
+        assert_eq!(refused, 9);
     }
 
     #[test]

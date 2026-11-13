@@ -54,6 +54,7 @@ mod windows {
     /// The system ends a container process that uses a handle value it does not hold (invalid handle).
     const ENDED_FOR_INVALID_HANDLE: u32 = 0xC000_0008;
     /// Kill on close, one active process, die on an unhandled exception, memory cap; and all eight UI classes.
+    /// The job's limit of one process: "not enough quota".
     const PROCESS_QUOTA: &str = "err 1816";
     const JOB_FLAGS: u32 = 0x2000 | 0x8 | 0x400 | 0x200;
 
@@ -402,22 +403,15 @@ mod windows {
             readable.starts_with("ok "),
             "the confined probe can read the program it then fails to start: {readable}"
         );
-        let mut answers = Vec::new();
-        for _ in 0..5 {
-            answers.push(confined.attempt(&format!("spawn {shell}")));
-            answers.push(confined.attempt(&format!("spawn {PROBE}")));
+        // Two refusals, both measured ten times over: a program the helper can read is refused by the job's limit
+        // of one process (quota); the helper's own program it cannot even read (access denied).
+        for _ in 0..3 {
+            assert_eq!(confined.attempt(&format!("spawn {shell}")), PROCESS_QUOTA);
+            assert_eq!(confined.attempt(&format!("spawn {PROBE}")), ACCESS_DENIED);
         }
-        println!("spawn-answers: {answers:?}");
-        assert!(
-            answers
-                .iter()
-                .all(|answer| answer == ACCESS_DENIED || answer == PROCESS_QUOTA),
-            "{answers:?}"
-        );
     }
 
-    /// The start of a second process is refused with "access denied" before the job's limit is asked, so the test
-    /// above does not show the limit. This one does: the helper reads the limits of its own job.
+    /// The whole job as the helper itself reads it: every limit, not only the one a refused start shows.
     #[test]
     fn a_confined_helper_runs_in_a_job_of_one_process_with_its_memory_cap_and_every_ui_restriction() {
         let _serial = serial();
@@ -684,7 +678,7 @@ mod windows {
             .join("cmd.exe");
 
         let mut confined = Probe::confined();
-        let mut answers = [
+        let answers = [
             confined.attempt(&format!("connect {}", listener.local_addr().unwrap())),
             confined.attempt(&format!("write {}", target.text())),
             confined.attempt(&format!("spawn {}", shell.to_str().unwrap())),
@@ -694,11 +688,8 @@ mod windows {
             // SAFETY: as above.
             unsafe { std::env::remove_var(name) };
         }
-        if answers[2] == PROCESS_QUOTA {
-            answers[2] = ACCESS_DENIED.to_string();
-        }
         let names = format!("env {}", helper_environment_names().join(","));
-        assert_eq!(answers, [NETWORK_REFUSED, ACCESS_DENIED, ACCESS_DENIED, names.as_str()]);
+        assert_eq!(answers, [NETWORK_REFUSED, ACCESS_DENIED, PROCESS_QUOTA, names.as_str()]);
         assert_eq!(accepted(&listener), 0);
         assert!(!target.0.exists());
     }

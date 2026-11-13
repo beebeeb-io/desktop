@@ -14,7 +14,11 @@
 //! checked; only then does the helper run. It never executes while a place it could write to exists, two helpers
 //! never share an identity (so one cannot open the other), and nothing of the profile outlives the spawn call. If
 //! the parent is killed inside that window (a few system calls long), one empty profile under the name prefix
-//! `beebeeb.office.` stays behind and the helper, still suspended, is ended by its job.
+//! `beebeeb.office.` stays behind and the helper, still suspended, is ended by its job. The next `Sandbox::new`
+//! deletes such a left-over: it lists this user's registered profiles, and deletes those whose name has exactly
+//! our shape (the prefix and 32 hexadecimal digits) and that are older than a minute, so a profile another
+//! process of ours is using right now is not touched. That list is the one input read from outside; it can only
+//! select which of OUR empty profiles to delete, never change how a helper is confined.
 //!
 //! The job handle is held by the parent only and is not inheritable: when the parent ends, for any reason, the
 //! handle closes and the system ends the helper.
@@ -32,6 +36,7 @@ use std::ptr::{null, null_mut};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use windows_sys::Win32::Foundation::FILETIME;
 use windows_sys::Win32::Foundation::{
     GetLastError, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
@@ -52,7 +57,12 @@ use windows_sys::Win32::System::JobObjects::{
     SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
-use windows_sys::Win32::System::SystemInformation::{GetSystemDirectoryW, GetSystemWindowsDirectoryW};
+use windows_sys::Win32::System::Registry::{
+    HKEY, HKEY_CURRENT_USER, KEY_READ, RRF_RT_REG_SZ, RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
+};
+use windows_sys::Win32::System::SystemInformation::{
+    GetSystemDirectoryW, GetSystemTimeAsFileTime, GetSystemWindowsDirectoryW,
+};
 use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, DETACHED_PROCESS,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
@@ -62,7 +72,7 @@ use windows_sys::Win32::System::Threading::{
     UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
-use crate::block::{checked_path, command_line, environment_block};
+use crate::block::{checked_path, command_line, environment_block, is_our_profile_name, profile_name};
 use crate::{ExitStatus, KILLED_EXIT_CODE, Limits, Pipes, SandboxError};
 
 /// `PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT`: the helper's token is not a member of the "all application
@@ -230,11 +240,7 @@ impl Container {
                 code: status as u32,
             });
         }
-        let mut text = String::from("beebeeb.office.");
-        for byte in bytes {
-            text.push_str(&format!("{byte:02x}"));
-        }
-        let name: Vec<u16> = text.encode_utf16().chain([0]).collect();
+        let name: Vec<u16> = profile_name(bytes).encode_utf16().chain([0]).collect();
         let mut sid: PSID = null_mut();
         // SAFETY: `name` is a terminated UTF-16 string, used as name, display name and description; the
         // capability list is empty; `sid` receives an allocation freed in `drop`.
@@ -276,6 +282,94 @@ impl Drop for Container {
         // SAFETY: the pointer came from `CreateAppContainerProfile` and is freed once.
         unsafe { FreeSid(self.sid) };
     }
+}
+
+/// Where Windows lists this user's registered container profiles (one key per profile, its name in `Moniker`).
+const PROFILE_LIST: &str =
+    r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings";
+
+/// A profile of ours this old was left behind: the window in which one exists is a few system calls long.
+const LEFT_OVER_AFTER: Duration = Duration::from_secs(60);
+
+pub(crate) fn remove_left_over_profiles() {
+    remove_profiles_older_than(LEFT_OVER_AFTER);
+}
+
+/// Deletes this user's container profiles whose name has our shape and whose list entry is older than `age`.
+/// Returns how many were deleted. A list that cannot be read deletes nothing.
+fn remove_profiles_older_than(age: Duration) -> usize {
+    let list: Vec<u16> = PROFILE_LIST.encode_utf16().chain([0]).collect();
+    let value_name: Vec<u16> = "Moniker".encode_utf16().chain([0]).collect();
+    let mut key: HKEY = null_mut();
+    // SAFETY: `list` is a terminated UTF-16 string; `key` receives a handle closed below.
+    if unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, list.as_ptr(), 0, KEY_READ, &mut key) } != 0 {
+        return 0;
+    }
+    let ticks = |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    let mut now = FILETIME::default();
+    // SAFETY: `now` is a valid place for the time.
+    unsafe { GetSystemTimeAsFileTime(&mut now) };
+    let age_ticks = u64::try_from(age.as_nanos() / 100).unwrap_or(u64::MAX);
+
+    let mut ours: Vec<Vec<u16>> = Vec::new();
+    for index in 0u32.. {
+        let mut entry = [0u16; 256];
+        let mut entry_length = entry.len() as u32;
+        let mut written = FILETIME::default();
+        // SAFETY: `key` is open; `entry` is writable for `entry_length` units; `written` is a valid place for
+        // the entry's time; the unused out-parameters are null, which the call allows.
+        let result = unsafe {
+            RegEnumKeyExW(
+                key,
+                index,
+                entry.as_mut_ptr(),
+                &mut entry_length,
+                null(),
+                null_mut(),
+                null_mut(),
+                &mut written,
+            )
+        };
+        if result != 0 {
+            break;
+        }
+        if ticks(now).saturating_sub(ticks(written)) < age_ticks {
+            continue;
+        }
+        let mut name = [0u16; 128];
+        let mut name_bytes = size_of_val(&name) as u32;
+        // SAFETY: `key` is open; `entry` was terminated by the call above; `value_name` is terminated; `name`
+        // is writable for `name_bytes` bytes; only a text value is accepted.
+        let result = unsafe {
+            RegGetValueW(
+                key,
+                entry.as_ptr(),
+                value_name.as_ptr(),
+                RRF_RT_REG_SZ,
+                null_mut(),
+                name.as_mut_ptr().cast(),
+                &mut name_bytes,
+            )
+        };
+        if result != 0 {
+            continue;
+        }
+        let length = name.iter().position(|&unit| unit == 0).unwrap_or(name.len());
+        if is_our_profile_name(&name[..length]) {
+            ours.push(name[..length].iter().copied().chain([0]).collect());
+        }
+    }
+    // SAFETY: `key` was opened above and is closed once.
+    unsafe { RegCloseKey(key) };
+
+    let mut deleted = 0;
+    for name in ours {
+        // SAFETY: `name` is a terminated UTF-16 string that passed `is_our_profile_name`.
+        if unsafe { DeleteAppContainerProfile(name.as_ptr()) } == 0 {
+            deleted += 1;
+        }
+    }
+    deleted
 }
 
 /// An unnamed pipe: (read end, write end). Neither end is inheritable.
@@ -600,4 +694,74 @@ pub(crate) fn spawn(helper_exe: &Path, limits: Limits) -> Result<(ChildInner, Pi
             from_helper: File::from(from_helper),
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALREADY_EXISTS: u32 = 0x8007_00B7;
+
+    fn wide(name: &str) -> Vec<u16> {
+        name.encode_utf16().chain([0]).collect()
+    }
+
+    /// Registers a profile with no capabilities; the result code.
+    fn register(name: &str) -> u32 {
+        let name = wide(name);
+        let mut sid: PSID = null_mut();
+        // SAFETY: `name` is a terminated UTF-16 string; no capabilities; `sid` receives an allocation freed below.
+        let result =
+            unsafe { CreateAppContainerProfile(name.as_ptr(), name.as_ptr(), name.as_ptr(), null(), 0, &mut sid) };
+        if !sid.is_null() {
+            // SAFETY: the pointer came from the call above and is freed once.
+            unsafe { FreeSid(sid) };
+        }
+        result as u32
+    }
+
+    fn delete(name: &str) -> u32 {
+        // SAFETY: a terminated UTF-16 string.
+        (unsafe { DeleteAppContainerProfile(wide(name).as_ptr()) }) as u32
+    }
+
+    /// Whether a profile of that name is registered: registering it again is refused as "already exists".
+    fn exists(name: &str) -> bool {
+        match register(name) {
+            ALREADY_EXISTS => true,
+            0 => {
+                assert_eq!(delete(name), 0);
+                false
+            }
+            other => panic!("unexpected result {other:#x}"),
+        }
+    }
+
+    /// A parent killed while starting a helper leaves a profile of ours behind. The clean-up deletes it, and only
+    /// it: a fresh one (possibly in use by another process of ours) and one with a foreign name stay.
+    #[test]
+    fn a_left_over_profile_of_ours_is_deleted_and_nothing_else_is() {
+        let unique = std::process::id();
+        let ours = profile_name([0xEE; 16]);
+        let foreign = format!("beebeeb.officetest.{unique:08x}");
+        let _ = (delete(&ours), delete(&foreign));
+        assert_eq!((register(&ours), register(&foreign)), (0, 0), "both planted");
+        assert!(
+            exists(&ours) && exists(&foreign),
+            "the instrument sees a planted profile"
+        );
+
+        // Younger than a minute: what `Sandbox::new` does. Nothing of the two goes.
+        remove_left_over_profiles();
+        assert!(exists(&ours), "a fresh profile of ours is left alone");
+        assert!(exists(&foreign));
+
+        // Any age: ours goes, the foreign one stays.
+        assert!(remove_profiles_older_than(Duration::ZERO) >= 1);
+        assert!(!exists(&ours), "the left-over profile of ours is gone");
+        assert!(exists(&foreign), "a profile that is not ours is untouched");
+
+        assert_eq!(delete(&foreign), 0, "the test removes what it planted");
+        assert!(!exists(&foreign));
+    }
 }

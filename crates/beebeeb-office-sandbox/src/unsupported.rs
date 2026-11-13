@@ -23,6 +23,8 @@ impl ChildInner {
     }
 }
 
+pub(crate) fn remove_left_over_profiles() {}
+
 pub(crate) fn spawn(_helper_exe: &Path, _limits: Limits) -> Result<(ChildInner, Pipes), SandboxError> {
     Err(SandboxError::Unsupported)
 }
