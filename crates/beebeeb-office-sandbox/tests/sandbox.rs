@@ -49,9 +49,12 @@ mod windows {
     /// The codes the confined probe gets, as measured on the Windows build VM (the PR body has the run).
     const ACCESS_DENIED: &str = "err 5";
     const PATH_NOT_FOUND: &str = "err 3";
-    const SOCKET_ACCESS_DENIED: &str = "err 10013";
-    const PROCESS_QUOTA: &str = "err 1816";
-    const INVALID_HANDLE: &str = "err 6";
+    /// The system's network library refuses to start inside the container: no socket ever exists.
+    const NETWORK_REFUSED: &str = "err network-start 10091";
+    /// The system ends a container process that uses a handle value it does not hold (invalid handle).
+    const ENDED_FOR_INVALID_HANDLE: u32 = 0xC000_0008;
+    /// Kill on close, one active process, die on an unhandled exception, memory cap; and all eight UI classes.
+    const JOB_FLAGS: u32 = 0x2000 | 0x8 | 0x400 | 0x200;
 
     /// One probe at a time: the timing bounds and the handle-inheritance control are not disturbed by a sibling.
     static SERIAL: Mutex<()> = Mutex::new(());
@@ -300,7 +303,7 @@ mod windows {
         drop(plain);
 
         let mut confined = Probe::confined();
-        assert_eq!(confined.attempt(&format!("connect {loopback}")), SOCKET_ACCESS_DENIED);
+        assert_eq!(confined.attempt(&format!("connect {loopback}")), NETWORK_REFUSED);
         assert_eq!(
             accepted(&listener),
             0,
@@ -308,7 +311,7 @@ mod windows {
         );
         assert_eq!(
             confined.attempt(&format!("connect {}", SocketAddr::new(own, port))),
-            SOCKET_ACCESS_DENIED
+            NETWORK_REFUSED
         );
     }
 
@@ -398,8 +401,25 @@ mod windows {
             readable.starts_with("ok "),
             "the confined probe can read the program it then fails to start: {readable}"
         );
-        assert_eq!(confined.attempt(&format!("spawn {shell}")), PROCESS_QUOTA);
-        assert_eq!(confined.attempt(&format!("spawn {PROBE}")), PROCESS_QUOTA);
+        assert_eq!(confined.attempt(&format!("spawn {shell}")), ACCESS_DENIED);
+        assert_eq!(confined.attempt(&format!("spawn {PROBE}")), ACCESS_DENIED);
+    }
+
+    /// The start of a second process is refused with "access denied" before the job's limit is asked, so the test
+    /// above does not show the limit. This one does: the helper reads the limits of its own job.
+    #[test]
+    fn a_confined_helper_runs_in_a_job_of_one_process_with_its_memory_cap_and_every_ui_restriction() {
+        let _serial = serial();
+        let cap = 96 * 1024 * 1024;
+        let expected = format!("job flags={JOB_FLAGS:#x} processes=1 memory={cap} ui=0xff");
+        let mut plain = Probe::plain();
+        assert_ne!(
+            plain.attempt("job"),
+            expected,
+            "the instrument can fail: a plain probe is in no such job"
+        );
+        let mut confined = Probe::confined_with(Limits { memory_bytes: cap });
+        assert_eq!(confined.attempt("job"), expected);
     }
 
     // ── 4. gone with the parent; a dead or hung helper is seen and killed within the bound ──────────────────
@@ -606,7 +626,24 @@ mod windows {
         drop(plain);
 
         let mut confined = Probe::confined();
-        assert_eq!(confined.attempt(&request), INVALID_HANDLE);
+        // The handle value means nothing in the confined helper. The system does not merely refuse the call: it
+        // ends a container process that uses a handle it does not hold. That exact ending is the pinned result.
+        assert_eq!(confined.ask("ping"), "pong");
+        confined.send(&request);
+        let mut line = String::new();
+        let read = confined.from.as_mut().unwrap().read_line(&mut line).unwrap();
+        assert_eq!((read, line.trim()), (0, ""), "no answer: the helper was ended");
+        let status = confined
+            .child()
+            .wait_timeout(BOUND)
+            .unwrap()
+            .expect("ended within the bound");
+        assert_eq!(
+            status.code(),
+            ENDED_FOR_INVALID_HANDLE,
+            "ended for an invalid handle, code {:#x}",
+            status.code()
+        );
         assert!(!signalled_within(&event, Duration::ZERO), "the event was not touched");
     }
 
@@ -647,10 +684,7 @@ mod windows {
             unsafe { std::env::remove_var(name) };
         }
         let names = format!("env {}", helper_environment_names().join(","));
-        assert_eq!(
-            answers,
-            [SOCKET_ACCESS_DENIED, ACCESS_DENIED, PROCESS_QUOTA, names.as_str()]
-        );
+        assert_eq!(answers, [NETWORK_REFUSED, ACCESS_DENIED, ACCESS_DENIED, names.as_str()]);
         assert_eq!(accepted(&listener), 0);
         assert!(!target.0.exists());
     }

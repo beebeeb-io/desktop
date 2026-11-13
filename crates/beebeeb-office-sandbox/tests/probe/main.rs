@@ -3,7 +3,8 @@
 //!
 //! Requests (one per line on standard input):
 //!   ping                 -> pong
-//!   connect <ip:port>    -> ok | err <system code>
+//!   connect <ip:port>    -> ok | err <system code> | err network-start <system code>
+//!   job                  -> job flags=<hex> processes=<n> memory=<bytes> ui=<hex> | err <system code>
 //!   write <path>         -> ok | err <system code>      (creates a new file and writes 5 bytes)
 //!   writetemp <name>    -> ok | err <system code>      (the same, in the folder its own TEMP variable names)
 //!   read <path>          -> ok <bytes read> | err <system code>
@@ -30,7 +31,32 @@ fn code(error: &std::io::Error) -> String {
     }
 }
 
+/// Starts the system's network library the way every program has to before its first socket, through the system
+/// call itself: the standard library does the same but panics when it fails, and the answer wanted is the code.
+#[cfg(windows)]
+fn network_start() -> Result<(), String> {
+    #[link(name = "ws2_32")]
+    unsafe extern "system" {
+        fn WSAStartup(version: u16, data: *mut u64) -> i32;
+    }
+    // Larger than the structure the call fills in (about 400 bytes), and aligned for it.
+    let mut data = [0u64; 128];
+    // SAFETY: version 2.2 and a writable, aligned buffer larger than the structure the call fills in.
+    match unsafe { WSAStartup(0x0202, data.as_mut_ptr()) } {
+        0 => Ok(()),
+        code => Err(format!("err network-start {code}")),
+    }
+}
+
+#[cfg(not(windows))]
+fn network_start() -> Result<(), String> {
+    Ok(())
+}
+
 fn connect(target: &str) -> String {
+    if let Err(answer) = network_start() {
+        return answer;
+    }
     let Ok(address) = target.parse::<SocketAddr>() else {
         return "err parse".into();
     };
@@ -170,6 +196,50 @@ fn set_event(_value: &str) -> String {
     "err unsupported".into()
 }
 
+/// The limits of the job this process runs in, read by the process itself.
+#[cfg(windows)]
+fn job() -> String {
+    use windows_sys::Win32::System::JobObjects::{
+        JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicUIRestrictions,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject,
+    };
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    let mut ui = JOBOBJECT_BASIC_UI_RESTRICTIONS::default();
+    // SAFETY: a null job handle means "the job of this process"; each buffer is writable for the size passed,
+    // which is the size of the class asked for.
+    let ok = unsafe {
+        QueryInformationJobObject(
+            std::ptr::null_mut(),
+            JobObjectExtendedLimitInformation,
+            (&raw mut limits).cast(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            std::ptr::null_mut(),
+        ) != 0
+            && QueryInformationJobObject(
+                std::ptr::null_mut(),
+                JobObjectBasicUIRestrictions,
+                (&raw mut ui).cast(),
+                size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32,
+                std::ptr::null_mut(),
+            ) != 0
+    };
+    if !ok {
+        return code(&std::io::Error::last_os_error());
+    }
+    format!(
+        "job flags={:#x} processes={} memory={} ui={:#x}",
+        limits.BasicLimitInformation.LimitFlags,
+        limits.BasicLimitInformation.ActiveProcessLimit,
+        limits.JobMemoryLimit,
+        ui.UIRestrictionsClass
+    )
+}
+
+#[cfg(not(windows))]
+fn job() -> String {
+    "err unsupported".into()
+}
+
 fn sleep_for_ever() -> ! {
     loop {
         std::thread::sleep(Duration::from_secs(3600));
@@ -243,6 +313,7 @@ fn main() {
             "alloc" => alloc(rest),
             "env" => env(),
             "setevent" => set_event(rest),
+            "job" => job(),
             "hang" | "spin" => {
                 let _ = writeln!(stdout, "{}", if request == "hang" { "hanging" } else { "spinning" });
                 let _ = stdout.flush();
