@@ -39,6 +39,8 @@ try {
         if ($names.Count -gt 0) { $red += 1 }
         "mutant ${name}: $($names.Count) tests red | $result"
         $names | ForEach-Object { "    red: $_" }
+        # What the red tests got instead (answers of the probe: codes only).
+        @($lines | Where-Object { $_ -match '^\s+left: ' -or $_ -match 'did not start the probe' } | Sort-Object -Unique) | Select-Object -First 6 | ForEach-Object { "    got: $($_.Trim())" }
     }
 }
 finally {
