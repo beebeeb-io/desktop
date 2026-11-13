@@ -698,13 +698,24 @@ mod windows {
     #[test]
     fn no_environment_variable_of_the_parent_weakens_the_confinement() {
         let _serial = serial();
-        let switches = [
+        /// Takes the variables away again, also when the test fails: a later test must not inherit them.
+        struct Unset(&'static [(&'static str, &'static str)]);
+        impl Drop for Unset {
+            fn drop(&mut self) {
+                for (name, _) in self.0 {
+                    // SAFETY: as below; the test still holds `SERIAL` when its locals are dropped.
+                    unsafe { std::env::remove_var(name) };
+                }
+            }
+        }
+        const SWITCHES: &[(&str, &str)] = &[
             ("BB_DIAG", "127"),
             ("BB_ENV", "USERPROFILE,APPDATA,PATH"),
             ("BEEBEEB_SANDBOX", "off"),
             ("BEEBEEB_NO_SANDBOX", "1"),
         ];
-        for (name, value) in switches {
+        let _unset = Unset(SWITCHES);
+        for (name, value) in SWITCHES {
             // SAFETY: every test of this file holds `SERIAL` while it runs, so no other thread of this process
             // reads or writes the environment now.
             unsafe { std::env::set_var(name, value) };
@@ -723,10 +734,6 @@ mod windows {
             confined.attempt(&format!("spawn {}", shell.to_str().unwrap())),
             confined.attempt("env"),
         ];
-        for (name, _) in switches {
-            // SAFETY: as above.
-            unsafe { std::env::remove_var(name) };
-        }
         let names = format!("env {}", helper_environment_names().join(","));
         assert_eq!(answers, [NETWORK_REFUSED, ACCESS_DENIED, PROCESS_QUOTA, names.as_str()]);
         assert_eq!(accepted(&listener), 0);
