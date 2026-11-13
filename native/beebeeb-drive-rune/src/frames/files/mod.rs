@@ -418,7 +418,10 @@ impl State {
     /// May things be added to the folder shown? Not when it could not be read, and not to a
     /// folder the source protects (DW-0414: "New is dimmed in Backups, service folders, Trash…").
     pub fn can_add(&self) -> bool {
-        self.list_error.is_none() && self.actions.source.can_add(self.listing.folder.id.as_deref())
+        // A protected folder takes nothing new, whatever the source would accept (`protected.rs`).
+        self.list_error.is_none()
+            && !self.in_protected_folder()
+            && self.actions.source.can_add(self.listing.folder.id.as_deref())
     }
 
     pub(super) fn selected_items(&self) -> Vec<DriveItem> {
@@ -877,6 +880,10 @@ impl State {
             return false;
         }
         if files.is_empty() || self.list_error.is_some() || !self.actions.source.can_add(folder.as_deref()) {
+            return false;
+        }
+        // Nothing is dropped into a protected folder (the Backups row in Files, or inside it).
+        if self.actions.source.protection(folder.as_deref(), None).is_some() {
             return false;
         }
         self.forget_undo();

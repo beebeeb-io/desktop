@@ -530,7 +530,7 @@ impl FilesSource for FilesFixture {
     }
 
     fn can_add(&self, folder: Option<&str>) -> bool {
-        folder != Some(BACKUPS_ID) && !super::protected_fixture::holds(folder)
+        self.lenient || (folder != Some(BACKUPS_ID) && !super::protected_fixture::holds(folder))
     }
 
     fn backups_root(&self) -> Option<String> {

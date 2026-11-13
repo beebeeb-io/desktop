@@ -344,6 +344,17 @@ fn nothing_is_added_to_a_protected_folder() {
         assert!(asked(&calls).is_empty(), "{:?}", asked(&calls));
         assert!(find(&rt, "dlg").is_none(), "a refused drop is silent");
     }
+    // The Backups row in Files takes no drop either (the source here would accept it).
+    let (mut rt, calls) = app(true);
+    let (x, y) = centre(&rt, "row-0-date");
+    rt.drop_files(vec![std::path::PathBuf::from("a.txt")], Some((x, y)));
+    settle(&mut rt);
+    assert!(asked(&calls).is_empty(), "{:?}", asked(&calls));
+    // And the same source does take a drop where nothing is protected: the guard is the window's.
+    let (x, y) = centre(&rt, "row-1-date");
+    rt.drop_files(vec![std::path::PathBuf::from("a.txt")], Some((x, y)));
+    settle(&mut rt);
+    assert_eq!(asked(&calls).len(), 1);
 }
 
 #[test]
