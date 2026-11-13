@@ -709,16 +709,14 @@ fn the_previews_open_opens_the_file_and_its_share_goes_to_the_share_dialog() {
     press(&mut rt, Key::Text(" ".into()), NONE);
     click(&mut rt, "pv-open");
     assert!(rt.state.actions.dialog.is_none());
-    // A PDF opens in the window's viewer (`frames::viewers::open_item`): the route is on the
-    // file, and it is not also handed to another app.
+    // "Open in its app" hands the file to its own app, as the button says, also for a kind the window's
+    // viewer shows (a PDF): the route stays on the list, and the source is asked to open it, once.
     assert!(
-        matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some("contract")),
-        "Open in its app shows the file"
+        matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.is_none()),
+        "Open in its app never opens the window's viewer"
     );
-    assert!(asked(&calls).is_empty());
-    rt.update(|s, _| crate::frames::viewers::close(s));
-    settle(&mut rt);
-    assert!(matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.is_none()));
+    assert_eq!(asked(&calls), [Call::Open(ids(&["contract"]))]);
+    calls.lock().unwrap().clear();
     click(&mut rt, "row-6-date");
     press(&mut rt, Key::Text(" ".into()), NONE);
     click(&mut rt, "pv-share");
