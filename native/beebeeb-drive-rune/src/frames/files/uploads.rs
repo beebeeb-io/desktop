@@ -42,6 +42,9 @@ pub struct PickerAsk {
     pub filter: Option<&'static str>,
     /// The folder the picked items go into (`None`: the root).
     pub into: Option<String>,
+    /// The session it was asked under (`Actions::session_no`): an answer that comes back under
+    /// another one is dropped.
+    pub asked_in: u64,
 }
 
 /// The picker's words for the folder shown (`folder`: its name).
@@ -55,6 +58,7 @@ pub fn picker_words(kind: PickerKind, folder: &str, into: Option<String>) -> Pic
         button: upload_button(None),
         filter: (kind == PickerKind::Files).then_some("All files"),
         into,
+        asked_in: 0,
     }
 }
 
@@ -73,7 +77,10 @@ impl State {
             return;
         }
         let into = self.listing.folder.id.clone();
-        self.actions.picker = Some(picker_words(kind, &self.listing.folder.name, into));
+        self.actions.picker = Some(PickerAsk {
+            asked_in: self.actions.session_no,
+            ..picker_words(kind, &self.listing.folder.name, into)
+        });
     }
 
     /// The picker to open, once.
@@ -83,7 +90,13 @@ impl State {
 
     /// What the picker came back with. `None` or nothing chosen (Cancel, Esc): nothing happens.
     /// Else the chosen files or folder upload into the folder the picker was asked for (DW-0426).
+    ///
+    /// An answer to a picker that was asked under an EARLIER session (the account signed out or
+    /// changed while Windows' dialog was up) is dropped: its folder is another account's.
     pub fn picked(&mut self, ask: &PickerAsk, chosen: Option<Vec<std::path::PathBuf>>, tx: &mut Tx) -> bool {
+        if ask.asked_in != self.actions.session_no {
+            return false;
+        }
         match chosen {
             Some(files) if !files.is_empty() => self.upload(ask.into.clone(), &files, tx),
             _ => false,
@@ -264,13 +277,21 @@ impl State {
 
     /// Try again, on an upload that stopped: asked of the source once.
     pub fn retry_one_upload(&mut self, id: &str, tx: &mut Tx) {
+        if self.needs_session(tx) {
+            return;
+        }
         if let Err(why) = self.actions.source.retry_upload(id) {
-            self.failed(Action::Upload, why, tx);
+            // Its own label: the message has no Try again (the panel's button is still there),
+            // and it is not mistaken for a drop that failed, whose Try again uploads again.
+            self.failed(Action::RetryUpload, why, tx);
         }
     }
 
     /// Pause all, or Resume all: asked once. The b then shows the pause badge (DW-1204).
     pub fn pause_uploads(&mut self, tx: &mut Tx) {
+        if self.needs_session(tx) {
+            return;
+        }
         let Some(uploads) = self.actions.source.uploads() else {
             return;
         };
@@ -285,13 +306,22 @@ impl State {
     /// Cancel upload, from a row's menu: asked once; nothing is left half-uploaded.
     pub fn cancel_one_upload(&mut self, id: &str, tx: &mut Tx) {
         self.actions.upload_menu = None;
+        if self.needs_session(tx) {
+            return;
+        }
         match self.actions.source.cancel_upload(id) {
             Ok(()) => {
-                // Its row in the folder goes with it.
+                // Its row in the folder goes with it. What was selected stays selected BY ITEM:
+                // the rows under the one that went move up, and the selection moves with them.
+                let id_of = |s: &State, row: usize| s.listing.items.get(row).map(|i| i.id.clone());
+                let lead = self.selected.and_then(|i| id_of(self, i));
+                let anchor = self.actions.anchor.and_then(|i| id_of(self, i));
+                let selected: Vec<String> = self.actions.selection.iter().filter_map(|&i| id_of(self, i)).collect();
                 self.listing.items.retain(|item| item.id != id);
-                let rows = self.listing.items.len();
-                self.actions.selection.retain(|&i| i < rows);
-                self.selected = self.selected.filter(|&i| i < rows);
+                let row_of = |s: &State, id: &String| s.listing.items.iter().position(|i| &i.id == id);
+                self.selected = lead.and_then(|id| row_of(self, &id));
+                self.actions.anchor = anchor.and_then(|id| row_of(self, &id));
+                self.actions.selection = selected.iter().filter_map(|id| row_of(self, id)).collect();
             }
             Err(why) => self.failed(Action::CancelUpload, why, tx),
         }

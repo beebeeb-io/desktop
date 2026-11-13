@@ -279,6 +279,109 @@ fn a_refused_pause_says_so_and_changes_nothing() {
     );
 }
 
+/// A refusal in the panel says so under its own label and offers NO Try again: the message's
+/// Try again would repeat nothing (or, for the panel's own Try again, upload an earlier drop).
+#[test]
+fn a_refusal_in_the_uploads_panel_offers_no_try_again_that_does_nothing() {
+    type Press = fn(&mut State, &mut rune::Tx);
+    let cases: [(Action, Action, Press); 3] = [
+        (Action::PauseUploads, Action::PauseUploads, |s, tx| s.pause_uploads(tx)),
+        (Action::CancelUpload, Action::CancelUpload, |s, tx| {
+            s.cancel_one_upload("up-ponte", tx)
+        }),
+        (Action::RetryUpload, Action::RetryUpload, |s, tx| {
+            s.retry_one_upload("up-scan", tx)
+        }),
+    ];
+    for (refuse, label, press) in cases {
+        let (mut rt, calls, fails) = uploading();
+        // An earlier drop that failed is still remembered: the panel's refusal must not reach it.
+        rt.update(|s, _| s.actions.retry_upload = Some((None, files(&["earlier.pdf"]))));
+        fails.lock().unwrap().push((refuse, ActionError::Offline));
+        let before = rt.state.actions.source.uploads().unwrap();
+        rt.update(press);
+        settle(&mut rt);
+        assert_eq!(
+            rt.state.live_toast(),
+            Some(Toast::Failed(label, ActionError::Offline)),
+            "{refuse:?}"
+        );
+        assert!(find(&rt, "toast-action").is_none(), "{refuse:?}: a Try again is drawn");
+        // And asked for directly, it repeats nothing.
+        rt.update(|s, tx| s.retry(tx));
+        settle(&mut rt);
+        assert!(asked(&calls).is_empty(), "{refuse:?}: {:?}", asked(&calls));
+        let after = rt.state.actions.source.uploads().unwrap();
+        assert_eq!(
+            (after.items.len(), after.paused),
+            (before.items.len(), before.paused),
+            "{refuse:?}: nothing changed"
+        );
+    }
+    // A drop that failed still offers Try again: that one repeats the upload.
+    let (mut rt, _, fails) = spied();
+    fails.lock().unwrap().push((Action::Upload, ActionError::Offline));
+    rt.update(|s, tx| {
+        s.upload(None, &files(&["a.heic"]), tx);
+    });
+    settle(&mut rt);
+    assert_eq!(
+        rt.state.live_toast(),
+        Some(Toast::Failed(Action::Upload, ActionError::Offline))
+    );
+    assert!(find(&rt, "toast-action").is_some(), "a failed drop keeps its Try again");
+}
+
+/// Cancel upload takes the upload's row out of the folder; what was selected stays selected BY
+/// ITEM, also the rows under the one that went.
+#[test]
+fn cancel_upload_keeps_the_selection_on_the_same_items() {
+    let (mut rt, _, _) = uploading();
+    // The upload's row stands above the selected ones.
+    rt.update(|s, _| {
+        let mut arriving = s.listing.items[9].clone();
+        arriving.id = "up-ponte".into();
+        arriving.name = "Ponte.heic".into();
+        s.listing.items.insert(2, arriving);
+        s.selected = Some(7);
+        s.actions.selection = [5, 7].into_iter().collect();
+        s.actions.anchor = Some(5);
+    });
+    let id_at = |rt: &Runtime<State>, row: usize| rt.state.listing.items[row].id.clone();
+    let (five, seven) = (id_at(&rt, 5), id_at(&rt, 7));
+    let rows = rt.state.listing.items.len();
+    rt.update(|s, tx| s.cancel_one_upload("up-ponte", tx));
+    settle(&mut rt);
+    assert_eq!(rt.state.listing.items.len(), rows - 1, "the upload's row went");
+    assert_eq!(
+        rt.state.selected.map(|i| id_at(&rt, i)),
+        Some(seven.clone()),
+        "the lead row"
+    );
+    assert_eq!(
+        rt.state.actions.anchor.map(|i| id_at(&rt, i)),
+        Some(five.clone()),
+        "the anchor"
+    );
+    let selected: Vec<String> = rt.state.actions.selection.iter().map(|&i| id_at(&rt, i)).collect();
+    assert_eq!(selected, [five, seven], "the same two items");
+    // The cancelled row itself selected: it leaves the selection, the other stays.
+    let (mut rt, _, _) = uploading();
+    rt.update(|s, _| {
+        let mut arriving = s.listing.items[9].clone();
+        arriving.id = "up-ponte".into();
+        s.listing.items.insert(2, arriving);
+        s.selected = Some(2);
+        s.actions.selection = [2, 6].into_iter().collect();
+    });
+    let six = id_at(&rt, 6);
+    rt.update(|s, tx| s.cancel_one_upload("up-ponte", tx));
+    settle(&mut rt);
+    assert_eq!(rt.state.selected, None, "the row that went is not selected");
+    let selected: Vec<String> = rt.state.actions.selection.iter().map(|&i| id_at(&rt, i)).collect();
+    assert_eq!(selected, [six]);
+}
+
 #[test]
 fn an_upload_shows_in_its_row_with_its_bar_or_that_it_waits() {
     let mut state = crate::init();

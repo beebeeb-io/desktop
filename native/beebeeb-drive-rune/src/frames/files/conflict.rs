@@ -83,6 +83,9 @@ impl State {
         let Some((conflict, _, _)) = shown(self) else {
             return;
         };
+        if self.needs_session(tx) {
+            return;
+        }
         if let Err(why) = self.actions.source.keep_version(&conflict.file, keep) {
             self.leave_conflict(tx);
             self.failed(Action::KeepVersion, why, tx);

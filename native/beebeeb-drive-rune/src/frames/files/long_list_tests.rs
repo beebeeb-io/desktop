@@ -283,3 +283,22 @@ fn a_stand_in_picture_comes_only_from_a_fixture_source() {
         .collect();
     assert_eq!(samples, [Some(1), Some(2), Some(3), Some(4), None]);
 }
+
+#[test]
+fn letters_jump_in_a_grid_too() {
+    let mut rt = long_trip();
+    rt.update(|s, _| grid::set(s, true));
+    settle(&mut rt);
+    click(&mut rt, "grid-0");
+    let tile = format!("grid-{BOARD_FIRST_ROW}");
+    let seen = |rt: &Runtime<State>| {
+        find(rt, &tile).is_some_and(|e| e.rect[1] >= 0.0 && e.rect[1] + e.rect[3] <= 798.0 - 28.0)
+    };
+    assert!(!seen(&rt), "the tile starts out of view");
+    for letter in ["m", "i", "r"] {
+        press(&mut rt, Key::Text(letter.into()), NONE);
+    }
+    settle(&mut rt);
+    assert_eq!(rt.state.selected, Some(BOARD_FIRST_ROW), "the first Mir\u{2026}");
+    assert!(seen(&rt), "and its tile is scrolled into view");
+}

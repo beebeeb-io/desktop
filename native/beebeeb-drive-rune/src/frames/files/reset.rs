@@ -56,7 +56,7 @@ pub fn sync(s: &mut State) {
 ///
 /// `Actions` is taken apart field by field, with no `..`: a field added to it does not compile
 /// until it is named here, as something that goes or as something that stays, with the reason.
-pub fn end_session(s: &mut State) {
+pub fn end_session(s: &mut State, account_left: bool) {
     close_dialogs(s);
     let super::Actions {
         // Stays: the wiring, not the session's state.
@@ -92,7 +92,23 @@ pub fn end_session(s: &mut State) {
         drop_hover,
         uploads_open,
         upload_menu,
+        session_no,
+        // Dropped by `forget_session_ended_rows` below (PR 372's held rows and its count).
+        session: _,
+        first_load_strip,
     } = &mut s.actions;
+    // Another session of this window: an answer asked for under the one that ended is dropped.
+    *session_no += 1;
+    // The folder has not loaded under the next session yet.
+    *first_load_strip = false;
+    // The account left (a sign-out, another account): what it was uploading is cancelled and
+    // forgotten by the source, so the next account sees no status line, panel or row of it. A
+    // LOCK is the same account coming back: its uploads go on (the panel says "Continues in the
+    // background"); only the window's own state of them goes.
+    // Asked only when there is something to forget.
+    if account_left && source.uploads().is_some() {
+        source.forget_uploads();
+    }
     // What Try again would repeat: a share names a file, an upload names paths on this PC.
     *retry_share = None;
     *retry_upload = None;
@@ -131,10 +147,12 @@ pub fn end_session(s: &mut State) {
     forget_session_ended_rows(s);
 }
 
-/// HOOK for the session-ended window (`frames/files/session.rs`, PR 372, not merged here): the
-/// rows it holds of the session that ended are dropped HERE when another session starts. Empty
-/// until that PR is in; its lane fills this body and nothing else has to change.
-fn forget_session_ended_rows(_s: &mut State) {}
+/// The session-ended window (`frames/files/session.rs`, PR 372) holds rows it took out of the
+/// listing while `KEEP_THE_LIST` was false. A sign-out or account switch drops them so they
+/// cannot replace a new listing when the next session starts. The refusal count resets too.
+fn forget_session_ended_rows(s: &mut State) {
+    s.actions.session = super::session::Ui::default();
+}
 
 /// The rows of a session that ended under a gate that did not move (another account while it
 /// stayed Ready, or a change the poll did not see happen): dropped first, then the root is read

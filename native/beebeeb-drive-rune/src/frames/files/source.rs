@@ -89,6 +89,8 @@ pub enum Action {
     Invite,
     /// Pause all, Resume all (DW-0427).
     PauseUploads,
+    /// Try again on ONE upload, from the Uploads panel (as distinct from a drop that failed).
+    RetryUpload,
     /// Cancel upload (DW-0427).
     CancelUpload,
 }
@@ -118,6 +120,7 @@ impl Action {
             Action::KeepVersion => "keep that version",
             Action::Invite => "invite someone to this",
             Action::PauseUploads => "pause the uploads",
+            Action::RetryUpload => "try that upload again",
             Action::CancelUpload => "cancel the upload",
         }
     }
@@ -157,6 +160,8 @@ pub enum Call {
     KeepVersion(String, super::actions_data::Keep),
     /// The upload with this id is tried again now (DW-0427).
     RetryUpload(String),
+    /// The account left: what was uploading is cancelled and forgotten.
+    ForgetUploads,
     /// The upload with this id is cancelled; nothing of it stays.
     CancelUpload(String),
     /// Uploads pause (`true`) or go on.
@@ -298,6 +303,10 @@ pub trait FilesSource: Send + 'static {
     fn cancel_upload(&mut self, _id: &str) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
     }
+    /// The account that was uploading left (a sign-out, another account): cancel what is in
+    /// flight and forget every upload of it, so that [`FilesSource::uploads`] says nothing of the
+    /// earlier account. Nothing is left half-uploaded. Default: a source that keeps no uploads.
+    fn forget_uploads(&mut self) {}
     /// Pause every upload, or let them go on.
     fn pause_uploads(&mut self, _pause: bool) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
@@ -634,7 +643,7 @@ impl FilesSource for FilesFixture {
     }
 
     fn can_add(&self, folder: Option<&str>) -> bool {
-        folder != Some(BACKUPS_ID) && !super::protected_fixture::holds(folder)
+        self.lenient || (folder != Some(BACKUPS_ID) && !super::protected_fixture::holds(folder))
     }
 
     fn backups_root(&self) -> Option<String> {
@@ -896,8 +905,13 @@ impl FilesSource for FilesFixture {
         self.more.uploads.clone()
     }
 
+    fn forget_uploads(&mut self) {
+        self.record(Call::ForgetUploads);
+        self.more.uploads = None;
+    }
+
     fn retry_upload(&mut self, id: &str) -> Result<(), ActionError> {
-        self.refuse(Action::Upload, &[])?;
+        self.refuse(Action::RetryUpload, &[])?;
         self.record(Call::RetryUpload(id.to_string()));
         // It waits its turn again.
         if let Some(upload) = self

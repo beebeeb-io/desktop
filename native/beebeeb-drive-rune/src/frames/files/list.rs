@@ -73,7 +73,8 @@ pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
                             let i = shown + s.actions.board_first_row;
                             // The file that could not open without a connection says so in its
                             // row, at 45 % (`frames::global`, DW-0121).
-                            let blocked = crate::frames::global::dims(s, &item.id);
+                            let blocked = crate::frames::global::dims(s, &item.id)
+                                || super::browse_states::needs_connection(s, item);
                             let date = if blocked {
                                 Some("Needs a connection".to_string())
                             } else {

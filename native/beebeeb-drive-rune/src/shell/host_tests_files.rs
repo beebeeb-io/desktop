@@ -280,6 +280,25 @@ const PIECES: &[Piece] = &[
         held: |s| s.frames.find.open || !s.search.text.is_empty() || s.frames.find.selected.is_some(),
     },
     Piece {
+        shell_keeps_it_across_a_lock: false,
+        name: "the session-ended rows and refusal count",
+        put: |rt| {
+            rt.update(|s, _| {
+                // The other answer: the rows are held out of the listing while the session ended.
+                s.actions.session.keep_the_list = Some(false);
+                s.actions.session.asked = 3;
+                // Take the listing into session::Ui::held as poll() would.
+                crate::frames::files::session::poll(s);
+            });
+            settle(rt);
+            assert!(
+                rt.state.actions.session.asked > 0 || rt.state.listing.items.is_empty(),
+                "session-ended state not set up"
+            );
+        },
+        held: |s| s.actions.session.asked > 0 || s.listing.items.is_empty(),
+    },
+    Piece {
         shell_keeps_it_across_a_lock: true,
         name: "the shell's Two versions dialog",
         put: |rt| {
@@ -366,7 +385,7 @@ fn every_ending_of_a_session_takes_every_piece_of_the_files_window_with_it() {
             cases += 1;
         }
     }
-    assert_eq!(cases, 3 * 23, "every ending × every piece ran");
+    assert_eq!(cases, 3 * 24, "every ending × every piece ran");
     assert_eq!(
         kept_by_the_shell, 1,
         "one case is the shell's rule, not this window's: Two versions across a lock"
@@ -721,4 +740,173 @@ fn what_try_again_holds_goes_when_its_message_goes() {
         rt.state.actions.retry_upload.is_none(),
         "and the upload it would have repeated"
     );
+}
+
+// ---- Uploading across a session's end (review of the uploads PR) ----
+
+use crate::frames::files::source::{Call, FilesFixture};
+use crate::frames::files::uploads::PickerKind;
+
+type Calls = Arc<std::sync::Mutex<Vec<Call>>>;
+
+/// The shell's window on the board's sample, with a Files source that records what it is asked.
+fn recording() -> (Arc<FixtureEngine>, Runtime<State>, Calls) {
+    let (engine, _platform, mut rt) = fixture();
+    let fixture = FilesFixture::default();
+    let calls = fixture.calls.clone();
+    rt.update(move |s, _| {
+        s.source = Box::new(crate::frames::files::source::BoardDrive::sharing(&fixture.edits));
+        s.actions.source = Box::new(fixture);
+    });
+    settle(&mut rt);
+    (engine, rt, calls)
+}
+
+fn two_files() -> Vec<std::path::PathBuf> {
+    vec!["a.heic".into(), "b.heic".into()]
+}
+
+fn status_text(rt: &Runtime<State>) -> String {
+    rt.elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("status-text") && !e.exiting)
+        .and_then(|e| e.text)
+        .unwrap_or_default()
+}
+
+/// The uploads live in the SOURCE. When the account leaves (a sign-out, another account) the
+/// source is asked, once, to cancel and forget them: the next account sees no status line, no
+/// panel and no upload of the earlier one. A lock is the same account: its uploads go on.
+#[test]
+fn the_account_that_leaves_takes_its_uploads_with_it_and_a_lock_does_not() {
+    for ending in [Ending::Lock, Ending::SignOut, Ending::OtherAccount] {
+        let (engine, mut rt, calls) = recording();
+        rt.update(|s, tx| assert!(s.upload(None, &two_files(), tx)));
+        settle(&mut rt);
+        assert!(
+            status_text(&rt).starts_with("Uploading"),
+            "{ending:?}: something uploads"
+        );
+        rt.update(|s, _| s.status_pressed());
+        settle(&mut rt);
+        assert!(rt.state.actions.uploads_open);
+        calls.lock().unwrap().clear();
+
+        end(&mut rt, &engine, ending);
+        assert!(!rt.state.actions.uploads_open, "{ending:?}: the panel closed");
+        let forgotten = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| **c == Call::ForgetUploads)
+            .count();
+        if matches!(ending, Ending::Lock) {
+            assert_eq!(forgotten, 0, "a lock cancels nothing");
+            assert!(
+                rt.state.actions.source.uploads().is_some(),
+                "the uploads go on under a lock"
+            );
+            continue;
+        }
+        assert_eq!(forgotten, 1, "{ending:?}: the source is asked once to forget");
+        assert!(
+            rt.state.actions.source.uploads().is_none(),
+            "{ending:?}: nothing uploads"
+        );
+        // The next account's window.
+        engine.set_account("user-b");
+        engine.set_gate(GateState::Ready);
+        settle(&mut rt);
+        settle(&mut rt);
+        assert_eq!(rt.state.shell.app.account(), Some("user-b"));
+        assert!(
+            !status_text(&rt).contains("Uploading"),
+            "{ending:?}: no earlier status line"
+        );
+        assert!(
+            rt.elements()
+                .iter()
+                .all(|e| e.key.as_deref().is_none_or(|k| !k.starts_with("upload"))),
+            "{ending:?}: no element of the earlier account's uploads"
+        );
+    }
+}
+
+/// A picker that was asked for under one session and answers under the next: the answer is
+/// dropped. Its folder is the earlier account's.
+#[test]
+fn a_picker_answer_that_comes_back_under_another_session_uploads_nothing() {
+    // The control: the same answer under the same session uploads.
+    let (_engine, mut rt, calls) = recording();
+    rt.update(|s, _| s.ask_picker(PickerKind::Files));
+    let ask = rt.state.take_picker().expect("the picker was asked for");
+    let same = ask.clone();
+    rt.update(move |s, tx| assert!(s.picked(&same, Some(two_files()), tx)));
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        1,
+        "one upload under the session it was asked in"
+    );
+
+    for ending in [Ending::Lock, Ending::SignOut, Ending::OtherAccount] {
+        let (engine, mut rt, calls) = recording();
+        rt.update(|s, _| s.ask_picker(PickerKind::Files));
+        let ask = rt.state.take_picker().expect("the picker was asked for");
+        end(&mut rt, &engine, ending);
+        engine.set_account("user-b");
+        engine.set_gate(GateState::Ready);
+        settle(&mut rt);
+        settle(&mut rt);
+        calls.lock().unwrap().clear();
+        rt.update(move |s, tx| assert!(!s.picked(&ask, Some(two_files()), tx)));
+        settle(&mut rt);
+        let made: Vec<Call> = calls.lock().unwrap().clone();
+        assert!(
+            made.iter().all(|c| !matches!(c, Call::Upload(..))),
+            "{ending:?}: a late answer uploaded: {made:?}"
+        );
+        assert!(rt.state.actions.source.uploads().is_none());
+    }
+}
+
+/// The session ended (the engine says so; the window keeps its list): a drop, a picked file and
+/// the panel's Try again, Pause all and Cancel upload are refused before the source is asked.
+#[test]
+fn on_a_session_ended_window_no_upload_path_reaches_the_source() {
+    use crate::frames::global::source::{GlobalFixture, board};
+    let (_engine, mut rt, calls) = recording();
+    // Something uploads and a picker is out while the session is still there.
+    rt.update(|s, tx| assert!(s.upload(None, &two_files(), tx)));
+    rt.update(|s, _| s.ask_picker(PickerKind::Files));
+    let ask = rt.state.take_picker().expect("the picker was asked for");
+    settle(&mut rt);
+    calls.lock().unwrap().clear();
+    rt.update(|s, _| {
+        s.global = crate::frames::global::Ui::new(Box::new(GlobalFixture::of(board::signed_out())));
+    });
+    settle(&mut rt);
+    assert!(rt.state.session_ended());
+    let refused_before = rt.state.actions.session.asked;
+
+    let folder = first_folder(&rt.state);
+    rt.update(move |s, tx| {
+        // A drop on the list and on a folder row.
+        assert!(!s.upload(None, &two_files(), tx));
+        assert!(!s.upload(folder.clone(), &two_files(), tx));
+        // The picker's answer.
+        assert!(!s.picked(&ask, Some(two_files()), tx));
+        // The panel.
+        s.retry_one_upload("up-scan", tx);
+        s.pause_uploads(tx);
+        s.cancel_one_upload("up-ponte", tx);
+    });
+    settle(&mut rt);
+    let made: Vec<Call> = calls.lock().unwrap().clone();
+    assert!(made.is_empty(), "the source was asked: {made:?}");
+    assert_eq!(
+        rt.state.actions.session.asked - refused_before,
+        6,
+        "each of the six was refused by the session guard"
+    );
+    assert!(rt.state.actions.toast.is_none(), "a refusal is no failure message");
 }

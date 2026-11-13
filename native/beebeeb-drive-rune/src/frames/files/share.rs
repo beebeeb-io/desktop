@@ -134,6 +134,9 @@ impl State {
         let Some(Dialog::Share(share)) = self.actions.dialog.clone() else {
             return;
         };
+        if self.needs_session(tx) {
+            return;
+        }
         let typed = self.actions.share_password.text.clone();
         if share.password_on && typed.is_empty() {
             if let Some(share) = self.share_mut() {

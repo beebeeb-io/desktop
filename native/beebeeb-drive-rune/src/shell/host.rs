@@ -464,7 +464,7 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
             crate::frames::account::end_flows(s);
             // The same for the Files window: its dialogs (a link's password among them), what
             // Undo and Try again hold, the selection and where Back and Forward go.
-            crate::frames::files::reset::end_session(s);
+            crate::frames::files::reset::end_session(s, now.1 != account);
             changed = true;
         }
         // The rows are the session's too. `on_gate_change` reads them again when THIS poll's
