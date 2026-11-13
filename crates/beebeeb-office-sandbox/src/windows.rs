@@ -491,11 +491,18 @@ pub(crate) fn spawn(helper_exe: &Path, limits: Limits) -> Result<(ChildInner, Pi
     let inherited: [HANDLE; 2] = [helper_stdin.as_raw_handle(), helper_stdout.as_raw_handle()];
     let jobs: [HANDLE; 1] = [job.as_raw_handle()];
 
+    let diag: u32 = std::env::var("BB_DIAG").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     let mut attributes = AttributeList::new(4)?;
-    attributes.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities)?;
-    attributes.set(PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, &packages_policy)?;
+    if diag & 32 == 0 {
+        attributes.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities)?;
+    }
+    if diag & 33 == 0 {
+        attributes.set(PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, &packages_policy)?;
+    }
     attributes.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &inherited)?;
-    attributes.set(PROC_THREAD_ATTRIBUTE_JOB_LIST, &jobs)?;
+    if diag & 4 == 0 {
+        attributes.set(PROC_THREAD_ATTRIBUTE_JOB_LIST, &jobs)?;
+    }
 
     let mut startup = STARTUPINFOEXW::default();
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
@@ -521,15 +528,23 @@ pub(crate) fn spawn(helper_exe: &Path, limits: Limits) -> Result<(ChildInner, Pi
     // `created` receives the new handles. Handles are inherited, but only the two in the handle list.
     let ok = unsafe {
         CreateProcessAsUserW(
-            token.as_raw_handle(),
+            if diag & 2 == 0 {
+                token.as_raw_handle()
+            } else {
+                null_mut()
+            },
             application.as_ptr(),
             command.as_mut_ptr(),
             null(),
             null(),
             1,
             flags,
-            environment.as_ptr().cast(),
-            current.as_ptr(),
+            if diag & 8 == 0 {
+                environment.as_ptr().cast()
+            } else {
+                null()
+            },
+            if diag & 16 == 0 { current.as_ptr() } else { null() },
             &raw const startup.StartupInfo,
             &mut created,
         )

@@ -597,4 +597,35 @@ mod windows {
             SandboxError::HelperPath("not a file")
         );
     }
+
+    #[test]
+    fn diag() {
+        let _serial = serial();
+        for bits in [0u32, 1, 2, 4, 8, 16, 32, 3, 9, 24, 27, 63] {
+            // SAFETY: tests run one at a time (`--test-threads=1`).
+            unsafe { std::env::set_var("BB_DIAG", bits.to_string()) };
+            let result = match Sandbox::new(Limits::default()).unwrap().spawn(Path::new(PROBE)) {
+                Ok(mut child) => {
+                    let pipes = child.take_pipes().unwrap();
+                    let mut to = pipes.to_helper;
+                    let _ = writeln!(to, "ping");
+                    let mut line = String::new();
+                    let read = BufReader::new(pipes.from_helper).read_line(&mut line);
+                    format!(
+                        "started, answer {:?} {:?}, exit {:?}",
+                        read.ok(),
+                        line.trim(),
+                        child
+                            .wait_timeout(Duration::from_millis(300))
+                            .ok()
+                            .flatten()
+                            .map(|s| s.code())
+                    )
+                }
+                Err(error) => format!("{error}"),
+            };
+            println!("DIAG {bits}: {result}");
+        }
+        unsafe { std::env::remove_var("BB_DIAG") };
+    }
 }
