@@ -1053,55 +1053,6 @@ impl<C: CredentialStores> Engine<C> {
             Ok((usage.used_bytes.max(0), usage.quota_bytes.max(0)))
         })
     }
-
-    /// Move items to Trash (server-side, recoverable). Each file id must be known to the server.
-    pub fn trash_items(&self, file_ids: &[&str]) -> Result<(), String> {
-        if file_ids.is_empty() {
-            return Ok(());
-        }
-        let token = self.session_token()?;
-        self.runtime.block_on(async {
-            for id in file_ids {
-                let resp = self
-                    .client
-                    .delete(format!("{}/api/v1/files/{id}", self.config.api_base))
-                    .bearer_auth(&token)
-                    .send()
-                    .await
-                    .map_err(|_| "offline".to_string())?;
-                if !resp.status().is_success() {
-                    return Err(format!("could not trash item"));
-                }
-            }
-            // Ask the sync engine to re-snapshot so the listing updates.
-            self.request_resnapshot();
-            Ok(())
-        })
-    }
-
-    /// Restore items from Trash (server-side).
-    pub fn restore_items(&self, file_ids: &[&str]) -> Result<(), String> {
-        if file_ids.is_empty() {
-            return Ok(());
-        }
-        let token = self.session_token()?;
-        self.runtime.block_on(async {
-            for id in file_ids {
-                let resp = self
-                    .client
-                    .post(format!("{}/api/v1/files/{id}/restore", self.config.api_base))
-                    .bearer_auth(&token)
-                    .send()
-                    .await
-                    .map_err(|_| "offline".to_string())?;
-                if !resp.status().is_success() {
-                    return Err(format!("could not restore item"));
-                }
-            }
-            self.request_resnapshot();
-            Ok(())
-        })
-    }
 }
 
 /// The server's record of the account behind `token` (`GET /api/v1/auth/me`). The body is never passed on.

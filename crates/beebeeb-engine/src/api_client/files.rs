@@ -244,6 +244,20 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// [`ApiClient::trash_file`] without reading the answer: `Ok` is any 2xx, whatever its body says; a 409
+    /// `protected_folder` is a [`ProtectedFolderRefused`] all the same. For a caller that only needs to know the
+    /// move to Trash was made.
+    pub async fn trash_file_sent(&self, file_id: &str) -> anyhow::Result<()> {
+        let resp = self
+            .client
+            .delete(self.file_url(FileId::new(file_id)))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await?;
+        protected_folder_response(resp).await?;
+        Ok(())
+    }
+
     pub async fn restore_file(&self, file_id: &str) -> anyhow::Result<serde_json::Value> {
         let resp = self
             .client

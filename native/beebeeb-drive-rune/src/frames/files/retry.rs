@@ -22,9 +22,8 @@ impl State {
             return;
         }
         match action {
-            Action::Trash => {
-                self.trash_selection(tx);
-            }
+            // Exactly the items that were left (`to_trash.rs`).
+            Action::Trash => self.trash_again(tx),
             Action::Restore => {
                 self.undo(tx);
             }
@@ -84,6 +83,8 @@ impl State {
             && match action {
                 Action::Upload => !matches!(&self.actions.retry_upload, Some((_, files)) if files.is_empty()),
                 Action::KeepOffline | Action::RemoveOffline | Action::FreeUpSpace => self.local_can_retry(action),
+                Action::Trash => self.trash_can_retry(),
+                Action::Restore => self.undo_can_retry(),
                 _ => true,
             }
     }

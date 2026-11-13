@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use beebeeb_engine::app::settings_api::AccountCallError;
+use beebeeb_engine::app::trash_api::NotTrashed;
 use beebeeb_engine::app::{Engine, EngineConfig};
 use beebeeb_engine::host::ChannelHost;
 use beebeeb_engine::identity::TEST;
@@ -29,6 +30,10 @@ const BODY_MARKER: &str = "server-body-must-not-leak";
 const ANSWER: u8 = 0;
 const SERVER_ERROR: u8 = 1;
 const SESSION_ENDED: u8 = 2;
+/// A move to Trash is answered as Beebeeb answers for a protected folder.
+const PROTECTED: u8 = 3;
+/// A move to Trash is made and answered 204 with no body.
+const NO_BODY: u8 = 4;
 
 const DOCS: &str = "a0000000-0000-4000-8000-000000000101";
 const CONTRACT: &str = "a0000000-0000-4000-8000-000000000102";
@@ -68,13 +73,20 @@ fn account(email: &str) -> Account {
     let during: Hook = Arc::new(Mutex::new(None));
     let (mode_in, paged_in, during_in) = (mode.clone(), paged.clone(), during.clone());
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
-        let restoring = is_restore(req);
+        let restoring = is_restore(req) || is_trash(req);
         if !restoring && !(req.route() == "GET /api/v1/files" && req.query("trashed") == Some("true")) {
             return rest(req);
         }
         match mode_in.load(Ordering::SeqCst) {
             SERVER_ERROR => return Reply::json(500, json!({ "error": BODY_MARKER })),
             SESSION_ENDED => return Reply::json(401, json!({ "error": BODY_MARKER })),
+            PROTECTED if is_trash(req) => {
+                return Reply::json(409, json!({ "error": "protected_folder", "message": BODY_MARKER }));
+            }
+            NO_BODY if is_trash(req) => {
+                let made = rest(req);
+                return if made.status == 200 { Reply::empty(204) } else { made };
+            }
             _ => {}
         }
         if restoring {
@@ -144,6 +156,16 @@ fn is_restore(req: &Request) -> bool {
     req.route().starts_with("POST /api/v1/files/") && req.route().ends_with("/restore")
 }
 
+fn is_trash(req: &Request) -> bool {
+    req.route().starts_with("DELETE /api/v1/files/")
+}
+
+/// Every move-to-Trash request that reached the fake, whatever token it carried (counted before the fake looks at
+/// one).
+fn trashes(fake: &FakeApi) -> usize {
+    fake.requests().iter().filter(|r| is_trash(r)).count()
+}
+
 /// Every restore request that reached the fake, whatever token it carried (counted before the fake looks at one).
 fn restores(fake: &FakeApi) -> usize {
     fake.requests().iter().filter(|r| is_restore(r)).count()
@@ -199,7 +221,9 @@ fn the_trash_is_listed_with_names_decrypted_in_the_engine() {
     assert_eq!(listings(&account.fake), 1);
 
     // Restored on Beebeeb: no longer listed.
-    engine.restore_items(&[CONTRACT]).expect("the fake restores it");
+    engine
+        .restore_items_for(engine.session_turn(), &[CONTRACT])
+        .expect("the fake restores it");
     let items = engine.trash_listing().expect("the fake answers").items;
     assert_eq!(items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), [DOCS]);
 }
@@ -551,5 +575,176 @@ fn a_session_bound_restore_fails_by_kind() {
     assert_eq!(
         engine.restore_items_for(now, &[CONTRACT]).expect_err("no answer"),
         AccountCallError::Offline
+    );
+}
+
+/// A move to Trash is sent only under the session it was pressed under ([`Engine::trash_items_for`]): after a lock
+/// and an unlock, after a sign-out and a sign-in, and while a sign-out is ending the session, nothing is sent; under
+/// the session that is still there each item is sent once. Sends are counted at the fake as they arrive.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_trash_pressed_under_one_session_is_never_sent_under_another() {
+    let account = account("trash-move-turn@example.eu");
+    for id in [DOCS, CONTRACT, OLD] {
+        account.vault.add_item(id, None, "An invented name", false, 1);
+    }
+    let engine = Arc::new(signed_in(&account));
+    let gone = NotTrashed::Call(AccountCallError::NotSignedIn);
+
+    let pressed_under = engine.session_turn();
+    let _ = engine.lock();
+    engine
+        .unlock_with_phrase(Zeroizing::new(account.phrase.clone()))
+        .expect("the phrase unlocks");
+    assert_eq!(
+        engine.trash_items_for(pressed_under, &[CONTRACT]),
+        Err(gone),
+        "a lock and an unlock in between"
+    );
+    assert_eq!(trashes(&account.fake), 0, "nothing was sent after the unlock");
+
+    let pressed_under = engine.session_turn();
+    engine.sign_out_keeping_local_data().expect("signed out");
+    engine
+        .sign_in_password(&account.email, Zeroizing::new(PASSWORD.into()))
+        .expect("the fake accepts the password");
+    engine
+        .unlock_with_phrase(Zeroizing::new(account.phrase.clone()))
+        .expect("the phrase unlocks");
+    assert_eq!(
+        engine.trash_items_for(pressed_under, &[CONTRACT]),
+        Err(gone),
+        "a sign-out and a sign-in in between"
+    );
+    assert_eq!(trashes(&account.fake), 0, "nothing was sent after the sign-in");
+    assert_eq!(trashed(&engine), Vec::<String>::new(), "nothing is in Trash");
+
+    // Under the session that is still there: sent once each, in order, and Beebeeb lists them in Trash. No item:
+    // nothing is asked.
+    let now = engine.session_turn();
+    engine.trash_items_for(now, &[]).expect("nothing to do");
+    assert_eq!(trashes(&account.fake), 0, "no item, no request");
+    engine
+        .trash_items_for(now, &[CONTRACT, OLD])
+        .expect("the session is the one of the press");
+    assert_eq!(trashes(&account.fake), 2, "sent once each");
+    assert_eq!(trashed(&engine), [CONTRACT, OLD]);
+    let routes: Vec<String> = account
+        .fake
+        .requests()
+        .iter()
+        .filter(|r| is_trash(r))
+        .map(|r| r.route())
+        .collect();
+    assert_eq!(
+        routes,
+        [
+            format!("DELETE /api/v1/files/{CONTRACT}"),
+            format!("DELETE /api/v1/files/{OLD}")
+        ],
+        "the file's own route: never the permanent delete"
+    );
+
+    // While a sign-out is ending the session (it is not yet gone from memory): nothing is sent.
+    let (during, said) = (engine.clone(), Arc::new(Mutex::new(None)));
+    let heard = said.clone();
+    engine.during_next_forget_for_test(Box::new(move || {
+        *heard.lock().unwrap() = Some(during.trash_items_for(now, &[DOCS]));
+    }));
+    engine.sign_out_keeping_local_data().expect("signed out");
+    assert_eq!(
+        said.lock().unwrap().take().expect("the hook ran"),
+        Err(gone),
+        "a session that is ending"
+    );
+    assert_eq!(trashes(&account.fake), 2, "and nothing more was sent");
+}
+
+/// The session is asked again before EACH item: a lock while the first item is answered stops the second.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_session_that_ends_between_two_items_stops_the_trash_there() {
+    let account = account("trash-move-items@example.eu");
+    for id in [DOCS, CONTRACT] {
+        account.vault.add_item(id, None, "An invented name", false, 1);
+    }
+    let engine = Arc::new(signed_in(&account));
+    let pressed_under = engine.session_turn();
+    let locker = engine.clone();
+    *account.during.lock().unwrap() = Some(Box::new(move || {
+        let _ = locker.lock();
+    }));
+    assert_eq!(
+        engine.trash_items_for(pressed_under, &[DOCS, CONTRACT]),
+        Err(NotTrashed::Call(AccountCallError::NotSignedIn)),
+        "the session ended after the first item"
+    );
+    assert_eq!(trashes(&account.fake), 1, "the first item was sent, the second was not");
+    let sent = account.fake.requests().into_iter().find(is_trash).expect("one trash");
+    assert_eq!(sent.route(), format!("DELETE /api/v1/files/{DOCS}"));
+}
+
+/// The session-bound move to Trash on every other answer: a server error and a refused session each their own kind
+/// (never the body), a protected folder its own, an item Beebeeb does not have for this account is refused, a
+/// handle with no session asks nothing, and Beebeeb gone is offline. A failure stops the items after it.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_session_bound_trash_fails_by_kind() {
+    let account = account("trash-move-kinds@example.eu");
+    for id in [DOCS, CONTRACT] {
+        account.vault.add_item(id, None, "An invented name", false, 1);
+    }
+    let engine = signed_in(&account);
+    let now = engine.session_turn();
+
+    for (mode, kind) in [
+        (SERVER_ERROR, NotTrashed::Call(AccountCallError::ServerError)),
+        (SESSION_ENDED, NotTrashed::Call(AccountCallError::SessionEnded)),
+        (PROTECTED, NotTrashed::Protected),
+    ] {
+        account.mode.store(mode, Ordering::SeqCst);
+        let before = trashes(&account.fake);
+        let error = engine.trash_items_for(now, &[CONTRACT, DOCS]).expect_err("refused");
+        assert_eq!(error, kind);
+        assert!(!format!("{error:?}").contains(BODY_MARKER));
+        assert_eq!(
+            trashes(&account.fake),
+            before + 1,
+            "the item after a failure is not sent"
+        );
+    }
+    account.mode.store(ANSWER, Ordering::SeqCst);
+    assert_eq!(trashed(&engine), Vec::<String>::new(), "refused: nothing is in Trash");
+
+    // Made, and answered without a body to read: it is in Trash, and the next item is sent.
+    account.mode.store(NO_BODY, Ordering::SeqCst);
+    engine
+        .trash_items_for(now, &[CONTRACT, DOCS])
+        .expect("a 2xx is a trash that was made");
+    account.mode.store(ANSWER, Ordering::SeqCst);
+    assert_eq!(trashed(&engine), [DOCS, CONTRACT]);
+    for id in [DOCS, CONTRACT] {
+        assert!(account.vault.restore_item(id));
+    }
+
+    assert_eq!(
+        engine.trash_items_for(now, &[OLD]),
+        Err(NotTrashed::Call(AccountCallError::ServerError)),
+        "an id Beebeeb does not have for this account"
+    );
+
+    let signed_out = engine_at(&account.fake.base);
+    let before = trashes(&account.fake);
+    assert_eq!(
+        signed_out.trash_items_for(signed_out.session_turn(), &[CONTRACT]),
+        Err(NotTrashed::Call(AccountCallError::NotSignedIn))
+    );
+    assert_eq!(trashes(&account.fake), before, "nothing is asked without a session");
+
+    let Account { fake, .. } = account;
+    drop(fake);
+    assert_eq!(
+        engine.trash_items_for(now, &[CONTRACT]),
+        Err(NotTrashed::Call(AccountCallError::Offline))
     );
 }
