@@ -309,3 +309,46 @@ pub fn matched(name: &str, query: &str) -> Option<(usize, usize)> {
     }
     None
 }
+
+/// The board's sample, counting every question it is asked: for a test outside this group that
+/// proves Search was not asked (the shell's session gate).
+#[cfg(test)]
+pub struct Counted(BoardSearch, pub std::sync::Arc<std::sync::atomic::AtomicU32>);
+
+#[cfg(test)]
+impl Counted {
+    pub fn board(count: std::sync::Arc<std::sync::atomic::AtomicU32>) -> Counted {
+        Counted(BoardSearch::new(), count)
+    }
+
+    fn asked(&self) {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+impl SearchSource for Counted {
+    fn wired(&self) -> bool {
+        self.0.wired()
+    }
+    fn recent(&self) -> Vec<String> {
+        self.asked();
+        self.0.recent()
+    }
+    fn clear_recent(&mut self) {
+        self.asked();
+        self.0.clear_recent()
+    }
+    fn remember(&mut self, query: &str) {
+        self.asked();
+        self.0.remember(query)
+    }
+    fn search(&self, query: &str, narrow: Narrow) -> Answer {
+        self.asked();
+        self.0.search(query, narrow)
+    }
+    fn details(&self, id: &str) -> Option<Details> {
+        self.asked();
+        self.0.details(id)
+    }
+}

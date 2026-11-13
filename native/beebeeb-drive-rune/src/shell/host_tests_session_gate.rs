@@ -11,9 +11,8 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::*;
-use crate::frames::files::source::{BoardDrive, Call, Details, FilesFixture};
+use crate::frames::files::source::{BoardDrive, Call, FilesFixture};
 use crate::frames::global::source::{GlobalFixture, board};
-use crate::frames::search::source::{Answer, BoardSearch, Narrow, SearchSource};
 use crate::source::{DriveSource, Listing, SourceError, StorageSummary};
 
 type Count = Arc<AtomicU32>;
@@ -50,35 +49,6 @@ impl DriveSource for Drive {
     }
 }
 
-/// The board's search, counting every question it is asked.
-struct Search(BoardSearch, Count);
-
-impl SearchSource for Search {
-    fn wired(&self) -> bool {
-        self.0.wired()
-    }
-    fn recent(&self) -> Vec<String> {
-        self.1.fetch_add(1, Ordering::SeqCst);
-        self.0.recent()
-    }
-    fn clear_recent(&mut self) {
-        self.1.fetch_add(1, Ordering::SeqCst);
-        self.0.clear_recent()
-    }
-    fn remember(&mut self, query: &str) {
-        self.1.fetch_add(1, Ordering::SeqCst);
-        self.0.remember(query)
-    }
-    fn search(&self, query: &str, narrow: Narrow) -> Answer {
-        self.1.fetch_add(1, Ordering::SeqCst);
-        self.0.search(query, narrow)
-    }
-    fn details(&self, id: &str) -> Option<Details> {
-        self.1.fetch_add(1, Ordering::SeqCst);
-        self.0.details(id)
-    }
-}
-
 struct App {
     rt: Runtime<State>,
     engine: Arc<FixtureEngine>,
@@ -103,7 +73,7 @@ fn app() -> App {
         reads: reads.clone(),
     });
     state.actions.source = Box::new(fixture);
-    state.frames.find.source = Box::new(Search(BoardSearch::new(), searches.clone()));
+    state.frames.find.source = Box::new(crate::frames::search::source::Counted::board(searches.clone()));
     let asked = opened.clone();
     crate::frames::viewers::wire(
         &mut state,
