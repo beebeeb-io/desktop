@@ -53,6 +53,8 @@ pub struct State {
     pub(crate) tray: Option<crate::frames::tray::Ui>,
     pub(crate) shortcuts: crate::frames::tray::shortcuts::Shortcuts,
     pub(crate) setup: Option<crate::frames::signin::setup::Ui>,
+    /// The first-time guide over the main window (DW-0380, DW-0301 to DW-0305).
+    pub(crate) guide: crate::frames::signin::setup::guide::Guide,
     /// Sync history and Available offline (`frames::this_pc`).
     pub(crate) this_pc: crate::frames::this_pc::Ui,
     /// Backups, a section of settings (`frames::backups`).
@@ -127,6 +129,7 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         tray: None,
         shortcuts: Default::default(),
         setup: None,
+        guide: Default::default(),
         this_pc: crate::frames::this_pc::Ui::fixture(),
         backups: crate::frames::backups::BackupsUi::first(crate::shell::instance::DEV_BUILD),
     }
@@ -144,6 +147,9 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     s.identity = AppIdentity::CURRENT;
     s.actions =
         crate::frames::files::Actions::new(Box::new(crate::engine_host::EngineFilesSource::new(engine.clone())));
+    // The banner's two fields S1 feeds from the engine's view (the session ended, offline).
+    s.global = crate::frames::global::Ui::new(Box::new(crate::engine_host::EngineGlobalSource::new(engine.clone())));
+    s.settings.source = Box::new(crate::engine_host::settings::EngineSettingsSource::new(engine.clone()));
     s.signin = Some(crate::frames::signin::Ui::new(Box::new(
         crate::engine_host::EngineSignInSource::new(engine),
     )));
@@ -151,12 +157,12 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     // Every area not yet backed by the engine: the shell's "not built yet" frame, never sample
     // data beside a real account. This depends ONLY on "is this the live engine path", never on
     // the identity or a dev flag.
-    s.settings.source = Box::new(crate::frames::settings::source::Unwired);
     s.settings.drive = Box::new(crate::frames::settings::drive::UnwiredDrive::new());
     s.account.source = None;
     s.storage_split = None;
     s.frames.shared.source = Box::new(crate::frames::shared::source::Unwired);
     s.frames.trash.source = Box::new(crate::frames::trash::source::Unwired);
+    s.frames.find = crate::frames::search::SearchUi::default();
     s.frames.pc = Box::new(crate::frames::UnwiredPc);
     s.photos = crate::frames::photos::Ui::new(Box::new(crate::frames::photos::source::Unwired));
     s.this_pc = crate::frames::this_pc::Ui::new(Box::new(crate::frames::this_pc::source::Unwired));

@@ -2419,6 +2419,290 @@
     178,
     255
    ]
+  },
+  "seg-0": {
+   "kind": "box",
+   "x": 240,
+   "y": 90,
+   "w": 247.55,
+   "h": 28,
+   "bg": [
+    35,
+    30,
+    24,
+    255
+   ]
+  },
+  "seg-0-all": {
+   "kind": "box",
+   "x": 242,
+   "y": 92,
+   "w": 34.79,
+   "h": 24,
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ],
+   "on": true
+  },
+  "seg-0-all-label": {
+   "kind": "text",
+   "x": 252,
+   "y": 96.5,
+   "w": 14.79,
+   "h": 14.5,
+   "text": "All",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 550,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0
+  },
+  "seg-0-folders": {
+   "kind": "box",
+   "x": 276.79,
+   "y": 92,
+   "w": 62.77,
+   "h": 24,
+   "on": false
+  },
+  "seg-0-folders-label": {
+   "kind": "text",
+   "x": 286.79,
+   "y": 96.5,
+   "w": 42.77,
+   "h": 14.5,
+   "text": "Folders",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 550,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "seg-0-photos": {
+   "kind": "box",
+   "x": 339.56,
+   "y": 92,
+   "w": 60.13,
+   "h": 24,
+   "on": false
+  },
+  "seg-0-photos-label": {
+   "kind": "text",
+   "x": 349.56,
+   "y": 96.5,
+   "w": 40.13,
+   "h": 14.5,
+   "text": "Photos",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 550,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "seg-0-documents": {
+   "kind": "box",
+   "x": 399.7,
+   "y": 92,
+   "w": 85.85,
+   "h": 24,
+   "on": false
+  },
+  "seg-0-documents-label": {
+   "kind": "text",
+   "x": 409.7,
+   "y": 96.5,
+   "w": 65.85,
+   "h": 14.5,
+   "text": "Documents",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 550,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "list-0": {
+   "kind": "box",
+   "x": 1010.5,
+   "y": 477.5,
+   "w": 251.5,
+   "h": 40,
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ]
+  },
+  "item-0-0": {
+   "kind": "box",
+   "x": 1010.5,
+   "y": 477.5,
+   "w": 251.5,
+   "h": 40,
+   "selected": false
+  },
+  "item-0-0-title": {
+   "kind": "text",
+   "x": 1020.5,
+   "y": 481,
+   "w": 187.5,
+   "h": 17,
+   "text": "Available offline",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "item-0-0-sub": {
+   "kind": "text",
+   "x": 1020.5,
+   "y": 499,
+   "w": 187.5,
+   "h": 15,
+   "text": "Online only now · 1.2 MB",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0
+  },
+  "btn-share": {
+   "kind": "box",
+   "x": 1010.5,
+   "y": 529.5,
+   "w": 90.81,
+   "h": 22,
+   "bg": [
+    16,
+    13,
+    9,
+    255
+   ]
+  },
+  "btn-share-icon": {
+   "kind": "icon",
+   "x": 1023.5,
+   "y": 533.5,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M18 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 22a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "btn-share-label": {
+   "kind": "text",
+   "x": 1044.5,
+   "y": 531.93,
+   "w": 43.81,
+   "h": 17.14,
+   "text": "Share…",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "btn-version-history": {
+   "kind": "box",
+   "x": 1109.31,
+   "y": 529.5,
+   "w": 132.45,
+   "h": 22,
+   "bg": [
+    16,
+    13,
+    9,
+    255
+   ]
+  },
+  "btn-version-history-icon": {
+   "kind": "icon",
+   "x": 1122.31,
+   "y": 533.5,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "btn-version-history-label": {
+   "kind": "text",
+   "x": 1143.31,
+   "y": 531.93,
+   "w": 85.45,
+   "h": 17.14,
+   "text": "Version history",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.06
   }
  },
  "theme": "dark"

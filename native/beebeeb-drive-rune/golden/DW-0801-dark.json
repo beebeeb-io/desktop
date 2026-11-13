@@ -1299,6 +1299,170 @@
     178,
     255
    ]
+  },
+  "label-recent": {
+   "kind": "text",
+   "x": 244,
+   "y": 103,
+   "w": 44.4,
+   "h": 12,
+   "text": "RECENT",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0.7
+  },
+  "list-0": {
+   "kind": "box",
+   "x": 244,
+   "y": 128,
+   "w": 512,
+   "h": 84,
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ]
+  },
+  "item-0-0": {
+   "kind": "box",
+   "x": 244,
+   "y": 128,
+   "w": 512,
+   "h": 28,
+   "selected": false
+  },
+  "item-0-0-icon": {
+   "kind": "icon",
+   "x": 260,
+   "y": 133,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "item-0-0-title": {
+   "kind": "text",
+   "x": 292,
+   "y": 133.5,
+   "w": 454,
+   "h": 17,
+   "text": "contract",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "item-0-1": {
+   "kind": "box",
+   "x": 244,
+   "y": 156,
+   "w": 512,
+   "h": 28,
+   "selected": false
+  },
+  "item-0-1-icon": {
+   "kind": "icon",
+   "x": 260,
+   "y": 161,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "item-0-1-title": {
+   "kind": "text",
+   "x": 292,
+   "y": 161.5,
+   "w": 454,
+   "h": 17,
+   "text": "lisbon",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "item-0-2": {
+   "kind": "box",
+   "x": 244,
+   "y": 184,
+   "w": 512,
+   "h": 28,
+   "selected": false
+  },
+  "item-0-2-icon": {
+   "kind": "icon",
+   "x": 260,
+   "y": 189,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "item-0-2-title": {
+   "kind": "text",
+   "x": 292,
+   "y": 189.5,
+   "w": 454,
+   "h": 17,
+   "text": "invoice 2026",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.06
   }
  },
  "theme": "dark"

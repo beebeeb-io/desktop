@@ -446,8 +446,11 @@ pub(crate) fn register_sync_root_with(
         //    that pairs with `ALWAYS_FULL` — it reinforces, at the root, that
         //    Explorer must not block on a placeholder fetch that never comes.
         let register_flags = CF_REGISTER_FLAG_UPDATE | CF_REGISTER_FLAG_DISABLE_ON_DEMAND_POPULATION_ON_ROOT;
-        CfRegisterSyncRoot(PCWSTR(path_wide.as_ptr()), &info, &policies, register_flags)
-            .map_err(|e| anyhow::anyhow!("CfRegisterSyncRoot failed: {e}"))?;
+        // Windows' error stays the source, so a start can name its code (`sync_root_port::hresult_of`).
+        CfRegisterSyncRoot(PCWSTR(path_wide.as_ptr()), &info, &policies, register_flags).map_err(|e| {
+            let words = format!("CfRegisterSyncRoot failed: {e}");
+            anyhow::Error::new(e).context(words)
+        })?;
     }
 
     tracing::info!(
@@ -1037,19 +1040,26 @@ fn connect_callbacks(sync_root_path: &std::path::Path, generation: u64) -> anyho
 
 /// Connect once per runner generation. Existing placeholders may call us before
 /// the bridge is installed; those requests fail promptly until activation.
-pub fn connect_root(identity: &'static EngineIdentity, sync_root: &std::path::Path) {
+/// `Ok`: the root is registered and its callbacks connected, with how the
+/// Explorer entry went; `Err`: it is not, with Windows' code when it gave one.
+pub fn connect_root(
+    identity: &'static EngineIdentity,
+    sync_root: &std::path::Path,
+) -> std::result::Result<crate::sync_view::Explorer, Option<i32>> {
+    use crate::sync_view::Explorer;
     if ensure_reactivation_allowed().is_err() {
-        return;
+        return Err(None);
     }
     let mut connection = CONNECTION.lock().unwrap();
     if ensure_reactivation_allowed().is_err() {
-        return;
+        return Err(None);
     }
     if let Some(current) = connection.as_ref() {
         if current.root != sync_root {
             tracing::error!("old Cloud Files root still connected");
+            return Err(None);
         }
-        return;
+        return Ok(Explorer::Unknown);
     }
     // Stash the current tokio runtime handle so the Cloud Files fetch
     // callback (which fires on an OS filter-driver thread with no runtime
@@ -1064,7 +1074,7 @@ pub fn connect_root(identity: &'static EngineIdentity, sync_root: &std::path::Pa
 
     if let Err(e) = register_sync_root(identity, sync_root) {
         tracing::error!(error = %e, "Cloud Files sync root registration failed; connect skipped");
-        return;
+        return Err(crate::sync_root_port::hresult_of(&e));
     }
 
     // Write the Explorer SHELL registration (Status column + overlays + nav-pane
@@ -1073,9 +1083,15 @@ pub fn connect_root(identity: &'static EngineIdentity, sync_root: &std::path::Pa
     // NOT abort the connect/hydration path (which runs entirely off the Win32
     // registration), so we log-and-continue exactly like a Cloud Files hiccup.
     // Re-running on every engine spawn makes a re-login reconverge the shell entry.
-    if let Err(e) = register_shell_sync_root(identity, sync_root) {
-        tracing::warn!(error = %e, "Explorer shell sync-root registration failed; overlays/column/sidebar may be absent (hydration unaffected)");
-    }
+    let explorer = match register_shell_sync_root(identity, sync_root) {
+        Ok(()) => Explorer::Added,
+        Err(e) => {
+            tracing::warn!(error = %e, "Explorer shell sync-root registration failed; overlays/column/sidebar may be absent (hydration unaffected)");
+            Explorer::Failed {
+                code: crate::sync_root_port::hresult_of(&e),
+            }
+        }
+    };
 
     // LD-0105 S7: the policy Windows holds now, after both registrations. Anything but PROGRESSIVE
     // with no modifier keeps the whole-file path (W2 reads `progressive_in_effect`).
@@ -1126,8 +1142,12 @@ pub fn connect_root(identity: &'static EngineIdentity, sync_root: &std::path::Pa
                 root: sync_root.to_path_buf(),
             });
             tracing::info!(generation, "Cloud Files callbacks connected");
+            Ok(explorer)
         }
-        Err(e) => tracing::error!(error = %e, "CfConnectSyncRoot failed; on-demand hydration disabled"),
+        Err(e) => {
+            tracing::error!(error = %e, "CfConnectSyncRoot failed; on-demand hydration disabled");
+            Err(None)
+        }
     }
 }
 

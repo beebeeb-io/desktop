@@ -130,8 +130,11 @@ fn every_state_without_a_frame_has_a_placeholder_and_only_files_is_built() {
         // As for the sections above: the placeholder, unless the group's lane registered its frame.
         let built = registry::frame(registry::group_for(&rt.state.shell.app)).is_some();
         assert_eq!(rt.find("not-built").is_none(), built, "{gate:?}");
-        // Behind the gate there is no sidebar and no list: nothing of the account.
-        assert!(rt.find("sidebar").is_none(), "{gate:?}");
+        // Behind the gate there is no list, and no sidebar: nothing of the account. The two states
+        // before Files are the exception the board draws (DW-0009, DW-0014): the sidebar stands
+        // closed (dimmed, nothing in it can be pressed), and still no list and no file name.
+        let before_files = matches!(gate, GateState::Locked | GateState::NoPlan);
+        assert_eq!(rt.find("sidebar").is_some(), before_files, "{gate:?}");
         assert!(rt.find("file-list").is_none(), "{gate:?}");
     }
 }
@@ -756,6 +759,14 @@ fn entering_a_secret_route_sets_capture_exclusion_and_leaving_clears_it() {
     rt.frame(2.0);
     assert_eq!(
         platform.capture_exclusions.lock().unwrap().clone(),
+        vec![true],
+        "the poll that first sees no secret keeps the window excluded"
+    );
+    // Exclusion drops one poll late: the poll that first sees no secret keeps it and lands the
+    // leaving elements; the next one tells the platform.
+    rt.frame(2.5);
+    assert_eq!(
+        platform.capture_exclusions.lock().unwrap().clone(),
         vec![true, false],
         "leaving sign-in calls the platform with clear"
     );
@@ -836,6 +847,9 @@ fn after_failure_subsequent_polls_retry_bounded() {
     platform.capture_exclusion_fails.store(false, Ordering::SeqCst);
     engine.set_gate(GateState::Ready);
     rt.frame(5.0);
+    // Exclusion drops one poll late: the poll that first sees no secret keeps it and lands the
+    // leaving elements; the next one tells the platform.
+    rt.frame(5.5);
     // Desired false, applied false → match → retries reset.
     assert_eq!(rt.state.shell.capture_exclusion_retries, 0);
 
@@ -1043,3 +1057,6 @@ fn dispatching_gate_ready_does_not_override_the_engines_authority() {
         );
     }
 }
+
+#[path = "host_tests_flows.rs"]
+mod flows;

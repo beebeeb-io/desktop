@@ -60,7 +60,21 @@ pub enum Body {
     Text(TextDoc),
     /// DW-1513: a Markdown note, decrypted in memory.
     Markdown(MdDoc),
+    /// DW-1501, DW-1502: a photo (a RAW shows the preview the camera stored in it).
+    Photo(PhotoDoc),
+    /// DW-1503: a recording, with its folder as the queue.
+    Audio(AudioDoc),
+    /// DW-1505, DW-1506: a PDF.
+    Pdf(PdfDoc),
+    /// DW-1514: a CSV or TSV as a table.
+    Table(TableDoc),
+    /// DW-1515: an archive's list.
+    Archive(ArchiveDoc),
 }
+
+pub use super::kinds::{
+    ArchiveDoc, AudioDoc, Column, Entry, EntryKind, Match, PdfDoc, PhotoDoc, Picture, StripItem, TableDoc, Track,
+};
 
 /// A Markdown note: its text.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -220,6 +234,20 @@ pub trait ViewerSource {
     }
     /// Download and decrypt again after a failure.
     fn retry(&mut self, file_id: &str) -> Result<OpenFile, OpenError>;
+    /// A picture of the open file as decoded pixels (the photo, a strip thumbnail, the artwork,
+    /// a PDF page), rendered on this PC from the decrypted file. `None`: there is none (yet);
+    /// the frame draws its plain tile.
+    fn picture(&self, _file_id: &str, _which: Picture) -> Option<rune::Pixels> {
+        None
+    }
+    /// Where `words` are in the open PDF, in reading order. Empty: nowhere, or no text to search.
+    fn find(&mut self, _file_id: &str, _words: &str) -> Vec<Match> {
+        Vec::new()
+    }
+    /// Play or pause the open recording. `false`: not done.
+    fn play(&mut self, _file_id: &str, _on: bool) -> bool {
+        false
+    }
 }
 
 const MB: u64 = 1_000_000;
@@ -239,6 +267,18 @@ pub mod board {
     pub const LOG: &str = "server.log";
     /// DW-1513.
     pub const NOTES: &str = "meeting-notes-4-nov.md";
+    /// DW-1501, DW-1502.
+    pub const RAW: &str = "dsc04182.arw";
+    /// DW-1503.
+    pub const AUDIO: &str = "harbour-sessions-take-3.m4a";
+    /// DW-1505.
+    pub const PDF: &str = "studio-plan.pdf";
+    /// DW-1506.
+    pub const PDF_FIND: &str = "service-agreement.pdf";
+    /// DW-1514.
+    pub const CSV: &str = "rates-2026.csv";
+    /// DW-1515.
+    pub const ZIP: &str = "shoot-selects-export.zip";
     /// DW-1513's text, as the note's source (DW-1523 shows it with one more line being typed).
     pub const NOTES_TEXT: &str = "# Meeting notes, 4 Nov\n\nPresent: Anna, Lotte, Jonas\n\n## Harbourlight shoot\n- Final selects due **Friday**\n- Colour grade in `Shoot selects/graded`\n- Send the agreement: [Service agreement](Service agreement.docx)\n\n## Studio\n- Rent goes up in January (see Studio rent 2026.pdf)\n- Book the Lisbon follow-up\n";
 }
@@ -368,7 +408,7 @@ impl FixtureViewerSource {
                 };
                 file
             }
-            _ => return None,
+            _ => return super::fixture_media::file(id),
         })
     }
 }
@@ -472,6 +512,20 @@ impl ViewerSource for FixtureViewerSource {
 
     fn set_offline(&mut self, file_id: &str, on: bool) -> bool {
         self.calls.push(format!("offline {file_id} {on}"));
+        true
+    }
+
+    fn picture(&self, file_id: &str, which: Picture) -> Option<rune::Pixels> {
+        super::fixture_media::picture(file_id, which)
+    }
+
+    fn find(&mut self, file_id: &str, words: &str) -> Vec<Match> {
+        self.calls.push(format!("find {file_id} {words}"));
+        super::fixture_media::find(file_id, words)
+    }
+
+    fn play(&mut self, file_id: &str, on: bool) -> bool {
+        self.calls.push(format!("play {file_id} {on}"));
         true
     }
 

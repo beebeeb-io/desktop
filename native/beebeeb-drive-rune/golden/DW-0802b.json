@@ -1785,6 +1785,133 @@
     61,
     255
    ]
+  },
+  "seg-0": {
+   "kind": "box",
+   "x": 240,
+   "y": 90,
+   "w": 247.55,
+   "h": 28,
+   "bg": [
+    244,
+    241,
+    237,
+    255
+   ]
+  },
+  "seg-0-all": {
+   "kind": "box",
+   "x": 242,
+   "y": 92,
+   "w": 34.79,
+   "h": 24,
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ],
+   "on": true
+  },
+  "seg-0-all-label": {
+   "kind": "text",
+   "x": 252,
+   "y": 96.5,
+   "w": 14.79,
+   "h": 14.5,
+   "text": "All",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 550,
+   "color": [
+    20,
+    17,
+    13,
+    255
+   ],
+   "tracking": 0
+  },
+  "seg-0-folders": {
+   "kind": "box",
+   "x": 276.79,
+   "y": 92,
+   "w": 62.77,
+   "h": 24,
+   "on": false
+  },
+  "seg-0-folders-label": {
+   "kind": "text",
+   "x": 286.79,
+   "y": 96.5,
+   "w": 42.77,
+   "h": 14.5,
+   "text": "Folders",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 550,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "seg-0-photos": {
+   "kind": "box",
+   "x": 339.56,
+   "y": 92,
+   "w": 60.13,
+   "h": 24,
+   "on": false
+  },
+  "seg-0-photos-label": {
+   "kind": "text",
+   "x": 349.56,
+   "y": 96.5,
+   "w": 40.13,
+   "h": 14.5,
+   "text": "Photos",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 550,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
+  },
+  "seg-0-documents": {
+   "kind": "box",
+   "x": 399.7,
+   "y": 92,
+   "w": 85.85,
+   "h": 24,
+   "on": false
+  },
+  "seg-0-documents-label": {
+   "kind": "text",
+   "x": 409.7,
+   "y": 96.5,
+   "w": 65.85,
+   "h": 14.5,
+   "text": "Documents",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 550,
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "tracking": 0
   }
  },
  "theme": "light"

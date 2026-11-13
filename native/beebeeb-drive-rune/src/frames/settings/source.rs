@@ -254,15 +254,51 @@ pub enum AlertKind {
     Security,
 }
 
+/// What a source's workers answered since the last frame (`SettingsSource::pump`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Pumped {
+    /// Something a pane draws changed: the window draws again.
+    pub changed: bool,
+    /// What the toast over the pane says now (a change taken, or refused).
+    pub toast: Option<&'static str>,
+    /// An answer is still out: the window looks again soon.
+    pub busy: bool,
+}
+
 pub trait SettingsSource {
     /// `true` only for a source whose values are sample content (`BoardSettings`): a build
     /// that ships must never open settings on one.
     fn sample(&self) -> bool {
         false
     }
-    /// `false`: nothing answers yet (`Unwired`), and settings draws no pane at all.
-    fn wired(&self) -> bool {
+    /// `false` for a pane this source does not answer for (`Unwired`: none): settings draws the
+    /// shell's "not built yet" frame in its place, never a value of it.
+    fn wired(&self, pane: super::Pane) -> bool {
+        let _ = pane;
         true
+    }
+    /// `false` for a frame over a wired pane (a dialog) that this source has nothing real behind
+    /// yet: settings asks the shell for it, as for a frame it has not built.
+    fn opens(&self, frame: &str) -> bool {
+        let _ = frame;
+        true
+    }
+    /// The window shows `pane` now: a source that reads from elsewhere asks again if what it
+    /// holds is old. Never waits.
+    fn opened(&mut self, pane: super::Pane) {
+        let _ = pane;
+    }
+    /// Take what the source's workers answered since the last call. Never waits.
+    fn pump(&mut self) -> Pumped {
+        Pumped::default()
+    }
+    /// The list of storage locations is being asked for and nothing is known yet.
+    fn locations_loading(&self) -> bool {
+        false
+    }
+    /// The theme preference alone (every window reads it on every frame).
+    fn theme(&self) -> ThemeChoice {
+        self.general().theme
     }
     /// Engine: the Recent notifications page has been opened and left: nothing on it is new
     /// any more, and the count on the Notifications row is 0.
@@ -631,7 +667,7 @@ impl SettingsSource for BoardSettings {
 pub struct Unwired;
 
 impl SettingsSource for Unwired {
-    fn wired(&self) -> bool {
+    fn wired(&self, _pane: super::Pane) -> bool {
         false
     }
     fn mark_recent_seen(&mut self) {}
