@@ -636,9 +636,11 @@ fn backups_has_no_source_on_a_live_engine() {
 fn settings_is_unwired_on_a_live_engine() {
     use crate::frames::settings::Pane;
     let s = engine_state();
-    // Task 2473: General and Storage location answer from the engine; every other pane is the shell's frame.
+    // Task 2473: General and Storage location answer from the engine; so do Notifications and Recent
+    // notifications (`engine_host::settings::notifications`); every other pane is the shell's frame.
     assert!(s.settings.source.wired(Pane::General) && s.settings.source.wired(Pane::StorageLocation));
-    for pane in [Pane::About, Pane::Notifications, Pane::Recent] {
+    assert!(s.settings.source.wired(Pane::Notifications) && s.settings.source.wired(Pane::Recent));
+    for pane in [Pane::About] {
         assert!(!s.settings.source.wired(pane), "{pane:?}");
     }
     // Drive's panes (`engine_host::drive_settings`): Storage insights answers; the rest is the shell's frame.

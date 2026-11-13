@@ -72,7 +72,7 @@ fn account(email: &str) -> Account {
                 | "GET /api/v1/notifications"
                 | "GET /api/v1/notifications/preferences"
                 | "PUT /api/v1/notifications/preferences"
-        );
+        ) || route.starts_with("PATCH /api/v1/notifications/");
         if !ours {
             return rest(req);
         }
@@ -112,6 +112,15 @@ fn account(email: &str) -> Account {
             })),
             "GET /api/v1/notifications/preferences" => {
                 Reply::ok(json!({ "preferences": prefs.lock().unwrap().clone() }))
+            }
+            // One notification seen; `n-gone` is one the server no longer has.
+            seen if seen.starts_with("PATCH ") => {
+                writes_in.lock().unwrap().push((route.clone(), req.json()));
+                if seen.ends_with("/n-gone") {
+                    Reply::json(404, json!({ "error": BODY_MARKER }))
+                } else {
+                    Reply::ok(json!({ "message": "updated" }))
+                }
             }
             _ => {
                 let body = req.json();
@@ -346,6 +355,37 @@ fn the_accounts_alert_switches_are_read_and_one_change_is_sent_alone() {
     gone(account);
     assert_eq!(read(&engine).expect_err("no answer"), AccountCallError::Offline);
     assert_eq!(write(&engine).expect_err("no answer"), AccountCallError::Offline);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn notifications_are_marked_seen_one_by_one_and_one_that_is_gone_counts_as_seen() {
+    let account = account("seen@example.eu");
+    let engine = signed_in(&account);
+    let ids = ["n-2".to_string(), "n-gone".to_string(), "n-1".to_string()];
+    engine.mark_notifications_read(&ids).expect("the fake marks them");
+    assert_eq!(
+        account.writes.lock().unwrap().clone(),
+        [
+            ("PATCH /api/v1/notifications/n-2".to_string(), json!({ "read": true })),
+            (
+                "PATCH /api/v1/notifications/n-gone".to_string(),
+                json!({ "read": true })
+            ),
+            ("PATCH /api/v1/notifications/n-1".to_string(), json!({ "read": true })),
+        ],
+        "each id once, in order, as read"
+    );
+    engine
+        .mark_notifications_read(&[])
+        .expect("nothing to mark asks nothing");
+    assert_eq!(account.writes.lock().unwrap().len(), 3);
+
+    let mark = |engine: &Engine<MemoryCredentials>| engine.mark_notifications_read(&ids);
+    refusals("mark_notifications_read", &account, &engine, mark);
+    not_signed_in("mark_notifications_read", &account, mark);
+    gone(account);
+    assert_eq!(mark(&engine).expect_err("no answer"), AccountCallError::Offline);
 }
 
 #[test]

@@ -201,17 +201,21 @@ fn command_icon_uri() -> WinResult<Uri> {
 
 // ── The "Free up space" command shown in the flyout ─────────────────────────
 //
-// `Invoke` runs the SAME reclaim path as the `free_up_space` IPC
-// (`crate::free_up_space_blocking`) — dehydrate every unpinned, fully-local
-// placeholder back to cloud-only. It is a synchronous blocking fn (DB +
-// filesystem), so it runs directly on the COM thread Windows delivers `Invoke`
-// on — no tokio runtime required (and the engine's runtime may not even be
-// reachable from this thread). Bounded, best-effort: a reclaim error is logged,
-// never surfaced as a COM failure that would make the flyout look broken.
+// Task 2490: the command acts for the signed-in account alone. `State` and
+// `Invoke` ask the engine handle served to `crate::explorer_command` each time
+// (never when the flyout was built: Explorer may keep this object across a lock
+// or a sign-out); no handle, a handle that is gone, or a refusal of the
+// account-bound local state answers Disabled and frees nothing. The reclaim is
+// the engine handle's own (`Engine::free_up_space`, through the account-bound
+// handle); nothing here opens the state database. `State` reads the owner on a
+// read-only connection (bounded wait); `Invoke` hands the reclaim to a worker
+// thread so the COM thread is never held by it, one reclaim at a time. A
+// reclaim error is logged, never surfaced as a COM failure.
 #[implement(IStorageProviderUICommand)]
-struct FreeUpSpaceCommand {
-    app: &'static crate::identity::EngineIdentity,
-}
+struct FreeUpSpaceCommand;
+
+/// One reclaim from the flyout at a time: a second click while one runs is ignored.
+static FLYOUT_RECLAIM_RUNNING: AtomicBool = AtomicBool::new(false);
 
 // windows-rs 0.58 convention: `#[implement(IFoo)] struct Bar;` generates a
 // `Bar_Impl` wrapper, and the `IFoo_Impl` trait must be implemented on the
@@ -234,21 +238,35 @@ impl IStorageProviderUICommand_Impl for FreeUpSpaceCommand_Impl {
         command_icon_uri()
     }
     fn State(&self) -> WinResult<StorageProviderUICommandState> {
-        Ok(StorageProviderUICommandState::Enabled)
+        use crate::explorer_command::{CommandState, served, state_of};
+        Ok(match state_of(served().as_deref()) {
+            CommandState::Enabled => StorageProviderUICommandState::Enabled,
+            CommandState::Disabled => StorageProviderUICommandState::Disabled,
+        })
     }
     fn Invoke(&self) -> WinResult<()> {
-        match crate::free_up_space::free_up_space_unbound(self.this.app) {
-            Ok(result) => {
-                tracing::info!(
-                    bytes_freed = result.bytes_freed,
-                    "Explorer status flyout: Free up space invoked"
-                );
-            }
-            Err(e) => {
-                // Don't fail the COM call — the user asked to free space, a
-                // partial/failed reclaim is logged and the flyout closes cleanly.
-                tracing::warn!(error = %e, "Explorer status flyout: Free up space failed");
-            }
+        use crate::explorer_command::{Invoked, invoke, served};
+        if FLYOUT_RECLAIM_RUNNING.swap(true, Ordering::SeqCst) {
+            tracing::info!("Explorer status flyout: Free up space already running");
+            return Ok(());
+        }
+        let spawned = std::thread::Builder::new()
+            .name("beebeeb-flyout-free-up-space".to_string())
+            .spawn(|| {
+                match invoke(served().as_deref()) {
+                    Invoked::Freed(bytes_freed) => {
+                        tracing::info!(bytes_freed, "Explorer status flyout: Free up space invoked")
+                    }
+                    Invoked::Refused(kind) => {
+                        tracing::info!(kind, "Explorer status flyout: Free up space refused; nothing freed")
+                    }
+                    Invoked::Failed => tracing::warn!("Explorer status flyout: Free up space failed"),
+                }
+                FLYOUT_RECLAIM_RUNNING.store(false, Ordering::SeqCst);
+            });
+        if spawned.is_err() {
+            FLYOUT_RECLAIM_RUNNING.store(false, Ordering::SeqCst);
+            tracing::warn!("Explorer status flyout: Free up space could not start; nothing freed");
         }
         Ok(())
     }
@@ -349,7 +367,7 @@ impl IStorageProviderStatusUISource_Impl for StatusUiSource_Impl {
         }
 
         // ── Primary command: "Free up space" (the textual button) ──
-        let free_up: IStorageProviderUICommand = FreeUpSpaceCommand { app: self.this.app }.into();
+        let free_up: IStorageProviderUICommand = FreeUpSpaceCommand.into();
         ui.SetProviderPrimaryCommand(&free_up)?;
 
         Ok(ui)
@@ -531,6 +549,13 @@ pub fn unregister_status_ui_source(identity: &'static crate::identity::EngineIde
     let _ = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &clsid_key) };
 
     tracing::info!(shell_id, "Explorer status-flyout source unregistered");
+}
+
+/// Task 2490: remove the flyout's binding for `sync_root` (the engine's stop, lock and sign-out, through
+/// `crate::explorer_command::OsExplorerBinding`). The sync folder, its placeholders and Explorer's shell
+/// registration stay; the next engine start binds the flyout again when it connects the folder.
+pub fn remove_for_sync_root(identity: &'static crate::identity::EngineIdentity, sync_root: &std::path::Path) {
+    unregister_status_ui_source(identity, &super::shell_sync_root_id(identity, sync_root));
 }
 
 /// Create-or-open `subkey` under `root` and set a REG_SZ value (`value_name`
