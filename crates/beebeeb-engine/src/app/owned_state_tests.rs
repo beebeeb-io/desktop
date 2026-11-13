@@ -20,15 +20,22 @@ use crate::state_db::{FileEntry, FileStatus, ItemKind};
 type TestEngine = Engine<MemoryCredentials>;
 
 fn engine() -> Arc<TestEngine> {
+    engine_on(MemoryCredentials::default())
+}
+
+/// A handle on `credentials` (a clone shares the stored items: a new handle on it is a restart).
+fn engine_on(credentials: MemoryCredentials) -> Arc<TestEngine> {
     let state_dir = crate::state_paths::init_for_test();
     let (host, _messages) = ChannelHost::new(|| {});
     let config = EngineConfig {
-        account_id: "an-invented-slot".into(),
+        account_id: SLOT.into(),
         state_dir,
         api_base: "http://127.0.0.1:9".into(),
     };
-    Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"))
+    Arc::new(Engine::open(&REAL, config, host, credentials).expect("the handle opens"))
 }
+
+const SLOT: &str = "an-invented-slot";
 
 /// A session in memory, as a sign-in and an unlock leave it: the email, and the user id recorded for it.
 fn signed_in(engine: &TestEngine, user_id: Option<&str>, email: Option<&str>) {
@@ -356,4 +363,40 @@ fn a_refusal_is_a_fixed_word() {
         3,
         "unowned, another account's, not comparable"
     );
+}
+
+/// After a restart the session's identity is completed from the user id stored with the session, never decided by
+/// the email alone: a stored session of ANOTHER user id with the SAME email as the state's recorded owner is
+/// refused; the same user id is handed the state. The restart is a new handle on the stored items (`restore`, no
+/// profile in memory); the unlock after it leaves the session's email alone in memory.
+#[test]
+fn after_a_restart_the_stored_user_id_decides_not_the_email() {
+    use crate::keychain::{AuthSecretStore, SessionToken};
+    let dir = tempfile::tempdir().unwrap();
+    let path = state(dir.path(), Some((Some("user-a"), Some("same@example.eu"))), true);
+    for (stored_user_id, expected) in [("user-b", Some(LocalStateRefused::OtherAccount)), ("user-a", None)] {
+        let credentials = MemoryCredentials::default();
+        let store = credentials.store_for(SLOT);
+        store
+            .save_session_token(&SessionToken::new("an-invented-token").unwrap())
+            .unwrap();
+        store.save_session_owner(stored_user_id).unwrap();
+        let engine = engine_on(credentials);
+        engine.restore();
+        {
+            let _writes = engine.writes.lock().unwrap();
+            engine
+                .acct
+                .advance_session_generation_holding_session_write_lock(SessionTransition::Write);
+            *engine.acct.session.lock().unwrap() = Some(Session {
+                token: "an-invented-token".into(),
+                master_key: [7; 32],
+                email: Some("same@example.eu".into()),
+            });
+        }
+        engine.use_local_state_for_test(path.clone());
+        assert_eq!(refusal(&engine), expected, "stored user id {stored_user_id}");
+        let handed_out = expected.is_none();
+        assert_eq!(every_door(&engine), [handed_out; 3], "stored user id {stored_user_id}");
+    }
 }
