@@ -151,8 +151,9 @@ impl Pane {
     }
 }
 
-/// A confirm over a pane. A destructive choice is confirmed, never one press.
-#[derive(Clone, PartialEq, Eq, Debug)]
+/// A confirm over a pane. A destructive choice is confirmed, never one press. `Debug` is written by hand
+/// (below): three of them hold the server's id of a device or a passkey.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Dialog {
     /// Sign out one device (DW-A56): the server's id of the device.
     SignOutDevice(String),
@@ -190,6 +191,31 @@ pub enum Dialog {
     },
     /// No board frame: Deny came after this PC's own approval had gone through.
     ApproveTooLate,
+}
+
+// By hand: which confirm it is, never the id it holds.
+impl std::fmt::Debug for Dialog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Dialog::SignOutDevice(_) => f.write_str("SignOutDevice(..)"),
+            Dialog::SignOutElsewhere => f.write_str("SignOutElsewhere"),
+            Dialog::SignOutApp => f.write_str("SignOutApp"),
+            Dialog::SignOutAllApps => f.write_str("SignOutAllApps"),
+            Dialog::Code(what) => write!(f, "Code({what:?})"),
+            Dialog::PasskeyMenu(_) => f.write_str("PasskeyMenu(..)"),
+            Dialog::RemovePasskey(_) => f.write_str("RemovePasskey(..)"),
+            Dialog::LeaveCodes => f.write_str("LeaveCodes"),
+            Dialog::Plan => f.write_str("Plan"),
+            Dialog::LockDelay(hot) => write!(f, "LockDelay({hot:?})"),
+            Dialog::ApproveReview => f.write_str("ApproveReview"),
+            Dialog::ApproveHello => f.write_str("ApproveHello"),
+            Dialog::ApproveApproved => f.write_str("ApproveApproved"),
+            Dialog::ApproveDenied => f.write_str("ApproveDenied"),
+            Dialog::ApproveExpired { handled } => write!(f, "ApproveExpired {{ handled: {handled} }}"),
+            Dialog::ApproveUnsure { denying } => write!(f, "ApproveUnsure {{ denying: {denying} }}"),
+            Dialog::ApproveTooLate => f.write_str("ApproveTooLate"),
+        }
+    }
 }
 
 impl Dialog {
@@ -332,15 +358,49 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         ui.told_open = now;
         // A toast belongs to the pane it was said over.
         source.clear_notice();
-        if let Some(pane) = now {
-            source.opened(pane);
+        match now {
+            Some(pane) => source.opened(pane),
+            // No account pane shows: the source reads nothing more until one opens.
+            None => source.closed(),
         }
     }
     let pumped = source.pump();
-    if pumped.busy {
+    if pumped.busy || pumped.watch {
         tx.wake_after(POLL_EVERY);
     }
     pumped.changed
+}
+
+/// The toast over a pane. With a way to try again it is the failure toast with its button (`ui::toast`), laid
+/// where the settings toast sits; the words alone are the settings toast, as before.
+fn notice_toast(source: &dyn AccountSource, t: &Theme) -> Option<El> {
+    let words = source.notice()?;
+    let Some(action) = source.notice_action() else {
+        return Some(crate::ui::settings_notice::toast(0, words, t));
+    };
+    let again = crate::ui::toast::ToastAction {
+        text: action,
+        name: action,
+        shortcut: None,
+        run: |s: &mut State, _: &mut Tx| {
+            if let Some(source) = s.account.source.as_mut() {
+                source.run_notice_action();
+            }
+        },
+    };
+    Some(
+        row()
+            .key("toast-0-line")
+            .pin(Some(set::SIDEBAR_W), None, Some(0.0), Some(42.0))
+            .justify_center()
+            .child(crate::ui::toast::toast(
+                &crate::theme::icons_settings::WARN_CIRCLE,
+                crate::ui::toast::Tone::Failed,
+                words,
+                Some(again),
+                t,
+            )),
+    )
 }
 
 /// How soon the window looks again while an answer is out (the worker also wakes it).
@@ -443,6 +503,17 @@ pub fn go(s: &mut State, frame: &'static str) {
         return;
     };
     let want = pane.section();
+    // A page under a section opens only when something answers for it. When the section itself is answered
+    // for and the page is not, the person stays where they are: never the full-window "not built yet" frame,
+    // which has no way back to the section. (A section nothing answers for is still that frame, as before.)
+    if let Some(source) = s.account.source.as_deref()
+        && let Some(root) = Pane::root(want)
+        && pane != root
+        && source.pane_state(pane) == source::PaneState::Unwired
+        && source.pane_state(root) != source::PaneState::Unwired
+    {
+        return;
+    }
     if s.shell.app.screen() != Screen::Settings(want) {
         host::dispatch(s, Event::OpenSettings(want));
     }
@@ -753,8 +824,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     if let Some(overlay) = overlay {
         body = body.child(overlay);
     }
-    if let Some(words) = source.notice() {
-        body = body.child(crate::ui::settings_notice::toast(0, words, &t));
+    if let Some(toast) = notice_toast(source, &t) {
+        body = body.child(toast);
     }
     col()
         .key("window")

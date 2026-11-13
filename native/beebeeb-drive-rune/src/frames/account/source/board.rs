@@ -297,6 +297,7 @@ impl AccountSource for BoardAccount {
             size: "1 TB".into(),
             used: "240 GB".into(),
             share: 0.24,
+            day_label: "Renews",
             renews: "14 Mar 2027".into(),
             billing: "Yearly".into(),
         })
