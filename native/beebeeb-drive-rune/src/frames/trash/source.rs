@@ -17,6 +17,45 @@ pub struct Emptying {
     pub of: usize,
 }
 
+/// How far a source that answers late has got with the list (the view draws each).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Loaded {
+    /// The list is here (an empty one too).
+    #[default]
+    Ready,
+    /// The first answer is on its way.
+    Loading,
+    /// Beebeeb could not be reached, and no list was read.
+    Offline,
+    /// Beebeeb answered with an error, and no list was read.
+    Failed,
+    /// Beebeeb no longer accepts this session.
+    SessionEnded,
+    /// No session in memory: signed out, or locked.
+    SignedOut,
+}
+
+/// Something the view says once, over the list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Notice {
+    /// Beebeeb refused to put this item back; it is still in Trash (the item's name).
+    RestoreRefused(String),
+    /// A newer list could not be read; the one shown may be out of date.
+    RefreshFailed,
+    /// The control needs something this version does not have yet.
+    NotAvailable,
+}
+
+/// What [`TrashSource::pump`] took in.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Pumped {
+    /// Something the view draws changed.
+    pub changed: bool,
+    /// A read or a restore is still on its way: poll again.
+    pub busy: bool,
+    pub notice: Option<Notice>,
+}
+
 pub trait TrashSource {
     /// `false`: nothing answers yet (`Unwired`), and the view draws the shell's "not built yet"
     /// frame instead of sample rows.
@@ -30,6 +69,27 @@ pub trait TrashSource {
     fn emptying(&self) -> Option<Emptying>;
     /// Put an item back where it came from. `false`: no such item.
     fn restore(&mut self, id: &str) -> bool;
+    /// How far the list has got. A source that answers at once is always `Ready`.
+    fn loaded(&self) -> Loaded {
+        Loaded::Ready
+    }
+    /// The Trash section opened: read the list if it is missing or old.
+    fn opened(&mut self) {}
+    /// Take in what arrived since the last call (the window's poll).
+    fn pump(&mut self) -> Pumped {
+        Pumped::default()
+    }
+    /// The session or the account changed: drop every name and count at once.
+    fn forget(&mut self) {}
+    /// The sidebar's count. `None`: no badge (a source that cannot count without reading the whole list).
+    fn count(&self) -> Option<usize> {
+        Some(self.totals().items)
+    }
+    /// Whether Empty Trash, Details, Preview and Delete permanently can do anything here. `false`: pressing them
+    /// says "not available yet" instead.
+    fn actions_available(&self) -> bool {
+        true
+    }
 }
 
 /// DW-0747's sample: six rows of the twelve items.
@@ -157,6 +217,8 @@ impl TrashSource for BoardTrash {
 
 /// The source of a build that ships before the engine lane has wired Trash: it answers
 /// nothing, and the view draws the shell's "not built yet" frame instead of sample rows.
+// Not used by the running app since Trash reads the engine; kept for a build or a test that turns Trash off.
+#[allow(dead_code)]
 pub struct Unwired;
 
 impl TrashSource for Unwired {

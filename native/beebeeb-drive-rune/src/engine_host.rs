@@ -53,11 +53,13 @@ pub mod backups;
 mod binding_tests;
 pub mod drive_settings;
 pub mod open;
+pub mod search;
 pub mod settings;
 pub mod sync;
 #[cfg(test)]
 pub(crate) mod tests;
 pub mod this_pc;
+pub mod trash;
 pub mod tray;
 
 pub use sync::EngineGlobalSource;

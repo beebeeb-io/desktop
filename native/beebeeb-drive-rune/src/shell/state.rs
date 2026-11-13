@@ -135,6 +135,12 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
     }
 }
 
+/// Search on the engine (`engine_host::search`) in the running app. OFF until task 2488: the search index is built
+/// from this computer's local state, which can still belong to the previous account (a sign-out keeps it, and no
+/// read checks the data's owner against the session), so Search could answer with another account's names. While
+/// this is false the shell hands Search the `Unwired` source and no part of the adapter runs (no index, no worker).
+pub(crate) const SEARCH_ON_ENGINE: bool = false;
+
 /// The window on the real engine: Files and sign-in ask the handle. Every area not yet
 /// backed by the engine starts on its `Unwired` state (the shell's "not built yet" frame),
 /// never the board's sample data presented as the person's own.
@@ -165,8 +171,12 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     s.account.source = None;
     s.storage_split = None;
     s.frames.shared.source = Box::new(crate::frames::shared::source::Unwired);
-    s.frames.trash.source = Box::new(crate::frames::trash::source::Unwired);
+    // Trash reads the engine (`engine_host::trash`); Search only when `SEARCH_ON_ENGINE` (task 2488).
+    s.frames.trash.source = Box::new(crate::engine_host::trash::EngineTrashSource::new(engine.clone()));
     s.frames.find = crate::frames::search::SearchUi::default();
+    if SEARCH_ON_ENGINE {
+        s.frames.find.source = Box::new(crate::engine_host::search::EngineSearchSource::new(engine.clone()));
+    }
     s.frames.pc = Box::new(crate::frames::UnwiredPc);
     s.photos = crate::frames::photos::Ui::new(Box::new(crate::frames::photos::source::Unwired));
     // This PC: the `Unwired` source while its constant is off (nothing of the adapter runs then).

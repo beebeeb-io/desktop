@@ -60,7 +60,7 @@ pub fn window(s: &State, cx: &mut Cx<State>, t: &Theme, toolbar: El, body: El, s
                     s,
                     sidebar::Counts {
                         waiting: s.frames.shared.source.invitations().len() as u32,
-                        trash: s.frames.trash.source.totals().items as u32,
+                        trash: s.frames.trash.source.count().unwrap_or(0) as u32,
                     },
                     t,
                 ))

@@ -50,6 +50,7 @@ pub mod owned_state;
 pub mod settings_api;
 // Is the local state the signed-in account's (task 2488): a read-only check for windows that show it.
 pub mod state_owner;
+pub mod trash_api;
 
 pub use owned_state::{LocalStateRefused, OwnedState};
 

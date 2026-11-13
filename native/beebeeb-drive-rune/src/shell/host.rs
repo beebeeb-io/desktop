@@ -434,6 +434,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // The engine's answers that arrive between presses (a sign-in that took a second, the other device).
     changed |= crate::frames::signin::poll(s, tx);
     changed |= crate::frames::settings::poll(s, tx);
+    // Trash: a gate or account change drops its names; the section opening reads the list; answers come in.
+    changed |= crate::frames::trash::poll(s, tx);
     // This PC's answers and refusals (`frames::this_pc::poll`).
     changed |= crate::frames::this_pc::poll(s, tx);
     // The speed test's steps (Settings, Bandwidth).

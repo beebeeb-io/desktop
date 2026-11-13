@@ -77,6 +77,8 @@ pub enum Shows {
     Results { hits: Vec<Hit>, loading: Option<Loading> },
     /// No match (DW-0803).
     Nothing { loading: Option<Loading> },
+    /// The query is being answered.
+    Searching,
 }
 
 impl Shows {
@@ -85,6 +87,7 @@ impl Shows {
         let so_far = |loading: &Option<Loading>| if loading.is_some() { " so far" } else { "" };
         match self {
             Shows::Unavailable => "Not available yet".into(),
+            Shows::Searching => "Searching\u{2026}".into(),
             Shows::Recent(_) => "Files".into(),
             Shows::Results { hits, loading } if hits.len() == 1 => format!("1 result{}", so_far(loading)),
             Shows::Results { hits, loading } => format!("{} results{}", hits.len(), so_far(loading)),
@@ -105,6 +108,7 @@ impl SearchUi {
         }
         match self.source.search(query, self.narrow) {
             Answer::Unavailable => Shows::Unavailable,
+            Answer::Searching => Shows::Searching,
             Answer::Found { hits, loading } if hits.is_empty() => Shows::Nothing { loading },
             Answer::Found { hits, loading } => Shows::Results { hits, loading },
         }
