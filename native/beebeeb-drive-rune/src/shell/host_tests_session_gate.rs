@@ -292,9 +292,10 @@ fn in_a_folder(app: &mut App) {
     assert_eq!(app.rt.state.listing.items[0].name, "Day 1", "the folder opened");
 }
 
-#[test]
-fn with_the_session_gate_closed_no_shortcut_reaches_a_source_or_changes_the_window() {
-    let on_a_row: [Input; 14] = [
+/// The shortcuts of a selected row. Asked in two tests (each builds a window per case, and a window's first
+/// frame is the slow part): together they are every input of this list, once.
+fn on_a_row() -> [Input; 14] {
+    [
         ("Enter", Key::Enter, none()),
         ("Space", Key::Text(" ".into()), none()),
         ("Delete", Key::Delete, none()),
@@ -309,9 +310,25 @@ fn with_the_session_gate_closed_no_shortcut_reaches_a_source_or_changes_the_wind
         ("Ctrl+3", Key::Command('3'), ctrl()),
         ("Ctrl+4", Key::Command('4'), ctrl()),
         ("Ctrl+5", Key::Command('5'), ctrl()),
-    ];
+    ]
+}
+/// How many of [`on_a_row`] the first test asks; the second asks the rest.
+const FIRST_HALF: usize = 7;
+
+#[test]
+fn with_the_session_gate_closed_no_shortcut_reaches_a_source_or_changes_the_window() {
     let mut runs = Baselines::default();
-    for input in &on_a_row {
+    for input in &on_a_row()[..FIRST_HALF] {
+        refused_when_closed(&mut runs, "a row selected", nothing, input);
+    }
+    // 7 inputs, each closed 3 ways, seen by the poll or not; 1 setup, run once per way without an input.
+    assert_eq!((runs.compared, runs.without.len()), (FIRST_HALF * 6, 6));
+}
+
+#[test]
+fn with_the_session_gate_closed_no_other_shortcut_reaches_a_source_or_changes_the_window() {
+    let mut runs = Baselines::default();
+    for input in &on_a_row()[FIRST_HALF..] {
         refused_when_closed(&mut runs, "a row selected", nothing, input);
     }
     refused_when_closed(
@@ -327,8 +344,16 @@ fn with_the_session_gate_closed_no_shortcut_reaches_a_source_or_changes_the_wind
         in_a_folder,
         &("Backspace", Key::Backspace, none()),
     );
-    // 17 inputs, each closed 3 ways, seen by the poll or not; 3 setups, each run once per way without an input.
-    assert_eq!((runs.compared, runs.without.len()), (17 * 6, 3 * 6));
+    // The other 7 row inputs and 3 more, each closed 3 ways, seen by the poll or not; 3 setups.
+    assert_eq!(
+        (runs.compared, runs.without.len()),
+        ((on_a_row().len() - FIRST_HALF + 3) * 6, 3 * 6)
+    );
+    assert_eq!(
+        on_a_row().len(),
+        14,
+        "with the first test: all 14 row inputs, 17 inputs in all"
+    );
 }
 
 /// A name being typed in a row.
