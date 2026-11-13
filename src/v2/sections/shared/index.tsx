@@ -112,6 +112,9 @@ export default function Section({ nav }: SectionProps) {
   const [menu, setMenu] = useState<{ kind: RowKind; id: string; x: number; y: number } | null>(null)
   const [dialog, setDialog] = useState<Dialog | null>(() => seed('shared.dialog', null))
   const [busy, setBusy] = useState(false)
+  // A seal (They match / They don't match / Share anyway) runs once: a second click or a way out while it is in
+  // flight is ignored, and the dialog moves only when it settles (2440 item 1).
+  const inFlight = useRef(false)
   const dismissed = useRef(new Set<string>())
   const now = useMemo(() => new Date(), [])
 
@@ -203,20 +206,28 @@ export default function Section({ nav }: SectionProps) {
   }
 
   const invite = async (itemId: string, email: string, canEdit: boolean, acceptChangedKey = false, memberId: string | null = null) => {
+    // A re-entrant call (a second Share anyway, or the refused-invite seal's own invite) runs nothing.
+    if (inFlight.current) return
+    inFlight.current = true
     setBusy(true)
-    const r = await api.shareInvite(itemId, email, canEdit ? 'Can edit' : 'Can view', acceptChangedKey, memberId)
-    setBusy(false)
-    if (!r.ok) {
-      toast(r)
-      // A folder's Share anyway: Rust withdrew the refused invite, so the dialog about it closes and People reloads.
-      if (acceptChangedKey && /sharing a folder to a changed key/.test(r.reason)) await openPeople(itemId)
-      return
+    try {
+      const r = await api.shareInvite(itemId, email, canEdit ? 'Can edit' : 'Can view', acceptChangedKey, memberId)
+      if (!r.ok) {
+        toast(r)
+        // A folder's Share anyway: Rust withdrew the refused invite, so the dialog about it closes and People reloads.
+        if (acceptChangedKey && /sharing a folder to a changed key/.test(r.reason)) await openPeople(itemId)
+        return
+      }
+      if (r.value.status === 'key-changed') {
+        const member = members.find((m) => m.id === (r.value as { memberId: string }).memberId) ?? { id: r.value.memberId, name: email, email }
+        setDialog({ kind: 'key-changed', itemId, member, email, canEdit })
+        return
+      }
+      await openPeople(itemId)
+    } finally {
+      inFlight.current = false
+      setBusy(false)
     }
-    if (r.value.status === 'key-changed') {
-      const member = members.find((m) => m.id === (r.value as { memberId: string }).memberId) ?? { id: r.value.memberId, name: email, email }
-      return setDialog({ kind: 'key-changed', itemId, member, email, canEdit })
-    }
-    await openPeople(itemId)
   }
 
   const safety = async (itemId: string, member: Member, refused?: { email: string; canEdit: boolean }) => {
@@ -348,18 +359,38 @@ export default function Section({ nav }: SectionProps) {
       {d?.kind === 'remove' && <RemoveAccessAlert member={d.member} folder={nameOf(d.itemId)} busy={busy}
         onRemove={async () => { setBusy(true); const r = await api.shareRevoke(d.itemId, d.member.id); setBusy(false); toast(r); if (r.ok) await openPeople(d.itemId) }}
         onCancel={() => setDialog({ kind: 'person', itemId: d.itemId, member: d.member })} />}
-      {d?.kind === 'safety' && <SafetyNumberDialog member={d.member} groups={d.groups}
+      {d?.kind === 'safety' && <SafetyNumberDialog member={d.member} groups={d.groups} busy={busy}
         onMatch={async () => {
+          if (inFlight.current) return
+          inFlight.current = true
+          setBusy(true)
           const r = await api.shareMarkCompared(d.member.id, true)
           // A refused invite is not shared yet: They match seals it now, to the key just compared.
-          if (d.refused) return r.ok ? void invite(d.itemId, d.refused.email, d.refused.canEdit, true, d.member.id) : toast(r)
+          if (d.refused) {
+            if (!r.ok) { inFlight.current = false; setBusy(false); toast(r); return }
+            // Hand the seal to invite() without an await in between, so no click can slip into the gap.
+            inFlight.current = false
+            await invite(d.itemId, d.refused.email, d.refused.canEdit, true, d.member.id)
+            return
+          }
+          inFlight.current = false
+          setBusy(false)
           // Rust wrote They match to every mark of the person: no earlier state of theirs stands.
           toast(r, 'Marked as compared'); setDialog({ kind: 'person', itemId: d.itemId, member: afterMarkCompared(d.member, r, true) })
         }}
-        onNoMatch={async () => { const r = await api.shareMarkCompared(d.member.id, false); if (!r.ok) return toast(r); setDialog({ kind: 'mismatch', itemId: d.itemId, member: afterMarkCompared(d.member, r, false), groups: d.groups, refused: d.refused }) }}
+        onNoMatch={async () => {
+          if (inFlight.current) return
+          inFlight.current = true
+          setBusy(true)
+          const r = await api.shareMarkCompared(d.member.id, false)
+          inFlight.current = false
+          setBusy(false)
+          if (!r.ok) return toast(r)
+          setDialog({ kind: 'mismatch', itemId: d.itemId, member: afterMarkCompared(d.member, r, false), groups: d.groups, refused: d.refused })
+        }}
         // A refused invite holds no key: every way out of its comparison but They match withdraws it (as DW-0515 Cancel).
         onClose={() => (d.refused ? void withdraw(d.itemId, d.member) : setDialog({ kind: 'person', itemId: d.itemId, member: d.member }))} />}
-      {d?.kind === 'mismatch' && <MismatchDialog member={d.member} groups={d.groups}
+      {d?.kind === 'mismatch' && <MismatchDialog member={d.member} groups={d.groups} busy={busy}
         onRemove={() => (d.refused ? void withdraw(d.itemId, d.member) : setDialog({ kind: 'remove', itemId: d.itemId, member: d.member }))}
         onCompare={() => setDialog({ kind: 'safety', itemId: d.itemId, member: d.member, groups: d.groups, refused: d.refused })}
         onClose={() => (d.refused ? void withdraw(d.itemId, d.member) : setDialog(null))} />}
@@ -367,7 +398,7 @@ export default function Section({ nav }: SectionProps) {
       {d?.kind === 'details' && <DetailsDialog item={d.details.item} details={d.details} now={now} onVersions={() => showVersions(d.details)} onClose={() => setDialog(null)} />}
       {d?.kind === 'versions' && <VersionsDialog name={d.details.item.name} versions={d.versions} now={now} onClose={() => setDialog({ kind: 'details', details: d.details })}
         onRestore={(vid) => void source.restoreVersion(d.details.item.id, vid).then(() => { setDialog(null); showToast({ kind: 'done', text: 'Version restored' }) }, (e: unknown) => showToast({ kind: 'failed', text: api.openFailureText(e, 'restore that version') }))} />}
-      {d?.kind === 'key-changed' && <KeyChangedAlert member={d.member}
+      {d?.kind === 'key-changed' && <KeyChangedAlert member={d.member} busy={busy}
         onCompare={() => void safety(d.itemId, d.member, { email: d.email, canEdit: d.canEdit })}
         onShareAnyway={() => void invite(d.itemId, d.email, d.canEdit, true, d.member.id)} onCancel={() => void withdraw(d.itemId, d.member)} />}
     </>

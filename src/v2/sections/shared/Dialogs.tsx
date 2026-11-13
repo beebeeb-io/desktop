@@ -149,11 +149,11 @@ function Groups({ groups }: { groups: string[] }) {
   )
 }
 
-export function SafetyNumberDialog({ member, groups, onMatch, onNoMatch, onClose }: { member: Member; groups: string[]; onMatch?: () => void; onNoMatch?: () => void; onClose?: () => void }) {
+export function SafetyNumberDialog({ member, groups, busy, onMatch, onNoMatch, onClose }: { member: Member; groups: string[]; busy?: boolean; onMatch?: () => void; onNoMatch?: () => void; onClose?: () => void }) {
   const first = member.name.split(' ')[0]
   return (
-    <Modal title="Safety number" onClose={onClose} width={480}
-      footer={<><span className="flex-1" /><button type="button" className={BTN} onClick={onNoMatch}>They don’t match</button><button type="button" className={BTN} onClick={onMatch}>They match</button></>}>
+    <Modal title="Safety number" onClose={busy ? undefined : onClose} width={480}
+      footer={<><span className="flex-1" /><button type="button" className={BTN} disabled={busy} onClick={onNoMatch}>They don’t match</button><button type="button" className={BTN} disabled={busy} onClick={onMatch}>They match</button></>}>
       <p className="m-0">Compare this with {first}, in person or on a call. It should be exactly the same on both devices.</p>
       <Groups groups={groups} />
       <p className="m-0 text-[12px] leading-4 text-ink-3">Optional. Never compare over a channel someone else could change, such as the same email. Beebeeb never sees this comparison.</p>
@@ -161,12 +161,12 @@ export function SafetyNumberDialog({ member, groups, onMatch, onNoMatch, onClose
   )
 }
 
-export function MismatchDialog({ member, groups, onRemove, onCompare, onClose }: { member: Member; groups: string[]; onRemove?: () => void; onCompare?: () => void; onClose?: () => void }) {
+export function MismatchDialog({ member, groups, busy, onRemove, onCompare, onClose }: { member: Member; groups: string[]; busy?: boolean; onRemove?: () => void; onCompare?: () => void; onClose?: () => void }) {
   const first = member.name.split(' ')[0]
   return (
-    <Modal label="Sharing stopped" onClose={onClose} width={500}
+    <Modal label="Sharing stopped" onClose={busy ? undefined : onClose} width={500}
       title={<span className="flex items-center gap-3"><span aria-hidden="true" className={`grid h-9 w-9 place-items-center rounded-lg border border-line bg-paper-2 ${RED_TEXT}`}><Icon name="shield" size={18} /></span><span>Sharing with {first} is stopped<span className="block text-[12px] font-normal text-ink-2">The safety numbers didn’t match.</span></span></span>}
-      footer={<><button type="button" className={`${BTN.replace(" text-ink ", " ")} ${RED_TEXT}`} onClick={onRemove}>Remove {first}’s access</button><span className="flex-1" /><button type="button" className={BTN_AMBER} onClick={onCompare}>Compare again</button></>}>
+      footer={<><button type="button" className={`${BTN.replace(" text-ink ", " ")} ${RED_TEXT}`} disabled={busy} onClick={onRemove}>Remove {first}’s access</button><span className="flex-1" /><button type="button" className={BTN_AMBER} disabled={busy} onClick={onCompare}>Compare again</button></>}>
       <div className="grid grid-cols-2 gap-3">
         <div className="rounded-lg border border-line px-3 py-2"><div className="text-[12px] font-semibold text-ink">What stops</div><div className="text-[12px] text-ink-2">New files, invites and links to {first}.</div></div>
         <div className="rounded-lg border border-line px-3 py-2"><div className="text-[12px] font-semibold text-ink">What stays</div><div className="text-[12px] text-ink-2">What they already have.</div></div>
@@ -198,11 +198,11 @@ export function InviteDialog({ email: initialEmail = '', access: initialAccess =
 
 // ── DW-0515 ──────────────────────────────────────────────────────────────────
 
-export function KeyChangedAlert({ member, onCompare, onShareAnyway, onCancel }: { member: Member; onCompare?: () => void; onShareAnyway?: () => void; onCancel?: () => void }) {
+export function KeyChangedAlert({ member, busy, onCompare, onShareAnyway, onCancel }: { member: Member; busy?: boolean; onCompare?: () => void; onShareAnyway?: () => void; onCancel?: () => void }) {
   const first = member.name.split(' ')[0]
   return (
-    <Modal title={`${first}’s key has changed`} onClose={onCancel} width={520}
-      footer={<><button type="button" className={BTN} onClick={onShareAnyway}>Share anyway</button><span className="flex-1" /><button type="button" className={BTN} onClick={onCancel}>Cancel</button><button type="button" className={BTN} onClick={onCompare}>Compare safety numbers</button></>}>
+    <Modal title={`${first}’s key has changed`} onClose={busy ? undefined : onCancel} width={520}
+      footer={<><button type="button" className={BTN} disabled={busy} onClick={onShareAnyway}>Share anyway</button><span className="flex-1" /><button type="button" className={BTN} disabled={busy} onClick={onCancel}>Cancel</button><button type="button" className={BTN} disabled={busy} onClick={onCompare}>Compare safety numbers</button></>}>
       <p className="m-0">{first} may have set up a new account, or someone may be trying to read what you share. Nothing new goes to {first} until you choose.</p>
     </Modal>
   )
