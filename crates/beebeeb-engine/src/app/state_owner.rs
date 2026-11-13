@@ -7,7 +7,6 @@
 //! the binding's own rule (`account_binding::same_account`). Changes nothing: it never records, adopts or resets an
 //! owner (that stays `account_binding::bind_before_engine_start`'s). Must not: log a name, an email or an id.
 
-use super::{CredentialStores, Engine};
 use crate::account_binding::{Identity, same_account};
 use crate::state_db::StateDb;
 
@@ -15,20 +14,9 @@ use crate::state_db::StateDb;
 #[path = "state_owner_tests.rs"]
 mod tests;
 
-impl<C: CredentialStores> Engine<C> {
-    /// `true` only when `db`'s recorded owner is the signed-in account. No one signed in, no owner recorded, an owner
-    /// that cannot be compared or cannot be read: `false` (never shown). In memory and one small read: never waits
-    /// on the network.
-    pub fn owns_local_state(&self, db: &StateDb) -> bool {
-        owned_by(
-            db,
-            &Identity::new(self.user_id().as_deref(), self.account_email().as_deref()),
-        )
-    }
-}
-
-/// [`Engine::owns_local_state`] for a known `session`: the owner is recorded, and the binding's rule says it is the
-/// same account.
+/// For a known `session`: the owner is recorded, and the binding's rule says it is the same account. The engine
+/// handle itself decides through `owned_state` (`Engine::local_state`); this is the same rule for a test double
+/// that stands in for the handle.
 pub fn owned_by(db: &StateDb, session: &Identity) -> bool {
     if !session.is_known() {
         return false;

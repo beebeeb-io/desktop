@@ -91,7 +91,7 @@ enum Mode {
 pub struct OwnedState<'e> {
     acct: &'e AccountRuntime,
     generation: SessionGeneration,
-    db: StateDb,
+    db: std::sync::Arc<StateDb>,
 }
 
 impl OwnedState<'_> {
@@ -101,6 +101,18 @@ impl OwnedState<'_> {
     pub fn with<T>(&self, read: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused> {
         self.still_this_session()?;
         let answer = read(&self.db);
+        self.still_this_session()?;
+        Ok(answer)
+    }
+
+    /// [`Self::with`] for the engine's own operations that need the database shared (the sync bridge takes an
+    /// `Arc`). The same checks, before and after; the engine's alone, so a shell cannot keep the `Arc`.
+    pub(crate) fn with_shared<T>(
+        &self,
+        operation: impl FnOnce(std::sync::Arc<StateDb>) -> T,
+    ) -> Result<T, LocalStateRefused> {
+        self.still_this_session()?;
+        let answer = operation(self.db.clone());
         self.still_this_session()?;
         Ok(answer)
     }
@@ -244,7 +256,7 @@ impl<C: CredentialStores> Engine<C> {
         let state = OwnedState {
             acct: &self.acct,
             generation,
-            db,
+            db: std::sync::Arc::new(db),
         };
         state.still_this_session()?;
         Ok(state)

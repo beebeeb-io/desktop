@@ -97,10 +97,19 @@ pub(crate) fn free_up_space_unbound(
         return Ok(FreeUpSpaceResult { bytes_freed: 0 });
     }
     let db = crate::state_db::StateDb::open(&db_path).map_err(|e| format!("open state.db: {e}"))?;
+    free_up_space_in(identity, &db, &sync_root)
+}
 
+/// The reclaim itself, in a state database the caller already holds: the engine handle's is the signed-in
+/// account's (`app::Engine::free_up_space`, through the account-bound handle).
+pub(crate) fn free_up_space_in(
+    identity: &'static crate::identity::EngineIdentity,
+    db: &crate::state_db::StateDb,
+    sync_root: &std::path::Path,
+) -> Result<FreeUpSpaceResult, String> {
     #[cfg(target_os = "windows")]
     {
-        free_up_space_windows(identity, &db, &sync_root)
+        free_up_space_windows(identity, db, sync_root)
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -110,7 +119,7 @@ pub(crate) fn free_up_space_unbound(
         let paths = db
             .disposable_unpinned_cache_paths()
             .map_err(|e| format!("list cache paths: {e}"))?;
-        free_up_space_unix(identity, &db, &sync_root, paths)
+        free_up_space_unix(identity, db, sync_root, paths)
     }
 }
 

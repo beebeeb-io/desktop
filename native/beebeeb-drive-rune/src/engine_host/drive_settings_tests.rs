@@ -3,6 +3,7 @@
 //! file list unreadable, locked), the Sync pane's reads and changes, Free up space, Keep on this PC's tree and Apply,
 //! and every pane left unwired drawing the shell's frame, never a sample value. Every name is invented.
 
+use beebeeb_engine::app::LocalStateRefused;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -78,16 +79,16 @@ impl DriveEngine for Fake {
     fn account(&self) -> Option<String> {
         self.account.lock().unwrap().clone()
     }
-    fn state_db(&self) -> Result<StateDb, String> {
+    fn local_state<T>(&self, read: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused> {
         if self.broken.load(Ordering::SeqCst) {
-            return Err("could not open the local state".into());
+            return Err(LocalStateRefused::Unreadable);
         }
-        StateDb::open(&self.path).map_err(|_| "could not open the local state".to_string())
-    }
-    fn owns(&self, db: &StateDb) -> bool {
-        let account = self.account.lock().unwrap();
-        let session = Identity::new(None, account.as_deref());
-        beebeeb_engine::app::state_owner::owned_by(db, &session)
+        let db = StateDb::open(&self.path).map_err(|_| LocalStateRefused::Unreadable)?;
+        let session = Identity::new(None, self.account.lock().unwrap().as_deref());
+        if !beebeeb_engine::app::state_owner::owned_by(&db, &session) {
+            return Err(LocalStateRefused::OtherAccount);
+        }
+        Ok(read(&db))
     }
     fn storage_info(&self) -> Result<(i64, i64), String> {
         self.usage.lock().unwrap().clone()

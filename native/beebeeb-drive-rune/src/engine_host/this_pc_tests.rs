@@ -4,6 +4,7 @@
 //! no local state, a read that fails, no name while the vault is locked, the account on every answer, and nothing of
 //! another account's local state (task 2488). Every name is invented.
 
+use beebeeb_engine::app::LocalStateRefused;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -65,16 +66,19 @@ impl ThisPcEngine for Fake {
     fn account(&self) -> Option<String> {
         self.account.lock().unwrap().clone()
     }
-    fn state_db(&self) -> Result<StateDb, String> {
+    fn local_state<T>(&self, read: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused> {
         if self.broken.load(Ordering::SeqCst) {
-            return Err("could not open the local state".into());
+            return Err(LocalStateRefused::Unreadable);
         }
-        StateDb::open(&self.path).map_err(|_| "could not open the local state".to_string())
+        let db = StateDb::open(&self.path).map_err(|_| LocalStateRefused::Unreadable)?;
+        let session = Identity::new(None, self.account.lock().unwrap().as_deref());
+        if !beebeeb_engine::app::state_owner::owned_by(&db, &session) {
+            return Err(LocalStateRefused::OtherAccount);
+        }
+        Ok(read(&db))
     }
-    fn owns(&self, db: &StateDb) -> bool {
-        let account = self.account.lock().unwrap();
-        let session = Identity::new(None, account.as_deref());
-        beebeeb_engine::app::state_owner::owned_by(db, &session)
+    fn change_local_state<T>(&self, change: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused> {
+        self.local_state(change)
     }
     fn syncing(&self) -> bool {
         self.syncing.load(Ordering::SeqCst)
