@@ -341,7 +341,15 @@ impl<C: CredentialStores> Engine<C> {
     /// folder is known, the path is not one below it, or its name leads to a different file here (a Windows
     /// short name): that file is never read as this one.
     fn local_copy_path(&self, rel_path: &str) -> Option<PathBuf> {
-        let root = self.sync_root().ok()?;
+        let root = match self.configured_sync_root().ok()? {
+            Some(root) => root,
+            // No folder named in the settings: the identity's own, as `Engine::sync_root` answers. A test names
+            // its folder or has none (it never reads the developer's own).
+            #[cfg(not(any(test, feature = "test-support")))]
+            None => crate::config::default_sync_root_suggestion(self.identity),
+            #[cfg(any(test, feature = "test-support"))]
+            None => return None,
+        };
         let path = crate::engine_bridge::local_file_path_under_sync_root(&root, rel_path).ok()?;
         matches!(crate::name_alias::conflict_below(&root, &path), Ok(None)).then_some(path)
     }

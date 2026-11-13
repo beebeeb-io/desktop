@@ -2,10 +2,6 @@
 
 use super::*;
 
-#[cfg(test)]
-#[path = "open_in_memory_tests.rs"]
-mod tests;
-
 /// What [`EngineBridge::open_in_memory`] answered.
 pub(crate) enum InMemoryOpen {
     /// The whole file, decrypted. Wiped when dropped.

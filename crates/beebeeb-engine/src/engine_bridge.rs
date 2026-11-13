@@ -239,6 +239,7 @@ mod tests {
     mod ld0113_protect;
     mod logging;
     mod metadata_2;
+    mod open_in_memory_routes;
     mod refusals;
     mod refusals_2;
     mod refusals_3;
