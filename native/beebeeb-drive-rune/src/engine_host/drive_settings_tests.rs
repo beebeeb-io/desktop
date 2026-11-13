@@ -5,8 +5,8 @@
 
 use beebeeb_engine::app::LocalStateRefused;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::account_binding::Identity;
@@ -21,7 +21,56 @@ use crate::shell::platform::fake::FakePlatform;
 
 const GB: i64 = 1_000_000_000;
 
+/// Holds the worker inside one call of the fake (the `at`-th, counted from 1) until the test lets it go: an
+/// answer in flight, with no clock deciding the order.
+#[derive(Default)]
+struct Hold {
+    at: AtomicUsize,
+    passes: AtomicUsize,
+    /// (the worker is inside, the test let it go)
+    state: Mutex<(bool, bool)>,
+    moved: Condvar,
+}
+
+const HOLD_FOR: Duration = Duration::from_secs(30);
+
+impl Hold {
+    fn arm_at(&self, at: usize) {
+        self.at.store(at, Ordering::SeqCst);
+    }
+
+    /// The fake's side: the armed pass waits here.
+    fn pass(&self) {
+        if self.passes.fetch_add(1, Ordering::SeqCst) + 1 != self.at.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut state = self.state.lock().unwrap();
+        state.0 = true;
+        self.moved.notify_all();
+        let (state, timed_out) = self.moved.wait_timeout_while(state, HOLD_FOR, |s| !s.1).unwrap();
+        drop(state);
+        assert!(!timed_out.timed_out(), "the test never let the held call go");
+    }
+
+    /// The test's side: wait until the worker is inside the armed pass.
+    fn reached(&self) {
+        let state = self.state.lock().unwrap();
+        let (_state, timed_out) = self.moved.wait_timeout_while(state, HOLD_FOR, |s| !s.0).unwrap();
+        assert!(!timed_out.timed_out(), "the worker never reached the held call");
+    }
+
+    fn release(&self) {
+        self.state.lock().unwrap().1 = true;
+        self.moved.notify_all();
+    }
+}
+
 struct Fake {
+    /// After a read of the local state, before its answer leaves the engine.
+    after_read: Hold,
+    /// Inside the call that asks Beebeeb for the use.
+    in_usage: Hold,
+    pause_fails: AtomicBool,
     _dir: tempfile::TempDir,
     path: PathBuf,
     view: Mutex<SyncView>,
@@ -45,6 +94,9 @@ impl Fake {
         let db = StateDb::open(&path).unwrap();
         db.set_owner(&Identity::new(None, Some(email))).unwrap();
         Arc::new(Fake {
+            after_read: Hold::default(),
+            in_usage: Hold::default(),
+            pause_fails: AtomicBool::new(false),
             _dir: dir,
             path,
             view: Mutex::new(SyncView {
@@ -88,12 +140,18 @@ impl DriveEngine for Fake {
         if !beebeeb_engine::app::state_owner::owned_by(&db, &session) {
             return Err(LocalStateRefused::OtherAccount);
         }
-        Ok(read(&db))
+        let answer = read(&db);
+        self.after_read.pass();
+        Ok(answer)
     }
     fn storage_info(&self) -> Result<(i64, i64), String> {
+        self.in_usage.pass();
         self.usage.lock().unwrap().clone()
     }
     fn set_paused(&self, paused: bool) -> Result<(), String> {
+        if self.pause_fails.load(Ordering::SeqCst) {
+            return Err("refused".into());
+        }
         self.paused.lock().unwrap().push(paused);
         self.view.lock().unwrap().paused = paused;
         Ok(())
@@ -432,10 +490,18 @@ fn a_change_of_account_clears_the_held_answer() {
 
     // Switch to account B.
     *fake.account.lock().unwrap() = Some("other@beebeeb.io".into());
+    assert_eq!(
+        source.insights(),
+        &Insights::Loading,
+        "at once, before a pump: nothing of A"
+    );
+    assert_eq!(source.keep(), Keep::Failed, "at once, before a pump");
+    assert_eq!(source.storage().used, "", "at once, before a pump");
     source.pump(0.0);
     assert_eq!(source.keep(), Keep::Failed, "A's tree is gone");
     assert!(source.usage.is_none(), "A's usage is gone");
     assert!(source.on_pc.is_none(), "A's local sizes are gone");
+    assert_eq!(source.insights, Insights::Loading, "A's insights are gone from memory");
 
     // The source asked a new read; B's state DB is A's, so nothing shows (task 2488).
     settle(&mut source);
@@ -507,4 +573,204 @@ fn sizes_counts_and_paths_read_as_the_board_writes_them() {
     );
     assert_eq!(shown.chars().count(), 49);
     assert_eq!(cut_middle("Short/path.txt"), "Short/path.txt");
+}
+
+/// Wait until the worker has nothing left (at most 30 s), without pumping: the test decides when the window looks.
+fn worker_done(pending: &AtomicUsize) {
+    let deadline = Instant::now() + HOLD_FOR;
+    while pending.load(Ordering::SeqCst) > 0 {
+        assert!(Instant::now() < deadline, "the worker did not finish");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn frames(rt: &mut Runtime<State>) {
+    for _ in 0..3 {
+        rt.frame(0.016);
+        rt.settle_all();
+    }
+}
+
+/// Names and figures of the first account (`account()`), as Storage insights draws them.
+const OF_THE_FIRST: [&str; 5] = ["Archive.zip", "Clip one.mov", "Taxes 2025.pdf", "240 GB", "Take 9.mp4"];
+
+/// Insights worked out for one account and landing after a lock: dropped, in the window and in memory.
+#[test]
+fn insights_landing_after_a_lock_are_dropped() {
+    let fake = account();
+    // The second read of the local state is the insights' (the first is the local sizes').
+    fake.after_read.arm_at(2);
+    let mut source = EngineDriveSettings::new(fake.clone(), Arc::new(FakePlatform::default()));
+    fake.after_read.reached();
+    fake.gate(GateState::Locked);
+    source.pump(0.0);
+    fake.after_read.release();
+    settle(&mut source);
+    assert_eq!(source.insights(), &Insights::Failed(INSIGHTS_LOCKED.into()));
+    assert_eq!(
+        source.insights,
+        Insights::Failed(INSIGHTS_LOCKED.into()),
+        "no name of it in memory"
+    );
+    assert!(source.usage.is_none() && source.on_pc.is_none());
+    assert_eq!(source.keep, Keep::Failed);
+}
+
+/// Insights worked out for one account and landing after another account opened the vault: never drawn. Asserted
+/// on the element tree, while the second account's own answer is still held back (so nothing has replaced it).
+#[test]
+fn insights_of_one_account_landing_under_another_are_never_drawn() {
+    let fake = account();
+    fake.after_read.arm_at(2);
+    // The second ask for the use is the second account's.
+    fake.in_usage.arm_at(2);
+    let source = EngineDriveSettings::new(fake.clone(), Arc::new(FakePlatform::default()));
+    let pending = source.pending.clone();
+    fake.after_read.reached();
+    let mut rt = drawn("DW-0783", Box::new(source));
+
+    // The first account locks; another one signs in and unlocks. The window sees each.
+    fake.gate(GateState::Locked);
+    frames(&mut rt);
+    assert!(texts(&rt).iter().any(|t| t == INSIGHTS_LOCKED), "the locked sentence");
+    *fake.account.lock().unwrap() = Some("other@beebeeb.io".into());
+    *fake.usage.lock().unwrap() = Ok((5 * GB, 100 * GB));
+    fake.gate(GateState::Ready);
+    frames(&mut rt);
+
+    // The first account's answer lands now; the second account's is held inside its ask for the use.
+    fake.after_read.release();
+    fake.in_usage.reached();
+    frames(&mut rt);
+    let drawn_now = texts(&rt);
+    for theirs in OF_THE_FIRST {
+        assert!(
+            !drawn_now.iter().any(|t| t.contains(theirs)),
+            "{theirs} of the first account is drawn"
+        );
+    }
+    assert_eq!(rt.state.settings.drive.insights(), &Insights::Loading);
+    assert_eq!(rt.state.settings.drive.keep(), Keep::Failed);
+    assert_eq!(rt.state.settings.drive.storage().used, "");
+
+    // The second account's own answer: its use, and no file of the first (the local state is not its own).
+    fake.in_usage.release();
+    worker_done(&pending);
+    frames(&mut rt);
+    let drawn_now = texts(&rt);
+    assert!(drawn_now.iter().any(|t| t.contains("5 GB")), "the second account's use");
+    for theirs in OF_THE_FIRST {
+        assert!(
+            !drawn_now.iter().any(|t| t.contains(theirs)),
+            "{theirs} of the first account is drawn"
+        );
+    }
+}
+
+/// Changes one account asked for that the worker reaches after another account signed in: none is made, for
+/// anyone.
+#[test]
+fn a_change_asked_by_one_account_is_not_made_for_the_next() {
+    let fake = account();
+    let platform = Arc::new(FakePlatform::default());
+    // The worker is held in its first read while the changes queue up behind it.
+    fake.after_read.arm_at(1);
+    let mut source = EngineDriveSettings::new(fake.clone(), platform.clone());
+    fake.after_read.reached();
+    source.set_paused(true);
+    source.set_open_at_login(true);
+    source.clear(Kept::Downloaded);
+    source.apply_keep(&["d-shoot".into()], &["d-papers".into()]);
+
+    *fake.account.lock().unwrap() = Some("other@beebeeb.io".into());
+    source.pump(0.0);
+    fake.after_read.release();
+    settle(&mut source);
+    assert!(
+        fake.paused.lock().unwrap().is_empty(),
+        "sync was paused for another account"
+    );
+    assert!(!platform.autostart_enabled().unwrap(), "open at login was changed");
+    assert_eq!(*fake.freed.lock().unwrap(), 0, "space was freed for another account");
+    assert!(
+        fake.kept_calls.lock().unwrap().is_empty(),
+        "folders were changed for another account"
+    );
+    assert_eq!(
+        source.take_toast(),
+        None,
+        "the refusal belongs to the account that left"
+    );
+}
+
+/// The same, landing after a lock: no change is made in a locked vault.
+#[test]
+fn a_change_the_worker_reaches_after_a_lock_is_not_made() {
+    let fake = account();
+    let platform = Arc::new(FakePlatform::default());
+    fake.after_read.arm_at(1);
+    let mut source = EngineDriveSettings::new(fake.clone(), platform.clone());
+    fake.after_read.reached();
+    source.set_paused(true);
+    source.set_open_at_login(true);
+    fake.gate(GateState::Locked);
+    fake.after_read.release();
+    // The window has not looked yet: the refusal is of its generation, and is said.
+    worker_done(&source.pending);
+    assert!(fake.paused.lock().unwrap().is_empty());
+    assert!(!platform.autostart_enabled().unwrap());
+    settle(&mut source);
+    assert!(fake.paused.lock().unwrap().is_empty());
+}
+
+/// A change that cannot be asked, or that the engine refuses, is said in the window's toast, never a log line only.
+#[test]
+fn a_change_that_does_not_happen_is_said() {
+    let fake = account();
+    let mut source = source(&fake, Arc::default());
+    fake.pause_fails.store(true, Ordering::SeqCst);
+    source.set_paused(true);
+    settle(&mut source);
+    assert_eq!(source.take_toast(), Some(PAUSE_FAILED));
+    assert_eq!(source.take_toast(), None, "taken once");
+
+    fake.gate(GateState::Locked);
+    source.set_paused(true);
+    assert_eq!(source.take_toast(), Some(CHANGE_LOCKED), "at once, before a pump");
+    settle(&mut source);
+    source.clear(Kept::Downloaded);
+    assert_eq!(source.take_toast(), Some(CHANGE_LOCKED));
+    settle(&mut source);
+    assert_eq!(*fake.freed.lock().unwrap(), 0);
+    assert!(fake.paused.lock().unwrap().is_empty());
+}
+
+/// The app's own glue (`impl DriveEngine for Engine`), against a real engine handle with no one signed in: no
+/// account, no local state handed out (and why), no use asked of Beebeeb, no folder kept.
+#[test]
+fn the_engines_own_glue_hands_out_nothing_with_no_one_signed_in() {
+    use beebeeb_engine::app::{Engine, EngineConfig};
+    let (host, _messages) = beebeeb_engine::host::ChannelHost::new(|| {});
+    let config = EngineConfig {
+        account_id: "drive-settings-test-slot".into(),
+        state_dir: crate::engine_host::tests::process_state_dir(),
+        api_base: crate::engine_host::open::ApiBase::engine_default().origin().to_string(),
+    };
+    let engine = Engine::open(
+        &beebeeb_engine::identity::TEST,
+        config,
+        host,
+        beebeeb_engine::signin::memory_store::MemoryCredentials::default(),
+    )
+    .expect("the engine opens");
+    engine.restore();
+    assert_eq!(DriveEngine::account(&engine), None);
+    assert_ne!(DriveEngine::view(&engine).gate, GateState::Ready);
+    assert_eq!(
+        DriveEngine::local_state(&engine, |_| ()),
+        Err(LocalStateRefused::SignedOut)
+    );
+    assert!(DriveEngine::storage_info(&engine).is_err());
+    assert!(DriveEngine::set_kept(&engine, "an-invented-id", true).is_err());
+    assert!(!DriveEngine::syncing(&engine));
 }

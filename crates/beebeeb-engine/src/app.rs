@@ -210,7 +210,9 @@ pub struct Engine<C: CredentialStores> {
     /// One session step at a time (a sign-in step, a lock, a sign-out, an engine start or stop).
     transition: tokio::sync::Mutex<()>,
     /// The order of the credential-store writes and the session generation.
-    writes: Mutex<()>,
+    /// Session changes take it for writing; a reader that asks whether its session is still there takes it for
+    /// reading without waiting, so readers never refuse each other, only yield to a session change.
+    writes: std::sync::RwLock<()>,
     /// A token is stored: someone is signed in, unlocked or not.
     auth_present: Mutex<bool>,
     /// A proven password waiting for its second factor (core holds the partial token, wiped on drop).
@@ -229,6 +231,9 @@ pub struct Engine<C: CredentialStores> {
     /// Test builds only: where the account-bound handle reads (`Engine::use_local_state_for_test`).
     #[cfg(any(test, feature = "test-support"))]
     local_state_for_test: Mutex<Option<PathBuf>>,
+    /// Test builds only: run once in the middle of the next lock or sign-out (`Engine::during_next_forget_for_test`).
+    #[cfg(any(test, feature = "test-support"))]
+    forget_hook_for_test: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl<C: CredentialStores> Engine<C> {
@@ -270,7 +275,7 @@ impl<C: CredentialStores> Engine<C> {
             runtime,
             client,
             transition: tokio::sync::Mutex::new(()),
-            writes: Mutex::new(()),
+            writes: std::sync::RwLock::new(()),
             auth_present: Mutex::new(false),
             pending_2fa: Mutex::new(None),
             failures: AtomicU32::new(0),
@@ -279,6 +284,8 @@ impl<C: CredentialStores> Engine<C> {
             explorer: Mutex::new(explorer_api::ExplorerSeat::new(identity)),
             #[cfg(any(test, feature = "test-support"))]
             local_state_for_test: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            forget_hook_for_test: Mutex::new(None),
         })
     }
 
@@ -330,8 +337,8 @@ impl<C: CredentialStores> Engine<C> {
 
     /// Take this step's turn: the write lock, and a refusal when another session transition happened since `turn`
     /// was captured. On success the generation moves on.
-    fn claim(&self, turn: SessionGeneration) -> Result<std::sync::MutexGuard<'_, ()>, String> {
-        let writes = self.writes.lock().unwrap_or_else(|p| p.into_inner());
+    fn claim(&self, turn: SessionGeneration) -> Result<std::sync::RwLockWriteGuard<'_, ()>, String> {
+        let writes = self.writes.write().unwrap_or_else(|p| p.into_inner());
         if !self.acct.session_unchanged_since(turn) {
             return Err(
                 "Something changed on this computer while Beebeeb was working; nothing was saved. Try again."
@@ -897,8 +904,19 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     fn forget_session(&self, by: SessionTransition) {
-        let _writes = self.writes.lock().unwrap_or_else(|p| p.into_inner());
+        let _writes = self.writes.write().unwrap_or_else(|p| p.into_inner());
         self.acct.advance_session_generation_holding_session_write_lock(by);
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let hook = self
+                .forget_hook_for_test
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         let mut guard = self.acct.session.lock().unwrap_or_else(|p| p.into_inner());
         *guard = None;
         if let Ok(mut pending) = self.pending_2fa.lock() {

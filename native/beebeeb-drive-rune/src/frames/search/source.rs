@@ -47,7 +47,7 @@ impl Narrow {
 }
 
 /// One result: an item whose name holds the query, and where it is.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Hit {
     /// The item's id, as the engine gives it.
     pub id: String,
@@ -61,6 +61,25 @@ pub struct Hit {
     pub place: String,
     /// The PC column; `None`: the source does not know, and the cell stays empty.
     pub pc: Option<PcState>,
+}
+
+/// Never the name, the id or the place: a result is a decrypted file name, and a `{:?}` must not print one.
+impl std::fmt::Debug for Hit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hit")
+            .field("kind", &self.kind)
+            .field("pc", &self.pc)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a source that answers late did since the last poll.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pumped {
+    /// Something a draw reads changed.
+    pub changed: bool,
+    /// An answer is still on its way: poll again soon.
+    pub busy: bool,
 }
 
 /// How far the list of files has loaded while a first sign-in still gets it (DW-0802b).
@@ -100,6 +119,17 @@ pub trait SearchSource {
     fn search(&self, query: &str, narrow: Narrow) -> Answer;
     /// The details panel's facts of the result with this id; `None`: not known, and no panel.
     fn details(&self, id: &str) -> Option<Details>;
+    /// Search opened: a source that reads late reads now, when what it holds is old. Never from a draw.
+    fn opened(&mut self) {}
+    /// The words in the field or the pill changed: a source that answers late starts on this query now, and
+    /// `search` says `Searching` until it has it. Never from a draw.
+    fn ask(&mut self, _query: &str, _narrow: Narrow) {}
+    /// What arrived since the last poll (`frames::search::poll`).
+    fn pump(&mut self) -> Pumped {
+        Pumped::default()
+    }
+    /// The gate or the account changed: every name this source holds goes now.
+    fn forget(&mut self) {}
 }
 
 /// How many recent searches are kept (the iPhone's rule, DI-0801: "Up to 10 recent searches").
