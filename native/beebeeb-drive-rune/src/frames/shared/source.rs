@@ -162,6 +162,45 @@ pub struct Request {
     pub state: RequestState,
 }
 
+/// How far a source that answers late has got (the view draws each). A source that answers at once is `Ready`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Loaded {
+    /// The lists are here (empty ones too).
+    #[default]
+    Ready,
+    /// The first answer is on its way.
+    Loading,
+    /// Beebeeb could not be reached, and nothing was read.
+    Offline,
+    /// Beebeeb answered with an error, and nothing was read.
+    Failed,
+    /// Beebeeb no longer accepts this session.
+    SessionEnded,
+    /// No session in memory: signed out, or locked.
+    SignedOut,
+}
+
+/// Something the view says once, over the lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Notice {
+    /// The control needs something this version does not have yet. Nothing was changed.
+    NotAvailable,
+    /// Beebeeb refused or could not be reached: the change was not made.
+    ChangeRefused,
+    /// Newer lists could not be read; what is shown may be out of date.
+    RefreshFailed,
+}
+
+/// What [`SharedSource::pump`] took in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pumped {
+    /// Something the view draws changed.
+    pub changed: bool,
+    /// A read or a change is still on its way: poll again.
+    pub busy: bool,
+    pub notice: Option<Notice>,
+}
+
 pub trait SharedSource {
     /// `false`: nothing answers yet (`Unwired`), and the view draws the shell's "not built yet"
     /// frame instead of a section of sample values.
@@ -197,6 +236,18 @@ pub trait SharedSource {
     /// Share with someone by their email address (DW-0514); they show as invited until they
     /// accept. `false`: no such share, or they are on it already.
     fn invite(&mut self, share: &str, email: &str, access: Access) -> bool;
+    /// How far the lists have got. A source that answers at once is always `Ready`.
+    fn loaded(&self) -> Loaded {
+        Loaded::Ready
+    }
+    /// The Shared section opened: read the lists if they are missing or old.
+    fn opened(&mut self) {}
+    /// Take in what arrived since the last call (the window's poll).
+    fn pump(&mut self) -> Pumped {
+        Pumped::default()
+    }
+    /// The session or the account changed: drop every name, address and count at once.
+    fn forget(&mut self) {}
 }
 
 /// The board's sample (DW-0501, DW-0502, DW-0503), or nothing at all (DW-0508, DW-0509, DW-0510).
