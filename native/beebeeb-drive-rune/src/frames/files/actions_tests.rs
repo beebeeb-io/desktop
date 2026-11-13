@@ -247,14 +247,169 @@ fn turning_the_password_off_wipes_it_and_the_link_then_has_none() {
 #[test]
 fn a_link_that_could_not_be_made_says_so_and_never_says_copied() {
     let (mut rt, calls, fails) = spied();
-    fails.lock().unwrap().push((Action::CopyLink, ActionError::Offline));
+    fails.lock().unwrap().push((Action::ShareLink, ActionError::Offline));
     pick(&mut rt, "Share\u{2026}");
     click(&mut rt, "btn-0");
     assert!(asked(&calls).is_empty());
     assert_eq!(
         rt.state.live_toast(),
-        Some(Toast::Failed(Action::CopyLink, ActionError::Offline))
+        Some(Toast::Failed(Action::ShareLink, ActionError::Offline))
     );
+}
+
+/// Tab until `key` holds the keyboard.
+fn tab_to(rt: &mut Runtime<State>, key: &str) {
+    for _ in 0..16 {
+        if focused(rt).as_deref() == Some(key) {
+            return;
+        }
+        press(rt, Key::Tab, NONE);
+    }
+    panic!("Tab never reached {key}; the keyboard is on {:?}", focused(rt));
+}
+
+#[test]
+fn try_again_after_a_link_failed_opens_the_dialog_again_and_never_makes_a_plain_link() {
+    let (mut rt, calls, fails) = spied();
+    fails.lock().unwrap().push((Action::ShareLink, ActionError::Offline));
+    pick(&mut rt, "Share\u{2026}");
+    click(&mut rt, "item-0-0");
+    click(&mut rt, "menu-0-item-1");
+    click(&mut rt, "item-0-1");
+    click(&mut rt, "menu-0-item-0");
+    click(&mut rt, "item-0-2-switch");
+    type_text(&mut rt, "s3cret-words");
+    let (access, expires) = share_of(&rt).map(|s| (s.access, s.expires)).unwrap();
+    assert_ne!(
+        (access, expires),
+        (LinkAccess::default(), LinkExpiry::default()),
+        "the choices are not the defaults"
+    );
+    click(&mut rt, "btn-0");
+    assert_eq!(
+        rt.state.live_toast(),
+        Some(Toast::Failed(Action::ShareLink, ActionError::Offline))
+    );
+    assert!(asked(&calls).is_empty(), "the refused link is no link");
+    assert_eq!(rt.state.actions.share_password.text, "", "wiped with the dialog");
+    // Another row is selected meanwhile: Try again is about the file the dialog was about.
+    click(&mut rt, "row-2-date");
+    fails.lock().unwrap().clear();
+
+    click(&mut rt, "toast-action");
+    assert!(
+        asked(&calls).is_empty(),
+        "Try again asks nothing by itself: no plain link"
+    );
+    let again = share_of(&rt).expect("the Share dialog is open again");
+    assert_eq!(
+        again.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+        ["contract"]
+    );
+    assert_eq!(
+        (again.access, again.expires, again.password_on),
+        (access, expires, true)
+    );
+    assert_eq!(rt.state.actions.share_password.text, "", "the password is typed again");
+    assert!(rt.state.actions.retry_share.is_none(), "kept for one Try again only");
+    // Copy link without the password still makes no link.
+    click(&mut rt, "btn-0");
+    assert!(asked(&calls).is_empty());
+    type_text(&mut rt, "s3cret-words");
+    click(&mut rt, "btn-0");
+    let made = asked(&calls);
+    assert_eq!(made.len(), 1, "exactly one request: {made:?}");
+    let Call::ShareLink(what, options) = &made[0] else {
+        panic!("not the full request: {made:?}");
+    };
+    assert_eq!(what, &ids(&["contract"]));
+    assert_eq!((options.access, options.expires), (access, expires));
+    assert_eq!(options.password.as_deref(), Some("s3cret-words"));
+    assert_eq!(
+        made.iter().filter(|c| matches!(c, Call::CopyLink(_))).count(),
+        0,
+        "0 plain links"
+    );
+    assert_eq!(rt.state.live_toast(), Some(Toast::LinkCopied));
+}
+
+#[test]
+fn the_gates_notes_never_carry_a_passwords_characters() {
+    let (mut rt, _, _) = spied();
+    pick(&mut rt, "Share\u{2026}");
+    click(&mut rt, "item-0-2-switch");
+    type_text(&mut rt, "s3cret-words");
+    // Select all of it: a selection is what the note would otherwise quote.
+    rt.update(|s, _| s.actions.share_password.anchor = 0);
+    settle(&mut rt);
+    assert_eq!(rt.state.actions.share_password.text, "s3cret-words");
+    let (from, to) = rt.state.actions.share_password.range();
+    assert_ne!(from, to, "the password is selected");
+    assert!(
+        find(&rt, "field-0-caret-at").is_none(),
+        "a secure field's selection is neither read nor measured for the gate"
+    );
+    crate::ui::kit::record();
+    let share = share_of(&rt).unwrap();
+    let _ = super::share::view(&rt.state, share, &crate::theme::tokens::theme(false));
+    let notes = crate::ui::kit::take();
+    assert!(notes.len() > 10, "the view was noted: {} notes", notes.len());
+    let texts: Vec<&str> = notes.values().filter_map(|n| n.text.as_deref()).collect();
+    assert!(
+        texts.iter().all(|t| !t.contains("s3cret") && !t.contains("words")),
+        "a note carries the password"
+    );
+    assert_eq!(
+        notes.get("field-0-value").and_then(|n| n.text.as_deref()),
+        Some("\u{2022}".repeat(12).as_str()),
+        "the gate is told the bullets' count"
+    );
+}
+
+#[test]
+fn enter_on_a_focused_button_of_share_presses_that_button_not_copy_link() {
+    // Cancel.
+    let (mut rt, calls, _) = spied();
+    pick(&mut rt, "Share\u{2026}");
+    tab_to(&mut rt, "btn-2");
+    press(&mut rt, Key::Enter, NONE);
+    assert!(share_of(&rt).is_none(), "Enter on Cancel cancels");
+    assert!(asked(&calls).is_empty(), "and makes no link");
+    assert_eq!(rt.state.live_toast(), None);
+    // Invite someone…
+    pick(&mut rt, "Share\u{2026}");
+    tab_to(&mut rt, "btn-1");
+    press(&mut rt, Key::Enter, NONE);
+    assert_eq!(rt.state.actions.intents.last(), Some(&Intent::Frame("DW-0514")));
+    assert!(asked(&calls).is_empty(), "Enter on Invite makes no link");
+    // The Password switch.
+    let (mut rt, calls, _) = spied();
+    pick(&mut rt, "Share\u{2026}");
+    tab_to(&mut rt, "item-0-2-switch");
+    press(&mut rt, Key::Enter, NONE);
+    assert!(
+        share_of(&rt).is_some_and(|s| s.password_on),
+        "Enter on the switch turns it"
+    );
+    assert!(asked(&calls).is_empty());
+}
+
+#[test]
+fn enter_on_a_focused_button_of_two_versions_presses_that_button_not_keep_both() {
+    // Cancel: nothing is decided.
+    let (mut rt, calls) = conflicted();
+    press(&mut rt, Key::Enter, NONE);
+    assert!(conflict_file(&rt).is_some());
+    tab_to(&mut rt, "btn-3");
+    press(&mut rt, Key::Enter, NONE);
+    assert_eq!(conflict_file(&rt), None, "Enter on Cancel cancels");
+    assert!(asked(&calls).is_empty(), "and answers nothing");
+    assert_eq!(rt.state.actions.source.conflicts().len(), 2);
+    // Keep this PC's: that answer, once.
+    press(&mut rt, Key::Enter, NONE);
+    tab_to(&mut rt, "btn-1");
+    press(&mut rt, Key::Enter, NONE);
+    assert_eq!(asked(&calls), [Call::KeepVersion("contract".into(), Keep::Here)]);
 }
 
 #[test]

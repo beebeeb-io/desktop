@@ -21,7 +21,7 @@ use crate::theme::tokens::{Theme, radius, type_};
 use crate::theme::{icons, icons_settings};
 use crate::ui::settings_dialog::{self, BUTTON_MD, Weight};
 use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
-use crate::ui::{button, field, kit, settings_controls as controls};
+use crate::ui::{banner, button, field, kit, settings_controls as controls};
 use rune::{Align, El, Side, Tx, col, el, row};
 
 /// The key of the password's text input.
@@ -138,11 +138,39 @@ impl State {
         };
         self.forget_undo();
         let answer = self.actions.source.share_link(&share.items, &options);
+        drop(options);
         // The dialog closes either way; a failure says so, with Try again (DW-0109).
         self.close_dialog(tx);
         match answer {
-            Ok(()) => self.show_toast(Toast::LinkCopied, tx),
-            Err(why) => self.failed(Action::CopyLink, why, tx),
+            Ok(()) => {
+                self.actions.retry_share = None;
+                self.show_toast(Toast::LinkCopied, tx);
+            }
+            Err(why) => {
+                // What Try again opens: the same items and choices, without the password.
+                self.actions.retry_share = Some(Share {
+                    password_missing: false,
+                    menu: None,
+                    ..share
+                });
+                self.failed(Action::ShareLink, why, tx);
+            }
+        }
+    }
+
+    /// Try again on "Couldn't make the link": the dialog opens again on the same items with the
+    /// same choices. Nothing is asked of the source: the link is made by Copy link, as before,
+    /// and when it should ask for a password, that password is typed again (it was wiped).
+    pub fn share_again(&mut self, tx: &mut Tx) {
+        let Some(share) = self.actions.retry_share.take() else {
+            return;
+        };
+        self.close_menu();
+        self.actions.share_password = rune::TextEdit::new("").secure();
+        let password_on = share.password_on;
+        self.actions.dialog = Some(Dialog::Share(share));
+        if password_on {
+            tx.focus(PASSWORD_INPUT, false);
         }
     }
 
@@ -299,7 +327,13 @@ pub fn view(s: &State, share: &Share, t: &Theme) -> El {
                 .role(Role::PopUp),
             t,
         )
-        .on_press(|s: &mut State| s.share_toggle_menu(Menu::Access)),
+        .on_press(|s: &mut State| s.share_toggle_menu(Menu::Access))
+        .on_key(|s: &mut State, ev: &rune::KeyEvent, _: &mut Tx| {
+            dialogs::plain_enter(ev) && {
+                s.share_toggle_menu(Menu::Access);
+                true
+            }
+        }),
         lists::item(
             0,
             1,
@@ -309,16 +343,22 @@ pub fn view(s: &State, share: &Share, t: &Theme) -> El {
                 .ruled(),
             t,
         )
-        .on_press(|s: &mut State| s.share_toggle_menu(Menu::Expiry)),
+        .on_press(|s: &mut State| s.share_toggle_menu(Menu::Expiry))
+        .on_key(|s: &mut State, ev: &rune::KeyEvent, _: &mut Tx| {
+            dialogs::plain_enter(ev) && {
+                s.share_toggle_menu(Menu::Expiry);
+                true
+            }
+        }),
         lists::item_with(
             0,
             2,
             &Item::new(Some(&icons::LOCK), "Password").ruled(),
-            vec![
+            vec![banner::pressable(
                 lists::switch("item-0-2", "Password", share.password_on, t)
-                    .description("The link then asks for a password you choose.")
-                    .on_press_tx(|s: &mut State, tx: &mut Tx| s.share_toggle_password(tx)),
-            ],
+                    .description("The link then asks for a password you choose."),
+                State::share_toggle_password,
+            )],
             t,
         ),
     ];
@@ -364,25 +404,28 @@ pub fn view(s: &State, share: &Share, t: &Theme) -> El {
         .wrap(),
     );
 
+    // The keyboard starts on Copy link (or in the password field, when that shows), so the
+    // dialog's first Enter is its default action and not the first row's pop-up.
+    let copy = primary(0, "Copy link", &icons::LINK, t)
+        .w_full()
+        .default_button()
+        .on_press_tx(|s: &mut State, tx: &mut Tx| s.share_copy_link(tx));
     let foot = col()
+        .child(if share.password_on { copy } else { copy.autofocus() })
         .child(
-            primary(0, "Copy link", &icons::LINK, t)
-                .w_full()
-                .default_button()
-                .on_press_tx(|s: &mut State, tx: &mut Tx| s.share_copy_link(tx)),
-        )
-        .child(
-            button::outline_button("btn-1", "Invite someone\u{2026}", Some(&icons::SHARED), t)
-                .w_full()
-                .on_press_tx(|s: &mut State, tx: &mut Tx| s.share_invite(tx)),
+            // Enter on a focused button presses THAT button, never the default one (the Files
+            // window has no web focus, so Rune would send Return to Copy link).
+            banner::pressable(
+                button::outline_button("btn-1", "Invite someone\u{2026}", Some(&icons::SHARED), t).w_full(),
+                State::share_invite,
+            ),
         )
         // `.flex-1` between the actions and the way out: one more gap.
         .child(el().key("dlg-foot-gap").h(0.0))
-        .child(
-            settings_dialog::button(2, "Cancel", Weight::Quiet, t)
-                .w_full()
-                .on_press_tx(|s: &mut State, tx: &mut Tx| s.close_dialog(tx)),
-        );
+        .child(banner::pressable(
+            settings_dialog::button(2, "Cancel", Weight::Quiet, t).w_full(),
+            State::close_dialog,
+        ));
     let dialog = dialogs::shell("Share", 440.0, "Share", None, body, foot, t);
     match menu_layer(share, t) {
         Some(menu) => dialog.child(menu),
