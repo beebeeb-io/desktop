@@ -9,18 +9,55 @@ Status after the review of #298 (2026-11-12, `origin/v2-native` 598ed681 merged)
 frames, light and dark): 52 with every line at 0 failing, 6 with a red pixel line, each named in its row (8 keyed
 elements in all; no geometry, text, icon or fill line is red). The built frames are the scenes of `frames::account::FRAMES`.
 
+Since 2026-11-13 Settings > Security is ONE page: DW-A52, DW-A84 and DW-A84a are replaced by it, and the gates of
+the seven frames that draw it are red by design ("Sign-in and security, one page" below has the decision and the counts).
+
 ## Account in settings (8)
 
 | Frame | What it is | Status |
 | --- | --- | --- |
 | `DW-A51` | Who is signed in, what became of the recovery phrase, which Beebeeb products this account uses. | built; light: 0 failing on all six lines; dark: 1 pixel line red (`item-0-0-avatar edge 10 > 9`: the rim of the 32 pt avatar disc; measured, the board's disc is 0.2 device px smaller under its ring) |
-| `DW-A52` | Sign-in and security: everything about getting in, who else is in, and getting out. | built (light and dark: 0 failing on all six lines) |
-| `DW-A84` | Security checkup: the account's security factors in one list, with a score (7 of 7). | built (light and dark: 0 failing on all six lines) |
-| `DW-A84a` | The same page with one thing left: no passkey yet (6 of 7). | built (light and dark: 0 failing on all six lines) |
+| `DW-A52` | Sign-in and security: everything about getting in, who else is in, and getting out. | REPLACED by the one page (see "Sign-in and security, one page" below); the id shows that page; gate red by design |
+| `DW-A84` | Security checkup: the account's security factors in one list, with a score (7 of 7). | REPLACED: not a screen any more; the id shows the one page; gate red by design |
+| `DW-A84a` | The same page with one thing left: no passkey yet (6 of 7). | REPLACED: the id shows the one page with one thing left; gate red by design |
 | `DW-A55` | Devices and sessions: see and end every session of the account. | built (light and dark: 0 failing on all six lines) |
 | `DW-A56` | Confirm ending one device's sessions. | built (light and dark: 0 failing on all six lines) |
-| `DW-A57` | Confirm signing out of this app only. | built (light and dark: 0 failing on all six lines) |
-| `DW-A57a` | Confirm signing out of all Beebeeb apps on this PC. | built (light and dark: 0 failing on all six lines) |
+| `DW-A57` | Confirm signing out of this app only. | built; the confirm is the board's, the page behind it is the one page: gate red on the page's keys |
+| `DW-A57a` | Confirm signing out of all Beebeeb apps on this PC. | built; as DW-A57: gate red on the page's keys |
+
+## Sign-in and security, one page (a design of this app's: no board frame)
+
+`security_overview.rs`, tests in `tests_security.rs`. ONE scrolling page is what Settings > Security shows, in place
+of DW-A52 (a list of rows) and the security checkup DW-A84 / DW-A84a (a second screen with the same subjects):
+
+- the score card: the ring, "N of M security steps done", and what is left to do, each with the button that fixes it
+  (the first is the page's one primary action);
+- Sign-in: Password, Two-factor authentication, Passkeys, each with its state and the mark of a thing that is done;
+- This PC and your devices: App lock with its switch and delay (DW-0716's menu), Devices and sessions with the
+  count, Approve a sign-in;
+- Recent sign-in activity: the last three, then "All sign-in activity";
+- Sign out (the board's two confirms, DW-A57 and DW-A57a) and Delete, at the bottom.
+
+Every row still opens its existing page. The page is drawn from `SecurityFacts`, where each part is known or not:
+"Not known" for a part nobody read, "Not available yet" (and no link, switch or button) for what a build has not
+bound; no score, no ring fill and no mark from a value that was not read. On the real engine today the page knows
+two-factor (the profile's own mark; absent: not known) and the number of devices; the rest says so.
+
+Decision (lane, 2026-11-13): DW-A52 and DW-A84 / DW-A84a are replaced by this one page (the product owner's ruling
+of 2026-11-13 21:58, option C of three rendered options), because the two screens listed the same subjects twice
+and the pane was a menu that said nothing about the account's state.
+
+Decision (lane, 2026-11-13): the goldens of DW-A52, DW-A84, DW-A84a, DW-A57, DW-A57a, DW-0716 and DW-0716b are
+left as the board drew them: not recaptured, not deleted, no tolerance loosened, no key dropped, because a golden
+is the BOARD's drawing and the board has no drawing of this page (one captured from the app could not fail). Their
+gates are red until the board draws the page and the goldens are captured again: a board follow-up.
+
+Gate on this branch, light / dark, geometry failing of checked (VM, 2026-11-13): DW-A52 66 of 114 / 66 of 114;
+DW-A84 49 of 98 / 49 of 98; DW-A84a 51 of 100 / 51 of 100; DW-A57 66 of 124 / 66 of 124; DW-A57a 66 of 124 /
+66 of 124; DW-0716 113 of 124 / 113 of 124 (96 before, see below); DW-0716b 100 of 111 / 100 of 111 (83 before).
+
+`SEC-PARTLY-KNOWN` is a scene with no board frame and no golden: the page as a source draws it that knows only
+two-factor and the devices (what the running app shows today), so it can be rendered and looked at.
 
 ## Name, email and password (5)
 
