@@ -532,14 +532,64 @@ fn alert_switches_turn_by_keyboard_and_are_never_amber() {
     tab_to(&mut rt, "item-3-1-switch");
     key(&mut rt, Key::Enter);
     assert!(
-        rt.state.settings.source.notifications().groups[0].1[1].on,
+        rt.state.settings.source.notifications().groups[0].1[1].on == Some(true),
         "File updates is on"
     );
     click(&mut rt, "item-3-1-switch");
-    assert!(!rt.state.settings.source.notifications().groups[0].1[1].on);
+    assert_eq!(rt.state.settings.source.notifications().groups[0].1[1].on, Some(false));
     click(&mut rt, "item-1-0");
     assert_eq!(rt.state.settings.pane, Pane::Recent);
     assert_eq!(on_settings(&rt), Some(SettingsPane::Notifications));
+}
+
+/// A switch with no value is never drawn, whatever the source says (or does not say) about why: the row says it
+/// could not load, the pane offers "Try again" below the last group, and this PC's switches are as they were.
+#[test]
+fn an_account_switch_without_a_value_is_never_drawn_as_a_switch() {
+    let board = runtime("DW-0750");
+    let mut state = init();
+    assert!(super::scene("DW-0750", &mut state));
+    state.settings.source = Box::new(source::BoardSettings::new().with_account_alerts_not_read());
+    let mut rt = window(state, (958.0, 638.0));
+    for i in 0..3 {
+        assert!(
+            find(&rt, &format!("item-3-{i}-switch")).is_none(),
+            "row {i} has a switch"
+        );
+        assert_eq!(
+            info(&rt, &format!("item-3-{i}-value")).text.as_deref(),
+            Some("Couldn't load")
+        );
+        assert_eq!(
+            info(&rt, &format!("item-3-{i}")).rect,
+            info(&board, &format!("item-3-{i}")).rect,
+            "the row is where the board draws it"
+        );
+    }
+    assert_eq!(
+        info(&rt, "item-4-0-switch").rect,
+        info(&board, "item-4-0-switch").rect,
+        "this PC's switches are where they were"
+    );
+    let note = info(&rt, "note-0");
+    assert_eq!(note.role, "status");
+    assert!(
+        note.label
+            .as_deref()
+            .is_some_and(|l| l.starts_with(super::notifications::NOT_READ.0)),
+        "{:?}",
+        note.label
+    );
+    assert!(note.rect[1] > info(&rt, "item-5-1").rect[1], "below the last group");
+    assert!(find(&board, "note-0").is_none(), "the board's scene has no such notice");
+    // A press where a switch would be changes nothing.
+    let at = info(&board, "item-3-1-switch").rect;
+    rt.pointer_down(at[0] + at[2] / 2.0, at[1] + at[3] / 2.0);
+    rt.pointer_up(at[0] + at[2] / 2.0, at[1] + at[3] / 2.0);
+    settle(&mut rt);
+    assert_eq!(rt.state.settings.source.notifications().groups[0].1[1].on, None);
+    tab_to(&mut rt, "btn-1");
+    assert_eq!(info(&rt, "btn-1").label.as_deref(), Some("Try again"));
 }
 
 #[test]
@@ -552,7 +602,7 @@ fn notifications_off_in_windows_keep_the_choices_out_of_reach_and_open_windows_s
     );
     click(&mut rt, "item-2-0-switch");
     assert!(
-        rt.state.settings.source.notifications().groups[0].1[0].on,
+        rt.state.settings.source.notifications().groups[0].1[0].on == Some(true),
         "and a press changes nothing"
     );
     assert_eq!(info(&rt, "item-1-0-value").text.as_deref(), Some("Off in Windows"));
@@ -700,7 +750,7 @@ fn space_and_enter_both_press_the_focused_control() {
         tab_to(&mut rt, "item-3-1-switch");
         key(&mut rt, press.clone());
         assert!(
-            rt.state.settings.source.notifications().groups[0].1[1].on,
+            rt.state.settings.source.notifications().groups[0].1[1].on == Some(true),
             "{press:?} on a switch"
         );
         // A pop-up row opens its menu.
@@ -1033,7 +1083,7 @@ fn a_pane_taller_than_the_window_scrolls_to_the_focused_control() {
     );
     key(&mut rt, space());
     assert!(
-        !rt.state.settings.source.notifications().groups[2].1[1].on,
+        rt.state.settings.source.notifications().groups[2].1[1].on == Some(false),
         "and it turns"
     );
 }
