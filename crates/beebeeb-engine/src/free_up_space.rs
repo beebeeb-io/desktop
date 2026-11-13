@@ -1,6 +1,7 @@
-//! Free up space: make unpinned local files online-only again. One implementation, two callers: the shell's
-//! command and the Windows Explorer flyout (`windows_cf::status_ui`). Must not touch a pinned file, an unsent
-//! change, or a path outside the allowed roots.
+//! Free up space: make unpinned local files online-only again. One implementation ([`free_up_space_in`]); the
+//! native shell and the Windows Explorer flyout reach it through the engine handle (`app::Engine::free_up_space`,
+//! the account-bound handle; the flyout by `crate::explorer_command`, task 2490). Must not touch a pinned file, an
+//! unsent change, or a path outside the allowed roots.
 
 use std::path::PathBuf;
 
@@ -70,24 +71,13 @@ pub fn remove_linux_freedesktop_thumbnails_for_evicted_files(
     }
 }
 
-// `pub(crate)` so the Windows Explorer status-flyout command
-// (`windows_cf::status_ui::FreeUpSpaceCommand::Invoke`) can reuse the exact same
-// reclaim path the `free_up_space` IPC uses — one implementation, two callers
-// (the WebView IPC and the shell flyout button). It is a synchronous blocking fn
-// (DB + filesystem work), so the COM `Invoke` can call it directly off the
-// arbitrary thread Windows delivers the command on, without a tokio runtime.
+/// The Tauri shell's reclaim (its `free_up_space` IPC). A synchronous blocking fn (DB + filesystem work).
 ///
 /// Task 2488: `pub` only with the `direct-state-db` feature (the Tauri shell): it opens the state database itself,
-/// asking nobody whose it is. Inside the crate it is the Explorer command's ([`free_up_space_unbound`]).
+/// asking nobody whose it is. Task 2490: Explorer's command no longer calls it; it asks the engine handle
+/// (`crate::explorer_command`), whose reclaim runs through the account-bound handle.
 #[cfg(any(test, feature = "direct-state-db"))]
 pub fn free_up_space_blocking(identity: &'static crate::identity::EngineIdentity) -> Result<FreeUpSpaceResult, String> {
-    free_up_space_unbound(identity)
-}
-
-#[cfg_attr(not(any(test, feature = "direct-state-db", target_os = "windows")), allow(dead_code))]
-pub(crate) fn free_up_space_unbound(
-    identity: &'static crate::identity::EngineIdentity,
-) -> Result<FreeUpSpaceResult, String> {
     let cfg = crate::config::DesktopConfig::load_for(identity)?;
     let Some(sync_root) = cfg.sync_root.clone() else {
         return Ok(FreeUpSpaceResult { bytes_freed: 0 });
