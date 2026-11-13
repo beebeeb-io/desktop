@@ -150,14 +150,16 @@ fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() 
         !state.backups.has_source(),
         "Backups is 'not built yet' on a real engine"
     );
-    // Shared, Trash, Photos, This PC: all unwired on a real engine, never sample data.
+    // Shared, Trash, Photos: unwired on a real engine, never sample data. This PC reads the engine
+    // (`engine_host::this_pc`); this handle's vault is not open, so it shows no name.
     assert!(
         !state.frames.shared.source.wired(),
         "Shared is unwired on a real engine"
     );
     assert!(!state.frames.trash.source.wired(), "Trash is unwired on a real engine");
     assert!(!state.photos.source.wired(), "Photos is unwired on a real engine");
-    assert!(!state.this_pc.wired(), "This PC is unwired on a real engine");
+    assert!(state.this_pc.wired(), "This PC is engine-backed on a real engine");
+    assert_eq!(state.this_pc.changes().len() + state.this_pc.kept_count(), 0);
     assert_eq!(started.live.drain(), 0, "nothing reported, nothing queued");
 }
 
@@ -624,7 +626,15 @@ fn settings_is_unwired_on_a_live_engine() {
     for pane in [Pane::About, Pane::Notifications, Pane::Recent] {
         assert!(!s.settings.source.wired(pane), "{pane:?}");
     }
-    for pane in [Pane::Storage, Pane::Insights, Pane::Sync] {
+    // Drive's panes (`engine_host::drive_settings`): Storage insights answers; the rest is the shell's frame.
+    assert!(s.settings.drive.wired(Pane::Insights));
+    for pane in [
+        Pane::Storage,
+        Pane::Sync,
+        Pane::Bandwidth,
+        Pane::Previews,
+        Pane::Diagnostics,
+    ] {
         assert!(!s.settings.drive.wired(pane), "{pane:?}");
     }
     assert!(!s.settings.source.sample());
