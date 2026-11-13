@@ -138,6 +138,88 @@ pub(crate) fn free_up_space_in(
     }
 }
 
+/// Free up space for a SELECTION: the downloaded copies of `ids` (a file, or a folder with everything in it) become
+/// online only; nothing else on this computer is touched. Answers per id, in the order asked: `true` when nothing
+/// that could be freed is left at or under it (also when nothing was there to free). `false`: unknown id, or at
+/// least one file under it stayed (kept, an unsent change, a failed call, or the session ended before it).
+///
+/// The same per-file guards as the whole reclaim (`dehydrate_these`): a kept file, a file with a change that is not
+/// sent and a path outside the allowed roots are never touched. `go_on` is asked before each file.
+/// Windows only today: elsewhere the engine has no reclaim for a selection, and says so.
+pub(crate) fn free_up_space_of(
+    identity: &'static crate::identity::EngineIdentity,
+    db: &crate::state_db::StateDb,
+    sync_root: &std::path::Path,
+    ids: &[String],
+    go_on: &dyn Fn() -> bool,
+) -> Result<Vec<(String, bool)>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let candidates = db
+            .unpinned_local_files_for_dehydration()
+            .map_err(|e| format!("list dehydration candidates: {e}"))?;
+        Ok(free_selection(db, ids, candidates, |wanted| {
+            dehydrate_these(identity, db, sync_root, wanted, go_on).1
+        }))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (identity, db, sync_root, ids, go_on);
+        Err(NO_SELECTION_RECLAIM.to_string())
+    }
+}
+
+/// What [`free_up_space_of`] answers where a selection cannot be reclaimed (not Windows).
+pub const NO_SELECTION_RECLAIM: &str = "freeing up space for a selection is not available on this system";
+
+/// Which of `candidates` (id, path, size) a selection names, handed to `reclaim` (which answers the ids it made
+/// online only), and the answer per selected id. One read per selected id; the candidates are matched by path in
+/// memory. A folder ROW among the candidates is not a file to free: it never counts against its folder.
+#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+pub(crate) fn free_selection(
+    db: &crate::state_db::StateDb,
+    ids: &[String],
+    candidates: Vec<(String, String, i64)>,
+    reclaim: impl FnOnce(Vec<(String, String, i64)>) -> Vec<String>,
+) -> Vec<(String, bool)> {
+    use crate::state_db::ItemKind;
+    // Each selected id's place: its path, without slashes at the ends. `None`: no such row.
+    let places: Vec<Option<String>> = ids
+        .iter()
+        .map(|id| match db.get_file(id) {
+            Ok(Some(entry)) => Some(entry.path.trim_matches('/').to_string()),
+            _ => None,
+        })
+        .collect();
+    let under = |path: &str, place: &str| {
+        let path = path.trim_matches('/');
+        path == place || (path.len() > place.len() && path.starts_with(place) && path.as_bytes()[place.len()] == b'/')
+    };
+    let is_file = |id: &str| matches!(db.get_file(id), Ok(Some(entry)) if entry.item_kind == ItemKind::File);
+    let wanted: Vec<(String, String, i64)> = candidates
+        .into_iter()
+        .filter(|(id, path, _)| places.iter().flatten().any(|place| under(path, place)) && is_file(id))
+        .collect();
+    let asked: Vec<(String, String)> = wanted.iter().map(|(id, path, _)| (id.clone(), path.clone())).collect();
+    let freed: std::collections::HashSet<String> = if wanted.is_empty() {
+        Default::default()
+    } else {
+        reclaim(wanted).into_iter().collect()
+    };
+    ids.iter()
+        .zip(&places)
+        .map(|(id, place)| {
+            let done = place.as_ref().is_some_and(|place| {
+                asked
+                    .iter()
+                    .filter(|(_, path)| under(path, place))
+                    .all(|(file, _)| freed.contains(file))
+            });
+            (id.clone(), done)
+        })
+        .collect()
+}
+
 /// Windows reclaim path (task 0781). On Cloud Files the hydrated bytes live
 /// INSIDE the placeholder's data stream, not in a separate cache copy — so the
 /// old Unix-style `remove_file` would either delete the user's whole file or
@@ -167,16 +249,29 @@ pub(crate) fn free_up_space_windows_while(
     sync_root: &std::path::Path,
     go_on: &dyn Fn() -> bool,
 ) -> Result<FreeUpSpaceResult, String> {
+    let candidates = db
+        .unpinned_local_files_for_dehydration()
+        .map_err(|e| format!("list dehydration candidates: {e}"))?;
+    Ok(dehydrate_these(identity, db, sync_root, candidates, go_on).0)
+}
+
+/// The reclaim of `candidates` (rows of `StateDb::unpinned_local_files_for_dehydration`, all of them or the ones a
+/// selection names): the bytes freed, and the ids of the files that are online only now. Every guard is here, once,
+/// for both callers.
+#[cfg(target_os = "windows")]
+fn dehydrate_these(
+    identity: &crate::identity::EngineIdentity,
+    db: &crate::state_db::StateDb,
+    sync_root: &std::path::Path,
+    candidates: Vec<(String, String, i64)>,
+    go_on: &dyn Fn() -> bool,
+) -> (FreeUpSpaceResult, Vec<String>) {
     // Reclaim targets are the UNPINNED, LOCAL files — addressed by their
     // server-relative path, NOT by `cache_path`. On Windows CF the bytes live
     // inside the placeholder in the sync root, and `cache_path` records the
     // already-deleted `%TEMP%` decrypt path from the fetch callback, so it is
     // useless as a dehydration target. We reconstruct the real placeholder path
     // exactly as `windows_cf::populate_placeholders` does.
-    let candidates = db
-        .unpinned_local_files_for_dehydration()
-        .map_err(|e| format!("list dehydration candidates: {e}"))?;
-
     let allowed_roots = free_up_space_allowed_roots(identity, sync_root);
     let mut bytes_freed: u64 = 0;
     let mut dehydrated_ids: Vec<String> = Vec::new();
@@ -274,7 +369,7 @@ pub(crate) fn free_up_space_windows_while(
     }
 
     tracing::info!(bytes_freed, "free_up_space dehydrated unpinned placeholders");
-    Ok(FreeUpSpaceResult { bytes_freed })
+    (FreeUpSpaceResult { bytes_freed }, dehydrated_ids)
 }
 
 /// Unix reclaim path (macOS File Provider / Linux FUSE). Unchanged from the

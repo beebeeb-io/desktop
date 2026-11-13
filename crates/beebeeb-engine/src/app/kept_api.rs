@@ -79,6 +79,35 @@ impl<C: CredentialStores> Engine<C> {
     }
 }
 
+impl<C: CredentialStores> Engine<C> {
+    /// Free up space for a selection: the downloaded copies of `ids` (each a file, or a folder with everything in
+    /// it) become online only, in the signed-in account's local state (the account-bound handle, task 2488). Per
+    /// id, in the order asked: whether nothing that could be freed is left under it
+    /// (`free_up_space::free_up_space_of`). A kept file and a file with a change that is not sent are never touched.
+    /// The session is asked again before each file; an answer read across a session change is dropped (`Err`).
+    /// BLOCKS: a worker's.
+    pub fn free_up_space_of(&self, ids: &[String]) -> Result<Vec<(String, bool)>, String> {
+        if self.view().gate != GateState::Ready {
+            return Err(NOT_SIGNED_IN.to_string());
+        }
+        let Some(sync_root) = self.configured_sync_root()? else {
+            return Err(NO_SYNC_FOLDER.to_string());
+        };
+        let state = self.local_state_for_changes().map_err(|refused| {
+            if refused.not_this_accounts() {
+                NOT_YOURS.to_string()
+            } else {
+                NO_LOCAL_STATE.to_string()
+            }
+        })?;
+        state
+            .with_while(|db, go_on| crate::free_up_space::free_up_space_of(self.identity, db, &sync_root, ids, go_on))
+            .map_err(|_| NOT_SIGNED_IN.to_string())?
+    }
+}
+
+pub const NO_SYNC_FOLDER: &str = "no sync folder is set on this computer";
+
 /// `set_kept`'s refusals before anything is read or written.
 pub const NOT_SIGNED_IN: &str = "not signed in";
 pub const NOT_YOURS: &str = "the local state on this computer is another account's";

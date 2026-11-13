@@ -8,6 +8,7 @@
 pub mod action_scenes;
 pub mod actions_data;
 pub mod browse_states;
+pub mod changes;
 pub mod conflict;
 pub mod details;
 pub mod dialogs;
@@ -56,7 +57,7 @@ use std::collections::BTreeSet;
 use crate::State;
 use crate::source::DriveItem;
 use rune::Tx;
-use source::{Action, ActionError, Change, FilesFixture, FilesSource, NoEngine};
+use source::{Action, ActionError, FilesFixture, FilesSource, NoEngine};
 
 pub use window::view;
 
@@ -151,6 +152,8 @@ impl Toast {
     pub fn failure(action: Action, why: ActionError) -> String {
         let fix = match why {
             ActionError::Offline => " Check your connection.",
+            ActionError::InFlight => " The last change is still on its way.",
+            ActionError::NotAll => " Some items were left as they were.",
             _ => "",
         };
         format!("Couldn't {}.{fix}", action.words())
@@ -510,37 +513,6 @@ impl State {
         tx.wake_after(stay);
     }
 
-    /// Take what accepted actions changed (`FilesSource::changes`) into the rows: a copy stands
-    /// next to its original, selected. Returns whether a copy arrived, and what failed after all.
-    pub fn take_changes(&mut self) -> (bool, Vec<(Action, ActionError)>) {
-        let mut copies = Vec::new();
-        let mut failures = Vec::new();
-        for change in self.actions.source.changes() {
-            match change {
-                Change::Copied { after, item } => {
-                    // A copy made in a folder that is no longer shown is there when it is shown again.
-                    if let Some(at) = self.listing.items.iter().position(|i| i.id == after) {
-                        copies.push(item.id.clone());
-                        self.listing.items.insert(at + 1, *item);
-                    }
-                }
-                Change::Made { item } => {
-                    // A folder made in the folder shown stands in its rows, in the folder's order.
-                    if item.parent_id == self.listing.folder.id {
-                        self.listing.items.push((*item).clone());
-                        self.apply_sort();
-                    }
-                    self.actions.made.push(*item);
-                }
-                Change::Failed(action, why) => failures.push((action, why)),
-            }
-        }
-        if !copies.is_empty() {
-            self.select_ids(&copies);
-        }
-        (!copies.is_empty(), failures)
-    }
-
     /// [`State::take_changes`], with its messages: "Duplicated", or what failed. The engine lane
     /// calls this from its `handle.update` when the source has news.
     pub fn apply_changes(&mut self, tx: &mut Tx) {
@@ -836,6 +808,10 @@ impl State {
             return true;
         }
         self.forget_undo();
+        // Accepted, not done: the rows change when the source says what it did (`late_changes`).
+        if self.actions.source.answers_later() {
+            return true;
+        }
         for i in rows {
             self.listing.items[i].pc_status = Some(if keep { "available_offline" } else { "online_only" }.into());
         }
@@ -913,6 +889,10 @@ impl State {
             return true;
         }
         self.forget_undo();
+        // Accepted, not done: the rows change when the source says what it did (`late_changes`).
+        if self.actions.source.answers_later() {
+            return true;
+        }
         for i in rows {
             if items.iter().any(|item| item.id == self.listing.items[i].id) {
                 self.listing.items[i].pc_status = Some("online_only".into());
@@ -954,7 +934,10 @@ impl State {
         }
         self.forget_undo();
         if let Err(why) = self.actions.source.upload(folder.as_deref(), files) {
-            self.actions.retry_upload = Some((folder, files.to_vec()));
+            // Try again sends what was NOT copied in alone: a file already in the folder would get a second
+            // copy under another name.
+            let left = self.actions.source.upload_left().unwrap_or_else(|| files.to_vec());
+            self.actions.retry_upload = Some((folder, left));
             self.failed(Action::Upload, why, tx);
             return false;
         }
