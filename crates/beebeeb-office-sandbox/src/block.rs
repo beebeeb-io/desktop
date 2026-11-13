@@ -8,8 +8,10 @@ use crate::SandboxError;
 ///
 /// - `SystemRoot` is needed by the system libraries a process loads at start; its value is asked from the system.
 /// - `LOCALAPPDATA` has to be present or Windows refuses to create an AppContainer process (system code 203,
-///   measured). Windows then overwrites it and adds `TEMP` and `TMP`, all three pointing into the container's
-///   own folder, which no longer exists when the helper runs (see the Windows module).
+///   measured). Its value here is a placeholder (the system folder). Windows rewrites it and adds `TEMP` and
+///   `TMP`, building all three from that placeholder plus the container's name (measured: each sits under the
+///   placeholder, holds the profile name, and does not exist). So the user's profile path does not reach the
+///   helper through its environment.
 pub(crate) const ENVIRONMENT_NAMES: &[&str] = &["LOCALAPPDATA", "SystemRoot", "TEMP", "TMP"];
 
 /// Every container profile of ours is named this prefix plus 32 lowercase hexadecimal digits.

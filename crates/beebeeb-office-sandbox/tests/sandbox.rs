@@ -382,8 +382,10 @@ mod windows {
     fn a_confined_helper_has_no_folder_of_its_own_to_write_to() {
         let _serial = serial();
         // Windows gives a container process a folder of its own and points LOCALAPPDATA, TEMP and TMP into it.
-        // The probe tries to create and write all three. (This does not show that deleting the profile is what
-        // closes them: a build that keeps the profile gets the same answer. See the mutant script.)
+        // They are built from the placeholder the crate passes, so they name folders that do not exist; the probe
+        // tries to create and write all three. The profile's real folder (under the user's profile) is deleted
+        // before the helper runs: the last assertion counts it, and is the one a build that keeps the profile
+        // turns red.
         let name = format!("beebeeb-sandbox-test-{}-own.tmp", std::process::id());
         let folders = ["LOCALAPPDATA", "TEMP", "TMP"]
             .map(|variable| PathBuf::from(std::env::var_os(variable).expect("set for the test")));
