@@ -1,4 +1,4 @@
-//! Try again (DW-0109): the same action on what is selected now.
+//! Try again, on the message of a failure (DW-0109): which action is repeated, and how.
 
 use super::Toast;
 use super::source::Action;
@@ -60,7 +60,32 @@ impl State {
                 self.open_in_file_explorer(tx);
             }
             // These are asked again from their own dialog: the message goes, nothing is repeated blind.
-            Action::RestoreVersion | Action::OpenWith | Action::KeepVersion | Action::Invite => {}
+            // Said without Try again ([`offers_try_again`]): nothing is repeated blind.
+            Action::Share
+            | Action::RestoreVersion
+            | Action::OpenWith
+            | Action::KeepVersion
+            | Action::Invite
+            | Action::PauseUploads
+            | Action::RetryUpload
+            | Action::CancelUpload => {}
         }
     }
+}
+
+/// Does the message of this failure offer Try again? Only where [`State::retry`] repeats
+/// something: a Try again that does nothing is not drawn. These are asked again from where they
+/// were asked (their dialog, the Uploads panel), which is still there.
+pub fn offers_try_again(action: Action) -> bool {
+    !matches!(
+        action,
+        Action::Share
+            | Action::RestoreVersion
+            | Action::OpenWith
+            | Action::KeepVersion
+            | Action::Invite
+            | Action::PauseUploads
+            | Action::RetryUpload
+            | Action::CancelUpload
+    )
 }

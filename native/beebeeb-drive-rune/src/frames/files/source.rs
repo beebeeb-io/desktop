@@ -63,6 +63,9 @@ pub enum Action {
     CopyLink,
     /// A link with choices (the Share dialog), as distinct from the plain Copy link.
     ShareLink,
+    /// Share… that was refused before its dialog opened (a protected item): said, with no Try
+    /// again, because there is nothing to repeat but the plain link nobody asked for.
+    Share,
     Open,
     ShowInFileExplorer,
     Upload,
@@ -84,6 +87,12 @@ pub enum Action {
     KeepVersion,
     /// Invite someone… (DW-0407 to DW-0514).
     Invite,
+    /// Pause all, Resume all (DW-0427).
+    PauseUploads,
+    /// Try again on ONE upload, from the Uploads panel (as distinct from a drop that failed).
+    RetryUpload,
+    /// Cancel upload (DW-0427).
+    CancelUpload,
 }
 
 impl Action {
@@ -97,6 +106,7 @@ impl Action {
             Action::RemoveOffline => "remove from this PC",
             Action::CopyLink => "copy the link",
             Action::ShareLink => "make the link",
+            Action::Share => "share this",
             Action::Open => "open",
             Action::ShowInFileExplorer => "show in File Explorer",
             Action::Upload => "upload",
@@ -109,6 +119,9 @@ impl Action {
             Action::OpenWith => "open it in another app",
             Action::KeepVersion => "keep that version",
             Action::Invite => "invite someone to this",
+            Action::PauseUploads => "pause the uploads",
+            Action::RetryUpload => "try that upload again",
+            Action::CancelUpload => "cancel the upload",
         }
     }
 }
@@ -145,6 +158,14 @@ pub enum Call {
     OpenWith(String),
     /// The file with this id that changed in two places: what is kept (DW-0429).
     KeepVersion(String, super::actions_data::Keep),
+    /// The upload with this id is tried again now (DW-0427).
+    RetryUpload(String),
+    /// The account left: what was uploading is cancelled and forgotten.
+    ForgetUploads,
+    /// The upload with this id is cancelled; nothing of it stays.
+    CancelUpload(String),
+    /// Uploads pause (`true`) or go on.
+    PauseUploads(bool),
 }
 
 /// What an accepted action changed since the window last asked.
@@ -268,6 +289,26 @@ pub trait FilesSource: Send + 'static {
     /// Answer the conflict of the file with this id. Whatever is kept, no version is lost: the
     /// other one stays in the file's version history, or beside it (Keep both).
     fn keep_version(&mut self, _file: &str, _keep: super::actions_data::Keep) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    /// What uploads now: what stopped, what moves, what waits (DW-0426, DW-0427). `None`: nothing.
+    fn uploads(&self) -> Option<super::uploads::Uploads> {
+        None
+    }
+    /// Try the upload with this id again now.
+    fn retry_upload(&mut self, _id: &str) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    /// Cancel the upload with this id; nothing is left half-uploaded.
+    fn cancel_upload(&mut self, _id: &str) -> Result<(), ActionError> {
+        Err(ActionError::Unavailable)
+    }
+    /// The account that was uploading left (a sign-out, another account): cancel what is in
+    /// flight and forget every upload of it, so that [`FilesSource::uploads`] says nothing of the
+    /// earlier account. Nothing is left half-uploaded. Default: a source that keeps no uploads.
+    fn forget_uploads(&mut self) {}
+    /// Pause every upload, or let them go on.
+    fn pause_uploads(&mut self, _pause: bool) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
     }
     /// The id of the Backups folder, which the sidebar's Backups shows (DW-0422). `None`: this
@@ -712,6 +753,8 @@ impl FilesSource for FilesFixture {
             return Err(ActionError::Protected);
         }
         self.record(Call::Upload(folder.map(str::to_string), files.to_vec()));
+        // Something uploads now: the board's sample of it (DW-0426).
+        self.more.uploads = Some(super::uploads::board_uploads());
         Ok(())
     }
 
@@ -855,6 +898,48 @@ impl FilesSource for FilesFixture {
             });
         }
         self.more.answered(&conflict, keep, all);
+        Ok(())
+    }
+
+    fn uploads(&self) -> Option<super::uploads::Uploads> {
+        self.more.uploads.clone()
+    }
+
+    fn forget_uploads(&mut self) {
+        self.record(Call::ForgetUploads);
+        self.more.uploads = None;
+    }
+
+    fn retry_upload(&mut self, id: &str) -> Result<(), ActionError> {
+        self.refuse(Action::RetryUpload, &[])?;
+        self.record(Call::RetryUpload(id.to_string()));
+        // It waits its turn again.
+        if let Some(upload) = self
+            .more
+            .uploads
+            .as_mut()
+            .and_then(|u| u.items.iter_mut().find(|u| u.id == id))
+        {
+            upload.state = super::uploads::UploadState::Waiting("Waiting to upload".to_string());
+        }
+        Ok(())
+    }
+
+    fn cancel_upload(&mut self, id: &str) -> Result<(), ActionError> {
+        self.refuse(Action::CancelUpload, &[])?;
+        self.record(Call::CancelUpload(id.to_string()));
+        if let Some(uploads) = self.more.uploads.as_mut() {
+            uploads.items.retain(|u| u.id != id);
+        }
+        Ok(())
+    }
+
+    fn pause_uploads(&mut self, pause: bool) -> Result<(), ActionError> {
+        self.refuse(Action::PauseUploads, &[])?;
+        self.record(Call::PauseUploads(pause));
+        if let Some(uploads) = self.more.uploads.as_mut() {
+            uploads.paused = pause;
+        }
         Ok(())
     }
 

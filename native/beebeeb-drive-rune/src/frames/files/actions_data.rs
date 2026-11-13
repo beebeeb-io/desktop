@@ -204,6 +204,8 @@ pub struct More {
     versions: std::collections::HashMap<String, Vec<Version>>,
     /// The files that wait for a choice.
     pub conflicts: Vec<Conflict>,
+    /// What uploads (DW-0426). `None` until something was uploaded in this session.
+    pub uploads: Option<super::uploads::Uploads>,
 }
 
 impl More {

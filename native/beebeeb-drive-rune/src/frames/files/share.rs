@@ -57,7 +57,8 @@ impl State {
     /// selection, on the board's defaults (Can view, 30 days, no password).
     pub fn begin_share(&mut self) -> bool {
         let items = self.selected_items();
-        if items.is_empty() {
+        // No dialog for nothing, and none for a protected item, whoever asks.
+        if items.is_empty() || self.protects_selection() {
             return false;
         }
         self.close_menu();
@@ -71,6 +72,16 @@ impl State {
             menu: None,
         }));
         true
+    }
+
+    /// Share… (the file menu, the details panel): the dialog; for a protected item the refusal,
+    /// said under its own label and with no Try again (there is nothing to repeat).
+    pub fn ask_share(&mut self, tx: &mut Tx) {
+        if self.protects_selection() {
+            self.failed(Action::Share, super::source::ActionError::Protected, tx);
+        } else {
+            self.intent(Intent::Frame("DW-0407"));
+        }
     }
 
     fn share_mut(&mut self) -> Option<&mut Share> {
@@ -123,6 +134,9 @@ impl State {
         let Some(Dialog::Share(share)) = self.actions.dialog.clone() else {
             return;
         };
+        if self.needs_session(tx) {
+            return;
+        }
         let typed = self.actions.share_password.text.clone();
         if share.password_on && typed.is_empty() {
             if let Some(share) = self.share_mut() {
@@ -318,6 +332,10 @@ pub fn view(s: &State, share: &Share, t: &Theme) -> El {
         // Under the pop-up button's left edge, a little below the row.
         menu_at: (252.0, 28.0),
     };
+    // The keyboard arrives on the first choice (Rune gives a modal's first control the
+    // keyboard; the password field takes it when it shows): never on the button that sends.
+    // Enter and Space on arrival open this pop-up; a link is made only by going to Copy link
+    // (`actions_tests::the_keyboard_arrives_on_a_choice_…` binds both).
     let rows = vec![
         lists::item(
             0,
@@ -404,14 +422,13 @@ pub fn view(s: &State, share: &Share, t: &Theme) -> El {
         .wrap(),
     );
 
-    // The keyboard starts on Copy link (or in the password field, when that shows), so the
-    // dialog's first Enter is its default action and not the first row's pop-up.
-    let copy = primary(0, "Copy link", &icons::LINK, t)
-        .w_full()
-        .default_button()
-        .on_press_tx(|s: &mut State, tx: &mut Tx| s.share_copy_link(tx));
     let foot = col()
-        .child(if share.password_on { copy } else { copy.autofocus() })
+        .child(
+            primary(0, "Copy link", &icons::LINK, t)
+                .w_full()
+                .default_button()
+                .on_press_tx(|s: &mut State, tx: &mut Tx| s.share_copy_link(tx)),
+        )
         .child(
             // Enter on a focused button presses THAT button, never the default one (the Files
             // window has no web focus, so Rune would send Return to Copy link).

@@ -1,7 +1,7 @@
 //! The Files window with what the Files frames add: several selected rows, the menus, the toasts,
 //! the selected item's own details.
 
-use super::{Intent, MenuKind, Toast, details, dialogs, list, menus, rename};
+use super::{MenuKind, Toast, details, dialogs, list, menus, rename};
 use super::{sidebar, toolbar};
 use crate::State;
 use crate::theme::tokens::{self, Theme};
@@ -123,7 +123,8 @@ fn toast_of(kind: Toast, t: &Theme) -> El {
             &icons_files::ALERT,
             toast::Tone::Failed,
             &Toast::failure(action, why),
-            Some(toast::ToastAction {
+            // Only where Try again repeats something (`retry::offers_try_again`).
+            super::retry::offers_try_again(action).then_some(toast::ToastAction {
                 text: "Try again",
                 name: "Try again",
                 shortcut: None,
@@ -246,15 +247,22 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 None => details.clone(),
             };
             // Without a connection the line says so (`frames::global`, DW-0121).
+            // While something uploads the line says so, and opens Uploads (DW-0426, DW-0427).
+            let uploading = super::uploads::status(s, &details, &t);
+            let name = match &uploading {
+                Some((_, words)) => format!("{words}. {details}"),
+                None => name,
+            };
             super::session::status_line(s, &t)
                 .or_else(|| super::browse_states::status_line(s, &details, &t))
                 .or_else(|| crate::frames::global::status_line(state.as_deref(), &details, &t))
+                .or(uploading.map(|(line, _)| line))
                 .unwrap_or_else(|| status_line::status_line(state.as_deref(), &details, &t))
                 .role("button")
                 .label(name)
                 .description("Shows sync status")
                 .focusable(true)
-                .on_press(|s: &mut State| s.intent(Intent::Frame("DW-1201")))
+                .on_press(|s: &mut State| s.status_pressed())
         });
     if let Some(kind) = s.live_toast() {
         main = main.child(toast::layer(toast_of(kind, &t)));
@@ -303,6 +311,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let layers: Vec<El> = [
         menu_layer(s, &t),
         rename::tip_layer(s, &t),
+        super::uploads::drop_layer(s, &t),
+        super::uploads::layer(s, &t),
         dialogs::layer(s, &t),
         super::protected::layer(s, &t),
     ]

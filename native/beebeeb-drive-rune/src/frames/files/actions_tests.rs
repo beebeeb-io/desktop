@@ -177,9 +177,22 @@ fn copy_link_asks_once_with_the_choices_and_then_says_link_copied() {
 }
 
 #[test]
-fn enter_is_copy_link_on_the_defaults() {
+fn the_keyboard_arrives_on_a_choice_and_only_copy_link_itself_makes_the_link() {
+    // On arrival the keyboard is on the first choice, never on the button that sends: Space
+    // and Enter there open that choice's pop-up and make no link.
+    for key in [Key::Enter, Key::Text(" ".into())] {
+        let (mut rt, calls, _) = spied();
+        pick(&mut rt, "Share\u{2026}");
+        assert_eq!(focused(&rt).as_deref(), Some("item-0-0"), "arrival focus");
+        press(&mut rt, key, NONE);
+        assert!(asked(&calls).is_empty(), "a key on arrival sends nothing");
+        assert!(share_of(&rt).is_some(), "the dialog is still open");
+        assert_eq!(rt.state.live_toast(), None);
+    }
+    // Copy link by the keyboard: Tab to it, Enter.
     let (mut rt, calls, _) = spied();
     pick(&mut rt, "Share\u{2026}");
+    tab_to(&mut rt, "btn-0");
     press(&mut rt, Key::Enter, NONE);
     assert_eq!(
         asked(&calls),

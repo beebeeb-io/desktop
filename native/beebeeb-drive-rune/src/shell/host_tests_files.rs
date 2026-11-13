@@ -310,6 +310,39 @@ const PIECES: &[Piece] = &[
         },
         held: |s| s.shell.app.dialog().is_some(),
     },
+    Piece {
+        shell_keeps_it_across_a_lock: false,
+        name: "a picker that was asked for",
+        put: |rt| {
+            rt.update(|s, _| s.ask_picker(crate::frames::files::uploads::PickerKind::Files));
+            assert!(rt.state.actions.picker.is_some());
+        },
+        held: |s| s.actions.picker.is_some(),
+    },
+    Piece {
+        shell_keeps_it_across_a_lock: false,
+        name: "a drag over the list",
+        put: |rt| {
+            rt.update(|s, _| {
+                s.actions.drop_hover = Some(crate::frames::files::uploads::DropHover {
+                    row: None,
+                    count: Some(3),
+                });
+            });
+        },
+        held: |s| s.actions.drop_hover.is_some(),
+    },
+    Piece {
+        shell_keeps_it_across_a_lock: false,
+        name: "the open Uploads panel and its row menu",
+        put: |rt| {
+            rt.update(|s, _| {
+                s.actions.uploads_open = true;
+                s.actions.upload_menu = Some("u-1".into());
+            });
+        },
+        held: |s| s.actions.uploads_open || s.actions.upload_menu.is_some(),
+    },
 ];
 
 fn shift() -> Mods {
@@ -352,7 +385,7 @@ fn every_ending_of_a_session_takes_every_piece_of_the_files_window_with_it() {
             cases += 1;
         }
     }
-    assert_eq!(cases, 3 * 21, "every ending × every piece ran");
+    assert_eq!(cases, 3 * 24, "every ending × every piece ran");
     assert_eq!(
         kept_by_the_shell, 1,
         "one case is the shell's rule, not this window's: Two versions across a lock"
@@ -492,4 +525,388 @@ fn leaving_the_files_route_closes_its_dialogs_and_wipes_the_password() {
     });
     go(&mut rt, Section::Shared);
     assert!(rt.state.actions.dialog.is_none(), "Move to closed with the route");
+}
+
+/// A source that lists PER ACCOUNT: the first account has the board's files, any other one file
+/// of its own. The test names the account beside the engine.
+#[derive(Clone)]
+struct PerAccount {
+    who: Arc<std::sync::Mutex<String>>,
+}
+
+const FIRST_ACCOUNT: &str = "fixture-account";
+const ONLY_THE_SECOND_HAS: &str = "Second account only.txt";
+
+impl crate::source::DriveSource for PerAccount {
+    fn list(&self, folder_id: Option<&str>) -> Result<crate::source::Listing, crate::source::SourceError> {
+        let mut listing = crate::source::DriveSource::list(&crate::source::BoardFixtureSource::new(), folder_id)?;
+        if *self.who.lock().unwrap() != FIRST_ACCOUNT {
+            listing.items.retain(|i| !i.is_folder);
+            listing.items.truncate(1);
+            listing.items[0].name = ONLY_THE_SECOND_HAS.to_string();
+        }
+        Ok(listing)
+    }
+    fn storage(&self) -> Option<crate::source::StorageSummary> {
+        None
+    }
+}
+
+fn per_account() -> (Arc<FixtureEngine>, PerAccount, Runtime<State>) {
+    let engine = Arc::new(FixtureEngine::ready());
+    let source = PerAccount {
+        who: Arc::new(std::sync::Mutex::new(FIRST_ACCOUNT.to_string())),
+    };
+    let shell = Shell::fixture_on(engine.clone(), Arc::new(FakePlatform::default()));
+    let mut rt = runtime(state::init_from(shell, Box::new(source.clone()), None));
+    settle(&mut rt);
+    assert_eq!(rt.state.shell.app.account(), Some(FIRST_ACCOUNT));
+    (engine, source, rt)
+}
+
+fn names(rt: &Runtime<State>) -> Vec<String> {
+    rt.state.listing.items.iter().map(|i| i.name.clone()).collect()
+}
+
+/// Another account while the gate stays Ready: the rows are the session's too. The earlier
+/// account's are gone from the state and from the element tree, and the new account's are read.
+#[test]
+fn another_account_under_an_open_gate_sees_its_own_rows_and_none_of_the_earlier_ones() {
+    let (engine, source, mut rt) = per_account();
+    let earlier = names(&rt);
+    assert!(earlier.len() > 3 && !earlier.contains(&ONLY_THE_SECOND_HAS.to_string()));
+    // Inside a folder, so the path and the Back stack are the earlier account's as well.
+    rt.update(|s, _| {
+        let folder = first_folder(s).expect("a folder in the sample");
+        s.open_folder(Some(folder));
+    });
+    settle(&mut rt);
+    let inside = names(&rt);
+
+    *source.who.lock().unwrap() = "user-b".into();
+    engine.set_account("user-b");
+    settle(&mut rt);
+    settle(&mut rt);
+    assert_eq!(rt.state.shell.app.account(), Some("user-b"));
+    assert_eq!(rt.state.shell.app.gate(), GateState::Ready, "the gate never moved");
+    assert_eq!(
+        names(&rt),
+        [ONLY_THE_SECOND_HAS],
+        "the root of the account that is signed in now"
+    );
+    assert!(rt.state.listing.folder.id.is_none(), "at the root");
+    let drawn: Vec<String> = rt
+        .elements()
+        .into_iter()
+        .flat_map(|e| [e.text, e.label].into_iter().flatten())
+        .collect();
+    let leaked: Vec<&String> = drawn
+        .iter()
+        // "Backups" is also the sidebar's own word: it is no file name of an account.
+        .filter(|words| {
+            earlier
+                .iter()
+                .chain(&inside)
+                .filter(|n| n.as_str() != "Backups")
+                .any(|n| words.contains(n.as_str()))
+        })
+        .collect();
+    assert!(leaked.is_empty(), "names of the earlier account are drawn: {leaked:?}");
+    assert!(drawn.iter().any(|w| w.contains(ONLY_THE_SECOND_HAS)));
+}
+
+/// The same when the poll never sees the change happen: a sign-out and the next sign-in are both
+/// first seen by a refresh between polls (the engine's status events refresh the session too).
+#[test]
+fn a_change_of_account_seen_between_polls_still_reads_the_rows_again() {
+    let (engine, source, mut rt) = per_account();
+    let earlier = names(&rt);
+    engine.set_gate(GateState::SignedOut);
+    rt.update(|s, _| {
+        s.shell.refresh();
+    });
+    *source.who.lock().unwrap() = "user-b".into();
+    engine.set_account("user-b");
+    engine.set_gate(GateState::Ready);
+    rt.update(|s, _| {
+        s.shell.refresh();
+    });
+    assert_eq!(names(&rt), earlier, "nothing read yet: no poll ran");
+    settle(&mut rt);
+    settle(&mut rt);
+    assert_eq!(rt.state.shell.app.account(), Some("user-b"));
+    assert_eq!(names(&rt), [ONLY_THE_SECOND_HAS]);
+}
+
+/// Share… on a protected item (a device's backup) is refused before its dialog opens: it says
+/// so with NO Try again, and nothing makes a plain link afterwards, whatever is selected by then.
+#[test]
+fn share_refused_on_a_protected_item_offers_no_try_again_and_never_makes_a_plain_link() {
+    use crate::frames::files::source::{Action, ActionError, FilesFixture};
+    let (_engine, _platform, mut rt) = fixture();
+    let fixture = FilesFixture::default();
+    let calls = fixture.calls.clone();
+    rt.update(move |s, _| {
+        s.source = Box::new(crate::frames::files::source::BoardDrive::sharing(&fixture.edits));
+        s.actions.source = Box::new(fixture);
+    });
+    settle(&mut rt);
+    click(&mut rt, "Backups-row");
+    settle(&mut rt);
+    click(&mut rt, "row-0-date");
+    assert!(rt.state.protects_selection(), "a device's backup is selected");
+    // By the state's own entry (the file menu's and the details panel's Share… both call it).
+    rt.update(|s, tx| s.ask_share(tx));
+    settle(&mut rt);
+    // And the dialog itself refuses a protected item, whoever asks.
+    rt.update(|s, _| assert!(!s.begin_share()));
+    assert!(
+        rt.state.actions.dialog.is_none(),
+        "no Share dialog for a protected item"
+    );
+    assert_eq!(
+        rt.state.live_toast(),
+        Some(crate::frames::files::Toast::Failed(
+            Action::Share,
+            ActionError::Protected
+        ))
+    );
+    assert!(
+        rt.elements().iter().all(|e| e.key.as_deref() != Some("toast-action")),
+        "the refusal offers no Try again"
+    );
+    // Even asked for directly, Try again repeats nothing.
+    rt.update(|s, tx| s.retry(tx));
+    settle(&mut rt);
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "0 calls of the source: {:?}",
+        calls.lock().unwrap()
+    );
+}
+
+/// The sidebar's navigation does not go through `dispatch`: the Files window still closes what
+/// was open in it. A name being typed in a row does not come along to another section.
+#[test]
+fn a_sidebar_click_ends_a_name_being_typed_in_a_row() {
+    let (_engine, _platform, mut rt) = fixture();
+    rt.update(|s, tx| assert!(s.begin_rename(tx)));
+    settle(&mut rt);
+    type_text(&mut rt, "Mine");
+    assert!(rt.state.actions.rename.is_some());
+    rt.update(|s, _| s.sidebar_section = crate::ui::sidebar::SidebarSection::Shared);
+    settle(&mut rt);
+    assert_eq!(
+        registry::group_for(&rt.state.shell.app),
+        FrameGroup::Section(Section::Shared)
+    );
+    assert!(rt.state.actions.rename.is_none(), "the rename ended with the route");
+    assert_eq!(rt.state.actions.name_edit.text, "", "and what was typed is gone");
+}
+
+/// A message that went takes what its Try again held with it.
+#[test]
+fn what_try_again_holds_goes_when_its_message_goes() {
+    use crate::frames::files::source::{Action, ActionError};
+    let (_engine, _platform, mut rt) = fixture();
+    rt.update(|s, _| {
+        let items = vec![s.listing.items[6].clone()];
+        s.actions.retry_share = Some(Share {
+            items,
+            access: Default::default(),
+            expires: Default::default(),
+            password_on: true,
+            password_missing: false,
+            menu: None,
+        });
+        s.actions.retry_upload = Some((None, vec!["notes.txt".into()]));
+        s.actions.toast = Some(crate::frames::files::Toast::Failed(
+            Action::ShareLink,
+            ActionError::Offline,
+        ));
+        // Still showing: nothing goes yet.
+        s.actions.toast_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+    });
+    settle(&mut rt);
+    assert!(rt.state.actions.retry_share.is_some() && rt.state.actions.toast.is_some());
+    rt.update(|s, _| s.actions.toast_until = Some(std::time::Instant::now()));
+    settle(&mut rt);
+    assert!(rt.state.actions.toast.is_none(), "the message is gone from the state");
+    assert!(
+        rt.state.actions.retry_share.is_none(),
+        "and the share it would have reopened"
+    );
+    assert!(
+        rt.state.actions.retry_upload.is_none(),
+        "and the upload it would have repeated"
+    );
+}
+
+// ---- Uploading across a session's end (review of the uploads PR) ----
+
+use crate::frames::files::source::{Call, FilesFixture};
+use crate::frames::files::uploads::PickerKind;
+
+type Calls = Arc<std::sync::Mutex<Vec<Call>>>;
+
+/// The shell's window on the board's sample, with a Files source that records what it is asked.
+fn recording() -> (Arc<FixtureEngine>, Runtime<State>, Calls) {
+    let (engine, _platform, mut rt) = fixture();
+    let fixture = FilesFixture::default();
+    let calls = fixture.calls.clone();
+    rt.update(move |s, _| {
+        s.source = Box::new(crate::frames::files::source::BoardDrive::sharing(&fixture.edits));
+        s.actions.source = Box::new(fixture);
+    });
+    settle(&mut rt);
+    (engine, rt, calls)
+}
+
+fn two_files() -> Vec<std::path::PathBuf> {
+    vec!["a.heic".into(), "b.heic".into()]
+}
+
+fn status_text(rt: &Runtime<State>) -> String {
+    rt.elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("status-text") && !e.exiting)
+        .and_then(|e| e.text)
+        .unwrap_or_default()
+}
+
+/// The uploads live in the SOURCE. When the account leaves (a sign-out, another account) the
+/// source is asked, once, to cancel and forget them: the next account sees no status line, no
+/// panel and no upload of the earlier one. A lock is the same account: its uploads go on.
+#[test]
+fn the_account_that_leaves_takes_its_uploads_with_it_and_a_lock_does_not() {
+    for ending in [Ending::Lock, Ending::SignOut, Ending::OtherAccount] {
+        let (engine, mut rt, calls) = recording();
+        rt.update(|s, tx| assert!(s.upload(None, &two_files(), tx)));
+        settle(&mut rt);
+        assert!(
+            status_text(&rt).starts_with("Uploading"),
+            "{ending:?}: something uploads"
+        );
+        rt.update(|s, _| s.status_pressed());
+        settle(&mut rt);
+        assert!(rt.state.actions.uploads_open);
+        calls.lock().unwrap().clear();
+
+        end(&mut rt, &engine, ending);
+        assert!(!rt.state.actions.uploads_open, "{ending:?}: the panel closed");
+        let forgotten = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| **c == Call::ForgetUploads)
+            .count();
+        if matches!(ending, Ending::Lock) {
+            assert_eq!(forgotten, 0, "a lock cancels nothing");
+            assert!(
+                rt.state.actions.source.uploads().is_some(),
+                "the uploads go on under a lock"
+            );
+            continue;
+        }
+        assert_eq!(forgotten, 1, "{ending:?}: the source is asked once to forget");
+        assert!(
+            rt.state.actions.source.uploads().is_none(),
+            "{ending:?}: nothing uploads"
+        );
+        // The next account's window.
+        engine.set_account("user-b");
+        engine.set_gate(GateState::Ready);
+        settle(&mut rt);
+        settle(&mut rt);
+        assert_eq!(rt.state.shell.app.account(), Some("user-b"));
+        assert!(
+            !status_text(&rt).contains("Uploading"),
+            "{ending:?}: no earlier status line"
+        );
+        assert!(
+            rt.elements()
+                .iter()
+                .all(|e| e.key.as_deref().is_none_or(|k| !k.starts_with("upload"))),
+            "{ending:?}: no element of the earlier account's uploads"
+        );
+    }
+}
+
+/// A picker that was asked for under one session and answers under the next: the answer is
+/// dropped. Its folder is the earlier account's.
+#[test]
+fn a_picker_answer_that_comes_back_under_another_session_uploads_nothing() {
+    // The control: the same answer under the same session uploads.
+    let (_engine, mut rt, calls) = recording();
+    rt.update(|s, _| s.ask_picker(PickerKind::Files));
+    let ask = rt.state.take_picker().expect("the picker was asked for");
+    let same = ask.clone();
+    rt.update(move |s, tx| assert!(s.picked(&same, Some(two_files()), tx)));
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        1,
+        "one upload under the session it was asked in"
+    );
+
+    for ending in [Ending::Lock, Ending::SignOut, Ending::OtherAccount] {
+        let (engine, mut rt, calls) = recording();
+        rt.update(|s, _| s.ask_picker(PickerKind::Files));
+        let ask = rt.state.take_picker().expect("the picker was asked for");
+        end(&mut rt, &engine, ending);
+        engine.set_account("user-b");
+        engine.set_gate(GateState::Ready);
+        settle(&mut rt);
+        settle(&mut rt);
+        calls.lock().unwrap().clear();
+        rt.update(move |s, tx| assert!(!s.picked(&ask, Some(two_files()), tx)));
+        settle(&mut rt);
+        let made: Vec<Call> = calls.lock().unwrap().clone();
+        assert!(
+            made.iter().all(|c| !matches!(c, Call::Upload(..))),
+            "{ending:?}: a late answer uploaded: {made:?}"
+        );
+        assert!(rt.state.actions.source.uploads().is_none());
+    }
+}
+
+/// The session ended (the engine says so; the window keeps its list): a drop, a picked file and
+/// the panel's Try again, Pause all and Cancel upload are refused before the source is asked.
+#[test]
+fn on_a_session_ended_window_no_upload_path_reaches_the_source() {
+    use crate::frames::global::source::{GlobalFixture, board};
+    let (_engine, mut rt, calls) = recording();
+    // Something uploads and a picker is out while the session is still there.
+    rt.update(|s, tx| assert!(s.upload(None, &two_files(), tx)));
+    rt.update(|s, _| s.ask_picker(PickerKind::Files));
+    let ask = rt.state.take_picker().expect("the picker was asked for");
+    settle(&mut rt);
+    calls.lock().unwrap().clear();
+    rt.update(|s, _| {
+        s.global = crate::frames::global::Ui::new(Box::new(GlobalFixture::of(board::signed_out())));
+    });
+    settle(&mut rt);
+    assert!(rt.state.session_ended());
+    let refused_before = rt.state.actions.session.asked;
+
+    let folder = first_folder(&rt.state);
+    rt.update(move |s, tx| {
+        // A drop on the list and on a folder row.
+        assert!(!s.upload(None, &two_files(), tx));
+        assert!(!s.upload(folder.clone(), &two_files(), tx));
+        // The picker's answer.
+        assert!(!s.picked(&ask, Some(two_files()), tx));
+        // The panel.
+        s.retry_one_upload("up-scan", tx);
+        s.pause_uploads(tx);
+        s.cancel_one_upload("up-ponte", tx);
+    });
+    settle(&mut rt);
+    let made: Vec<Call> = calls.lock().unwrap().clone();
+    assert!(made.is_empty(), "the source was asked: {made:?}");
+    assert_eq!(
+        rt.state.actions.session.asked - refused_before,
+        6,
+        "each of the six was refused by the session guard"
+    );
+    assert!(rt.state.actions.toast.is_none(), "a refusal is no failure message");
 }

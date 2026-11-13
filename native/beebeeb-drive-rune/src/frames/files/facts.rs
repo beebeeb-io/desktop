@@ -60,6 +60,9 @@ impl State {
         let Some(Dialog::Versions(item)) = self.actions.dialog.clone() else {
             return;
         };
+        if self.needs_session(tx) {
+            return;
+        }
         self.forget_undo();
         if let Err(why) = self.actions.source.restore_version(&item, version) {
             self.failed(Action::RestoreVersion, why, tx);

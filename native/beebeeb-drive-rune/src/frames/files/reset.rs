@@ -51,24 +51,86 @@ pub fn sync(s: &mut State) {
 }
 
 /// The session ended under the window (lock, sign-out, another account): everything it held of
-/// that session goes. The listing itself is read again by the shell (`on_gate_change`).
-pub fn end_session(s: &mut State) {
+/// that session goes. The rows themselves are read again by the shell (`on_gate_change`, or
+/// [`read_the_root_again`] where the gate did not move).
+///
+/// `Actions` is taken apart field by field, with no `..`: a field added to it does not compile
+/// until it is named here, as something that goes or as something that stays, with the reason.
+pub fn end_session(s: &mut State, account_left: bool) {
     close_dialogs(s);
-    let a = &mut s.actions;
+    let super::Actions {
+        // Stays: the wiring, not the session's state.
+        source,
+        // Closed by `close_dialogs` above.
+        menu: _,
+        dialog: _,
+        rename: _,
+        name_edit: _,
+        name_error: _,
+        share_password: _,
+        toast,
+        toast_until,
+        selection,
+        anchor,
+        sort,
+        undo,
+        // Stays: the ids of board frames that were asked for, no name of a file.
+        intents: _,
+        retry_upload,
+        retry_share,
+        // Stay: the window's size, the two values only a board scene sets, whose disk this is.
+        window: _,
+        board_crop_top: _,
+        board_first_row: _,
+        host: _,
+        forward,
+        made,
+        conflicts_done,
+        protected,
+        typed,
+        picker,
+        drop_hover,
+        uploads_open,
+        upload_menu,
+        session_no,
+        // Dropped by `forget_session_ended_rows` below (PR 372's held rows and its count).
+        session: _,
+        first_load_strip,
+    } = &mut s.actions;
+    // Another session of this window: an answer asked for under the one that ended is dropped.
+    *session_no += 1;
+    // The folder has not loaded under the next session yet.
+    *first_load_strip = false;
+    // The account left (a sign-out, another account): what it was uploading is cancelled and
+    // forgotten by the source, so the next account sees no status line, panel or row of it. A
+    // LOCK is the same account coming back: its uploads go on (the panel says "Continues in the
+    // background"); only the window's own state of them goes.
+    // Asked only when there is something to forget.
+    if account_left && source.uploads().is_some() {
+        source.forget_uploads();
+    }
     // What Try again would repeat: a share names a file, an upload names paths on this PC.
-    a.retry_share = None;
-    a.retry_upload = None;
+    *retry_share = None;
+    *retry_upload = None;
     // What Undo would put back: the earlier session's rows.
-    a.undo.clear();
-    a.toast = None;
-    a.toast_until = None;
-    a.selection.clear();
-    a.anchor = None;
-    a.forward.clear();
-    a.made.clear();
-    a.conflicts_done = 0;
-    a.protected.alert = None;
-    a.typed = super::long_list::Typed::default();
+    undo.clear();
+    *toast = None;
+    *toast_until = None;
+    selection.clear();
+    *anchor = None;
+    forward.clear();
+    made.clear();
+    *conflicts_done = 0;
+    // The open message goes; the section last seen stays (it is the route's, not the session's).
+    protected.alert = None;
+    *typed = super::long_list::Typed::default();
+    // Uploading (`uploads.rs`): a picker that was asked for, a drag over the list, the open panel.
+    *picker = None;
+    *drop_hover = None;
+    *uploads_open = false;
+    *upload_menu = None;
+    // The root's own sort, not the one of the folder the earlier session was in.
+    *sort = source.sort_of(None).unwrap_or_default();
     s.selected = None;
     s.files.back.clear();
     // Search over the window: what was typed, what was narrowed to and the result that was
@@ -90,4 +152,34 @@ pub fn end_session(s: &mut State) {
 /// cannot replace a new listing when the next session starts. The refusal count resets too.
 fn forget_session_ended_rows(s: &mut State) {
     s.actions.session = super::session::Ui::default();
+}
+
+/// The rows of a session that ended under a gate that did not move (another account while it
+/// stayed Ready, or a change the poll did not see happen): dropped first, then the root is read
+/// from the source as it is now.
+pub fn read_the_root_again(s: &mut State) {
+    s.listing.items.clear();
+    s.selected = None;
+    s.files.back.clear();
+    s.actions.forward.clear();
+    (s.listing, s.list_error) = crate::load(s.source.as_ref(), None);
+    s.actions.sort = s.actions.source.sort_of(None).unwrap_or_default();
+    s.apply_sort();
+}
+
+/// A message whose time is over goes from the state too, and what its Try again held goes with
+/// it: the share's items and choices, the upload's paths. `true`: one went.
+pub fn poll(s: &mut State) -> bool {
+    let over = s
+        .actions
+        .toast_until
+        .is_some_and(|until| std::time::Instant::now() >= until);
+    if !over {
+        return false;
+    }
+    s.actions.toast = None;
+    s.actions.toast_until = None;
+    s.actions.retry_share = None;
+    s.actions.retry_upload = None;
+    true
 }

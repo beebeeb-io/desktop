@@ -29,6 +29,7 @@ pub mod sidebar;
 pub mod sorting;
 pub mod source;
 pub mod toolbar;
+pub mod uploads;
 pub mod window;
 
 #[cfg(test)]
@@ -47,6 +48,8 @@ mod review_tests;
 mod session_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod uploads_tests;
 
 use std::collections::BTreeSet;
 
@@ -199,6 +202,16 @@ pub struct Actions {
     pub share_password: rune::TextEdit,
     /// Files answered since Two versions opened (DW-0429): the second reads "2 of 2".
     pub conflicts_done: usize,
+    /// Windows' picker to open (DW-0415, DW-0480): the shell takes it (`State::take_picker`).
+    pub picker: Option<uploads::PickerAsk>,
+    /// Files dragged over the list (DW-0481).
+    pub drop_hover: Option<uploads::DropHover>,
+    /// Uploads is open over the status line (DW-0427), and the row whose menu is open in it.
+    pub uploads_open: bool,
+    pub upload_menu: Option<String>,
+    /// Which session of this window this is: one more at each session's end (`reset.rs`). An
+    /// answer that was asked for under an earlier one (a picker that comes back late) is dropped.
+    pub session_no: u64,
     /// The protected folders: the open message, the section last seen (`protected.rs`).
     pub protected: protected::Ui,
     /// The letters typed in the list, which jump to a name (`long_list.rs`).
@@ -239,6 +252,11 @@ impl Actions {
             host: names::Host::this(),
             share_password: rune::TextEdit::new("").secure(),
             conflicts_done: 0,
+            picker: None,
+            drop_hover: None,
+            uploads_open: false,
+            upload_menu: None,
+            session_no: 0,
             protected: protected::Ui::default(),
             typed: long_list::Typed::default(),
             session: session::Ui::default(),
@@ -439,6 +457,9 @@ impl State {
             "DW-0413" => {
                 self.begin_versions();
             }
+            // Windows draws these two: the request for its picker, with our words on it.
+            "DW-0415" => self.ask_picker(uploads::PickerKind::Files),
+            "DW-0480" => self.ask_picker(uploads::PickerKind::Folder),
             _ => {}
         }
         if flyout {
@@ -937,6 +958,7 @@ impl State {
             self.failed(Action::Upload, why, tx);
             return false;
         }
+        self.actions.drop_hover = None;
         true
     }
 
@@ -975,8 +997,7 @@ impl State {
             "preview" => {
                 self.preview();
             }
-            "share" if self.protects_selection() => self.failed(Action::CopyLink, ActionError::Protected, tx),
-            "share" => self.intent(Intent::Frame("DW-0407")),
+            "share" => self.ask_share(tx),
             "copy-link" => {
                 self.copy_link(tx);
             }
@@ -1161,4 +1182,8 @@ pub const SCENES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-0408", action_scenes::preview),
     ("DW-0408b", action_scenes::no_preview),
     ("DW-0429", action_scenes::two_versions),
+    // Uploads (lane files-actions): a drag over the list, uploads in their folder, the panel.
+    ("DW-0481", action_scenes::drag_over_documents),
+    ("DW-0426", action_scenes::uploading),
+    ("DW-0427", action_scenes::uploads_panel),
 ];
