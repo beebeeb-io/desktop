@@ -12,7 +12,7 @@ const FLYOUT_EXTRAS = (what: string) => `the flyout’s ${what} comes from no li
 const EXPLORER = 'File Explorer, its menus and its toasts are drawn by Windows (the board draws them for reference)'
 
 // ── B10: sign-in ────────────────────────────────────────────────────────────────────────────────────────────────
-const OUT = { sync_status: { logged_in: false } }
+const OUT = { sync_status: { logged_in: false }, auth_gate_state: 'signed_out' }
 const ANNA_EMAIL = 'anna@northwind.studio'
 const signIn = (o: Recipe = {}): Recipe => ({ ...o, q: 'section=files', reads: { ...OUT, last_signed_in_email: ANNA_EMAIL, ...o.reads } })
 const PASSWORD = 'correct horse battery'
@@ -125,8 +125,8 @@ export const WINDOW_STATES: Record<string, Recipe> = {
   'DW-A28': signIn({ answers: { desktop_login: [{ ...OUTCOME, requires_2fa: true }] }, steps: [...submit(), { click: 'btn:Use a backup code' }] }),
   'DW-A29': signIn({ answers: { auth_passkey_sign_in: [{ pending: true }] }, steps: [{ click: 'btn:Use a passkey' }] }),
   'DW-A30': signIn({ answers: { auth_passkey_sign_in: [{ ...OUTCOME, vault_unlocked: false }] }, steps: [{ click: 'btn:Use a passkey' }] }),
-  'DW-0009': { q: 'section=files', reads: { sync_status: { logged_in: true, vault_unlocked: false } } },
-  'DW-0014': { q: 'section=files', reads: { sync_status: { logged_in: true, vault_unlocked: true }, account_subscription: { plan_state: 'none' } } },
+  'DW-0009': { q: 'section=files', reads: { sync_status: { logged_in: true, vault_unlocked: false }, auth_gate_state: 'locked' } },
+  'DW-0014': { q: 'section=files', reads: { sync_status: { logged_in: true, vault_unlocked: true }, account_subscription: { plan_state: 'none' }, auth_gate_state: 'no_plan' } },
 
   // ── B11: create an account ────────────────────────────────────────────────────────────────────────────────────
   'DW-A31': create('email'),

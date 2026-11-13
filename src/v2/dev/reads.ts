@@ -37,6 +37,9 @@ export function boardSnapshot(): PopoverSnapshot {
 }
 
 export const BOARD_READS: Reads = {
+  // The gate moved to Rust (task 2445) and fails closed when the host cannot answer: a browser state is signed in
+  // unless its recipe says otherwise (states-windows.ts: signed_out, locked, no_plan).
+  auth_gate_state: 'ready',
   share_list: { invitations: INVITATIONS, links: BY_ME_LINKS, requests: REQUESTS, pending: BY_ME_PEOPLE.filter((p) => p.pending).map((p) => p.id) },
   share_people: LISBON_PEOPLE,
   share_safety_number: { groups: SAFETY_NUMBER },
