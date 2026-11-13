@@ -20,9 +20,14 @@ use crate::ui::kit;
 use rune::tok::Family;
 use rune::{Color, El, TextStyle, col, el, row};
 
+/// DW-1108 against DW-0101 and DW-0121 (the same state, two pictures on the board): offline, does
+/// the list itself say so (rows that need a connection dimmed and worded, the status line
+/// "Offline")? `false` is the other answer: only the banner says it, as DW-0101 draws.
+pub const LIST_SAYS_OFFLINE: bool = true;
+
 /// Is there no connection (the engine says so)?
 pub fn offline(s: &State) -> bool {
-    s.global.source.status().offline.is_some()
+    LIST_SAYS_OFFLINE && s.global.source.status().offline.is_some()
 }
 
 /// Can this row not be opened now: a file that is only online, with no connection?
@@ -32,7 +37,8 @@ pub fn needs_connection(s: &State, item: &DriveItem) -> bool {
 
 fn loading(s: &State) -> Option<Loading> {
     let status = s.global.source.status();
-    if status.locked || status.signed_out {
+    // Once the card has given way to the strip, the window counts its own way again (DW-0118).
+    if status.locked || status.signed_out || s.actions.first_load_strip {
         return None;
     }
     status.loading

@@ -162,6 +162,12 @@ fn the_first_download_says_what_happens_here_and_the_listed_rows_work() {
     assert_eq!(asked(&calls), [Call::Open(ids(&["budget"]))]);
     assert!(rt.state.actions.toast != Some(Toast::LinkCopied));
     assert!(find(&rt, "ready-card").is_none(), "the card is gone");
+    assert_eq!(
+        text(&rt, "item-count"),
+        "7 items",
+        "and the window counts its rows again"
+    );
+    assert_eq!(text(&rt, "status-text"), "Up to date");
     assert!(
         info(&rt, "banner")
             .label
