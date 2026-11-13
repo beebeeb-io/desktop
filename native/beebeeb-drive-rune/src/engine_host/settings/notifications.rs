@@ -4,12 +4,12 @@
 //! What each value is, and where it comes from:
 //! - "Your account" (Shared with you, File updates, Storage warnings): the account's own alert switches on Beebeeb
 //!   ([`Engine::notification_preferences`]; `share_received`, `file_updated`, `storage_warning`). A change is sent
-//!   once ([`Engine::set_notification_preferences_for`], only the one switch, only under the session the press was
-//!   made in) and shown only after Beebeeb took it. The group and its three rows are always there, in their places
-//!   (so no row moves under the pointer when an answer lands); until the switches are read (or when the read failed)
-//!   [`NotificationsPart::alerts_state`] says so and the pane draws the rows without a switch: never a value that
-//!   was not read, and nothing to press. A press finds its row by its fixed place in the group table, never by what
-//!   is drawn at that position now.
+//!   once ([`Engine::set_notification_preferences_for`], only the one switch, only under the session the switches
+//!   it was pressed on were read in) and shown only after Beebeeb took it. The group and its three rows are always
+//!   there, in their places (so no row moves under the pointer when an answer lands); until the switches are read
+//!   (or when the read failed) a row's `Alert::on` is `None`, [`NotificationsPart::alerts_state`] says which of the
+//!   two, and the pane draws the row without a switch: never a value that was not read, and nothing to press. A
+//!   press finds its row by its fixed place in the group table, never by what is drawn at that position now.
 //!   `new_device_login` is never sent from here: the pane says security alerts cannot be turned off.
 //! - "Allow notifications", "Sync on this PC" and "Backups on this PC": this PC's settings file (`DesktopConfig`'s
 //!   `notify_*` switches), read when the window starts and written merge-only by one writer, the switch alone. A
@@ -20,11 +20,19 @@
 //!   count of the "New" alerts the page shows. Leaving the page marks those seen
 //!   ([`Engine::mark_notifications_read_for`], only the ones shown as new, one call each); a refusal says so and reads
 //!   again, so "New" comes back on exactly the ones Beebeeb still holds unread (the engine stops at the first that
-//!   fails; the ones before it are marked). When that read fails too (no connection is the usual reason for both),
-//!   what was held stays drawn, possibly stale: it is not stamped fresh, so the next opening reads again, and the one
-//!   toast is the mark's. Any other failed read leaves nothing of the account drawn, and
-//!   [`NotificationsPart::recent_state`] says loading or failed: the page never says "No notifications" for a list
-//!   that was not read.
+//!   fails; the ones before it are marked).
+//! - A read that fails. One rule, judged for the read as a whole and the same in whatever order the answers land:
+//!   - Beebeeb ended the session (401) on either half: nothing of the account stays drawn.
+//!   - It follows a write that failed and said so (a mark that was refused, a switch whose result is unknown; no
+//!     connection is the usual reason for both): what was held stays drawn, the write's toast is the only one,
+//!     [`NotificationsPart::unconfirmed`] says it may be out of date and both panes draw that with "Try again".
+//!     It is not stamped fresh, so the next opening reads again.
+//!   - Another answer is still on its way (a write of this session, or a read asked after this one began): it is
+//!     not judged and drops nothing; the read after that answer is judged, and if it fails too what was kept stays,
+//!     said to be possibly out of date.
+//!   - Any other: nothing of the account stays drawn, the toast says so, and
+//!     [`NotificationsPart::recent_state`] / [`NotificationsPart::alerts_state`] say failed (both panes offer "Try
+//!     again"): the page never says "No notifications" for a list that was not read.
 //! - What Windows allows for this app is not read here: `allowed_in_windows` is always `true` (see the PR record).
 //!
 //! When it reads: when Notifications or Recent notifications opens and what it holds is missing or older than
@@ -32,8 +40,9 @@
 //!
 //! Session rule: every answer carries the session ([`Engine::session_turn`]) and the account it was made for; one
 //! that is not the current session's and account's is dropped, every accessor checks before it hands anything out,
-//! a write's session is read at the press, on the window's thread, and the engine sends nothing when the session
-//! has moved on since (the token is copied under that check, never apart from it),
+//! a write is bound to the session of the very value it was pressed on (the switches', the list's: checked and
+//! handed over in one step on the window's thread, never read a second time), and the engine sends nothing when
+//! the session has moved on since (the token is copied under that check, never apart from it),
 //! and the window's poll ([`NotificationsPart::pump`]) drops what it holds the moment the session moves on (a lock,
 //! a sign-out, another sign-in).
 //!
@@ -303,18 +312,18 @@ enum Answer {
         number: u64,
         /// The count of account switch changes Beebeeb had taken when the read began.
         changes: u64,
-        made_for: Option<(SessionGeneration, Option<String>)>,
+        made_for: Option<Stamp>,
         switches: Result<NotificationPreferenceValues, AccountCallError>,
         list: Result<Vec<Listed>, AccountCallError>,
     },
     /// A change of one account switch, for this session, and what Beebeeb holds after it, or why not.
     Switched {
-        made_for: Option<(SessionGeneration, Option<String>)>,
+        made_for: Option<Stamp>,
         result: Result<NotificationPreferenceValues, AccountCallError>,
     },
     /// These notifications were marked seen for this session, or why not.
     Marked {
-        made_for: Option<(SessionGeneration, Option<String>)>,
+        made_for: Option<Stamp>,
         ids: Vec<String>,
         result: Result<(), AccountCallError>,
     },
@@ -327,16 +336,20 @@ fn account_of<C: CredentialStores>(engine: &Engine<C>) -> Option<String> {
     engine.account_email().or_else(|| engine.user_id())
 }
 
-/// The session and account a call on `engine` is made for, taken before it.
-fn stamp<C: CredentialStores>(engine: &Engine<C>) -> (SessionGeneration, Option<String>) {
+/// The session and the account something was made for.
+type Stamp = (SessionGeneration, Option<String>);
+
+/// The session and account a read on `engine` is made for, taken before it.
+fn stamp<C: CredentialStores>(engine: &Engine<C>) -> Stamp {
     (engine.session_turn(), account_of(engine))
 }
 
+fn ended(kind: AccountCallError) -> bool {
+    matches!(kind, AccountCallError::NotSignedIn | AccountCallError::SessionEnded)
+}
+
 /// The stamp, when it is still the engine's after the call: else `None` (the answer is dropped).
-fn still<C: CredentialStores>(
-    engine: &Engine<C>,
-    before: (SessionGeneration, Option<String>),
-) -> Option<(SessionGeneration, Option<String>)> {
+fn still<C: CredentialStores>(engine: &Engine<C>, before: Stamp) -> Option<Stamp> {
     (stamp(engine) == before).then_some(before)
 }
 
@@ -393,12 +406,26 @@ pub(super) struct NotificationsPart<C: CredentialStores> {
     changes: u64,
     /// Marks on their way.
     marking: usize,
-    /// A mark was refused under this session and what Beebeeb holds is being read again: if that read fails too,
-    /// what is held stays (possibly stale) and the mark's toast is the only one.
-    after_mark: Option<SessionGeneration>,
+    /// A write under this session failed and its toast said so (a refused mark, a switch whose result is unknown),
+    /// and what Beebeeb holds is being read again: a read under it that fails for want of an answer keeps what is
+    /// held. Until a read under it lands whole.
+    unconfirmed: Option<SessionGeneration>,
+    /// Such a read failed: what is held is drawn as possibly out of date ([`Self::unconfirmed`]).
+    stale: bool,
+    /// The read on its way was asked for by the person (a pane opened, "Try again"): when it fails and what is
+    /// held stays, the toast says so all the same. A write's failure takes it back: that toast stands alone.
+    loud: bool,
+    /// A read failed while a write was on its way and was not judged: read again when no write is out.
+    recheck: bool,
+    /// The session the writes on their way were sent under (`marking`, `switching` count answers still to come,
+    /// whichever session asked): only a write of the read's own session defers that read's verdict.
+    writes_of: Option<SessionGeneration>,
     /// Test builds: the next write's worker waits for a word down this before it calls the engine.
     #[cfg(test)]
     hold_next_write: Option<mpsc::Receiver<()>>,
+    /// Test builds: the same for the next read.
+    #[cfg(test)]
+    hold_next_read: Option<mpsc::Receiver<()>>,
     toast_next: Option<&'static str>,
     dirty: bool,
     answers: mpsc::Sender<Answer>,
@@ -437,9 +464,15 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             switching: false,
             changes: 0,
             marking: 0,
-            after_mark: None,
+            unconfirmed: None,
+            stale: false,
+            loud: false,
+            recheck: false,
+            writes_of: None,
             #[cfg(test)]
             hold_next_write: None,
+            #[cfg(test)]
+            hold_next_read: None,
             toast_next: None,
             dirty: false,
             answers,
@@ -452,10 +485,13 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
         self.engine.has_session() && session == self.engine.session_turn() && *account == account_of(&self.engine)
     }
 
+    /// What is held, while it is the current session's and account's: the value WITH the session it was read in.
+    fn held_now<'a, T>(&self, held: &'a Option<Held<T>>) -> Option<&'a Held<T>> {
+        held.as_ref().filter(|held| self.is_now(held.session, &held.account))
+    }
+
     fn current<'a, T>(&self, held: &'a Option<Held<T>>) -> Option<&'a T> {
-        held.as_ref()
-            .filter(|held| self.is_now(held.session, &held.account))
-            .map(|held| &held.value)
+        self.held_now(held).map(|held| &held.value)
     }
 
     /// The account's notifications the pane can show, while they are the current session's, with "new" as the
@@ -480,8 +516,8 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
 
     /// The groups the pane draws now: every group of [`GROUPS`] with every one of its rows, always in its place, so
     /// a row never moves under the pointer when an answer lands. An account row whose switch is not read is there
-    /// with a filler `on` (`false`): [`Self::alerts_state`] says the group is not read, and the pane then draws no
-    /// switch for it (never a guessed switch).
+    /// with no value (`on: None`): there is nothing a pane could draw as its switch, and [`Self::alerts_state`]
+    /// says whether it is on its way or failed.
     fn rows(&self) -> Vec<(&'static str, Vec<Alert>)> {
         GROUPS
             .iter()
@@ -491,7 +527,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                     .map(|&(name, says, stored)| Alert {
                         title: name.into(),
                         says: says.into(),
-                        on: self.value_of(stored).unwrap_or(false),
+                        on: self.value_of(stored),
                     })
                     .collect();
                 (*title, rows)
@@ -504,7 +540,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
     fn unread_state(&self) -> ReadState {
         let about_to_ask =
             self.showing && self.engine.has_session() && self.asked_for != Some(self.engine.session_turn());
-        if self.reading.is_some() || self.again || about_to_ask {
+        if self.reading.is_some() || self.again || self.recheck || about_to_ask {
             ReadState::Loading
         } else {
             ReadState::Failed
@@ -533,10 +569,25 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
         }
     }
 
+    /// What is held of the account is drawn but could not be confirmed (a write failed, and so did the read after
+    /// it): it may be out of date. Asked live, as every accessor: only for the session it was said under.
+    pub(super) fn unconfirmed(&self) -> bool {
+        self.stale
+            && self.engine.has_session()
+            && self.unconfirmed == Some(self.engine.session_turn())
+            && (self.current(&self.switches).is_some() || self.current(&self.recent).is_some())
+    }
+
     /// "Try again": read now.
     pub(super) fn reload(&mut self) {
-        self.read();
+        self.read_loud();
         self.dirty = true;
+    }
+
+    /// A read the person asked for (a pane opened, "Try again").
+    fn read_loud(&mut self) {
+        self.loud = true;
+        self.read();
     }
 
     /// Ask Beebeeb for the switches and the list on a worker, unless a read is on its way.
@@ -544,6 +595,8 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
         if !self.engine.has_session() {
             return;
         }
+        // Any read asked for from here on is the one an unjudged failure waits for.
+        self.recheck = false;
         if self.reading.is_some() {
             // What is on its way may have been answered before what asks now: read again when it lands.
             self.again = true;
@@ -552,11 +605,17 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
         self.reads += 1;
         self.asked_for = Some(self.engine.session_turn());
         let (number, changes) = (self.reads, self.changes);
+        #[cfg(test)]
+        let hold = self.hold_next_read.take();
         let started = spawn(
             "settings-notifications",
             &self.engine,
             &self.answers,
             move |engine| {
+                #[cfg(test)]
+                if let Some(hold) = hold {
+                    let _ = hold.recv();
+                }
                 let before = stamp(engine);
                 let switches = engine.notification_preferences().map(|answer| answer.preferences);
                 let list = engine.notifications().map(listed);
@@ -629,14 +688,15 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
 
     /// Send a change of one account switch, on a worker. One at a time: a change while one is on its way waits, and
     /// the toast says so.
-    fn set_account(&mut self, switch: AccountSwitch, on: bool) {
+    /// `before`: the session and account of the switches the press was made on (the held value's own, as
+    /// [`Self::set_alert`] checked it): the engine sends nothing under another.
+    fn set_account(&mut self, switch: AccountSwitch, on: bool, before: Stamp) {
         if self.switching {
             self.toast_next = Some(STILL_SAVING);
             return;
         }
         let update = switch.update(on);
-        // The session of the press, read here on the window's thread: the engine sends nothing under another.
-        let before = stamp(&self.engine);
+        let session = before.0;
         #[cfg(test)]
         let hold = self.hold_next_write.take();
         let started = spawn(
@@ -662,6 +722,9 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             },
         );
         self.switching = started;
+        if started {
+            self.writes_of = Some(session);
+        }
         if !started {
             log("settings: could not start a thread for a notification setting");
             self.toast_next = Some(ALERT_NOT_SAVED);
@@ -671,7 +734,10 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
     /// Drop everything of the account: its switches, its notifications, what was seen.
     fn forget(&mut self) {
         self.again = false;
-        self.after_mark = None;
+        self.unconfirmed = None;
+        self.stale = false;
+        self.loud = false;
+        self.recheck = false;
         self.switches = None;
         self.recent = None;
         self.seen.clear();
@@ -695,21 +761,26 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                 let Some((session, account)) = made_for.filter(|(s, a)| self.is_now(*s, a)) else {
                     return;
                 };
-                self.read_at = Some(Instant::now());
-                // The read after a refused mark, under the session of that mark: one that fails for want of an
-                // answer keeps what is held. (A session Beebeeb ended keeps nothing.) The read that `again` starts
-                // next is that read too.
-                let after_mark = self.after_mark == Some(session);
-                if !self.again {
-                    self.after_mark = None;
+                let kinds = [switches.as_ref().err().copied(), list.as_ref().err().copied()];
+                // Judged for the read as a whole. Beebeeb ended the session on either half: nothing of it stays
+                // drawn, whatever the other half says and whatever came before.
+                if kinds.iter().flatten().any(|kind| ended(*kind)) {
+                    self.forget();
+                    return;
                 }
-                let keeps = |kind: AccountCallError| {
-                    after_mark && !matches!(kind, AccountCallError::NotSignedIn | AccountCallError::SessionEnded)
-                };
-                let mut failed = None;
+                let failed = kinds.iter().flatten().next().copied();
+                // Another answer is on its way (a write, or a read asked after this one began): a failure here is
+                // not judged, so the outcome does not depend on which answer lands first.
+                let write_out = (self.marking > 0 || self.switching) && self.writes_of == Some(session);
+                let later = self.again || write_out;
+                // After a write that failed and said so, under the session of that write.
+                let unconfirmed = self.unconfirmed == Some(session);
+                let keeps = later || unconfirmed;
+                let mut reread = false;
                 match switches {
-                    // A change Beebeeb took after this read began is newer than what the read says.
-                    Ok(_) if changes != self.changes => {}
+                    // A change Beebeeb took after this read began is newer than what the read says: with none
+                    // held (that change was another session's), nothing is known, so it is read again.
+                    Ok(_) if changes != self.changes => reread = self.current(&self.switches).is_none(),
                     Ok(value) => {
                         self.switches = Some(Held {
                             session,
@@ -717,12 +788,8 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                             value,
                         })
                     }
-                    Err(kind) => {
-                        if !keeps(kind) {
-                            self.switches = None;
-                        }
-                        failed = Some(kind);
-                    }
+                    Err(_) if keeps => {}
+                    Err(_) => self.switches = None,
                 }
                 match list {
                     Ok(value) => {
@@ -735,23 +802,40 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                             value,
                         });
                     }
-                    Err(kind) => {
-                        if !keeps(kind) {
-                            self.recent = None;
+                    Err(_) if keeps => {}
+                    Err(_) => self.recent = None,
+                }
+                match failed {
+                    None => {
+                        self.read_at = Some(Instant::now());
+                        // With a read still to come (asked for after this one began, by a write that failed), that
+                        // one is the read after the write: what was said stands until it lands.
+                        if !self.again {
+                            self.unconfirmed = None;
+                            self.stale = false;
+                            self.loud = false;
                         }
-                        failed = failed.or(Some(kind));
+                    }
+                    // Never stamped fresh: the next opening reads again (what was kept may be stale).
+                    Some(kind) => {
+                        self.read_at = None;
+                        log(format!("settings: the notifications did not load ({kind})"));
+                        if later {
+                            // The write's answer reads again (a read asked for meanwhile does so by itself).
+                            self.recheck = write_out;
+                        } else {
+                            // Kept after a failed write: that write's words stand, and the panes say "may be out
+                            // of date"; only a read the person asked for says it failed too.
+                            self.stale = unconfirmed;
+                            if !unconfirmed || self.loud {
+                                *toast = Some(NOT_LOADED);
+                            }
+                            self.loud = false;
+                        }
                     }
                 }
-                if let Some(kind) = failed {
-                    // Never stamped fresh: the next opening reads again (what was kept may be stale).
-                    self.read_at = None;
-                    if !matches!(kind, AccountCallError::NotSignedIn | AccountCallError::SessionEnded) {
-                        log(format!("settings: the notifications did not load ({kind})"));
-                        // After a refused mark the mark's words stand: one toast for the one thing that went wrong.
-                        if !after_mark {
-                            *toast = Some(NOT_LOADED);
-                        }
-                    }
+                if reread {
+                    self.read();
                 }
             }
             Answer::Switched { made_for, result } => {
@@ -767,6 +851,10 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                                 value,
                             });
                             *toast = Some(ALERT_SAVED);
+                            // The switches are Beebeeb's own again; what else was unsure is asked for now.
+                            if self.stale {
+                                self.read();
+                            }
                         }
                     }
                     Err(kind) => {
@@ -779,32 +867,38 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                                 AccountCallError::NotSignedIn => {}
                                 _ => {
                                     // It may have landed: say the result is unknown and read what Beebeeb has.
+                                    // If that read fails too, what is held stays, said to be unconfirmed.
                                     *toast = Some(ALERT_UNKNOWN);
+                                    self.unconfirmed = mine.map(|(session, _)| session);
+                                    self.loud = false;
                                     self.read();
                                 }
                             }
                         }
                     }
                 }
+                self.read_unjudged();
             }
             Answer::Marked { made_for, ids, result } => {
                 self.marking = self.marking.saturating_sub(1);
-                if !made_for.as_ref().is_some_and(|(s, a)| self.is_now(*s, a)) {
-                    return;
-                }
-                if let Err(kind) = result {
+                let mine = made_for.as_ref().is_some_and(|(s, a)| self.is_now(*s, a));
+                if let (true, Err(kind)) = (mine, result) {
                     log(format!("settings: notifications were not marked seen ({kind})"));
                     // The engine stops at the first that fails, so the ones before it ARE marked on Beebeeb. "New"
                     // comes back on all of them until a read (asked now) says which ones Beebeeb still holds unread.
                     for id in &ids {
                         self.seen.remove(id);
                     }
-                    self.after_mark = made_for.map(|(session, _)| session);
-                    self.read();
-                    if !matches!(kind, AccountCallError::NotSignedIn | AccountCallError::SessionEnded) {
+                    // Said: if the read fails too, what is held stays, said to be unconfirmed. A session Beebeeb
+                    // ended says nothing here and keeps nothing: the read's own failure is then drawn.
+                    if !ended(kind) {
                         *toast = Some(NOT_MARKED);
+                        self.unconfirmed = made_for.map(|(session, _)| session);
+                        self.loud = false;
                     }
+                    self.read();
                 }
+                self.read_unjudged();
             }
             Answer::Pc { switch, on, saved } => {
                 let slot = switch.slot();
@@ -817,6 +911,17 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                     *toast = Some(SWITCH_NOT_SAVED);
                 }
             }
+        }
+    }
+
+    /// A read failed while a write was on its way and was not judged: with no write out any more, read again (the
+    /// read whose failure is judged).
+    fn read_unjudged(&mut self) {
+        if self.recheck && self.marking == 0 && !self.switching && self.engine.has_session() {
+            // What was kept while the write was out stays if this read fails too, said to be possibly out of
+            // date: a failure that was not judged then is not a reason to drop what a write has just confirmed.
+            self.unconfirmed = Some(self.engine.session_turn());
+            self.read();
         }
     }
 
@@ -834,7 +939,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
         let held = self.current(&self.switches).is_some() && self.current(&self.recent).is_some();
         let fresh = held && self.read_at.is_some_and(|at| at.elapsed() < FRESH_FOR);
         if !fresh {
-            self.read();
+            self.read_loud();
         }
     }
 
@@ -923,11 +1028,18 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
         let Some(&(_, _, stored)) = GROUPS.get(group).and_then(|(_, rows)| rows.get(index)) else {
             return;
         };
-        if self.value_of(stored).is_none_or(|now| now == on) {
-            return;
-        }
         match stored {
-            Stored::Account(switch) => self.set_account(switch, on),
+            Stored::Account(switch) => {
+                // The value and the session it was read in, in one step: the change is bound to that session,
+                // never to one read again after the check.
+                let Some(held) = self.held_now(&self.switches) else {
+                    return;
+                };
+                if switch.of(&held.value) != on {
+                    let before = (held.session, held.account.clone());
+                    self.set_account(switch, on, before);
+                }
+            }
             Stored::Pc(switch) => self.set_pc(switch, on),
         }
     }
@@ -935,18 +1047,23 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
     /// The page was left: what it showed as new is seen. Sent once, on a worker; the page stops saying "New" at
     /// once; a refusal is a toast and a read, after which only what Beebeeb still holds unread says "New" again.
     pub(super) fn mark_recent_seen(&mut self) {
-        let ids: Vec<String> = self
-            .shown()
-            .into_iter()
-            .filter(|(_, new)| *new)
-            .map(|(listed, _)| listed.id)
+        // The list and the session it was read in, in one step: the mark is bound to the session whose page
+        // showed these, never to one read again after the check.
+        let Some(held) = self.held_now(&self.recent) else {
+            return;
+        };
+        let before = (held.session, held.account.clone());
+        let ids: Vec<String> = held
+            .value
+            .iter()
+            .filter(|listed| listed.unread && !self.seen.contains(&listed.id))
+            .map(|listed| listed.id.clone())
             .collect();
         if ids.is_empty() {
             return;
         }
         let sent = ids.clone();
-        // The session whose page showed these, read here on the window's thread (as a switch's press).
-        let before = stamp(&self.engine);
+        let session = before.0;
         #[cfg(test)]
         let hold = self.hold_next_write.take();
         let started = spawn(
@@ -972,6 +1089,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             },
         );
         if started {
+            self.writes_of = Some(session);
             self.marking += 1;
             self.seen.extend(ids);
             self.dirty = true;
@@ -994,6 +1112,14 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
     pub(super) fn hold_next_write(&mut self) -> mpsc::Sender<()> {
         let (release, held) = mpsc::channel();
         self.hold_next_write = Some(held);
+        release
+    }
+
+    /// The next read waits on its worker, before it calls the engine, until the returned sender is sent to or
+    /// dropped.
+    pub(super) fn hold_next_read(&mut self) -> mpsc::Sender<()> {
+        let (release, held) = mpsc::channel();
+        self.hold_next_read = Some(held);
         release
     }
 }

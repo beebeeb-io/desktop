@@ -447,6 +447,105 @@ fn the_accounts_alert_switches_are_read_and_one_change_is_sent_alone() {
     assert_eq!(write(&engine).expect_err("no answer"), AccountCallError::Offline);
 }
 
+/// The two notification writes a window sends, bound to the session of their press: sent once under that session;
+/// after a lock and an unlock (the same account, its token still good) nothing is sent; and while a sign-out is
+/// ENDING the session (its number has moved, the session and its token are still in memory) nothing is sent
+/// either, even for a caller that names the number it has now: the question "is it this session" and the copy of
+/// its token are one step that no session change can be half-way through.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_notification_write_is_sent_only_under_its_own_session_and_never_while_it_is_ending() {
+    let account = account("alerts-turn@example.eu");
+    let engine = Arc::new(signed_in(&account));
+    let sent = || account.writes.lock().unwrap().clone();
+    let update = NotificationPreferencesUpdate {
+        storage_warning: Some(true),
+        ..Default::default()
+    };
+    let ids = ["n-2".to_string()];
+
+    let pressed_under = engine.session_turn();
+    let _ = engine.lock();
+    engine
+        .unlock_with_phrase(Zeroizing::new(account.phrase.clone()))
+        .expect("the phrase unlocks");
+    assert_eq!(
+        engine
+            .set_notification_preferences_for(pressed_under, &update)
+            .expect_err("the session moved on"),
+        AccountCallError::NotSignedIn
+    );
+    assert_eq!(
+        engine.mark_notifications_read_for(pressed_under, &ids),
+        Err(AccountCallError::NotSignedIn)
+    );
+    assert!(sent().is_empty(), "nothing was sent after the unlock");
+
+    // Under the session that is still there: each sent once, as pressed.
+    let now = engine.session_turn();
+    let after = engine
+        .set_notification_preferences_for(now, &update)
+        .expect("the session is the one of the press");
+    assert!(after.preferences.storage_warning);
+    engine
+        .mark_notifications_read_for(now, &ids)
+        .expect("the session is the one of the page");
+    assert_eq!(
+        sent(),
+        [
+            (
+                "PUT /api/v1/notifications/preferences".to_string(),
+                json!({ "storage_warning": true })
+            ),
+            ("PATCH /api/v1/notifications/n-2".to_string(), json!({ "read": true })),
+        ]
+    );
+
+    // While a sign-out is ending the session: asked from inside it, under the number the session still has.
+    let (during, said) = (engine.clone(), Arc::new(Mutex::new(None)));
+    let (heard, change, marks) = (said.clone(), update.clone(), ids.clone());
+    engine.during_next_forget_for_test(Box::new(move || {
+        let still = during.session_turn();
+        let switched = during.set_notification_preferences_for(still, &change).map(|_| ());
+        let marked = during.mark_notifications_read_for(still, &marks);
+        *heard.lock().unwrap() = Some((still, switched, marked));
+    }));
+    engine.sign_out_keeping_local_data().expect("signed out");
+    let (still, switched, marked) = said.lock().unwrap().take().expect("the hook ran");
+    assert_ne!(
+        still, now,
+        "the session's number had moved, and both writes named the number it has NOW, with the session still in \
+         memory: only the session-write lock can have refused them"
+    );
+    assert_eq!(switched, Err(AccountCallError::NotSignedIn), "a session that is ending");
+    assert_eq!(marked, Err(AccountCallError::NotSignedIn), "a session that is ending");
+    assert_eq!(sent().len(), 2, "and nothing more was sent");
+}
+
+/// The session-bound notification writes against the fake on every other answer: each kind its own, never the body.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_session_bound_notification_write_fails_by_kind() {
+    let account = account("alerts-turn-kinds@example.eu");
+    let engine = signed_in(&account);
+    let update = NotificationPreferencesUpdate {
+        file_updated: Some(false),
+        ..Default::default()
+    };
+    let ids = ["n-2".to_string()];
+    let write =
+        |engine: &Engine<MemoryCredentials>| engine.set_notification_preferences_for(engine.session_turn(), &update);
+    let mark = |engine: &Engine<MemoryCredentials>| engine.mark_notifications_read_for(engine.session_turn(), &ids);
+    refusals("set_notification_preferences_for", &account, &engine, write);
+    refusals("mark_notifications_read_for", &account, &engine, mark);
+    not_signed_in("set_notification_preferences_for", &account, write);
+    not_signed_in("mark_notifications_read_for", &account, mark);
+    assert!(account.writes.lock().unwrap().is_empty(), "none of them was stored");
+    gone(account);
+    assert_eq!(write(&engine).expect_err("no answer"), AccountCallError::Offline);
+    assert_eq!(mark(&engine).expect_err("no answer"), AccountCallError::Offline);
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn notifications_are_marked_seen_one_by_one_and_one_that_is_gone_counts_as_seen() {

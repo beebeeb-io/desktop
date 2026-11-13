@@ -603,6 +603,9 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
     fn alerts_state(&self, group: usize) -> ReadState {
         self.alerts.alerts_state(group)
     }
+    fn notifications_unconfirmed(&self) -> bool {
+        self.alerts.unconfirmed()
+    }
     fn reload_notifications(&mut self) {
         self.alerts.reload();
     }
