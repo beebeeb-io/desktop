@@ -196,6 +196,30 @@ fn everything_that_needs_the_session_is_refused_and_no_source_is_asked() {
             let (x, y) = centre(rt, "row-1-date");
             rt.drop_files(vec![std::path::PathBuf::from("a.txt")], Some((x, y)));
         }),
+        ("open a photo (Enter)", |rt| {
+            click(rt, "row-7-date");
+            press(rt, Key::Enter, NONE);
+        }),
+        ("double-click a PDF", |rt| {
+            rt.update(|s, tx| {
+                s.open_row(6, tx);
+            });
+            settle(rt);
+        }),
+        ("double-click a photo", |rt| {
+            rt.update(|s, tx| {
+                s.open_row(7, tx);
+            });
+            settle(rt);
+        }),
+        ("menu: Open a photo", |rt| {
+            click(rt, "row-7-date");
+            pick(rt, MenuKind::File, "open");
+        }),
+        ("open a .key file (Enter)", |rt| {
+            click(rt, "row-9-date");
+            press(rt, Key::Enter, NONE);
+        }),
         ("the sidebar's Backups (a folder to read)", |rt| {
             click(rt, "Backups-row")
         }),
@@ -227,6 +251,7 @@ fn everything_that_needs_the_session_is_refused_and_no_source_is_asked() {
         assert_eq!(s.listing.items.len(), 11, "{name}");
         assert_eq!(s.listing.folder.id, None, "{name}");
         assert!(s.actions.dialog.is_none() && s.actions.rename.is_none(), "{name}");
+        assert!(s.viewer.ui.is_none(), "{name}: a viewer opened");
         assert!(s.actions.toast.is_none(), "{name}: {:?}", s.actions.toast);
         assert!(s.actions.intents.is_empty(), "{name}: {:?}", s.actions.intents);
         assert!(s.global.blocked_preview.is_none(), "{name}");
@@ -236,12 +261,20 @@ fn everything_that_needs_the_session_is_refused_and_no_source_is_asked() {
         );
         refused += 1;
     }
-    assert_eq!(refused, 36);
-    // The same ways with a session: the first one does reach the source (the guard is what refuses).
+    assert_eq!(refused, 41);
+    // The same ways with a session: the PDF's Enter now opens the viewer (no source call).
     let mut with = app(false);
     press(&mut with.rt, Key::Enter, NONE);
-    assert_eq!(asked(&with.calls).len(), 1);
+    assert!(with.rt.state.viewer.ui.is_some(), "the PDF opened in the viewer");
+    assert!(asked(&with.calls).is_empty(), "no source call: the viewer handles it");
     assert_eq!(with.rt.state.actions.session.asked, 0);
+    // A file without a viewer (.key) still reaches the source (the guard is what refuses).
+    let mut with_key = app(false);
+    click(&mut with_key.rt, "row-9-date");
+    press(&mut with_key.rt, Key::Enter, NONE);
+    assert_eq!(asked(&with_key.calls).len(), 1, "the .key file called source.open");
+    assert!(with_key.rt.state.viewer.ui.is_none(), "no viewer for .key");
+    assert_eq!(with_key.rt.state.actions.session.asked, 0);
 }
 
 #[test]

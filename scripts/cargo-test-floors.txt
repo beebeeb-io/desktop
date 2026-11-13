@@ -23,3 +23,10 @@ linux 1760 deps/beebeeb_engine-
 windows 1670 deps/beebeeb_engine-
 macos 1830 deps/beebeeb_engine-
 linux 18 deps/beebeeb_drive-
+# The Office sandbox crate (2026-11-13, Windows build VM): library 13 on Windows (12 rules + the profile clean-up),
+# 13 on Linux (12 rules + "nothing is started"); native tests 16 on Windows; 1 on Linux and macOS (fail closed).
+# Exact counts, no margin: every test is a security claim.
+windows 13 deps/beebeeb_office_sandbox-
+linux 13 deps/beebeeb_office_sandbox-
+windows 16 deps/sandbox-
+linux 1 deps/sandbox-

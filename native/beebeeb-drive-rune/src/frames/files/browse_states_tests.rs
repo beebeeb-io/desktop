@@ -76,16 +76,29 @@ fn offline_a_dimmed_file_says_it_needs_a_connection_and_the_rest_opens() {
     click(&mut rt, "row-6-date");
     press(&mut rt, Key::Enter, NONE);
     assert!(asked(&calls).is_empty(), "{:?}", asked(&calls));
+    assert!(
+        rt.state.viewer.ui.is_none(),
+        "online-only PDF must not reach the viewer"
+    );
     assert_eq!(
         rt.state.global.blocked_preview,
         Some(("contract".to_string(), "Contract draft.pdf".to_string()))
     );
     assert!(rt.state.actions.toast.is_none());
     press(&mut rt, Key::Escape, NONE);
-    // Harbour.heic is on this PC: it opens.
+    // Harbour.heic is on this PC: it opens in the viewer (no source call).
     click(&mut rt, "row-7-date");
     press(&mut rt, Key::Enter, NONE);
-    assert_eq!(asked(&calls), [Call::Open(ids(&["harbour"]))]);
+    assert!(rt.state.viewer.ui.is_some(), "the photo opened in the viewer");
+    assert!(asked(&calls).is_empty(), "the viewer handles it, no source call");
+    // Back to the list: drop the viewer's state and leave the file route.
+    rt.update(|s, _| {
+        if let Some(mut ui) = s.viewer.ui.take() {
+            ui.cancel();
+        }
+        crate::shell::host::dispatch(s, crate::shell::app::Event::Escape);
+    });
+    settle(&mut rt);
     // A folder that is only online is still browsed (the list is on this PC).
     click(&mut rt, "row-3-date");
     press(&mut rt, Key::Enter, NONE);
@@ -105,6 +118,17 @@ fn offline_a_dimmed_file_says_it_needs_a_connection_and_the_rest_opens() {
     assert_eq!(dim, online_only);
     assert_eq!((dim.len(), inside.len()), (4, 7));
     assert!(!dim.contains(&"Tickets.pdf"));
+    // An online-only photo (Alfama.heic, row 3) must not reach a viewer while offline.
+    click(&mut rt, "row-3-date");
+    press(&mut rt, Key::Enter, NONE);
+    assert!(
+        rt.state.viewer.ui.is_none(),
+        "online-only photo must not open in the viewer"
+    );
+    assert!(
+        rt.state.global.blocked_preview.is_some(),
+        "the panel says it needs a connection"
+    );
 }
 
 #[test]
