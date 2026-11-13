@@ -212,6 +212,13 @@ fn a_page_is_never_rendered_past_the_pixel_limits_whatever_its_box_says() {
         "a tall page: by its pixels or its side"
     );
     assert!(within(100.0, 14_400.0) * 14_400.0 <= PAGE_SIDE_MAX + 0.5);
+    // A page five and a half times as tall as wide: within the side limit at the viewer's width, and past the
+    // pixel limit there, so the pixel limit alone holds it.
+    let tall = within(200.0, 1_100.0);
+    assert!(
+        tall < PAGE_WIDTH_PX / 200.0 && 1_100.0 * tall < PAGE_SIDE_MAX - 1.0,
+        "{tall}"
+    );
     for (width, height) in [(0.0, 100.0), (100.0, 0.5), (f32::NAN, 10.0), (f32::INFINITY, 10.0)] {
         assert_eq!(scale_for(width, height), None, "{width} x {height}");
     }
@@ -241,6 +248,11 @@ fn only_the_newest_page_waiting_is_rendered_and_a_page_that_is_not_there_is_said
 fn a_cancelled_worker_renders_and_delivers_nothing_and_ends_when_the_asker_goes() {
     let document = open(sample_pdf(2, 300, 300)).unwrap();
     assert!(served(&document, &[1], true).is_empty());
+    // Not rendered and then held back: the renderer was never asked (a page can take seconds, and the document
+    // is to leave memory when its session does).
+    assert_eq!(document.renders.load(Ordering::SeqCst), 0);
+    assert_eq!(served(&document, &[1], false).len(), 1);
+    assert_eq!(document.renders.load(Ordering::SeqCst), 1);
     // Nothing asked, the asker gone: `serve` returns (this test would hang otherwise).
     assert!(served(&document, &[], false).is_empty());
 }

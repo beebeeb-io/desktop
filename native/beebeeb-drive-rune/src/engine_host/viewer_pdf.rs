@@ -88,6 +88,9 @@ impl std::fmt::Debug for Rendered {
 /// An open PDF, on the thread that opened it.
 pub struct Document {
     pdf: Pdf,
+    /// How many pages were handed to the renderer (a test asks that a cancelled worker renders none).
+    #[cfg(test)]
+    renders: std::sync::atomic::AtomicU32,
 }
 
 /// The scale a page of `width` x `height` points is rendered at: [`PAGE_WIDTH_PX`] wide, less when that would
@@ -129,7 +132,11 @@ impl Document {
         if pages > PAGES_MAX {
             return Err(NotOpened::TooLong { pages });
         }
-        Ok(Document { pdf })
+        Ok(Document {
+            pdf,
+            #[cfg(test)]
+            renders: std::sync::atomic::AtomicU32::new(0),
+        })
     }
 
     pub fn pages(&self) -> u32 {
@@ -203,6 +210,8 @@ impl Document {
         let page = pages.get(usize::try_from(page.checked_sub(1)?).ok()?)?;
         let (width, height) = page.render_dimensions();
         let scale = scale_for(width, height)?;
+        #[cfg(test)]
+        self.renders.fetch_add(1, Ordering::SeqCst);
         let pixmap = hayro::render(
             page,
             cache,
