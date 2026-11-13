@@ -54,6 +54,8 @@ fn end(rt: &mut Runtime<State>, engine: &FixtureEngine, ending: Ending) {
 /// One piece of the Files window's state: how it gets there, and whether it is still there.
 struct Piece {
     name: &'static str,
+    /// The shell's own dialog: its route machine keeps it across a lock, by its rule.
+    shell_keeps_it_across_a_lock: bool,
     put: fn(&mut Runtime<State>),
     held: fn(&State) -> bool,
 }
@@ -74,16 +76,19 @@ fn first_folder(s: &State) -> Option<String> {
 
 const PIECES: &[Piece] = &[
     Piece {
+        shell_keeps_it_across_a_lock: false,
         name: "the Share dialog",
         put: share_with_a_password,
         held: |s| s.actions.dialog.is_some(),
     },
     Piece {
+        shell_keeps_it_across_a_lock: false,
         name: "the link's password",
         put: share_with_a_password,
         held: |s| !s.actions.share_password.text.is_empty(),
     },
     Piece {
+        shell_keeps_it_across_a_lock: false,
         name: "what Try again shares",
         put: |rt| {
             rt.update(|s, _| {
@@ -101,6 +106,7 @@ const PIECES: &[Piece] = &[
         held: |s| s.actions.retry_share.is_some(),
     },
     Piece {
+        shell_keeps_it_across_a_lock: false,
         name: "what Try again uploads",
         put: |rt| {
             rt.update(|s, _| s.actions.retry_upload = Some((None, vec!["notes.txt".into()])));
@@ -108,6 +114,7 @@ const PIECES: &[Piece] = &[
         held: |s| s.actions.retry_upload.is_some(),
     },
     Piece {
+        shell_keeps_it_across_a_lock: false,
         name: "what Undo puts back",
         put: |rt| {
             rt.update(|s, tx| assert!(s.trash_selection(tx)));
@@ -117,6 +124,7 @@ const PIECES: &[Piece] = &[
         held: |s| !s.actions.undo.is_empty(),
     },
     Piece {
+        shell_keeps_it_across_a_lock: false,
         name: "the toast",
         put: |rt| {
             rt.update(|s, tx| assert!(s.trash_selection(tx)));
@@ -126,6 +134,7 @@ const PIECES: &[Piece] = &[
         held: |s| s.actions.toast.is_some(),
     },
     Piece {
+        shell_keeps_it_across_a_lock: false,
         name: "the selected rows",
         put: |rt| {
             rt.update(|s, _| {
@@ -136,6 +145,7 @@ const PIECES: &[Piece] = &[
         held: |s| !s.actions.selection.is_empty() || s.actions.anchor.is_some() || s.selected.is_some(),
     },
     Piece {
+        shell_keeps_it_across_a_lock: false,
         name: "where Back goes",
         put: |rt| {
             rt.update(|s, _| {
@@ -148,6 +158,7 @@ const PIECES: &[Piece] = &[
         held: |s| !s.files.back.is_empty(),
     },
     Piece {
+        shell_keeps_it_across_a_lock: false,
         name: "where Forward goes",
         put: |rt| {
             rt.update(|s, _| {
@@ -162,6 +173,7 @@ const PIECES: &[Piece] = &[
         held: |s| !s.actions.forward.is_empty(),
     },
     Piece {
+        shell_keeps_it_across_a_lock: false,
         name: "the Move to dialog",
         put: |rt| {
             rt.update(|s, tx| assert!(s.begin_move(tx)));
@@ -170,6 +182,7 @@ const PIECES: &[Piece] = &[
         held: |s| s.actions.dialog.is_some(),
     },
     Piece {
+        shell_keeps_it_across_a_lock: false,
         name: "the name being typed in a row",
         put: |rt| {
             rt.update(|s, tx| assert!(s.begin_rename(tx)));
@@ -180,6 +193,7 @@ const PIECES: &[Piece] = &[
         held: |s| s.actions.rename.is_some() || !s.actions.name_edit.text.is_empty(),
     },
     Piece {
+        shell_keeps_it_across_a_lock: false,
         name: "the New folder dialog and its name",
         put: |rt| {
             rt.update(|s, _| assert!(s.begin_new_folder()));
@@ -188,6 +202,7 @@ const PIECES: &[Piece] = &[
         held: |s| s.actions.dialog.is_some() || !s.actions.name_edit.text.is_empty(),
     },
     Piece {
+        shell_keeps_it_across_a_lock: false,
         name: "the Preview and its page",
         put: |rt| {
             press(rt, Key::Text(" ".into()), Mods::default());
@@ -196,6 +211,7 @@ const PIECES: &[Piece] = &[
         held: |s| s.actions.dialog.is_some(),
     },
     Piece {
+        shell_keeps_it_across_a_lock: false,
         name: "an open menu",
         put: |rt| {
             press(rt, Key::Function(10), shift());
@@ -204,6 +220,7 @@ const PIECES: &[Piece] = &[
         held: |s| s.actions.menu.is_some(),
     },
     Piece {
+        shell_keeps_it_across_a_lock: false,
         name: "the folders made and the files answered",
         put: |rt| {
             rt.update(|s, _| {
@@ -213,6 +230,66 @@ const PIECES: &[Piece] = &[
             });
         },
         held: |s| !s.actions.made.is_empty() || s.actions.conflicts_done != 0,
+    },
+    Piece {
+        shell_keeps_it_across_a_lock: false,
+        name: "when the toast goes",
+        put: |rt| {
+            rt.update(|s, _| {
+                s.actions.toast_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+            });
+        },
+        held: |s| s.actions.toast_until.is_some(),
+    },
+    Piece {
+        shell_keeps_it_across_a_lock: false,
+        name: "a refused name",
+        put: |rt| {
+            rt.update(|s, _| {
+                s.actions.name_error = Some(("Lisbon".into(), crate::frames::files::names::NameError::Empty));
+            });
+        },
+        held: |s| s.actions.name_error.is_some(),
+    },
+    Piece {
+        shell_keeps_it_across_a_lock: false,
+        name: "the message of a protected folder",
+        put: |rt| {
+            rt.update(|s, _| {
+                s.actions.protected.alert = Some(crate::frames::files::protected::Words {
+                    title: "Backups can't be renamed".into(),
+                    body: "It holds the backups of Anna's iPhone.".into(),
+                });
+            });
+        },
+        held: |s| s.actions.protected.alert.is_some(),
+    },
+    Piece {
+        shell_keeps_it_across_a_lock: false,
+        name: "Search: the words typed, the narrowing, the selected result",
+        put: |rt| {
+            rt.update(|s, tx| {
+                crate::frames::search::open(s, tx);
+                s.search = rune::TextEdit::new("contract");
+                s.frames.find.selected = Some("contract".into());
+            });
+            settle(rt);
+            assert!(rt.state.frames.find.open, "Search is open");
+            assert_eq!(rt.state.search.text, "contract");
+        },
+        held: |s| s.frames.find.open || !s.search.text.is_empty() || s.frames.find.selected.is_some(),
+    },
+    Piece {
+        shell_keeps_it_across_a_lock: true,
+        name: "the shell's Two versions dialog",
+        put: |rt| {
+            rt.update(|s, _| {
+                dispatch(s, Event::Request(Intent::ReviewConflict { file: None }));
+            });
+            settle(rt);
+            assert!(rt.state.shell.app.dialog().is_some());
+        },
+        held: |s| s.shell.app.dialog().is_some(),
     },
 ];
 
@@ -228,14 +305,21 @@ fn shift() -> Mods {
 #[test]
 fn every_ending_of_a_session_takes_every_piece_of_the_files_window_with_it() {
     let mut cases = 0;
+    let mut kept_by_the_shell = 0;
     for ending in [Ending::Lock, Ending::SignOut, Ending::OtherAccount] {
         for piece in PIECES {
             let (engine, _platform, mut rt) = fixture();
             (piece.put)(&mut rt);
             assert!((piece.held)(&rt.state), "{}: not set up", piece.name);
             end(&mut rt, &engine, ending);
+            let lock = matches!(ending, Ending::Lock);
+            if lock && piece.shell_keeps_it_across_a_lock {
+                cases += 1;
+                kept_by_the_shell += 1;
+                continue;
+            }
             assert!(!(piece.held)(&rt.state), "{ending:?}: {} survived", piece.name);
-            if matches!(ending, Ending::Lock) {
+            if lock {
                 engine.set_gate(GateState::Ready);
                 settle(&mut rt);
                 settle(&mut rt);
@@ -249,7 +333,11 @@ fn every_ending_of_a_session_takes_every_piece_of_the_files_window_with_it() {
             cases += 1;
         }
     }
-    assert_eq!(cases, 3 * 15, "every ending × every piece ran");
+    assert_eq!(cases, 3 * 20, "every ending × every piece ran");
+    assert_eq!(
+        kept_by_the_shell, 1,
+        "one case is the shell's rule, not this window's: Two versions across a lock"
+    );
 }
 
 /// A lock with the link's password on screen: the dialog and the password are gone, and the

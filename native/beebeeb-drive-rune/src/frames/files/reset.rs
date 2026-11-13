@@ -8,7 +8,8 @@
 //!   screen to come back with it.
 //! * [`end_session`], when the session's gate closes or another account is signed in (the app
 //!   locked, the account signed out): the WHOLE window state of the session goes. Nothing of the
-//!   earlier session is drawn, kept for Try again, or put back by Undo under the next one.
+//!   earlier session is drawn, kept for Try again, or put back by Undo under the next one. That
+//!   includes Search over the window.
 //!
 //! The password of a link (`Actions::share_password`) is a secure `rune::TextEdit`: `clear`
 //! zeroizes its buffer and its history, and the edit zeroizes again when it is dropped. Both
@@ -70,6 +71,17 @@ pub fn end_session(s: &mut State) {
     a.typed = super::long_list::Typed::default();
     s.selected = None;
     s.files.back.clear();
+    // Search over the window: what was typed, what was narrowed to and the result that was
+    // selected are the earlier session's. Its source stays: that is wiring, not session state.
+    s.search = rune::TextEdit::new("");
+    let find = &mut s.frames.find;
+    find.open = false;
+    find.selected = None;
+    find.narrow = crate::frames::search::source::Narrow::All;
+    find.pictured = false;
+    // Two versions (DW-0429) is the SHELL's dialog (`shell::app`): the route machine drops it
+    // on a sign-out and for another account, and keeps it across a lock ("unlock returns to the
+    // same place"). It holds no secret and is not closed from here.
     forget_session_ended_rows(s);
 }
 
