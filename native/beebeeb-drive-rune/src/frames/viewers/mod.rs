@@ -17,6 +17,7 @@ mod archive;
 mod audio;
 mod chrome;
 pub use chrome::{FROM_THIS_PC, FROM_THIS_PC_UNSENT};
+pub use pdf::{PAGE_FAILED, PAGE_RENDERING};
 mod details;
 mod dialogs;
 mod fixture_media;
@@ -69,6 +70,8 @@ pub enum Intent {
     SaveCopy,
     /// Edit, where the source cannot save an edit.
     Edit,
+    /// Find, where the source cannot search the document's text.
+    Find,
     /// Available offline, where the source cannot change it.
     KeepOffline,
     /// DW-0782: the report dialog. The report carries the code, never the file's name.
@@ -118,6 +121,7 @@ impl Intent {
             Intent::OpenInAnotherApp => "Open in another app",
             Intent::SaveCopy => "Save a copy",
             Intent::Edit => "Edit and save from here",
+            Intent::Find => "Find in this document",
             Intent::KeepOffline => "Available offline from here",
             Intent::EditInSheets => "Edit in Sheets",
             Intent::VersionHistory => "Version history",
@@ -239,6 +243,11 @@ impl Ui {
     /// Whether the source can store an edit (`ViewerSource::can_save`).
     pub(crate) fn can_save(&self) -> bool {
         self.source.can_save()
+    }
+
+    /// What there is of page `page` of the open PDF (`ViewerSource::page_state`).
+    pub(crate) fn page_state(&self, page: u32) -> source::PageState {
+        self.source.page_state(&self.file.id, page)
     }
 
     /// Whether "Save a copy…" has somewhere to go (`ViewerSource::saves_copies`).
@@ -486,12 +495,19 @@ impl Ui {
     pub fn pump(&mut self) -> bool {
         match self.source.poll(&self.file.id) {
             Some(body) => {
-                if std::mem::discriminant(&body) != std::mem::discriminant(&self.file.body) {
+                let another_kind = std::mem::discriminant(&body) != std::mem::discriminant(&self.file.body);
+                if another_kind {
                     self.focus = Some(states::TITLE_KEY);
                 }
                 // What was shown until now leaves memory overwritten (a session that ended takes the text).
                 self.file.body.wipe();
                 self.file.body = body;
+                // Content that arrives after "Decrypting" starts where its kind starts (a PDF on its first page):
+                // what was open inside the body before belongs to that body. The same kind again (a page of the
+                // open PDF arrived) keeps the page, the zoom and the find bar where the person has them.
+                if another_kind {
+                    self.media = media::Media::of(&self.file);
+                }
                 true
             }
             None => false,

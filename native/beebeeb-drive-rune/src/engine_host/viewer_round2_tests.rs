@@ -202,3 +202,160 @@ fn a_cancelled_open_decodes_no_picture() {
     let content = picture_body(&png_bytes(6, 4), &AtomicBool::new(false));
     assert!(content.picture.is_some());
 }
+
+// ── A PDF ───────────────────────────────────────────────────────────────────────────────────────────
+
+use viewer_pdf::tests::sample_pdf;
+
+/// Poll until page `page` of `id` has a picture.
+fn page_of(source: &mut Source, id: &str, page: u32) -> rune::Pixels {
+    let began = Instant::now();
+    loop {
+        if let Some(pixels) = source.picture(id, Picture::Page(page)) {
+            return pixels;
+        }
+        let _ = source.poll(id);
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "page {page} was never rendered"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn a_pdf_opens_and_its_pages_are_rendered_when_the_view_asks_for_them() {
+    let fake = Fake::new();
+    fake.put("f-pdf", "Invented plan.pdf", &sample_pdf(3, 612, 792));
+    let (mut source, file, body) = opened(&fake, "f-pdf");
+    assert!(file.facts.starts_with("PDF \u{00B7} "), "{}", file.facts);
+    let Body::Pdf(doc) = &body else { panic!("{body:?}") };
+    assert_eq!((doc.pages, doc.page), (3, 1));
+    assert!(!doc.size.is_empty());
+    assert_eq!(fake.s().fetches, ["f-pdf"], "downloaded once, for every page");
+
+    // Nothing is rendered before the view asks; the first ask says "rendering" and the page comes later.
+    assert_eq!(source.page_state("f-pdf", 2), PageState::Rendering);
+    assert!(source.picture("f-pdf", Picture::Page(2)).is_none());
+    let wakes = fake.s().wakes;
+    let began = Instant::now();
+    let again = loop {
+        // The page's arrival is an answer of `poll`: the same document, so the view is drawn again.
+        if let Some(body) = source.poll("f-pdf") {
+            break body;
+        }
+        assert!(began.elapsed() < Duration::from_secs(20), "the page never came");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert_eq!(again, body);
+    assert!(fake.s().wakes > wakes, "the window is woken for the page");
+    assert_eq!(source.page_state("f-pdf", 2), PageState::Ready);
+    let pixels = source.picture("f-pdf", Picture::Page(2)).expect("page 2");
+    let (w, h) = pixels.size();
+    assert!(
+        (1_259..=1_260).contains(&w) && (1_629..=1_631).contains(&h),
+        "{w} x {h}"
+    );
+    assert_eq!(fake.s().fetches.len(), 1, "a page costs no download");
+
+    // A page the document does not have is not asked of the worker, and another file's page is nobody's.
+    assert!(source.picture("f-pdf", Picture::Page(0)).is_none());
+    assert!(source.picture("f-pdf", Picture::Page(4)).is_none());
+    assert!(source.picture("another", Picture::Page(1)).is_none());
+    assert_eq!(
+        source.page_state("another", 1),
+        PageState::Ready,
+        "not this source's to wait for"
+    );
+    assert!(!source.finds(), "the text is not searched here");
+}
+
+#[test]
+fn a_file_named_pdf_that_is_not_one_is_said_so_and_no_page_is_waited_for() {
+    let fake = Fake::new();
+    fake.put(
+        "f-not-pdf",
+        "Invented broken.pdf",
+        b"%PDF-1.7 invented, and nothing after",
+    );
+    let (source, _, body) = opened(&fake, "f-not-pdf");
+    assert_eq!(body, Body::NotPreviewable(NoPreview::Unreadable));
+    assert!(source.picture("f-not-pdf", Picture::Page(1)).is_none());
+}
+
+#[test]
+fn only_the_last_pages_are_kept_and_an_earlier_one_is_rendered_again_when_it_is_shown_again() {
+    let fake = Fake::new();
+    let pages = PAGES_KEPT as u32 + 2;
+    fake.put("f-long", "Invented long.pdf", &sample_pdf(pages as usize, 200, 200));
+    let (mut source, _, _) = opened(&fake, "f-long");
+    for page in 1..=pages {
+        let _ = page_of(&mut source, "f-long", page);
+    }
+    assert_eq!(source.page_state("f-long", pages), PageState::Ready);
+    assert_eq!(source.page_state("f-long", 3), PageState::Ready);
+    assert_eq!(
+        source.page_state("f-long", 1),
+        PageState::Rendering,
+        "page 1 was let go"
+    );
+    assert_eq!(source.page_state("f-long", 2), PageState::Rendering);
+    // Shown again: rendered again.
+    let _ = page_of(&mut source, "f-long", 1);
+    assert_eq!(source.page_state("f-long", 1), PageState::Ready);
+}
+
+#[test]
+fn a_pdfs_pages_leave_with_its_session_and_a_page_on_its_way_is_never_shown() {
+    let fake = Fake::new();
+    fake.put("f-pdf", "Invented plan.pdf", &sample_pdf(2, 612, 792));
+    let (mut source, _, _) = opened(&fake, "f-pdf");
+    let _ = page_of(&mut source, "f-pdf", 1);
+    // Page 2 is asked for, and the session moves on before it is taken.
+    assert!(source.picture("f-pdf", Picture::Page(2)).is_none());
+    fake.new_session("b@example.eu");
+    assert!(
+        source.picture("f-pdf", Picture::Page(1)).is_none(),
+        "the kept page is not handed out"
+    );
+    assert_eq!(source.poll("f-pdf"), Some(Body::Stopped(Stopped::SessionChanged)));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        source.poll("f-pdf"),
+        None,
+        "what the worker rendered meanwhile is not an answer"
+    );
+    assert!(source.picture("f-pdf", Picture::Page(2)).is_none());
+    assert!(source.picture("f-pdf", Picture::Page(1)).is_none());
+}
+
+#[test]
+fn a_pdf_kept_on_this_pc_is_rendered_from_its_copy() {
+    let fake = Fake::new();
+    // Beebeeb has two pages; the copy on this PC, edited and not sent yet, has three.
+    fake.put("f-pdf", "Invented plan.pdf", &sample_pdf(2, 612, 792));
+    fake.keep("f-pdf", OnThisPc::NotSentYet, Some(&sample_pdf(3, 612, 792)));
+    let (source, _, body) = opened(&fake, "f-pdf");
+    assert!(matches!(body, Body::Pdf(ref doc) if doc.pages == 3), "{body:?}");
+    assert!(fake.s().fetches.is_empty());
+    assert_eq!(source.origin("f-pdf"), Origin::ThisPc { unsent: true });
+}
+
+#[test]
+fn find_on_a_source_that_cannot_search_says_it_is_not_built_never_no_matches() {
+    let fake = Fake::new();
+    fake.put("f-pdf", "Invented plan.pdf", &sample_pdf(2, 612, 792));
+    let mut ui = crate::frames::viewers::Ui::open(Box::new(Source::on(fake.clone())), "f-pdf").expect("it opens");
+    let began = Instant::now();
+    while !matches!(ui.file.body, Body::Pdf(_)) {
+        ui.pump();
+        assert!(began.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    ui.open_find();
+    assert!(
+        ui.media.find.is_none(),
+        "no find bar that would answer for words nobody looked for"
+    );
+    assert_eq!(ui.toast.as_deref(), Some("Not built yet: Find in this document"));
+}

@@ -98,7 +98,10 @@ pub fn status(body: &Body) -> Option<Status> {
             text: "No preview here".into(),
             details: match why {
                 NoPreview::NoViewer | NoPreview::TooBig { .. } => "Nothing was downloaded",
-                NoPreview::Unreadable | NoPreview::PictureTooBig { .. } => "Decrypted in memory only; nothing was kept",
+                NoPreview::Unreadable
+                | NoPreview::PictureTooBig { .. }
+                | NoPreview::PdfLocked
+                | NoPreview::PdfTooLong { .. } => "Decrypted in memory only; nothing was kept",
             }
             .into(),
         },
@@ -294,6 +297,18 @@ fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, t: &Theme) -> 
             "It was decrypted on this PC, but this app can't read its content: text that isn't UTF-8, or a picture \
              it can't decode. Nothing was kept."
                 .to_string(),
+        ),
+        NoPreview::PdfLocked => (
+            "This PDF asks for a password",
+            "It is protected with a password of its own, and this app can't ask for it yet. Open it in your PDF app. \
+             Nothing was kept."
+                .to_string(),
+        ),
+        NoPreview::PdfTooLong { pages } => (
+            "Too long to preview here",
+            format!(
+                "This PDF has {pages} pages, more than a preview lists. Open it in your PDF app. Nothing was kept."
+            ),
         ),
         NoPreview::PictureTooBig { width, height } => (
             "Too large to preview here",

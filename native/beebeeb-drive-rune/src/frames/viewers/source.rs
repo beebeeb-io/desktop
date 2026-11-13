@@ -114,6 +114,21 @@ pub enum NoPreview {
     Unreadable,
     /// A picture that declares more pixels than a preview decodes. It was not decoded.
     PictureTooBig { width: u32, height: u32 },
+    /// A PDF that asks for a password. It stays closed here.
+    PdfLocked,
+    /// A PDF with more pages than the viewer lists.
+    PdfTooLong { pages: u32 },
+}
+
+/// What there is of one page of the open PDF.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageState {
+    /// Its picture is there, or this source has none to wait for (the frame draws its plain page).
+    Ready,
+    /// It is being rendered on this PC: its picture comes.
+    Rendering,
+    /// It could not be rendered.
+    Failed,
 }
 
 /// Why opening stopped, when it is not a failed decryption (DW-1518 is that).
@@ -461,6 +476,15 @@ pub trait ViewerSource {
     /// Where the content on screen was read from. Asked when it is drawn.
     fn origin(&self, _file_id: &str) -> Origin {
         Origin::Beebeeb
+    }
+    /// What there is of page `page` (from 1) of the open PDF, for the page the frame draws without a picture.
+    fn page_state(&self, _file_id: &str, _page: u32) -> PageState {
+        PageState::Ready
+    }
+    /// Whether [`ViewerSource::find`] searches the open PDF's text. `false`: Find says it is not built, never
+    /// "No matches" for words that were not looked for.
+    fn finds(&self) -> bool {
+        true
     }
     /// Whether "Save a copy…" has somewhere to go. `false`: the button is not drawn.
     fn saves_copies(&self) -> bool {

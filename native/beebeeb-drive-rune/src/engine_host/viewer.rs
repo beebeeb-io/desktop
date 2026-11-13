@@ -11,11 +11,12 @@
 //!   - any other file is downloaded and decrypted IN MEMORY by the engine's own download path
 //!     ([`Engine::open_file_in_memory`]: the path every hydrate uses, no crypto here), with the engine's
 //!     progress.
-//!   Text, Markdown, CSV / TSV (as text) and PNG / JPEG / GIF / WebP pictures are shown.
+//!   Text, Markdown, CSV / TSV (as text), PNG / JPEG / GIF / WebP pictures and PDFs are shown. A PDF's pages are
+//!   rendered on the same worker, page by page as the view shows them (`viewer_pdf`), from memory.
 //! - which app opens a file: a list's Open of a file that is kept on this PC while sync runs goes to the file's
 //!   own app ([`ViewerSource::kept_on_this_pc`]); the viewer is for a file that is not on this PC (no download to
 //!   disk) and for a route that names a file directly.
-//! - not shown here: PDF pages when the file cannot be rendered, audio, archives, RAW and HEIC pictures, Office
+//! - not shown here: a PDF that asks for a password or cannot be read, audio, archives, RAW and HEIC pictures, Office
 //!   documents. A list's Open leaves those to their own app, as before ([`ViewerSource::previews`]); a route that
 //!   names one anyway (Search, a link) gets the honest state, `Body::NotPreviewable`, and nothing is downloaded.
 //!   The same state, with its own words, for any file over [`IN_MEMORY_MAX`], and for a picture that declares
@@ -44,6 +45,8 @@
 //!
 //! Must not: log a name, an id, a path or a byte; write a decrypted byte anywhere; show a sample.
 
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 
@@ -54,14 +57,19 @@ use beebeeb_engine::file_ops;
 use zeroize::Zeroize;
 
 use super::log;
-use crate::frames::viewers::kinds::{self, PhotoDoc, Picture, Viewer};
+use crate::frames::viewers::kinds::{self, PdfDoc, PhotoDoc, Picture, Viewer};
 use crate::frames::viewers::source::{
-    Body, Cut, Details, Elsewhere, MdDoc, NoPreview, OpenError, OpenFile, Origin, Stopped, TextDoc, Truncated,
-    ViewerSource, plain_lines,
+    Body, Cut, Details, Elsewhere, MdDoc, NoPreview, OpenError, OpenFile, Origin, PageState, Stopped, TextDoc,
+    Truncated, ViewerSource, plain_lines,
 };
 
+#[path = "viewer_pdf.rs"]
+pub(crate) mod viewer_pdf;
 #[path = "viewer_picture.rs"]
 pub(crate) mod viewer_picture;
+
+/// How many rendered pages of the open PDF are kept (the page on screen and the ones just left).
+pub const PAGES_KEPT: usize = 6;
 
 #[cfg(test)]
 #[path = "viewer_tests.rs"]
@@ -229,10 +237,64 @@ struct Opening {
     /// The view holds decrypted content of this file (text, or the picture below).
     holds: bool,
     picture: Option<rune::Pixels>,
+    /// The open PDF's pages, while the file is a PDF.
+    pages: Option<Pages>,
     /// Where the content the view holds came from (Beebeeb, until an answer says the copy on this PC).
     origin: Origin,
     /// The session moved on and the view was told: nothing more comes from this opening.
     ended: bool,
+}
+
+/// One page's answer from the worker: the page (from 1), and its pixels or `None` when it could not be rendered.
+type PageAnswer = (u32, Option<rune::Pixels>);
+
+/// The window's side of an open PDF: pages are asked of the worker that holds the document, and the last few that
+/// came back are kept. Asking happens while the view is drawn (`ViewerSource::picture` takes `&self`), so what
+/// changes then sits in cells; this is the window's thread's alone.
+struct Pages {
+    ask: mpsc::Sender<u32>,
+    got: mpsc::Receiver<PageAnswer>,
+    /// The newest last. `None` pixels: that page could not be rendered.
+    kept: RefCell<VecDeque<PageAnswer>>,
+    /// The page the worker was last asked for and has not answered.
+    asked: Cell<Option<u32>>,
+    /// The document as the view was told, once the worker opened it.
+    doc: RefCell<Option<PdfDoc>>,
+}
+
+impl Pages {
+    /// Take what the worker rendered since the last call. `true`: something came.
+    fn take_in(&self) -> bool {
+        let mut kept = self.kept.borrow_mut();
+        let mut came = false;
+        while let Ok((page, pixels)) = self.got.try_recv() {
+            kept.retain(|(held, _)| *held != page);
+            kept.push_back((page, pixels));
+            while kept.len() > PAGES_KEPT {
+                kept.pop_front();
+            }
+            if self.asked.get() == Some(page) {
+                self.asked.set(None);
+            }
+            came = true;
+        }
+        came
+    }
+
+    fn held(&self, page: u32) -> Option<Option<rune::Pixels>> {
+        self.kept
+            .borrow()
+            .iter()
+            .find(|(held, _)| *held == page)
+            .map(|(_, pixels)| pixels.clone())
+    }
+}
+
+/// The worker's ends of an open PDF's channels, and the size the view is told.
+struct PdfEnds {
+    asks: mpsc::Receiver<u32>,
+    answers: mpsc::Sender<PageAnswer>,
+    size: String,
 }
 
 /// An open file on the real engine. See the module's doc.
@@ -254,6 +316,7 @@ enum Shows {
     Text,
     Markdown,
     Picture,
+    Pdf,
     /// No viewer here for this kind of file: nothing is downloaded.
     Nothing,
 }
@@ -269,6 +332,7 @@ fn shows(name: &str) -> Shows {
         Some(Viewer::Markdown) => Shows::Markdown,
         // The formats the toolkit decodes. A RAW or a HEIC has no decoder here.
         Some(Viewer::Photo) if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") => Shows::Picture,
+        Some(Viewer::Pdf) => Shows::Pdf,
         _ => Shows::Nothing,
     }
 }
@@ -435,7 +499,8 @@ fn content_of(shows: Shows, bytes: &[u8], cancel: &AtomicBool) -> Content {
             origin: Origin::Beebeeb,
         },
         Shows::Picture => picture_body(bytes, cancel),
-        Shows::Nothing => Content {
+        // A PDF is opened by the worker itself (`open_pdf`): it keeps the document for its pages.
+        Shows::Pdf | Shows::Nothing => Content {
             body: Some(Body::NotPreviewable(NoPreview::NoViewer)),
             picture: None,
             origin: Origin::Beebeeb,
@@ -443,32 +508,60 @@ fn content_of(shows: Shows, bytes: &[u8], cancel: &AtomicBool) -> Content {
     }
 }
 
-/// The file's bytes for the view: the copy on this PC when the local state says it is here and it really is
-/// (no network at all), else the download. The answer says which.
+/// The file's bytes: the copy on this PC when the local state says it is here and it really is (no network at
+/// all), else the download. The answer says which, and the session the bytes were read for. The buffer is the
+/// engine's own, wiped when it is dropped.
 fn read<E: ViewerEngine>(
     engine: &E,
     file_id: &str,
     here: bool,
-    shows: Shows,
     progress: &(dyn Fn(u64, u64) + Send + Sync + 'static),
     cancel: &AtomicBool,
-) -> Answer {
+) -> Result<(SessionGeneration, zeroize::Zeroizing<Vec<u8>>, Origin), OpenFileError> {
     if here {
         match engine.local(file_id, IN_MEMORY_MAX, cancel)? {
             LocalCopy::Opened(copy) => {
-                let mut content = content_of(shows, &copy.bytes, cancel);
-                content.origin = Origin::ThisPc {
+                let origin = Origin::ThisPc {
                     unsent: copy.copy == OnThisPc::NotSentYet,
                 };
-                return Ok((copy.session, content));
+                return Ok((copy.session, copy.bytes, origin));
             }
             // Not wholly on this PC after all: the download is the way.
             LocalCopy::NotHere => {}
         }
     }
     let opened = engine.fetch(file_id, IN_MEMORY_MAX, progress, cancel)?;
-    // `opened` is dropped at the end of this function: the engine's buffer is wiped there.
-    Ok((opened.session, content_of(shows, &opened.bytes, cancel)))
+    Ok((opened.session, opened.bytes, Origin::Beebeeb))
+}
+
+/// Open the PDF in `bytes` (taken: the document reads the engine's buffer and wipes it when it is dropped). The
+/// view's body, and the document for its pages when it opened.
+fn open_pdf(bytes: zeroize::Zeroizing<Vec<u8>>, size: &str) -> (Body, Option<viewer_pdf::Document>) {
+    match viewer_pdf::Document::open(bytes) {
+        Ok(document) => (
+            Body::Pdf(PdfDoc {
+                pages: document.pages(),
+                page: 1,
+                size: size.to_string(),
+            }),
+            Some(document),
+        ),
+        Err(why) => (
+            Body::NotPreviewable(match why {
+                viewer_pdf::NotOpened::Locked => NoPreview::PdfLocked,
+                viewer_pdf::NotOpened::TooLong { pages } => NoPreview::PdfTooLong { pages },
+                viewer_pdf::NotOpened::Unreadable => NoPreview::Unreadable,
+            }),
+            None,
+        ),
+    }
+}
+
+/// A rendered page as the toolkit draws it (with the smaller copies it scales down from). `None`: the toolkit
+/// did not take it.
+fn page_pixels(page: viewer_pdf::Rendered) -> Option<rune::Pixels> {
+    let image = decoders().rgba(page.width, page.height, page.rgba);
+    image.wait().is_ok().then(|| image.pixels().clone())
 }
 
 /// What the view shows for a download that did not hand over content. `None`: nothing (it was cancelled).
@@ -494,6 +587,8 @@ impl Opening {
     fn end(&mut self) {
         self.cancel.store(true, Ordering::SeqCst);
         self.picture = None;
+        // The worker that holds the document ends when nobody asks any more: the document and its bytes go.
+        self.pages = None;
         while self.inbox.try_recv().is_ok() {}
         self.fetching = false;
         self.holds = false;
@@ -529,6 +624,26 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         let here = facts.on_this_pc.is_some();
         let shows = shows(&facts.name);
         let (answers, inbox) = mpsc::channel();
+        // A PDF: the worker keeps the document and renders the pages the view asks for.
+        let (pages, pdf) = if shows == Shows::Pdf && facts.size <= IN_MEMORY_MAX {
+            let ((ask, asks), (page_answers, got)) = (mpsc::channel(), mpsc::channel());
+            let pages = Pages {
+                ask,
+                got,
+                kept: RefCell::default(),
+                asked: Cell::new(None),
+                doc: RefCell::new(None),
+            };
+            let size = crate::source::format_size(i64::try_from(facts.size).unwrap_or(i64::MAX));
+            let ends = PdfEnds {
+                asks,
+                answers: page_answers,
+                size,
+            };
+            (Some(pages), Some(ends))
+        } else {
+            (None, None)
+        };
         let mut opening = Opening {
             file_id: file_id.to_string(),
             session,
@@ -540,6 +655,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             drawn: (0, facts.size),
             holds: false,
             picture: None,
+            pages,
             origin: Origin::Beebeeb,
             ended: false,
         };
@@ -550,7 +666,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 size: facts.size,
                 limit: IN_MEMORY_MAX,
             })
-        } else if self.fetch_on_a_worker(&opening, shows, here, answers) {
+        } else if self.fetch_on_a_worker(&opening, shows, here, answers, pdf) {
             opening.fetching = true;
             Body::Decrypting {
                 done: 0,
@@ -593,7 +709,14 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 
     /// Read (the copy on this PC, else download and decrypt) on a worker; its one answer goes down `answers`.
     /// `false`: no worker started.
-    fn fetch_on_a_worker(&self, opening: &Opening, shows: Shows, here: bool, answers: mpsc::Sender<Answer>) -> bool {
+    fn fetch_on_a_worker(
+        &self,
+        opening: &Opening,
+        shows: Shows,
+        here: bool,
+        answers: mpsc::Sender<Answer>,
+        pdf: Option<PdfEnds>,
+    ) -> bool {
         let (engine, file_id) = (self.engine.clone(), opening.file_id.clone());
         let (cancel, progress) = (opening.cancel.clone(), opening.progress.clone());
         std::thread::Builder::new()
@@ -610,10 +733,29 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                     }
                 };
                 // A panic in this worker must not leave the view on "Decrypting" for good: it answers Failed.
-                let answer: Answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    read(&*engine, &file_id, here, shows, &report, &cancel)
-                }))
-                .unwrap_or(Err(OpenFileError::Failed));
+                let (answer, document): (Answer, Option<viewer_pdf::Document>) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let (session, bytes, origin) = match read(&*engine, &file_id, here, &report, &cancel) {
+                            Ok(read) => read,
+                            Err(error) => return (Err(error), None),
+                        };
+                        let (mut content, document) = match (&pdf, shows) {
+                            (Some(ends), Shows::Pdf) => {
+                                let (body, document) = open_pdf(bytes, &ends.size);
+                                let content = Content {
+                                    body: Some(body),
+                                    picture: None,
+                                    origin,
+                                };
+                                (content, document)
+                            }
+                            // `bytes` is dropped at the end of this arm: the engine's buffer is wiped there.
+                            _ => (content_of(shows, &bytes, &cancel), None),
+                        };
+                        content.origin = origin;
+                        (Ok((session, content)), document)
+                    }))
+                    .unwrap_or((Err(OpenFileError::Failed), None));
                 // Nobody waits for the content any more (the file was closed, its session moved on, Cancel): it is
                 // dropped here, its text overwritten, and never queued. What is sent says only "cancelled".
                 let answer = if cancel.load(Ordering::SeqCst) {
@@ -622,8 +764,18 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 } else {
                     answer
                 };
+                let cancelled = answer.is_err();
                 let _ = answers.send(answer);
                 engine.wake();
+                // An open PDF: this thread keeps the document and renders the pages the view asks for, until
+                // the file is left (the asker goes) or its session moves on (`cancel`). Then the document is
+                // dropped, and the bytes it read from are overwritten.
+                if let (Some(document), Some(ends), false) = (document, pdf, cancelled) {
+                    document.serve(&ends.asks, &cancel, &|page, rendered| {
+                        let _ = ends.answers.send((page, rendered.and_then(page_pixels)));
+                        engine.wake();
+                    });
+                }
             })
             .is_ok()
     }
@@ -687,7 +839,11 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
                         opening.picture = content.picture.take();
                         opening.origin = content.origin;
                         opening.holds = true;
-                        content.body.take()
+                        let body = content.body.take();
+                        if let (Some(pages), Some(Body::Pdf(doc))) = (&opening.pages, &body) {
+                            *pages.doc.borrow_mut() = Some(doc.clone());
+                        }
+                        body
                     }
                     // Decrypted for another session than the one this file was opened for: never shown.
                     Ok(_) => Some(Body::Stopped(Stopped::SessionChanged)),
@@ -714,6 +870,12 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
                     }
                 })
             }
+            // A page of the open PDF came back: the same document again, so the view is drawn with the page.
+            Err(_) if opening.pages.as_ref().is_some_and(Pages::take_in) => opening
+                .pages
+                .as_ref()
+                .and_then(|pages| pages.doc.borrow().clone())
+                .map(Body::Pdf),
             Err(mpsc::TryRecvError::Empty) => None,
             // The worker ended without an answer.
             Err(mpsc::TryRecvError::Disconnected) => std::mem::take(&mut opening.fetching).then_some(Body::Failed),
@@ -733,7 +895,23 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     fn picture(&self, file_id: &str, which: Picture) -> Option<rune::Pixels> {
         match which {
             Picture::Photo => self.current(file_id)?.picture.clone(),
-            // A strip, artwork and PDF pages are not bound: the frame draws its plain tile.
+            // A page of the open PDF: the one kept, else it is asked of the worker (once) and comes later.
+            Picture::Page(page) => {
+                let pages = self.current(file_id)?.pages.as_ref()?;
+                pages
+                    .doc
+                    .borrow()
+                    .as_ref()
+                    .filter(|doc| (1..=doc.pages).contains(&page))?;
+                if let Some(held) = pages.held(page) {
+                    return held;
+                }
+                if pages.asked.get() != Some(page) && pages.ask.send(page).is_ok() {
+                    pages.asked.set(Some(page));
+                }
+                None
+            }
+            // A strip and artwork are not bound: the frame draws its plain tile.
             _ => None,
         }
     }
@@ -764,6 +942,22 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
         self.current(file_id)
             .filter(|opening| opening.holds)
             .map_or(Origin::Beebeeb, |opening| opening.origin)
+    }
+
+    fn page_state(&self, file_id: &str, page: u32) -> PageState {
+        let Some(pages) = self.current(file_id).and_then(|opening| opening.pages.as_ref()) else {
+            return PageState::Ready;
+        };
+        match pages.held(page) {
+            Some(Some(_)) => PageState::Ready,
+            Some(None) => PageState::Failed,
+            None => PageState::Rendering,
+        }
+    }
+
+    /// The text of a PDF is not searched here.
+    fn finds(&self) -> bool {
+        false
     }
 
     /// "Save a copy…" has nowhere to go yet: the button is not drawn.

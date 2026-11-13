@@ -548,7 +548,6 @@ fn a_picture_is_decoded_here_and_bytes_that_are_not_what_the_name_says_are_said_
 fn a_kind_without_a_viewer_here_is_said_so_and_nothing_is_downloaded() {
     let fake = Fake::new();
     let kinds = [
-        ("Invented plan.pdf", "PDF"),
         ("Invented take.m4a", "Audio"),
         ("Invented export.zip", "Archive"),
         ("Invented shot.arw", "Picture"),
@@ -745,7 +744,7 @@ fn another_account_with_the_same_generation_is_not_the_session_either() {
 #[test]
 fn a_state_that_holds_nothing_stays_and_acts_for_the_same_account_after_a_lock() {
     let fake = Fake::new();
-    fake.put("f-pdf", "Invented plan.pdf", b"%PDF invented");
+    fake.put("f-pdf", "Invented plan.zip", b"PK invented");
     let (mut source, _, body) = opened(&fake, "f-pdf");
     assert_eq!(body, Body::NotPreviewable(NoPreview::NoViewer));
     // A lock and an unlock of the same account: there was no content to take, the state stays, and its button

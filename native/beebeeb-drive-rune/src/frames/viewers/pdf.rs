@@ -17,6 +17,11 @@ use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
 use crate::ui::toolbar::{ToolState, tool_button};
 
+/// What a page says while its picture is being rendered on this PC.
+pub const PAGE_RENDERING: &str = "Rendering this page\u{2026}";
+/// What a page says when it could not be rendered.
+pub const PAGE_FAILED: &str = "This page can't be shown here. Open the PDF in your PDF app to see it.";
+
 /// The page at 100 %: 420 points wide (the board's `MPage`).
 const PAGE_W: f32 = 420.0;
 /// The zoom's figure: mono 11px on 17px.
@@ -322,8 +327,22 @@ fn page(ui: &Ui) -> El {
             let height = if w == 0 { 0.0 } else { width * h as f32 / w as f32 };
             sheet.h(height).pixels_fit(&pixels, SurfaceFit::Fill)
         }
-        // No picture of this page: a blank page of the board's shape.
-        None => sheet.h(560.0 * scale),
+        // No picture of this page: a blank page of the board's shape. A source that renders pages says what
+        // is the matter with this one: on its way, or not renderable.
+        None => {
+            let sheet = sheet.h(560.0 * scale);
+            let words = match ui.page_state(ui.media.page) {
+                super::source::PageState::Ready => None,
+                super::source::PageState::Rendering => Some(PAGE_RENDERING),
+                super::source::PageState::Failed => Some(PAGE_FAILED),
+            };
+            match words {
+                Some(words) => sheet.center().child(
+                    kit::label("page-note", words, type_::CAPTION, Color::BLACK.alpha(0.55)).align(rune::Align::Center),
+                ),
+                None => sheet,
+            }
+        }
     };
     if let Some(find) = &ui.media.find {
         let ink = |alpha: f32| Color::BLACK.alpha(alpha);

@@ -48,7 +48,14 @@ const LONG_NAME: &str = "long-of-the-first-account-viewer.txt";
 const PICTURE_NAME: &str = "harbour-of-the-first-account-viewer.png";
 /// The last line of the long file, far below one window of lines.
 const LONG_END: &str = "the-very-last-line-of-the-long-file";
-const PLAN_NAME: &str = "plan-of-the-first-account-viewer.pdf";
+/// A kind this app has no viewer for.
+const PLAN_NAME: &str = "plan-of-the-first-account-viewer.zip";
+const REPORT: &str = "b0000000-0000-4000-8000-000000000605";
+const REPORT_NAME: &str = "report-of-the-first-account-viewer.pdf";
+
+fn report_pdf() -> Vec<u8> {
+    super::viewer_pdf::tests::sample_pdf(2, 612, 792)
+}
 /// Words found nowhere else in the app.
 const NOTE_WORDS: &str = "harbourlight-words-of-the-first-account";
 
@@ -213,7 +220,8 @@ fn window(tag: &str) -> Window {
     let (second, _) = FakeAccount::register(&format!("second-viewer-{tag}@example.eu"), PASSWORD, OTHER_PHRASE);
     let (first, second) = (Arc::new(first), Arc::new(second));
     first.add_file_with_content(NOTE, None, NOTE_NAME, note_text().as_bytes());
-    first.add_file_with_content(PLAN, None, PLAN_NAME, b"%PDF-1.7 invented");
+    first.add_file_with_content(PLAN, None, PLAN_NAME, b"PK invented");
+    first.add_file_with_content(REPORT, None, REPORT_NAME, &report_pdf());
     first.add_file_with_content(LONG, None, LONG_NAME, long_text().as_bytes());
     first.add_file_with_content(PICTURE, None, PICTURE_NAME, &super::tests::png_bytes(8, 6));
     let hold = Arc::new(Hold::default());
@@ -235,7 +243,8 @@ fn window(tag: &str) -> Window {
     let db_path = dir.path().join("state.db");
     let db = StateDb::open(&db_path).unwrap();
     put(&db, NOTE, NOTE_NAME, note_text().len() as i64);
-    put(&db, PLAN, PLAN_NAME, 17);
+    put(&db, PLAN, PLAN_NAME, 11);
+    put(&db, REPORT, REPORT_NAME, report_pdf().len() as i64);
     put(&db, LONG, LONG_NAME, long_text().len() as i64);
     put(&db, PICTURE, PICTURE_NAME, super::tests::png_bytes(8, 6).len() as i64);
     db.set_owner(&Identity::new(Some(&first.user_id), Some(&first.email)))
@@ -314,7 +323,11 @@ impl Window {
             if self.drawn().contains(words) {
                 return;
             }
-            assert!(began.elapsed() < Duration::from_secs(15), "{words:?} was never drawn");
+            assert!(
+                began.elapsed() < Duration::from_secs(15),
+                "{words:?} was never drawn; the window draws:\n{}",
+                self.drawn()
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -372,6 +385,7 @@ impl Window {
             NOTE_WORDS,
             NOTE_NAME,
             PLAN_NAME,
+            REPORT_NAME,
             LONG_NAME,
             PICTURE_NAME,
             "the last line",
@@ -507,10 +521,10 @@ fn a_lock_closes_the_open_file_and_a_download_on_its_way_shows_nothing_later() {
 
 #[test]
 fn a_kind_with_no_viewer_stays_its_own_apps_and_a_route_to_it_says_so_with_two_buttons_that_answer() {
-    let mut w = window("pdf");
+    let mut w = window("zip");
     sign_in(&w.engine, &w.first, TEST_PHRASE);
     w.settle();
-    // The Files window's Open on a PDF: not this viewer's (the Files window opens it in its own app, as before;
+    // The Files window's Open on an archive: not this viewer's (the Files window opens it in its own app, as before;
     // with no sync running here that is refused by the Files window itself).
     w.open_row(PLAN_NAME);
     assert_eq!(
@@ -656,6 +670,49 @@ fn open_in_its_app_never_opens_the_windows_viewer() {
     w.press(Key::Enter, Mods::default());
     w.until_drawn(NOTE_WORDS);
     assert_eq!(w.route_item().as_deref(), Some(NOTE));
+}
+
+/// A PDF, end to end on the real engine: downloaded and decrypted in memory, its page rendered on this PC and
+/// drawn, and nothing of it left after a lock.
+#[test]
+fn a_pdf_opened_from_the_files_window_shows_its_page_rendered_here() {
+    let mut w = window("pdfpage");
+    sign_in(&w.engine, &w.first, TEST_PHRASE);
+    w.settle();
+    w.open_row(REPORT_NAME);
+    assert_eq!(w.route_item().as_deref(), Some(REPORT));
+    w.until_drawn("Page 1 of 2");
+    // The page is asked for when it is drawn, says so meanwhile, and then has its picture.
+    let began = Instant::now();
+    loop {
+        w.settle();
+        let page =
+            w.rt.elements()
+                .into_iter()
+                .find(|e| e.key.as_deref() == Some("page") && !e.exiting)
+                .expect("the page");
+        // A Letter page in its own proportions (the blank page of the board is 3:4): its picture is drawn.
+        let ratio = page.rect[3] / page.rect[2];
+        if (ratio - 792.0 / 612.0).abs() < 0.01 && !w.drawn().contains(viewers::PAGE_RENDERING) {
+            break;
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the page was never drawn: {}",
+            w.drawn()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let drawn = w.drawn();
+    assert!(drawn.contains("Decrypted on this PC"), "{drawn}");
+    assert!(!drawn.contains(viewers::PAGE_FAILED), "{drawn}");
+    // Page Down: the second page, rendered when it is shown.
+    w.press(Key::PageDown, Mods::default());
+    w.until_drawn("Page 2 of 2");
+
+    w.engine.lock();
+    w.settle();
+    w.assert_nothing_of_the_file("after a lock");
 }
 
 #[test]
