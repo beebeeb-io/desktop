@@ -138,7 +138,7 @@ pub fn details_pane(item: Option<(&DriveItem, Details)>, t: &Theme) -> El {
                 .gap(8.0)
                 .child(
                     action_button("share", "Share\u{2026}", &icons::SHARE, t)
-                        .on_press(|s: &mut State| s.intent(Intent::Frame("DW-0407"))),
+                        .on_press_tx(|s: &mut State, tx: &mut rune::Tx| s.ask_share(tx)),
                 )
                 .child(
                     action_button("versions", "Version history", &icons::VERSION_HISTORY, t)

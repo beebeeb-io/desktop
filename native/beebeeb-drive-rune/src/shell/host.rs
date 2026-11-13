@@ -443,7 +443,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // The session and the tray: the engine may have changed since the last frame.
     let gate_before = s.shell.app.gate();
     changed |= s.shell.refresh();
-    if s.shell.app.gate() != gate_before {
+    let read_by_the_gate = s.shell.app.gate() != gate_before;
+    if read_by_the_gate {
         on_gate_change(s);
         changed = true;
     }
@@ -466,6 +467,14 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
             crate::frames::files::reset::end_session(s);
             changed = true;
         }
+        // The rows are the session's too. `on_gate_change` reads them again when THIS poll's
+        // refresh moved the gate; another account under a gate that stays Ready, and a change
+        // first seen by a refresh between polls, come by here only: the rows are dropped and
+        // the root is read again, so no name of the earlier account stays on screen.
+        if (gate, account) != now && !read_by_the_gate {
+            crate::frames::files::reset::read_the_root_again(s);
+            changed = true;
+        }
     }
     // Windows Hello's answer to an approval of another device's sign-in (DW-A14). Read after the
     // session: an answer that comes with a lock or a sign-out finds its wait already ended.
@@ -486,8 +495,13 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
             .app
             .apply(Event::Navigate(Route::section(section_for(s.sidebar_section))));
         sync_sidebar(s);
+        // The sidebar's route event does not go through `dispatch`: the Files window still
+        // closes what was open in it (a name being typed in a row is not modal).
+        crate::frames::files::reset::sync(s);
         changed |= outcome == Outcome::Changed;
     }
+    // A message that went takes what its Try again held with it.
+    changed |= crate::frames::files::reset::poll(s);
     // Backups shows its own folder in the Files window (`frames::files::protected`, DW-0422).
     changed |= crate::frames::files::protected::poll(s);
     changed

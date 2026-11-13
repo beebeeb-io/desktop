@@ -63,6 +63,9 @@ pub enum Action {
     CopyLink,
     /// A link with choices (the Share dialog), as distinct from the plain Copy link.
     ShareLink,
+    /// Share… that was refused before its dialog opened (a protected item): said, with no Try
+    /// again, because there is nothing to repeat but the plain link nobody asked for.
+    Share,
     Open,
     ShowInFileExplorer,
     Upload,
@@ -101,6 +104,7 @@ impl Action {
             Action::RemoveOffline => "remove from this PC",
             Action::CopyLink => "copy the link",
             Action::ShareLink => "make the link",
+            Action::Share => "share this",
             Action::Open => "open",
             Action::ShowInFileExplorer => "show in File Explorer",
             Action::Upload => "upload",

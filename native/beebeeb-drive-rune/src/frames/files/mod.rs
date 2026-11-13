@@ -975,8 +975,7 @@ impl State {
             "preview" => {
                 self.preview();
             }
-            "share" if self.protects_selection() => self.failed(Action::CopyLink, ActionError::Protected, tx),
-            "share" => self.intent(Intent::Frame("DW-0407")),
+            "share" => self.ask_share(tx),
             "copy-link" => {
                 self.copy_link(tx);
             }

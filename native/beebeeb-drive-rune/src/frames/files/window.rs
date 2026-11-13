@@ -123,7 +123,8 @@ fn toast_of(kind: Toast, t: &Theme) -> El {
             &icons_files::ALERT,
             toast::Tone::Failed,
             &Toast::failure(action, why),
-            Some(toast::ToastAction {
+            // Share… refused before its dialog opened has nothing to try again.
+            (action != super::source::Action::Share).then_some(toast::ToastAction {
                 text: "Try again",
                 name: "Try again",
                 shortcut: None,

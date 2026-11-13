@@ -58,7 +58,9 @@ impl State {
                 self.open_in_file_explorer(tx);
             }
             // These are asked again from their own dialog: the message goes, nothing is repeated blind.
-            Action::RestoreVersion
+            // Said without Try again (`window::toast_of`): nothing to repeat.
+            Action::Share
+            | Action::RestoreVersion
             | Action::OpenWith
             | Action::KeepVersion
             | Action::Invite
