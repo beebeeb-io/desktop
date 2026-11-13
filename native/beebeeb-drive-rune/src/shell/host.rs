@@ -406,6 +406,7 @@ pub fn dispatch(s: &mut State, event: Event) -> Outcome {
     crate::frames::backups::sync(s); // the same for Backups, and its one-time code is wiped
     crate::frames::account::sync(s); // and what was open inside the account sections
     crate::frames::tray::shortcuts::sync(s); // a closed shortcuts list forgets its page
+    crate::frames::files::reset::sync(s); // a route that left the Files window closes its dialogs, wiped
     outcome
 }
 
@@ -460,6 +461,9 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
         let other_account = account.is_some() && now.1 != account;
         if left_ready || other_account {
             crate::frames::account::end_flows(s);
+            // The same for the Files window: its dialogs (a link's password among them), what
+            // Undo and Try again hold, the selection and where Back and Forward go.
+            crate::frames::files::reset::end_session(s);
             changed = true;
         }
     }
@@ -508,7 +512,10 @@ fn poll_capture(s: &mut State, tx: &mut Tx) -> bool {
             group,
             registry::FrameGroup::Settings(pane) if crate::frames::account::Pane::root(pane).is_some()
         ) && s.account.shows_secret()
-    };
+    }
+    // A link's password being typed in the Files window's Share dialog (DW-0407).
+    || (matches!(registry::group_for(&s.shell.app), registry::FrameGroup::Section(_))
+        && crate::frames::files::share::shows_secret(s));
     let leaving = std::mem::replace(&mut s.shell.secret_seen, secret) && !secret;
     if leaving {
         tx.settle();

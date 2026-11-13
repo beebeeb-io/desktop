@@ -292,7 +292,7 @@ pub struct DialogFrame {
 pub const DIALOGS: &[DialogFrame] = &[
     crate::frames::tray::shortcuts::DIALOG,
     crate::frames::global::sync_off::DIALOG,
-    // DialogFrame { group: FrameGroup::ConflictDialog, view: crate::frames::conflict::card, on_key: None, feedback: FeedbackPolicy::Denied("its lane has not opted in yet") },
+    crate::frames::files::conflict::DIALOG,
 ];
 
 /// The scrim between a dialog and the window: the board's `--kit-scrim`, "color-mix(in oklch,
@@ -375,7 +375,13 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .pt(crate::TITLEBAR_H)
                 .child(
                     rune::el()
-                        .key("dialog-scrim")
+                        // Two versions' board frame keys its scrim (DW-0429: `scrim`); the
+                        // shortcuts dialog's frames do not, and keep the name they had.
+                        .key(if dialog_group == FrameGroup::ConflictDialog {
+                            "scrim"
+                        } else {
+                            "dialog-scrim"
+                        })
                         .w_full()
                         .grow(1.0)
                         .fill(scrim(cx.system_dark())),
@@ -484,7 +490,7 @@ mod tests {
         );
         assert_eq!(
             DIALOGS.len(),
-            2,
+            3,
             "a dialog was added to DIALOGS without updating this test"
         );
     }
