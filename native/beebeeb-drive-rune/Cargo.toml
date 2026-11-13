@@ -60,7 +60,7 @@ beebeeb-engine = { path = "../../crates/beebeeb-engine", default-features = fals
 # `source_engine` tests build a state.db with the engine's own writers.
 tempfile = "3"
 # The timing test asks SQLite for its query plan; same version the engine links.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", default-features = false, features = ["bundled", "cache"] }
 tokio = { version = "1", features = ["rt"] } # the tray tests hold a task in the engine's slot (`hold_running`)
 # For headless golden-PNG tests.
 

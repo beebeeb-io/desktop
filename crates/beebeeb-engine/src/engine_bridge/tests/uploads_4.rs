@@ -64,16 +64,24 @@ async fn an_upload_reports_its_bytes_chunk_by_chunk_and_a_cut_one_leaves_nothing
     assert!(board.active().is_empty());
 }
 
+/// The 0.8.x upgrade case: a session an older build opened (v1 frames on the server, no stored
+/// completion name) with some of its chunks acknowledged. This build writes v2, and a v2 writer never
+/// continues a v1 stream: frames of two formats in one session are a file that completes and never
+/// opens. The session is abandoned on the server and the file is uploaded whole, as v2, in a fresh
+/// one. Mutant: `resume_step` taking "some chunks acknowledged" for "all of them" (the op then fails
+/// on the body's guard and never completes); a body without that guard PUTs into `session-old`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_resumed_upload_starts_its_bar_at_the_acknowledged_watermark() {
+async fn a_persisted_v1_session_with_acknowledged_chunks_is_never_continued() {
+    const OLD_FILE: &str = "40000000-0000-4000-8000-0000000000f5";
     let dir = tempfile::tempdir().unwrap();
     let payload = dir.path().join("resume.bin");
     std::fs::write(&payload, b"0123456789abcdefghij").unwrap();
-    let server = ResumableUploadMock::start(ResumeMockMode::HangOnce);
-    let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), [21u8; 32]);
+    let server = ResumableUploadMock::start(ResumeMockMode::Plain);
+    let master_key = [21u8; 32];
+    let bridge = test_bridge_with_api(&dir.path().join("state.db"), server.base_url.clone(), master_key);
     let op = resumable_create_op(&payload);
     bridge.db.enqueue_operation(&op).unwrap();
-    // A previous run acknowledged chunk 0 (8 bytes) of session-1 and was killed.
+    // A previous build acknowledged chunk 0 (8 bytes, a v1 frame) of its session and was replaced.
     bridge
         .db
         .put_upload_resume(&UploadResume {
@@ -81,37 +89,56 @@ async fn a_resumed_upload_starts_its_bar_at_the_acknowledged_watermark() {
             payload_path: payload.to_string_lossy().into_owned(),
             payload_size: 20,
             payload_mtime_ns: payload_mtime_ns(&payload),
-            upload_session_id: "session-1".into(),
-            server_file_id: "40000000-0000-4000-8000-0000000000f5".into(),
-            object_version_id: "object-init-1".into(),
+            upload_session_id: "session-old".into(),
+            server_file_id: OLD_FILE.into(),
+            object_version_id: "object-init-old".into(),
             chunk_size_bytes: 8,
             chunk_count: 3,
             acked_chunks: 1,
             metadata_applied: true,
             is_create: true,
-            // A session the new code opened always chose its own id.
             self_minted: true,
             completed_version: None,
             completed_object_version_id: None,
             completed_mime_type: None,
         })
         .unwrap();
-    let board = bridge.transfers().clone();
-    let (cut, seen) = tokio::join!(
-        tokio::time::timeout(
-            Duration::from_millis(1200),
-            bridge.process_due_operations(dir.path(), 200)
-        ),
-        wait_for_upload_bytes(&board, "local-file-resume", 8, Duration::from_millis(1000)),
-    );
-    assert!(cut.is_err(), "chunk 1 hangs, so the pass is cut");
-    let seen = seen.expect("the resumed upload shows on the board");
-    assert_eq!((seen.done, seen.total), (8, 20), "it resumes at 8 of 20, not at 0");
+    assert!(bridge.db.upload_completion_name(&op.op_id).unwrap().is_none());
+
+    let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
+    assert_eq!(outcome.completed_op_ids, vec![op.op_id.clone()]);
+
     let requests = server.finish();
     assert_eq!(
-        count_requests(&requests, "PUT", "/api/v1/uploads/session-1/chunks/0"),
+        requests.iter().filter(|r| r.path.contains("session-old")).count(),
         0,
-        "chunk 0 is not re-sent, so 8 bytes can only come from the watermark"
+        "nothing is ever sent into the old session: no chunk, no complete"
+    );
+    assert_eq!(
+        count_requests(&requests, "POST", &format!("/api/v1/files/{OLD_FILE}/upload/abandon")),
+        1,
+        "the old session is abandoned on the server"
+    );
+    assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/init"), 1);
+    for index in 0..3 {
+        assert_eq!(
+            count_requests(&requests, "PUT", &format!("/api/v1/uploads/session-1/chunks/{index}")),
+            1,
+            "chunk {index} is sent once into the fresh session, chunk 0 included"
+        );
+    }
+    assert_eq!(
+        count_requests(&requests, "POST", "/api/v1/uploads/session-1/complete"),
+        1
+    );
+    // The whole file is there as v2: every frame opens against the commitment `complete` published.
+    let item_id = init_item_id(&requests);
+    let file_key = hydration_test_key(master_key, &item_id);
+    let (record, _) = uploaded_record(&requests, &file_key);
+    assert_eq!(record.format, beebeeb_core::chunk_stream::ExpectedChunkFormat::V2);
+    assert_eq!(
+        uploaded_plaintext(&requests, &file_key, &item_id),
+        b"0123456789abcdefghij"
     );
 }
 
@@ -132,15 +159,12 @@ async fn flow7_gone_session_abandons_orphan_then_reuploads_once() {
     assert!(cut.is_err(), "the first pass must be cut mid-upload");
     assert!(bridge.db.get_upload_resume("op-upload-resume").unwrap().is_some());
 
-    // Second pass: the persisted session is gone → the orphan create row is
-    // abandoned, resume state dropped, and the op scheduled for retry.
+    // Second pass: a cut session is never continued (chunk format v2), so whether the server
+    // still has it does not matter: the orphan create row is abandoned and a fresh session
+    // uploads the file exactly once.
     let outcome = bridge.process_due_operations(dir.path(), 200).await.unwrap();
-    assert_eq!(outcome.retried_op_ids, vec!["op-upload-resume".to_string()]);
-    assert!(bridge.db.get_upload_resume("op-upload-resume").unwrap().is_none());
-
-    // Third pass: a fresh session uploads the file exactly once.
-    let outcome = bridge.process_due_operations(dir.path(), 10_000).await.unwrap();
     assert_eq!(outcome.completed_op_ids, vec!["op-upload-resume".to_string()]);
+    assert!(bridge.db.get_upload_resume("op-upload-resume").unwrap().is_none());
 
     let requests = server.finish();
     assert_eq!(count_requests(&requests, "POST", "/api/v1/uploads/init"), 2);
@@ -240,10 +264,11 @@ async fn flow7_given_up_create_upload_abandons_its_orphan_row() {
 
     let requests = server.finish();
     let item_id = init_item_id(&requests);
-    assert_eq!(requests.len(), 4);
-    assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
-    assert_eq!(requests[3].method, "POST");
-    assert_eq!(requests[3].path, format!("/api/v1/files/{item_id}/upload/abandon"));
+    // init, the refused chunk, the abandon (no metadata update: the name travels with `complete`).
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[1].path, "/api/v1/uploads/upload-session-1/chunks/0");
+    assert_eq!(requests[2].method, "POST");
+    assert_eq!(requests[2].path, format!("/api/v1/files/{item_id}/upload/abandon"));
     assert_eq!(
         count_requests(&requests, "DELETE", &format!("/api/v1/files/{item_id}")),
         0,

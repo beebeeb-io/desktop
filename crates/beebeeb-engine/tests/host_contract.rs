@@ -45,7 +45,7 @@ const APPLE: &str = "a0000000-0000-4000-8000-000000000002";
 fn master_key() -> beebeeb_core::kdf::MasterKey {
     static KEY: OnceLock<[u8; 32]> = OnceLock::new();
     beebeeb_core::kdf::MasterKey::from_bytes(
-        *KEY.get_or_init(|| beebeeb_core::recovery::recover_from_phrase(PHRASE).unwrap().to_bytes()),
+        *KEY.get_or_init(|| *beebeeb_core::recovery::recover_from_phrase(PHRASE).unwrap().to_bytes()),
     )
 }
 

@@ -403,6 +403,18 @@ impl StateDb {
         // SF-0001 (L13): sessions persisted before this flag existed were opened
         // under a server-chosen id; only a self-minted CREATE may be resumed.
         ensure_column(conn, "upload_resume", "self_minted", "INTEGER NOT NULL DEFAULT 0")?;
+        // Chunk format v2: the sealed name (with the upload's version commitment) that `complete` publishes,
+        // stored before the first chunk is sent. NULL on every session an older build opened: those are v1.
+        ensure_column(conn, "upload_resume", "completion_name_encrypted", "TEXT")?;
+        // Chunk format v2: the highest version counter this device wrote or authenticated for a file, so a
+        // replacement's counter is above it (core's rule) whatever the local key record still says.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS file_version_counters (
+                file_id TEXT PRIMARY KEY,
+                highest INTEGER NOT NULL,
+                published_name TEXT
+            );",
+        )?;
         // Task 2270 (spec M1): a finalization that cannot complete for a lasting reason is held for review.
         ensure_column(conn, "upload_finalizations", "review", "TEXT")?;
         ensure_column(conn, "upload_finalizations", "review_at", "INTEGER")?;
@@ -615,6 +627,8 @@ impl StateDb {
                  updated_at INTEGER NOT NULL DEFAULT 0
              );",
         )?;
+        // Chunk format v2: as `upload_resume.completion_name_encrypted`, for a backup's session.
+        ensure_column(conn, "backup_upload_resume", "completion_name_encrypted", "TEXT")?;
         // LD-0113 Task D4: where this account's backup lives on the server (resolved once, then cached), the
         // category folders it created or adopted, and the backups that were turned off with why (rule 11).
         conn.execute_batch(

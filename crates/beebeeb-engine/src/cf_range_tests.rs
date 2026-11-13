@@ -21,8 +21,10 @@ const FILE_ID: &str = "11111111-2222-4333-8444-555555555555";
 const VERSION: &str = "22222222-3333-4444-8555-666666666666";
 const KEY: [u8; 32] = [9u8; 32];
 
-/// A v1 file of `len` bytes in chunks of `stride`, as the server stores it.
+/// A file of `len` bytes in chunks of `stride`, as this build writes it and the server stores it:
+/// v2 frames, and the commitment its sealed name carries.
 struct Fx {
+    version: Option<beebeeb_core::chunk_stream::VersionCommitment>,
     frames: Vec<Vec<u8>>,
     plain: Vec<u8>,
     geometry: Geometry,
@@ -36,6 +38,7 @@ fn fx(len: usize, stride: u64) -> Arc<Fx> {
         .chunks(stride as usize)
         .map(|p| enc.push_chunk(p).unwrap().data)
         .collect();
+    let version = Some(enc.version_commitment_after(None).unwrap());
     let s = enc.finish().unwrap();
     let geometry = Geometry {
         chunk_count: frames.len() as u32,
@@ -44,6 +47,7 @@ fn fx(len: usize, stride: u64) -> Arc<Fx> {
         original_size: s.total_plaintext,
     };
     Arc::new(Fx {
+        version,
         frames,
         plain,
         geometry,
@@ -155,6 +159,8 @@ fn request(fx: &Fx, on_disk: u64, recorded: Option<RangeIdentity>) -> RangeReque
         object_version_id: VERSION.into(),
         file_size: fx.geometry.original_size,
         pin: ExpectedChunkFormat::Unrecorded,
+        version: fx.version,
+        authenticated_chunk_size: None,
         geometry: Some(fx.geometry),
         recorded,
         on_disk_bytes: on_disk,
@@ -317,7 +323,11 @@ async fn ld0105_s9_identity_and_candidate_are_recorded_before_the_first_transfer
     let identity = db.range_identity(FILE_ID).unwrap().expect("recorded");
     assert_eq!(
         (identity.object_version_id.as_str(), identity.format.as_str()),
-        (VERSION, "v1")
+        (VERSION, "v2")
+    );
+    assert!(
+        identity.version_id_hex.is_some(),
+        "a v2 version is recorded with the version id its frames were opened against"
     );
 }
 

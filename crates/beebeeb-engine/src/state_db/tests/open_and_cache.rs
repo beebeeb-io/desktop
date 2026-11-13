@@ -221,9 +221,12 @@ fn task_2240_a_commit_elsewhere_costs_one_cold_pass() {
     });
 }
 
-/// Task 2240 (I6): a UI command that reads more than its own 2,000 KiB on its connection takes the scan's oldest
-/// pages (one shared LRU). The next pass re-reads at most what that command read, never more than a cold pass, and
-/// the one after it reads nothing.
+/// Task 2240 (I6): after a UI command that reads more than its own 2,000 KiB on its connection, the next pass
+/// re-reads at most what that command read, never more than a cold pass, and the one after it reads nothing.
+/// With the SQLite that rusqlite 0.32 bundled (built with `SQLITE_ENABLE_MEMORY_MANAGEMENT`: one page-cache LRU for
+/// the whole process) the command took the scan's oldest pages, and the next pass re-read them. The SQLite that
+/// rusqlite 0.41 bundles is built without that flag: each connection keeps its own cache, so the pass re-reads
+/// nothing. The bound holds on both, and is what this test asserts.
 #[test]
 fn task_2240_a_large_ui_read_costs_at_most_one_partial_pass() {
     task_2240_in_own_process("task_2240_a_large_ui_read_costs_at_most_one_partial_pass", || {
@@ -240,8 +243,8 @@ fn task_2240_a_large_ui_read_costs_at_most_one_partial_pass() {
                 .unwrap();
         let ui_read = ui.page_reads() - before;
         drop(ui);
+        assert!(ui_read > 0, "precondition: the UI command read pages");
         let partial = task_2240_pass(&engine);
-        assert!(partial > 0, "precondition: the UI read took some of the scan's pages");
         assert!(
             partial <= ui_read && partial <= full,
             "{partial} pages, the UI read {ui_read}, a cold pass {full}"

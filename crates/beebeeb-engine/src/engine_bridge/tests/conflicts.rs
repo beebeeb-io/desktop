@@ -181,7 +181,13 @@ async fn test_resolve_keep_mine_uploads_local_payload_and_commits_state() {
     assert_eq!(contract.content_type.as_deref(), Some("text/plain"));
 
     let requests = server.finish();
-    assert_eq!(requests.len(), 4);
+    // A new version of an existing file reads the row first: its record as the server holds it.
+    assert_eq!(requests.len(), 5);
+    assert_eq!(
+        (requests[0].method.as_str(), requests[0].path.as_str()),
+        ("GET", "/api/v1/files/6d2d20bc-321b-533d-931c-778b0b34a9fc")
+    );
+    let requests = &requests[1..];
     assert_eq!(requests[0].method, "POST");
     assert_eq!(requests[0].path, "/api/v1/uploads/init");
     let init_body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
@@ -202,7 +208,7 @@ async fn test_resolve_keep_mine_uploads_local_payload_and_commits_state() {
     let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
     let file_key = beebeeb_core::kdf::derive_file_key(&master_key, b"6d2d20bc-321b-533d-931c-778b0b34a9fc");
     assert_eq!(
-        beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &requests[2].body).unwrap(),
+        uploaded_plaintext(requests, &file_key, "6d2d20bc-321b-533d-931c-778b0b34a9fc"),
         b"mine upload payload"
     );
     assert_eq!(requests[3].method, "POST");
@@ -258,10 +264,19 @@ async fn test_resolve_keep_mine_returns_error_when_upload_fails() {
     assert_eq!(entry.remote_updated_at, 90);
 
     let requests = server.finish();
-    assert_eq!(requests.len(), 3);
-    assert_eq!(requests[0].path, "/api/v1/uploads/init");
-    assert_eq!(requests[1].path, "/api/v1/files/6d2d20bc-321b-533d-931c-778b0b34a9fc");
-    assert_eq!(requests[2].path, "/api/v1/uploads/upload-session-1/chunks/0");
+    assert_eq!(
+        requests
+            .iter()
+            .map(|r| (r.method.as_str(), r.path.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            // The row as the server holds it, then the session and the refused chunk. No metadata
+            // update: the file stays where it is, and its name travels with `complete`.
+            ("GET", "/api/v1/files/6d2d20bc-321b-533d-931c-778b0b34a9fc"),
+            ("POST", "/api/v1/uploads/init"),
+            ("PUT", "/api/v1/uploads/upload-session-1/chunks/0"),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -385,8 +400,8 @@ async fn test_process_due_operations_uploads_encrypted_image_thumbnails_after_co
 
     let master_key = beebeeb_core::kdf::MasterKey::from_bytes(master_key);
     let file_key = beebeeb_core::kdf::derive_file_key(&master_key, item_id.as_bytes());
-    let medium_plain = beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &medium.body).unwrap();
-    let large_plain = beebeeb_core::encrypt::decrypt_chunk_raw(&file_key, &large.body).unwrap();
+    let medium_plain = beebeeb_core::encrypt::decrypt_thumbnail(&file_key, &medium.body).unwrap();
+    let large_plain = beebeeb_core::encrypt::decrypt_thumbnail(&file_key, &large.body).unwrap();
 
     assert_ne!(medium.body, medium_plain);
     assert_ne!(large.body, large_plain);

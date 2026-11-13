@@ -156,7 +156,9 @@ impl EngineBridge {
         if chunk_size == 0 || chunk_count == 0 {
             return Err(anyhow::anyhow!("upload init returned invalid chunk plan").into());
         }
-        let (file_key, pin) = owned_key_and_pin(&self.db, self.api.master_key(), &id)?;
+        // A new item: no record yet. Its name is sealed again at `complete`, with the commitment of this upload.
+        let (file_key, record) = owned_key_and_record(&self.db, self.api.master_key(), &id)?;
+        let name_key = beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes());
         let mut writer = beebeeb_core::chunk_stream::ChunkEncryptor::from_reader_with_file_key(
             file_key,
             &id,
@@ -164,39 +166,70 @@ impl EngineBridge {
             chunk_size,
             std::io::Cursor::new(bytes.to_vec()),
         )?
-        .with_recorded_pin(pin)?;
+        .with_recorded_pin(record.format)?;
+        let mut completion_name = None;
         for index in 0..chunk_count {
             let chunk = writer
                 .next_chunk()?
                 .ok_or_else(|| anyhow::anyhow!("small file ended early"))?;
+            if index == 0 {
+                completion_name = Some(upload_v2::seal_completion_name(
+                    &self.db,
+                    &id,
+                    &writer,
+                    &name_key,
+                    record,
+                    true,
+                    name,
+                    Some(mime),
+                )?);
+            }
             self.backup_api()
                 .upload_session_chunk(&upload.upload_session_id, index as u32, &chunk.data)
                 .await?;
         }
         writer.finish()?;
-        self.backup_api()
-            .complete_upload_session(&upload.upload_session_id)
+        let completion_name =
+            completion_name.ok_or_else(|| anyhow::anyhow!("a small file sealed no chunk and so no name"))?;
+        let completed = self
+            .backup_api()
+            .complete_upload_session(&upload.upload_session_id, Some(&completion_name))
             .await?;
+        self.publish_completion_name(
+            self.backup_api(),
+            &id,
+            &name_key,
+            &completion_name,
+            &upload.object_version_id,
+            &completed,
+        )
+        .await?;
         tracing::info!(file_id = %id, bytes = size, "backup: small file written");
         Ok(id)
     }
 
-    /// The plaintext of the small file `id` (`chunk_count` chunks), read in full. `Ok(None)`: it cannot be opened on
-    /// this device (no key, a frame that does not open, or over [`MANIFEST_READ_CAP`]). A network or server failure
-    /// is an error, never `None`: an unread manifest must not look like another device's.
+    /// The plaintext of the small file `id` (`chunk_count` chunks), read in full. `record` is the content record of
+    /// the row's sealed name as the listing served it (`BackupChild::record`): the pin and the version commitment
+    /// the content is read against. `Ok(None)`: it cannot be opened on this device (no key, no record, a frame that
+    /// does not open, or over [`MANIFEST_READ_CAP`]). A network or server failure is an error, never `None`: an
+    /// unread manifest must not look like another device's.
     pub async fn backup_read_small_file(
         &self,
         id: &str,
+        record: Option<crate::content_record::ContentRecord>,
         chunk_count: u32,
         size: u64,
     ) -> Result<Option<Vec<u8>>, EngineError> {
         if size > MANIFEST_READ_CAP || chunk_count == 0 {
             return Ok(None);
         }
-        let Ok((file_key, pin)) = owned_key_and_pin(&self.db, self.api.master_key(), id) else {
+        let Some(record) = record else {
             return Ok(None);
         };
-        let mut reader = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(file_key, id, pin);
+        let Ok((file_key, _)) = owned_key_and_pin(&self.db, self.api.master_key(), id) else {
+            return Ok(None);
+        };
+        let mut reader = record.decryptor(file_key, id);
         let mut plain = Vec::new();
         for index in 0..chunk_count {
             let bytes = self.backup_api().download_chunk(id, index, &|_| {}).await?;
