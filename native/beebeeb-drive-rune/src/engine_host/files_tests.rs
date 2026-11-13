@@ -628,3 +628,95 @@ fn the_backups_id_is_read_per_session_and_handed_out_only_while_the_section_is_o
         }
     ));
 }
+
+/// What a row reads after a change is what the engine's rows say, the way a listing reads them: kept and here,
+/// here, or online only; a folder has a mark only while it is kept; an id no row has reads as unknown.
+#[test]
+fn the_mark_of_a_row_is_read_the_way_a_listing_reads_it() {
+    use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, PinState, StateDb};
+    let dir = tempfile::tempdir().unwrap();
+    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let put = |id: &str, status: FileStatus, kind: ItemKind, kept: bool| {
+        let entry = FileEntry {
+            file_id: id.into(),
+            path: format!("/{id}"),
+            status,
+            size_bytes: 10,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: kind,
+        };
+        db.upsert_file_with_contract(&entry, |contract| {
+            contract.item_kind = entry.item_kind.clone();
+            if kept {
+                contract.pin_state = PinState::Pinned;
+            }
+        })
+        .unwrap();
+    };
+    put("here", FileStatus::Local, ItemKind::File, false);
+    put("kept", FileStatus::Local, ItemKind::File, true);
+    put("online", FileStatus::CloudOnly, ItemKind::File, false);
+    // Kept, and not downloaded yet: the engine's model says online only until it is.
+    put("kept-not-here", FileStatus::CloudOnly, ItemKind::File, true);
+    put("folder", FileStatus::Local, ItemKind::Folder, false);
+    put("kept-folder", FileStatus::Local, ItemKind::Folder, true);
+    let ids: Vec<String> = [
+        "here",
+        "kept",
+        "online",
+        "kept-not-here",
+        "folder",
+        "kept-folder",
+        "gone",
+    ]
+    .iter()
+    .map(|id| id.to_string())
+    .collect();
+    let mark = |mark: &str| Some(Some(mark.to_string()));
+    assert_eq!(
+        marks_in(&db, &ids),
+        [
+            mark("on_this_pc"),
+            mark("available_offline"),
+            mark("online_only"),
+            mark("online_only"),
+            Some(None),
+            mark("available_offline"),
+            None
+        ]
+    );
+}
+
+/// The app's own glue (`impl FilesEngine for Engine`), against a real engine handle with no one signed in: nothing
+/// is read, nothing is changed, and whether a selection can be reclaimed is the engine's own word.
+#[test]
+fn the_engines_own_glue_hands_out_nothing_with_no_one_signed_in() {
+    use beebeeb_engine::app::EngineConfig;
+    let (host, _messages) = beebeeb_engine::host::ChannelHost::new(|| {});
+    let config = EngineConfig {
+        account_id: "files-copies-test-slot".into(),
+        state_dir: crate::engine_host::tests::process_state_dir(),
+        api_base: crate::engine_host::open::ApiBase::engine_default().origin().to_string(),
+    };
+    let engine = Engine::open(
+        &beebeeb_engine::identity::TEST,
+        config,
+        host,
+        beebeeb_engine::signin::memory_store::MemoryCredentials::default(),
+    )
+    .expect("the engine opens");
+    engine.restore();
+    let ids = vec!["an-invented-id".to_string()];
+    assert!(!FilesEngine::unlocked(&engine));
+    assert_eq!(FilesEngine::states_of(&engine, &ids), Err(LocalStateRefused::SignedOut));
+    assert!(FilesEngine::free_up_space_of(&engine, &ids).is_err());
+    assert!(FilesEngine::set_kept(&engine, "an-invented-id", false).is_err());
+    assert_eq!(
+        FilesEngine::can_free_selection(&engine),
+        cfg!(target_os = "windows"),
+        "a selection is reclaimed on Windows alone"
+    );
+}

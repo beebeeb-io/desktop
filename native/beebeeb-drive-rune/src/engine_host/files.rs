@@ -106,18 +106,7 @@ impl<C: CredentialStores> FilesEngine for Engine<C> {
         Engine::free_up_space_of(self, ids)
     }
     fn states_of(&self, ids: &[String]) -> Result<Vec<Option<Option<String>>>, LocalStateRefused> {
-        // The listing's own two steps (the engine's row model, then the window's mark of it): a row reads here
-        // exactly what it reads when its folder is read again.
-        Engine::local_state(self)?.with(|db| {
-            ids.iter()
-                .map(|id| {
-                    let entry = db.get_file(id).ok().flatten()?;
-                    let contract = db.get_file_contract_state(id).ok()?;
-                    let row = beebeeb_engine::drive_v2::model::item_from(&entry, contract.as_ref(), None);
-                    Some(crate::source_engine::item(row).pc_status)
-                })
-                .collect()
-        })
+        Engine::local_state(self)?.with(|db| marks_in(db, ids))
     }
     fn backups_root(&self) -> Result<Option<String>, LocalStateRefused> {
         Engine::local_state(self)?.with(|db| {
@@ -129,6 +118,20 @@ impl<C: CredentialStores> FilesEngine for Engine<C> {
     fn wake(&self) {
         self.wake_host();
     }
+}
+
+/// Per id, the row's mark of what this PC holds as the rows say now, by the listing's own two steps (the engine's
+/// row model, then the window's mark of it): a row reads here exactly what it reads when its folder is read again.
+/// `None`: no such row, or it could not be read.
+fn marks_in(db: &beebeeb_engine::state_db::StateDb, ids: &[String]) -> Vec<Option<Option<String>>> {
+    ids.iter()
+        .map(|id| {
+            let entry = db.get_file(id).ok().flatten()?;
+            let contract = db.get_file_contract_state(id).ok()?;
+            let row = beebeeb_engine::drive_v2::model::item_from(&entry, contract.as_ref(), None);
+            Some(crate::source_engine::item(row).pc_status)
+        })
+        .collect()
 }
 
 enum Ask {
