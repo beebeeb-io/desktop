@@ -488,7 +488,7 @@ fn picture_body(bytes: &[u8], cancel: &AtomicBool) -> Content {
 fn picture(bytes: &[u8]) -> Option<rune::Pixels> {
     let mut encoded: Arc<[u8]> = Arc::from(bytes);
     let image = decoders().load(encoded.clone());
-    let decoded = image.wait().is_ok();
+    let decoded = settled(&image);
     // The decoder's job holds the other handle for a moment after it answered.
     let mut wiped = false;
     for _ in 0..2_000 {
@@ -502,7 +502,7 @@ fn picture(bytes: &[u8]) -> Option<rune::Pixels> {
     if !wiped {
         log("viewer: the picture decoder kept its copy of an open file; it was released, not overwritten");
     }
-    decoded.then(|| image.pixels().clone())
+    decoded
 }
 
 /// What the view draws of the file's bytes.
@@ -596,8 +596,23 @@ fn open_pdf(bytes: zeroize::Zeroizing<Vec<u8>>, size: &str) -> (Body, Option<vie
 /// A rendered page as the toolkit draws it (with the smaller copies it scales down from). `None`: the toolkit
 /// did not take it.
 fn page_pixels(page: viewer_pdf::Rendered) -> Option<rune::Pixels> {
-    let image = decoders().rgba(page.width, page.height, page.rgba);
-    image.wait().is_ok().then(|| image.pixels().clone())
+    settled(&decoders().rgba(page.width, page.height, page.rgba))
+}
+
+/// The pixels of `image` once the toolkit decoded it, waited for on this (a worker's) thread. `None`: it does
+/// not decode. The toolkit marks an image decoded a moment BEFORE its pixel handle holds the picture, so the
+/// handle is waited for too: handed out earlier it has no size yet, and a page or a photo drawn from it in that
+/// moment has no height.
+fn settled(image: &rune::Image) -> Option<rune::Pixels> {
+    let [width, height] = image.wait().ok()?;
+    let pixels = image.pixels().clone();
+    for _ in 0..2_000 {
+        if pixels.size() == (width, height) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    Some(pixels)
 }
 
 /// What the view shows for a download that did not hand over content. `None`: nothing (it was cancelled).
