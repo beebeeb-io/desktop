@@ -21,6 +21,8 @@ struct Held {
     loaded: Loaded,
     notice: Option<Notice>,
     restored: Vec<String>,
+    /// How often the window told the source to forget.
+    forgot: usize,
 }
 
 struct Stub(Rc<RefCell<Held>>);
@@ -57,6 +59,11 @@ impl TrashSource for Stub {
     }
     fn count(&self) -> Option<usize> {
         None
+    }
+    fn forget(&mut self) {
+        let mut held = self.0.borrow_mut();
+        held.forgot += 1;
+        held.rows.clear();
     }
     fn actions_available(&self) -> bool {
         false
@@ -228,4 +235,52 @@ fn the_selection_follows_its_item_when_the_list_re_sorts_and_restore_acts_on_tha
         ),
         (None, None)
     );
+}
+
+/// A lock, and another account behind the gate: the window tells the source to forget on its own side (its poll), and
+/// no name of before is in the element tree.
+#[test]
+fn a_gate_or_account_change_makes_the_window_drop_every_name() {
+    use crate::shell::actions::FixtureEngine;
+    use crate::shell::app::GateState;
+    let engine = std::sync::Arc::new(FixtureEngine::ready());
+    let shell = crate::shell::host::Shell::fixture_on(engine.clone(), crate::shell::platform::current());
+    let mut state = crate::shell::state::init_with(shell);
+    crate::frames::go(&mut state, Section::Trash);
+    let held = Rc::new(RefCell::new(Held {
+        rows: three(),
+        ..Held::default()
+    }));
+    state.frames.trash = TrashUi::on(Box::new(Stub(held.clone())));
+    let env = rune::Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, crate::view, (1278.0, 798.0), env);
+    poll(&mut rt);
+    let drawn = |rt: &Runtime<State>| {
+        rt.elements()
+            .into_iter()
+            .filter(|e| !e.exiting)
+            .any(|e| e.text.as_deref() == Some("Bravo.pdf") || e.label.as_deref() == Some("Bravo.pdf"))
+    };
+    assert!(drawn(&rt), "the list is drawn");
+    assert_eq!(held.borrow().forgot, 0);
+
+    engine.set_gate(GateState::Locked);
+    rt.update(|s, _| {
+        s.shell.refresh();
+    });
+    poll(&mut rt);
+    assert_eq!(held.borrow().forgot, 1, "the lock: forgotten on the window's side");
+    assert!(!drawn(&rt));
+
+    held.borrow_mut().rows = three();
+    engine.set_gate(GateState::Ready);
+    engine.set_account("another-account");
+    rt.update(|s, _| {
+        s.shell.refresh();
+    });
+    poll(&mut rt);
+    assert!(held.borrow().forgot >= 2, "another account: forgotten again");
 }
