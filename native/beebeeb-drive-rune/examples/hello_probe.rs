@@ -8,7 +8,8 @@
 //!
 //! With `--prompt` it opens a small window of its own ("Beebeeb Hello probe") and asks for the prompt on that
 //! window, as the app will on its own: the prompt must come up in front of it. Nobody answering is not a hang:
-//! after `--cancel-after` seconds (default 60; 0 waits for ever) the probe takes the prompt away itself and says so.
+//! after `--cancel-after` seconds (default 60; 0 waits for ever) the probe takes the prompt away itself, says so,
+//! and stays 3 s more so that it can be seen whether Windows closed the prompt.
 //! It signs in to nothing, reads no account and prints only the names of the answers. It needs a desktop: over
 //! plain SSH there is none (`scripts/rungs/hello-probe.ps1` is the wrapper for the build VM's desktop session).
 
@@ -49,9 +50,12 @@ fn main() {
         std::process::exit(1);
     };
     let (tx, rx) = mpsc::channel();
-    let request = windows_hello::start(window, REASON, move |result| {
+    let Some(request) = windows_hello::start(window, REASON, move |result| {
         let _ = tx.send(result);
-    });
+    }) else {
+        println!("result: none (no thread for the prompt)");
+        std::process::exit(1);
+    };
     println!("result: {:?}", wait(&rx, &request, cancel_after));
 }
 
@@ -67,7 +71,12 @@ fn wait(rx: &mpsc::Receiver<HelloResult>, request: &HelloRequest, cancel_after: 
     loop {
         pump_messages();
         match rx.recv_timeout(Duration::from_millis(20)) {
-            Ok(result) => return result,
+            Ok(result) => {
+                if cancelled {
+                    linger(Duration::from_secs(3));
+                }
+                return result;
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             // `start` answers exactly once; a sender that went without an answer is a failure of the module.
             Err(mpsc::RecvTimeoutError::Disconnected) => return HelloResult::Failed,
@@ -80,6 +89,15 @@ fn wait(rx: &mpsc::Receiver<HelloResult>, request: &HelloRequest, cancel_after: 
             );
             request.cancel();
         }
+    }
+}
+
+/// Keeps the probe's window (and so a prompt Windows has not closed yet) on screen a little longer.
+fn linger(time: Duration) {
+    let until = Instant::now() + time;
+    while Instant::now() < until {
+        pump_messages();
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
