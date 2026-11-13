@@ -59,6 +59,8 @@ struct Server {
     /// Every session id a DELETE named, in order, and how many times "all others" was asked.
     deleted: Arc<Mutex<Vec<String>>>,
     revoked_all: Arc<AtomicU64>,
+    /// Runs once, while the next sessions list is being answered (the call is under way).
+    during_read: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
 }
 
 fn sessions_of_the_first() -> Vec<Value> {
@@ -126,6 +128,8 @@ fn server() -> Server {
         deleted.clone(),
         revoked_all.clone(),
     );
+    let during_read: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>> = Arc::new(Mutex::new(None));
+    let during_read_in = during_read.clone();
     let signing_in_second = Mutex::new(false);
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
         let who = match req.bearer() {
@@ -171,6 +175,10 @@ fn server() -> Server {
                     return Reply::json(401, json!({}));
                 }
                 let now = person.sessions.lock().unwrap().clone();
+                let hook = during_read_in.lock().unwrap().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
                 std::thread::sleep(Duration::from_millis(read_delay_in.load(Ordering::SeqCst)));
                 Reply::ok(json!({ "sessions": if read == EMPTY { Vec::new() } else { now } }))
             }),
@@ -210,6 +218,7 @@ fn server() -> Server {
         change_delay_ms,
         deleted,
         revoked_all,
+        during_read,
     }
 }
 
@@ -782,6 +791,36 @@ fn the_engines_account_calls_answer_for_their_session_and_send_only_for_it() {
     assert_eq!(engine.revoke_other_account_sessions(engine.session_turn()), Ok(0));
 }
 
+/// The session is locked while Beebeeb is answering: the engine hands the answer to nobody, and the source
+/// (asked the same way) holds nothing of it.
+#[test]
+fn an_answer_that_lands_after_a_lock_is_handed_to_nobody() {
+    let server = server();
+    let engine = signed_in(&server);
+    let lock = |engine: &TestEngine| {
+        let engine = engine.clone();
+        Box::new(move || {
+            engine.lock();
+        }) as Box<dyn FnOnce() + Send>
+    };
+    *server.during_read.lock().unwrap() = Some(lock(&engine));
+    assert_eq!(engine.account_sessions().err(), Some(AccountCallError::NotSignedIn));
+    assert_eq!(
+        server.asked("GET /api/v1/account/sessions"),
+        1,
+        "it was asked, and answered"
+    );
+
+    engine
+        .unlock_with_phrase(Zeroizing::new(server.people[0].phrase.clone()))
+        .expect("the phrase unlocks");
+    let mut source = Source::new(engine.clone());
+    *server.during_read.lock().unwrap() = Some(lock(&engine));
+    opened(&mut source, Pane::Sessions);
+    assert!(source.sessions().is_empty());
+    assert_eq!(source.pane_state(Pane::Sessions), PaneState::SignedOut);
+}
+
 #[test]
 fn sizes_initials_and_times_read_as_the_board_writes_them() {
     assert_eq!(size_words(1_000_000_000_000), "1 TB");
@@ -894,10 +933,11 @@ fn the_window_drops_the_first_account_when_another_signs_in() {
     let mut rt = window_on(engine.clone(), SettingsPane::DevicesAndSessions);
     wait_for(&mut rt, "the sessions", |rt| shows(rt, PHONE));
     engine.sign_out_keeping_local_data().expect("signs out");
-    // Before any poll: the next frame alone draws nothing of the account.
+    // Before any poll of the source: a draw alone shows nothing of the account.
     rt.poll = None;
+    rt.update(|_, _| {});
     rt.frame(0.016);
-    rt.frame(0.4);
+    rt.frame(1.0);
     for words in [PHONE, BROWSER, THIS_PC, FIRST, FIRST_NAME] {
         assert!(!says_anywhere(&rt, words), "signed out, still shows {words}");
     }
