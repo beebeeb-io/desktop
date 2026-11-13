@@ -14,8 +14,10 @@
 //!   the list that shows, never for this session, and the list is read again after EVERY answer (taken, already
 //!   gone, refused, not known): a row goes only when Beebeeb's list no longer has it. A sign-out Beebeeb did not
 //!   take is said with a way to send it again ([`AccountSource::notice_action`]).
-//! - Every other account pane (Sign-in and security and all under it, Name, Change email): `PaneState::Unwired`,
-//!   the shell's "not built yet" frame. Their methods here do nothing and are not reachable from a drawn pane.
+//! - Every other account pane (Sign-in and security and all under it, Name, Change email): `PaneState::Unwired`.
+//!   The view says "not built yet" for them inside the settings shell, and does not open Name or Change email
+//!   from the live Account pane (their rows are the values alone). Their methods here do nothing and are not
+//!   reachable from a drawn pane.
 //!
 //! Session rule: every answer carries the session ([`Engine::session_turn`]) and the account it was made for; one
 //! that is not the current session's and account's is dropped, every accessor checks before it hands anything
@@ -1054,8 +1056,8 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         self.sign_out(ELSEWHERE);
     }
 
-    // ---- Not bound: each pane these belong to is `PaneState::Unwired` (the shell's "not built yet" frame), so
-    // no drawn control reaches them. Each does nothing and claims nothing.
+    // ---- Not bound: each pane these belong to is `PaneState::Unwired` (it says "not built yet", and none of
+    // its controls is drawn), so no drawn control reaches them. Each does nothing and claims nothing.
 
     /// Sign-in and security (DW-A52) is not bound: its values have no "not known".
     fn security(&self) -> Security {

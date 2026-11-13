@@ -453,7 +453,8 @@ pub enum EmailRefused {
 pub enum PaneState {
     /// What the pane draws is the signed-in account's, read from Beebeeb.
     Ready,
-    /// Nothing answers for this pane yet: the shell's "not built yet" frame.
+    /// Nothing answers for this pane yet: it says "not built yet" inside the settings shell (the sidebar stays),
+    /// and a page under a section that IS answered for does not open at all.
     Unwired,
     /// Asked, not answered yet.
     Loading,
@@ -479,7 +480,7 @@ pub struct Pumped {
 
 pub trait AccountSource {
     /// Where `pane` stands. Anything but `Ready`: the pane's own accessors are not asked; the view draws the
-    /// state instead (`frames::account::state_pane`, or the shell's frame for `Unwired`).
+    /// state instead (`frames::account::state_pane`, or `unbuilt_pane` for `Unwired`).
     fn pane_state(&self, _pane: super::Pane) -> PaneState {
         PaneState::Ready
     }

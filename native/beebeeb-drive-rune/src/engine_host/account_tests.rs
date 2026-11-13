@@ -1,8 +1,8 @@
 //! The account sections on the real engine (`EngineAccountSource`), against the engine's fake accounts on
 //! loopback with the account routes added here (the display name, the plan, the sessions and their sign-outs):
-//! what Account and Devices and sessions draw, every way a read can fail, a sign-out sent once and shown only
-//! after Beebeeb's list no longer has the session, a session that changes on the way, another account, and the
-//! running app's window. Every name is invented.
+//! the fake and its helpers, what Account and Devices and sessions draw, every way a read can fail, a session
+//! Beebeeb or the engine ended, another account, and the engine's own calls. The sign-outs are in
+//! `account_tests_sign_out.rs`, the running app's window in `account_tests_window.rs`. Every name is invented.
 
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
