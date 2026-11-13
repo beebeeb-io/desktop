@@ -2,9 +2,8 @@
 //!
 //! [`open::open`] is the start path: it makes the one engine handle of this process, for the identity this
 //! binary was built as (`shell::identity::engine_identity`, the only place the native app asks for it).
-//! `LiveEngine` wraps that handle and implements `EngineActions`. `EngineSignInSource` implements
-//! `SignInSource` by spawning worker threads for each blocking engine call and delivering results through a
-//! channel. `EngineDriveSource` implements `DriveSource` on the handle's local state, with the engine's own
+//! `LiveEngine` wraps that handle and implements `EngineActions`. `EngineSignInSource` ([`signin`]) implements
+//! `SignInSource`: one worker runs the blocking engine calls and delivers results through a channel. `EngineDriveSource` implements `DriveSource` on the handle's local state, with the engine's own
 //! view models. `EngineTraySource` ([`tray`]) is the flyout's. Every type is generic over the credential
 //! stores, so a test runs the same code on stores in memory; the app uses the platform's.
 //!
@@ -18,9 +17,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
-use std::thread;
-
-use zeroize::Zeroizing;
 
 use beebeeb_engine::app::{CredentialStores, Engine, LocalStateRefused};
 use beebeeb_engine::drive_v2::DriveError;
@@ -38,10 +34,7 @@ use beebeeb_engine::sync_view::Start;
 use crate::frames::files::source::{
     self as files_source, Account, ActionError, Change, Counts, Details, FilesSource, StorageSplit,
 };
-use crate::frames::signin::source::{
-    CodeKind, GateState, HelloOutcome, NextAfterSignIn, PhraseProblem, SharedSession, SignInEvent, SignInProblem,
-    SignInSource, TwoFactorProblem,
-};
+use crate::frames::signin::source::{GateState, NextAfterSignIn, PhraseProblem, SignInProblem, TwoFactorProblem};
 use crate::shell::actions::{self, EngineActions};
 use crate::shell::app::{GateState as ShellGate, Session};
 use crate::shell::instance::ProfileHolder;
@@ -58,6 +51,7 @@ pub mod open;
 pub mod search;
 pub mod settings;
 pub mod shared;
+pub mod signin;
 pub mod sync;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -65,6 +59,7 @@ pub mod this_pc;
 pub mod trash;
 pub mod tray;
 
+pub use signin::EngineSignInSource;
 pub use sync::EngineGlobalSource;
 pub use tray::EngineTraySource;
 
@@ -384,126 +379,6 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
 
     fn resume_after_cancelled_quit(&self) {
         log("NotWired(resume_after_cancelled_quit)");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// EngineSignInSource: SignInSource on the real engine
-// ---------------------------------------------------------------------------
-
-/// `SignInSource` backed by the real engine. Each `begin_*` spawns a named thread that calls the
-/// blocking engine method and sends the result through a channel; `poll` drains it. Secrets go
-/// from the `&str` argument into `Zeroizing<String>` for the thread and nowhere else.
-pub struct EngineSignInSource<C: CredentialStores> {
-    engine: Arc<Engine<C>>,
-    tx: mpsc::Sender<SignInEvent>,
-    rx: mpsc::Receiver<SignInEvent>,
-}
-
-impl<C: CredentialStores> EngineSignInSource<C> {
-    pub fn new(engine: Arc<Engine<C>>) -> Self {
-        let (tx, rx) = mpsc::channel();
-        Self { engine, tx, rx }
-    }
-}
-
-impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
-    /// The gate from the handle's view: read without waiting, on every frame.
-    fn gate(&self) -> GateState {
-        map_gate_signin(self.engine.view().gate)
-    }
-
-    fn shared_session(&self) -> Option<SharedSession> {
-        None // Windows Hello / shared session not wired
-    }
-
-    fn begin_sign_in(&mut self, email: &str, password: &str) {
-        let engine = self.engine.clone();
-        let email = email.to_string();
-        let password = Zeroizing::new(password.to_string());
-        let tx = self.tx.clone();
-        thread::Builder::new()
-            .name("signin".into())
-            .spawn(move || {
-                let result = engine.sign_in_password(&email, password);
-                let event = match result {
-                    Ok(next) => SignInEvent::SignedIn(Ok(map_next(next))),
-                    Err(problem) => SignInEvent::SignedIn(Err(map_problem(problem))),
-                };
-                let _ = tx.send(event);
-            })
-            .expect("spawn sign-in thread");
-    }
-
-    fn begin_hello(&mut self) {
-        log("NotWired(begin_hello)");
-        let _ = self.tx.send(SignInEvent::Hello(HelloOutcome::Cancelled));
-    }
-
-    fn cancel_hello(&mut self) {
-        log("NotWired(cancel_hello)");
-    }
-
-    fn begin_device_request(&mut self) {
-        log("NotWired(begin_device_request)");
-    }
-
-    fn cancel_device_request(&mut self) {
-        log("NotWired(cancel_device_request)");
-    }
-
-    fn begin_two_factor(&mut self, code: &str, _kind: CodeKind) {
-        let engine = self.engine.clone();
-        let code = Zeroizing::new(code.to_string());
-        let tx = self.tx.clone();
-        thread::Builder::new()
-            .name("2fa".into())
-            .spawn(move || {
-                let result = engine.two_factor(code);
-                let event = match result {
-                    Ok(next) => SignInEvent::TwoFactor(Ok(map_next(next))),
-                    Err(words) => SignInEvent::TwoFactor(Err(two_factor_problem(words))),
-                };
-                let _ = tx.send(event);
-            })
-            .expect("spawn 2fa thread");
-    }
-
-    fn begin_restore(&mut self, words: &[&str]) {
-        let engine = self.engine.clone();
-        let phrase = Zeroizing::new(words.join(" "));
-        let tx = self.tx.clone();
-        thread::Builder::new()
-            .name("restore".into())
-            .spawn(move || {
-                let result = engine.unlock_with_phrase(phrase);
-                let event = match result {
-                    Ok(()) => SignInEvent::PhraseRestored(Ok(NextAfterSignIn::Drive)),
-                    Err(words) => SignInEvent::PhraseRestored(Err(phrase_problem(words))),
-                };
-                let _ = tx.send(event);
-            })
-            .expect("spawn restore thread");
-    }
-
-    fn begin_passkey(&mut self) {
-        log("NotWired(begin_passkey)");
-    }
-
-    fn begin_unlock(&mut self, _password: &str) {
-        log("NotWired(begin_unlock)");
-    }
-
-    fn begin_recovery_verify(&mut self, _email: &str, _words: &[&str]) {
-        log("NotWired(begin_recovery_verify)");
-    }
-
-    fn begin_set_password(&mut self, _password: &str) {
-        log("NotWired(begin_set_password)");
-    }
-
-    fn poll(&mut self) -> Option<SignInEvent> {
-        self.rx.try_recv().ok()
     }
 }
 

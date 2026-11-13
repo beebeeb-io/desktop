@@ -187,6 +187,11 @@ pub struct Ui {
     set_problem: Option<SignInProblem>,
     /// Sign-up's own state (DW-A31 to DW-A44), made ONCE here with its secure fields.
     pub(super) create: create::Create,
+    /// The session's gate as the last poll saw it (`follow_gate`).
+    gate_seen: Option<GateState>,
+    /// The device request was asked from the twelve words (a session without a key is waiting behind it): leaving
+    /// the request, or its refusal, goes back to the words, and the session is not discarded.
+    words_behind: bool,
 }
 
 impl Ui {
@@ -232,6 +237,8 @@ impl Ui {
             setting: false,
             set_problem: None,
             create: create::Create::new(),
+            gate_seen: None,
+            words_behind: false,
         }
     }
 
@@ -326,9 +333,32 @@ impl Ui {
         self.drop_steps();
     }
 
+    /// A step the engine is working on (the password, a code, the twelve words, the vault password, recovery):
+    /// while one runs the person cannot leave its screen, as during the password check (DW-A18). Leaving discards
+    /// the half-done sign-in, and a step that is on its way must not finish after that.
+    pub fn step_running(&self) -> bool {
+        self.busy || self.verifying || self.restoring || self.unlocking || self.recovering || self.setting
+    }
+
+    /// Back to the twelve words from a device request that was asked from them. Nothing is discarded.
+    fn back_to_the_words(&mut self) {
+        self.source.cancel_device_request();
+        self.request = None;
+        self.reconnecting = false;
+        if let Some(copy) = self.code_copy.take() {
+            copy.clear_now();
+        }
+        self.words_behind = false;
+        self.screen = Screen::Phrase;
+        self.focus = Some(steps::WORD_KEYS[0]);
+    }
+
     pub fn open_sign_in(&mut self) {
-        if self.busy {
+        if self.step_running() {
             return;
+        }
+        if self.words_behind && matches!(self.screen, Screen::Device { .. }) {
+            return self.back_to_the_words();
         }
         // A password typed to unlock after a passkey is not the sign-in form's.
         if self.screen == Screen::UnlockVault {
@@ -369,10 +399,30 @@ impl Ui {
 
     /// "Sign in with another device", "Ask again" and "Get a new code".
     pub fn ask_other_device(&mut self) {
-        if self.busy || self.passkey_waiting {
+        if self.step_running() || self.passkey_waiting {
             return;
         }
-        self.drop_waits();
+        if matches!(self.screen, Screen::Phrase | Screen::NoPhrase) {
+            // Asked from the twelve words: the other device hands its keys to the session that is waiting
+            // here, so that session is KEPT (no discard). The words typed so far are forgotten.
+            self.words_behind = true;
+            for word in &mut self.words {
+                word.clear();
+            }
+            self.phrase_problem = None;
+            self.pictured = None;
+        } else if !(self.words_behind && matches!(self.screen, Screen::Device { .. })) {
+            self.words_behind = false;
+            self.drop_waits();
+        } else {
+            // "Get a new code" on a request asked from the words: the old request closes, the session stays.
+            self.source.cancel_device_request();
+            self.request = None;
+            self.reconnecting = false;
+            if let Some(copy) = self.code_copy.take() {
+                copy.clear_now();
+            }
+        }
         self.seconds_left = 0;
         self.screen = Screen::Device { expired: false };
         self.source.begin_device_request();
@@ -387,6 +437,96 @@ impl Ui {
             any = true;
         }
         any
+    }
+
+    /// The session's gate moved (or is seen for the first time): the window's screen follows it. `true`: the
+    /// screen changed. Nothing here discards a session: the gate is the session's own word.
+    ///
+    /// - It ARRIVES at "signed in, no key on this computer" (a sign-in that just finished, or a start with such
+    ///   a session): the twelve words come in front (DW-A23), and what was typed before is forgotten. Only on
+    ///   arrival: while the gate holds, the person may go back to the form (which asks the engine to end that
+    ///   session), and the words are not put in front again.
+    /// - It LEAVES for signed out while a screen that needs the session is up (the words, the device request
+    ///   asked from them, the vault password): the form, with nothing of the step left.
+    /// - It leaves for any other state (open, locked, no plan): the steps are over; the window starts from the
+    ///   form the next time it shows.
+    ///
+    /// The first gate seen moves nothing but the words (a window that opens signed out is already on its form).
+    pub fn follow_gate(&mut self, gate: GateState) -> bool {
+        let before = self.gate_seen.replace(gate);
+        if before == Some(gate) || matches!(self.screen, Screen::Create(_)) {
+            return false;
+        }
+        match gate {
+            GateState::NeedsRecoveryPhrase => {
+                if matches!(self.screen, Screen::Phrase | Screen::NoPhrase) || self.words_behind {
+                    return false;
+                }
+                self.forget_steps();
+                self.proceed(NextAfterSignIn::RecoveryPhrase);
+                true
+            }
+            _ if before.is_none() => false,
+            GateState::SignedOut => {
+                let needs_session = matches!(self.screen, Screen::Phrase | Screen::NoPhrase | Screen::UnlockVault)
+                    || (self.words_behind && matches!(self.screen, Screen::Device { .. }));
+                if !needs_session {
+                    return false;
+                }
+                self.forget_steps();
+                self.screen = Screen::SignIn;
+                self.focus = Some(EMAIL_KEY);
+                true
+            }
+            _ => {
+                let changed = self.screen != Screen::SignIn;
+                self.forget_steps();
+                self.screen = Screen::SignIn;
+                changed
+            }
+        }
+    }
+
+    /// Every wait and every typed secret of the steps is forgotten, WITHOUT telling the engine to discard
+    /// anything: the session's gate moved by itself. The email stays.
+    fn forget_steps(&mut self) {
+        if self.hello_waiting {
+            self.source.cancel_hello();
+            self.hello_waiting = false;
+        }
+        if self.passkey_waiting {
+            self.source.cancel_passkey();
+            self.passkey_waiting = false;
+        }
+        if matches!(self.screen, Screen::Device { .. }) {
+            self.source.cancel_device_request();
+        }
+        self.request = None;
+        self.reconnecting = false;
+        if let Some(copy) = self.code_copy.take() {
+            copy.clear_now();
+        }
+        self.words_behind = false;
+        self.busy = false;
+        self.verifying = false;
+        self.restoring = false;
+        self.unlocking = false;
+        self.recovering = false;
+        self.setting = false;
+        self.problem = None;
+        self.code_problem = None;
+        self.phrase_problem = None;
+        self.unlock_problem = None;
+        self.set_problem = None;
+        self.deleted = false;
+        self.pictured = None;
+        self.password.clear();
+        self.confirm.clear();
+        self.code.clear();
+        self.backup_code.clear();
+        for word in &mut self.words {
+            word.clear();
+        }
     }
 
     /// Hand the focus this change asked for to Rune.
@@ -472,11 +612,21 @@ impl Ui {
                 self.seconds_left = request.seconds_left;
                 self.request = Some(request);
             }
+            SignInEvent::DeviceRequested(Err(_))
+                if waiting_for_device && self.request.is_none() && self.words_behind =>
+            {
+                // Asked from the twelve words: back to them, with the session, and said there.
+                self.back_to_the_words();
+                self.phrase_problem = Some(PhraseProblem::Other);
+            }
             SignInEvent::DeviceRequested(Err(problem)) if waiting_for_device && self.request.is_none() => {
                 self.drop_waits();
                 self.problem = Some(problem);
                 self.screen = Screen::SignIn;
             }
+            // Leaving a step did not end its session: the gate is read as new, so the screen it asks for
+            // (the twelve words) comes back in front on this poll. Back tries the sign-out again.
+            SignInEvent::StillSignedIn => self.gate_seen = None,
             SignInEvent::DeviceTick { seconds_left } if waiting_for_device => self.seconds_left = seconds_left,
             SignInEvent::DeviceConnection { connected } if waiting_for_device => self.reconnecting = !connected,
             SignInEvent::Device(status) if waiting_for_device => {
@@ -553,8 +703,10 @@ pub fn frame(s: &State, cx: &mut Cx<State>) -> El {
 /// sign-in that took a second). `true`: the view must run again. For `shell::host::poll`.
 #[cfg_attr(not(test), allow(dead_code))] // waits for its one line in `shell/host.rs` (PR body)
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    let gate = s.shell.app.gate();
     let Some(ui) = ui(s) else { return false };
-    let changed = ui.pump();
+    let mut changed = ui.pump();
+    changed |= ui.follow_gate(gate);
     ui.settle(tx);
     changed
 }

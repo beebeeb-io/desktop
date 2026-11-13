@@ -20,6 +20,7 @@ use beebeeb_engine::{signin::gate, state_paths};
 use super::backups::may_back_up;
 use super::open::{self, ApiBase, Opened, Refused};
 use super::*;
+use crate::frames::signin::source::SignInSource;
 use crate::shell::app::GateState as Shell;
 use crate::shell::identity::engine_identity;
 use crate::shell::instance;
