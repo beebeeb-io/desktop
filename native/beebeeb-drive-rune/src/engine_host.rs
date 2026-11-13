@@ -51,10 +51,12 @@ pub mod backups;
 #[cfg(test)]
 mod binding_tests;
 pub mod open;
+pub mod search;
 pub mod settings;
 pub mod sync;
 #[cfg(test)]
 mod tests;
+pub mod trash;
 pub mod tray;
 
 pub use sync::EngineGlobalSource;

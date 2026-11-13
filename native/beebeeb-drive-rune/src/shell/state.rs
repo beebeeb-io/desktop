@@ -151,7 +151,7 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     s.global = crate::frames::global::Ui::new(Box::new(crate::engine_host::EngineGlobalSource::new(engine.clone())));
     s.settings.source = Box::new(crate::engine_host::settings::EngineSettingsSource::new(engine.clone()));
     s.signin = Some(crate::frames::signin::Ui::new(Box::new(
-        crate::engine_host::EngineSignInSource::new(engine),
+        crate::engine_host::EngineSignInSource::new(engine.clone()),
     )));
     s.backups = crate::frames::backups::BackupsUi::new(None);
     // Every area not yet backed by the engine: the shell's "not built yet" frame, never sample
@@ -161,8 +161,10 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     s.account.source = None;
     s.storage_split = None;
     s.frames.shared.source = Box::new(crate::frames::shared::source::Unwired);
-    s.frames.trash.source = Box::new(crate::frames::trash::source::Unwired);
+    // Trash and Search read the engine (`engine_host::trash`, `engine_host::search`).
+    s.frames.trash.source = Box::new(crate::engine_host::trash::EngineTrashSource::new(engine.clone()));
     s.frames.find = crate::frames::search::SearchUi::default();
+    s.frames.find.source = Box::new(crate::engine_host::search::EngineSearchSource::new(engine));
     s.frames.pc = Box::new(crate::frames::UnwiredPc);
     s.photos = crate::frames::photos::Ui::new(Box::new(crate::frames::photos::source::Unwired));
     s.this_pc = crate::frames::this_pc::Ui::new(Box::new(crate::frames::this_pc::source::Unwired));
