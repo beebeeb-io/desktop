@@ -94,8 +94,10 @@ $env:RUNE_INPUT_CHECK_LOG = $log
 $proc = Start-Process -FilePath $Exe -PassThru
 $hwnd = [IntPtr]::Zero
 try {
-  for ($i = 0; $i -lt 100 -and $hwnd -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 200; $hwnd = [Win]::FindWindow($null, 'Rune input check') }
+  # The process's own top-level window (its console, in a debug build, belongs to another process).
+  for ($i = 0; $i -lt 100 -and $hwnd -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 200; $proc.Refresh(); $hwnd = $proc.MainWindowHandle }
   if ($hwnd -eq [IntPtr]::Zero) { throw 'the probe opened no window within 20 s' }
+  $results.Add("INFO window title: '$($proc.MainWindowTitle)'")
   # Top-most at a fixed place, so nothing (its own console window included) covers it. 0x1 = keep its size.
   [void][Win]::SetWindowPos($hwnd, [IntPtr](-1), 200, 200, 0, 0, 0x1)
   Wait 1000
