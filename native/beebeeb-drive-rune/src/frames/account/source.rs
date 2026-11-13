@@ -428,7 +428,53 @@ pub enum EmailRefused {
     Offline,
 }
 
+/// Where a pane's content stands. A source that answers at once (the board's fixture) is always `Ready`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneState {
+    /// What the pane draws is the signed-in account's, read from Beebeeb.
+    Ready,
+    /// Nothing answers for this pane yet: the shell's "not built yet" frame.
+    Unwired,
+    /// Asked, not answered yet.
+    Loading,
+    /// Nobody is signed in, or the app is locked: nothing of an account is drawn.
+    SignedOut,
+    /// Beebeeb no longer accepts the session: nothing is asked until the person signs in again.
+    SessionEnded,
+    /// The read failed: nothing of the account is drawn, and the pane offers to try again.
+    Failed,
+}
+
+/// What a poll of the source found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pumped {
+    /// Something a pane draws changed: the window draws again.
+    pub changed: bool,
+    /// An answer is still out.
+    pub busy: bool,
+}
+
 pub trait AccountSource {
+    /// Where `pane` stands. Anything but `Ready`: the pane's own accessors are not asked; the view draws the
+    /// state instead (`frames::account::state_pane`, or the shell's frame for `Unwired`).
+    fn pane_state(&self, _pane: super::Pane) -> PaneState {
+        PaneState::Ready
+    }
+    /// The window shows `pane` now: a source that reads from Beebeeb asks here, when what it holds is missing
+    /// or old. Never called from a draw.
+    fn opened(&mut self, _pane: super::Pane) {}
+    /// "Try again" on a pane that failed to load.
+    fn reload(&mut self, _pane: super::Pane) {}
+    /// The window's poll: take in what arrived, drop what belongs to a session that is over.
+    fn pump(&mut self) -> Pumped {
+        Pumped::default()
+    }
+    /// What the toast over the pane says: how the last change ended (taken, refused, not known).
+    fn notice(&self) -> Option<&'static str> {
+        None
+    }
+    /// The person did something else: the toast goes.
+    fn clear_notice(&mut self) {}
     /// Engine: the signed-in account (`session.account`).
     fn identity(&self) -> Identity;
     /// Engine: which Beebeeb products hold a session on this PC (the shared credential store).

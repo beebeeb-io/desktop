@@ -658,9 +658,16 @@ fn settings_is_unwired_on_a_live_engine() {
 }
 
 #[test]
-fn account_has_no_source_on_a_live_engine() {
+fn account_is_the_engines_source_on_a_live_engine_and_unbound_panes_are_unwired() {
+    use crate::frames::account::Pane as AccountPane;
+    use crate::frames::account::source::PaneState;
     let s = engine_state();
-    assert!(s.account.source.is_none());
+    let source = s.account.source.as_deref().expect("the engine's account source");
+    // Account and Devices and sessions answer (`engine_host::account`); Security does not.
+    assert_ne!(source.pane_state(AccountPane::Account), PaneState::Unwired);
+    assert_ne!(source.pane_state(AccountPane::Sessions), PaneState::Unwired);
+    assert_eq!(source.pane_state(AccountPane::Security), PaneState::Unwired);
+    assert!(source.identity().email.is_empty() && source.sessions().is_empty());
 }
 
 #[test]

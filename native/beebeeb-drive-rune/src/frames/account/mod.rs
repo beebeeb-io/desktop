@@ -39,7 +39,7 @@ use crate::shell::app::{Event, Screen, SettingsPane};
 use crate::shell::{host, instance, placeholder, registry};
 use crate::theme::tokens::{self, Theme};
 use crate::ui::{account_set as set, caption};
-use rune::{Cx, El, Icon, Key, KeyEvent, Tx, col, row};
+use rune::{Cx, El, Icon, Key, KeyEvent, Tx, col, el, row};
 
 use source::AccountSource;
 
@@ -247,6 +247,8 @@ pub struct AccountUi {
     /// `None`: nothing answers yet (a build that ships before the engine lane wires it); the
     /// view then draws the shell's "not built yet" frame, never sample values.
     pub source: Option<Box<dyn AccountSource>>,
+    /// The pane the source was last told is showing (`None`: no account section shows).
+    told_open: Option<Pane>,
 }
 
 impl Default for AccountUi {
@@ -257,6 +259,7 @@ impl Default for AccountUi {
             form: form::Form::default(),
             approve: approve::Approve::default(),
             source: source::first(instance::DEV_BUILD),
+            told_open: None,
         }
     }
 }
@@ -304,6 +307,95 @@ pub fn end_flows(s: &mut State) {
     approve::leave(ui);
     ui.form = form::Form::default();
     ui.show(Pane::root(ui.pane.section()).unwrap_or(Pane::Account));
+}
+
+/// The pane the window shows now, when the route is on one of this lane's sections.
+fn showing(s: &State) -> Option<Pane> {
+    let section = routed(s)?;
+    if s.account.pane.section() == section {
+        Some(s.account.pane)
+    } else {
+        Pane::root(section)
+    }
+}
+
+/// The window's poll for the account sections: tells the source which pane shows when that changed (it reads
+/// then, never from a draw), and takes in what its workers answered. `true`: something a pane draws changed.
+pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    let now = showing(s);
+    let ui = &mut s.account;
+    let Some(source) = ui.source.as_mut() else {
+        ui.told_open = None;
+        return false;
+    };
+    if ui.told_open != now {
+        ui.told_open = now;
+        // A toast belongs to the pane it was said over.
+        source.clear_notice();
+        if let Some(pane) = now {
+            source.opened(pane);
+        }
+    }
+    let pumped = source.pump();
+    if pumped.busy {
+        tx.wake_after(POLL_EVERY);
+    }
+    pumped.changed
+}
+
+/// How soon the window looks again while an answer is out (the worker also wakes it).
+const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The pane in a state that is not its content: asked and not answered, nobody signed in, the session ended,
+/// or the read failed. Nothing of an account is in it.
+fn state_pane(pane: Pane, state: source::PaneState, t: &Theme) -> El {
+    use crate::ui::settings_notice as notices;
+    let title = match pane.section() {
+        SettingsPane::DevicesAndSessions => "Devices and sessions",
+        SettingsPane::Security => "Sign-in and security",
+        _ => "Account",
+    };
+    let (head, words, again) = match state {
+        source::PaneState::Loading => ("Loading", "Asking Beebeeb for your account.", false),
+        source::PaneState::SignedOut => (
+            "Not signed in",
+            "Sign in and unlock Beebeeb to see your account.",
+            false,
+        ),
+        source::PaneState::SessionEnded => (
+            "Your session ended",
+            "Sign in again to see your account. Nothing was changed.",
+            false,
+        ),
+        _ => (
+            "Couldn't load this",
+            "Beebeeb didn't answer. Nothing was changed.",
+            true,
+        ),
+    };
+    let body = if state == source::PaneState::Loading {
+        el().key("account-loading")
+            .role("status")
+            .label(format!("{head}. {words}"))
+            .child(crate::ui::kit::label(
+                "account-loading-text",
+                words,
+                set::SUB,
+                t.text_tertiary,
+            ))
+    } else {
+        let action = again.then(|| {
+            set::button("btn-0", "Try again", None, set::Look::Plain, set::Size::Small, false, t).on_press(
+                move |s: &mut State| {
+                    if let Some(source) = s.account.source.as_mut() {
+                        source.reload(pane);
+                    }
+                },
+            )
+        });
+        notices::problem(0, 0, head, words, action, t)
+    };
+    set::pane(vec![set::heading(title, None, None, t), body], t)
 }
 
 /// A board frame of this lane's as a state of it: the pane, and the confirm over it.
@@ -615,6 +707,11 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         Pane::root(section).unwrap_or(Pane::Account)
     };
     let dialog = ui.dialog.as_ref().filter(|_| inside);
+    // A source that does not answer for this pane (or not yet): its state, never the pane on empty values.
+    let state = source.pane_state(pane);
+    if state == source::PaneState::Unwired {
+        return placeholder::window(s, cx, registry::group_for(&s.shell.app));
+    }
     if pane == Pane::DeleteUndone {
         // The result of undoing a deletion is a screen of its own (the account window's
         // layout, DW-A83), not a pane of settings.
@@ -622,6 +719,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     }
     let form = &ui.form;
     let (pane_el, overlay) = match pane {
+        _ if state != source::PaneState::Ready => (state_pane(pane, state, &t), None),
         Pane::Account => (
             overview::pane(source, &t),
             dialog
@@ -654,6 +752,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .child(pane_el);
     if let Some(overlay) = overlay {
         body = body.child(overlay);
+    }
+    if let Some(words) = source.notice() {
+        body = body.child(crate::ui::settings_notice::toast(0, words, &t));
     }
     col()
         .key("window")
