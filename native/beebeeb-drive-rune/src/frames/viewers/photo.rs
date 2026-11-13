@@ -154,10 +154,13 @@ pub fn body(ui: &Ui, doc: &PhotoDoc, t: &Theme) -> El {
                 ui.intent(Intent::Share);
             }
         }))
-        .child(action(1, offline, &media_icons::OFFLINE).on_press(|s: &mut State| {
-            if let Some(ui) = super::ui(s) {
-                ui.toggle_offline();
-            }
+        // Only where the source read whether the file is kept on this PC: a state that was not read is not shown.
+        .children(ui.knows_offline().then(|| {
+            action(1, offline, &media_icons::OFFLINE).on_press(|s: &mut State| {
+                if let Some(ui) = super::ui(s) {
+                    ui.toggle_offline();
+                }
+            })
         }))
         .child(action(2, "Details", &super::icons::INFO).on_press(|s: &mut State| {
             if let Some(ui) = super::ui(s) {

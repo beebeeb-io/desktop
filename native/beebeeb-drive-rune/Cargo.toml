@@ -48,6 +48,9 @@ feedback = ["dep:wgpu"]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 # Names the Win32 window handle Rune's `WindowHandle::with_raw_handle` lends.
 raw-window-handle = "0.6"
+# Windows Hello's prompt is a WinRT API (`shell/platform/windows_hello.rs`), which windows-sys does not have. The
+# same `windows` the engine already builds: no new crate is compiled.
+windows = { version = "0.58", features = ["Foundation", "Security_Credentials_UI", "Win32_Foundation", "Win32_System_WinRT"] }
 
 [dev-dependencies]
 # `engine_host` tests open the engine on credential stores in memory, with the settings file in the engine's test

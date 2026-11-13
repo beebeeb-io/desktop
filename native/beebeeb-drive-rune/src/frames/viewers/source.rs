@@ -6,9 +6,17 @@
 //!
 //! The fixture holds exactly the board's samples (DW-1501 to DW-1527): invented data is forbidden
 //! where the board shows data.
+//!
+//! An open file holds a decrypted name and decrypted content: a `{:?}` of [`OpenFile`], [`Body`],
+//! [`TextDoc`], [`MdDoc`] or [`Run`] prints counts and kinds, never a name or a word of the file,
+//! and [`OpenFile::wipe`] overwrites the text it holds when the file is left.
+
+use std::fmt;
+
+use zeroize::Zeroize;
 
 /// One open file, as the viewer draws it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct OpenFile {
     pub id: String,
     /// The folders above the file, outermost first ("Files", "Lisbon trip").
@@ -23,6 +31,24 @@ pub struct OpenFile {
     pub details: Details,
     /// Another device saved a newer version while this one is open (DW-1519).
     pub newer: Option<Newer>,
+}
+
+/// The body's kind and the version, never the id, the name, the path or the details' values.
+impl fmt::Debug for OpenFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenFile")
+            .field("version", &self.version)
+            .field("body", &self.body)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OpenFile {
+    /// Overwrite the decrypted text this file holds (the note, the lines) before it is dropped: the file was
+    /// closed, the route left it, or its session ended. Pictures are the source's to release.
+    pub fn wipe(&mut self) {
+        self.body.wipe();
+    }
 }
 
 /// The details panel's facts (`.mk-det`).
@@ -47,8 +73,39 @@ pub struct Newer {
     pub at: String,
 }
 
+/// Why a file that is in Beebeeb is not shown here. Either way there is a way out: another app, or a copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoPreview {
+    /// This app has no viewer for this kind of file yet. Nothing was downloaded.
+    NoViewer,
+    /// Larger than a preview holds in memory (`limit`). Nothing was downloaded.
+    TooBig { size: u64, limit: u64 },
+    /// Decrypted, and not what its name says (text that is not text, a picture that does not decode).
+    Unreadable,
+}
+
+/// Why opening stopped, when it is not a failed decryption (DW-1518 is that).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stopped {
+    /// Beebeeb could not be reached. Trying again may work.
+    Offline,
+    /// Beebeeb no longer accepts this session: the person signs in again first.
+    SessionEnded,
+    /// Beebeeb was locked, or the account changed, while the file was open or opening: its content left memory.
+    SessionChanged,
+    /// The file is no longer in Beebeeb.
+    Gone,
+}
+
+impl Stopped {
+    /// Opening again may work as things are.
+    pub fn can_retry(self) -> bool {
+        matches!(self, Stopped::Offline | Stopped::SessionChanged)
+    }
+}
+
 /// What the content area shows.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Body {
     /// DW-1516: opening takes over about a second. Bytes done and in all.
     Decrypting { done: u64, total: u64 },
@@ -56,6 +113,10 @@ pub enum Body {
     TooLarge { size: u64, free: u64 },
     /// DW-1518: decrypting failed. The copy in Beebeeb is untouched.
     Failed,
+    /// Opening stopped for a reason that is not a failed decryption (not a board frame: the engine's states).
+    Stopped(Stopped),
+    /// The file is in Beebeeb and is not shown here (not a board frame: the engine's states).
+    NotPreviewable(NoPreview),
     /// DW-1512, DW-1527: text or code, decrypted in memory.
     Text(TextDoc),
     /// DW-1513: a Markdown note, decrypted in memory.
@@ -72,14 +133,52 @@ pub enum Body {
     Archive(ArchiveDoc),
 }
 
+/// The kind and its counts, never a word of the content, a name or a title.
+impl fmt::Debug for Body {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Body::Decrypting { done, total } => write!(f, "Decrypting({done} of {total})"),
+            Body::TooLarge { size, free } => write!(f, "TooLarge({size}, {free} free)"),
+            Body::Failed => f.write_str("Failed"),
+            Body::Stopped(why) => write!(f, "Stopped({why:?})"),
+            Body::NotPreviewable(why) => write!(f, "NotPreviewable({why:?})"),
+            Body::Text(doc) => write!(f, "Text({doc:?})"),
+            Body::Markdown(doc) => write!(f, "Markdown({doc:?})"),
+            Body::Photo(_) => f.write_str("Photo"),
+            Body::Audio(_) => f.write_str("Audio"),
+            Body::Pdf(doc) => write!(f, "Pdf({} pages)", doc.pages),
+            Body::Table(doc) => write!(f, "Table({} rows)", doc.rows.len()),
+            Body::Archive(doc) => write!(f, "Archive({} entries)", doc.entries.len()),
+        }
+    }
+}
+
+impl Body {
+    /// Overwrite the decrypted text held here (see [`OpenFile::wipe`]).
+    pub fn wipe(&mut self) {
+        match self {
+            Body::Text(doc) => doc.wipe(),
+            Body::Markdown(doc) => doc.source.zeroize(),
+            _ => {}
+        }
+    }
+}
+
 pub use super::kinds::{
     ArchiveDoc, AudioDoc, Column, Entry, EntryKind, Match, PdfDoc, PhotoDoc, Picture, StripItem, TableDoc, Track,
 };
 
 /// A Markdown note: its text.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct MdDoc {
     pub source: String,
+}
+
+/// How long the note is, never a word of it.
+impl fmt::Debug for MdDoc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "MdDoc({} bytes)", self.source.len())
+    }
 }
 
 /// Which side stays when a file was saved elsewhere while it was being edited (DW-1526).
@@ -131,7 +230,7 @@ pub enum Ink {
 }
 
 /// A run of one line in one ink.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Run {
     pub text: String,
     pub ink: Ink,
@@ -140,8 +239,22 @@ pub struct Run {
     pub underline: bool,
 }
 
+/// The ink and the length, never the text.
+impl fmt::Debug for Run {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Run({:?}, {} bytes)", self.ink, self.text.len())
+    }
+}
+
+/// How many lines, never one of them.
+impl fmt::Debug for TextDoc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "TextDoc({} lines, {:?})", self.lines.len(), self.truncated)
+    }
+}
+
 /// A text file as the viewer draws it: the lines it holds, coloured.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TextDoc {
     pub lines: Vec<Vec<Run>>,
     /// The file is over the editor's limit (2 MB): read-only, the first lines only (DW-1527).
@@ -154,9 +267,28 @@ pub struct Truncated {
     pub shown: u32,
     /// Lines in the file.
     pub total: u32,
+    /// Why only the first lines are held: the banner says so.
+    pub why: Cut,
+}
+
+/// Why a text is shown read-only, its first lines only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Cut {
+    /// DW-1527: the file is over the editor's limit (2 MB).
+    #[default]
+    OverTwoMb,
+    /// Under 2 MB, and too many lines, or lines too long, for the reader to hold whole.
+    TooLong,
 }
 
 impl TextDoc {
+    /// Overwrite every line's text.
+    pub fn wipe(&mut self) {
+        for run in self.lines.iter_mut().flatten() {
+            run.text.zeroize();
+        }
+    }
+
     /// The text as it is in the file: what Copy puts on the clipboard.
     pub fn plain(&self) -> String {
         let mut out = String::new();
@@ -196,6 +328,19 @@ pub enum OpenError {
     NotFound,
 }
 
+/// What became of "Open in another app…".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Elsewhere {
+    /// The system was asked to open the file with its own app.
+    Opened,
+    /// The file opens from the account's folder on this PC, and that folder is not in sync now.
+    NeedsSync,
+    /// It could not be opened there (the file is gone, the system refused, the kind is not opened for safety).
+    Refused,
+    /// This source has no way to another app: the shell is asked instead (`Intent::OpenInAnotherApp`).
+    NotBound,
+}
+
 pub trait ViewerSource {
     /// Start opening a file. The answer is what can be shown NOW; a `Decrypting` body is
     /// followed by [`ViewerSource::poll`].
@@ -231,6 +376,26 @@ pub trait ViewerSource {
                 .map(|line| plain_lines(line).pop().unwrap_or_default())
                 .collect(),
         }
+    }
+    /// Open the file with the app the system has for it, from the place the engine keeps the account's files on
+    /// this PC (never a decrypted copy made for the occasion).
+    fn open_elsewhere(&mut self, _file_id: &str) -> Elsewhere {
+        Elsewhere::NotBound
+    }
+    /// Whether a file of this name is shown HERE (decrypted and drawn). `false`: a list's Open leaves it to its
+    /// own app, as before (`viewers::open_item`); a route that names it anyway gets the source's honest state.
+    fn previews(&self, _name: &str) -> bool {
+        true
+    }
+    /// Whether [`ViewerSource::save`] can store an edit. `false`: the editor does not open (an edit that cannot
+    /// be saved is not offered), and the press says so.
+    fn can_save(&self) -> bool {
+        true
+    }
+    /// Whether `Details::offline` was read and [`ViewerSource::set_offline`] can change it. `false`: the
+    /// details panel draws no Available offline switch (a state that was not read is not shown).
+    fn knows_offline(&self) -> bool {
+        true
     }
     /// Download and decrypt again after a failure.
     fn retry(&mut self, file_id: &str) -> Result<OpenFile, OpenError>;
@@ -380,6 +545,7 @@ impl FixtureViewerSource {
                     truncated: Some(Truncated {
                         shown: 500,
                         total: 41_206,
+                        why: Cut::OverTwoMb,
                     }),
                 }),
             ),

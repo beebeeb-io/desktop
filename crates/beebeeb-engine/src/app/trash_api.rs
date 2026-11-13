@@ -83,24 +83,17 @@ impl<C: CredentialStores> Engine<C> {
     /// that a lock or a sign-out is ending is never taken for the current one. Never waits: while a session change
     /// is under way the answer is no.
     pub(super) fn session_is_still(&self, generation: SessionGeneration, key: &[u8; 32]) -> bool {
-        let _writes = match self.writes.try_read() {
-            Ok(writes) => writes,
-            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return false,
-        };
-        if !self.acct.session_unchanged_since(generation) {
-            return false;
-        }
-        let guard = self.acct.session.lock().unwrap_or_else(|p| p.into_inner());
-        guard.as_ref().is_some_and(|session| {
-            // Every byte is compared, whatever the first difference.
-            session
-                .master_key
-                .iter()
-                .zip(key.iter())
-                .fold(0u8, |differs, (a, b)| differs | (a ^ b))
-                == 0
-        })
+        self.acct
+            .while_session_is(&self.writes, generation, |session| {
+                // Every byte is compared, whatever the first difference.
+                session
+                    .master_key
+                    .iter()
+                    .zip(key.iter())
+                    .fold(0u8, |differs, (a, b)| differs | (a ^ b))
+                    == 0
+            })
+            .unwrap_or(false)
     }
 
     /// Test builds only: `hook` runs once, in the middle of the next lock or sign-out (the session is ending and

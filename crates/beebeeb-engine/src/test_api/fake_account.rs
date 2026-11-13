@@ -30,11 +30,15 @@ pub struct VaultItem {
     pub is_trashed: bool,
     pub version_number: i32,
     pub content_hash: Option<String>,
+    /// The file's content as the server holds it: one encrypted frame per chunk (core's chunk encryptor, the
+    /// account's own file key; an empty file has none). `None`: the item has no content to download
+    /// ([`FakeAccount::add_file_with_content`] gives it one).
+    pub content_frames: Option<Vec<Vec<u8>>>,
 }
 
 impl VaultItem {
     fn to_node(&self) -> Value {
-        json!({
+        let mut node = json!({
             "id": self.id,
             "parent_id": self.parent_id,
             "name_encrypted": self.name_encrypted,
@@ -44,9 +48,18 @@ impl VaultItem {
             "is_trashed": self.is_trashed,
             "version_number": self.version_number,
             "content_hash": self.content_hash,
-        })
+        });
+        // A file with content also says how it is cut, as the server's row does: what a download reads.
+        if let Some(frames) = &self.content_frames {
+            node["chunk_count"] = json!(frames.len());
+            node["chunk_size_bytes"] = json!(CONTENT_CHUNK_BYTES);
+        }
+        node
     }
 }
+
+/// How large a chunk of [`FakeAccount::add_file_with_content`] is: small, so a short test file is several chunks.
+pub const CONTENT_CHUNK_BYTES: u32 = 1024;
 
 // ── The account ─────────────────────────────────────────────────────────────────
 
@@ -129,8 +142,49 @@ impl FakeAccount {
             is_trashed: false,
             version_number: 1,
             content_hash: if is_folder { None } else { Some(format!("hash-{id}")) },
+            content_frames: None,
         };
         self.items.lock().expect("vault items").insert(id.to_string(), item);
+    }
+
+    /// Add a FILE with content: [`Self::add_item`], and `content` encrypted chunk by chunk with core's chunk
+    /// encryptor under the account's own key for `id` (a UUID), as an upload of this account would have stored it.
+    /// The fake then serves the row with its chunk count and each chunk (`GET /api/v1/files/{id}/chunks/{n}`), so a
+    /// client downloads and decrypts it by its real path; a client that asks with another account's key gets
+    /// bytes it cannot open.
+    pub fn add_file_with_content(&self, id: &str, parent_id: Option<&str>, name: &str, content: &[u8]) {
+        self.add_item(id, parent_id, name, false, content.len() as u64);
+        let master = beebeeb_core::kdf::MasterKey::from_bytes(self.master_key);
+        let file_key = beebeeb_core::kdf::derive_file_key(&master, id.as_bytes());
+        let mut encryptor = beebeeb_core::chunk_stream::ChunkEncryptor::for_push_with_file_key(
+            file_key,
+            id,
+            content.len() as u64,
+            CONTENT_CHUNK_BYTES.into(),
+        )
+        .expect("a chunk encryptor")
+        .with_recorded_pin(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded)
+        .expect("the format of the name");
+        // An empty file is one empty chunk, as core plans it.
+        let pieces: Vec<&[u8]> = if content.is_empty() {
+            vec![content]
+        } else {
+            content.chunks(CONTENT_CHUNK_BYTES as usize).collect()
+        };
+        let frames: Vec<Vec<u8>> = pieces
+            .into_iter()
+            .map(|chunk| encryptor.push_chunk(chunk).expect("an encrypted chunk").data)
+            .collect();
+        encryptor.finish().expect("the last chunk");
+        if let Some(item) = self.items.lock().expect("vault items").get_mut(id) {
+            item.content_frames = Some(frames);
+        }
+    }
+
+    /// Chunk `index` of the file `id`, as stored. `None`: no such file, no content, or no such chunk.
+    fn content_frame(&self, id: &str, index: usize) -> Option<Vec<u8>> {
+        let items = self.items.lock().expect("vault items");
+        items.get(id)?.content_frames.as_ref()?.get(index).cloned()
     }
 
     /// The non-trashed items as sync-snapshot nodes.
@@ -461,6 +515,22 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
 
             // ── Shares invites ──────────────────────────────────────────
             "GET /api/v1/shares/invites/incoming" => Reply::ok(json!({ "invites": [] })),
+
+            // ── One chunk of a file with content (`FakeAccount::add_file_with_content`) ──
+            route_str if route_str.starts_with("GET /api/v1/files/") && route_str.contains("/chunks/") => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                let path_only = req.path.split('?').next().unwrap_or("");
+                let frame = path_only
+                    .strip_prefix("/api/v1/files/")
+                    .and_then(|rest| rest.split_once("/chunks/"))
+                    .and_then(|(id, index)| account.content_frame(id, index.parse().ok()?));
+                match frame {
+                    Some(frame) => Reply::bytes(200, frame),
+                    None => Reply::json(404, json!({ "error": "not_found" })),
+                }
+            }
 
             // ── Single file (canonical row for the owner-keys prepare path) ──
             route_str if route_str.starts_with("GET /api/v1/files/") && !route_str.contains('?') => {

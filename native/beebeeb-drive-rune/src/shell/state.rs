@@ -164,6 +164,16 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     s.signin = Some(crate::frames::signin::Ui::new(Box::new(
         crate::engine_host::EngineSignInSource::new(engine.clone()),
     )));
+    // An open file: read from the engine, decrypted in memory (`engine_host::viewer`); one source per opened file.
+    let viewer_engine = engine.clone();
+    crate::frames::viewers::wire(
+        &mut s,
+        Box::new(move || {
+            Box::new(crate::engine_host::viewer::EngineViewerSource::new(
+                viewer_engine.clone(),
+            ))
+        }),
+    );
     // Backups: no source while its constant is off (nothing of the adapter runs then; `engine_host::backups`).
     s.backups = crate::frames::backups::BackupsUi::new(crate::engine_host::backups::source_for(engine.clone()));
     // Every area not yet backed by the engine: the shell's "not built yet" frame, never sample
