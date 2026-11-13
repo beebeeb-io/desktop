@@ -153,6 +153,7 @@ fn the_first_download_says_what_happens_here_and_the_listed_rows_work() {
     assert!((filled / whole - 0.45).abs() < 0.01, "{filled} of {whole}");
     assert_eq!(text(&rt, "status-text"), "Getting your files ready");
     assert_eq!(text(&rt, "status-details"), "18,240 of 40,112 listed");
+    assert_eq!(text(&rt, "item-count"), "18,240 of 40,112 listed");
     assert_eq!(rt.state.listing.items.len(), 7, "the rows listed so far");
     assert!(find(&rt, "banner").is_none(), "the card, not the strip");
     // A listed file works at once; then the card gives way to the strip (DW-0118).

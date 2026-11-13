@@ -46,6 +46,18 @@ fn listed_words(loading: &Loading) -> String {
     )
 }
 
+/// The words under the window's title while the first list arrives: how many are listed so far.
+/// Only in the root, where the count is the whole drive's; a folder inside counts its own rows.
+pub fn title_words(s: &State) -> Option<String> {
+    s.listing
+        .folder
+        .id
+        .is_none()
+        .then(|| loading(s))
+        .flatten()
+        .map(|l| listed_words(&l))
+}
+
 /// The status line's right-hand words in these states. `None`: the window counts its own way.
 pub fn status_words(s: &State) -> Option<String> {
     if let Some(loading) = loading(s) {
