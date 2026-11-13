@@ -402,10 +402,23 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
         credentials.is_empty(),
         "nothing of the account is left in the credential store"
     );
+    // Signed out, the handle lists nothing (the local state is the signed-in account's alone, task 2488); the
+    // state on disk is as it was.
     assert_eq!(
-        names(&again, None).len(),
-        3,
-        "sign-out with keep deletes no local state"
+        again.engine.local_state_refusal(),
+        Some(beebeeb_engine::app::LocalStateRefused::SignedOut)
+    );
+    assert!(names(&again, None).is_empty(), "nothing is listed without a session");
+    let state_db =
+        beebeeb_engine::state_paths::state_db_path_from_state_dir(&beebeeb_engine::state_paths::init_for_test());
+    let rows = beebeeb_engine::state_db::StateDb::open(state_db)
+        .unwrap()
+        .list_files()
+        .unwrap()
+        .len();
+    assert_eq!(
+        rows, 4,
+        "sign-out with keep deletes no local state (3 at the root, 1 inside a folder)"
     );
 }
 

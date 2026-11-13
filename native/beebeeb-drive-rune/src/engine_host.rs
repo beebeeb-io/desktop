@@ -55,7 +55,7 @@ pub mod open;
 pub mod settings;
 pub mod sync;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 pub mod tray;
 
 pub use sync::EngineGlobalSource;

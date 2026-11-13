@@ -79,7 +79,8 @@ impl SourceError {
             SourceError::NotFound => "This folder is not here any more.",
             SourceError::Unreadable => "Your files cannot be read right now.",
             SourceError::NotThisAccounts => {
-                "The files on this PC could not be confirmed as this account's, so they are not shown."
+                "The files on this PC couldn\u{2019}t be confirmed as belonging to the account you\u{2019}re signed in to, so \
+                 they are not shown."
             }
         }
     }

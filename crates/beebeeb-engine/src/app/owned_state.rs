@@ -250,3 +250,7 @@ impl<C: CredentialStores> Engine<C> {
         Ok(state)
     }
 }
+
+#[cfg(test)]
+#[path = "owned_state_tests.rs"]
+mod tests;

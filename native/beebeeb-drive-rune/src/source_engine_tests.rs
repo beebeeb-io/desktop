@@ -155,7 +155,7 @@ fn lists_the_root_opens_folders_and_pages_through_5000_children() {
 }
 
 #[test]
-fn the_source_never_writes_and_refuses_what_is_not_a_state_db() {
+fn the_source_never_writes_and_refuses_what_is_not_a_state_database() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("state.db");
     build(&path);

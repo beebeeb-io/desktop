@@ -563,6 +563,9 @@ impl<C: CredentialStores> Engine<C> {
             *cached = Some(profile.clone());
         }
         self.remember_session_user_id(Some(profile.user_id.clone()));
+        // A session the server just made is not the one it ended before: the streak of refusals was the earlier
+        // session's (the Tauri shell clears it at its sign-out).
+        self.acct.auth_health.note_result(None);
         if let Ok(mut stored) = self.acct.auth_email.lock() {
             *stored = Some(email.to_string());
         }
@@ -916,6 +919,7 @@ impl<C: CredentialStores> Engine<C> {
                 *profile = None;
             }
             self.remember_session_user_id(None);
+            self.acct.auth_health.note_result(None);
             self.set_auth_present(false);
             if let Some(token) = token {
                 revoke(&self.client, &self.config.api_base, &token).await;
