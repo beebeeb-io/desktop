@@ -603,7 +603,8 @@ fn photos_shows_0_fixture_days_on_a_live_engine() {
 #[test]
 fn this_pc_shows_0_fixture_changes_on_a_live_engine() {
     let s = engine_state();
-    assert!(!s.this_pc.wired());
+    // Engine-backed (`engine_host::this_pc`); this handle's vault is not open, so no name shows.
+    assert!(s.this_pc.wired());
     assert_eq!(s.this_pc.changes().len(), 0);
     assert_eq!(s.this_pc.kept_count(), 0);
 }

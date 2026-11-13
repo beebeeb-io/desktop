@@ -44,6 +44,7 @@ use crate::sync_root_port::{OsSyncRoots, SyncRootPort};
 use crate::sync_view::{Explorer, Start, SyncView, ViewCell, ViewHost};
 use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
 
+pub mod kept_api;
 pub mod settings_api;
 
 /// Where the handle keeps an account's session token and vault key. The handle names the app on every call

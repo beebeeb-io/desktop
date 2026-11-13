@@ -45,8 +45,15 @@ impl Origin {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reason {
     OpenInAnotherApp,
-    Unreachable { tries: u8 },
-    NameInUse { place: String },
+    Unreachable {
+        tries: u8,
+    },
+    NameInUse {
+        place: String,
+    },
+    /// The engine's own plain words for why (`drive_v2::status::reason_for`): a fixed sentence, never a
+    /// raw error code, a path or a server's words.
+    Said(&'static str),
 }
 
 impl Reason {
@@ -58,6 +65,7 @@ impl Reason {
                 format!("Couldn't reach Beebeeb after {tries} tries. Nothing was lost.")
             }
             Reason::NameInUse { place } => format!("The name is already in use in {place}. Nothing was lost."),
+            Reason::Said(words) => (*words).to_string(),
         }
     }
 }
@@ -148,12 +156,15 @@ impl Change {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeptStatus {
     UpToDate,
+    /// Kept, but not every copy is on this PC yet (still downloading, or waiting to).
+    NotOnPcYet,
 }
 
 impl KeptStatus {
     pub fn label(self) -> &'static str {
         match self {
             KeptStatus::UpToDate => "Up to date",
+            KeptStatus::NotOnPcYet => "Not on this PC yet",
         }
     }
 }
