@@ -14,7 +14,8 @@
 //!
 //! Must not: log, print or return a token, a key, a password, a code or a phrase; hand keys to an engine start
 //! from anywhere but the session in memory; start an engine before the local data is bound to the session's
-//! account; reset or delete local data (a start onto another account's data is refused, on every OS).
+//! account; reset or delete local data (a start onto another account's data is refused, on every OS); hand a shell
+//! the local state by any way but the account-bound handle (`owned_state`, task 2488).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -45,10 +46,13 @@ use crate::sync_view::{Explorer, Start, SyncView, ViewCell, ViewHost};
 use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
 
 pub mod kept_api;
+pub mod owned_state;
 pub mod settings_api;
 // Is the local state the signed-in account's (task 2488): a read-only check for windows that show it.
 pub mod state_owner;
 pub mod trash_api;
+
+pub use owned_state::{LocalStateRefused, OwnedState};
 
 /// Where the handle keeps an account's session token and vault key. The handle names the app on every call
 /// (`identity` is the one [`Engine::open`] was given): a store has no identity of its own to disagree with it.
@@ -213,6 +217,13 @@ pub struct Engine<C: CredentialStores> {
     failures: AtomicU32,
     /// What a window reads without waiting ([`Engine::view`]); `host` writes the engine's reports into it.
     view: Arc<ViewCell>,
+    /// The user id the server named for the session: from the profile at a sign-in, from the record beside the stored
+    /// session at a restart. Cleared by a sign-out. Read by `owned_state` and the sync start, so an email alone
+    /// never decides whose the local state is while the id is known.
+    session_user_id: Mutex<Option<String>>,
+    /// Test builds only: where the account-bound handle reads (`Engine::use_local_state_for_test`).
+    #[cfg(any(test, feature = "test-support"))]
+    local_state_for_test: Mutex<Option<PathBuf>>,
 }
 
 impl<C: CredentialStores> Engine<C> {
@@ -259,6 +270,9 @@ impl<C: CredentialStores> Engine<C> {
             pending_2fa: Mutex::new(None),
             failures: AtomicU32::new(0),
             view,
+            session_user_id: Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            local_state_for_test: Mutex::new(None),
         })
     }
 
@@ -297,6 +311,11 @@ impl<C: CredentialStores> Engine<C> {
             .unwrap_or(false)
     }
 
+    fn remember_session_user_id(&self, user_id: Option<String>) {
+        let user_id = user_id.map(|id| id.trim().to_string()).filter(|id| !id.is_empty());
+        *self.session_user_id.lock().unwrap_or_else(|p| p.into_inner()) = user_id;
+    }
+
     fn set_auth_present(&self, present: bool) {
         if let Ok(mut guard) = self.auth_present.lock() {
             *guard = present;
@@ -328,6 +347,10 @@ impl<C: CredentialStores> Engine<C> {
             let vault = self.vault();
             let present = matches!(vault.session_token(), Ok(Some(_)));
             self.set_auth_present(present);
+            if present {
+                // Whose the stored session is, as its sign-in recorded it (unknown stays unknown).
+                self.remember_session_user_id(vault.session_owner().ok().flatten());
+            }
             if present && !self.unlocked() {
                 match store::load_session_from_vault(vault, None) {
                     Ok(Some(session)) => {
@@ -543,6 +566,10 @@ impl<C: CredentialStores> Engine<C> {
         if let Ok(mut cached) = self.acct.cached_profile.lock() {
             *cached = Some(profile.clone());
         }
+        self.remember_session_user_id(Some(profile.user_id.clone()));
+        // A session the server just made is not the one it ended before: the streak of refusals was the earlier
+        // session's (the Tauri shell clears it at its sign-out).
+        self.acct.auth_health.note_result(None);
         if let Ok(mut stored) = self.acct.auth_email.lock() {
             *stored = Some(email.to_string());
         }
@@ -677,6 +704,9 @@ impl<C: CredentialStores> Engine<C> {
                 }
                 Err(start::EngineStartBlocked::Refused(_)) => return Err(SyncStartRefused::Other),
             };
+            // The same identity the account-bound handle compares with (task 2488): the id recorded for the session
+            // completes an identity that has the email alone.
+            let identity = self.with_recorded_user_id(identity);
             if !identity.is_known() {
                 return Err(SyncStartRefused::IdentityUnknown);
             }
@@ -892,6 +922,8 @@ impl<C: CredentialStores> Engine<C> {
             if let Ok(mut profile) = self.acct.cached_profile.lock() {
                 *profile = None;
             }
+            self.remember_session_user_id(None);
+            self.acct.auth_health.note_result(None);
             self.set_auth_present(false);
             if let Some(token) = token {
                 revoke(&self.client, &self.config.api_base, &token).await;
@@ -909,18 +941,20 @@ impl<C: CredentialStores> Engine<C> {
         offset: usize,
         limit: usize,
     ) -> Result<(Vec<DriveItem>, usize), String> {
-        let db = self.state_db()?;
-        model::children_of(&db, folder_id, sort, offset, limit).map_err(|_| "could not list this folder".to_string())
+        const REFUSED: &str = "could not list this folder";
+        self.local_state()
+            .map_err(|_| REFUSED.to_string())?
+            .with(|db| model::children_of(db, folder_id, sort, offset, limit))
+            .map_err(|_| REFUSED.to_string())?
+            .map_err(|_| REFUSED.to_string())
     }
 
-    /// The local state database, opened read-write as the engine opens it. `Err` before the first engine start
-    /// created it.
-    pub fn state_db(&self) -> Result<StateDb, String> {
-        let path = state_paths::state_db_path_from_state_dir(&self.config.state_dir);
-        if !path.exists() {
-            return Err("nothing has synced on this computer yet".to_string());
+    /// Ask the sync engine to take the server's list again, in the signed-in account's local state. Nothing is
+    /// asked of a state that is not the session's.
+    fn request_resnapshot(&self) {
+        if let Ok(state) = self.local_state_for_changes() {
+            let _ = state.with(|db| db.request_resnapshot());
         }
-        StateDb::open(&path).map_err(|_| "could not open the local state".to_string())
     }
 
     /// The account registry, for a host that needs the runtime's flags (auth health, the engine refusal).
@@ -992,9 +1026,7 @@ impl<C: CredentialStores> Engine<C> {
                 }
             }
             // Ask the sync engine to re-snapshot so the listing updates.
-            if let Ok(db) = self.state_db() {
-                let _ = db.request_resnapshot();
-            }
+            self.request_resnapshot();
             Ok(())
         })
     }
@@ -1018,9 +1050,7 @@ impl<C: CredentialStores> Engine<C> {
                     return Err(format!("could not restore item"));
                 }
             }
-            if let Ok(db) = self.state_db() {
-                let _ = db.request_resnapshot();
-            }
+            self.request_resnapshot();
             Ok(())
         })
     }
@@ -1054,6 +1084,10 @@ async fn revoke(client: &reqwest::Client, base: &str, token: &str) {
 
 /// The binding's view of this computer's local data, for a start from this handle. It never resets: the binding
 /// is asked with resets not allowed, and a reset asked anyway is refused.
+///
+/// One of the engine's own ways to the state database that do not go through the account-bound handle
+/// (`owned_state`): the binding is what DECIDES whose the data is, so it reads before that is known. It hands
+/// nothing to a shell.
 struct LocalState {
     db: StateDb,
 }

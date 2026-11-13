@@ -31,23 +31,54 @@ impl<C: CredentialStores> Engine<C> {
         let sync_root = config
             .sync_root
             .ok_or_else(|| "no sync folder is set on this computer".to_string())?;
-        let db = self.state_db()?;
-        if !self.owns_local_state(&db) {
-            return Err(NOT_YOURS.to_string());
-        }
-        pin(self.identity, &self.config.api_base, db, &sync_root, file_id, kept)
+        // The account-bound handle (task 2488): the pin is changed in the signed-in account's state alone, and
+        // nothing is written into a state before it is proven that account's.
+        let state = self.local_state_for_changes().map_err(|refused| {
+            if refused.not_this_accounts() {
+                NOT_YOURS.to_string()
+            } else {
+                NO_LOCAL_STATE.to_string()
+            }
+        })?;
+        state
+            .with_shared(|db| pin(self.identity, &self.config.api_base, db, &sync_root, file_id, kept))
+            .map_err(|_| NOT_SIGNED_IN.to_string())?
+    }
+}
+
+impl<C: CredentialStores> Engine<C> {
+    /// Make every downloaded copy that is not kept online only again, in the signed-in account's local state
+    /// (the account-bound handle, task 2488): the bytes freed. Nothing is touched for a state that is not handed
+    /// out. BLOCKS: a worker's.
+    pub fn free_up_space(&self) -> Result<u64, String> {
+        let config = crate::config::DesktopConfig::load_for(self.identity)?;
+        let Some(sync_root) = config.sync_root else {
+            return Ok(0);
+        };
+        let state = match self.local_state_for_changes() {
+            Ok(state) => state,
+            // Nothing synced on this computer: nothing to free (as the unbound reclaim answers a missing database).
+            Err(super::LocalStateRefused::NothingSynced) => return Ok(0),
+            Err(refused) if refused.not_this_accounts() => return Err(NOT_YOURS.to_string()),
+            Err(_) => return Err(NO_LOCAL_STATE.to_string()),
+        };
+        state
+            .with(|db| crate::free_up_space::free_up_space_in(self.identity, db, &sync_root))
+            .map_err(|_| NOT_SIGNED_IN.to_string())?
+            .map(|freed| freed.bytes_freed)
     }
 }
 
 /// `set_kept`'s refusals before anything is read or written.
 pub const NOT_SIGNED_IN: &str = "not signed in";
 pub const NOT_YOURS: &str = "the local state on this computer is another account's";
+pub const NO_LOCAL_STATE: &str = "the local state on this computer could not be opened";
 
 /// The pin change itself, on a state database already open.
 fn pin(
     identity: &'static crate::identity::EngineIdentity,
     api_base: &str,
-    db: crate::state_db::StateDb,
+    db: Arc<crate::state_db::StateDb>,
     sync_root: &Path,
     file_id: &str,
     kept: bool,
@@ -55,7 +86,7 @@ fn pin(
     // The pin change reads and writes the state database only (and the OS pin state): no request, so the client
     // carries no token and no key, as the 0.8 app's command builds it.
     let api = Arc::new(ApiClient::new(api_base.to_string(), String::new(), [0u8; 32]));
-    EngineBridge::new(identity, Arc::new(db), api)
+    EngineBridge::new(identity, db, api)
         .set_recursive_pin(sync_root, file_id, kept)
         .map(|_| ())
         .map_err(|_| "could not change what is kept on this computer".to_string())

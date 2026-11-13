@@ -4,15 +4,15 @@
 //! [`EngineTraySource`] gathers what the flyout is drawn from ([`Facts`]): the session gate and the two
 //! switches from the handle; the engine's last report of itself from the host's fold (`LiveEngine::drain`,
 //! taken first on every read, so the flyout is current also while the main window is closed); the counts
-//! and the history from the state database on this PC, read-only and only while the account's keys are in
-//! memory; the
+//! and the history from the signed-in account's local state, through the engine's account-bound handle
+//! (`Engine::local_state`, task 2488: read-only, only while the account's keys are in memory, and nothing of a
+//! state that is not this account's); the
 //! account's storage from Beebeeb, through #322's `EngineDriveSource::storage` on a thread of its own, at
 //! most once a minute. The words are `frames::tray::live`'s.
 //!
 //! Must not: read the board's fixture; wait for the network on the window's thread; log a name, a path
 //! or anything a report carries.
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -22,7 +22,6 @@ use beebeeb_engine::drive_v2::model as drive_model;
 use beebeeb_engine::engine_status::{EngineStatusView, REASON_AUTH, REASON_ENGINE_ERROR};
 use beebeeb_engine::signin::gate::GateState as EngineGate;
 use beebeeb_engine::state_db::{FileStatus, LocalActivityKind, StateDb};
-use beebeeb_engine::state_paths;
 use beebeeb_engine::sync_view::Start;
 
 use super::{EngineDriveSource, EngineFilesSource, LiveEngine, log};
@@ -50,9 +49,6 @@ pub struct EngineTraySource<C: CredentialStores> {
     /// Beebeeb is in File Explorer, as the shell's tray state says ([`TraySource::follow`]).
     explorer_ready: bool,
     storage: Arc<Mutex<StorageRead>>,
-    /// This PC's state database: the one in the process's state folder, the only folder the engine opens a
-    /// handle on. `None` when the folder has no place on this PC.
-    database: Option<PathBuf>,
 }
 
 /// The account's storage as last read, and whose it is.
@@ -68,14 +64,10 @@ struct StorageRead {
 
 impl<C: CredentialStores> EngineTraySource<C> {
     pub fn new(live: Arc<LiveEngine<C>>) -> Self {
-        let database = state_paths::beebeeb_state_dir_for(live.identity)
-            .ok()
-            .map(|folder| state_paths::state_db_path_from_state_dir(&folder));
         Self {
             live,
             explorer_ready: false,
             storage: Arc::default(),
-            database,
         }
     }
 
@@ -92,11 +84,7 @@ impl<C: CredentialStores> EngineTraySource<C> {
         let ready = gate == Gate::Ready;
         // A file's "uploading" or "downloading" is a file on its way only while sync runs and reaches Beebeeb.
         let moving = running && !paused && matches!(report, Report::Syncing | Report::Idle);
-        let local = if ready {
-            self.database().map(|db| local_of(&db, now(), moving))
-        } else {
-            None
-        };
+        let local = if ready { self.local(moving) } else { None };
         Facts {
             gate,
             session_ended: sync.session_ended,
@@ -110,11 +98,13 @@ impl<C: CredentialStores> EngineTraySource<C> {
         }
     }
 
-    /// This PC's state database, read-only: the handle's own `Engine::state_db` checks the schema under a
-    /// write lock on every open, which the flyout (read up to once a second while it shows during a sync)
-    /// would make the engine's writers wait for. `None` before the first sync.
-    fn database(&self) -> Option<StateDb> {
-        StateDb::open_read_only(self.database.as_ref()?).ok()
+    /// What the signed-in account's local state says, through the engine's account-bound handle: read-only (no
+    /// schema check under a write lock, which the flyout, read up to once a second while it shows during a sync,
+    /// would make the engine's writers wait for). `None` before the first sync, for a state that is not this
+    /// account's, and when the session changed while it was read.
+    fn local(&self, moving: bool) -> Option<Local> {
+        let state = self.live.engine.local_state().ok()?;
+        state.with(|db| local_of(db, now(), moving)).ok()
     }
 
     /// The account's storage as last read, while it is the account signed in now. Starts a read on a thread

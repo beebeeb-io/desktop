@@ -109,6 +109,7 @@ pub mod watcher;
 pub mod windows_cf;
 pub mod write_token;
 
+#[cfg(any(test, feature = "direct-state-db"))]
 pub use free_up_space::free_up_space_blocking;
 #[cfg(target_os = "windows")]
 pub use free_up_space::free_up_space_windows;

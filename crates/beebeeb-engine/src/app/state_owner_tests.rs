@@ -1,4 +1,4 @@
-//! `owned_by` / `Engine::owns_local_state` against a real state database in a folder of the test's own: the owner
+//! `owned_by` (and the handle's refusal while signed out) against a real state database in a folder of the test's own: the owner
 //! the engine start records decides, by the binding's own rule; anything that cannot be compared is not the signed-in
 //! account's. Every name is invented.
 
@@ -63,6 +63,11 @@ fn a_signed_out_handle_owns_no_state() {
         api_base: "http://127.0.0.1:9".into(),
     };
     let engine = Arc::new(Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens"));
-    let (_dir, db) = db_owned_by(Some(who(Some("u-first"), Some("first@example.eu"))));
-    assert!(!engine.owns_local_state(&db));
+    let (dir, db) = db_owned_by(Some(who(Some("u-first"), Some("first@example.eu"))));
+    drop(db);
+    engine.use_local_state_for_test(dir.path().join("state.db"));
+    assert_eq!(
+        engine.local_state_refusal(),
+        Some(crate::app::LocalStateRefused::SignedOut)
+    );
 }

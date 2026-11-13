@@ -29,4 +29,14 @@ for crate in src-tauri:beebeeb-desktop native/beebeeb-drive-rune:beebeeb-drive-r
   on=$(printf '%s\n' "$graph" | grep -c "$needle" || true)
   [ "$on" -eq 0 ] || fail "$dir turns on the engine's test-support feature outside dev-dependencies ($on edge(s))"
 done
+# Rule 3 (task 2488): the engine's `direct-state-db` feature makes the state database's raw constructors `pub`. The
+# Tauri shell has it (it opens the database itself); the native app must not, on any normal or build edge: it reaches
+# the local state through the engine's account-bound handle, and a direct open does not compile there. The instrument
+# is shown to see the feature where it IS on (src-tauri's normal edges).
+direct='beebeeb-engine feature "direct-state-db"'
+tauri_direct=$(cd "$root/src-tauri" && cargo tree $locked -e normal,build,features -p beebeeb-desktop | grep -c "$direct" || true)
+[ "$tauri_direct" -ge 1 ] || fail "src-tauri's edges do not show direct-state-db, so this check cannot see the feature"
+native_direct=$(cd "$root/native/beebeeb-drive-rune" && cargo tree $locked -e normal,build,features -p beebeeb-drive-rune | grep -c "$direct" || true)
+[ "$native_direct" -eq 0 ] || fail "native/beebeeb-drive-rune turns on the engine's direct-state-db feature ($native_direct edge(s)): its readers must use the account-bound handle"
+echo "engine boundary: ok ($tauri_direct direct-state-db edge(s) of src-tauri, 0 of native/beebeeb-drive-rune)"
 echo "engine boundary: ok ($lines tree lines, 0 name tauri; test-support on $dev dev edge(s) of src-tauri, 0 normal or build edges of src-tauri and native/beebeeb-drive-rune)"

@@ -6,7 +6,18 @@ impl StateDb {
     /// Open or create the state database at `path`. Idempotent — the
     /// schema migration uses `CREATE TABLE IF NOT EXISTS` so re-opens
     /// are cheap.
+    ///
+    /// Task 2488: `pub` only with the `direct-state-db` feature (the Tauri shell, tests). Without it the constructor
+    /// is the crate's own, and a shell reaches the local state through `app::Engine::local_state` alone.
+    #[cfg(any(test, feature = "direct-state-db"))]
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_at(path.as_ref())
+    }
+    #[cfg(not(any(test, feature = "direct-state-db")))]
+    pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_at(path.as_ref())
+    }
+    fn open_at(path: &Path) -> Result<Self> {
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // Task 2278: the journal mode cannot be changed inside a transaction, so it is set first, on its own.
@@ -32,8 +43,17 @@ impl StateDb {
     /// (`state_db::read_only_tests`). Before it returns, the listing's own columns are read once, so a file that
     /// is not a state database, or one from a build too old to list, is refused here with its own reason and
     /// never shows as an empty folder.
+    ///
+    /// Task 2488: `pub` only with the `direct-state-db` feature, as [`Self::open`] is.
+    #[cfg(any(test, feature = "direct-state-db"))]
     pub fn open_read_only(path: impl AsRef<Path>) -> std::result::Result<Self, ReadOnlyOpenError> {
-        let path = path.as_ref();
+        Self::open_read_only_at(path.as_ref())
+    }
+    #[cfg(not(any(test, feature = "direct-state-db")))]
+    pub(crate) fn open_read_only(path: impl AsRef<Path>) -> std::result::Result<Self, ReadOnlyOpenError> {
+        Self::open_read_only_at(path.as_ref())
+    }
+    fn open_read_only_at(path: &Path) -> std::result::Result<Self, ReadOnlyOpenError> {
         if !path.is_file() {
             return Err(ReadOnlyOpenError::NotFound);
         }

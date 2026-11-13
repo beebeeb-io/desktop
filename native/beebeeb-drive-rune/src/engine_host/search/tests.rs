@@ -350,31 +350,39 @@ fn the_engine_handle_is_a_search_host() {
     let before = woken.load(Ordering::SeqCst);
     SearchHost::wake(&engine);
     assert_eq!(woken.load(Ordering::SeqCst), before + 1, "the host's loop is woken");
-    // The index goes through the glue: it agrees with a direct build from the same state DB. When both fail
-    // (no state DB on this test process), the state DB must genuinely be missing — a stubbed `Err(())` would
-    // survive the `(Err, Err)` arm silently, so we guard it by trying the DB independently.
-    let db_result = engine.state_db();
-    let index_result = SearchHost::index(&engine);
-    match (index_result, &db_result) {
-        (Ok(index), Ok(db)) => {
-            let direct = build_local_index(db).expect("the index from the DB");
-            assert_eq!(
-                index.records.len(),
-                direct.records.len(),
-                "the host's index matches a direct build"
-            );
-        }
-        (Err(()), Err(_)) => {
-            // The state DB must genuinely not exist: a state_db() that works means the glue is wrong.
-            let db_err = db_result.as_ref().err().expect("already Err from match arm");
-            assert!(
-                db_err.contains("nothing has synced"),
-                "index returned Err but state_db path exists: the glue is broken ({})",
-                db_err
-            );
-        }
-        (index, db) => panic!("the host and the handle disagree: {} {}", index.is_ok(), db.is_ok()),
-    }
+    // The index goes through the account-bound handle (task 2488): a local state with rows, recorded as an
+    // account's, builds nothing while no one is signed in, and the handle says why.
+    let dir = tempfile::tempdir().expect("a temp folder");
+    let path = dir.path().join("state.db");
+    let db = StateDb::open(&path).expect("a state database");
+    put(
+        &db,
+        "f-draft",
+        "/Contract draft.pdf",
+        FileStatus::Local,
+        1_258_291,
+        false,
+    );
+    db.set_owner(&beebeeb_engine::account_binding::Identity::new(
+        Some("u-invented"),
+        Some(ME),
+    ))
+    .unwrap();
+    assert_eq!(
+        build_local_index(&db).expect("a direct build").records.len(),
+        1,
+        "the state has a row"
+    );
+    drop(db);
+    engine.use_local_state_for_test(path);
+    assert!(
+        SearchHost::index(&engine).is_err(),
+        "signed out: no index of the local state"
+    );
+    assert_eq!(
+        engine.local_state_refusal(),
+        Some(beebeeb_engine::app::LocalStateRefused::SignedOut)
+    );
 }
 
 /// While `SEARCH_ON_ENGINE` is false (task 2488), a real build's shell gets the unwired Search, and no part of the

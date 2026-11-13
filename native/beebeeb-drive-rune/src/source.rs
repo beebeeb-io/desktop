@@ -68,6 +68,8 @@ pub enum SourceError {
     NotFound,
     /// The data behind the source could not be read.
     Unreadable,
+    /// This PC holds local data that could not be confirmed as the signed-in account's: none of it is shown.
+    NotThisAccounts,
 }
 
 impl SourceError {
@@ -76,6 +78,10 @@ impl SourceError {
         match self {
             SourceError::NotFound => "This folder is not here any more.",
             SourceError::Unreadable => "Your files cannot be read right now.",
+            SourceError::NotThisAccounts => {
+                "The files on this PC couldn\u{2019}t be confirmed as belonging to the account you\u{2019}re signed in to, so \
+                 they are not shown."
+            }
         }
     }
 }
