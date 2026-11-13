@@ -21,10 +21,14 @@
 //! source does every read and every change in the order asked and sends each answer down one channel, which
 //! [`DriveSettings::pump`] drains every frame.
 //!
-//! Whose answer (review of desktop#377, P2-5; the model is `engine_host/settings.rs`): every job carries the account
-//! it was asked for and a generation, and an answer counts only when the generation is still current. The window drops
-//! what it holds the moment the gate or the account changes (in `pump`), and every reader hands out nothing unless the
-//! vault is open and the signed-in account is the one the answer was read for.
+//! Whose answer (review of desktop#377, P2-5; the model is `engine_host/this_pc.rs`): every job carries the account
+//! it was asked for and a generation, and every answer the generation and the account it is for (none when the
+//! account was not the same after the work as before it). `pump` compares the gate and the account FIRST: a change
+//! drops what the window holds and starts a new generation, and only then are the worker's answers taken in, each
+//! only when its generation is the current one and its account the one the window sees. Every reader hands out
+//! nothing unless the vault is open and the signed-in account is the one the answer was read for. A change (Pause,
+//! Open at login, Free up space, Keep) runs only while the account that asked is still signed in with the vault
+//! open; a change that did not happen is said in the window's toast.
 //!
 //! Whose state (task 2488): the local state database can still belong to an EARLIER account after a sign-out that
 //! keeps local data. Nothing is read from it unless its recorded owner is the signed-in account
@@ -79,6 +83,10 @@ pub const INSIGHTS_LOCKED: &str = "Unlock Beebeeb to see where your storage goes
 pub const KEEP_NOT_SYNCING: &str = "Sync isn't running, so the folders were not changed.";
 pub const KEEP_FAILED: &str = "Couldn't change what is kept on this PC. Try again.";
 pub const FREE_UP_FAILED: &str = "Couldn't free up space on this PC. Try again.";
+pub const PAUSE_FAILED: &str = "Couldn't pause or resume sync. Try again.";
+pub const OPEN_AT_LOGIN_FAILED: &str = "Couldn't change Open at login. Try again.";
+/// A change asked while no one is signed in with the vault open, or by an account that has left since.
+pub const CHANGE_LOCKED: &str = "Unlock Beebeeb to change this.";
 
 /// What the adapter asks of the engine handle. The app's is `Engine`; a test's is a state database in a folder of
 /// its own.
@@ -144,7 +152,7 @@ struct OnThisPc {
     status_on_files: bool,
 }
 
-enum Job {
+enum Ask {
     /// The local sizes, the settings, Open at login and the folder tree.
     Read,
     Insights,
@@ -152,6 +160,13 @@ enum Job {
     OpenAtLogin(bool),
     FreeUp,
     Keep(Vec<String>, Vec<String>),
+}
+
+/// One job: what is asked, for whose account, in which generation.
+struct Job {
+    ask: Ask,
+    account: String,
+    generation: u64,
 }
 
 enum Answer {
@@ -163,14 +178,22 @@ enum Answer {
     Refused(&'static str),
 }
 
+/// A worker's answer: the generation it was asked in and the account it is for (`None`: the account that asked was
+/// no longer signed in with the vault open when the work ended).
+struct Tagged {
+    generation: u64,
+    whose: Option<String>,
+    answer: Answer,
+}
+
 /// Drive's settings panes on the real engine. See the module's doc.
 pub struct EngineDriveSettings<E: DriveEngine> {
     engine: Arc<E>,
     platform: Arc<dyn Platform>,
     jobs: Option<mpsc::Sender<Job>>,
     pending: Arc<AtomicUsize>,
-    answers: mpsc::Sender<Answer>,
-    inbox: mpsc::Receiver<Answer>,
+    answers: mpsc::Sender<Tagged>,
+    inbox: mpsc::Receiver<Tagged>,
     on_pc: Option<OnThisPc>,
     open_at_login: Option<bool>,
     usage: Option<(i64, i64)>,
@@ -180,8 +203,12 @@ pub struct EngineDriveSettings<E: DriveEngine> {
     insights_at: Option<Instant>,
     /// Whether an insights read is out: no second one is asked.
     insights_reading: bool,
-    /// The (gate, account) the last pump saw: a change drops everything held and starts a new read.
+    /// The (gate, account) the last pump saw: a change drops everything held and starts a new generation.
     seen: (GateState, Option<String>),
+    generation: u64,
+    /// What `insights()` lends while what is held is not the signed-in account's.
+    locked: Insights,
+    loading: Insights,
     /// A refused change: the window's toast says it once.
     toast: Option<&'static str>,
 }
@@ -207,14 +234,21 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
             insights_at: None,
             insights_reading: false,
             seen: (gate, account),
+            generation: 0,
+            locked: Insights::Failed(INSIGHTS_LOCKED.into()),
+            loading: Insights::Loading,
             toast: None,
         };
-        source.send(Job::Read);
-        source.send(Job::Insights);
+        source.send(Ask::Read);
+        source.ask_insights();
         source
     }
 
-    fn send(&mut self, job: Job) {
+    /// Send `ask` for the account the window sees now. Nothing is sent while no one is signed in with the vault open.
+    fn send(&mut self, ask: Ask) -> bool {
+        let (GateState::Ready, Some(account)) = self.seen.clone() else {
+            return false;
+        };
         if self.jobs.is_none() {
             let (tx, rx) = mpsc::channel::<Job>();
             let (engine, platform, answers, pending) = (
@@ -239,12 +273,29 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
                 });
             match started {
                 Ok(_) => self.jobs = Some(tx),
-                Err(_) => return log("drive settings: could not start its worker"),
+                Err(_) => {
+                    log("drive settings: could not start its worker");
+                    return false;
+                }
             }
         }
         self.pending.fetch_add(1, Ordering::SeqCst);
-        if !self.jobs.as_ref().is_some_and(|tx| tx.send(job).is_ok()) {
+        let job = Job {
+            ask,
+            account,
+            generation: self.generation,
+        };
+        let sent = self.jobs.as_ref().is_some_and(|tx| tx.send(job).is_ok());
+        if !sent {
             self.pending.fetch_sub(1, Ordering::SeqCst);
+        }
+        sent
+    }
+
+    /// Send a change the person asked for; one that cannot be asked (no one signed in with the vault open) is said.
+    fn change(&mut self, ask: Ask) {
+        if !self.mine() || !self.send(ask) {
+            self.toast = Some(CHANGE_LOCKED);
         }
     }
 
@@ -252,45 +303,82 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
         self.engine.view().gate == GateState::Ready
     }
 
+    /// Whether what the window holds may be handed out: the vault is open, and the signed-in account is the one the
+    /// last `pump` saw (what is held was read for that account, or is nothing). Asked on every reader, so nothing of
+    /// an account that left is drawn even before the next `pump` drops it.
+    fn mine(&self) -> bool {
+        if self.seen.0 != GateState::Ready || !self.unlocked() {
+            return false;
+        }
+        let account = self.engine.account();
+        account.is_some() && account == self.seen.1
+    }
+
     fn ask_insights(&mut self) {
         if !self.insights_reading {
-            self.insights_reading = true;
-            self.send(Job::Insights);
+            self.insights_reading = self.send(Ask::Insights);
+            if !self.insights_reading {
+                self.insights = Insights::Failed(INSIGHTS_LOCKED.into());
+            }
         }
     }
 }
 
-/// One job, on the worker. Every change is followed by the read it changes.
-fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, answers: &mpsc::Sender<Answer>, job: Job) {
+/// The account `job` was asked for is still the signed-in one, with the vault open.
+fn still_for<E: DriveEngine>(engine: &E, account: &str) -> bool {
+    engine.view().gate == GateState::Ready && engine.account().as_deref() == Some(account)
+}
+
+/// One job, on the worker. A change runs only while the account that asked is still signed in with the vault open,
+/// and is followed by the read it changes. Every answer says the generation it was asked in and, checked after the
+/// work, whose it is.
+fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, answers: &mpsc::Sender<Tagged>, job: Job) {
+    let Job {
+        ask,
+        account,
+        generation,
+    } = job;
     let send = |answer| {
-        let _ = answers.send(answer);
+        let whose = still_for(engine, &account).then(|| account.clone());
+        let _ = answers.send(Tagged {
+            generation,
+            whose,
+            answer,
+        });
     };
     let refuse = |words| send(Answer::Refused(words));
-    match job {
-        Job::Read => read_local(engine, platform, answers),
-        Job::Insights => {
-            let (insights, usage) = insights(engine);
+    if !matches!(ask, Ask::Read | Ask::Insights) && !still_for(engine, &account) {
+        // The account that asked has left, or the vault is locked: nothing is changed for whoever is here now.
+        log("drive settings: a change was not made (the account that asked is not signed in)");
+        return refuse(CHANGE_LOCKED);
+    }
+    match ask {
+        Ask::Read => read_local(engine, platform, &account, &send),
+        Ask::Insights => {
+            let (insights, usage) = insights(engine, &account);
             send(Answer::Insights(insights, usage));
         }
-        Job::Pause(paused) => {
+        Ask::Pause(paused) => {
             if engine.set_paused(paused).is_err() {
                 log("drive settings: sync was not paused or resumed (the settings file)");
+                refuse(PAUSE_FAILED);
             }
         }
-        Job::OpenAtLogin(on) => {
+        Ask::OpenAtLogin(on) => {
             if platform.set_autostart(on).is_err() {
                 log("drive settings: open at login was not changed");
+                refuse(OPEN_AT_LOGIN_FAILED);
             }
             send(Answer::OpenAtLogin(platform.autostart_enabled().ok()));
         }
-        Job::FreeUp => {
+        Ask::FreeUp => {
             if engine.free_up_space().is_err() {
                 log("drive settings: free up space did not finish");
                 refuse(FREE_UP_FAILED);
             }
-            read_local(engine, platform, answers);
+            read_local(engine, platform, &account, &send);
         }
-        Job::Keep(keep, release) => {
+        Ask::Keep(keep, release) => {
             if !engine.syncing() {
                 log("drive settings: keep on this PC was not changed: sync does not run");
                 refuse(KEEP_NOT_SYNCING);
@@ -299,23 +387,26 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, answers: &mpsc::Send
                     .iter()
                     .map(|id| (id, true))
                     .chain(release.iter().map(|id| (id, false)));
-                let failed = changes.filter(|(id, on)| engine.set_kept(id, *on).is_err()).count();
+                // Each folder only while the account that asked is still the one signed in.
+                let failed = changes
+                    .filter(|(id, on)| !still_for(engine, &account) || engine.set_kept(id, *on).is_err())
+                    .count();
                 if failed > 0 {
                     log(format!("drive settings: {failed} folders were not changed"));
                     refuse(KEEP_FAILED);
                 }
             }
-            read_local(engine, platform, answers);
+            read_local(engine, platform, &account, &send);
         }
     }
 }
 
-fn read_local<E: DriveEngine>(engine: &E, platform: &dyn Platform, answers: &mpsc::Sender<Answer>) {
-    let _ = answers.send(Answer::OpenAtLogin(platform.autostart_enabled().ok()));
-    if engine.view().gate != GateState::Ready {
-        // Locked or signed out: no folder name stays in memory.
-        let _ = answers.send(Answer::OnThisPc(None));
-        let _ = answers.send(Answer::Keep(Keep::Failed));
+fn read_local<E: DriveEngine>(engine: &E, platform: &dyn Platform, account: &str, send: &dyn Fn(Answer)) {
+    send(Answer::OpenAtLogin(platform.autostart_enabled().ok()));
+    if !still_for(engine, account) {
+        // Locked, signed out or another account: no folder name stays in memory.
+        send(Answer::OnThisPc(None));
+        send(Answer::Keep(Keep::Failed));
         return;
     }
     let read = engine.local_state(|db| -> Result<_, String> {
@@ -341,17 +432,17 @@ fn read_local<E: DriveEngine>(engine: &E, platform: &dyn Platform, answers: &mps
     };
     match read {
         Ok(Some((on_pc, keep))) => {
-            let _ = answers.send(Answer::OnThisPc(Some(on_pc)));
-            let _ = answers.send(Answer::Keep(keep));
+            send(Answer::OnThisPc(Some(on_pc)));
+            send(Answer::Keep(keep));
         }
         Ok(None) => {
             // Not this account's state (task 2488): nothing.
-            let _ = answers.send(Answer::OnThisPc(None));
-            let _ = answers.send(Answer::Keep(Keep::Failed));
+            send(Answer::OnThisPc(None));
+            send(Answer::Keep(Keep::Failed));
         }
         Err(_) => {
             log("drive settings: the local state could not be read");
-            let _ = answers.send(Answer::Keep(Keep::Failed));
+            send(Answer::Keep(Keep::Failed));
         }
     }
 }
@@ -380,8 +471,8 @@ fn files_of(rows: &[(FileEntry, bool, DriveItem)]) -> Vec<&FileEntry> {
 }
 
 /// Storage insights: the account's use from Beebeeb, the rest from this PC's file list.
-fn insights<E: DriveEngine>(engine: &E) -> (Insights, Option<(i64, i64)>) {
-    if engine.view().gate != GateState::Ready {
+fn insights<E: DriveEngine>(engine: &E, account: &str) -> (Insights, Option<(i64, i64)>) {
+    if !still_for(engine, account) {
         return (Insights::Failed(INSIGHTS_LOCKED.into()), None);
     }
     let usage = match engine.storage_info() {
@@ -606,44 +697,60 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
         matches!(pane, Pane::Insights)
     }
 
+    /// The gate or the account changed: what the window held goes now, a new generation starts, and an open vault
+    /// is read again. Only then the worker's answers: one counts when it was asked in this generation and is for
+    /// the account the window sees.
     fn pump(&mut self, _seconds: f64) -> (bool, bool) {
         let mut changed = false;
-        while let Ok(answer) = self.inbox.try_recv() {
-            changed = true;
-            match answer {
-                Answer::OnThisPc(on_pc) => self.on_pc = on_pc,
-                Answer::OpenAtLogin(on) => self.open_at_login = on,
-                Answer::Keep(keep) => self.keep = keep,
-                Answer::Insights(insights, usage) => {
-                    self.insights_reading = false;
-                    self.insights_at = Some(Instant::now());
-                    self.insights = insights;
-                    self.usage = usage;
-                }
-                Answer::Refused(words) => {
-                    self.toast = Some(words);
-                }
-            }
-        }
-        // A lock, a sign-out, an unlock or a change of account: everything held goes and a new read is asked.
         let now = (self.engine.view().gate, self.engine.account());
         if now != self.seen {
-            let was_ready = self.seen.0 == GateState::Ready;
             self.seen = now;
+            self.generation += 1;
             self.on_pc = None;
+            self.open_at_login = None;
             self.usage = None;
             self.keep = Keep::Failed;
             self.insights_at = None;
             self.insights_reading = false;
-            if self.seen.0 != GateState::Ready {
-                self.insights = Insights::Failed(INSIGHTS_LOCKED.into());
-            } else if was_ready {
-                // Account changed while the vault stayed open: start fresh.
-                self.insights = Insights::Loading;
-            }
-            self.send(Job::Read);
+            self.insights = if self.seen.0 == GateState::Ready {
+                Insights::Loading
+            } else {
+                Insights::Failed(INSIGHTS_LOCKED.into())
+            };
+            self.send(Ask::Read);
             self.ask_insights();
             changed = true;
+        }
+        while let Ok(Tagged {
+            generation,
+            whose,
+            answer,
+        }) = self.inbox.try_recv()
+        {
+            if generation != self.generation {
+                // Asked before the gate or the account changed: dropped, never drawn.
+                continue;
+            }
+            changed = true;
+            let mine = self.seen.0 == GateState::Ready && whose.is_some() && whose == self.seen.1;
+            match answer {
+                Answer::Refused(words) => self.toast = Some(words),
+                Answer::Insights(insights, usage) => {
+                    self.insights_reading = false;
+                    if mine {
+                        self.insights_at = Some(Instant::now());
+                        self.insights = insights;
+                        self.usage = usage;
+                    } else {
+                        // The account left while it was worked out: nothing of it is kept; Try again asks anew.
+                        self.insights = Insights::Failed(INSIGHTS_FAILED.into());
+                    }
+                }
+                _ if !mine => {}
+                Answer::OnThisPc(on_pc) => self.on_pc = on_pc,
+                Answer::OpenAtLogin(on) => self.open_at_login = on,
+                Answer::Keep(keep) => self.keep = keep,
+            }
         }
         (changed, !self.idle())
     }
@@ -651,7 +758,7 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
     /// A pane of Drive's settings opened: insights reads again when what it holds is old (P2-3).
     fn opened(&mut self, pane: Pane) {
         if pane == Pane::Insights {
-            let fresh = self.insights_at.is_some_and(|at| at.elapsed() < INSIGHTS_FRESH_FOR) && self.unlocked();
+            let fresh = self.insights_at.is_some_and(|at| at.elapsed() < INSIGHTS_FRESH_FOR) && self.mine();
             if !fresh {
                 self.ask_insights();
             }
@@ -664,8 +771,9 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
     }
 
     fn storage(&self) -> Storage {
-        let on_pc = self.on_pc.filter(|_| self.unlocked());
-        let usage = self.usage.filter(|_| self.unlocked());
+        let mine = self.mine();
+        let on_pc = self.on_pc.filter(|_| mine);
+        let usage = self.usage.filter(|_| mine);
         let limit_gb = on_pc.map_or(0, |p| {
             u32::try_from(p.limit_bytes.max(0) / 1_000_000_000).unwrap_or(u32::MAX)
         });
@@ -711,13 +819,14 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
     /// call.
     fn clear(&mut self, which: Kept) {
         if which == Kept::Downloaded {
-            self.send(Job::FreeUp);
+            self.change(Ask::FreeUp);
         }
     }
 
     fn sync(&self) -> SyncPane {
         let view = self.engine.view();
-        let on_pc = self.on_pc.filter(|_| view.gate == GateState::Ready);
+        let mine = self.mine();
+        let on_pc = self.on_pc.filter(|_| mine);
         let says = super::sync::sync_word(&view).unwrap_or("").to_string();
         SyncPane {
             in_explorer: view.explorer == Explorer::Added,
@@ -728,7 +837,7 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
             } else {
                 SyncStatus::Running(says)
             },
-            open_at_login: self.open_at_login.unwrap_or(false),
+            open_at_login: self.open_at_login.filter(|_| mine).unwrap_or(false),
             downloaded: on_pc.map(|p| size_words(p.downloaded)).unwrap_or_default(),
             limit_gb: on_pc.map_or(0, |p| {
                 u32::try_from(p.limit_bytes.max(0) / 1_000_000_000).unwrap_or(u32::MAX)
@@ -750,12 +859,12 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
     fn set_status_on_files(&mut self, _on: bool) {}
 
     fn set_open_at_login(&mut self, on: bool) {
-        self.send(Job::OpenAtLogin(on));
+        self.change(Ask::OpenAtLogin(on));
     }
 
     /// The handle's view says paused at once when the settings file took it.
     fn set_paused(&mut self, paused: bool) {
-        self.send(Job::Pause(paused));
+        self.change(Ask::Pause(paused));
     }
 
     /// Not bound: no metered state is read here, so `sync()` never says sync waits on one.
@@ -767,12 +876,16 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
     /// Not bound: the turn-off lives in the Tauri app only (PR body).
     fn turn_off_explorer(&mut self) {}
 
+    /// What is held, only while it is the signed-in account's (P2-5): a locked vault lends the locked sentence, an
+    /// account the last `pump` has not seen yet lends "loading", whatever is still stored.
     fn insights(&self) -> &Insights {
-        if !self.unlocked() {
-            // P2-5: a stored insights from before a lock or sign-out is never shown. `pump` already sets it to
-            // the locked sentence on a gate change, so the reference is to that stored value.
+        if self.mine() {
+            &self.insights
+        } else if self.unlocked() {
+            &self.loading
+        } else {
+            &self.locked
         }
-        &self.insights
     }
 
     fn reload_insights(&mut self) {
@@ -781,15 +894,11 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
     }
 
     fn keep(&self) -> Keep {
-        if self.unlocked() {
-            self.keep.clone()
-        } else {
-            Keep::Failed
-        }
+        if self.mine() { self.keep.clone() } else { Keep::Failed }
     }
 
     fn reload_keep(&mut self) {
-        self.send(Job::Read);
+        self.send(Ask::Read);
     }
 
     /// Only the folders named: each newly kept or newly released folder alone, through the pin change. Refused
@@ -798,7 +907,7 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
         if keep.is_empty() && release.is_empty() {
             return;
         }
-        self.send(Job::Keep(keep.to_vec(), release.to_vec()));
+        self.change(Ask::Keep(keep.to_vec(), release.to_vec()));
     }
 }
 

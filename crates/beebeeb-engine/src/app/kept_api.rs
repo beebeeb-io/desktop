@@ -51,8 +51,7 @@ impl<C: CredentialStores> Engine<C> {
     /// (the account-bound handle, task 2488): the bytes freed. Nothing is touched for a state that is not handed
     /// out. BLOCKS: a worker's.
     pub fn free_up_space(&self) -> Result<u64, String> {
-        let config = crate::config::DesktopConfig::load_for(self.identity)?;
-        let Some(sync_root) = config.sync_root else {
+        let Some(sync_root) = self.configured_sync_root()? else {
             return Ok(0);
         };
         let state = match self.local_state_for_changes() {
@@ -62,10 +61,21 @@ impl<C: CredentialStores> Engine<C> {
             Err(refused) if refused.not_this_accounts() => return Err(NOT_YOURS.to_string()),
             Err(_) => return Err(NO_LOCAL_STATE.to_string()),
         };
-        state
-            .with(|db| crate::free_up_space::free_up_space_in(self.identity, db, &sync_root))
-            .map_err(|_| NOT_SIGNED_IN.to_string())?
-            .map(|freed| freed.bytes_freed)
+        // The session is asked again before each file: a lock or a sign-out while this runs ends it there. What was
+        // freed until then was freed, and is the answer.
+        let mut reclaimed = None;
+        let whole = state.with_while(|db, go_on| {
+            reclaimed = Some(crate::free_up_space::free_up_space_in(
+                self.identity,
+                db,
+                &sync_root,
+                go_on,
+            ));
+        });
+        match (whole, reclaimed) {
+            (_, Some(reclaimed)) => reclaimed.map(|freed| freed.bytes_freed),
+            (_, None) => Err(NOT_SIGNED_IN.to_string()),
+        }
     }
 }
 

@@ -208,7 +208,8 @@ fn general_and_storage_location_draw_what_beebeeb_says_by_country() {
         "no updater: never says a newer version exists"
     );
     assert!(source.wired(Pane::General) && source.wired(Pane::StorageLocation));
-    assert!(!source.wired(Pane::About) && !source.wired(Pane::Notifications) && !source.wired(Pane::Recent));
+    assert!(!source.wired(Pane::About));
+    assert!(source.wired(Pane::Notifications) && source.wired(Pane::Recent));
     assert!(
         !source.opens("DW-0782"),
         "no support bundle behind Report a problem yet"
@@ -550,11 +551,12 @@ fn the_running_apps_settings_show_no_sample_value() {
         }
     };
     check(&rt, "General");
-    for (frame, pane) in [
-        ("DW-0751", "About"),
-        ("DW-0750", "Notifications"),
-        ("DW-0712", "Storage"),
-    ] {
+    // Notifications is the engine's (`settings::notifications`): drawn, with no sample value in it.
+    rt.update(|s, _| crate::frames::settings::go(s, "DW-0750"));
+    rt.frame(0.016);
+    assert!(shows(&rt, "Allow notifications"), "Notifications is drawn");
+    check(&rt, "Notifications");
+    for (frame, pane) in [("DW-0751", "About"), ("DW-0712", "Storage")] {
         rt.update(move |s, _| crate::frames::settings::go(s, frame));
         rt.frame(0.016);
         assert!(

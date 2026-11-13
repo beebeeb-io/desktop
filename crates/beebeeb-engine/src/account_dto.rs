@@ -56,7 +56,8 @@ pub use sessions::{AccountSessionList, ClientDeviceList, ClientSyncSessionList, 
 
 mod notifications;
 pub use notifications::{
-    ActivityFeed, ActivityFeedEvent, NotificationList, NotificationPreferences, NotificationPreferencesUpdate,
+    ActivityFeed, ActivityFeedEvent, Notification, NotificationList, NotificationPreferenceValues,
+    NotificationPreferences, NotificationPreferencesUpdate,
 };
 
 mod storage;

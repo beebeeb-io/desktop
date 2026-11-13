@@ -39,7 +39,7 @@ const SLOT: &str = "an-invented-slot";
 
 /// A session in memory, as a sign-in and an unlock leave it: the email, and the user id recorded for it.
 fn signed_in(engine: &TestEngine, user_id: Option<&str>, email: Option<&str>) {
-    let _writes = engine.writes.lock().unwrap();
+    let _writes = engine.writes.write().unwrap();
     engine
         .acct
         .advance_session_generation_holding_session_write_lock(SessionTransition::Write);
@@ -254,6 +254,94 @@ fn a_handle_does_not_outlive_its_session() {
     signed_out(&engine);
 }
 
+/// A handle made while a lock is ending its session (the turn has moved on, the session is not yet gone from memory)
+/// answers nothing once the lock is done.
+#[test]
+fn a_handle_made_while_its_session_is_ending_answers_nothing_after() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    engine.use_local_state_for_test(state(dir.path(), Some((Some("user-a"), Some("a@example.eu"))), true));
+    signed_in(&engine, Some("user-a"), Some("a@example.eu"));
+
+    // The first half of a lock, as `forget_session` does it.
+    {
+        let _writes = engine.writes.write().unwrap();
+        engine
+            .acct
+            .advance_session_generation_holding_session_write_lock(SessionTransition::Lock);
+    }
+    let handle = engine.local_state().expect("the session is still in memory");
+    // The second half: the session leaves memory.
+    *engine.acct.session.lock().unwrap() = None;
+    assert_eq!(
+        handle.with(|db| db.list_files().map(|files| files.len()).unwrap_or(0)),
+        Err(LocalStateRefused::SessionChanged)
+    );
+    signed_out(&engine);
+}
+
+/// An operation of many steps stops at the step after a lock: the steps before it ran, none after it does.
+#[test]
+fn an_operation_of_many_steps_takes_no_step_after_a_lock() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    engine.use_local_state_for_test(state(dir.path(), Some((Some("user-a"), Some("a@example.eu"))), true));
+    signed_in(&engine, Some("user-a"), Some("a@example.eu"));
+    let handle = engine.local_state_for_changes().expect("the owner's handle");
+    let mut reached = Vec::new();
+    let answer = handle.with_while(|_db, go_on| {
+        crate::free_up_space::each_while(["first", "second", "third"], go_on, |file| {
+            reached.push(file);
+            if file == "first" {
+                // Between two files: the vault is locked.
+                engine.forget_session(SessionTransition::Lock);
+            }
+        })
+    });
+    assert_eq!(reached, ["first"], "a file was reached after the lock");
+    assert_eq!(answer, Err(LocalStateRefused::SessionChanged));
+    signed_out(&engine);
+
+    // The control: with no lock every file is reached.
+    signed_in(&engine, Some("user-a"), Some("a@example.eu"));
+    let handle = engine.local_state_for_changes().expect("the owner's handle");
+    let mut reached = Vec::new();
+    let all = handle.with_while(|_db, go_on| {
+        crate::free_up_space::each_while(["first", "second", "third"], go_on, |file| reached.push(file))
+    });
+    assert_eq!((all, reached.len()), (Ok(true), 3));
+    signed_out(&engine);
+}
+
+/// Readers do not refuse each other: while another reader asks whether its session is still there, this one is
+/// answered. Only a session change makes a reader yield.
+#[test]
+fn a_reader_is_not_refused_because_another_reader_is_asking() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    engine.use_local_state_for_test(state(dir.path(), Some((Some("user-a"), Some("a@example.eu"))), true));
+    signed_in(&engine, Some("user-a"), Some("a@example.eu"));
+    let handle = engine.local_state().expect("the owner's handle");
+    {
+        // As another reader holds it, in the middle of its own question.
+        let _another_reader = engine.writes.read().unwrap();
+        assert_eq!(
+            handle.with(|db| db.list_files().map(|files| files.len()).unwrap_or(0)),
+            Ok(1)
+        );
+        assert!(engine.local_state().is_ok());
+    }
+    {
+        // A session change under way: the reader yields.
+        let _change = engine.writes.write().unwrap();
+        assert_eq!(
+            handle.with(|db| db.list_files().map(|files| files.len()).unwrap_or(0)),
+            Err(LocalStateRefused::SessionChanged)
+        );
+    }
+    signed_out(&engine);
+}
+
 /// An answer that was read while the session changed is dropped, not returned.
 #[test]
 fn an_answer_read_across_a_session_change_is_dropped() {
@@ -384,7 +472,7 @@ fn after_a_restart_the_stored_user_id_decides_not_the_email() {
         let engine = engine_on(credentials);
         engine.restore();
         {
-            let _writes = engine.writes.lock().unwrap();
+            let _writes = engine.writes.write().unwrap();
             engine
                 .acct
                 .advance_session_generation_holding_session_write_lock(SessionTransition::Write);

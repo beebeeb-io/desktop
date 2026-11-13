@@ -58,6 +58,8 @@ struct App {
     reads: Count,
     searches: Count,
     opened: Count,
+    /// How often Search's source was told to forget what it holds.
+    forgotten: Count,
 }
 
 /// The shell's window on the board's sample, every source counting, the seventh row selected.
@@ -66,14 +68,17 @@ fn app() -> App {
     let mut state = state::init_with(Shell::fixture_on(engine.clone(), Arc::new(FakePlatform::default())));
     let fixture = FilesFixture::default();
     let calls = fixture.calls.clone();
-    let (reads, searches, opened) = (Count::default(), Count::default(), Count::default());
+    let (reads, searches, opened, forgotten) = (Count::default(), Count::default(), Count::default(), Count::default());
     state.source = Box::new(Drive {
         board: BoardDrive::sharing(&fixture.edits),
         engine: engine.clone(),
         reads: reads.clone(),
     });
     state.actions.source = Box::new(fixture);
-    state.frames.find.source = Box::new(crate::frames::search::source::Counted::board(searches.clone()));
+    state.frames.find.source = Box::new(crate::frames::search::source::Counted::board(
+        searches.clone(),
+        forgotten.clone(),
+    ));
     let asked = opened.clone();
     crate::frames::viewers::wire(
         &mut state,
@@ -92,6 +97,7 @@ fn app() -> App {
         reads,
         searches,
         opened,
+        forgotten,
     };
     click(&mut app.rt, "row-6-date");
     app
@@ -563,5 +569,40 @@ fn a_gate_that_closes_reads_no_folder() {
         settle(&mut app.rt);
         assert_eq!(app.reads.load(Ordering::SeqCst), reads, "{closing:?}");
         assert!(app.rt.state.listing.items.is_empty(), "{closing:?}");
+    }
+}
+
+/// Search open with results when the session gate closes, in each way: its source is told to
+/// forget what it holds, and from then on it is not told search opened, not asked a query and
+/// not pumped for answers, however many frames run.
+#[test]
+fn search_forgets_and_is_not_asked_again_once_the_session_gate_closed() {
+    for closing in [Closing::Lock, Closing::SignOut, Closing::Ended] {
+        let mut app = app();
+        searching(&mut app);
+        let before = app.searches.load(Ordering::SeqCst);
+        // The control: while the session is open, a frame asks the source (its poll pumps it).
+        settle(&mut app.rt);
+        assert!(
+            app.searches.load(Ordering::SeqCst) > before,
+            "an open search asks its source"
+        );
+        assert_eq!(app.forgotten.load(Ordering::SeqCst), 0);
+
+        close(&mut app, closing);
+        settle(&mut app.rt);
+        assert!(
+            app.forgotten.load(Ordering::SeqCst) >= 1,
+            "{closing:?}: nothing was forgotten"
+        );
+        let asked = app.searches.load(Ordering::SeqCst);
+        for _ in 0..4 {
+            settle(&mut app.rt);
+        }
+        assert_eq!(
+            app.searches.load(Ordering::SeqCst),
+            asked,
+            "{closing:?}: asked after it closed"
+        );
     }
 }

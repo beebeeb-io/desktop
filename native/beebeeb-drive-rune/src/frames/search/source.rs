@@ -47,7 +47,7 @@ impl Narrow {
 }
 
 /// One result: an item whose name holds the query, and where it is.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Hit {
     /// The item's id, as the engine gives it.
     pub id: String,
@@ -61,6 +61,25 @@ pub struct Hit {
     pub place: String,
     /// The PC column; `None`: the source does not know, and the cell stays empty.
     pub pc: Option<PcState>,
+}
+
+/// Never the name, the id or the place: a result is a decrypted file name, and a `{:?}` must not print one.
+impl std::fmt::Debug for Hit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hit")
+            .field("kind", &self.kind)
+            .field("pc", &self.pc)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a source that answers late did since the last poll.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pumped {
+    /// Something a draw reads changed.
+    pub changed: bool,
+    /// An answer is still on its way: poll again soon.
+    pub busy: bool,
 }
 
 /// How far the list of files has loaded while a first sign-in still gets it (DW-0802b).
@@ -100,6 +119,17 @@ pub trait SearchSource {
     fn search(&self, query: &str, narrow: Narrow) -> Answer;
     /// The details panel's facts of the result with this id; `None`: not known, and no panel.
     fn details(&self, id: &str) -> Option<Details>;
+    /// Search opened: a source that reads late reads now, when what it holds is old. Never from a draw.
+    fn opened(&mut self) {}
+    /// The words in the field or the pill changed: a source that answers late starts on this query now, and
+    /// `search` says `Searching` until it has it. Never from a draw.
+    fn ask(&mut self, _query: &str, _narrow: Narrow) {}
+    /// What arrived since the last poll (`frames::search::poll`).
+    fn pump(&mut self) -> Pumped {
+        Pumped::default()
+    }
+    /// The gate or the account changed: every name this source holds goes now.
+    fn forget(&mut self) {}
 }
 
 /// How many recent searches are kept (the iPhone's rule, DI-0801: "Up to 10 recent searches").
@@ -310,45 +340,73 @@ pub fn matched(name: &str, query: &str) -> Option<(usize, usize)> {
     None
 }
 
-/// The board's sample, counting every question it is asked: for a test outside this group that
-/// proves Search was not asked (the shell's session gate).
+/// The board's sample, counting every time it is asked or told something, and (apart) every
+/// time it is told to forget: for a test outside this group that proves Search was not asked
+/// (the shell's session gate).
 #[cfg(test)]
-pub struct Counted(BoardSearch, pub std::sync::Arc<std::sync::atomic::AtomicU32>);
+pub struct Counted {
+    board: BoardSearch,
+    asked: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    forgotten: std::sync::Arc<std::sync::atomic::AtomicU32>,
+}
 
 #[cfg(test)]
 impl Counted {
-    pub fn board(count: std::sync::Arc<std::sync::atomic::AtomicU32>) -> Counted {
-        Counted(BoardSearch::new(), count)
+    pub fn board(
+        asked: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        forgotten: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    ) -> Counted {
+        Counted {
+            board: BoardSearch::new(),
+            asked,
+            forgotten,
+        }
     }
 
     fn asked(&self) {
-        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 #[cfg(test)]
 impl SearchSource for Counted {
     fn wired(&self) -> bool {
-        self.0.wired()
+        self.board.wired()
     }
     fn recent(&self) -> Vec<String> {
         self.asked();
-        self.0.recent()
+        self.board.recent()
     }
     fn clear_recent(&mut self) {
         self.asked();
-        self.0.clear_recent()
+        self.board.clear_recent()
     }
     fn remember(&mut self, query: &str) {
         self.asked();
-        self.0.remember(query)
+        self.board.remember(query)
     }
     fn search(&self, query: &str, narrow: Narrow) -> Answer {
         self.asked();
-        self.0.search(query, narrow)
+        self.board.search(query, narrow)
     }
     fn details(&self, id: &str) -> Option<Details> {
         self.asked();
-        self.0.details(id)
+        self.board.details(id)
+    }
+    fn opened(&mut self) {
+        self.asked();
+        self.board.opened()
+    }
+    fn ask(&mut self, query: &str, narrow: Narrow) {
+        self.asked();
+        self.board.ask(query, narrow)
+    }
+    fn pump(&mut self) -> Pumped {
+        self.asked();
+        self.board.pump()
+    }
+    fn forget(&mut self) {
+        self.forgotten.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.board.forget()
     }
 }
