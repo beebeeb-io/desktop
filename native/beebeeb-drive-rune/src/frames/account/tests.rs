@@ -11,13 +11,13 @@ use crate::{State, init, view};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 /// A window showing board frame `frame`.
-fn runtime(frame: &str) -> Runtime<State> {
+pub(super) fn runtime(frame: &str) -> Runtime<State> {
     let mut state = init();
     assert!(super::scene(frame, &mut state), "{frame} is a built frame");
     window(state)
 }
 
-fn window(state: State) -> Runtime<State> {
+pub(super) fn window(state: State) -> Runtime<State> {
     let env = Env {
         system_dark: false,
         scale: 2.0,
@@ -30,32 +30,32 @@ fn window(state: State) -> Runtime<State> {
     rt
 }
 
-fn find(rt: &Runtime<State>, key: &str) -> Option<rune::ElementInfo> {
+pub(super) fn find(rt: &Runtime<State>, key: &str) -> Option<rune::ElementInfo> {
     rt.elements()
         .into_iter()
         .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
 }
 
-fn info(rt: &Runtime<State>, key: &str) -> rune::ElementInfo {
+pub(super) fn info(rt: &Runtime<State>, key: &str) -> rune::ElementInfo {
     find(rt, key).unwrap_or_else(|| panic!("no element keyed {key}"))
 }
 
-fn says(rt: &Runtime<State>, key: &str) -> String {
+pub(super) fn says(rt: &Runtime<State>, key: &str) -> String {
     info(rt, key).text.unwrap_or_default()
 }
 
-fn name(rt: &Runtime<State>, key: &str) -> String {
+pub(super) fn name(rt: &Runtime<State>, key: &str) -> String {
     info(rt, key).label.unwrap_or_default()
 }
 
 /// Lets leaving elements finish leaving: Rune keeps them in the tree while they animate out.
-fn settle(rt: &mut Runtime<State>) {
+pub(super) fn settle(rt: &mut Runtime<State>) {
     rt.frame(0.016);
     rt.settle_all();
     rt.frame(0.016);
 }
 
-fn key(rt: &mut Runtime<State>, key: Key) {
+pub(super) fn key(rt: &mut Runtime<State>, key: Key) {
     rt.key(KeyEvent {
         key,
         mods: Mods::default(),
@@ -63,7 +63,7 @@ fn key(rt: &mut Runtime<State>, key: Key) {
     settle(rt);
 }
 
-fn click(rt: &mut Runtime<State>, key: &str) {
+pub(super) fn click(rt: &mut Runtime<State>, key: &str) {
     let r = info(rt, key).rect;
     let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
     rt.pointer_down(x, y);
@@ -72,7 +72,7 @@ fn click(rt: &mut Runtime<State>, key: &str) {
 }
 
 /// Tab until the element keyed `target` has focus; panics when focus never gets there.
-fn tab_to(rt: &mut Runtime<State>, target: &str) {
+pub(super) fn tab_to(rt: &mut Runtime<State>, target: &str) {
     for _ in 0..80 {
         if find(rt, target).is_some_and(|e| e.focused) {
             return;
@@ -102,7 +102,7 @@ fn tab_stops(rt: &mut Runtime<State>) -> Vec<String> {
     stops
 }
 
-fn section(rt: &Runtime<State>) -> Option<SettingsPane> {
+pub(super) fn section(rt: &Runtime<State>) -> Option<SettingsPane> {
     match rt.state.shell.app.screen() {
         Screen::Settings(pane) => Some(pane),
         _ => None,
@@ -113,13 +113,13 @@ fn source(rt: &Runtime<State>) -> &dyn AccountSource {
     rt.state.account.source.as_deref().expect("the fixture")
 }
 
-fn asked(rt: &Runtime<State>) -> Vec<Intent> {
+pub(super) fn asked(rt: &Runtime<State>) -> Vec<Intent> {
     rt.state.settings.intents.clone()
 }
 
 #[test]
 fn every_built_frame_renders_and_names_no_city_and_no_provider() {
-    assert_eq!(super::FRAMES.len(), 38, "the frames this lane built");
+    assert_eq!(super::FRAMES.len(), 39, "the frames this lane built");
     for (frame, _) in super::FRAMES {
         let rt = runtime(frame);
         assert!(find(&rt, "caption-bar").is_some(), "{frame}: the same window");
@@ -211,108 +211,6 @@ fn account_says_who_is_signed_in_and_the_phrase_row_is_text() {
 }
 
 #[test]
-fn every_row_of_sign_in_and_security_goes_where_it_points() {
-    // The pages of this lane open here; Esc goes back to Sign-in and security.
-    for (row, pane) in [
-        ("item-1-0", Pane::Password),
-        ("item-1-1", Pane::TwoFactor),
-        ("item-1-2", Pane::Passkeys),
-        ("item-1-3", Pane::Activity),
-        ("item-4-0", Pane::Delete),
-    ] {
-        let mut rt = runtime("DW-A52");
-        tab_to(&mut rt, row);
-        key(&mut rt, Key::Enter);
-        assert_eq!(rt.state.account.pane, pane, "{row}");
-        assert_eq!(asked(&rt), Vec::new(), "{row}");
-        // From a page with a field in focus Esc goes one step back. From a page without one
-        // the shell takes Esc first and closes settings (the PR's request to the shell lane).
-        if matches!(pane, Pane::Password | Pane::Delete) {
-            key(&mut rt, Key::Escape);
-            assert_eq!(rt.state.account.pane, Pane::Security, "{row}: Esc goes back");
-        }
-    }
-    // Both rows that only asked the shell have their own pages now: App lock's delay (item-0-0-pop-button,
-    // DW-0716: `app_lock.rs`) and "Approve a sign-in" (item-2-1, DW-A12: `approve_tests.rs`). No row of this
-    // pane is left that only asks; a new one goes in this list.
-    let asks: [(&str, &str); 0] = [];
-    for (row, frame) in asks {
-        let mut rt = runtime("DW-A52");
-        tab_to(&mut rt, row);
-        key(&mut rt, Key::Enter);
-        assert_eq!(asked(&rt), vec![Intent::Show(frame)], "{row}");
-    }
-    let mut rt = runtime("DW-A52");
-    click(&mut rt, "item-2-0");
-    assert_eq!(section(&rt), Some(SettingsPane::DevicesAndSessions));
-    assert_eq!(says(&rt, "item-0-1-title"), "Anna's iPhone");
-}
-
-#[test]
-fn the_checkup_opens_from_the_heading_line_and_the_sidebar_goes_back() {
-    let mut rt = runtime("DW-A52");
-    assert_eq!(says(&rt, "btn-0-label"), "Security checkup · 7 of 7");
-    tab_to(&mut rt, "btn-0");
-    key(&mut rt, Key::Enter);
-    assert_eq!(rt.state.account.pane, Pane::Checkup);
-    assert_eq!(section(&rt), Some(SettingsPane::Security), "a page of Security");
-    assert_eq!(says(&rt, "set-title"), "Security checkup");
-    assert_eq!(says(&rt, "ring-head"), "7 of 7 done");
-    assert_eq!(says(&rt, "ring-sub"), "Nothing to do.");
-    assert_eq!(name(&rt, "item-0-0"), "Email verified, anna@northwind.studio, done");
-    // The sidebar goes back to Sign-in and security.
-    click(&mut rt, "Security-row");
-    assert_eq!(rt.state.account.pane, Pane::Security);
-    assert_eq!(says(&rt, "set-title"), "Sign-in and security");
-    // Esc is the shell's first: it closes settings from any page of it (the board's "Esc goes
-    // back" one step to Sign-in and security is a request to the shell lane, in the PR).
-    click(&mut rt, "btn-0");
-    key(&mut rt, Key::Escape);
-    assert_eq!(section(&rt), None);
-    // When the keys do reach this lane (nothing of the shell's to close), Esc goes one step back.
-    let mut rt = runtime("DW-A84");
-    let escape = KeyEvent {
-        key: Key::Escape,
-        mods: Mods::default(),
-    };
-    rt.update(|s, tx| assert!(super::on_key(s, &escape, tx)));
-    assert_eq!(rt.state.account.pane, Pane::Security);
-}
-
-#[test]
-fn one_thing_left_comes_first_with_the_button_that_fixes_it() {
-    let mut rt = runtime("DW-A84a");
-    assert_eq!(says(&rt, "ring-head"), "6 of 7 done");
-    assert_eq!(says(&rt, "ring-sub"), "One thing to do.");
-    assert_eq!(says(&rt, "list-0-title"), "To do");
-    assert_eq!(says(&rt, "item-0-0-title"), "Passkeys");
-    assert_eq!(says(&rt, "item-0-0-sub"), "Add a passkey");
-    assert_eq!(says(&rt, "list-1-title"), "Done");
-    assert!(
-        find(&rt, "item-1-5").is_some() && find(&rt, "item-1-6").is_none(),
-        "six done"
-    );
-    tab_to(&mut rt, "btn-0");
-    key(&mut rt, Key::Enter);
-    assert_eq!(rt.state.account.pane, Pane::Passkeys);
-    assert_eq!(says(&rt, "empty-title"), "No passkeys yet");
-    // The way in on Sign-in and security shows the same count.
-    super::go(&mut rt.state, "DW-A52");
-    settle(&mut rt);
-    assert_eq!(says(&rt, "btn-0-label"), "Security checkup · 6 of 7");
-}
-
-#[test]
-fn a_done_factor_opens_its_own_screen() {
-    let mut rt = runtime("DW-A84");
-    click(&mut rt, "item-0-6");
-    assert_eq!(section(&rt), Some(SettingsPane::DevicesAndSessions));
-    let mut rt = runtime("DW-A84");
-    click(&mut rt, "item-0-0");
-    assert_eq!(section(&rt), Some(SettingsPane::Account));
-}
-
-#[test]
 fn signing_out_is_confirmed_and_enter_is_cancel() {
     let mut rt = runtime("DW-A52");
     // Destructive rows are announced as such.
@@ -366,15 +264,15 @@ fn signing_out_of_all_apps_is_its_own_confirm() {
 #[test]
 fn app_lock_turns_by_keyboard_and_without_it_there_is_no_time_choice() {
     let mut rt = runtime("DW-A52");
-    let sw = info(&rt, "item-0-0-switch");
+    let sw = info(&rt, "item-1-0-switch");
     assert_eq!(sw.role, "switch");
     assert_eq!(sw.label.as_deref(), Some("Lock Beebeeb"));
-    assert!(find(&rt, "item-0-0-pop").is_some());
-    tab_to(&mut rt, "item-0-0-switch");
+    assert!(find(&rt, "item-1-0-pop").is_some());
+    tab_to(&mut rt, "item-1-0-switch");
     key(&mut rt, Key::Text(" ".into()));
     assert!(!source(&rt).security().app_lock);
-    assert!(find(&rt, "item-0-0-pop").is_none(), "off: no time choice (DW-0716b)");
-    assert_eq!(says(&rt, "item-0-0-sub"), "Off: anyone using this PC can open Beebeeb");
+    assert!(find(&rt, "item-1-0-pop").is_none(), "off: no time choice (DW-0716b)");
+    assert_eq!(says(&rt, "item-1-0-sub"), "Off: anyone using this PC can open Beebeeb");
     key(&mut rt, Key::Enter);
     assert!(source(&rt).security().app_lock);
 }
@@ -446,7 +344,7 @@ fn nothing_stays_open_across_leaving_the_section_and_coming_back() {
     key(&mut rt, Key::Escape); // the confirm
     key(&mut rt, Key::Escape); // settings
     assert_eq!(section(&rt), None);
-    let mut rt = runtime("DW-A84");
+    let mut rt = runtime("DW-A67");
     click(&mut rt, "Account-row");
     click(&mut rt, "Security-row");
     assert_eq!(rt.state.account.pane, Pane::Security, "a section opens on its own pane");
@@ -973,7 +871,7 @@ fn a_plan_nobody_can_describe_opens_the_website_instead_of_an_empty_dialog() {
 #[test]
 fn the_delay_menu_opens_on_the_current_choice_and_the_keys_choose() {
     let mut rt = runtime("DW-A52");
-    tab_to(&mut rt, "item-0-0-pop-button");
+    tab_to(&mut rt, "item-1-0-pop-button");
     key(&mut rt, Key::Enter);
     assert_eq!(
         rt.state.account.dialog,
@@ -990,7 +888,7 @@ fn the_delay_menu_opens_on_the_current_choice_and_the_keys_choose() {
     );
     assert!(find(&rt, "menu-0-item-2-check").is_none());
     // The menu hangs under its pop-up button, inside the card.
-    let (menu, pop) = (info(&rt, "menu-0").rect, info(&rt, "item-0-0-pop").rect);
+    let (menu, pop) = (info(&rt, "menu-0").rect, info(&rt, "item-1-0-pop").rect);
     assert!(
         (menu[1] - (pop[1] + pop[3] + 3.0)).abs() < 0.01,
         "{menu:?} under {pop:?}"
@@ -1009,7 +907,7 @@ fn the_delay_menu_opens_on_the_current_choice_and_the_keys_choose() {
     key(&mut rt, Key::Enter);
     assert_eq!(source(&rt).security().lock_after, "30 min");
     assert_eq!(rt.state.account.dialog, None, "the pop-up closes");
-    assert_eq!(says(&rt, "item-0-0-pop-label"), "30 min");
+    assert_eq!(says(&rt, "item-1-0-pop-label"), "30 min");
     assert_eq!(rt.state.account.pane, Pane::Security);
 }
 
@@ -1027,7 +925,7 @@ fn the_delay_menu_takes_a_press_and_esc_changes_nothing() {
     assert_eq!(rt.state.account.dialog, None);
     assert_eq!(source(&rt).security().lock_after, "5 min", "Esc chooses nothing");
     assert_eq!(section(&rt), Some(SettingsPane::Security), "and settings stays open");
-    click(&mut rt, "item-0-0-pop-button");
+    click(&mut rt, "item-1-0-pop-button");
     click(&mut rt, "menu-0-item-3");
     assert_eq!(source(&rt).security().lock_after, "60 min");
     assert!(find(&rt, "menu-0").is_none());
@@ -1037,17 +935,17 @@ fn the_delay_menu_takes_a_press_and_esc_changes_nothing() {
 fn with_the_lock_off_there_is_no_delay_and_turning_it_on_brings_it_back() {
     let mut rt = runtime("DW-0716b");
     assert!(!source(&rt).security().app_lock);
-    assert!(find(&rt, "item-0-0-pop").is_none(), "no time choice");
+    assert!(find(&rt, "item-1-0-pop").is_none(), "no time choice");
     assert!(find(&rt, "menu-0").is_none());
-    assert_eq!(says(&rt, "item-0-0-sub"), "Off: anyone using this PC can open Beebeeb");
+    assert_eq!(says(&rt, "item-1-0-sub"), "Off: anyone using this PC can open Beebeeb");
     // Asking for the menu while the lock is off opens nothing.
     rt.update(|s, _| super::go(s, "DW-0716"));
     settle(&mut rt);
     assert_eq!(rt.state.account.dialog, None);
-    click(&mut rt, "item-0-0-switch");
+    click(&mut rt, "item-1-0-switch");
     assert!(source(&rt).security().app_lock, "DW-0716");
-    assert_eq!(says(&rt, "item-0-0-sub"), "Windows Hello · locks again after");
-    assert!(find(&rt, "item-0-0-pop").is_some());
+    assert_eq!(says(&rt, "item-1-0-sub"), "Windows Hello · locks again after");
+    assert!(find(&rt, "item-1-0-pop").is_some());
 }
 
 #[test]
@@ -1074,8 +972,8 @@ fn a_stored_delay_the_menu_does_not_have_checks_no_row() {
         }
     });
     settle(&mut rt);
-    assert_eq!(says(&rt, "item-0-0-pop-label"), "15 min");
-    click(&mut rt, "item-0-0-pop-button");
+    assert_eq!(says(&rt, "item-1-0-pop-label"), "15 min");
+    click(&mut rt, "item-1-0-pop-button");
     assert_eq!(rt.state.account.dialog, Some(Dialog::LockDelay(None)));
     for i in 0..4 {
         assert!(
@@ -1089,7 +987,7 @@ fn a_stored_delay_the_menu_does_not_have_checks_no_row() {
     assert_eq!(rt.state.account.dialog, None);
     assert_eq!(source(&rt).security().lock_after, "15 min");
     // The keys still reach every row: Down starts at the first.
-    click(&mut rt, "item-0-0-pop-button");
+    click(&mut rt, "item-1-0-pop-button");
     key(&mut rt, Key::Down);
     assert_eq!(rt.state.account.dialog, Some(Dialog::LockDelay(Some(0))));
     key(&mut rt, Key::Enter);

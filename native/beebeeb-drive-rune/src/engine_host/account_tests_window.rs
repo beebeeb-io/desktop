@@ -77,16 +77,81 @@ fn the_running_apps_account_draws_loading_then_the_account_and_never_a_sample() 
     for sample in ["Anna", "northwind", "Pass", "VPN", "Chat", "Mail"] {
         assert!(!says_anywhere(&rt, sample), "a sample value shows: {sample}");
     }
-    // A pane nothing answers for: the shell's frame, with nothing of the account's panes in it.
-    for section in [SettingsPane::Security] {
-        rt.update(move |s, _| {
-            host::dispatch(s, ShellEvent::OpenSettings(section));
-        });
-        rt.frame(0.016);
-        rt.frame(0.4);
-        assert!(has(&rt, "not-built"), "{section:?}");
-        assert!(!says_anywhere(&rt, "Two-factor") && !says_anywhere(&rt, "anyone using this PC"));
+}
+
+/// Sign-in and security in the running app: the page with what Beebeeb said for THIS account (two-factor, the
+/// number of devices), and for everything else "not known" or "not available yet": no score, no mark, no
+/// sample value, and nothing to press that is not bound.
+#[test]
+fn the_running_apps_security_page_says_what_is_known_and_guesses_nothing() {
+    let server = server();
+    server.two_factor.lock().unwrap()[0] = Some(true);
+    let mut rt = window_on(signed_in(&server), SettingsPane::Security);
+    wait_for(&mut rt, "the page", |rt| shows(rt, "3 devices"));
+    assert!(!has(&rt, "not-built"));
+    assert!(shows(&rt, "Security score not known yet") && shows(&rt, "On"));
+    let text = |rt: &Runtime<State>, key: &str| {
+        rt.elements()
+            .into_iter()
+            .find(|e| !e.exiting && e.key.as_deref() == Some(key))
+            .and_then(|e| e.text)
+            .unwrap_or_default()
+    };
+    assert_eq!(text(&rt, "item-0-1-sub"), "On");
+    assert_eq!(text(&rt, "item-0-0-sub"), "Last change not known");
+    assert_eq!(text(&rt, "item-0-2-sub"), "Not known");
+    // The one mark on the page is two-factor's: it is the one state that was read as good.
+    let marks: Vec<String> = rt
+        .elements()
+        .into_iter()
+        .filter(|e| !e.exiting)
+        .filter_map(|e| e.key)
+        .filter(|k| k.ends_with("-check"))
+        .collect();
+    assert_eq!(marks, ["item-0-1-check"]);
+    for sample in [
+        "Anna",
+        "northwind",
+        "3 weeks",
+        "backup codes",
+        "Nothing to do",
+        " of 7",
+        "anyone using this PC",
+    ] {
+        assert!(!says_anywhere(&rt, sample), "a sample or a guess shows: {sample}");
     }
+    // Nothing that is not bound can be pressed: no switch, and a press on such a row changes nothing.
+    assert!(!has(&rt, "item-1-0-switch"));
+    for row in ["item-0-0", "item-0-1", "item-3-0", "item-4-0"] {
+        click(&mut rt, row);
+        assert!(shows(&rt, "Security score not known yet"), "{row}: the page stays");
+        assert!(!has(&rt, "dlg") && !has(&rt, "not-built"), "{row}");
+    }
+    // Devices and sessions is bound: its row opens it.
+    click(&mut rt, "item-1-1");
+    wait_for(&mut rt, "the sessions", |rt| shows(rt, PHONE));
+}
+
+#[test]
+fn the_security_page_drops_the_first_account_when_another_signs_in() {
+    let server = server();
+    *server.two_factor.lock().unwrap() = [Some(true), Some(false)];
+    let engine = signed_in(&server);
+    let mut rt = window_on(engine.clone(), SettingsPane::Security);
+    wait_for(&mut rt, "the page", |rt| shows(rt, "3 devices"));
+    engine.sign_out_keeping_local_data().expect("signs out");
+    // Before any poll of the source: a draw alone shows nothing of the account.
+    rt.poll = None;
+    rt.update(|_, _| {});
+    rt.frame(0.016);
+    rt.frame(1.0);
+    assert!(shows(&rt, "Not signed in"));
+    assert!(!says_anywhere(&rt, "3 devices") && !has(&rt, "item-0-1-check"));
+    sign_in(&engine, &server.people[1]);
+    rt.poll = Some(|s: &mut State, _: f64, tx: &mut Tx| crate::frames::account::poll(s, tx));
+    wait_for(&mut rt, "the second account's page", |rt| shows(rt, "1 device"));
+    assert!(shows(&rt, "Off: your password alone signs you in"));
+    assert!(!has(&rt, "item-0-1-check") && !says_anywhere(&rt, "3 devices"));
 }
 
 /// The name and the email rows of the live Account pane: nothing answers for the pages behind them, so they
@@ -136,19 +201,25 @@ fn no_route_from_a_live_pane_ends_on_the_not_built_frame() {
             "{frame}: Account still shows"
         );
     }
-    // A section nothing answers for (Security, and a page under it) says so INSIDE settings: the sidebar
-    // stays, and it leads back.
-    for frame in ["DW-A52", "DW-A67", "DW-A83"] {
+    // The pages under Security that nothing answers for do not open either: the person stays on Account.
+    for frame in ["DW-A67", "DW-A83"] {
         rt.update(move |s, _| crate::frames::account::go(s, frame));
         rt.frame(0.016);
         rt.frame(0.4);
-        assert!(has(&rt, "not-built"), "{frame}");
+        assert!(!has(&rt, "not-built"), "{frame}");
         assert!(
-            shows(&rt, "Back to Drive") && shows(&rt, "Devices and sessions"),
-            "{frame}: the sidebar"
+            shows(&rt, FIRST) && shows(&rt, "240 GB"),
+            "{frame}: Account still shows"
         );
-        assert!(!says_anywhere(&rt, FIRST) && !says_anywhere(&rt, "deletion"), "{frame}");
     }
+    // Security itself answers: its page, inside settings, with the sidebar.
+    rt.update(|s, _| crate::frames::account::go(s, "DW-A52"));
+    wait_for(&mut rt, "the Security page", |rt| {
+        shows(rt, "Security score not known yet")
+    });
+    assert!(!has(&rt, "not-built"));
+    assert!(shows(&rt, "Back to Drive") && shows(&rt, "Devices and sessions"));
+    assert!(!says_anywhere(&rt, FIRST) && !says_anywhere(&rt, "deletion"));
     rt.update(|s, _| crate::frames::account::go(s, "DW-A51"));
     wait_for(&mut rt, "back on Account", |rt| {
         shows(rt, FIRST) && !has(rt, "not-built")

@@ -121,6 +121,48 @@ pub struct Security {
     pub sessions: usize,
 }
 
+/// What the Security page says, each part on its own: `None` is "not known", never "off", never 0. A source
+/// that cannot say a thing leaves it `None` and the page says so; it never draws a check or a count from a
+/// value nobody read. No `Debug`: the events name devices.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecurityFacts {
+    /// App lock on this PC: on, and how soon it locks again. `None`: this build cannot set it yet.
+    pub app_lock: Option<(bool, String)>,
+    /// "3 weeks ago".
+    pub password_changed: Option<String>,
+    pub two_factor: Option<bool>,
+    /// Backup codes left, of how many.
+    pub backup_codes: Option<(usize, usize)>,
+    pub passkeys: Option<usize>,
+    pub sessions: Option<usize>,
+    /// The last few sign-ins and security changes, newest first. `Some(None)`: security logging is off.
+    pub activity: Option<Option<Vec<Event>>>,
+    /// The checkup's factors. `None` or empty: there is no score, and the page says so.
+    pub factors: Option<Vec<Factor>>,
+    /// This source can sign this app out (`sign_out_this_app`, `sign_out_all_apps`).
+    pub can_sign_out: bool,
+}
+
+impl SecurityFacts {
+    /// Nothing is known and nothing can be done: what a source starts from before it fills in what it read.
+    pub fn unknown() -> Self {
+        SecurityFacts {
+            app_lock: None,
+            password_changed: None,
+            two_factor: None,
+            backup_codes: None,
+            passkeys: None,
+            sessions: None,
+            activity: None,
+            factors: None,
+            can_sign_out: false,
+        }
+    }
+}
+
+/// How many events the Security page shows before "All sign-in activity".
+pub const RECENT_EVENTS: usize = 3;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FactorKind {
     EmailVerified,
@@ -521,6 +563,13 @@ pub trait AccountSource {
     fn security(&self) -> Security;
     /// Engine: `GET /api/v1/account/security-score`, checked each time the page opens.
     fn factors(&self) -> Vec<Factor>;
+    /// What the Security page draws. This body is for a source that knows every part (the board's fixture):
+    /// it takes them from the accessors above. A source that knows only some overrides it and leaves the
+    /// rest `None`. (Seam: Beebeeb's `GET /api/v1/account/security` and the score's own "can this be said"
+    /// mark fill more of it once the engine reads them.)
+    fn security_facts(&self) -> SecurityFacts {
+        all_known(self)
+    }
     /// Engine: `GET /api/v1/account/sessions`, grouped by device.
     fn sessions(&self) -> Vec<Session>;
 
@@ -657,6 +706,29 @@ pub trait AccountSource {
     #[cfg(test)]
     fn sent(&self) -> Vec<String> {
         Vec::new()
+    }
+}
+
+/// The Security page's facts of a source that knows every part: taken from its accessors.
+pub fn all_known<S: AccountSource + ?Sized>(source: &S) -> SecurityFacts {
+    let sec = source.security();
+    let two = source.two_factor();
+    SecurityFacts {
+        backup_codes: sec.two_factor.then_some((two.codes_left, two.codes_total)),
+        app_lock: Some((sec.app_lock, sec.lock_after)),
+        password_changed: Some(sec.password_changed),
+        two_factor: Some(sec.two_factor),
+        passkeys: Some(sec.passkeys),
+        sessions: Some(sec.sessions),
+        activity: Some(source.activity().map(|periods| {
+            periods
+                .into_iter()
+                .flat_map(|(_, events)| events)
+                .take(RECENT_EVENTS)
+                .collect()
+        })),
+        factors: Some(source.factors()),
+        can_sign_out: true,
     }
 }
 

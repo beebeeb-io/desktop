@@ -1,5 +1,5 @@
 //! App lock's delay (DW-0716, DW-0716b): the menu the pop-up button of Sign-in and security's
-//! Lock Beebeeb row drops, and its keyboard. The row itself is `security::pane`'s.
+//! Lock Beebeeb row drops, and its keyboard. The row itself is `security_overview`'s.
 //!
 //! Nothing here is a secret: the menu holds four lengths of time. Turning the lock off or
 //! changing the delay asks for Windows Hello first; that question is the source's

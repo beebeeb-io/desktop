@@ -39,7 +39,7 @@ fn runtime(frame: &str) -> Runtime<State> {
 /// The window on the empty code page (DW-A12), reached from Sign-in and security by its row.
 fn on_code_page() -> Runtime<State> {
     let mut rt = runtime("DW-A52");
-    click(&mut rt, "item-2-1");
+    click(&mut rt, "item-1-2");
     assert_eq!(rt.state.account.pane, Pane::ApproveCode, "the row opens the code page");
     rt
 }

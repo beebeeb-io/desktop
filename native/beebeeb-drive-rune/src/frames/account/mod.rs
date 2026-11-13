@@ -26,12 +26,13 @@ mod overview;
 mod passkeys;
 mod plan;
 mod request;
-mod security;
-mod security_proto;
+mod security_overview;
 mod sessions;
 pub mod source;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_security;
 mod two_factor;
 
 use crate::State;
@@ -49,10 +50,9 @@ use source::AccountSource;
 pub enum Pane {
     /// Account (DW-A51).
     Account,
-    /// Sign-in and security (DW-A52).
+    /// Sign-in and security: ONE page (`security_overview.rs`), in place of DW-A52 and the security checkup
+    /// (DW-A84, DW-A84a). Those three frame ids all show it.
     Security,
-    /// Security › Security checkup (DW-A84, DW-A84a).
-    Checkup,
     /// Devices and sessions (DW-A55).
     Sessions,
     /// Account › Name (DW-A64).
@@ -125,7 +125,6 @@ impl Pane {
             // The rest: overviews, lists, confirmations without key material.
             Pane::Account
             | Pane::Security
-            | Pane::Checkup
             | Pane::Sessions
             | Pane::Name
             | Pane::EmailCode
@@ -276,8 +275,6 @@ pub struct AccountUi {
     pub source: Option<Box<dyn AccountSource>>,
     /// The pane the source was last told is showing (`None`: no account section shows).
     told_open: Option<Pane>,
-    /// RENDER-ONLY PROTOTYPE: which Security option is drawn.
-    pub proto: Option<u8>,
 }
 
 impl Default for AccountUi {
@@ -289,7 +286,6 @@ impl Default for AccountUi {
             approve: approve::Approve::default(),
             source: source::first(instance::DEV_BUILD),
             told_open: None,
-            proto: None,
         }
     }
 }
@@ -501,7 +497,8 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>)> {
         "DW-A52" => (Pane::Security, None),
         "DW-A57" => (Pane::Security, Some(Dialog::SignOutApp)),
         "DW-A57a" => (Pane::Security, Some(Dialog::SignOutAllApps)),
-        "DW-A84" | "DW-A84a" => (Pane::Checkup, None),
+        // The checkup is on the page itself now: its ids lead there, so a link to one still arrives.
+        "DW-A84" | "DW-A84a" => (Pane::Security, None),
         "DW-A55" => (Pane::Sessions, None),
         "DW-A64" => (Pane::Name, None),
         "DW-A65" => (Pane::Email, None),
@@ -598,6 +595,20 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-A51", |s| open_on(s, "DW-A51")),
     ("DW-A52", |s| open_on(s, "DW-A52")),
     ("DW-A84", |s| open_on(s, "DW-A84")),
+    // No board frame: the page as a build draws it whose source knows two-factor and the devices and
+    // nothing else (the running app today). A scene so it can be rendered and looked at.
+    ("SEC-PARTLY-KNOWN", |s| {
+        s.account.source = Some(Box::new(
+            source::BoardAccount::new()
+                .knowing(|all| source::SecurityFacts {
+                    two_factor: all.two_factor,
+                    sessions: all.sessions,
+                    ..source::SecurityFacts::unknown()
+                })
+                .sections_only(),
+        ));
+        go(s, "DW-A52");
+    }),
     ("DW-A84a", |s| {
         open_on(s, "DW-A84a");
         s.account.source = Some(Box::new(source::BoardAccount::new().without_passkeys()));
@@ -707,19 +718,6 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         if let Some(source) = s.account.source.as_mut() {
             source.set_app_lock(false);
         }
-    }),
-    ("SEC-OPT-A", |s| {
-        open_on(s, "DW-A52");
-        s.account.proto = Some(0);
-    }),
-    ("SEC-OPT-B", |s| {
-        open_on(s, "DW-A52");
-        s.account.proto = Some(1);
-    }),
-    ("SEC-OPT-C", |s| {
-        open_on(s, "DW-A52");
-        s.account.source = Some(Box::new(source::BoardAccount::new().without_passkeys()));
-        s.account.proto = Some(2);
     }),
     ("DW-A12", |s| approve::scene(s, "DW-A12")),
     ("DW-A13", |s| approve::scene(s, "DW-A13")),
@@ -846,9 +844,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .and_then(|_| source.plan_details())
                 .map(|plan| plan::overlay(&plan, &t)),
         ),
-        Pane::Security if ui.proto.is_some() => (security_proto::pane(source, ui.proto.unwrap_or(0), &t), None),
-        Pane::Security => security::pane(source, dialog, &t),
-        Pane::Checkup => (security::checkup(source, &t), None),
+        Pane::Security => security_overview::pane(source, dialog, &t),
         Pane::Sessions => sessions::pane(source, dialog, &t),
         Pane::Name => (forms::name(form, &t), None),
         Pane::Email => (forms::email(form, &t), None),

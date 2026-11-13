@@ -70,6 +70,9 @@ struct Server {
     revoked_all: Arc<AtomicU64>,
     /// Runs once, while the next sessions list is being answered (the call is under way).
     during_read: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    /// Two-factor as each person's profile marks it. `None`: the profile does not say (the accounts' own
+    /// handler answers, without the mark). A profile that says is as slow as `read_delay_ms`.
+    two_factor: Arc<Mutex<[Option<bool>; 2]>>,
 }
 
 fn sessions_of_the_first() -> Vec<Value> {
@@ -142,6 +145,8 @@ fn server() -> Server {
     let during_read: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>> = Arc::new(Mutex::new(None));
     let during_read_in = during_read.clone();
     let signing_in_second = Mutex::new(false);
+    let two_factor: Arc<Mutex<[Option<bool>; 2]>> = Arc::new(Mutex::new([None, None]));
+    let two_factor_in = two_factor.clone();
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
         let who = match req.bearer() {
             Some(token) => usize::from(token == people_in[1].account.session_token),
@@ -164,6 +169,14 @@ fn server() -> Server {
         match route.as_str() {
             // Who is signed in: the accounts' own handler answers it, unless a read is asked to fail.
             "GET /api/v1/auth/me" if authed && failed(read).is_some() => failed(read).expect("checked"),
+            "GET /api/v1/auth/me" if authed && two_factor_in.lock().unwrap()[who].is_some() => {
+                let on = two_factor_in.lock().unwrap()[who];
+                std::thread::sleep(Duration::from_millis(read_delay_in.load(Ordering::SeqCst)));
+                Reply::ok(json!({
+                    "user_id": person.account.user_id, "email": person.account.email, "email_verified": true,
+                    "created_at": "2025-01-01T00:00:00Z", "role": "user", "totp_enabled": on,
+                }))
+            }
             "GET /api/v1/me/profile" => failed(read)
                 .or_else(|| failed(name_in.load(Ordering::SeqCst)))
                 .unwrap_or_else(|| {
@@ -249,6 +262,7 @@ fn server() -> Server {
         deleted,
         revoked_all,
         during_read,
+        two_factor,
     }
 }
 
@@ -361,12 +375,10 @@ fn account_draws_who_is_signed_in_and_the_plan() {
 }
 
 #[test]
-fn only_account_and_devices_answer_every_other_pane_is_the_shells_frame() {
+fn only_the_three_sections_answer_every_page_under_them_is_unwired() {
     let server = server();
     let source = Source::new(signed_in(&server));
     for pane in [
-        Pane::Security,
-        Pane::Checkup,
         Pane::Name,
         Pane::Email,
         Pane::EmailCode,
@@ -387,7 +399,125 @@ fn only_account_and_devices_answer_every_other_pane_is_the_shells_frame() {
         assert_eq!(source.pane_state(pane), PaneState::Unwired, "{pane:?}");
     }
     assert_ne!(source.pane_state(Pane::Account), PaneState::Unwired);
+    assert_ne!(source.pane_state(Pane::Security), PaneState::Unwired);
     assert_ne!(source.pane_state(Pane::Sessions), PaneState::Unwired);
+}
+
+// ---- Sign-in and security: what the page is told (`security_facts`) ----
+
+/// Everything this source never reads stays "not known", whatever else is held.
+fn the_rest_is_not_known(facts: &SecurityFacts) {
+    assert!(facts.app_lock.is_none() && facts.password_changed.is_none() && facts.backup_codes.is_none());
+    assert!(facts.passkeys.is_none() && facts.activity.is_none() && facts.factors.is_none());
+    assert!(!facts.can_sign_out);
+}
+
+#[test]
+fn the_security_page_says_two_factor_and_the_devices_of_this_account_and_nothing_else() {
+    let server = server();
+    server.two_factor.lock().unwrap()[0] = Some(true);
+    let mut source = Source::new(signed_in(&server));
+    // Before anything is read: nothing is known, and nothing is a guess.
+    let before = source.security_facts();
+    assert_eq!((before.two_factor, before.sessions), (None, None));
+    the_rest_is_not_known(&before);
+    assert_eq!(source.pane_state(Pane::Security), PaneState::Loading);
+    opened(&mut source, Pane::Security);
+    assert_eq!(source.pane_state(Pane::Security), PaneState::Ready);
+    let facts = source.security_facts();
+    assert_eq!(facts.two_factor, Some(true));
+    assert_eq!(facts.sessions, Some(3), "one per session of the list");
+    the_rest_is_not_known(&facts);
+    // Off is said only when the profile says off.
+    server.two_factor.lock().unwrap()[0] = Some(false);
+    source.reload(Pane::Security);
+    settle(&mut source);
+    assert_eq!(source.security_facts().two_factor, Some(false));
+}
+
+#[test]
+fn a_profile_without_the_two_factor_mark_is_not_known_never_off() {
+    let server = server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Security);
+    assert_eq!(source.pane_state(Pane::Security), PaneState::Ready);
+    assert_eq!(source.security_facts().two_factor, None);
+}
+
+#[test]
+fn a_sessions_list_that_fails_leaves_the_device_count_not_known_and_the_page_up() {
+    let server = server();
+    server.two_factor.lock().unwrap()[0] = Some(true);
+    server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    // The profile is the accounts' own route here (it answers); the sessions list fails.
+    let mut source = Source::new(signed_in(&server));
+    server.name_mode.store(ANSWER, Ordering::SeqCst);
+    opened(&mut source, Pane::Security);
+    let facts = source.security_facts();
+    assert_eq!(facts.sessions, None, "never 0 for a list that was not read");
+}
+
+#[test]
+fn signed_out_the_security_page_holds_nothing_before_any_poll() {
+    let server = server();
+    server.two_factor.lock().unwrap()[0] = Some(true);
+    let engine = signed_in(&server);
+    let mut source = Source::new(engine.clone());
+    opened(&mut source, Pane::Security);
+    assert_eq!(source.security_facts().two_factor, Some(true));
+    engine.sign_out_keeping_local_data().expect("signs out");
+    // No poll ran: the accessor itself refuses what another session read.
+    let facts = source.security_facts();
+    assert_eq!((facts.two_factor, facts.sessions), (None, None));
+    assert_eq!(source.pane_state(Pane::Security), PaneState::SignedOut);
+}
+
+#[test]
+fn another_account_never_sees_the_first_ones_two_factor_or_device_count() {
+    let server = server();
+    *server.two_factor.lock().unwrap() = [Some(true), Some(false)];
+    let engine = signed_in(&server);
+    let mut source = Source::new(engine.clone());
+    opened(&mut source, Pane::Security);
+    assert_eq!(source.security_facts().two_factor, Some(true));
+    assert_eq!(source.security_facts().sessions, Some(3));
+    // The first account's answers are slow: they land after the second account signed in.
+    server.read_delay_ms.store(400, Ordering::SeqCst);
+    source.reload(Pane::Security);
+    source.reload(Pane::Sessions);
+    engine.sign_out_keeping_local_data().expect("signs out");
+    sign_in(&engine, &server.people[1]);
+    let facts = source.security_facts();
+    assert_eq!(
+        (facts.two_factor, facts.sessions),
+        (None, None),
+        "before the poll: nothing of the first"
+    );
+    server.read_delay_ms.store(0, Ordering::SeqCst);
+    settle(&mut source);
+    std::thread::sleep(Duration::from_millis(500));
+    settle(&mut source);
+    // The page is on screen: the second account's own values were read without a reopening.
+    let facts = source.security_facts();
+    assert_eq!(facts.two_factor, Some(false), "the second account's own mark");
+    assert_eq!(facts.sessions, Some(1), "the second account's own list");
+}
+
+#[test]
+fn the_device_count_is_not_read_for_a_page_that_does_not_show_it() {
+    let server = server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Account);
+    assert_eq!(
+        server.asked("GET /api/v1/account/sessions"),
+        0,
+        "Account does not count devices"
+    );
+    opened(&mut source, Pane::Security);
+    assert_eq!(server.asked("GET /api/v1/account/sessions"), 1);
+    // Fresh: opening it again asks nothing more.
+    opened(&mut source, Pane::Security);
+    assert_eq!(server.asked("GET /api/v1/account/sessions"), 1);
 }
 
 #[test]

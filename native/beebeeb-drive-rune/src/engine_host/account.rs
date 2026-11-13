@@ -14,10 +14,14 @@
 //!   the list that shows, never for this session, and the list is read again after EVERY answer (taken, already
 //!   gone, refused, not known): a row goes only when Beebeeb's list no longer has it. A sign-out Beebeeb did not
 //!   take is said with a way to send it again ([`AccountSource::notice_action`]).
-//! - Every other account pane (Sign-in and security and all under it, Name, Change email): `PaneState::Unwired`.
-//!   The view says "not built yet" for them inside the settings shell, and does not open Name or Change email
-//!   from the live Account pane (their rows are the values alone). Their methods here do nothing and are not
-//!   reachable from a drawn pane.
+//! - Sign-in and security (the one page): only what Beebeeb already tells this file. Whether two-factor is on
+//!   comes with the Account read (the profile's own mark; absent: not known), and the number of devices is
+//!   the length of the sessions list when this session's list is held. Everything else on the page is `None`
+//!   ([`AccountSource::security_facts`]): the score, the password's age, passkeys, sign-in activity, App lock,
+//!   signing this app out. The page says "Not known" or "Not available yet" for those and draws no check.
+//! - Every other account pane (all the pages under Sign-in and security, Name, Change email):
+//!   `PaneState::Unwired`. The view does not open them from a live pane (their rows are the values alone).
+//!   Their methods here do nothing and are not reachable from a drawn pane.
 //!
 //! Session rule: every answer carries the session ([`Engine::session_turn`]) and the account it was made for; one
 //! that is not the current session's and account's is dropped, every accessor checks before it hands anything
@@ -51,13 +55,17 @@ use crate::frames::account::approve::{Approval, Denial, Lookup, SignInRequest};
 use crate::frames::account::source::{
     AccountSource, CodeRefused, Deletion, DeletionRefused, DeviceKind, EmailRefused, Event, Factor, Identity,
     PaneState, Passkey, Password, Plan, PlanDetails, ProductKind, ProductState, Pumped, Purpose, Refused, Secret,
-    Security, Session, Setup, StepUp, Strength, TwoFactor,
+    Security, SecurityFacts, Session, Setup, StepUp, Strength, TwoFactor,
 };
 use crate::frames::global::source::size_words;
 
 #[cfg(test)]
 #[path = "account_tests.rs"]
 mod tests;
+#[path = "account_words.rs"]
+mod words;
+use words::kind_of;
+pub(crate) use words::{ago, initials_of};
 
 /// What a pane holds is not read again, when it opens, for this long.
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
@@ -102,6 +110,8 @@ struct Row {
 struct Overview {
     identity: Identity,
     plan: Option<(Plan, Option<PlanDetails>)>,
+    /// Two-factor, as the profile marks it. `None`: Beebeeb did not say.
+    two_factor: Option<bool>,
     /// Every part answered. `false`: the name or the plan could not be read; what is drawn stands, but it is
     /// not fresh, so the next opening reads again.
     whole: bool,
@@ -175,7 +185,8 @@ enum Kind {
 impl Kind {
     fn of(pane: Pane) -> Option<Kind> {
         match pane {
-            Pane::Account => Some(Kind::Overview),
+            // The Security page stands on the Account read (the profile says whether two-factor is on).
+            Pane::Account | Pane::Security => Some(Kind::Overview),
             Pane::Sessions => Some(Kind::Sessions),
             _ => None,
         }
@@ -233,46 +244,6 @@ fn stamp<C: CredentialStores>(engine: &Engine<C>) -> Stamp {
 /// The stamp, when it is still the engine's after the call: else `None` (the answer is dropped).
 fn still<C: CredentialStores>(engine: &Engine<C>, before: Stamp) -> Option<Stamp> {
     (stamp(engine) == before).then_some(before)
-}
-
-/// Up to two letters: the first of the first word and of the last.
-pub(crate) fn initials_of(name: &str) -> String {
-    let mut words = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty());
-    let first = words.next().and_then(|w| w.chars().next());
-    let last = words.last().and_then(|w| w.chars().next());
-    first.into_iter().chain(last).flat_map(char::to_uppercase).collect()
-}
-
-/// "now", "12 min ago", "3 hours ago", "5 days ago"; "not recorded" when Beebeeb named no time.
-pub(crate) fn ago(at: Option<i64>, now: i64) -> String {
-    let Some(at) = at else {
-        return "not recorded".into();
-    };
-    let seconds = (now - at).max(0);
-    match seconds {
-        0..=59 => "now".into(),
-        60..=3_599 => format!("{} min ago", seconds / 60),
-        3_600..=7_199 => "1 hour ago".into(),
-        7_200..=86_399 => format!("{} hours ago", seconds / 3_600),
-        86_400..=172_799 => "1 day ago".into(),
-        _ => format!("{} days ago", seconds / 86_400),
-    }
-}
-
-/// The icon and the words for a session's `device_kind`, as Beebeeb stores it (web, desktop, cli, ios, android,
-/// app, api). Beebeeb names no product per session, so the row says the kind of client, never a product's name;
-/// `ios` and `android` are a phone's app or its browser, so the words name the system only. A kind this list
-/// does not know is "Other client": never a guess.
-fn kind_of(device_kind: &str) -> (DeviceKind, &'static str) {
-    match device_kind {
-        "web" => (DeviceKind::Browser, "Web browser"),
-        "desktop" => (DeviceKind::Laptop, "Desktop app"),
-        "cli" => (DeviceKind::CommandLine, "Command line"),
-        "ios" => (DeviceKind::Phone, "iPhone or iPad"),
-        "android" => (DeviceKind::Phone, "Android"),
-        "app" => (DeviceKind::Laptop, "Beebeeb app"),
-        _ => (DeviceKind::Browser, "Other client"),
-    }
 }
 
 fn row_of(session: AccountSession) -> Row {
@@ -357,6 +328,7 @@ fn overview_of(basics: AccountBasics) -> Result<Overview, AccountCallError> {
         return Err(AccountCallError::SessionEnded);
     }
     let whole = basics.display_name.is_ok() && basics.subscription.is_ok();
+    let two_factor = basics.profile.totp_enabled;
     let email = basics.profile.email;
     let name = basics.display_name.ok().flatten();
     // The email standing in for the name gives the initials of its part before the `@`: never a letter of
@@ -372,6 +344,7 @@ fn overview_of(basics: AccountBasics) -> Result<Overview, AccountCallError> {
             email,
         },
         plan: basics.subscription.ok().and_then(|plan| plan_of(&plan)),
+        two_factor,
         whole,
     })
 }
@@ -413,6 +386,9 @@ pub struct EngineAccountSource<C: CredentialStores> {
     ended: Option<(SessionGeneration, EndedBy)>,
     /// The pane the window shows, when it is one this source answers for.
     showing: Option<Kind>,
+    /// The pane on screen is Sign-in and security: it also says how many devices are signed in, so the
+    /// sessions are read with it.
+    counting_devices: bool,
     notice: Option<(SessionGeneration, Said)>,
     /// How a sign-out ended that was answered after the person left Devices and sessions, when it was not
     /// done: said when that pane shows again (a toast belongs to the pane it is about).
@@ -440,6 +416,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             changing: Vec::new(),
             ended: None,
             showing: None,
+            counting_devices: false,
             notice: None,
             later: None,
             dirty: false,
@@ -887,9 +864,17 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
 
     fn opened(&mut self, pane: Pane) {
         self.showing = Kind::of(pane);
+        self.counting_devices = pane == Pane::Security;
         let Some(kind) = self.showing else {
             return;
         };
+        // The Security page's device count: the sessions list, read beside the page's own read.
+        if self.counting_devices
+            && !(self.current(&self.sessions).is_some()
+                && self.sessions_reads.read_at.is_some_and(|at| at.elapsed() < FRESH_FOR))
+        {
+            self.read(Kind::Sessions);
+        }
         // A sign-out that was not done, answered while another pane showed: said now, over its own pane.
         if kind == Kind::Sessions
             && let Some((session, said)) = self.later.take()
@@ -910,6 +895,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
 
     fn closed(&mut self) {
         self.showing = None;
+        self.counting_devices = false;
     }
 
     fn reload(&mut self, pane: Pane) {
@@ -954,6 +940,15 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
             && self.reads_of(kind).asked_for != Some(turn)
         {
             self.read(kind);
+            changed = true;
+        }
+        // The same for the device count of the Security page.
+        if self.counting_devices
+            && self.open()
+            && self.sessions_reads.reading.is_none()
+            && self.sessions_reads.asked_for != Some(turn)
+        {
+            self.read(Kind::Sessions);
             changed = true;
         }
         self.dirty = false;
@@ -1059,7 +1054,16 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     // ---- Not bound: each pane these belong to is `PaneState::Unwired` (it says "not built yet", and none of
     // its controls is drawn), so no drawn control reaches them. Each does nothing and claims nothing.
 
-    /// Sign-in and security (DW-A52) is not bound: its values have no "not known".
+    /// What the Security page draws: two-factor as the profile of THIS session's account marks it, the number
+    /// of devices when this session's list is held, and nothing else. Every other part is not known here.
+    fn security_facts(&self) -> SecurityFacts {
+        SecurityFacts {
+            two_factor: self.current(&self.overview).and_then(|overview| overview.two_factor),
+            sessions: self.current(&self.sessions).map(Vec::len),
+            ..SecurityFacts::unknown()
+        }
+    }
+    /// The old rows' values have no "not known": the page is drawn from `security_facts`, never from this.
     fn security(&self) -> Security {
         Security {
             app_lock: false,

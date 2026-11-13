@@ -32,6 +32,10 @@ pub struct BoardAccount {
     wait: u32,
     /// Approving a sign-in: the answers on their way.
     approvals: super::super::request::BoardApprovals,
+    /// What the Security page is told instead of everything (a source that knows only some parts).
+    facts: Option<fn(SecurityFacts) -> SecurityFacts>,
+    /// Only the three sections answer; every page under them is unwired (as on the real engine today).
+    sections_only: bool,
 }
 
 /// The password the fixture's account has.
@@ -170,7 +174,21 @@ impl BoardAccount {
             deletion: Deletion::None,
             wait: 42,
             approvals: super::super::request::BoardApprovals::default(),
+            facts: None,
+            sections_only: false,
         }
+    }
+
+    /// A source that knows only part of the Security page: `change` takes what the board knows and hands
+    /// back what this source says.
+    pub fn knowing(mut self, change: fn(SecurityFacts) -> SecurityFacts) -> Self {
+        self.facts = Some(change);
+        self
+    }
+    /// A source that answers for the three sections and for no page under them.
+    pub fn sections_only(mut self) -> Self {
+        self.sections_only = true;
+        self
     }
 
     /// DW-A79: security logging off.
@@ -225,6 +243,18 @@ impl BoardAccount {
 }
 
 impl AccountSource for BoardAccount {
+    fn pane_state(&self, pane: super::super::Pane) -> PaneState {
+        use super::super::Pane;
+        if self.sections_only && !matches!(pane, Pane::Account | Pane::Security | Pane::Sessions) {
+            PaneState::Unwired
+        } else {
+            PaneState::Ready
+        }
+    }
+    fn security_facts(&self) -> SecurityFacts {
+        let all = all_known(self);
+        self.facts.map_or(all.clone(), |change| change(all))
+    }
     fn identity(&self) -> Identity {
         Identity {
             name: self.name.clone(),
