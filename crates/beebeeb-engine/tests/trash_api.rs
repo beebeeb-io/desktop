@@ -9,8 +9,8 @@
 //! with `#[cfg(not(target_os = "macos"))]`.
 #![cfg_attr(target_os = "macos", allow(unused_imports, dead_code))]
 
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use beebeeb_engine::app::settings_api::AccountCallError;
 use beebeeb_engine::app::{Engine, EngineConfig};
@@ -34,10 +34,16 @@ const DOCS: &str = "a0000000-0000-4000-8000-000000000101";
 const CONTRACT: &str = "a0000000-0000-4000-8000-000000000102";
 const OLD: &str = "a0000000-0000-4000-8000-000000000103";
 
+type Hook = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+
 struct Account {
     fake: FakeApi,
     vault: Arc<FakeAccount>,
     mode: Arc<AtomicU8>,
+    /// The listing answers one item per page, `next_cursor` to the next.
+    paged: Arc<AtomicBool>,
+    /// Runs once, inside the next listing request, before it answers.
+    during: Hook,
     email: String,
     phrase: String,
 }
@@ -58,7 +64,9 @@ fn account(email: &str) -> Account {
     let token = vault.session_token.clone();
     let rest = account_handler(vault.clone());
     let mode = Arc::new(AtomicU8::new(ANSWER));
-    let mode_in = mode.clone();
+    let paged = Arc::new(AtomicBool::new(false));
+    let during: Hook = Arc::new(Mutex::new(None));
+    let (mode_in, paged_in, during_in) = (mode.clone(), paged.clone(), during.clone());
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
         if !(req.route() == "GET /api/v1/files" && req.query("trashed") == Some("true")) {
             return rest(req);
@@ -71,15 +79,29 @@ fn account(email: &str) -> Account {
         if req.bearer() != Some(token.as_str()) {
             return Reply::json(401, json!({ "error": "unauthorized" }));
         }
+        if let Some(hook) = during_in.lock().unwrap().take() {
+            hook();
+        }
         let answer = rest(req);
         let body: Value = serde_json::from_slice(&answer.body).expect("the fake's listing");
-        Reply::ok(json!({ "files": body["items"], "next_cursor": null }))
+        let mut items = body["items"].as_array().cloned().unwrap_or_default();
+        items.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+        if !paged_in.load(Ordering::SeqCst) {
+            return Reply::ok(json!({ "files": items, "next_cursor": null }));
+        }
+        // One item per page: the cursor is the index of the next one.
+        let at: usize = req.query("cursor").and_then(|c| c.parse().ok()).unwrap_or(0);
+        let page: Vec<Value> = items.iter().skip(at).take(1).cloned().collect();
+        let next = (at + 1 < items.len()).then(|| (at + 1).to_string());
+        Reply::ok(json!({ "files": page, "next_cursor": next }))
     }));
     assert_loopback(&fake.base);
     Account {
         fake,
         vault,
         mode,
+        paged,
+        during,
         email: email.to_string(),
         phrase,
     }
@@ -128,7 +150,7 @@ fn the_trash_is_listed_with_names_decrypted_in_the_engine() {
     account.vault.trash_item(CONTRACT);
     let engine = signed_in(&account);
 
-    let mut items = engine.trash_listing().expect("the fake answers");
+    let mut items = engine.trash_listing().expect("the fake answers").items;
     items.sort_by(|a, b| a.id.cmp(&b.id));
     let rows: Vec<_> = items
         .iter()
@@ -147,7 +169,7 @@ fn the_trash_is_listed_with_names_decrypted_in_the_engine() {
 
     // Restored on Beebeeb: no longer listed.
     engine.restore_items(&[CONTRACT]).expect("the fake restores it");
-    let items = engine.trash_listing().expect("the fake answers");
+    let items = engine.trash_listing().expect("the fake answers").items;
     assert_eq!(items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), [DOCS]);
 }
 
@@ -157,7 +179,7 @@ fn an_empty_trash_is_an_empty_list() {
     let account = account("trash-empty@example.eu");
     account.vault.add_item(OLD, None, "Still here.txt", false, 10);
     let engine = signed_in(&account);
-    assert!(engine.trash_listing().expect("the fake answers").is_empty());
+    assert!(engine.trash_listing().expect("the fake answers").items.is_empty());
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -190,6 +212,81 @@ fn refusals_are_kinds_signed_out_asks_nothing_and_gone_is_offline() {
     assert_eq!(
         engine.trash_listing().expect_err("no answer"),
         AccountCallError::Offline
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn every_page_of_the_trash_is_listed() {
+    let account = account("trash-pages@example.eu");
+    for id in [DOCS, CONTRACT, OLD] {
+        account.vault.add_item(id, None, "An invented name", false, 1);
+        account.vault.trash_item(id);
+    }
+    account.paged.store(true, Ordering::SeqCst);
+    let engine = signed_in(&account);
+    let mut ids: Vec<_> = engine
+        .trash_listing()
+        .expect("the fake answers")
+        .items
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    ids.sort();
+    assert_eq!(ids, [DOCS, CONTRACT, OLD], "three pages, one item each");
+    assert_eq!(listings(&account.fake), 3, "the cursor is followed to the end");
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_listing_is_bound_to_its_session_and_one_that_outlives_it_is_dropped() {
+    let account = account("trash-session@example.eu");
+    account
+        .vault
+        .add_item(CONTRACT, None, "Invented contract.pdf", false, 1_200);
+    account.vault.trash_item(CONTRACT);
+    let engine = Arc::new(signed_in(&account));
+    assert!(engine.has_session());
+    let listing = engine.trash_listing().expect("the fake answers");
+    assert_eq!(
+        listing.session,
+        engine.session_turn(),
+        "the listing names the session it was made in"
+    );
+
+    // A lock while the call is under way: the answer is dropped, never handed over.
+    let locker = engine.clone();
+    *account.during.lock().unwrap() = Some(Box::new(move || {
+        let _ = locker.lock();
+    }));
+    assert_eq!(
+        engine.trash_listing().expect_err("the session ended during the call"),
+        AccountCallError::NotSignedIn
+    );
+    assert!(!engine.has_session());
+    assert_ne!(listing.session, engine.session_turn(), "a lock moves the session on");
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn wake_host_wakes_the_hosts_loop() {
+    let woken = Arc::new(AtomicUsize::new(0));
+    let count = woken.clone();
+    let (host, _messages) = ChannelHost::new(move || {
+        count.fetch_add(1, Ordering::SeqCst);
+    });
+    let config = EngineConfig {
+        account_id: "trash-api-wake-slot".into(),
+        state_dir: process_state_dir(),
+        api_base: "http://127.0.0.1:9".into(),
+    };
+    let engine = Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("the engine opens");
+    let before = woken.load(Ordering::SeqCst);
+    engine.wake_host();
+    assert_eq!(woken.load(Ordering::SeqCst), before + 1);
+    assert!(
+        !engine.has_session(),
+        "a handle that was never signed in has no session"
     );
 }
 

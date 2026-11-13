@@ -125,13 +125,20 @@ fn settle(source: &EngineSearchSource<Host>) {
     }
 }
 
+/// Ask until the worker's answer for THIS query is here (at most 10 s).
 fn found(source: &EngineSearchSource<Host>, query: &str, narrow: Narrow) -> Vec<Hit> {
-    match source.search(query, narrow) {
-        Answer::Found { hits, loading } => {
-            assert_eq!(loading, None);
-            hits
+    let began = Instant::now();
+    loop {
+        match source.search(query, narrow) {
+            Answer::Found { hits, loading } => {
+                assert_eq!(loading, None);
+                return hits;
+            }
+            Answer::Searching => {}
+            Answer::Unavailable => panic!("search answered Unavailable"),
         }
-        Answer::Unavailable => panic!("search answered Unavailable"),
+        assert!(began.elapsed() < Duration::from_secs(10), "the query did not come back");
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -295,4 +302,87 @@ fn the_engine_handle_signed_out_is_unavailable() {
     assert_eq!(SearchHost::account(&*source.host), None);
     assert!(!source.wired());
     assert_eq!(source.search("contract", Narrow::All), Answer::Unavailable);
+}
+
+#[test]
+fn a_query_runs_on_a_worker_and_a_result_answers_only_the_query_that_asked() {
+    let host = host(Some(ME));
+    let source = EngineSearchSource::new(host.clone());
+    settle(&source);
+    let woken = host.woken.load(Ordering::SeqCst);
+    assert_eq!(
+        source.search("contract", Narrow::All),
+        Answer::Searching,
+        "not answered on the window's thread"
+    );
+    assert_eq!(source.search("draft", Narrow::All), Answer::Searching);
+    let hits = found(&source, "draft", Narrow::All);
+    assert_eq!(
+        ids(&hits),
+        ["f-draft"],
+        "the answer to \"contract\" never stands for \"draft\""
+    );
+    assert!(
+        host.woken.load(Ordering::SeqCst) > woken,
+        "the window is woken when a result lands"
+    );
+    // The same words on another pill are another query.
+    assert_eq!(source.search("draft", Narrow::Photos), Answer::Searching);
+    assert!(found(&source, "draft", Narrow::Photos).is_empty());
+}
+
+/// The engine handle as the host: whose account, the index of its local state, and the wake.
+#[test]
+fn the_engine_handle_is_a_search_host() {
+    let woken = Arc::new(AtomicUsize::new(0));
+    let count = woken.clone();
+    let (channel, _messages) = ChannelHost::new(move || {
+        count.fetch_add(1, Ordering::SeqCst);
+    });
+    let config = EngineConfig {
+        account_id: "search-host-slot".into(),
+        state_dir: crate::engine_host::tests::process_state_dir(),
+        api_base: "http://127.0.0.1:9".into(),
+    };
+    let engine = Engine::open(&TEST, config, channel, MemoryCredentials::default()).expect("the engine opens");
+    engine.restore();
+    assert_eq!(SearchHost::account(&engine), None, "signed out");
+    let before = woken.load(Ordering::SeqCst);
+    SearchHost::wake(&engine);
+    assert_eq!(woken.load(Ordering::SeqCst), before + 1, "the host's loop is woken");
+    // The index is the engine's own, over the handle's local state (or none before the first sync).
+    match (SearchHost::index(&engine), engine.state_db()) {
+        (Ok(index), Ok(db)) => assert_eq!(index.records, build_local_index(&db).expect("the index").records),
+        (Err(()), Err(_)) => {}
+        (index, db) => panic!("the host and the handle disagree: {} {}", index.is_ok(), db.is_ok()),
+    }
+}
+
+/// While `SEARCH_ON_ENGINE` is false (task 2488), a real build's shell gets the unwired Search, and no part of the
+/// adapter runs: none is made, so no index is built and no worker starts.
+#[test]
+fn a_real_build_shell_gets_the_unwired_search_and_runs_no_part_of_the_adapter() {
+    assert!(
+        !crate::shell::state::SEARCH_ON_ENGINE,
+        "task 2488 decides when Search reads the engine"
+    );
+    let (channel, _messages) = ChannelHost::new(|| {});
+    let config = EngineConfig {
+        account_id: "search-shell-slot".into(),
+        state_dir: crate::engine_host::tests::process_state_dir(),
+        api_base: "http://127.0.0.1:9".into(),
+    };
+    let engine = Engine::open(&TEST, config, channel, MemoryCredentials::default()).expect("the engine opens");
+    let before = made_here();
+    let s = crate::shell::state::init_on_engine(crate::shell::host::Shell::fixture(), Arc::new(engine));
+    assert_eq!(made_here(), before, "no Search adapter was made");
+    assert!(!s.frames.find.source.wired());
+    assert_eq!(
+        s.frames.find.source.search("contract", Narrow::All),
+        Answer::Unavailable
+    );
+    assert_eq!(
+        s.frames.find.shows("contract"),
+        crate::frames::search::Shows::Unavailable
+    );
 }

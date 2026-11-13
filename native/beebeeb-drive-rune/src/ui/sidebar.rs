@@ -185,7 +185,8 @@ pub(crate) fn badge_for(s: &State, section: SidebarSection) -> Option<Count> {
             (n > 0).then_some(Count::Pill(n))
         }
         SidebarSection::Trash => {
-            let n = s.frames.trash.source.totals().items as u32;
+            // The source's count: `None` when it cannot count without reading the whole list (the engine's).
+            let n = s.frames.trash.source.count().unwrap_or(0) as u32;
             (n > 0).then_some(Count::Plain(n))
         }
         _ => None,

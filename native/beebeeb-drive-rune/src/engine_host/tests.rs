@@ -150,12 +150,20 @@ fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() 
         !state.backups.has_source(),
         "Backups is 'not built yet' on a real engine"
     );
-    // Shared, Trash, Photos, This PC: all unwired on a real engine, never sample data.
+    // Shared, Photos, This PC: all unwired on a real engine, never sample data. Trash reads the engine
+    // (`engine_host::trash`): this handle has no session in memory, so it draws the signed-out state, no row.
     assert!(
         !state.frames.shared.source.wired(),
         "Shared is unwired on a real engine"
     );
-    assert!(!state.frames.trash.source.wired(), "Trash is unwired on a real engine");
+    assert_eq!(
+        (
+            state.frames.trash.source.items().len(),
+            state.frames.trash.source.loaded()
+        ),
+        (0, crate::frames::trash::source::Loaded::SignedOut),
+        "Trash on a real engine without a session: signed out, no row"
+    );
     assert!(!state.photos.source.wired(), "Photos is unwired on a real engine");
     assert!(!state.this_pc.wired(), "This PC is unwired on a real engine");
     assert_eq!(started.live.drain(), 0, "nothing reported, nothing queued");
@@ -587,9 +595,14 @@ fn shared_shows_0_fixture_rows_on_a_live_engine() {
 #[test]
 fn trash_shows_0_fixture_rows_on_a_live_engine() {
     let s = engine_state();
-    assert!(!s.frames.trash.source.wired());
+    // Trash reads the engine (it is wired); without a session it holds no row and no count, never the board's.
     assert_eq!(s.frames.trash.source.items().len(), 0);
     assert_eq!(s.frames.trash.source.totals().items, 0);
+    assert_eq!(s.frames.trash.source.count(), None, "no sidebar count from the engine");
+    assert_eq!(
+        s.frames.trash.source.loaded(),
+        crate::frames::trash::source::Loaded::SignedOut
+    );
 }
 
 #[test]
