@@ -22,7 +22,7 @@ use parts::table::{Columns, header, rows, table_row, tile};
 use parts::toolbar::{Bar, slot_sep, toolbar};
 use parts::{chrome, empty, list, style};
 use rune::{Cx, El, Key, KeyEvent, Tx, col, el, row};
-use source::{BoardShared, RequestState, SharedSource};
+use source::{BoardShared, Loaded, Notice, RequestState, SharedSource};
 
 const COLUMNS: Columns = Columns {
     names: ["Name", "Shared on", "Size", "From", "PC"],
@@ -56,6 +56,115 @@ pub struct SharedUi {
     pub dialog: Option<dialogs::Dialog>,
     /// What the open dialog's fields hold.
     pub fields: dialogs::Fields,
+    /// What the view says over the lists (a control not available yet, a change Beebeeb refused).
+    pub notice: Option<Notice>,
+    /// The gate and account the last poll saw: a change drops every name at once.
+    seen: Option<(crate::shell::app::GateState, Option<String>)>,
+    /// Whether the Shared section was open at the last poll.
+    was_open: bool,
+}
+
+/// How often the poll runs again while a read or a change is on its way.
+const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The window's poll (`shell::host::poll`), as Trash's: a gate or account change drops the source's names at once,
+/// on the window's side, with the selection, the menu and any dialog about them; opening the Shared section asks for
+/// the lists (the source decides whether they are old); what arrived is taken in. `true`: something drawn changed.
+pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    let gate = (s.shell.app.gate(), s.shell.app.account().map(str::to_owned));
+    let open = s.sidebar_section == crate::ui::sidebar::SidebarSection::Shared
+        && gate.0 == crate::shell::app::GateState::Ready;
+    let ui = &mut s.frames.shared;
+    let mut changed = false;
+    if ui.seen.as_ref() != Some(&gate) {
+        if ui.seen.is_some() {
+            ui.source.forget();
+            ui.selected = None;
+            ui.menu = None;
+            ui.notice = None;
+            if ui.dialog_over(Section::Shared) {
+                ui.close_dialog();
+            }
+            // The section must re-open on the next poll, so a new read starts for the new account.
+            ui.was_open = false;
+            changed = true;
+        }
+        ui.seen = Some(gate);
+    }
+    if open && !ui.was_open {
+        ui.notice = None;
+        ui.source.opened();
+        changed = true;
+    }
+    ui.was_open = open;
+    let pumped = ui.source.pump();
+    if let Some(notice) = pumped.notice {
+        ui.notice = Some(notice);
+    }
+    if pumped.busy {
+        tx.wake_after(POLL_EVERY);
+    }
+    if pumped.changed {
+        // An item that went takes the selection with it.
+        let left = ui.count();
+        ui.selected = ui.selected.filter(|i| *i < left);
+        if ui.selected.is_none() {
+            ui.menu = None;
+        }
+    }
+    changed | pumped.changed
+}
+
+/// The words of a notice.
+fn notice_words(notice: Notice) -> &'static str {
+    match notice {
+        Notice::NotAvailable => "Not available yet in this version. Nothing was changed.",
+        Notice::ChangeRefused => "Couldn\u{2019}t make that change. Nothing was changed.",
+        Notice::RefreshFailed => "Couldn\u{2019}t refresh Shared. What\u{2019}s shown may be out of date.",
+    }
+}
+
+/// The notice over the lists (Trash's). Keys: `notice`, `notice-words`.
+fn notice_note(notice: Notice, t: &Theme) -> El {
+    const WORDS: rune::TextStyle = rune::TextStyle::new(12.5, 400.0).lh(17.0);
+    el().key("notice-wrap").w_full().px(14.0).pt(10.0).child(
+        col()
+            .key("notice")
+            .role("status")
+            .label(notice_words(notice))
+            .w_full()
+            .pt(9.0)
+            .pb(9.0)
+            .pl(12.0)
+            .pr(10.0)
+            .radius(10.0)
+            .fill(t.text.alpha(0.06))
+            .child(
+                rune::rich(notice_words(notice), Vec::new())
+                    .key("notice-words")
+                    .font(WORDS)
+                    .color(t.text_secondary)
+                    .w_full(),
+            ),
+    )
+}
+
+/// The words of lists that are not here (`None`: they are, draw them).
+fn not_here(loaded: Loaded) -> Option<(&'static str, &'static str)> {
+    match loaded {
+        Loaded::Ready => None,
+        Loaded::Loading => Some(("Loading Shared\u{2026}", "Getting your shares from Beebeeb.")),
+        Loaded::Offline => Some((
+            "Can\u{2019}t reach Beebeeb",
+            "Shared shows again once you\u{2019}re online.",
+        )),
+        Loaded::Failed => Some((
+            "Couldn\u{2019}t load Shared",
+            "Open Shared again in a moment to try again.",
+        )),
+        Loaded::SessionEnded => Some(("Your session ended", "Sign in again to see Shared.")),
+        Loaded::SignedOut => Some(("Signed out", "Sign in to see Shared.")),
+    }
 }
 
 impl Default for SharedUi {
@@ -67,6 +176,9 @@ impl Default for SharedUi {
             menu: None,
             dialog: None,
             fields: dialogs::Fields::default(),
+            notice: None,
+            seen: None,
+            was_open: false,
         }
     }
 }
@@ -623,12 +735,25 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     }
     let t = tokens::theme(cx.system_dark());
     let ui = &s.frames.shared;
-    let (body, status, count) = match ui.tab {
-        Tab::WithMe => with_me(ui, &t),
-        Tab::ByMe => by_me(ui, &t),
-        Tab::Requests => requests(ui, &t),
+    // A source that answers late: its loading, offline, error and signed-out states instead of an empty list.
+    let away = not_here(ui.source.loaded());
+    let (body, status, count) = match (away, ui.tab) {
+        (Some((title, words)), _) => (empty::empty(&icons::SHARED, title, words, None, &t), String::new(), 0),
+        (None, Tab::WithMe) => with_me(ui, &t),
+        (None, Tab::ByMe) => by_me(ui, &t),
+        (None, Tab::Requests) => requests(ui, &t),
+    };
+    let body = match ui.notice {
+        Some(notice) => col()
+            .key("notice-body")
+            .w_full()
+            .grow(1.0)
+            .child(notice_note(notice, &t))
+            .child(body),
+        None => body,
     };
     let sub = match (ui.tab, count) {
+        (_, 0) if away.is_some() => String::new(),
         (_, 0) => "No items".to_string(),
         (Tab::WithMe, 1) => "1 item".to_string(),
         (Tab::WithMe, n) => format!("{n} items"),

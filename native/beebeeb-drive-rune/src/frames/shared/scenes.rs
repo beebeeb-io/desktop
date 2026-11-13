@@ -17,6 +17,7 @@ fn scene(s: &mut State, tab: Tab, source: BoardShared) {
         menu: None,
         dialog: None,
         fields: Default::default(),
+        ..Default::default()
     };
 }
 
