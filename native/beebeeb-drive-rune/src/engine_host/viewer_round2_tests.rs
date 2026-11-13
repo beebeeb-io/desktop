@@ -193,12 +193,20 @@ fn a_picture_that_declares_more_than_the_viewer_decodes_is_refused_from_its_head
 #[test]
 fn a_file_named_as_a_picture_that_is_another_format_by_its_content_never_reaches_a_decoder() {
     let fake = Fake::new();
-    // The toolkit picks a decoder by content and has one for this: the viewer shows four formats, by content.
-    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>"#;
-    fake.put("f-svg", "Invented drawing.png", svg);
-    let (source, _, body) = opened(&fake, "f-svg");
+    // The toolkit picks a decoder by content and HAS one for this: an icon container with a PNG inside. The viewer
+    // shows four formats, by content, and this is none of them.
+    let png = png_bytes(6, 4);
+    let mut icon = b"icns".to_vec();
+    icon.extend_from_slice(&(16 + png.len() as u32).to_be_bytes());
+    icon.extend_from_slice(b"ic07");
+    icon.extend_from_slice(&(8 + png.len() as u32).to_be_bytes());
+    icon.extend_from_slice(&png);
+    // The toolkit's own decoder does decode it (or this test would prove nothing about the check before it).
+    assert!(picture(&icon).is_some(), "the toolkit decodes the container");
+    fake.put("f-icon", "Invented drawing.png", &icon);
+    let (source, _, body) = opened(&fake, "f-icon");
     assert_eq!(body, Body::NotPreviewable(NoPreview::Unreadable));
-    assert!(source.picture("f-svg", Picture::Photo).is_none());
+    assert!(source.picture("f-icon", Picture::Photo).is_none());
 }
 
 #[test]
