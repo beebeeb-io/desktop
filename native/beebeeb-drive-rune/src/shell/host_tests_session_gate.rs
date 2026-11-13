@@ -482,9 +482,12 @@ fn with_the_session_ended_settings_and_this_pc_open_and_the_way_back_works() {
 /// files is not followed while the session ended; Settings is.
 #[test]
 fn a_request_from_outside_is_not_followed_to_account_data_while_the_session_ended() {
-    // The control: the same link is followed while the session is open.
+    // The control: the same request (the shell's entry for a link or the b) is followed while
+    // the session is open.
     let mut control = app();
-    control.rt.update(|s, tx| on_open_url(s, "beebeeb://open/photos", tx));
+    control.rt.update(|s, _| {
+        request(s, Intent::Go(Route::section(Section::Photos)));
+    });
     settle(&mut control.rt);
     assert_eq!(
         control.rt.state.shell.app.screen(),
@@ -496,7 +499,9 @@ fn a_request_from_outside_is_not_followed_to_account_data_while_the_session_ende
     settle(&mut app.rt);
     let files = app.rt.state.shell.app.screen();
     let opened = app.opened.load(Ordering::SeqCst);
-    app.rt.update(|s, tx| on_open_url(s, "beebeeb://open/photos", tx));
+    app.rt.update(|s, _| {
+        request(s, Intent::Go(Route::section(Section::Photos)));
+    });
     settle(&mut app.rt);
     assert_eq!(app.rt.state.shell.app.screen(), files);
     assert_eq!(app.opened.load(Ordering::SeqCst), opened);
