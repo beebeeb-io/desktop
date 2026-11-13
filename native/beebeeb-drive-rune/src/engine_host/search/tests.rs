@@ -366,9 +366,11 @@ fn the_engine_handle_is_a_search_host() {
         }
         (Err(()), Err(_)) => {
             // The state DB must genuinely not exist: a state_db() that works means the glue is wrong.
+            let db_err = db_result.as_ref().err().expect("already Err from match arm");
             assert!(
-                db_result.is_err(),
-                "index returned Err but state_db works: the glue is broken"
+                db_err.contains("nothing has synced"),
+                "index returned Err but state_db path exists: the glue is broken ({})",
+                db_err
             );
         }
         (index, db) => panic!("the host and the handle disagree: {} {}", index.is_ok(), db.is_ok()),
