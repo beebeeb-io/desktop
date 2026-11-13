@@ -25,6 +25,8 @@ struct Spy {
     refuse: Arc<Mutex<Option<ActionError>>>,
     wakes: Arc<Mutex<Vec<Duration>>>,
     uploads: Arc<Mutex<Vec<Vec<PathBuf>>>>,
+    /// The source's words for why an item cannot change, once it has them.
+    words: Arc<Mutex<Option<super::super::protected::Words>>>,
 }
 
 impl Spy {
@@ -92,6 +94,10 @@ impl FilesSource for Later {
     fn changes(&mut self) -> Vec<Change> { std::mem::take(&mut self.spy.later.lock().unwrap()) }
     fn answers_later(&self) -> bool { true }
     fn wake_after(&mut self, after: Duration) { self.spy.wakes.lock().unwrap().push(after); }
+    fn protection(&self, _: Option<&str>, item: Option<&DriveItem>) -> Option<super::super::protected::Protection> {
+        let words = self.spy.words.lock().unwrap().clone()?;
+        item.map(|_| super::super::protected::Protection::Managed(words))
+    }
 }
 
 /// The window over such a source, with `rows` files that can change (not Backups) first in the list, each
@@ -423,6 +429,23 @@ fn a_refusal_of_a_protected_item_that_comes_later_takes_the_path_of_one_at_once_
         "Try again for an item that cannot change"
     );
     assert_eq!(*spy.wakes.lock().unwrap(), [Duration::from_secs(8)]);
+    // The source has words for the items by the time the answer comes: its message opens, for the items the
+    // refusal was about (none of them is held for Try again), and no plain message is put over it.
+    let (mut rt, spy, ids, _) = window(None, 1, "on_this_pc");
+    rt.update(|s, tx| assert!(s.toggle_keep_offline(tx)));
+    let words = super::super::protected::Words {
+        title: "A service manages this".into(),
+        body: "Invented words.".into(),
+    };
+    *spy.words.lock().unwrap() = Some(words.clone());
+    spy.answer(
+        Action::KeepOffline,
+        &[(&ids[0], Some("on_this_pc"), Some(ActionError::Protected))],
+    );
+    assert!(frame(&mut rt));
+    assert_eq!(rt.state.actions.protected.alert, Some(words));
+    assert_eq!(rt.state.actions.toast, None);
+    assert_eq!(rt.state.actions.local.retry, Some((Action::KeepOffline, Vec::new())));
 }
 
 #[test]
