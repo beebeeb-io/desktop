@@ -39,7 +39,9 @@ mod direct;
 // LD-0105 W2: the range session's transport (`beebeeb_transfer::DirectIo`).
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod range_io;
-pub use direct::{BodyBytes, ChunkApiError, GrantReply, OnBody, fetch_from_storage, now_ms};
+pub use direct::{
+    BodyBytes, ChunkApiError, ChunkOverLimit, ChunkUnreachable, GrantReply, OnBody, fetch_from_storage, now_ms,
+};
 mod headers;
 pub use headers::provenance_headers;
 use headers::*;

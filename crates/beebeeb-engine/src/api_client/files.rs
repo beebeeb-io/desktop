@@ -77,6 +77,31 @@ impl ApiClient {
         chunk_idx: u32,
         on_body: super::OnBody<'_>,
     ) -> anyhow::Result<Vec<u8>> {
+        self.download_chunk_within(file_id, chunk_idx, None, on_body).await
+    }
+
+    /// [`Self::download_chunk`], holding at most `max_len` bytes of the body: a body that passes it is given up
+    /// while it streams ([`super::ChunkOverLimit`]; what arrived is reported as discarded), never read whole
+    /// first. For a caller that holds the file in memory and has no manifest to bound a chunk by (a file whose
+    /// metadata names no version).
+    pub async fn download_chunk_capped(
+        &self,
+        file_id: &str,
+        chunk_idx: u32,
+        max_len: u64,
+        on_body: super::OnBody<'_>,
+    ) -> anyhow::Result<Vec<u8>> {
+        self.download_chunk_within(file_id, chunk_idx, Some(max_len), on_body)
+            .await
+    }
+
+    async fn download_chunk_within(
+        &self,
+        file_id: &str,
+        chunk_idx: u32,
+        max_len: Option<u64>,
+        on_body: super::OnBody<'_>,
+    ) -> anyhow::Result<Vec<u8>> {
         let mut resp = self
             .client
             .get(&self.chunk_url(FileId::new(file_id), chunk_idx))
@@ -91,6 +116,12 @@ impl ApiClient {
         loop {
             match resp.chunk().await {
                 Ok(Some(piece)) => {
+                    if max_len.is_some_and(|max| body.len() as u64 + piece.len() as u64 > max) {
+                        if !body.is_empty() {
+                            on_body(super::BodyBytes::Discarded(body.len() as u64));
+                        }
+                        return Err(anyhow::Error::new(super::ChunkOverLimit));
+                    }
                     on_body(super::BodyBytes::Read(piece.len() as u64));
                     body.extend_from_slice(&piece);
                 }

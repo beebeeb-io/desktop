@@ -13,6 +13,11 @@
 //! session in memory is still the very one they were copied from ([`Engine::session_is_still`], asked with no
 //! session change half done). Every answer carries that generation, for the host to compare.
 //!
+//! A file whose bytes are wholly on this computer is read from there instead ([`Engine::open_local_copy_in_memory`]):
+//! it opens without a connection, and a change made here that is not sent yet is what is shown (never the older
+//! version the server holds). That read is bounded, never fetches a file that is not wholly here, and its answer
+//! says where the content came from ([`OnThisPc`]).
+//!
 //! The handle is the one for changes: resolving the key of a file in a shared folder may record that folder's
 //! custody (the engine's own ratchet, as every other download of such a file does), and that is the only thing
 //! this module can cause to be written.
@@ -21,6 +26,8 @@
 //! local state alone, as a listing does. Must not: log or return a name, a path, a key or a byte of content
 //! outside the two answer types; write a decrypted byte anywhere.
 
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -30,8 +37,10 @@ use zeroize::Zeroizing;
 use super::settings_api::{AccountCallError, kind_of};
 use super::{CredentialStores, Engine, LocalStateRefused};
 use crate::account::SessionGeneration;
-use crate::api_client::ApiClient;
+use crate::api_client::{ApiClient, ChunkUnreachable};
+use crate::direct_download::DirectError;
 use crate::engine_bridge::{EngineBridge, EngineError, InMemoryOpen, error_http_status};
+use crate::state_db::FileStatus;
 
 #[cfg(test)]
 #[path = "viewer_api_tests.rs"]
@@ -51,6 +60,32 @@ pub struct OpenFileFacts {
     pub folders: Vec<String>,
     /// Its size in bytes, as last synced.
     pub size: u64,
+    /// What the local state says about the file's bytes on this computer. `None`: not here (online only, on
+    /// its way down, or in a state that is not a copy to show). What is really on disk is asked again when the
+    /// copy is read ([`Engine::open_local_copy_in_memory`]).
+    pub on_this_pc: Option<OnThisPc>,
+}
+
+/// A file's bytes are on this computer, as the local state has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnThisPc {
+    /// The copy here is the version Beebeeb has.
+    InSync,
+    /// The copy here has a change that is not in Beebeeb yet.
+    NotSentYet,
+}
+
+fn on_this_pc(status: &FileStatus) -> Option<OnThisPc> {
+    match status {
+        FileStatus::Local => Some(OnThisPc::InSync),
+        FileStatus::Uploading => Some(OnThisPc::NotSentYet),
+        // Not a copy to show as the file: not here, half here, two versions to choose from, or on its way out.
+        FileStatus::CloudOnly
+        | FileStatus::Downloading
+        | FileStatus::Conflict
+        | FileStatus::Error
+        | FileStatus::Trashing => None,
+    }
 }
 
 /// The session and the size, never the name or a folder: a `{:?}` must not print one.
@@ -59,6 +94,7 @@ impl std::fmt::Debug for OpenFileFacts {
         f.debug_struct("OpenFileFacts")
             .field("session", &self.session)
             .field("size", &self.size)
+            .field("on_this_pc", &self.on_this_pc)
             .finish_non_exhaustive()
     }
 }
@@ -78,6 +114,36 @@ impl std::fmt::Debug for OpenedFile {
             .field("bytes", &self.bytes.len())
             .finish()
     }
+}
+
+/// A file's content as it is on this computer, and the session it was read for. The bytes are wiped when this
+/// is dropped.
+pub struct OpenedLocalCopy {
+    pub session: SessionGeneration,
+    pub bytes: Zeroizing<Vec<u8>>,
+    /// Whether this copy is what Beebeeb has, by the local state and the copy's own size.
+    pub copy: OnThisPc,
+}
+
+/// How many bytes, never one of them.
+impl std::fmt::Debug for OpenedLocalCopy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenedLocalCopy")
+            .field("session", &self.session)
+            .field("bytes", &self.bytes.len())
+            .field("copy", &self.copy)
+            .finish()
+    }
+}
+
+/// What reading the copy on this computer came to.
+#[derive(Debug)]
+pub enum LocalCopy {
+    /// The whole copy, read into memory.
+    Opened(OpenedLocalCopy),
+    /// The file's bytes are not wholly on this computer (or cannot be told to be, or no folder is set up for
+    /// them): nothing was read and nothing was fetched. The caller downloads the file instead.
+    NotHere,
 }
 
 /// Why a file was not opened. Fixed kinds: none carries a name, an id or a server's words.
@@ -127,8 +193,23 @@ fn refused(refusal: LocalStateRefused) -> OpenFileError {
     }
 }
 
-/// The kind of a failed download, read from the error's chain (never its text).
-fn failure(error: EngineError) -> OpenFileError {
+/// The kind of a failed download, read from the error's chain (never its text). Every download route is named
+/// here: the metadata request and the unpinned chunk route fail with the API client's own typed errors; the
+/// pinned and the direct route with [`DirectError`] (an authorization answer or a not-found, never routed
+/// around) or [`ChunkUnreachable`] (no whole answer after the route's own retries).
+pub(crate) fn failure(error: EngineError) -> OpenFileError {
+    if let Some(direct) = error.caused_by::<DirectError>() {
+        return match direct {
+            DirectError::Refused(401) => OpenFileError::SessionEnded,
+            DirectError::Refused(404) => OpenFileError::NotFound,
+            // Another refusal (403: no longer allowed), a version that kept changing, a chunk that did not
+            // authenticate: the download failed, and nothing changed.
+            DirectError::Refused(_) | DirectError::VersionChanged | DirectError::Corrupt => OpenFileError::Failed,
+        };
+    }
+    if error.caused_by::<ChunkUnreachable>().is_some() {
+        return OpenFileError::Offline;
+    }
     let EngineError::Api(error) = error else {
         return OpenFileError::Failed;
     };
@@ -172,9 +253,190 @@ impl<C: CredentialStores> Engine<C> {
             name,
             folders: parts,
             size: u64::try_from(entry.size_bytes).unwrap_or(0),
+            on_this_pc: on_this_pc(&entry.status),
         })
     }
 
+    /// The content of the file `file_id` as it is ON THIS COMPUTER, read into memory for the session in memory:
+    /// for a file kept here it needs no connection, and a change made here that is not sent yet is what it
+    /// answers. No network, and nothing is written.
+    ///
+    /// [`LocalCopy::NotHere`] unless the local state says the file's bytes are here AND the file in the
+    /// account's folder is a plain file whose every byte is on disk (on Windows a file that is not wholly on
+    /// disk is never opened: opening it would fetch it; this process's own fetch of it is refused for the
+    /// length of the read as well). A name that leads to a different file on this computer is `NotHere` too.
+    ///
+    /// A copy over `max_bytes` is [`OpenFileError::TooLarge`] from its length alone; the read itself is bounded
+    /// too (a file that grows meanwhile is `TooLarge`, never more than `max_bytes` + 1 in memory). `cancel` and
+    /// the session are asked between pieces. The hand-over is the same as a download's: only while the session
+    /// in memory is still the one the read began for.
+    pub fn open_local_copy_in_memory(
+        &self,
+        file_id: &str,
+        max_bytes: u64,
+        cancel: &AtomicBool,
+    ) -> Result<LocalCopy, OpenFileError> {
+        let turn = self.acct.session_generation();
+        let entry = self
+            .local_state()
+            .map_err(refused)?
+            .with(|db| db.get_file(file_id))
+            .map_err(refused)?
+            .map_err(|_| OpenFileError::Failed)?
+            .ok_or(OpenFileError::NotFound)?;
+        if entry.is_dir() {
+            return Err(OpenFileError::NotFound);
+        }
+        let Some(recorded) = on_this_pc(&entry.status) else {
+            return Ok(LocalCopy::NotHere);
+        };
+        // The key of the session the read is for: the hand-over below asks whether it is still that session.
+        let key = {
+            let guard = self.acct.session.lock().map_err(|_| OpenFileError::NotSignedIn)?;
+            let current = guard.as_ref().ok_or(OpenFileError::NotSignedIn)?;
+            if !self.acct.session_unchanged_since(turn) {
+                return Err(OpenFileError::NotSignedIn);
+            }
+            Zeroizing::new(current.master_key)
+        };
+        let Some(path) = self.local_copy_path(&entry.path) else {
+            return Ok(LocalCopy::NotHere);
+        };
+        // This process's own fetch of the file is refused until the read is over: a file that stops being
+        // wholly on disk between the check and the open is not downloaded by the open.
+        let _no_fetch = crate::no_fetch_scope::enter(&[file_id]);
+        let Some(length) = wholly_here(&path) else {
+            return Ok(LocalCopy::NotHere);
+        };
+        if length > max_bytes {
+            return Err(OpenFileError::TooLarge { size: length });
+        }
+        let still = || self.acct.session_unchanged_since(turn);
+        let bytes = match read_bounded(&path, length, max_bytes, cancel, &still) {
+            Ok(bytes) => bytes,
+            Err(ReadStopped::Refused(error)) => return Err(error),
+            // It went away, or cannot be read, between the check and the read: the download is the way.
+            Err(ReadStopped::Unreadable) => return Ok(LocalCopy::NotHere),
+        };
+        if cancel.load(Ordering::SeqCst) {
+            return Err(OpenFileError::Cancelled);
+        }
+        if !self.session_is_still(turn, &key) {
+            return Err(OpenFileError::NotSignedIn);
+        }
+        // A copy whose length is not the synced size was changed here, whatever the row says so far.
+        let copy = if recorded == OnThisPc::InSync && u64::try_from(entry.size_bytes).ok() == Some(bytes.len() as u64) {
+            OnThisPc::InSync
+        } else {
+            OnThisPc::NotSentYet
+        };
+        Ok(LocalCopy::Opened(OpenedLocalCopy {
+            session: turn,
+            bytes,
+            copy,
+        }))
+    }
+
+    /// Where the file at `rel_path` of the local state is in the account's folder on this computer. `None`: no
+    /// folder is known, the path is not one below it, or its name leads to a different file here (a Windows
+    /// short name): that file is never read as this one.
+    fn local_copy_path(&self, rel_path: &str) -> Option<PathBuf> {
+        let root = self.sync_root().ok()?;
+        let path = crate::engine_bridge::local_file_path_under_sync_root(&root, rel_path).ok()?;
+        matches!(crate::name_alias::conflict_below(&root, &path), Ok(None)).then_some(path)
+    }
+}
+
+/// The length of the plain file at `path` when every byte of it is on disk, asked from its attributes alone
+/// (nothing is opened for data). `None`: not a plain file (a link, a folder, gone), or not wholly on disk.
+fn wholly_here(path: &Path) -> Option<u64> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_OFFLINE, _RECALL_ON_OPEN, _RECALL_ON_DATA_ACCESS: reading it would fetch it.
+        const NOT_ON_DISK: u32 = 0x0000_1000 | 0x0004_0000 | 0x0040_0000;
+        if metadata.file_attributes() & NOT_ON_DISK != 0 {
+            return None;
+        }
+    }
+    Some(metadata.len())
+}
+
+enum ReadStopped {
+    /// Cancelled, the session moved on, or the file grew past the limit.
+    Refused(OpenFileError),
+    Unreadable,
+}
+
+/// The file at `path` into one buffer that is wiped when dropped, at most `max_bytes` + 1 bytes of it, in pieces
+/// with `cancel` and `still` asked between them. The buffer is sized once (from `length`, capped), so no
+/// earlier copy of the content is left behind by a growing allocation.
+fn read_bounded(
+    path: &Path,
+    length: u64,
+    max_bytes: u64,
+    cancel: &AtomicBool,
+    still: &dyn Fn() -> bool,
+) -> Result<Zeroizing<Vec<u8>>, ReadStopped> {
+    const PIECE: usize = 1 << 20;
+    let file = std::fs::File::open(path).map_err(|_| ReadStopped::Unreadable)?;
+    // Asked again through the handle: it describes the file the read then reads.
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const NOT_ON_DISK: u32 = 0x0000_1000 | 0x0004_0000 | 0x0040_0000;
+        match file.metadata() {
+            Ok(metadata) if metadata.is_file() && metadata.file_attributes() & NOT_ON_DISK == 0 => {}
+            _ => return Err(ReadStopped::Unreadable),
+        }
+    }
+    let ceiling = max_bytes.saturating_add(1);
+    let room = usize::try_from(length.saturating_add(1).min(ceiling)).map_err(|_| ReadStopped::Unreadable)?;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(room));
+    let mut file = file.take(ceiling);
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(ReadStopped::Refused(OpenFileError::Cancelled));
+        }
+        if !still() {
+            return Err(ReadStopped::Refused(OpenFileError::NotSignedIn));
+        }
+        // Never past the buffer's own room: a file that grew is read into a fresh buffer below, not by a
+        // reallocation that would leave the first one unwiped.
+        let want = PIECE.min(bytes.capacity() - bytes.len());
+        if want == 0 {
+            break;
+        }
+        let at = bytes.len();
+        bytes.resize(at + want, 0);
+        let read = match file.read(&mut bytes[at..]) {
+            Ok(read) => read,
+            Err(_) => return Err(ReadStopped::Unreadable),
+        };
+        bytes.truncate(at + read);
+        if read == 0 {
+            return Ok(bytes);
+        }
+    }
+    // The buffer is full: the file is as long as it was (the next read says so), or it grew.
+    let mut one = [0u8; 1];
+    match file.read(&mut one) {
+        Ok(0) if bytes.len() as u64 <= max_bytes => Ok(bytes),
+        Ok(_) => {
+            one[0] = 0;
+            Err(ReadStopped::Refused(OpenFileError::TooLarge {
+                size: (bytes.len() as u64).max(max_bytes.saturating_add(1)),
+            }))
+        }
+        Err(_) => Err(ReadStopped::Unreadable),
+    }
+}
+
+impl<C: CredentialStores> Engine<C> {
     /// The content of the file `file_id`, downloaded and decrypted in memory for the session in memory, by the
     /// download path every hydrate uses. See the module's doc for what is (not) written and the session rule.
     ///

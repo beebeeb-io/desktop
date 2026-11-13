@@ -237,7 +237,7 @@ pub async fn download(
                 Err(ChunkApiError::Terminal(status)) => return Err(DirectError::Refused(status)),
                 // The pinned route failed: nothing per chunk is left to try. The planner ends the
                 // file and the API path takes it from the start.
-                Err(ChunkApiError::Failed(message)) => {
+                Err(ChunkApiError::Failed(message) | ChunkApiError::Unreachable(message)) => {
                     tracing::debug!(chunk = index, %message, "direct download: pinned API route failed");
                     if let Err(e) = planner.api_fetch_failed(index) {
                         tracing::debug!(error = %e, "direct download: planner error");

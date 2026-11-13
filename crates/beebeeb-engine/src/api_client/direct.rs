@@ -69,8 +69,13 @@ enum PinnedFailure {
     /// Not worth another try: an authorization answer, a gone version, a refusal that will repeat.
     Final(ChunkApiError),
     /// Could be gone in a moment: a 429, a 5xx, a held file, a network blip. `wait` is what the
-    /// server asked for, if it did.
-    Again { wait: Option<Duration>, message: String },
+    /// server asked for, if it did. `answered`: the server answered this try (a status), as opposed to no
+    /// connection or one that broke.
+    Again {
+        wait: Option<Duration>,
+        message: String,
+        answered: bool,
+    },
 }
 
 /// Unix milliseconds: the clock the planner and the discovery cache are given.
@@ -96,7 +101,35 @@ pub enum ChunkApiError {
     Terminal(u16),
     /// Anything else (network, 5xx, wrong length). The text never holds a URL.
     Failed(String),
+    /// [`Self::Failed`], when the last try got no whole answer: the server was not reached, or the connection
+    /// broke while the body was read. A caller that names the failure for a person reads "can't reach" from it;
+    /// every other caller treats it as `Failed`. The text never holds a URL.
+    Unreachable(String),
 }
+
+/// The typed cause of [`ChunkApiError::Unreachable`] in an error chain. Its text is the route's own message.
+#[derive(Debug)]
+pub struct ChunkUnreachable(pub String);
+
+impl std::fmt::Display for ChunkUnreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ChunkUnreachable {}
+
+/// A chunk body passed the length its caller holds ([`ApiClient::download_chunk_capped`]). Nothing of it is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkOverLimit;
+
+impl std::fmt::Display for ChunkOverLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a chunk is longer than its caller holds in memory")
+    }
+}
+
+impl std::error::Error for ChunkOverLimit {}
 
 /// Read a body incrementally, giving up (`None`) when it passes `max` bytes.
 async fn read_capped(resp: &mut reqwest::Response, max: usize) -> Option<Vec<u8>> {
@@ -340,16 +373,24 @@ impl ApiClient {
         let mut waited = Duration::ZERO;
         let mut attempt: u32 = 1;
         loop {
-            let (asked, message) = match self
+            let (asked, message, answered) = match self
                 .pinned_attempt(file_id, index, version, expected_len, on_body)
                 .await
             {
                 Ok(bytes) => return Ok(bytes),
                 Err(PinnedFailure::Final(e)) => return Err(e),
-                Err(PinnedFailure::Again { wait, message }) => (wait, message),
+                Err(PinnedFailure::Again {
+                    wait,
+                    message,
+                    answered,
+                }) => (wait, message, answered),
             };
             let Some(wait) = retry_wait(retry, attempt, waited, asked) else {
-                return Err(ChunkApiError::Failed(message));
+                return Err(if answered {
+                    ChunkApiError::Failed(message)
+                } else {
+                    ChunkApiError::Unreachable(message)
+                });
             };
             tracing::debug!(chunk = index, attempt, %message, "pinned API route: trying again");
             tokio::time::sleep(wait).await;
@@ -376,6 +417,7 @@ impl ApiClient {
             .map_err(|e| PinnedFailure::Again {
                 wait: None,
                 message: dt::scrub(&e.without_url().to_string()),
+                answered: false,
             })?;
         let status = resp.status();
         if !status.is_success() {
@@ -398,10 +440,12 @@ impl ApiClient {
                 dt::Outcome::Backoff(wait) => PinnedFailure::Again {
                     wait: Some(wait),
                     message: failed,
+                    answered: true,
                 },
                 dt::Outcome::UseApiNow => PinnedFailure::Again {
                     wait: None,
                     message: failed,
+                    answered: true,
                 },
                 _ => PinnedFailure::Final(ChunkApiError::Failed(failed)),
             });
@@ -416,6 +460,7 @@ impl ApiClient {
             Exact::Broken => Err(PinnedFailure::Again {
                 wait: None,
                 message: format!("chunk {index} through the API: the connection broke while reading"),
+                answered: false,
             }),
         }
     }

@@ -107,6 +107,7 @@ mod backup_tree;
 mod backup_upload;
 // LD-0113: the Backups root, the merge's moves and the device manifest.
 mod backup_root;
+mod chunk_frames;
 mod finder_create;
 mod finder_edit;
 mod hydrate;
@@ -455,6 +456,7 @@ pub(crate) use types::engine_remove;
 // The native app's open file: the whole file in memory, nothing recorded (`app::viewer_api`).
 mod open_in_memory;
 pub(crate) use open_in_memory::InMemoryOpen;
+use open_in_memory::{CAPPED_FRAME_ROOM, OverInMemoryLimit};
 
 mod errors;
 use errors::*;
