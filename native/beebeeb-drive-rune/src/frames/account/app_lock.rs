@@ -32,9 +32,10 @@ pub fn arrive(ui: &mut AccountUi) {
     if !matches!(ui.dialog, Some(Dialog::LockDelay(_))) {
         return;
     }
-    let sec = ui.source.as_deref().map(|s| s.security());
-    ui.dialog = match sec {
-        Some(sec) if sec.app_lock => Some(Dialog::LockDelay(chosen(&sec.lock_after))),
+    // From what the page itself draws: a source that cannot set the lock has no row for the menu to hang on.
+    let lock = ui.source.as_deref().and_then(|s| s.security_facts().app_lock);
+    ui.dialog = match lock {
+        Some((true, after)) => Some(Dialog::LockDelay(chosen(&after))),
         _ => None,
     };
 }

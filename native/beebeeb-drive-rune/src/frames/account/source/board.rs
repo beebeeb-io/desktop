@@ -253,7 +253,10 @@ impl AccountSource for BoardAccount {
     }
     fn security_facts(&self) -> SecurityFacts {
         let all = all_known(self);
-        self.facts.map_or(all.clone(), |change| change(all))
+        match self.facts {
+            Some(change) => change(all),
+            None => all,
+        }
     }
     fn identity(&self) -> Identity {
         Identity {

@@ -32,7 +32,7 @@ fn every_row_of_sign_in_and_security_goes_where_it_points() {
         }
     }
     let mut rt = runtime("DW-A52");
-    assert_eq!(says(&rt, "item-1-1-value"), "4 devices");
+    assert_eq!(says(&rt, "item-1-1-value"), "4 signed in");
     click(&mut rt, "item-1-1");
     assert_eq!(section(&rt), Some(SettingsPane::DevicesAndSessions));
     assert_eq!(says(&rt, "item-0-1-title"), "Anna's iPhone");
@@ -49,7 +49,7 @@ fn the_score_and_every_state_are_on_the_one_page() {
         "Nothing to do. Checked each time you open this page."
     );
     assert!(
-        find(&rt, "todo-0").is_none() && find(&rt, "btn-0").is_none(),
+        find(&rt, "todo-0").is_none() && find(&rt, "todo-0-btn").is_none(),
         "nothing left: no to-do"
     );
     // Each subject says its state, and has the mark of a thing that is done.
@@ -90,20 +90,20 @@ fn one_thing_left_is_in_the_score_card_with_the_button_that_fixes_it() {
     assert_eq!(says(&rt, "ring-label"), "6");
     assert_eq!(says(&rt, "ring-sub"), "One thing left to do.");
     assert_eq!(says(&rt, "todo-0-title"), "Add a passkey");
-    assert_eq!(says(&rt, "btn-0-label"), "Add");
-    assert_eq!(name(&rt, "btn-0"), "Add, Add a passkey");
+    assert_eq!(says(&rt, "todo-0-btn-label"), "Add");
+    assert_eq!(name(&rt, "todo-0-btn"), "Add, Add a passkey");
     assert!(find(&rt, "todo-1").is_none(), "one thing");
     // The row of the thing that is left has no mark; the others keep theirs.
     assert_eq!(says(&rt, "item-0-2-sub"), "None added");
     assert!(find(&rt, "item-0-2-check").is_none());
     assert!(find(&rt, "item-0-1-check").is_some());
     // The button stays inside its card.
-    let (card, button) = (info(&rt, "card-0").rect, info(&rt, "btn-0").rect);
+    let (card, button) = (info(&rt, "card-0").rect, info(&rt, "todo-0-btn").rect);
     assert!(
         button[0] + button[2] <= card[0] + card[2] - 17.9,
         "{button:?} inside {card:?}"
     );
-    tab_to(&mut rt, "btn-0");
+    tab_to(&mut rt, "todo-0-btn");
     key(&mut rt, Key::Enter);
     assert_eq!(rt.state.account.pane, Pane::Passkeys);
     assert_eq!(says(&rt, "empty-title"), "No passkeys yet");
@@ -146,7 +146,7 @@ fn a_source_that_knows_nothing_gets_no_score_no_mark_and_no_sample_value() {
         "backup codes",
         "passkeys",
         "Anna-Laptop",
-        "4 devices",
+        "4 signed in",
         "5 min",
     ] {
         assert!(!text.contains(never), "says {never:?}");
@@ -206,14 +206,36 @@ fn nothing_that_is_not_bound_can_be_pressed() {
         assert_eq!(rt.state.account.dialog, None, "{row}");
         assert!(find(&rt, "dlg").is_none(), "{row}");
     }
-    // Asked for by its frame id, the confirm still does not draw.
-    rt.update(|s, _| super::go(s, "DW-A57"));
-    settle(&mut rt);
-    assert!(find(&rt, "dlg").is_none());
+    // Asked for by its frame id, the confirm does not open: nothing undrawn holds the keyboard.
+    for frame in ["DW-A57", "DW-A57a", "DW-0716"] {
+        rt.update(move |s, _| super::go(s, frame));
+        settle(&mut rt);
+        assert_eq!(rt.state.account.dialog, None, "{frame}");
+        assert!(find(&rt, "dlg").is_none() && find(&rt, "menu-0").is_none(), "{frame}");
+    }
     // Devices and sessions answers, so its row is a link.
     assert_eq!(info(&rt, "item-1-1").role, "link");
     click(&mut rt, "item-1-1");
     assert_eq!(section(&rt), Some(SettingsPane::DevicesAndSessions));
+}
+
+/// The page of a source that knows two-factor and how many are signed in, and answers for no page under it (the
+/// running app today): a row keeps the state it has, and "Not available yet" is only on a row with none.
+#[test]
+fn a_row_with_a_state_keeps_it_and_does_not_also_say_not_available() {
+    let mut rt = runtime("SEC-PARTLY-KNOWN");
+    assert_eq!(name(&rt, "item-0-1"), "Two-factor authentication, On, done");
+    assert_eq!(info(&rt, "item-0-1").role, "listitem");
+    assert_eq!(
+        name(&rt, "item-0-0"),
+        "Password, Last change not known, Not available yet"
+    );
+    assert_eq!(says(&rt, "item-1-1-value"), "4 signed in");
+    assert_eq!(info(&rt, "item-1-1").role, "link");
+    // The board's source has App lock on; this page has no row for it, so its menu does not open either.
+    rt.update(|s, _| super::go(s, "DW-0716"));
+    settle(&mut rt);
+    assert_eq!(rt.state.account.dialog, None);
 }
 
 #[test]
@@ -256,7 +278,7 @@ fn a_to_do_whose_page_is_not_there_has_no_button() {
     state.account.source = Some(Box::new(BoardAccount::new().without_passkeys().sections_only()));
     let rt = window(state);
     assert_eq!(says(&rt, "todo-0-title"), "Add a passkey");
-    assert!(find(&rt, "btn-0").is_none());
+    assert!(find(&rt, "todo-0-btn").is_none());
     assert_eq!(says(&rt, "todo-0-value"), "Not available yet");
 }
 

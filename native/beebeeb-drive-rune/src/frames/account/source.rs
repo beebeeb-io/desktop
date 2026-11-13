@@ -134,6 +134,7 @@ pub struct SecurityFacts {
     /// Backup codes left, of how many.
     pub backup_codes: Option<(usize, usize)>,
     pub passkeys: Option<usize>,
+    /// How many are signed in: devices or sessions, as the source lists them (the page says "N signed in").
     pub sessions: Option<usize>,
     /// Sign-ins and security changes, newest first (the page shows the first `RECENT_EVENTS`). `Some(None)`:
     /// security logging is off.
@@ -564,12 +565,12 @@ pub trait AccountSource {
     fn security(&self) -> Security;
     /// Engine: `GET /api/v1/account/security-score`, checked each time the page opens.
     fn factors(&self) -> Vec<Factor>;
-    /// What the Security page draws. This body is for a source that knows every part (the board's fixture):
-    /// it takes them from the accessors above. A source that knows only some overrides it and leaves the
-    /// rest `None`. (Seam: Beebeeb's `GET /api/v1/account/security` and the score's own "can this be said"
-    /// mark fill more of it once the engine reads them.)
+    /// What the Security page draws. This body knows nothing, so a source that forgets it draws no score, no
+    /// mark and no control: a source says here what it really read ([`all_known`] for one that knows every
+    /// part). (Seam: Beebeeb's `GET /api/v1/account/security` and the score's own "can this be said" mark
+    /// fill more of it once the engine reads them.)
     fn security_facts(&self) -> SecurityFacts {
-        all_known(self)
+        SecurityFacts::unknown()
     }
     /// Engine: `GET /api/v1/account/sessions`, grouped by device.
     fn sessions(&self) -> Vec<Session>;

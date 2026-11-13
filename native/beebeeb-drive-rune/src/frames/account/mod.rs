@@ -554,6 +554,7 @@ pub fn go(s: &mut State, frame: &'static str) {
     s.account.dialog = dialog;
     form::arrive(&mut s.account);
     app_lock::arrive(&mut s.account);
+    security_overview::arrive(&mut s.account);
     if plan::arrive(&mut s.account) {
         // Nothing can say what the plan is: the website can.
         s.settings.ask(settings::Intent::Web(plan::PLAN_PAGE));

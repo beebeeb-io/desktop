@@ -87,7 +87,7 @@ fn the_running_apps_security_page_says_what_is_known_and_guesses_nothing() {
     let server = server();
     server.two_factor.lock().unwrap()[0] = Some(true);
     let mut rt = window_on(signed_in(&server), SettingsPane::Security);
-    wait_for(&mut rt, "the page", |rt| shows(rt, "3 devices"));
+    wait_for(&mut rt, "the page", |rt| shows(rt, "3 signed in"));
     assert!(!has(&rt, "not-built"));
     assert!(shows(&rt, "Security score not known yet") && shows(&rt, "On"));
     let text = |rt: &Runtime<State>, key: &str| {
@@ -109,6 +109,9 @@ fn the_running_apps_security_page_says_what_is_known_and_guesses_nothing() {
         .filter(|k| k.ends_with("-check"))
         .collect();
     assert_eq!(marks, ["item-0-1-check"]);
+    // A state that was read is not also called unavailable.
+    assert!(shows(&rt, "Two-factor authentication, On, done"));
+    assert!(!shows(&rt, "Two-factor authentication, On, done, Not available yet"));
     for sample in [
         "Anna",
         "northwind",
@@ -138,7 +141,7 @@ fn the_security_page_drops_the_first_account_when_another_signs_in() {
     *server.two_factor.lock().unwrap() = [Some(true), Some(false)];
     let engine = signed_in(&server);
     let mut rt = window_on(engine.clone(), SettingsPane::Security);
-    wait_for(&mut rt, "the page", |rt| shows(rt, "3 devices"));
+    wait_for(&mut rt, "the page", |rt| shows(rt, "3 signed in"));
     engine.sign_out_keeping_local_data().expect("signs out");
     // Before any poll of the source: a draw alone shows nothing of the account.
     rt.poll = None;
@@ -146,12 +149,12 @@ fn the_security_page_drops_the_first_account_when_another_signs_in() {
     rt.frame(0.016);
     rt.frame(1.0);
     assert!(shows(&rt, "Not signed in"));
-    assert!(!says_anywhere(&rt, "3 devices") && !has(&rt, "item-0-1-check"));
+    assert!(!says_anywhere(&rt, "3 signed in") && !has(&rt, "item-0-1-check"));
     sign_in(&engine, &server.people[1]);
     rt.poll = Some(|s: &mut State, _: f64, tx: &mut Tx| crate::frames::account::poll(s, tx));
-    wait_for(&mut rt, "the second account's page", |rt| shows(rt, "1 device"));
+    wait_for(&mut rt, "the second account's page", |rt| shows(rt, "1 signed in"));
     assert!(shows(&rt, "Off: your password alone signs you in"));
-    assert!(!has(&rt, "item-0-1-check") && !says_anywhere(&rt, "3 devices"));
+    assert!(!has(&rt, "item-0-1-check") && !says_anywhere(&rt, "3 signed in"));
 }
 
 /// The name and the email rows of the live Account pane: nothing answers for the pages behind them, so they

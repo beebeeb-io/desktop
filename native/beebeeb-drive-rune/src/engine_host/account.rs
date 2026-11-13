@@ -386,8 +386,7 @@ pub struct EngineAccountSource<C: CredentialStores> {
     ended: Option<(SessionGeneration, EndedBy)>,
     /// The pane the window shows, when it is one this source answers for.
     showing: Option<Kind>,
-    /// The pane on screen is Sign-in and security: it also says how many devices are signed in, so the
-    /// sessions are read with it.
+    /// Sign-in and security is on screen: it says how many are signed in, so the sessions are read with it.
     counting_devices: bool,
     notice: Option<(SessionGeneration, Said)>,
     /// How a sign-out ended that was answered after the person left Devices and sessions, when it was not
@@ -680,7 +679,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                     // read again while the pane shows, and when it opens otherwise.
                     Ok(_) if changes != self.changes => {
                         self.sessions_reads.read_at = None;
-                        if self.showing == Some(Kind::Sessions) {
+                        if self.showing == Some(Kind::Sessions) || self.counting_devices {
                             self.read(Kind::Sessions);
                         }
                     }
@@ -761,6 +760,10 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                             // the pane it is about, and nothing is read for a pane that does not show: what
                             // was not done is said when the pane shows again, where the list is read.
                             self.later = Some((self.engine.session_turn(), said));
+                        }
+                        // The Security page shows the count of that list: it is read again for it too.
+                        if self.counting_devices && sent {
+                            self.read(Kind::Sessions);
                         }
                     }
                 }
@@ -854,6 +857,11 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
             Kind::Sessions => (self.current(&self.sessions).is_some(), &self.sessions_reads),
         };
         if held {
+            // The Security page's count: while its first read is out the page loads (never "Not known").
+            if pane == Pane::Security && self.current(&self.sessions).is_none() && self.sessions_reads.reading.is_some()
+            {
+                return PaneState::Loading;
+            }
             PaneState::Ready
         } else if reads.reading.is_none() && reads.failed_for == Some(turn) {
             PaneState::Failed
@@ -875,20 +883,23 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         {
             self.read(Kind::Sessions);
         }
-        // A sign-out that was not done, answered while another pane showed: said now, over its own pane.
+        // A sign-out that was not done, answered while another pane showed: said now, over its own pane, and
+        // the list is read again with it, however fresh (the Security page's count may have read it since).
+        let mut said_later = false;
         if kind == Kind::Sessions
             && let Some((session, said)) = self.later.take()
             && self.open()
             && session == self.engine.session_turn()
         {
             self.say(said);
+            said_later = true;
         }
         let held = match kind {
             Kind::Overview => self.current(&self.overview).is_some(),
             Kind::Sessions => self.current(&self.sessions).is_some(),
         };
         let fresh = held && self.reads_of(kind).read_at.is_some_and(|at| at.elapsed() < FRESH_FOR);
-        if !fresh {
+        if !fresh || said_later {
             self.read(kind);
         }
     }
@@ -901,6 +912,9 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn reload(&mut self, pane: Pane) {
         if let Some(kind) = Kind::of(pane) {
             self.read(kind);
+        }
+        if pane == Pane::Security {
+            self.read(Kind::Sessions);
         }
     }
 
@@ -1051,11 +1065,8 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         self.sign_out(ELSEWHERE);
     }
 
-    // ---- Not bound: each pane these belong to is `PaneState::Unwired` (it says "not built yet", and none of
-    // its controls is drawn), so no drawn control reaches them. Each does nothing and claims nothing.
-
-    /// What the Security page draws: two-factor as the profile of THIS session's account marks it, the number
-    /// of devices when this session's list is held, and nothing else. Every other part is not known here.
+    /// The Security page: two-factor as THIS session's profile marks it, how many sessions are signed in when
+    /// this session's list is held (Beebeeb names no device per session), and nothing else.
     fn security_facts(&self) -> SecurityFacts {
         SecurityFacts {
             two_factor: self.current(&self.overview).and_then(|overview| overview.two_factor),
@@ -1063,6 +1074,9 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
             ..SecurityFacts::unknown()
         }
     }
+    // ---- Not bound: each pane these belong to is `PaneState::Unwired`, or the page that shows them draws no
+    // control for them (`security_facts`), so no drawn control reaches them. Each does nothing and claims nothing.
+
     /// The old rows' values have no "not known": the page is drawn from `security_facts`, never from this.
     fn security(&self) -> Security {
         Security {

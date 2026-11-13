@@ -58,11 +58,27 @@ fn answered(source: &dyn AccountSource, frame: &str) -> bool {
     super::local(frame).is_none_or(|(pane, _)| source.pane_state(pane) != PaneState::Unwired)
 }
 
-/// A row that opens `frame`. While nothing answers for that page it is the row alone, saying so: no press,
-/// no chevron (never a row that leads to a page that is not there).
-fn leads(list: usize, index: usize, it: Row, frame: &'static str, source: &dyn AccountSource, t: &Theme) -> El {
-    if !answered(source, frame) {
-        return set::item(list, index, &it.tail(Tail::Value(NOT_YET.into())), Vec::new(), t);
+/// A row that opens `frame`, with its own `mark` at the trailing edge (a value, the mark of a thing done).
+/// While nothing answers for that page it is the row alone: no press, no chevron (never a row that leads to a
+/// page that is not there). It then keeps a mark it has (the state is still true), and says "Not available
+/// yet" only where it has none: never both, which would read as the state not being available.
+fn leads(
+    list: usize,
+    index: usize,
+    it: Row,
+    mark: Option<Tail>,
+    frame: &'static str,
+    source: &dyn AccountSource,
+    t: &Theme,
+) -> El {
+    let open = answered(source, frame);
+    let it = match mark {
+        Some(mark) => it.tail(mark),
+        None if !open => it.tail(Tail::Value(NOT_YET.into())),
+        None => it,
+    };
+    if !open {
+        return set::item(list, index, &it, Vec::new(), t);
     }
     set::item(list, index, &it.link(true), Vec::new(), t).on_press(move |s: &mut State| super::go(s, frame))
 }
@@ -172,7 +188,7 @@ fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> E
             let look = if i == 0 { Look::Primary } else { Look::Plain };
             todo = todo.child(
                 set::button(
-                    &format!("btn-{i}"),
+                    &format!("todo-{i}-btn"),
                     f.kind.fix_label(),
                     None,
                     look,
@@ -197,8 +213,8 @@ fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> E
 }
 
 /// The mark of a row whose state is good AND was read. Nothing else gets it.
-fn checked(it: Row, good: bool) -> Row {
-    if good { it.tail(Tail::Check) } else { it }
+fn checked(good: bool) -> Option<Tail> {
+    good.then_some(Tail::Check)
 }
 
 fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
@@ -206,10 +222,7 @@ fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
         Some(when) => format!("Changed {when}"),
         None => "Last change not known".into(),
     });
-    let password = checked(
-        password,
-        done(facts, FactorKind::StrongPassword) && done(facts, FactorKind::PasswordNotInBreach),
-    );
+    let password_ok = checked(done(facts, FactorKind::StrongPassword) && done(facts, FactorKind::PasswordNotInBreach));
     let two = Row::new(Lead::Icon(&icons::SHIELD), "Two-factor authentication").sub(
         match (facts.two_factor, facts.backup_codes) {
             (Some(true), Some((left, of))) => format!("On · {left} of {of} backup codes left"),
@@ -218,21 +231,21 @@ fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
             (None, _) => NOT_KNOWN.into(),
         },
     );
-    let two = checked(two, facts.two_factor == Some(true));
+    let two_ok = checked(facts.two_factor == Some(true));
     let passkeys = Row::new(Lead::Icon(&icons::PASSKEY), "Passkeys").sub(match facts.passkeys {
         Some(0) => "None added".into(),
         Some(1) => "1 passkey".into(),
         Some(n) => format!("{n} passkeys"),
         None => NOT_KNOWN.into(),
     });
-    let passkeys = checked(passkeys, facts.passkeys.is_some_and(|n| n > 0));
+    let passkeys_ok = checked(facts.passkeys.is_some_and(|n| n > 0));
     lists::list(
         0,
         Some("Sign-in"),
         vec![
-            leads(0, 0, password, "DW-A67", source, t),
-            leads(0, 1, two, "DW-A71", source, t),
-            leads(0, 2, passkeys, "DW-A73", source, t),
+            leads(0, 0, password, password_ok, "DW-A67", source, t),
+            leads(0, 1, two, two_ok, "DW-A71", source, t),
+            leads(0, 2, passkeys, passkeys_ok, "DW-A73", source, t),
         ],
         None,
         t,
@@ -294,23 +307,24 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
 }
 
 fn devices(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
-    let sessions = Row::new(Lead::Icon(&icons::DEVICE_PHONE), "Devices and sessions")
-        .sub("Where your account is signed in")
-        .tail(Tail::Value(match facts.sessions {
-            Some(1) => "1 device".into(),
-            Some(n) => format!("{n} devices"),
-            None => NOT_KNOWN.into(),
-        }));
+    // "N signed in": true of devices and of sessions alike (a source lists one or the other).
+    let sessions =
+        Row::new(Lead::Icon(&icons::DEVICE_PHONE), "Devices and sessions").sub("Where your account is signed in");
+    let signed_in = Tail::Value(match facts.sessions {
+        Some(n) => format!("{n} signed in"),
+        None => NOT_KNOWN.into(),
+    });
     lists::list(
         1,
         Some("This PC and your devices"),
         vec![
             app_lock_row(facts, t),
-            leads(1, 1, sessions, "DW-A55", source, t),
+            leads(1, 1, sessions, Some(signed_in), "DW-A55", source, t),
             leads(
                 1,
                 2,
                 Row::new(Lead::Icon(&icons::SCAN), "Approve a sign-in").sub("Let another device sign in"),
+                None,
                 "DW-A12",
                 source,
                 t,
@@ -329,6 +343,7 @@ fn activity(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El 
             2,
             index,
             Row::new(Lead::Icon(&icons::ACTIVITY), "All sign-in activity").sub(sub),
+            None,
             "DW-A77",
             source,
             t,
@@ -409,10 +424,20 @@ fn delete(source: &dyn AccountSource, t: &Theme) -> El {
     lists::list(
         4,
         Some("Delete"),
-        vec![leads(4, 0, it, "DW-A58", source, t)],
+        vec![leads(4, 0, it, None, "DW-A58", source, t)],
         Some("Deletes every product's data after 72 hours to undo. After that it cannot be undone."),
         t,
     )
+}
+
+/// A confirm was just asked for over the page (`go`): one this source cannot act on does not open at all, so
+/// nothing that is not drawn holds the keyboard.
+pub fn arrive(ui: &mut super::AccountUi) {
+    if matches!(ui.dialog, Some(Dialog::SignOutApp | Dialog::SignOutAllApps))
+        && !ui.source.as_deref().is_some_and(|s| s.security_facts().can_sign_out)
+    {
+        ui.dialog = None;
+    }
 }
 
 /// The page, and the confirm or the menu over it when one is open.
