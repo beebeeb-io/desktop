@@ -500,7 +500,6 @@ fn not_wired(what: &str) -> ActionError {
     ActionError::Unavailable
 }
 
-/// Map a `DriveError` to the UI's `ActionError`.
 /// The path the system is asked to open for the item `id`, read under the account-bound handle: below the
 /// account's folder on this PC, and never a file of a kind that is not opened for safety. The ONE check behind
 /// every hand-over of a file to another app (the Files window's Open, a viewer's "Open in another app…").
@@ -513,6 +512,7 @@ fn path_the_system_opens(db: &StateDb, sync_root: &Path, id: &str) -> Result<std
     Ok(path)
 }
 
+/// Map a `DriveError` to the UI's `ActionError`.
 fn map_drive_err(e: DriveError) -> ActionError {
     match e {
         DriveError::ReadOnly => ActionError::Protected,

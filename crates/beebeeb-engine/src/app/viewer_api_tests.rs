@@ -338,6 +338,25 @@ fn signed_out_or_locked_nothing_is_read_and_nothing_is_asked() {
 }
 
 #[test]
+fn a_computer_where_nothing_has_synced_yet_says_that_and_never_that_the_file_is_not_there() {
+    let fake = fake("nothingyet");
+    let engine = engine_at(&fake.api.base);
+    // Signed in, and no local state was ever made here.
+    signed_in(&engine, &fake.first);
+    assert_eq!(engine.open_file_facts(NOTE), Err(OpenFileError::NothingSynced));
+    assert_eq!(
+        local(&engine, NOTE, NO_LIMIT).map(|_| ()).unwrap_err(),
+        OpenFileError::NothingSynced
+    );
+    assert_eq!(OpenFileError::NothingSynced.kind(), "nothing_synced");
+    assert_eq!(fake.api.requests().len(), 0, "nothing was asked of Beebeeb");
+    // Once it has synced, a file it does not list is "no such file".
+    let _state = local_state(&engine, &fake.first);
+    assert!(engine.open_file_facts(NOTE).is_ok());
+    assert_eq!(engine.open_file_facts("no-such-file"), Err(OpenFileError::NotFound));
+}
+
+#[test]
 fn another_accounts_local_state_answers_nothing_and_its_files_are_never_asked_for() {
     let fake = fake("other");
     let engine = engine_at(&fake.api.base);
@@ -584,6 +603,55 @@ fn a_link_where_the_file_should_be_is_never_followed() {
     assert_eq!(wholly_here(&folder.join("Invented note.txt")), None);
     assert_eq!(wholly_here(&folder), None);
     assert_eq!(wholly_here(&elsewhere.path().join("other.txt")), Some(20));
+}
+
+/// What is at the path may change between the check of its attributes and the open: the read asks the file it
+/// opened, and never waits on something that is not a plain file.
+#[cfg(unix)]
+#[test]
+fn what_was_put_at_the_path_after_the_check_is_asked_again_through_the_open_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let (never, always) = (AtomicBool::new(false), || true);
+    // A pipe nobody writes to: an open or a read of it would wait for ever.
+    let pipe = dir.path().join("pipe");
+    let name = std::ffi::CString::new(pipe.to_str().unwrap()).unwrap();
+    // SAFETY: `name` is a NUL-terminated path that lives for the call.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    assert_eq!(wholly_here(&pipe), None);
+    let (said, heard) = std::sync::mpsc::channel();
+    let at = pipe.clone();
+    std::thread::spawn(move || {
+        let (never, always) = (AtomicBool::new(false), || true);
+        let _ = said.send(matches!(
+            read_bounded(&at, 20, 5_000, &never, &always),
+            Err(ReadStopped::Unreadable)
+        ));
+    });
+    assert_eq!(
+        heard.recv_timeout(std::time::Duration::from_secs(20)),
+        Ok(true),
+        "a pipe is refused at once, never waited on"
+    );
+    // A link to a real file: the read does not follow it.
+    std::fs::write(dir.path().join("other.txt"), b"another file's words").unwrap();
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink(dir.path().join("other.txt"), &link).unwrap();
+    assert!(matches!(
+        read_bounded(&link, 20, 5_000, &never, &always),
+        Err(ReadStopped::Unreadable)
+    ));
+    // A folder.
+    assert!(matches!(
+        read_bounded(dir.path(), 20, 5_000, &never, &always),
+        Err(ReadStopped::Unreadable)
+    ));
+    // The plain file is read.
+    assert_eq!(
+        read_bounded(&dir.path().join("other.txt"), 20, 5_000, &never, &always)
+            .ok()
+            .map(|bytes| bytes.len()),
+        Some(20)
+    );
 }
 
 #[test]

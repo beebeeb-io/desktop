@@ -164,6 +164,9 @@ pub enum OpenFileError {
     SessionEnded,
     /// The local state on this computer is not provably the signed-in account's: nothing of it is read.
     NotYours,
+    /// Nothing has synced on this computer yet: its local state holds no files at all, so it says nothing
+    /// about this one (it is not "no such file").
+    NothingSynced,
     /// No such file: not in the local state, a folder, or gone from Beebeeb.
     NotFound,
     /// The file is larger than the caller holds in memory, by its stated size or the copy's own length:
@@ -192,6 +195,7 @@ impl OpenFileError {
             Self::NotSignedIn => "not_signed_in",
             Self::SessionEnded => "session_ended",
             Self::NotYours => "not_this_accounts",
+            Self::NothingSynced => "nothing_synced",
             Self::NotFound => "not_found",
             Self::TooLarge { .. } => "too_large",
             Self::OverLimit => "over_limit",
@@ -206,7 +210,7 @@ impl OpenFileError {
 fn refused(refusal: LocalStateRefused) -> OpenFileError {
     match refusal {
         LocalStateRefused::SessionEnded => OpenFileError::SessionEnded,
-        LocalStateRefused::NothingSynced => OpenFileError::NotFound,
+        LocalStateRefused::NothingSynced => OpenFileError::NothingSynced,
         LocalStateRefused::Unreadable => OpenFileError::Failed,
         refusal if refusal.not_this_accounts() => OpenFileError::NotYours,
         _ => OpenFileError::NotSignedIn,
@@ -392,23 +396,33 @@ impl<C: CredentialStores> Engine<C> {
     }
 }
 
+/// Whether `metadata` describes a plain file whose every byte is on this computer: core's reading of it, the
+/// one the backup takes for a source file, on every platform (Windows: not offline and no recall on open or on
+/// data access; macOS: not dataless). A link, a folder, a pipe or a device is not a plain file.
+fn is_plain_and_wholly_here(metadata: &std::fs::Metadata) -> bool {
+    let attrs = beebeeb_backup::attrs_of(metadata);
+    !(attrs.is_dir || attrs.is_link || attrs.not_local)
+}
+
 /// The length of the plain file at `path` when every byte of it is on disk, asked from its attributes alone
-/// (nothing is opened for data). `None`: not a plain file (a link, a folder, gone), or not wholly on disk.
+/// (nothing is opened for data). `None`: not a plain file (a link, a folder, a pipe, gone), or not wholly on
+/// disk.
 fn wholly_here(path: &Path) -> Option<u64> {
     let metadata = std::fs::symlink_metadata(path).ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
-    #[cfg(target_os = "windows")]
+    is_plain_and_wholly_here(&metadata).then(|| metadata.len())
+}
+
+/// Opens `path` for the read. Unix: a link is never followed, and the open never waits (a pipe put where the
+/// file was is opened at once, and refused by the check through the handle).
+fn open_for_the_read(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
     {
-        use std::os::windows::fs::MetadataExt;
-        // FILE_ATTRIBUTE_OFFLINE, _RECALL_ON_OPEN, _RECALL_ON_DATA_ACCESS: reading it would fetch it.
-        const NOT_ON_DISK: u32 = 0x0000_1000 | 0x0004_0000 | 0x0040_0000;
-        if metadata.file_attributes() & NOT_ON_DISK != 0 {
-            return None;
-        }
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    Some(metadata.len())
+    options.open(path)
 }
 
 /// How often a copy that grew while it was read is read again.
@@ -434,16 +448,12 @@ fn read_bounded(
     still: &dyn Fn() -> bool,
 ) -> Result<Zeroizing<Vec<u8>>, ReadStopped> {
     const PIECE: usize = 1 << 20;
-    let file = std::fs::File::open(path).map_err(|_| ReadStopped::Unreadable)?;
-    // Asked again through the handle: it describes the file the read then reads.
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const NOT_ON_DISK: u32 = 0x0000_1000 | 0x0004_0000 | 0x0040_0000;
-        match file.metadata() {
-            Ok(metadata) if metadata.is_file() && metadata.file_attributes() & NOT_ON_DISK == 0 => {}
-            _ => return Err(ReadStopped::Unreadable),
-        }
+    let file = open_for_the_read(path).map_err(|_| ReadStopped::Unreadable)?;
+    // Asked again through the handle, on every platform: it describes the file the read then reads, whatever
+    // was put at the path since the check before.
+    match file.metadata() {
+        Ok(metadata) if is_plain_and_wholly_here(&metadata) => {}
+        _ => return Err(ReadStopped::Unreadable),
     }
     let ceiling = max_bytes.saturating_add(1);
     let room = usize::try_from(length.saturating_add(1).min(ceiling)).map_err(|_| ReadStopped::Unreadable)?;

@@ -8,7 +8,7 @@
 use rune::{Align, El, Icon, col, el, row};
 
 use super::chrome::{ButtonKind, Dot, Status, button};
-use super::source::{Body, NoPreview, OpenFile, Stopped, percent, progress_words, size_words};
+use super::source::{Body, NoPreview, OpenFile, Origin, Stopped, percent, progress_words, size_words};
 use super::{Intent, icons, style, ui};
 use crate::State;
 use crate::theme::tokens::Theme;
@@ -59,8 +59,22 @@ fn sentence(words: String, t: &Theme) -> El {
         .align(Align::Center)
 }
 
-/// The status line's words for a state.
-pub fn status(body: &Body) -> Option<Status> {
+/// The status line's right side for bytes that were decrypted, looked at, and dropped.
+pub const DECRYPTED_NOT_KEPT: &str = "Decrypted in memory only; nothing was kept";
+/// The same for bytes read from the copy on this PC: nothing was decrypted.
+pub const READ_HERE_NOT_KEPT: &str = "Read from the copy on this PC; nothing was kept";
+
+/// Whether content from `origin` was decrypted on this PC just now (downloaded from Beebeeb). The copy kept on
+/// this PC was read as it is: nothing was decrypted, and no state says so.
+fn was_decrypted(origin: Origin) -> bool {
+    match origin {
+        Origin::Beebeeb | Origin::BeebeebNotThisPcs => true,
+        Origin::ThisPc { .. } | Origin::ThisPcSyncOff => false,
+    }
+}
+
+/// The status line's words for a state. `origin`: where the bytes a state speaks of were read from.
+pub fn status(body: &Body, origin: Origin) -> Option<Status> {
     Some(match body {
         Body::Decrypting { done, total } => Status {
             dot: Dot::Warn,
@@ -90,6 +104,8 @@ pub fn status(body: &Body) -> Option<Status> {
                 Stopped::Gone => "Not opened: the file is gone",
                 Stopped::NotNow => "Not opened: couldn't read it right now",
                 Stopped::CopyNotReadable => "Not opened: the copy on this PC couldn't be read",
+                Stopped::NothingSynced => "Not opened: nothing has synced on this PC yet",
+                Stopped::NotThisAccounts => "Not opened: this PC's data couldn't be confirmed as this account's",
             }
             .into(),
             details: "The copy in Beebeeb is unchanged".into(),
@@ -103,7 +119,14 @@ pub fn status(body: &Body) -> Option<Status> {
                 NoPreview::Unreadable
                 | NoPreview::PictureTooBig { .. }
                 | NoPreview::PdfLocked
-                | NoPreview::PdfTooLong { .. } => "Decrypted in memory only; nothing was kept",
+                | NoPreview::PdfUnreadable
+                | NoPreview::PdfTooLong { .. } => {
+                    if was_decrypted(origin) {
+                        DECRYPTED_NOT_KEPT
+                    } else {
+                        READ_HERE_NOT_KEPT
+                    }
+                }
             }
             .into(),
         },
@@ -256,6 +279,16 @@ fn stopped(why: Stopped, t: &Theme) -> El {
             "Couldn't open this file right now",
             "What this PC knows about the file couldn't be read at this moment. Nothing changed.",
         ),
+        Stopped::NothingSynced => (
+            "Nothing has synced on this PC yet",
+            "This PC doesn't know your files yet, so it can't open this one. The file in Beebeeb is unchanged. \
+             Try again once the first sync has run.",
+        ),
+        Stopped::NotThisAccounts => (
+            "Couldn't confirm this PC's data is this account's",
+            "What this PC holds of Beebeeb couldn't be confirmed as this account's, so nothing of it was read. \
+             This says nothing about the file: the copy in Beebeeb is unchanged.",
+        ),
     };
     let act = if why.can_retry() {
         let label = if why == Stopped::SessionChanged {
@@ -281,7 +314,13 @@ fn stopped(why: Stopped, t: &Theme) -> El {
 
 /// The file is in Beebeeb and is not shown here: why, and the ways out. `copies`: "Save a copy…" has somewhere to
 /// go (`ViewerSource::saves_copies`); a button with no target is not drawn.
-fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, t: &Theme) -> El {
+fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, origin: Origin, t: &Theme) -> El {
+    // What happened to the bytes before this app looked at them: decrypted, or read from the copy on this PC.
+    let it_was = if was_decrypted(origin) {
+        "It was decrypted on this PC"
+    } else {
+        "It was read from the copy on this PC"
+    };
     let (title, words) = match why {
         NoPreview::NoViewer => (
             "No preview for this kind of file yet",
@@ -311,9 +350,17 @@ fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, t: &Theme) -> 
         ),
         NoPreview::Unreadable => (
             "Can't show this file",
-            "It was decrypted on this PC, but this app can't read its content: text that isn't UTF-8, or a picture \
-             it can't decode. Nothing was kept."
-                .to_string(),
+            format!(
+                "{it_was}, but this app can't read its content: text that isn't UTF-8, or a picture it can't \
+                 decode. Nothing was kept."
+            ),
+        ),
+        NoPreview::PdfUnreadable => (
+            "Can't show this PDF",
+            format!(
+                "{it_was}, but this app can't read it: it may be damaged or cut short, or protected in a way this \
+                 app doesn't open. Open it in your PDF app. Nothing was kept."
+            ),
         ),
         NoPreview::PdfLocked => (
             "This PDF asks for a password",
@@ -373,14 +420,15 @@ fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, t: &Theme) -> 
     stage(content, t)
 }
 
-/// The body of a state. `copies`: see [`not_previewable`].
-pub fn body(file: &OpenFile, copies: bool, t: &Theme) -> Option<El> {
+/// The body of a state. `copies`: see [`not_previewable`]. `origin`: where the bytes a state speaks of were
+/// read from.
+pub fn body(file: &OpenFile, copies: bool, origin: Origin, t: &Theme) -> Option<El> {
     Some(match &file.body {
         Body::Decrypting { done, total } => decrypting(file, *done, *total, t),
         Body::TooLarge { size, free } => too_large(file, *size, *free, t),
         Body::Failed => failed(t),
         Body::Stopped(why) => stopped(*why, t),
-        Body::NotPreviewable(why) => not_previewable(file, *why, copies, t),
+        Body::NotPreviewable(why) => not_previewable(file, *why, copies, origin, t),
         // Each has its own view (`text.rs`, `markdown.rs`, `photo.rs`, …).
         _ => return None,
     })

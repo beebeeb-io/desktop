@@ -66,6 +66,8 @@ struct Inner {
     local_error: Option<OpenFileError>,
     /// What the next reads of the facts answer instead of facts, and how many of them (`usize::MAX`: all).
     facts_error: Option<(OpenFileError, usize)>,
+    /// The session ends while the facts are read (the read that is refused finds none after it).
+    session_ends_at_facts: bool,
 }
 
 struct Fake {
@@ -99,6 +101,7 @@ impl Fake {
                 local_calls: Vec::new(),
                 local_error: None,
                 facts_error: None,
+                session_ends_at_facts: false,
             }),
             door: Mutex::new(()),
         };
@@ -157,6 +160,9 @@ impl ViewerEngine for Fake {
     fn facts(&self, file_id: &str) -> Result<OpenFileFacts, OpenFileError> {
         let mut s = self.s();
         s.facts_calls += 1;
+        if s.session_ends_at_facts {
+            s.signed_in = false;
+        }
         if let Some((error, left)) = s.facts_error {
             s.facts_error = (left > 1).then_some((error, left.saturating_sub(usize::from(left != usize::MAX))));
             return Err(error);

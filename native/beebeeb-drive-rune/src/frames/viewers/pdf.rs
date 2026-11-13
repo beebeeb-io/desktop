@@ -269,54 +269,91 @@ fn bar_ground(t: &Theme) -> Color {
     rune::color::hex(if t.dark { "#201C17" } else { "#F3F2F1" }).unwrap_or(t.bg)
 }
 
-fn thumbs(ui: &Ui, doc: &PdfDoc, t: &Theme) -> El {
-    let mut column = col()
+/// A thumbnail's key: page 1 is `thumb-0`.
+pub fn thumb_key(page: u32) -> String {
+    format!("thumb-{}", page.saturating_sub(1))
+}
+
+/// A thumbnail with its number: 64 x 84, the number under it, 12 points to the next.
+const THUMB_ROW: f32 = 84.0 + 4.0 + 14.0 + 12.0;
+
+/// The pages' column. It scrolls (the wheel, a touchpad), and only the thumbnails in and near the window are
+/// built: a file of 2,000 pages builds a handful per draw, not 6,000 elements.
+fn thumbs(doc: &PdfDoc, t: &Theme) -> El {
+    let t = *t;
+    col()
         .key("thumb-sidebar")
         .role("list")
         .label("Pages")
         .w(120.0)
         .h_full()
+        .min_h(0.0)
         .py(16.0)
-        .gap(12.0)
         .items_center()
         .fill(t.sidebar_bg)
         .border_sides([0.0, kit::HAIR, 0.0, 0.0], t.separator)
         .border_layout()
-        .clip_rounded(0.0);
-    for n in 1..=doc.pages {
-        let i = n - 1;
-        let current = n == ui.media.page;
-        let page = el()
-            .key(format!("thumb-{i}-page"))
-            .size(64.0, 84.0)
-            .radius(2.0)
-            .fill(Color::WHITE);
-        let page = if current {
-            page.box_shadow(kit::ring(2.0, t.text))
-        } else {
-            page.box_shadow(kit::drop(1.0, 4.0, Color::BLACK.alpha(0.14)))
-        };
-        column = column.child(
+        .clip_rounded(0.0)
+        .scroll(rune::ScrollSpec { stick_bottom: false })
+        .child(
             col()
-                .key(format!("thumb-{i}"))
-                .role("button")
-                .label(format!("Page {n}"))
-                .checked(current)
+                .key("thumb-list")
                 .items_center()
-                .gap(4.0)
-                .focusable(true)
-                .cursor(rune::Cursor::Pointer)
-                .on_press(with_ui(move |ui| ui.go_page(n)))
-                .child(page)
-                .child(style::fitted(
-                    format!("thumb-{i}-num"),
-                    &n.to_string(),
-                    style::CAP_MONO,
-                    t.text_tertiary,
-                )),
-        );
-    }
-    column
+                .gap(12.0)
+                .growth(rune::GrowthSpec::default())
+                .virtual_rows(
+                    doc.pages as usize,
+                    THUMB_ROW,
+                    |_: &State, i| std::borrow::Cow::Owned(format!("thumb-{i}")),
+                    move |s: &State, i| thumb(s, i, &t),
+                ),
+        )
+}
+
+/// One thumbnail of the column: row `i` is page `i + 1`.
+fn thumb(s: &State, i: usize, t: &Theme) -> El {
+    let n = u32::try_from(i).map_or(u32::MAX, |i| i.saturating_add(1));
+    let current = s.viewer.ui.as_ref().is_some_and(|ui| ui.media.page == n);
+    let page = el()
+        .key(format!("thumb-{i}-page"))
+        .size(64.0, 84.0)
+        .radius(2.0)
+        .fill(Color::WHITE);
+    let page = if current {
+        page.box_shadow(kit::ring(2.0, t.text))
+    } else {
+        page.box_shadow(kit::drop(1.0, 4.0, Color::BLACK.alpha(0.14)))
+    };
+    col()
+        .key(format!("thumb-{i}"))
+        .role("button")
+        .label(format!("Page {n}"))
+        .checked(current)
+        .items_center()
+        .gap(4.0)
+        .focusable(true)
+        .cursor(rune::Cursor::Pointer)
+        .on_press_tx(move |s: &mut State, tx: &mut rune::Tx| {
+            if let Some(ui) = ui(s) {
+                ui.go_page(n);
+            }
+            show_page_from_its_top(tx);
+        })
+        .child(page)
+        .child(style::fitted(
+            format!("thumb-{i}-num"),
+            &n.to_string(),
+            style::CAP_MONO,
+            t.text_tertiary,
+        ))
+}
+
+/// The mark at the page's top-left corner that a turned page is scrolled back to.
+const PAGE_TOP: &str = "page-top";
+
+/// After the page changed: the new page is read from its top, wherever the last one was scrolled to.
+pub fn show_page_from_its_top(tx: &mut rune::Tx) {
+    tx.scroll_into_view(PAGE_TOP);
 }
 
 fn page(ui: &Ui) -> El {
@@ -329,7 +366,8 @@ fn page(ui: &Ui) -> El {
         .w(width)
         .radius(2.0)
         .fill(Color::WHITE)
-        .box_shadow(kit::drop(4.0, 18.0, Color::BLACK.alpha(0.16)));
+        .box_shadow(kit::drop(4.0, 18.0, Color::BLACK.alpha(0.16)))
+        .child(el().key(PAGE_TOP).absolute(0.0, 0.0).size(1.0, 1.0).opacity(0.0));
     let mut sheet = match ui.source.picture(&ui.file.id, Picture::Page(ui.media.page)) {
         Some(pixels) => {
             let (w, h) = pixels.size();
@@ -377,18 +415,26 @@ pub fn body(ui: &Ui, doc: &PdfDoc, t: &Theme) -> El {
         .grow(1.0)
         .min_w(0.0)
         .h_full()
-        .child(thumbs(ui, doc, t))
+        .child(thumbs(doc, t))
         .child(
             row()
                 .key("page-area")
                 .grow(1.0)
                 .min_w(0.0)
+                .min_h(0.0)
                 .h_full()
                 .pt(24.0)
+                .pb(24.0)
                 .justify_center()
                 .items_start()
                 .fill(style::stage(t))
                 .clip_rounded(0.0)
+                // A page taller or wider than the window (a long page, a zoom above 100 %) is read by
+                // scrolling: the wheel or a touchpad, both ways.
+                .scroll(rune::ScrollSpec { stick_bottom: false })
+                .scroll_xy()
+                // A turned page is scrolled back to its top with the area's own 24 points over it.
+                .scroll_margin(24.0)
                 .child(page(ui)),
         )
 }

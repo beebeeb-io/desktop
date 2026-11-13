@@ -586,7 +586,7 @@ fn open_pdf(bytes: zeroize::Zeroizing<Vec<u8>>, size: &str) -> (Body, Option<vie
             Body::NotPreviewable(match why {
                 viewer_pdf::NotOpened::Locked => NoPreview::PdfLocked,
                 viewer_pdf::NotOpened::TooLong { pages } => NoPreview::PdfTooLong { pages },
-                viewer_pdf::NotOpened::Unreadable => NoPreview::Unreadable,
+                viewer_pdf::NotOpened::Unreadable => NoPreview::PdfUnreadable,
             }),
             None,
         ),
@@ -633,6 +633,7 @@ fn body_of(error: OpenFileError) -> Option<Body> {
         // The session, or whose local state this is, changed under the download.
         OpenFileError::NotSignedIn | OpenFileError::NotYours => Body::Stopped(Stopped::SessionChanged),
         OpenFileError::NotFound => Body::Stopped(Stopped::Gone),
+        OpenFileError::NothingSynced => Body::Stopped(Stopped::NothingSynced),
         OpenFileError::Failed => Body::Failed,
     })
 }
@@ -740,8 +741,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     }
 
     /// The facts of `file_id` for the session in memory, with the session they are for. Each refusal keeps its
-    /// kind: no session, a session Beebeeb ended, a file that is not there, and "not right now" (the local state
-    /// could not be read, or the session changed during the read; the read is tried once more first).
+    /// kind: no session, a session Beebeeb ended, a file that is not there, a PC where nothing has synced yet,
+    /// a local state that is not this account's, and "not right now" (the local state could not be read, or the
+    /// session changed during the read; the read is tried once more first, whether the change shows as facts
+    /// of another session or as a refused read).
     fn facts_now(&self, file_id: &str) -> Result<(SessionGeneration, Option<String>, OpenFileFacts), OpenError> {
         let mut again = true;
         loop {
@@ -749,16 +752,19 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 return Err(OpenError::SignedOut);
             }
             let (session, account) = (self.engine.session_turn(), self.engine.account());
-            let facts = self.engine.facts(file_id).map_err(|error| match error {
-                // Not in the local state, or the local state is not this account's: no such file for this account.
-                OpenFileError::NotFound | OpenFileError::NotYours => OpenError::NotFound,
-                OpenFileError::NotSignedIn => OpenError::SignedOut,
-                OpenFileError::SessionEnded => OpenError::SessionEnded,
-                _ => OpenError::NotNow,
-            })?;
-            // Facts read across a session change are not this session's.
-            if facts.session == session {
-                return Ok((session, account, facts));
+            match self.engine.facts(file_id) {
+                // Facts read across a session change are not this session's.
+                Ok(facts) if facts.session == session => return Ok((session, account, facts)),
+                Ok(_) => {}
+                Err(OpenFileError::NotFound) => return Err(OpenError::NotFound),
+                // Neither says anything about the file: it is not "gone".
+                Err(OpenFileError::NothingSynced) => return Err(OpenError::NothingSynced),
+                Err(OpenFileError::NotYours) => return Err(OpenError::NotThisAccounts),
+                Err(OpenFileError::SessionEnded) => return Err(OpenError::SessionEnded),
+                // The read was refused for the session: there is none any more, or it changed during the read.
+                Err(OpenFileError::NotSignedIn) if !self.engine.has_session() => return Err(OpenError::SignedOut),
+                Err(OpenFileError::NotSignedIn) => {}
+                Err(_) => return Err(OpenError::NotNow),
             }
             if !std::mem::take(&mut again) {
                 return Err(OpenError::NotNow);

@@ -119,6 +119,8 @@ pub enum NoPreview {
     PictureTooBig { width: u32, height: u32 },
     /// A PDF that asks for a password. It stays closed here.
     PdfLocked,
+    /// A PDF this app cannot read: damaged, cut short, or protected in a way it does not open.
+    PdfUnreadable,
     /// A PDF with more pages than the viewer lists.
     PdfTooLong { pages: u32 },
 }
@@ -149,6 +151,12 @@ pub enum Stopped {
     Gone,
     /// What this PC knows about the file could not be read at this moment. Trying again may work.
     NotNow,
+    /// Nothing has synced on this PC yet, so it knows no file: this says nothing about the file, which may
+    /// well be in Beebeeb. Trying again after the first sync works.
+    NothingSynced,
+    /// What this PC holds of Beebeeb is not provably the signed-in account's, so nothing of it is read. It
+    /// says nothing about the file. Trying again may work (once sync has set this PC up for this account).
+    NotThisAccounts,
     /// This PC holds a change to the file that is not in Beebeeb yet, and its copy could not be read just now.
     /// The older version Beebeeb has is not shown in its place. Trying again may work.
     CopyNotReadable,
@@ -159,7 +167,12 @@ impl Stopped {
     pub fn can_retry(self) -> bool {
         matches!(
             self,
-            Stopped::Offline | Stopped::SessionChanged | Stopped::NotNow | Stopped::CopyNotReadable
+            Stopped::Offline
+                | Stopped::SessionChanged
+                | Stopped::NotNow
+                | Stopped::CopyNotReadable
+                | Stopped::NothingSynced
+                | Stopped::NotThisAccounts
         )
     }
 }
@@ -401,8 +414,12 @@ pub fn plain_lines(text: &str) -> Vec<Vec<Run>> {
 /// [`OpenError::SignedOut`], which the shell's session gate draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenError {
-    /// The engine has no such item (deleted elsewhere, or not this account's).
+    /// The engine has no such item (deleted elsewhere).
     NotFound,
+    /// Nothing has synced on this PC yet: it knows no file, this one included.
+    NothingSynced,
+    /// What this PC holds of Beebeeb is not provably this account's: nothing of it is read.
+    NotThisAccounts,
     /// No session in memory (signed out, or locked): nothing is read.
     SignedOut,
     /// Beebeeb no longer accepts this session.
@@ -418,6 +435,8 @@ impl OpenError {
     pub fn stopped(self) -> Option<Stopped> {
         match self {
             OpenError::NotFound => Some(Stopped::Gone),
+            OpenError::NothingSynced => Some(Stopped::NothingSynced),
+            OpenError::NotThisAccounts => Some(Stopped::NotThisAccounts),
             OpenError::SessionEnded => Some(Stopped::SessionEnded),
             OpenError::NotNow => Some(Stopped::NotNow),
             OpenError::SignedOut => None,

@@ -134,25 +134,54 @@ fn kept_on_this_pc_is_said_only_for_a_file_that_is_here_while_sync_runs_for_this
 
 #[test]
 fn each_refusal_of_the_facts_keeps_its_kind_and_one_that_passes_opens_on_the_next_ask() {
-    for (error, kind) in [
-        (OpenFileError::NotFound, OpenError::NotFound),
-        (OpenFileError::NotYours, OpenError::NotFound),
-        (OpenFileError::SessionEnded, OpenError::SessionEnded),
-        (OpenFileError::NotSignedIn, OpenError::SignedOut),
-        (OpenFileError::Failed, OpenError::NotNow),
-        (OpenFileError::Offline, OpenError::NotNow),
+    for (error, times, kind) in [
+        (OpenFileError::NotFound, 1, OpenError::NotFound),
+        // Neither says the file is gone: nothing has synced here yet, and a local state that is not this account's.
+        (OpenFileError::NothingSynced, 1, OpenError::NothingSynced),
+        (OpenFileError::NotYours, 1, OpenError::NotThisAccounts),
+        (OpenFileError::SessionEnded, 1, OpenError::SessionEnded),
+        // The session changed during the read, twice in a row: not right now (never "signed out": there is a
+        // session, and the window must draw a state with Try again).
+        (OpenFileError::NotSignedIn, 2, OpenError::NotNow),
+        (OpenFileError::Failed, 1, OpenError::NotNow),
+        (OpenFileError::Offline, 1, OpenError::NotNow),
     ] {
         let fake = Fake::new();
         let mut source = Source::on(fake.clone());
-        // Refused once (the local state could not be read at that moment), then readable again.
-        fake.s().facts_error = Some((error, 1));
+        // Refused (the local state could not be read at that moment), then readable again.
+        fake.s().facts_error = Some((error, times));
         assert_eq!(source.open(NOTE).err(), Some(kind), "{error:?}");
+        // Each of them is a state the window draws, and all but "gone" and "the session ended" can be tried again.
+        let state = kind.stopped().expect("a state, not the shell's placeholder");
+        assert_eq!(
+            state.can_retry(),
+            !matches!(kind, OpenError::NotFound | OpenError::SessionEnded),
+            "{error:?}"
+        );
         assert!(fake.s().fetches.is_empty(), "{error:?}");
         assert_eq!(source.poll(NOTE), None, "{error:?}");
         let again = source.retry(NOTE).expect("the refusal passed");
         assert!(matches!(again.body, Body::Decrypting { .. }), "{error:?}");
         assert_eq!(words(&answered(&mut source, NOTE)), NOTE_TEXT, "{error:?}");
     }
+}
+
+#[test]
+fn a_read_refused_once_because_the_session_changed_under_it_is_read_again_and_no_session_is_signed_out() {
+    // Refused once for the session, with a session in memory: the read is tried once more, and the file opens.
+    let fake = Fake::new();
+    let mut source = Source::on(fake.clone());
+    fake.s().facts_error = Some((OpenFileError::NotSignedIn, 1));
+    let before = fake.s().facts_calls;
+    let file = source.open(NOTE).expect("the second read is this session's");
+    assert!(matches!(file.body, Body::Decrypting { .. }));
+    assert_eq!(fake.s().facts_calls, before + 2, "asked twice, not more");
+    // Refused for the session, and there is none by then: signed out (the shell's gate says it).
+    let fake = Fake::new();
+    let mut source = Source::on(fake.clone());
+    fake.s().facts_error = Some((OpenFileError::NotSignedIn, 1));
+    fake.s().session_ends_at_facts = true;
+    assert_eq!(source.open(NOTE).err(), Some(OpenError::SignedOut));
 }
 
 // ── Pictures: the viewer's own limits ───────────────────────────────────────────────────────────────
@@ -315,7 +344,18 @@ fn a_file_named_pdf_that_is_not_one_is_said_so_and_no_page_is_waited_for() {
         b"%PDF-1.7 invented, and nothing after",
     );
     let (source, _, body) = opened(&fake, "f-not-pdf");
-    assert_eq!(body, Body::NotPreviewable(NoPreview::Unreadable));
+    // Its own state: not "text that isn't UTF-8, or a picture".
+    assert_eq!(body, Body::NotPreviewable(NoPreview::PdfUnreadable));
+    assert_eq!(source.origin("f-not-pdf"), Origin::Beebeeb);
+    // The same file read from the copy on this PC: the origin says so, and the state's words follow it.
+    fake.keep(
+        "f-not-pdf",
+        OnThisPc::InSync,
+        Some(b"%PDF-1.7 invented, and nothing after"),
+    );
+    let (source, _, body) = opened(&fake, "f-not-pdf");
+    assert_eq!(body, Body::NotPreviewable(NoPreview::PdfUnreadable));
+    assert_eq!(source.origin("f-not-pdf"), Origin::ThisPc { unsent: false });
     assert!(source.picture("f-not-pdf", Picture::Page(1)).is_none());
 }
 

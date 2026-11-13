@@ -964,8 +964,8 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
         _ => {}
     }
     let (body, status) = match (
-        states::body(&ui.file, ui.saves_copies(), &t),
-        states::status(&ui.file.body),
+        states::body(&ui.file, ui.saves_copies(), ui.origin(), &t),
+        states::status(&ui.file.body, ui.origin()),
     ) {
         (Some(body), Some(status)) => (body, status),
         _ => return crate::shell::placeholder::window(s, cx, FrameGroup::Viewer),
@@ -983,7 +983,15 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             ui.toast = None;
         }
     }
+    let page_before = ui(s).map(|ui| ui.media.page);
     if media::on_key(s, ev) {
+        // A page turned by a key: its thumbnail comes into view, and the page is read from its top.
+        if let Some(ui) = ui(s).filter(|ui| matches!(ui.file.body, Body::Pdf(_))) {
+            if Some(ui.media.page) != page_before {
+                tx.scroll_into_view(pdf::thumb_key(ui.media.page));
+                pdf::show_page_from_its_top(tx);
+            }
+        }
         if let Some(key) = ui(s).and_then(|ui| ui.focus.take()) {
             tx.focus(key, true);
         }

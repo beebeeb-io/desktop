@@ -11,7 +11,7 @@ use rune::{Env, Runtime};
 use super::source::{
     Body, Details, NoPreview, OpenError, OpenFile, Origin, Stopped, TextDoc, ViewerSource, plain_lines,
 };
-use super::{chrome, open_item, text, wire};
+use super::{chrome, open_item, states, text, wire};
 use crate::shell::app::{Event, Screen};
 use crate::shell::host;
 use crate::{State, init, view};
@@ -492,7 +492,106 @@ fn a_text_a_source_cannot_save_does_not_name_the_edit_key() {
 }
 
 #[test]
+fn a_pc_that_knows_no_file_yet_never_says_the_file_is_gone_and_can_be_tried_again() {
+    for (refusal, title, line) in [
+        (
+            OpenError::NothingSynced,
+            "Nothing has synced on this PC yet",
+            "Not opened: nothing has synced on this PC yet",
+        ),
+        (
+            OpenError::NotThisAccounts,
+            "Couldn't confirm this PC's data is this account's",
+            "Not opened: this PC's data couldn't be confirmed as this account's",
+        ),
+    ] {
+        let (mut rt, script) = window(Script {
+            answers: VecDeque::from([Err(refusal)]),
+            ..Script::default()
+        });
+        route_to_file(&mut rt);
+        let words = drawn(&rt);
+        assert!(words.contains(title), "{words}");
+        assert!(words.contains(line), "{words}");
+        // Neither says anything about the file: no "no longer here", no Trash, no "deleted".
+        for wrong in ["no longer here", "moved to Trash", "deleted", "is gone"] {
+            assert!(!words.contains(wrong), "{wrong}: {words}");
+        }
+        assert!(words.contains("Try again"), "{words}");
+        // Try again asks the source again, and what it answers then is shown.
+        click(&mut rt, "state-btn-0");
+        assert_eq!(opens(&script, "retry"), 1, "{refusal:?}");
+        assert!(drawn(&rt).contains(WORDS), "{refusal:?}");
+    }
+}
+
+#[test]
+fn a_pdf_that_cannot_be_read_has_its_own_words_and_says_decrypted_only_when_it_was() {
+    let said = |why: NoPreview, origin: Option<Origin>| {
+        let (mut rt, _script) = window(Script {
+            answers: VecDeque::from([Ok(Body::NotPreviewable(why))]),
+            origin,
+            ..Script::default()
+        });
+        route_to_file(&mut rt);
+        drawn(&rt)
+    };
+    // Downloaded and decrypted: it says so, and speaks of a PDF (not of text or a picture).
+    let words = said(NoPreview::PdfUnreadable, None);
+    assert!(words.contains("Can't show this PDF"), "{words}");
+    assert!(
+        words.contains("It was decrypted on this PC, but this app can't read it"),
+        "{words}"
+    );
+    assert!(words.contains("damaged or cut short, or protected in a way"), "{words}");
+    assert!(words.contains(states::DECRYPTED_NOT_KEPT), "{words}");
+    for wrong in ["UTF-8", "a picture"] {
+        assert!(!words.contains(wrong), "{wrong}: {words}");
+    }
+    // Read from the copy on this PC (in sync, with unsent changes, with sync off): nothing was decrypted, and
+    // no word of the state says it was.
+    for origin in [
+        Origin::ThisPc { unsent: false },
+        Origin::ThisPc { unsent: true },
+        Origin::ThisPcSyncOff,
+    ] {
+        for why in [
+            NoPreview::PdfUnreadable,
+            NoPreview::Unreadable,
+            NoPreview::PdfLocked,
+            NoPreview::PdfTooLong { pages: 2001 },
+            NoPreview::PictureTooBig {
+                width: 9000,
+                height: 7000,
+            },
+        ] {
+            let words = said(why, Some(origin));
+            assert!(
+                !words.to_lowercase().contains("decrypted"),
+                "{why:?} {origin:?}: {words}"
+            );
+            assert!(
+                words.contains(states::READ_HERE_NOT_KEPT),
+                "{why:?} {origin:?}: {words}"
+            );
+        }
+        let words = said(NoPreview::PdfUnreadable, Some(origin));
+        assert!(
+            words.contains("It was read from the copy on this PC, but this app can't read it"),
+            "{words}"
+        );
+    }
+    // Beebeeb's version of a file that is not in sync here WAS decrypted.
+    let words = said(NoPreview::Unreadable, Some(Origin::BeebeebNotThisPcs));
+    assert!(words.contains("It was decrypted on this PC"), "{words}");
+    assert!(words.contains(states::DECRYPTED_NOT_KEPT), "{words}");
+}
+
+#[test]
 fn each_refusal_to_open_has_its_own_state_and_no_session_has_none() {
+    assert_eq!(OpenError::NothingSynced.stopped(), Some(Stopped::NothingSynced));
+    assert_eq!(OpenError::NotThisAccounts.stopped(), Some(Stopped::NotThisAccounts));
+    assert!(Stopped::NothingSynced.can_retry() && Stopped::NotThisAccounts.can_retry());
     assert_eq!(OpenError::NotFound.stopped(), Some(Stopped::Gone));
     assert_eq!(OpenError::SessionEnded.stopped(), Some(Stopped::SessionEnded));
     assert_eq!(OpenError::NotNow.stopped(), Some(Stopped::NotNow));
