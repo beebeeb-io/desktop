@@ -90,6 +90,9 @@ enum Mode {
 /// answers only while the session it was made for is still the session.
 pub struct OwnedState<'e> {
     acct: &'e AccountRuntime,
+    /// The engine's session-write lock: the handle asks whether its session is still there with no session change
+    /// half done.
+    writes: &'e std::sync::RwLock<()>,
     generation: SessionGeneration,
     db: std::sync::Arc<StateDb>,
 }
@@ -101,6 +104,18 @@ impl OwnedState<'_> {
     pub fn with<T>(&self, read: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused> {
         self.still_this_session()?;
         let answer = read(&self.db);
+        self.still_this_session()?;
+        Ok(answer)
+    }
+
+    /// [`Self::with`] for an operation of many steps: `operation` is also handed a question to ask before each step,
+    /// "is this still the session the handle was made for?". Once the answer is no, it must take no further step.
+    pub(crate) fn with_while<T>(
+        &self,
+        operation: impl FnOnce(&StateDb, &dyn Fn() -> bool) -> T,
+    ) -> Result<T, LocalStateRefused> {
+        self.still_this_session()?;
+        let answer = operation(&self.db, &|| self.still_this_session().is_ok());
         self.still_this_session()?;
         Ok(answer)
     }
@@ -117,10 +132,27 @@ impl OwnedState<'_> {
         Ok(answer)
     }
 
-    /// Whether the handle would still answer.
+    /// Whether the handle would still answer: no session change since it was made, and a session in memory, asked
+    /// with no session change half done. Never waits: while a session change is under way the handle answers
+    /// nothing. A handle made while a lock or a sign-out was ending its session answers nothing, then and after.
     pub fn still_this_session(&self) -> Result<(), LocalStateRefused> {
-        if !self.acct.session_unchanged_since(self.generation) {
-            return Err(LocalStateRefused::SessionChanged);
+        {
+            let _writes = match self.writes.try_read() {
+                Ok(writes) => writes,
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return Err(LocalStateRefused::SessionChanged),
+            };
+            if !self.acct.session_unchanged_since(self.generation) {
+                return Err(LocalStateRefused::SessionChanged);
+            }
+            let session = self
+                .acct
+                .session
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if session.is_none() {
+                return Err(LocalStateRefused::SessionChanged);
+            }
         }
         if self.acct.auth_health.is_expired() {
             return Err(LocalStateRefused::SessionEnded);
@@ -255,6 +287,7 @@ impl<C: CredentialStores> Engine<C> {
         };
         let state = OwnedState {
             acct: &self.acct,
+            writes: &self.writes,
             generation,
             db: std::sync::Arc::new(db),
         };

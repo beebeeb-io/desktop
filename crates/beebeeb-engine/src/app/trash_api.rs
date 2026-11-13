@@ -20,12 +20,22 @@ use crate::api_client::ApiClient;
 use crate::owner_keys;
 
 /// The account's Trash as the server listed it, and the session it was listed for.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TrashListing {
     /// The session the listing belongs to: a host compares it with [`Engine::session_turn`] and drops a listing
     /// whose session is gone (a lock, a sign-out, another account's sign-in), before it draws a name of it.
     pub session: SessionGeneration,
     pub items: Vec<DesktopTrashItem>,
+}
+
+/// How many items, never one of them: a listing holds decrypted names, and a `{:?}` must not print one.
+impl std::fmt::Debug for TrashListing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrashListing")
+            .field("session", &self.session)
+            .field("items", &self.items.len())
+            .finish()
+    }
 }
 
 impl<C: CredentialStores> Engine<C> {
@@ -60,10 +70,44 @@ impl<C: CredentialStores> Engine<C> {
             return Err(AccountCallError::NotSignedIn);
         }
         let items = raw.iter().filter_map(|meta| trash_item_from_meta(meta, &key)).collect();
-        if !self.acct.session_unchanged_since(session) {
+        // The hand-over: only while the session in memory is the one the token and the key were copied from, asked
+        // with no session change half done. A listing made for a session that is ending is dropped here.
+        if !self.session_is_still(session, &key) {
             return Err(AccountCallError::NotSignedIn);
         }
         Ok(TrashListing { session, items })
+    }
+
+    /// Whether the session in memory is, now, the very one `generation` and `key` were copied from: asked with no
+    /// session change half done (the session-write lock is held for the question), so an answer made for a session
+    /// that a lock or a sign-out is ending is never taken for the current one. Never waits: while a session change
+    /// is under way the answer is no.
+    pub(super) fn session_is_still(&self, generation: SessionGeneration, key: &[u8; 32]) -> bool {
+        let _writes = match self.writes.try_read() {
+            Ok(writes) => writes,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return false,
+        };
+        if !self.acct.session_unchanged_since(generation) {
+            return false;
+        }
+        let guard = self.acct.session.lock().unwrap_or_else(|p| p.into_inner());
+        guard.as_ref().is_some_and(|session| {
+            // Every byte is compared, whatever the first difference.
+            session
+                .master_key
+                .iter()
+                .zip(key.iter())
+                .fold(0u8, |differs, (a, b)| differs | (a ^ b))
+                == 0
+        })
+    }
+
+    /// Test builds only: `hook` runs once, in the middle of the next lock or sign-out (the session is ending and
+    /// not yet gone from memory), on the thread that locks.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn during_next_forget_for_test(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.forget_hook_for_test.lock().unwrap_or_else(|p| p.into_inner()) = Some(hook);
     }
 
     /// The session's generation now: it moves on at every sign-in, unlock, lock and sign-out. In memory, never

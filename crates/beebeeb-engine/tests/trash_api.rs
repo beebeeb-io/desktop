@@ -267,6 +267,74 @@ fn a_listing_is_bound_to_its_session_and_one_that_outlives_it_is_dropped() {
     assert_ne!(listing.session, engine.session_turn(), "a lock moves the session on");
 }
 
+/// A listing asked while a lock is ending its session is never handed over, not even under the turn the lock
+/// leaves behind: the call ends as "not signed in". The lock is held half done until the listing's request has
+/// reached the fake, and the fake holds its reply until the lock is done (no clock decides the order).
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_listing_asked_while_its_session_is_ending_is_never_handed_over() {
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+    let account = account("trash-ending@example.eu");
+    account
+        .vault
+        .add_item(CONTRACT, None, "Invented contract.pdf", false, 1_200);
+    account.vault.trash_item(CONTRACT);
+    let engine = Arc::new(signed_in(&account));
+    assert_eq!(
+        engine
+            .trash_listing()
+            .expect("the control: the fake answers")
+            .items
+            .len(),
+        1
+    );
+
+    let (reached, was_reached) = std::sync::mpsc::channel::<()>();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    *account.during.lock().unwrap() = Some(Box::new(move || {
+        let _ = reached.send(());
+        let _ = released.recv_timeout(WAIT);
+    }));
+    let (answered, answer) = std::sync::mpsc::channel();
+    let reader = engine.clone();
+    engine.during_next_forget_for_test(Box::new(move || {
+        std::thread::spawn(move || {
+            let _ = answered.send(reader.trash_listing().map(|listing| listing.items.len()));
+        });
+        was_reached
+            .recv_timeout(WAIT)
+            .expect("the listing's request reached the fake while the lock was under way");
+    }));
+    let _ = engine.lock();
+    assert!(!engine.has_session(), "locked");
+    release.send(()).expect("the fake still holds the reply");
+    assert_eq!(
+        answer.recv_timeout(WAIT).expect("the listing call ended"),
+        Err(AccountCallError::NotSignedIn),
+        "a listing for a session that ended is not handed over"
+    );
+}
+
+/// A listing's `{:?}` says how many items, never a name or an id.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_listing_prints_no_name() {
+    let account = account("trash-debug@example.eu");
+    account
+        .vault
+        .add_item(CONTRACT, None, "Invented contract.pdf", false, 1_200);
+    account.vault.trash_item(CONTRACT);
+    let engine = signed_in(&account);
+    let listing = engine.trash_listing().expect("the fake answers");
+    assert_eq!(listing.items[0].name, "Invented contract.pdf");
+    let printed = format!("{listing:?} {:?}", listing.items);
+    assert!(
+        !printed.contains("Invented") && !printed.contains(CONTRACT),
+        "{printed}"
+    );
+    assert!(printed.contains("items: 1"), "{printed}");
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn wake_host_wakes_the_hosts_loop() {

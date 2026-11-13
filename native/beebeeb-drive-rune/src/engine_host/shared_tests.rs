@@ -40,6 +40,8 @@ struct Fake {
     /// The status the share routes answer with (200: the lists).
     status: Arc<AtomicU16>,
     delay_ms: Arc<AtomicU64>,
+    /// The status the four list reads answer with instead of `status` (0: `status`).
+    read_status: Arc<AtomicU16>,
 }
 
 fn encrypted(account: &FakeAccount, id: &str, name: &str) -> String {
@@ -99,6 +101,8 @@ fn fake(tag: &str) -> Fake {
     let (ours, theirs_lists) = (lists(&first, true), lists(&second, false));
     let (status, delay_ms) = (Arc::new(AtomicU16::new(200)), Arc::new(AtomicU64::new(0)));
     let (code, delay) = (status.clone(), delay_ms.clone());
+    let read_status = Arc::new(AtomicU16::new(0));
+    let read_code = read_status.clone();
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
         let route = req.route();
         let theirs = if route.starts_with("POST /api/v1/opaque/") {
@@ -113,7 +117,11 @@ fn fake(tag: &str) -> Fake {
             return if theirs { two(req) } else { one(req) };
         }
         std::thread::sleep(Duration::from_millis(delay.load(Ordering::SeqCst)));
-        match (code.load(Ordering::SeqCst), at) {
+        let code = match (read_code.load(Ordering::SeqCst), at) {
+            (0, _) | (_, None) => code.load(Ordering::SeqCst),
+            (read, Some(_)) => read,
+        };
+        match (code, at) {
             (200, Some(at)) => Reply::ok(if theirs { &theirs_lists } else { &ours }[at].clone()),
             (200, None) => Reply::ok(json!({})),
             (status, _) => Reply::json(status, json!({ "error": "a server body" })),
@@ -127,6 +135,7 @@ fn fake(tag: &str) -> Fake {
         second_phrase,
         status,
         delay_ms,
+        read_status,
     }
 }
 
@@ -433,6 +442,17 @@ fn a_change_beebeeb_never_made_is_never_drawn_as_made_also_when_the_refresh_fail
             .count(),
         reads + 1
     );
+
+    // A change Beebeeb MADE after a refused one, with the read after it failing: the words are about the refresh,
+    // never "couldn't make that change" for a change that was made.
+    fake.status.store(500, Ordering::SeqCst);
+    assert!(source.set_access(TRIP, INV_B, Access::Edit));
+    assert!(settle(&mut source).contains(&Notice::ChangeRefused));
+    fake.status.store(200, Ordering::SeqCst);
+    fake.read_status.store(500, Ordering::SeqCst);
+    assert!(source.set_access(TRIP, INV_B, Access::Edit));
+    assert_eq!(settle(&mut source), [Notice::RefreshFailed]);
+    fake.read_status.store(0, Ordering::SeqCst);
 
     // Beebeeb cannot be reached at all (the change and the read both get no answer).
     drop(fake);

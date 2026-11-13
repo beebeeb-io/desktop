@@ -78,7 +78,8 @@ pub struct EngineSharedSource<C: CredentialStores> {
     /// The ids (an invitation's, a person's) with a change on its way: one change per id at a time.
     changing: HashSet<String>,
     notice: Option<Notice>,
-    /// A change was refused and no read has answered since: a failed read keeps saying the change was not made.
+    /// The last change answered was refused and no read has answered since: a failed read keeps saying the change
+    /// was not made. A change Beebeeb made clears it.
     unmade: bool,
     /// Something changed outside an answer: the next pump says so.
     dirty: bool,
@@ -247,10 +248,14 @@ impl<C: CredentialStores> EngineSharedSource<C> {
                 if session != now {
                     return;
                 }
-                if let Err(kind) = done {
-                    log(format!("shared: a change was not made ({kind})"));
-                    self.notice = Some(Notice::ChangeRefused);
-                    self.unmade = true;
+                match done {
+                    // Beebeeb made this change: an earlier refusal is no longer what a failed read is about.
+                    Ok(()) => self.unmade = false,
+                    Err(kind) => {
+                        log(format!("shared: a change was not made ({kind})"));
+                        self.notice = Some(Notice::ChangeRefused);
+                        self.unmade = true;
+                    }
                 }
                 // Nothing was drawn ahead of the answer: the lists change when Beebeeb's are read again.
                 self.read();

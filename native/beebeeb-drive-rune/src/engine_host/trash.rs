@@ -84,13 +84,23 @@ struct Listing {
 }
 
 /// One row, with what it was sorted by and the bytes it adds to the total.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct Listed {
     pub(crate) row: Row,
     /// Deleted, in Unix seconds (`i64::MIN`: not known, last).
     pub(crate) at: i64,
     /// A file's size; a folder's 0.
     pub(crate) bytes: i64,
+}
+
+/// Never the row: it holds a decrypted name, and a `{:?}` must not print one.
+impl std::fmt::Debug for Listed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Listed")
+            .field("at", &self.at)
+            .field("bytes", &self.bytes)
+            .finish_non_exhaustive()
+    }
 }
 
 enum Answer {

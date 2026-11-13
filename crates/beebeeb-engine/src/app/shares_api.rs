@@ -199,7 +199,9 @@ impl<C: CredentialStores> Engine<C> {
             by_me,
             requests: list(&bodies[3], "file_requests").filter_map(request_row).collect(),
         };
-        if !self.acct.session_unchanged_since(session) {
+        // The hand-over, as the Trash listing's: only while the session in memory is the very one the token and the
+        // key were copied from, asked with no session change half done.
+        if !self.session_is_still(session, &key) {
             return Err(AccountCallError::NotSignedIn);
         }
         Ok(overview)
@@ -208,11 +210,13 @@ impl<C: CredentialStores> Engine<C> {
     /// WRITES on the server: one change, for the account of `session`. Refused before anything is sent when
     /// `session` is not the session in memory any more, or an id is not a canonical id.
     pub fn share_change(&self, session: SessionGeneration, change: &ShareChange) -> Result<(), ShareChangeError> {
-        let (token, _key, _, now) = self.share_session().ok_or(ShareChangeError::NotSignedIn)?;
-        if now != session {
+        let (token, key, _, now) = self.share_session().ok_or(ShareChangeError::NotSignedIn)?;
+        let (req, gone_is_done) = change_request(change)?;
+        // Asked last before sending, with no session change half done: a change for a session that ended, or that a
+        // lock or a sign-out is ending, is never sent.
+        if now != session || !self.session_is_still(session, &key) {
             return Err(ShareChangeError::NotSignedIn);
         }
-        let (req, gone_is_done) = change_request(change)?;
         let client = auth_transport::client_for(&self.config.api_base).map_err(|_| ShareChangeError::Offline)?;
         let base = self.config.api_base.trim_end_matches('/');
         let resp = self
