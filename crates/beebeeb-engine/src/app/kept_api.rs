@@ -82,11 +82,11 @@ impl<C: CredentialStores> Engine<C> {
 impl<C: CredentialStores> Engine<C> {
     /// Free up space for a selection: the downloaded copies of `ids` (each a file, or a folder with everything in
     /// it) become online only, in the signed-in account's local state (the account-bound handle, task 2488). Per
-    /// id, in the order asked: whether nothing that could be freed is left under it
-    /// (`free_up_space::free_up_space_of`). A kept file and a file with a change that is not sent are never touched.
+    /// id, in the order asked: what the rows say of it after the reclaim (`free_up_space::Reclaimed`). A kept file
+    /// and a file with a change that is not sent are never touched.
     /// The session is asked again before each file; an answer read across a session change is dropped (`Err`).
     /// BLOCKS: a worker's.
-    pub fn free_up_space_of(&self, ids: &[String]) -> Result<Vec<(String, bool)>, String> {
+    pub fn free_up_space_of(&self, ids: &[String]) -> Result<Vec<(String, crate::free_up_space::Reclaimed)>, String> {
         if self.view().gate != GateState::Ready {
             return Err(NOT_SIGNED_IN.to_string());
         }

@@ -139,27 +139,27 @@ pub(crate) fn free_up_space_in(
 }
 
 /// Free up space for a SELECTION: the downloaded copies of `ids` (a file, or a folder with everything in it) become
-/// online only; nothing else on this computer is touched. Answers per id, in the order asked: `true` when nothing
-/// that could be freed is left at or under it (also when nothing was there to free). `false`: unknown id, or at
-/// least one file under it stayed (kept, an unsent change, a failed call, or the session ended before it).
+/// online only; nothing else on this computer is touched. Answers per id, in the order asked, from the rows as they
+/// are AFTER the reclaim ([`Reclaimed`]): freed only when every file at or under it is online only.
 ///
 /// The same per-file guards as the whole reclaim (`dehydrate_these`): a kept file, a file with a change that is not
 /// sent and a path outside the allowed roots are never touched. `go_on` is asked before each file.
-/// Windows only today: elsewhere the engine has no reclaim for a selection, and says so.
+/// Windows only today ([`SELECTION_RECLAIM`]): elsewhere the engine has no reclaim for a selection, and says so
+/// before anything is read.
 pub(crate) fn free_up_space_of(
     identity: &'static crate::identity::EngineIdentity,
     db: &crate::state_db::StateDb,
     sync_root: &std::path::Path,
     ids: &[String],
     go_on: &dyn Fn() -> bool,
-) -> Result<Vec<(String, bool)>, String> {
+) -> Result<Vec<(String, Reclaimed)>, String> {
     #[cfg(target_os = "windows")]
     {
         let candidates = db
             .unpinned_local_files_for_dehydration()
             .map_err(|e| format!("list dehydration candidates: {e}"))?;
         Ok(free_selection(db, ids, candidates, |wanted| {
-            dehydrate_these(identity, db, sync_root, wanted, go_on).1
+            dehydrate_these(identity, db, sync_root, wanted, go_on);
         }))
     }
     #[cfg(not(target_os = "windows"))]
@@ -169,20 +169,43 @@ pub(crate) fn free_up_space_of(
     }
 }
 
+/// Can a selection be reclaimed on this system ([`free_up_space_of`])? A host asks BEFORE it changes anything for a
+/// Free up space (a kept item is released first): where this is `false`, nothing is released and nothing is asked.
+pub const SELECTION_RECLAIM: bool = cfg!(target_os = "windows");
+
 /// What [`free_up_space_of`] answers where a selection cannot be reclaimed (not Windows).
 pub const NO_SELECTION_RECLAIM: &str = "freeing up space for a selection is not available on this system";
 
-/// Which of `candidates` (id, path, size) a selection names, handed to `reclaim` (which answers the ids it made
-/// online only), and the answer per selected id. One read per selected id; the candidates are matched by path in
-/// memory. A folder ROW among the candidates is not a file to free: it never counts against its folder.
+/// What a selection's reclaim did for ONE selected id, read from the rows after it ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reclaimed {
+    /// Every file at or under it is online only now (also when it already was, or when it holds no file).
+    Freed,
+    /// No row has this id.
+    NoSuchItem,
+    /// A file at or under it holds a change that is not sent (uploading, a conflict, an error): its bytes are the
+    /// only copy and stay.
+    Unsent,
+    /// A file at or under it is kept on this computer (also one that was kept after the selection was read).
+    Kept,
+    /// A file at or under it is still downloaded: the reclaim did not reach it or could not free it (open in an
+    /// app, the session ended first, a call that failed), or the rows could not be read to prove otherwise.
+    Left,
+}
+
+/// Which of `candidates` (id, path, size) a selection names, handed to `reclaim` (which makes them online only and
+/// records that in the rows), and the answer per selected id. The answer is decided from the rows AFTER `reclaim`,
+/// never from what was handed over: an id with nothing to hand over (a file that is uploading, in conflict, in
+/// error, or kept since) is not "freed" while its bytes are here. A folder ROW is not a file to free: it never
+/// counts against its folder.
 #[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
 pub(crate) fn free_selection(
     db: &crate::state_db::StateDb,
     ids: &[String],
     candidates: Vec<(String, String, i64)>,
-    reclaim: impl FnOnce(Vec<(String, String, i64)>) -> Vec<String>,
-) -> Vec<(String, bool)> {
-    use crate::state_db::ItemKind;
+    reclaim: impl FnOnce(Vec<(String, String, i64)>),
+) -> Vec<(String, Reclaimed)> {
+    use crate::state_db::{FileStatus, PinState};
     // Each selected id's place: its path, without slashes at the ends. `None`: no such row.
     let places: Vec<Option<String>> = ids
         .iter()
@@ -195,27 +218,54 @@ pub(crate) fn free_selection(
         let path = path.trim_matches('/');
         path == place || (path.len() > place.len() && path.starts_with(place) && path.as_bytes()[place.len()] == b'/')
     };
-    let is_file = |id: &str| matches!(db.get_file(id), Ok(Some(entry)) if entry.item_kind == ItemKind::File);
-    let wanted: Vec<(String, String, i64)> = candidates
-        .into_iter()
-        .filter(|(id, path, _)| places.iter().flatten().any(|place| under(path, place)) && is_file(id))
-        .collect();
-    let asked: Vec<(String, String)> = wanted.iter().map(|(id, path, _)| (id.clone(), path.clone())).collect();
-    let freed: std::collections::HashSet<String> = if wanted.is_empty() {
-        Default::default()
-    } else {
-        reclaim(wanted).into_iter().collect()
+    // The files (never a folder's row) at or under a selected place, as the rows say now. One read.
+    let selected_files = || -> Option<Vec<crate::state_db::FileEntry>> {
+        let rows = db.list_files().ok()?;
+        Some(
+            rows.into_iter()
+                .filter(|row| !row.is_dir() && places.iter().flatten().any(|place| under(&row.path, place)))
+                .collect(),
+        )
     };
+    let files: std::collections::HashSet<String> = selected_files()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| row.file_id)
+        .collect();
+    let wanted: Vec<(String, String, i64)> = candidates.into_iter().filter(|(id, _, _)| files.contains(id)).collect();
+    if !wanted.is_empty() {
+        reclaim(wanted);
+    }
+    // What is there now decides. Rows that cannot be read prove nothing: nothing is called freed.
+    let after = selected_files();
+    let kept = |id: &str| matches!(db.get_file_contract_state(id), Ok(Some(contract)) if contract.effective_pin_state() == PinState::Pinned);
     ids.iter()
         .zip(&places)
         .map(|(id, place)| {
-            let done = place.as_ref().is_some_and(|place| {
-                asked
-                    .iter()
-                    .filter(|(_, path)| under(path, place))
-                    .all(|(file, _)| freed.contains(file))
-            });
-            (id.clone(), done)
+            let (Some(place), Some(after)) = (place, &after) else {
+                let why = if place.is_none() {
+                    Reclaimed::NoSuchItem
+                } else {
+                    Reclaimed::Left
+                };
+                return (id.clone(), why);
+            };
+            let mut answer = Reclaimed::Freed;
+            for row in after.iter().filter(|row| under(&row.path, place)) {
+                let this = match row.status {
+                    FileStatus::CloudOnly => continue,
+                    FileStatus::Uploading | FileStatus::Conflict | FileStatus::Error => Reclaimed::Unsent,
+                    FileStatus::Local if kept(&row.file_id) => Reclaimed::Kept,
+                    _ => Reclaimed::Left,
+                };
+                // The reason that says most: an unsent change before a kept file before a file merely left.
+                answer = match (answer, this) {
+                    (Reclaimed::Unsent, _) | (_, Reclaimed::Unsent) => Reclaimed::Unsent,
+                    (Reclaimed::Kept, _) | (_, Reclaimed::Kept) => Reclaimed::Kept,
+                    _ => Reclaimed::Left,
+                };
+            }
+            (id.clone(), answer)
         })
         .collect()
 }
