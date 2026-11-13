@@ -9,6 +9,7 @@
 //!   writeown <name>      -> own ok=<n> codes=<...>       (the same, as <name>.0/.1/.2 in the folders its own
 //!                                                         LOCALAPPDATA, TEMP and TMP variables name, after
 //!                                                         trying to create those folders)
+//!   ownfolders           -> folders <per variable: system=0|1,ours=0|1,exists=0|1>
 //!   read <path>          -> ok <bytes read> | err <system code>
 //!   spawn <program>      -> ok | err <system code>      (starts it with `/c exit`, waits for it)
 //!   alloc <mebibytes>    -> ok | err alloc              (reserves and touches every page)
@@ -103,6 +104,24 @@ fn write_own(name: &str) -> String {
         }
     }
     format!("own ok={written} codes={}", codes.join(","))
+}
+
+/// Where the three folder variables point, as yes/no answers only (never the value): under the system folder
+/// (the placeholder the parent passed), holding our profile-name prefix (the container's own folder), existing.
+fn own_folders() -> String {
+    let system = std::env::var("SystemRoot").unwrap_or_default().to_lowercase();
+    let mut parts = Vec::new();
+    for variable in ["LOCALAPPDATA", "TEMP", "TMP"] {
+        let value = std::env::var(variable).unwrap_or_default();
+        let lower = value.to_lowercase();
+        parts.push(format!(
+            "{variable}:system={},ours={},exists={}",
+            u8::from(!system.is_empty() && lower.starts_with(&system)),
+            u8::from(lower.contains("beebeeb.office.")),
+            u8::from(std::path::Path::new(&value).exists())
+        ));
+    }
+    format!("folders {}", parts.join(" "))
 }
 
 fn read(path: &str) -> String {
@@ -335,6 +354,7 @@ fn main() {
             "connect" => connect(rest),
             "write" => write(rest),
             "writeown" => write_own(rest),
+            "ownfolders" => own_folders(),
             "read" => read(rest),
             "spawn" => spawn(rest),
             "alloc" => alloc(rest),

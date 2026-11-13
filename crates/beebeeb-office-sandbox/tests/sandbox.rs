@@ -259,6 +259,22 @@ mod windows {
         places
     }
 
+    /// Folders of container profiles under our name prefix, in the place Windows keeps them for this user.
+    fn our_package_folders() -> usize {
+        let packages = PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("set for the test")).join("Packages");
+        let entries = std::fs::read_dir(&packages).expect("the profile folder list is readable");
+        let mut seen = 0;
+        let mut ours = 0;
+        for entry in entries.flatten() {
+            seen += 1;
+            if entry.file_name().to_string_lossy().starts_with("beebeeb.office.") {
+                ours += 1;
+            }
+        }
+        assert!(seen > 0, "the instrument sees profile folders at all");
+        ours
+    }
+
     // ── 1. no network ───────────────────────────────────────────────────────────────────────────────────────
 
     fn accepted(listener: &TcpListener) -> usize {
@@ -306,12 +322,9 @@ mod windows {
         drop(plain);
 
         let mut confined = Probe::confined();
-        assert_eq!(confined.attempt(&format!("connect {loopback}")), NETWORK_REFUSED);
-        assert_eq!(
-            accepted(&listener),
-            0,
-            "the listener saw nothing from the confined probe"
-        );
+        // The answer and the listener's count as one pair, so a failure shows both.
+        let answer = confined.attempt(&format!("connect {loopback}"));
+        assert_eq!((answer.as_str(), accepted(&listener)), (NETWORK_REFUSED, 0));
         assert_eq!(
             confined.attempt(&format!("connect {}", SocketAddr::new(own, port))),
             NETWORK_REFUSED
@@ -390,6 +403,20 @@ mod windows {
 
         let mut confined = Probe::confined();
         assert_eq!(confined.attempt(&format!("writeown {name}")), NO_OWN_FOLDER);
+        let where_ = confined.attempt("ownfolders");
+        println!("own-folders: {where_}");
+        assert_eq!(
+            where_.matches("exists=0").count(),
+            3,
+            "none of the three exists: {where_}"
+        );
+        // While the helper runs and answers, nothing under our profile-name prefix is left on this PC.
+        assert_eq!(confined.ask("ping"), "pong");
+        assert_eq!(
+            our_package_folders(),
+            0,
+            "a container profile folder of ours exists while its helper runs"
+        );
     }
 
     // ── 3. no child process ─────────────────────────────────────────────────────────────────────────────────

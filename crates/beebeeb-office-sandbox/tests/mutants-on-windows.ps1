@@ -19,6 +19,8 @@ $mutants = [ordered]@{
     'no-process-limit'    = @('\s+\| JOB_OBJECT_LIMIT_ACTIVE_PROCESS(?=\s)', '')
     'no-kill-on-close'    = @('= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE\s+\| ', '= ')
     'memory-cap-times-64' = @('wanted\.JobMemoryLimit = memory;', 'wanted.JobMemoryLimit = memory * 64;')
+    'unrestricted-token'  = @('token\.as_raw_handle\(\),(?=\s+application\.as_ptr\(\),)', 'null_mut(),')
+    'switch-put-back'     = @('attributes\.set\(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities\)\?;', 'if std::env::var("BEEBEEB_NO_SANDBOX").is_err() { attributes.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities)?; }')
 }
 
 $profiles = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings'
@@ -32,14 +34,14 @@ try {
         $matches_ = [regex]::Matches($original, $pattern).Count
         if ($matches_ -ne 1) { "mutant ${name}: the pattern matches $matches_ times, expected 1"; exit 4 }
         [IO.File]::WriteAllText($file, [regex]::Replace($original, $pattern, $replacement))
-        & cargo test --locked --test sandbox -- --test-threads=1 *> $log
+        & cargo test --locked --no-fail-fast --lib --test sandbox -- --test-threads=1 *> $log
         $lines = Get-Content $log
-        $result = @($lines | Where-Object { $_ -match '^test result:' }) | Select-Object -Last 1
+        $result = (@($lines | Where-Object { $_ -match '^test result:' }) | ForEach-Object { ($_ -replace '; 0 ignored.*$', '') -replace '^test result: ', '' }) -join ' + '
         $failed = @($lines | Where-Object { $_ -match '^test .* \.\.\. FAILED' -or $_ -match '^test windows::\S+ \.\.\. .*FAILED' })
-        $names = @($lines | Where-Object { $_ -match '^    windows::' } | ForEach-Object { $_.Trim() } | Sort-Object -Unique)
+        $names = @($lines | Where-Object { $_ -match '^    (windows|tests|block)::' } | ForEach-Object { $_.Trim() } | Sort-Object -Unique)
         if (-not $result) { $result = 'no result line (the build failed?): ' + (@($lines | Where-Object { $_ -match '^error' }) | Select-Object -First 1) }
         if ($names.Count -gt 0) { $red += 1 }
-        "mutant ${name}: $($names.Count) tests red | $result"
+        "mutant ${name}: $($names.Count) tests red | $result | profiles of ours left by the run: $(Count-Profiles)"
         $names | ForEach-Object { "    red: $_" }
         # What the red tests got instead (answers of the probe: codes only).
         @($lines | Where-Object { $_ -match '^\s+left: ' -or $_ -match 'did not start the probe' } | Sort-Object -Unique) | Select-Object -First 6 | ForEach-Object { "    got: $($_.Trim())" }
