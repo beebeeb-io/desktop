@@ -22,6 +22,11 @@ pub trait ThumbSource: Send + 'static {
     fn arrived(&self, id: &str) -> bool;
     /// A video's length, as it is written on its tile ("0:41").
     fn video_length(&self, id: &str) -> Option<String>;
+    /// Which of the board's six stand-in pictures this item shows (1 to 6). Only a board fixture
+    /// answers; a source of real thumbnails hands over pixels, and says `None` here.
+    fn sample(&self, _id: &str) -> Option<u8> {
+        None
+    }
 }
 
 /// Nothing is connected that hands over thumbnails: every picture stays a plain tile.
@@ -123,7 +128,7 @@ fn pictured(item: &DriveItem) -> bool {
 pub fn thumb_of(item: &DriveItem, thumbs: &dyn ThumbSource) -> Thumb {
     if pictured(item) {
         return if thumbs.arrived(&item.id) {
-            Thumb::Picture
+            thumbs.sample(&item.id).map_or(Thumb::Picture, Thumb::Sample)
         } else {
             Thumb::Plain
         };

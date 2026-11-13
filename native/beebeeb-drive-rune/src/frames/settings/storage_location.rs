@@ -25,6 +25,18 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     // No answer, or an answer without a single choice: said, with a way to ask again. Never
     // an empty list, and never a guess at what the choice was.
     let answer = ui.source.locations();
+    // Asked for, nothing known yet (the board has no frame for it): one sentence, never a blank pane.
+    if answer.is_none() && ui.source.locations_loading() {
+        children.push(notices::note(
+            0,
+            Tone::Neutral,
+            &ic::GLOBE,
+            "Loading storage locations…",
+            "Asking Beebeeb for the list.",
+            t,
+        ));
+        return (shell::pane(children, t), None);
+    }
     let chosen = answer.as_ref().and_then(|l| l.chosen().cloned());
     let (Some(l), Some(chosen)) = (answer, chosen) else {
         let again = controls::button(0, "Try again", None, Emphasis::Plain, t)

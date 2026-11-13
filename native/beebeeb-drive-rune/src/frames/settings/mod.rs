@@ -15,10 +15,16 @@
 //! do (show a frame another lane owns, open a web page, start a download).
 
 pub mod about;
+pub mod bandwidth;
+pub mod bandwidth_data;
+pub mod diagnostics;
 pub mod drive;
 pub mod general;
 pub mod insights;
+pub mod keep;
+pub mod more;
 pub mod notifications;
+pub mod previews;
 pub mod recent;
 pub mod source;
 pub mod storage;
@@ -27,7 +33,13 @@ pub mod sync;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_bandwidth;
+#[cfg(test)]
 mod tests_drive;
+#[cfg(test)]
+mod tests_more;
+#[cfg(test)]
+mod tests_previews;
 
 use crate::State;
 use crate::shell::app::{Event, Screen, SettingsPane};
@@ -58,6 +70,12 @@ pub enum Pane {
     Insights,
     /// Sync and File Explorer (DW-0746).
     Sync,
+    /// Bandwidth (DW-0785), with the speed test (DW-0786).
+    Bandwidth,
+    /// General › Diagnostics (DW-0790).
+    Diagnostics,
+    /// Thumbnails and previews (DW-0744).
+    Previews,
 }
 
 /// Which menu a pop-up button drops.
@@ -67,6 +85,8 @@ pub enum MenuKind {
     Theme,
     /// About › Updates › Release channel (DW-0789).
     Channel,
+    /// Bandwidth › Limits › Upload, Download (DW-0785d).
+    SpeedLimit(bandwidth_data::Direction),
 }
 
 impl MenuKind {
@@ -74,12 +94,15 @@ impl MenuKind {
         match self {
             Self::Theme => ThemeChoice::ALL.iter().map(|c| c.label()).collect(),
             Self::Channel => Channel::ALL.iter().map(|c| c.label()).collect(),
+            Self::SpeedLimit(_) => bandwidth_data::PRESET_LABELS.to_vec(),
         }
     }
     pub fn name(self) -> &'static str {
         match self {
             Self::Theme => "Theme",
             Self::Channel => "Release channel",
+            Self::SpeedLimit(bandwidth_data::Direction::Upload) => "Upload limit",
+            Self::SpeedLimit(bandwidth_data::Direction::Download) => "Download limit",
         }
     }
     /// The key of the point in the menu's own row where its top-left corner goes
@@ -89,6 +112,8 @@ impl MenuKind {
         match self {
             Self::Theme => "item-0-0-menu-at",
             Self::Channel => "item-1-1-menu-at",
+            Self::SpeedLimit(bandwidth_data::Direction::Upload) => bandwidth::UPLOAD_MENU_AT,
+            Self::SpeedLimit(bandwidth_data::Direction::Download) => bandwidth::DOWNLOAD_MENU_AT,
         }
     }
 }
@@ -115,6 +140,14 @@ pub enum Dialog {
     TurnOffExplorer,
     /// Repair… (DW-0746c).
     Repair,
+    /// Sync and File Explorer › Choose folders… (DW-0784, DW-0784c, DW-0784d).
+    Keep,
+    /// Before downloaded copies leave this PC (DW-0784b), over Keep's choices.
+    KeepConfirm,
+    /// A new preview size or format, confirmed with its cost (DW-0744b).
+    ApplyPreviews,
+    /// The compare view over Thumbnails and previews (DW-0745).
+    Compare,
 }
 
 /// What settings asks of the app around it. The shell lane drains `SettingsUi::intents`.
@@ -156,6 +189,12 @@ pub struct SettingsUi {
     pub drive: Box<dyn DriveSettings>,
     /// The limit a limit dialog's slider stands on, until Save (DW-0713, DW-0714).
     pub draft_gb: u32,
+    /// What the Bandwidth pane holds between draws: the chart's hovered bucket (DW-0785).
+    pub bandwidth: bandwidth::Held,
+    /// What Diagnostics and Keep on this PC hold open (lane settings-rest).
+    pub more: more::MoreUi,
+    /// What Thumbnails and previews holds open: a drafted choice, the compare view.
+    pub previews: previews::PreviewsUi,
 }
 
 impl Default for SettingsUi {
@@ -170,6 +209,9 @@ impl Default for SettingsUi {
             intents: Vec::new(),
             drive: drive::first(instance::DEV_BUILD),
             draft_gb: 0,
+            bandwidth: bandwidth::Held::default(),
+            more: more::MoreUi::default(),
+            previews: previews::PreviewsUi::default(),
         }
     }
 }
@@ -188,6 +230,7 @@ impl SettingsUi {
             self.source.mark_recent_seen();
         }
         self.pane = pane;
+        self.bandwidth.tip = None;
         self.menu = None;
         self.dialog = None;
         self.toast = None;
@@ -225,10 +268,20 @@ impl SettingsUi {
 
     /// The theme the window draws in: the person's choice, or the system's.
     pub fn dark(&self, system_dark: bool) -> bool {
-        match self.source.general().theme {
+        match self.source.theme() {
             ThemeChoice::System => system_dark,
             ThemeChoice::Light => false,
             ThemeChoice::Dark => true,
+        }
+    }
+
+    /// Whether `pane` draws from a source that answers for it (Drive's own panes ask `drive`).
+    pub fn wired(&self, pane: Pane) -> bool {
+        match pane {
+            Pane::Storage | Pane::Insights | Pane::Sync | Pane::Bandwidth | Pane::Diagnostics | Pane::Previews => {
+                self.drive.wired(pane)
+            }
+            _ => self.source.wired(pane),
         }
     }
 
@@ -243,12 +296,16 @@ impl SettingsUi {
     pub fn chosen(&self, kind: MenuKind) -> usize {
         match kind {
             MenuKind::Theme => {
-                let now = self.source.general().theme;
+                let now = self.source.theme();
                 ThemeChoice::ALL.iter().position(|c| *c == now).unwrap_or(0)
             }
             MenuKind::Channel => {
                 let now = self.source.about().channel;
                 Channel::ALL.iter().position(|c| *c == now).unwrap_or(0)
+            }
+            // A saved limit that is no preset is the menu's ninth item: Enter on it changes nothing.
+            MenuKind::SpeedLimit(direction) => {
+                bandwidth::chosen(self, direction).unwrap_or(bandwidth_data::PRESETS.len())
             }
         }
     }
@@ -275,6 +332,11 @@ impl SettingsUi {
             MenuKind::Channel => {
                 if let Some(channel) = Channel::ALL.get(index) {
                     self.source.set_channel(*channel);
+                }
+            }
+            MenuKind::SpeedLimit(direction) => {
+                if let Some(limit) = bandwidth_data::PRESETS.get(index) {
+                    self.drive.set_speed_limit(direction, *limit);
                 }
             }
         }
@@ -376,9 +438,62 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         s.settings.drive = Box::new(drive::BoardDrive::new().with_insights(drive::Insights::Empty));
         open_on(s, "DW-0783");
     }),
+    ("DW-0785", |s| bandwidth::scene(s, "DW-0785")),
+    ("DW-0785b", |s| bandwidth::scene(s, "DW-0785b")),
+    ("DW-0785c", |s| bandwidth::scene(s, "DW-0785c")),
+    ("DW-0785d", |s| bandwidth::scene(s, "DW-0785d")),
+    ("DW-0785e", |s| bandwidth::scene(s, "DW-0785e")),
+    ("DW-0785f", |s| bandwidth::scene(s, "DW-0785f")),
+    ("DW-0786", |s| bandwidth::scene(s, "DW-0786")),
+    ("DW-0786b", |s| bandwidth::scene(s, "DW-0786b")),
+    ("DW-0786c", |s| bandwidth::scene(s, "DW-0786c")),
+    ("DW-0786d", |s| bandwidth::scene(s, "DW-0786d")),
+    ("DW-0790", |s| open_on(s, "DW-0790")),
+    ("DW-0790b", |s| {
+        // Showing the page exports nothing: the scene starts on a source that has just saved.
+        s.settings.drive = Box::new(drive::BoardDrive::new().with_bundle_saved());
+        open_on(s, "DW-0790b");
+    }),
+    ("DW-0784", |s| {
+        open_on(s, "DW-0784");
+        // The board draws the dialog two choices in: Lisbon trip open, Documents unchecked,
+        // Day 1 checked.
+        let draft = &mut s.settings.more.keep;
+        draft.toggle_open("lisbon");
+        draft.toggle("documents");
+        draft.toggle("lisbon/day-1");
+    }),
+    ("DW-0784b", |s| {
+        open_on(s, "DW-0784");
+        let draft = &mut s.settings.more.keep;
+        draft.toggle("documents");
+        draft.toggle("lisbon/day-1");
+        go(s, "DW-0784b");
+    }),
+    ("DW-0784c", |s| {
+        s.settings.drive = Box::new(drive::BoardDrive::new().with_keep(keep::Keep::Failed));
+        open_on(s, "DW-0784");
+    }),
+    ("DW-0784d", |s| {
+        s.settings.drive = Box::new(drive::BoardDrive::new().with_keep(keep::Keep::Ready {
+            folders: Vec::new(),
+            total_mb: 0.0,
+        }));
+        open_on(s, "DW-0784");
+    }),
+    ("DW-0744", |s| open_on(s, "DW-0744")),
+    ("DW-0744b", |s| {
+        open_on(s, "DW-0744");
+        // The board asks about 2K, the format as it is.
+        s.settings.choose_previews(Some(previews::PreviewSize::K2), None);
+    }),
+    ("DW-0745", |s| {
+        open_on(s, "DW-0744");
+        s.settings.open_compare();
+    }),
 ];
 
-fn open_on(s: &mut State, frame: &'static str) {
+pub(super) fn open_on(s: &mut State, frame: &'static str) {
     s.settings.reset();
     go(s, frame);
 }
@@ -390,6 +505,8 @@ fn routed(s: &State) -> Option<Pane> {
         Screen::Settings(SettingsPane::Notifications) => Some(Pane::Notifications),
         Screen::Settings(SettingsPane::Storage) => Some(Pane::Storage),
         Screen::Settings(SettingsPane::SyncAndFileExplorer) => Some(Pane::Sync),
+        Screen::Settings(SettingsPane::Bandwidth) => Some(Pane::Bandwidth),
+        Screen::Settings(SettingsPane::ThumbnailsAndPreviews) => Some(Pane::Previews),
         _ => None,
     }
 }
@@ -414,6 +531,17 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>, Option<MenuKind>)> {
         "DW-0713" => (Pane::Storage, Some(Dialog::Limit(Kept::Previews)), None),
         "DW-0714" => (Pane::Storage, Some(Dialog::Limit(Kept::Downloaded)), None),
         "DW-0783" | "DW-0783b" | "DW-0783c" | "DW-0783d" => (Pane::Insights, None, None),
+        "DW-0785" | "DW-0785b" | "DW-0785c" | "DW-0785e" | "DW-0785f" => (Pane::Bandwidth, None, None),
+        "DW-0785d" => (
+            Pane::Bandwidth,
+            None,
+            Some(MenuKind::SpeedLimit(bandwidth_data::Direction::Upload)),
+        ),
+        "DW-0786" | "DW-0786b" | "DW-0786c" | "DW-0786d" => (Pane::Bandwidth, None, None),
+        "DW-0790" | "DW-0790b" => (Pane::Diagnostics, None, None),
+        "DW-0784" | "DW-0784c" | "DW-0784d" => (Pane::Sync, Some(Dialog::Keep), None),
+        "DW-0784b" => (Pane::Sync, Some(Dialog::KeepConfirm), None),
+        "DW-0744" => (Pane::Previews, None, None),
         _ => return None,
     })
 }
@@ -424,10 +552,33 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>, Option<MenuKind>)> {
 /// the window left settings, is forgotten, so nothing is still open on the next visit.
 pub fn sync(s: &mut State) {
     match routed(s) {
-        Some(section) if s.settings.pane.section() == section => {}
-        Some(section) => s.settings.show(section),
+        Some(section) if s.settings.pane.section() == section => {
+            let pane = s.settings.pane;
+            s.settings.source.opened(pane);
+        }
+        Some(section) => {
+            s.settings.show(section);
+            s.settings.source.opened(section);
+        }
         None => s.settings.reset(),
     }
+}
+
+/// How soon the window looks again while a settings source's answer is still out.
+pub const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// What the settings source's workers answered since the last frame (`SettingsSource::pump`),
+/// for the shell's poll: `true` when the window must draw again. While an answer is still out
+/// the loop is woken again in `POLL_EVERY`, never otherwise. Never calls the engine, never waits.
+pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    let pumped = s.settings.source.pump();
+    if let Some(toast) = pumped.toast {
+        s.settings.toast = Some(toast);
+    }
+    if pumped.busy {
+        tx.wake_after(POLL_EVERY);
+    }
+    pumped.changed || pumped.toast.is_some()
 }
 
 /// The frame a recent alert leads to.
@@ -446,6 +597,8 @@ fn shell_pane(section: Pane) -> SettingsPane {
         Pane::Notifications | Pane::Recent => SettingsPane::Notifications,
         Pane::Storage | Pane::Insights => SettingsPane::Storage,
         Pane::Sync => SettingsPane::SyncAndFileExplorer,
+        Pane::Bandwidth => SettingsPane::Bandwidth,
+        Pane::Previews => SettingsPane::ThumbnailsAndPreviews,
         _ => SettingsPane::General,
     }
 }
@@ -460,12 +613,20 @@ pub fn go(s: &mut State, frame: &'static str) {
         "DW-A52" => Some(SettingsPane::Security),
         "DW-A55" => Some(SettingsPane::DevicesAndSessions),
         "DW-0737" => Some(SettingsPane::Backups),
-        "DW-0744" => Some(SettingsPane::ThumbnailsAndPreviews),
         _ => None,
     };
     if let Some(pane) = foreign {
         s.settings.reset();
         host::dispatch(s, Event::OpenSettings(pane));
+        return;
+    }
+    // "Show the guide again": settings closes and the guide runs on Files (DW-0701's action).
+    if frame == "DW-0380" {
+        s.settings.reset();
+        if matches!(s.shell.app.screen(), Screen::Settings(_)) {
+            host::dispatch(s, Event::Escape);
+        }
+        crate::frames::signin::setup::guide::start(s);
         return;
     }
     if frame == "DW-0401" {
@@ -476,7 +637,8 @@ pub fn go(s: &mut State, frame: &'static str) {
         }
         return;
     }
-    let Some((pane, dialog, menu)) = local(frame) else {
+    let local = local(frame).filter(|_| s.settings.source.opens(frame));
+    let Some((pane, dialog, menu)) = local else {
         // Not a frame of this lane's: asked of the shell, and the window stays where it is.
         let ui = &mut s.settings;
         (ui.dialog, ui.toast) = (None, None);
@@ -490,8 +652,11 @@ pub fn go(s: &mut State, frame: &'static str) {
     }
     let ui = &mut s.settings;
     ui.show(pane);
+    ui.source.opened(pane);
     match dialog {
         Some(Dialog::Limit(which)) => ui.open_limit(which),
+        Some(Dialog::Keep) => keep::open(ui),
+        Some(Dialog::KeepConfirm) => keep::open_question(ui),
         other => ui.dialog = other,
     }
     if let Some(kind) = menu {
@@ -515,10 +680,12 @@ impl Pane {
     /// The sidebar section a pane belongs to (a pane opened from General stays under General).
     pub fn section(self) -> Pane {
         match self {
-            Pane::General | Pane::About | Pane::StorageLocation => Pane::General,
+            Pane::General | Pane::About | Pane::StorageLocation | Pane::Diagnostics => Pane::General,
             Pane::Notifications | Pane::Recent => Pane::Notifications,
             Pane::Storage | Pane::Insights => Pane::Storage,
             Pane::Sync => Pane::Sync,
+            Pane::Bandwidth => Pane::Bandwidth,
+            Pane::Previews => Pane::Previews,
         }
     }
 }
@@ -590,13 +757,13 @@ const DRIVE_SECTIONS: &[Section] = &[
         label: "Thumbnails and previews",
         icon: &ic::CHEV_RIGHT,
         frame: "DW-0744",
-        pane: None,
+        pane: Some(Pane::Previews),
     },
     Section {
         label: "Bandwidth",
         icon: &ic::CHEV_RIGHT,
         frame: "DW-0785",
-        pane: None,
+        pane: Some(Pane::Bandwidth),
     },
 ];
 
@@ -625,31 +792,36 @@ fn sidebar(section: Pane, t: &Theme) -> El {
 /// The window while settings is open.
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let ui = &s.settings;
-    // Nothing answers for settings yet (a build that ships before the engine lane wires it):
+    // The shell says which section shows. What this lane has open inside a section counts
+    // only while it belongs to that section (`sync` forgets the rest on the next input).
+    let section = routed(s).unwrap_or(Pane::General);
+    let inside = ui.pane.section() == section;
+    let pane = if inside { ui.pane } else { section };
+    // A pane nothing answers for yet (a build that ships before the engine lane wires it):
     // the shell's "not built yet" frame, never a pane of sample values.
-    if !ui.source.wired() {
+    if !ui.wired(pane) {
         return placeholder::window(s, cx, registry::group_for(&s.shell.app));
     }
     // Keyboard as Windows has it: Tab visits every control, Space and Enter press the focused
     // one (Rune's default leaves Enter on a button to the default button, as macOS does).
     cx.web_focus();
     let t = tokens::theme(ui.dark(cx.system_dark()));
-    // The shell says which section shows. What this lane has open inside a section counts
-    // only while it belongs to that section (`sync` forgets the rest on the next input).
-    let section = routed(s).unwrap_or(Pane::General);
-    let inside = ui.pane.section() == section;
-    let pane = if inside { ui.pane } else { section };
     let (pane_el, overlay) = match pane {
         Pane::General => general::pane(ui, &t),
         Pane::About => about::pane(ui, &t),
         Pane::StorageLocation => storage_location::pane(ui, &t),
         Pane::Notifications => notifications::pane(ui, &t),
         Pane::Recent => recent::pane(ui, &t),
-        // Drive's own panes: never sample values in a build nothing answers for yet.
-        _ if !ui.drive.wired() => return placeholder::window(s, cx, registry::group_for(&s.shell.app)),
         Pane::Storage => storage::pane(ui, &t),
         Pane::Insights => insights::pane(ui, &t),
         Pane::Sync => sync::pane(ui, &t),
+        Pane::Bandwidth => bandwidth::pane(ui, &t),
+        Pane::Diagnostics => diagnostics::pane(ui, &t),
+        // A source that does not answer for this pane: the same "not built yet" frame.
+        Pane::Previews if ui.drive.photo_previews() == previews::PhotoPreviews::Unavailable => {
+            return placeholder::window(s, cx, registry::group_for(&s.shell.app));
+        }
+        Pane::Previews => previews::pane(ui, &t),
     };
     let overlay = overlay.filter(|_| inside);
     let mut body = row()

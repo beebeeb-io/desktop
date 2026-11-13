@@ -13,10 +13,14 @@ pub mod dialogs;
 pub mod facts;
 pub mod keys;
 pub mod list;
+pub mod long_list;
 pub mod menus;
 pub mod names;
 pub mod preview;
+pub mod protected;
+pub mod protected_fixture;
 pub mod rename;
+pub mod reset;
 pub mod share;
 pub mod sidebar;
 pub mod source;
@@ -25,6 +29,10 @@ pub mod window;
 
 #[cfg(test)]
 mod actions_tests;
+#[cfg(test)]
+mod long_list_tests;
+#[cfg(test)]
+mod protected_tests;
 #[cfg(test)]
 mod rest_tests;
 #[cfg(test)]
@@ -183,6 +191,13 @@ pub struct Actions {
     pub share_password: rune::TextEdit,
     /// Files answered since Two versions opened (DW-0429): the second reads "2 of 2".
     pub conflicts_done: usize,
+    /// The protected folders: the open message, the section last seen (`protected.rs`).
+    pub protected: protected::Ui,
+    /// The letters typed in the list, which jump to a name (`long_list.rs`).
+    pub typed: long_list::Typed,
+    /// A board frame that draws a long list from this row on (DW-0420b: the gate draws one frame
+    /// and cannot scroll). 0 in the app.
+    pub board_first_row: usize,
 }
 
 pub const INTENTS_KEPT: usize = 32;
@@ -212,6 +227,9 @@ impl Actions {
             host: names::Host::this(),
             share_password: rune::TextEdit::new("").secure(),
             conflicts_done: 0,
+            protected: protected::Ui::default(),
+            typed: long_list::Typed::default(),
+            board_first_row: 0,
         }
     }
 }
@@ -265,6 +283,9 @@ impl State {
         if row >= self.listing.items.len() {
             return;
         }
+        if self.selects_one_at_a_time() {
+            return self.select_only(row);
+        }
         let mut rows: BTreeSet<usize> = self.selected_rows().into_iter().collect();
         if !rows.remove(&row) {
             rows.insert(row);
@@ -282,6 +303,9 @@ impl State {
         if row >= count {
             return;
         }
+        if self.selects_one_at_a_time() {
+            return self.select_only(row);
+        }
         let from = self.actions.anchor.or(self.selected).unwrap_or(row).min(count - 1);
         self.actions.selection = (from.min(row)..=from.max(row)).collect();
         self.actions.anchor = Some(from);
@@ -290,7 +314,7 @@ impl State {
 
     pub fn select_all(&mut self) {
         let count = self.listing.items.len();
-        if count == 0 {
+        if count == 0 || self.selects_one_at_a_time() {
             return;
         }
         self.actions.selection = (0..count).collect();
@@ -375,6 +399,8 @@ impl State {
         use crate::shell::app::{Event, Route, Section, SettingsPane};
         let Intent::Frame(frame) = &intent;
         let frame: &'static str = frame;
+        // The status line shows the b's flyout (DW-0401 to DW-1201): a second surface, no route.
+        let flyout = frame == "DW-1201";
         let event = match frame {
             "DW-0701" => Some(Event::OpenSettings(SettingsPane::General)),
             "DW-1301" => Some(Event::Navigate(Route::section(Section::SyncHistory))),
@@ -397,6 +423,9 @@ impl State {
                 self.begin_versions();
             }
             _ => {}
+        }
+        if flyout {
+            crate::frames::tray::show_from_window(self);
         }
         if let Some(event) = event {
             crate::shell::host::dispatch(self, event);
@@ -425,6 +454,8 @@ impl State {
     pub(super) fn failed(&mut self, action: Action, why: ActionError, tx: &mut Tx) {
         if why == ActionError::Protected {
             self.intent(Intent::Frame("DW-1110"));
+            // Where the source has words for it, they are said here (`protected.rs`).
+            self.say_protected(action, tx);
         } else {
             self.show_toast(Toast::Failed(action, why), tx);
         }
@@ -504,6 +535,7 @@ impl State {
         self.actions.undo.clear();
         self.actions.menu = None;
         self.actions.rename = None;
+        self.actions.protected.alert = None;
         self.selected = None;
         self.actions.sort = self
             .actions
@@ -580,14 +612,11 @@ impl State {
         if files.is_empty() {
             return false;
         }
-        self.forget_undo();
-        // One file the viewer renders opens in the window (`frames::viewers`); every other goes
-        // to its own app.
-        if let [only] = &files[..]
-            && crate::frames::viewers::open(self, &only.id)
-        {
-            return false;
+        // One file of a type the window shows itself: its viewer (`frames::viewers`, the router).
+        if matches!(&files[..], [only] if crate::frames::viewers::open_item(self, only)) {
+            return true;
         }
+        self.forget_undo();
         if let Err(why) = self.actions.source.open(&files) {
             self.failed(Action::Open, why, tx);
         }
@@ -633,6 +662,11 @@ impl State {
         if items.is_empty() {
             return false;
         }
+        // Refused before the source is asked (`protected.rs`).
+        if self.protects(&items) {
+            self.failed(Action::Trash, ActionError::Protected, tx);
+            return true;
+        }
         if let Err(why) = self.actions.source.trash(&items) {
             self.failed(Action::Trash, why, tx);
             // Handled: there is a message to draw.
@@ -677,6 +711,10 @@ impl State {
         let items = self.selected_items();
         if items.is_empty() {
             return false;
+        }
+        if self.protects(&items) {
+            self.failed(Action::Duplicate, ActionError::Protected, tx);
+            return true;
         }
         let names: Vec<&str> = self.listing.items.iter().map(|i| i.name.as_str()).collect();
         if let Err(why) = self.actions.source.duplicate(&items, &names) {
@@ -730,6 +768,10 @@ impl State {
         let items = self.selected_items();
         if items.is_empty() {
             return false;
+        }
+        if self.protects(&items) {
+            self.failed(Action::CopyLink, ActionError::Protected, tx);
+            return true;
         }
         self.forget_undo();
         match self.actions.source.copy_link(&items) {
@@ -870,6 +912,10 @@ impl State {
 
     /// Change this folder's sort and put the rows in that order.
     pub fn set_sort(&mut self, sort: Sort) {
+        // A protected folder keeps its owner's order: no choice of the Sort menu applies there.
+        if self.in_protected_folder() {
+            return;
+        }
         self.actions.sort = sort;
         self.actions.source.set_sort(self.listing.folder.id.as_deref(), sort);
         self.forget_undo();
@@ -896,6 +942,11 @@ impl State {
     /// Put the rows in the folder's order; what was selected stays selected. Backups stays the
     /// first row whatever the sort (DW-0404).
     pub fn apply_sort(&mut self) {
+        // A protected folder stays in the order its owner gives it (devices, then services; the
+        // years newest first: DW-0422, DW-0424).
+        if self.in_protected_folder() {
+            return;
+        }
         let sort = self.actions.sort;
         let id_of = |s: &State, row: usize| s.listing.items.get(row).map(|i| i.id.clone());
         let lead = self.selected.and_then(|i| id_of(self, i));
@@ -915,7 +966,7 @@ impl State {
             } else {
                 Ordering::Equal
             };
-            let name = a.name.to_lowercase().cmp(&b.name.to_lowercase());
+            let name = long_list::sort_key(&a.name).cmp(&long_list::sort_key(&b.name));
             let by = match sort.by {
                 SortBy::Name => name,
                 // Newest first, largest first: the board's first Order choice for these.
@@ -960,6 +1011,7 @@ impl State {
             "preview" => {
                 self.preview();
             }
+            "share" if self.protects_selection() => self.failed(Action::CopyLink, ActionError::Protected, tx),
             "share" => self.intent(Intent::Frame("DW-0407")),
             "copy-link" => {
                 self.copy_link(tx);

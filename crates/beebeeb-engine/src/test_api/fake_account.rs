@@ -520,7 +520,13 @@ pub const TEST_PHRASE: &str =
 pub fn test_account() -> (Arc<FakeAccount>, String, FakeApi) {
     let (account, phrase) = FakeAccount::register("test@example.eu", "correct horse battery", TEST_PHRASE);
     let account = Arc::new(account);
+    add_sample_tree(&account);
+    let fake = start_fake(account.clone());
+    (account, phrase, fake)
+}
 
+/// The small tree of [`test_account`] (and of the fake server's fixture account): 2 folders and 5 files.
+pub fn add_sample_tree(account: &FakeAccount) {
     // Use real UUIDs for item ids: the engine's owner-keys prepare path calls `item_class(id)` which
     // requires a valid UUID (a non-UUID id makes the class unknown, the row unreadable, and the
     // decrypted name empty in state.db).
@@ -542,9 +548,6 @@ pub fn test_account() -> (Arc<FakeAccount>, String, FakeApi) {
     account.add_item(file_report, Some(folder_docs), "report.pdf", false, 512_000);
     account.add_item(file_photo1, Some(folder_photos), "sunset.jpg", false, 2_048_000);
     account.add_item(file_photo2, Some(folder_photos), "portrait.png", false, 4_096_000);
-
-    let fake = start_fake(account.clone());
-    (account, phrase, fake)
 }
 
 #[cfg(test)]

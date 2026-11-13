@@ -377,7 +377,22 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         shortcuts::open(s);
         s.shortcuts.page = shortcuts::Page::Window;
     }),
+    // The same dialog while a document is open: the editor's four lists. The board draws the
+    // document editor behind it, which is not built; the scene opens the note in the text
+    // editor (DW-1523). No golden, so no gate: `FRAMES.md` says what is left.
+    ("DW-1234", |s| {
+        crate::frames::viewers::set_scene(s, "DW-1523");
+        shortcuts::open(s);
+    }),
 ];
+
+/// The window's status line shows the b's flyout (DW-0401: "a click shows the b's flyout";
+/// DW-1201), as a left click on the b does: the flyout reads the engine first, then opens where
+/// it last opened. A second click, or the click that took the focus from an open flyout, closes
+/// it (`shell::flyout::on_tray_click`).
+pub fn show_from_window(s: &mut State) {
+    s.shell.toggle_flyout(None);
+}
 
 /// Puts one board frame's flyout in the window (`--scene DW-1203 --size 340x520`).
 pub fn set_scene(s: &mut State, frame: &str) {

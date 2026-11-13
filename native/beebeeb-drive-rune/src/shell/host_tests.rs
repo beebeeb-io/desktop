@@ -81,6 +81,8 @@ fn files_is_the_registered_frame_and_draws_dw_0401() {
 #[test]
 fn an_unbuilt_route_draws_the_placeholder_that_names_its_group() {
     let (_, _, mut rt) = fixture();
+    // A window whose source knows no Backups folder (`FilesSource::backups_root` is `None`).
+    rt.update(|s, _| s.actions = crate::frames::files::Actions::default());
     go(&mut rt, Section::Backups);
     assert!(rt.find("not-built").is_some());
     assert!(
@@ -110,8 +112,8 @@ fn every_state_without_a_frame_has_a_placeholder_and_only_files_is_built() {
         unbuilt += usize::from(!built);
     }
     assert_eq!(
-        unbuilt, 1,
-        "one section waits for its lane: Backups (Photos, Shared, Trash, Sync history and Available offline are built; the Backups that landed is the settings pane)"
+        unbuilt, 0,
+        "every section has its frame (Backups is the Files window on the Backups folder: `frames::files::protected`)"
     );
     for gate in [
         GateState::SignedOut,
@@ -128,8 +130,11 @@ fn every_state_without_a_frame_has_a_placeholder_and_only_files_is_built() {
         // As for the sections above: the placeholder, unless the group's lane registered its frame.
         let built = registry::frame(registry::group_for(&rt.state.shell.app)).is_some();
         assert_eq!(rt.find("not-built").is_none(), built, "{gate:?}");
-        // Behind the gate there is no sidebar and no list: nothing of the account.
-        assert!(rt.find("sidebar").is_none(), "{gate:?}");
+        // Behind the gate there is no list, and no sidebar: nothing of the account. The two states
+        // before Files are the exception the board draws (DW-0009, DW-0014): the sidebar stands
+        // closed (dimmed, nothing in it can be pressed), and still no list and no file name.
+        let before_files = matches!(gate, GateState::Locked | GateState::NoPlan);
+        assert_eq!(rt.find("sidebar").is_some(), before_files, "{gate:?}");
         assert!(rt.find("file-list").is_none(), "{gate:?}");
     }
 }
@@ -137,8 +142,13 @@ fn every_state_without_a_frame_has_a_placeholder_and_only_files_is_built() {
 #[test]
 fn the_placeholder_never_shows_fixture_rows() {
     let (_, _, mut rt) = fixture();
+    // A window whose source knows no Backups folder (`FilesSource::backups_root` is `None`).
+    rt.update(|s, _| s.actions = crate::frames::files::Actions::default());
     go(&mut rt, Section::Backups);
-    assert!(rt.find("not-built").is_some(), "Backups is the section without a frame");
+    assert!(
+        rt.find("not-built").is_some(),
+        "Backups without a source that knows its folder"
+    );
     let texts = texts(&rt);
     for name in ["Contract draft.pdf", "Lisbon trip", "Budget 2026.xlsx"] {
         assert!(
@@ -313,6 +323,8 @@ fn signed_out_takes_no_shortcut_to_the_account() {
 #[test]
 fn a_sidebar_selection_becomes_a_navigation() {
     let (_, _, mut rt) = fixture();
+    // A window whose source knows no Backups folder (`FilesSource::backups_root` is `None`).
+    rt.update(|s, _| s.actions = crate::frames::files::Actions::default());
     // What `ui::sidebar` does on a click.
     rt.update(|s, _| s.sidebar_section = SidebarSection::Backups);
     rt.frame(0.016);
@@ -747,6 +759,14 @@ fn entering_a_secret_route_sets_capture_exclusion_and_leaving_clears_it() {
     rt.frame(2.0);
     assert_eq!(
         platform.capture_exclusions.lock().unwrap().clone(),
+        vec![true],
+        "the poll that first sees no secret keeps the window excluded"
+    );
+    // Exclusion drops one poll late: the poll that first sees no secret keeps it and lands the
+    // leaving elements; the next one tells the platform.
+    rt.frame(2.5);
+    assert_eq!(
+        platform.capture_exclusions.lock().unwrap().clone(),
         vec![true, false],
         "leaving sign-in calls the platform with clear"
     );
@@ -827,6 +847,9 @@ fn after_failure_subsequent_polls_retry_bounded() {
     platform.capture_exclusion_fails.store(false, Ordering::SeqCst);
     engine.set_gate(GateState::Ready);
     rt.frame(5.0);
+    // Exclusion drops one poll late: the poll that first sees no secret keeps it and lands the
+    // leaving elements; the next one tells the platform.
+    rt.frame(5.5);
     // Desired false, applied false → match → retries reset.
     assert_eq!(rt.state.shell.capture_exclusion_retries, 0);
 
@@ -882,52 +905,160 @@ fn the_account_panes_change_password_and_2fa_setup_are_secret() {
     assert!(!AccountDialog::LockDelay(Some(1)).shows_secret(), "DW-0716");
 }
 
-/// The Share dialog's password field (DW-0407) is a secret on a route that is not one: the
-/// window is excluded from capture exactly while the field shows. The link itself is never
-/// drawn, so the dialog without the field leaves the window capturable.
+/// DW-0401 to DW-1201: the window's status line shows the b's flyout, as a click on the b does.
+/// The click asks the flyout to read the engine once and open (that a window shows is Rune's
+/// window host's to say, as above); the Search window's status line does the same.
 #[test]
-fn a_links_password_field_excludes_the_window_from_capture_while_it_shows() {
-    let (_engine, platform, mut rt) = fixture();
-    let exclusions = || platform.capture_exclusions.lock().unwrap().clone();
-    let centre_of = |rt: &Runtime<State>, key: &str| {
-        let e = rt
+fn the_status_line_of_the_window_opens_the_flyout() {
+    let shell_with_flyout = || {
+        let flyout = rune::App::new(rune::AppSpec::new(
+            "flyout",
+            WindowKind::Flyout.default_size(),
+            flyout_window::fixture_state,
+            flyout_window::view,
+        ))
+        .handle();
+        let wiring = Wiring {
+            flyout: Some(flyout),
+            ..Wiring::default()
+        };
+        let platform = Arc::new(FakePlatform::default());
+        let actions = Arc::new(HostActions::new(Arc::new(FixtureEngine::ready()), platform.clone()));
+        Shell::new(actions, platform, wiring)
+    };
+    let click_status = |rt: &mut Runtime<State>| {
+        let r = rt
             .elements()
             .into_iter()
-            .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
-            .unwrap_or_else(|| panic!("no element keyed {key}"));
-        (e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0)
-    };
-    let click = |rt: &mut Runtime<State>, key: &str| {
-        let (x, y) = centre_of(rt, key);
+            .find(|e| e.key.as_deref() == Some("status-text") && !e.exiting)
+            .expect("the status line")
+            .rect;
+        let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
-        for i in 0..3 {
-            rt.frame(10.0 + f64::from(i));
-        }
+        settle(rt);
     };
-    // Share…, from the details panel's button: the dialog alone shows no secret.
-    click(&mut rt, "share-box");
-    assert!(matches!(
-        rt.state.actions.dialog,
-        Some(crate::frames::files::dialogs::Dialog::Share(_))
-    ));
-    assert!(
-        exclusions().is_empty(),
-        "the dialog without a password field is capturable"
+    // Files.
+    let mut rt = runtime(state::init_with(shell_with_flyout()));
+    assert_eq!(rt.state.shell.flyout_reads, 0);
+    click_status(&mut rt);
+    assert_eq!(
+        rt.state.shell.flyout_reads, 1,
+        "the click reads the flyout and opens it"
     );
-    // Password on: the field shows, and the platform is told to exclude the window.
-    click(&mut rt, "item-0-2-switch");
-    assert!(crate::frames::files::share::shows_secret(&rt.state));
-    assert_eq!(exclusions(), vec![true]);
-    assert!(rt.state.shell.capture_excluded);
-    // Password off again: capturable again.
-    click(&mut rt, "item-0-2-switch");
-    assert_eq!(exclusions(), vec![true, false]);
-    // On, then Cancel: the dialog and the field are gone, and so is the exclusion.
-    click(&mut rt, "item-0-2-switch");
-    assert_eq!(exclusions(), vec![true, false, true]);
-    click(&mut rt, "btn-2");
-    assert!(rt.state.actions.dialog.is_none());
-    assert_eq!(exclusions(), vec![true, false, true, false]);
-    assert!(!rt.state.shell.capture_excluded);
+    // Search (the Files window while searching).
+    let mut state = state::init_with(shell_with_flyout());
+    crate::frames::search::dw_0802(&mut state);
+    let mut rt = runtime(state);
+    click_status(&mut rt);
+    assert_eq!(rt.state.shell.flyout_reads, 1);
 }
+
+// ---------------------------------------------------------------------------
+// Snapshot gate: scenes that set a non-Ready gate must survive the poll's
+// refresh, which reads the fixture engine. Regression d6506fb7.
+// ---------------------------------------------------------------------------
+
+/// The snapshot path: a scene sets the gate to SignedOut, poll runs, and the gate stays
+/// SignedOut. Before the fix, `refresh()` read `Ready` from the fixture engine and flipped
+/// the sign-in gate to Files.
+#[test]
+fn a_scene_gate_survives_the_polls_refresh() {
+    let engine = Arc::new(FixtureEngine::ready());
+    let platform = Arc::new(FakePlatform::default());
+    let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform)));
+    assert_eq!(
+        rt.state.shell.app.screen(),
+        Screen::Drive(Route::section(Section::Files))
+    );
+    // Apply a scene that sets the gate to SignedOut (the sign-in scene's mechanism).
+    rt.update(|s, _| {
+        dispatch(s, Event::Gate(GateState::SignedOut));
+    });
+    assert_eq!(rt.state.shell.app.screen(), Screen::SignIn);
+    // Run two frames: the poll's refresh must not flip the gate back to Ready.
+    rt.frame(1.0);
+    assert_eq!(
+        rt.state.shell.app.screen(),
+        Screen::SignIn,
+        "the scene's SignedOut gate must survive the first poll"
+    );
+    rt.frame(2.0);
+    assert_eq!(
+        rt.state.shell.app.screen(),
+        Screen::SignIn,
+        "the scene's SignedOut gate must survive the second poll"
+    );
+    // The app machine's gate is still SignedOut (the fixture engine says so too).
+    assert_eq!(rt.state.shell.app.gate(), GateState::SignedOut);
+    // The sidebar must not be drawn behind the gate.
+    assert!(rt.find("sidebar").is_none(), "no sidebar behind sign-in");
+    assert!(rt.find("file-list").is_none(), "no file list behind sign-in");
+}
+
+/// Every gate scene keeps its gate through two frames of poll.
+#[test]
+fn every_gate_scene_survives_two_polls() {
+    for (gate, name) in [
+        (GateState::SignedOut, "signed-out"),
+        (GateState::Locked, "locked"),
+        (GateState::NoPlan, "no-plan"),
+        (GateState::FirstRun, "first-run"),
+    ] {
+        let engine = Arc::new(FixtureEngine::ready());
+        let platform = Arc::new(FakePlatform::default());
+        let mut rt = runtime(state::init_with(Shell::fixture_on(engine, platform)));
+        rt.update(|s, _| {
+            dispatch(s, Event::Gate(gate));
+        });
+        rt.frame(1.0);
+        rt.frame(2.0);
+        assert_ne!(
+            rt.state.shell.app.screen(),
+            Screen::Drive(Route::section(Section::Files)),
+            "scene {name}: Files must not show behind a {gate:?} gate"
+        );
+        assert!(
+            rt.find("file-list").is_none(),
+            "scene {name}: no file list behind a {gate:?} gate"
+        );
+    }
+}
+
+/// The guard: with an engine that is the authority (the live-engine stand-in), dispatching
+/// `Event::Gate(Ready)` and polling does NOT show Files. This proves that in the real app
+/// the engine's gate cannot be overridden by a dispatch.
+#[test]
+fn dispatching_gate_ready_does_not_override_the_engines_authority() {
+    for gate in [GateState::Locked, GateState::SignedOut, GateState::NeedsRecoveryPhrase] {
+        let engine = Arc::new(FixtureEngine::live_stand_in(gate));
+        let platform = Arc::new(FakePlatform::default());
+        let mut rt = runtime(state::init_with(Shell::fixture_on(engine.clone(), platform)));
+        // The engine says `gate`; dispatch tries to set Ready.
+        rt.update(|s, _| {
+            dispatch(s, Event::Gate(GateState::Ready));
+        });
+        // The dispatch set the app machine to Ready momentarily, but the very next poll's
+        // refresh reads the engine (still `gate`) and overrides it.
+        rt.frame(1.0);
+        assert_eq!(
+            rt.state.shell.app.gate(),
+            gate,
+            "the engine's {gate:?} must win over a dispatched Ready"
+        );
+        assert_ne!(
+            rt.state.shell.app.screen(),
+            Screen::Drive(Route::section(Section::Files)),
+            "Files must not show when the engine says {gate:?}"
+        );
+        assert!(
+            rt.find("file-list").is_none(),
+            "no file list when the engine says {gate:?}"
+        );
+    }
+}
+
+#[path = "host_tests_files.rs"]
+mod files;
+#[path = "host_tests_flows.rs"]
+mod flows;

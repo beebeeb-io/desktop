@@ -691,12 +691,22 @@ fn left_and_right_preview_the_neighbouring_files_and_skip_folders() {
 }
 
 #[test]
-fn the_previews_open_goes_to_the_files_app_and_its_share_to_the_share_dialog() {
+fn the_previews_open_opens_the_file_and_its_share_goes_to_the_share_dialog() {
     let (mut rt, calls, _) = spied();
     press(&mut rt, Key::Text(" ".into()), NONE);
     click(&mut rt, "pv-open");
     assert!(rt.state.actions.dialog.is_none());
-    assert_eq!(asked(&calls), [Call::Open(ids(&["contract"]))]);
+    // A PDF opens in the window's viewer (`frames::viewers::open_item`): the route is on the
+    // file, and it is not also handed to another app.
+    assert!(
+        matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.as_deref() == Some("contract")),
+        "Open in its app shows the file"
+    );
+    assert!(asked(&calls).is_empty());
+    rt.update(|s, _| crate::frames::viewers::close(s));
+    settle(&mut rt);
+    assert!(matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.is_none()));
+    click(&mut rt, "row-6-date");
     press(&mut rt, Key::Text(" ".into()), NONE);
     click(&mut rt, "pv-share");
     assert!(share_of(&rt).is_some_and(|s| s.items[0].id == "contract"));
@@ -745,9 +755,11 @@ fn a_file_with_no_preview_says_so_and_offers_the_two_ways_on() {
 #[test]
 fn open_goes_to_the_viewer_for_a_file_it_renders_and_to_the_files_app_otherwise() {
     let (mut rt, calls, _) = spied();
-    // Contract draft.pdf: the viewer's sample has no such file, so it goes to its own app.
+    // A file of a type the window has no viewer for goes to its own app.
+    click(&mut rt, "row-9-date");
+    let other = rt.state.listing.items[9].id.clone();
     press(&mut rt, Key::Enter, NONE);
-    assert_eq!(asked(&calls), [Call::Open(ids(&["contract"]))]);
+    assert_eq!(asked(&calls), [Call::Open(vec![other])]);
     assert!(matches!(rt.state.shell.app.screen(), Screen::Drive(route) if route.item.is_none()));
     // A file the viewer renders (its sample's notes): Open shows it in the window.
     let notes = crate::frames::viewers::source::board::NOTES;

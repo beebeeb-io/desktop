@@ -39,6 +39,17 @@ use crate::host::{ConflictAutoResolved, ConflictNotice, EngineEvent, EngineHost,
 
 /// The program around the engine: where its events, notices and questions go.
 pub type Host = Arc<dyn EngineHost>;
+
+/// Tells the host that the engine task ended, when it drops (every way out of [`run`], an abort included).
+struct EndedGuard(Host);
+
+impl Drop for EndedGuard {
+    fn drop(&mut self) {
+        self.0.start_report(StartReport::Ended);
+    }
+}
+
+use crate::sync_view::StartReport;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
@@ -165,6 +176,10 @@ async fn run(
     #[cfg(not(unix))]
     let _ = &ipc_bind_error;
 
+    // However this task ends (a return below, the loop's end, an abort that drops it), the host hears that it
+    // ended: a handle's view then never says sync runs when it does not (`crate::sync_view`).
+    let _ended = EndedGuard(app.clone());
+
     #[cfg(target_os = "windows")]
     if let Err(error) = crate::windows_cf::wait_for_credential_release().await {
         emit_status(&app, "error", Some(&sync_root), Some(&error));
@@ -183,8 +198,22 @@ async fn run(
     // Windows Cloud Files: connect the sync root before any placeholder work.
     // Beebeeb metadata now lives in the app-local state dir, but Cloud Files
     // placeholder seeding still needs a connected root later in this task.
+    // An engine runs only on a root that is registered and connected: a
+    // failed connect ends the task here, before any API client exists.
     #[cfg(target_os = "windows")]
-    crate::windows_cf::connect_root(identity, &sync_root);
+    match crate::windows_cf::connect_root(identity, &sync_root) {
+        Ok(explorer) => app.start_report(StartReport::Connected { explorer }),
+        Err(code) => {
+            let refused = crate::app::SyncStartRefused::RegistrationFailed { code };
+            tracing::error!(
+                kind = refused.kind(),
+                "the sync folder is not connected; the engine does not start"
+            );
+            app.start_report(StartReport::Refused(refused));
+            emit_status(&app, "error", Some(&sync_root), Some(&refused.to_string()));
+            return;
+        }
+    }
 
     if let Err(e) = state_paths::prepare_beebeeb_state_dir_for_sync_root(identity, &sync_root) {
         let msg = format!("prepare app-local state dir: {e}");

@@ -101,7 +101,8 @@ if (auSet) {
       if (more) { box(`${k}-more`, more); icon(`${k}-more-icon`, q('svg', more)); }
     });
   });
-  each('.kit-btn', auSet, (b, i) => {
+  // Not a button of Windows' own dialog over the view (`.kit-os`: Windows Hello's Cancel, DW-A14): Windows draws it.
+  qa('.kit-btn', auSet).filter((b) => !b.closest('.kit-os')).forEach((b, i) => {
     box(`btn-${i}`, b);
     icon(`btn-${i}-icon`, q('svg', b));
     text(`btn-${i}-label`, q('span', b));

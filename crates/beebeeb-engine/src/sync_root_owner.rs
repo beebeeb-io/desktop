@@ -64,8 +64,8 @@ pub fn refusal(identity: &EngineIdentity, registered: &Registration, root: &Path
 }
 
 /// What the OS says about `root` now. A folder that does not exist yet is nobody's (the first start makes it);
-/// a folder whose existence cannot be read is unreadable.
-fn registered(root: &Path) -> Registration {
+/// a folder whose existence cannot be read is unreadable. The engine start asks it through `sync_root_port`.
+pub(crate) fn registered(root: &Path) -> Registration {
     match std::fs::symlink_metadata(root) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Registration::Nobody,
@@ -188,8 +188,9 @@ mod tests {
         );
     }
 
-    /// The four callers ask before they act: the handle before it makes an engine, the runner before it connects
-    /// the root, the Windows registration before it registers, the Windows unregistration before it unregisters.
+    /// The four callers ask before they act: the handle before it makes an engine (with the registration its
+    /// `sync_root_port` read), the runner before it connects the root, the Windows registration before it
+    /// registers, the Windows unregistration before it unregisters.
     #[test]
     fn every_way_into_a_sync_folder_asks_first() {
         let read = |file: &str| {
@@ -199,15 +200,15 @@ mod tests {
         for (file, from, ask, act) in [
             (
                 "app.rs",
-                "pub fn start_sync(",
-                "crate::sync_root_owner::check(self.identity, &sync_root)?;",
+                "fn start_on(",
+                "crate::sync_root_owner::refusal(self.identity, &registered, &sync_root)",
                 "EngineRunner::spawn(",
             ),
             (
                 "runner.rs",
                 "async fn run(",
                 "if let Err(msg) = crate::sync_root_owner::check(identity, &sync_root) {",
-                "crate::windows_cf::connect_root(identity, &sync_root);",
+                "crate::windows_cf::connect_root(identity, &sync_root)",
             ),
             (
                 "windows_cf/mod.rs",

@@ -199,7 +199,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .grow(1.0)
                 .min_w(0.0)
                 .h_full()
-                .child(list::column_headers(s.actions.sort, &t))
+                .child(
+                    super::protected::column_headers(s, &t).unwrap_or_else(|| list::column_headers(s.actions.sort, &t)),
+                )
                 // A folder that could not be read says so. It never draws as an empty folder.
                 .child(match s.list_error {
                     // It holds the keyboard while it shows, so Back still works from the keys.
@@ -223,12 +225,14 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .fill(t.bg)
         .child(toolbar::toolbar(s, &t, 0.0))
         // The one banner of the whole window, or the loading strip (`frames::global`).
-        .children(crate::frames::global::under_toolbar(s, &t))
+        .children(crate::frames::global::under_toolbar(s, &t).or_else(|| super::protected::notice(s, &t)))
         .child(body)
         .child({
             // The sync state is the source's; a click shows the b's flyout (DW-0401 to DW-1201).
             let state = s.actions.source.sync_state();
-            let details = crate::frames::global::status_words(s).unwrap_or_else(|| pc_summary(s));
+            let details = crate::frames::global::status_words(s)
+                .or_else(|| super::protected::status_words(s))
+                .unwrap_or_else(|| pc_summary(s));
             let name = match &state {
                 Some(state) => format!("{state}. {details}"),
                 None => details.clone(),
@@ -286,10 +290,15 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .child(caption::caption_bar(s.identity.main_window_title(), &t, cx))
         .child(body);
     // What lies over the window: the open menu, the reason a name cannot be given, a dialog.
-    let layers: Vec<El> = [menu_layer(s, &t), rename::tip_layer(s, &t), dialogs::layer(s, &t)]
-        .into_iter()
-        .flatten()
-        .collect();
+    let layers: Vec<El> = [
+        menu_layer(s, &t),
+        rename::tip_layer(s, &t),
+        dialogs::layer(s, &t),
+        super::protected::layer(s, &t),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     if layers.is_empty() {
         return window;
     }

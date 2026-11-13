@@ -14,7 +14,7 @@ board are Windows' (`scripts/capture-golden.mjs`, `OWN_WINDOW`).
 
 | Frame | What | State |
 | --- | --- | --- |
-| DW-1201 | The desktop: the taskbar, the b pressed, the flyout over the window on Files | not a frame of its own to draw: Windows draws the taskbar, the flyout is DW-1202, the window is DW-0401; where the flyout opens is `shell/flyout.rs` (the shell lane's, merged) |
+| DW-1201 | The desktop: the taskbar, the b pressed, the flyout over the window on Files | linked, no scene and no golden of its own: Windows draws the taskbar and the b's button, the flyout is DW-1202, the window is DW-0401. It opens from the b (`shell/host.rs` `on_tray`, signed out: the window on sign-in) and from the window's status line in Files and in Search (`tray::show_from_window`, test `the_status_line_of_the_window_opens_the_flyout`). Left: see "DW-1201 and DW-1234: what is left" |
 | DW-1202 | Up to date | built, 0 |
 | DW-1203 | Syncing: the batch bar, the upload speed, rows in progress | built, 0 |
 | DW-1204 | Paused | built, 0 |
@@ -34,17 +34,43 @@ board are Windows' (`scripts/capture-golden.mjs`, `OWN_WINDOW`).
 | DW-1220 | The end of the list: the last 50, View full history, the scroll thumb | built, 0 |
 | DW-1221 | The longest copy and names | built, 0 |
 | DW-1222 | Waiting on a metered connection | built, 0 |
-| DW-1230 | The b's six icons | the shell lane's, merged (`shell/tray_icon.rs`, `shell/tray.rs`); Windows draws the taskbar around them. Not gated here: the board draws them inside Windows' own notification area |
-| DW-1231 | The b's menu | the shell lane's, merged (`shell/tray.rs`: the items; Windows draws the menu) |
-| DW-1231b | The b's menu while paused | the same |
+| DW-1230 | The b's six icons | OS-drawn, verified by a real-window capture (shell lane's icon code merged: `shell/tray_icon.rs`, `shell/tray.rs`; Windows draws the taskbar and notification area around them) |
+| DW-1231 | The b's menu | OS-drawn, verified by a real-window capture (shell lane's menu code merged: `shell/tray.rs`; Windows draws the context menu) |
+| DW-1231b | The b's menu while paused | OS-drawn, verified by a real-window capture (same) |
 | DW-1232 | Commands and keyboard shortcuts: Beebeeb, File, Edit | built (`shortcuts.rs`, `registry::DIALOGS`); gate NOT at 0: light geometry 2, pixels 8, frame tiles 4; dark 2, 10, 1 (text, icons, fills 0). Every failing key is, or lies under, "New ▾" (2 rows): the board's ▾ is the capture machine's fallback font (see the PR, "Gate not at 0") |
 | DW-1233 | Commands and keyboard shortcuts: View, Go, Window, Help | built (the dialog's second page: Page Down); gate NOT at 0: light geometry 1, pixels 7, frame tiles 8; dark 1, 10, 4. Every failing key is, or lies under, "Alt+←", "Alt+→" or "the □ caption button": the same fallback fonts |
-| DW-1234 | Commands and keyboard shortcuts while a document is open | the lists are built and tested (`commands::EDITOR`, shown while the window is on a viewer); NOT gated and no golden: the frame behind it is the document editor, which no lane has built |
+| DW-1234 | Commands and keyboard shortcuts while a document is open | the dialog is built: the editor's four lists (`commands::EDITOR`), shown while the window is on an open file, a scene (`DW-1234`: the note open in the text editor, the dialog in front) held by the test `the_scene_of_dw_1234_is_the_editors_four_lists_over_an_open_document`. NOT gated and no golden: see "DW-1201 and DW-1234: what is left" |
 
 Measured on 2026-11-12 at `b6df6207` (the base of the tray's engine wiring) and at its head, the same both times:
 DW-1232 light geometry 12, pixels 19, frame tiles 44, dark 12, 20, 12; DW-1233 light 11, 18, 50, dark 11, 20, 13
 (text, icons, fills 0). That is more than the two rows above say; the dialog is over the window, which other
 lanes have changed since. The 19 flyout frames are at 0 in both themes, both times.
+
+Measured again on 2026-11-12 on the Linux build VM, after the board's b4ffef881 goldens (the toolbar's Open in File
+Explorer; a 22nd File command, Free up space, which has no home on the board) and with the one window toolbar:
+DW-1232 light geometry 0, pixels 0, frame tiles 2, dark 0, 4 (`Files-row`, `row-5`, `row-5-tile`, `row-6-tile`: edges
+under the scrim), 2; DW-1233 light geometry 3 (`sc-1-0-home`, `sc-1-1-home`, `sc-2-1-home`), pixels 9, frame tiles 18,
+dark 3, 13, 11 (text, icons, fills 0).
+
+## DW-1201 and DW-1234: what is left
+
+**DW-1201.** Nothing of it is Beebeeb's to draw beyond DW-1202 and DW-0401, so it has no gated scene.
+- Opened from the status line, the flyout opens where it last opened: its place 12 px over the taskbar comes from
+  the b's rectangle, which only a click on the b carries (`TrayEvent::Activate { anchor }`). Before the first click
+  on the b it opens at the place its window was made with. Needs: the b's rectangle from the platform without a
+  click (`Shell_NotifyIconGetRect`), a shell change.
+- The status lines of Shared, Trash, Photos, Sync history and Available offline still only record the intent
+  (`Intent::Frame("DW-1201")` in their own queues); each needs the one call `tray::show_from_window`.
+- "The b pressed while the flyout is open" is Windows' drawing of the notification area button.
+
+**DW-1234.** The dialog and its words are done; the frame is not gated.
+- The board draws the dialog over the document editor (Docs, with its ribbon). No lane has built that editor, and
+  whether it can be native is an open decision (the office editor needs a web view). A golden captured today would
+  gate the dialog's keys at their place and fail on every key of the editor behind the scrim.
+- When the editor exists: capture `golden/DW-1234*` (keymap-tray.js keys the dialog already, as for DW-1232), point
+  the scene at the document the board has open instead of the note, and gate it light and dark.
+- The dialog shares DW-1232's card, so its known reds apply here too once gated (the fallback font of "▾", "←", "→").
+- Until then the lists are held by tests: their names and counts (`the_three_contents_hold_the_boards_lists_and_counts`), and the first and last command of each (the scene's test).
 
 ## The engine calls each action needs
 

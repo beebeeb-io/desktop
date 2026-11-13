@@ -7,6 +7,7 @@ State after the review delta (2026-11-11): 11 built here (plus DW-0401, built be
 State after lane f-files-rest (2026-11-12, PR 305): 16 built (2 of them with a gate not at 0), 34 not built here.
 Of those 34, the six list states DW-0101, 0102, 0114, 0118, 0119 and 0121 are built by the global lane (PR 299): 28 are built nowhere.
 State after lane files-actions (2026-11-12): DW-0407, DW-0408, DW-0408b, DW-0411, DW-0413 and DW-0429 are built (6 more), and DW-0406 and DW-1104 are back at 0 failing: the board now draws Free up space and the Open in File Explorer button, so the paragraph below describes the state before its goldens were recaptured.
+State after lane files-browse, PR 1 (2026-11-12): DW-0422, 0423, 0424, 0425 and 1110 built, none at 0 (the reds are named in their rows).
 Not on the board, added on the owner's request (PR 305): Free up space (file menu, details panel) and the
 toolbar's Open in File Explorer; until the board draws them and the goldens are recaptured, NO Files frame
 gates at 0: the toolbar button moves ten keys in each of the 16 frames (`view-toggle`, `view-list`,
@@ -38,12 +39,12 @@ before those two additions (at `1b2da021`). The 32 truth lines at the PR's head 
 | `DW-0480` | Files | Upload a whole folder, with everything in it, keeping its structure. | not built; Upload a folder… emits `Intent::Frame("DW-0480")` |
 | `DW-0481` | Files | Drag files from File Explorer into the list to upload them. | not built as a frame (drop highlight, drag badge); a drop works: `Intent::Upload(folder, files)` |
 | `DW-0420` | Folders | The same view one level deeper. | not built: golden captured; the fixture lists the folder's 7 rows and the path title is drawn; the four photo thumbnails and the video mark are not |
-| `DW-0420b` | Folders | Long content: a folder of 212 items scrolled two-thirds down, and names longer than a row. | not built |
-| `DW-0421` | Folders | The grid: thumbnails first, the way the iPhone's grid shows them. | not built |
-| `DW-0422` | Folders | Every device's backup and every Beebeeb service, in one protected folder. | not built |
-| `DW-0423` | Folders | What one device backed up: this PC's folders, contacts and calendar. | not built |
-| `DW-0424` | Folders | A folder a Beebeeb service manages: open and download only. | not built |
-| `DW-0425` | Folders | Say why a protected folder can't change, in the core's words. | not built |
+| `DW-0420b` | Folders | Long content: a folder of 212 items scrolled two-thirds down, and names longer than a row. | built (lane files-browse, `long_list.rs`): 212 items in one lazy list; names over 58 characters shortened in the middle with the whole name under the pointer; letters jump to a name. The frame is drawn from row 139 by a scene value (the gate draws one frame and cannot scroll). Gate not at 0: the board lists 0140 before 0141 (by number), the app sorts by name, so rows 1 and 2 are swapped; the overlay scrollbar is not drawn; the details toggle as in DW-0422 |
+| `DW-0421` | Folders | The grid: thumbnails first, the way the iPhone's grid shows them. | built (`long_list.rs`, on the global lane's grid): the view switch in Lisbon trip; thumbnails from the fixture's `ThumbSource`, the video's length. Gate not at 0: only the details toggle the board draws pressed (`panel-toggle-btn`, `panel-icon`) |
+| `DW-0422` | Folders | Every device's backup and every Beebeeb service, in one protected folder. | built (lane files-browse, `protected.rs`): the sidebar's Backups (Ctrl+4), the Backups row in Files and Back lead here; one row selected at a time. Gate not at 0: `item-count` says "5 items" (board "5 folders": the toolbar's title is the one-toolbar lane's), and the board draws the details toggle pressed with no panel (`panel-toggle-btn`, `panel-icon`) |
+| `DW-0423` | Folders | What one device backed up: this PC's folders, contacts and calendar. | built (`protected.rs`): Enter or a double-click on Anna-Laptop; read-only, Delete is Delete this backup (DW-0742). Gate not at 0: as DW-0422, and `status-details` (the board repeats DW-0401's sentence; the app counts the 5 rows) |
+| `DW-0424` | Folders | A folder a Beebeeb service manages: open and download only. | built (`protected.rs`): the note with Settings; the service's order is kept; New dimmed, drops refused. Gate not at 0: as DW-0423 |
+| `DW-0425` | Folders | Say why a protected folder can't change, in the core's words. | built (`protected.rs`): the message, in the source's words, on every way to rename, move or delete there (menu, Delete, F2, Ctrl+D, Move, several selected). Gate not at 0: as DW-0423 |
 | `DW-0426` | Folders | Uploads in progress, in their folder and in the status line. | not built |
 | `DW-0427` | Folders | Every upload with its state: what needs attention, what is moving, what waits. | not built |
 | `DW-0429` | Folders | A file changed in two places at once: nothing is overwritten until Anna picks. | built (lane files-actions): the shell's dialog route (`Dialog::Conflict`), this group's card (`conflict.rs`). The flyout's Review… opens it, and so does opening the row whose date reads "Two versions". Each Keep asks `FilesSource::keep_version` once; Cancel and Esc ask nothing. Not built: a double-click on a card (Preview of that version) |
@@ -56,7 +57,7 @@ before those two additions (at `1b2da021`). The 32 truth lines at the PR's head 
 | `DW-1107` | Browse | The first sign-in on a PC: the list downloads and is decrypted here, and Beebeeb can be used before it's finished. | not built |
 | `DW-1108` | Browse | Offline, everything stays visible; only what isn't on this PC is dimmed and says why. | not built |
 | `DW-1109` | Browse | The session ended after 90Â days without use: the list and the key are still here, so only the password is needed. | not built |
-| `DW-1110` | Browse | Trying to delete Mail Backup: the protected folder message. | not built |
+| `DW-1110` | Browse | Trying to delete Mail Backup: the protected folder message. | built (`protected.rs`): Delete or F2 on Mail Backup in Backups: the message, in the source's words for the folder itself. Gate not at 0: as DW-0423 |
 | `DW-0101` | List states | No connection: the list stays and says how old it is. | built by the global lane (`frames::global`, PR 299; its checklist is `../global/FRAMES.md`) |
 | `DW-0102` | List states | Some items can't sync: say how many, and that the rest is fine. | built by the global lane (`frames::global`, PR 299; its checklist is `../global/FRAMES.md`) |
 | `DW-0107` | List states | A short confirmation that needs nothing. | built (light and dark: 0 failing on all six) |

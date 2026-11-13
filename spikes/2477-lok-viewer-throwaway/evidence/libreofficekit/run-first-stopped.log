@@ -1,0 +1,16 @@
+headers: 4 of 4 match their pinned SHA-256 (tag branch libreoffice-26-2-7)
+cargo:     Finished `release` profile [optimized] target(s) in 1.85s
+spike exe bytes=415232
+before the rule: probe download.documentfoundation.org:443: CONNECTED
+exit= netopen remote.docx :: {"label":"netopen","file":"remote.docx","doc_type":0,"parts":1,"pages_found":1,"pages_rendered_non_blank":1,"tile_mode":1,"scale":1,"dims":["794x1123"],"distinct_colours":[412],"part_names":[],"init_ms":6914,"load_ms":1258,"init_render_ms":3,"page_ms":[185],"total_to_last_page_ms":8384,"peak_working_set_mb":326,"peak_commit_mb":269,"listener_hits":0,"version":{ "ProductName": "LibreOffice", "ProductVersion": "26.2", "ProductExtension": ".7.3", "BuildId": "08dfbf04dcac895fc3a8d30dbf5a00de1b9dda5e" }}
+  stderr lines=1; first: No language allowlisted, turning off the language support.
+with the rule:   probe download.documentfoundation.org:443: NO CONNECTION
+network block: PROVEN (same exe: connected before the rule, no connection with it)
+exit= cold spike.docx :: {"label":"cold","file":"spike.docx","doc_type":0,"parts":3,"pages_found":3,"pages_rendered_non_blank":3,"tile_mode":1,"scale":1,"dims":["794x1123","794x1123","794x1123"],"distinct_colours":[350, 362, 374],"part_names":[],"init_ms":5447,"load_ms":787,"init_render_ms":3,"page_ms":[253,10,9],"total_to_last_page_ms":6583,"peak_working_set_mb":319,"peak_commit_mb":267,"listener_hits":0,"version":{ "ProductName": "LibreOffice", "ProductVersion": "26.2", "ProductExtension": ".7.3", "BuildId": "08dfbf04dcac895fc3a8d30dbf5a00de1b9dda5e" }}
+  stderr lines=1; first: No language allowlisted, turning off the language support.
+RED warm0 spike.xlsx: no exit within 180 s, killed pid 2044
+RED warm0 spike.pptx: no exit within 180 s, killed pid 1676
+exit= warm1 spike.docx :: {"label":"warm1","file":"spike.docx","doc_type":0,"parts":3,"pages_found":3,"pages_rendered_non_blank":3,"tile_mode":1,"scale":1,"dims":["794x1123","794x1123","794x1123"],"distinct_colours":[350, 362, 374],"part_names":[],"init_ms":2096,"load_ms":516,"init_render_ms":2,"page_ms":[112,5,5],"total_to_last_page_ms":2783,"peak_working_set_mb":327,"peak_commit_mb":274,"listener_hits":0,"version":{ "ProductName": "LibreOffice", "ProductVersion": "26.2", "ProductExtension": ".7.3", "BuildId": "08dfbf04dcac895fc3a8d30dbf5a00de1b9dda5e" }}
+  stderr lines=1; first: No language allowlisted, turning off the language support.
+RED warm1 spike.xlsx: no exit within 180 s, killed pid 5592
+exit=255

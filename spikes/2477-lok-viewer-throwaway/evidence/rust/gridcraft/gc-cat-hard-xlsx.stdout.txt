@@ -1,0 +1,11 @@
+Budget 2026 (hard fixture)
+Item                        Qty  Rate code  Unit price  Total
+Hosting                      12  A           EUR 49.50     EUR 594.00
+Design                       40  B           EUR 95.00   EUR 3,800.00
+Support                      25  A           EUR 49.50   EUR 1,237.50
+Licences                      6  C          EUR 120.25     EUR 721.50
+Travel                        3  B           EUR 95.00     EUR 285.00
+Training                     16  C          EUR 120.25   EUR 1,924.00
+Total                       102                          EUR 8,562.00
+Average                                                  EUR 1,427.00
+Over budget?                                            YES over 8000

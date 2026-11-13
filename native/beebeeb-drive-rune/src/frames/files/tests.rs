@@ -264,7 +264,11 @@ fn the_board_fixture_honours_the_folder_id() {
 #[test]
 fn enter_on_a_file_asks_to_open_it_and_space_asks_for_the_preview() {
     let (mut rt, calls, _) = spied();
+    // A file of a type the window has no viewer for goes to its own app. (A PDF, a photo, …
+    // open in the window: `frames::viewers::open_item`, tested there.)
+    click(&mut rt, "row-9-date");
     press(&mut rt, Key::Enter, NONE);
+    click(&mut rt, "row-6-date");
     press(&mut rt, Key::Text(" ".into()), NONE);
     // The preview is over the window (DW-0408; `actions_tests.rs`): Esc closes it.
     press(&mut rt, Key::Escape, NONE);
@@ -278,7 +282,7 @@ fn enter_on_a_file_asks_to_open_it_and_space_asks_for_the_preview() {
         [Intent::Frame("DW-0408"), Intent::Frame("DW-0411")]
     );
     assert!(rt.state.actions.dialog.is_some(), "Details is open (DW-0411)");
-    assert_eq!(asked(&calls), [Call::Open(ids(&["contract"]))]);
+    assert_eq!(asked(&calls), [Call::Open(ids(&["q4plan"]))]);
 }
 
 // ---- Selection ----

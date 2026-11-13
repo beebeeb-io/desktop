@@ -1,5 +1,6 @@
-// keymap-signin-setup.js: the gate keys of the first run on Windows (DW-0201 to DW-0209), on top of
-// what keymap-signin.js keys in any `.au-mac` window (lockup, heading, buttons, banners, lists, rows).
+// keymap-signin-setup.js: the gate keys of the first run on Windows (DW-0201 to DW-0209) and the
+// first-time guide overlay (DW-0380, DW-0301 to DW-0305), on top of what keymap-signin.js keys in
+// any `.au-mac` window (lockup, heading, buttons, banners, lists, rows).
 // Same scope as keymap.js (`win`, `api`, `q`, `qa`); a block of its own, so no name collides.
 {
   const mac = q('.au-mac');
@@ -94,6 +95,7 @@
     text('banner-0-code', q('.kit-banner-text > span > .font-mono', col));
 
     // ---- DW-0209: the compare view, a sheet over the window ----
+
     const sheet = q('.mk-sheet', mac);
     if (sheet) {
       box('scrim', q('.mk-scrim', mac));
@@ -120,4 +122,49 @@
       box('cmp-choose', choose); text('cmp-choose-label', q('span', choose));
     }
   }
+}
+
+// ---- The first-time guide overlay (DW-0380 and DW-0301 to DW-0305) ----
+// Runs for every frame; the guard (`mk-coach` present) limits it to guide frames.
+{
+  const coach = q('.mk-coach');
+  if (coach) {
+    api.box('coach', coach);
+
+    // DW-0380 only: the heading "Beebeeb lives in the notification area"
+    const title = q('.t-head', coach);
+    if (title) api.text('coach-title', title);
+
+    // The body paragraph: t-body in tips 1-5, t-sub in DW-0380
+    const body = q('p', coach);
+    if (body) api.text('coach-text', body);
+
+    // Progress dots and the active dot (tips 1-5 only)
+    const dots = q('.mk-pdots', coach);
+    if (dots) {
+      api.box('coach-dots', dots);
+      [...dots.querySelectorAll('i')].forEach((dot, i) => api.box(`coach-dot-${i}`, dot));
+    }
+
+    // "1 of 5" / "5 of 5" counter (tips 1-5 only)
+    const counter = q('.t-cap', coach);
+    if (counter) api.text('coach-counter', counter);
+
+    // Action buttons: Skip (ghost) and Next / Done / Got it (outlined or amber)
+    [...coach.querySelectorAll('.kit-btn-sm')].forEach((btn) => {
+      const label = btn.querySelector('span');
+      const t = label ? label.textContent.trim() : '';
+      if (t === 'Skip') {
+        api.box('coach-skip', btn);
+        api.text('coach-skip-label', label);
+      } else if (t === 'Next' || t === 'Done' || t === 'Got it') {
+        api.box('coach-next', btn);
+        api.text('coach-next-label', label);
+      }
+    });
+  }
+
+  // The highlight ring around the target element (sibling of coach, DW-0301 to DW-0305)
+  const ring = q('.mk-ring');
+  if (ring) api.box('coach-ring', ring);
 }
