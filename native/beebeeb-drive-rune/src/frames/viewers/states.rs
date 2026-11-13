@@ -1,10 +1,14 @@
 //! Open files: the states (DW-1516 decrypting, DW-1517 too large, DW-1518 failed). One tile, a
 //! title, a sentence, and what the person can do, centred on the stage.
+//!
+//! Two more states are the engine's, not the board's (no golden): opening stopped for a reason that is
+//! not a failed decryption ([`Stopped`]), and a file that is in Beebeeb and is not shown here
+//! ([`NoPreview`]). They are drawn with the same parts as the board's three.
 
 use rune::{Align, El, Icon, col, el, row};
 
 use super::chrome::{ButtonKind, Dot, Status, button};
-use super::source::{Body, OpenFile, percent, progress_words, size_words};
+use super::source::{Body, NoPreview, OpenFile, Stopped, percent, progress_words, size_words};
 use super::{Intent, icons, style, ui};
 use crate::State;
 use crate::theme::tokens::Theme;
@@ -76,6 +80,26 @@ pub fn status(body: &Body) -> Option<Status> {
             dot: Dot::Red,
             text: "Not decrypted: nothing changed".into(),
             details: "The copy in Beebeeb is unchanged".into(),
+        },
+        Body::Stopped(why) => Status {
+            dot: Dot::Warn,
+            text: match why {
+                Stopped::Offline => "Not opened: Beebeeb can't be reached",
+                Stopped::SessionEnded => "Not opened: the session ended",
+                Stopped::SessionChanged => "Closed: its content left memory",
+                Stopped::Gone => "Not opened: the file is gone",
+            }
+            .into(),
+            details: "The copy in Beebeeb is unchanged".into(),
+        },
+        Body::NotPreviewable(why) => Status {
+            dot: Dot::Warn,
+            text: "No preview here".into(),
+            details: match why {
+                NoPreview::NoViewer | NoPreview::TooBig { .. } => "Nothing was downloaded",
+                NoPreview::Unreadable => "Decrypted in memory only; nothing was kept",
+            }
+            .into(),
         },
         // Each has its own view (`text.rs`, `markdown.rs`, `photo.rs`, …).
         _ => return None,
@@ -191,12 +215,113 @@ fn failed(t: &Theme) -> El {
     stage(content, t)
 }
 
+/// Opening stopped, and it was not a failed decryption: what happened, and the one thing to do.
+fn stopped(why: Stopped, t: &Theme) -> El {
+    let (title, words) = match why {
+        Stopped::Offline => (
+            "Can't reach Beebeeb",
+            "Opening downloads the file, and Beebeeb can't be reached right now. Nothing changed.",
+        ),
+        Stopped::SessionEnded => (
+            "Your session ended",
+            "Sign in again to open this file. Nothing changed.",
+        ),
+        Stopped::SessionChanged => (
+            "This file was closed",
+            "Beebeeb was locked or the account changed while it was open, so its content was cleared from memory.",
+        ),
+        Stopped::Gone => (
+            "This file is no longer in Beebeeb",
+            "It may have been moved to Trash or deleted on another device.",
+        ),
+    };
+    let act = if why.can_retry() {
+        let label = if why == Stopped::Offline {
+            "Try again"
+        } else {
+            "Open it again"
+        };
+        button("state-btn-0", label, ButtonKind::Outline, false, t).on_press(|s: &mut State| {
+            if let Some(ui) = ui(s) {
+                ui.retry();
+            }
+        })
+    } else {
+        button("state-btn-0", "Close", ButtonKind::Outline, false, t).on_press(super::close)
+    };
+    let content = col()
+        .key("state")
+        .role("alert")
+        .items_center()
+        .gap(8.0)
+        .child(tile(&icons::ALERT, false, t))
+        .child(heading(title, t))
+        .child(sentence(words.into(), t))
+        .child(actions(vec![act]));
+    stage(content, t)
+}
+
+/// The file is in Beebeeb and is not shown here: why, and the two ways out.
+fn not_previewable(file: &OpenFile, why: NoPreview, t: &Theme) -> El {
+    let (title, words) = match why {
+        NoPreview::NoViewer => (
+            "No preview for this kind of file yet",
+            format!(
+                "{} is safe in Beebeeb. This app can't show this kind of file yet, so nothing was downloaded.",
+                file.name
+            ),
+        ),
+        NoPreview::TooBig { size, limit } => (
+            "Too large to preview here",
+            format!(
+                "{} is {}. A preview is decrypted in memory, up to {}, so nothing was downloaded.",
+                file.name,
+                crate::source::format_size(i64::try_from(size).unwrap_or(i64::MAX)),
+                crate::source::format_size(i64::try_from(limit).unwrap_or(i64::MAX))
+            ),
+        ),
+        NoPreview::Unreadable => (
+            "Can't show this file",
+            "It was decrypted on this PC, but its content isn't what its name says. Nothing was kept.".to_string(),
+        ),
+    };
+    let content = col()
+        .key("state")
+        .items_center()
+        .gap(8.0)
+        .child(tile(&icons::INFO, false, t))
+        .child(heading(title, t))
+        .child(sentence(words, t))
+        .child(actions(vec![
+            button(
+                "state-btn-0",
+                "Open in another app\u{2026}",
+                ButtonKind::Outline,
+                false,
+                t,
+            )
+            .on_press(|s: &mut State| {
+                if let Some(ui) = ui(s) {
+                    ui.intent(Intent::OpenInAnotherApp);
+                }
+            }),
+            button("state-btn-1", "Save a copy\u{2026}", ButtonKind::Outline, false, t).on_press(|s: &mut State| {
+                if let Some(ui) = ui(s) {
+                    ui.intent(Intent::SaveCopy);
+                }
+            }),
+        ]));
+    stage(content, t)
+}
+
 /// The body of a state.
 pub fn body(file: &OpenFile, t: &Theme) -> Option<El> {
     Some(match &file.body {
         Body::Decrypting { done, total } => decrypting(file, *done, *total, t),
         Body::TooLarge { size, free } => too_large(file, *size, *free, t),
         Body::Failed => failed(t),
+        Body::Stopped(why) => stopped(*why, t),
+        Body::NotPreviewable(why) => not_previewable(file, *why, t),
         // Each has its own view (`text.rs`, `markdown.rs`, `photo.rs`, …).
         _ => return None,
     })

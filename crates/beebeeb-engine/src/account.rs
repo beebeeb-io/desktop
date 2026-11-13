@@ -64,6 +64,15 @@ impl AccountId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionGeneration(u64);
 
+#[cfg(any(test, feature = "test-support"))]
+impl SessionGeneration {
+    /// Test builds only: a generation of a test's own choosing, for a double of the engine that names its own
+    /// sessions (a host's adapter tested without a handle).
+    pub fn for_test(number: u64) -> Self {
+        Self(number)
+    }
+}
+
 /// What moved an account's [`SessionGeneration`] last, so a transition that is refused can say why in words that fit
 /// (Task 12 fix round 1, item 8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

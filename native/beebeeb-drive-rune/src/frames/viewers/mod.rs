@@ -50,7 +50,8 @@ use crate::shell::host;
 use crate::shell::registry::FrameGroup;
 use crate::theme::tokens;
 use source::{
-    Body, Conflict, FixtureViewerSource, Keep, OpenError, OpenFile, SaveOutcome, TextDoc, ViewerSource, board,
+    Body, Conflict, Elsewhere, FixtureViewerSource, Keep, OpenError, OpenFile, SaveOutcome, TextDoc, ViewerSource,
+    board,
 };
 
 /// Where the person goes when an action leaves this group. The shell opens it.
@@ -60,6 +61,13 @@ pub enum Intent {
     FreeUpSpace,
     /// A save panel that lists only disks with room; the decrypted copy goes there.
     DownloadTo,
+    /// "Save a copy…" of a file that is not shown here: a save panel, and the decrypted copy goes where the
+    /// person says.
+    SaveCopy,
+    /// Edit, where the source cannot save an edit.
+    Edit,
+    /// Available offline, where the source cannot change it.
+    KeepOffline,
     /// DW-0782: the report dialog. The report carries the code, never the file's name.
     ReportProblem,
     /// DW-1520: New's menu.
@@ -88,6 +96,10 @@ pub enum Intent {
 /// What a control whose target is not built yet says (the shell's words for it).
 pub const NOT_BUILT: &str = "Not built yet";
 
+/// What "Open in another app…" says when the file could not be opened there.
+pub const NOT_OPENED_ELSEWHERE: &str =
+    "Couldn't open it in another app. It opens from your Beebeeb folder, so sync has to be on for this PC.";
+
 impl Intent {
     /// The name of where this intent goes, while nothing there answers it yet.
     fn not_built(&self) -> Option<&'static str> {
@@ -95,6 +107,9 @@ impl Intent {
             Intent::Share => "Share",
             Intent::Trash => "Move to Trash",
             Intent::OpenInAnotherApp => "Open in another app",
+            Intent::SaveCopy => "Save a copy",
+            Intent::Edit => "Edit and save from here",
+            Intent::KeepOffline => "Available offline from here",
             Intent::EditInSheets => "Edit in Sheets",
             Intent::VersionHistory => "Version history",
             _ => return None,
@@ -192,12 +207,22 @@ impl Ui {
         self.show_details = !self.show_details;
     }
 
-    /// Available offline, on or off: the engine keeps or releases the copy on this PC.
+    /// Available offline, on or off: the engine keeps or releases the copy on this PC. A source that cannot
+    /// change it says so (never a press that does nothing).
     pub fn toggle_offline(&mut self) {
+        if !self.source.knows_offline() {
+            self.intent(Intent::KeepOffline);
+            return;
+        }
         let on = !self.file.details.offline;
         if self.source.set_offline(&self.file.id, on) {
             self.file.details.offline = on;
         }
+    }
+
+    /// Whether the details panel shows the Available offline switch: only a state that was read.
+    pub(crate) fn knows_offline(&self) -> bool {
+        self.source.knows_offline()
     }
 
     /// A link in a note: to the web in the browser, else a file in Drive.
@@ -210,6 +235,21 @@ impl Ui {
     }
 
     pub fn intent(&mut self, intent: Intent) {
+        // "Open in another app…" is the source's when it has a way there: the system opens the file from
+        // the place the engine keeps the account's files on this PC. A refusal says so.
+        if intent == Intent::OpenInAnotherApp {
+            match self.source.open_elsewhere(&self.file.id) {
+                Elsewhere::Opened => {
+                    self.toast = None;
+                    return;
+                }
+                Elsewhere::Refused => {
+                    self.toast = Some(NOT_OPENED_ELSEWHERE.to_string());
+                    return;
+                }
+                Elsewhere::NotBound => {}
+            }
+        }
         // Nothing takes these yet (the shell's drain of this group's intents comes with the
         // engine's wiring): the press says so, in the shell's own words, never nothing.
         if let Some(what) = intent.not_built() {
@@ -231,15 +271,27 @@ impl Ui {
         }
     }
 
-    /// DW-1518's Try again: download and decrypt again (DW-1516).
+    /// DW-1518's Try again: download and decrypt again (DW-1516). Also after a stop that trying again may
+    /// get past (offline, a lock that ended).
     pub fn retry(&mut self) {
-        if self.file.body != Body::Failed {
+        let may = match &self.file.body {
+            Body::Failed => true,
+            Body::Stopped(why) => why.can_retry(),
+            _ => false,
+        };
+        if !may {
             return;
         }
         if let Ok(file) = self.source.retry(&self.file.id) {
-            self.file = file;
+            self.replace(file);
             self.focus = Some(states::TITLE_KEY);
         }
+    }
+
+    /// Put `file` in place of the open one, whose decrypted text is overwritten first.
+    fn replace(&mut self, file: OpenFile) {
+        self.file.wipe();
+        self.file = file;
     }
 
     /// Edit (Ctrl+E): the editor on this file (DW-1523). A file over the editor's limit stays
@@ -251,6 +303,11 @@ impl Ui {
             _ => return,
         };
         if self.editor.is_some() {
+            return;
+        }
+        // An edit that cannot be saved is not offered: the press says so.
+        if !self.source.can_save() {
+            self.intent(Intent::Edit);
             return;
         }
         let mut edit = rune::TextEdit::new(text.clone());
@@ -289,7 +346,7 @@ impl Ui {
 
     /// Leave the editor for the reader on `file`.
     fn show(&mut self, file: OpenFile) {
-        self.file = file;
+        self.replace(file);
         self.editor = None;
         self.dialog = None;
         self.md_source = false;
@@ -338,7 +395,7 @@ impl Ui {
             return;
         }
         if let Ok(file) = self.source.newer(&self.file.id) {
-            self.file = file;
+            self.replace(file);
             self.focus = Some("tb-btn-0");
         }
     }
@@ -371,10 +428,25 @@ impl Ui {
                 if std::mem::discriminant(&body) != std::mem::discriminant(&self.file.body) {
                     self.focus = Some(states::TITLE_KEY);
                 }
+                // What was shown until now leaves memory overwritten (a session that ended takes the text).
+                self.file.body.wipe();
                 self.file.body = body;
                 true
             }
             None => false,
+        }
+    }
+}
+
+/// The open file is left (closed, the route moved on, the account left): the decrypted text it holds is
+/// overwritten, not only freed, and so is an edit of it. The source drops what it holds itself.
+impl Drop for Ui {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.file.wipe();
+        if let Some(editor) = self.editor.as_mut() {
+            editor.base.zeroize();
+            editor.edit.text.zeroize();
         }
     }
 }

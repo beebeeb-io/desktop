@@ -63,6 +63,8 @@ pub(crate) mod tests;
 pub mod this_pc;
 pub mod trash;
 pub mod tray;
+// An open file: its facts from the local state, its content decrypted in memory (`viewer`).
+pub mod viewer;
 
 pub use sync::EngineGlobalSource;
 pub use tray::EngineTraySource;
