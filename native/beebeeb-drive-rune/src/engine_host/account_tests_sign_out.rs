@@ -97,10 +97,13 @@ fn a_sign_out_beebeeb_did_not_take_is_said_read_again_and_can_be_sent_again() {
     assert_eq!(source.notice(), Some(NOT_SIGNED_OUT_ELSEWHERE));
     assert_eq!(source.notice_action(), Some(TRY_AGAIN));
     assert_eq!(server.revoked_all.load(Ordering::SeqCst), 0);
+    // Its Try again sends by id, for the sessions that were confirmed (here the one that is left): never the
+    // one request for "all others" a second time.
     server.change_mode.store(ANSWER, Ordering::SeqCst);
     source.run_notice_action();
     settle(&mut source);
-    assert_eq!(server.revoked_all.load(Ordering::SeqCst), 1);
+    assert_eq!(server.revoked_all.load(Ordering::SeqCst), 0);
+    assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone", "s-phone", "s-web"]);
     assert_eq!(source.notice(), Some(SIGNED_OUT_ELSEWHERE));
     assert_eq!(ids(&source), ["s-this"]);
 }
@@ -205,13 +208,13 @@ fn a_stale_list_is_not_read_again_while_the_pane_does_not_show() {
 }
 
 #[test]
-fn an_unconfirmed_sign_out_reads_again_and_a_failed_re_read_keeps_the_words() {
+fn an_unconfirmed_sign_out_reads_again_and_a_failed_re_read_keeps_the_list_and_the_way_back() {
     let server = server();
     let mut source = Source::new(signed_in(&server));
     opened(&mut source, Pane::Sessions);
     let reads = server.asked("GET /api/v1/account/sessions");
 
-    // The connection broke: not known, so the list is read again; and when that read fails too, the words stay.
+    // The connection broke: not known, so the list is read again.
     server.change_mode.store(DROP_CONNECTION, Ordering::SeqCst);
     assert!(source.sign_out_device("s-phone"));
     settle(&mut source);
@@ -221,39 +224,68 @@ fn an_unconfirmed_sign_out_reads_again_and_a_failed_re_read_keeps_the_words() {
     assert_eq!(source.notice(), Some(NOT_SIGNED_OUT));
     assert_eq!(source.notice_action(), Some(TRY_AGAIN));
     assert_eq!(ids(&source).len(), 3);
+    // Not known, and the check fails too: no longer "checking", never "signed out", and the list that was
+    // drawn stays (nothing was taken for certain), so the row can be pressed again.
     server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
     assert!(source.sign_out_device("s-phone"));
     settle(&mut source);
-    assert_eq!(
-        source.notice(),
-        Some(UNKNOWN_SIGN_OUT),
-        "the re-read failed: the words stay"
-    );
+    assert_eq!(source.notice(), Some(UNCONFIRMED_SIGN_OUT));
     assert!(source.notice_failed());
     assert_eq!(source.notice_action(), None, "not known is not \"send it again\"");
-    assert_eq!(source.pane_state(Pane::Sessions), PaneState::Failed);
+    assert_eq!(source.pane_state(Pane::Sessions), PaneState::Ready);
+    assert_eq!(ids(&source).len(), 3);
+    // Its time is up: the pane still says what it draws is old.
+    later(&mut source, STAYS_FAILED);
+    assert_eq!(source.notice(), Some(NOT_REFRESHED));
 
-    // Refused, then the re-read fails: the refusal's words stay too.
-    server.read_mode.store(ANSWER, Ordering::SeqCst);
-    source.reload(Pane::Sessions);
-    settle(&mut source);
+    // Refused (a 5xx), and the re-read fails in the same outage: the refusal's words stay, the list stays, and
+    // TRY AGAIN STILL WORKS: it sends that sign-out once more.
     server.change_mode.store(SERVER_ERROR, Ordering::SeqCst);
-    server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
     assert!(source.sign_out_device("s-phone"));
     settle(&mut source);
     assert_eq!(source.notice(), Some(NOT_SIGNED_OUT));
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN));
+    assert_eq!(source.pane_state(Pane::Sessions), PaneState::Ready);
+    let sent = server.deleted.lock().unwrap().len();
+    source.run_notice_action();
+    settle(&mut source);
+    assert_eq!(server.deleted.lock().unwrap().len(), sent + 1, "sent again");
+    assert_eq!(
+        source.notice(),
+        Some(NOT_SIGNED_OUT),
+        "refused again: the button is still there"
+    );
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN));
+    // The outage ends for the sign-out, not yet for the list: sent, taken, said as made; and the list from
+    // before the change is NOT drawn as the list of now.
+    server.change_mode.store(ANSWER, Ordering::SeqCst);
+    source.run_notice_action();
+    settle(&mut source);
+    assert_eq!(server.deleted.lock().unwrap().len(), sent + 2);
+    assert_eq!(source.notice(), Some(SIGNED_OUT));
+    assert!(!source.notice_failed());
+    assert!(source.sessions().is_empty(), "never the list from before the change");
     assert_eq!(source.pane_state(Pane::Sessions), PaneState::Failed);
 
-    // Made, then the re-read fails: said as made, and the list is not drawn from before the change.
+    // A 404 (Beebeeb has no such session), and the re-read fails: not said as signed out, for the list has not
+    // confirmed it.
     server.read_mode.store(ANSWER, Ordering::SeqCst);
     source.reload(Pane::Sessions);
     settle(&mut source);
-    server.change_mode.store(ANSWER, Ordering::SeqCst);
-    assert!(source.sign_out_device("s-phone"));
+    assert_eq!(ids(&source), ["s-this", "s-web"]);
+    server.change_mode.store(A_404_THAT_ENDED_NOTHING, Ordering::SeqCst);
     server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    assert!(source.sign_out_device("s-web"));
     settle(&mut source);
-    assert_eq!(source.notice(), Some(SIGNED_OUT));
-    assert!(source.sessions().is_empty(), "never the list from before the change");
+    assert_eq!(source.notice(), Some(UNCONFIRMED_SIGN_OUT));
+    assert!(source.notice_failed(), "never the mark of a thing that worked");
+    assert_eq!(ids(&source), ["s-this", "s-web"]);
+    // The list answers and still has it: not signed out, and it can be sent again.
+    server.read_mode.store(ANSWER, Ordering::SeqCst);
+    source.reload(Pane::Sessions);
+    settle(&mut source);
+    assert_eq!(source.notice(), Some(NOT_SIGNED_OUT));
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN));
 
     // A toast is never drawn in another session, even when nothing else is held for the poll to drop.
     let engine = source.engine.clone();
@@ -263,6 +295,212 @@ fn an_unconfirmed_sign_out_reads_again_and_a_failed_re_read_keeps_the_words() {
         .expect("the phrase unlocks");
     assert_eq!(source.notice(), None, "before any poll");
     assert_eq!(source.notice_action(), None);
+}
+
+/// Two sign-outs answered one after the other, the first refused, the second taken: the failure is not replaced
+/// by the success. Each toast has its time from the moment it shows, then the next one shows.
+#[test]
+fn a_failure_is_not_hidden_by_a_later_success_and_each_toast_has_its_time() {
+    let server = server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    *server.refused_ids.lock().unwrap() = vec!["s-phone"];
+    assert!(source.sign_out_device("s-phone"));
+    settle(&mut source);
+    assert_eq!(source.notice(), Some(NOT_SIGNED_OUT));
+    // The second press keeps what was not done for the first.
+    assert!(source.sign_out_device("s-web"));
+    assert_eq!(
+        source.notice(),
+        Some(NOT_SIGNED_OUT),
+        "a press for another row keeps the failure"
+    );
+    settle(&mut source);
+    assert_eq!(ids(&source), ["s-this", "s-phone"]);
+    assert_eq!(source.notice(), Some(NOT_SIGNED_OUT), "the success did not replace it");
+    assert!(source.notice_failed());
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN));
+    // The failure's time, from when it showed; the window is told when to look again.
+    let wake = source.pump().wake_in.expect("a toast shows: the window looks again");
+    assert!(
+        wake <= STAYS_FAILED && wake > STAYS_FAILED - Duration::from_secs(4),
+        "{wake:?}"
+    );
+    let early = later(&mut source, STAYS_FAILED - Duration::from_secs(4));
+    assert!(
+        early.wake_in.is_some_and(|left| left <= Duration::from_secs(4)),
+        "{early:?}"
+    );
+    assert_eq!(source.notice(), Some(NOT_SIGNED_OUT), "not before its time");
+    let pumped = later(&mut source, Duration::from_secs(4));
+    assert!(pumped.changed, "the window draws the next one");
+    assert_eq!(source.notice(), Some(SIGNED_OUT), "then what worked is said");
+    assert!(!source.notice_failed());
+    assert_eq!(
+        pumped.wake_in,
+        Some(STAYS_DONE),
+        "its time starts when it shows, not when it was said"
+    );
+    assert_eq!(later(&mut source, STAYS_DONE).wake_in, None);
+    assert_eq!(source.notice(), None, "and it goes by itself");
+    assert_eq!(source.notice_action(), None);
+
+    // The other order: what worked is up, then a refusal lands: the refusal shows at once.
+    let server = self::server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    *server.refused_ids.lock().unwrap() = vec!["s-phone"];
+    assert!(source.sign_out_device("s-web"));
+    settle(&mut source);
+    assert_eq!(source.notice(), Some(SIGNED_OUT));
+    assert!(source.sign_out_device("s-phone"));
+    settle(&mut source);
+    assert_eq!(source.notice(), Some(NOT_SIGNED_OUT));
+
+    // Two refusals: both are said, one after the other, each with its own Try again; and Try again sends the
+    // one its toast is about.
+    let server = self::server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    *server.refused_ids.lock().unwrap() = vec!["s-phone", "s-web"];
+    assert!(source.sign_out_device("s-phone"));
+    settle(&mut source);
+    assert!(source.sign_out_device("s-web"));
+    settle(&mut source);
+    assert_eq!(source.notice(), Some(NOT_SIGNED_OUT));
+    later(&mut source, STAYS_FAILED);
+    assert_eq!(
+        source.notice(),
+        Some(NOT_SIGNED_OUT),
+        "the second refusal, after the first had its time"
+    );
+    server.refused_ids.lock().unwrap().clear();
+    source.run_notice_action();
+    settle(&mut source);
+    assert_eq!(
+        server.deleted.lock().unwrap().clone(),
+        ["s-phone", "s-web", "s-web"],
+        "the one that toast was about"
+    );
+    assert_eq!(ids(&source), ["s-this", "s-phone"]);
+
+    // A refusal that waited behind another and never showed is not lost when the pane is left: it is said
+    // when Devices and sessions shows again. The one that did show is not said twice.
+    let server = self::server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    *server.refused_ids.lock().unwrap() = vec!["s-phone", "s-web"];
+    assert!(source.sign_out_device("s-phone"));
+    settle(&mut source);
+    assert!(source.sign_out_device("s-web"));
+    settle(&mut source);
+    source.clear_notice();
+    opened(&mut source, Pane::Account);
+    assert_eq!(source.notice(), None, "no toast about a sign-out over Account");
+    server.refused_ids.lock().unwrap().clear();
+    source.clear_notice();
+    opened(&mut source, Pane::Sessions);
+    assert_eq!(source.notice(), Some(NOT_SIGNED_OUT));
+    source.run_notice_action();
+    settle(&mut source);
+    assert_eq!(
+        server.deleted.lock().unwrap().clone(),
+        ["s-phone", "s-web", "s-web"],
+        "the one that had not been said"
+    );
+    later(&mut source, STAYS_DONE);
+    assert_eq!(source.notice(), None, "nothing else waits");
+}
+
+/// "Sign out everywhere else" that Beebeeb did not take: its Try again fades as every toast does, and it ends
+/// only the sessions that were listed at the confirm. A session made since is never ended by it.
+#[test]
+fn try_again_for_everywhere_else_ends_only_the_sessions_that_were_confirmed() {
+    let server = server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    server.change_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    source.sign_out_everywhere_else();
+    settle(&mut source);
+    assert_eq!(source.notice(), Some(NOT_SIGNED_OUT_ELSEWHERE));
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN));
+
+    // Someone signs in on another device while the toast is up, and the list is read again.
+    let made_since = json!({ "id": "s-new", "device_name": "An invented tablet", "device_kind": "android",
+        "country_code": "FI", "last_active_at": null, "is_current": false });
+    server.people[0].sessions.lock().unwrap().push(made_since.clone());
+    source.reload(Pane::Sessions);
+    settle(&mut source);
+    assert_eq!(ids(&source), ["s-this", "s-phone", "s-web", "s-new"]);
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN), "the toast is still up");
+
+    // One of the confirmed sessions is refused again: per session, what ended and what did not.
+    server.change_mode.store(ANSWER, Ordering::SeqCst);
+    *server.refused_ids.lock().unwrap() = vec!["s-web"];
+    source.run_notice_action();
+    settle(&mut source);
+    assert_eq!(
+        server.revoked_all.load(Ordering::SeqCst),
+        0,
+        "never \"all others\" again"
+    );
+    assert_eq!(
+        server.deleted.lock().unwrap().clone(),
+        ["s-phone", "s-web"],
+        "never s-new"
+    );
+    assert_eq!(ids(&source), ["s-this", "s-web", "s-new"]);
+    assert_eq!(source.notice(), Some(NOT_ALL_SIGNED_OUT));
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN));
+    // Again: only the one that is left of the confirmed set.
+    server.refused_ids.lock().unwrap().clear();
+    source.run_notice_action();
+    settle(&mut source);
+    assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone", "s-web", "s-web"]);
+    assert_eq!(server.revoked_all.load(Ordering::SeqCst), 0);
+    assert_eq!(ids(&source), ["s-this", "s-new"], "the session made since stands");
+    assert_eq!(
+        source.notice(),
+        Some(SIGNED_OUT_THOSE),
+        "not \"everywhere else\": another session is listed"
+    );
+    assert_eq!(source.notice_action(), None);
+
+    // The toast fades: after its time there is no button left to press at some later moment.
+    let server = self::server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    server.change_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    source.sign_out_everywhere_else();
+    settle(&mut source);
+    assert_eq!(source.notice_action(), Some(TRY_AGAIN));
+    assert!(source.pump().wake_in.is_some());
+    later(&mut source, STAYS_FAILED);
+    assert_eq!(source.notice(), None);
+    assert_eq!(source.notice_action(), None);
+    server.change_mode.store(ANSWER, Ordering::SeqCst);
+    source.run_notice_action();
+    settle(&mut source);
+    assert_eq!(
+        server.revoked_all.load(Ordering::SeqCst),
+        0,
+        "a press on nothing sends nothing"
+    );
+    assert!(server.deleted.lock().unwrap().is_empty());
+    assert_eq!(ids(&source).len(), 3);
+
+    // The result is not known (the connection broke) and Beebeeb took it: the list has none of the confirmed
+    // sessions, and no other: "everywhere else".
+    server.change_mode.store(DROP_CONNECTION, Ordering::SeqCst);
+    source.sign_out_everywhere_else();
+    server.people[0]
+        .sessions
+        .lock()
+        .unwrap()
+        .retain(|s| s["is_current"] == json!(true));
+    settle(&mut source);
+    assert_eq!(source.notice(), Some(SIGNED_OUT_ELSEWHERE));
+    assert_eq!(ids(&source), ["s-this"]);
 }
 
 /// The answer to a sign-out lands after the person left Devices and sessions: no toast over another pane, no

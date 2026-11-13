@@ -368,6 +368,10 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if pumped.busy || pumped.watch {
         tx.wake_after(POLL_EVERY);
     }
+    // A toast that goes by itself: look again when its time is up.
+    if let Some(stay) = pumped.wake_in {
+        tx.wake_after(stay);
+    }
     pumped.changed
 }
 
