@@ -464,6 +464,62 @@ fn what_a_section_has_in_front_hides_the_tip_and_gets_esc_first() {
 }
 
 #[test]
+fn the_new_file_dialog_over_tip_1_hides_the_tip_and_has_the_keyboard() {
+    // Tip 1 rings New; New › "New file…" (DW-1521) asks Files, and the dialog opens on the poll.
+    let mut rt = started();
+    click(&mut rt, NEXT_KEY);
+    tick(&mut rt);
+    assert_eq!(rt.state.guide.step, Some(Step::Tip(1)));
+    assert_eq!(focused(&rt).as_deref(), Some(NEXT_KEY), "the card has the keyboard");
+    rt.state
+        .actions
+        .intents
+        .push(crate::frames::files::Intent::Frame("DW-1521"));
+    tick(&mut rt);
+    tick(&mut rt);
+    assert!(rt.state.viewer.new_file.is_some(), "the dialog is open");
+    assert_eq!(guide::showing(&rt.state), None, "the dialog is in front of the tip");
+    assert!(
+        rect(&rt, COACH_KEY).is_none() && rect(&rt, RING_KEY).is_none(),
+        "no card and no ring over the dialog"
+    );
+    assert_eq!(focused(&rt).as_deref(), Some("type-0"), "the keyboard is the dialog's");
+    // Tab is the dialog's: it never jumps to the card's buttons.
+    press(&mut rt, Key::Tab);
+    let at = focused(&rt);
+    assert!(
+        at.as_deref().is_some_and(|k| !k.starts_with("coach")),
+        "Tab stays in the dialog: {at:?}"
+    );
+    // Esc closes the dialog, not the guide; the tip is there again.
+    press(&mut rt, Key::Escape);
+    tick(&mut rt);
+    assert!(rt.state.viewer.new_file.is_none(), "Esc closed the dialog");
+    assert_eq!(rt.state.guide.step, Some(Step::Tip(1)), "the guide is still on tip 1");
+    assert!(rect(&rt, COACH_KEY).is_some() && rect(&rt, RING_KEY).is_some());
+}
+
+#[test]
+fn tip_1s_ring_stands_where_the_board_places_it() {
+    // The board's ring: left 964, top 37, 88 x 36, around New at (967.73, 40.75, 80.27 x 28).
+    let rt = at_scene("DW-0301");
+    let ring = rect(&rt, RING_KEY).expect("the ring is drawn");
+    let new = rect(&rt, "new-btn").expect("New is drawn");
+    assert!(
+        (new[1] - 40.75).abs() < 0.01 && (new[3] - 28.0).abs() < 0.01,
+        "New {new:?}"
+    );
+    // Its top and bottom are the board's to the hundredth; its sides follow New's own width.
+    assert!((ring[1] - 37.0).abs() < 0.01, "top {ring:?}");
+    assert!((ring[1] + ring[3] - 73.0).abs() < 0.01, "bottom {ring:?}");
+    assert!((ring[0] - (new[0] - 3.73)).abs() < 0.01, "left {ring:?}");
+    assert!(
+        (ring[0] + ring[2] - (new[0] + new[2] + 4.0)).abs() < 0.01,
+        "right {ring:?}"
+    );
+}
+
+#[test]
 fn at_the_windows_smallest_size_every_card_and_ring_is_inside_it() {
     // 960 x 640 less the frame the OS draws.
     let size = (958.0, 638.0);
