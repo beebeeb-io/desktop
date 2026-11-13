@@ -36,6 +36,8 @@ struct Inner {
     answers_for: Option<u64>,
     panics: bool,
     facts_calls: usize,
+    /// The local state answers for the session before this one.
+    facts_are_old: bool,
     fetches: Vec<String>,
     /// How many downloads reached the door.
     at_door: usize,
@@ -69,6 +71,7 @@ impl Fake {
                 answers_for: None,
                 panics: false,
                 facts_calls: 0,
+                facts_are_old: false,
                 fetches: Vec::new(),
                 at_door: 0,
                 cancelled: 0,
@@ -124,7 +127,8 @@ impl ViewerEngine for Fake {
     fn facts(&self, file_id: &str) -> Result<OpenFileFacts, OpenFileError> {
         let mut s = self.s();
         s.facts_calls += 1;
-        let session = SessionGeneration::for_test(s.turn);
+        // A read that began before a session change answers for the session before it.
+        let session = SessionGeneration::for_test(s.turn - u64::from(s.facts_are_old));
         let stored = s.files.get(file_id).ok_or(OpenFileError::NotFound)?;
         let mut folders: Vec<String> = stored.path.split('/').map(str::to_string).collect();
         let name = folders.pop().unwrap();
@@ -566,6 +570,21 @@ fn without_a_session_or_without_the_file_nothing_opens() {
     );
     assert!(fake.s().fetches.is_empty());
     assert_eq!(source.poll(NOTE), None);
+}
+
+#[test]
+fn facts_read_across_a_session_change_open_nothing() {
+    let fake = Fake::new();
+    let mut source = Source::on(fake.clone());
+    fake.s().facts_are_old = true;
+    assert_eq!(source.open(NOTE).err(), Some(OpenError::NotFound));
+    assert!(
+        fake.s().fetches.is_empty(),
+        "nothing is downloaded for facts of another session"
+    );
+    assert_eq!(source.poll(NOTE), None);
+    fake.s().facts_are_old = false;
+    assert!(source.open(NOTE).is_ok());
 }
 
 #[test]
