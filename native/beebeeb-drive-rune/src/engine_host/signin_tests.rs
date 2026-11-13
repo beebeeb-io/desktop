@@ -508,6 +508,37 @@ fn leaving_the_code_step_drops_its_answer_and_a_code_that_had_not_been_sent_yet(
 }
 
 #[test]
+fn a_code_that_was_waiting_behind_another_when_the_person_left_is_never_sent() {
+    let fake = fake("queued");
+    fake.two_factor.store(true, Ordering::SeqCst);
+    let (engine, mut source) = source(&fake);
+    source.begin_sign_in(&fake.first.email, PASSWORD);
+    assert_eq!(next(&mut source), SignInEvent::SignedIn(Ok(NextAfterSignIn::TwoFactor)));
+
+    // A wrong code is at the server (it keeps the step); the right one waits behind it; the person goes back.
+    fake.code_door.shut();
+    source.begin_two_factor("000000", CodeKind::Authenticator);
+    wait_until("the code to be sent", || requests(&fake, "/auth/2fa/verify") == 1);
+    source.begin_two_factor(TOTP, CodeKind::Authenticator);
+    source.discard_partial_sign_in();
+    // The next thing asked runs after all of it: its answer says the earlier jobs are done.
+    source.begin_sign_in(&fake.second.email, PASSWORD);
+    fake.code_door.open();
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::SignedIn(Ok(NextAfterSignIn::RecoveryPhrase))
+    );
+
+    assert_eq!(
+        requests(&fake, "/auth/2fa/verify"),
+        1,
+        "the waiting code was never sent"
+    );
+    assert_eq!(requests(&fake, "/auth/logout"), 0, "so nobody was signed in by it");
+    assert_eq!(engine.user_id().as_deref(), Some(fake.second.user_id.as_str()));
+}
+
+#[test]
 fn going_back_from_the_twelve_words_signs_out_so_another_account_can_sign_in() {
     let fake = fake("back");
     let (engine, mut source) = source(&fake);
@@ -564,11 +595,8 @@ fn what_is_not_bound_answers_its_screens_refusal_at_once_and_asks_the_server_not
 }
 
 #[test]
-fn a_secret_is_copied_once_into_a_buffer_of_its_own_size() {
-    let password = secret(PASSWORD);
-    assert_eq!(password.as_str(), PASSWORD);
-    assert_eq!(password.capacity(), PASSWORD.len(), "made at full size: it never moved");
-    let phrase = phrase_of(&words(TEST_PHRASE));
-    assert_eq!(phrase.as_str(), TEST_PHRASE);
-    assert!(phrase.capacity() >= TEST_PHRASE.len() && phrase.capacity() <= TEST_PHRASE.len() + 1);
+fn a_secret_reaches_the_engine_as_it_was_typed_and_the_words_as_one_phrase() {
+    assert_eq!(secret(PASSWORD).as_str(), PASSWORD);
+    assert_eq!(phrase_of(&words(TEST_PHRASE)).as_str(), TEST_PHRASE);
+    assert_eq!(phrase_of(&[]).as_str(), "");
 }

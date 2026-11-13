@@ -711,3 +711,48 @@ fn a_phrase_that_does_not_verify_changes_nothing_and_offers_the_dead_end() {
     assert_eq!(ui(&mut rt).screen, Screen::Recover);
     assert!(ui(&mut rt).password.text.is_empty() && ui(&mut rt).confirm.text.is_empty());
 }
+
+/// The session's gate says "signed in, no key on this computer" (a sign-in whose answer is still on its way, or
+/// a start with such a session): the twelve words come in front, what was typed is forgotten, and the session is
+/// NOT discarded (it is why the screen shows). Any other gate, and a screen already there, change nothing.
+#[test]
+fn the_gate_that_needs_the_phrase_puts_the_twelve_words_in_front_and_discards_nothing() {
+    use crate::shell::app::GateState;
+    let (mut rt, calls) = form(Script::default());
+    for gate in [
+        GateState::SignedOut,
+        GateState::Ready,
+        GateState::Locked,
+        GateState::NoPlan,
+    ] {
+        assert!(!ui(&mut rt).follow_gate(gate), "{gate:?}");
+    }
+    assert_eq!(ui(&mut rt).screen, Screen::SignIn);
+    assert!(!ui(&mut rt).password.text.is_empty(), "the form is as it was");
+
+    ui(&mut rt).busy = true;
+    assert!(ui(&mut rt).follow_gate(GateState::NeedsRecoveryPhrase));
+    assert_eq!(ui(&mut rt).screen, Screen::Phrase);
+    assert!(
+        ui(&mut rt).password.text.is_empty(),
+        "the password does not stay behind the words"
+    );
+    assert!(!ui(&mut rt).busy);
+    assert_eq!(
+        calls
+            .borrow()
+            .iter()
+            .filter(|call| **call == "discard_partial_sign_in")
+            .count(),
+        0,
+        "the session is kept"
+    );
+
+    // Already there: the words being typed stay, and "I've lost my recovery phrase" stays open.
+    ui(&mut rt).words[0].replace_text("harbor");
+    assert!(!ui(&mut rt).follow_gate(GateState::NeedsRecoveryPhrase));
+    assert_eq!(ui(&mut rt).words[0].text, "harbor");
+    ui(&mut rt).lost_phrase(true);
+    assert!(!ui(&mut rt).follow_gate(GateState::NeedsRecoveryPhrase));
+    assert_eq!(ui(&mut rt).screen, Screen::NoPhrase);
+}
