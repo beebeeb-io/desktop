@@ -92,7 +92,7 @@ pub struct OwnedState<'e> {
     acct: &'e AccountRuntime,
     /// The engine's session-write lock: the handle asks whether its session is still there with no session change
     /// half done.
-    writes: &'e std::sync::Mutex<()>,
+    writes: &'e std::sync::RwLock<()>,
     generation: SessionGeneration,
     db: std::sync::Arc<StateDb>,
 }
@@ -137,7 +137,7 @@ impl OwnedState<'_> {
     /// nothing. A handle made while a lock or a sign-out was ending its session answers nothing, then and after.
     pub fn still_this_session(&self) -> Result<(), LocalStateRefused> {
         {
-            let _writes = match self.writes.try_lock() {
+            let _writes = match self.writes.try_read() {
                 Ok(writes) => writes,
                 Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock) => return Err(LocalStateRefused::SessionChanged),

@@ -96,7 +96,7 @@ fn fixture() -> Fixture {
 
 /// A session in memory, as a sign-in and an unlock leave it.
 fn signed_in(engine: &TestEngine, user_id: &str, email: &str) {
-    let _writes = engine.writes.lock().unwrap();
+    let _writes = engine.writes.write().unwrap();
     engine
         .acct
         .advance_session_generation_holding_session_write_lock(SessionTransition::Write);

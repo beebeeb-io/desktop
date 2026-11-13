@@ -209,7 +209,9 @@ pub struct Engine<C: CredentialStores> {
     /// One session step at a time (a sign-in step, a lock, a sign-out, an engine start or stop).
     transition: tokio::sync::Mutex<()>,
     /// The order of the credential-store writes and the session generation.
-    writes: Mutex<()>,
+    /// Session changes take it for writing; a reader that asks whether its session is still there takes it for
+    /// reading without waiting, so readers never refuse each other, only yield to a session change.
+    writes: std::sync::RwLock<()>,
     /// A token is stored: someone is signed in, unlocked or not.
     auth_present: Mutex<bool>,
     /// A proven password waiting for its second factor (core holds the partial token, wiped on drop).
@@ -272,7 +274,7 @@ impl<C: CredentialStores> Engine<C> {
             runtime,
             client,
             transition: tokio::sync::Mutex::new(()),
-            writes: Mutex::new(()),
+            writes: std::sync::RwLock::new(()),
             auth_present: Mutex::new(false),
             pending_2fa: Mutex::new(None),
             failures: AtomicU32::new(0),
@@ -334,8 +336,8 @@ impl<C: CredentialStores> Engine<C> {
 
     /// Take this step's turn: the write lock, and a refusal when another session transition happened since `turn`
     /// was captured. On success the generation moves on.
-    fn claim(&self, turn: SessionGeneration) -> Result<std::sync::MutexGuard<'_, ()>, String> {
-        let writes = self.writes.lock().unwrap_or_else(|p| p.into_inner());
+    fn claim(&self, turn: SessionGeneration) -> Result<std::sync::RwLockWriteGuard<'_, ()>, String> {
+        let writes = self.writes.write().unwrap_or_else(|p| p.into_inner());
         if !self.acct.session_unchanged_since(turn) {
             return Err(
                 "Something changed on this computer while Beebeeb was working; nothing was saved. Try again."
@@ -901,7 +903,7 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     fn forget_session(&self, by: SessionTransition) {
-        let _writes = self.writes.lock().unwrap_or_else(|p| p.into_inner());
+        let _writes = self.writes.write().unwrap_or_else(|p| p.into_inner());
         self.acct.advance_session_generation_holding_session_write_lock(by);
         #[cfg(any(test, feature = "test-support"))]
         {
@@ -919,38 +921,6 @@ impl<C: CredentialStores> Engine<C> {
         if let Ok(mut pending) = self.pending_2fa.lock() {
             *pending = None;
         }
-    }
-
-    /// Whether the session in memory is, now, the very one `generation` and `key` were copied from: asked with no
-    /// session change half done (the session-write lock is held for the question), so an answer made for a session
-    /// that a lock or a sign-out is ending is never taken for the current one. Never waits: while a session change
-    /// is under way the answer is no.
-    pub(super) fn session_is_still(&self, generation: SessionGeneration, key: &[u8; 32]) -> bool {
-        let _writes = match self.writes.try_lock() {
-            Ok(writes) => writes,
-            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return false,
-        };
-        if !self.acct.session_unchanged_since(generation) {
-            return false;
-        }
-        let guard = self.acct.session.lock().unwrap_or_else(|p| p.into_inner());
-        guard.as_ref().is_some_and(|session| {
-            // Every byte is compared, whatever the first difference.
-            session
-                .master_key
-                .iter()
-                .zip(key.iter())
-                .fold(0u8, |differs, (a, b)| differs | (a ^ b))
-                == 0
-        })
-    }
-
-    /// Test builds only: `hook` runs once, in the middle of the next lock or sign-out (the session is ending and
-    /// not yet gone from memory), on the thread that locks.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn during_next_forget_for_test(&self, hook: Box<dyn FnOnce() + Send>) {
-        *self.forget_hook_for_test.lock().unwrap_or_else(|p| p.into_inner()) = Some(hook);
     }
 
     /// Sign out and KEEP the local files and the local state: the engine stops, the session is ended on the server
