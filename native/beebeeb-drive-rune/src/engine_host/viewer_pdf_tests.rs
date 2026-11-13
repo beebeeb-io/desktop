@@ -19,6 +19,74 @@ pub(crate) fn sample_pdf(pages: usize, width: u32, height: u32) -> Vec<u8> {
         let content = format!("0 0 0 rg\n0 0 {} {} re\nf\n", width / 2, height / 2);
         objects.push(format!("<< /Length {} >>\nstream\n{content}endstream", content.len()));
     }
+    file_of(&objects)
+}
+
+/// What a page of [`fonts_pdf`] writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Writes {
+    /// A filled rectangle, no text.
+    Nothing,
+    /// A line in a Latin font the file names and does not carry (one of the standard 14, and one that is not).
+    Latin,
+    /// A line in a Japanese font the file names and does not carry.
+    Japanese,
+    /// A line in a font the file names and does not carry, written by glyph number (no script is named).
+    ByGlyphNumber,
+}
+
+/// A Letter PDF with one page per entry of `pages`. Every page lists the same four fonts (none is in the file):
+/// what differs is which one its content uses.
+pub(crate) fn fonts_pdf(pages: &[Writes]) -> Vec<u8> {
+    const FIRST_PAGE: usize = 11;
+    let kids: Vec<String> = (0..pages.len())
+        .map(|i| format!("{} 0 R", FIRST_PAGE + 2 * i))
+        .collect();
+    let mut objects: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".into(),
+        format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), pages.len()),
+        "<< /Type /Font /Subtype /Type0 /BaseFont /KozMinPr6N-Regular /Encoding /UniJIS-UCS2-H \
+         /DescendantFonts [4 0 R] >>"
+            .into(),
+        "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /KozMinPr6N-Regular \
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >> /FontDescriptor 5 0 R >>"
+            .into(),
+        "<< /Type /FontDescriptor /FontName /KozMinPr6N-Regular /Flags 6 /FontBBox [0 -120 1000 880] \
+         /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 700 /StemV 80 >>"
+            .into(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Garamond /FirstChar 32 /LastChar 32 /Widths [250] \
+         /FontDescriptor 8 0 R >>"
+            .into(),
+        "<< /Type /FontDescriptor /FontName /Garamond /Flags 34 /FontBBox [0 -200 1000 800] \
+         /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >>"
+            .into(),
+        "<< /Type /Font /Subtype /Type0 /BaseFont /Invented-Grotesk /Encoding /Identity-H \
+         /DescendantFonts [10 0 R] >>"
+            .into(),
+        "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Invented-Grotesk \
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 8 0 R >>"
+            .into(),
+    ];
+    for (i, writes) in pages.iter().enumerate() {
+        objects.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+             /Resources << /Font << /F1 3 0 R /F2 6 0 R /F3 7 0 R /F4 9 0 R >> >> /Contents {} 0 R >>",
+            FIRST_PAGE + 2 * i + 1
+        ));
+        let content = match writes {
+            Writes::Nothing => "0 0 0 rg\n0 0 306 396 re\nf\n".to_string(),
+            Writes::Latin => "BT /F2 24 Tf 40 600 Td (Invented) Tj /F3 24 Tf 0 -40 Td (words) Tj ET\n".to_string(),
+            Writes::Japanese => "BT /F1 24 Tf 40 600 Td <65E5672C8A9E> Tj ET\n".to_string(),
+            Writes::ByGlyphNumber => "BT /F4 24 Tf 40 600 Td <002B004800580059> Tj ET\n".to_string(),
+        };
+        objects.push(format!("<< /Length {} >>\nstream\n{content}endstream", content.len()));
+    }
+    file_of(&objects)
+}
+
+/// The file of `objects` (numbered from 1, the first is the catalog), with its xref table.
+fn file_of(objects: &[String]) -> Vec<u8> {
     let mut out = b"%PDF-1.4\n".to_vec();
     let mut offsets = Vec::new();
     for (i, object) in objects.iter().enumerate() {
@@ -54,6 +122,27 @@ fn served(document: &Document, pages: &[u32], cancel: bool) -> Vec<(u32, Option<
     let delivered = Mutex::new(Vec::new());
     document.serve(&asks, &AtomicBool::new(cancel), &|page, rendered| {
         delivered.lock().unwrap().push((page, rendered));
+    });
+    delivered.into_inner().unwrap()
+}
+
+/// Ask for `pages` one after the other, each when the one before was answered (a person paging): per page asked,
+/// whether it rendered and whether it lacks text.
+fn served_in_turn(document: &Document, pages: &[u32]) -> Vec<(u32, bool, bool)> {
+    let (ask, asks) = mpsc::channel();
+    let mut rest = pages.iter().copied();
+    ask.send(rest.next().expect("a page to ask for")).unwrap();
+    let asker = Mutex::new((Some(ask), rest));
+    let delivered = Mutex::new(Vec::new());
+    document.serve(&asks, &AtomicBool::new(false), &|page, rendered| {
+        let lacks_text = rendered.as_ref().is_some_and(|rendered| rendered.lacks_text);
+        delivered.lock().unwrap().push((page, rendered.is_some(), lacks_text));
+        let mut asker = asker.lock().unwrap();
+        match asker.1.next() {
+            Some(next) => asker.0.as_ref().expect("the asker").send(next).unwrap(),
+            // The asker goes: `serve` returns.
+            None => asker.0 = None,
+        }
     });
     delivered.into_inner().unwrap()
 }
@@ -154,4 +243,34 @@ fn a_cancelled_worker_renders_and_delivers_nothing_and_ends_when_the_asker_goes(
     assert!(served(&document, &[1], true).is_empty());
     // Nothing asked, the asker gone: `serve` returns (this test would hang otherwise).
     assert!(served(&document, &[], false).is_empty());
+}
+
+#[test]
+fn a_page_whose_text_is_in_a_font_the_file_does_not_carry_says_so_and_no_other_page_does() {
+    use Writes::{Japanese, Latin, Nothing};
+    let document = open(fonts_pdf(&[Nothing, Japanese, Japanese, Latin, Nothing])).expect("it opens");
+    // Paged through and back, on one worker (one font cache): each page answers for itself, also the second
+    // page in the same font, a page after them, and a page shown again.
+    let delivered = served_in_turn(&document, &[1, 2, 3, 4, 5, 3, 1, 2]);
+    assert_eq!(
+        delivered,
+        [
+            (1, true, false),
+            (2, true, true),
+            (3, true, true),
+            (4, true, false),
+            (5, true, false),
+            (3, true, true),
+            (1, true, false),
+            (2, true, true),
+        ]
+    );
+    // A Latin font that is not in the file has a stand-in: nothing is said of it, on a worker of its own too.
+    let latin = open(fonts_pdf(&[Latin])).expect("it opens");
+    assert_eq!(served_in_turn(&latin, &[1]), [(1, true, false)]);
+    // A font written by glyph number has none, whatever its script: said, and the Latin page after it is not.
+    let numbered = open(fonts_pdf(&[Writes::ByGlyphNumber, Latin])).expect("it opens");
+    assert_eq!(served_in_turn(&numbered, &[1, 2]), [(1, true, true), (2, true, false)]);
+    // A page that is not there lacks no text: it is not rendered.
+    assert_eq!(served_in_turn(&document, &[2, 9]), [(2, true, true), (9, false, false)]);
 }

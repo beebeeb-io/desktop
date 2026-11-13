@@ -1,7 +1,11 @@
 # Third-party notices: bundled data
 
 Data that is compiled into the app through the PDF renderer (`hayro`, Apache-2.0 OR MIT) and whose licence asks
-that its notice goes with a binary. A release ships this file next to the app.
+that its notice goes with a binary. A release has to carry this file with the app; the installer does not pick it
+up yet (open, named in the pull request that added the renderer).
+
+Also compiled in, with nothing asked of a binary: two colour profiles in `hayro-interpret`
+(`CGATS001Compat-v2-micro.icc` and `LAB.icc`, both CC0-1.0 by that crate's `assets/README.md`).
 
 ## The 14 standard PDF fonts' stand-ins (Foxit fonts, from PDFium), in `hayro-font`
 

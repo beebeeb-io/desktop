@@ -359,3 +359,30 @@ fn find_on_a_source_that_cannot_search_says_it_is_not_built_never_no_matches() {
     );
     assert_eq!(ui.toast.as_deref(), Some("Not built yet: Find in this document"));
 }
+
+#[test]
+fn a_pdf_page_whose_font_is_not_in_the_file_is_said_for_that_page_and_for_no_other() {
+    use viewer_pdf::tests::{Writes, fonts_pdf};
+    let fake = Fake::new();
+    fake.put(
+        "f-pdf",
+        "Invented letter.pdf",
+        &fonts_pdf(&[Writes::Japanese, Writes::Latin]),
+    );
+    let (mut source, _, _) = opened(&fake, "f-pdf");
+    // Until its picture is there the page is "rendering": what it lacks is said of the picture, not before it.
+    assert_eq!(source.page_state("f-pdf", 1), PageState::Rendering);
+    page_of(&mut source, "f-pdf", 1);
+    assert_eq!(source.page_state("f-pdf", 1), PageState::LacksText);
+    page_of(&mut source, "f-pdf", 2);
+    assert_eq!(source.page_state("f-pdf", 2), PageState::Ready);
+    assert_eq!(
+        source.page_state("f-pdf", 1),
+        PageState::LacksText,
+        "kept with its page"
+    );
+    // Another session: nothing of the page is said any more.
+    fake.new_session("b@example.eu");
+    let _ = source.poll("f-pdf");
+    assert_ne!(source.page_state("f-pdf", 1), PageState::LacksText);
+}

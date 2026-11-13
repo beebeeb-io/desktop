@@ -17,7 +17,7 @@ mod archive;
 mod audio;
 mod chrome;
 pub use chrome::{FROM_THIS_PC, FROM_THIS_PC_UNSENT};
-pub use pdf::{PAGE_FAILED, PAGE_RENDERING};
+pub use pdf::{PAGE_FAILED, PAGE_LACKS_TEXT, PAGE_RENDERING};
 mod details;
 mod dialogs;
 mod fixture_media;
@@ -913,7 +913,7 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
         }
         Body::Pdf(doc) => {
             let (tools, bar, body) = (pdf::tools(ui, &t), pdf::find_bar(ui, &t), pdf::body(ui, doc, &t));
-            return chrome::window(s, cx, ui, pdf::head(ui, doc), tools, bar, body, &pdf::status(), &t);
+            return chrome::window(s, cx, ui, pdf::head(ui, doc), tools, bar, body, &pdf::status(ui), &t);
         }
         Body::Table(doc) => {
             let (tools, body) = (table::tools(&t), table::body(ui, doc, &t));

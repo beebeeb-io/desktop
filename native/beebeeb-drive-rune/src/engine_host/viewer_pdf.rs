@@ -11,9 +11,16 @@
 //!   most [`PAGE_WIDTH_PX`] wide and never more than [`PAGE_PIXELS_MAX`] pixels, from the page's own box.
 //! - A page that makes the renderer panic is that page's failure ([`PageState::Failed`]), not the app's. (A stack
 //!   overflow or an out-of-memory abort in the renderer is not caught by this; the limits above are the bound.)
-//! - Not done here: a password prompt (a protected PDF says so and stays closed), text search, fonts that the PDF
-//!   does not embed beyond the 14 standard Latin ones (such text is not drawn; the renderer gives no warning for
-//!   it, so the view cannot say it).
+//! - Text the renderer has no font for is SAID: a PDF may name a font without carrying it. The renderer's own
+//!   fonts are the 14 standard Latin ones; for a font addressed by character or glyph numbers (every Chinese,
+//!   Japanese or Korean one, and others) they are no stand-in, and its text is drawn wrong or not at all. The
+//!   page is then handed over as lacking text ([`Rendered::lacks_text`]), and the view says so under it.
+//!   (Measured: the renderer asks its font resolver for such a font and gives no warning of its own; text in a
+//!   Japanese or Chinese font that is not in the file came out as empty space.)
+//! - Not done here: a password prompt (a protected PDF says so and stays closed), text search, drawing text in
+//!   a font the file does not carry beyond the Latin stand-ins (no other font is bundled). Not noticed: a
+//!   one-byte font that is not in the file and writes another script than the stand-ins hold (the renderer
+//!   picks the stand-in without asking).
 //!
 //! The renderer's page cache is not `Send` and borrows the document: both live and die on the worker's thread.
 //! Must not: log a byte, a title or a page's text; write anything.
@@ -23,6 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 use hayro::hayro_interpret::InterpreterSettings;
+use hayro::hayro_interpret::font::FontQuery;
 use hayro::hayro_syntax::{DecryptionError, LoadPdfError, Pdf};
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{PixmapSettings, RenderCache, RenderSettings};
@@ -62,6 +70,9 @@ pub struct Rendered {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    /// The page writes in a font the file does not carry and the renderer has no stand-in for: that text is
+    /// not in the pixels as it was written.
+    pub lacks_text: bool,
 }
 
 impl std::fmt::Debug for Rendered {
@@ -85,6 +96,17 @@ pub fn scale_for(width: f32, height: f32) -> Option<f32> {
     let by_pixels = (PAGE_PIXELS_MAX / (width * height)).sqrt();
     let by_side = PAGE_SIDE_MAX / width.max(height);
     Some(by_width.min(by_pixels).min(by_side))
+}
+
+/// Whether `query` asks for a font the renderer's own fonts cannot stand in for. The renderer asks for one of
+/// the 14 standard fonts by name (it has them), and otherwise only for a font that is not in the file and is
+/// addressed by character or glyph numbers: every Chinese, Japanese or Korean font, and any other written that
+/// way. What it gets is a Latin font in another order.
+fn has_no_stand_in(query: &FontQuery) -> bool {
+    match query {
+        FontQuery::Standard(_) => false,
+        FontQuery::Fallback(_) => true,
+    }
 }
 
 impl Document {
@@ -114,9 +136,27 @@ impl Document {
     /// goes to `deliver`: the page, and its pixels or `None` when it could not be rendered. Only the newest
     /// request waiting is rendered.
     pub fn serve(&self, asks: &mpsc::Receiver<u32>, cancel: &AtomicBool, deliver: &dyn Fn(u32, Option<Rendered>)) {
-        let settings = InterpreterSettings::default();
+        // The renderer asks for a font the file names and does not carry. Where the answer is a Latin stand-in
+        // that cannot draw the text, the page says so.
+        let lacking = Arc::new(AtomicBool::new(false));
+        let settings = {
+            let defaults = InterpreterSettings::default();
+            let (stand_in, lacking) = (defaults.font_resolver.clone(), lacking.clone());
+            InterpreterSettings {
+                font_resolver: Arc::new(move |query| {
+                    if has_no_stand_in(query) {
+                        lacking.store(true, Ordering::SeqCst);
+                    }
+                    stand_in(query)
+                }),
+                ..defaults
+            }
+        };
         let render_settings = RenderSettings::default();
         let mut cache = RenderCache::new();
+        // The cache keeps a font once asked for, so a later page would not ask again: from the first page that
+        // lacks text on, every page starts from an empty cache and is asked for itself.
+        let mut ask_each_page = false;
         while let Ok(mut page) = asks.recv() {
             while let Ok(newer) = asks.try_recv() {
                 page = newer;
@@ -124,11 +164,17 @@ impl Document {
             if cancel.load(Ordering::SeqCst) {
                 return;
             }
+            if ask_each_page {
+                cache = RenderCache::new();
+            }
+            lacking.store(false, Ordering::SeqCst);
             let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.render(page, &cache, &settings, &render_settings)
             }));
+            let lacks_text = lacking.load(Ordering::SeqCst);
+            ask_each_page |= lacks_text;
             let rendered = match rendered {
-                Ok(rendered) => rendered,
+                Ok(rendered) => rendered.map(|rendered| Rendered { lacks_text, ..rendered }),
                 Err(_) => {
                     // What the cache held half-made goes with the page that broke.
                     cache = RenderCache::new();
@@ -173,6 +219,7 @@ impl Document {
             width,
             height,
             rgba: pixmap.data_as_u8_slice().to_vec(),
+            lacks_text: false,
         })
     }
 }

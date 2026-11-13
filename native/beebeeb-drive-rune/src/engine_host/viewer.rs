@@ -245,8 +245,9 @@ struct Opening {
     ended: bool,
 }
 
-/// One page's answer from the worker: the page (from 1), and its pixels or `None` when it could not be rendered.
-type PageAnswer = (u32, Option<rune::Pixels>);
+/// One page's answer from the worker: the page (from 1), its pixels or `None` when it could not be rendered, and
+/// whether text of the page is not in the pixels (`viewer_pdf::Rendered::lacks_text`).
+type PageAnswer = (u32, Option<rune::Pixels>, bool);
 
 /// The window's side of an open PDF: pages are asked of the worker that holds the document, and the last few that
 /// came back are kept. Asking happens while the view is drawn (`ViewerSource::picture` takes `&self`), so what
@@ -267,9 +268,9 @@ impl Pages {
     fn take_in(&self) -> bool {
         let mut kept = self.kept.borrow_mut();
         let mut came = false;
-        while let Ok((page, pixels)) = self.got.try_recv() {
-            kept.retain(|(held, _)| *held != page);
-            kept.push_back((page, pixels));
+        while let Ok((page, pixels, lacks_text)) = self.got.try_recv() {
+            kept.retain(|(held, ..)| *held != page);
+            kept.push_back((page, pixels, lacks_text));
             while kept.len() > PAGES_KEPT {
                 kept.pop_front();
             }
@@ -285,8 +286,16 @@ impl Pages {
         self.kept
             .borrow()
             .iter()
-            .find(|(held, _)| *held == page)
-            .map(|(_, pixels)| pixels.clone())
+            .find(|(held, ..)| *held == page)
+            .map(|(_, pixels, _)| pixels.clone())
+    }
+
+    /// Whether the kept picture of `page` lacks text the renderer had no font for.
+    fn lacks_text(&self, page: u32) -> bool {
+        self.kept
+            .borrow()
+            .iter()
+            .any(|(held, pixels, lacks_text)| *held == page && pixels.is_some() && *lacks_text)
     }
 }
 
@@ -772,7 +781,8 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 // dropped, and the bytes it read from are overwritten.
                 if let (Some(document), Some(ends), false) = (document, pdf, cancelled) {
                     document.serve(&ends.asks, &cancel, &|page, rendered| {
-                        let _ = ends.answers.send((page, rendered.and_then(page_pixels)));
+                        let lacks_text = rendered.as_ref().is_some_and(|rendered| rendered.lacks_text);
+                        let _ = ends.answers.send((page, rendered.and_then(page_pixels), lacks_text));
                         engine.wake();
                     });
                 }
@@ -949,6 +959,7 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
             return PageState::Ready;
         };
         match pages.held(page) {
+            Some(Some(_)) if pages.lacks_text(page) => PageState::LacksText,
             Some(Some(_)) => PageState::Ready,
             Some(None) => PageState::Failed,
             None => PageState::Rendering,

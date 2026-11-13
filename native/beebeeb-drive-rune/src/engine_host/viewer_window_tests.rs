@@ -56,6 +56,15 @@ const REPORT_NAME: &str = "report-of-the-first-account-viewer.pdf";
 fn report_pdf() -> Vec<u8> {
     super::viewer_pdf::tests::sample_pdf(2, 612, 792)
 }
+
+const LETTER: &str = "b0000000-0000-4000-8000-000000000606";
+const LETTER_NAME: &str = "letter-of-the-first-account-viewer.pdf";
+
+/// A PDF whose first page writes in a font that is not in the file; its second page has no text.
+fn letter_pdf() -> Vec<u8> {
+    use super::viewer_pdf::tests::{Writes, fonts_pdf};
+    fonts_pdf(&[Writes::Japanese, Writes::Nothing])
+}
 /// Words found nowhere else in the app.
 const NOTE_WORDS: &str = "harbourlight-words-of-the-first-account";
 
@@ -222,6 +231,7 @@ fn window(tag: &str) -> Window {
     first.add_file_with_content(NOTE, None, NOTE_NAME, note_text().as_bytes());
     first.add_file_with_content(PLAN, None, PLAN_NAME, b"PK invented");
     first.add_file_with_content(REPORT, None, REPORT_NAME, &report_pdf());
+    first.add_file_with_content(LETTER, None, LETTER_NAME, &letter_pdf());
     first.add_file_with_content(LONG, None, LONG_NAME, long_text().as_bytes());
     first.add_file_with_content(PICTURE, None, PICTURE_NAME, &super::tests::png_bytes(8, 6));
     let hold = Arc::new(Hold::default());
@@ -245,6 +255,7 @@ fn window(tag: &str) -> Window {
     put(&db, NOTE, NOTE_NAME, note_text().len() as i64);
     put(&db, PLAN, PLAN_NAME, 11);
     put(&db, REPORT, REPORT_NAME, report_pdf().len() as i64);
+    put(&db, LETTER, LETTER_NAME, letter_pdf().len() as i64);
     put(&db, LONG, LONG_NAME, long_text().len() as i64);
     put(&db, PICTURE, PICTURE_NAME, super::tests::png_bytes(8, 6).len() as i64);
     db.set_owner(&Identity::new(Some(&first.user_id), Some(&first.email)))
@@ -386,6 +397,7 @@ impl Window {
             NOTE_NAME,
             PLAN_NAME,
             REPORT_NAME,
+            LETTER_NAME,
             LONG_NAME,
             PICTURE_NAME,
             "the last line",
@@ -713,6 +725,48 @@ fn a_pdf_opened_from_the_files_window_shows_its_page_rendered_here() {
     w.engine.lock();
     w.settle();
     w.assert_nothing_of_the_file("after a lock");
+}
+
+/// A page that is drawn without some of its text says so in the status line, and the next page does not.
+#[test]
+fn a_pdf_page_that_may_lack_text_says_so_under_the_page_and_a_page_that_does_not_is_as_before() {
+    let mut w = window("pdffont");
+    sign_in(&w.engine, &w.first, TEST_PHRASE);
+    w.settle();
+    w.open_row(LETTER_NAME);
+    assert_eq!(w.route_item().as_deref(), Some(LETTER));
+    w.until_drawn("Page 1 of 2");
+    // Not said while the page is on its way; said once its picture is there.
+    assert!(
+        !w.drawn().contains(viewers::PAGE_LACKS_TEXT) || !w.drawn().contains(viewers::PAGE_RENDERING),
+        "{}",
+        w.drawn()
+    );
+    w.until_drawn(viewers::PAGE_LACKS_TEXT);
+    let drawn = w.drawn();
+    assert!(!drawn.contains(viewers::PAGE_RENDERING), "{drawn}");
+    assert!(
+        !drawn.contains("Space for Preview"),
+        "the note takes the hint's place: {drawn}"
+    );
+    assert!(drawn.contains("Decrypted on this PC"), "{drawn}");
+    // The second page lacks nothing: the hint is back, the note is gone.
+    w.press(Key::PageDown, Mods::default());
+    w.until_drawn("Page 2 of 2");
+    let began = Instant::now();
+    while w.drawn().contains(viewers::PAGE_RENDERING) {
+        assert!(began.elapsed() < Duration::from_secs(20), "page 2 never came");
+        std::thread::sleep(Duration::from_millis(10));
+        w.settle();
+    }
+    let drawn = w.drawn();
+    assert!(!drawn.contains(viewers::PAGE_LACKS_TEXT), "{drawn}");
+    assert!(drawn.contains("Space for Preview"), "{drawn}");
+    // And a lock leaves nothing of it.
+    w.engine.lock();
+    w.settle();
+    w.assert_nothing_of_the_file("after a lock");
+    assert!(!w.drawn().contains(viewers::PAGE_LACKS_TEXT));
 }
 
 #[test]

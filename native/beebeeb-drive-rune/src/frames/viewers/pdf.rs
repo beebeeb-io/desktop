@@ -21,6 +21,8 @@ use crate::ui::toolbar::{ToolState, tool_button};
 pub const PAGE_RENDERING: &str = "Rendering this page\u{2026}";
 /// What a page says when it could not be rendered.
 pub const PAGE_FAILED: &str = "This page can't be shown here. Open the PDF in your PDF app to see it.";
+/// What the status line says of a page whose picture lacks text: the PDF names a font it does not carry.
+pub const PAGE_LACKS_TEXT: &str = "Some text on this page may be missing: the PDF does not include its font";
 
 /// The page at 100 %: 420 points wide (the board's `MPage`).
 const PAGE_W: f32 = 420.0;
@@ -43,11 +45,18 @@ pub fn head(ui: &Ui, doc: &PdfDoc) -> Head {
     }
 }
 
-pub fn status() -> Status {
+/// The status line. A page that is shown without some of its text says so here, in place of the key hint.
+pub fn status(ui: &Ui) -> Status {
+    let lacks_text = ui.page_state(ui.media.page) == super::source::PageState::LacksText;
     Status {
-        dot: Dot::Green,
+        dot: if lacks_text { Dot::Warn } else { Dot::Green },
         text: details::DECRYPTED_HERE.into(),
-        details: "Space for Preview".into(),
+        details: if lacks_text {
+            PAGE_LACKS_TEXT
+        } else {
+            "Space for Preview"
+        }
+        .into(),
     }
 }
 
@@ -332,7 +341,7 @@ fn page(ui: &Ui) -> El {
         None => {
             let sheet = sheet.h(560.0 * scale);
             let words = match ui.page_state(ui.media.page) {
-                super::source::PageState::Ready => None,
+                super::source::PageState::Ready | super::source::PageState::LacksText => None,
                 super::source::PageState::Rendering => Some(PAGE_RENDERING),
                 super::source::PageState::Failed => Some(PAGE_FAILED),
             };

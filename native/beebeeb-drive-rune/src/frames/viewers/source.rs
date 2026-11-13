@@ -129,6 +129,8 @@ pub enum PageState {
     Rendering,
     /// It could not be rendered.
     Failed,
+    /// Its picture is there; text whose font the PDF names and does not carry may be missing from it.
+    LacksText,
 }
 
 /// Why opening stopped, when it is not a failed decryption (DW-1518 is that).
