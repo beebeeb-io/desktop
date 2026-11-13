@@ -11,8 +11,9 @@ pub(crate) enum InMemoryOpen {
     TooLarge { size: u64 },
     /// The download passed the caller's limit although the metadata said it would not: it was given up, and
     /// what had been decrypted was wiped. The file's size is not known. `held`: how much plaintext was in
-    /// memory when it was given up.
-    OverLimit { held: u64 },
+    /// memory when it was given up. `body_given_up`: a chunk's body was given up while it streamed (it was never
+    /// read whole); otherwise a decrypted chunk was dropped before it was added to what is held.
+    OverLimit { held: u64, body_given_up: bool },
 }
 
 /// A limited download passed its limit ([`EngineBridge::hydrate_whole_file_within`]). What was decrypted until
@@ -21,6 +22,8 @@ pub(crate) enum InMemoryOpen {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct OverInMemoryLimit {
     pub(super) held: u64,
+    /// A chunk's body was given up while it streamed; `false`: a decrypted chunk was dropped before it was added.
+    pub(super) body_given_up: bool,
 }
 
 impl std::fmt::Display for OverInMemoryLimit {
@@ -121,7 +124,10 @@ impl EngineBridge {
             {
                 Ok((plaintext, _)) => Ok(InMemoryOpen::Opened(plaintext)),
                 Err(e) => match e.caused_by::<OverInMemoryLimit>() {
-                    Some(over) => Ok(InMemoryOpen::OverLimit { held: over.held }),
+                    Some(over) => Ok(InMemoryOpen::OverLimit {
+                        held: over.held,
+                        body_given_up: over.body_given_up,
+                    }),
                     None => Err(e),
                 },
             }

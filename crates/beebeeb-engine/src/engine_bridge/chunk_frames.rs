@@ -115,7 +115,11 @@ impl EngineBridge {
             let cap = limit.map(|limit| body_cap(limit, acc.len() as u64));
             let chunk_bytes = match self.download_content_frame(file_id, i, pin, meter, cap).await {
                 Err(e) if e.is_caused_by::<crate::api_client::ChunkOverLimit>() => {
-                    return Err(anyhow::Error::new(OverInMemoryLimit { held: acc.len() as u64 }).into());
+                    return Err(anyhow::Error::new(OverInMemoryLimit {
+                        held: acc.len() as u64,
+                        body_given_up: true,
+                    })
+                    .into());
                 }
                 other => other?,
             };
@@ -132,7 +136,11 @@ impl EngineBridge {
             // Asked BEFORE the chunk is added: what is held never passes the limit, not even for a moment.
             if limit.is_some_and(|limit| decrypted.len() as u64 > limit.saturating_sub(acc.len() as u64)) {
                 decrypted.zeroize();
-                return Err(anyhow::Error::new(OverInMemoryLimit { held: acc.len() as u64 }).into());
+                return Err(anyhow::Error::new(OverInMemoryLimit {
+                    held: acc.len() as u64,
+                    body_given_up: false,
+                })
+                .into());
             }
             acc.extend_from_slice(&decrypted);
             decrypted.zeroize();

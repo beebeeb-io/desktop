@@ -43,8 +43,9 @@ fn bridge_on(dir: &Path, base: &str, transport: Transport) -> EngineBridge {
 enum Came {
     Opened(Vec<u8>),
     TooLarge(u64),
-    /// Given up while it downloaded, with this much plaintext held.
-    OverLimit(u64),
+    /// Given up while it downloaded, with this much plaintext held; and whether it was a chunk's body that was
+    /// given up as it streamed (`false`: a decrypted chunk was dropped before it was added).
+    OverLimit(u64, bool),
     Refused(OpenFileError),
 }
 
@@ -52,7 +53,7 @@ async fn open(bridge: &EngineBridge, max: u64) -> Came {
     match bridge.open_in_memory(TEST_FILE_ID, max, None).await {
         Ok(InMemoryOpen::Opened(bytes)) => Came::Opened(bytes.to_vec()),
         Ok(InMemoryOpen::TooLarge { size }) => Came::TooLarge(size),
-        Ok(InMemoryOpen::OverLimit { held }) => Came::OverLimit(held),
+        Ok(InMemoryOpen::OverLimit { held, body_given_up }) => Came::OverLimit(held, body_given_up),
         Err(error) => Came::Refused(failure(error)),
     }
 }
@@ -347,13 +348,12 @@ async fn with_no_version_an_understated_size_is_stopped_by_the_running_total() {
     let bridge = bridge_on(dir.path(), &api.base, Transport::Auto);
     // Two chunks fit (2,048 bytes); the third would pass 3,000 and is dropped before it is added: what is held
     // never passes the limit. No size is claimed for the file.
-    assert_eq!(open(&bridge, 3_000).await, Came::OverLimit(2 * 1024));
+    assert_eq!(open(&bridge, 3_000).await, Came::OverLimit(2 * 1024, false));
     assert_eq!(chunk_requests(&api), 3, "the other eight chunks were never asked for");
 }
 
 /// One chunk far longer than the limit, behind metadata that says 10 bytes: its body is given up while it streams.
-/// Nothing of it was decrypted when it was given up, which only the streaming cap gives; had the body been read
-/// whole and decrypted, the total's check would have held 400,000 bytes.
+/// The answer says the body was given up as it streamed: it was never read whole and nothing of it was decrypted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn with_no_version_one_oversized_chunk_body_is_given_up_while_it_streams() {
     let version = version_of(400_000, 400_000);
@@ -367,12 +367,18 @@ async fn with_no_version_one_oversized_chunk_body_is_given_up_while_it_streams()
     );
     let dir = tempfile::tempdir().unwrap();
     let bridge = bridge_on(dir.path(), &api.base, Transport::Auto);
-    assert_eq!(open(&bridge, 1_000).await, Came::OverLimit(0));
+    assert_eq!(open(&bridge, 1_000).await, Came::OverLimit(0, true));
     assert_eq!(chunk_requests(&api), 1);
     // A binary body just past its own cap (the limit and a chunk's framing) is given up as it streams too: the
     // room an old JSON envelope gets (several times the limit) is not a binary body's.
-    assert_eq!(open(&bridge, 200_000).await, Came::OverLimit(0));
-    assert_eq!(open(&bridge, 400_000 - CAPPED_FRAME_ROOM - 1).await, Came::OverLimit(0));
+    assert_eq!(open(&bridge, 200_000).await, Came::OverLimit(0, true));
+    assert_eq!(
+        open(&bridge, 400_000 - CAPPED_FRAME_ROOM - 1).await,
+        Came::OverLimit(0, true)
+    );
+    // One byte under the file's size, the body is within the binary cap (it has a chunk's framing to spare): it is
+    // read and decrypted, and the chunk is dropped before it is added.
+    assert_eq!(open(&bridge, 399_999).await, Came::OverLimit(0, false));
     // Under the limit the same file opens: the cap is not a refusal of long chunks.
     assert_eq!(open(&bridge, 400_000).await, Came::Opened(version.plain.clone()));
 }
