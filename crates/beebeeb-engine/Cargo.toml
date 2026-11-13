@@ -216,7 +216,7 @@ required-features = ["test-support"]
 
 # Task 2448: the Windows engine job ran into its 30-minute limit. Each integration binary in `tests/` registers the
 # invented account, signs in and unlocks with core's production Argon2id parameters, and at opt-level 0 that cost
-# 45-63 s per binary on both hosted runners (19 binaries, about 20 minutes, run one after another). The same list as
+# 45-63 s per binary on both hosted runners (18 binaries, about 20 minutes, run one after another). The same list as
 # `src-tauri/Cargo.toml` ("Fast tests and a usable dev app", docs/ci/2026-11-11-rust-ci-speed.md): these third-party
 # crypto, KDF, hash and SQLite crates are compiled optimised in the dev and test profiles. No KDF parameter, no crypto
 # code, no release setting changes; Cargo.lock is unchanged. A name that matches no package is a cargo warning.
