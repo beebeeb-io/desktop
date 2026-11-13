@@ -20,7 +20,7 @@ $before = Count-State
 $log = Join-Path $env:TEMP ("beebeeb-sandbox-run-{0}.log" -f $PID)
 & cargo test --locked @args -- --nocapture --test-threads=1 *> $log
 $exit = $LASTEXITCODE
-Get-Content $log | Where-Object { $_ -match '^(test |running |test result|gone-with-parent|kill-|error|\s+Running|thread |assertion|  left|  right|failures)' -or $_ -match 'panicked' }
+Get-Content $log | Where-Object { $_ -notmatch '^\s*(Compiling|Downloading|Downloaded|Updating|Locking|Blocking|Finished|note: run with)' -and $_.Trim() -ne '' }
 Remove-Item $log -Force
 $after = Count-State
 
