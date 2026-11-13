@@ -21,6 +21,8 @@ pub(super) struct RecordedRequest {
     pub(super) body: Vec<u8>,
     /// LD-0113: the `X-Beebeeb-Origin` header, when the request carried one.
     pub(super) origin: Option<String>,
+    /// The `X-Beebeeb-Capabilities` header, when the request carried one.
+    pub(super) capabilities: Option<String>,
 }
 
 pub(super) struct UploadMockServer {
@@ -52,6 +54,10 @@ impl UploadMockServer {
         let server_shutdown = Arc::clone(&shutdown);
         let handle = thread::spawn(move || {
             let started = std::time::Instant::now();
+            // What a server remembers of a completed upload: the file's name is the completion name
+            // of its last upload (chunk format v2). `GET /api/v1/files/{id}` serves it.
+            let mut last_init_file: Option<String> = None;
+            let mut names = std::collections::HashMap::<String, String>::new();
             loop {
                 // Task 1700: shutdown is owned by `finish()`, not by an
                 // idle timer. The old heuristic — stop 300ms after the
@@ -93,7 +99,29 @@ impl UploadMockServer {
                         // load and passed 3/3 when rerun in isolation).
                         stream.set_nonblocking(false).unwrap();
                         let request = read_http_request(&mut stream);
-                        let response = upload_mock_response(&request, fail_chunk, fail_thumbnails);
+                        if request.method == "POST" && request.path == "/api/v1/uploads/init" {
+                            last_init_file = serde_json::from_slice::<serde_json::Value>(&request.body)
+                                .ok()
+                                .and_then(|body| body["file_id"].as_str().map(str::to_string));
+                        }
+                        if request.method == "POST"
+                            && request.path.ends_with("/complete")
+                            && let (Some(file), Some(name)) = (last_init_file.clone(), completion_name(&request))
+                        {
+                            names.insert(file, name);
+                        }
+                        let served_row = (request.method == "GET")
+                            .then(|| request.path.strip_prefix("/api/v1/files/"))
+                            .flatten()
+                            .filter(|id| !id.contains('/'))
+                            .and_then(|id| names.get(id).map(|name| (id.to_string(), name.clone())));
+                        let response = match served_row {
+                            Some((id, name)) => http_json(
+                                "200 OK",
+                                serde_json::json!({ "id": id, "name_encrypted": name, "is_folder": false }),
+                            ),
+                            None => upload_mock_response(&request, fail_chunk, fail_thumbnails),
+                        };
                         server_requests.lock().unwrap().push(request);
                         stream.write_all(response.as_bytes()).unwrap();
                     }
@@ -150,5 +178,6 @@ pub(super) fn read_http_request_or_hangup(stream: &mut std::net::TcpStream) -> O
         path,
         body: Vec::new(),
         origin: None,
+        capabilities: None,
     })
 }

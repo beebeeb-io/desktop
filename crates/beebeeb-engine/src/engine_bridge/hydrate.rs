@@ -717,7 +717,7 @@ impl EngineBridge {
         };
 
         let (file_key, name_key) = self.file_keys_for_download(file_id).await?;
-        let expected_format = recorded_content_format(&name_key, meta)?;
+        let record = recorded_content_format(&name_key, meta)?;
 
         // Rate-limit ceiling for downloads, and the transport (task 2173).
         let config = crate::config::DesktopConfig::load_for(self.identity).ok();
@@ -756,7 +756,7 @@ impl EngineBridge {
                 file_id,
                 file_key: &file_key,
                 chunk_count,
-                expected_format,
+                record,
                 download_kbps_limit,
                 approx_size,
                 pin: pin.as_ref(),
@@ -793,7 +793,7 @@ impl EngineBridge {
                         progress,
                         meter,
                         pin.as_ref(),
-                        expected_format,
+                        record,
                         chunk_count,
                     )
                     .await
@@ -906,7 +906,7 @@ impl EngineBridge {
         progress: Option<&HydrateProgressFn>,
         meter: Option<&crate::transfer_progress::ReceiveMeter>,
         pin: Option<&crate::download_pin::PinnedVersion>,
-        expected: beebeeb_core::chunk_stream::ExpectedChunkFormat,
+        record: crate::content_record::ContentRecord,
         chunk_count: u32,
     ) -> Result<Zeroizing<Vec<u8>>, EngineError> {
         let mut acc: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(approx_size_hint));
@@ -924,24 +924,12 @@ impl EngineBridge {
             report(0, total);
         }
 
-        // Public ChunkDecryptor delegates to core's StreamOpener; desktop owns no crypto.
+        // Core's readers, built from the file's authenticated record; desktop owns no crypto. A whole
+        // read is one sequential stream (order, last frame and `finish` are checked). A partial read
+        // opens each chunk at its own index against the record's version commitment, so it never
+        // trusts a served frame 0 to say which upload it is reading.
         let whole = range.start == 0 && range.end == chunk_count;
-        let mut reader = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(
-            beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes()),
-            file_id,
-            expected,
-        );
-        let context = if whole {
-            None
-        } else {
-            let first = self.download_content_frame(file_id, 0, pin, meter).await?;
-            let mut opened = reader.push_frame(&content_frame(&first)?)?;
-            opened.data.zeroize();
-            Some((
-                reader.format().ok_or_else(|| anyhow::anyhow!("missing chunk format"))?,
-                reader.version_id(),
-            ))
-        };
+        let mut reader = record.decryptor(beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes()), file_id);
         for i in range {
             let chunk_start = std::time::Instant::now();
             let chunk_bytes = self.download_content_frame(file_id, i, pin, meter).await?;
@@ -950,18 +938,10 @@ impl EngineBridge {
             // then zeroize the temporary. This limits live plaintext to
             // the accumulator + one chunk at any moment.
             let frame = content_frame(&chunk_bytes)?;
-            let mut decrypted = if let Some((format, version)) = context {
-                beebeeb_core::chunk_stream::open_chunk(
-                    file_key,
-                    file_id,
-                    version.as_ref().map(|v| v.as_slice()).unwrap_or(&[]),
-                    i,
-                    i + 1 == chunk_count,
-                    format,
-                    &frame,
-                )?
-            } else {
+            let mut decrypted = if whole {
                 reader.push_frame(&frame)?.data
+            } else {
+                record.open_chunk(file_key, file_id, i, i + 1 == chunk_count, &frame)?
             };
             acc.extend_from_slice(&decrypted);
             decrypted.zeroize();
@@ -1110,7 +1090,7 @@ impl EngineBridge {
         self.db.set_status(file_id, FileStatus::Downloading)?;
 
         let (file_key, name_key) = self.file_keys_for_download(file_id).await?;
-        let expected_format = recorded_content_format(&name_key, meta)?;
+        let record = recorded_content_format(&name_key, meta)?;
         let download_kbps_limit = crate::config::DesktopConfig::load_for(self.identity)
             .map(|c| c.download_kbps_limit)
             .unwrap_or(0);
@@ -1126,7 +1106,7 @@ impl EngineBridge {
                 None,
                 None,
                 pin.as_ref(),
-                expected_format,
+                record,
                 chunk_count as u32,
             )
             .await

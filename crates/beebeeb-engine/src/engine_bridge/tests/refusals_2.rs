@@ -102,10 +102,11 @@ async fn after_an_outage_a_counted_failure_still_has_its_remaining_attempts() {
     drop(server.finish());
 }
 
-/// Spec §8.4: a save whose upload session was open through an outage. 24 transient
-/// failures at the resumed chunk; then the server has reaped the session, so the resumed chunk
-/// answers 404. The attempt abandons the session, which is not a counted failure, and the next
-/// attempt starts a fresh upload that lands.
+/// Spec §8.4: a save whose upload session was open through an outage. Chunk format v2: the only
+/// session an attempt resumes is one the server holds every chunk of, to `complete` it. 24
+/// transient failures at that `complete`; then the server has reaped the session, so it answers
+/// 404. The attempt abandons the session, which is not a counted failure, and the next attempt
+/// starts a fresh upload that lands.
 #[tokio::test]
 async fn a_session_reaped_during_an_outage_lands_on_a_fresh_upload() {
     let master_key = [167u8; 32];
@@ -113,7 +114,7 @@ async fn a_session_reaped_during_an_outage_lands_on_a_fresh_upload() {
     seed_uploaded_row(&bridge, &server, "abb2ac63-26f4-506d-a275-7ef18b27841e");
     refuse(
         &server,
-        Refused::Chunk,
+        Refused::Complete,
         "abb2ac63-26f4-506d-a275-7ef18b27841e",
         ("503 Service Unavailable", json!({ "error": "unavailable" })),
     );
@@ -141,7 +142,7 @@ async fn a_session_reaped_during_an_outage_lands_on_a_fresh_upload() {
             1,
             "precondition: one session, resumed after the first attempt"
         );
-        s.refuse_chunk_with.remove("abb2ac63-26f4-506d-a275-7ef18b27841e");
+        s.refuse_complete_with.remove("abb2ac63-26f4-506d-a275-7ef18b27841e");
         s.sessions.clear(); // the server reaped it
     }
     let reaped = bridge.process_due_operations(&sync_root, now).await.unwrap();
@@ -182,7 +183,8 @@ async fn a_session_reaped_during_an_outage_lands_on_a_fresh_upload() {
 
 /// Spec §8.4 (fix round 5): a resumed session the server answers with 400 is abandoned, so the
 /// next attempt starts a fresh upload, but the 400 is counted: one attempt. Only a reaped
-/// session (404, 410) is not.
+/// session (404, 410) is not. The resumed step is `complete` (chunk format v2: a session with
+/// chunks still to send is never resumed).
 #[tokio::test]
 async fn a_resumed_sessions_400_is_counted_and_the_next_attempt_starts_fresh() {
     let master_key = [169u8; 32];
@@ -190,7 +192,7 @@ async fn a_resumed_sessions_400_is_counted_and_the_next_attempt_starts_fresh() {
     seed_uploaded_row(&bridge, &server, "f39d78f8-e6a7-5b2e-968e-a1fc7d9a447a");
     refuse(
         &server,
-        Refused::Chunk,
+        Refused::Complete,
         "f39d78f8-e6a7-5b2e-968e-a1fc7d9a447a",
         ("503 Service Unavailable", json!({ "error": "unavailable" })),
     );
@@ -220,7 +222,7 @@ async fn a_resumed_sessions_400_is_counted_and_the_next_attempt_starts_fresh() {
     );
     refuse(
         &server,
-        Refused::Chunk,
+        Refused::Complete,
         "f39d78f8-e6a7-5b2e-968e-a1fc7d9a447a",
         ("400 Bad Request", json!({ "error": "bad_request" })),
     );
@@ -366,7 +368,7 @@ async fn the_gone_session_line_logs_a_category_not_its_text() {
     seed_uploaded_row(&bridge, &server, "aed0a62d-d7d2-5e26-9d3d-42554cf4da99");
     refuse(
         &server,
-        Refused::Chunk,
+        Refused::Complete,
         "aed0a62d-d7d2-5e26-9d3d-42554cf4da99",
         ("503 Service Unavailable", json!({ "error": "unavailable" })),
     );
@@ -382,7 +384,7 @@ async fn the_gone_session_line_logs_a_category_not_its_text() {
     bridge.process_due_operations(&sync_root, now).await.unwrap();
     {
         let mut s = server.state.lock().unwrap();
-        s.refuse_chunk_with.remove("aed0a62d-d7d2-5e26-9d3d-42554cf4da99");
+        s.refuse_complete_with.remove("aed0a62d-d7d2-5e26-9d3d-42554cf4da99");
         s.sessions.clear();
     }
     let logs = capture_logs_async(async {

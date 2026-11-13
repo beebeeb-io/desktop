@@ -24,6 +24,10 @@ pub struct BackupChild {
     pub uploaded_at_ms: i64,
     /// How many chunks the file's current version has (a small file's read, the device manifest's).
     pub chunk_count: u32,
+    /// The content record of a file's sealed name (its format pin and version commitment), opened on this
+    /// device: what a read of the file's content is checked against. `None` for a folder and for a name
+    /// that does not open as a file's.
+    pub record: Option<crate::content_record::ContentRecord>,
 }
 
 /// A folder the backup knows by id, as the server has it now.
@@ -56,6 +60,19 @@ impl EngineBridge {
     pub(super) fn open_backup_name(&self, id: &str, name_encrypted: Option<&str>) -> Option<String> {
         let (key, _) = owned_key_and_pin(&self.db, self.api.master_key(), id).ok()?;
         beebeeb_core::encrypt::decrypt_name_with_key(&key, name_encrypted?)
+    }
+
+    /// The content record of a listed backup FILE's sealed name, authenticated under the item's own key (core's
+    /// file-metadata reader: a plaintext name carries no record).
+    pub(super) fn open_backup_record(
+        &self,
+        id: &str,
+        name_encrypted: Option<&str>,
+    ) -> Option<crate::content_record::ContentRecord> {
+        let (key, _) = owned_key_and_pin(&self.db, self.api.master_key(), id).ok()?;
+        beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, name_encrypted?)
+            .ok()
+            .map(|opened| crate::content_record::ContentRecord::of(&opened))
     }
 
     /// Every live child of `parent`, every page read. `complete` is `false` when a page cursor repeated, the cap
@@ -92,10 +109,14 @@ impl EngineBridge {
                 if entry["is_trashed"].as_bool() == Some(true) {
                     continue;
                 }
+                let is_folder = entry["is_folder"].as_bool() == Some(true);
                 children.push(BackupChild {
                     id: id.to_string(),
                     name: self.open_backup_name(id, entry["name_encrypted"].as_str()),
-                    is_folder: entry["is_folder"].as_bool() == Some(true),
+                    record: (!is_folder)
+                        .then(|| self.open_backup_record(id, entry["name_encrypted"].as_str()))
+                        .flatten(),
+                    is_folder,
                     size: entry["size_bytes"].as_u64().unwrap_or(0),
                     uploaded_at_ms: timestamp_ms(entry),
                     chunk_count: entry["chunk_count"]
@@ -220,7 +241,10 @@ impl EngineBridge {
     /// `BackupHost::move_file`: move and rename the server file `id` (its name sealed again for its own id).
     pub async fn backup_move_file(&self, id: &str, new_parent: &str, new_name: &str) -> Result<(), EngineError> {
         let mime = beebeeb_core::media::guess_mime_type(new_name);
-        let sealed = owned_metadata_for_rename(&self.db, self.api.master_key(), id, new_name, mime)?;
+        // The row's CURRENT record, from the server's row: the new name carries its pin and its version commitment,
+        // so the file's content stays readable under it (this device holds no key record of a backup row).
+        let (key, record, _) = self.backup_row_material(id).await?;
+        let sealed = record.seal_name(&key, new_name, mime)?;
         self.backup_api()
             .update_metadata(id, Some(&sealed), crate::api_client::ParentChange::Folder(new_parent))
             .await?;

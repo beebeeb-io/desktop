@@ -195,11 +195,21 @@ fn respond(tree: &mut std::collections::BTreeMap<String, Node>, request: &Record
             );
         }
         if let Some(id) = rest.strip_suffix("/complete") {
+            // As the server does with version metadata on: the completion name becomes the file's name, and
+            // the answer carries the name the file now has.
             let node = tree.get_mut(id).unwrap();
             node.pending = false;
+            if let Some(name) = serde_json::from_slice::<serde_json::Value>(&request.body)
+                .ok()
+                .and_then(|body| body["name_encrypted"].as_str().map(str::to_string))
+            {
+                node.name_encrypted = name;
+            }
             return json(
                 "200 OK",
-                serde_json::json!({ "version_number": 1, "size_bytes": node.size }),
+                serde_json::json!({
+                    "version_number": 1, "size_bytes": node.size, "name_encrypted": node.name_encrypted,
+                }),
             );
         }
     }
@@ -574,9 +584,19 @@ async fn first_pass_writes_manifest_and_adopts_legacy_glegion_folder() {
     let (manifest_id, manifest) = fx
         .child(Some(&legacy), MANIFEST_NAME)
         .expect("the manifest is in GLegion");
+    // The record the read is checked against is the listed row's own (its name carries the upload's commitment).
+    let (listed, _) = fx.bridge.backup_list_children(&legacy).await.unwrap();
+    let record = listed
+        .iter()
+        .find(|child| child.id == manifest_id)
+        .and_then(|child| child.record);
+    assert!(
+        record.is_some_and(|record| record.version.is_some()),
+        "the manifest's name carries a version commitment"
+    );
     let bytes = fx
         .bridge
-        .backup_read_small_file(&manifest_id, manifest.chunks.len() as u32, manifest.size)
+        .backup_read_small_file(&manifest_id, record, manifest.chunks.len() as u32, manifest.size)
         .await
         .unwrap()
         .expect("the manifest opens on this device");
