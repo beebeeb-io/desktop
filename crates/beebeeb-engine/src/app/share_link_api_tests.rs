@@ -308,6 +308,28 @@ fn a_file_that_has_a_live_link_never_gets_a_second_one_behind_it() {
 }
 
 #[test]
+fn a_listed_link_that_is_another_files_is_never_handed_out_for_this_file() {
+    let (fake, engine, _state, turn) = ready("mislabelled");
+    let plans = engine.share_link_for(turn, PLAN, None).expect("the other file's link");
+    assert_eq!(fake.count(POST), 1);
+    // The list carries everything a rebuild needs, and names the wrong file on the row: the link rebuilds and
+    // opens, to the OTHER file's key.
+    fake.first.list_links_with_their_wrapped_key(true);
+    fake.first.list_every_link_as(NOTE);
+    let answer = engine.share_link_for(turn, NOTE, None);
+    assert_eq!(
+        refusal(answer),
+        ShareLinkError::HasLink,
+        "not handed out, and no second link behind it"
+    );
+    assert_eq!(fake.count(POST), 1);
+    // Named truthfully again, it is its own file's link as before.
+    fake.first.list_every_link_as(PLAN);
+    let again = engine.share_link_for(turn, PLAN, None).expect("its own link");
+    assert_eq!(again.expose(), plans.expose());
+}
+
+#[test]
 fn when_the_links_cannot_be_read_no_link_is_made() {
     let (fake, engine, _state, turn) = ready("unread");
     fake.list_status.store(500, Ordering::SeqCst);

@@ -91,6 +91,8 @@ pub struct FakeAccount {
     link_token_taken: std::sync::atomic::AtomicBool,
     /// `GET /api/v1/shares/mine` also carries each link's `wrapped_file_key`.
     links_list_wrapped_key: std::sync::atomic::AtomicBool,
+    /// `GET /api/v1/shares/mine` names this file on every row, whatever file the link is to.
+    links_listed_as: Mutex<Option<String>>,
 }
 
 impl FakeAccount {
@@ -123,6 +125,7 @@ impl FakeAccount {
             links: Mutex::new(Vec::new()),
             link_token_taken: std::sync::atomic::AtomicBool::new(false),
             links_list_wrapped_key: std::sync::atomic::AtomicBool::new(false),
+            links_listed_as: Mutex::new(None),
         };
         (account, recovery_phrase.to_string())
     }
@@ -276,6 +279,12 @@ impl FakeAccount {
         self.links_list_wrapped_key.store(on, Ordering::SeqCst);
     }
 
+    /// A list that lies: from now on every row of `GET /api/v1/shares/mine` names `file_id`, whatever file its
+    /// link is to.
+    pub fn list_every_link_as(&self, file_id: &str) {
+        *self.links_listed_as.lock().expect("links") = Some(file_id.to_string());
+    }
+
     /// Every link of the account is revoked.
     pub fn revoke_links(&self) {
         for link in self.links.lock().expect("links").iter_mut() {
@@ -310,6 +319,7 @@ impl FakeAccount {
     /// file itself), in the listing's shape: no token, and the wrapped file key only when switched on.
     fn list_links(&self) -> Reply {
         let with_key = self.links_list_wrapped_key.load(Ordering::SeqCst);
+        let listed_as = self.links_listed_as.lock().expect("links").clone();
         let shares: Vec<Value> = self
             .links
             .lock()
@@ -328,6 +338,9 @@ impl FakeAccount {
                 });
                 if with_key {
                     row["wrapped_file_key"] = link["wrapped_file_key"].clone();
+                }
+                if let Some(file_id) = &listed_as {
+                    row["file_id"] = json!(file_id);
                 }
                 row
             })

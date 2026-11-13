@@ -13,8 +13,9 @@
 //! under one session never sends under another, and its link is never handed to another.
 //!
 //! Never two links behind a person's back: every `POST` is a new public link. A plain Copy link (no choices) first
-//! reads the account's links; when the file has a live one, that one is rebuilt, or the call ends with
-//! [`ShareLinkError::HasLink`] and nothing is made. A read that fails makes nothing either.
+//! reads the account's links; when the file has a live one, that one is rebuilt (and handed out only if it opens
+//! to this file's own key: the list is the server's word), or the call ends with [`ShareLinkError::HasLink`] and
+//! nothing is made. A read that fails makes nothing either.
 //!
 //! The link carries the key that opens the file (after `#`). It leaves this file only inside a [`MadeLink`], which
 //! prints nothing of it; no error holds a byte of it, of a token or of anything the server sent.
@@ -26,7 +27,7 @@
 use beebeeb_core::auth_flow::{HttpRequest, HttpResponse, Method};
 use beebeeb_core::item_id::{ItemClass, item_class};
 use beebeeb_core::kdf::{FileKey, MasterKey};
-use beebeeb_core::share_flow::link::{CreateLink, LinkOptions, LinkStep, rebuild_link};
+use beebeeb_core::share_flow::link::{CreateLink, LinkOptions, LinkStep, open_link_file_key, rebuild_link};
 use beebeeb_core::share_flow::{self, ShareFlowError};
 use serde_json::Value;
 use zeroize::Zeroizing;
@@ -185,7 +186,7 @@ impl<C: CredentialStores> Engine<C> {
         if choices.is_none() {
             let mine = answered(send(get(format!("{MINE}?file_id={id}")))?)?;
             let live = live_links(&mine, id);
-            link = live.iter().find_map(|share| rebuilt(&master, share));
+            link = live.iter().find_map(|share| rebuilt(&master, &file_key, share));
             // A live link that cannot be checked is not handed out, and no second one is made.
             if link.is_none() && !live.is_empty() {
                 return Err(ShareLinkError::HasLink);
@@ -297,17 +298,30 @@ fn live_links<'a>(mine: &'a Value, id: &str) -> Vec<&'a Value> {
         .collect()
 }
 
-/// A live link rebuilt from its owner copies and checked against its stored wrapped file key, by core. `None`
-/// when a part is absent or does not open.
-fn rebuilt(master: &MasterKey, share: &Value) -> Option<Zeroizing<String>> {
+/// A live link rebuilt from its owner copies and checked against its stored wrapped file key, by core, and then
+/// held to THIS file: the link's key part must open the row's wrapped key to the very key that opens the file
+/// asked for (core's recipient-side opener). The list is the server's word: a row that names this file and
+/// carries another file's link is not handed out. `None` when a part is absent, does not open, or is not this
+/// file's.
+fn rebuilt(master: &MasterKey, file_key: &FileKey, share: &Value) -> Option<Zeroizing<String>> {
     let text = |field: &str| share.get(field).and_then(Value::as_str);
-    rebuild_link(
+    let wrapped = text("wrapped_file_key")?;
+    let link = rebuild_link(
         WEB_APP_URL,
         master,
         text("owner_wrapped_key"),
         text("owner_wrapped_token"),
-        text("wrapped_file_key").unwrap_or_default(),
-    )
+        wrapped,
+    )?;
+    let key_part = link.split_once("#key=")?.1;
+    let opens = open_link_file_key(key_part, wrapped).ok()?;
+    // Every byte is compared, whatever the first difference.
+    let differs = opens
+        .as_bytes()
+        .iter()
+        .zip(file_key.as_bytes().iter())
+        .fold(0u8, |differs, (a, b)| differs | (a ^ b));
+    (differs == 0).then_some(link)
 }
 
 fn flow_refusal(error: ShareFlowError) -> ShareLinkError {
