@@ -117,7 +117,15 @@ fn the_name_and_email_rows_are_not_links_while_nothing_answers_for_their_pages()
             "{label}: Account still shows"
         );
     }
-    // Any other way to those pages (a link, a key) stays on Account too.
+}
+
+/// Any other way to the pages nothing answers for (a link, a key) stays on Account too: only the section
+/// itself, when nothing answers for it, is the shell's frame.
+#[test]
+fn no_route_from_a_live_pane_ends_on_the_not_built_frame() {
+    let server = server();
+    let mut rt = window_on(signed_in(&server), SettingsPane::Account);
+    wait_for(&mut rt, "the account", |rt| shows(rt, FIRST));
     for frame in ["DW-A64", "DW-A65", "DW-A66"] {
         rt.update(move |s, _| crate::frames::account::go(s, frame));
         rt.frame(0.016);
