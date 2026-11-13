@@ -68,13 +68,23 @@ fn account(email: &str) -> Account {
     let during: Hook = Arc::new(Mutex::new(None));
     let (mode_in, paged_in, during_in) = (mode.clone(), paged.clone(), during.clone());
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
-        if !(req.route() == "GET /api/v1/files" && req.query("trashed") == Some("true")) {
+        let restoring = is_restore(req);
+        if !restoring && !(req.route() == "GET /api/v1/files" && req.query("trashed") == Some("true")) {
             return rest(req);
         }
         match mode_in.load(Ordering::SeqCst) {
             SERVER_ERROR => return Reply::json(500, json!({ "error": BODY_MARKER })),
             SESSION_ENDED => return Reply::json(401, json!({ "error": BODY_MARKER })),
             _ => {}
+        }
+        if restoring {
+            // The fake's own restore (it refuses a token that is not the account's), then the hook: the session
+            // may end while the answer is on its way back.
+            let answer = rest(req);
+            if let Some(hook) = during_in.lock().unwrap().take() {
+                hook();
+            }
+            return answer;
         }
         if req.bearer() != Some(token.as_str()) {
             return Reply::json(401, json!({ "error": "unauthorized" }));
@@ -128,6 +138,27 @@ fn signed_in(account: &Account) -> Engine<MemoryCredentials> {
         .unlock_with_phrase(Zeroizing::new(account.phrase.clone()))
         .expect("the phrase unlocks");
     engine
+}
+
+fn is_restore(req: &Request) -> bool {
+    req.route().starts_with("POST /api/v1/files/") && req.route().ends_with("/restore")
+}
+
+/// Every restore request that reached the fake, whatever token it carried (counted before the fake looks at one).
+fn restores(fake: &FakeApi) -> usize {
+    fake.requests().iter().filter(|r| is_restore(r)).count()
+}
+
+fn trashed(engine: &Engine<MemoryCredentials>) -> Vec<String> {
+    let mut ids: Vec<String> = engine
+        .trash_listing()
+        .expect("the fake answers")
+        .items
+        .into_iter()
+        .map(|item| item.id)
+        .collect();
+    ids.sort();
+    ids
 }
 
 fn listings(fake: &FakeApi) -> usize {
@@ -362,4 +393,163 @@ fn wake_host_wakes_the_hosts_loop() {
 #[test]
 fn the_test_identity_is_refused_on_macos() {
     assert!(TEST.refusal_on("macos").is_some());
+}
+
+/// A restore is sent only under the session it was pressed in: after a lock and an unlock (the same account, its
+/// token still good), after a sign-out and a sign-in, and while a sign-out is ending the session, nothing is sent;
+/// under the session that is still there each item is sent once. Sends are counted at the fake as they arrive.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_restore_pressed_under_one_session_is_never_sent_under_another() {
+    let account = account("trash-restore-turn@example.eu");
+    for id in [DOCS, CONTRACT, OLD] {
+        account.vault.add_item(id, None, "An invented name", false, 1);
+        account.vault.trash_item(id);
+    }
+    let engine = Arc::new(signed_in(&account));
+
+    let pressed_under = engine.session_turn();
+    let _ = engine.lock();
+    engine
+        .unlock_with_phrase(Zeroizing::new(account.phrase.clone()))
+        .expect("the phrase unlocks");
+    assert_eq!(
+        engine
+            .restore_items_for(pressed_under, &[CONTRACT])
+            .expect_err("the session moved on"),
+        AccountCallError::NotSignedIn,
+        "a lock and an unlock in between"
+    );
+    assert_eq!(restores(&account.fake), 0, "nothing was sent after the unlock");
+
+    let pressed_under = engine.session_turn();
+    engine.sign_out_keeping_local_data().expect("signed out");
+    engine
+        .sign_in_password(&account.email, Zeroizing::new(PASSWORD.into()))
+        .expect("the fake accepts the password");
+    engine
+        .unlock_with_phrase(Zeroizing::new(account.phrase.clone()))
+        .expect("the phrase unlocks");
+    assert_eq!(
+        engine
+            .restore_items_for(pressed_under, &[CONTRACT])
+            .expect_err("the session moved on"),
+        AccountCallError::NotSignedIn,
+        "a sign-out and a sign-in in between"
+    );
+    assert_eq!(restores(&account.fake), 0, "nothing was sent after the sign-in");
+    assert_eq!(trashed(&engine), [DOCS, CONTRACT, OLD], "everything is still in Trash");
+
+    // Under the session that is still there: sent once, and Beebeeb no longer lists it. No item: nothing is asked.
+    let now = engine.session_turn();
+    engine.restore_items_for(now, &[]).expect("nothing to do");
+    assert_eq!(restores(&account.fake), 0, "no item, no request");
+    engine
+        .restore_items_for(now, &[CONTRACT])
+        .expect("the session is the one of the press");
+    assert_eq!(restores(&account.fake), 1, "sent once");
+    assert_eq!(trashed(&engine), [DOCS, OLD]);
+
+    // While a sign-out is ending the session (it is not yet gone from memory): nothing is sent.
+    let (during, said) = (engine.clone(), Arc::new(Mutex::new(None)));
+    let heard = said.clone();
+    engine.during_next_forget_for_test(Box::new(move || {
+        *heard.lock().unwrap() = Some(during.restore_items_for(now, &[DOCS]));
+    }));
+    engine.sign_out_keeping_local_data().expect("signed out");
+    assert_eq!(
+        said.lock().unwrap().take().expect("the hook ran").expect_err("ending"),
+        AccountCallError::NotSignedIn,
+        "a session that is ending"
+    );
+    assert_eq!(restores(&account.fake), 1, "and nothing more was sent");
+}
+
+/// The session is asked again before EACH item: a lock while the first item is answered stops the second.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_session_that_ends_between_two_items_stops_the_restore_there() {
+    let account = account("trash-restore-items@example.eu");
+    for id in [DOCS, CONTRACT] {
+        account.vault.add_item(id, None, "An invented name", false, 1);
+        account.vault.trash_item(id);
+    }
+    let engine = Arc::new(signed_in(&account));
+    let pressed_under = engine.session_turn();
+    let locker = engine.clone();
+    *account.during.lock().unwrap() = Some(Box::new(move || {
+        let _ = locker.lock();
+    }));
+    assert_eq!(
+        engine
+            .restore_items_for(pressed_under, &[DOCS, CONTRACT])
+            .expect_err("the session ended after the first item"),
+        AccountCallError::NotSignedIn
+    );
+    assert_eq!(
+        restores(&account.fake),
+        1,
+        "the first item was sent, the second was not"
+    );
+    let sent = account
+        .fake
+        .requests()
+        .into_iter()
+        .find(is_restore)
+        .expect("one restore");
+    assert_eq!(sent.route(), format!("POST /api/v1/files/{DOCS}/restore"));
+}
+
+/// The session-bound restore on every other answer: a server error and a refused session each their own kind (never
+/// the body), an item Beebeeb does not have in this account's Trash is refused, a handle with no session asks
+/// nothing, and Beebeeb gone is offline.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_session_bound_restore_fails_by_kind() {
+    let account = account("trash-restore-kinds@example.eu");
+    account.vault.add_item(CONTRACT, None, "An invented name", false, 1);
+    account.vault.trash_item(CONTRACT);
+    let engine = signed_in(&account);
+    let now = engine.session_turn();
+
+    account.mode.store(SERVER_ERROR, Ordering::SeqCst);
+    let error = engine
+        .restore_items_for(now, &[CONTRACT])
+        .expect_err("a 500 is an error");
+    assert_eq!(error, AccountCallError::ServerError);
+    assert!(!format!("{error} {error:?}").contains(BODY_MARKER));
+
+    account.mode.store(SESSION_ENDED, Ordering::SeqCst);
+    let error = engine
+        .restore_items_for(now, &[CONTRACT])
+        .expect_err("a 401 is an error");
+    assert_eq!(error, AccountCallError::SessionEnded);
+    assert!(!format!("{error} {error:?}").contains(BODY_MARKER));
+    account.mode.store(ANSWER, Ordering::SeqCst);
+    assert_eq!(trashed(&engine), [CONTRACT], "refused: still in Trash");
+
+    assert_eq!(
+        engine
+            .restore_items_for(now, &[OLD])
+            .expect_err("not an item of this account"),
+        AccountCallError::ServerError,
+        "an id Beebeeb does not have for this account"
+    );
+
+    let signed_out = engine_at(&account.fake.base);
+    let before = restores(&account.fake);
+    assert_eq!(
+        signed_out
+            .restore_items_for(signed_out.session_turn(), &[CONTRACT])
+            .expect_err("signed out"),
+        AccountCallError::NotSignedIn
+    );
+    assert_eq!(restores(&account.fake), before, "nothing is asked without a session");
+
+    let Account { fake, .. } = account;
+    drop(fake);
+    assert_eq!(
+        engine.restore_items_for(now, &[CONTRACT]).expect_err("no answer"),
+        AccountCallError::Offline
+    );
 }

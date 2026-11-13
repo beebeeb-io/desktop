@@ -6,8 +6,8 @@
 //! account signed in. Engine handles are on the process's state folder, which nothing here writes in. Every name is
 //! invented.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::app::{Engine, EngineConfig};
@@ -24,6 +24,8 @@ use zeroize::Zeroizing;
 use super::*;
 use crate::State;
 use crate::shell::app::Section;
+
+mod session;
 
 const PASSWORD: &str = "an invented password for trash";
 
@@ -51,7 +53,12 @@ struct Fake {
     restore_mode: Arc<AtomicU8>,
     /// How long the listing waits before it answers (with what Beebeeb held when it was asked), in ms.
     list_delay_ms: Arc<AtomicU64>,
+    /// The next restore request says on the first that it reached the fake, then waits on the second before
+    /// anything is done with it.
+    restore_hold: RestoreHold,
 }
+
+type RestoreHold = Arc<Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>>;
 
 fn is_listing(req: &Request) -> bool {
     req.route() == "GET /api/v1/files" && req.query("trashed") == Some("true")
@@ -76,6 +83,8 @@ fn fake(tag: &str) -> Fake {
         Arc::new(AtomicU64::new(0)),
     );
     let (list_in, restore_in, delay_in) = (list_mode.clone(), restore_mode.clone(), list_delay_ms.clone());
+    let restore_hold = RestoreHold::default();
+    let hold_in = restore_hold.clone();
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
         let route = req.route();
         let sign_in = route.starts_with("POST /api/v1/opaque/");
@@ -88,6 +97,15 @@ fn fake(tag: &str) -> Fake {
         let restoring = route.starts_with("POST /api/v1/files/") && route.ends_with("/restore");
         if !is_listing(req) && !restoring {
             return rest(req);
+        }
+        let held = if restoring {
+            hold_in.lock().unwrap().take()
+        } else {
+            None
+        };
+        if let Some((reached, release)) = held {
+            let _ = reached.send(());
+            let _ = release.recv_timeout(Duration::from_secs(30));
         }
         let mode = if restoring { &restore_in } else { &list_in };
         match mode.load(Ordering::SeqCst) {
@@ -122,6 +140,7 @@ fn fake(tag: &str) -> Fake {
         list_mode,
         restore_mode,
         list_delay_ms,
+        restore_hold,
     }
 }
 

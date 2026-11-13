@@ -85,7 +85,7 @@ pub struct EngineTrashSource<C: CredentialStores> {
     /// Outlives `forget`, and holds no name of an item.
     not_done_for: Option<String>,
     /// Tests only: the next restore waits on the first, on its worker, before it calls the engine, and says on the
-    /// second that the engine's call ended.
+    /// second that the engine's call ended and its answer is in the inbox.
     #[cfg(test)]
     next_restore: Option<(mpsc::Receiver<()>, mpsc::Sender<()>)>,
     /// Something changed outside an answer (a restore started, a forget): the next pump says so.
@@ -291,16 +291,11 @@ impl<C: CredentialStores> EngineTrashSource<C> {
 
 impl<C: CredentialStores> EngineTrashSource<C> {
     /// A restore answered under another session or account than its press: no row is touched and nothing of it is
-    /// drawn. The account that pressed is told when the restore was certainly not made; when it may have been, what
-    /// is listed for that account is read again.
+    /// drawn. The account that pressed is told when the restore was certainly not made (by `pump`, which says it to
+    /// that account only); when it may have been made, the list is read again.
     fn answered_late(&mut self, pressed: Stamp, result: Result<(), AccountCallError>) {
-        // The account that pressed is the one this engine names now (its vault may be locked).
-        let theirs = pressed.1.is_some() && pressed.1 == account_of(&self.engine);
         if let Err(kind) = &result {
             log(format!("trash: an item was not restored ({kind})"));
-        }
-        if !theirs {
-            return;
         }
         match result {
             // Still in Trash for certain: the engine sent nothing (the session of the press is gone: a lock, a
@@ -309,7 +304,8 @@ impl<C: CredentialStores> EngineTrashSource<C> {
                 self.not_done_for = pressed.1;
             }
             // Taken under the session of the press, or sent with an answer that never came: a list read since may
-            // be out of date. The next opening reads again, and a list on screen is read again now.
+            // be out of date. The next opening reads again, and a list on screen is read again now (whoever is
+            // here is asked for their own list, under their own session).
             _ => {
                 self.read_at = None;
                 if self.current().is_some() {
@@ -390,11 +386,11 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
                 engine.restore_items_for(session, &[item.as_str()])
             }))
             .unwrap_or(Err(AccountCallError::Offline));
+            let _ = answers.send(Answer::Restored(item, stamped, result));
             #[cfg(test)]
             if let Some((_, ended)) = &hooks {
                 let _ = ended.send(());
             }
-            let _ = answers.send(Answer::Restored(item, stamped, result));
             engine.wake_host();
         });
         if started.is_err() {
