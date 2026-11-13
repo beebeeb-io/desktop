@@ -28,6 +28,8 @@ struct Stored {
     here: Option<OnThisPc>,
     /// The copy on this PC, when it really is wholly there (it may differ from what Beebeeb has).
     copy: Option<Vec<u8>>,
+    /// The local state says the copy on this PC is not settled with Beebeeb's version.
+    unsettled: bool,
 }
 
 struct Inner {
@@ -118,6 +120,7 @@ impl Fake {
                 size: bytes.len() as u64,
                 here: None,
                 copy: None,
+                unsettled: false,
             },
         );
     }
@@ -169,6 +172,7 @@ impl ViewerEngine for Fake {
             folders,
             size: stored.size,
             on_this_pc: stored.here,
+            unsettled_here: stored.unsettled,
         })
     }
 
@@ -776,14 +780,17 @@ fn content_that_arrives_after_its_session_moved_on_is_dropped_by_the_worker_not_
     until("the download reaches the door", || fake.s().at_door == 1);
     fake.new_session("a@example.eu");
     assert_eq!(source.poll(NOTE), Some(Body::Stopped(Stopped::SessionChanged)));
-    let wakes = fake.s().wakes;
     drop(door);
     until("the download returned", || fake.s().returned == 1);
-    until("the worker finished", || fake.s().wakes > wakes);
-    // What the worker queued holds no content: it says "cancelled" and nothing else.
-    let queued = source.open.as_ref().unwrap().inbox.try_recv();
+    // What the worker queues holds no content: it says "cancelled" and nothing else. Waited for on the queue
+    // itself: a wake is not the answer (the download's last progress report wakes the window too).
+    let mut queued = None;
+    until("the worker answered", || {
+        queued = source.open.as_ref().unwrap().inbox.try_recv().ok();
+        queued.is_some()
+    });
     assert!(
-        matches!(queued, Ok(Err(OpenFileError::Cancelled))),
+        matches!(queued, Some(Err(OpenFileError::Cancelled))),
         "decrypted content was queued for a session that is gone"
     );
     assert_eq!(source.poll(NOTE), None);

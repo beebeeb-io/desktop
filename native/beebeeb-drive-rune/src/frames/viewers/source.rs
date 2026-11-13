@@ -110,6 +110,9 @@ pub enum NoPreview {
     NoViewer,
     /// Larger than a preview holds in memory (`limit`). Nothing was downloaded.
     TooBig { size: u64, limit: u64 },
+    /// It passed what a preview holds in memory (`limit`) while it was read, although it was said to be
+    /// smaller: the read was given up and what was held was dropped. Its size is not known.
+    OverLimit { limit: u64 },
     /// Decrypted, and not what its name says (text that is not text, a picture that does not decode).
     Unreadable,
     /// A picture that declares more pixels than a preview decodes. It was not decoded.
@@ -146,12 +149,18 @@ pub enum Stopped {
     Gone,
     /// What this PC knows about the file could not be read at this moment. Trying again may work.
     NotNow,
+    /// This PC holds a change to the file that is not in Beebeeb yet, and its copy could not be read just now.
+    /// The older version Beebeeb has is not shown in its place. Trying again may work.
+    CopyNotReadable,
 }
 
 impl Stopped {
     /// Opening again may work as things are.
     pub fn can_retry(self) -> bool {
-        matches!(self, Stopped::Offline | Stopped::SessionChanged | Stopped::NotNow)
+        matches!(
+            self,
+            Stopped::Offline | Stopped::SessionChanged | Stopped::NotNow | Stopped::CopyNotReadable
+        )
     }
 }
 
@@ -163,6 +172,12 @@ pub enum Origin {
     /// The copy kept on this PC. `unsent`: it has a change that is not in Beebeeb yet, so it is NOT the
     /// version Beebeeb has; the view says so.
     ThisPc { unsent: bool },
+    /// The copy kept on this PC, read while sync is not running here: the local state calls it in sync, and
+    /// nothing has checked that since sync stopped. Beebeeb may have a newer version; the view says so.
+    ThisPcSyncOff,
+    /// Downloaded from Beebeeb, for a file whose copy on this PC is not settled with it (two versions to choose
+    /// from, or a sync of this file that failed): what is shown may not be what is on this PC; the view says so.
+    BeebeebNotThisPcs,
 }
 
 /// What the content area shows.

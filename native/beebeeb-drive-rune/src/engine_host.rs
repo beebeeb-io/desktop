@@ -495,6 +495,18 @@ fn not_wired(what: &str) -> ActionError {
 }
 
 /// Map a `DriveError` to the UI's `ActionError`.
+/// The path the system is asked to open for the item `id`, read under the account-bound handle: below the
+/// account's folder on this PC, and never a file of a kind that is not opened for safety. The ONE check behind
+/// every hand-over of a file to another app (the Files window's Open, a viewer's "Open in another app…").
+fn path_the_system_opens(db: &StateDb, sync_root: &Path, id: &str) -> Result<std::path::PathBuf, ActionError> {
+    let entry = file_ops::resolve(db, id).map_err(map_drive_err)?;
+    let path = file_ops::item_path(sync_root, &entry).map_err(map_drive_err)?;
+    if !entry.is_dir() && file_ops::is_dangerous_executable(&path) {
+        return Err(ActionError::Failed);
+    }
+    Ok(path)
+}
+
 fn map_drive_err(e: DriveError) -> ActionError {
     match e {
         DriveError::ReadOnly => ActionError::Protected,
@@ -623,16 +635,10 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     fn open(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
         // The paths are resolved under the handle; the OS is asked after it answered.
         let paths = self.local(|db, sync_root| {
-            let mut paths = Vec::with_capacity(items.len());
-            for item in items {
-                let entry = file_ops::resolve(db, &item.id).map_err(map_drive_err)?;
-                let path = file_ops::item_path(sync_root, &entry).map_err(map_drive_err)?;
-                if !entry.is_dir() && file_ops::is_dangerous_executable(&path) {
-                    return Err(ActionError::Failed);
-                }
-                paths.push(path);
-            }
-            Ok(paths)
+            items
+                .iter()
+                .map(|item| path_the_system_opens(db, sync_root, &item.id))
+                .collect::<Result<Vec<_>, _>>()
         })?;
         paths.iter().try_for_each(|path| open_path(path))
     }

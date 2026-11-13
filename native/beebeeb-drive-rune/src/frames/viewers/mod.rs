@@ -346,10 +346,13 @@ impl Ui {
             }
             // Never a press that does nothing. A refusal the window can say is said in its place (the file is
             // gone now, the session ended); the same one again, or one it cannot say, is the toast.
-            Err(why) => match why.stopped().map(Body::Stopped) {
-                Some(body) if body != self.file.body => {
+            Err(why) => match why.stopped() {
+                // The file as a route to a file that did not open draws it: its name and folders are overwritten
+                // and gone, so nothing of them is drawn empty.
+                Some(stopped) if Body::Stopped(stopped) != self.file.body => {
+                    let id = self.file.id.clone();
                     self.file.wipe();
-                    self.file.body = body;
+                    self.file = unopened(&id, stopped);
                     self.toast = None;
                     self.focus = Some(states::TITLE_KEY);
                 }
@@ -634,9 +637,14 @@ pub fn open_item(s: &mut State, item: &crate::source::DriveItem) -> bool {
     !item.is_folder
         && kinds::viewer_of(&item.name).is_some()
         // A kind the window's source does not show here stays its own app's. So does a file whose bytes are kept
-        // on this PC: the system opens it there with the app the person chose for it, with nothing to download.
-        // The viewer is for a file that is NOT on this PC (shown from memory, no copy lands on disk).
-        && route_source(s).is_some_and(|source| source.previews(&item.name) && !source.kept_on_this_pc(&item.id))
+        // on this PC, when its own app shows it (a document, a picture): the system opens it there with the app
+        // the person chose for it, with nothing to download. The viewer is for a file that is NOT on this PC
+        // (shown from memory, no copy lands on disk), and for source code, scripts and web pages wherever they
+        // are: Enter on one reads it, it never runs it (`kinds::its_app_shows_it`).
+        && route_source(s).is_some_and(|source| {
+            source.previews(&item.name)
+                && !(kinds::its_app_shows_it(&item.name) && source.kept_on_this_pc(&item.id))
+        })
         && open(s, &item.id)
 }
 

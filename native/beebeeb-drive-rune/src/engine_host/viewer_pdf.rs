@@ -9,8 +9,12 @@
 //!   request that was overtaken (the person paged on) is skipped.
 //! - Its own limits, asked BEFORE rendering: more pages than [`PAGES_MAX`] is not opened; a page is rendered at
 //!   most [`PAGE_WIDTH_PX`] wide and never more than [`PAGE_PIXELS_MAX`] pixels, from the page's own box.
-//! - A page that makes the renderer panic is that page's failure ([`PageState::Failed`]), not the app's. (A stack
-//!   overflow or an out-of-memory abort in the renderer is not caught by this; the limits above are the bound.)
+//! - A page that makes the renderer panic is that page's failure ([`PageState::Failed`]), not the app's.
+//! - NOT bounded here (open, named in the pull request): what the renderer allocates while it decodes a stream
+//!   or an image inside the file, and how deep it recurses. The limits above bound a page's pixels, not that; a
+//!   stack overflow or an out-of-memory abort is not caught by anything, so a file made for it can end the app.
+//!   And a page the renderer never finishes keeps this worker, and the document in memory, past a lock:
+//!   `cancel` is asked between pages, the renderer has no way to be stopped inside one.
 //! - Text the renderer has no font for is SAID: a PDF may name a font without carrying it. The renderer's own
 //!   fonts are the 14 standard Latin ones; for a font addressed by character or glyph numbers (every Chinese,
 //!   Japanese or Korean one, and others) they are no stand-in, and its text is drawn wrong or not at all. The

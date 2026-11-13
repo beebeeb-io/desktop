@@ -7,15 +7,20 @@
 //! - the content, on a worker, from one of two places:
 //!   - a file whose bytes are wholly ON THIS PC is read from there ([`Engine::open_local_copy_in_memory`]): it
 //!     opens without a connection, and a change made here that is not sent yet is what is shown, never the older
-//!     version Beebeeb has. The view says where the content came from ([`ViewerSource::origin`]);
+//!     version Beebeeb has. The view says where the content came from ([`ViewerSource::origin`]), and never
+//!     more than is known: a copy read while sync is off is not called the version Beebeeb has; a copy with an
+//!     unsent change that cannot be read is a state of its own, never answered with a download; and Beebeeb's
+//!     version of a file whose copy here is not settled with it (a conflict, a failed sync) is said to be that;
 //!   - any other file is downloaded and decrypted IN MEMORY by the engine's own download path
 //!     ([`Engine::open_file_in_memory`]: the path every hydrate uses, no crypto here), with the engine's
 //!     progress.
 //!   Text, Markdown, CSV / TSV (as text), PNG / JPEG / GIF / WebP pictures and PDFs are shown. A PDF's pages are
 //!   rendered on the same worker, page by page as the view shows them (`viewer_pdf`), from memory.
 //! - which app opens a file: a list's Open of a file that is kept on this PC while sync runs goes to the file's
-//!   own app ([`ViewerSource::kept_on_this_pc`]); the viewer is for a file that is not on this PC (no download to
-//!   disk) and for a route that names a file directly.
+//!   own app ([`ViewerSource::kept_on_this_pc`]) when that app shows it (a document, a picture); the viewer is
+//!   for a file that is not on this PC (no download to disk), for a route that names a file directly, and for
+//!   source code, scripts and web pages wherever they are (`kinds::its_app_shows_it`: Enter reads one, it
+//!   never runs it).
 //! - not shown here: a PDF that asks for a password or cannot be read, audio, archives, RAW and HEIC pictures, Office
 //!   documents. A list's Open leaves those to their own app, as before ([`ViewerSource::previews`]); a route that
 //!   names one anyway (Search, a link) gets the honest state, `Body::NotPreviewable`, and nothing is downloaded.
@@ -165,9 +170,10 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
         self.engine.is_syncing()
     }
 
-    /// What the Files window's own open does, for this one file by its id: the path is resolved under the
-    /// account-bound handle, a kind that is not opened for safety is refused, and the system is asked without a
-    /// shell, after the handle answered. "Sync is off" and "refused" are two answers.
+    /// What the Files window's own open does, for this one file by its id, through the same check
+    /// (`engine_host::path_the_system_opens`): the path is resolved under the account-bound handle, a kind that
+    /// is not opened for safety is refused, and the system is asked without a shell, after the handle answered.
+    /// "Sync is off" and "refused" are two answers.
     fn open_elsewhere(&self, file_id: &str) -> Elsewhere {
         if !self.engine.is_syncing() {
             return Elsewhere::NeedsSync;
@@ -177,9 +183,9 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
         };
         let path = self.engine.local_state_for_changes().and_then(|state| {
             state.with(|db| {
-                let entry = file_ops::resolve(db, file_id).ok()?;
-                let path = file_ops::item_path(&sync_root, &entry).ok()?;
-                (!entry.is_dir() && !file_ops::is_dangerous_executable(&path)).then_some(path)
+                // A folder is not a file to open from a viewer.
+                file_ops::resolve(db, file_id).ok().filter(|entry| !entry.is_dir())?;
+                super::path_the_system_opens(db, &sync_root, file_id).ok()
             })
         });
         match path {
@@ -415,7 +421,8 @@ fn first_lines(text: &str) -> Vec<Vec<crate::frames::viewers::source::Run>> {
         }
         end
     };
-    let mut shown = String::new();
+    // Sized once: a buffer that grew would leave its earlier copies of the text behind, not overwritten.
+    let mut shown = String::with_capacity(SHOWN_BYTES);
     for (i, line) in text.lines().take(SHOWN_LINES).enumerate() {
         let room = SHOWN_BYTES.saturating_sub(shown.len() + usize::from(i > 0));
         if room == 0 && i > 0 {
@@ -517,30 +524,50 @@ fn content_of(shows: Shows, bytes: &[u8], cancel: &AtomicBool) -> Content {
     }
 }
 
+/// What the local state said of the file's copy on this PC when the file was opened.
+#[derive(Clone, Copy)]
+struct Recorded {
+    /// Its bytes are here (`OpenFileFacts::on_this_pc`).
+    here: bool,
+    /// The copy here is not settled with Beebeeb's version (`OpenFileFacts::unsettled_here`).
+    unsettled: bool,
+}
+
 /// The file's bytes: the copy on this PC when the local state says it is here and it really is (no network at
 /// all), else the download. The answer says which, and the session the bytes were read for. The buffer is the
 /// engine's own, wiped when it is dropped.
+///
+/// The origin never says more than is known: a copy in sync by the local state is only that while sync runs
+/// (with sync off nothing has compared it with Beebeeb since), and Beebeeb's version of a file whose copy here
+/// is not settled with it may not be what is on this PC.
 fn read<E: ViewerEngine>(
     engine: &E,
     file_id: &str,
-    here: bool,
+    recorded: Recorded,
     progress: &(dyn Fn(u64, u64) + Send + Sync + 'static),
     cancel: &AtomicBool,
 ) -> Result<(SessionGeneration, zeroize::Zeroizing<Vec<u8>>, Origin), OpenFileError> {
-    if here {
+    if recorded.here {
         match engine.local(file_id, IN_MEMORY_MAX, cancel)? {
             LocalCopy::Opened(copy) => {
-                let origin = Origin::ThisPc {
-                    unsent: copy.copy == OnThisPc::NotSentYet,
+                let origin = match copy.copy {
+                    OnThisPc::NotSentYet => Origin::ThisPc { unsent: true },
+                    OnThisPc::InSync if engine.is_syncing() => Origin::ThisPc { unsent: false },
+                    OnThisPc::InSync => Origin::ThisPcSyncOff,
                 };
                 return Ok((copy.session, copy.bytes, origin));
             }
-            // Not wholly on this PC after all: the download is the way.
+            // Not wholly on this PC after all, and in sync: the download is the way.
             LocalCopy::NotHere => {}
         }
     }
     let opened = engine.fetch(file_id, IN_MEMORY_MAX, progress, cancel)?;
-    Ok((opened.session, opened.bytes, Origin::Beebeeb))
+    let origin = if recorded.unsettled {
+        Origin::BeebeebNotThisPcs
+    } else {
+        Origin::Beebeeb
+    };
+    Ok((opened.session, opened.bytes, origin))
 }
 
 /// Open the PDF in `bytes` (taken: the document reads the engine's buffer and wipes it when it is dropped). The
@@ -581,6 +608,11 @@ fn body_of(error: OpenFileError) -> Option<Body> {
             size,
             limit: IN_MEMORY_MAX,
         }),
+        // It passed the limit while it was read: no size is known, and none is said.
+        OpenFileError::OverLimit => Body::NotPreviewable(NoPreview::OverLimit { limit: IN_MEMORY_MAX }),
+        // The copy on this PC holds a change that is not sent, and could not be read: asked again on Try
+        // again, never answered with the older version Beebeeb has.
+        OpenFileError::CopyNotReadable => Body::Stopped(Stopped::CopyNotReadable),
         OpenFileError::Offline => Body::Stopped(Stopped::Offline),
         OpenFileError::SessionEnded => Body::Stopped(Stopped::SessionEnded),
         // The session, or whose local state this is, changed under the download.
@@ -630,7 +662,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             before.end();
         }
         let (session, account, facts) = self.facts_now(file_id)?;
-        let here = facts.on_this_pc.is_some();
+        let recorded = Recorded {
+            here: facts.on_this_pc.is_some(),
+            unsettled: facts.unsettled_here,
+        };
         let shows = shows(&facts.name);
         let (answers, inbox) = mpsc::channel();
         // A PDF: the worker keeps the document and renders the pages the view asks for.
@@ -675,7 +710,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 size: facts.size,
                 limit: IN_MEMORY_MAX,
             })
-        } else if self.fetch_on_a_worker(&opening, shows, here, answers, pdf) {
+        } else if self.fetch_on_a_worker(&opening, shows, recorded, answers, pdf) {
             opening.fetching = true;
             Body::Decrypting {
                 done: 0,
@@ -722,7 +757,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         &self,
         opening: &Opening,
         shows: Shows,
-        here: bool,
+        recorded: Recorded,
         answers: mpsc::Sender<Answer>,
         pdf: Option<PdfEnds>,
     ) -> bool {
@@ -744,7 +779,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 // A panic in this worker must not leave the view on "Decrypting" for good: it answers Failed.
                 let (answer, document): (Answer, Option<viewer_pdf::Document>) =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let (session, bytes, origin) = match read(&*engine, &file_id, here, &report, &cancel) {
+                        let (session, bytes, origin) = match read(&*engine, &file_id, recorded, &report, &cancel) {
                             Ok(read) => read,
                             Err(error) => return (Err(error), None),
                         };
@@ -858,7 +893,10 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
                     // Decrypted for another session than the one this file was opened for: never shown.
                     Ok(_) => Some(Body::Stopped(Stopped::SessionChanged)),
                     Err(error) => {
-                        if !matches!(error, OpenFileError::Cancelled | OpenFileError::TooLarge { .. }) {
+                        if !matches!(
+                            error,
+                            OpenFileError::Cancelled | OpenFileError::TooLarge { .. } | OpenFileError::OverLimit
+                        ) {
                             log(format!("viewer: a file did not open ({})", error.kind()));
                         }
                         body_of(error)

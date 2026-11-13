@@ -212,6 +212,18 @@ fn try_again_on_a_file_that_is_gone_by_now_says_gone_in_place() {
     let words = drawn(&rt);
     assert!(words.contains("This file is no longer here"), "{words}");
     assert!(!words.contains("Couldn't open this file right now"), "{words}");
+    // What is drawn above the state is what a route to a file that is gone draws: no emptied name, no emptied
+    // folders with their separators.
+    let ui = rt.state.viewer.ui.as_ref().expect("the state is this group's");
+    assert_eq!(ui.file.path, ["Files"]);
+    assert_eq!(ui.file.id, FILE);
+    assert!(ui.file.name.is_empty() && ui.file.facts.is_empty());
+    let (mut gone, _script) = window(Script {
+        answers: VecDeque::from([Err(OpenError::NotFound)]),
+        ..Script::default()
+    });
+    route_to_file(&mut gone);
+    assert_eq!(words, drawn(&gone), "the same window as a route to a file that is gone");
 }
 
 #[test]
@@ -263,6 +275,57 @@ fn the_status_line_says_when_the_content_is_the_copy_on_this_pc_and_when_it_is_n
     let words = status(Some(Origin::ThisPc { unsent: true }));
     assert!(words.contains(chrome::FROM_THIS_PC_UNSENT), "{words}");
     assert!(!words.contains("Decrypted on this PC"), "{words}");
+    // A copy read while sync is off: nothing says it is still what Beebeeb has, and the line says that.
+    let words = status(Some(Origin::ThisPcSyncOff));
+    assert!(words.contains(chrome::FROM_THIS_PC_SYNC_OFF), "{words}");
+    assert!(words.contains("may have a newer version"), "{words}");
+    // Beebeeb's version of a file whose copy here is not in sync with it: never a plain "Decrypted on this PC".
+    let words = status(Some(Origin::BeebeebNotThisPcs));
+    assert!(words.contains(chrome::FROM_BEEBEEB_NOT_THIS_PCS), "{words}");
+    assert!(
+        !words.contains("Decrypted on this PC \u{00B7} the key never left it"),
+        "{words}"
+    );
+}
+
+#[test]
+fn the_origin_adds_a_warning_to_the_status_line_and_never_takes_the_frames_own_away() {
+    use chrome::{Dot, Status, origin_status};
+    let status = |dot| Status {
+        dot,
+        text: "the frame's words".into(),
+        details: "the frame's details".into(),
+    };
+    let dot = |origin, of| origin_status(origin, true, &status(of)).dot;
+    // What is not plainly Beebeeb's version warns; a copy in sync and a download do not.
+    assert_eq!(dot(Origin::Beebeeb, Dot::Green), Dot::Green);
+    assert_eq!(dot(Origin::ThisPc { unsent: false }, Dot::Green), Dot::Green);
+    assert_eq!(dot(Origin::ThisPc { unsent: true }, Dot::Green), Dot::Warn);
+    assert_eq!(dot(Origin::ThisPcSyncOff, Dot::Green), Dot::Warn);
+    assert_eq!(dot(Origin::BeebeebNotThisPcs, Dot::Green), Dot::Warn);
+    // A frame's own warning (a PDF page that may lack text) stays under every origin.
+    for origin in [
+        Origin::Beebeeb,
+        Origin::ThisPc { unsent: false },
+        Origin::ThisPc { unsent: true },
+        Origin::ThisPcSyncOff,
+        Origin::BeebeebNotThisPcs,
+    ] {
+        assert_eq!(dot(origin, Dot::Warn), Dot::Warn, "{origin:?}");
+        assert_eq!(dot(origin, Dot::Red), Dot::Red, "{origin:?}");
+        // The details are the frame's, always.
+        assert_eq!(
+            origin_status(origin, true, &status(Dot::Green)).details,
+            "the frame's details"
+        );
+        // With no content on screen the line is the frame's own, whatever the origin.
+        let own = origin_status(origin, false, &status(Dot::Green));
+        assert_eq!(
+            (own.dot, own.text.as_str()),
+            (Dot::Green, "the frame's words"),
+            "{origin:?}"
+        );
+    }
 }
 
 #[test]
@@ -311,6 +374,25 @@ fn a_lists_open_of_a_file_kept_on_this_pc_is_left_to_its_own_app_and_another_fil
     assert_eq!(opens(&script, "kept?"), 1);
     assert_eq!(route_item(&rt), None);
     assert!(rt.state.viewer.ui.is_none());
+
+    // Kept on this PC, and its own app would run it or load it, not show it: read here, never handed over.
+    for name in [
+        "Invented tool.py",
+        "Invented page.html",
+        "Invented run.sh",
+        "Invented data.json",
+    ] {
+        let (mut rt, script) = window(Script {
+            kept_here: true,
+            ..Script::default()
+        });
+        let mut opened = false;
+        rt.update(|s, _| opened = open_item(s, &item(name)));
+        frames(&mut rt, 4);
+        assert!(opened, "{name}");
+        assert_eq!(opens(&script, "open"), 1, "{name}");
+        assert_eq!(route_item(&rt).as_deref(), Some(FILE), "{name}");
+    }
 
     // Not on this PC: the viewer.
     let (mut rt, script) = window(Script::default());
@@ -361,6 +443,39 @@ fn a_picture_that_declares_too_much_says_its_size_and_that_it_was_not_decoded() 
 }
 
 #[test]
+fn a_file_that_passed_the_limit_while_it_was_read_claims_no_size_and_no_nothing_was_downloaded() {
+    let (mut rt, _script) = window(Script {
+        answers: VecDeque::from([Ok(Body::NotPreviewable(NoPreview::OverLimit { limit: 64 << 20 }))]),
+        ..Script::default()
+    });
+    route_to_file(&mut rt);
+    let words = drawn(&rt);
+    assert!(words.contains("Too large to preview here"), "{words}");
+    assert!(words.contains("turned out to be larger than 64"), "{words}");
+    assert!(words.contains("Stopped; nothing was kept"), "{words}");
+    // Part of it WAS downloaded before it was given up.
+    assert!(!words.to_lowercase().contains("nothing was downloaded"), "{words}");
+}
+
+#[test]
+fn a_copy_with_unsent_changes_that_cannot_be_read_says_so_and_can_be_tried_again() {
+    let (mut rt, script) = window(Script {
+        answers: VecDeque::from([Ok(Body::Stopped(Stopped::CopyNotReadable))]),
+        ..Script::default()
+    });
+    route_to_file(&mut rt);
+    let words = drawn(&rt);
+    assert!(words.contains("Couldn't read the copy on this PC"), "{words}");
+    assert!(words.contains("aren't in Beebeeb yet"), "{words}");
+    assert!(words.contains("isn't shown in its place"), "{words}");
+    assert!(!words.contains(WORDS), "{words}");
+    // Try again asks the source again, and what it answers then is shown.
+    click(&mut rt, "state-btn-0");
+    assert_eq!(opens(&script, "retry"), 1);
+    assert!(drawn(&rt).contains(WORDS));
+}
+
+#[test]
 fn a_text_a_source_cannot_save_does_not_name_the_edit_key() {
     let hint = |cannot_save: bool| {
         let (mut rt, _script) = window(Script {
@@ -403,4 +518,33 @@ fn a_file_that_is_left_takes_its_name_its_folders_and_its_details_and_none_is_pr
     assert!(file.path.iter().all(String::is_empty));
     assert!(file.details.facts.iter().all(|(_, value, _)| value.is_empty()));
     assert!(file.newer.as_ref().is_some_and(|newer| newer.from.is_empty()));
+}
+
+#[test]
+fn a_document_goes_to_its_own_app_and_code_a_script_or_a_web_page_does_not() {
+    use super::kinds::its_app_shows_it;
+    for name in [
+        "a.txt",
+        "a.LOG",
+        "a.md",
+        "a.markdown",
+        "a.csv",
+        "a.tsv",
+        "a.pdf",
+        "a.png",
+        "a.jpg",
+        "a.gif",
+        "a.webp",
+        // Not this group's to route at all: left as it was.
+        "a.docx",
+        "no-extension",
+    ] {
+        assert!(its_app_shows_it(name), "{name}");
+    }
+    for name in [
+        "a.py", "a.sh", "a.js", "a.ts", "a.html", "a.HTML", "a.xml", "a.css", "a.json", "a.toml", "a.yaml", "a.yml",
+        "a.rs",
+    ] {
+        assert!(!its_app_shows_it(name), "{name}");
+    }
 }

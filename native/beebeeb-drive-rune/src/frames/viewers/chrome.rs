@@ -303,24 +303,50 @@ pub fn status_bar(status: &Status, t: &Theme) -> El {
 pub const FROM_THIS_PC: &str = "Opened from the copy on this PC";
 /// The same, for a copy with a change that is not in Beebeeb yet: what is on screen is NOT what Beebeeb has.
 pub const FROM_THIS_PC_UNSENT: &str = "Opened from the copy on this PC \u{00B7} its changes aren't in Beebeeb yet";
+/// The same, for a copy read while sync is off: nothing says it is still the version Beebeeb has.
+pub const FROM_THIS_PC_SYNC_OFF: &str =
+    "Opened from the copy on this PC \u{00B7} sync is off, Beebeeb may have a newer version";
+/// What the line says for the version Beebeeb has of a file whose copy on this PC is not in sync with it.
+pub const FROM_BEEBEEB_NOT_THIS_PCS: &str =
+    "The version in Beebeeb, decrypted on this PC \u{00B7} the copy on this PC is not in sync with it";
 
-/// `status`, saying where the content on screen came from when that is not Beebeeb: content read from the copy
-/// kept on this PC was not downloaded and decrypted just now, and a copy with unsent changes is not the version
-/// Beebeeb has, so the line never says "Decrypted on this PC" over it. Only while content is shown (a state has
-/// its own words).
+/// `status`, saying where the content on screen came from when that is not plainly Beebeeb: content read from
+/// the copy kept on this PC was not downloaded and decrypted just now, a copy with unsent changes is not the
+/// version Beebeeb has, a copy read while sync is off may be older than Beebeeb's, and Beebeeb's version of a file
+/// that is not in sync here may not be what is on this PC. The line never says a plain "Decrypted on this PC"
+/// over any of those. Only while content is shown (a state has its own words). A frame's own warning (its dot)
+/// is kept: the origin can add one, never take one away.
 fn from_where(ui: &Ui, status: &Status) -> Status {
-    use super::source::{Body, Origin};
+    use super::source::Body;
     let shows_content = matches!(
         ui.file.body,
         Body::Text(_) | Body::Markdown(_) | Body::Photo(_) | Body::Pdf(_)
     );
-    match ui.origin() {
-        Origin::ThisPc { unsent } if shows_content && ui.editor.is_none() => Status {
-            dot: if unsent { Dot::Warn } else { Dot::Green },
-            text: if unsent { FROM_THIS_PC_UNSENT } else { FROM_THIS_PC }.into(),
+    origin_status(ui.origin(), shows_content && ui.editor.is_none(), status)
+}
+
+/// [`from_where`], from the origin alone. `shows_content`: content of the file is on screen (not a state, not
+/// the editor).
+pub(super) fn origin_status(origin: super::source::Origin, shows_content: bool, status: &Status) -> Status {
+    use super::source::Origin;
+    let said = match origin {
+        _ if !shows_content => None,
+        Origin::Beebeeb => None,
+        Origin::ThisPc { unsent: false } => Some((FROM_THIS_PC, false)),
+        Origin::ThisPc { unsent: true } => Some((FROM_THIS_PC_UNSENT, true)),
+        Origin::ThisPcSyncOff => Some((FROM_THIS_PC_SYNC_OFF, true)),
+        Origin::BeebeebNotThisPcs => Some((FROM_BEEBEEB_NOT_THIS_PCS, true)),
+    };
+    match said {
+        Some((text, warns)) => Status {
+            dot: match status.dot {
+                Dot::Green if warns => Dot::Warn,
+                dot => dot,
+            },
+            text: text.into(),
             details: status.details.clone(),
         },
-        _ => Status {
+        None => Status {
             dot: status.dot,
             text: status.text.clone(),
             details: status.details.clone(),

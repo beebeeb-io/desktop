@@ -89,6 +89,7 @@ pub fn status(body: &Body) -> Option<Status> {
                 Stopped::SessionChanged => "Closed: its content left memory",
                 Stopped::Gone => "Not opened: the file is gone",
                 Stopped::NotNow => "Not opened: couldn't read it right now",
+                Stopped::CopyNotReadable => "Not opened: the copy on this PC couldn't be read",
             }
             .into(),
             details: "The copy in Beebeeb is unchanged".into(),
@@ -98,6 +99,7 @@ pub fn status(body: &Body) -> Option<Status> {
             text: "No preview here".into(),
             details: match why {
                 NoPreview::NoViewer | NoPreview::TooBig { .. } => "Nothing was downloaded",
+                NoPreview::OverLimit { .. } => "Stopped; nothing was kept",
                 NoPreview::Unreadable
                 | NoPreview::PictureTooBig { .. }
                 | NoPreview::PdfLocked
@@ -245,6 +247,11 @@ fn stopped(why: Stopped, t: &Theme) -> El {
             "This file is no longer here",
             "It may have been moved to Trash or deleted on another device.",
         ),
+        Stopped::CopyNotReadable => (
+            "Couldn't read the copy on this PC",
+            "This PC has changes to this file that aren't in Beebeeb yet, and its copy couldn't be read just now: \
+             another app may have it open. The older version in Beebeeb isn't shown in its place.",
+        ),
         Stopped::NotNow => (
             "Couldn't open this file right now",
             "What this PC knows about the file couldn't be read at this moment. Nothing changed.",
@@ -289,6 +296,16 @@ fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, t: &Theme) -> 
                 "{} is {}. A preview is decrypted in memory, up to {}, so nothing was downloaded.",
                 file.name,
                 crate::source::format_size(i64::try_from(size).unwrap_or(i64::MAX)),
+                crate::source::format_size(i64::try_from(limit).unwrap_or(i64::MAX))
+            ),
+        ),
+        // No size is said: none is known, and what had arrived is gone.
+        NoPreview::OverLimit { limit } => (
+            "Too large to preview here",
+            format!(
+                "{} turned out to be larger than {}, the most a preview decrypts in memory. Opening it was \
+                 stopped, and nothing was kept.",
+                file.name,
                 crate::source::format_size(i64::try_from(limit).unwrap_or(i64::MAX))
             ),
         ),

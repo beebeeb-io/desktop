@@ -64,6 +64,13 @@ fn a_refused_read_of_the_copy_is_a_state_and_is_not_routed_around_by_a_download(
         (OpenFileError::NotSignedIn, Body::Stopped(Stopped::SessionChanged)),
         (OpenFileError::NotFound, Body::Stopped(Stopped::Gone)),
         (OpenFileError::Failed, Body::Failed),
+        // It grew past the limit while it was read: no size is said.
+        (
+            OpenFileError::OverLimit,
+            Body::NotPreviewable(NoPreview::OverLimit { limit: IN_MEMORY_MAX }),
+        ),
+        // A change that is not sent, in a copy that cannot be read: never the older version from Beebeeb.
+        (OpenFileError::CopyNotReadable, Body::Stopped(Stopped::CopyNotReadable)),
     ] {
         let fake = Fake::new();
         fake.keep(NOTE, OnThisPc::InSync, Some(LOCAL_WORDS.as_bytes()));
@@ -385,4 +392,52 @@ fn a_pdf_page_whose_font_is_not_in_the_file_is_said_for_that_page_and_for_no_oth
     fake.new_session("b@example.eu");
     let _ = source.poll("f-pdf");
     assert_ne!(source.page_state("f-pdf", 1), PageState::LacksText);
+}
+
+#[test]
+fn a_copy_read_while_sync_is_off_is_not_called_what_beebeeb_has() {
+    let fake = Fake::new();
+    fake.keep(NOTE, OnThisPc::InSync, Some(LOCAL_WORDS.as_bytes()));
+    fake.s().syncing = false;
+    let (source, _, body) = opened(&fake, NOTE);
+    // It opens from the copy (no connection is needed), and the origin says what is not known.
+    assert_eq!(words(&body).trim_end(), LOCAL_WORDS);
+    assert!(fake.s().fetches.is_empty());
+    assert_eq!(source.origin(NOTE), Origin::ThisPcSyncOff);
+    // With sync running the same copy is the version Beebeeb has.
+    fake.s().syncing = true;
+    let (source, _, _) = opened(&fake, NOTE);
+    assert_eq!(source.origin(NOTE), Origin::ThisPc { unsent: false });
+    // A change that is not sent is that, whether sync runs or not.
+    fake.keep(NOTE, OnThisPc::NotSentYet, Some(LOCAL_WORDS.as_bytes()));
+    fake.s().syncing = false;
+    let (source, _, _) = opened(&fake, NOTE);
+    assert_eq!(source.origin(NOTE), Origin::ThisPc { unsent: true });
+}
+
+#[test]
+fn beebeebs_version_of_a_file_that_is_not_in_sync_here_is_not_called_the_file() {
+    let fake = Fake::new();
+    fake.s().files.get_mut(NOTE).unwrap().unsettled = true;
+    let (source, _, body) = opened(&fake, NOTE);
+    // The local state calls no copy of it "here": Beebeeb's version is downloaded, and the origin says which.
+    assert_eq!(words(&body), NOTE_TEXT);
+    assert_eq!(fake.s().fetches, [NOTE]);
+    assert!(fake.s().local_calls.is_empty());
+    assert_eq!(source.origin(NOTE), Origin::BeebeebNotThisPcs);
+    // A file that is settled is plainly Beebeeb's.
+    fake.s().files.get_mut(NOTE).unwrap().unsettled = false;
+    let (source, _, _) = opened(&fake, NOTE);
+    assert_eq!(source.origin(NOTE), Origin::Beebeeb);
+}
+
+#[test]
+fn a_download_that_passed_the_limit_on_its_way_claims_no_size() {
+    let fake = Fake::new();
+    fake.s().error = Some(OpenFileError::OverLimit);
+    let (_source, _, body) = opened(&fake, NOTE);
+    assert_eq!(
+        body,
+        Body::NotPreviewable(NoPreview::OverLimit { limit: IN_MEMORY_MAX })
+    );
 }
