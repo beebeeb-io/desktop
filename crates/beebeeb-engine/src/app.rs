@@ -52,6 +52,8 @@ mod explorer_api;
 pub mod kept_api;
 pub mod owned_state;
 pub mod settings_api;
+// A link to one of the account's files, for the native Files window's Copy link.
+pub mod share_link_api;
 // What the account shares and what is shared with it, for the native Shared window.
 pub mod shares_api;
 pub mod signin_api;
