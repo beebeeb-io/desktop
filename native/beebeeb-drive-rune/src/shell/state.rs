@@ -156,6 +156,11 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     // The banner's two fields S1 feeds from the engine's view (the session ended, offline).
     s.global = crate::frames::global::Ui::new(Box::new(crate::engine_host::EngineGlobalSource::new(engine.clone())));
     s.settings.source = Box::new(crate::engine_host::settings::EngineSettingsSource::new(engine.clone()));
+    // Drive's panes: Storage insights answers; every other pane is the shell's frame (`engine_host::drive_settings`).
+    s.settings.drive = Box::new(crate::engine_host::drive_settings::EngineDriveSettings::new(
+        engine.clone(),
+        crate::shell::platform::current(),
+    ));
     s.signin = Some(crate::frames::signin::Ui::new(Box::new(
         crate::engine_host::EngineSignInSource::new(engine.clone()),
     )));
@@ -163,7 +168,6 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     // Every area not yet backed by the engine: the shell's "not built yet" frame, never sample
     // data beside a real account. This depends ONLY on "is this the live engine path", never on
     // the identity or a dev flag.
-    s.settings.drive = Box::new(crate::frames::settings::drive::UnwiredDrive::new());
     s.account.source = None;
     s.storage_split = None;
     s.frames.shared.source = Box::new(crate::frames::shared::source::Unwired);
@@ -171,10 +175,11 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     s.frames.trash.source = Box::new(crate::engine_host::trash::EngineTrashSource::new(engine.clone()));
     s.frames.find = crate::frames::search::SearchUi::default();
     if SEARCH_ON_ENGINE {
-        s.frames.find.source = Box::new(crate::engine_host::search::EngineSearchSource::new(engine));
+        s.frames.find.source = Box::new(crate::engine_host::search::EngineSearchSource::new(engine.clone()));
     }
     s.frames.pc = Box::new(crate::frames::UnwiredPc);
     s.photos = crate::frames::photos::Ui::new(Box::new(crate::frames::photos::source::Unwired));
-    s.this_pc = crate::frames::this_pc::Ui::new(Box::new(crate::frames::this_pc::source::Unwired));
+    // This PC: the `Unwired` source while its constant is off (nothing of the adapter runs then).
+    s.this_pc = crate::frames::this_pc::Ui::new(crate::engine_host::this_pc::source_for(engine));
     s
 }

@@ -44,7 +44,10 @@ use crate::sync_root_port::{OsSyncRoots, SyncRootPort};
 use crate::sync_view::{Explorer, Start, SyncView, ViewCell, ViewHost};
 use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
 
+pub mod kept_api;
 pub mod settings_api;
+// Is the local state the signed-in account's (task 2488): a read-only check for windows that show it.
+pub mod state_owner;
 pub mod trash_api;
 
 /// Where the handle keeps an account's session token and vault key. The handle names the app on every call

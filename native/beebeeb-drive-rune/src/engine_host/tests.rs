@@ -150,8 +150,9 @@ fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() 
         !state.backups.has_source(),
         "Backups is 'not built yet' on a real engine"
     );
-    // Shared, Photos, This PC: all unwired on a real engine, never sample data. Trash reads the engine
+    // Shared, Photos: unwired on a real engine, never sample data. Trash reads the engine
     // (`engine_host::trash`): this handle has no session in memory, so it draws the signed-out state, no row.
+    // This PC reads the engine (`engine_host::this_pc`) but is held off until its chrome is honest.
     assert!(
         !state.frames.shared.source.wired(),
         "Shared is unwired on a real engine"
@@ -165,7 +166,12 @@ fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() 
         "Trash on a real engine without a session: signed out, no row"
     );
     assert!(!state.photos.source.wired(), "Photos is unwired on a real engine");
-    assert!(!state.this_pc.wired(), "This PC is unwired on a real engine");
+    assert_eq!(
+        state.this_pc.wired(),
+        crate::engine_host::this_pc::TURNED_ON,
+        "This PC: held off until its chrome is honest"
+    );
+    assert_eq!(state.this_pc.changes().len() + state.this_pc.kept_count(), 0);
     assert_eq!(started.live.drain(), 0, "nothing reported, nothing queued");
 }
 
@@ -616,7 +622,8 @@ fn photos_shows_0_fixture_days_on_a_live_engine() {
 #[test]
 fn this_pc_shows_0_fixture_changes_on_a_live_engine() {
     let s = engine_state();
-    assert!(!s.this_pc.wired());
+    // Engine-backed (`engine_host::this_pc`), held off until its chrome is honest; no name shows either way.
+    assert_eq!(s.this_pc.wired(), crate::engine_host::this_pc::TURNED_ON);
     assert_eq!(s.this_pc.changes().len(), 0);
     assert_eq!(s.this_pc.kept_count(), 0);
 }
@@ -636,7 +643,15 @@ fn settings_is_unwired_on_a_live_engine() {
     for pane in [Pane::About, Pane::Notifications, Pane::Recent] {
         assert!(!s.settings.source.wired(pane), "{pane:?}");
     }
-    for pane in [Pane::Storage, Pane::Insights, Pane::Sync] {
+    // Drive's panes (`engine_host::drive_settings`): Storage insights answers; the rest is the shell's frame.
+    assert!(s.settings.drive.wired(Pane::Insights));
+    for pane in [
+        Pane::Storage,
+        Pane::Sync,
+        Pane::Bandwidth,
+        Pane::Previews,
+        Pane::Diagnostics,
+    ] {
         assert!(!s.settings.drive.wired(pane), "{pane:?}");
     }
     assert!(!s.settings.source.sample());

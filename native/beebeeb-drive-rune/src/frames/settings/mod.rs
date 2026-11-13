@@ -555,10 +555,12 @@ pub fn sync(s: &mut State) {
         Some(section) if s.settings.pane.section() == section => {
             let pane = s.settings.pane;
             s.settings.source.opened(pane);
+            s.settings.drive.opened(pane);
         }
         Some(section) => {
             s.settings.show(section);
             s.settings.source.opened(section);
+            s.settings.drive.opened(section);
         }
         None => s.settings.reset(),
     }
@@ -572,13 +574,15 @@ pub const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(100
 /// the loop is woken again in `POLL_EVERY`, never otherwise. Never calls the engine, never waits.
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let pumped = s.settings.source.pump();
-    if let Some(toast) = pumped.toast {
+    // A refusal of Drive's panes (Keep, Free up space, Pause) is the same toast.
+    let toast = pumped.toast.or_else(|| s.settings.drive.take_toast());
+    if let Some(toast) = toast {
         s.settings.toast = Some(toast);
     }
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
     }
-    pumped.changed || pumped.toast.is_some()
+    pumped.changed || toast.is_some()
 }
 
 /// The frame a recent alert leads to.
@@ -653,6 +657,7 @@ pub fn go(s: &mut State, frame: &'static str) {
     let ui = &mut s.settings;
     ui.show(pane);
     ui.source.opened(pane);
+    ui.drive.opened(pane);
     match dialog {
         Some(Dialog::Limit(which)) => ui.open_limit(which),
         Some(Dialog::Keep) => keep::open(ui),
