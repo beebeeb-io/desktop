@@ -164,6 +164,30 @@ fn a_sign_out_answered_under_the_security_page_is_followed_by_a_new_count() {
     );
 }
 
+/// The same when a list read was already on its way: that list is older than the sign-out, so it is not counted,
+/// and the list is read once more.
+#[test]
+fn a_list_read_before_a_sign_out_is_not_the_security_pages_count() {
+    let server = server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    // A slow read of the list starts; then the sign-out, which Beebeeb answers first.
+    server.read_delay_ms.store(700, Ordering::SeqCst);
+    source.reload(Pane::Sessions);
+    std::thread::sleep(Duration::from_millis(150));
+    server.change_delay_ms.store(100, Ordering::SeqCst);
+    assert!(source.sign_out_device("s-phone"));
+    source.opened(Pane::Security);
+    server.read_delay_ms.store(0, Ordering::SeqCst);
+    settle(&mut source);
+    assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone"]);
+    assert_eq!(
+        source.security_facts().sessions,
+        Some(2),
+        "the older list is not what is counted"
+    );
+}
+
 /// A sign-out that was not done, said when Devices and sessions shows again: the list is read with it, even
 /// when the Security page's count read it a moment ago.
 #[test]
