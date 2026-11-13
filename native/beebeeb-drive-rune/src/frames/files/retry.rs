@@ -32,9 +32,8 @@ impl State {
             }
             // Exactly the items that were left, in the same direction (`local.rs`).
             Action::KeepOffline | Action::RemoveOffline | Action::FreeUpSpace => self.local_again(action, tx),
-            Action::CopyLink => {
-                self.copy_link(tx);
-            }
+            // Exactly the items the link was asked for (`link.rs`).
+            Action::CopyLink => self.copy_link_again(tx),
             // The Share dialog again, with the items and the choices it had. No link is made
             // here: a plain link would drop the password, the access and the end date.
             Action::ShareLink => self.share_again(tx),
@@ -79,12 +78,16 @@ impl State {
     /// upload with every file in, not a change of what this PC holds with no item left to ask for.
     pub fn offers_try_again(&self, action: Action, why: ActionError) -> bool {
         offers_try_again(action)
-            && !matches!(why, ActionError::NotOnThisSystem | ActionError::HoldsKept)
+            && !matches!(
+                why,
+                ActionError::NotOnThisSystem | ActionError::HoldsKept | ActionError::NotYet | ActionError::HasLink
+            )
             && match action {
                 Action::Upload => !matches!(&self.actions.retry_upload, Some((_, files)) if files.is_empty()),
                 Action::KeepOffline | Action::RemoveOffline | Action::FreeUpSpace => self.local_can_retry(action),
                 Action::Trash => self.trash_can_retry(),
                 Action::Restore => self.undo_can_retry(),
+                Action::CopyLink => self.link_can_retry(),
                 _ => true,
             }
     }

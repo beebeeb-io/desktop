@@ -47,6 +47,7 @@ pub mod backups;
 mod binding_tests;
 pub mod drive_settings;
 pub mod files;
+mod files_link;
 mod files_trash;
 pub mod open;
 pub mod search;
@@ -465,6 +466,8 @@ pub struct EngineFilesSource<C: CredentialStores> {
     copies: files::LocalCopies<Engine<C>>,
     /// Move to Trash and its Undo.
     trash: files_trash::TrashCalls<C>,
+    /// Copy link and the Share dialog's link.
+    links: files_link::LinkCalls<C>,
     /// After a refused upload: the files of it that were not copied in.
     upload_left: Option<Vec<PathBuf>>,
 }
@@ -475,6 +478,7 @@ impl<C: CredentialStores> EngineFilesSource<C> {
         Self {
             copies: files::LocalCopies::new(engine.clone()),
             trash: files_trash::TrashCalls::new(engine.clone()),
+            links: files_link::LinkCalls::new(engine.clone()),
             engine,
             upload_left: None,
         }
@@ -606,8 +610,19 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.copies.ask(action, local_items(items))
     }
 
-    fn copy_link(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
-        Err(not_wired("copy_link"))
+    /// Accepted here, asked of the engine on a worker for the session of this press, answered through `changes`:
+    /// the window copies the link then.
+    fn copy_link(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
+        self.links.copy(items)
+    }
+
+    /// The Share dialog's link: as `copy_link`, a new link with the choices.
+    fn share_link(
+        &mut self,
+        items: &[DriveItem],
+        options: &crate::frames::files::actions_data::ShareOptions,
+    ) -> Result<(), ActionError> {
+        self.links.share(items, options)
     }
 
     fn open(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
@@ -723,6 +738,7 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     /// activity feed).
     fn changes(&mut self) -> Vec<Change> {
         let mut changes = self.trash.take();
+        changes.extend(self.links.take());
         changes.extend(self.copies.take());
         changes
     }

@@ -536,6 +536,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= crate::frames::files::reset::poll(s);
     // Backups shows its own folder in the Files window (`frames::files::protected`, DW-0422).
     changed |= crate::frames::files::protected::poll(s);
+    // A link the source answered since: only this `Tx` can put it on the clipboard (`frames::files::link`).
+    changed |= crate::frames::files::link::poll(s, tx);
     changed
 }
 

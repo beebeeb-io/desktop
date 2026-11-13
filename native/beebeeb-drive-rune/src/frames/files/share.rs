@@ -156,6 +156,16 @@ impl State {
         // The dialog closes either way; a failure says so, with Try again (DW-0109).
         self.close_dialog(tx);
         match answer {
+            // Accepted, not made: "Link copied" is said when the link is on the clipboard (`link.rs`), and a
+            // failure then opens this dialog again as a refusal at the press does.
+            Ok(()) if self.actions.source.answers_later() => {
+                self.actions.retry_share = None;
+                self.actions.link.share = Some(Share {
+                    password_missing: false,
+                    menu: None,
+                    ..share
+                });
+            }
             Ok(()) => {
                 self.actions.retry_share = None;
                 self.show_toast(Toast::LinkCopied, tx);

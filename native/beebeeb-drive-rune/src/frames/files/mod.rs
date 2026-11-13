@@ -14,6 +14,7 @@ pub mod details;
 pub mod dialogs;
 pub mod facts;
 pub mod keys;
+pub mod link;
 pub mod list;
 pub mod local;
 pub mod long_list;
@@ -158,6 +159,8 @@ impl Toast {
             ActionError::InFlight => " The last change is still on its way.",
             ActionError::NotAll => " Some items were left as they were.",
             ActionError::NotOnThisSystem => " It is not available on this computer yet.",
+            ActionError::NotYet => " It is not available yet.",
+            ActionError::HasLink => " This file already has a link, and copying it again is not available yet.",
             ActionError::NotSent => " It has changes that are not uploaded yet.",
             ActionError::HoldsKept => " Something in it is kept on this PC.",
             _ => "",
@@ -183,6 +186,8 @@ pub struct Actions {
     pub undo: Vec<(usize, DriveItem)>,
     /// Moves to and from Trash that are not answered yet, and what Try again of one asks for (`to_trash.rs`).
     pub trash: to_trash::Ui,
+    /// Links that were asked for and are not answered yet, and what Try again of one asks for (`link.rs`).
+    pub link: link::Ui,
     /// The last frames asked for, oldest first (at most [`INTENTS_KEPT`]).
     pub intents: Vec<Intent>,
     /// An upload that failed: what Try again uploads.
@@ -252,6 +257,7 @@ impl Actions {
             sort: Sort::default(),
             undo: Vec::new(),
             trash: to_trash::Ui::default(),
+            link: link::Ui::default(),
             intents: Vec::new(),
             retry_upload: None,
             retry_share: None,
@@ -741,27 +747,6 @@ impl State {
         }
         self.forget_undo();
         self.apply_changes(tx);
-        true
-    }
-
-    /// Copy the selection's share link. "Link copied" is said once it is on the clipboard, not before.
-    pub fn copy_link(&mut self, tx: &mut Tx) -> bool {
-        if self.needs_session(tx) {
-            return true;
-        }
-        let items = self.selected_items();
-        if items.is_empty() {
-            return false;
-        }
-        if self.protects(&items) {
-            self.failed(Action::CopyLink, ActionError::Protected, tx);
-            return true;
-        }
-        self.forget_undo();
-        match self.actions.source.copy_link(&items) {
-            Ok(()) => self.show_toast(Toast::LinkCopied, tx),
-            Err(why) => self.failed(Action::CopyLink, why, tx),
-        }
         true
     }
 
