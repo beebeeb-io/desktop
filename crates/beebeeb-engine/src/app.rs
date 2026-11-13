@@ -45,6 +45,8 @@ use crate::sync_root_port::{OsSyncRoots, SyncRootPort};
 use crate::sync_view::{Explorer, Start, SyncView, ViewCell, ViewHost};
 use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
 
+// Explorer's "Free up space" command asks this handle, and a stop removes its binding (task 2490).
+mod explorer_api;
 pub mod kept_api;
 pub mod owned_state;
 pub mod settings_api;
@@ -221,6 +223,8 @@ pub struct Engine<C: CredentialStores> {
     /// session at a restart. Cleared by a sign-out. Read by `owned_state` and the sync start, so an email alone
     /// never decides whose the local state is while the id is known.
     session_user_id: Mutex<Option<String>>,
+    /// Explorer's command: the binding a stop removes, and the folder an engine started in (`explorer_api`).
+    explorer: Mutex<explorer_api::ExplorerSeat>,
     /// Test builds only: where the account-bound handle reads (`Engine::use_local_state_for_test`).
     #[cfg(any(test, feature = "test-support"))]
     local_state_for_test: Mutex<Option<PathBuf>>,
@@ -271,6 +275,7 @@ impl<C: CredentialStores> Engine<C> {
             failures: AtomicU32::new(0),
             view,
             session_user_id: Mutex::new(None),
+            explorer: Mutex::new(explorer_api::ExplorerSeat::new(identity)),
             #[cfg(any(test, feature = "test-support"))]
             local_state_for_test: Mutex::new(None),
         })
@@ -751,6 +756,7 @@ impl<C: CredentialStores> Engine<C> {
             // (9) Registered as this app's sync root (Windows; nothing to do elsewhere), with Windows' code if not.
             port.register(&sync_root)
                 .map_err(|code| SyncStartRefused::RegistrationFailed { code })?;
+            self.note_explorer_root(&sync_root);
             // (10) The engine. A restart while paused stays paused: the flag follows the file, under the
             // config-write lock.
             {
@@ -849,7 +855,16 @@ impl<C: CredentialStores> Engine<C> {
         stopped
     }
 
+    /// The engine's stop, then Explorer's "Free up space" binding is removed (task 2490), whether an engine ran or
+    /// not and whether its end was confirmed: the binding outlives a restart of the app. A lock and a sign-out stop
+    /// through here.
     async fn stop_holding_step(&self) -> SyncStop {
+        let stopped = self.stop_runner().await;
+        self.remove_explorer_command();
+        stopped
+    }
+
+    async fn stop_runner(&self) -> SyncStop {
         let mut slot = self.acct.engine.lock().await;
         let Some(runner) = slot.take() else {
             return SyncStop::WasNotRunning;

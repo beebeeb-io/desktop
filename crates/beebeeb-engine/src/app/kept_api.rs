@@ -51,8 +51,7 @@ impl<C: CredentialStores> Engine<C> {
     /// (the account-bound handle, task 2488): the bytes freed. Nothing is touched for a state that is not handed
     /// out. BLOCKS: a worker's.
     pub fn free_up_space(&self) -> Result<u64, String> {
-        let config = crate::config::DesktopConfig::load_for(self.identity)?;
-        let Some(sync_root) = config.sync_root else {
+        let Some(sync_root) = self.configured_sync_root()? else {
             return Ok(0);
         };
         let state = match self.local_state_for_changes() {

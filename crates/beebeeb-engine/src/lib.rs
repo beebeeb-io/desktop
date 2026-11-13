@@ -40,6 +40,7 @@ pub mod download_pin;
 pub mod drive_v2;
 pub mod engine_bridge;
 pub mod engine_status;
+pub mod explorer_command;
 pub mod file_ops;
 pub mod file_provider_port;
 pub mod finder_setup;
