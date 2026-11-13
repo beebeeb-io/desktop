@@ -632,6 +632,7 @@ async fn http_api_interrupted_upload_round_trip() {
                 chunk_size_bytes: Some(8),
                 chunk_count: Some(3),
                 base_version_number: None,
+                version_metadata_encrypted: None,
             })
             .await
             .unwrap();
@@ -656,7 +657,10 @@ async fn http_api_interrupted_upload_round_trip() {
                 result.unwrap();
             }
         }
-        api.complete_upload_session(&upload.upload_session_id).await.unwrap();
+        // The frames above are v1 (sealed by hand), so the session completes without a completion name.
+        api.complete_upload_session(&upload.upload_session_id, None)
+            .await
+            .unwrap();
         sync_tick(&bridge, f.root.path()).await.unwrap();
         let bytes = hydrate(&f, &bridge, 10).await.unwrap();
         assert_eq!(hash(&bytes), f.corpus.objects[9].versions[0].sha256);

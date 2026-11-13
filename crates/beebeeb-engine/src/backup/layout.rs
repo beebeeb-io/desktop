@@ -201,7 +201,9 @@ async fn merge_duplicate_roots(
         duplicate_trees.push(merge_tree(bridge, *id, beebeeb_core::backup::ROOT_NAME.to_string()).await?);
     }
     let hhmm = chrono::Local::now().format("%H.%M").to_string();
-    let steps = plan_merge(&survivor_tree, &duplicate_trees, MERGE_CLASH_LABEL, &hhmm);
+    // Core refuses a clash time that is not `HH.MM`; `hhmm` is formatted as one just above.
+    let steps = plan_merge(&survivor_tree, &duplicate_trees, MERGE_CLASH_LABEL, &hhmm)
+        .map_err(|_| LayoutError("merge_plan"))?;
     let (mut moved, mut trashed) = (0usize, 0usize);
     for step in &steps {
         match step {
@@ -261,7 +263,7 @@ async fn read_manifest(
         .filter(|c| !c.is_folder && c.name.as_deref() == Some(MANIFEST_NAME))
     {
         let bytes = bridge
-            .backup_read_small_file(&child.id, child.chunk_count, child.size)
+            .backup_read_small_file(&child.id, child.record, child.chunk_count, child.size)
             .await
             .map_err(failed("manifest_read"))?;
         let parsed = bytes

@@ -8,6 +8,7 @@ use crate::state_db::{
     BackupEnqueue, ClaimOutcome, FileEntry, FileStatus, ItemKind, Namespace, PERMISSION_READ, StateDb,
 };
 use base64::Engine as _;
+use beebeeb_engine::content_record::ContentRecord;
 use serde_json::json;
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;

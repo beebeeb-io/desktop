@@ -198,6 +198,12 @@ async fn a_restore_with_a_queued_write_runs_after_it_and_keeps_both_versions() {
         .fail_first_chunk_once
         .insert("session-1".into());
     seed_uploaded_row(&bridge, &server, "1672eade-e439-5ad0-972f-53bb8688c354");
+    protect_seeded_row(
+        &bridge,
+        &server,
+        "1672eade-e439-5ad0-972f-53bb8688c354",
+        "object-ordered",
+    );
     let w = fp_save(
         &bridge,
         dir.path(),
@@ -258,6 +264,12 @@ async fn a_restore_the_server_made_is_never_sent_again_after_a_local_failure() {
     let db_path = dir.path().join("state.db");
     let bridge = test_bridge_with_api(&db_path, server.base_url.clone(), master_key);
     seed_uploaded_row(&bridge, &server, "421ef12f-65e1-55da-bcfa-ab09bed0b382");
+    protect_seeded_row(
+        &bridge,
+        &server,
+        "421ef12f-65e1-55da-bcfa-ab09bed0b382",
+        "object-restore-once",
+    );
     bridge
         .queue_restore_version("421ef12f-65e1-55da-bcfa-ab09bed0b382", "object-restore-once-v1", None)
         .unwrap();

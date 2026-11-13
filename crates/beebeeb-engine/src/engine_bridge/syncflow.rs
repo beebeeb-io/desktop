@@ -104,6 +104,15 @@ pub(super) fn upload_session_is_gone(error: &anyhow::Error) -> bool {
         .any(|status| matches!(status.as_u16(), 400 | 404 | 410))
 }
 
+/// `complete` was refused because the file was renamed while the upload ran
+/// (`UploadRefused::file_changed`): the session can never complete with the name it sealed.
+pub(super) fn upload_file_changed(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<crate::api_client::UploadRefused>())
+        .any(|refused| refused.file_changed)
+}
+
 /// The class of an `init` 409 somewhere in `error`'s chain (spec §8.4).
 pub fn init_conflict_class(error: &anyhow::Error) -> Option<crate::api_client::InitConflictClass> {
     error

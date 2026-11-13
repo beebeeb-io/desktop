@@ -482,8 +482,8 @@ async fn a_purged_folder_never_re_homes_a_write_in_a_live_folder_with_the_same_p
     );
     assert_eq!(
         patched_parents(&state, "4cc1d957-b7e5-5ca1-b8e0-f7b479568a72"),
-        vec![None],
-        "the save does not move the server file"
+        Vec::<Option<serde_json::Value>>::new(),
+        "the save does not move the server file: it sends no metadata update at all (the name travels with `complete`)"
     );
 }
 
