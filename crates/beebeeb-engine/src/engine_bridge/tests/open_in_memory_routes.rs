@@ -368,3 +368,35 @@ async fn with_no_version_one_oversized_chunk_body_is_given_up_while_it_streams()
     // Under the limit the same file opens: the cap is not a refusal of long chunks.
     assert_eq!(open(&bridge, 400_000).await, Came::Opened(version.plain.clone()));
 }
+
+/// A pinned chunk's body breaks off part-way on every try: the connection was lost during the chunks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_pinned_api_route_says_offline_when_a_chunk_body_breaks_off() {
+    let version = version_of(STRIDE, SIZE);
+    let file = format!("/api/v1/files/{TEST_FILE_ID}");
+    let mut metadata = unpinned_metadata(&version, |_| {});
+    metadata["download_version"] = version.manifest();
+    let api = Mock::start(Arc::new(move |req: &Seen| {
+        if req.method == "GET" && req.path() == file {
+            return Reply::json(200, metadata.clone());
+        }
+        match req
+            .path()
+            .strip_prefix(&format!("{file}/chunks/"))
+            .and_then(|index| index.parse::<usize>().ok())
+        {
+            // The headers and 100 bytes arrive, then nothing, then the connection closes.
+            Some(2) => Reply::bytes(version.frames[2].clone()).stalling(100, std::time::Duration::from_millis(50)),
+            Some(index) => Reply::bytes(version.frames[index].clone()),
+            None => Reply::json(404, json!({"error": "not found"})),
+        }
+    }));
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = bridge_on(dir.path(), &api.base, Transport::Api);
+    assert_eq!(open(&bridge, NO_LIMIT).await, Came::Refused(OpenFileError::Offline));
+    assert_eq!(
+        api.count(|seen| seen.path().ends_with("/chunks/2")),
+        4,
+        "after the route's own tries"
+    );
+}

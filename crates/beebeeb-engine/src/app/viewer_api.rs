@@ -305,22 +305,26 @@ impl<C: CredentialStores> Engine<C> {
         // This process's own fetch of the file is refused until the read is over: a file that stops being
         // wholly on disk between the check and the open is not downloaded by the open.
         let _no_fetch = crate::no_fetch_scope::enter(&[file_id]);
-        let Some(length) = wholly_here(&path) else {
-            return Ok(LocalCopy::NotHere);
-        };
-        if length > max_bytes {
-            return Err(OpenFileError::TooLarge { size: length });
-        }
         let still = || self.acct.session_unchanged_since(turn);
-        let bytes = match read_bounded(&path, length, max_bytes, cancel, &still) {
-            Ok(bytes) => bytes,
-            Err(ReadStopped::Refused(error)) => return Err(error),
-            // It went away, or cannot be read, between the check and the read: the download is the way.
-            Err(ReadStopped::Unreadable) => return Ok(LocalCopy::NotHere),
+        let mut tries = 0;
+        let bytes = loop {
+            let Some(length) = wholly_here(&path) else {
+                return Ok(LocalCopy::NotHere);
+            };
+            if length > max_bytes {
+                return Err(OpenFileError::TooLarge { size: length });
+            }
+            match read_bounded(&path, length, max_bytes, cancel, &still) {
+                Ok(bytes) => break bytes,
+                Err(ReadStopped::Refused(error)) => return Err(error),
+                // It went away, or cannot be read, between the check and the read: the download is the way.
+                Err(ReadStopped::Unreadable) => return Ok(LocalCopy::NotHere),
+                // It is being written: its length is asked again, a few times. Then the open failed for now
+                // (never the version Beebeeb has in its place: this copy is the newer one).
+                Err(ReadStopped::Grew) if tries < GREW_TRIES => tries += 1,
+                Err(ReadStopped::Grew) => return Err(OpenFileError::Failed),
+            }
         };
-        if cancel.load(Ordering::SeqCst) {
-            return Err(OpenFileError::Cancelled);
-        }
         if !self.session_is_still(turn, &key) {
             return Err(OpenFileError::NotSignedIn);
         }
@@ -350,7 +354,8 @@ impl<C: CredentialStores> Engine<C> {
             #[cfg(any(test, feature = "test-support"))]
             None => return None,
         };
-        let path = crate::engine_bridge::local_file_path_under_sync_root(&root, rel_path).ok()?;
+        // As the Files window resolves a row for the system's Open: below the folder, by plain names only.
+        let path = crate::file_ops::full_path(&root, rel_path).ok()?;
         matches!(crate::name_alias::conflict_below(&root, &path), Ok(None)).then_some(path)
     }
 }
@@ -374,15 +379,21 @@ fn wholly_here(path: &Path) -> Option<u64> {
     Some(metadata.len())
 }
 
+/// How often a copy that grew while it was read is read again.
+const GREW_TRIES: u32 = 3;
+
 enum ReadStopped {
-    /// Cancelled, the session moved on, or the file grew past the limit.
+    /// Cancelled, the session moved on, or the file is past the limit.
     Refused(OpenFileError),
     Unreadable,
+    /// The file is longer than the length it was read for, and (so far) within the limit.
+    Grew,
 }
 
-/// The file at `path` into one buffer that is wiped when dropped, at most `max_bytes` + 1 bytes of it, in pieces
-/// with `cancel` and `still` asked between them. The buffer is sized once (from `length`, capped), so no
-/// earlier copy of the content is left behind by a growing allocation.
+/// The file at `path` into one buffer that is wiped when dropped, in pieces with `cancel` and `still` asked
+/// between them. The buffer is sized once, for `length` + 1 bytes and never more than `max_bytes` + 1, and the
+/// read never goes past it: no earlier copy of the content is left behind by a growing allocation, and a file
+/// that is longer than `length` by now costs one byte more, not the file.
 fn read_bounded(
     path: &Path,
     length: u64,
@@ -405,7 +416,7 @@ fn read_bounded(
     let ceiling = max_bytes.saturating_add(1);
     let room = usize::try_from(length.saturating_add(1).min(ceiling)).map_err(|_| ReadStopped::Unreadable)?;
     let mut bytes = Zeroizing::new(Vec::with_capacity(room));
-    let mut file = file.take(ceiling);
+    let mut file = file;
     loop {
         if cancel.load(Ordering::SeqCst) {
             return Err(ReadStopped::Refused(OpenFileError::Cancelled));
@@ -413,8 +424,7 @@ fn read_bounded(
         if !still() {
             return Err(ReadStopped::Refused(OpenFileError::NotSignedIn));
         }
-        // Never past the buffer's own room: a file that grew is read into a fresh buffer below, not by a
-        // reallocation that would leave the first one unwiped.
+        // Never past the buffer's own room.
         let want = PIECE.min(bytes.capacity() - bytes.len());
         if want == 0 {
             break;
@@ -427,21 +437,19 @@ fn read_bounded(
         };
         bytes.truncate(at + read);
         if read == 0 {
-            return Ok(bytes);
+            break;
         }
     }
-    // The buffer is full: the file is as long as it was (the next read says so), or it grew.
-    let mut one = [0u8; 1];
-    match file.read(&mut one) {
-        Ok(0) if bytes.len() as u64 <= max_bytes => Ok(bytes),
-        Ok(_) => {
-            one[0] = 0;
-            Err(ReadStopped::Refused(OpenFileError::TooLarge {
-                size: (bytes.len() as u64).max(max_bytes.saturating_add(1)),
-            }))
-        }
-        Err(_) => Err(ReadStopped::Unreadable),
+    if bytes.len() as u64 > max_bytes {
+        return Err(ReadStopped::Refused(OpenFileError::TooLarge {
+            size: bytes.len() as u64,
+        }));
     }
+    // The file ended where its length said, or the buffer is full: one more byte means it grew.
+    if bytes.len() as u64 > length {
+        return Err(ReadStopped::Grew);
+    }
+    Ok(bytes)
 }
 
 impl<C: CredentialStores> Engine<C> {

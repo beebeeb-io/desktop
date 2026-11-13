@@ -529,7 +529,8 @@ fn a_kind_with_no_viewer_stays_its_own_apps_and_a_route_to_it_says_so_with_two_b
     assert_eq!(w.route_item().as_deref(), Some(PLAN));
     let drawn = w.drawn();
     assert!(drawn.contains("No preview for this kind of file yet"), "{drawn}");
-    assert!(drawn.contains("Open in another app\u{2026}") && drawn.contains("Save a copy\u{2026}"));
+    // "Save a copy…" has nowhere to go on this source: it is not drawn (never a button that only says "not built").
+    assert!(drawn.contains("Open in another app\u{2026}") && !drawn.contains("Save a copy"));
     assert!(!drawn.contains("Decrypting on this PC"));
     w.settle();
     assert_eq!(w.chunk_requests(), 0, "nothing was downloaded");
@@ -538,14 +539,11 @@ fn a_kind_with_no_viewer_stays_its_own_apps_and_a_route_to_it_says_so_with_two_b
     // refusal is said, in its own words, on screen.
     w.click("state-btn-0");
     assert!(w.drawn().contains(viewers::NEEDS_SYNC_ELSEWHERE), "{}", w.drawn());
-    // Save a copy is not built: the press says so.
-    w.click("state-btn-1");
-    assert!(w.drawn().contains("Not built yet: Save a copy"), "{}", w.drawn());
     assert_eq!(w.chunk_requests(), 0);
 }
 
 #[test]
-fn a_route_to_a_file_that_is_not_there_is_asked_of_the_local_state_once_not_on_every_frame() {
+fn a_route_to_a_file_that_is_not_there_says_it_is_no_longer_here_and_close_goes_back() {
     let mut w = window("gone");
     sign_in(&w.engine, &w.first, TEST_PHRASE);
     w.settle();
@@ -555,18 +553,109 @@ fn a_route_to_a_file_that_is_not_there_is_asked_of_the_local_state_once_not_on_e
     for _ in 0..10 {
         w.settle();
     }
-    assert!(w.rt.state.viewer.ui.is_none());
-    assert_eq!(
-        w.rt.state.viewer.unopened_for_test().as_deref(),
-        Some("b0000000-0000-4000-8000-00000000ffff"),
-        "the window remembers what did not open instead of asking again"
+    let drawn = w.drawn();
+    assert!(drawn.contains("This file is no longer here"), "{drawn}");
+    assert!(
+        !drawn.contains("Not built yet") && !drawn.contains("Try again"),
+        "{drawn}"
     );
-    // Another route: forgotten, and a file that is there opens.
-    w.press(Key::Escape, Mods::default());
-    w.settle();
-    assert_eq!(w.rt.state.viewer.unopened_for_test(), None);
+    assert_eq!(
+        w.rt.state.viewer.unopened_for_test(),
+        None,
+        "it is a state on screen, not a memo"
+    );
+    assert_eq!(w.chunk_requests(), 0);
+    // Close: back to the folder, and a file that is there opens.
+    w.click("state-btn-0");
+    assert_eq!(w.route_item(), None);
+    assert!(w.rt.state.viewer.ui.is_none());
     w.open_row(NOTE_NAME);
     w.until_drawn(NOTE_WORDS);
+}
+
+/// The engine's own glue, in a window: a file whose bytes are in the account's folder on this PC opens from
+/// there with Beebeeb unreachable for its chunks, shows what is on disk (an edit that is not sent yet), and says
+/// where it came from.
+#[test]
+fn a_file_kept_on_this_pc_opens_from_its_copy_without_a_download_and_says_so() {
+    let mut w = window("local");
+    sign_in(&w.engine, &w.first, TEST_PHRASE);
+    w.settle();
+    // The local state says an upload of the note is on its way; the folder holds the edited file.
+    let folder = tempfile::tempdir().unwrap();
+    std::fs::write(folder.path().join(NOTE_NAME), "edited-on-this-pc-words, not sent yet\n").unwrap();
+    w.engine.use_sync_root_for_test(folder.path().to_path_buf());
+    w.engine
+        .local_state_for_changes()
+        .unwrap()
+        .with(|db| db.set_status(NOTE, FileStatus::Uploading).unwrap())
+        .unwrap();
+    // Every chunk request would fail: nothing may be downloaded.
+    w.hold.fails.store(true, Ordering::SeqCst);
+
+    w.rt.update(|s, _| {
+        host::dispatch(s, Event::OpenItem(NOTE.to_string()));
+    });
+    w.until_drawn("edited-on-this-pc-words");
+    let drawn = w.drawn();
+    assert!(
+        !drawn.contains(NOTE_WORDS),
+        "the older version Beebeeb has is not what is shown"
+    );
+    assert!(drawn.contains(viewers::FROM_THIS_PC_UNSENT), "{drawn}");
+    assert!(!drawn.contains("Decrypted on this PC"), "{drawn}");
+    assert_eq!(w.chunk_requests(), 0, "nothing was downloaded");
+
+    // In sync, and the copy is what Beebeeb has: said as the copy on this PC, without the warning.
+    w.press(Key::Escape, Mods::default());
+    std::fs::write(folder.path().join(NOTE_NAME), note_text()).unwrap();
+    w.engine
+        .local_state_for_changes()
+        .unwrap()
+        .with(|db| db.set_status(NOTE, FileStatus::Local).unwrap())
+        .unwrap();
+    w.rt.update(|s, _| {
+        host::dispatch(s, Event::OpenItem(NOTE.to_string()));
+    });
+    w.until_drawn(NOTE_WORDS);
+    let drawn = w.drawn();
+    assert!(drawn.contains(viewers::FROM_THIS_PC), "{drawn}");
+    assert!(!drawn.contains("aren't in Beebeeb yet"), "{drawn}");
+    assert_eq!(w.chunk_requests(), 0);
+
+    // After a lock nothing of it is left, as for a downloaded file.
+    w.engine.lock();
+    w.settle();
+    w.assert_nothing_of_the_file("after a lock");
+}
+
+/// "Open in its app" on the preview panel hands the file to its own app, never to the window's viewer, also
+/// for a file the viewer shows. (No sync runs here, so the Files window's own open refuses and says so.)
+#[test]
+fn open_in_its_app_never_opens_the_windows_viewer() {
+    let mut w = window("itsapp");
+    sign_in(&w.engine, &w.first, TEST_PHRASE);
+    w.settle();
+    let row =
+        w.rt.state
+            .listing
+            .items
+            .iter()
+            .position(|item| item.name == NOTE_NAME)
+            .expect("the note is listed");
+    w.click(&format!("row-{row}-date"));
+    w.rt.update(|s, tx| {
+        assert!(s.preview(), "the preview panel opens");
+        s.open_from_preview(tx);
+    });
+    w.settle();
+    assert_eq!(w.route_item(), None, "the route did not go to the viewer");
+    assert!(w.rt.state.viewer.ui.is_none());
+    assert_eq!(w.chunk_requests(), 0);
+    // Enter on the same row is the viewer's (the file is not on this PC).
+    w.press(Key::Enter, Mods::default());
+    w.until_drawn(NOTE_WORDS);
+    assert_eq!(w.route_item().as_deref(), Some(NOTE));
 }
 
 #[test]

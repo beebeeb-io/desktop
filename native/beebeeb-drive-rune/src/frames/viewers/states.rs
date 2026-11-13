@@ -88,6 +88,7 @@ pub fn status(body: &Body) -> Option<Status> {
                 Stopped::SessionEnded => "Not opened: the session ended",
                 Stopped::SessionChanged => "Closed: its content left memory",
                 Stopped::Gone => "Not opened: the file is gone",
+                Stopped::NotNow => "Not opened: couldn't read it right now",
             }
             .into(),
             details: "The copy in Beebeeb is unchanged".into(),
@@ -97,7 +98,7 @@ pub fn status(body: &Body) -> Option<Status> {
             text: "No preview here".into(),
             details: match why {
                 NoPreview::NoViewer | NoPreview::TooBig { .. } => "Nothing was downloaded",
-                NoPreview::Unreadable => "Decrypted in memory only; nothing was kept",
+                NoPreview::Unreadable | NoPreview::PictureTooBig { .. } => "Decrypted in memory only; nothing was kept",
             }
             .into(),
         },
@@ -238,15 +239,19 @@ fn stopped(why: Stopped, t: &Theme) -> El {
             "Beebeeb was locked or the account changed while it was open, so its content was cleared from memory.",
         ),
         Stopped::Gone => (
-            "This file is no longer in Beebeeb",
+            "This file is no longer here",
             "It may have been moved to Trash or deleted on another device.",
+        ),
+        Stopped::NotNow => (
+            "Couldn't open this file right now",
+            "What this PC knows about the file couldn't be read at this moment. Nothing changed.",
         ),
     };
     let act = if why.can_retry() {
-        let label = if why == Stopped::Offline {
-            "Try again"
-        } else {
+        let label = if why == Stopped::SessionChanged {
             "Open it again"
+        } else {
+            "Try again"
         };
         button("state-btn-0", label, ButtonKind::Outline, false, t).on_press(retry)
     } else {
@@ -264,8 +269,9 @@ fn stopped(why: Stopped, t: &Theme) -> El {
     stage(content, t)
 }
 
-/// The file is in Beebeeb and is not shown here: why, and the two ways out.
-fn not_previewable(file: &OpenFile, why: NoPreview, t: &Theme) -> El {
+/// The file is in Beebeeb and is not shown here: why, and the ways out. `copies`: "Save a copy…" has somewhere to
+/// go (`ViewerSource::saves_copies`); a button with no target is not drawn.
+fn not_previewable(file: &OpenFile, why: NoPreview, copies: bool, t: &Theme) -> El {
     let (title, words) = match why {
         NoPreview::NoViewer => (
             "No preview for this kind of file yet",
@@ -289,6 +295,13 @@ fn not_previewable(file: &OpenFile, why: NoPreview, t: &Theme) -> El {
              it can't decode. Nothing was kept."
                 .to_string(),
         ),
+        NoPreview::PictureTooBig { width, height } => (
+            "Too large to preview here",
+            format!(
+                "This picture is {width} \u{00D7} {height} pixels, more than a preview decodes in memory. It was \
+                 not decoded, and nothing was kept."
+            ),
+        ),
     };
     let content = col()
         .key("state")
@@ -297,36 +310,45 @@ fn not_previewable(file: &OpenFile, why: NoPreview, t: &Theme) -> El {
         .child(tile(&icons::INFO, false, t))
         .child(heading(title, t))
         .child(sentence(words, t))
-        .child(actions(vec![
-            button(
-                "state-btn-0",
-                "Open in another app\u{2026}",
-                ButtonKind::Outline,
-                false,
-                t,
-            )
-            .on_press(|s: &mut State| {
-                if let Some(ui) = ui(s) {
-                    ui.intent(Intent::OpenInAnotherApp);
-                }
-            }),
-            button("state-btn-1", "Save a copy\u{2026}", ButtonKind::Outline, false, t).on_press(|s: &mut State| {
-                if let Some(ui) = ui(s) {
-                    ui.intent(Intent::SaveCopy);
-                }
-            }),
-        ]));
+        .child(actions({
+            let mut buttons = vec![
+                button(
+                    "state-btn-0",
+                    "Open in another app\u{2026}",
+                    ButtonKind::Outline,
+                    false,
+                    t,
+                )
+                .on_press(|s: &mut State| {
+                    if let Some(ui) = ui(s) {
+                        ui.intent(Intent::OpenInAnotherApp);
+                    }
+                }),
+            ];
+            if copies {
+                buttons.push(
+                    button("state-btn-1", "Save a copy\u{2026}", ButtonKind::Outline, false, t).on_press(
+                        |s: &mut State| {
+                            if let Some(ui) = ui(s) {
+                                ui.intent(Intent::SaveCopy);
+                            }
+                        },
+                    ),
+                );
+            }
+            buttons
+        }));
     stage(content, t)
 }
 
-/// The body of a state.
-pub fn body(file: &OpenFile, t: &Theme) -> Option<El> {
+/// The body of a state. `copies`: see [`not_previewable`].
+pub fn body(file: &OpenFile, copies: bool, t: &Theme) -> Option<El> {
     Some(match &file.body {
         Body::Decrypting { done, total } => decrypting(file, *done, *total, t),
         Body::TooLarge { size, free } => too_large(file, *size, *free, t),
         Body::Failed => failed(t),
         Body::Stopped(why) => stopped(*why, t),
-        Body::NotPreviewable(why) => not_previewable(file, *why, t),
+        Body::NotPreviewable(why) => not_previewable(file, *why, copies, t),
         // Each has its own view (`text.rs`, `markdown.rs`, `photo.rs`, …).
         _ => return None,
     })

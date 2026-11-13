@@ -4,15 +4,26 @@
 //! What it shows, and from where:
 //! - the name, the folders above it and the size: the signed-in account's local state, through the engine's
 //!   account-bound handle ([`Engine::open_file_facts`]); read once, when the file opens.
-//! - the content: downloaded and decrypted IN MEMORY by the engine's own download path
-//!   ([`Engine::open_file_in_memory`]: the path every hydrate uses, no crypto here), on a worker, with the
-//!   engine's progress. Text, Markdown, CSV / TSV (as text) and PNG / JPEG / GIF / WebP pictures are shown.
-//! - not shown here: PDF (this app links no PDF renderer), audio, archives, RAW and HEIC pictures, Office
+//! - the content, on a worker, from one of two places:
+//!   - a file whose bytes are wholly ON THIS PC is read from there ([`Engine::open_local_copy_in_memory`]): it
+//!     opens without a connection, and a change made here that is not sent yet is what is shown, never the older
+//!     version Beebeeb has. The view says where the content came from ([`ViewerSource::origin`]);
+//!   - any other file is downloaded and decrypted IN MEMORY by the engine's own download path
+//!     ([`Engine::open_file_in_memory`]: the path every hydrate uses, no crypto here), with the engine's
+//!     progress.
+//!   Text, Markdown, CSV / TSV (as text) and PNG / JPEG / GIF / WebP pictures are shown.
+//! - which app opens a file: a list's Open of a file that is kept on this PC while sync runs goes to the file's
+//!   own app ([`ViewerSource::kept_on_this_pc`]); the viewer is for a file that is not on this PC (no download to
+//!   disk) and for a route that names a file directly.
+//! - not shown here: PDF pages when the file cannot be rendered, audio, archives, RAW and HEIC pictures, Office
 //!   documents. A list's Open leaves those to their own app, as before ([`ViewerSource::previews`]); a route that
 //!   names one anyway (Search, a link) gets the honest state, `Body::NotPreviewable`, and nothing is downloaded.
-//!   The same state, with its own words, for any file over [`IN_MEMORY_MAX`].
-//! - "Open in another app…": the Files window's own open ([`EngineFilesSource`]): the system opens the file from
-//!   the account's folder on this PC, where the engine already puts opened files. No copy is made here.
+//!   The same state, with its own words, for any file over [`IN_MEMORY_MAX`], and for a picture that declares
+//!   more than the viewer decodes (`viewer_picture`, asked of the header before anything is decoded).
+//! - a file that cannot be opened at all says why ([`OpenError`]): gone, the session ended, or "not right now"
+//!   (asked again on Try again), never one catch-all.
+//! - "Open in another app…": the system opens the file from the account's folder on this PC, where the engine
+//!   already puts opened files. No copy is made here.
 //! - not bound: saving an edit, Available offline, a newer version's banner, find, play, a photo's strip.
 //!
 //! Where the decrypted bytes are: in the engine's `Zeroizing` buffer until the worker made of them what the view
@@ -37,18 +48,20 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 
 use beebeeb_engine::account::SessionGeneration;
-use beebeeb_engine::app::viewer_api::{OpenFileError, OpenFileFacts, OpenedFile};
+use beebeeb_engine::app::viewer_api::{LocalCopy, OnThisPc, OpenFileError, OpenFileFacts, OpenedFile};
 use beebeeb_engine::app::{CredentialStores, Engine};
+use beebeeb_engine::file_ops;
 use zeroize::Zeroize;
 
-use super::{EngineFilesSource, log};
-use crate::frames::files::source::{ActionError, FilesSource};
+use super::log;
 use crate::frames::viewers::kinds::{self, PhotoDoc, Picture, Viewer};
 use crate::frames::viewers::source::{
-    Body, Cut, Details, Elsewhere, MdDoc, NoPreview, OpenError, OpenFile, Stopped, TextDoc, Truncated, ViewerSource,
-    plain_lines,
+    Body, Cut, Details, Elsewhere, MdDoc, NoPreview, OpenError, OpenFile, Origin, Stopped, TextDoc, Truncated,
+    ViewerSource, plain_lines,
 };
-use crate::source::DriveItem;
+
+#[path = "viewer_picture.rs"]
+pub(crate) mod viewer_picture;
 
 #[cfg(test)]
 #[path = "viewer_tests.rs"]
@@ -92,6 +105,11 @@ pub trait ViewerEngine: Send + Sync + 'static {
         progress: &(dyn Fn(u64, u64) + Send + Sync + 'static),
         cancel: &AtomicBool,
     ) -> Result<OpenedFile, OpenFileError>;
+    /// [`Engine::open_local_copy_in_memory`]: the copy on this PC, read into memory. No network. A worker's.
+    fn local(&self, file_id: &str, max_bytes: u64, cancel: &AtomicBool) -> Result<LocalCopy, OpenFileError>;
+    /// Sync runs for the account's folder on this PC ([`Engine::is_syncing`]): the system can open a file kept
+    /// there.
+    fn is_syncing(&self) -> bool;
     /// Ask the system to open the file with its own app, from the account's folder on this PC. Never
     /// `Elsewhere::NotBound`.
     fn open_elsewhere(&self, file_id: &str) -> Elsewhere;
@@ -131,29 +149,34 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
         self.engine.open_file_in_memory(file_id, max_bytes, progress, cancel)
     }
 
-    /// The Files window's own open, for this one file: the path is resolved under the account-bound handle, the
-    /// sync guard and the executable check apply, and the system is asked without a shell.
+    fn local(&self, file_id: &str, max_bytes: u64, cancel: &AtomicBool) -> Result<LocalCopy, OpenFileError> {
+        self.engine.open_local_copy_in_memory(file_id, max_bytes, cancel)
+    }
+
+    fn is_syncing(&self) -> bool {
+        self.engine.is_syncing()
+    }
+
+    /// What the Files window's own open does, for this one file by its id: the path is resolved under the
+    /// account-bound handle, a kind that is not opened for safety is refused, and the system is asked without a
+    /// shell, after the handle answered. "Sync is off" and "refused" are two answers.
     fn open_elsewhere(&self, file_id: &str) -> Elsewhere {
-        let item = DriveItem {
-            id: file_id.to_string(),
-            parent_id: None,
-            name: String::new(),
-            is_folder: false,
-            size: None,
-            child_count: None,
-            modified_at: String::new(),
-            mime: None,
-            has_thumbnail: false,
-            shared_type: None,
-            shared_badges: Vec::new(),
-            pc_status: None,
-            is_protected: false,
+        if !self.engine.is_syncing() {
+            return Elsewhere::NeedsSync;
+        }
+        let Ok(sync_root) = self.engine.sync_root() else {
+            return Elsewhere::NeedsSync;
         };
-        match EngineFilesSource::new(self.engine.clone()).open(&[item]) {
-            Ok(()) => Elsewhere::Opened,
-            // No sync runs for this handle, or the local state is not handed out.
-            Err(ActionError::Unavailable) => Elsewhere::NeedsSync,
-            Err(_) => Elsewhere::Refused,
+        let path = self.engine.local_state_for_changes().and_then(|state| {
+            state.with(|db| {
+                let entry = file_ops::resolve(db, file_id).ok()?;
+                let path = file_ops::item_path(&sync_root, &entry).ok()?;
+                (!entry.is_dir() && !file_ops::is_dangerous_executable(&path)).then_some(path)
+            })
+        });
+        match path {
+            Ok(Some(path)) if super::open_path(&path).is_ok() => Elsewhere::Opened,
+            _ => Elsewhere::Refused,
         }
     }
 
@@ -167,6 +190,8 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
 struct Content {
     body: Option<Body>,
     picture: Option<rune::Pixels>,
+    /// Where the bytes came from.
+    origin: Origin,
 }
 
 impl Drop for Content {
@@ -204,6 +229,8 @@ struct Opening {
     /// The view holds decrypted content of this file (text, or the picture below).
     holds: bool,
     picture: Option<rune::Pixels>,
+    /// Where the content the view holds came from (Beebeeb, until an answer says the copy on this PC).
+    origin: Origin,
     /// The session moved on and the view was told: nothing more comes from this opening.
     ended: bool,
 }
@@ -282,15 +309,7 @@ fn text_body(bytes: &[u8], markdown: bool) -> Option<Body> {
         None
     };
     if let Some(why) = why {
-        let mut end = text
-            .match_indices('\n')
-            .nth(SHOWN_LINES - 1)
-            .map_or(text.len(), |(at, _)| at)
-            .min(SHOWN_BYTES);
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        let lines = plain_lines(&text[..end]);
+        let lines = first_lines(text);
         return Some(Body::Text(TextDoc {
             truncated: Some(Truncated {
                 shown: u32::try_from(lines.len()).unwrap_or(u32::MAX),
@@ -312,6 +331,33 @@ fn text_body(bytes: &[u8], markdown: bool) -> Option<Body> {
     })
 }
 
+/// The first lines of a text shown in part: at most [`SHOWN_LINES`] of them, each cut at [`LINE_BYTES_MAX`]
+/// (on a character), and at most [`SHOWN_BYTES`] in all. No line the reader is handed is longer than the limit
+/// it is said to hold.
+fn first_lines(text: &str) -> Vec<Vec<crate::frames::viewers::source::Run>> {
+    let cut = |line: &str, at_most: usize| {
+        let mut end = line.len().min(at_most);
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        end
+    };
+    let mut shown = String::new();
+    for (i, line) in text.lines().take(SHOWN_LINES).enumerate() {
+        let room = SHOWN_BYTES.saturating_sub(shown.len() + usize::from(i > 0));
+        if room == 0 && i > 0 {
+            break;
+        }
+        if i > 0 {
+            shown.push('\n');
+        }
+        shown.push_str(&line[..cut(line, LINE_BYTES_MAX.min(room))]);
+    }
+    let lines = plain_lines(&shown);
+    shown.zeroize();
+    lines
+}
+
 /// The toolkit's decoders, one set for the app (started with the first picture). Its waker does nothing: the
 /// worker waits for its own picture.
 fn decoders() -> &'static rune::ImageCache {
@@ -319,9 +365,46 @@ fn decoders() -> &'static rune::ImageCache {
     DECODERS.get_or_init(|| rune::ImageCache::new(Arc::new(|| {})))
 }
 
-/// The decrypted bytes as a picture: decoded by the toolkit's decoders, waited for on this (the worker's) thread.
-/// `None`: it does not decode. The decoder reads a copy of the bytes; that copy is overwritten here once the
-/// decoder let go of it, and a line is logged if it never did.
+/// The decrypted bytes as a picture, or why not. What the file declares is held to the viewer's own limits FIRST
+/// (`viewer_picture::check`, from the header): a file that is not one of the four formats by its content, or
+/// that declares more than the viewer decodes, never reaches a decoder. `cancel` is asked before the decode
+/// starts; the decode itself cannot be stopped, and is bounded by those limits.
+fn picture_body(bytes: &[u8], cancel: &AtomicBool) -> Content {
+    let nothing = |why| Content {
+        body: Some(Body::NotPreviewable(why)),
+        picture: None,
+        origin: Origin::Beebeeb,
+    };
+    match viewer_picture::check(bytes) {
+        Err(viewer_picture::Refused::NotAPicture) => return nothing(NoPreview::Unreadable),
+        Err(viewer_picture::Refused::TooBig(declared)) => {
+            return nothing(NoPreview::PictureTooBig {
+                width: declared.width,
+                height: declared.height,
+            });
+        }
+        Ok(_) => {}
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return nothing(NoPreview::Unreadable);
+    }
+    match picture(bytes) {
+        Some(pixels) => Content {
+            body: Some(Body::Photo(PhotoDoc {
+                pill: None,
+                note: String::new(),
+                strip: Vec::new(),
+            })),
+            picture: Some(pixels),
+            origin: Origin::Beebeeb,
+        },
+        None => nothing(NoPreview::Unreadable),
+    }
+}
+
+/// The bytes decoded by the toolkit's decoders, waited for on this (the worker's) thread. `None`: it does not
+/// decode. The decoder reads a copy of the bytes; that copy is overwritten here once the decoder let go of it,
+/// and a line is logged if it never did. Only for bytes [`viewer_picture::check`] passed.
 fn picture(bytes: &[u8]) -> Option<rune::Pixels> {
     let mut encoded: Arc<[u8]> = Arc::from(bytes);
     let image = decoders().load(encoded.clone());
@@ -342,33 +425,50 @@ fn picture(bytes: &[u8]) -> Option<rune::Pixels> {
     decoded.then(|| image.pixels().clone())
 }
 
-/// What the view draws of the decrypted file.
-fn content_of(shows: Shows, bytes: &[u8]) -> Content {
+/// What the view draws of the file's bytes.
+fn content_of(shows: Shows, bytes: &[u8], cancel: &AtomicBool) -> Content {
     let unreadable = || Body::NotPreviewable(NoPreview::Unreadable);
     match shows {
         Shows::Text | Shows::Markdown => Content {
             body: Some(text_body(bytes, shows == Shows::Markdown).unwrap_or_else(unreadable)),
             picture: None,
+            origin: Origin::Beebeeb,
         },
-        Shows::Picture => match picture(bytes) {
-            Some(pixels) => Content {
-                body: Some(Body::Photo(PhotoDoc {
-                    pill: None,
-                    note: String::new(),
-                    strip: Vec::new(),
-                })),
-                picture: Some(pixels),
-            },
-            None => Content {
-                body: Some(unreadable()),
-                picture: None,
-            },
-        },
+        Shows::Picture => picture_body(bytes, cancel),
         Shows::Nothing => Content {
             body: Some(Body::NotPreviewable(NoPreview::NoViewer)),
             picture: None,
+            origin: Origin::Beebeeb,
         },
     }
+}
+
+/// The file's bytes for the view: the copy on this PC when the local state says it is here and it really is
+/// (no network at all), else the download. The answer says which.
+fn read<E: ViewerEngine>(
+    engine: &E,
+    file_id: &str,
+    here: bool,
+    shows: Shows,
+    progress: &(dyn Fn(u64, u64) + Send + Sync + 'static),
+    cancel: &AtomicBool,
+) -> Answer {
+    if here {
+        match engine.local(file_id, IN_MEMORY_MAX, cancel)? {
+            LocalCopy::Opened(copy) => {
+                let mut content = content_of(shows, &copy.bytes, cancel);
+                content.origin = Origin::ThisPc {
+                    unsent: copy.copy == OnThisPc::NotSentYet,
+                };
+                return Ok((copy.session, content));
+            }
+            // Not wholly on this PC after all: the download is the way.
+            LocalCopy::NotHere => {}
+        }
+    }
+    let opened = engine.fetch(file_id, IN_MEMORY_MAX, progress, cancel)?;
+    // `opened` is dropped at the end of this function: the engine's buffer is wiped there.
+    Ok((opened.session, content_of(shows, &opened.bytes, cancel)))
 }
 
 /// What the view shows for a download that did not hand over content. `None`: nothing (it was cancelled).
@@ -425,15 +525,8 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         if let Some(mut before) = self.open.take() {
             before.end();
         }
-        if !self.engine.has_session() {
-            return Err(OpenError::NotFound);
-        }
-        let (session, account) = (self.engine.session_turn(), self.engine.account());
-        let facts = self.engine.facts(file_id).map_err(|_| OpenError::NotFound)?;
-        // Facts read across a session change are not this session's.
-        if facts.session != session {
-            return Err(OpenError::NotFound);
-        }
+        let (session, account, facts) = self.facts_now(file_id)?;
+        let here = facts.on_this_pc.is_some();
         let shows = shows(&facts.name);
         let (answers, inbox) = mpsc::channel();
         let mut opening = Opening {
@@ -447,6 +540,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             drawn: (0, facts.size),
             holds: false,
             picture: None,
+            origin: Origin::Beebeeb,
             ended: false,
         };
         let body = if shows == Shows::Nothing {
@@ -456,7 +550,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 size: facts.size,
                 limit: IN_MEMORY_MAX,
             })
-        } else if self.fetch_on_a_worker(&opening, shows, answers) {
+        } else if self.fetch_on_a_worker(&opening, shows, here, answers) {
             opening.fetching = true;
             Body::Decrypting {
                 done: 0,
@@ -470,8 +564,36 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         Ok(file_of(file_id, facts, body))
     }
 
-    /// Download and decrypt on a worker; its one answer goes down `answers`. `false`: no worker started.
-    fn fetch_on_a_worker(&self, opening: &Opening, shows: Shows, answers: mpsc::Sender<Answer>) -> bool {
+    /// The facts of `file_id` for the session in memory, with the session they are for. Each refusal keeps its
+    /// kind: no session, a session Beebeeb ended, a file that is not there, and "not right now" (the local state
+    /// could not be read, or the session changed during the read; the read is tried once more first).
+    fn facts_now(&self, file_id: &str) -> Result<(SessionGeneration, Option<String>, OpenFileFacts), OpenError> {
+        let mut again = true;
+        loop {
+            if !self.engine.has_session() {
+                return Err(OpenError::SignedOut);
+            }
+            let (session, account) = (self.engine.session_turn(), self.engine.account());
+            let facts = self.engine.facts(file_id).map_err(|error| match error {
+                // Not in the local state, or the local state is not this account's: no such file for this account.
+                OpenFileError::NotFound | OpenFileError::NotYours => OpenError::NotFound,
+                OpenFileError::NotSignedIn => OpenError::SignedOut,
+                OpenFileError::SessionEnded => OpenError::SessionEnded,
+                _ => OpenError::NotNow,
+            })?;
+            // Facts read across a session change are not this session's.
+            if facts.session == session {
+                return Ok((session, account, facts));
+            }
+            if !std::mem::take(&mut again) {
+                return Err(OpenError::NotNow);
+            }
+        }
+    }
+
+    /// Read (the copy on this PC, else download and decrypt) on a worker; its one answer goes down `answers`.
+    /// `false`: no worker started.
+    fn fetch_on_a_worker(&self, opening: &Opening, shows: Shows, here: bool, answers: mpsc::Sender<Answer>) -> bool {
         let (engine, file_id) = (self.engine.clone(), opening.file_id.clone());
         let (cancel, progress) = (opening.cancel.clone(), opening.progress.clone());
         std::thread::Builder::new()
@@ -489,9 +611,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 };
                 // A panic in this worker must not leave the view on "Decrypting" for good: it answers Failed.
                 let answer: Answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let opened = engine.fetch(&file_id, IN_MEMORY_MAX, &report, &cancel)?;
-                    // `opened` is dropped at the end of this closure: the engine's buffer is wiped there.
-                    Ok((opened.session, content_of(shows, &opened.bytes)))
+                    read(&*engine, &file_id, here, shows, &report, &cancel)
                 }))
                 .unwrap_or(Err(OpenFileError::Failed));
                 // Nobody waits for the content any more (the file was closed, its session moved on, Cancel): it is
@@ -565,6 +685,7 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
                 match answer {
                     Ok((session, mut content)) if session == opening.session => {
                         opening.picture = content.picture.take();
+                        opening.origin = content.origin;
                         opening.holds = true;
                         content.body.take()
                     }
@@ -626,6 +747,28 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
 
     fn previews(&self, name: &str) -> bool {
         shows(name) != Shows::Nothing
+    }
+
+    /// The local state says the file's bytes are on this PC, and sync runs for the folder they are in (so the
+    /// system can open the file there). Otherwise the viewer shows it.
+    fn kept_on_this_pc(&self, file_id: &str) -> bool {
+        self.engine.has_session()
+            && self.engine.is_syncing()
+            && self
+                .engine
+                .facts(file_id)
+                .is_ok_and(|facts| facts.session == self.engine.session_turn() && facts.on_this_pc.is_some())
+    }
+
+    fn origin(&self, file_id: &str) -> Origin {
+        self.current(file_id)
+            .filter(|opening| opening.holds)
+            .map_or(Origin::Beebeeb, |opening| opening.origin)
+    }
+
+    /// "Save a copy…" has nowhere to go yet: the button is not drawn.
+    fn saves_copies(&self) -> bool {
+        false
     }
 
     /// Saving an edit is not bound: the editor does not open.

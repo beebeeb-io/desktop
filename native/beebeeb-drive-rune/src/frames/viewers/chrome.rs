@@ -299,6 +299,35 @@ pub fn status_bar(status: &Status, t: &Theme) -> El {
         ))
 }
 
+/// What the status line says at the left while content read from the copy on this PC is on screen.
+pub const FROM_THIS_PC: &str = "Opened from the copy on this PC";
+/// The same, for a copy with a change that is not in Beebeeb yet: what is on screen is NOT what Beebeeb has.
+pub const FROM_THIS_PC_UNSENT: &str = "Opened from the copy on this PC \u{00B7} its changes aren't in Beebeeb yet";
+
+/// `status`, saying where the content on screen came from when that is not Beebeeb: content read from the copy
+/// kept on this PC was not downloaded and decrypted just now, and a copy with unsent changes is not the version
+/// Beebeeb has, so the line never says "Decrypted on this PC" over it. Only while content is shown (a state has
+/// its own words).
+fn from_where(ui: &Ui, status: &Status) -> Status {
+    use super::source::{Body, Origin};
+    let shows_content = matches!(
+        ui.file.body,
+        Body::Text(_) | Body::Markdown(_) | Body::Photo(_) | Body::Pdf(_)
+    );
+    match ui.origin() {
+        Origin::ThisPc { unsent } if shows_content && ui.editor.is_none() => Status {
+            dot: if unsent { Dot::Warn } else { Dot::Green },
+            text: if unsent { FROM_THIS_PC_UNSENT } else { FROM_THIS_PC }.into(),
+            details: status.details.clone(),
+        },
+        _ => Status {
+            dot: status.dot,
+            text: status.text.clone(),
+            details: status.details.clone(),
+        },
+    }
+}
+
 /// The window with an open file in its content area: `body` between the toolbar and the status line.
 pub fn window(
     s: &State,
@@ -330,7 +359,7 @@ pub fn window(
             }
             content
         })
-        .child(status_bar(status, t));
+        .child(status_bar(&from_where(ui, status), t));
 
     col()
         .key("window")

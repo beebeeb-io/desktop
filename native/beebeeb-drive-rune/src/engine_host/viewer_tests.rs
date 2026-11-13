@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::account::SessionGeneration;
+use beebeeb_engine::app::viewer_api::OpenedLocalCopy;
 use zeroize::Zeroizing;
 
 use super::*;
@@ -23,6 +24,10 @@ struct Stored {
     bytes: Vec<u8>,
     /// The size the local state names (the content's own, unless a test says otherwise).
     size: u64,
+    /// What the local state says about the file's bytes on this PC.
+    here: Option<OnThisPc>,
+    /// The copy on this PC, when it really is wholly there (it may differ from what Beebeeb has).
+    copy: Option<Vec<u8>>,
 }
 
 struct Inner {
@@ -51,6 +56,14 @@ struct Inner {
     late: bool,
     /// Downloads that returned.
     returned: usize,
+    /// Sync runs for the account's folder.
+    syncing: bool,
+    /// Reads of the copy on this PC that were asked for.
+    local_calls: Vec<String>,
+    /// What the next reads of the copy on this PC answer instead of content.
+    local_error: Option<OpenFileError>,
+    /// What the next reads of the facts answer instead of facts, and how many of them (`usize::MAX`: all).
+    facts_error: Option<(OpenFileError, usize)>,
 }
 
 struct Fake {
@@ -80,6 +93,10 @@ impl Fake {
                 elsewhere_calls: Vec::new(),
                 late: false,
                 returned: 0,
+                syncing: true,
+                local_calls: Vec::new(),
+                local_error: None,
+                facts_error: None,
             }),
             door: Mutex::new(()),
         };
@@ -99,8 +116,18 @@ impl Fake {
                 path: path.to_string(),
                 bytes: bytes.to_vec(),
                 size: bytes.len() as u64,
+                here: None,
+                copy: None,
             },
         );
+    }
+
+    /// The local state says `id` is on this PC (`here`), and `copy` is what is really there (`None`: not wholly).
+    fn keep(&self, id: &str, here: OnThisPc, copy: Option<&[u8]>) {
+        let mut s = self.s();
+        let stored = s.files.get_mut(id).expect("a stored file");
+        stored.here = Some(here);
+        stored.copy = copy.map(<[u8]>::to_vec);
     }
 
     /// A lock and an unlock, or a sign-out and a sign-in: the generation moves, and the account is `account`.
@@ -127,6 +154,10 @@ impl ViewerEngine for Fake {
     fn facts(&self, file_id: &str) -> Result<OpenFileFacts, OpenFileError> {
         let mut s = self.s();
         s.facts_calls += 1;
+        if let Some((error, left)) = s.facts_error {
+            s.facts_error = (left > 1).then_some((error, left.saturating_sub(usize::from(left != usize::MAX))));
+            return Err(error);
+        }
         // A read that began before a session change answers for the session before it.
         let session = SessionGeneration::for_test(s.turn - u64::from(s.facts_are_old));
         let stored = s.files.get(file_id).ok_or(OpenFileError::NotFound)?;
@@ -137,7 +168,38 @@ impl ViewerEngine for Fake {
             name,
             folders,
             size: stored.size,
+            on_this_pc: stored.here,
         })
+    }
+
+    fn local(&self, file_id: &str, max_bytes: u64, cancel: &AtomicBool) -> Result<LocalCopy, OpenFileError> {
+        let mut s = self.s();
+        s.local_calls.push(file_id.to_string());
+        if let Some(error) = s.local_error {
+            return Err(error);
+        }
+        if cancel.load(Ordering::SeqCst) {
+            return Err(OpenFileError::Cancelled);
+        }
+        let turn = s.answers_for.unwrap_or(s.turn);
+        let stored = s.files.get(file_id).ok_or(OpenFileError::NotFound)?;
+        let (Some(here), Some(copy)) = (stored.here, stored.copy.clone()) else {
+            return Ok(LocalCopy::NotHere);
+        };
+        if copy.len() as u64 > max_bytes {
+            return Err(OpenFileError::TooLarge {
+                size: copy.len() as u64,
+            });
+        }
+        Ok(LocalCopy::Opened(OpenedLocalCopy {
+            session: SessionGeneration::for_test(turn),
+            bytes: Zeroizing::new(copy),
+            copy: here,
+        }))
+    }
+
+    fn is_syncing(&self) -> bool {
+        self.s().syncing
     }
 
     fn fetch(
@@ -392,11 +454,32 @@ fn a_text_the_reader_cannot_hold_whole_is_cut_by_lines_and_by_bytes_and_says_why
 
     let doc = cut("f-long-line");
     assert_eq!(doc.truncated.map(|cut| (cut.total, cut.why)), Some((4, Cut::TooLong)));
-    assert_eq!(doc.lines.len(), 3, "the two short lines and the start of the long one");
+    assert_eq!(doc.lines.len(), 4, "every line, the long one cut");
+    let held = doc.plain();
+    let longest = held.lines().map(str::len).max().unwrap();
     assert_eq!(
-        doc.plain().len(),
-        SHOWN_BYTES + 1,
-        "held: the byte limit (and the last line's end)"
+        longest, LINE_BYTES_MAX,
+        "no line handed to the reader is over the line limit"
+    );
+    assert!(held.starts_with("one\ntwo\nxxx") && held.trim_end().ends_with("last"));
+
+    // One line of 30,000 bytes (a minified file): shown cut at the line limit, never whole under a "cut" banner.
+    fake.put("f-minified", "Invented minified.json", "z".repeat(30_000).as_bytes());
+    let doc = cut("f-minified");
+    assert_eq!(doc.truncated.map(|cut| cut.why), Some(Cut::TooLong));
+    assert_eq!(doc.plain().trim_end_matches('\n').len(), LINE_BYTES_MAX);
+
+    // Many long lines: the byte limit over all of them holds too.
+    let wide = format!("{}\n", "w".repeat(LINE_BYTES_MAX + 5)).repeat(10);
+    fake.put("f-wide", "Invented wide.log", wide.as_bytes());
+    let doc = cut("f-wide");
+    let held = doc.plain();
+    assert!(held.len() <= SHOWN_BYTES + 1, "{}", held.len());
+    assert!(held.lines().all(|line| line.len() <= LINE_BYTES_MAX));
+    assert_eq!(
+        held.lines().count(),
+        4,
+        "three whole cut lines and what the byte limit leaves of a fourth"
     );
 
     let doc = cut("f-one-line");
@@ -406,7 +489,11 @@ fn a_text_the_reader_cannot_hold_whole_is_cut_by_lines_and_by_bytes_and_says_why
     );
     let held = doc.plain();
     let held = held.trim_end_matches('\n');
-    assert_eq!(held.len(), SHOWN_BYTES - SHOWN_BYTES % 3, "cut on a whole character");
+    assert_eq!(
+        held.len(),
+        LINE_BYTES_MAX - LINE_BYTES_MAX % 3,
+        "cut on a whole character"
+    );
     assert!(held.chars().all(|c| c == '\u{20AC}'));
 }
 
@@ -561,8 +648,8 @@ fn without_a_session_or_without_the_file_nothing_opens() {
     assert_eq!(source.open("no-such-file").err(), Some(OpenError::NotFound));
     fake.s().signed_in = false;
     let facts_before = fake.s().facts_calls;
-    assert_eq!(source.open(NOTE).err(), Some(OpenError::NotFound));
-    assert_eq!(source.retry(NOTE).err(), Some(OpenError::NotFound));
+    assert_eq!(source.open(NOTE).err(), Some(OpenError::SignedOut));
+    assert_eq!(source.retry(NOTE).err(), Some(OpenError::SignedOut));
     assert_eq!(
         fake.s().facts_calls,
         facts_before,
@@ -577,7 +664,13 @@ fn facts_read_across_a_session_change_open_nothing() {
     let fake = Fake::new();
     let mut source = Source::on(fake.clone());
     fake.s().facts_are_old = true;
-    assert_eq!(source.open(NOTE).err(), Some(OpenError::NotFound));
+    // Not "no such file": it could not be read for this session right now, after one more try.
+    assert_eq!(source.open(NOTE).err(), Some(OpenError::NotNow));
+    assert_eq!(
+        fake.s().facts_calls,
+        2,
+        "the read is tried once more before it is refused"
+    );
     assert!(
         fake.s().fetches.is_empty(),
         "nothing is downloaded for facts of another session"
@@ -835,7 +928,8 @@ impl ViewerSource for InState {
         if self.there {
             Ok(self.file(file_id, Body::Decrypting { done: 0, total: 10 }))
         } else {
-            Err(OpenError::NotFound)
+            // A refusal the window has no state of its own for.
+            Err(OpenError::SignedOut)
         }
     }
 }
@@ -934,3 +1028,6 @@ fn a_source_that_cannot_save_or_keep_offline_says_so_on_the_press() {
     );
     assert!(!cannot.knows_offline());
 }
+
+#[path = "viewer_round2_tests.rs"]
+mod round2;

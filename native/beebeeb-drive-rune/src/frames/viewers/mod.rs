@@ -16,6 +16,7 @@
 mod archive;
 mod audio;
 mod chrome;
+pub use chrome::{FROM_THIS_PC, FROM_THIS_PC_UNSENT};
 mod details;
 mod dialogs;
 mod fixture_media;
@@ -39,6 +40,8 @@ mod text;
 mod media_tests;
 #[cfg(test)]
 mod new_file_tests;
+#[cfg(test)]
+mod route_tests;
 #[cfg(test)]
 mod tests;
 
@@ -193,7 +196,26 @@ impl Ui {
     /// Open `file_id` from `source`.
     pub fn open(mut source: Box<dyn ViewerSource>, file_id: &str) -> Result<Ui, OpenError> {
         let file = source.open(file_id)?;
-        Ok(Ui {
+        Ok(Self::on(source, file))
+    }
+
+    /// The file the ROUTE names (Search's Open, Back and Forward, the reopen after an unlock), opened from
+    /// `source`; or, when it cannot be opened, the window saying why (it is gone, the session ended, or it could
+    /// not be read right now, with Try again), never the shell's "not built yet" frame and never nothing. Such a
+    /// window knows no name: what this PC knows of the file was not read. `Err`: nothing of this group to draw
+    /// (no session: the shell's gate says it).
+    pub fn open_or_say_why(mut source: Box<dyn ViewerSource>, file_id: &str) -> Result<Ui, OpenError> {
+        match source.open(file_id) {
+            Ok(file) => Ok(Self::on(source, file)),
+            Err(why) => {
+                let stopped = why.stopped().ok_or(why)?;
+                Ok(Self::on(source, unopened(file_id, stopped)))
+            }
+        }
+    }
+
+    fn on(source: Box<dyn ViewerSource>, file: OpenFile) -> Ui {
+        Ui {
             source,
             media: media::Media::of(&file),
             file,
@@ -206,7 +228,22 @@ impl Ui {
             saved_at: None,
             focus: None,
             intents: Vec::new(),
-        })
+        }
+    }
+
+    /// Where the content on screen was read from (`ViewerSource::origin`).
+    pub(crate) fn origin(&self) -> source::Origin {
+        self.source.origin(&self.file.id)
+    }
+
+    /// Whether the source can store an edit (`ViewerSource::can_save`).
+    pub(crate) fn can_save(&self) -> bool {
+        self.source.can_save()
+    }
+
+    /// Whether "Save a copy…" has somewhere to go (`ViewerSource::saves_copies`).
+    pub(crate) fn saves_copies(&self) -> bool {
+        self.source.saves_copies()
     }
 
     pub fn toggle_details(&mut self) {
@@ -298,8 +335,17 @@ impl Ui {
                 self.toast = None;
                 self.focus = Some(states::TITLE_KEY);
             }
-            // Never a press that does nothing: the file is not there to open now.
-            Err(_) => self.toast = Some(NOT_REOPENED.to_string()),
+            // Never a press that does nothing. A refusal the window can say is said in its place (the file is
+            // gone now, the session ended); the same one again, or one it cannot say, is the toast.
+            Err(why) => match why.stopped().map(Body::Stopped) {
+                Some(body) if body != self.file.body => {
+                    self.file.wipe();
+                    self.file.body = body;
+                    self.toast = None;
+                    self.focus = Some(states::TITLE_KEY);
+                }
+                _ => self.toast = Some(NOT_REOPENED.to_string()),
+            },
         }
     }
 
@@ -478,6 +524,20 @@ fn route_item(s: &State) -> Option<String> {
     }
 }
 
+/// The window of a file that could not be opened at all: no name, no path beyond "Files", and why.
+fn unopened(file_id: &str, why: source::Stopped) -> OpenFile {
+    OpenFile {
+        id: file_id.to_string(),
+        path: vec!["Files".to_string()],
+        name: String::new(),
+        facts: String::new(),
+        version: 0,
+        body: Body::Stopped(why),
+        details: source::Details::default(),
+        newer: None,
+    }
+}
+
 /// What the window keeps for this group (`State::viewer`): the open file, and where the route's
 /// files are read from.
 #[derive(Default)]
@@ -489,8 +549,10 @@ pub struct Slot {
     /// route shows the shell's placeholder. The board's fixture is here only in the board's
     /// sample window ([`board_fixture`]), never as a fallback.
     route: Option<RouteSource>,
-    /// The file the route names that the source could not open: it is not asked for again on every poll, only
-    /// once the route names another file or the session gate closed and opened again.
+    /// The file the route names for which there is nothing of this group to draw (no session in memory): it is not
+    /// asked for again on every poll, only once the route names another file or the session gate closed and opened
+    /// again. A file that did not open for a reason the window can say is an open `Ui` saying it instead
+    /// (`Ui::open_or_say_why`), with Try again where trying again may work.
     unopened: Option<String>,
     /// The New file dialog over the Files window (DW-1521, DW-1522), while it is open.
     pub(crate) new_file: Option<new_file::NewFile>,
@@ -555,8 +617,10 @@ pub fn open(s: &mut State, file_id: &str) -> bool {
 pub fn open_item(s: &mut State, item: &crate::source::DriveItem) -> bool {
     !item.is_folder
         && kinds::viewer_of(&item.name).is_some()
-        // A kind the window's source does not show here stays its own app's.
-        && route_source(s).is_some_and(|source| source.previews(&item.name))
+        // A kind the window's source does not show here stays its own app's. So does a file whose bytes are kept
+        // on this PC: the system opens it there with the app the person chose for it, with nothing to download.
+        // The viewer is for a file that is NOT on this PC (shown from memory, no copy lands on disk).
+        && route_source(s).is_some_and(|source| source.previews(&item.name) && !source.kept_on_this_pc(&item.id))
         && open(s, &item.id)
 }
 
@@ -674,7 +738,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     }
     if let (None, Some(id), true) = (&s.viewer.ui, here, gate_open) {
         if s.viewer.unopened.as_deref() != Some(id.as_str()) {
-            match route_source(s).map(|source| Ui::open(source, &id)) {
+            match route_source(s).map(|source| Ui::open_or_say_why(source, &id)) {
                 Some(Ok(ui)) => {
                     s.viewer.ui = Some(ui);
                     return true;
@@ -771,10 +835,17 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
             ),
             details: format!("{} \u{00B7} UTF-8", kind_word(&ui.file)),
         },
-        None => text::status(&TextDoc {
-            lines: Vec::new(),
-            truncated: doc_truncated,
-        }),
+        None => {
+            let mut status = text::status(&TextDoc {
+                lines: Vec::new(),
+                truncated: doc_truncated,
+            });
+            // An edit that cannot be saved is not offered: the status line does not name its key either.
+            if doc_truncated.is_none() && !ui.can_save() {
+                status.details = text::READ_ONLY_HINT.into();
+            }
+            status
+        }
     };
     let banner = text::newer_banner(&ui.file, &t);
     if let Body::Text(doc) = &ui.file.body {
@@ -838,7 +909,10 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
         }
         _ => {}
     }
-    let (body, status) = match (states::body(&ui.file, &t), states::status(&ui.file.body)) {
+    let (body, status) = match (
+        states::body(&ui.file, ui.saves_copies(), &t),
+        states::status(&ui.file.body),
+    ) {
         (Some(body), Some(status)) => (body, status),
         _ => return crate::shell::placeholder::window(s, cx, FrameGroup::Viewer),
     };

@@ -638,6 +638,12 @@ impl State {
     /// Open the selection: one folder opens in place; files go to their apps, all of them.
     /// Returns whether the folder shown changed.
     pub fn open_selection(&mut self, tx: &mut Tx) -> bool {
+        self.open_selection_with(tx, true)
+    }
+
+    /// [`Self::open_selection`]. `viewer`: one file of a type the window shows itself may open in the window's
+    /// viewer. `false` ("Open in its app"): every file goes to its own app, as the button says.
+    pub(crate) fn open_selection_with(&mut self, tx: &mut Tx, viewer: bool) -> bool {
         if self.needs_session(tx) {
             return false;
         }
@@ -670,7 +676,7 @@ impl State {
             return false;
         }
         // One file of a type the window shows itself: its viewer (`frames::viewers`, the router).
-        if matches!(&files[..], [only] if crate::frames::viewers::open_item(self, only)) {
+        if viewer && matches!(&files[..], [only] if crate::frames::viewers::open_item(self, only)) {
             return true;
         }
         self.forget_undo();

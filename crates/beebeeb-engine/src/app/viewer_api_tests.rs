@@ -603,20 +603,23 @@ fn the_read_is_bounded_by_itself_when_the_file_grows_after_its_length_was_asked(
     let path = dir.path().join("grows.bin");
     std::fs::write(&path, vec![7u8; 5_000]).unwrap();
     let (never, always) = (AtomicBool::new(false), || true);
-    // Its length was 100 when asked; it is 5,000 now, and the limit is 1,000.
-    let Err(ReadStopped::Refused(error)) = read_bounded(&path, 100, 1_000, &never, &always) else {
+    // Its length was 100 when asked; it is 5,000 now. One byte more than was asked for is read, never the file.
+    assert!(matches!(
+        read_bounded(&path, 100, 5_000, &never, &always),
+        Err(ReadStopped::Grew)
+    ));
+    // Its length was within the limit when asked, and it is past the limit now: refused, with one byte over held.
+    let Err(ReadStopped::Refused(error)) = read_bounded(&path, 1_000, 1_000, &never, &always) else {
         panic!("a file that grew past the limit was read");
     };
-    assert!(matches!(error, OpenFileError::TooLarge { size } if size > 1_000));
-    // Grown, and still within the limit: all of it, not the first 100 bytes.
-    let read = read_bounded(&path, 100, 5_000, &never, &always);
-    assert!(
-        matches!(read, Err(ReadStopped::Refused(OpenFileError::TooLarge { .. })))
-            || read.is_ok_and(|b| b.len() == 5_000)
-    );
-    // As long as it said: read whole.
+    assert_eq!(error, OpenFileError::TooLarge { size: 1_001 });
+    // As long as it said: read whole. Shorter by now: what is there.
     assert_eq!(
         read_bounded(&path, 5_000, 5_000, &never, &always).ok().map(|b| b.len()),
+        Some(5_000)
+    );
+    assert_eq!(
+        read_bounded(&path, 6_000, 6_000, &never, &always).ok().map(|b| b.len()),
         Some(5_000)
     );
     // Cancelled, or the session moved on: nothing.
