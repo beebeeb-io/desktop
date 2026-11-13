@@ -491,6 +491,16 @@ fn the_new_file_dialog_over_tip_1_hides_the_tip_and_has_the_keyboard() {
         at.as_deref().is_some_and(|k| !k.starts_with("coach")),
         "Tab stays in the dialog: {at:?}"
     );
+    // Enter is the dialog's too: it never presses the card's Next.
+    press(&mut rt, Key::Enter);
+    tick(&mut rt);
+    assert!(rt.state.viewer.new_file.is_some(), "Enter left the dialog open");
+    assert_eq!(
+        rt.state.guide.step,
+        Some(Step::Tip(1)),
+        "Enter did not move the guide on"
+    );
+    assert!(rect(&rt, COACH_KEY).is_none(), "still no card over the dialog");
     // Esc closes the dialog, not the guide; the tip is there again.
     press(&mut rt, Key::Escape);
     tick(&mut rt);
