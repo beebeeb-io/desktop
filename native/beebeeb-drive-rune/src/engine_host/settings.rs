@@ -32,8 +32,8 @@ use beebeeb_engine::identity::EngineIdentity;
 use super::log;
 use crate::frames::settings::Pane;
 use crate::frames::settings::source::{
-    About, Channel, General, Location, Locations, Notifications, Pumped, RecentAlert, SettingsSource, ThemeChoice,
-    Unwired, Update,
+    About, Channel, General, Location, Locations, Notifications, Pumped, ReadState, RecentAlert, SettingsSource,
+    ThemeChoice, Unwired, Update,
 };
 
 mod notifications;
@@ -488,6 +488,15 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
     }
     fn set_alert(&mut self, group: usize, index: usize, on: bool) {
         self.alerts.set_alert(group, index, on);
+    }
+    fn recent_state(&self) -> ReadState {
+        self.alerts.recent_state()
+    }
+    fn alerts_state(&self, group: usize) -> ReadState {
+        self.alerts.alerts_state(group)
+    }
+    fn reload_notifications(&mut self) {
+        self.alerts.reload();
     }
 
     fn locations(&self) -> Option<Locations> {

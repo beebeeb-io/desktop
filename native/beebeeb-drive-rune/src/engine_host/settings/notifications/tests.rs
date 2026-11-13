@@ -26,8 +26,11 @@ use zeroize::Zeroizing;
 use super::super::EngineSettingsSource;
 use super::*;
 use crate::State;
-use crate::frames::settings::source::{Pumped, SettingsSource};
+use crate::frames::settings::source::{Pumped, ReadState, SettingsSource};
 use crate::shell::app::{Event, SettingsPane};
+
+/// The read states, the rows' places on screen, and writes bound to the session of their press.
+mod states;
 
 const PASSWORD: &str = "an invented password for notifications";
 
@@ -318,15 +321,35 @@ fn titles(source: &Source) -> Vec<(String, bool)> {
         .collect()
 }
 
-/// The groups that have rows (every group is drawn in its place; the account's has none until it is read).
+/// The groups whose switches are read (every group and row is always in its place; the account's rows are drawn
+/// without a switch until its switches are read).
 fn group_titles(source: &Source) -> Vec<String> {
     source
         .notifications()
         .groups
         .into_iter()
-        .filter(|(_, rows)| !rows.is_empty())
-        .map(|(title, _)| title)
+        .enumerate()
+        .filter(|(group, _)| source.alerts_state(*group) == ReadState::Ready)
+        .map(|(_, (title, _))| title)
         .collect()
+}
+
+/// Every group with its count of rows.
+fn places(source: &Source) -> Vec<(String, usize)> {
+    source
+        .notifications()
+        .groups
+        .iter()
+        .map(|(title, rows)| (title.clone(), rows.len()))
+        .collect()
+}
+
+fn all_places() -> Vec<(String, usize)> {
+    vec![
+        ("Your account".to_string(), 3),
+        ("Sync on this PC".to_string(), 4),
+        ("Backups on this PC".to_string(), 2),
+    ]
 }
 
 /// The switch at `group`, `index` now.
@@ -397,6 +420,11 @@ fn an_empty_list_is_nothing_to_show_and_no_count() {
     let mut source = Source::new(signed_in(&fake));
     assert!(opened(&mut source, Pane::Recent).is_empty());
     assert!(source.recent_alerts().is_empty());
+    assert_eq!(
+        source.recent_state(),
+        ReadState::Ready,
+        "read, and empty: the page may say so"
+    );
     assert_eq!(source.notifications().new_recent, 0);
     assert_eq!(
         group_titles(&source),
@@ -416,8 +444,19 @@ fn a_failed_read_draws_nothing_of_the_account_and_says_so() {
         assert_eq!(
             group_titles(&source),
             ["Sync on this PC", "Backups on this PC"],
-            "the account's switches were not read: their group is not drawn, never a guess"
+            "the account's switches were not read: never a guess"
         );
+        assert_eq!(
+            source.alerts_state(0),
+            ReadState::Failed,
+            "said as failed, not as loading"
+        );
+        assert_eq!(
+            source.recent_state(),
+            ReadState::Failed,
+            "never an empty list nobody read"
+        );
+        assert_eq!(places(&source), all_places(), "the rows keep their places");
         // The next opening tries again (a failed read is never fresh), and an answer is drawn.
         fake.read_mode.store(ANSWER, Ordering::SeqCst);
         assert!(opened(&mut source, Pane::Notifications).is_empty());
@@ -754,36 +793,30 @@ fn a_press_while_the_read_lands_changes_only_the_switch_drawn_there() {
     fake.delay_ms.store(800, Ordering::SeqCst);
     let mut source = Source::new(signed_in(&fake));
     source.opened(Pane::Notifications);
-    let groups = source.notifications().groups;
-    let places: Vec<_> = groups
-        .iter()
-        .map(|(title, rows)| (title.as_str(), rows.len()))
-        .collect();
     assert_eq!(
-        places,
-        [("Your account", 0), ("Sync on this PC", 4), ("Backups on this PC", 2)],
-        "every group in its place before the read lands; the account's has no rows (never a guess)"
+        places(&source),
+        all_places(),
+        "every group and row in its place before the read lands"
+    );
+    assert_eq!(
+        source.alerts_state(0),
+        ReadState::Loading,
+        "the account's switches are not read: said so, never a guess"
+    );
+    assert_eq!(source.recent_state(), ReadState::Loading);
+    assert_eq!(
+        [source.alerts_state(1), source.alerts_state(2)],
+        [ReadState::Ready; 2],
+        "this PC's switches need no read"
     );
     let stopped = switch(&source, 1, 0);
     // A press on the account's group before it is read changes nothing; one on "Sync stopped" changes that one.
     source.set_alert(0, 0, false);
     source.set_alert(1, 0, !stopped);
     assert!(settle(&mut source).is_empty());
-    let places: Vec<_> = source
-        .notifications()
-        .groups
-        .iter()
-        .map(|(title, rows)| (title.clone(), rows.len()))
-        .collect();
-    assert_eq!(
-        places,
-        [
-            ("Your account".to_string(), 3),
-            ("Sync on this PC".to_string(), 4),
-            ("Backups on this PC".to_string(), 2)
-        ],
-        "the read landed: nothing moved"
-    );
+    assert_eq!(places(&source), all_places(), "the read landed: nothing moved");
+    assert_eq!(source.alerts_state(0), ReadState::Ready);
+    assert_eq!(source.recent_state(), ReadState::Ready);
     assert_eq!(switch(&source, 1, 0), !stopped, "the switch drawn there changed");
     assert!(switch(&source, 0, 0), "Shared with you is as Beebeeb holds it");
     // The same press after the read lands still means the same switch.
