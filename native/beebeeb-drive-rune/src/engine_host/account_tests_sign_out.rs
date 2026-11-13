@@ -508,6 +508,12 @@ fn checking_stays_until_the_list_answered_and_a_404_one_by_one_is_not_a_yes() {
     );
     assert_eq!(source.notice_action(), Some(TRY_AGAIN));
     server.read_delay_ms.store(0, Ordering::SeqCst);
+    later(&mut source, STAYS_FAILED);
+    assert_eq!(
+        source.notice(),
+        None,
+        "that toast had its time: the line is empty for what follows"
+    );
 
     // "Everywhere else" refused, then its Try again is answered 404 for every session while they all stand.
     server.change_mode.store(SERVER_ERROR, Ordering::SeqCst);
