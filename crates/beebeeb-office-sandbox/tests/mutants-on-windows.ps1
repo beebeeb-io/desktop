@@ -20,7 +20,7 @@ $mutants = [ordered]@{
 }
 
 $profiles = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings'
-function Count-Profiles { if (Test-Path $profiles) { @(Get-ChildItem $profiles -ErrorAction SilentlyContinue).Count } else { 0 } }
+function Count-Profiles { if (Test-Path $profiles) { @(Get-ChildItem $profiles -ErrorAction SilentlyContinue | Where-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).Moniker -like 'beebeeb.office*' }).Count } else { 0 } }
 $profilesBefore = Count-Profiles
 $log = Join-Path $env:TEMP ("beebeeb-sandbox-mutant-{0}.log" -f $PID)
 $red = 0
@@ -50,5 +50,5 @@ finally {
 # The 'profile-kept' mutant leaves profiles of ours registered; the crate's own clean-up test removes every one.
 & cargo test --locked --lib a_left_over_profile *> $null
 "clean-up test exit code: $LASTEXITCODE"
-"container profiles: before=$profilesBefore after=$(Count-Profiles)"
+"container profiles of ours: before=$profilesBefore after=$(Count-Profiles)"
 "probe processes: $(@(Get-Process -Name 'beebeeb-sandbox-probe' -ErrorAction SilentlyContinue).Count)"

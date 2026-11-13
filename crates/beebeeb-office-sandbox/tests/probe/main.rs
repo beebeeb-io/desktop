@@ -6,7 +6,8 @@
 //!   connect <ip:port>    -> ok | err <system code> | err network-start <system code>
 //!   job                  -> job flags=<hex> processes=<n> memory=<bytes> ui=<hex> | err <system code>
 //!   write <path>         -> ok | err <system code>      (creates a new file and writes 5 bytes)
-//!   writetemp <name>    -> ok | err <system code>      (the same, in the folder its own TEMP variable names)
+//!   writeown <name>      -> own ok=<n> codes=<...>       (the same, as <name>.0/.1/.2 in the folders its own
+//!                                                         LOCALAPPDATA, TEMP and TMP variables name)
 //!   read <path>          -> ok <bytes read> | err <system code>
 //!   spawn <program>      -> ok | err <system code>      (starts it with `/c exit`, waits for it)
 //!   alloc <mebibytes>    -> ok | err alloc              (reserves and touches every page)
@@ -76,6 +77,27 @@ fn write(path: &str) -> String {
         Ok(()) => "ok".into(),
         Err(error) => code(&error),
     }
+}
+
+fn write_own(name: &str) -> String {
+    let mut written = 0;
+    let mut codes = Vec::new();
+    for (index, variable) in ["LOCALAPPDATA", "TEMP", "TMP"].into_iter().enumerate() {
+        let answer = match std::env::var_os(variable) {
+            Some(folder) => write(
+                &std::path::Path::new(&folder)
+                    .join(format!("{name}.{index}"))
+                    .to_string_lossy(),
+            ),
+            None => "err unset".to_string(),
+        };
+        if answer == "ok" {
+            written += 1;
+        } else {
+            codes.push(answer.trim_start_matches("err ").to_string());
+        }
+    }
+    format!("own ok={written} codes={}", codes.join(","))
 }
 
 fn read(path: &str) -> String {
@@ -307,7 +329,7 @@ fn main() {
             "ping" => "pong".to_string(),
             "connect" => connect(rest),
             "write" => write(rest),
-            "writetemp" => write(&std::env::temp_dir().join(rest).to_string_lossy()),
+            "writeown" => write_own(rest),
             "read" => read(rest),
             "spawn" => spawn(rest),
             "alloc" => alloc(rest),

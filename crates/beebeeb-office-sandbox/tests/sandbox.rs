@@ -48,7 +48,8 @@ mod windows {
 
     /// The codes the confined probe gets, as measured on the Windows build VM (the PR body has the run).
     const ACCESS_DENIED: &str = "err 5";
-    const PATH_NOT_FOUND: &str = "err 3";
+    /// None of the three folders exists: "path not found", three times.
+    const NO_OWN_FOLDER: &str = "own ok=0 codes=3,3,3";
     /// The system's network library refuses to start inside the container: no socket ever exists.
     const NETWORK_REFUSED: &str = "err network-start 10107";
     /// The system ends a container process that uses a handle value it does not hold (invalid handle).
@@ -367,19 +368,27 @@ mod windows {
     #[test]
     fn a_confined_helper_has_no_folder_of_its_own_to_write_to() {
         let _serial = serial();
-        // The folder a container process is given by the system (its TEMP) is gone before the helper runs.
-        let control = Scratch::in_dir(&std::env::temp_dir());
-        let name = control.0.file_name().unwrap().to_str().unwrap().to_string();
+        // Windows gives a container process a folder of its own and points LOCALAPPDATA, TEMP and TMP into it.
+        // The crate deletes that folder before the helper runs. The probe tries all three.
+        let name = format!("beebeeb-sandbox-test-{}-own.tmp", std::process::id());
+        let folders = ["LOCALAPPDATA", "TEMP", "TMP"]
+            .map(|variable| PathBuf::from(std::env::var_os(variable).expect("set for the test")));
+        let controls: Vec<Scratch> = folders
+            .iter()
+            .enumerate()
+            .map(|(index, folder)| Scratch(folder.join(format!("{name}.{index}"))))
+            .collect();
+
         let mut plain = Probe::plain();
         assert_eq!(
-            plain.attempt(&format!("writetemp {name}")),
-            "ok",
-            "the instrument can fail: a plain probe writes to its TEMP"
+            plain.attempt(&format!("writeown {name}")),
+            "own ok=3 codes=",
+            "the instrument can fail: a plain probe writes to all three"
         );
-        assert!(control.0.exists());
+        assert_eq!(controls.iter().filter(|control| control.0.exists()).count(), 3);
 
         let mut confined = Probe::confined();
-        assert_eq!(confined.attempt(&format!("writetemp {name}-confined")), PATH_NOT_FOUND);
+        assert_eq!(confined.attempt(&format!("writeown {name}")), NO_OWN_FOLDER);
     }
 
     // ── 3. no child process ─────────────────────────────────────────────────────────────────────────────────
