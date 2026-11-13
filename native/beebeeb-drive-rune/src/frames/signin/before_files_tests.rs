@@ -4,9 +4,9 @@
 
 use std::sync::Arc;
 
-use super::before_files::{CHECK_PLAN, OPEN_PLANS, SIGN_OUT_FRAME, UNLOCK};
+use super::before_files::{CHECK_PLAN, OPEN_PLANS, SIGN_OUT};
 use crate::State;
-use crate::frames::Intent;
+use crate::frames::GateNotice;
 use crate::shell::actions::FixtureEngine;
 use crate::shell::app::{GateState, Screen};
 use crate::shell::host::{self, Shell};
@@ -67,8 +67,8 @@ fn click(rt: &mut Runtime<State>, key: &str) {
     settle(rt);
 }
 
-fn asked(rt: &Runtime<State>) -> Vec<Intent> {
-    rt.state.frames.intents.clone()
+fn notice(rt: &Runtime<State>) -> Option<GateNotice> {
+    rt.state.frames.gate_notice.clone()
 }
 
 /// Every key Tab stops on, in order of first visit.
@@ -124,6 +124,34 @@ fn both_states_say_what_the_board_says_in_both_themes() {
     }
 }
 
+/// The sidebar shows the source's account (the fixture's) for NoPlan, and blanks the account
+/// details for Locked (decision 2483: LOCKED_BLANKS_ACCOUNT).
+#[test]
+fn the_sidebar_shows_the_sources_account_and_locked_blanks_it() {
+    // NoPlan: the fixture's account shows in the sidebar.
+    let (_, rt) = window(GateState::NoPlan, false);
+    assert_eq!(
+        says(&rt, "account-name"),
+        "Anna Visser",
+        "NoPlan shows the fixture account"
+    );
+    assert_eq!(says(&rt, "account-email"), "anna@northwind.studio");
+
+    // Locked: the account details are blanked while LOCKED_BLANKS_ACCOUNT is true.
+    let (_, rt) = window(GateState::Locked, false);
+    assert_eq!(says(&rt, "account-name"), "", "locked: account name is blank");
+    assert!(
+        find(&rt, "account-email").is_none() || says(&rt, "account-email").is_empty(),
+        "locked: account email is blank or absent"
+    );
+    // The storage meter keeps its shape but shows no figure.
+    assert!(says(&rt, "storage-value").is_empty(), "locked: storage value is blank");
+    // Section counts are hidden.
+    for badge in ["Files-badge", "Shared-badge", "Trash-badge"] {
+        assert!(find(&rt, badge).is_none(), "locked: {badge} is not drawn");
+    }
+}
+
 #[test]
 fn the_scenes_are_the_two_gate_states() {
     for (frame, gate) in [("DW-0009", GateState::Locked), ("DW-0014", GateState::NoPlan)] {
@@ -138,42 +166,43 @@ fn the_scenes_are_the_two_gate_states() {
 }
 
 #[test]
-fn unlock_asks_for_windows_hello_by_press_and_by_enter() {
+fn unlock_shows_not_available_by_press_and_by_enter() {
     let (_, mut rt) = window(GateState::Locked, false);
+    assert!(notice(&rt).is_none(), "no notice before a press");
     click(&mut rt, "gate-btn-0");
-    assert_eq!(asked(&rt), vec![Intent::Do(UNLOCK, String::new())]);
+    let n = notice(&rt).expect("a press sets the notice");
+    assert_eq!(n.message, "Not available yet");
+    assert_eq!(n.gate, GateState::Locked, "stamped with the gate it was raised under");
+    // Enter is Unlock (the default button): the notice is still set.
     key(&mut rt, Key::Enter);
-    assert_eq!(
-        asked(&rt).len(),
-        2,
-        "Enter is Unlock: Cancel on the prompt, then Unlock starts it again"
-    );
+    assert!(notice(&rt).is_some());
     assert_eq!(
         rt.state.shell.app.screen(),
         Screen::Gate(GateState::Locked),
-        "a request opens nothing by itself"
+        "a not-built action changes nothing"
     );
 }
 
 #[test]
-fn each_button_without_a_plan_asks_for_its_own_thing() {
+fn each_button_without_a_plan_shows_not_available() {
     let (_, mut rt) = window(GateState::NoPlan, false);
-    click(&mut rt, "gate-btn-0");
-    click(&mut rt, "gate-btn-1");
-    click(&mut rt, "gate-btn-2");
-    assert_eq!(
-        asked(&rt),
-        vec![
-            Intent::Do(OPEN_PLANS, String::new()),
-            Intent::Do(CHECK_PLAN, String::new()),
-            Intent::Frame(SIGN_OUT_FRAME),
-        ]
-    );
+    for (key, action) in [
+        ("gate-btn-0", OPEN_PLANS),
+        ("gate-btn-1", CHECK_PLAN),
+        ("gate-btn-2", SIGN_OUT),
+    ] {
+        rt.state.frames.gate_notice = None;
+        click(&mut rt, key);
+        let n = notice(&rt).unwrap_or_else(|| panic!("{action}: pressing {key} sets the notice"));
+        assert_eq!(n.message, "Not available yet", "{action}");
+        assert_eq!(n.gate, GateState::NoPlan, "{action}: stamped with the gate");
+    }
     let name = find(&rt, "gate-btn-0").and_then(|e| e.label).unwrap_or_default();
     assert!(
         name.contains("opens in your browser"),
         "the button says it leaves the app: {name}"
     );
+    assert!(rt.state.frames.intents.is_empty(), "no dead intent was queued");
 }
 
 #[test]
@@ -208,7 +237,7 @@ fn nothing_but_the_blocks_buttons_can_be_reached() {
             Screen::Gate(gate),
             "{gate:?}: and the window stays"
         );
-        assert_eq!(asked(&rt), Vec::new(), "{gate:?}: nothing was asked for");
+        assert!(notice(&rt).is_none(), "{gate:?}: nothing was asked for");
         click(&mut rt, "search-input");
         key(&mut rt, Key::Text("budget".into()));
         assert!(rt.state.search.text.is_empty(), "{gate:?}: nothing is searched");
@@ -235,6 +264,22 @@ fn a_locked_window_shows_no_file_name() {
     assert!(
         find(&rt, "row-0").is_none() && find(&rt, "column-headers").is_none(),
         "no list at all"
+    );
+}
+
+/// The notice a button raised is not drawn after the gate changes: it was stamped with the old
+/// gate, so the view's filter drops it.
+#[test]
+fn the_notice_is_not_drawn_after_a_gate_change() {
+    let (engine, mut rt) = window(GateState::NoPlan, false);
+    click(&mut rt, "gate-btn-0");
+    assert!(find(&rt, "gate-notice").is_some(), "the notice is drawn");
+    engine.set_gate(GateState::Ready);
+    rt.frame(1.0);
+    settle(&mut rt);
+    assert!(
+        find(&rt, "gate-notice").is_none(),
+        "the notice is gone after the gate changed"
     );
 }
 

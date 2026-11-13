@@ -62,6 +62,14 @@ pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
     })
 }
 
+/// A notice the gate screens show when a button's action is not built in the engine yet.
+/// Stamped with the gate it was raised under so a gate change clears it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GateNotice {
+    pub message: &'static str,
+    pub gate: crate::shell::app::GateState,
+}
+
 /// Somewhere a control wants to go that this lane does not draw: the shell's route machine
 /// (or the lane that owns the target frame) picks it up. A control never does nothing, and an
 /// intent about ONE item always carries that item's id.
@@ -128,6 +136,10 @@ pub struct Ui {
     /// The board draws its frames so; only a scene sets it (the route machine always starts
     /// on Files, so in the running app a section has Files behind it).
     pub first_place: bool,
+    /// A notice the gate screens (DW-0009, DW-0014) show when a button's action is not built
+    /// yet. Set by `on_press`, drawn under the buttons, stamped with the gate it was raised
+    /// under so a gate change clears it.
+    pub gate_notice: Option<GateNotice>,
 }
 
 impl Default for Ui {
@@ -140,6 +152,7 @@ impl Default for Ui {
             search: rune::TextEdit::new(""),
             pc: Box::new(BoardPc),
             first_place: false,
+            gate_notice: None,
         }
     }
 }
