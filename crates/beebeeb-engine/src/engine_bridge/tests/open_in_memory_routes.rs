@@ -16,7 +16,7 @@ use crate::direct_download::Transport;
 use crate::direct_download::test_support::{
     ApiScript, GrantScript, Mock, Pair, Reply, Seen, StorageScript, Version, content, file_key,
 };
-use crate::engine_bridge::open_in_memory::{CAPPED_FRAME_ROOM, capped_body_len};
+use crate::engine_bridge::open_in_memory::{CAPPED_FRAME_ROOM, body_cap};
 
 const KEY: [u8; 32] = [43; 32];
 const STRIDE: u64 = 1024;
@@ -345,9 +345,9 @@ async fn with_no_version_an_understated_size_is_stopped_by_the_running_total() {
     );
     let dir = tempfile::tempdir().unwrap();
     let bridge = bridge_on(dir.path(), &api.base, Transport::Auto);
-    // Two chunks fit (2,048 bytes); the third passes 3,000. No size is claimed for the file: only that it
-    // passed the limit, with three chunks held.
-    assert_eq!(open(&bridge, 3_000).await, Came::OverLimit(3 * 1024));
+    // Two chunks fit (2,048 bytes); the third would pass 3,000 and is dropped before it is added: what is held
+    // never passes the limit. No size is claimed for the file.
+    assert_eq!(open(&bridge, 3_000).await, Came::OverLimit(2 * 1024));
     assert_eq!(chunk_requests(&api), 3, "the other eight chunks were never asked for");
 }
 
@@ -369,6 +369,10 @@ async fn with_no_version_one_oversized_chunk_body_is_given_up_while_it_streams()
     let bridge = bridge_on(dir.path(), &api.base, Transport::Auto);
     assert_eq!(open(&bridge, 1_000).await, Came::OverLimit(0));
     assert_eq!(chunk_requests(&api), 1);
+    // A binary body just past its own cap (the limit and a chunk's framing) is given up as it streams too: the
+    // room an old JSON envelope gets (several times the limit) is not a binary body's.
+    assert_eq!(open(&bridge, 200_000).await, Came::OverLimit(0));
+    assert_eq!(open(&bridge, 400_000 - CAPPED_FRAME_ROOM - 1).await, Came::OverLimit(0));
     // Under the limit the same file opens: the cap is not a refusal of long chunks.
     assert_eq!(open(&bridge, 400_000).await, Came::Opened(version.plain.clone()));
 }
@@ -413,13 +417,31 @@ fn the_cap_on_a_chunk_body_leaves_room_for_the_old_envelope_of_what_is_still_all
     // The longest way a byte is written: "255,".
     let envelope =
         serde_json::to_vec(&json!({ "nonce": vec![255u8; 12], "ciphertext": vec![255u8; LEFT + 16] })).unwrap();
-    let cap = capped_body_len(LEFT as u64, 0);
-    assert!(envelope.len() as u64 <= cap, "{} > {cap}", envelope.len());
+    let cap = body_cap(LEFT as u64, 0);
+    assert!(
+        envelope.len() as u64 <= cap.enveloped,
+        "{} > {}",
+        envelope.len(),
+        cap.enveloped
+    );
     // And it is a bound: not twice that envelope.
-    assert!(cap < 2 * envelope.len() as u64);
-    // What is held counts against it; at or past the limit only a chunk's own framing is left.
-    assert_eq!(capped_body_len(5_000, 4_000), capped_body_len(1_000, 0));
-    assert_eq!(capped_body_len(1_000, 1_000), CAPPED_FRAME_ROOM);
-    assert_eq!(capped_body_len(1_000, 9_000), CAPPED_FRAME_ROOM);
-    assert_eq!(capped_body_len(u64::MAX, 0), u64::MAX);
+    assert!(cap.enveloped < 2 * envelope.len() as u64);
+    // Only a body that begins as a JSON object gets that room; any other is held to what is left of the limit and
+    // a chunk's own framing.
+    assert_eq!(cap.raw, LEFT as u64 + CAPPED_FRAME_ROOM);
+    assert_eq!(cap.of(Some(b'{')), cap.enveloped);
+    for first in [None, Some(0u8), Some(b'['), Some(b' '), Some(0x7c), Some(0xff)] {
+        assert_eq!(cap.of(first), cap.raw, "{first:?}");
+    }
+    // What is held counts against both; at or past the limit only a chunk's own framing is left.
+    assert_eq!(body_cap(5_000, 4_000), body_cap(1_000, 0));
+    for held in [1_000, 9_000] {
+        let none_left = body_cap(1_000, held);
+        assert_eq!(
+            (none_left.raw, none_left.enveloped),
+            (CAPPED_FRAME_ROOM, CAPPED_FRAME_ROOM)
+        );
+    }
+    assert_eq!(body_cap(u64::MAX, 0).enveloped, u64::MAX);
+    assert_eq!(body_cap(u64::MAX, 0).raw, u64::MAX);
 }

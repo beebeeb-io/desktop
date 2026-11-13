@@ -119,6 +119,24 @@ impl std::fmt::Display for ChunkUnreachable {
 
 impl std::error::Error for ChunkUnreachable {}
 
+/// The most bytes of a chunk body a caller holds ([`ApiClient::download_chunk_capped`]), by how the body
+/// begins. A chunk is binary, or (an old one) a JSON envelope that writes every byte as a number: the envelope
+/// is several times its content on the wire, and only a body that begins as one gets that room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodyCap {
+    /// For a body that does not begin as a JSON object.
+    pub raw: u64,
+    /// For a body that begins with `{`.
+    pub enveloped: u64,
+}
+
+impl BodyCap {
+    /// The cap for a body whose first byte is `first` (`None`: an empty body so far).
+    pub fn of(self, first: Option<u8>) -> u64 {
+        if first == Some(b'{') { self.enveloped } else { self.raw }
+    }
+}
+
 /// A chunk body passed the length its caller holds ([`ApiClient::download_chunk_capped`]). Nothing of it is kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkOverLimit;

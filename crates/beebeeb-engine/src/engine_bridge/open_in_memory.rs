@@ -36,15 +36,21 @@ impl std::error::Error for OverInMemoryLimit {}
 pub(super) const CAPPED_FRAME_ROOM: u64 = 64 * 1024;
 
 /// The longest body a chunk with no manifest may have while `held` bytes of plaintext are in memory under
-/// `limit`: what is left of the limit, times [`ENVELOPE_BYTES_PER_BYTE`], plus [`CAPPED_FRAME_ROOM`]. A file
-/// with no version named is an old one, and an old chunk may be the JSON envelope (`content_frame`), which
-/// writes every byte as a decimal number and a comma: a cap of the plaintext's own length would refuse a file
-/// that is within the limit.
-pub(super) fn capped_body_len(limit: u64, held: u64) -> u64 {
-    limit
-        .saturating_sub(held)
-        .saturating_mul(ENVELOPE_BYTES_PER_BYTE)
-        .saturating_add(CAPPED_FRAME_ROOM)
+/// `limit`.
+/// - A binary chunk: what is left of the limit plus [`CAPPED_FRAME_ROOM`].
+/// - A body that begins as a JSON object: that, with what is left of the limit times
+///   [`ENVELOPE_BYTES_PER_BYTE`]. A file with no version named is an old one, and an old chunk may be the JSON
+///   envelope (`content_frame`), which writes every byte as a decimal number and a comma: the binary cap would
+///   refuse a file that is within the limit. That room is on the wire only: the plaintext a chunk decrypts to
+///   is held to what is left of the limit before it is added (`download_and_decrypt_chunk_range`).
+pub(super) fn body_cap(limit: u64, held: u64) -> crate::api_client::BodyCap {
+    let left = limit.saturating_sub(held);
+    crate::api_client::BodyCap {
+        raw: left.saturating_add(CAPPED_FRAME_ROOM),
+        enveloped: left
+            .saturating_mul(ENVELOPE_BYTES_PER_BYTE)
+            .saturating_add(CAPPED_FRAME_ROOM),
+    }
 }
 
 /// The most bytes the JSON envelope spends on one byte of a chunk: "255,".
@@ -85,9 +91,10 @@ impl EngineBridge {
     ///   the download path holds every chunk body and the total to that manifest;
     /// - no version named: the size the metadata states, and the size its chunk count implies, are checked
     ///   before a chunk is asked for; then every chunk body is given up while it streams once it passes what a
-    ///   chunk of the plaintext still allowed may be on the wire ([`capped_body_len`]), and the plaintext total
-    ///   is checked after every chunk. A file that understates its size costs at most the limit in plaintext
-    ///   and one capped body in memory, never the file, and answers [`InMemoryOpen::OverLimit`].
+    ///   chunk of the plaintext still allowed may be on the wire ([`body_cap`]), and a decrypted chunk that
+    ///   would pass the limit is dropped BEFORE it is added to what is held. A file that understates its size
+    ///   never has more than the limit of plaintext held, plus one capped body and one chunk being checked,
+    ///   and answers [`InMemoryOpen::OverLimit`].
     ///
     /// `progress` is `(decrypted bytes, bytes in all)`, called from the download loop.
     pub(crate) async fn open_in_memory(

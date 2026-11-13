@@ -24,7 +24,7 @@ impl EngineBridge {
         pin: Option<&crate::download_pin::PinnedVersion>,
         meter: Option<&crate::transfer_progress::ReceiveMeter>,
         // The longest body an unpinned chunk may have, for a caller with a limit. `None`: unbounded, as before.
-        cap: Option<u64>,
+        cap: Option<crate::api_client::BodyCap>,
     ) -> Result<Vec<u8>, EngineError> {
         // LD-0105 S0: every piece of the body is counted as it arrives, not once the chunk is whole.
         let on_body = |b: crate::api_client::BodyBytes| {
@@ -112,7 +112,7 @@ impl EngineBridge {
             let chunk_start = std::time::Instant::now();
             // What a chunk of the plaintext still allowed may be on the wire: a longer body is given up as it
             // streams, and the limit is the answer.
-            let cap = limit.map(|limit| capped_body_len(limit, acc.len() as u64));
+            let cap = limit.map(|limit| body_cap(limit, acc.len() as u64));
             let chunk_bytes = match self.download_content_frame(file_id, i, pin, meter, cap).await {
                 Err(e) if e.is_caused_by::<crate::api_client::ChunkOverLimit>() => {
                     return Err(anyhow::Error::new(OverInMemoryLimit { held: acc.len() as u64 }).into());
@@ -129,11 +129,13 @@ impl EngineBridge {
             } else {
                 record.open_chunk(file_key, file_id, i, i + 1 == chunk_count, &frame)?
             };
-            acc.extend_from_slice(&decrypted);
-            decrypted.zeroize();
-            if limit.is_some_and(|limit| acc.len() as u64 > limit) {
+            // Asked BEFORE the chunk is added: what is held never passes the limit, not even for a moment.
+            if limit.is_some_and(|limit| decrypted.len() as u64 > limit.saturating_sub(acc.len() as u64)) {
+                decrypted.zeroize();
                 return Err(anyhow::Error::new(OverInMemoryLimit { held: acc.len() as u64 }).into());
             }
+            acc.extend_from_slice(&decrypted);
+            decrypted.zeroize();
             self.transfers.report(file_id, acc.len() as u64, total);
             if let Some(report) = progress {
                 report(acc.len() as u64, total);

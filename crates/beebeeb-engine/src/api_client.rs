@@ -40,7 +40,7 @@ mod direct;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod range_io;
 pub use direct::{
-    BodyBytes, ChunkApiError, ChunkOverLimit, ChunkUnreachable, GrantReply, OnBody, fetch_from_storage, now_ms,
+    BodyBytes, BodyCap, ChunkApiError, ChunkOverLimit, ChunkUnreachable, GrantReply, OnBody, fetch_from_storage, now_ms,
 };
 mod headers;
 pub use headers::provenance_headers;
