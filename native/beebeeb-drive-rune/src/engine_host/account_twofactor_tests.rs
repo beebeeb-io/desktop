@@ -403,3 +403,6 @@ fn new_backup_codes_reach_the_pane_when_the_screen_locks_while_the_request_is_ou
         "shown once: nothing is held for a second look"
     );
 }
+
+#[path = "account_twofactor_tests_window.rs"]
+mod window;

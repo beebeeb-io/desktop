@@ -347,6 +347,20 @@ mod queued_save_tests {
         assert_eq!(base_after_own_landed_save("queued-own-1", s, 4, 6, |_| true), 4);
     }
 
+    /// Review of desktop#424 (engine P2-3): the viewer's queued save landed as base + 1, then another device saved
+    /// base + 2 and the tick recorded it. The next save from the viewer is a conflict: only the version the viewer's
+    /// own op became is adopted, never a version past it.
+    #[test]
+    fn a_version_past_the_one_the_own_save_became_stays_a_conflict() {
+        queued("queued-own-3", 3, 4);
+        let s = SessionGeneration::for_test(3);
+        assert_eq!(
+            base_after_own_landed_save("queued-own-3", s, 4, 6, |op| op == "op-1"),
+            4,
+            "another device's version after the own one is not adopted"
+        );
+    }
+
     /// Another device's save is never adopted: no record of this viewer's, another session, or another base.
     #[test]
     fn another_device_s_newer_version_stays_a_conflict() {

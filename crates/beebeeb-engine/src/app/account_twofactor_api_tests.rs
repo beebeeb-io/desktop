@@ -268,3 +268,49 @@ fn new_backup_codes_reach_the_person_when_the_turn_moves_while_the_request_is_ou
     assert!(engine.account_session_refused());
     assert_eq!(answer.err(), Some(AccountFlowFailure::NotSignedIn));
 }
+
+/// Review of desktop#424 (delta 2 P2): a session stored before the owner tag (task 2447) comes back from a restart
+/// with no recorded owner id. A same-account turn move while "New backup codes" is out still delivers the codes
+/// Beebeeb made: the account is known by its id (Beebeeb's answer for this session's token), never guessed.
+#[test]
+fn a_session_with_no_recorded_owner_still_gets_its_codes_after_a_same_account_move() {
+    let codes = r#"{"backup_codes":["11111111","22222222"]}"#;
+    let me = r#"{"user_id":"user-a","email":"a@example.eu","email_verified":true,"created_at":"2026-01-01T00:00:00Z"}"#;
+    let (base, seen) = serve_after(
+        vec![
+            ("/api/v1/auth/2fa/backup-codes", 200, codes),
+            ("/api/v1/auth/me", 200, me),
+        ],
+        300,
+    );
+    let engine = engine(&base);
+    let session = signed_in(&engine);
+    *engine.acct.auth_email.lock().unwrap() = Some("a@example.eu".into());
+    // No `remember_session_user_id`: what a restore of a session stored before the owner tag leaves.
+    let answer = std::thread::scope(|scope| {
+        let call = scope.spawn(|| engine.two_factor_new_backup_codes(session, "123456"));
+        let mut left = false;
+        for _ in 0..300 {
+            if seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(route, _)| route.ends_with("/api/v1/auth/2fa/backup-codes"))
+            {
+                left = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(left, "the request never left");
+        {
+            let _writes = engine.writes.write().unwrap();
+            engine
+                .acct
+                .advance_session_generation_holding_session_write_lock(SessionTransition::Write);
+        }
+        call.join().unwrap()
+    });
+    let codes = answer.expect("the codes Beebeeb made reach the person");
+    assert_eq!(codes.len(), 2);
+}
