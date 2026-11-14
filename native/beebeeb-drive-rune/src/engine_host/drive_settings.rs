@@ -9,13 +9,22 @@
 //!   [`Engine::resume`]), Open at login through the shell's own autostart call (`Platform::set_autostart`, no
 //!   registry write of its own), the downloaded and kept sizes, Free up space
 //!   ([`Engine::free_up_space`], in the signed-in account's local state through the account-bound handle).
-//!   Missing: a repair and a turn-off of File Explorer in the engine crate, a limit that can say "no limit" (the
-//!   engine's default), an engine that honours "Show sync status".
+//!   The limit on downloaded copies is stored through the engine ([`Engine::set_transfer_limits_for`]; eviction
+//!   works to it). Missing: a repair and a turn-off of File Explorer in the engine crate, a pane that can say "no
+//!   limit" (the engine's default), an engine that honours "Show sync status".
 //! - Storage: `storage()` holds only what the engine has (use, downloaded, kept); the per-kind use, the Trash size,
 //!   the previews' size and limit have no engine call.
 //! - Keep on this PC (a dialog of Sync and Storage): the folder tree with sizes and the kept set from the local
 //!   state, and Apply through the pin change ([`Engine::set_kept`]), refused while sync does not run.
-//! - Bandwidth, Thumbnails and previews, Diagnostics: the trait's defaults (no engine module).
+//! - Bandwidth: the two speed limits, read from and stored in this PC's settings file through the engine (its
+//!   upload and download paths honour them), and the last 20 hours of traffic from the signed-in account's local
+//!   state. Read when the pane opens and after a change, never at launch. Missing: the live figures, the other
+//!   devices, a metered state the engine reads and honours, a speed test.
+//! - Thumbnails and previews, Diagnostics: the trait's defaults (no engine module).
+//!
+//! Whose press: a limit is this PC's own setting, not an account's. It is still changed only under the session it
+//! was pressed in (`Engine::session_turn`, read on the window's thread at the press): a session that moved on
+//! before the worker ran changes nothing, and says so.
 //!
 //! Thread rule: nothing here waits on the window's thread but the handle's `view()` (never waits). One worker per
 //! source does every read and every change in the order asked and sends each answer down one channel, which
@@ -45,16 +54,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use beebeeb_engine::account::SessionGeneration;
+use beebeeb_engine::app::transfer_limits_api::{TransferLimits, TransferLimitsChange};
 use beebeeb_engine::app::{CredentialStores, Engine, LocalStateRefused};
 use beebeeb_engine::backup_protect::BackupsTree;
 use beebeeb_engine::config::DesktopConfig;
 use beebeeb_engine::drive_v2::{dto::DriveItem, model, status};
 use beebeeb_engine::signin::gate::GateState;
-use beebeeb_engine::state_db::{FileEntry, PinState, StateDb};
+use beebeeb_engine::state_db::{BandwidthSample, FileEntry, PinState, StateDb};
 use beebeeb_engine::sync_view::{Explorer, SyncView};
 
 use super::log;
 use crate::frames::settings::Pane;
+use crate::frames::settings::bandwidth_data::{Bandwidth, Direction, History};
 use crate::frames::settings::drive::{
     DriveSettings, Insights, InsightsData, Kept, KeptOnPc, KindShare, LargeFile, Limit, Repair, Storage, SyncPane,
     SyncStatus,
@@ -87,6 +99,10 @@ pub const PAUSE_FAILED: &str = "Couldn't pause or resume sync. Try again.";
 pub const OPEN_AT_LOGIN_FAILED: &str = "Couldn't change Open at login. Try again.";
 /// A change asked while no one is signed in with the vault open, or by an account that has left since.
 pub const CHANGE_LOCKED: &str = "Unlock Beebeeb to change this.";
+pub const LIMIT_FAILED: &str = "Couldn't change the limit. Try again.";
+/// How far back the Bandwidth pane's traffic goes, and how long one of its buckets is.
+const TRAFFIC_HOURS: i64 = 20;
+const BUCKET_MINUTES: i64 = 20;
 
 /// What the adapter asks of the engine handle. The app's is `Engine`; a test's is a state database in a folder of
 /// its own.
@@ -108,6 +124,13 @@ pub trait DriveEngine: Send + Sync + 'static {
     fn free_up_space(&self) -> Result<u64, String>;
     /// The settings file's limit on downloaded copies (0: no limit) and its "Show sync status on files".
     fn local_settings(&self) -> Result<(i64, bool), String>;
+    /// The engine's session, which moves on at every sign-in, lock and sign-out (`Engine::session_turn`). Never
+    /// waits.
+    fn session(&self) -> SessionGeneration;
+    /// This PC's transfer limits, from the settings file. A worker's.
+    fn limits(&self) -> Result<TransferLimits, String>;
+    /// WRITES the settings file: change the limits, under `session` and no other. A worker's.
+    fn set_limits(&self, session: SessionGeneration, change: TransferLimitsChange) -> Result<TransferLimits, String>;
 }
 
 impl<C: CredentialStores> DriveEngine for Engine<C> {
@@ -140,6 +163,16 @@ impl<C: CredentialStores> DriveEngine for Engine<C> {
         let config = DesktopConfig::load_for(crate::shell::identity::engine_identity())?;
         Ok((config.local_cache_limit_bytes, config.sync_overlays.unwrap_or(true)))
     }
+    fn session(&self) -> SessionGeneration {
+        self.session_turn()
+    }
+    fn limits(&self) -> Result<TransferLimits, String> {
+        self.transfer_limits().map_err(|error| error.words().to_string())
+    }
+    fn set_limits(&self, session: SessionGeneration, change: TransferLimitsChange) -> Result<TransferLimits, String> {
+        self.set_transfer_limits_for(session, change)
+            .map_err(|error| error.words().to_string())
+    }
 }
 
 /// What this PC holds, as last read.
@@ -160,16 +193,25 @@ enum Ask {
     OpenAtLogin(bool),
     FreeUp,
     Keep(Vec<String>, Vec<String>),
+    /// The Bandwidth pane's limits and traffic.
+    Bandwidth,
+    /// Change this PC's transfer limits.
+    Limits(TransferLimitsChange),
 }
 
-/// One job: what is asked, for whose account, in which generation.
+/// One job: what is asked, for whose account, under which engine session (as the window's thread read it when it
+/// was asked: the session of the press), in which generation.
 struct Job {
     ask: Ask,
     account: String,
+    session: SessionGeneration,
     generation: u64,
 }
 
 enum Answer {
+    /// The limits the settings file holds, and the traffic of the last 20 hours (`None`: the local state did not
+    /// hand it out). `None`: the limits could not be read.
+    Bandwidth(Option<(TransferLimits, Option<History>)>),
     OnThisPc(Option<OnThisPc>),
     OpenAtLogin(Option<bool>),
     Keep(Keep),
@@ -197,6 +239,8 @@ pub struct EngineDriveSettings<E: DriveEngine> {
     on_pc: Option<OnThisPc>,
     open_at_login: Option<bool>,
     usage: Option<(i64, i64)>,
+    /// The Bandwidth pane's limits and traffic, as last read (`None`: not read yet, or not readable).
+    bandwidth: Option<(TransferLimits, Option<History>)>,
     insights: Insights,
     keep: Keep,
     /// When insights were last answered: `opened(Insights)` re-asks when this is older than [`INSIGHTS_FRESH_FOR`].
@@ -229,6 +273,7 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
             on_pc: None,
             open_at_login: None,
             usage: None,
+            bandwidth: None,
             insights: Insights::Loading,
             keep: Keep::Failed,
             insights_at: None,
@@ -283,6 +328,8 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
         let job = Job {
             ask,
             account,
+            // The session of the press: read here, on the window's thread, before any worker runs.
+            session: self.engine.session(),
             generation: self.generation,
         };
         let sent = self.jobs.as_ref().is_some_and(|tx| tx.send(job).is_ok());
@@ -336,6 +383,7 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, answers: &mpsc::Send
     let Job {
         ask,
         account,
+        session,
         generation,
     } = job;
     let send = |answer| {
@@ -347,7 +395,7 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, answers: &mpsc::Send
         });
     };
     let refuse = |words| send(Answer::Refused(words));
-    if !matches!(ask, Ask::Read | Ask::Insights) && !still_for(engine, &account) {
+    if !matches!(ask, Ask::Read | Ask::Insights | Ask::Bandwidth) && !still_for(engine, &account) {
         // The account that asked has left, or the vault is locked: nothing is changed for whoever is here now.
         log("drive settings: a change was not made (the account that asked is not signed in)");
         return refuse(CHANGE_LOCKED);
@@ -370,6 +418,19 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, answers: &mpsc::Send
                 refuse(OPEN_AT_LOGIN_FAILED);
             }
             send(Answer::OpenAtLogin(platform.autostart_enabled().ok()));
+        }
+        Ask::Bandwidth => send(Answer::Bandwidth(read_bandwidth(engine, &account))),
+        Ask::Limits(change) => {
+            // Under the session of the press and no other: the engine asks it again before it writes.
+            if engine.set_limits(session, change).is_err() {
+                log("drive settings: a limit was not changed (the session moved on, or the settings file)");
+                refuse(LIMIT_FAILED);
+            }
+            // What the file holds now, changed or not: the pane never keeps a limit the engine did not take.
+            send(Answer::Bandwidth(read_bandwidth(engine, &account)));
+            if change.downloaded_copies_bytes.is_some() {
+                read_local(engine, platform, &account, &send);
+            }
         }
         Ask::FreeUp => {
             if engine.free_up_space().is_err() {
@@ -399,6 +460,71 @@ fn run<E: DriveEngine>(engine: &E, platform: &dyn Platform, answers: &mpsc::Send
             read_local(engine, platform, &account, &send);
         }
     }
+}
+
+/// The limits from the settings file, and the last 20 hours of traffic from `account`'s local state (not handed
+/// out, or another account's: no traffic). `None`: the limits could not be read, or the account left.
+fn read_bandwidth<E: DriveEngine>(engine: &E, account: &str) -> Option<(TransferLimits, Option<History>)> {
+    if !still_for(engine, account) {
+        return None;
+    }
+    let limits = engine.limits().ok()?;
+    let now = chrono::Local::now();
+    let since = now.timestamp() - TRAFFIC_HOURS * 3_600;
+    let samples = engine
+        .local_state(|db| db.get_bandwidth_history_since(since).ok())
+        .ok()
+        .flatten();
+    Some((limits, samples.map(|samples| history_of(&samples, now))))
+}
+
+/// The last 20 hours in buckets of 20 minutes, oldest first, the last bucket ending at `now`. No sample at all:
+/// the empty history ("nothing recorded yet").
+pub(crate) fn history_of(samples: &[BandwidthSample], now: chrono::DateTime<chrono::Local>) -> History {
+    use chrono::Timelike;
+    if samples.is_empty() {
+        return History::default();
+    }
+    let bucket = BUCKET_MINUTES * 60;
+    let buckets = (TRAFFIC_HOURS * 3_600 / bucket) as usize;
+    let start = now.timestamp() - TRAFFIC_HOURS * 3_600;
+    let (mut up, mut down) = (vec![0u64; buckets], vec![0u64; buckets]);
+    for sample in samples {
+        let Ok(i) = usize::try_from((sample.sampled_at - start).div_euclid(bucket)) else {
+            continue;
+        };
+        if let (Some(up), Some(down)) = (up.get_mut(i), down.get_mut(i)) {
+            *up = up.saturating_add(sample.up_bytes);
+            *down = down.saturating_add(sample.down_bytes);
+        }
+    }
+    let total = |bytes: &[u64]| size_words(i64::try_from(bytes.iter().sum::<u64>()).unwrap_or(i64::MAX));
+    let mb = |bytes: &[u64]| bytes.iter().map(|b| *b as f32 / 1e6).collect::<Vec<f32>>();
+    let (up_mb, down_mb) = (mb(&up), mb(&down));
+    let most = up_mb.iter().chain(&down_mb).copied().fold(0.0_f32, f32::max);
+    let first = now - chrono::Duration::seconds(TRAFFIC_HOURS * 3_600);
+    History {
+        up_total: total(&up),
+        down_total: total(&down),
+        // The axis ends on the next hundred megabytes over the busiest bucket (at least one hundred).
+        top_mb: ((most / 100.0).ceil() * 100.0).max(100.0),
+        starts_at: first.hour() * 60 + first.minute(),
+        bucket_minutes: BUCKET_MINUTES as u32,
+        starts_days_ago: u32::try_from((now.date_naive() - first.date_naive()).num_days()).unwrap_or(0),
+        up_mb,
+        down_mb,
+    }
+}
+
+/// A speed limit as the pane counts it (megabits per second) in the unit the engine's transfer paths work in (KiB
+/// per second). No limit is 0. Never 0 for a limit that was asked for.
+pub(crate) fn kib_per_s(mbps: Option<u32>) -> u64 {
+    mbps.map_or(0, |mbps| (u64::from(mbps) * 125_000 / 1_024).max(1))
+}
+
+/// The stored speed limit in megabits per second, to the nearest (at least 1); 0 is no limit.
+pub(crate) fn mbps(kib_per_s: u64) -> Option<u32> {
+    (kib_per_s > 0).then(|| u32::try_from(((kib_per_s * 1_024 + 62_500) / 125_000).max(1)).unwrap_or(u32::MAX))
 }
 
 fn read_local<E: DriveEngine>(engine: &E, platform: &dyn Platform, account: &str, send: &dyn Fn(Answer)) {
@@ -709,6 +835,7 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
             self.on_pc = None;
             self.open_at_login = None;
             self.usage = None;
+            self.bandwidth = None;
             self.keep = Keep::Failed;
             self.insights_at = None;
             self.insights_reading = false;
@@ -747,6 +874,7 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
                     }
                 }
                 _ if !mine => {}
+                Answer::Bandwidth(read) => self.bandwidth = read,
                 Answer::OnThisPc(on_pc) => self.on_pc = on_pc,
                 Answer::OpenAtLogin(on) => self.open_at_login = on,
                 Answer::Keep(keep) => self.keep = keep,
@@ -762,6 +890,10 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
             if !fresh {
                 self.ask_insights();
             }
+        }
+        // Bandwidth is read when its pane opens (and after a change), never at launch.
+        if pane == Pane::Bandwidth {
+            self.send(Ask::Bandwidth);
         }
     }
 
@@ -812,8 +944,16 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
         }
     }
 
-    /// Not bound: the limit cannot say "no limit", the engine's default (PR body).
-    fn set_limit(&mut self, _which: Kept, _gb: u32) {}
+    /// Downloaded copies: stored in this PC's settings file through the engine, under the session of the press; the
+    /// engine's eviction works to it. Previews: no engine call (they have no limit of their own yet).
+    fn set_limit(&mut self, which: Kept, gb: u32) {
+        if which == Kept::Downloaded {
+            self.change(Ask::Limits(TransferLimitsChange {
+                downloaded_copies_bytes: Some(i64::from(gb) * 1_000_000_000),
+                ..TransferLimitsChange::default()
+            }));
+        }
+    }
 
     /// Downloaded copies: the engine's Free up space (never a kept file, never an unsent change). Previews: no engine
     /// call.
@@ -875,6 +1015,37 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
 
     /// Not bound: the turn-off lives in the Tauri app only (PR body).
     fn turn_off_explorer(&mut self) {}
+
+    /// The two limits as the settings file holds them and the last 20 hours of traffic, only while they are the
+    /// signed-in account's read. Everything the engine has no answer for stays as the empty pane draws it: no live
+    /// figure, no device, no speed test; the metered switch is the pane's default and is not the engine's to read.
+    fn bandwidth(&self) -> Bandwidth {
+        let Some((limits, history)) = self.bandwidth.clone().filter(|_| self.mine()) else {
+            return Bandwidth::default();
+        };
+        Bandwidth {
+            upload_limit: mbps(limits.upload_kib_per_s),
+            download_limit: mbps(limits.download_kib_per_s),
+            history: history.unwrap_or_default(),
+            ..Bandwidth::default()
+        }
+    }
+
+    /// Stored in this PC's settings file through the engine, under the session of the press; the engine's upload
+    /// and download paths read it for every transfer. The pane shows the limit the file holds after the change.
+    fn set_speed_limit(&mut self, direction: Direction, limit: Option<u32>) {
+        let limit = Some(kib_per_s(limit));
+        self.change(Ask::Limits(match direction {
+            Direction::Upload => TransferLimitsChange {
+                upload_kib_per_s: limit,
+                ..TransferLimitsChange::default()
+            },
+            Direction::Download => TransferLimitsChange {
+                download_kib_per_s: limit,
+                ..TransferLimitsChange::default()
+            },
+        }));
+    }
 
     /// What is held, only while it is the signed-in account's (P2-5): a locked vault lends the locked sentence, an
     /// account the last `pump` has not seen yet lends "loading", whatever is still stored.

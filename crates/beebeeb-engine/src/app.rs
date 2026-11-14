@@ -53,11 +53,13 @@ pub mod kept_api;
 pub mod owned_state;
 pub mod photos_api;
 pub mod settings_api;
+pub mod setup_api;
 // What the account shares and what is shared with it, for the native Shared window.
 pub mod shares_api;
 pub mod signin_api;
 // Is the local state the signed-in account's (task 2488): a read-only check for windows that show it.
 pub mod state_owner;
+pub mod transfer_limits_api;
 pub mod trash_api;
 // An open file for the native viewer: its facts, and its content decrypted in memory.
 pub mod viewer_api;

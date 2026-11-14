@@ -56,7 +56,8 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphic
 raw-window-handle = "0.6"
 # Windows Hello's prompt is a WinRT API (`shell/platform/windows_hello.rs`), which windows-sys does not have. The
 # same `windows` the engine already builds: no new crate is compiled.
-windows = { version = "0.58", features = ["Foundation", "Security_Credentials_UI", "Win32_Foundation", "Win32_System_WinRT"] }
+# The first run's folder picker is a COM dialog (`shell/platform/windows_folder.rs`): three more features of it.
+windows = { version = "0.58", features = ["Foundation", "Security_Credentials_UI", "Win32_Foundation", "Win32_System_Com", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
 
 [dev-dependencies]
 # `engine_host` tests open the engine on credential stores in memory, with the settings file in the engine's test

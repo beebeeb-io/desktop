@@ -95,6 +95,7 @@ pub mod state_db;
 pub mod state_paths;
 pub mod surfaces;
 pub mod sync_activity;
+pub mod sync_folder_rule;
 pub mod sync_root_owner;
 pub mod sync_root_port;
 pub mod sync_view;

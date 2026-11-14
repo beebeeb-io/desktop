@@ -1,6 +1,8 @@
 //! `BackupsSource`: what the Backups frames ask of the engine, and the board's fixture
 //! (DW-0737, DW-1411, DW-0739, DW-0741: exactly the board's sample content).
 
+use super::mail::{self, Connection, Entry, Mail, MailState};
+
 /// What a person can try to do to a folder from the app.
 /// (Backups itself only opens the root; the lane that draws the root's row in Files reads the rest.)
 #[cfg_attr(not(test), allow(dead_code))]
@@ -173,6 +175,40 @@ pub trait BackupsSource {
     /// Move another device's backup to Trash. It is a risky action: the engine checks the
     /// second-factor `code` first. `false`: the code was not accepted, nothing changed.
     fn delete_device_backup(&mut self, id: &str, code: &str) -> bool;
+
+    // Mail Backup (the board's proposal, DW-0740 to DW-0743b). Every default is the answer of a
+    // source with no mail engine behind it: nothing to show, nothing done.
+
+    /// Mail Backup as its page draws it. `None`: nothing answers for it; the section draws no
+    /// page and asks the shell instead (`Intent::MailBackup`).
+    fn mail(&self) -> Option<Mail> {
+        None
+    }
+    /// Sign in to a mail server with what was typed. The answer is read from
+    /// [`BackupsSource::mail_connection`]; nothing is saved before the server accepts.
+    fn mail_connect(&mut self, _entry: &Entry<'_>) {}
+    /// Where that sign-in stands.
+    fn mail_connection(&self) -> Connection {
+        Connection::Idle
+    }
+    /// The dialog closed: drop the sign-in and what it listed.
+    fn mail_forget_connection(&mut self) {}
+    /// Start archiving these folders (by name) of the mailbox that just signed in. `false`:
+    /// nothing started.
+    fn mail_start(&mut self, _folders: &[String]) -> bool {
+        false
+    }
+    /// Pause or carry on with the first archive.
+    fn mail_pause(&mut self, _paused: bool) {}
+    /// Turn Mail Backup off. A risky action: the engine checks the second-factor `code` first.
+    /// `false`: the code was not accepted, nothing changed. Its files stay, read-only.
+    fn mail_turn_off(&mut self, _code: &str) -> bool {
+        false
+    }
+    /// After turning it off: move its kept files to Trash. `false`: nothing moved.
+    fn mail_files_to_trash(&mut self) -> bool {
+        false
+    }
 }
 
 /// What stands in for the engine in a build that ships before the engine lane wires Backups:
@@ -186,9 +222,20 @@ pub struct FixtureSource {
     folders: Vec<Folder>,
     devices: Vec<Device>,
     failures: Vec<NotBackedUp>,
+    /// Mail Backup's sample state; `None` in the frames that are not about it.
+    mail: Option<Mail>,
+    connection: Connection,
 }
 
 impl FixtureSource {
+    /// The board's sample PC with Mail Backup answering (DW-0740 and its neighbours).
+    pub fn with_mail(mail: Mail) -> FixtureSource {
+        FixtureSource {
+            mail: Some(mail),
+            ..Self::board()
+        }
+    }
+
     /// DW-0737.
     pub fn board() -> FixtureSource {
         let folder = |name: &str, items, size: &str, on: bool, chosen: bool, last: Option<&str>| Folder {
@@ -241,6 +288,8 @@ impl FixtureSource {
             device("old-iphone", "Old iPhone", DeviceKind::Phone, 8_204, None, None, false),
         ];
         FixtureSource {
+            mail: None,
+            connection: Connection::Idle,
             devices,
             status: Status::AllBackedUp {
                 last: "09:30".into(),
@@ -341,7 +390,82 @@ impl BackupsSource for FixtureSource {
     }
 
     fn mail_backup_on(&self) -> bool {
+        self.mail.as_ref().is_none_or(|m| m.state != MailState::Off)
+    }
+
+    fn mail(&self) -> Option<Mail> {
+        self.mail.clone()
+    }
+
+    fn mail_connect(&mut self, entry: &Entry<'_>) {
+        // The fixture's mail server: it accepts the board's sample password and nothing else.
+        self.connection = if entry.password == mail::board::APP_PASSWORD {
+            Connection::Folders {
+                address: entry.address.to_string(),
+                folders: mail::board::folders(),
+                size: mail::board::SIZE.into(),
+            }
+        } else {
+            Connection::Refused {
+                server: entry.server.to_string(),
+            }
+        };
+    }
+
+    fn mail_connection(&self) -> Connection {
+        self.connection.clone()
+    }
+
+    fn mail_forget_connection(&mut self) {
+        self.connection = Connection::Idle;
+    }
+
+    fn mail_start(&mut self, folders: &[String]) -> bool {
+        let Connection::Folders { address, .. } = &self.connection else {
+            return false;
+        };
+        if self.mail.is_none() {
+            return false;
+        }
+        let mut first = mail::board::first();
+        first.accounts[0].address = address.clone();
+        first.accounts[0].folders = folders.len() as u32;
+        self.mail = Some(first);
+        self.connection = Connection::Idle;
         true
+    }
+
+    fn mail_pause(&mut self, now_paused: bool) {
+        if let Some(Mail {
+            state: MailState::First { paused, .. },
+            ..
+        }) = &mut self.mail
+        {
+            *paused = now_paused;
+        }
+    }
+
+    fn mail_turn_off(&mut self, code: &str) -> bool {
+        // The fixture's authenticator, as `delete_device_backup`'s.
+        let accepted = code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()) && code != "000000";
+        if accepted && let Some(mail) = &mut self.mail {
+            *mail = Mail {
+                used: mail.used.clone(),
+                ..mail::board::off()
+            };
+        }
+        accepted && self.mail.is_some()
+    }
+
+    fn mail_files_to_trash(&mut self) -> bool {
+        match &mut self.mail {
+            Some(mail) if mail.state == MailState::Off && mail.used.is_some() => {
+                mail.used = None;
+                mail.last_backup = None;
+                true
+            }
+            _ => false,
+        }
     }
 
     fn back_up_now(&mut self) {
