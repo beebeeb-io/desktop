@@ -113,6 +113,44 @@ pub fn note_with(
 /// A toast over the pane (`.mk-toast`): a pill, centred, 42 pt above the pane's foot. It
 /// says that something the person just did took effect. The caller adds it as an overlay.
 pub fn toast(index: usize, words: &str, t: &Theme) -> El {
+    toast_on(index, words, 0, t)
+}
+
+/// How far apart two lines of toasts are (a pill is 34 pt).
+const TOAST_LINE: f32 = 42.0;
+
+/// Something that was not done, or that a pane could not read or confirm, said where the toast sits
+/// (`ui::toast`: its own mark, read at once), with its button when there is a way to go on. The one rule of the
+/// account's panes and of Notifications: it is over the pane, so it is in view however far the pane is scrolled,
+/// and no row moves when it comes or goes. `key`: the line's key; `line`: 0 is the toast's own place, 1 the line
+/// above it.
+pub fn standing(key: &str, words: &str, action: Option<crate::ui::toast::ToastAction>, line: usize, t: &Theme) -> El {
+    row()
+        .key(key.to_string())
+        .pin(
+            Some(super::settings_shell::SIDEBAR_W),
+            None,
+            Some(0.0),
+            Some(42.0 + TOAST_LINE * line as f32),
+        )
+        .justify_center()
+        .child(crate::ui::toast::toast(
+            &ic::WARN_CIRCLE,
+            crate::ui::toast::Tone::Failed,
+            words,
+            action,
+            t,
+        ))
+}
+
+/// The room a pane leaves under its last row for `lines` lines of toasts that stay (`standing`), so the row can
+/// be scrolled clear of them. Key: `toast-room`.
+pub fn toast_room(lines: usize) -> El {
+    el().key("toast-room").w_full().h(34.0 + TOAST_LINE * lines as f32)
+}
+
+/// [`toast`] on line `line` (0: its own place; 1: above a notice that stays).
+pub fn toast_on(index: usize, words: &str, line: usize, t: &Theme) -> El {
     let key = format!("toast-{index}");
     // `--kit-glass`: the paper, see-through. (The board blurs what is behind it; behind a
     // toast is the pane's flat ground.)
@@ -123,7 +161,12 @@ pub fn toast(index: usize, words: &str, t: &Theme) -> El {
     };
     row()
         .key(format!("{key}-line"))
-        .pin(Some(super::settings_shell::SIDEBAR_W), None, Some(0.0), Some(42.0))
+        .pin(
+            Some(super::settings_shell::SIDEBAR_W),
+            None,
+            Some(0.0),
+            Some(42.0 + TOAST_LINE * line as f32),
+        )
         .justify_center()
         .child(
             row()

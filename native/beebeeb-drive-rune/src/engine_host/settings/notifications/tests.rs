@@ -30,6 +30,7 @@ use crate::frames::settings::source::{Pumped, ReadState, SettingsSource};
 use crate::shell::app::{Event, SettingsPane};
 
 /// The read states, the rows' places on screen, and writes bound to the session of their press.
+mod orders;
 mod states;
 
 const PASSWORD: &str = "an invented password for notifications";

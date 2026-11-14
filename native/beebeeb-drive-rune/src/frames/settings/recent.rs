@@ -31,7 +31,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 "Asking Beebeeb for the list.",
                 t,
             ));
-            return (shell::pane(children, t), None);
+            return (shell::pane(children, t), super::notifications::said_over(ui, None, t));
         }
         ReadState::Failed => {
             let again = super::notifications::try_again(0, t);
@@ -39,11 +39,12 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 0,
                 0,
                 "Couldn't load your notifications",
-                "Nothing was changed. There may be alerts that aren't shown here.",
+                // Only what holds in every way this is reached (a mark may have been taken for some of them).
+                "There may be alerts that aren't shown here.",
                 Some(again),
                 t,
             ));
-            return (shell::pane(children, t), None);
+            return (shell::pane(children, t), super::notifications::said_over(ui, None, t));
         }
     }
     if days.is_empty() {
@@ -55,8 +56,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             "When something needs your attention, a new device sign-in, a share or a storage warning, it shows up here.",
             t,
         ));
-        children.extend(unconfirmed(ui, t));
-        return (shell::pane(children, t), None);
+        return done(ui, children, t);
     }
     let mut pills = 0;
     for (l, (day, alerts)) in days.iter().enumerate() {
@@ -99,23 +99,22 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             .collect();
         children.push(lists::list(l, Some(day), rows, None, t));
     }
-    children.extend(unconfirmed(ui, t));
-    (shell::pane(children, t), None)
+    done(ui, children, t)
 }
 
-/// Read, but a later change could not be confirmed: the list stays, and below it (so no row moves under the
-/// pointer when this comes or goes) the page says it may be out of date, with "Try again".
-fn unconfirmed(ui: &SettingsUi, t: &Theme) -> Option<El> {
-    let (strong, words) = super::notifications::UNCONFIRMED;
-    ui.source.notifications_unconfirmed().then(|| {
-        notices::note_with(
-            0,
-            Tone::Warn,
-            &ic::WARN_CIRCLE,
-            strong,
-            words,
-            Some(super::notifications::try_again(0, t)),
-            t,
-        )
-    })
+/// Read, but a later change could not be confirmed: the list stays, and over the pane (so no row moves under
+/// the pointer when this comes or goes, and it is in view wherever the list is scrolled) the page says it may be
+/// out of date, with "Try again". The pane's column and what is said over it.
+fn done(ui: &SettingsUi, mut children: Vec<El>, t: &Theme) -> (El, Option<El>) {
+    let standing = ui
+        .source
+        .notifications_unconfirmed()
+        .then_some(super::notifications::UNCONFIRMED);
+    if standing.is_some() {
+        children.push(notices::toast_room(1));
+    }
+    (
+        shell::pane(children, t),
+        super::notifications::said_over(ui, standing, t),
+    )
 }

@@ -157,15 +157,16 @@ fn a_toast_that_takes_the_place_of_one_about_another_session_reads_differently()
         ["s-web"],
         "the session of the toast that was drawn"
     );
-    // What was not done goes first: the answer about s-web shows, in the words it had.
-    assert_eq!(source.notice(), Some(NOT_SIGNED_OUT_ANOTHER));
-    later(&mut source, STAYS_FAILED);
+    // The toast that is drawn stays; what was not done for s-web again waits behind it, and then shows in
+    // words that are not the ones that just went.
     assert_eq!(source.notice(), Some(NOT_SIGNED_OUT_ONE_MORE));
+    later(&mut source, STAYS_FAILED);
+    assert_eq!(source.notice(), Some(NOT_SIGNED_OUT_ANOTHER));
     let sent = server.deleted.lock().unwrap().len();
     server.refused_ids.lock().unwrap().clear();
     source.run_notice_action();
     settle(&mut source);
-    assert_eq!(server.deleted.lock().unwrap()[sent..], ["s-new"]);
+    assert_eq!(server.deleted.lock().unwrap()[sent..], ["s-web"]);
     // The line emptied: the next failure is not "another" one.
     later(&mut source, STAYS_FAILED);
     assert_eq!(source.notice(), None);

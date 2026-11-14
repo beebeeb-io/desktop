@@ -622,80 +622,133 @@ fn switches_skipped_as_older_than_a_change_are_read_again_not_called_failed() {
     assert!(!toasts.contains(&NOT_LOADED), "{toasts:?}");
 }
 
-/// A press in the middle of the element keyed `target`, which must be inside the window.
-fn press_in_view(rt: &mut Runtime<State>, target: &str) {
+/// The default window: the Notifications pane is taller than it, so its last group is below the fold.
+const DEFAULT: (f32, f32) = (958.0, 638.0);
+
+/// The rect of the element keyed `target`, which must be wholly inside the default window.
+fn in_view(rt: &Runtime<State>, target: &str) -> [f32; 4] {
     let r = find(rt, target)
         .unwrap_or_else(|| panic!("no element keyed {target}"))
         .rect;
     assert!(
-        r[1] >= 0.0 && r[1] + r[3] <= TALL.1,
+        r[0] >= 0.0 && r[1] >= 0.0 && r[0] + r[2] <= DEFAULT.0 && r[1] + r[3] <= DEFAULT.1,
         "{target} is outside the window: {r:?}"
     );
+    r
+}
+
+/// A press in the middle of the element keyed `target`, which must be inside the window.
+fn press_in_view(rt: &mut Runtime<State>, target: &str) {
+    let r = in_view(rt, target);
     click_at(rt, (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0));
 }
 
-/// A window tall enough to show the whole Notifications pane, so a press can reach what is below the groups.
-const TALL: (f32, f32) = (958.0, 1400.0);
+/// Poll settings as the window does (and only so: no toast is taken past the window) until `done`, then draw.
+fn poll_until(rt: &mut Runtime<State>, what: &str, done: impl Fn(&Runtime<State>) -> bool) {
+    let began = Instant::now();
+    loop {
+        rt.update(|s, tx| {
+            crate::frames::settings::poll(s, tx);
+        });
+        draw(rt);
+        if done(rt) {
+            return;
+        }
+        assert!(began.elapsed() < Duration::from_secs(10), "{what}: {}", words(rt));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
-/// The Notifications pane in the window: what the rows cannot say is said below the last group with "Try again"
-/// (a failed read; switches that stay drawn but could not be confirmed), and no row moves when it comes or goes.
+fn text_of(rt: &Runtime<State>, key: &str) -> Option<String> {
+    find(rt, key).and_then(|e| e.text)
+}
+
+/// The Notifications pane in the DEFAULT window, where its last group is below the fold: what the rows cannot
+/// say is said over the pane with "Try again" (a failed read; switches that stay drawn but could not be
+/// confirmed), in view without scrolling, and no row moves when it comes or goes. What a press did is said there
+/// too, above a notice that stands, and the rows under them still take a press.
 #[test]
-fn the_pane_offers_try_again_below_the_groups_and_no_row_moves() {
+fn the_pane_says_it_in_view_with_try_again_and_no_row_moves() {
     use crate::frames::settings::notifications::{NOT_READ, UNCONFIRMED};
     let fake = fake("pane-retry");
     fake.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
     let engine = signed_in(&fake);
-    let mut rt = window_sized(&engine, TALL);
+    let mut rt = window(&engine);
     rt.update(|s, _| crate::frames::settings::go(s, "DW-0750"));
-    poll(&mut rt);
+    poll_until(&mut rt, "the read never failed", |rt| find(rt, "notice-line").is_some());
     let seen = words(&rt);
     assert!(seen.contains("Couldn't load"), "the rows say it: {seen}");
-    assert!(seen.contains(NOT_READ.0), "and the pane says how to go on: {seen}");
+    assert_eq!(text_of(&rt, "toast-text").as_deref(), Some(NOT_READ), "{seen}");
     assert!(find(&rt, "item-3-0-switch").is_none(), "no switch without a value");
     let rows = row_rects(&rt);
-    let (last, note) = (rows.last().unwrap().1, find(&rt, "note-0").expect("the notice").rect);
+    let last = rows.last().unwrap().1;
     assert!(
-        note[1] >= last[1] + last[3],
-        "below the last row: {note:?} under {last:?}"
+        last[1] + last[3] > DEFAULT.1,
+        "precondition: the last row is below the fold: {last:?}"
     );
+    in_view(&rt, "toast");
 
-    // "Try again": one read, and its answer is drawn where the rows already were.
+    // "Try again", pressed where it is drawn: one read, and its answer is drawn where the rows already were.
     fake.read_mode.store(ANSWER, Ordering::SeqCst);
     let lists = asked(&fake.fake, LIST);
-    press_in_view(&mut rt, "btn-1");
-    poll(&mut rt);
+    press_in_view(&mut rt, "toast-action");
+    poll_until(&mut rt, "the read never answered", |rt| {
+        find(rt, "item-3-0-switch").is_some()
+    });
     assert_eq!(asked(&fake.fake, LIST), lists + 1, "one read for the one press");
-    assert!(find(&rt, "item-3-0-switch").is_some(), "the switches, once read");
-    assert!(find(&rt, "note-0").is_none(), "nothing left to say");
+    assert!(find(&rt, "notice-line").is_none(), "nothing left to say");
+    assert!(find(&rt, "toast-room").is_none());
     assert_eq!(row_rects(&rt), rows, "no row moved when the notice went");
 
-    // A switch whose result is unknown, and the read after it fails: the switches stay, said to be unsure.
+    // A switch Beebeeb takes: said where the toast sits.
+    press_in_view(&mut rt, "item-3-1-switch");
+    poll_until(&mut rt, "the change was never said", |rt| find(rt, "toast-0").is_some());
+    assert_eq!(text_of(&rt, "toast-0-text").as_deref(), Some(ALERT_SAVED));
+    assert_eq!(puts(&fake), 1, "the press was sent");
+    in_view(&rt, "toast-0");
+    let on = rt.state.settings.source.notifications().groups[0].1[1].on;
+
+    // A switch whose result is unknown, and the read after it fails: the switches stay, said to be unsure, with
+    // the way to ask again in view; what the press itself came to is said above it.
     fake.put_mode.store(UNREADABLE, Ordering::SeqCst);
     fake.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
     press_in_view(&mut rt, "item-3-1-switch");
-    poll(&mut rt);
-    assert_eq!(puts(&fake), 1, "the press was sent");
+    poll_until(&mut rt, "never said to be unsure", |rt| {
+        find(rt, "notice-line").is_some()
+    });
+    assert_eq!(puts(&fake), 2, "the press was sent");
     let seen = words(&rt);
-    assert!(seen.contains(UNCONFIRMED.0) && seen.contains(UNCONFIRMED.1), "{seen}");
+    assert_eq!(text_of(&rt, "toast-text").as_deref(), Some(UNCONFIRMED), "{seen}");
     assert!(!seen.contains("Couldn't load"), "nothing was dropped: {seen}");
     assert!(find(&rt, "item-3-1-switch").is_some(), "the switches stay drawn");
     assert_eq!(row_rects(&rt), rows, "no row moved when the notice came");
-    // Recent says the same below its list, which stays.
+    assert_eq!(text_of(&rt, "toast-0-text").as_deref(), Some(ALERT_UNKNOWN));
+    let (notice, toast) = (in_view(&rt, "toast"), in_view(&rt, "toast-0"));
+    assert!(
+        toast[1] + toast[3] <= notice[1],
+        "above the notice, not over it: {toast:?} {notice:?}"
+    );
+    in_view(&rt, "toast-action");
+    // With both up, a row still takes a press (this PC's switch at the top of the pane).
+    let allow = rt.state.settings.source.notifications().allow;
+    press_in_view(&mut rt, "item-0-0-switch");
+    assert_eq!(rt.state.settings.source.notifications().allow, !allow);
+    // Recent says the same over its list, which stays.
     rt.update(|s, _| crate::frames::settings::go(s, "DW-0791"));
     draw(&mut rt);
     let seen = words(&rt);
-    assert!(seen.contains(UNCONFIRMED.0) && seen.contains(FIRST_SHARE), "{seen}");
+    assert!(seen.contains(UNCONFIRMED) && seen.contains(FIRST_SHARE), "{seen}");
+    in_view(&rt, "toast-action");
     rt.update(|s, _| crate::frames::settings::go(s, "DW-0750"));
-    poll(&mut rt);
+    draw(&mut rt);
 
     // "Try again" with an answer: what Beebeeb has, and the notice goes.
     fake.read_mode.store(ANSWER, Ordering::SeqCst);
-    press_in_view(&mut rt, "btn-1");
-    poll(&mut rt);
-    assert!(find(&rt, "note-0").is_none(), "confirmed: {}", words(&rt));
+    press_in_view(&mut rt, "toast-action");
+    poll_until(&mut rt, "never confirmed", |rt| find(rt, "notice-line").is_none());
     assert_eq!(
         rt.state.settings.source.notifications().groups[0].1[1].on,
-        Some(true),
+        on.map(|on| !on),
         "the change had landed"
     );
     assert_eq!(row_rects(&rt), rows);
