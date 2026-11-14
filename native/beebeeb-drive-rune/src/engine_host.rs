@@ -52,6 +52,7 @@ mod files_facts;
 #[path = "engine_host/files_open_with_tests.rs"]
 mod files_open_with_tests;
 mod files_places;
+mod files_preview;
 mod files_trash;
 mod files_versions;
 #[cfg(test)]
@@ -569,6 +570,8 @@ pub struct EngineFilesSource<C: CredentialStores> {
     versions: files_versions::VersionCalls<C>,
     /// Where each row stands in the Backups tree.
     places: files_places::Places<C>,
+    /// What the Preview panel shows of a file.
+    previews: files_preview::Previews<viewer::LiveViewerEngine<C>>,
 }
 
 impl<C: CredentialStores> EngineFilesSource<C> {
@@ -580,6 +583,7 @@ impl<C: CredentialStores> EngineFilesSource<C> {
             facts: files_facts::Facts::new(engine.clone()),
             versions: files_versions::VersionCalls::new(engine.clone()),
             places: files_places::Places::new(engine.clone()),
+            previews: files_preview::Previews::new(Arc::new(viewer::LiveViewerEngine::new(engine.clone()))),
             engine,
             upload_left: None,
         }
@@ -773,6 +777,20 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
 
     fn restore_version(&mut self, item: &DriveItem, version: &str) -> Result<(), ActionError> {
         self.versions.restore(item, version)
+    }
+
+    fn preview(&mut self, item: &DriveItem) -> Option<crate::frames::files::actions_data::PreviewOf> {
+        // Answered later: the read starts here, and the panel asks `preview_later` until it lands.
+        self.previews.start(item);
+        None
+    }
+
+    fn preview_later(&mut self, item: &DriveItem) -> Option<crate::frames::files::actions_data::Previewed> {
+        Some(self.previews.later(item))
+    }
+
+    fn cancel_preview(&mut self) {
+        self.previews.cancel();
     }
 
     fn folder_shown(&mut self, folder: Option<&str>) {

@@ -286,7 +286,9 @@ pub fn poll(s: &mut State) -> bool {
     }
     // What a source that answers later did since the last frame (`State::late_changes`).
     let late = s.late_changes();
-    if super::session::poll(s) || late {
+    // A preview that is still being read (a source that answers it later).
+    let previewing = super::preview::poll(s);
+    if super::session::poll(s) || late || previewing {
         return true;
     }
     let Some(root) = s.actions.source.backups_root() else {
@@ -714,3 +716,6 @@ pub const SCENES: &[crate::ui::gate::Scene<State>] = &[
 #[cfg(test)]
 #[path = "folder_told_tests.rs"]
 mod folder_told_tests;
+#[cfg(test)]
+#[path = "preview_panel_tests.rs"]
+mod preview_panel_tests;

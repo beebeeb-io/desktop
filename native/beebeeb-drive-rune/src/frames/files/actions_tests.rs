@@ -655,7 +655,9 @@ fn space_previews_in_the_window_and_space_or_esc_closes_without_leaving_files() 
     let (mut rt, calls, _) = spied();
     let route = rt.state.shell.app.screen();
     press(&mut rt, Key::Text(" ".into()), NONE);
-    assert!(matches!(&rt.state.actions.dialog, Some(Dialog::Preview(p)) if p.shown.is_some()));
+    assert!(
+        matches!(&rt.state.actions.dialog, Some(Dialog::Preview(p)) if matches!(p.state, crate::frames::files::actions_data::Previewed::Shown(_)))
+    );
     let card = info(&rt, "pv-card");
     assert_eq!(
         (card.role, card.label.as_deref()),
@@ -733,7 +735,9 @@ fn a_file_with_no_preview_says_so_and_offers_the_two_ways_on() {
     });
     settle(&mut rt);
     press(&mut rt, Key::Text(" ".into()), NONE);
-    assert!(matches!(&rt.state.actions.dialog, Some(Dialog::Preview(p)) if p.shown.is_none()));
+    assert!(
+        matches!(&rt.state.actions.dialog, Some(Dialog::Preview(p)) if p.state == crate::frames::files::actions_data::Previewed::NoPreview)
+    );
     assert_eq!(text_of(&rt, "pv-name"), "Moodboard.sketch");
     assert_eq!(text_of(&rt, "pv-blank-title"), "No preview for this kind of file");
     assert_eq!(
