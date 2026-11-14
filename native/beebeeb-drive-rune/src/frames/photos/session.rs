@@ -41,6 +41,9 @@ pub struct Later {
     was_open: bool,
     /// The open photo a move to Trash was asked for, as it was at the press, and the one that comes in after it.
     open_trash: Option<(Viewing, Option<PhotoId>)>,
+    /// The shell's session gate was closed at the last poll (`shell::session_gate`): a source that answers later
+    /// is not asked for a change. The second line; the source's own look at the session at the press is the first.
+    closed: bool,
     /// What Undo (Ctrl+Z) puts back: the photos the source said Beebeeb moved to Trash.
     pub(super) undo: Vec<PhotoId>,
 }
@@ -51,7 +54,12 @@ const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(120);
 impl Ui {
     /// Asks for a move to Trash. `true`: asked (or, for a fixture, made). A refusal is said at once.
     fn ask_trash(&mut self, ids: &[PhotoId]) -> bool {
-        match self.source.trash(ids) {
+        let asked = if self.later.closed {
+            Err(Left::Unavailable)
+        } else {
+            self.source.trash(ids)
+        };
+        match asked {
             Ok(()) => true,
             Err(why) => {
                 self.toast = Some(Toast::Left {
@@ -136,7 +144,12 @@ impl Ui {
             _ if !self.later.undo.is_empty() => self.later.undo.clone(),
             _ => return false,
         };
-        if let Err(why) = self.source.restore(&ids) {
+        let asked = if self.later.closed {
+            Err(Left::Unavailable)
+        } else {
+            self.source.restore(&ids)
+        };
+        if let Err(why) = asked {
             self.toast = Some(Toast::Left {
                 what: What::Restore,
                 why,
@@ -173,7 +186,12 @@ impl Ui {
     }
 
     fn keep(&mut self, id: PhotoId, keep: bool) {
-        match self.source.keep_offline(id, keep) {
+        let asked = if self.later.closed {
+            Err(Left::Unavailable)
+        } else {
+            self.source.keep_offline(id, keep)
+        };
+        match asked {
             Err(why) => {
                 self.toast = Some(Toast::Left {
                     what: What::Keep(keep),
@@ -467,7 +485,10 @@ pub(super) fn not_here_body(ui: &Ui, t: &Theme) -> Option<El> {
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let gate = (s.shell.app.gate(), s.shell.app.account().map(str::to_owned));
     let open = s.sidebar_section == crate::ui::sidebar::SidebarSection::Photos && gate.0 == GateState::Ready;
+    // Asked of the shell's gate with the engine as it is now; kept for the presses until the next poll.
+    let closed = !crate::shell::session_gate::open(s);
     let ui = &mut s.photos;
+    ui.later.closed = closed && ui.source.answers_later();
     let mut changed = false;
     if ui.later.seen.as_ref() != Some(&gate) {
         if ui.later.seen.is_some() {

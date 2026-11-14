@@ -621,3 +621,30 @@ fn a_checked_photo_that_left_the_library_is_no_longer_checked_and_a_finished_che
     rt.frame(0.0);
     assert!(script.lock().unwrap().opened > opened);
 }
+
+#[test]
+fn while_the_session_gate_is_closed_no_change_is_asked_of_the_source() {
+    let (mut rt, script) = window();
+    let harbour = id(board::HARBOUR);
+    rt.state.photos.check_tile(0, 0);
+    rt.state.photos.later.undo = vec![harbour];
+    // The shell's gate closed (the session ended) and no poll has run since.
+    rt.state.photos.later.closed = true;
+    rt.state.photos.trash_selected();
+    assert!(matches!(
+        rt.state.photos.toast,
+        Some(Toast::Left {
+            what: What::Trash,
+            why: Left::Unavailable,
+            ..
+        })
+    ));
+    assert!(rt.state.photos.undo(), "said, not done");
+    rt.state.photos.open(harbour);
+    rt.state.photos.press_offline();
+    assert_eq!(asked(&script), [], "the source heard of none of the three");
+    // The next poll asks the gate again: it is open, and a press is asked of the source.
+    rt.frame(0.0);
+    rt.state.photos.press_offline();
+    assert_eq!(asked(&script), [("keep", vec![harbour])]);
+}

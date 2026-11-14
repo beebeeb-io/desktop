@@ -49,7 +49,7 @@ mod tests;
 pub const MAX_PICTURES: usize = 600;
 /// At most this many bytes of pixels are held.
 pub const MAX_BYTES: usize = 160 * 1024 * 1024;
-/// At most this many wishes wait; the oldest are dropped (a tile that is still on screen asks again).
+/// At most this many wishes wait; one more is not taken (a tile that is still on screen asks again).
 pub const MAX_WISHES: usize = 400;
 /// How many fetches run at once.
 const WORKERS: usize = 3;
@@ -60,7 +60,11 @@ pub const TRY_AGAIN_AFTER: Duration = Duration::from_secs(5);
 /// A picture held this long is shown and fetched again.
 pub const REFRESH_AFTER: Duration = Duration::from_secs(600);
 /// A wish no draw repeated for this long is dropped; a picture no draw looked at for this long may go for room.
+#[cfg(not(test))]
 pub const WISH_LIVES: Duration = Duration::from_secs(2);
+/// Tests hold a fetch on its worker: a wish outlives that.
+#[cfg(test)]
+pub const WISH_LIVES: Duration = Duration::from_secs(20);
 /// How long an idle worker sleeps before it looks whether the store is still there.
 const IDLE: Duration = Duration::from_millis(500);
 
@@ -245,10 +249,11 @@ impl<C: CredentialStores> EngineThumbStore<C> {
         if answer.is_none() && matches!(ask, Ask::Picture(_)) && !inner.has_room(now) {
             return None;
         }
-        inner.wishes.push_back((key, stamped, now));
-        while inner.wishes.len() > MAX_WISHES {
-            inner.wishes.pop_front();
+        // The line is full: this one waits for a later draw (the ones wished first are fetched first).
+        if inner.wishes.len() >= MAX_WISHES {
+            return answer;
         }
+        inner.wishes.push_back((key, stamped, now));
         self.start_workers(&mut inner);
         self.wake.notify_one();
         answer
