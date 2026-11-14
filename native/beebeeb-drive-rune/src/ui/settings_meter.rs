@@ -138,6 +138,8 @@ pub fn bar(index: usize, width: f32, share: f32, ink: Color, t: &Theme) -> El {
 /// `on_drag`). Keys: `slider`, `slider-track`, `slider-fill`, `slider-knob`.
 pub fn slider(name: &str, width: f32, at: f32, t: &Theme) -> El {
     let at = at.clamp(0.0, 1.0);
+    let f = |n: &str| std::env::var(n).ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+    let (dx, dy) = (f("KNOB_DX"), f("KNOB_DY"));
     el().key("slider")
         .role("slider")
         .label(name)
@@ -159,7 +161,9 @@ pub fn slider(name: &str, width: f32, at: f32, t: &Theme) -> El {
         )
         .child(
             disc("slider-knob", 18.0, Color::WHITE)
-                .pin(Some(width * at - 9.0), Some(2.0), None, None)
+                .pin(Some(width * at - 9.0 + dx), Some(2.0 + dy), None, None)
+                // The knob sits where the value is, between device pixels if need be.
+                .pixel_snap(false)
                 .radius(9.0)
                 .box_shadow(kit::drop(1.0, 3.0, Color::BLACK.alpha(0.30)))
                 .box_shadow(kit::ring(kit::HAIR, t.separator)),
