@@ -197,7 +197,7 @@ fn every_frame_of_the_editor_draws_its_words_in_both_themes() {
         ),
         (
             "DW-1552",
-            &[("st-7", "unsaved changes"), ("crumb-here", "Service agreement.docx")],
+            &[("st-7", "unsaved changes"), ("crumb-name", "Service agreement.docx")],
         ),
         (
             "DW-1553",
@@ -340,9 +340,11 @@ fn the_command_search_shows_only_what_the_source_finds() {
     assert!(has(&rt, "pal"));
     assert!(!has(&rt, "pal-0"), "nothing typed, nothing found");
     let type_query = |rt: &mut Runtime<State>| {
-        if let Some(Over::Palette(palette)) = rt.state.viewer.ui.as_mut().and_then(|ui| ui.office.over.as_mut()) {
-            palette.query.insert(QUERY);
-        }
+        rt.update(|s, _| {
+            if let Some(Over::Palette(palette)) = s.viewer.ui.as_mut().and_then(|ui| ui.office.over.as_mut()) {
+                palette.query.insert(QUERY);
+            }
+        });
         rt.frame(0.0);
     };
     type_query(&mut rt);
