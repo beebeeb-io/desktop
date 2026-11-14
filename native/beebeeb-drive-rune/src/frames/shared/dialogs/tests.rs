@@ -136,14 +136,16 @@ fn each_dialog_and_its_controls_are_named_as_the_board_names_them() {
     assert_eq!(focused(&rt).as_deref(), Some(super::EMAIL_INPUT));
     assert_eq!(info(&rt, "first-share").role, "note");
 
-    // Empty Trash?: ONE control for the code, named without its digits; the button is off.
+    // Empty Trash?: the password field is named without what is typed; the button is on once something is.
     let rt = runtime(scenes::dw_0749);
     assert_eq!(
-        role_and_name(&rt, "secure-code"),
-        named("textbox", "Authenticator code, 6 digits, 2 entered")
+        info(&rt, super::PASSWORD_INPUT).label.as_deref(),
+        Some("Your account password")
     );
-    assert_eq!(focused(&rt).as_deref(), Some("secure-code"));
-    assert!(!info(&rt, "btn-empty-trash-2").focusable, "Empty Trash is off");
+    assert!(
+        info(&rt, "btn-empty-trash-2").focusable,
+        "Empty Trash is on: a password is typed"
+    );
 }
 
 #[test]
@@ -342,35 +344,68 @@ fn a_long_title_scrolls_and_the_caret_is_runes_where_only_rune_knows_its_place()
 }
 
 #[test]
-fn the_code_takes_six_digits_at_most_shows_none_to_any_reader_and_is_wiped_on_close() {
+fn the_password_shows_to_no_reader_is_sent_once_and_wiped_and_empty_trash_waits_for_one() {
     let mut rt = runtime(scenes::dw_0749);
-    // Digits only, six at most; Backspace takes the last.
-    press(&mut rt, Key::Text("x7".into()));
-    press(&mut rt, Key::Text("2345".into()));
-    assert_eq!(rt.state.frames.shared.code_len(), 6);
-    assert_eq!(rt.state.frames.shared.fields.code.text, "517234");
-    press(&mut rt, Key::Backspace);
-    assert_eq!(rt.state.frames.shared.code_len(), 5);
-    assert_eq!(
-        info(&rt, "secure-code").label.as_deref(),
-        Some("Authenticator code, 6 digits, 5 entered")
-    );
-    // No reader sees a digit: each is secure text, the control's name counts them only.
-    for i in 0..5 {
-        assert_eq!(info(&rt, &format!("code-{i}-digit")).text, None, "digit {i}");
-    }
+    assert_eq!(rt.state.frames.shared.fields.password.text, "sample");
     let debug = format!("{:?}", rt.state.frames.shared.fields);
-    assert!(!debug.contains("51723"), "the code is in the fields' Debug");
-    // Six digits still do not empty the Trash (the engine has no call for it yet).
-    press(&mut rt, Key::Text("9".into()));
-    click(&mut rt, "btn-empty-trash-2");
-    assert!(rt.state.frames.intents.is_empty());
+    assert!(!debug.contains("sample"), "the password is in the fields' Debug");
+    // Nothing typed: the button is off and nothing is sent.
+    rt.state.frames.shared.fields.password.clear();
+    settle(&mut rt);
+    assert!(
+        !info(&rt, "btn-empty-trash-2").focusable,
+        "Empty Trash is off without a password"
+    );
     assert_eq!(rt.state.frames.trash.source.totals().items, 12);
-    // Cancel or Esc: closed, and the code is gone.
-    press(&mut rt, Key::Escape);
+    // A password typed: pressing sends it (the board's sample takes any), the field is wiped at once, the dialog
+    // closes when the source says it ended, and the list is empty.
+    rt.state
+        .frames
+        .shared
+        .fields
+        .password
+        .replace_text("another".to_string());
+    settle(&mut rt);
+    click(&mut rt, "btn-empty-trash-2");
+    assert_eq!(rt.state.frames.shared.fields.password.text, "");
+    settle(&mut rt);
     assert_eq!(dialog(&rt), None);
-    assert!(rt.find("dialog-empty-trash").is_none());
-    assert_eq!(rt.state.frames.shared.fields.code.text, "");
+    assert_eq!(rt.state.frames.trash.source.totals().items, 0);
+}
+
+#[test]
+fn delete_permanently_names_its_item_and_deletes_only_that_one() {
+    let mut rt = runtime(scenes::dw_0749);
+    rt.state
+        .frames
+        .shared
+        .open_dialog(Dialog::DeleteForever("t-contract-old".into()));
+    settle(&mut rt);
+    assert!(rt.find("dialog-delete-forever").is_some());
+    assert!(
+        text(&rt, "dlg-text-0").unwrap_or_default().contains("Contract old.pdf"),
+        "the warning names the item"
+    );
+    rt.state
+        .frames
+        .shared
+        .fields
+        .password
+        .replace_text("another".to_string());
+    settle(&mut rt);
+    click(&mut rt, "btn-delete-forever");
+    settle(&mut rt);
+    assert_eq!(dialog(&rt), None);
+    assert_eq!(rt.state.frames.trash.source.totals().items, 11);
+    assert!(
+        rt.state
+            .frames
+            .trash
+            .source
+            .items()
+            .iter()
+            .all(|r| r.id != "t-contract-old")
+    );
 }
 
 #[test]
@@ -478,10 +513,10 @@ fn a_dialog_shows_only_over_its_own_section_and_closes_once_left_behind() {
     crate::frames::go(&mut rt.state, Section::Shared);
     settle(&mut rt);
     assert!(rt.find("dialog-empty-trash").is_none(), "Trash's dialog over Shared");
-    // Left behind: the first key in Shared closes it, and the code goes with it.
+    // Left behind: the first key in Shared closes it, and the password goes with it.
     press(&mut rt, Key::Down);
     assert_eq!(dialog(&rt), None);
-    assert_eq!(rt.state.frames.shared.fields.code.text, "");
+    assert_eq!(rt.state.frames.shared.fields.password.text, "");
     crate::frames::go(&mut rt.state, Section::Trash);
     settle(&mut rt);
     assert!(rt.find("dialog-empty-trash").is_none(), "nothing waits in Trash");

@@ -146,11 +146,11 @@ pub fn dw_0515(s: &mut State) {
     });
 }
 
-/// Empty Trash? over Trash, two digits of the code typed.
+/// Empty Trash? over Trash, the first characters of the account password typed.
 pub fn dw_0749(s: &mut State) {
     crate::frames::trash::scenes::dw_0747(s);
     s.frames.shared.open_dialog(Dialog::EmptyTrash);
-    s.frames.shared.type_code("51");
+    s.frames.shared.fields.password.replace_text("sample".into());
 }
 
 /// The lane's dialogs, by frame id (`frames::scenes`).

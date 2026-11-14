@@ -61,6 +61,7 @@ pub mod signin_api;
 pub mod state_owner;
 pub mod transfer_limits_api;
 pub mod trash_api;
+pub mod trash_purge_api;
 // An open file for the native viewer: its facts, and its content decrypted in memory.
 pub mod viewer_api;
 

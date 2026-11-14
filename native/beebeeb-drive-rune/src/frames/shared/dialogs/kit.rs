@@ -1,7 +1,7 @@
 //! The pieces of the lane's dialogs that `crate::ui` does not have, or has keyed for another
 //! group: the card with a head of its own, the alert, a labelled field, the wide switch, a
 //! grouped list keyed as this group's keymap keys it, a person's row, the safety number's
-//! groups, the code boxes and the plain note.
+//! groups and the plain note.
 //!
 //! | Piece | Function | Keys it gives |
 //! | --- | --- | --- |
@@ -13,7 +13,6 @@
 //! | Grouped list (`.kit-list`) | `list(n, name, title, body, foot, t)` | `list-<n>` (the card), `list-<n>-title`, `list-<n>-foot` |
 //! | A person's row (`.kit-item` with `.kit-avatar`) | `person(n, m, &Member, link, t)` | `item-<n>-<m>`, `-person`, `-title`, `-sub`, `-chev` |
 //! | Safety number (`.grid.font-mono`) | `groups(&Groups, numbers, t)` | `safety`, `safety-<i>` |
-//! | Code boxes (`.kit-fieldwrap` > six boxes) | `code_boxes(label, digits, t)` | `code-field`, `code-label`, `secure-code`, `code-<i>`, `code-caret` |
 //! | Note with a glyph (`.kit-banner.tone-neutral`) | `note(key, icon, words, t)` | `<key>`, `<key>-icon`, `<key>-text` |
 //!
 //! Keys a frame's golden has are the board's (`scripts/keymap.js`, the Shared and Trash
@@ -41,10 +40,6 @@ pub const BODY: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0);
 pub const SEG_MD: TextStyle = TextStyle::new(12.5, 550.0).lh(17.0);
 /// `.kit-banner-text`.
 pub const NOTE: TextStyle = TextStyle::new(12.5, 400.0).lh(17.0);
-/// A digit of the authenticator code (`font-mono`, 18px).
-pub const CODE_DIGIT: TextStyle = TextStyle::new(18.0, 400.0).family(Family::Mono).lh(17.0);
-/// The six boxes of the code.
-pub const CODE_LEN: usize = 6;
 
 /// The caption bar the scrim leaves free: the window can still be moved and closed (`.mk-scrim`).
 const CAPTION_H: f32 = 32.0;
@@ -246,7 +241,8 @@ pub fn field(
     let key = spec.key;
     let focused = edit.focused;
     // The drawn caret's room after the last character: 1 pt, and its own 1.5.
-    let scrolls = ui_field::advance(&edit.text, FIELD_VALUE) + 2.5 > spec.inner_w;
+    // A secure field (a password) is drawn as dots by Rune: its text is never measured here, and Rune's own caret shows.
+    let scrolls = edit.is_secure() || ui_field::advance(&edit.text, FIELD_VALUE) + 2.5 > spec.inner_w;
     let rune_caret = if scrolls { t.accent_deep } else { Color::TRANSPARENT };
     let mut field = text_input(edit, FIELD_VALUE)
         .key(spec.input_key)
@@ -548,79 +544,6 @@ pub fn groups(g: &Groups, numbers: &[String], t: &Theme) -> El {
         lines = lines.child(r);
     }
     lines
-}
-
-/// An inset line of `width` (CSS `box-shadow: inset 0 0 0 <width>`).
-fn inset(width: f32, color: Color) -> Shadow {
-    Shadow {
-        x: 0.0,
-        y: 0.0,
-        blur: 0.0,
-        spread: width,
-        color,
-        inset: true,
-    }
-}
-
-/// The authenticator code as six boxes under its label: the digits typed so far, the next box
-/// lit with the caret. ONE control (`secure-code`): it takes the focus and the keys, and its
-/// name never holds a digit. Each digit is a secure text inside it, drawn and never copied.
-/// The caller adds `.on_key(..)` through `control`.
-/// Keys: `code-field`, `code-label`, `secure-code`, `code-<i>`, `code-caret`.
-pub fn code_boxes(label: &str, digits: &str, control: impl FnOnce(El) -> El, t: &Theme) -> El {
-    // Counted and read where they are: no copy of the code is made to draw it.
-    let typed = digits.chars().count().min(CODE_LEN);
-    let mut boxes = row()
-        .key("secure-code")
-        .role("textbox")
-        .label(format!("{label}, {CODE_LEN} digits, {typed} entered"))
-        .gap(6.0)
-        .focusable(true)
-        .no_focus_ring()
-        .autofocus();
-    let mut chars = digits.chars();
-    for i in 0..CODE_LEN {
-        let mut b = el()
-            .key(format!("code-{i}"))
-            .pixel_snap(false)
-            .size(38.0, 44.0)
-            .radius(8.0)
-            .fill(t.field)
-            .center();
-        b = if i == typed {
-            b.box_shadow(kit::ring(3.0, t.accent.alpha(0.3)))
-                .box_shadow(inset(1.0, t.accent_deep))
-                .child(
-                    // `margin: 0 1px -3px` in a centred grid cell: 18.25 and 15 into the box.
-                    el().key("code-caret")
-                        .pixel_snap(false)
-                        .pin(Some(18.25), Some(15.0), None, None)
-                        .size(1.5, 17.0)
-                        .radius(1.0)
-                        .fill(t.accent_deep),
-                )
-        } else {
-            b.box_shadow(kit::ring_inset(t.separator))
-        };
-        if let Some(d) = chars.next().filter(|_| i < typed) {
-            // Each digit's own secure text: Rune wipes it when the frame lets it go.
-            b = b.child(
-                text(d.to_string())
-                    .key(format!("code-{i}-digit"))
-                    .font(CODE_DIGIT)
-                    .color(t.text)
-                    .secure()
-                    .revealed(true),
-            );
-        }
-        boxes = boxes.child(b);
-    }
-    col()
-        .key("code-field")
-        .w_full()
-        .gap(6.0)
-        .child(outer_label("code-label", label, t))
-        .child(control(boxes))
 }
 
 /// A note with a glyph (`.kit-banner.tone-neutral`): what the person should know before they
