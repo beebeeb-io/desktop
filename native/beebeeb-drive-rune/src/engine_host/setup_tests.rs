@@ -81,13 +81,20 @@ impl SetupEngine for Fake {
     fn first_run_due(&self) -> Result<bool, SetupRefused> {
         *self.due.lock().unwrap()
     }
+    // As the engine: a write for a session that is not the one in memory writes nothing.
     fn mark_done_for(&self, session: SessionGeneration) -> Result<(), SetupRefused> {
         let _held = self.held.lock().unwrap();
+        if session != self.stamp().0 {
+            return Err(SetupRefused::SessionMoved);
+        }
         self.marked.lock().unwrap().push(session);
         *self.writes.lock().unwrap()
     }
     fn set_notifications_for(&self, session: SessionGeneration, on: bool) -> Result<(), SetupRefused> {
         let _held = self.held.lock().unwrap();
+        if session != self.stamp().0 {
+            return Err(SetupRefused::SessionMoved);
+        }
         self.notified.lock().unwrap().push((session, on));
         *self.writes.lock().unwrap()
     }
@@ -105,14 +112,18 @@ struct Asked {
     starts: AtomicUsize,
     /// What a start answers.
     start_refused: AtomicBool,
+    /// How often the window was asked to look again later.
+    looks: AtomicUsize,
 }
 
 static OPENED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 fn hooks(asked: &Arc<Asked>, platform: Arc<FakePlatform>, first_run: Arc<FirstRun>) -> Hooks {
     let asked = asked.clone();
+    let starts = asked.clone();
     Hooks {
         start_sync: Arc::new(move || {
+            let asked = &starts;
             asked.starts.fetch_add(1, Ordering::SeqCst);
             !asked.start_refused.load(Ordering::SeqCst)
         }),
@@ -123,6 +134,12 @@ fn hooks(asked: &Arc<Asked>, platform: Arc<FakePlatform>, first_run: Arc<FirstRu
         platform,
         first_run,
         explorer_step: true,
+        look_later: {
+            let asked = asked.clone();
+            Arc::new(move |_| {
+                asked.looks.fetch_add(1, Ordering::SeqCst);
+            })
+        },
     }
 }
 
@@ -225,6 +242,22 @@ fn file_explorer_is_drawn_from_the_engines_view_and_a_refused_start_is_not_addin
         set.engine.set(start, explorer);
         assert_eq!(set.source.explorer(), drawn, "{start:?}, {explorer:?}");
     }
+    // A start that never came: "adding" only for the moment a start that was just asked for needs; after it,
+    // sync is off, and the step says so (with its Try again, which asks for a start and waits again).
+    assert_eq!(
+        set.asked.looks.load(Ordering::SeqCst),
+        1,
+        "the window looks again after that moment"
+    );
+    set.engine.set(Start::NotAsked, EngineExplorer::Unknown);
+    assert_eq!(set.source.explorer(), Explorer::Adding);
+    set.source.start_asked_at = Instant::now() - START_GRACE;
+    assert_eq!(set.source.explorer(), Explorer::NotSyncing);
+    assert!(set.source.poll(), "the window draws it");
+    set.source.retry_explorer();
+    assert_eq!(set.source.explorer(), Explorer::Adding, "a start was just asked for");
+    assert_eq!(set.asked.looks.load(Ordering::SeqCst), 2);
+    settle(&mut set, 1);
     // The poll says so when the view moved, once.
     set.engine.set(Start::Running, EngineExplorer::Adding);
     set.source.poll();
@@ -391,6 +424,19 @@ fn open_my_beebeeb_marks_the_first_run_done_and_only_then_lets_the_main_window_t
     set.source.finish();
     settle(&mut set, 1);
     assert!(!set.first_run.due());
+
+    // Written, and the vault is locked before the window polls again: the first run is over for this PC all the
+    // same (the file says so), so an unlock in this run does not show it again.
+    let mut set = set_on(fake(), FakePlatform::default());
+    set.source.finish();
+    let began = Instant::now();
+    while set.engine.wakes.load(Ordering::SeqCst) < 1 {
+        assert!(began.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    set.engine.view.lock().unwrap().gate = GateState::Locked;
+    set.source.poll();
+    assert!(!set.first_run.due());
 }
 
 #[test]
@@ -448,6 +494,7 @@ fn another_session_or_account_is_never_written_for_and_never_answered() {
         settle(&mut set, 2);
         assert!(set.source.take_outcomes().is_empty(), "{moved_to:?}");
         assert!(set.first_run.due(), "{moved_to:?}");
+        assert!(set.engine.marked.lock().unwrap().is_empty(), "{moved_to:?}");
     }
     // Locked (the gate is not Ready): the same.
     let mut set = set();
@@ -658,6 +705,49 @@ fn the_first_run_is_dropped_with_its_session_and_made_again_for_another_account(
     press(&mut rt, "Allow notifications");
     wait_for(&mut rt, "its write", |_| !engine.notified.lock().unwrap().is_empty());
     assert_eq!(engine.notified.lock().unwrap().clone(), [(session(3), true)]);
+}
+
+/// "Skip setup" asks nothing of the engine: the last page claims no value for a switch nothing set.
+#[test]
+fn skip_setup_sets_nothing_and_the_last_page_claims_nothing() {
+    let set = set();
+    set.engine.set(Start::Running, EngineExplorer::Added);
+    let (mut rt, engine, fixture, _first_run, platform) = window(set);
+    fixture.set_gate_for_scene(ShellGate::FirstRun);
+    wait_for(&mut rt, "the first run", |rt| rt.state.setup.is_some());
+    rt.update(|s, _| {
+        if let Some(ui) = s.setup.as_mut() {
+            ui.skip();
+        }
+    });
+    wait_for(&mut rt, "the last page", |rt| says(rt, "You're set up"));
+    assert!(says(&rt, "Notifications, Not set here") && says(&rt, "Open at login, Not set here"));
+    assert!(!says(&rt, "Notifications, On") && !says(&rt, "Open at login, On"));
+    assert!(engine.notified.lock().unwrap().is_empty() && platform.autostart_writes().is_empty());
+}
+
+/// A gate that was moved by a refresh outside the poll (the b's menu refreshes the session too) still gets its
+/// first run, and loses it the same way.
+#[test]
+fn a_gate_change_seen_outside_the_poll_still_makes_and_drops_the_first_run() {
+    let set = set();
+    set.engine.set(Start::Running, EngineExplorer::Added);
+    let (mut rt, _engine, fixture, ..) = window(set);
+    fixture.set_gate_for_scene(ShellGate::FirstRun);
+    rt.update(|s, _| {
+        s.shell.refresh();
+        assert_eq!(
+            s.shell.app.gate(),
+            ShellGate::FirstRun,
+            "the refresh moved the gate, not the poll"
+        );
+    });
+    wait_for(&mut rt, "the first run", |rt| rt.state.setup.is_some());
+    fixture.set_gate_for_scene(ShellGate::Ready);
+    rt.update(|s, _| {
+        s.shell.refresh();
+    });
+    wait_for(&mut rt, "dropped", |rt| rt.state.setup.is_none());
 }
 
 /// A window nobody wired a first run into (every scene, every other test) is never moved by this: the frame says

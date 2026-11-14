@@ -737,6 +737,7 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     // A switch whose change is answered after the press draws no value before the answer, and never the value
     // that was asked for when the change did not happen.
     let switch = |switch: Switch, on: bool| match ui.answered(switch) {
+        Some(Answered::NotAsked) => "Not set here",
         Some(Answered::Waiting) => "Saving\u{2026}",
         Some(Answered::NotKnown) => "Not changed",
         Some(Answered::NotChanged) | None => on_off(on),

@@ -266,6 +266,13 @@ pub fn run() {
     } else {
         None
     };
+    // The first run (DW-0201 to DW-0208 are Windows' frames): whether this PC still has it to do is read here,
+    // once, before the first window is chosen, so a start with a stored session opens on the right one.
+    if cfg!(target_os = "windows")
+        && let Some((_, live)) = &real_engine
+    {
+        live.wire_first_run();
+    }
     let engine: Arc<dyn EngineActions> = match &real_engine {
         Some((opened, live)) => {
             host::log(format!("the engine is open; the stored session says {:?}", opened.gate));

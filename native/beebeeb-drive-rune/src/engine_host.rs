@@ -290,6 +290,18 @@ impl<C: CredentialStores> LiveEngine<C> {
             platform,
             first_run: self.first_run.clone(),
             explorer_step: cfg!(target_os = "windows"),
+            look_later: {
+                let engine = self.engine.clone();
+                Arc::new(move |after| {
+                    let engine = engine.clone();
+                    let _ = std::thread::Builder::new()
+                        .name("first-run-look".into())
+                        .spawn(move || {
+                            std::thread::sleep(after);
+                            engine.wake_host();
+                        });
+                })
+            },
         }
     }
 

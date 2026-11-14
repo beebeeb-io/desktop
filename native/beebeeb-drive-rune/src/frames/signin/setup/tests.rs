@@ -545,6 +545,15 @@ fn an_answered_switch_draws_what_the_answer_says_not_what_was_asked() {
         Some(Answered::NotKnown),
         "the other one stands"
     );
+    // Made, and what is set could not be read back: it was made (the value that was asked for stands).
+    ui.results.notifications = true;
+    ui.take_in(Outcome {
+        switch: Switch::Notifications,
+        done: true,
+        now: None,
+    });
+    assert!(ui.results.notifications);
+    assert_eq!(ui.answered(Switch::Notifications), None);
     // The fixture's changes are made at once: nothing waits, and every step and row is there (the board).
     assert_eq!(ui.steps(), Step::STEPS);
     assert!(ui.opens_settings() && ui.has(Setting::Passkey));

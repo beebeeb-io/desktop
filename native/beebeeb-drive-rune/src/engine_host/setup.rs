@@ -30,6 +30,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::app::setup_api::SetupRefused;
@@ -138,11 +139,19 @@ pub struct Hooks {
     pub first_run: Arc<FirstRun>,
     /// The File Explorer step exists on this OS (Windows).
     pub explorer_step: bool,
+    /// Wake the window once, after this long (a start that never came is said without waiting for a press).
+    pub look_later: Arc<dyn Fn(Duration) + Send + Sync>,
 }
 
+/// How long a start that was just asked for may still read as "not asked" in the engine's view before the step
+/// says sync did not start (the start worker sets the view a moment after it was asked).
+pub const START_GRACE: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy)]
 enum Answer {
     Switched(Outcome),
-    /// "Open my Beebeeb" was answered: the first run is over for this session, written or not.
+    /// "Open my Beebeeb" could not be written to the settings file (or its worker did not run): the first run is
+    /// over for this session all the same. (A write that worked ends it on the worker, for every session.)
     Finished,
     /// Something the view reads through the engine's view may have changed (a start was asked).
     Looked,
@@ -156,17 +165,21 @@ pub struct EngineSetupSource<E: SetupEngine> {
     made_for: Stamp,
     /// What `explorer` said at the last poll: a change draws again.
     seen: Explorer,
+    /// When a sync start was last asked for on this first run's behalf (the shell asks one as it opens).
+    start_asked_at: Instant,
     outcomes: Vec<Outcome>,
     changed: bool,
     answers: mpsc::Sender<(Stamp, Answer)>,
     inbox: mpsc::Receiver<(Stamp, Answer)>,
 }
 
-/// The engine's view as the step draws it. A start the engine refused, or one that was never asked while the
-/// vault is open, is not "adding": nothing is being added.
-fn explorer_of(view: &SyncView) -> Explorer {
+/// The engine's view as the step draws it. A start the engine refused is not "adding": nothing is being added.
+/// Nor is a start that was never made (`start_due`: none is on its way any more): sync is off, and the step says
+/// so, with its Try again.
+fn explorer_of(view: &SyncView, start_due: bool) -> Explorer {
     match (view.start, view.explorer) {
         (Start::Refused(_), _) => Explorer::NotSyncing,
+        (Start::NotAsked, _) if !start_due => Explorer::NotSyncing,
         (_, EngineExplorer::Added) => Explorer::Added,
         (_, EngineExplorer::Failed { code }) => Explorer::Failed {
             // As Windows writes an HRESULT: "0x8007017C".
@@ -182,17 +195,27 @@ impl<E: SetupEngine> EngineSetupSource<E> {
     /// For the session and account that are the engine's now. Nothing is asked of the engine here.
     pub fn new(engine: Arc<E>, hooks: Hooks) -> Self {
         let (answers, inbox) = mpsc::channel();
-        let (made_for, seen) = (engine.stamp(), explorer_of(&engine.view()));
-        Self {
+        let (made_for, seen) = (engine.stamp(), explorer_of(&engine.view(), true));
+        let mut source = Self {
             engine,
             hooks,
             made_for,
             seen,
+            start_asked_at: Instant::now(),
             outcomes: Vec::new(),
             changed: false,
             answers,
             inbox,
-        }
+        };
+        source.look_after_the_grace();
+        source
+    }
+
+    /// A start was asked for now: the view may say "not asked" for a moment longer. When the grace is over the
+    /// window is woken once, so a start that never came is said without waiting for a press.
+    fn look_after_the_grace(&mut self) {
+        self.start_asked_at = Instant::now();
+        (self.hooks.look_later)(START_GRACE + Duration::from_millis(50));
     }
 
     /// Whether the engine's session and account are still the ones this first run was made for, with the vault
@@ -202,27 +225,34 @@ impl<E: SetupEngine> EngineSetupSource<E> {
     }
 
     /// Run `work` on a worker named `name`, for the session of this press; its answer goes down the channel
-    /// with that session, and the window is woken. A press under another session, or a worker that could not
-    /// start, answers `refused` at once (never a press that ends in nothing).
+    /// with that session, and the window is woken. A worker that could not start, or that panicked, answers
+    /// `refused` (never a press that ends in nothing). A press under another session sends and says nothing.
     fn ask(
         &mut self,
         name: &str,
         work: impl FnOnce(&E, SessionGeneration) -> Answer + Send + 'static,
         refused: Option<Answer>,
     ) {
-        let mut refuse = |source: &mut Self| {
+        let refuse = |source: &mut Self| {
             if let Some(answer) = refused {
                 let _ = source.answers.send((source.made_for.clone(), answer));
                 source.changed = true;
             }
         };
         if !self.mine() {
-            return refuse(self);
+            // Another session's press: nothing is sent, and nothing is said to it either (its answer would be
+            // dropped by the poll: it is not this first run's session).
+            return;
         }
         let (engine, answers, stamp) = (self.engine.clone(), self.answers.clone(), self.made_for.clone());
         let started = std::thread::Builder::new().name(name.into()).spawn(move || {
-            let answer = work(&engine, stamp.0);
-            let _ = answers.send((stamp, answer));
+            // A worker that panicked answers as a press that was refused: never a switch left on "Saving".
+            let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&engine, stamp.0)))
+                .ok()
+                .or(refused);
+            if let Some(answer) = answer {
+                let _ = answers.send((stamp, answer));
+            }
             engine.wake();
         });
         if started.is_err() {
@@ -259,7 +289,7 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
     }
 
     fn explorer(&self) -> Explorer {
-        explorer_of(&self.engine.view())
+        explorer_of(&self.engine.view(), self.start_asked_at.elapsed() < START_GRACE)
     }
 
     /// "Try again" (DW-0280). Sync does not run: one start is asked for, the shell's way. Sync runs and Windows
@@ -267,6 +297,9 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
     fn retry_explorer(&mut self) {
         let running = self.engine.view().start == Start::Running;
         let start = self.hooks.start_sync.clone();
+        if self.mine() {
+            self.look_after_the_grace();
+        }
         self.ask(
             "first-run-explorer",
             move |engine, _| {
@@ -351,18 +384,26 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
     }
 
     /// "Open my Beebeeb": mark the first run done for this PC, for the session of the press. The main window
-    /// opens once that was answered, whether or not the file could be written (a first run that cannot be
-    /// written is shown again at the next start; it never holds a person out of their files).
+    /// opens once that was answered. Written: the first run is over for this PC, whoever is signed in by then
+    /// (the worker says so itself, so a lock that lands before the next poll cannot bring it back). Not
+    /// written (the settings file, or no worker): it is over for this session all the same (it is shown again
+    /// at the next start; it never holds a person out of their files). A session that moved on: nothing.
     fn finish(&mut self) {
+        let first_run = self.hooks.first_run.clone();
         self.ask(
             "first-run-finish",
-            |engine, session| {
-                if let Err(refused) = engine.mark_done_for(session) {
-                    log(format!("first run: could not be marked done ({})", refused.kind()));
+            move |engine, session| match engine.mark_done_for(session) {
+                Ok(()) => {
+                    first_run.end();
+                    Answer::Looked
                 }
-                Answer::Finished
+                Err(SetupRefused::SessionMoved) => Answer::Looked,
+                Err(refused) => {
+                    log(format!("first run: could not be marked done ({})", refused.kind()));
+                    Answer::Finished
+                }
             },
-            None,
+            Some(Answer::Finished),
         );
     }
 

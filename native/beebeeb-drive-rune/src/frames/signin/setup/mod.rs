@@ -157,6 +157,9 @@ impl Setting {
 /// Where a switch of "You're set up" stands when its change is answered after the press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answered {
+    /// Never asked of a source that answers later ("Skip setup", a step that was left with nothing chosen):
+    /// nothing was set here, and no value is claimed.
+    NotAsked,
     /// Asked, not answered yet: no value is drawn.
     Waiting,
     /// The change did not happen, and what the switch is now is known (`results` holds it).
@@ -210,6 +213,8 @@ pub struct Ui {
     /// Switches whose change is answered after the press, and where each stands. One that is not listed here was
     /// made (or never asked): `results` says what it is.
     answered: Vec<(Switch, Answered)>,
+    /// The switches that were asked of the source at all.
+    asked: Vec<Switch>,
 }
 
 /// Decode a PNG into pixels Rune draws. A file that does not decode draws nothing.
@@ -245,6 +250,7 @@ impl Ui {
             step: offered.first().copied().unwrap_or(Step::Done),
             offered,
             answered: Vec::new(),
+            asked: Vec::new(),
             compare: None,
             explorer: source.explorer(),
             // Step 2 draws the switch on and "5 min" chosen; step 7 draws its switch on.
@@ -325,11 +331,17 @@ impl Ui {
 
     /// Where a switch stands while its change has not been made: `None` once it was (or when it was never asked).
     pub fn answered(&self, switch: Switch) -> Option<Answered> {
+        if self.source.answers_later() && !self.asked.contains(&switch) {
+            return Some(Answered::NotAsked);
+        }
         self.answered.iter().find(|(s, _)| *s == switch).map(|(_, a)| *a)
     }
 
     /// A switch was asked of the source. A source that answers later: no value is drawn until it does.
     fn asked(&mut self, switch: Switch) {
+        if !self.asked.contains(&switch) {
+            self.asked.push(switch);
+        }
         self.answered.retain(|(s, _)| *s != switch);
         if self.source.answers_later() {
             self.answered.push((switch, Answered::Waiting));
@@ -346,8 +358,9 @@ impl Ui {
             }
         }
         match (outcome.done, outcome.now) {
-            (true, Some(_)) => {}
-            (_, None) => self.answered.push((outcome.switch, Answered::NotKnown)),
+            // Made (when what is set could not be read back, the value that was asked for stands).
+            (true, _) => {}
+            (false, None) => self.answered.push((outcome.switch, Answered::NotKnown)),
             (false, Some(_)) => self.answered.push((outcome.switch, Answered::NotChanged)),
         }
     }

@@ -145,21 +145,17 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
 /// this is false the shell hands Search the `Unwired` source and no part of the adapter runs (no index, no worker).
 pub(crate) const SEARCH_ON_ENGINE: bool = false;
 
-/// The window on the real engine: Files and sign-in ask the handle. Every area not yet
-/// backed by the engine starts on its `Unwired` state (the shell's "not built yet" frame),
-/// never the board's sample data presented as the person's own.
 /// Makes a first-run source for the session that is signed in when it is called.
 pub type SetupMaker = Box<dyn Fn() -> Box<dyn crate::frames::signin::setup::source::SetupSource>>;
 
-/// The running app's first run, on the real engine: read once whether this PC still has it to do, and give the
-/// window the way to make its source. Only the app's start calls this: a window that was not wired never shows
-/// a first run (the gate stays as the engine says).
+/// The running app's first run, on the real engine: give the window the way to make its source. Only the app's
+/// start calls this (after it read whether a first run is due, `LiveEngine::wire_first_run`): a window that was
+/// not wired never shows a first run (the gate stays as the engine says).
 pub fn wire_first_run<C: beebeeb_engine::app::CredentialStores + 'static>(
     s: &mut State,
     engine: std::sync::Arc<beebeeb_engine::app::Engine<C>>,
     live: &std::sync::Arc<crate::engine_host::LiveEngine<C>>,
 ) {
-    live.wire_first_run();
     let hooks = live.setup_hooks(crate::shell::platform::current());
     s.setup_source = Some(Box::new(move || {
         Box::new(crate::engine_host::setup::EngineSetupSource::new(
@@ -169,6 +165,9 @@ pub fn wire_first_run<C: beebeeb_engine::app::CredentialStores + 'static>(
     }));
 }
 
+/// The window on the real engine: Files and sign-in ask the handle. Every area not yet
+/// backed by the engine starts on its `Unwired` state (the shell's "not built yet" frame),
+/// never the board's sample data presented as the person's own.
 pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     shell: Shell,
     engine: std::sync::Arc<beebeeb_engine::app::Engine<C>>,
