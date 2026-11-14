@@ -214,7 +214,22 @@ fn tool(key: &str, name: &'static str, face: Face, state: Tool, command: &'stati
     }
     b.child(match face {
         Face::Glyph(icon, size) => kit::glyph(format!("{key}-icon"), icon, size, ink),
-        Face::Letter(letter, text_style) => kit::label(format!("{key}-letter"), letter, text_style, ink).a11y_hidden(),
+        Face::Letter(letter, text_style) => {
+            // Underline is drawn underlined and Italic slanted, as the board's letters are.
+            let key = format!("{key}-letter");
+            let span = match letter {
+                "U" => vec![Span::new(0, 1).underline(ink)],
+                "I" => vec![Span::new(0, 1).italic()],
+                _ => Vec::new(),
+            };
+            kit::note_text(&key, &key, letter, text_style, ink);
+            rich(letter, span)
+                .key(key)
+                .font(text_style)
+                .color(ink)
+                .w(rune::text::advance(letter, text_style))
+                .a11y_hidden()
+        }
     })
 }
 
@@ -248,15 +263,13 @@ fn pop(key: &str, name: &'static str, choice: &str, w: f32, command: &'static st
     )
     .focusable(true)
     .on_press(ask(command))
-    .child(kit::label(format!("{key}-label"), choice, POP, t.text).a11y_hidden())
+    .child(style::fitted(format!("{key}-label"), choice, POP, t.text).a11y_hidden())
     .child(el().key(format!("{key}-gap")).grow(1.0))
     .child(kit::glyph(format!("{key}-caret"), &oi::CARET, 11.0, t.text_tertiary))
 }
 
-/// A small button of the ribbon's first row (`.kit-btn-sm`). The board draws these two on light
-/// paper in both themes, so they take the light theme's colours. Keys: `<key>`, `-icon`, `-label`, `-hint`.
-fn small_button(key: &str, label: &'static str, icon: &'static Icon, hint: Option<&'static str>) -> El {
-    let light = tokens::theme(false);
+/// A small button of the ribbon's first row (`.kit-btn-sm`). Keys: `<key>`, `-icon`, `-label`, `-hint`.
+fn small_button(key: &str, label: &'static str, icon: &'static Icon, hint: Option<&'static str>, t: &Theme) -> El {
     let mut b = row()
         .key(key.to_string())
         .role("button")
@@ -266,17 +279,17 @@ fn small_button(key: &str, label: &'static str, icon: &'static Icon, hint: Optio
         .gap(7.0)
         .center()
         .radius(6.0)
-        .fill(light.paper)
-        .border(1.0, light.card_border)
+        .fill(t.paper)
+        .border(1.0, t.card_border)
         .border_layout()
-        .child(kit::glyph(format!("{key}-icon"), icon, 14.0, light.text))
-        .child(kit::label(format!("{key}-label"), label, style::BUTTON_SM, light.text));
+        .child(kit::glyph(format!("{key}-icon"), icon, 14.0, t.text))
+        .child(style::fitted(format!("{key}-label"), label, style::BUTTON_SM, t.text));
     if let Some(hint) = hint {
         b = b.shortcut_hint(hint).child(
             el().key(format!("{key}-hint-box"))
                 .ml(-3.0)
                 .opacity(0.6)
-                .child(kit::label(format!("{key}-hint"), hint, HINT, light.text).a11y_hidden()),
+                .child(style::fitted(format!("{key}-hint"), hint, HINT, t.text).a11y_hidden()),
         );
     }
     b
@@ -302,7 +315,7 @@ fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
                 }
             })
             .child(
-                kit::label(
+                style::fitted(
                     format!("rib-tab-{i}"),
                     tab.label(),
                     if on { TAB_ON } else { TAB },
@@ -339,21 +352,32 @@ fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
     .focusable(true)
     .on_press(ask("the command search"))
     .child(kit::glyph("rib-find-icon", &oi::FIND, 12.0, t.text_tertiary))
-    .child(kit::label(
+    .child(style::fitted(
         "rib-find-text",
         "Search commands, styles, files\u{2026}",
         CAP,
         t.text_tertiary,
     ))
-    .child(tb::kbd("rib-find-kbd", "Ctrl+K", t));
-    let share = small_button("rib-btn-0", "Share", &oi::SHARE, None)
+    // `.kit-kbd`, as wide as its letters (the toolbar's own rounds up to half a point).
+    .child(
+        el().key("rib-find-kbd-box")
+            .h(20.0)
+            .px(6.0)
+            .radius(6.0)
+            .fill(t.card)
+            .box_shadow(kit::ring_inset(t.separator))
+            .box_shadow(kit::drop(1.0, 0.0, t.separator))
+            .center()
+            .child(style::fitted("rib-find-kbd", "Ctrl+K", type_::KBD, t.text_tertiary)),
+    );
+    let share = small_button("rib-btn-0", "Share", &oi::SHARE, None, t)
         .focusable(true)
         .on_press(|s: &mut State| {
             if let Some(ui) = super::ui(s) {
                 ui.intent(Intent::Share);
             }
         });
-    let save = small_button("rib-btn-1", "Save", &oi::PADLOCK, Some("Ctrl+S"));
+    let save = small_button("rib-btn-1", "Save", &oi::PADLOCK, Some("Ctrl+S"), t);
     // Save is off, at 45 %, while there is nothing to save.
     let save = if unsaved {
         el().key("rib-save").child(save.focusable(true).on_press(ask("Save")))
@@ -599,6 +623,8 @@ fn stage(doc: &WordDoc, t: &Theme) -> El {
                             .radius(10.0)
                             .fill(t.card.alpha(if t.dark { 0.68 } else { 0.72 }))
                             .border(kit::HAIR, t.separator)
+                            .border_layout()
+                            .backdrop_blur(22.0)
                             .box_shadow(kit::drop(6.0, 22.0, Color::BLACK.alpha(0.10)))
                             .child(letter("ft-0", "Bold", "B", LETTER_HEAVY))
                             .child(letter("ft-1", "Italic", "I", LETTER))
@@ -628,7 +654,7 @@ fn stage(doc: &WordDoc, t: &Theme) -> El {
 
 /// The status line: what the document is, how it is kept, the zoom, About.
 fn status(file: &OpenFile, doc: &WordDoc, unsaved: bool, t: &Theme) -> El {
-    let plain = |key: String, words: String| kit::label(key, words, type_::STATUS, t.text_tertiary);
+    let plain = |key: String, words: String| style::fitted(key, &words, type_::STATUS, t.text_tertiary);
     let dot = |key: &str| plain(key.to_string(), "\u{00B7}".to_string());
     let sep = |key: &str| el().key(key.to_string()).w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
     let pages = if doc.pages == 1 {
@@ -651,6 +677,7 @@ fn status(file: &OpenFile, doc: &WordDoc, unsaved: bool, t: &Theme) -> El {
             .key("st-7")
             .font(type_::STATUS)
             .color(t.text_tertiary)
+            .w(rune::text::advance(&kept[..at], type_::STATUS) + rune::text::advance(&doc.saved_at, STATUS_MONO))
     };
     row()
         .key("status-bar")
@@ -676,7 +703,7 @@ fn status(file: &OpenFile, doc: &WordDoc, unsaved: bool, t: &Theme) -> El {
                 .gap(4.0)
                 .center_y()
                 .child(kit::glyph("st-5-icon", &oi::PADLOCK, 11.0, t.accent_deep))
-                .child(kit::label("st-5", "Encrypted", STATUS_ENC, t.accent_deep)),
+                .child(style::fitted("st-5", "Encrypted", STATUS_ENC, t.accent_deep)),
         )
         .child(dot("st-6"))
         .child(kept_el)
@@ -689,7 +716,7 @@ fn status(file: &OpenFile, doc: &WordDoc, unsaved: bool, t: &Theme) -> El {
                 .gap(4.0)
                 .center_y()
                 .child(kit::glyph("st-8-less", &oi::LESS, 12.0, t.text_tertiary))
-                .child(kit::label("st-8-zoom", "100%", STATUS_MONO, t.text_tertiary))
+                .child(style::fitted("st-8-zoom", "100%", STATUS_MONO, t.text_tertiary))
                 .child(kit::glyph("st-8-more", &oi::MORE, 12.0, t.text_tertiary)),
         )
         .child(sep("st-sep-1"))
@@ -699,12 +726,14 @@ fn status(file: &OpenFile, doc: &WordDoc, unsaved: bool, t: &Theme) -> El {
                 .label("About this editor")
                 .focusable(true)
                 .on_press(ask("About this editor"))
-                .child(
+                .child({
+                    kit::note_text("st-9", "st-9", "About", type_::STATUS, t.text_tertiary);
                     rich("About", vec![Span::new(0, 5).underline(t.text_tertiary)])
                         .key("st-9")
                         .font(type_::STATUS)
-                        .color(t.text_tertiary),
-                ),
+                        .color(t.text_tertiary)
+                        .w(rune::text::advance("About", type_::STATUS))
+                }),
         )
 }
 

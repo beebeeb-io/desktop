@@ -44,7 +44,7 @@
         icon('rib-find-icon', q(':scope > svg', find));
         text('rib-find-text', q(':scope > .t-cap', find));
         box('rib-find-kbd-box', q('kbd', find));
-        text('rib-find-kbd', q('kbd', find));
+        if (q('kbd', find)) api.textNode('rib-find-kbd', q('kbd', find));
       }
       qa('.kit-btn', tabs).forEach((b, i) => button(`rib-btn-${i}`, b));
       // The tools' row, in order: tool buttons, pop-up buttons, hairlines.
