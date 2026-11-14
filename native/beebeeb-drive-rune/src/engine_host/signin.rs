@@ -53,6 +53,8 @@ enum Wait {
     TwoFactor,
     Restore,
     Unlock,
+    /// A passkey sign-in: the system's dialog, on a thread of its own.
+    Passkey,
     /// The countdown after "too many tries".
     Retry,
     /// Sign-up's steps and the wait for a new code (`signup.rs`).
@@ -216,7 +218,8 @@ fn undo_left_step<C: CredentialStores>(engine: &Arc<Engine<C>>, answers: &mpsc::
     match event {
         SignInEvent::TwoFactor(Ok(_))
         | SignInEvent::PhraseRestored(Ok(_))
-        | SignInEvent::SignUp(SignUpEvent::Created(Ok(_))) => {
+        | SignInEvent::SignUp(SignUpEvent::Created(Ok(_)))
+        | SignInEvent::Passkey(PasskeyOutcome::Succeeded(_)) => {
             if engine.sign_out_keeping_local_data().is_err() {
                 still_signed_in(answers);
             }
@@ -352,8 +355,53 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
         );
     }
 
+    /// Core's passkey sign-in starts from an address: [`SignInSource::begin_passkey_for`] is the call a screen makes.
     fn begin_passkey(&mut self) {
-        self.not_bound("begin_passkey", SignInEvent::Passkey(PasskeyOutcome::Unavailable));
+        self.begin_passkey_for("");
+    }
+
+    fn passkey_available(&self) -> bool {
+        self.engine.passkeys_supported()
+    }
+
+    /// The system's passkey dialog for the address typed, on a thread of its own (it stays up for as long as the
+    /// person takes; the shared worker keeps serving the other steps). The person leaving ([`Self::cancel_passkey`])
+    /// moves the attempt on: its answer is dropped, and a sign-in it completed is undone.
+    fn begin_passkey_for(&mut self, email: &str) {
+        let attempt = self.next_attempt(Wait::Passkey);
+        let (engine, answers, attempts) = (self.engine.clone(), self.answers.clone(), self.attempts.clone());
+        let email = email.to_string();
+        let started = thread::Builder::new().name("signin-passkey".into()).spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::passkeys::sign_in_outcome(&engine, &email)
+            }))
+            .unwrap_or(PasskeyOutcome::Unavailable);
+            let event = SignInEvent::Passkey(outcome);
+            if attempts[Wait::Passkey as usize].load(Ordering::SeqCst) != attempt {
+                undo_left_step(&engine, &answers, &event);
+            } else {
+                let _ = answers.send(Answer {
+                    wait: Wait::Passkey,
+                    attempt,
+                    event,
+                });
+            }
+            engine.wake_host();
+        });
+        if started.is_err() {
+            log("sign-in: the passkey thread did not start");
+            let _ = self.answers.send(Answer {
+                wait: Wait::Passkey,
+                attempt,
+                event: SignInEvent::Passkey(PasskeyOutcome::Unavailable),
+            });
+        }
+    }
+
+    /// The person left while the dialog was up. The system's dialog cannot be closed from here: it ends when they
+    /// close it, and nothing it did is kept (an answer of an attempt that was left is undone, never drawn).
+    fn cancel_passkey(&mut self) {
+        self.next_attempt(Wait::Passkey);
     }
 
     /// A locked vault's password: proven by the server, then the key this computer holds is loaded

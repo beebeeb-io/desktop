@@ -214,7 +214,7 @@ impl<C: CredentialStores> Engine<C> {
     /// [`Engine::note_account_call`], only while the session in memory is still `session` (asked with no session
     /// change half done): a late answer of an earlier session never counts for, or clears, the next one's run.
     /// `false`: the session moved on, and nothing was noted.
-    fn note_for_session(&self, session: SessionGeneration, failed_as: Option<AccountCallError>) -> bool {
+    pub(super) fn note_for_session(&self, session: SessionGeneration, failed_as: Option<AccountCallError>) -> bool {
         self.acct
             .while_session_is(&self.writes, session, |_| self.note_account_call(failed_as))
             .is_some()

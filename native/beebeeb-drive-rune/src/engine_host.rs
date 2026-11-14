@@ -62,6 +62,7 @@ mod files_versions;
 mod files_window_support;
 pub mod guide;
 pub mod open;
+pub mod passkeys;
 pub mod photos;
 pub mod search;
 pub mod settings;
