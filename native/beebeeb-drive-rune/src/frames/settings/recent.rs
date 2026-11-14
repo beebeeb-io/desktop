@@ -4,7 +4,6 @@
 use crate::State;
 use crate::theme::icons_settings as ic;
 use crate::theme::tokens::{Theme, type_};
-use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_list::{self as lists, Item, Role};
 use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::{kit, settings_shell as shell};
@@ -35,8 +34,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             return (shell::pane(children, t), None);
         }
         ReadState::Failed => {
-            let again = controls::button(0, "Try again", None, Emphasis::Plain, t)
-                .on_press(|s: &mut State| s.settings.source.reload_notifications());
+            let again = super::notifications::try_again(0, t);
             children.push(notices::problem(
                 0,
                 0,
@@ -57,6 +55,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             "When something needs your attention, a new device sign-in, a share or a storage warning, it shows up here.",
             t,
         ));
+        children.extend(unconfirmed(ui, t));
         return (shell::pane(children, t), None);
     }
     let mut pills = 0;
@@ -100,5 +99,23 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             .collect();
         children.push(lists::list(l, Some(day), rows, None, t));
     }
+    children.extend(unconfirmed(ui, t));
     (shell::pane(children, t), None)
+}
+
+/// Read, but a later change could not be confirmed: the list stays, and below it (so no row moves under the
+/// pointer when this comes or goes) the page says it may be out of date, with "Try again".
+fn unconfirmed(ui: &SettingsUi, t: &Theme) -> Option<El> {
+    let (strong, words) = super::notifications::UNCONFIRMED;
+    ui.source.notifications_unconfirmed().then(|| {
+        notices::note_with(
+            0,
+            Tone::Warn,
+            &ic::WARN_CIRCLE,
+            strong,
+            words,
+            Some(super::notifications::try_again(0, t)),
+            t,
+        )
+    })
 }

@@ -153,7 +153,7 @@ impl State {
     }
 
     /// The rows shown that have these ids.
-    fn rows_of(&self, ids: &[String]) -> Vec<DriveItem> {
+    pub(super) fn rows_of(&self, ids: &[String]) -> Vec<DriveItem> {
         self.listing
             .items
             .iter()
@@ -208,6 +208,8 @@ impl State {
                 Late::Done(_) if busy => None,
                 Late::Done(Action::KeepOffline) => Some(self.set_toast(Toast::Keeping)),
                 Late::Done(Action::FreeUpSpace) => Some(self.set_toast(Toast::FreedUp)),
+                // The rows left when Beebeeb said so: "Moved to Trash", with Undo, from then.
+                Late::Done(Action::Trash) => Some(self.set_toast(Toast::Trashed)),
                 Late::Done(_) => None,
                 Late::Left {
                     action,
@@ -216,6 +218,9 @@ impl State {
                     again,
                 } => {
                     let items = self.rows_of(&ids);
+                    if action == Action::Trash {
+                        self.actions.trash.again = Some(again.clone());
+                    }
                     if is_local(action) {
                         self.actions.local.retry = Some((action, again));
                     }

@@ -476,6 +476,9 @@ pub struct Pumped {
     /// Nothing is out, but something outside the source can change what a pane says (the engine finds the
     /// session works again): the window looks again soon.
     pub watch: bool,
+    /// A toast shows that goes by itself: the window looks again after this long, to take it away (and show
+    /// the next one that waits).
+    pub wake_in: Option<std::time::Duration>,
 }
 
 pub trait AccountSource {
@@ -495,7 +498,9 @@ pub trait AccountSource {
     fn pump(&mut self) -> Pumped {
         Pumped::default()
     }
-    /// What the toast over the pane says: how the last change ended (taken, refused, not known).
+    /// What the toast over the pane says: how a change ended (taken, refused, not known), or that what the pane
+    /// draws could not be read again. One at a time; a source may hold more, and shows the next when this one
+    /// has had its time.
     fn notice(&self) -> Option<&'static str> {
         None
     }
@@ -509,7 +514,7 @@ pub trait AccountSource {
     }
     /// The toast's button was pressed: do again what the toast says was not done.
     fn run_notice_action(&mut self) {}
-    /// The person did something else: the toast goes.
+    /// The window shows another pane: the toasts go.
     fn clear_notice(&mut self) {}
     /// Engine: the signed-in account (`session.account`).
     fn identity(&self) -> Identity;

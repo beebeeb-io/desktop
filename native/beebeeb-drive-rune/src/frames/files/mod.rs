@@ -30,6 +30,7 @@ pub mod share;
 pub mod sidebar;
 pub mod sorting;
 pub mod source;
+pub mod to_trash;
 pub mod toolbar;
 pub mod uploads;
 pub mod window;
@@ -180,6 +181,8 @@ pub struct Actions {
     pub sort: Sort,
     /// What Undo puts back: the rows as they were, with their places. Emptied by whatever is done next.
     pub undo: Vec<(usize, DriveItem)>,
+    /// Moves to and from Trash that are not answered yet, and what Try again of one asks for (`to_trash.rs`).
+    pub trash: to_trash::Ui,
     /// The last frames asked for, oldest first (at most [`INTENTS_KEPT`]).
     pub intents: Vec<Intent>,
     /// An upload that failed: what Try again uploads.
@@ -248,6 +251,7 @@ impl Actions {
             anchor: None,
             sort: Sort::default(),
             undo: Vec::new(),
+            trash: to_trash::Ui::default(),
             intents: Vec::new(),
             retry_upload: None,
             retry_share: None,
@@ -569,6 +573,8 @@ impl State {
         self.actions.selection.clear();
         self.actions.anchor = None;
         self.actions.undo.clear();
+        // The rows an Undo waits for are another folder's now: its answer puts nothing in this one.
+        self.actions.trash.restoring.clear();
         self.actions.menu = None;
         self.actions.rename = None;
         self.actions.protected.alert = None;
@@ -711,64 +717,6 @@ impl State {
         if let Some(item) = self.selected.and_then(|i| self.listing.items.get(i)).cloned() {
             self.open_preview(item);
         }
-        true
-    }
-
-    /// Move the selection to Trash, without a question: Undo and Trash both bring it back.
-    /// Like the other actions it answers whether anything is to be drawn: a change, or the message of a failure.
-    pub fn trash_selection(&mut self, tx: &mut Tx) -> bool {
-        if self.needs_session(tx) {
-            return true;
-        }
-        let rows = self.selected_rows();
-        let items = self.selected_items();
-        if items.is_empty() {
-            return false;
-        }
-        // Refused before the source is asked (`protected.rs`).
-        if self.protects(&items) {
-            self.failed(Action::Trash, ActionError::Protected, tx);
-            return true;
-        }
-        if let Err(why) = self.actions.source.trash(&items) {
-            self.failed(Action::Trash, why, tx);
-            // Handled: there is a message to draw.
-            return true;
-        }
-        for &i in rows.iter().rev() {
-            self.listing.items.remove(i);
-        }
-        self.actions.undo = rows.into_iter().zip(items).collect();
-        self.clear_selection();
-        self.show_toast(Toast::Trashed, tx);
-        true
-    }
-
-    /// Undo the last Move to Trash: every row back where it was (in the order the folder has now).
-    pub fn undo(&mut self, tx: &mut Tx) -> bool {
-        if self.needs_session(tx) {
-            return true;
-        }
-        let rows = std::mem::take(&mut self.actions.undo);
-        if rows.is_empty() {
-            return false;
-        }
-        let items: Vec<DriveItem> = rows.iter().map(|(_, item)| item.clone()).collect();
-        if let Err(why) = self.actions.source.restore(&items) {
-            self.actions.undo = rows;
-            self.failed(Action::Restore, why, tx);
-            // Handled: there is a message to draw.
-            return true;
-        }
-        let ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
-        for (i, item) in rows {
-            let at = i.min(self.listing.items.len());
-            self.listing.items.insert(at, item);
-        }
-        self.actions.toast = None;
-        self.select_ids(&ids);
-        // The rows may have been put in another order since: the old places mean nothing then.
-        self.apply_sort();
         true
     }
 
