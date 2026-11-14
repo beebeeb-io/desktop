@@ -22,12 +22,13 @@
 
 use std::sync::Arc;
 
-use beebeeb_core::onboarding::PasswordStrength;
-use beebeeb_engine::app::account_password_api::{PasswordChangeError, password_strength as core_strength};
+use beebeeb_engine::app::account_password_api::{
+    PasswordChangeError, PasswordStrength, password_strength as core_strength,
+};
 use beebeeb_engine::app::{CredentialStores, Engine};
 use zeroize::Zeroizing;
 
-use super::stamp::{Stamp, stamp};
+use super::{Stamp, stamp};
 use crate::frames::account::source::{PaneState, Password, Purpose, Refused, StepUp, Strength};
 
 /// What a typed password is kept for: one change, under one session and account.

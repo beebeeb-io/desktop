@@ -230,6 +230,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     /// Nothing is asked of Beebeeb until a pane opens.
     pub fn new(engine: Arc<Engine<C>>) -> Self {
         let (answers, inbox) = mpsc::channel();
+        let password = password_change::PasswordCalls::new(engine.clone());
         Self {
             engine,
             overview: None,
@@ -253,7 +254,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             panic_next: Arc::default(),
             #[cfg(test)]
             ahead: Duration::ZERO,
-            password: password_change::PasswordCalls::new(engine.clone()),
+            password,
             answers,
             inbox,
         }

@@ -25,7 +25,8 @@ use beebeeb_core::account_flows::{
     AccountBinding, AccountFlow, AccountFlowError, AccountOutcome, ApiRequest, ApiResponse, Method, Step,
 };
 use beebeeb_core::kdf::MasterKey;
-use beebeeb_core::onboarding::{BreachCheck, BreachResponse, PasswordPolicy, PasswordStrength, evaluate_password};
+pub use beebeeb_core::onboarding::PasswordStrength;
+use beebeeb_core::onboarding::{BreachCheck, BreachResponse, PasswordPolicy, evaluate_password};
 use beebeeb_core::signup_flow::SignupPolicy;
 use zeroize::Zeroizing;
 
