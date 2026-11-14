@@ -153,7 +153,7 @@ fn backup_codes_held_under_a_lock_are_dropped_by_a_sign_out_or_a_closed_vault() 
     assert_eq!(codes_shown(&rt), None, "a sign-out drops them");
 
     // A closed vault (the session leaves memory) under the lock.
-    let fake = fake();
+    let fake = super::fake();
     let engine = signed_in(&fake);
     let mut rt = window_on(engine.clone());
     ask_for_new_codes(&fake, &mut rt);
