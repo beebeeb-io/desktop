@@ -361,7 +361,15 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     assert_eq!(root[1].backup, BackupMark::default());
 
     // Typed events arrived through the queue, each with a wake, in the engine's order: a status first.
+    // The state database is shared by every test in this process, so an earlier test's rows can already be
+    // listed before this engine's runner reports: wait for the first message, never assume it is there.
     let mut events = Vec::new();
+    wait_for("the engine's first message", || {
+        while let Ok(message) = host.messages.try_recv() {
+            events.push(message);
+        }
+        !events.is_empty()
+    });
     while let Ok(message) = host.messages.try_recv() {
         events.push(message);
     }
