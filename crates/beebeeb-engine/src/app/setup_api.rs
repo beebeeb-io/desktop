@@ -22,7 +22,8 @@ use super::{CredentialStores, Engine};
 use crate::account::SessionGeneration;
 use crate::config::DesktopConfig;
 use crate::identity::EngineIdentity;
-use crate::sync_folder_rule::{self, Facts, OnDisk, SyncFolderRefused};
+use crate::sync_folder_rule::{self, Facts, OnDisk, Owner, SyncFolderRefused};
+use crate::sync_root_owner::{self, Registration};
 
 #[cfg(test)]
 #[path = "setup_api_tests.rs"]
@@ -116,6 +117,16 @@ impl<C: CredentialStores> Engine<C> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => OnDisk::Missing,
             Err(_) => OnDisk::Unreadable,
         };
+        // The owner check is the start's own (`sync_root_owner`): this app's provider, or nobody, is free.
+        let registered = sync_root_owner::registered(folder);
+        let owner = match (
+            &registered,
+            sync_root_owner::refusal(self.identity, &registered, folder),
+        ) {
+            (_, None) => Owner::Free,
+            (Registration::Unreadable, Some(_)) => Owner::Unreadable,
+            (_, Some(_)) => Owner::Another,
+        };
         let settings = DesktopConfig::path_for(self.identity)
             .ok()
             .and_then(|file| file.parent().map(Path::to_path_buf));
@@ -128,16 +139,12 @@ impl<C: CredentialStores> Engine<C> {
                 .flatten()
                 .filter_map(text)
                 .collect(),
-            other_builds: [&crate::identity::REAL, &crate::identity::TEST]
+            other_builds: text(crate::config::default_sync_root_suggestion(self.identity.other_build()))
                 .into_iter()
-                .filter(|other| !std::ptr::eq(*other, self.identity))
-                .map(crate::config::default_sync_root_suggestion)
-                .filter_map(text)
                 .collect(),
             remote_drive: on_a_network_drive(folder),
             on_disk,
-            registration: crate::sync_root_owner::registered(folder),
-            own_provider: self.identity.cloud_files_provider_name(),
+            owner,
         }
     }
 

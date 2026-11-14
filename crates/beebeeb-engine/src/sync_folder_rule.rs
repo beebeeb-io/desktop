@@ -18,9 +18,11 @@
 //! This is the check BEFORE a start. The start has its own (`Engine::start_sync`: another provider's folder again,
 //! under its lock, and whose local data this is), and a folder that passes here can still be refused there.
 //!
+//! What it does not see (said in the PR): a folder reached through a link or a junction in the middle of its
+//! path (only the folder itself is looked at on disk), and, off Windows, a network mount. It is asked on
+//! Windows only today (the first run is wired there).
+//!
 //! Must not: log or return a path. A refusal is a kind, never a sentence with the folder in it.
-
-use crate::sync_root_owner::Registration;
 
 #[cfg(test)]
 #[path = "sync_folder_rule_tests.rs"]
@@ -92,9 +94,18 @@ pub struct Facts {
     pub remote_drive: bool,
     pub on_disk: OnDisk,
     /// Whose sync folder Windows says it is.
-    pub registration: Registration,
-    /// This app's own sync provider name (a folder registered to it is this app's).
-    pub own_provider: &'static str,
+    pub owner: Owner,
+}
+
+/// Whose sync folder the OS says a folder is (`sync_root_owner`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owner {
+    /// Nobody's, or this app's own.
+    Free,
+    /// Another sync provider's.
+    Another,
+    /// The OS could not say. Never read as free.
+    Unreadable,
 }
 
 /// A full path, as the rule compares it: the root (`c:`, or `/`) and the folder names below it. On Windows the
@@ -253,11 +264,10 @@ pub fn refusal(folder: &str, facts: &Facts) -> Option<SyncFolderRefused> {
         OnDisk::Unreadable => return Some(SyncFolderRefused::Unreadable),
     }
 
-    match &facts.registration {
-        Registration::Nobody => {}
-        Registration::Provider(provider) if provider.eq_ignore_ascii_case(facts.own_provider) => {}
-        Registration::Provider(_) => return Some(SyncFolderRefused::AnotherApps),
-        Registration::Unreadable => return Some(SyncFolderRefused::Unreadable),
+    match facts.owner {
+        Owner::Free => {}
+        Owner::Another => return Some(SyncFolderRefused::AnotherApps),
+        Owner::Unreadable => return Some(SyncFolderRefused::Unreadable),
     }
     if facts
         .other_builds

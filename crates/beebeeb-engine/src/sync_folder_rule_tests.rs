@@ -11,8 +11,7 @@ fn windows() -> Facts {
         other_builds: vec![r"C:\Users\Sam\Beebeeb Test".into()],
         remote_drive: false,
         on_disk: OnDisk::Missing,
-        registration: Registration::Nobody,
-        own_provider: "Beebeeb",
+        owner: Owner::Free,
     }
 }
 
@@ -25,8 +24,7 @@ fn unix() -> Facts {
         other_builds: vec!["/home/sam/Beebeeb Test".into()],
         remote_drive: false,
         on_disk: OnDisk::Missing,
-        registration: Registration::Nobody,
-        own_provider: "Beebeeb",
+        owner: Owner::Free,
     }
 }
 
@@ -210,24 +208,16 @@ fn what_is_not_a_folder_or_cannot_be_read_is_refused() {
 }
 
 #[test]
-fn another_apps_sync_folder_is_refused_and_this_apps_own_is_not() {
-    let with = |registration| Facts {
-        registration,
-        ..windows()
-    };
+fn another_apps_sync_folder_is_refused_and_one_that_cannot_be_read_is_not_free() {
+    let with = |owner| Facts { owner, ..windows() };
     let folder = r"C:\Users\Sam\Cloud";
-    assert_eq!(refusal(folder, &with(Registration::Nobody)), None);
-    assert_eq!(refusal(folder, &with(Registration::Provider("beebeeb".into()))), None);
+    assert_eq!(refusal(folder, &with(Owner::Free)), None);
     assert_eq!(
-        refusal(folder, &with(Registration::Provider("Beebeeb Test".into()))),
+        refusal(folder, &with(Owner::Another)),
         Some(SyncFolderRefused::AnotherApps)
     );
     assert_eq!(
-        refusal(folder, &with(Registration::Provider(String::new()))),
-        Some(SyncFolderRefused::AnotherApps)
-    );
-    assert_eq!(
-        refusal(folder, &with(Registration::Unreadable)),
+        refusal(folder, &with(Owner::Unreadable)),
         Some(SyncFolderRefused::Unreadable)
     );
 }
@@ -254,7 +244,7 @@ fn the_first_reason_in_the_rules_order_is_the_one_said() {
     let all = Facts {
         remote_drive: true,
         on_disk: OnDisk::NotAFolder,
-        registration: Registration::Provider("Other".into()),
+        owner: Owner::Another,
         ..windows()
     };
     assert_eq!(refusal(r"C:\Windows", &all), Some(SyncFolderRefused::Network));
