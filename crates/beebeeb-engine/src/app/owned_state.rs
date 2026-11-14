@@ -98,6 +98,11 @@ pub struct OwnedState<'e> {
 }
 
 impl OwnedState<'_> {
+    /// The session this handle was made for.
+    pub fn session(&self) -> SessionGeneration {
+        self.generation
+    }
+
     /// Read (or, on a handle for changes, write) through the state database. Refused when the session is no longer
     /// the one this handle was made for, before the closure runs; and when it changed while the closure ran, in
     /// which case the closure's answer is dropped.
