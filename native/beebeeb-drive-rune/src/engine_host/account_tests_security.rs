@@ -48,26 +48,36 @@ fn a_profile_without_the_two_factor_mark_is_not_known_never_off() {
     assert_eq!(source.security_facts().two_factor, None);
 }
 
+/// A list that was never read is "not known" (never 0). A re-read that fails over a list that was read keeps
+/// that list's count, as Devices and sessions keeps its rows (no sign-out was sent since it was read).
 #[test]
-fn a_sessions_list_that_fails_leaves_the_device_count_not_known_and_the_page_up() {
+fn a_sessions_list_that_fails_is_never_counted_as_none() {
     let server = server();
     server.two_factor.lock().unwrap()[0] = Some(true);
+    // The first read of the list fails: there is nothing to count.
     let mut source = Source::new(signed_in(&server));
-    opened(&mut source, Pane::Security);
-    assert_eq!(source.security_facts().sessions, Count::Known(3));
-    // The list is read again and fails: the count is not known (never 0, never the old one), the page stays.
+    opened(&mut source, Pane::Account);
     server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
-    source.reload(Pane::Sessions);
+    source.opened(Pane::Security);
     settle(&mut source);
     let facts = source.security_facts();
     assert_eq!(facts.sessions, Count::NotKnown, "never 0 for a list that was not read");
-    assert_eq!(facts.two_factor, Some(true), "what the page's own read said stands");
-    assert_eq!(source.pane_state(Pane::Security), PaneState::Ready);
+    assert_eq!(source.pane_state(Pane::Security), PaneState::Ready, "the page stays up");
     // Reading the page again reads the list again too.
     server.read_mode.store(ANSWER, Ordering::SeqCst);
     source.reload(Pane::Security);
     settle(&mut source);
     assert_eq!(source.security_facts().sessions, Count::Known(3));
+    assert_eq!(source.security_facts().two_factor, Some(true));
+    // A later re-read that fails keeps what was read.
+    server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    source.reload(Pane::Sessions);
+    settle(&mut source);
+    assert_eq!(
+        source.security_facts().sessions,
+        Count::Known(3),
+        "the list that was read stands"
+    );
 }
 
 #[test]
