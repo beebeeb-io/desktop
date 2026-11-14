@@ -37,6 +37,14 @@ pub struct Details {
     pub picture: bool,
 }
 
+/// Where a late read stands. `Answered`: this source answers in the call (the default).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Read {
+    Answered,
+    Loading,
+    Failed(ActionError),
+}
+
 /// Why an action did not happen. The window says it in words (DW-0109), never as a code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionError {
@@ -324,6 +332,12 @@ pub trait FilesSource: Send + 'static {
     /// Make the version with this id the current one. No version is deleted by it.
     fn restore_version(&mut self, _item: &DriveItem, _version: &str) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
+    }
+    /// The Versions or the Details dialog of this FILE opened: read its versions if what is held is old.
+    fn ask_versions(&mut self, _item: &DriveItem) {}
+    /// Where the read of a file's versions stands (what [`FilesSource::versions`] is empty for).
+    fn versions_state(&self, _item: &DriveItem) -> Read {
+        Read::Answered
     }
     /// What Preview shows of a file (DW-0408). `None`: no preview for it (DW-0408b).
     fn preview(&mut self, _item: &DriveItem) -> Option<super::actions_data::PreviewOf> {

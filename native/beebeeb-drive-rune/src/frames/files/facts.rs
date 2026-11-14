@@ -9,7 +9,7 @@
 use super::actions_data::{Version, versions_words};
 use super::dialogs::{self, Dialog};
 use super::share::{big_tile, file_head};
-use super::source::Action;
+use super::source::{Action, ActionError, Read};
 use crate::State;
 use crate::source::DriveItem;
 use crate::theme::tokens::{Theme, type_};
@@ -35,7 +35,10 @@ impl State {
             return false;
         };
         self.close_menu();
-        self.actions.dialog = Some(Dialog::Details(Box::new(item)));
+        self.actions.dialog = Some(Dialog::Details(Box::new(item.clone())));
+        if !item.is_folder {
+            self.actions.source.ask_versions(&item);
+        }
         true
     }
 
@@ -50,7 +53,8 @@ impl State {
             return false;
         };
         self.close_menu();
-        self.actions.dialog = Some(Dialog::Versions(Box::new(item)));
+        self.actions.dialog = Some(Dialog::Versions(Box::new(item.clone())));
+        self.actions.source.ask_versions(&item);
         true
     }
 
@@ -221,13 +225,14 @@ pub fn versions(s: &State, item: &DriveItem, t: &Theme) -> El {
     let mut body = Vec::new();
     let mut buttons = 0;
     if all.is_empty() {
-        // A source that knows no versions (nothing is connected): say so, list nothing.
-        body.push(kit::label(
-            "dlg-text-0",
-            "The versions of this file can't be shown right now.",
-            SUB,
-            t.text_tertiary,
-        ));
+        // A source that knows no versions (nothing is connected): say so, list nothing. A source that reads
+        // them later says it is reading, or why it could not.
+        let line = match s.actions.source.versions_state(item) {
+            Read::Loading => "Loading the versions\u{2026}",
+            Read::Failed(ActionError::Offline) => "Version history needs a connection.",
+            _ => "The versions of this file can't be shown right now.",
+        };
+        body.push(kit::label("dlg-text-0", line, SUB, t.text_tertiary));
     } else {
         let rows = all
             .iter()

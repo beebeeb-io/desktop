@@ -52,6 +52,7 @@ mod files_facts;
 #[path = "engine_host/files_open_with_tests.rs"]
 mod files_open_with_tests;
 mod files_trash;
+mod files_versions;
 pub mod guide;
 pub mod open;
 pub mod photos;
@@ -560,6 +561,8 @@ pub struct EngineFilesSource<C: CredentialStores> {
     upload_left: Option<Vec<PathBuf>>,
     /// The sidebar's figures and each folder's sort.
     facts: files_facts::Facts<C>,
+    /// A file's versions and the restore of one.
+    versions: files_versions::VersionCalls<C>,
 }
 
 impl<C: CredentialStores> EngineFilesSource<C> {
@@ -569,6 +572,7 @@ impl<C: CredentialStores> EngineFilesSource<C> {
             copies: files::LocalCopies::new(engine.clone()),
             trash: files_trash::TrashCalls::new(engine.clone()),
             facts: files_facts::Facts::new(engine.clone()),
+            versions: files_versions::VersionCalls::new(engine.clone()),
             engine,
             upload_left: None,
         }
@@ -748,6 +752,22 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.open_with_by(item, choose_app)
     }
 
+    fn versions(&self, item: &DriveItem) -> Vec<crate::frames::files::actions_data::Version> {
+        self.versions.versions(item)
+    }
+
+    fn ask_versions(&mut self, item: &DriveItem) {
+        self.versions.ask(item);
+    }
+
+    fn versions_state(&self, item: &DriveItem) -> files_source::Read {
+        self.versions.state(item)
+    }
+
+    fn restore_version(&mut self, item: &DriveItem, version: &str) -> Result<(), ActionError> {
+        self.versions.restore(item, version)
+    }
+
     fn show_in_file_explorer(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
         let paths = self.local(|db, sync_root| {
             let mut paths = Vec::with_capacity(items.len());
@@ -845,6 +865,7 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     fn changes(&mut self) -> Vec<Change> {
         let mut changes = self.trash.take();
         changes.extend(self.copies.take());
+        changes.extend(self.versions.take());
         // The sidebar's figures are read again after a change (`files_facts`); an arrival redraws by its wake.
         self.facts.pump(!changes.is_empty());
         changes
