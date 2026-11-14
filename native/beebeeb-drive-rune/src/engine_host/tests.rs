@@ -164,7 +164,10 @@ fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() 
         (0, crate::frames::trash::source::Loaded::SignedOut),
         "Trash on a real engine without a session: signed out, no row"
     );
-    assert!(!state.photos.source.wired(), "Photos is unwired on a real engine");
+    assert!(
+        state.photos.source.wired() && state.photos.source.days(None).is_empty(),
+        "Photos on a real engine without a session: the engine's source, no day"
+    );
     assert_eq!(
         state.this_pc.wired(),
         crate::engine_host::this_pc::TURNED_ON,

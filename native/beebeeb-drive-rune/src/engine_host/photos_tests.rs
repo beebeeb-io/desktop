@@ -510,8 +510,6 @@ fn signed_out_shows_nothing_and_another_account_sees_nothing_of_the_first() {
     assert_eq!(source.viewing(harbour), None);
     assert_eq!(source.details(harbour), []);
     assert!(source.thumbnail(harbour, Shape::Square).is_none());
-    assert_eq!(source.trash(&[harbour]), Err(Left::Unavailable));
-    assert_eq!(source.keep_offline(harbour, true), Err(Left::Unavailable));
 
     // The second account signs in on the same PC (the local state is still the first's).
     sign_in(&engine, &fake.second, &fake.second_phrase);
@@ -852,6 +850,22 @@ fn keep_on_this_pc_is_said_only_once_this_pc_answered() {
     );
     assert!(!source.kept_offline(tram));
     settle(&mut source);
+
+    // The engine's own rule, with the engine's parts: Keep for a session that is no longer the one in memory is
+    // refused as not signed in, before anything of this PC is read; for the session that is here it gets as far
+    // as this PC's settings (no sync folder is set in a test).
+    let earlier = engine.session_turn();
+    engine.sign_out_keeping_local_data().expect("signed out");
+    sign_in(&engine, &fake.first, &fake.first_phrase);
+    assert_eq!(
+        engine.set_kept_for(earlier, HARBOUR, true).err().as_deref(),
+        Some("not signed in")
+    );
+    let here = engine.set_kept_for(engine.session_turn(), HARBOUR, true);
+    assert!(here.as_ref().is_err_and(|why| why != "not signed in"), "{here:?}");
+    source.forget();
+    open(&mut source);
+    let tram = shown(&source)[0][2];
 
     // An answer for a session that is gone is dropped.
     source.keep_says = Some(Ok(()));

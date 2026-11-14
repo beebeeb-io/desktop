@@ -443,11 +443,6 @@ fn a_thumbnail_asked_for_an_earlier_session_sends_nothing() {
         Err(ThumbRefused::NotSignedIn)
     );
     assert_eq!(thumbnail_requests(&fake), 0);
-    // And Keep for that earlier session changes nothing (refused before anything is read).
-    assert_eq!(
-        engine.set_kept_for(earlier, HARBOUR, true).err().as_deref(),
-        Some(crate::app::kept_api::NOT_SIGNED_IN)
-    );
 }
 
 #[test]

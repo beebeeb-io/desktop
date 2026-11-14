@@ -27,6 +27,8 @@ struct Script {
     loaded: Loaded,
     /// No video's length is known (an engine that has no copy on this PC).
     no_length: bool,
+    /// These left the library some other way: the next pump no longer lists them.
+    leaves: Vec<PhotoId>,
     /// The next pump says the library changed.
     dirty: bool,
     opened: usize,
@@ -67,10 +69,18 @@ impl PhotosSource for Later {
         self.script.lock().unwrap().refreshed += 1;
     }
     fn pump(&mut self) -> Pumped {
-        let (answered, dirty) = {
+        let (answered, mut dirty, leaves) = {
             let mut script = self.script.lock().unwrap();
-            (std::mem::take(&mut script.answers), std::mem::take(&mut script.dirty))
+            (
+                std::mem::take(&mut script.answers),
+                std::mem::take(&mut script.dirty),
+                std::mem::take(&mut script.leaves),
+            )
         };
+        if !leaves.is_empty() {
+            self.library.trash(&leaves).unwrap();
+            dirty = true;
+        }
         // What Beebeeb did is in the library once it answered, never before.
         for answer in &answered {
             let done = |items: &[(PhotoId, Option<Left>)]| -> Vec<PhotoId> {
@@ -588,8 +598,10 @@ fn a_checked_photo_that_left_the_library_is_no_longer_checked_and_a_finished_che
     rt.state.photos.check_tile(0, 0);
     rt.state.photos.check_tile(0, 3);
     rt.frame(0.0);
-    // It left some other way (moved to Trash on the phone): the next read no longer lists it.
-    answer(&mut rt, &script, Answered::Trashed(vec![(id((0, 0)), None)]));
+    // It left some other way (moved to Trash on the phone): the next read no longer lists it, and nothing answers.
+    script.lock().unwrap().leaves = vec![id((0, 0))];
+    rt.frame(0.0);
+    rt.frame(0.0);
     assert_eq!(
         rt.state.photos.selected.keys().copied().collect::<Vec<_>>(),
         [id((0, 3))]
