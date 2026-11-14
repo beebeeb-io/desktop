@@ -245,7 +245,7 @@ mod on_windows {
                 .unwrap();
             assert!(made.status.success(), "mklink /J failed");
             assert_eq!(check(&junction), Err(SyncFolderRefused::NotAFolder));
-            assert_eq!(check(std::path::Path::new(r"C:")), Err(SyncFolderRefused::System));
+            assert_eq!(check(std::path::Path::new("C:\\")), Err(SyncFolderRefused::System));
             let root = std::env::var("SystemRoot").unwrap();
             assert_eq!(check(&PathBuf::from(root).join("Sync")), Err(SyncFolderRefused::System));
             assert_eq!(check(&home), Err(SyncFolderRefused::Home));
