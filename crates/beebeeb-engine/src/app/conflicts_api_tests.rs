@@ -229,18 +229,32 @@ fn replaced_folder(rig: &Rig) -> PathBuf {
 }
 
 #[test]
-fn a_safety_copy_is_one_per_file_and_a_later_one_replaces_it() {
+fn a_later_different_copy_is_kept_beside_the_earlier_one_and_the_same_bytes_once() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("Invented draft.txt");
     let folder = dir.path().join("replaced").join("a-file-id");
     std::fs::write(&file, b"first edit").unwrap();
     let kept = SafetyCopy::make(&file, &folder).unwrap().keep().unwrap();
     assert_eq!(kept, folder.join("Invented draft.txt"));
-    // A later Keep there of the same file, worked or failed (the copy is kept either way): still one copy.
+    // A later Keep there of the same file, worked or failed (the copy is kept either way): a different edit is
+    // kept beside the first, which stays as it was.
     std::fs::write(&file, b"second edit").unwrap();
-    let kept = SafetyCopy::make(&file, &folder).unwrap().keep().unwrap();
-    assert_eq!(std::fs::read(&kept).unwrap(), b"second edit");
-    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1, "one copy per file");
+    let second = SafetyCopy::make(&file, &folder).unwrap().keep().unwrap();
+    assert_eq!(std::fs::read(&second).unwrap(), b"second edit");
+    assert_eq!(
+        std::fs::read(&kept).unwrap(),
+        b"first edit",
+        "the earlier copy is never deleted"
+    );
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
+    // The same bytes again are kept once.
+    let again = SafetyCopy::make(&file, &folder).unwrap().keep().unwrap();
+    assert_eq!(again, second);
+    assert_eq!(
+        std::fs::read_dir(&folder).unwrap().count(),
+        2,
+        "the same edit is one copy"
+    );
     assert_eq!(
         std::fs::read(&file).unwrap(),
         b"second edit",

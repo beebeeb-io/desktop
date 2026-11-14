@@ -33,8 +33,11 @@ pub enum PurgeError {
     WrongPassword,
     /// Too many tries; seconds to wait.
     RateLimited(u64),
-    /// Beebeeb could not be reached.
+    /// Beebeeb could not be reached: nothing was sent that deletes (the proof did not go through).
     Offline,
+    /// The delete request LEFT and no answer came back (the connection dropped after it was sent): the item may be
+    /// gone for good. Never worded as "nothing was deleted" (review of desktop#424).
+    NotConfirmed,
     /// The id is not a file id, or Beebeeb refused or answered something else.
     Failed,
 }
@@ -106,7 +109,7 @@ pub async fn purge_one(
     let grant = prove(api_base, client, token, password).await?;
     let resp = auth_transport::send_to(api_base, client, Some(token), grant.attach(permanent_request(file_id)))
         .await
-        .map_err(|_| PurgeError::Offline)?;
+        .map_err(|_| PurgeError::NotConfirmed)?;
     match resp.status {
         200..=299 | 404 => Ok(()),
         401 => Err(PurgeError::SessionEnded),
@@ -155,9 +158,10 @@ impl<C: CredentialStores> Engine<C> {
         self.purged(done, None)
     }
 
-    /// Ask the sync engine to take the server's list again when anything was deleted (also when a later item failed).
+    /// Ask the sync engine to take the server's list again when anything was deleted (also when a later item failed),
+    /// and when the last delete is not confirmed (it may have gone through).
     fn purged(&self, done: usize, error: Option<PurgeError>) -> Purged {
-        if done > 0 {
+        if done > 0 || error == Some(PurgeError::NotConfirmed) {
             self.request_resnapshot();
         }
         Purged { done, error }

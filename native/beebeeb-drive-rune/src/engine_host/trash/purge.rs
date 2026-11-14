@@ -252,6 +252,7 @@ fn words_of(error: PurgeError) -> &'static str {
         PurgeError::WrongPassword => "wrong password",
         PurgeError::RateLimited(_) => "rate limited",
         PurgeError::Offline => "offline",
+        PurgeError::NotConfirmed => "not confirmed",
         PurgeError::Failed => "refused",
     }
 }
@@ -264,6 +265,7 @@ fn why_of(error: PurgeError) -> String {
         PurgeError::WrongPassword => "That password is not right.".into(),
         PurgeError::RateLimited(secs) => format!("Too many tries. Wait {secs} seconds."),
         PurgeError::Offline => "Beebeeb could not be reached.".into(),
+        PurgeError::NotConfirmed => "The connection dropped. Beebeeb may have deleted them; check Trash.".into(),
         PurgeError::Failed => "Beebeeb did not delete them.".into(),
     }
 }

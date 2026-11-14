@@ -50,7 +50,8 @@ pub struct BulkPurged {
     pub kept: Vec<Kept>,
     /// How many of the asked ids were not sent (over [`MAX_BULK_IDS`]).
     pub left_out: usize,
-    /// Why the call as a whole failed: nothing was deleted then.
+    /// Why the call as a whole failed: nothing was deleted then, except for [`PurgeError::NotConfirmed`] (the delete
+    /// left and its answer never came back: the items may be gone for good).
     pub error: Option<PurgeError>,
 }
 
@@ -126,7 +127,7 @@ pub async fn purge_many(
     };
     match auth_transport::send_to(api_base, client, Some(token), grant.attach(bulk_request(ids))).await {
         Ok(resp) => parse_answer(&resp),
-        Err(_) => failed(PurgeError::Offline),
+        Err(_) => failed(PurgeError::NotConfirmed),
     }
 }
 
@@ -157,7 +158,7 @@ impl<C: CredentialStores> Engine<C> {
             .runtime
             .block_on(purge_many(&base, &self.client, token.as_str(), sent, password));
         out.left_out = left_out;
-        if !out.deleted.is_empty() {
+        if !out.deleted.is_empty() || out.error == Some(PurgeError::NotConfirmed) {
             self.request_resnapshot();
         }
         out

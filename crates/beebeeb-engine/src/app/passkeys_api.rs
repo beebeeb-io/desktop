@@ -434,9 +434,13 @@ impl<C: CredentialStores> Engine<C> {
                 master_key: **key,
                 email,
             });
+            drop(guard);
             self.acct
                 .auth_resume_asked
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // A PRF passkey that opened the vault key is the strong proof, as the twelve words are (lead decision
+            // 2026-11-14, review of desktop#424): the lock opens in the same hold as the key's install.
+            self.lock_follows(super::lock_api::SessionMoved::StrongProof);
         }
     }
 

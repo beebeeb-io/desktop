@@ -33,9 +33,22 @@ impl State {
                 Change::Failed(action, why) => failures.push((action, why)),
                 // A cancelled upload: its row leaves the folder now, and the message says where the copy is.
                 Change::Cancelled { id } => {
+                    // The rows under it move up: the selection, the current row and the anchor follow the FILES (by
+                    // id), never the drawn positions (review of desktop#424).
+                    let id_at = |s: &Self, row: usize| s.listing.items.get(row).map(|item| item.id.clone());
+                    let current = self.selected.and_then(|row| id_at(self, row));
+                    let anchor = self.actions.anchor.and_then(|row| id_at(self, row));
+                    let selection: Vec<String> = self
+                        .actions
+                        .selection
+                        .iter()
+                        .filter_map(|&row| id_at(self, row))
+                        .collect();
                     self.listing.items.retain(|item| item.id != id);
-                    self.selected = self.selected.filter(|&i| i < self.listing.items.len());
-                    self.actions.selection.retain(|&i| i < self.listing.items.len());
+                    let row_of = |s: &Self, id: String| s.listing.items.iter().position(|item| item.id == id);
+                    self.selected = current.and_then(|id| row_of(self, id));
+                    self.actions.anchor = anchor.and_then(|id| row_of(self, id));
+                    self.actions.selection = selection.into_iter().filter_map(|id| row_of(self, id)).collect();
                     self.set_toast(super::Toast::UploadCancelled);
                 }
                 // A move to Trash or its Undo, answered later: drawn now, per item (`to_trash.rs`).

@@ -178,7 +178,8 @@ pub(super) mod flows {
 
 impl<C: CredentialStores> Engine<C> {
     /// Runs `work` over the real transport for `session`: nothing is sent when the session in memory is another
-    /// one, and an answer made while it moved on is dropped.
+    /// one, and an answer made while it moved on is dropped, unless the same account is still signed in (the request
+    /// has left, and Beebeeb may have changed the account).
     pub(super) fn account_flow<T>(
         &self,
         session: SessionGeneration,
@@ -190,6 +191,8 @@ impl<C: CredentialStores> Engine<C> {
         if now != session || !self.account_session_is_still(session) {
             return Err(AccountFlowFailure::NotSignedIn);
         }
+        // Who this call is for, to tell a turn that moved for the same account from another account's.
+        let account = self.account_email();
         let mut transport = FlowTransport {
             runtime: &self.runtime,
             api_base: &self.config.api_base,
@@ -199,8 +202,15 @@ impl<C: CredentialStores> Engine<C> {
         let answer = work(&mut transport);
         let offline = transport.offline;
         if !self.account_session_is_still(session) {
-            // The answer belongs to a session that is over: its secrets are dropped (wiped) here.
-            return Err(AccountFlowFailure::NotSignedIn);
+            // The request has gone out and Beebeeb may have changed the account (new backup codes, two-factor on):
+            // a turn that moved for the SAME account (a screen lock, a session write) must not wipe what Beebeeb
+            // made unseen (review of desktop#424). The answer is dropped only when the session ended or another
+            // account is signed in: its secrets are wiped here.
+            let same_account =
+                account.is_some() && self.account_email() == account && !self.acct.auth_health.is_expired();
+            if !same_account {
+                return Err(AccountFlowFailure::NotSignedIn);
+            }
         }
         answer.map_err(|error| {
             if offline {

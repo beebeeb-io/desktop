@@ -11,10 +11,10 @@
 //! - An answer writes. Keep here uploads this PC's file as a new version (the server's stays in the history); Keep
 //!   both renames this PC's file beside the original and downloads the server's; Keep there REPLACES this PC's
 //!   file, whose edit was never sent and is in no history: its bytes are copied first to where nothing syncs, the
-//!   engine's own app data, per account and one copy per file ([`REPLACED_FOLDER`], review of desktop#423, P2 #8),
+//!   engine's own app data, per account and one folder per file ([`REPLACED_FOLDER`], review of desktop#423, P2 #8),
 //!   and when that copy cannot be made nothing is replaced. When Keep there works the copy stays there (a later Keep
-//!   there of the same file replaces it); when it fails the copy stays there too (data safety over disk: a failure
-//!   may have replaced the file first).
+//!   there of the same file adds its copy beside it, and the same bytes are kept once); when it fails the copy stays
+//!   there too (data safety over disk: a failure may have replaced the file first). No earlier copy is ever deleted.
 //! - A session that moved on is [`ConflictsRefused::NotSignedIn`] / [`ResolveRefused::NotSignedIn`], with nothing
 //!   sent and nothing handed over.
 //!
@@ -254,19 +254,43 @@ impl SafetyCopy {
         })
     }
 
-    /// Keep there worked (or this copy is the only one left): it becomes the file's one kept copy, and an earlier
-    /// copy of the file (under its old name too) goes.
+    /// Keep there ran (it worked or failed): this copy becomes one of the file's kept copies. NOTHING kept earlier is
+    /// ever deleted (review of desktop#424, P1: an earlier copy can be the only copy of an edit that is in no
+    /// history). A copy of the same bytes as one already kept is not kept twice (the incoming one goes); a different
+    /// edit is kept beside the earlier ones under a free name. Returns where the bytes are kept.
     fn keep(self) -> std::io::Result<PathBuf> {
         let folder = self.kept.parent().ok_or_else(|| std::io::Error::other("no folder"))?;
+        let incoming_digest = sha256_of(&self.incoming)?;
         for entry in std::fs::read_dir(folder)? {
             let path = entry?.path();
-            if path != self.incoming && path != self.kept {
-                std::fs::remove_file(&path)?;
+            if path != self.incoming && sha256_of(&path).is_ok_and(|kept| kept == incoming_digest) {
+                std::fs::remove_file(&self.incoming)?;
+                return Ok(path);
             }
         }
-        std::fs::rename(&self.incoming, &self.kept)?;
-        Ok(self.kept)
+        let target = free_name_beside(&self.kept);
+        std::fs::rename(&self.incoming, &target)?;
+        Ok(target)
     }
+}
+
+/// `kept`, or `<stem> (2).<ext>`, `(3)`, ... when that name is taken: the first one that is free.
+fn free_name_beside(kept: &Path) -> PathBuf {
+    if !kept.exists() {
+        return kept.to_path_buf();
+    }
+    let stem = kept
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = kept
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    (2u32..)
+        .map(|n| kept.with_file_name(format!("{stem} ({n}){ext}")))
+        .find(|candidate| !candidate.exists())
+        .unwrap_or_else(|| kept.to_path_buf())
 }
 
 impl<C: CredentialStores> Engine<C> {
