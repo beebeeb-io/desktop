@@ -888,7 +888,6 @@ fn the_account_panes_change_password_and_2fa_setup_are_secret() {
     assert!(AccountDialog::Code(CodeFor::TurnOffTwoFactor).shows_secret(), "DW-A72");
     assert!(!Pane::Account.shows_secret(), "DW-A51");
     assert!(!Pane::Security.shows_secret(), "DW-A52");
-    assert!(!Pane::Checkup.shows_secret(), "DW-A84");
     assert!(!Pane::Sessions.shows_secret(), "DW-A55");
     assert!(!Pane::Name.shows_secret(), "DW-A64");
     assert!(!Pane::EmailCode.shows_secret(), "DW-A66");

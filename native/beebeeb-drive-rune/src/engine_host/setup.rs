@@ -597,6 +597,4 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
     }
     /// The app lock (step 2): a lane of its own (Windows Hello); nothing is switched on here.
     fn set_app_lock(&mut self, _on: bool, _after: LockAfter) {}
-    // `guide_shown` / `mark_guide_shown`: the trait's own bodies. The guide follows a first run, and a first run
-    // happens once per PC (the settings file's flag above), so it is shown once per PC without a flag of its own.
 }

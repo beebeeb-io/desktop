@@ -58,6 +58,8 @@ pub struct State {
     pub(crate) setup_source: Option<SetupMaker>,
     /// The first-time guide over the main window (DW-0380, DW-0301 to DW-0305).
     pub(crate) guide: crate::frames::signin::setup::guide::Guide,
+    /// Where the guide's "done" is kept, once per account (`guide_marks`).
+    pub(crate) guide_marks: Box<dyn crate::frames::signin::setup::guide_marks::GuideMarks>,
     /// Sync history and Available offline (`frames::this_pc`).
     pub(crate) this_pc: crate::frames::this_pc::Ui,
     /// Backups, a section of settings (`frames::backups`).
@@ -134,6 +136,7 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         setup: None,
         setup_source: None,
         guide: Default::default(),
+        guide_marks: crate::frames::signin::setup::guide_marks::first(crate::shell::instance::DEV_BUILD),
         this_pc: crate::frames::this_pc::Ui::fixture(),
         backups: crate::frames::backups::BackupsUi::first(crate::shell::instance::DEV_BUILD),
     }
@@ -209,6 +212,8 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
         engine.clone(),
     )));
     s.storage_split = None;
+    // The first-time guide's "done", once per account: the engine keeps it in the account's own local state.
+    s.guide_marks = Box::new(crate::engine_host::guide::EngineGuideMarks::new(engine.clone()));
     // Shared reads the engine (`engine_host::shared`): from Beebeeb only, for the session in memory.
     s.frames.shared.source = Box::new(crate::engine_host::shared::EngineSharedSource::new(engine.clone()));
     // Trash reads the engine (`engine_host::trash`); Search only when `SEARCH_ON_ENGINE` (task 2488).
@@ -218,7 +223,14 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
         s.frames.find.source = Box::new(crate::engine_host::search::EngineSearchSource::new(engine.clone()));
     }
     s.frames.pc = Box::new(crate::frames::UnwiredPc);
-    s.photos = crate::frames::photos::Ui::new(Box::new(crate::frames::photos::source::Unwired));
+    // Photos and every grid of thumbnails read the engine (`engine_host::photos`, `engine_host::thumbs`): one store
+    // of thumbnails for both, in memory only, the session's alone.
+    let thumbs = crate::engine_host::thumbs::EngineThumbStore::new(engine.clone());
+    s.global.grid.thumbs = Box::new(crate::engine_host::thumbs::EngineThumbs::new(thumbs.clone()));
+    s.photos = crate::frames::photos::Ui::new(Box::new(crate::engine_host::photos::EnginePhotos::new(
+        engine.clone(),
+        thumbs,
+    )));
     // This PC: the `Unwired` source while its constant is off (nothing of the adapter runs then).
     s.this_pc = crate::frames::this_pc::Ui::new(crate::engine_host::this_pc::source_for(engine));
     s

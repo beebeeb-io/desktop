@@ -65,14 +65,20 @@ yet (task 2445, B23): its 10 keys (`view-toggle`, `view-list`, `view-grid` and t
 
 - **The running app's source** is `engine_host::viewer::EngineViewerSource` (wired in `shell::state::init_on_engine`):
   the name and size from the local state, the content downloaded and decrypted in memory by the engine's own
-  download path. Shown: text, Markdown, CSV / TSV (as text), PNG / JPEG / GIF / WebP.
+  download path (or read from the copy kept on this PC). Shown: text, Markdown, CSV / TSV (as text), PNG / JPEG /
+  GIF / WebP, and PDF (its pages rendered on this PC by a pure-Rust renderer, `engine_host::viewer_pdf`; the
+  page and the thumbnail column scroll, only the thumbnails near the window are built; Find is not built on
+  the engine's source: the text is not searched yet).
 - **A list's Open asks the source first** (`ViewerSource::previews`, in `open_item`): a kind the source does not
-  show here (on the engine: PDF, audio, archives, RAW and HEIC pictures) stays its own app's, as before. A route
+  show here (on the engine: audio, archives, RAW and HEIC pictures) stays its own app's, as before. A route
   that names such a file anyway (Search's Open, a link) gets `Body::NotPreviewable`, and nothing is downloaded.
 - **Two states are the engine's, not the board's** (no golden, drawn with the parts of DW-1516 to DW-1518):
   `Body::Stopped` (Beebeeb can't be reached, the session ended, the file was closed by a lock or an account
-  change, the file is gone) and `Body::NotPreviewable` (no viewer for this kind yet, over the preview's memory
-  limit, content this app cannot read), the latter with "Open in another app…" and "Save a copy…".
+  change, the file is gone, nothing has synced on this PC yet, this PC's data could not be confirmed as this
+  account's, the copy here could not be read) and `Body::NotPreviewable` (no viewer for this kind yet, over the
+  preview's memory limit, content this app cannot read, a PDF it cannot read or that asks for a password), the
+  latter with "Open in another app…" and "Save a copy…". A state says "decrypted" only for bytes that were
+  downloaded and decrypted; for the copy on this PC it says "read from the copy on this PC".
 - **A text read in part** is DW-1527's state: over 2 MB (the board's words), or under 2 MB with more lines or longer
   lines than the reader holds whole (`Cut::TooLong`, its own banner). Text and notes scroll.
 - **"Open in another app…"** is the source's (`ViewerSource::open_elsewhere`): the system opens the file from the

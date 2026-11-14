@@ -9,18 +9,69 @@ Status after the review of #298 (2026-11-12, `origin/v2-native` 598ed681 merged)
 frames, light and dark): 52 with every line at 0 failing, 6 with a red pixel line, each named in its row (8 keyed
 elements in all; no geometry, text, icon or fill line is red). The built frames are the scenes of `frames::account::FRAMES`.
 
+Since 2026-11-13 Settings > Security is ONE page with frame ids of its own (`DW-S01` to `DW-S03b`, eight, all gated at
+0 failing): the seven board ids that drew the old pane are retired ("Sign-in and security, one page" below).
+
 ## Account in settings (8)
 
 | Frame | What it is | Status |
 | --- | --- | --- |
 | `DW-A51` | Who is signed in, what became of the recovery phrase, which Beebeeb products this account uses. | built; light: 0 failing on all six lines; dark: 1 pixel line red (`item-0-0-avatar edge 10 > 9`: the rim of the 32 pt avatar disc; measured, the board's disc is 0.2 device px smaller under its ring) |
-| `DW-A52` | Sign-in and security: everything about getting in, who else is in, and getting out. | built (light and dark: 0 failing on all six lines) |
-| `DW-A84` | Security checkup: the account's security factors in one list, with a score (7 of 7). | built (light and dark: 0 failing on all six lines) |
-| `DW-A84a` | The same page with one thing left: no passkey yet (6 of 7). | built (light and dark: 0 failing on all six lines) |
+| `DW-A52` | Sign-in and security: everything about getting in, who else is in, and getting out. | retired by the owner's ruling 2026-11-13 (option C), replaced by `DW-S01`. Not a gated frame any more; the id stays a name the app's links understand |
+| `DW-A84` | Security checkup: the account's security factors in one list, with a score (7 of 7). | retired by the owner's ruling 2026-11-13 (option C), replaced by `DW-S01` (the checkup is on the page). Not a gated frame any more |
+| `DW-A84a` | The same page with one thing left: no passkey yet (6 of 7). | retired by the owner's ruling 2026-11-13 (option C), replaced by `DW-S01a`. Not a gated frame any more |
 | `DW-A55` | Devices and sessions: see and end every session of the account. | built (light and dark: 0 failing on all six lines) |
 | `DW-A56` | Confirm ending one device's sessions. | built (light and dark: 0 failing on all six lines) |
-| `DW-A57` | Confirm signing out of this app only. | built (light and dark: 0 failing on all six lines) |
-| `DW-A57a` | Confirm signing out of all Beebeeb apps on this PC. | built (light and dark: 0 failing on all six lines) |
+| `DW-A57` | Confirm signing out of this app only. | retired by the owner's ruling 2026-11-13 (option C), replaced by `DW-S02` (the same confirm, over the one page). Not a gated frame any more |
+| `DW-A57a` | Confirm signing out of all Beebeeb apps on this PC. | retired by the owner's ruling 2026-11-13 (option C), replaced by `DW-S02a`. Not a gated frame any more |
+
+## Sign-in and security, one page (8; a design of this app's, no board frame)
+
+`security_overview.rs`, tests in `tests_security.rs`. ONE scrolling page is what Settings > Security shows, in place
+of DW-A52 (a list of rows) and the security checkup DW-A84 / DW-A84a (a second screen with the same subjects):
+
+- the score card: the ring, "N of M security steps done", and what is left to do, each with the button that fixes it
+  (the first is the page's one primary action);
+- Sign-in: Password, Two-factor authentication, Passkeys, each with its state and the mark of a thing that is done;
+- This PC and your devices: App lock with its switch and delay, Devices and sessions with how many are signed in,
+  Approve a sign-in;
+- Recent sign-in activity: the last three, then "All sign-in activity";
+- Sign out (two confirms, which wait for the answer) and Delete, at the bottom.
+
+Every row still opens its existing page. The page is drawn from `SecurityFacts`, where each part is known or not:
+"Not known" for a part nobody read, "Not available yet" (and no link, switch or button) for what a build has not
+bound; a row with a read state says that state alone; no score, no ring fill and no mark from a value that was not
+read. On the real engine today the page knows two-factor (the profile's own mark; absent: not known) and how many
+are signed in (one per session: "N signed in", never "devices"; "Loading" while that list is out; never the length
+of a list read before a sign-out); the rest says so.
+
+| Frame | What it is | Status |
+| --- | --- | --- |
+| `DW-S01` | The page with everything done (7 of 7). | built (light and dark: 0 failing on all six lines) |
+| `DW-S01a` | One thing left: no passkey yet (6 of 7), with its Add button in the score card. | built (light and dark: 0 failing on all six lines) |
+| `DW-S01u` | The page of a source that knows only two-factor and how many are signed in (the running app today). | built (light and dark: 0 failing on all six lines) |
+| `DW-S02` | Confirm signing out of this app only (was DW-A57). | built (light and dark: 0 failing on all six lines) |
+| `DW-S02a` | Confirm signing out of all Beebeeb apps on this PC (was DW-A57a). | built (light and dark: 0 failing on all six lines) |
+| `DW-S02w` | The confirm while its sign-out is out: it says so and takes no press. | built (light and dark: 0 failing on all six lines) |
+| `DW-S03` | App lock's delay menu, open (was DW-0716). | built (light and dark: 0 failing on all six lines) |
+| `DW-S03b` | App lock off: no time choice (was DW-0716b). | built (light and dark: 0 failing on all six lines) |
+
+Decision (lane, 2026-11-13): DW-A52, DW-A84, DW-A84a, DW-A57, DW-A57a, DW-0716 and DW-0716b are retired by the
+owner's ruling of 2026-11-13 (option C of three rendered options: one page), because the two screens listed the
+same subjects twice and the pane was a menu that said nothing about the account's state. The ruling wins over the
+old board frames. Their ids stay names the app's links understand (`go`); they are no scenes and are not gated.
+Their board goldens are left in `golden/` unread (not deleted: a deletion is the owner's call).
+
+Decision (lane, 2026-11-14): the goldens of `DW-S..` are the APP's own renders of the approved page
+(`scripts/golden-from-native.py`: the app's element export in the board golden's shape; the picture is `--snap`),
+because the board has no drawing of this page and the lead ruled that the new ids are gated. What such a golden
+is: a record of the approved render that fails when the page changes afterwards. It does not say the app matches
+a design. Proven able to fail: with the score card's padding changed, `DW-S01` reads `geometry: 155 checked, 92
+failing`. When the board draws the page, capture these goldens from the board instead.
+
+Decision (lane, 2026-11-14): the steps that are DONE are not listed on the page (the checkup listed all seven):
+the ruling's page shows the count, what is left, and the three sign-in rows. Recorded here as a removed
+behaviour; a "done" list in the score card is a follow-up if the owner wants it.
 
 ## Name, email and password (5)
 
@@ -71,8 +122,8 @@ built here (`plan.rs`, `app_lock.rs`) and are scenes of `frames::account::FRAMES
 | Frame | What it is | Status |
 | --- | --- | --- |
 | `DW-0708` | The plan, read only: a dialog over Account, from the plan card. | built; gate red, light and dark: the board draws an older Account pane behind the dialog (the plan card on top, no identity rows, a 540 pt column in Drive's settings kit), the app has one Account pane (DW-A51). In the gate, 9 of the dialog's 16 keys are at 0 (`scrim`, `dlg`, `dlg-title`, `dlg-text-0`, `dlg-foot`, `btn-0`, `btn-1` and the two labels) and 7 are RED: its list (`list-1-body`, `item-1-0`, `item-1-1` and their titles and values), which the board numbers `list-1` and the app `list-3` (the real pane has lists 0 to 2). Mapped by hand, `list-1` to `list-3`, those 7 are within 1 px; the gate does not measure that |
-| `DW-0716` | App lock's delay: the pop-up open on Immediately, 5 min, 30 min, 60 min. | built; gate red, light and dark: the board draws this frame in Drive's settings kit (28 pt sidebar rows, a 540 pt column) and DW-A52, "the same pane", in the account kit (30 pt, 520 pt). The app has ONE Security pane, DW-A52's, which gates at 0. DW-A52 itself still gates at 0 with the menu's anchor in its row. In the gate the menu's 10 keys are RED on geometry: the menu hangs 4 pt inside the card's trailing edge, the card is 520 pt here and 540 pt on this drawing, so the menu is 20 px to the left of the board's. Measured by hand as an offset from the pop-up button they are within 1 px; the gate does not measure that |
-| `DW-0716b` | App lock off: no time choice. | built: DW-A52 with the switch off; gate red for the same reason as DW-0716 |
+| `DW-0716` | App lock's delay: the pop-up open on Immediately, 5 min, 30 min, 60 min. | retired by the owner's ruling 2026-11-13 (option C), replaced by `DW-S03`. Before that: built; gate red, light and dark: the board draws this frame in Drive's settings kit (28 pt sidebar rows, a 540 pt column) and DW-A52, "the same pane", in the account kit (30 pt, 520 pt). The app has ONE Security pane, DW-A52's, which gates at 0. DW-A52 itself still gates at 0 with the menu's anchor in its row. In the gate the menu's 10 keys are RED on geometry: the menu hangs 4 pt inside the card's trailing edge, the card is 520 pt here and 540 pt on this drawing, so the menu is 20 px to the left of the board's. Measured by hand as an offset from the pop-up button they are within 1 px; the gate does not measure that |
+| `DW-0716b` | App lock off: no time choice. | retired by the owner's ruling 2026-11-13 (option C), replaced by `DW-S03b` |
 
 Decision (lane, 2026-11-12): one Security pane and one Account pane, in the account kit, because DW-0716's own rule
 says "Security is one pane (final review C3): DW-A52" and DW-0708's says it is "reached from the plan card Drive adds

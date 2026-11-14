@@ -1,0 +1,2148 @@
+{
+ "elements": {
+  "Account": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Account",
+   "tracking": 0.0,
+   "w": 157.5,
+   "weight": 500,
+   "x": 46.0,
+   "y": 149.5
+  },
+  "Account-icon": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 20.0,
+   "y": 150.0
+  },
+  "Account-row": {
+   "h": 30.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 143.0
+  },
+  "Back to Drive": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Back to Drive",
+   "tracking": 0.0,
+   "w": 82.5,
+   "weight": 500,
+   "x": 41.0,
+   "y": 52.5
+  },
+  "Back to Drive-icon": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "filled": false,
+   "h": 15.0,
+   "icon": [
+    "M15 5l-7 7 7 7"
+   ],
+   "kind": "icon",
+   "w": 15.0,
+   "x": 20.0,
+   "y": 53.5
+  },
+  "Back to Drive-row": {
+   "h": 30.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 46.0
+  },
+  "Backups": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Backups",
+   "tracking": 0.0,
+   "w": 157.5,
+   "weight": 500,
+   "x": 46.0,
+   "y": 339.5
+  },
+  "Backups-icon": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 20.0,
+   "y": 340.0
+  },
+  "Backups-row": {
+   "h": 30.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 333.0
+  },
+  "Bandwidth": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Bandwidth",
+   "tracking": 0.0,
+   "w": 157.5,
+   "weight": 500,
+   "x": 46.0,
+   "y": 432.5
+  },
+  "Bandwidth-icon": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 20.0,
+   "y": 433.0
+  },
+  "Bandwidth-row": {
+   "h": 30.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 426.0
+  },
+  "Devices and sessions": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Devices and sessions",
+   "tracking": 0.0,
+   "w": 157.5,
+   "weight": 500,
+   "x": 46.0,
+   "y": 211.5
+  },
+  "Devices and sessions-icon": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M8 3h8a1.5 1.5 0 0 1 1.5 1.5v15A1.5 1.5 0 0 1 16 21H8a1.5 1.5 0 0 1-1.5-1.5v-15A1.5 1.5 0 0 1 8 3z",
+    "M11 18h2"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 20.0,
+   "y": 212.0
+  },
+  "Devices and sessions-row": {
+   "h": 30.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 205.0
+  },
+  "General": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "General",
+   "tracking": 0.0,
+   "w": 157.5,
+   "weight": 500,
+   "x": 46.0,
+   "y": 118.5
+  },
+  "General-icon": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 20.0,
+   "y": 119.0
+  },
+  "General-row": {
+   "h": 30.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 112.0
+  },
+  "Notifications": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Notifications",
+   "tracking": 0.0,
+   "w": 157.5,
+   "weight": 500,
+   "x": 46.0,
+   "y": 242.5
+  },
+  "Notifications-icon": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 20.0,
+   "y": 243.0
+  },
+  "Notifications-row": {
+   "h": 30.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 236.0
+  },
+  "Security": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Security",
+   "tracking": 0.0,
+   "w": 157.5,
+   "weight": 500,
+   "x": 46.0,
+   "y": 180.5
+  },
+  "Security-icon": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 20.0,
+   "y": 181.0
+  },
+  "Security-row": {
+   "bg": [
+    230,
+    228,
+    224,
+    23
+   ],
+   "h": 30.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 174.0
+  },
+  "Storage": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Storage",
+   "tracking": 0.0,
+   "w": 157.5,
+   "weight": 500,
+   "x": 46.0,
+   "y": 308.5
+  },
+  "Storage-icon": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 20.0,
+   "y": 309.0
+  },
+  "Storage-row": {
+   "h": 30.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 302.0
+  },
+  "Sync and File Explorer": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Sync and File Explorer",
+   "tracking": 0.0,
+   "w": 157.5,
+   "weight": 500,
+   "x": 46.0,
+   "y": 370.5
+  },
+  "Sync and File Explorer-icon": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 20.0,
+   "y": 371.0
+  },
+  "Sync and File Explorer-row": {
+   "h": 30.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 364.0
+  },
+  "Thumbnails and previews": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Thumbnails and previews",
+   "tracking": 0.0,
+   "w": 157.5,
+   "weight": 500,
+   "x": 46.0,
+   "y": 401.5
+  },
+  "Thumbnails and previews-icon": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 20.0,
+   "y": 402.0
+  },
+  "Thumbnails and previews-row": {
+   "h": 30.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 395.0
+  },
+  "body": {
+   "h": 606.0,
+   "kind": "box",
+   "w": 958.0,
+   "x": 0.0,
+   "y": 32.0
+  },
+  "btn-1": {
+   "bg": [
+    204,
+    39,
+    46,
+    255
+   ],
+   "h": 28.0,
+   "kind": "box",
+   "w": 191.0,
+   "x": 283.0,
+   "y": 362.75
+  },
+  "btn-1-label": {
+   "color": [
+    255,
+    255,
+    255,
+    255
+   ],
+   "family": "sans",
+   "h": 18.57,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Sign out",
+   "tracking": -0.06,
+   "w": 51.0,
+   "weight": 500,
+   "x": 353.0,
+   "y": 367.47
+  },
+  "btn-2": {
+   "bg": [
+    16,
+    13,
+    9,
+    255
+   ],
+   "h": 28.0,
+   "kind": "box",
+   "w": 193.0,
+   "x": 482.0,
+   "y": 362.75
+  },
+  "btn-2-label": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "family": "sans",
+   "h": 18.57,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Cancel",
+   "tracking": -0.06,
+   "w": 43.0,
+   "weight": 500,
+   "x": 557.0,
+   "y": 367.47
+  },
+  "cap-buttons": {
+   "h": 31.0,
+   "kind": "box",
+   "w": 138.0,
+   "x": 820.0,
+   "y": 0.0
+  },
+  "cap-close": {
+   "h": 31.0,
+   "kind": "box",
+   "w": 46.0,
+   "x": 912.0,
+   "y": 0.0
+  },
+  "cap-close-icon": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "filled": false,
+   "h": 10.0,
+   "icon": [
+    "M.5.5l9 9M9.5.5l-9 9"
+   ],
+   "kind": "icon",
+   "w": 10.0,
+   "x": 930.0,
+   "y": 10.5
+  },
+  "cap-mark": {
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "kind": "icon",
+   "mark": true,
+   "w": 16.0,
+   "x": 12.0,
+   "y": 7.5
+  },
+  "cap-max": {
+   "h": 31.0,
+   "kind": "box",
+   "w": 46.0,
+   "x": 866.0,
+   "y": 0.0
+  },
+  "cap-max-icon": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "filled": false,
+   "h": 10.0,
+   "icon": [
+    "rect:x=.5,y=.5,width=9,height=9,rx=1.5"
+   ],
+   "kind": "icon",
+   "w": 10.0,
+   "x": 884.0,
+   "y": 10.5
+  },
+  "cap-min": {
+   "h": 31.0,
+   "kind": "box",
+   "w": 46.0,
+   "x": 820.0,
+   "y": 0.0
+  },
+  "cap-min-icon": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "filled": false,
+   "h": 10.0,
+   "icon": [
+    "M0 5.5h10"
+   ],
+   "kind": "icon",
+   "w": 10.0,
+   "x": 838.0,
+   "y": 10.5
+  },
+  "cap-title": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "family": "sans",
+   "h": 16.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "Beebeeb Drive",
+   "tracking": 0.0,
+   "w": 774.0,
+   "weight": 400,
+   "x": 37.0,
+   "y": 7.5
+  },
+  "caption-bar": {
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ],
+   "h": 32.0,
+   "kind": "box",
+   "w": 958.0,
+   "x": 0.0,
+   "y": 0.0
+  },
+  "card-0": {
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ],
+   "h": 92.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 96.0
+  },
+  "dlg": {
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ],
+   "h": 143.5,
+   "kind": "box",
+   "w": 440.0,
+   "x": 259.0,
+   "y": 263.25
+  },
+  "dlg-body": {
+   "h": 83.0,
+   "kind": "box",
+   "w": 440.0,
+   "x": 259.0,
+   "y": 263.25
+  },
+  "dlg-clip": {
+   "h": 143.5,
+   "kind": "box",
+   "w": 440.0,
+   "x": 259.0,
+   "y": 263.25
+  },
+  "dlg-foot": {
+   "bg": [
+    16,
+    13,
+    9,
+    255
+   ],
+   "h": 60.5,
+   "kind": "box",
+   "w": 440.0,
+   "x": 259.0,
+   "y": 346.25
+  },
+  "dlg-h": {
+   "h": 43.0,
+   "kind": "box",
+   "w": 392.0,
+   "x": 283.0,
+   "y": 285.25
+  },
+  "dlg-text-0": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "family": "sans",
+   "h": 15.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "Signing out. Nothing is signed out until Beebeeb has answered.",
+   "tracking": 0.0,
+   "w": 392.0,
+   "weight": 400,
+   "x": 283.0,
+   "y": 313.25
+  },
+  "dlg-title": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "family": "sans",
+   "h": 22.0,
+   "kind": "text",
+   "size": 17.0,
+   "text": "Sign out of Drive?",
+   "tracking": -0.2,
+   "w": 392.0,
+   "weight": 600,
+   "x": 283.0,
+   "y": 285.25
+  },
+  "item-0-0": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 221.0
+  },
+  "item-0-0-check": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M20 6L9 17l-5-5"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 726.0,
+   "y": 233.0
+  },
+  "item-0-0-chev": {
+   "color": [
+    96,
+    93,
+    89,
+    255
+   ],
+   "filled": false,
+   "h": 14.0,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "kind": "icon",
+   "w": 14.0,
+   "x": 750.0,
+   "y": 234.0
+  },
+  "item-0-0-icon": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "filled": false,
+   "h": 18.0,
+   "icon": [
+    "M19 11H5a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2zM7 11V7a5 5 0 0 1 10 0v4"
+   ],
+   "kind": "icon",
+   "w": 18.0,
+   "x": 270.0,
+   "y": 232.0
+  },
+  "item-0-0-icon-box": {
+   "h": 18.0,
+   "kind": "box",
+   "w": 30.0,
+   "x": 264.0,
+   "y": 232.0
+  },
+  "item-0-0-sub": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "family": "sans",
+   "h": 15.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "Changed 3 weeks ago",
+   "tracking": 0.0,
+   "w": 416.0,
+   "weight": 400,
+   "x": 302.0,
+   "y": 242.5
+  },
+  "item-0-0-text": {
+   "h": 33.0,
+   "kind": "box",
+   "w": 416.0,
+   "x": 302.0,
+   "y": 224.5
+  },
+  "item-0-0-title": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Password",
+   "tracking": -0.06,
+   "w": 416.0,
+   "weight": 500,
+   "x": 302.0,
+   "y": 224.5
+  },
+  "item-0-1": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 261.0
+  },
+  "item-0-1-check": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M20 6L9 17l-5-5"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 726.0,
+   "y": 273.0
+  },
+  "item-0-1-chev": {
+   "color": [
+    96,
+    93,
+    89,
+    255
+   ],
+   "filled": false,
+   "h": 14.0,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "kind": "icon",
+   "w": 14.0,
+   "x": 750.0,
+   "y": 274.0
+  },
+  "item-0-1-icon": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "filled": false,
+   "h": 18.0,
+   "icon": [
+    "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
+   ],
+   "kind": "icon",
+   "w": 18.0,
+   "x": 270.0,
+   "y": 272.0
+  },
+  "item-0-1-icon-box": {
+   "h": 18.0,
+   "kind": "box",
+   "w": 30.0,
+   "x": 264.0,
+   "y": 272.0
+  },
+  "item-0-1-rule": {
+   "bg": [
+    230,
+    228,
+    224,
+    31
+   ],
+   "h": 0.5,
+   "kind": "box",
+   "w": 510.0,
+   "x": 264.0,
+   "y": 261.0
+  },
+  "item-0-1-sub": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "family": "sans",
+   "h": 15.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "On \u00b7 6 of 8 backup codes left",
+   "tracking": 0.0,
+   "w": 416.0,
+   "weight": 400,
+   "x": 302.0,
+   "y": 282.5
+  },
+  "item-0-1-text": {
+   "h": 33.0,
+   "kind": "box",
+   "w": 416.0,
+   "x": 302.0,
+   "y": 264.5
+  },
+  "item-0-1-title": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Two-factor authentication",
+   "tracking": -0.06,
+   "w": 416.0,
+   "weight": 500,
+   "x": 302.0,
+   "y": 264.5
+  },
+  "item-0-2": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 301.0
+  },
+  "item-0-2-check": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M20 6L9 17l-5-5"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 726.0,
+   "y": 313.0
+  },
+  "item-0-2-chev": {
+   "color": [
+    96,
+    93,
+    89,
+    255
+   ],
+   "filled": false,
+   "h": 14.0,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "kind": "icon",
+   "w": 14.0,
+   "x": 750.0,
+   "y": 314.0
+  },
+  "item-0-2-icon": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "filled": false,
+   "h": 18.0,
+   "icon": [
+    "M8.5 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z",
+    "M2.5 20v-1a4.5 4.5 0 0 1 4.5-4.5h3",
+    "M17 12.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z",
+    "M17 17.5V21",
+    "M17 19.5h2"
+   ],
+   "kind": "icon",
+   "w": 18.0,
+   "x": 270.0,
+   "y": 312.0
+  },
+  "item-0-2-icon-box": {
+   "h": 18.0,
+   "kind": "box",
+   "w": 30.0,
+   "x": 264.0,
+   "y": 312.0
+  },
+  "item-0-2-rule": {
+   "bg": [
+    230,
+    228,
+    224,
+    31
+   ],
+   "h": 0.5,
+   "kind": "box",
+   "w": 510.0,
+   "x": 264.0,
+   "y": 301.0
+  },
+  "item-0-2-sub": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "family": "sans",
+   "h": 15.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "2 passkeys",
+   "tracking": 0.0,
+   "w": 416.0,
+   "weight": 400,
+   "x": 302.0,
+   "y": 322.5
+  },
+  "item-0-2-text": {
+   "h": 33.0,
+   "kind": "box",
+   "w": 416.0,
+   "x": 302.0,
+   "y": 304.5
+  },
+  "item-0-2-title": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Passkeys",
+   "tracking": -0.06,
+   "w": 416.0,
+   "weight": 500,
+   "x": 302.0,
+   "y": 304.5
+  },
+  "item-1-0": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 374.0
+  },
+  "item-1-0-icon": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "filled": false,
+   "h": 18.0,
+   "icon": [
+    "M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17z",
+    "M9 10v1",
+    "M15 10v1",
+    "M8.8 14.6a4.6 4.6 0 0 0 6.4 0"
+   ],
+   "kind": "icon",
+   "w": 18.0,
+   "x": 270.0,
+   "y": 385.0
+  },
+  "item-1-0-icon-box": {
+   "h": 18.0,
+   "kind": "box",
+   "w": 30.0,
+   "x": 264.0,
+   "y": 385.0
+  },
+  "item-1-0-knob": {
+   "bg": [
+    16,
+    13,
+    9,
+    255
+   ],
+   "h": 14.0,
+   "kind": "box",
+   "w": 14.0,
+   "x": 747.0,
+   "y": 387.0
+  },
+  "item-1-0-pop": {
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ],
+   "h": 24.0,
+   "kind": "box",
+   "w": 63.5,
+   "x": 648.5,
+   "y": 382.0
+  },
+  "item-1-0-pop-button": {
+   "h": 24.0,
+   "kind": "box",
+   "w": 63.5,
+   "x": 648.5,
+   "y": 382.0
+  },
+  "item-1-0-pop-caret": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "filled": false,
+   "h": 12.0,
+   "icon": [
+    "M7 10l5 5 5-5"
+   ],
+   "kind": "icon",
+   "w": 12.0,
+   "x": 694.0,
+   "y": 388.0
+  },
+  "item-1-0-pop-label": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 12.5,
+   "text": "5 min",
+   "tracking": 0.0,
+   "w": 32.5,
+   "weight": 400,
+   "x": 657.5,
+   "y": 385.5
+  },
+  "item-1-0-sub": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "family": "sans",
+   "h": 15.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "Windows Hello \u00b7 locks again after",
+   "tracking": 0.0,
+   "w": 338.5,
+   "weight": 400,
+   "x": 302.0,
+   "y": 395.5
+  },
+  "item-1-0-switch": {
+   "bg": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "h": 20.0,
+   "kind": "box",
+   "w": 36.0,
+   "x": 728.0,
+   "y": 384.0
+  },
+  "item-1-0-text": {
+   "h": 33.0,
+   "kind": "box",
+   "w": 338.5,
+   "x": 302.0,
+   "y": 377.5
+  },
+  "item-1-0-title": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Lock Beebeeb",
+   "tracking": -0.06,
+   "w": 338.5,
+   "weight": 500,
+   "x": 302.0,
+   "y": 377.5
+  },
+  "item-1-1": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 414.0
+  },
+  "item-1-1-chev": {
+   "color": [
+    96,
+    93,
+    89,
+    255
+   ],
+   "filled": false,
+   "h": 14.0,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "kind": "icon",
+   "w": 14.0,
+   "x": 750.0,
+   "y": 427.0
+  },
+  "item-1-1-icon": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "filled": false,
+   "h": 18.0,
+   "icon": [
+    "M8 3h8a1.5 1.5 0 0 1 1.5 1.5v15A1.5 1.5 0 0 1 16 21H8a1.5 1.5 0 0 1-1.5-1.5v-15A1.5 1.5 0 0 1 8 3z",
+    "M11 18h2"
+   ],
+   "kind": "icon",
+   "w": 18.0,
+   "x": 270.0,
+   "y": 425.0
+  },
+  "item-1-1-icon-box": {
+   "h": 18.0,
+   "kind": "box",
+   "w": 30.0,
+   "x": 264.0,
+   "y": 425.0
+  },
+  "item-1-1-rule": {
+   "bg": [
+    230,
+    228,
+    224,
+    31
+   ],
+   "h": 0.5,
+   "kind": "box",
+   "w": 510.0,
+   "x": 264.0,
+   "y": 414.0
+  },
+  "item-1-1-sub": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "family": "sans",
+   "h": 15.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "Where your account is signed in",
+   "tracking": 0.0,
+   "w": 364.0,
+   "weight": 400,
+   "x": 302.0,
+   "y": 435.5
+  },
+  "item-1-1-text": {
+   "h": 33.0,
+   "kind": "box",
+   "w": 364.0,
+   "x": 302.0,
+   "y": 417.5
+  },
+  "item-1-1-title": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Devices and sessions",
+   "tracking": -0.06,
+   "w": 364.0,
+   "weight": 500,
+   "x": 302.0,
+   "y": 417.5
+  },
+  "item-1-1-value": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "4 signed in",
+   "tracking": 0.0,
+   "w": 68.0,
+   "weight": 400,
+   "x": 674.0,
+   "y": 425.5
+  },
+  "item-1-2": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 454.0
+  },
+  "item-1-2-chev": {
+   "color": [
+    96,
+    93,
+    89,
+    255
+   ],
+   "filled": false,
+   "h": 14.0,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "kind": "icon",
+   "w": 14.0,
+   "x": 750.0,
+   "y": 467.0
+  },
+  "item-1-2-icon": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "filled": false,
+   "h": 18.0,
+   "icon": [
+    "M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M8 12h8M12 8v8"
+   ],
+   "kind": "icon",
+   "w": 18.0,
+   "x": 270.0,
+   "y": 465.0
+  },
+  "item-1-2-icon-box": {
+   "h": 18.0,
+   "kind": "box",
+   "w": 30.0,
+   "x": 264.0,
+   "y": 465.0
+  },
+  "item-1-2-rule": {
+   "bg": [
+    230,
+    228,
+    224,
+    31
+   ],
+   "h": 0.5,
+   "kind": "box",
+   "w": 510.0,
+   "x": 264.0,
+   "y": 454.0
+  },
+  "item-1-2-sub": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "family": "sans",
+   "h": 15.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "Let another device sign in",
+   "tracking": 0.0,
+   "w": 440.0,
+   "weight": 400,
+   "x": 302.0,
+   "y": 475.5
+  },
+  "item-1-2-text": {
+   "h": 33.0,
+   "kind": "box",
+   "w": 440.0,
+   "x": 302.0,
+   "y": 457.5
+  },
+  "item-1-2-title": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Approve a sign-in",
+   "tracking": -0.06,
+   "w": 440.0,
+   "weight": 500,
+   "x": 302.0,
+   "y": 457.5
+  },
+  "item-2-0": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 527.0
+  },
+  "item-2-0-icon": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "filled": false,
+   "h": 18.0,
+   "icon": [
+    "M5.5 5h13A1.5 1.5 0 0 1 20 6.5V15H4V6.5A1.5 1.5 0 0 1 5.5 5z",
+    "M2.5 19h19"
+   ],
+   "kind": "icon",
+   "w": 18.0,
+   "x": 270.0,
+   "y": 538.0
+  },
+  "item-2-0-icon-box": {
+   "h": 18.0,
+   "kind": "box",
+   "w": 30.0,
+   "x": 264.0,
+   "y": 538.0
+  },
+  "item-2-0-sub": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "family": "mono",
+   "h": 15.0,
+   "kind": "text",
+   "size": 11.5,
+   "text": "09:12 \u00b7 Netherlands \u00b7 203.0.113.24",
+   "tracking": 0.0,
+   "w": 462.0,
+   "weight": 400,
+   "x": 302.0,
+   "y": 548.5
+  },
+  "item-2-0-text": {
+   "h": 33.0,
+   "kind": "box",
+   "w": 462.0,
+   "x": 302.0,
+   "y": 530.5
+  },
+  "item-2-0-title": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "New sign-in on Anna-Laptop",
+   "tracking": -0.06,
+   "w": 462.0,
+   "weight": 500,
+   "x": 302.0,
+   "y": 530.5
+  },
+  "item-2-1": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 567.0
+  },
+  "item-2-1-icon": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "filled": false,
+   "h": 18.0,
+   "icon": [
+    "M8.5 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z",
+    "M2.5 20v-1a4.5 4.5 0 0 1 4.5-4.5h3",
+    "M17 12.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z",
+    "M17 17.5V21",
+    "M17 19.5h2"
+   ],
+   "kind": "icon",
+   "w": 18.0,
+   "x": 270.0,
+   "y": 578.0
+  },
+  "item-2-1-icon-box": {
+   "h": 18.0,
+   "kind": "box",
+   "w": 30.0,
+   "x": 264.0,
+   "y": 578.0
+  },
+  "item-2-1-rule": {
+   "bg": [
+    230,
+    228,
+    224,
+    31
+   ],
+   "h": 0.5,
+   "kind": "box",
+   "w": 510.0,
+   "x": 264.0,
+   "y": 567.0
+  },
+  "item-2-1-sub": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "family": "mono",
+   "h": 15.0,
+   "kind": "text",
+   "size": 11.5,
+   "text": "28 Oct \u00b7 This iPhone \u00b7 198.51.100.7",
+   "tracking": 0.0,
+   "w": 462.0,
+   "weight": 400,
+   "x": 302.0,
+   "y": 588.5
+  },
+  "item-2-1-text": {
+   "h": 33.0,
+   "kind": "box",
+   "w": 462.0,
+   "x": 302.0,
+   "y": 570.5
+  },
+  "item-2-1-title": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Passkey added",
+   "tracking": -0.06,
+   "w": 462.0,
+   "weight": 500,
+   "x": 302.0,
+   "y": 570.5
+  },
+  "item-2-2-icon": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "filled": false,
+   "h": 18.0,
+   "icon": [
+    "M20 6L9 17l-5-5"
+   ],
+   "kind": "icon",
+   "w": 18.0,
+   "x": 270.0,
+   "y": 618.0
+  },
+  "item-2-2-icon-box": {
+   "h": 18.0,
+   "kind": "box",
+   "w": 30.0,
+   "x": 264.0,
+   "y": 618.0
+  },
+  "item-2-2-rule": {
+   "bg": [
+    230,
+    228,
+    224,
+    31
+   ],
+   "h": 0.5,
+   "kind": "box",
+   "w": 510.0,
+   "x": 264.0,
+   "y": 607.0
+  },
+  "item-2-2-title": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Device approved: Anna's iPad",
+   "tracking": -0.06,
+   "w": 462.0,
+   "weight": 500,
+   "x": 302.0,
+   "y": 610.5
+  },
+  "list-0": {
+   "h": 139.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 202.0
+  },
+  "list-0-body": {
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ],
+   "h": 120.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 221.0
+  },
+  "list-0-rows": {
+   "h": 120.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 221.0
+  },
+  "list-0-title": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "family": "sans",
+   "h": 13.0,
+   "kind": "text",
+   "size": 10.0,
+   "text": "Sign-in",
+   "tracking": 0.1,
+   "w": 36.0,
+   "weight": 600,
+   "x": 268.0,
+   "y": 202.0
+  },
+  "list-0-title-box": {
+   "h": 13.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 202.0
+  },
+  "list-1": {
+   "h": 139.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 355.0
+  },
+  "list-1-body": {
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ],
+   "h": 120.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 374.0
+  },
+  "list-1-rows": {
+   "h": 120.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 374.0
+  },
+  "list-1-title": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "family": "sans",
+   "h": 13.0,
+   "kind": "text",
+   "size": 10.0,
+   "text": "This PC and your devices",
+   "tracking": 0.1,
+   "w": 125.0,
+   "weight": 600,
+   "x": 268.0,
+   "y": 355.0
+  },
+  "list-1-title-box": {
+   "h": 13.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 355.0
+  },
+  "list-2-title": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "family": "sans",
+   "h": 13.0,
+   "kind": "text",
+   "size": 10.0,
+   "text": "Recent sign-in activity",
+   "tracking": 0.1,
+   "w": 111.0,
+   "weight": 600,
+   "x": 268.0,
+   "y": 508.0
+  },
+  "list-2-title-box": {
+   "h": 13.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 508.0
+  },
+  "mark-b": {
+   "h": 16.0,
+   "kind": "box",
+   "w": 16.0,
+   "x": 12.0,
+   "y": 7.5
+  },
+  "mark-dot": {
+   "h": 16.0,
+   "kind": "box",
+   "w": 16.0,
+   "x": 12.0,
+   "y": 7.5
+  },
+  "mark-folder": {
+   "h": 16.0,
+   "kind": "box",
+   "w": 16.0,
+   "x": 12.0,
+   "y": 7.5
+  },
+  "mark-ring": {
+   "h": 16.0,
+   "kind": "box",
+   "w": 16.0,
+   "x": 12.0,
+   "y": 7.5
+  },
+  "pane-Security": {
+   "h": 606.0,
+   "kind": "box",
+   "w": 734.0,
+   "x": 224.0,
+   "y": 32.0
+  },
+  "ring": {
+   "h": 56.0,
+   "kind": "box",
+   "w": 56.0,
+   "x": 272.0,
+   "y": 114.0
+  },
+  "ring-box": {
+   "h": 56.0,
+   "kind": "box",
+   "w": 56.0,
+   "x": 272.0,
+   "y": 114.0
+  },
+  "ring-head": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "family": "sans",
+   "h": 24.0,
+   "kind": "text",
+   "size": 20.0,
+   "text": "7 of 7 security steps done",
+   "tracking": -0.3,
+   "w": 414.0,
+   "weight": 650,
+   "x": 342.0,
+   "y": 121.5
+  },
+  "ring-label": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "family": "mono",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "7",
+   "tracking": -0.08,
+   "w": 8.0,
+   "weight": 600,
+   "x": 296.0,
+   "y": 133.5
+  },
+  "ring-sub": {
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "family": "sans",
+   "h": 15.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "Nothing to do.",
+   "tracking": 0.0,
+   "w": 414.0,
+   "weight": 400,
+   "x": 342.0,
+   "y": 147.5
+  },
+  "score": {
+   "h": 56.0,
+   "kind": "box",
+   "w": 484.0,
+   "x": 272.0,
+   "y": 114.0
+  },
+  "score-words": {
+   "h": 41.0,
+   "kind": "box",
+   "w": 414.0,
+   "x": 342.0,
+   "y": 121.5
+  },
+  "scrim": {
+   "bg": [
+    0,
+    0,
+    0,
+    140
+   ],
+   "h": 606.0,
+   "kind": "box",
+   "w": 958.0,
+   "x": 0.0,
+   "y": 32.0
+  },
+  "set-h": {
+   "h": 28.0,
+   "kind": "box",
+   "w": 520.0,
+   "x": 254.0,
+   "y": 54.0
+  },
+  "set-main": {
+   "bg": [
+    16,
+    13,
+    9,
+    255
+   ],
+   "h": 606.0,
+   "kind": "box",
+   "w": 734.0,
+   "x": 224.0,
+   "y": 32.0
+  },
+  "set-title": {
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "family": "sans",
+   "h": 28.0,
+   "kind": "text",
+   "size": 22.0,
+   "text": "Sign-in and security",
+   "tracking": -0.48,
+   "w": 520.0,
+   "weight": 650,
+   "x": 254.0,
+   "y": 54.0
+  },
+  "settings-nav": {
+   "h": 481.5,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 90.0
+  },
+  "side-foot": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "family": "sans",
+   "h": 28.0,
+   "kind": "text",
+   "size": 11.0,
+   "text": "Settings open inside the app. Esc goes back.",
+   "tracking": 0.0,
+   "w": 174.5,
+   "weight": 500,
+   "x": 16.0,
+   "y": 596.0
+  },
+  "side-foot-box": {
+   "h": 38.5,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 585.5
+  },
+  "side-sec-drive": {
+   "h": 176.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 280.0
+  },
+  "side-sec-settings": {
+   "h": 176.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 90.0
+  },
+  "side-title-box-drive": {
+   "h": 21.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 280.0
+  },
+  "side-title-box-settings": {
+   "h": 21.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 90.0
+  },
+  "side-title-drive": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 10.5,
+   "text": "DRIVE",
+   "tracking": 0.74,
+   "w": 35.5,
+   "weight": 600,
+   "x": 20.0,
+   "y": 280.0
+  },
+  "side-title-settings": {
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 10.5,
+   "text": "SETTINGS",
+   "tracking": 0.74,
+   "w": 59.0,
+   "weight": 600,
+   "x": 20.0,
+   "y": 90.0
+  },
+  "sidebar": {
+   "bg": [
+    16,
+    13,
+    9,
+    255
+   ],
+   "h": 606.0,
+   "kind": "box",
+   "w": 224.0,
+   "x": 0.0,
+   "y": 32.0
+  },
+  "window": {
+   "bg": [
+    16,
+    13,
+    9,
+    255
+   ],
+   "h": 638.0,
+   "kind": "box",
+   "w": 958.0,
+   "x": 0.0,
+   "y": 0.0
+  }
+ },
+ "frame": "DW-S02w",
+ "height": 638,
+ "source": "the app's own render (no board frame): scripts/golden-from-native.py",
+ "theme": "dark",
+ "width": 958
+}

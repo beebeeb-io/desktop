@@ -447,6 +447,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= crate::frames::trash::poll(s, tx);
     // Shared: the same rule (`frames::shared::poll`).
     changed |= crate::frames::shared::poll(s, tx);
+    // Photos: the same rule (`frames::photos::poll`); the library is read when the section opens.
+    changed |= crate::frames::photos::poll(s, tx);
     // Search: a gate or account change drops its names; opening it and a new query ask the source; answers come in.
     changed |= crate::frames::search::poll(s, tx);
     // This PC's answers and refusals (`frames::this_pc::poll`).
@@ -485,6 +487,10 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // A refused sync start says so, once per attempt (the refusal modal, Q3).
     changed |= open_sync_refusal(s);
     // The first sync's files, once a check finished (R1.1).
+    // Photos reads its library again once a check finished (`frames::photos::after_a_check`).
+    if s.shell.check_finished {
+        crate::frames::photos::after_a_check(s);
+    }
     changed |= read_again_after_a_check(s);
     // A lock, a sign-out or another account ends what was open inside the account sections: a
     // review of another device's sign-in, a typed code or password, a Windows Hello that is up.

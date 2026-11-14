@@ -32,7 +32,29 @@ pub struct BoardAccount {
     wait: u32,
     /// Approving a sign-in: the answers on their way.
     approvals: super::super::request::BoardApprovals,
+    /// What the Security page is told instead of everything (a source that knows only some parts).
+    facts: Option<fn(SecurityFacts) -> SecurityFacts>,
+    /// Only the three sections answer; every page under them is unwired (as on the real engine today).
+    sections_only: bool,
+    /// How this fixture answers a sign-out of this app.
+    sign_out_mode: SignOutMode,
+    /// A sign-out that answered `Pending`: all apps or this one, and the polls until its answer.
+    signing_out: Option<(bool, u32)>,
 }
+
+/// How the fixture answers a sign-out of this app.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SignOutMode {
+    /// Done in the call (the board's frames).
+    AtOnce,
+    /// Refused: unsent changes.
+    Refused,
+    /// On its way: answered after this many polls (`u32::MAX`: never, in a test's lifetime).
+    After(u32),
+}
+
+/// What the fixture says when it refuses a sign-out.
+pub const BOARD_SIGN_OUT_REFUSED: &str = "Some changes are not sent yet. Nothing was signed out.";
 
 /// The password the fixture's account has.
 pub const BOARD_PASSWORD: &str = "correct horse battery staple";
@@ -170,7 +192,39 @@ impl BoardAccount {
             deletion: Deletion::None,
             wait: 42,
             approvals: super::super::request::BoardApprovals::default(),
+            facts: None,
+            sections_only: false,
+            sign_out_mode: SignOutMode::AtOnce,
+            signing_out: None,
         }
+    }
+
+    /// A source that knows only part of the Security page: `change` takes what the board knows and hands
+    /// back what this source says.
+    pub fn knowing(mut self, change: fn(SecurityFacts) -> SecurityFacts) -> Self {
+        self.facts = Some(change);
+        self
+    }
+    /// How a sign-out of this app is answered (tests, and a scene of a sign-out on its way).
+    pub fn answering_sign_out(mut self, mode: SignOutMode) -> Self {
+        self.sign_out_mode = mode;
+        self
+    }
+    /// What a sign-out answers before anything is done, when it is not done in the call.
+    fn sign_out_held(&mut self, all: bool) -> Option<SignOutAnswer> {
+        match self.sign_out_mode {
+            SignOutMode::AtOnce => None,
+            SignOutMode::Refused => Some(SignOutAnswer::Refused(BOARD_SIGN_OUT_REFUSED)),
+            SignOutMode::After(polls) => {
+                self.signing_out = Some((all, polls));
+                Some(SignOutAnswer::Pending)
+            }
+        }
+    }
+    /// A source that answers for the three sections and for no page under them.
+    pub fn sections_only(mut self) -> Self {
+        self.sections_only = true;
+        self
     }
 
     /// DW-A79: security logging off.
@@ -225,6 +279,21 @@ impl BoardAccount {
 }
 
 impl AccountSource for BoardAccount {
+    fn pane_state(&self, pane: super::super::Pane) -> PaneState {
+        use super::super::Pane;
+        if self.sections_only && !matches!(pane, Pane::Account | Pane::Security | Pane::Sessions) {
+            PaneState::Unwired
+        } else {
+            PaneState::Ready
+        }
+    }
+    fn security_facts(&self) -> SecurityFacts {
+        let all = all_known(self);
+        match self.facts {
+            Some(change) => change(all),
+            None => all,
+        }
+    }
     fn identity(&self) -> Identity {
         Identity {
             name: self.name.clone(),
@@ -318,14 +387,37 @@ impl AccountSource for BoardAccount {
         self.sessions.retain(|s| s.this_device);
         self.wire.push("DELETE sessions except=current".into());
     }
-    fn sign_out_this_app(&mut self) {
+    fn sign_out_this_app(&mut self) -> SignOutAnswer {
+        if let Some(answer) = self.sign_out_held(false) {
+            return answer;
+        }
         self.signed_out = Some("this app");
+        SignOutAnswer::Done
     }
-    fn sign_out_all_apps(&mut self) {
+    fn sign_out_all_apps(&mut self) -> SignOutAnswer {
+        if let Some(answer) = self.sign_out_held(true) {
+            return answer;
+        }
         self.signed_out = Some("all apps on this PC");
         for product in &mut self.products {
             product.1 = ProductState::NotSignedIn;
         }
+        SignOutAnswer::Done
+    }
+    fn sign_out_result(&mut self) -> Option<SignOutAnswer> {
+        let (all, polls) = self.signing_out?;
+        if polls > 0 {
+            self.signing_out = Some((all, polls - 1));
+            return None;
+        }
+        // The answer arrived: only now is anything signed out.
+        self.signing_out = None;
+        self.sign_out_mode = SignOutMode::AtOnce;
+        Some(if all {
+            self.sign_out_all_apps()
+        } else {
+            self.sign_out_this_app()
+        })
     }
     fn step_up(&mut self, password: Password<'_>, purpose: Purpose) -> Result<StepUp, Refused> {
         // The request carries an OPAQUE message: a blinded element, never the password. The

@@ -10,6 +10,7 @@
 
 mod folder;
 pub mod guide;
+pub mod guide_marks;
 pub mod icons;
 pub mod source;
 mod view;
@@ -590,14 +591,10 @@ impl Ui {
         }
     }
 
-    /// Once after "Open my Beebeeb": whether the first-time guide starts now. It does unless this
-    /// PC has shown it (`SetupSource::guide_shown`), and it is marked shown here. For `guide::poll`.
-    pub fn guide_due(&mut self) -> bool {
-        if !std::mem::take(&mut self.finished) || self.source.guide_shown() {
-            return false;
-        }
-        self.source.mark_guide_shown();
-        true
+    /// Once after "Open my Beebeeb": the first run has just ended. For `guide::poll`, which then asks whether the
+    /// signed-in account has done the first-time guide (`guide_marks`).
+    pub fn just_finished(&mut self) -> bool {
+        std::mem::take(&mut self.finished)
     }
 
     /// Read again what the engine changed on its own. `true`: something did.

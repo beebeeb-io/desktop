@@ -158,6 +158,22 @@ pub fn viewer_of(name: &str) -> Option<Viewer> {
     })
 }
 
+/// Whether the file's own app SHOWS it: a document, a picture, a table, a note. `false` for source code,
+/// scripts, web pages and data files: the system's Open would run a script with its interpreter, load a web
+/// page as a local file in the browser, or find no app at all; reading one is what the window's viewer is for.
+/// For a list's Open of a file that is kept on this PC (`viewers::open_item`).
+pub fn its_app_shows_it(name: &str) -> bool {
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+    match viewer_of(name) {
+        Some(Viewer::Text) => matches!(ext.as_str(), "txt" | "log"),
+        Some(_) => true,
+        None => true,
+    }
+}
+
 /// "4:02", "28:40": minutes and seconds.
 pub fn clock(seconds: u32) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
