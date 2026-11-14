@@ -228,7 +228,7 @@ impl<C: CredentialStores> Engine<C> {
 
     #[cfg(target_os = "windows")]
     fn unregister_in_os(&self, root: &Path) -> Result<(), ()> {
-        crate::windows_cf::registration::unregister_sync_root(self.identity, root).map_err(|_| ())
+        crate::windows_cf::unregister_sync_root(self.identity, root).map_err(|_| ())
     }
 
     /// Only Windows has a registration to remove.
