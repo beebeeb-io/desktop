@@ -55,7 +55,7 @@ fn throughput(mbps: f64) -> Option<SpeedFigure> {
 #[test]
 fn nothing_is_read_at_launch_and_a_pane_reads_once_when_it_opens() {
     let fake = account();
-    let mut source = EngineDriveSettings::new(fake.clone(), Arc::default());
+    let mut source = EngineDriveSettings::new(fake.clone(), Arc::new(FakePlatform::default()));
     settle(&mut source);
     assert_eq!(
         fake.in_usage.passes.load(Ordering::SeqCst),
@@ -193,7 +193,7 @@ fn a_speed_test_landing_after_the_account_changed_is_dropped() {
 #[test]
 fn the_speed_test_button_is_off_in_the_test_build() {
     assert!(!SPEED_TEST_ON);
-    let source = EngineDriveSettings::new(account(), Arc::default());
+    let source = EngineDriveSettings::new(account(), Arc::new(FakePlatform::default()));
     assert!(!source.shows(Control::SpeedTest));
     assert!(!source.shows(Control::SyncOnMetered), "no metered detection: no switch");
     assert!(!source.shows(Control::StatusOnFiles), "nothing honours it: no switch");
@@ -214,7 +214,7 @@ fn an_export_saves_shows_and_opens_a_draft_that_names_the_file_only() {
     DRAFT_OPENS.store(true, Ordering::SeqCst);
     let fake = account();
     *fake.bundle_answer.lock().unwrap() = Ok(saved());
-    let mut source = EngineDriveSettings::new(fake.clone(), Arc::default()).with_os(fake_os());
+    let mut source = EngineDriveSettings::new(fake.clone(), Arc::new(FakePlatform::default())).with_os(fake_os());
     source.opened(Pane::Diagnostics);
     assert_eq!(
         source.diagnostics().bundle,
@@ -245,7 +245,7 @@ fn an_export_that_cannot_save_says_why_in_a_fixed_sentence_and_no_draft_opens() 
     let _one_at_a_time = OS_LOCK.lock().unwrap();
     DRAFTS.lock().unwrap().clear();
     let fake = account();
-    let mut source = EngineDriveSettings::new(fake.clone(), Arc::default()).with_os(fake_os());
+    let mut source = EngineDriveSettings::new(fake.clone(), Arc::new(FakePlatform::default())).with_os(fake_os());
     source.export_bundle();
     settle(&mut source);
     assert_eq!(
