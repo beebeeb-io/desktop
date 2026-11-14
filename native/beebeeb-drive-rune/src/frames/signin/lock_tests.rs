@@ -536,8 +536,11 @@ fn windows_hello_starts_by_itself_when_the_focus_came_before_the_first_poll() {
     engine.set_gate(GateState::Ready);
     rt.frame(1.0);
     settle(&mut rt);
-    rt.update(|s, _| super::on_window_focus(s, true));
-    engine.set_gate(GateState::Locked);
+    // The lock and the focus arrive before the next poll: the focus is not "before the first poll".
+    rt.update(|s, _| {
+        engine.set_gate(GateState::Locked);
+        super::on_window_focus(s, true);
+    });
     rt.frame(1.0);
     settle(&mut rt);
     assert_eq!(ui(&rt).lock_level(), Some(lock::Level::Screen));
