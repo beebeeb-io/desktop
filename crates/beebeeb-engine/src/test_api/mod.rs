@@ -69,6 +69,8 @@ pub struct Reply {
     pub status: u16,
     pub content_type: &'static str,
     pub body: Vec<u8>,
+    /// Sent as the `Retry-After` header when set (seconds).
+    pub retry_after: Option<u64>,
 }
 
 impl Reply {
@@ -77,6 +79,7 @@ impl Reply {
             status,
             content_type: "application/json",
             body: body.to_string().into_bytes(),
+            retry_after: None,
         }
     }
 
@@ -89,6 +92,7 @@ impl Reply {
             status,
             content_type: "application/octet-stream",
             body,
+            retry_after: None,
         }
     }
 
@@ -210,8 +214,12 @@ fn serve(mut stream: TcpStream, handler: &Handler, log: Option<&Mutex<Vec<Reques
         "ERR"
     };
     let date = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT");
+    let retry = reply
+        .retry_after
+        .map(|seconds| format!("Retry-After: {seconds}\r\n"))
+        .unwrap_or_default();
     let head = format!(
-        "HTTP/1.1 {} {reason}\r\nDate: {date}\r\nServer: {FAKE_API_MARK}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {reason}\r\nDate: {date}\r\nServer: {FAKE_API_MARK}\r\n{retry}Content-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         reply.status,
         reply.content_type,
         reply.body.len()

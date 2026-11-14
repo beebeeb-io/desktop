@@ -10,15 +10,28 @@ pub enum LockFlag {
     AskPasswordAtStart,
     /// The vault was closed (by hand, by the start setting, or because a flag could not be read).
     VaultClosed,
+    /// Not a flag: the screen lock's wrong-try count (`screen_lock::AttemptState::to_bytes`), under core's entry name
+    /// `lock.attempts`. Read and written only as bytes ([`AuthVault::lock_entry`]); never logged.
+    Attempts,
+    /// Not a flag: the screen lock's local check record (`ScreenCheckRecord::to_bytes`), under core's entry name
+    /// `lock.screen_check`. Bytes only; never logged.
+    ScreenCheck,
 }
 
 impl LockFlag {
-    pub const ALL: [Self; 2] = [Self::AskPasswordAtStart, Self::VaultClosed];
+    pub const ALL: [Self; 4] = [
+        Self::AskPasswordAtStart,
+        Self::VaultClosed,
+        Self::Attempts,
+        Self::ScreenCheck,
+    ];
 
     pub const fn leaf(self) -> &'static str {
         match self {
             Self::AskPasswordAtStart => "lock.ask_password_at_start",
             Self::VaultClosed => "lock.vault_closed",
+            Self::Attempts => "lock.attempts",
+            Self::ScreenCheck => "lock.screen_check",
         }
     }
 }
@@ -294,6 +307,16 @@ impl<S: AuthSecretStore> AuthVault<S> {
             Ok(Some(bytes)) if bytes == b"0" => Some(false),
             Ok(Some(_)) | Err(_) => None,
         }
+    }
+
+    /// The raw bytes of a lock entry that is not a 1/0 flag ([`LockFlag::Attempts`], [`LockFlag::ScreenCheck`]).
+    pub fn lock_entry(&self, entry: LockFlag) -> AuthResult<Option<Vec<u8>>> {
+        self.store.load_lock_flag(entry)
+    }
+
+    /// Store the raw bytes of such an entry.
+    pub fn set_lock_entry(&self, entry: LockFlag, bytes: &[u8]) -> AuthResult<()> {
+        self.store.save_lock_flag(entry, bytes)
     }
 
     /// Remove a lock flag (absent reads as off).

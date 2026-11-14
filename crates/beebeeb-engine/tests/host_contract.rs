@@ -459,15 +459,17 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
         before_the_ask,
         "nothing is asked of the server for a person behind a locked screen"
     );
-    // The two things a locked screen allows: unlock and sign out. The password path is off in this build.
+    // The two things a locked screen allows: unlock and sign out. The password path's own rules are tested in
+    // `lock_password_api_tests`; here only that an empty password checks nothing and the start setting waits for an
+    // open app.
     assert_eq!(again.engine.check_call(Call::Person(LockedAction::SignOut)), Ok(()));
     assert_eq!(
-        again.engine.unlock_screen_with_password(secret(PASSWORD)),
-        Err(LockRefused::PasswordCheckUnavailable)
+        again.engine.unlock_screen_with_password(secret("")),
+        Err(LockRefused::NothingTyped)
     );
     assert_eq!(
-        again.engine.set_ask_password_at_start(true),
-        Err(LockRefused::PasswordCheckUnavailable)
+        again.engine.set_ask_password_at_start(true, None),
+        Err(beebeeb_engine::app::lock_password_api::StartSettingRefused::NotOpen)
     );
     assert_eq!(again.engine.ask_password_at_start(), Some(false), "off by default");
 

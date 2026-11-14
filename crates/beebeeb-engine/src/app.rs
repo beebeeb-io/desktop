@@ -61,6 +61,7 @@ pub mod files_facts_api;
 pub mod kept_api;
 // The two-level lock, bound to core's rules (`beebeeb_api::flows::lock`).
 pub mod lock_api;
+pub mod lock_password_api;
 pub mod owned_state;
 // What the app window may change of the rows of the Backups tree, for the native Files window.
 pub mod backup_places_api;
@@ -257,6 +258,8 @@ pub struct Engine<C: CredentialStores> {
     /// A proven password waiting for its second factor (core holds the partial token, wiped on drop).
     /// The email is wiped with it (the shell's `Pending2fa` does the same).
     pending_2fa: Mutex<Option<(PendingSecondFactor, Zeroizing<String>)>>,
+    /// The screen lock's password check state (`lock_password_api`).
+    lock_password: lock_password_api::LockPassword,
     /// Wrong passwords in a row, for the lock hint.
     failures: AtomicU32,
     /// [`Engine::watch_session`] ran on this handle.
@@ -321,6 +324,7 @@ impl<C: CredentialStores> Engine<C> {
             writes: std::sync::RwLock::new(()),
             auth_present: Mutex::new(false),
             pending_2fa: Mutex::new(None),
+            lock_password: lock_password_api::LockPassword::default(),
             failures: AtomicU32::new(0),
             session_watch_started: AtomicBool::new(false),
             lock_flow: Mutex::new(beebeeb_api::flows::LockFlow::at_start(lock_api::NO_SESSION)),
@@ -499,6 +503,8 @@ impl<C: CredentialStores> Engine<C> {
             )
             .await
             .map_err(|code| self.problem(&code))?;
+            // The server accepted this password: stretch it for the screen lock's check record (`lock_password_api`).
+            self.stretch_for_sign_in(&password);
             drop(password);
             match legs {
                 PasswordLegs::SecondFactor(pending) => {
@@ -585,6 +591,7 @@ impl<C: CredentialStores> Engine<C> {
         };
         // A stored session this sign-in replaces (the strong unlock): it must be this account's, and the key and
         // the engine of the old session leave first (`lock_api`).
+        let screen_check = self.take_pending_screen_check();
         let (turn, replaced) = match self.prepare_replacement(turn, &profile).await {
             Ok(ready) => ready,
             Err(error) => {
@@ -597,6 +604,7 @@ impl<C: CredentialStores> Engine<C> {
             revoke(&self.client, base, &token).await;
             return Err(error);
         }
+        self.install_screen_check(screen_check, &profile);
         self.failures.store(0, Ordering::SeqCst);
         // The stored key of this same account (a vault that was closed, a locked screen, an older build's lock) is
         // loaded through the guarded loader. The password was proven to the server: the lock opens in the same
@@ -992,6 +1000,7 @@ impl<C: CredentialStores> Engine<C> {
         if let Ok(mut pending) = self.pending_2fa.lock() {
             *pending = None;
         }
+        self.lock_password.drop_pending();
     }
 
     /// Sign out and KEEP the local files and the local state: the engine stops, the session is ended on the server
