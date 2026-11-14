@@ -28,7 +28,7 @@ mod view;
 pub use view::layers;
 
 use super::Tab;
-use super::source::{Access, Member, PeopleShare};
+use super::source::{Access, InviteResult, Member, Notice, PeopleShare};
 use crate::State;
 use crate::frames::{self, Intent};
 use crate::shell::app::Section;
@@ -40,6 +40,9 @@ pub const NOTE_INPUT: &str = "request-note-input";
 pub const EMAIL_INPUT: &str = "invite-email-input";
 /// Empty Trash's and Delete permanently's password field.
 pub const PASSWORD_INPUT: &str = "purge-password-input";
+
+/// What Invite someone says when the person's key is not the one they compared safety numbers against (DW-0514).
+pub const KEY_CHANGED: &str = "Their key changed since you compared safety numbers. Nothing was shared.";
 
 /// A safety number as the board draws it: twelve groups of five digits. Crypto material: in
 /// this build only a scene makes one (the board's sample); nothing here computes, keeps beyond
@@ -100,8 +103,12 @@ pub struct Fields {
     /// The account password Empty Trash and Delete permanently ask: secure, wiped whenever a dialog opens or closes
     /// and when it is sent.
     pub password: TextEdit,
-    /// What the last try said (the password was not right), shown under the field.
+    /// What the last try said (the password was not right; an invitation was not sent), shown under the field.
     pub problem: Option<&'static str>,
+    /// Invite someone: an invitation is on its way, and Send invite takes no second press.
+    pub sending: bool,
+    /// Invite someone for an item not shared with anyone yet (no row in By me): its name, for the title.
+    pub unlisted: Option<String>,
 }
 
 impl Default for Fields {
@@ -112,6 +119,8 @@ impl Default for Fields {
             email: TextEdit::new(""),
             password: TextEdit::new("").secure(),
             problem: None,
+            sending: false,
+            unlisted: None,
         }
     }
 }
@@ -124,6 +133,8 @@ impl Fields {
             edit.focused = false;
         }
         self.problem = None;
+        self.sending = false;
+        self.unlisted = None;
     }
 }
 
@@ -172,7 +183,9 @@ impl super::SharedUi {
             None => false,
             // Its row may be gone (Trash's poll closes it then): nothing here knows Trash's list.
             Some(Dialog::NewRequest | Dialog::EmptyTrash | Dialog::DeleteForever(_)) => true,
-            Some(Dialog::People { share, .. } | Dialog::Invite { share, .. }) => self.share(share).is_some(),
+            Some(Dialog::People { share, .. }) => self.share(share).is_some(),
+            // An item not shared with anyone yet has no row: its name is kept with the dialog.
+            Some(Dialog::Invite { share, .. }) => self.share(share).is_some() || self.fields.unlisted.is_some(),
             Some(
                 Dialog::Person { share, person }
                 | Dialog::RemoveAccess { share, person }
@@ -206,7 +219,8 @@ impl super::SharedUi {
             Some(Dialog::RemoveAccess { share, person })
             | Some(Dialog::SafetyNumber { share, person, .. })
             | Some(Dialog::Stopped { share, person, .. }) => Some(Dialog::Person { share, person }),
-            Some(Dialog::Invite { share, .. }) => Some(Dialog::People {
+            // Back to People, when the share has a list of people to go back to.
+            Some(Dialog::Invite { share, .. }) if self.share(&share).is_some() => Some(Dialog::People {
                 share,
                 key_changed: None,
             }),
@@ -264,19 +278,57 @@ impl super::SharedUi {
         self.fields.email.focused = true;
     }
 
-    /// Send invite: shares with the address typed; People then shows them as invited. Not an
-    /// address (`is_address`), or the source refuses (they are on the share already): nothing
-    /// is sent and the dialog stays.
+    /// Invite someone… for an item from Files (DW-0514): its share's dialog when it has one, else the same dialog
+    /// for an item not shared with anyone yet, titled with `name`.
+    pub fn start_invite_named(&mut self, share: &str, name: &str) {
+        self.start_invite(share);
+        if self.share(share).is_none() {
+            self.fields.unlisted = Some(name.to_string());
+        }
+    }
+
+    /// Send invite: hands the address typed to the source, with the access Beebeeb gives a new invitation. The
+    /// dialog says "Sending…" and takes no second press until the answer ([`Self::invite_answered`]); nothing is
+    /// drawn as sent before it. Not an address (`is_address`), one already on its way, or the source refuses at
+    /// once (they are on the share already): nothing is sent and the dialog stays.
     pub fn send_invite(&mut self) -> bool {
-        let Some(Dialog::Invite { share, access }) = self.dialog.clone() else {
+        let Some(Dialog::Invite { share, .. }) = self.dialog.clone() else {
             return false;
         };
-        let email = self.fields.email.text.trim().to_string();
-        if !is_address(&email) || !self.source.invite(&share, &email, access) {
+        if self.fields.sending {
             return false;
         }
-        self.show_people(&share);
+        let email = self.fields.email.text.trim().to_string();
+        if !is_address(&email) || !self.source.start_invite(&share, &email) {
+            return false;
+        }
+        self.fields.sending = true;
+        self.fields.problem = None;
         true
+    }
+
+    /// An invitation's answer (the window's poll). The dialog that sent it closes only on an answer that reached
+    /// Beebeeb (People shows the share, when it has a list); a changed key or a refusal keeps it open, with its
+    /// words. An answer whose dialog was closed in the meantime: a refusal says so over the lists.
+    pub fn invite_answered(&mut self, share: &str, result: InviteResult) {
+        let waiting =
+            self.fields.sending && matches!(&self.dialog, Some(Dialog::Invite { share: s, .. }) if s == share);
+        if !waiting {
+            if !result.sent() {
+                self.notice = Some(Notice::ChangeRefused);
+            }
+            return;
+        }
+        self.fields.sending = false;
+        match result {
+            InviteResult::KeyChanged => self.fields.problem = Some(KEY_CHANGED),
+            InviteResult::Refused(words) => self.fields.problem = Some(words),
+            _ => {
+                if !self.show_people(share) {
+                    self.close_dialog();
+                }
+            }
+        }
     }
 }
 
