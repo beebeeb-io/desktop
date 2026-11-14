@@ -192,3 +192,32 @@ fn backup_codes_held_under_a_lock_are_dropped_by_a_sign_out_or_a_closed_vault() 
     run_for(&mut rt, 400);
     assert_eq!(codes_shown(&rt), None, "a closed vault drops them");
 }
+
+/// The other order of the review: the codes already reached the Backup codes page when the screen locks. The lock
+/// ends the page, the codes go back to the source (never drawn while locked), and the page shows them again after the
+/// unlock.
+#[test]
+fn backup_codes_on_the_page_when_the_screen_locks_are_shown_again_after_the_unlock() {
+    let fake = fake();
+    let engine = signed_in(&fake);
+    let mut rt = window_on(engine.clone());
+    ask_for_new_codes(&fake, &mut rt);
+    wait_for(&mut rt, "the codes on their page", |rt| codes_shown(rt) == Some(2));
+    lock_the_screen(&engine, &mut rt);
+    run_for(&mut rt, 300);
+    assert_eq!(codes_shown(&rt), None, "nothing is drawn while the screen is locked");
+    assert!(
+        rt.state.account.form.codes.is_none(),
+        "the page holds none under the lock"
+    );
+
+    engine
+        .unlock_screen_platform_verified(engine.session_turn())
+        .expect("the platform's yes unlocks the screen");
+    rt.update(|s, _| {
+        host::dispatch(s, ShellEvent::Gate(GateState::Ready));
+    });
+    wait_for(&mut rt, "the codes again after the unlock", |rt| {
+        codes_shown(rt) == Some(2)
+    });
+}

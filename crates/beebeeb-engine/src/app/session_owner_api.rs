@@ -10,10 +10,11 @@
 //!   session's owner tag only while the stored token is still the one asked about (core's rule, as Tauri does). It is
 //!   recorded under the session-write lock and only for the session that was asked about; the turn does NOT move
 //!   (learning whose session it is changes nothing a call in flight was made for).
-//! - The stored key is judged against that id (`settle_owner_after_probe`'s answer). A key that is not provably the
-//!   account's is never in memory here: the start loads a key only when its tag matches or it has none, and an
-//!   untagged key beside the session stays "unknown" after the tag is written. So a refusal changes nothing in memory
-//!   and is logged (no id); the next start's loader refuses that key.
+//! - The stored key is judged against that id (`settle_owner_after_probe`'s answer). Another account's key (tagged
+//!   with another id) is never in memory here: beside an untagged session the start judged it `SessionUnknown` and
+//!   did not load it, and an untagged key stays "unknown" after the tag is written. So that answer changes nothing in
+//!   memory and is logged (no id); the next start's loader refuses the key. A stored token that is not the one asked
+//!   about (`SessionUnknown`) gets no tag; the id is still recorded for the session in memory.
 //! - Asked as a person's call (`person_session`): never under a locked screen, so the first ask is after the unlock.
 //!   The session watcher asks at most once a minute while the owner is unknown; a call that needs the owner now (the
 //!   two-factor calls) asks at once.
@@ -139,10 +140,13 @@ impl<C: CredentialStores> Engine<C> {
             return OwnerSettled::NotNow;
         }
         match key_owner::settle_owner_after_probe(&self.vault(), token.as_str(), user_id) {
+            // The stored token is not the one asked about (another, or none): no tag is written. The id is still the
+            // owner of the session in memory, whose token Beebeeb answered for.
+            Ok(key_owner::KeyOwnership::SessionUnknown) => {}
+            // A tagged key of another account: one the start never loaded (beside an untagged session it was
+            // `SessionUnknown`), so nothing in memory changes; the next start's loader refuses it.
             Ok(ownership) if !ownership.may_load() => {
-                tracing::warn!(
-                    "the stored vault key is not provably this session's account's; the next start won't load it"
-                );
+                tracing::warn!("the stored vault key is not this session's account's; the next start won't load it");
             }
             Ok(_) => {}
             Err(error) => tracing::warn!(%error, "could not record the session's owner in the credential store"),
