@@ -255,12 +255,36 @@ fn notice_words(notice: &Notice) -> String {
         }
         Notice::RefreshFailed => "Couldn\u{2019}t refresh Trash. What\u{2019}s shown may be out of date.".into(),
         Notice::NotAvailable => "Not available yet in this version.".into(),
+        Notice::FoldersKept { done, folders, inside } => folders_kept_words(*done, *folders, *inside),
         Notice::PurgeStopped { done: 0, why } => format!("Nothing was deleted. {why}"),
         Notice::PurgeStopped { done, why } => format!(
             "{} deleted for good. The rest are still in Trash. {why}",
             plural(*done, "item", "items")
         ),
     }
+}
+
+/// The words when a delete kept folders (and what it deleted): the reason is the server's, in our words.
+fn folders_kept_words(done: usize, folders: usize, inside: u64) -> String {
+    let one = folders == 1;
+    let gone = plural(done, "item", "items");
+    let kept = plural(folders, "folder", "folders");
+    let stay = if one { "stays" } else { "stay" };
+    let what = if inside == 0 {
+        format!(
+            "{} items that cannot be deleted from Trash",
+            if one { "it holds" } else { "they hold" }
+        )
+    } else {
+        format!(
+            "{} {} that {} not in Trash",
+            if one { "it holds" } else { "they hold" },
+            plural(inside as usize, "item", "items"),
+            if inside == 1 { "is" } else { "are" }
+        )
+    };
+    let see = if one { "the folder" } else { "the folders" };
+    format!("{gone} deleted for good. {kept} {stay} in Trash because {what}. Restore {see} to see inside.")
 }
 
 /// The notice over the list (`.mk-banner` without a bar). Keys: `notice`, `notice-words`.

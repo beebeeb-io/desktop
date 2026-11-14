@@ -579,15 +579,20 @@ fn purge(s: &State, target: Option<&str>, t: &Theme) -> Option<El> {
     let source = &s.frames.trash.source;
     let (title, words, button, key) = match target {
         None => {
-            let totals = source.totals();
+            let (totals, left) = source.purge_batch();
             let count = match totals.items {
                 1 => "1 item".to_string(),
                 n => format!("{n} items"),
             };
             let lead = format!("{count} and ");
             let they = if totals.items == 1 { "It" } else { "They" };
+            let more = if left > 0 {
+                format!(" Deletes {} now. Empty Trash again for the rest.", totals.items)
+            } else {
+                String::new()
+            };
             let words = format!(
-                "{lead}{} will be permanently deleted. {they} can't be restored by you or by Beebeeb, on any device.",
+                "{lead}{} will be permanently deleted. {they} can't be restored by you or by Beebeeb, on any device.{more}",
                 totals.size
             );
             let paragraph = rich(
