@@ -48,6 +48,9 @@ mod binding_tests;
 pub mod drive_settings;
 pub mod files;
 mod files_facts;
+#[cfg(test)]
+#[path = "engine_host/files_open_with_tests.rs"]
+mod files_open_with_tests;
 mod files_trash;
 pub mod guide;
 pub mod open;
@@ -163,7 +166,8 @@ fn log(message: impl AsRef<str>) {
 // the files). Nothing here routes a path through cmd.exe, PowerShell, bash or
 // any shell. On Windows, `ShellExecuteW` takes the path as one wide string,
 // never a command line. On macOS/Linux, `Command::new("open"/"xdg-open").arg`
-// passes it as a single argv entry, never through a shell.
+// passes it as a single argv entry, never through a shell. The app chooser (`choose_app`) takes the path as one
+// wide string in a struct field, the same way.
 // ---------------------------------------------------------------------------
 
 /// Open a file or folder with the OS's default handler. Never passes the path
@@ -207,6 +211,44 @@ fn open_path(path: &std::path::Path) -> Result<(), files_source::ActionError> {
             .map_err(|_| files_source::ActionError::Failed)?;
     }
     Ok(())
+}
+
+/// Windows' "Open with" chooser for this file, on a thread of its own (the dialog is modal for the thread that
+/// shows it: never the window's). `OAIF_EXEC`: the app picked opens the file; no `OAIF_ALLOW_REGISTRATION`, so
+/// the chooser cannot change the PC's default app. `Ok`: the thread started. Every other system: not there.
+fn choose_app(path: &std::path::Path) -> Result<(), files_source::ActionError> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+        use windows_sys::Win32::UI::Shell::{OAIF_EXEC, OPENASINFO, SHOpenWithDialog};
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        std::thread::Builder::new()
+            .name("files-open-with".into())
+            .spawn(move || {
+                // SAFETY: COM is initialised on this thread and uninitialised before it ends (only when the
+                // initialisation succeeded); `wide` is NUL-ended and outlives the call, `pcszClass` is null.
+                unsafe {
+                    let com = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+                    let info = OPENASINFO {
+                        pcszFile: wide.as_ptr(),
+                        pcszClass: std::ptr::null(),
+                        oaifInFlags: OAIF_EXEC,
+                    };
+                    let _ = SHOpenWithDialog(std::ptr::null_mut(), &info);
+                    if com >= 0 {
+                        CoUninitialize();
+                    }
+                }
+            })
+            .map(|_| ())
+            .map_err(|_| files_source::ActionError::Failed)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Err(files_source::ActionError::NotOnThisSystem)
+    }
 }
 
 /// Reveal a file or folder in File Explorer / Finder / Files. Never passes the
@@ -592,6 +634,22 @@ impl<C: CredentialStores> EngineFilesSource<C> {
     }
 }
 
+impl<C: CredentialStores> EngineFilesSource<C> {
+    /// "Open in another app…": the path is resolved under the account-bound handle FIRST (the one check behind
+    /// every hand-over of a file, [`path_the_system_opens`]); `choose` is asked only after that answered `Ok`.
+    fn open_with_by(
+        &self,
+        item: &DriveItem,
+        choose: impl FnOnce(&Path) -> Result<(), ActionError>,
+    ) -> Result<(), ActionError> {
+        if item.is_folder {
+            return Err(ActionError::Failed);
+        }
+        let path = self.local(|db, sync_root| path_the_system_opens(db, sync_root, &item.id))?;
+        choose(&path)
+    }
+}
+
 impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     /// Files kept on this PC, once read (`files_facts`); the other two counts are not known here (0: no badge).
     fn counts(&self) -> Option<Counts> {
@@ -684,6 +742,10 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
                 .collect::<Result<Vec<_>, _>>()
         })?;
         paths.iter().try_for_each(|path| open_path(path))
+    }
+
+    fn open_with(&mut self, item: &DriveItem) -> Result<(), ActionError> {
+        self.open_with_by(item, choose_app)
     }
 
     fn show_in_file_explorer(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
