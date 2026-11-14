@@ -441,6 +441,28 @@ fn a_passkey_sign_in_with_prf_opens_the_vault_and_without_it_asks_for_the_words(
         .expect("the passkey signs in");
     assert_eq!(next, NextAfterSignIn::Drive);
     assert_eq!(engine.gate(), GateState::Ready);
+    // A PRF passkey that opened the vault key is the strong proof (lead decision 2026-11-14, as the twelve words
+    // are): the lock is Open, the screen can be locked, and a session the server ended closes the vault.
+    assert_eq!(engine.lock_state(), super::super::lock_api::LockState::Open);
+    engine.lock_screen().expect("an open lock can lock the screen");
+    assert_eq!(engine.lock_state(), super::super::lock_api::LockState::ScreenLocked);
+    // (the screen is unlocked again by the platform call the host makes; here the close is asked on an open lock)
+    let fake_open = self::fake("signin-prf-close");
+    let open = self::engine(&fake_open, false);
+    open.sign_in_passkey_with(
+        &Platform {
+            cancel: false,
+            prf: true,
+        },
+        &fake_open.account.email,
+    )
+    .expect("the passkey signs in");
+    assert!(
+        open.close_session_the_server_refused(Some(open.session_turn()))
+            .is_some(),
+        "the ended session closes the vault: the lock was open"
+    );
+    assert_ne!(open.lock_state(), super::super::lock_api::LockState::Open);
 
     let fake = self::fake("signin-no-prf");
     let engine = self::engine(&fake, false);

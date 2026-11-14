@@ -20,6 +20,11 @@ type Seen = Arc<Mutex<Vec<(String, bool)>>>;
 
 /// Answers each request by its path from `routes` ((path, status, body)); 404 for any other.
 fn serve(routes: Vec<(&'static str, u16, &'static str)>) -> (String, Seen) {
+    serve_after(routes, 0)
+}
+
+/// [`serve`], answering each request `delay_ms` after it was read (the request has left, the answer is on its way).
+fn serve_after(routes: Vec<(&'static str, u16, &'static str)>, delay_ms: u64) -> (String, Seen) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let seen: Seen = Arc::default();
@@ -61,6 +66,7 @@ fn serve(routes: Vec<(&'static str, u16, &'static str)>) -> (String, Seen) {
                 .find(|(p, _, _)| *p == path)
                 .map(|(_, s, b)| (*s, *b))
                 .unwrap_or((404, "{}"));
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
             let reply = format!(
                 "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
@@ -196,4 +202,51 @@ fn the_email_code_is_checked_before_anything_is_sent() {
         Some(AccountFlowFailure::NotAnAddress)
     );
     assert!(seen.lock().unwrap().is_empty());
+}
+
+/// Review of desktop#424: an answer that arrives after Beebeeb already changed two-factor reaches the person even
+/// when the session's turn moved meanwhile (a screen lock does that) for the same account: the new backup codes are
+/// not wiped unseen. A turn that moved because ANOTHER account signed in drops them.
+#[test]
+fn new_backup_codes_reach_the_person_when_the_turn_moves_while_the_request_is_out() {
+    let codes = r#"{"backup_codes":["11111111","22222222"]}"#;
+    let (base, seen) = serve_after(vec![("/api/v1/auth/2fa/backup-codes", 200, codes)], 600);
+    let engine = engine(&base);
+    let session = signed_in(&engine);
+    *engine.acct.auth_email.lock().unwrap() = Some("a@example.eu".into());
+    let moved = |engine: &TestEngine| {
+        let _writes = engine.writes.write().unwrap();
+        engine
+            .acct
+            .advance_session_generation_holding_session_write_lock(SessionTransition::Write);
+    };
+    let waited = |seen: &Seen| {
+        for _ in 0..200 {
+            if !seen.lock().unwrap().is_empty() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the request never left");
+    };
+    let answer = std::thread::scope(|scope| {
+        let call = scope.spawn(|| engine.two_factor_new_backup_codes(session, "123456"));
+        waited(&seen);
+        moved(&engine);
+        call.join().unwrap()
+    });
+    let codes = answer.expect("the codes Beebeeb made reach the person");
+    assert_eq!(codes.len(), 2);
+
+    // Another account signed in meanwhile: the answer is dropped.
+    let session = engine.session_turn();
+    seen.lock().unwrap().clear();
+    let answer = std::thread::scope(|scope| {
+        let call = scope.spawn(|| engine.two_factor_new_backup_codes(session, "123456"));
+        waited(&seen);
+        moved(&engine);
+        *engine.acct.auth_email.lock().unwrap() = Some("b@example.eu".into());
+        call.join().unwrap()
+    });
+    assert_eq!(answer.err(), Some(AccountFlowFailure::NotSignedIn));
 }

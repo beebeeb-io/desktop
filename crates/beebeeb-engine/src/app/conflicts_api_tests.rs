@@ -357,6 +357,43 @@ fn a_keep_there_that_fails_leaves_the_sync_folder_as_it_was_every_time() {
     );
 }
 
+/// Review of desktop#424, P1: a Keep there that fails never deletes an EARLIER kept copy. Two failed tries with two
+/// different edits of one file leave both edits on disk (one copy per different edit); the same edit tried twice is
+/// one copy.
+#[test]
+fn two_failed_keep_there_tries_with_different_edits_keep_both_edits() {
+    let rig = rig();
+    let try_keep_there = |rig: &Rig| {
+        put(
+            &StateDb::open(&rig._dir.path().join("state.db")).unwrap(),
+            WAITING,
+            "Invented draft.txt",
+            FileStatus::Conflict,
+        );
+        assert_eq!(
+            rig.engine
+                .resolve_conflict_for(rig.session, WAITING, ConflictChoice::KeepThere)
+                .unwrap_err(),
+            ResolveRefused::Failed
+        );
+    };
+    try_keep_there(&rig);
+    std::fs::write(rig.root.join("Invented draft.txt"), b"a second, different edit").unwrap();
+    try_keep_there(&rig);
+    try_keep_there(&rig);
+    let kept = replaced_folder_of(&replaced_folder(&rig), WAITING);
+    let mut bytes: Vec<Vec<u8>> = std::fs::read_dir(&kept)
+        .unwrap()
+        .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+        .collect();
+    bytes.sort();
+    assert_eq!(
+        bytes,
+        vec![b"a second, different edit".to_vec(), b"my edit on this pc".to_vec()],
+        "both edits are on disk, the repeated one once"
+    );
+}
+
 const WITH_BYTES: &str = "a0000000-0000-4000-8000-000000000904";
 
 /// Review of desktop#423, P2 #8: Keep there that works ends as Keep there, not as Keep both: the sync folder holds

@@ -108,3 +108,33 @@ fn an_id_that_is_not_a_file_id_never_reaches_the_network() {
     assert_eq!(*minted.lock().unwrap(), 0);
     assert!(api.requests().is_empty());
 }
+
+/// Review of desktop#424: the DELETE is sent only after the password proof, so a connection that drops AFTER it left
+/// says nothing about whether the item is gone. It is "not confirmed", never "offline" (which promises that nothing
+/// was sent) and never "refused".
+#[test]
+fn a_connection_that_drops_after_the_delete_left_is_not_confirmed() {
+    let account = account();
+    let tokens = Arc::new(ConfirmTokens::default());
+    let api = FakeApi::start(Arc::new(move |request: &Request| match request.route().as_str() {
+        "POST /api/v1/auth/confirm-opaque-start" => account.login_start(&request.json()),
+        "POST /api/v1/auth/confirm-opaque-finish" => {
+            if account.login_finish(&request.json()) {
+                Reply::ok(serde_json::json!({ "confirmation_token": tokens.mint(), "expires_at": "soon" }))
+            } else {
+                Reply::error(401, "invalid_credentials")
+            }
+        }
+        _ => Reply::hang_up(),
+    }));
+    let error = run(&api, "any-session", ONE, PASSWORD).unwrap_err();
+    assert_eq!(
+        format!("{error:?}"),
+        "NotConfirmed",
+        "the delete left; nothing is known"
+    );
+    assert!(
+        api.routes().iter().any(|route| route.starts_with("DELETE ")),
+        "the delete did leave"
+    );
+}

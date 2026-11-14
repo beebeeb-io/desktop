@@ -173,3 +173,34 @@ fn the_answer_of_each_status_is_read_without_the_servers_words() {
     assert_eq!(r(403, serde_json::json!({})).error, Some(PurgeError::Failed));
     assert_eq!(r(401, serde_json::json!({})).error, Some(PurgeError::SessionEnded));
 }
+
+/// Review of desktop#424: the bulk DELETE is sent only after the proof, so a connection that drops after it left is
+/// "not confirmed" (the items may be gone), never "offline".
+#[test]
+fn a_connection_that_drops_after_the_bulk_delete_left_is_not_confirmed() {
+    let account = account();
+    let tokens = Arc::new(ConfirmTokens::default());
+    let api = FakeApi::start(Arc::new(move |request: &Request| match request.route().as_str() {
+        "POST /api/v1/auth/confirm-opaque-start" => account.login_start(&request.json()),
+        "POST /api/v1/auth/confirm-opaque-finish" => {
+            if account.login_finish(&request.json()) {
+                Reply::ok(serde_json::json!({ "confirmation_token": tokens.mint(), "expires_at": "soon" }))
+            } else {
+                Reply::error(401, "invalid_credentials")
+            }
+        }
+        _ => Reply::hang_up(),
+    }));
+    let ids: Vec<String> = (1..=2).map(id).collect();
+    let out = run(&api, "any-session", &ids, PASSWORD);
+    assert_eq!(
+        format!("{:?}", out.error),
+        "Some(NotConfirmed)",
+        "the delete left; nothing is known"
+    );
+    assert!(out.deleted.is_empty());
+    assert!(
+        api.routes().iter().any(|route| route == "POST /api/v1/files/permanent"),
+        "the delete did leave"
+    );
+}
