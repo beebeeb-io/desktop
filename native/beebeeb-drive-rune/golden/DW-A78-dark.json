@@ -1485,7 +1485,7 @@
   "btn-0": {
    "kind": "box",
    "x": 283,
-   "y": 409.75,
+   "y": 408.25,
    "w": 191,
    "h": 28,
    "bg": [
@@ -1503,7 +1503,7 @@
   "btn-0-label": {
    "kind": "text",
    "x": 354.24,
-   "y": 414.46,
+   "y": 412.96,
    "w": 48.51,
    "h": 18.57,
    "text": "Turn off",
@@ -1523,7 +1523,7 @@
   "btn-1": {
    "kind": "box",
    "x": 482,
-   "y": 409.75,
+   "y": 408.25,
    "w": 193,
    "h": 28,
    "bg": [
@@ -1542,7 +1542,7 @@
   "btn-1-label": {
    "kind": "text",
    "x": 557.12,
-   "y": 414.46,
+   "y": 412.96,
    "w": 42.77,
    "h": 18.57,
    "text": "Cancel",
@@ -1559,84 +1559,32 @@
    "tracking": -0.06,
    "lh": "18.5714px"
   },
-  "digit-0": {
-   "kind": "box",
-   "x": 327,
-   "y": 323.25,
-   "w": 44,
-   "h": 52,
-   "bg": [
-    35,
-    30,
-    24,
-    255
-   ],
-   "css": {
-    "radius": "12px",
-    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset"
-   }
-  },
-  "digit-0-text": {
+  "field-0-label": {
    "kind": "text",
-   "x": 342.4,
-   "y": 334.75,
-   "w": 13.2,
-   "h": 29,
-   "text": "5",
-   "family": "mono",
-   "fontFamily": "JetBrains Mono",
-   "size": 22,
-   "weight": 600,
+   "x": 285,
+   "y": 324.75,
+   "w": 388,
+   "h": 15,
+   "text": "Account password",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 500,
    "color": [
-    230,
-    228,
-    224,
+    186,
+    183,
+    178,
     255
    ],
-   "tracking": 0
+   "tracking": 0,
+   "lh": "15px"
   },
-  "digit-1": {
+  "field-0": {
    "kind": "box",
-   "x": 379,
-   "y": 323.25,
-   "w": 44,
-   "h": 52,
-   "bg": [
-    35,
-    30,
-    24,
-    255
-   ],
-   "css": {
-    "radius": "12px",
-    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset"
-   }
-  },
-  "digit-1-text": {
-   "kind": "text",
-   "x": 394.4,
-   "y": 334.75,
-   "w": 13.2,
-   "h": 29,
-   "text": "1",
-   "family": "mono",
-   "fontFamily": "JetBrains Mono",
-   "size": 22,
-   "weight": 600,
-   "color": [
-    230,
-    228,
-    224,
-    255
-   ],
-   "tracking": 0
-  },
-  "digit-2": {
-   "kind": "box",
-   "x": 431,
-   "y": 323.25,
-   "w": 44,
-   "h": 52,
+   "x": 283,
+   "y": 345.75,
+   "w": 392,
+   "h": 28,
    "bg": [
     25,
     21,
@@ -1644,65 +1592,33 @@
     255
    ],
    "css": {
-    "radius": "12px",
-    "shadow": "oklch(0.82 0.17 84 / 0.4) 0px 0px 0px 3px, oklch(0.76 0.15 72) 0px 0px 0px 1px inset"
+    "radius": "6px",
+    "shadow": "oklch(0.82 0.17 84 / 0.3) 0px 0px 0px 3px",
+    "border": "1px 1px 1px 1px oklch(0.76 0.15 72)",
+    "pad": "0px 8px",
+    "gap": "6px"
    }
   },
-  "digit-3": {
+  "field-0-caret": {
    "kind": "box",
-   "x": 483,
-   "y": 323.25,
-   "w": 44,
-   "h": 52,
+   "x": 293,
+   "y": 352.75,
+   "w": 1.5,
+   "h": 17,
    "bg": [
-    35,
-    30,
-    24,
+    235,
+    159,
+    44,
     255
    ],
    "css": {
-    "radius": "12px",
-    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset"
-   }
-  },
-  "digit-4": {
-   "kind": "box",
-   "x": 535,
-   "y": 323.25,
-   "w": 44,
-   "h": 52,
-   "bg": [
-    35,
-    30,
-    24,
-    255
-   ],
-   "css": {
-    "radius": "12px",
-    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset"
-   }
-  },
-  "digit-5": {
-   "kind": "box",
-   "x": 587,
-   "y": 323.25,
-   "w": 44,
-   "h": 52,
-   "bg": [
-    35,
-    30,
-    24,
-    255
-   ],
-   "css": {
-    "radius": "12px",
-    "shadow": "oklch(0.92 0.006 85 / 0.12) 0px 0px 0px 0.5px inset"
+    "radius": "1px"
    }
   },
   "dlg-bold": {
    "kind": "text",
    "x": 283,
-   "y": 266.25,
+   "y": 267.75,
    "w": 344.64,
    "h": 14.5,
    "text": "You may not notice if someone else gets into your account.",
@@ -1736,9 +1652,9 @@
   "dlg": {
    "kind": "box",
    "x": 259,
-   "y": 216.25,
+   "y": 217.75,
    "w": 440,
-   "h": 237.5,
+   "h": 234.5,
    "bg": [
     25,
     21,
@@ -1753,9 +1669,9 @@
   "dlg-body": {
    "kind": "box",
    "x": 259,
-   "y": 216.25,
+   "y": 217.75,
    "w": 440,
-   "h": 177,
+   "h": 174,
    "css": {
     "pad": "22px 24px 18px",
     "gap": "12px"
@@ -1764,7 +1680,7 @@
   "dlg-title": {
    "kind": "text",
    "x": 283,
-   "y": 238.25,
+   "y": 239.75,
    "w": 392,
    "h": 22,
    "text": "Turn off security logging?",
@@ -1784,7 +1700,7 @@
   "dlg-text-0": {
    "kind": "text",
    "x": 283,
-   "y": 266.25,
+   "y": 267.75,
    "w": 392,
    "h": 45,
    "text": "You may not notice if someone else gets into your account. Nothing new is recorded, and what was recorded is deleted within 30 days. This can't be undone.",
@@ -1804,7 +1720,7 @@
   "dlg-foot": {
    "kind": "box",
    "x": 259,
-   "y": 393.25,
+   "y": 391.75,
    "w": 440,
    "h": 60.5,
    "bg": [

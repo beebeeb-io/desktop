@@ -1325,7 +1325,7 @@
    "x": 254,
    "y": 568,
    "w": 540,
-   "h": 56,
+   "h": 28,
    "bg": [
     25,
     21,
@@ -1336,7 +1336,7 @@
   "list-3-foot": {
    "kind": "text",
    "x": 270,
-   "y": 630.5,
+   "y": 602.5,
    "w": 65.74,
    "h": 14.5,
    "text": "Initlabs B.V.",
@@ -1366,7 +1366,7 @@
    "y": 573.5,
    "w": 498,
    "h": 17,
-   "text": "About audits",
+   "text": "beebeeb.io",
    "family": "sans",
    "fontFamily": "Inter",
    "size": 13,
@@ -1383,52 +1383,6 @@
    "kind": "icon",
    "x": 770,
    "y": 575,
-   "w": 14,
-   "h": 14,
-   "icon": [
-    "M14 4h6v6",
-    "M20 4l-9 9",
-    "M18 14v4.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6H10"
-   ],
-   "filled": false,
-   "color": [
-    230,
-    228,
-    224,
-    255
-   ]
-  },
-  "item-3-1": {
-   "kind": "box",
-   "x": 254,
-   "y": 596,
-   "w": 540,
-   "h": 28,
-   "selected": false
-  },
-  "item-3-1-title": {
-   "kind": "text",
-   "x": 264,
-   "y": 601.5,
-   "w": 498,
-   "h": 17,
-   "text": "beebeeb.io",
-   "family": "sans",
-   "fontFamily": "Inter",
-   "size": 13,
-   "weight": 500,
-   "color": [
-    230,
-    228,
-    224,
-    255
-   ],
-   "tracking": -0.06
-  },
-  "item-3-1-ext": {
-   "kind": "icon",
-   "x": 770,
-   "y": 603,
    "w": 14,
    "h": 14,
    "icon": [
