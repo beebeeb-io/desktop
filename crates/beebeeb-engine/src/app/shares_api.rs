@@ -171,14 +171,15 @@ type SessionParts = (
 
 impl<C: CredentialStores> Engine<C> {
     fn share_session(&self) -> Option<SessionParts> {
-        let guard = self.acct.session.lock().ok()?;
-        let current = guard.as_ref()?;
-        Some((
-            Zeroizing::new(current.token.clone()),
-            Zeroizing::new(current.master_key),
-            current.email.clone(),
-            self.acct.session_generation(),
-        ))
+        self.person_session(|current, generation| {
+            (
+                Zeroizing::new(current.token.clone()),
+                Zeroizing::new(current.master_key),
+                current.email.clone(),
+                generation,
+            )
+        })
+        .ok()
     }
 
     /// Everything Shared shows (see [`SharesOverview`]): four reads, every name decrypted here. No session in memory,

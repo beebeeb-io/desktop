@@ -68,6 +68,13 @@ impl StartWorker {
     }
 }
 
+/// May sync be asked to start under this gate? Sync is the app's work, not a person's action: it starts behind a
+/// locked screen too (core's lock contract, section 1: "the stored key is loaded, sync starts, the app window
+/// opens screen-locked"). A closed vault, a session without its key and no session have no key: nothing starts.
+pub fn may_start(gate: EngineGate) -> bool {
+    matches!(gate, EngineGate::Ready | EngineGate::ScreenLocked)
+}
+
 /// Start sync and keep the folder's name for the modal: [`super::setup::start_now`] on the real engine (the
 /// folder the settings name, else the one the first run chose, else the identity's suggestion; none while a
 /// first run still has to ask). Blocks: a `start-sync` worker's.
@@ -113,7 +120,7 @@ pub fn tray_inputs_of(sync: &SyncView, status: &EngineStatusView) -> TrayInputs 
     TrayInputs {
         signed_in: gate != EngineGate::SignedOut && !session_expired,
         session_expired,
-        locked: gate == EngineGate::Locked,
+        locked: matches!(gate, EngineGate::Locked | EngineGate::ScreenLocked),
         paused: sync.paused,
         explorer_ready: running && sync.explorer == Explorer::Added,
         engine: if running {

@@ -20,9 +20,11 @@ serde_json = "1"
 sha2 = "0.10"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "56cd54fab366b3c7291145a8736b5c56f5107fe8" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "56cd54fab366b3c7291145a8736b5c56f5107fe8" }
-beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "56cd54fab366b3c7291145a8736b5c56f5107fe8" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", rev = "abf4e5d06f00cf66f5e00da3e622a001de50dd6b" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", rev = "abf4e5d06f00cf66f5e00da3e622a001de50dd6b" }
+# The two-level lock's rules (`flows::lock`): I/O-free, no transport and no store of its own.
+beebeeb-api = { git = "https://github.com/beebeeb-io/core", rev = "abf4e5d06f00cf66f5e00da3e622a001de50dd6b" }
+beebeeb-backup = { git = "https://github.com/beebeeb-io/core", rev = "abf4e5d06f00cf66f5e00da3e622a001de50dd6b" }
 # The running engine (API client, sync bridge, credential stores): the same versions as `src-tauri/Cargo.toml`.
 toml = "0.8"
 dirs = "6"
@@ -41,8 +43,8 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 bytes = "1"
 rand = "0.8"
 bip39 = { version = "2", default-features = false, features = ["std"] }
-beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "56cd54fab366b3c7291145a8736b5c56f5107fe8" }
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "56cd54fab366b3c7291145a8736b5c56f5107fe8" }
+beebeeb-sync = { git = "https://github.com/beebeeb-io/core", rev = "abf4e5d06f00cf66f5e00da3e622a001de50dd6b" }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "abf4e5d06f00cf66f5e00da3e622a001de50dd6b" }
 hostname = "0.4"
 # Production on unix (staged copies) and the test-support helpers.
 tempfile = "3"
@@ -175,7 +177,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 aes-gcm = "0.10"
 json-patch = { version = "3", default-features = false }
 tokio = { version = "1", features = ["test-util"] }
-beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "56cd54fab366b3c7291145a8736b5c56f5107fe8", features = ["test-support"] }
+beebeeb-transfer = { git = "https://github.com/beebeeb-io/core", rev = "abf4e5d06f00cf66f5e00da3e622a001de50dd6b", features = ["test-support"] }
 # The crate's own integration tests (`tests/`) link the lib with its test helpers (the in-memory credential store,
 # the fake API, the sandboxed config dir): a dev edge only, as in `src-tauri`.
 beebeeb-engine = { path = ".", features = ["test-support"] }

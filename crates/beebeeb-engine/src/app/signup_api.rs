@@ -586,6 +586,9 @@ impl<C: CredentialStores> Engine<C> {
             self.acct
                 .auth_resume_asked
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // The key of the new account is in memory: its lock opens, in the same hold as the key's install
+            // (`lock_api`: the twelve words of a first sign-up are a strong proof).
+            self.lock_follows(super::lock_api::SessionMoved::StrongProof);
             Ok(())
         })();
         if kept.is_err() {

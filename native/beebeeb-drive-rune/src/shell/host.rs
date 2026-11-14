@@ -95,6 +95,11 @@ pub struct Shell {
 }
 
 impl Shell {
+    /// The engine's sync is running (or finishing a check): the lock screen's line says so.
+    pub fn sync_runs(&self) -> bool {
+        self.tray_inputs.engine != EngineState::NotRunning
+    }
+
     pub fn new(actions: Arc<dyn ShellActions>, platform: Arc<dyn Platform>, wiring: Wiring) -> Shell {
         let app = AppMachine::for_session(actions.session());
         let window_kind = surfaces::kind_for(&app.screen());
@@ -167,6 +172,12 @@ impl Shell {
     #[cfg(test)]
     pub(crate) fn sync_off_opened(&self) -> u32 {
         self.sync_off_opened
+    }
+
+    /// The slot the main window's native handle is put in once it exists: the lock screen's Windows Hello
+    /// prompt is owned by that window (`engine_host::hello`).
+    pub(crate) fn main_window_slot(&self) -> Arc<Mutex<Option<WindowHandle>>> {
+        self.wiring.window.clone()
     }
 
     /// Asks the engine to start syncing; refused while another agent holds the profile.
@@ -565,6 +576,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= crate::frames::files::reset::poll(s);
     // Backups shows its own folder in the Files window (`frames::files::protected`, DW-0422).
     changed |= crate::frames::files::protected::poll(s);
+    // A link the source answered since: only this `Tx` can put it on the clipboard (`frames::files::link`).
+    changed |= crate::frames::files::link::poll(s, tx);
     changed
 }
 
@@ -665,8 +678,12 @@ fn on_gate_change(s: &mut State) {
     start_first_run(s);
     // The first run's File Explorer step is about the sync folder: a start is asked for with it, as when the main
     // window opens (the start worker holds it back until the first run has a folder). A start refused during
-    // the first run is said by that step and by the refusal modal (`open_sync_refusal`).
-    if gate == super::app::GateState::Ready || gate == super::app::GateState::FirstRun {
+    // the first run is said by that step and by the refusal modal (`open_sync_refusal`). Sync is the app's work:
+    // it also starts behind a lock (the engine refuses it for a closed vault).
+    if matches!(
+        gate,
+        super::app::GateState::Ready | super::app::GateState::Locked | super::app::GateState::FirstRun
+    ) {
         s.shell.start_sync();
     }
 }

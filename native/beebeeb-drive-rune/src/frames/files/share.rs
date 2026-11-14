@@ -13,7 +13,7 @@
 
 use super::actions_data::{LinkAccess, LinkExpiry, ShareOptions};
 use super::dialogs::{self, Dialog};
-use super::source::Action;
+use super::source::{Action, ActionError};
 use super::{Intent, Toast};
 use crate::State;
 use crate::source::{DriveItem, format_size};
@@ -137,8 +137,15 @@ impl State {
         if self.needs_session(tx) {
             return;
         }
+        // One link at a time (`link.rs`). Refused before anything is read or closed: the dialog stays as it is,
+        // with what was typed, and the press can be repeated when the link on its way answered.
+        if self.link_on_its_way() {
+            self.show_toast(Toast::Failed(Action::ShareLink, ActionError::InFlight), tx);
+            return;
+        }
         let typed = self.actions.share_password.text.clone();
-        if share.password_on && typed.is_empty() {
+        // Spaces are not a password: a link made with them would ask for none.
+        if share.password_on && typed.trim().is_empty() {
             if let Some(share) = self.share_mut() {
                 share.password_missing = true;
             }
@@ -156,6 +163,19 @@ impl State {
         // The dialog closes either way; a failure says so, with Try again (DW-0109).
         self.close_dialog(tx);
         match answer {
+            // Accepted, not made: "Link copied" is said when the link is on the clipboard (`link.rs`), and a
+            // failure then opens this dialog again as a refusal at the press does.
+            Ok(()) if self.actions.source.answers_later() => {
+                // An earlier message is not this press's.
+                self.actions.toast = None;
+                self.actions.toast_until = None;
+                self.actions.retry_share = None;
+                self.actions.link.share = Some(Share {
+                    password_missing: false,
+                    menu: None,
+                    ..share
+                });
+            }
             Ok(()) => {
                 self.actions.retry_share = None;
                 self.show_toast(Toast::LinkCopied, tx);

@@ -63,15 +63,11 @@ impl<C: CredentialStores> Engine<C> {
         // The token, the key and the session's generation leave the session's lock together, as copies of their own,
         // wiped when this call ends (the token inside the call's client, which wipes it on drop; the key in a
         // `Zeroizing`).
-        let (token, key, session) = {
-            let guard = self.acct.session.lock().map_err(|_| AccountCallError::NotSignedIn)?;
-            let current = guard.as_ref().ok_or(AccountCallError::NotSignedIn)?;
-            (
-                current.token.clone(),
-                Zeroizing::new(current.master_key),
-                self.acct.session_generation(),
-            )
-        };
+        let (token, key, session) = self
+            .person_session(|current, generation| {
+                (current.token.clone(), Zeroizing::new(current.master_key), generation)
+            })
+            .map_err(|_| AccountCallError::NotSignedIn)?;
         let api = ApiClient::new(self.config.api_base.clone(), token, [0; 32]);
         let raw = self
             .runtime

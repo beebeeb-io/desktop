@@ -23,7 +23,7 @@
 //!
 //! BLOCKS on the state database: a worker's call. Must not: log a user id, an email or a path.
 
-use super::{LocalStateRefused, Mode};
+use super::{LocalStateRefused, Mode, PERSON};
 use crate::account::SessionGeneration;
 use crate::account_binding::{self, Binding, BindingKind, Identity};
 use crate::app::{CredentialStores, Engine};
@@ -64,6 +64,7 @@ impl<C: CredentialStores> Engine<C> {
             Ok(())
         };
         still()?;
+        self.person_asks(PERSON)?;
         let identity = self.session_identity()?;
         // The row's key. An email never stands in for it: a row a sign-out keeps holds no address.
         let user_id = identity.user_id.clone().ok_or(LocalStateRefused::IdentityUnknown)?;
@@ -114,7 +115,7 @@ impl<C: CredentialStores> Engine<C> {
             .session_identity()?
             .user_id
             .ok_or(LocalStateRefused::IdentityUnknown)?;
-        let state = self.owned_state(Mode::Change)?;
+        let state = self.owned_state(Mode::Change, PERSON)?;
         // The handle's session is the one the host named, not a later one that opened in between.
         if state.generation != session {
             return Err(LocalStateRefused::SessionChanged);
