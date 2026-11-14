@@ -201,7 +201,11 @@ impl<C: CredentialStores> Engine<C> {
             return Err(AccountFlowFailure::NotSignedIn);
         }
         // Who this call is for, by the account's ID (never its email: an address can be another account's), to tell a
-        // turn that moved for the same account from another account's.
+        // turn that moved for the same account from another account's. A session stored before the owner tag has
+        // none yet: Beebeeb names it first (`session_owner_api`), so its codes are not dropped on a same-account move.
+        if self.account_id_now().is_none() {
+            let _ = self.settle_session_owner_now();
+        }
         let account = self.account_id_now();
         let mut transport = FlowTransport {
             runtime: &self.runtime,
@@ -216,12 +220,10 @@ impl<C: CredentialStores> Engine<C> {
             // a turn that moved for the SAME account (a screen lock, a session write) must not wipe what Beebeeb
             // made unseen (review of desktop#424). The answer is dropped only when the session ended or another
             // account is signed in: its secrets are wiped here.
-            // `person_session` says whether a session is still in memory: a locked screen keeps it (the case this
-            // exists for), a session that was forgotten or never there does not.
-            let still_held = !matches!(
-                self.person_session(|_, _| ()),
-                Err(super::lock_api::PersonRefused::NoSession)
-            );
+            // Whether a session is still in memory, asked directly (this is a worker: it may wait): a locked screen
+            // keeps it (the case this exists for), a session that was forgotten or never there does not. Not
+            // `person_session`, which answers "no session" while a session change (the unlock itself) is under way.
+            let still_held = self.has_session();
             let same_account =
                 account.is_some() && self.account_id_now() == account && !self.account_session_refused() && still_held;
             if !same_account {

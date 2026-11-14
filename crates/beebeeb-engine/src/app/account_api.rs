@@ -271,3 +271,7 @@ impl<C: CredentialStores> Engine<C> {
         answer
     }
 }
+
+#[path = "session_owner_api.rs"]
+mod session_owner;
+pub use session_owner::OwnerSettled;

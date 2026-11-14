@@ -3,6 +3,16 @@
 use super::*;
 
 impl StateDb {
+    /// The held write of `file_id` (`files.held_*`): its write and base, and, once its upload landed, the version it
+    /// became (§8.6.2: written only for that write). `None`: the row holds no write, or there is no row.
+    pub fn held_write(&self, file_id: &str) -> Result<Option<crate::write_token::HeldWrite>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        match held_write_conn(&conn, file_id) {
+            Ok((held, _)) => Ok(held),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
     /// §5.3: housekeeping only, guarded by the write the caller read, so it never
     /// clears a token a concurrent save has just set. `true`: it cleared the row.
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]

@@ -294,8 +294,12 @@ impl<C: CredentialStores> EngineSharedSource<C> {
                 if let InviteAnswer::Refused(kind) = answer {
                     log(format!("shared: an invitation was not sent ({kind})"));
                 }
-                // The person is on the share now (a changed key's invite stays too): the lists are Beebeeb's again.
-                if result.sent() || result == InviteResult::KeyChanged {
+                // The person is on the share now (a changed key's invite stays too, and so does one that could not be
+                // finished): the lists are Beebeeb's again.
+                if result.sent()
+                    || result == InviteResult::KeyChanged
+                    || matches!(answer, InviteAnswer::Unfinished { .. })
+                {
                     self.read();
                 }
                 self.invite_answers.push_back((share, result));
@@ -698,9 +702,15 @@ fn invite_result(answer: &InviteAnswer) -> InviteResult {
         InviteAnswer::Invited { .. } => InviteResult::Sent,
         InviteAnswer::AwaitingApproval { .. } => InviteResult::WaitingForApproval,
         InviteAnswer::PeerKeyChanged { .. } => InviteResult::KeyChanged,
+        // A claimed invite that stays (its key never went over, and it could not be withdrawn): never "nothing was
+        // shared" (review of desktop#424).
+        InviteAnswer::Unfinished { .. } => InviteResult::Refused(UNFINISHED),
         InviteAnswer::Refused(kind) => InviteResult::Refused(refusal_words(*kind)),
     }
 }
+
+/// What the invite dialog says when they accepted, but the key never went over and the invite could not be withdrawn.
+pub(crate) const UNFINISHED: &str = "They accepted, but Beebeeb couldn\u{2019}t finish sharing and the invitation is still open. They can\u{2019}t open anything yet. Cancel it in Shared, then invite them again.";
 
 /// What the invite dialog says for a refusal. Every one ends in what was (not) done.
 pub(crate) fn refusal_words(kind: InviteRefused) -> &'static str {

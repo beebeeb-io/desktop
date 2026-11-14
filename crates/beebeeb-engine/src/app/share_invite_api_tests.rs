@@ -684,7 +684,13 @@ fn share_invite_answers_and_logs_carry_no_key_material() {
         ]
     });
     assert_eq!(answers[2], InviteAnswer::Refused(InviteRefused::InvalidEmail));
-    assert_eq!(answers[0], InviteAnswer::Refused(InviteRefused::Failed));
+    // The withdrawal failed, so the claimed invite stays: never answered as nothing shared (review of desktop#424).
+    assert_eq!(
+        answers[0],
+        InviteAnswer::Unfinished {
+            invite_id: INVITE.into()
+        }
+    );
     assert!(
         logs.contains("an invite that holds no key could not be withdrawn"),
         "the capture reads this module's lines"

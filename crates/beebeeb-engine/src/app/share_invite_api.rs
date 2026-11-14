@@ -30,10 +30,15 @@
 //!   a write that fails stops the flow, that request unsent.
 //! - The person's marks (by address and every account id the sent list names for it) decide the expectation; a mark
 //!   that cannot be read stops the invite, never `NotCompared`.
-//! - A request is sent only while the session it was asked under is still the session in memory.
+//! - A request is sent only while the session it was asked under is still the session in memory. One exception, the
+//!   withdrawal of an invite this run claimed: after a turn that moved for the SAME account (a screen lock, a session
+//!   write; the session in memory still holds the run's vault key) it goes out on the run's token, so a session
+//!   change mid-invite never leaves a claimed invite behind (review of desktop#424). Another account, a sign-out or a
+//!   closed vault: nothing is sent.
 //! - The outcome's key bytes are recorded as the share's sealed key (or a changed key's offered key), so a safety
 //!   number is later computed from exactly those bytes. A claimed invite this engine could not finish holds no key
 //!   the other side can open: it is withdrawn and the answer says nothing was shared (Tauri `record_outcome_in`).
+//!   When the withdrawal cannot be made, the answer is [`InviteAnswer::Unfinished`], never "nothing was shared".
 //!
 //! Every method BLOCKS on the handle's runtime: call it from a worker thread, never from the UI thread, except
 //! [`Engine::share_target_of`], which reads the local state only.
@@ -80,6 +85,9 @@ pub enum InviteAnswer {
     /// Their key is not the one the person compared safety numbers against: nothing was sealed. The invite exists and
     /// stays claimed; the key it carried is kept as this invite's offered key.
     PeerKeyChanged { invite_id: String },
+    /// They accepted, but the invite could not be finished (its key never went over) and could not be withdrawn
+    /// either: it stays on Beebeeb, claimed, holding no key they can open, until it is cancelled in Shared.
+    Unfinished { invite_id: String },
     /// Nothing was shared.
     Refused(InviteRefused),
 }
@@ -325,14 +333,22 @@ impl<C: CredentialStores> Engine<C> {
     ) -> Result<InviteOutcome, InviteRefused> {
         let mut req = first;
         loop {
-            let resp = match self.invite_send(run, req)? {
-                Ok(resp) => resp,
+            let resp = match self.invite_send(run, req) {
+                Ok(Ok(resp)) => resp,
                 // After the approval was sent this is `AwaitingApproval` (withdrawn in `finish`); before it nothing
                 // was claimed (Tauri `unanswered_invite`).
-                Err(Unanswered) => {
+                Ok(Err(Unanswered)) => {
                     return match flow.on_response(HttpResponse::new(0, Value::Null)) {
                         Ok(InviteStep::Done(outcome @ InviteOutcome::AwaitingApproval { .. })) => Ok(outcome),
                         _ => Err(InviteRefused::Offline),
+                    };
+                }
+                // The session moved before this request left. When it was the approval, the invite was claimed and
+                // holds no key: `AwaitingApproval`, which `finish` withdraws. Before that nothing was claimed.
+                Err(refused) => {
+                    return match flow.on_response(HttpResponse::new(0, Value::Null)) {
+                        Ok(InviteStep::Done(outcome @ InviteOutcome::AwaitingApproval { .. })) => Ok(outcome),
+                        _ => Err(refused),
                     };
                 }
             };
@@ -369,12 +385,19 @@ impl<C: CredentialStores> Engine<C> {
                     .map_err(state_refusal)?
                     .map_err(|_| InviteRefused::Failed)?;
             }
-            let resp = match self.invite_send(run, request)? {
-                Ok(resp) => resp,
-                Err(Unanswered) => {
+            let resp = match self.invite_send(run, request) {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(Unanswered)) => {
                     return match flow.on_response(HttpResponse::new(0, Value::Null)) {
                         Ok(FolderStep::Done(outcome @ InviteOutcome::AwaitingApproval { .. })) => Ok(outcome),
                         _ => Err(InviteRefused::Offline),
+                    };
+                }
+                // As for a file: a claimed invite whose approval never left is withdrawn in `finish`.
+                Err(refused) => {
+                    return match flow.on_response(HttpResponse::new(0, Value::Null)) {
+                        Ok(FolderStep::Done(outcome @ InviteOutcome::AwaitingApproval { .. })) => Ok(outcome),
+                        _ => Err(refused),
                     };
                 }
             };
@@ -414,23 +437,39 @@ impl<C: CredentialStores> Engine<C> {
                 }
                 // A changed key that is not recorded can never be accepted later ("Share anyway" seals only recorded
                 // bytes): the invite goes.
-                let _ = self.withdraw(run, &invite_id);
-                InviteAnswer::Refused(InviteRefused::Failed)
+                match self.withdraw(run, &invite_id) {
+                    Ok(()) => InviteAnswer::Refused(InviteRefused::Failed),
+                    Err(_) => InviteAnswer::Unfinished { invite_id },
+                }
             }
-            InviteOutcome::AwaitingApproval { invite_id, .. } => match self.withdraw(run, &invite_id) {
-                Ok(()) => InviteAnswer::Refused(InviteRefused::Failed),
-                Err(refused) => InviteAnswer::Refused(refused),
-            },
+            InviteOutcome::AwaitingApproval { invite_id, .. } => {
+                // The session moved before the approval left (review of desktop#424): withdrawn all the same.
+                let moved = !self.session_is_still(run.session, &run.key);
+                match self.withdraw(run, &invite_id) {
+                    Ok(()) if moved => InviteAnswer::Refused(InviteRefused::SessionEnded),
+                    Ok(()) => InviteAnswer::Refused(InviteRefused::Failed),
+                    // It stays claimed: never "nothing was shared".
+                    Err(_) => InviteAnswer::Unfinished { invite_id },
+                }
+            }
             InviteOutcome::Invited { invite_id, .. } => InviteAnswer::Invited { invite_id },
         }
     }
 
-    /// Cancel one invite; one already gone counts as withdrawn.
+    /// Cancel one invite this run claimed; one already gone counts as withdrawn. Sent while the run's session is the
+    /// session in memory, or, after a turn that moved for the same account (the session in memory now holds the run's
+    /// vault key: a screen lock, a session write), on the run's token: the module's doc.
     fn withdraw(&self, run: &Run<'_>, invite_id: &str) -> Result<(), InviteRefused> {
         let req = share_flow::cancel_invite_request(invite_id).map_err(|_| InviteRefused::Failed)?;
-        let resp = self
-            .invite_send(run, req)?
-            .map_err(|Unanswered| InviteRefused::Offline)?;
+        let same_account = || self.session_is_still(self.acct.session_generation(), &run.key);
+        let sent = if self.session_is_still(run.session, &run.key) || same_account() {
+            self.runtime
+                .block_on(auth_transport::send_to(run.base, &run.client, Some(&run.token), req))
+                .map_err(|_| Unanswered)
+        } else {
+            return Err(InviteRefused::SessionEnded);
+        };
+        let resp = sent.map_err(|Unanswered| InviteRefused::Offline)?;
         if resp.ok() || resp.status == 404 {
             Ok(())
         } else {
