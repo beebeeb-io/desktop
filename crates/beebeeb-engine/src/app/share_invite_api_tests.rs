@@ -80,6 +80,8 @@ struct Server {
     approve_status: u16,
     /// What a withdrawal (`DELETE` of the invite) answers.
     cancel_status: u16,
+    /// The account id `/auth/me` answers; `None`: it answers 404.
+    me: Option<&'static str>,
     /// The folder's custody record, as the last PUT stored it.
     custody: Option<String>,
     /// Hang up once on this route.
@@ -139,6 +141,10 @@ fn handler(server: Arc<Mutex<Server>>, probe: Arc<StateDb>) -> crate::test_api::
             },
             APPROVE => Reply::json(s.approve_status, json!({})),
             CANCEL => Reply::json(s.cancel_status, json!({})),
+            "GET /api/v1/auth/me" => match s.me {
+                Some(id) => Reply::ok(json!({ "user_id": id, "email": OWN_EMAIL })),
+                None => Reply::error(404, "not_found"),
+            },
             FLAGS_ROUTE => match s.flags {
                 Some(on) => Reply::ok(json!({ "flags": { "shared_folders_v1": on } })),
                 None => Reply::error(503, "unavailable"),
@@ -208,6 +214,7 @@ fn fixture(recipient: Option<[u8; 32]>) -> Fixture {
         flags: Some(true),
         approve_status: 200,
         cancel_status: 200,
+        me: Some(OWN),
         custody: None,
         hang_once: None,
         seen: Vec::new(),
@@ -720,4 +727,40 @@ fn share_of_names_the_accounts_own_items_only() {
         f.routes().is_empty(),
         "local state only: nothing is asked of the server"
     );
+}
+
+#[test]
+fn share_invite_asks_beebeeb_whose_account_it_is_when_the_session_does_not_say() {
+    // A session restored without a recorded owner: the marks are read under the id Beebeeb names for it.
+    let them = person(49);
+    let f = fixture(Some(them.public));
+    f.engine.remember_session_user_id(None);
+    let fingerprint = hexfmt::encode(&key_fingerprint(&person(50).public).unwrap());
+    f.db.set_person_marks(
+        OWN,
+        Some("person@example.eu"),
+        &[],
+        &fingerprint,
+        MarkKind::Matched,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        f.invite(FILE),
+        InviteAnswer::PeerKeyChanged {
+            invite_id: INVITE.into()
+        }
+    );
+    assert!(f.routes().iter().any(|r| r == "GET /api/v1/auth/me"));
+    assert!(
+        sealed_fields(&f.api).is_empty(),
+        "the account's mark was found: nothing sealed"
+    );
+
+    // Beebeeb names no account: nothing is sent.
+    let g = fixture(Some(them.public));
+    g.engine.remember_session_user_id(None);
+    g.server.lock().unwrap().me = None;
+    assert_eq!(g.invite(FILE), InviteAnswer::Refused(InviteRefused::Failed));
+    assert!(!g.routes().iter().any(|r| r == INVITES));
 }

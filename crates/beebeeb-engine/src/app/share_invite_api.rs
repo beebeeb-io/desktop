@@ -58,6 +58,7 @@ use crate::state_db::{FileStatus, MarkKind, Namespace, StateDb, normalized_email
 use crate::{auth_transport, hexfmt, owner_keys};
 
 const SENT: &str = "/api/v1/shares/invites/sent";
+const ME: &str = "/api/v1/auth/me";
 const FLAGS: &str = "/api/v1/feature-flags/evaluate";
 const SHARED_FOLDERS_FLAG: &str = "shared_folders_v1";
 /// An invite that still names a person of the share (core's `ACTIVE_STATUSES`).
@@ -170,7 +171,6 @@ impl<C: CredentialStores> Engine<C> {
         email: &str,
     ) -> Result<InviteAnswer, InviteRefused> {
         let (token, key) = self.invite_session(session).ok_or(InviteRefused::SessionEnded)?;
-        let own = self.own_account_id().ok_or(InviteRefused::Failed)?;
         let item = canonical(item_id).ok_or(InviteRefused::NotYours)?;
         let state = self.local_state_for_changes().map_err(state_refusal)?;
         if state.session() != session {
@@ -188,6 +188,11 @@ impl<C: CredentialStores> Engine<C> {
             key,
             base: self.config.api_base.trim_end_matches('/'),
             client,
+        };
+        // Tauri `own_id`: the id the session named, else Beebeeb's answer for this session.
+        let own = match self.own_account_id() {
+            Some(own) => own,
+            None => self.invite_me(&run)?,
         };
 
         let sent = self.invite_read(&run, SENT)?;
@@ -260,6 +265,15 @@ impl<C: CredentialStores> Engine<C> {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         recorded.or_else(|| self.user_id()).filter(|id| canonical(id).is_some())
+    }
+
+    /// Beebeeb's id for the account of this session (`/auth/me`), as a canonical UUID.
+    fn invite_me(&self, run: &Run<'_>) -> Result<String, InviteRefused> {
+        let me = self.invite_read(run, ME)?;
+        text(&me, "user_id")
+            .and_then(canonical)
+            .map(str::to_string)
+            .ok_or(InviteRefused::Failed)
     }
 
     /// Send one request of the invite, only while its session is still the session in memory.
