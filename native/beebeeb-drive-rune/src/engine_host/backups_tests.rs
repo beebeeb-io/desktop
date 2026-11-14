@@ -319,6 +319,10 @@ fn the_unbound_parts_answer_nothing_and_send_nothing() {
     let mut source = EngineBackupsSource::new(fake.clone());
     settle(&mut source);
     assert!(source.devices().is_empty() && source.not_backed_up().is_empty() && !source.mail_backup_on());
+    assert!(
+        !source.mail_backup_offered(),
+        "no Mail Backup entry where no mail engine runs"
+    );
     assert!(!source.add_folder("/invented/Projects"));
     assert!(!source.delete_device_backup("invented-device", "123456"));
     source.remove_folder("documents", true);

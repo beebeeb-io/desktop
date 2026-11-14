@@ -400,6 +400,10 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
 /// OS call a file opens with: the address is one argument, never a command line.
 pub fn open_web_page(url: &'static str) -> Result<(), ()> {
     debug_assert!(url.starts_with("https://"));
+    // A test run opens nothing on the machine it runs on.
+    if cfg!(test) {
+        return Ok(());
+    }
     super::open_path(std::path::Path::new(url)).map_err(|_| ())
 }
 

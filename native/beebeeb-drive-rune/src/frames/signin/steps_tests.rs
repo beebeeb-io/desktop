@@ -303,23 +303,14 @@ fn a_wrong_phrase_is_an_alert_and_only_a_word_that_is_not_in_the_list_is_marked(
 }
 
 #[test]
-fn the_other_device_and_the_lost_phrase_are_reachable_from_the_keyboard() {
-    let (mut rt, calls) = signed_in(phrase_script());
-    tab_to(&mut rt, "link-0-box");
-    assert_eq!(
-        info(&rt, "link-0-box").label.as_deref(),
-        Some("approve from another device")
-    );
-    press(&mut rt, Key::Enter);
-    assert_eq!(ui(&mut rt).screen, Screen::Device { expired: false });
-    assert_eq!(
-        *calls.borrow(),
-        ["sign_in", "device_request"],
-        "the session that waits behind the words is kept: the other device hands its keys to it"
-    );
-
+fn the_lost_phrase_is_reachable_from_the_keyboard_and_no_other_device_door_is_drawn() {
     let (mut rt, _) = signed_in(phrase_script());
-    tab_to(&mut rt, "link-1-box");
+    assert!(
+        !a11y(&rt).contains("another device"),
+        "approving from another device is the web's: no door to it here"
+    );
+    let (mut rt, _) = signed_in(phrase_script());
+    tab_to(&mut rt, "link-0-box");
     space(&mut rt);
     assert_eq!(ui(&mut rt).screen, Screen::NoPhrase);
     assert_eq!(focused(&rt).as_deref(), Some(TITLE_KEY), "focus moves to the heading");
@@ -427,7 +418,6 @@ fn a_passkey_asks_windows_once_and_its_answers_are_frames() {
     click(&mut rt, "link-0-box");
     click(&mut rt, "btn-0");
     click(&mut rt, "btn-1");
-    click(&mut rt, "btn-2");
     assert_eq!(
         *calls.borrow(),
         ["passkey"],
@@ -499,26 +489,32 @@ fn after_a_passkey_the_vault_password_is_asked_with_focus_in_its_field() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn forgot_password_offers_three_honest_options_from_the_keyboard() {
+fn forgot_password_offers_the_web_page_and_the_honest_exit_from_the_keyboard() {
     let (mut rt, calls) = form(Script::default());
     click(&mut rt, "link-0-box");
     assert_eq!(ui(&mut rt).screen, Screen::Forgot);
     assert_eq!(focused(&rt).as_deref(), Some(TITLE_KEY));
     let tree = a11y(&rt).to_lowercase();
     assert!(!tree.contains("reset"), "the copy never says reset");
+    assert!(
+        !tree.contains("sign in with another device"),
+        "no door to approving from another device"
+    );
     for (card, title) in [
-        ("card-0", "I have my recovery phrase"),
-        ("card-1", "I have another device signed in"),
-        ("card-2", "I have neither"),
+        ("card-0", "I have my recovery phrase or a signed-in device"),
+        ("card-1", "I have neither"),
     ] {
         assert_eq!(info(&rt, card).label.as_deref(), Some(title));
     }
     tab_to(&mut rt, "btn-0");
     press(&mut rt, Key::Enter);
-    assert_eq!(ui(&mut rt).screen, Screen::Recover, "Recover with phrase");
-    press(&mut rt, Key::Escape);
-    assert_eq!(ui(&mut rt).screen, Screen::Forgot, "Escape is the back link");
-    tab_to(&mut rt, "btn-2");
+    assert_eq!(
+        ui(&mut rt).take_intents(),
+        vec![Intent::OpenRecoveryPage],
+        "the web's recovery page opens"
+    );
+    assert_eq!(ui(&mut rt).screen, Screen::Forgot, "the window stays where it was");
+    tab_to(&mut rt, "btn-1");
     space(&mut rt);
     assert_eq!(ui(&mut rt).screen, Screen::CannotRecover);
     assert_eq!(
@@ -532,13 +528,10 @@ fn forgot_password_offers_three_honest_options_from_the_keyboard() {
     tab_to(&mut rt, "btn-0");
     press(&mut rt, Key::Enter);
     assert_eq!(ui(&mut rt).screen, Screen::Forgot, "Back to recovery options");
-    click(&mut rt, "btn-2");
+    click(&mut rt, "btn-1");
     press(&mut rt, Key::Escape);
     assert_eq!(ui(&mut rt).screen, Screen::Forgot, "Escape is the back link");
-    tab_to(&mut rt, "btn-1");
-    press(&mut rt, Key::Enter);
-    assert_eq!(ui(&mut rt).screen, Screen::Device { expired: false });
-    assert_eq!(*calls.borrow(), ["device_request"]);
+    assert!(calls.borrow().is_empty(), "nothing was asked of the engine");
     press(&mut rt, Key::Escape);
     assert_eq!(ui(&mut rt).screen, Screen::SignIn);
 }
@@ -619,8 +612,9 @@ fn recovery_proves_the_phrase_then_sets_a_new_password_from_the_keyboard() {
     assert_eq!(NEW.chars().count(), board::PASSWORD_LEN);
     let (mut rt, calls) = form(Script::default());
     click(&mut rt, "link-0-box");
-    tab_to(&mut rt, "btn-0");
-    press(&mut rt, Key::Enter);
+    // The twelve-word recovery screens are kept but have no door in this build (recovery is the web's).
+    ui(&mut rt).recover_with_phrase();
+    rt.frame(0.0);
     assert_eq!(ui(&mut rt).screen, Screen::Recover);
     assert_eq!(info(&rt, EMAIL_KEY).label.as_deref(), Some("Email"));
     assert_eq!(
@@ -937,4 +931,20 @@ fn a_sign_out_that_did_not_finish_brings_the_words_back() {
     ui(&mut rt).apply(SignInEvent::StillSignedIn);
     assert!(!ui(&mut rt).follow_gate(GateState::SignedOut));
     assert_eq!(ui(&mut rt).screen, Screen::SignIn);
+}
+
+#[test]
+fn the_passkey_door_is_drawn_only_where_the_source_can_sign_in_with_one() {
+    // A source without passkey sign-in (the engine's default): no door, and no call even from the keyboard.
+    let (mut rt, calls) = form(Script {
+        passkey_available: false,
+        ..Script::default()
+    });
+    assert!(!a11y(&rt).contains("Use a passkey"), "no dead passkey door");
+    ui(&mut rt).use_passkey();
+    assert!(!ui(&mut rt).passkey_waiting());
+    assert!(calls.borrow().is_empty(), "the engine was not asked");
+    // Where it can, the door is there (the board's frames).
+    let (rt, _) = form(Script::default());
+    assert!(a11y(&rt).contains("Use a passkey"));
 }

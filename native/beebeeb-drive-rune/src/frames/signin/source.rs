@@ -330,6 +330,8 @@ pub struct Script {
     pub hello: HelloOutcome,
     pub device: Option<DeviceStatus>,
     pub passkey: PasskeyOutcome,
+    /// Whether the source offers sign-in with a passkey (the door is drawn only then).
+    pub passkey_available: bool,
     /// What a two-factor code gets instead of the check against the board's code (DW-A27 draws
     /// the board's own six digits as the wrong ones).
     pub two_factor_problem: Option<TwoFactorProblem>,
@@ -355,6 +357,7 @@ impl Default for Script {
             hello: HelloOutcome::Succeeded(NextAfterSignIn::Drive),
             device: None,
             passkey: PasskeyOutcome::NeedsPassword,
+            passkey_available: true,
             two_factor_problem: None,
             hold: false,
             sign_up: SignUpScript::default(),
@@ -491,7 +494,7 @@ impl SignInSource for FixtureSignInSource {
     }
 
     fn passkey_available(&self) -> bool {
-        true
+        self.script.passkey_available
     }
 
     fn begin_passkey(&mut self) {

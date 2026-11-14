@@ -152,12 +152,12 @@ fn welcome_buttons_work_from_the_keyboard() {
 }
 
 #[test]
-fn tab_order_is_continue_other_device_email_password_sign_in() {
+fn tab_order_is_continue_email_password_sign_in() {
     let mut rt = runtime("DW-A02");
     let mut order = Vec::new();
     // Where no system draws the caption buttons (this headless run), the caption's own three
     // come first; on Windows they are the system's and are not Tab stops.
-    while order.len() < 9 {
+    while order.len() < 8 {
         press(&mut rt, Key::Tab);
         let key = focused(&rt).unwrap_or_default();
         if !key.starts_with("cap-") {
@@ -168,13 +168,12 @@ fn tab_order_is_continue_other_device_email_password_sign_in() {
         order,
         [
             "btn-0",
-            "btn-1",
             EMAIL_KEY,
             PASSWORD_KEY,
             "field-1-act",
             "link-0-box",
             "link-1-box",
-            "btn-2",
+            "btn-1",
             "link-2-box"
         ]
     );
@@ -216,12 +215,11 @@ fn sign_in_waits_for_an_address_and_a_password() {
 fn a_running_sign_in_says_so_and_takes_no_second_press() {
     let mut rt = runtime("DW-A18");
     assert_eq!(
-        info(&rt, "btn-2-label").text.as_deref(),
+        info(&rt, "btn-1-label").text.as_deref(),
         Some("Unlocking vault\u{2026}")
     );
-    click(&mut rt, "btn-2");
-    click(&mut rt, "btn-0");
     click(&mut rt, "btn-1");
+    click(&mut rt, "btn-0");
     assert_eq!(
         ui(&mut rt).screen,
         Screen::SignIn,
@@ -247,7 +245,7 @@ fn each_problem_draws_the_boards_words() {
     assert_eq!(info(&offline, "banner-0-title").text.as_deref(), Some("You're offline"));
     assert_eq!(info(&offline, "banner-0").role, "alert");
     assert!(!has(&offline, "field-1-msg"));
-    assert!(info(&offline, "btn-2").focusable, "dimmed but pressable (DW-A20)");
+    assert!(info(&offline, "btn-1").focusable, "dimmed but pressable (DW-A20)");
     assert_eq!(info(&runtime("DW-A22"), "banner-0").role, "status");
 }
 
@@ -255,10 +253,10 @@ fn each_problem_draws_the_boards_words() {
 fn the_fifth_wrong_try_in_a_row_explains_the_lock() {
     let mut rt = runtime("DW-A19");
     for _ in 0..3 {
-        click(&mut rt, "btn-2");
+        click(&mut rt, "btn-1");
         assert!(!has(&rt, "banner-0"));
     }
-    click(&mut rt, "btn-2");
+    click(&mut rt, "btn-1");
     assert_eq!(ui(&mut rt).problem, Some(super::source::SignInProblem::LockedHint));
     assert!(has(&rt, "banner-0"), "the lock's note (DW-A22)");
     assert_eq!(
@@ -302,7 +300,8 @@ fn another_device_asks_waits_and_ends_in_each_answer() {
     let source = FixtureSignInSource::new(Script::default());
     let calls = source.calls.clone();
     let mut rt = runtime_of(Ui::new(Box::new(source)), false);
-    click(&mut rt, "btn-1");
+    ui(&mut rt).ask_other_device();
+    rt.frame(0.0);
     assert_eq!(ui(&mut rt).screen, Screen::Device { expired: false });
     assert_eq!(
         info(&rt, "code").text.as_deref(),
@@ -546,6 +545,9 @@ impl SignInSource for Late {
     }
     fn begin_two_factor(&mut self, _: &str, _: CodeKind) {}
     fn begin_restore(&mut self, _: &[&str]) {}
+    fn passkey_available(&self) -> bool {
+        true
+    }
     fn begin_passkey(&mut self) {}
     fn begin_unlock(&mut self, _: &str) {}
     fn begin_recovery_verify(&mut self, _: &str, _: &[&str]) {}
@@ -628,7 +630,7 @@ fn while_a_sign_in_runs_no_other_path_leaves() {
     for link in ["link-0-box", "link-1-box", "link-2-box"] {
         assert!(info(&rt, link).focusable, "{link} is a Tab stop before");
     }
-    click(&mut rt, "btn-2");
+    click(&mut rt, "btn-1");
     assert!(ui(&mut rt).busy);
     for link in ["link-0-box", "link-1-box", "link-2-box"] {
         click(&mut rt, link);
@@ -636,7 +638,6 @@ fn while_a_sign_in_runs_no_other_path_leaves() {
     }
     click(&mut rt, "btn-0");
     click(&mut rt, "btn-1");
-    click(&mut rt, "btn-2");
     assert!(
         ui(&mut rt).take_intents().is_empty(),
         "Forgot password?, Use a passkey and Create an account lead nowhere while it runs"
@@ -686,7 +687,7 @@ fn a_refused_sign_in_puts_focus_in_the_password_field() {
     ] {
         let (ui_, queue, _) = late();
         let mut rt = runtime_of(ui_, false);
-        tab_to(&mut rt, "btn-2");
+        tab_to(&mut rt, "btn-1");
         space(&mut rt);
         assert!(ui(&mut rt).busy);
         deliver(&mut rt, &queue, SignInEvent::SignedIn(Err(problem)));
@@ -696,7 +697,7 @@ fn a_refused_sign_in_puts_focus_in_the_password_field() {
     // Offline: the same field, and Enter there checks the connection again (DW-A20).
     let (ui_, queue, calls) = late();
     let mut rt = runtime_of(ui_, false);
-    tab_to(&mut rt, "btn-2");
+    tab_to(&mut rt, "btn-1");
     space(&mut rt);
     assert_eq!(focused(&rt), None, "the running button holds no focus");
     deliver(&mut rt, &queue, SignInEvent::SignedIn(Err(SignInProblem::Offline)));
@@ -710,7 +711,7 @@ fn a_refused_sign_in_puts_focus_in_the_password_field() {
 fn the_network_wait_counts_down_and_sign_in_comes_back() {
     let (ui_, queue, calls) = late();
     let mut rt = runtime_of(ui_, false);
-    click(&mut rt, "btn-2");
+    click(&mut rt, "btn-1");
     deliver(
         &mut rt,
         &queue,
@@ -718,15 +719,15 @@ fn the_network_wait_counts_down_and_sign_in_comes_back() {
     );
     let message = |rt: &Runtime<State>| info(rt, "field-1-msg").text.unwrap_or_default();
     assert!(message(&rt).contains("Wait 30 seconds"));
-    assert!(!info(&rt, "btn-2").focusable, "no press during the wait");
+    assert!(!info(&rt, "btn-1").focusable, "no press during the wait");
     rt.settle_all();
     rt.frame(0.0);
     assert_eq!(
-        info(&rt, "btn-2").opacity,
+        info(&rt, "btn-1").opacity,
         1.0,
         "drawn at full strength, as the board draws DW-A21"
     );
-    click(&mut rt, "btn-2");
+    click(&mut rt, "btn-1");
     click(&mut rt, PASSWORD_KEY);
     press(&mut rt, Key::Enter);
     assert_eq!(*calls.borrow(), ["sign_in"], "a press does not earn another 429");
@@ -738,8 +739,8 @@ fn the_network_wait_counts_down_and_sign_in_comes_back() {
     assert_eq!(ui(&mut rt).retry_wait(), Some(1));
     deliver(&mut rt, &queue, SignInEvent::RetryAfter { seconds: 0 });
     assert!(!has(&rt, "field-1-msg"), "the message goes with the wait");
-    assert!(info(&rt, "btn-2").focusable, "Sign in is back by itself");
-    click(&mut rt, "btn-2");
+    assert!(info(&rt, "btn-1").focusable, "Sign in is back by itself");
+    click(&mut rt, "btn-1");
     assert_eq!(*calls.borrow(), ["sign_in", "sign_in"]);
 }
 
@@ -749,7 +750,8 @@ fn the_network_wait_counts_down_and_sign_in_comes_back() {
 fn a_waiting_request_reconnects_counts_on_and_ends_on_the_heading() {
     let (ui_, queue, calls) = late();
     let mut rt = runtime_of(ui_, false);
-    click(&mut rt, "btn-1");
+    ui(&mut rt).ask_other_device();
+    rt.frame(0.0);
     ctrl_c(&mut rt);
     assert!(rt.copy_request.is_none(), "no code yet: nothing to copy");
     assert!(deliver(
@@ -810,7 +812,8 @@ fn a_waiting_request_reconnects_counts_on_and_ends_on_the_heading() {
 fn approved_without_keys_signs_nobody_in_and_offers_to_ask_again() {
     let (ui_, queue, calls) = late();
     let mut rt = runtime_of(ui_, false);
-    click(&mut rt, "btn-1");
+    ui(&mut rt).ask_other_device();
+    rt.frame(0.0);
     deliver(
         &mut rt,
         &queue,
@@ -848,7 +851,8 @@ fn approved_without_keys_signs_nobody_in_and_offers_to_ask_again() {
 fn answers_of_a_request_already_left_change_nothing() {
     let (ui_, queue, calls) = late();
     let mut rt = runtime_of(ui_, false);
-    click(&mut rt, "btn-1");
+    ui(&mut rt).ask_other_device();
+    rt.frame(0.0);
     click(&mut rt, "back-link");
     assert_eq!(*calls.borrow(), ["device_request", "cancel_device_request"]);
     for event in [
