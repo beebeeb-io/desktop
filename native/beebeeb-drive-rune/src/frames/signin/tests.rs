@@ -549,6 +549,9 @@ impl SignInSource for Late {
     fn passkey_available(&self) -> bool {
         true
     }
+    fn in_app_doors_available(&self) -> bool {
+        true
+    }
     fn begin_passkey(&mut self) {}
     fn begin_unlock(&mut self, _: &str) {}
     fn begin_recovery_verify(&mut self, _: &str, _: &[&str]) {}
