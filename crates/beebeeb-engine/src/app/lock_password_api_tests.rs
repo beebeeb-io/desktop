@@ -183,7 +183,7 @@ fn enrolled(engine: &TestEngine, credentials: &MemoryCredentials, now: u64) {
 fn a_right_password_opens_through_the_server_and_makes_no_session() {
     let _one = serial();
     let api = server();
-    let (engine, credentials) = locked_engine(&api.base());
+    let (engine, credentials) = locked_engine(&api.base);
     let token = stored_token(&credentials);
     assert_eq!(
         engine.unlock_screen_with_password_at(secret(PASSWORD), T0),
@@ -210,7 +210,7 @@ fn a_right_password_opens_through_the_server_and_makes_no_session() {
 fn wrong_passwords_are_counted_and_the_fifth_waits() {
     let _one = serial();
     let api = server();
-    let (engine, credentials) = locked_engine(&api.base());
+    let (engine, credentials) = locked_engine(&api.base);
     for tried in 1..=4u64 {
         assert_eq!(
             engine.unlock_screen_with_password_at(secret(WRONG), T0 + tried),
@@ -243,7 +243,7 @@ fn wrong_passwords_are_counted_and_the_fifth_waits() {
 fn the_servers_own_limit_is_not_a_wrong_try() {
     let _one = serial();
     let api = server();
-    let (engine, credentials) = locked_engine(&api.base());
+    let (engine, credentials) = locked_engine(&api.base);
     assert_eq!(
         engine.unlock_screen_with_password_at(secret(WRONG), T0),
         Ok(ScreenUnlock::Wrong { wait_ms: 0 })
@@ -262,7 +262,7 @@ fn the_servers_own_limit_is_not_a_wrong_try() {
 fn a_401_the_server_stands_behind_is_not_a_wrong_try_and_one_it_does_not_is_a_limit() {
     let _one = serial();
     let api = server();
-    let (engine, credentials) = locked_engine(&api.base());
+    let (engine, credentials) = locked_engine(&api.base);
     // The proof says 401 but `/auth/me` says the session lives: nothing was judged.
     MODE.store(REFUSED_401_ME_LIVES, Ordering::SeqCst);
     assert_eq!(
@@ -278,7 +278,7 @@ fn a_401_the_server_stands_behind_is_not_a_wrong_try_and_one_it_does_not_is_a_li
 fn an_ended_session_closes_the_vault_and_deletes_the_count_and_the_record() {
     let _one = serial();
     let api = server();
-    let (engine, credentials) = locked_engine(&api.base());
+    let (engine, credentials) = locked_engine(&api.base);
     enrolled(&engine, &credentials, T0);
     assert_eq!(
         engine.unlock_screen_with_password_at(secret(WRONG), T0 + 1),
@@ -300,7 +300,7 @@ fn an_ended_session_closes_the_vault_and_deletes_the_count_and_the_record() {
 fn offline_the_local_record_decides_and_only_for_the_right_password() {
     let _one = serial();
     let api = server();
-    let (engine, credentials) = locked_engine(&api.base());
+    let (engine, credentials) = locked_engine(&api.base);
     enrolled(&engine, &credentials, T0);
     MODE.store(HANGS_UP, Ordering::SeqCst);
     assert_eq!(
@@ -320,7 +320,7 @@ fn offline_the_local_record_decides_and_only_for_the_right_password() {
 fn offline_without_a_record_nothing_opens_and_the_count_is_restored() {
     let _one = serial();
     let api = server();
-    let (engine, credentials) = locked_engine(&api.base());
+    let (engine, credentials) = locked_engine(&api.base);
     MODE.store(HANGS_UP, Ordering::SeqCst);
     assert_eq!(
         engine.unlock_screen_with_password_at(secret(PASSWORD), T0),
@@ -334,7 +334,7 @@ fn offline_without_a_record_nothing_opens_and_the_count_is_restored() {
 fn the_tenth_wrong_try_turns_the_local_check_off_until_an_online_success() {
     let _one = serial();
     let api = server();
-    let (engine, credentials) = locked_engine(&api.base());
+    let (engine, credentials) = locked_engine(&api.base);
     enrolled(&engine, &credentials, T0);
     for tried in 1..LOCAL_CHECK_OFF_AT {
         assert!(matches!(
@@ -373,7 +373,7 @@ fn the_tenth_wrong_try_turns_the_local_check_off_until_an_online_success() {
 fn the_count_is_written_before_the_check_and_a_store_that_refuses_stops_the_try() {
     let _one = serial();
     let api = server();
-    let (engine, credentials) = locked_engine(&api.base());
+    let (engine, credentials) = locked_engine(&api.base);
     credentials.fail_lock_writes(true);
     assert_eq!(
         engine.unlock_screen_with_password_at(secret(PASSWORD), T0),
@@ -387,7 +387,7 @@ fn the_count_is_written_before_the_check_and_a_store_that_refuses_stops_the_try(
 fn an_unreadable_count_buys_no_tries() {
     let _one = serial();
     let api = server();
-    let (engine, credentials) = locked_engine(&api.base());
+    let (engine, credentials) = locked_engine(&api.base);
     credentials
         .store_for(SLOT)
         .save_lock_flag(LockFlag::Attempts, b"garbage")
@@ -405,7 +405,7 @@ fn an_unreadable_count_buys_no_tries() {
 fn an_answer_that_arrives_after_the_session_moved_opens_nothing() {
     let _one = serial();
     let api = server();
-    let (engine, _credentials) = locked_engine(&api.base());
+    let (engine, _credentials) = locked_engine(&api.base);
     let mover = engine.clone();
     *ON_FINISH.lock().unwrap() = Some(Box::new(move || {
         let _writes = mover.writes.write().unwrap();
@@ -424,7 +424,7 @@ fn an_answer_that_arrives_after_the_session_moved_opens_nothing() {
 fn a_press_while_a_check_runs_checks_nothing_and_an_empty_password_is_not_a_try() {
     let _one = serial();
     let api = server();
-    let (engine, credentials) = locked_engine(&api.base());
+    let (engine, credentials) = locked_engine(&api.base);
     {
         let _running = engine.lock_password.one_at_a_time.lock().unwrap();
         assert_eq!(
@@ -444,7 +444,7 @@ fn a_press_while_a_check_runs_checks_nothing_and_an_empty_password_is_not_a_try(
 fn a_start_that_went_stale_is_begun_again_once() {
     let _one = serial();
     let api = server();
-    let (engine, _credentials) = locked_engine(&api.base());
+    let (engine, _credentials) = locked_engine(&api.base);
     MODE.store(STALE_ONCE, Ordering::SeqCst);
     assert_eq!(
         engine.unlock_screen_with_password_at(secret(PASSWORD), T0),
@@ -463,7 +463,7 @@ fn a_start_that_went_stale_is_begun_again_once() {
 fn the_screen_password_path_is_for_a_locked_screen_only() {
     let _one = serial();
     let api = server();
-    let (engine, _credentials) = locked_engine(&api.base());
+    let (engine, _credentials) = locked_engine(&api.base);
     engine.unlock_screen_platform_verified(engine.session_turn()).unwrap();
     assert_eq!(
         engine.unlock_screen_with_password_at(secret(PASSWORD), T0),
@@ -483,7 +483,7 @@ fn open_engine(base: &str) -> (Arc<TestEngine>, MemoryCredentials) {
 fn the_start_setting_turns_on_asking_nothing_and_off_only_with_the_password_proven_online() {
     let _one = serial();
     let api = server();
-    let (engine, credentials) = open_engine(&api.base());
+    let (engine, credentials) = open_engine(&api.base);
     assert_eq!(engine.set_ask_password_at_start_at(true, None, T0), Ok(()));
     assert_eq!(engine.ask_password_at_start(), Some(true));
     assert_eq!(requests(&api), 0, "turning it on asks nothing");
@@ -529,7 +529,7 @@ fn enrolled_open(engine: &TestEngine) {
 fn a_password_confirmed_online_changes_no_lock_and_waits_like_any_try() {
     let _one = serial();
     let api = server();
-    let (engine, credentials) = open_engine(&api.base());
+    let (engine, credentials) = open_engine(&api.base);
     assert_eq!(engine.confirm_password_online_at(secret(PASSWORD), T0), Ok(()));
     assert_eq!(engine.lock_state(), LockState::Open);
     assert_eq!(
