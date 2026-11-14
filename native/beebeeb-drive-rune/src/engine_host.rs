@@ -48,6 +48,7 @@ mod binding_tests;
 pub mod drive_settings;
 pub mod files;
 mod files_facts;
+mod files_link;
 #[cfg(test)]
 #[path = "engine_host/files_open_with_tests.rs"]
 mod files_open_with_tests;
@@ -567,6 +568,8 @@ pub struct EngineFilesSource<C: CredentialStores> {
     copies: files::LocalCopies<Engine<C>>,
     /// Move to Trash and its Undo.
     trash: files_trash::TrashCalls<C>,
+    /// Copy link and the Share dialog's link.
+    links: files_link::LinkCalls<C>,
     /// After a refused upload: the files of it that were not copied in.
     upload_left: Option<Vec<PathBuf>>,
     /// The sidebar's figures and each folder's sort.
@@ -585,6 +588,7 @@ impl<C: CredentialStores> EngineFilesSource<C> {
         Self {
             copies: files::LocalCopies::new(engine.clone()),
             trash: files_trash::TrashCalls::new(engine.clone()),
+            links: files_link::LinkCalls::new(engine.clone()),
             facts: files_facts::Facts::new(engine.clone()),
             versions: files_versions::VersionCalls::new(engine.clone()),
             places: files_places::Places::new(engine.clone()),
@@ -749,8 +753,23 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.copies.ask(action, local_items(items))
     }
 
-    fn copy_link(&mut self, _: &[DriveItem]) -> Result<(), ActionError> {
-        Err(not_wired("copy_link"))
+    /// Accepted here, asked of the engine on a worker for the session of this press, answered through `changes`:
+    /// the window copies the link then.
+    fn copy_link(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
+        self.links.copy(items)
+    }
+
+    fn link_pending(&self) -> bool {
+        self.links.pending()
+    }
+
+    /// The Share dialog's link: as `copy_link`, a new link with the choices.
+    fn share_link(
+        &mut self,
+        items: &[DriveItem],
+        options: &crate::frames::files::actions_data::ShareOptions,
+    ) -> Result<(), ActionError> {
+        self.links.share(items, options)
     }
 
     fn open(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
@@ -906,10 +925,11 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         open_path(&path)
     }
 
-    /// What Move to Trash, its Undo, Keep on this PC and Free up space did, once the engine answered (not an
-    /// activity feed).
+    /// What Move to Trash, its Undo, a link that was asked for, Keep on this PC and Free up space did, once the
+    /// engine answered (not an activity feed).
     fn changes(&mut self) -> Vec<Change> {
         let mut changes = self.trash.take();
+        changes.extend(self.links.take());
         changes.extend(self.copies.take());
         changes.extend(self.versions.take());
         // Where the rows stand in the Backups tree: an arrival redraws by its wake.

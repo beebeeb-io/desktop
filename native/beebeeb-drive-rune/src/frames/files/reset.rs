@@ -78,6 +78,7 @@ pub fn end_session(s: &mut State, account_left: bool) {
         sort,
         undo,
         trash,
+        link,
         // Stays: the ids of board frames that were asked for, no name of a file.
         intents: _,
         retry_upload,
@@ -123,6 +124,8 @@ pub fn end_session(s: &mut State, account_left: bool) {
     undo.clear();
     // An Undo that was not answered, and the ids Try again of a move to Trash would ask for.
     *trash = super::to_trash::Ui::default();
+    // A link that landed and is not on the clipboard yet, and what Try again of a link would ask for.
+    *link = super::link::Ui::default();
     *toast = None;
     *toast_until = None;
     selection.clear();
@@ -210,5 +213,6 @@ pub fn poll(s: &mut State) -> bool {
     s.actions.retry_upload = None;
     s.actions.local.retry = None;
     s.actions.trash.again = None;
+    s.actions.link.again = None;
     true
 }

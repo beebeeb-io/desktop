@@ -33,6 +33,8 @@ impl State {
                 Change::Failed(action, why) => failures.push((action, why)),
                 // A move to Trash or its Undo, answered later: drawn now, per item (`to_trash.rs`).
                 Change::Trash { action, items } => self.trash_answered(action, items),
+                // A link, answered later: held for this frame's `Tx`, which alone writes the clipboard (`link.rs`).
+                Change::Link { action, answer } => self.actions.link.landed.push((action, answer)),
                 Change::Local { action, items } => {
                     // The row reads what the engine says of the item now, changed or left: by id, never by
                     // position (the rows may have changed since it was asked), never from the action.
