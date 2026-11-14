@@ -57,6 +57,8 @@ pub mod sync;
 pub(crate) mod tests;
 pub mod this_pc;
 pub mod trash;
+// The first run's steps that have an engine function behind them (`setup`).
+pub mod setup;
 pub mod tray;
 // An open file: its facts from the local state, its content decrypted in memory (`viewer`).
 pub mod viewer;
@@ -251,6 +253,9 @@ pub struct LiveEngine<C: CredentialStores> {
     status: Mutex<EngineStatusView>,
     /// One start at a time, and the name of the folder it asked for ([`sync::StartWorker`]).
     starts: sync::StartWorker,
+    /// Whether this PC still has its first run to do. Not due until the app's start reads it
+    /// ([`LiveEngine::wire_first_run`]): a handle nobody wired never shows one.
+    first_run: Arc<setup::FirstRun>,
 }
 
 impl<C: CredentialStores> LiveEngine<C> {
@@ -261,6 +266,30 @@ impl<C: CredentialStores> LiveEngine<C> {
             messages: Mutex::new(messages),
             status: Mutex::new(EngineStatusView::default()),
             starts: sync::StartWorker::default(),
+            first_run: Arc::default(),
+        }
+    }
+
+    /// At the app's start, before the window's first frame: read whether this PC still has its first run to do
+    /// (the settings file, once). From then on a session that is signed in and unlocked shows the first-run steps
+    /// until they end ([`EngineActions::session`]).
+    pub fn wire_first_run(&self) {
+        self.first_run.read(&*self.engine);
+    }
+
+    /// What the first-run source asks of the shell: the one start path, the folder opener, the start-at-login
+    /// entry and the gate's flag.
+    pub fn setup_hooks(self: &Arc<Self>, platform: Arc<dyn crate::shell::platform::Platform>) -> setup::Hooks
+    where
+        C: 'static,
+    {
+        let live = self.clone();
+        setup::Hooks {
+            start_sync: Arc::new(move || live.start_sync().is_ok()),
+            open_folder: |folder| open_path(folder).is_ok(),
+            platform,
+            first_run: self.first_run.clone(),
+            explorer_step: cfg!(target_os = "windows"),
         }
     }
 
@@ -319,7 +348,11 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     /// The gate from the handle's view (read without waiting: the UI thread asks it on every frame).
     fn session(&self) -> Session {
         self.drain();
-        let gate = map_gate_shell(self.engine.view().gate);
+        let gate = match map_gate_shell(self.engine.view().gate) {
+            // Signed in and unlocked, and this PC has not had its first run: its steps, not the main window.
+            ShellGate::Ready if self.first_run.due() => ShellGate::FirstRun,
+            gate => gate,
+        };
         // Whose session: the email is known from the stored session at start, the user id only once the
         // server named it in this run. One of them, always the same one for one account in one run.
         let account = self

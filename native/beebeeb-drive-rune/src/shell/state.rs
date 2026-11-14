@@ -53,6 +53,9 @@ pub struct State {
     pub(crate) tray: Option<crate::frames::tray::Ui>,
     pub(crate) shortcuts: crate::frames::tray::shortcuts::Shortcuts,
     pub(crate) setup: Option<crate::frames::signin::setup::Ui>,
+    /// The running app: makes the first run's source for the session that is signed in now (`engine_host::setup`).
+    /// `None`: no first run is ever started from the gate (scenes set `setup` themselves).
+    pub(crate) setup_source: Option<SetupMaker>,
     /// The first-time guide over the main window (DW-0380, DW-0301 to DW-0305).
     pub(crate) guide: crate::frames::signin::setup::guide::Guide,
     /// Sync history and Available offline (`frames::this_pc`).
@@ -129,6 +132,7 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         tray: None,
         shortcuts: Default::default(),
         setup: None,
+        setup_source: None,
         guide: Default::default(),
         this_pc: crate::frames::this_pc::Ui::fixture(),
         backups: crate::frames::backups::BackupsUi::first(crate::shell::instance::DEV_BUILD),
@@ -144,6 +148,27 @@ pub(crate) const SEARCH_ON_ENGINE: bool = false;
 /// The window on the real engine: Files and sign-in ask the handle. Every area not yet
 /// backed by the engine starts on its `Unwired` state (the shell's "not built yet" frame),
 /// never the board's sample data presented as the person's own.
+/// Makes a first-run source for the session that is signed in when it is called.
+pub type SetupMaker = Box<dyn Fn() -> Box<dyn crate::frames::signin::setup::source::SetupSource>>;
+
+/// The running app's first run, on the real engine: read once whether this PC still has it to do, and give the
+/// window the way to make its source. Only the app's start calls this: a window that was not wired never shows
+/// a first run (the gate stays as the engine says).
+pub fn wire_first_run<C: beebeeb_engine::app::CredentialStores + 'static>(
+    s: &mut State,
+    engine: std::sync::Arc<beebeeb_engine::app::Engine<C>>,
+    live: &std::sync::Arc<crate::engine_host::LiveEngine<C>>,
+) {
+    live.wire_first_run();
+    let hooks = live.setup_hooks(crate::shell::platform::current());
+    s.setup_source = Some(Box::new(move || {
+        Box::new(crate::engine_host::setup::EngineSetupSource::new(
+            engine.clone(),
+            hooks.clone(),
+        ))
+    }));
+}
+
 pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     shell: Shell,
     engine: std::sync::Arc<beebeeb_engine::app::Engine<C>>,

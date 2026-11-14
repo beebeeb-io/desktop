@@ -24,7 +24,8 @@ use crate::State;
 use crate::shell::app::{Event, GateState};
 use crate::shell::host;
 use source::{
-    Explorer, FixtureSetupSource, Folder, LockAfter, PreviewFormat, PreviewSize, Sample, Script, SetupSource,
+    Explorer, FixtureSetupSource, Folder, LockAfter, Outcome, PreviewFormat, PreviewSize, Sample, Script, SetupSource,
+    Switch,
 };
 
 pub use view::view;
@@ -87,18 +88,6 @@ impl Step {
             Step::Done => "You're set up",
         }
     }
-
-    fn next(self) -> Step {
-        match self {
-            Step::Passkey => Step::Lock,
-            Step::Lock => Step::Backup,
-            Step::Backup => Step::Previews,
-            Step::Previews => Step::Explorer,
-            Step::Explorer => Step::Notifications,
-            Step::Notifications => Step::Login,
-            Step::Login | Step::Done => Step::Done,
-        }
-    }
 }
 
 /// How the compare view shows the two pictures.
@@ -150,6 +139,32 @@ pub enum Setting {
     OpenAtLogin,
 }
 
+impl Setting {
+    /// The step that sets it.
+    pub fn step(self) -> Step {
+        match self {
+            Setting::Passkey => Step::Passkey,
+            Setting::AppLock => Step::Lock,
+            Setting::Backup => Step::Backup,
+            Setting::Previews => Step::Previews,
+            Setting::FileExplorer => Step::Explorer,
+            Setting::Notifications => Step::Notifications,
+            Setting::OpenAtLogin => Step::Login,
+        }
+    }
+}
+
+/// Where a switch of "You're set up" stands when its change is answered after the press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answered {
+    /// Asked, not answered yet: no value is drawn.
+    Waiting,
+    /// The change did not happen, and what the switch is now is known (`results` holds it).
+    NotChanged,
+    /// The change did not happen, and what the switch is now is not known.
+    NotKnown,
+}
+
 /// Where the person goes when they leave setup. The shell opens it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Intent {
@@ -190,6 +205,11 @@ pub struct Ui {
     intents: Vec<Intent>,
     /// "Open my Beebeeb" was pressed and the guide has not asked yet ([`Ui::guide_due`]).
     finished: bool,
+    /// The steps the source answers for, in order ([`SetupSource::offers`]).
+    offered: Vec<Step>,
+    /// Switches whose change is answered after the press, and where each stands. One that is not listed here was
+    /// made (or never asked): `results` says what it is.
+    answered: Vec<(Switch, Answered)>,
 }
 
 /// Decode a PNG into pixels Rune draws. A file that does not decode draws nothing.
@@ -220,8 +240,11 @@ fn decode(png_bytes: &[u8]) -> Pixels {
 impl Ui {
     pub fn new(source: Box<dyn SetupSource>) -> Self {
         let sample = source.sample();
+        let offered: Vec<Step> = Step::STEPS.into_iter().filter(|step| source.offers(*step)).collect();
         Ui {
-            step: Step::Passkey,
+            step: offered.first().copied().unwrap_or(Step::Done),
+            offered,
+            answered: Vec::new(),
             compare: None,
             explorer: source.explorer(),
             // Step 2 draws the switch on and "5 min" chosen; step 7 draws its switch on.
@@ -285,8 +308,57 @@ impl Ui {
         format!("{} {}", self.size.label(), self.format.label())
     }
 
+    /// The steps this first run has, in order: the ones the source answers for.
+    pub fn steps(&self) -> &[Step] {
+        &self.offered
+    }
+
+    /// Whether "You're set up" has a row for this setting: its step is one of this first run's.
+    pub fn has(&self, setting: Setting) -> bool {
+        self.offered.contains(&setting.step())
+    }
+
+    /// Whether a row of "You're set up" leads to its setting.
+    pub fn opens_settings(&self) -> bool {
+        self.source.opens_settings()
+    }
+
+    /// Where a switch stands while its change has not been made: `None` once it was (or when it was never asked).
+    pub fn answered(&self, switch: Switch) -> Option<Answered> {
+        self.answered.iter().find(|(s, _)| *s == switch).map(|(_, a)| *a)
+    }
+
+    /// A switch was asked of the source. A source that answers later: no value is drawn until it does.
+    fn asked(&mut self, switch: Switch) {
+        self.answered.retain(|(s, _)| *s != switch);
+        if self.source.answers_later() {
+            self.answered.push((switch, Answered::Waiting));
+        }
+    }
+
+    /// The source answered a change: the value it names is the one drawn, never the one that was asked for.
+    fn take_in(&mut self, outcome: Outcome) {
+        self.answered.retain(|(s, _)| *s != outcome.switch);
+        if let Some(now) = outcome.now {
+            match outcome.switch {
+                Switch::Notifications => self.results.notifications = now,
+                Switch::OpenAtLogin => self.results.open_at_login = now,
+            }
+        }
+        match (outcome.done, outcome.now) {
+            (true, Some(_)) => {}
+            (_, None) => self.answered.push((outcome.switch, Answered::NotKnown)),
+            (false, Some(_)) => self.answered.push((outcome.switch, Answered::NotChanged)),
+        }
+    }
+
     fn advance(&mut self) {
-        self.step = self.step.next();
+        self.step = self
+            .offered
+            .iter()
+            .copied()
+            .find(|step| *step > self.step)
+            .unwrap_or(Step::Done);
         self.focus = Some(TITLE_KEY);
     }
 
@@ -323,7 +395,7 @@ impl Ui {
             Step::Previews => self.source.set_previews(self.size, self.format),
             Step::Explorer => {
                 // "Try again" is the amber button while it failed (DW-0280).
-                if matches!(self.explorer, Explorer::Failed { .. }) {
+                if matches!(self.explorer, Explorer::Failed { .. } | Explorer::NotSyncing) {
                     self.source.retry_explorer();
                     self.pump();
                     self.focus = Some(TITLE_KEY);
@@ -333,10 +405,12 @@ impl Ui {
             Step::Notifications => {
                 self.source.set_notifications(true);
                 self.results.notifications = true;
+                self.asked(Switch::Notifications);
             }
             Step::Login => {
                 self.source.set_open_at_login(self.login_on);
                 self.results.open_at_login = self.login_on;
+                self.asked(Switch::OpenAtLogin);
             }
         }
         self.advance();
@@ -352,6 +426,7 @@ impl Ui {
             Step::Notifications => {
                 self.source.set_notifications(false);
                 self.results.notifications = false;
+                self.asked(Switch::Notifications);
             }
             _ => {}
         }
@@ -453,7 +528,7 @@ impl Ui {
 
     /// A row of "You're set up".
     pub fn open_setting(&mut self, setting: Setting) {
-        if self.step == Step::Done {
+        if self.step == Step::Done && self.opens_settings() && self.has(setting) {
             self.intents.push(Intent::OpenSetting(setting));
         }
     }
@@ -481,6 +556,9 @@ impl Ui {
     pub fn pump(&mut self) -> bool {
         if !self.source.poll() {
             return false;
+        }
+        for outcome in self.source.take_outcomes() {
+            self.take_in(outcome);
         }
         self.explorer = self.source.explorer();
         let sample = self.source.sample();
@@ -527,7 +605,6 @@ pub fn frame(s: &State, cx: &mut Cx<State>) -> El {
 }
 
 /// What the engine changed between presses (File Explorer finished). For `shell::host::poll`.
-#[allow(dead_code)] // waits for its one line in `shell/host.rs` (PR body)
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let Some(ui) = ui(s) else { return false };
     let changed = ui.pump();

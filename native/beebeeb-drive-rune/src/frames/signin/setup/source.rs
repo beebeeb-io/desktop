@@ -16,8 +16,29 @@ pub enum Explorer {
     Adding,
     /// DW-0206.
     Added,
-    /// DW-0280. `code`: what `CfRegisterSyncRoot` returned, for support ("0x8007017C").
+    /// DW-0280. `code`: what `CfRegisterSyncRoot` returned, for support ("0x8007017C"); empty when Windows
+    /// gave none.
     Failed { code: String },
+    /// Sync did not start on this PC, so Windows was not asked to add the folder at all. Drawn as DW-0280 with
+    /// its own sentence and no code: it is not Windows that refused.
+    NotSyncing,
+}
+
+/// A switch of setup whose change is answered after the press ([`SetupSource::take_outcomes`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Switch {
+    Notifications,
+    OpenAtLogin,
+}
+
+/// How a change asked through the source ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Outcome {
+    pub switch: Switch,
+    /// The change was made.
+    pub done: bool,
+    /// What the switch is now, when that is known (after a change that failed it may not be).
+    pub now: Option<bool>,
 }
 
 /// One folder the Windows app can back up (DW-0203), in the app's own order.
@@ -111,6 +132,25 @@ pub struct Sample {
 pub const BUNDLED_SAMPLE_PNG: &[u8] = include_bytes!("../../../../assets/sample/compare-sample.png");
 
 pub trait SetupSource {
+    /// Whether this source answers for a step. `false`: the step is not shown, in the list at the left, as a
+    /// step, or as a row of "You're set up": never a step that looks done while nothing was set. The fixture
+    /// answers for all of them (the board).
+    fn offers(&self, _step: super::Step) -> bool {
+        true
+    }
+    /// Whether a row of "You're set up" leads to its setting. `false`: the rows are values, not links.
+    fn opens_settings(&self) -> bool {
+        true
+    }
+    /// `true`: a switch this source changes is answered after the press ([`SetupSource::take_outcomes`]), and
+    /// "You're set up" draws its value only then. The fixture's changes are made at once.
+    fn answers_later(&self) -> bool {
+        false
+    }
+    /// The changes that were answered since the last call, oldest first.
+    fn take_outcomes(&mut self) -> Vec<Outcome> {
+        Vec::new()
+    }
     fn explorer(&self) -> Explorer;
     /// The six known folders with their sizes. Engine: `known_folder::list` + a size scan.
     fn folders(&self) -> Vec<Folder>;

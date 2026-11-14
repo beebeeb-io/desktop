@@ -457,9 +457,16 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= drain_signin_intents(s);
     // "Open my Beebeeb" at the end of the first run starts the first-time guide (DW-0380).
     changed |= crate::frames::signin::setup::guide::poll(s, tx);
+    // The first run's answers (File Explorer finished, a switch was set, the first run ended).
+    changed |= crate::frames::signin::setup::poll(s, tx);
     // The session and the tray: the engine may have changed since the last frame.
     let gate_before = s.shell.app.gate();
+    let account_before = s.shell.app.account().map(str::to_string);
     changed |= s.shell.refresh();
+    // Another account under the same gate: the first run is the new session's, from its first step.
+    if s.shell.app.gate() == gate_before && s.shell.app.account() != account_before.as_deref() {
+        start_first_run(s);
+    }
     let read_by_the_gate = s.shell.app.gate() != gate_before;
     if read_by_the_gate {
         on_gate_change(s);
@@ -625,9 +632,24 @@ fn on_gate_change(s: &mut State) {
     s.listing = listing;
     s.list_error = list_error;
     s.selected = None;
-    if s.shell.app.gate() == super::app::GateState::Ready {
+    let gate = s.shell.app.gate();
+    start_first_run(s);
+    // The first run's File Explorer step is about the sync folder: sync starts with it, as it does when the main
+    // window opens. A start refused during the first run is said by that step; the modal is the main window's.
+    if gate == super::app::GateState::Ready || gate == super::app::GateState::FirstRun {
         s.shell.start_sync();
     }
+}
+
+/// The first run's state follows the gate, in the running app (a scene sets its own): made for the session that
+/// is signed in when the gate shows the first run, dropped the moment the gate shows anything else, and made
+/// again when the account under it changed. Nothing of one session's first run is drawn or pressed in another.
+fn start_first_run(s: &mut State) {
+    let Some(make) = &s.setup_source else {
+        return;
+    };
+    s.setup =
+        (s.shell.app.gate() == super::app::GateState::FirstRun).then(|| crate::frames::signin::setup::Ui::new(make()));
 }
 
 /// The refusal modal (the owner's ruling Q3 on the sync-start contract): it opens once per refused start attempt,
