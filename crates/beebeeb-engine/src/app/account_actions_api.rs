@@ -40,6 +40,24 @@ pub const STEP_UP_WITHIN: Duration = Duration::from_secs(12);
 /// How many events the activity read asks for.
 pub const ACTIVITY_LIMIT: u32 = 50;
 
+/// What Beebeeb gave for a proven password: single use, short lived, bound to the session and account it was made
+/// for. A host holds it and hands it back to the engine call it guards ([`StepUpGrant::into_token`], for the engine's
+/// own calls); it cannot be read, copied or printed.
+pub struct StepUpGrant(ConfirmToken);
+
+impl StepUpGrant {
+    /// The core token, for an engine call that sends it with the one request it guards.
+    pub fn into_token(self) -> ConfirmToken {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for StepUpGrant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StepUpGrant(<redacted>)")
+    }
+}
+
 /// Why a call of this file did not do what it was asked. Nothing changed in any of these, except where the call's
 /// own doc says a request may have been sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,7 +136,7 @@ impl<C: CredentialStores> Engine<C> {
         &self,
         session: SessionGeneration,
         password: Zeroizing<String>,
-    ) -> Result<ConfirmToken, ActionError> {
+    ) -> Result<StepUpGrant, ActionError> {
         let (token, turn) = self.own_session()?;
         if turn != session || !self.session_is_in_memory(session) {
             return Err(ActionError::NotSignedIn);

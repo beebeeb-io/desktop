@@ -17,8 +17,7 @@
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use beebeeb_core::auth_flow::step_up::ConfirmToken;
-use beebeeb_engine::app::account_actions_api::ActionError;
+use beebeeb_engine::app::account_actions_api::{ActionError, StepUpGrant};
 use beebeeb_engine::app::{CredentialStores, Engine};
 use zeroize::Zeroizing;
 
@@ -47,7 +46,7 @@ struct Confirmation {
     purpose: Purpose,
     stamp: Stamp,
     made: Instant,
-    token: ConfirmToken,
+    token: StepUpGrant,
 }
 
 /// The things this file does for the account window.
@@ -285,7 +284,10 @@ impl<C: CredentialStores + 'static> Actions<C> {
 
     /// Spend a confirmation: the token of `confirmation`, once, for `purpose`, under the session and account it
     /// was made for. `None`: it was for something else, was spent, expired, or its session is over.
-    pub(super) fn spend(&mut self, confirmation: &StepUp, purpose: Purpose) -> Option<ConfirmToken> {
+    // Spent by the guarded calls of the pages under Sign-in and security (email, password, two-factor, passkeys,
+    // deletion) as each is bound; until then only the tests spend one.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn spend(&mut self, confirmation: &StepUp, purpose: Purpose) -> Option<StepUpGrant> {
         let position = self
             .confirmations
             .iter()

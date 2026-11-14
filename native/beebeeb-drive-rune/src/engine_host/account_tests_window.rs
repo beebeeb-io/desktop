@@ -513,8 +513,7 @@ fn the_running_app_saves_the_name_and_draws_it_after_beebeeb_has_it() {
     });
     rt.frame(0.016);
     click(&mut rt, "btn-1");
-    wait_for(&mut rt, "the new name on Account", |rt| {
-        shows(rt, &format!("Name, {super::bound::NEW_NAME}"))
-    });
+    let named = format!("Name, {}", super::bound::NEW_NAME);
+    wait_for(&mut rt, "the new name on Account", |rt| shows(rt, &named));
     assert_eq!(server.name.lock().unwrap().as_deref(), Some(super::bound::NEW_NAME));
 }
