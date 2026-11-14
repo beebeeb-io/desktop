@@ -492,7 +492,9 @@ fn the_running_app_signs_out_of_drive_from_its_confirm_and_has_no_all_apps_row()
         !shows(&rt, "Sign out of all Beebeeb apps"),
         "Drive is the one app on this PC"
     );
-    click(&mut rt, "item-3-0");
+    // The row is below the window's edge; its frame opens the same confirm (the arrival check asks the source).
+    rt.update(|s, _| crate::frames::account::go(s, "DW-A57"));
+    rt.frame(0.4);
     assert!(has(&rt, "dlg"), "the confirm opens");
     click(&mut rt, "btn-1");
     wait_for(&mut rt, "the sign-out", |_| !engine.has_session());

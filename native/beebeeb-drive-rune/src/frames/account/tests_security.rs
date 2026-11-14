@@ -213,7 +213,9 @@ fn nothing_that_is_not_bound_can_be_pressed() {
     click(&mut rt, "item-1-2");
     assert_eq!(rt.state.account.pane, Pane::Security, "a press leads nowhere");
     assert_eq!(asked(&rt), Vec::new());
-    click(&mut rt, "item-4-0");
+    // Below the window's edge: the keys reach it.
+    tab_to(&mut rt, "item-4-0");
+    key(&mut rt, Key::Enter);
     assert_eq!(
         asked(&rt),
         vec![crate::frames::settings::Intent::Web("delete-account")],
