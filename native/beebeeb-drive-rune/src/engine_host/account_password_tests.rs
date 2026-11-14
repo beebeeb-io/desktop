@@ -48,9 +48,9 @@ fn strength_is_cores_evaluator() {
     assert_eq!(of(""), Strength::TooShort);
     assert_eq!(of("short"), Strength::TooShort);
     assert_eq!(of("alllowercaseletters"), Strength::Fair);
-    assert_eq!(of("Mixed Case Letters"), Strength::Good);
+    assert_eq!(of("MixedCaseLettersOnly"), Strength::Good);
     assert_eq!(of("Mixed Case Letters 42"), Strength::Strong);
-    assert!(of("Mixed Case Letters").accepted() && !of("alllowercaseletters").accepted());
+    assert!(of("MixedCaseLettersOnly").accepted() && !of("alllowercaseletters").accepted());
 }
 
 #[test]

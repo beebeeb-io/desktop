@@ -320,6 +320,6 @@ fn the_strength_is_cores_and_needs_no_network() {
     assert_eq!(password_strength(""), PasswordStrength::TooShort);
     assert_eq!(password_strength("short"), PasswordStrength::TooShort);
     assert_eq!(password_strength("alllowercaseletters"), PasswordStrength::Fair);
-    assert_eq!(password_strength("Mixed Case Letters"), PasswordStrength::Good);
+    assert_eq!(password_strength("MixedCaseLettersOnly"), PasswordStrength::Good);
     assert_eq!(password_strength("Mixed Case Letters 42"), PasswordStrength::Strong);
 }

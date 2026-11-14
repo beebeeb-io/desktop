@@ -166,16 +166,18 @@ impl<C: CredentialStores> Engine<C> {
                 Step::Done(AccountOutcome::PasswordChanged { session_token }) => break session_token,
                 Step::Done(_) => return Err(PasswordChangeError::Failed("protocol")),
                 Step::Send(request) => {
+                    let is_step_up_start = request.path.ends_with("/confirm-opaque-start");
                     let response = self.send_account(&base, &held.token, &request).await;
                     drop(request);
                     let response = match response {
-                        Ok(response) => response,
-                        Err(error) => {
-                            if error == PasswordChangeError::SessionEnded {
-                                self.note_session_refused(session);
-                            }
-                            return Err(error);
+                        // The first leg of a step-up carries no proof of the password: a 401 there is about the
+                        // session (core would read it as a wrong password).
+                        Ok(response) if response.status == 401 && is_step_up_start => {
+                            self.note_session_refused(session);
+                            return Err(PasswordChangeError::SessionEnded);
                         }
+                        Ok(response) => response,
+                        Err(error) => return Err(error),
                     };
                     step = flow.resume(response).map_err(|error| {
                         let error = PasswordChangeError::of(&error);
