@@ -103,7 +103,8 @@ fn done(facts: &SecurityFacts, kind: FactorKind) -> bool {
 /// The score card: the ring and the count, then what is left to do, each with the button that fixes it.
 /// With no factors: no fill, no count, and a sentence that says there is no score.
 fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
-    // `ink`: the fill's colour. With no score it is the track's own, so no part of the ring reads as done.
+    // `ink`: the fill's colour. With no score the whole ring is drawn in the track's own colour: nothing of it
+    // reads as done, and no end of a fill shows.
     let ring = |fraction: f32, inside: String, ink: rune::Color| {
         el().key("ring-box")
             .a11y_hidden()
@@ -138,7 +139,7 @@ fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> E
         .box_shadow(kit::drop(1.0, 2.0, rune::Color::BLACK.alpha(0.04)));
     let line = row().key("score").w_full().center_y().gap(14.0);
     let Some(factors) = scored(facts) else {
-        return card.child(line.child(ring(0.0, "?".into(), t.separator)).child(words(
+        return card.child(line.child(ring(1.0, "?".into(), t.separator)).child(words(
             "Security score not known yet".into(),
             "Beebeeb can't say yet which steps are done. Nothing on this page is a guess.".into(),
         )));
