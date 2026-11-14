@@ -37,7 +37,8 @@ use std::time::Duration;
 
 use zeroize::Zeroizing;
 
-use beebeeb_engine::app::lock_api::LockState;
+use beebeeb_engine::app::lock_api::{LockRefused, LockState};
+use beebeeb_engine::app::lock_password_api::ScreenUnlock;
 use beebeeb_engine::app::{CredentialStores, Engine};
 
 use super::hello::{HelloCancel, HelloDone, HelloPrompter, HelloResult, NoHello};
@@ -48,8 +49,8 @@ use beebeeb_engine::app::signup_api::SignupAttempt;
 mod signup;
 use crate::frames::signin::create_source::{PasswordVerdict, SignUpEvent};
 use crate::frames::signin::source::{
-    CodeKind, GateState, HelloOutcome, NextAfterSignIn, PasskeyOutcome, PhraseProblem, SharedSession, SignInEvent,
-    SignInProblem, SignInSource,
+    CodeKind, GateState, HelloOutcome, NextAfterSignIn, PasskeyOutcome, PhraseProblem, ScreenPasswordOutcome,
+    SharedSession, SignInEvent, SignInProblem, SignInSource,
 };
 
 /// The waits an answer can belong to. An attempt of one is over when the person leaves its screen.
@@ -63,6 +64,9 @@ enum Wait {
     Passkey,
     /// The countdown after "too many tries".
     Retry,
+    /// The screen lock's password check, and the countdown of the wait after it.
+    ScreenPassword,
+    ScreenWait,
     /// The lock screen's Windows Hello prompt.
     Hello,
     /// Sign-up's steps and the wait for a new code (`signup.rs`).
@@ -181,6 +185,12 @@ impl<C: CredentialStores> EngineSignInSource<C> {
                 SignInEvent::SignedIn(Err(SignInProblem::RateLimited { seconds })) => Some(*seconds),
                 _ => None,
             };
+            let screen_wait_seconds = match &event {
+                SignInEvent::ScreenPassword(
+                    ScreenPasswordOutcome::Wait { wait_ms } | ScreenPasswordOutcome::Wrong { wait_ms },
+                ) => Some(seconds_up(*wait_ms)),
+                _ => None,
+            };
             let resend_seconds = match &event {
                 SignInEvent::SignUp(SignUpEvent::CodeSent(Ok(sent))) => Some(sent.resend_seconds),
                 _ => None,
@@ -192,6 +202,17 @@ impl<C: CredentialStores> EngineSignInSource<C> {
             // After the answer is in the channel: no tick can come before the problem it counts down.
             if let Some(seconds) = wait_seconds {
                 count_down(engine, &answers, &attempts, seconds, tick);
+            }
+            if let Some(seconds) = screen_wait_seconds.filter(|seconds| *seconds > 0) {
+                count_down_as(
+                    engine,
+                    &answers,
+                    &attempts,
+                    seconds,
+                    tick,
+                    Wait::ScreenWait,
+                    |seconds| SignInEvent::ScreenWaitLeft { seconds },
+                );
             }
             engine.wake_host();
         });
@@ -214,6 +235,31 @@ impl<C: CredentialStores> EngineSignInSource<C> {
             event,
         });
     }
+}
+
+/// The engine's answer for the window.
+fn map_screen_unlock(answer: Result<ScreenUnlock, LockRefused>) -> ScreenPasswordOutcome {
+    match answer {
+        Ok(ScreenUnlock::Opened) => ScreenPasswordOutcome::Opened,
+        Ok(ScreenUnlock::Wrong { wait_ms }) => ScreenPasswordOutcome::Wrong { wait_ms },
+        Ok(ScreenUnlock::Wait { wait_ms }) => ScreenPasswordOutcome::Wait { wait_ms },
+        Ok(ScreenUnlock::ServerLimit { wait_ms }) => ScreenPasswordOutcome::ServerLimit { wait_ms },
+        Ok(ScreenUnlock::LocalCheckOff) => ScreenPasswordOutcome::LocalCheckOff,
+        Ok(ScreenUnlock::OfflineNoRecord) => ScreenPasswordOutcome::OfflineNoRecord,
+        Ok(ScreenUnlock::AccountUpgradeNeeded) => ScreenPasswordOutcome::AccountUpgradeNeeded,
+        Ok(ScreenUnlock::SessionEnded) => ScreenPasswordOutcome::SessionEnded,
+        Err(LockRefused::Overtaken | LockRefused::NotAtThisLevel | LockRefused::NeedsThePassword) => {
+            ScreenPasswordOutcome::Overtaken
+        }
+        Err(LockRefused::NothingTyped | LockRefused::AlreadyChecking | LockRefused::CouldNotCheck) => {
+            ScreenPasswordOutcome::Failed
+        }
+    }
+}
+
+/// Whole seconds of a wait in milliseconds, rounded up (a wait of 1 ms is a second).
+fn seconds_up(wait_ms: u64) -> u32 {
+    u32::try_from(wait_ms.div_ceil(1_000)).unwrap_or(u32::MAX)
 }
 
 /// A secret as the engine takes it: one wiping buffer, made at its full size so it never moves.
@@ -261,6 +307,10 @@ fn undo_left_step<C: CredentialStores>(
         (_, Some(LockState::ScreenLocked)) if opened => {
             let _ = engine.lock_screen();
         }
+        // A screen password the person left finished anyway and opened the screen: locked again.
+        (SignInEvent::ScreenPassword(ScreenPasswordOutcome::Opened), _) => {
+            let _ = engine.lock_screen();
+        }
         (_, Some(_)) if opened => {
             let _ = engine.lock_vault();
         }
@@ -305,12 +355,27 @@ fn count_down<C: CredentialStores>(
     seconds: u32,
     tick: Duration,
 ) {
-    let attempt = attempts[Wait::Retry as usize].fetch_add(1, Ordering::SeqCst) + 1;
+    count_down_as(engine, answers, attempts, seconds, tick, Wait::Retry, |seconds| {
+        SignInEvent::RetryAfter { seconds }
+    });
+}
+
+/// [`count_down`] for the wait `wait`, its event made by `event`.
+fn count_down_as<C: CredentialStores>(
+    engine: &Arc<Engine<C>>,
+    answers: &mpsc::Sender<Answer>,
+    attempts: &Arc<[AtomicU64; WAITS]>,
+    seconds: u32,
+    tick: Duration,
+    wait: Wait,
+    event: fn(u32) -> SignInEvent,
+) {
+    let attempt = attempts[wait as usize].fetch_add(1, Ordering::SeqCst) + 1;
     let over = || {
         let _ = answers.send(Answer {
-            wait: Wait::Retry,
+            wait,
             attempt,
-            event: SignInEvent::RetryAfter { seconds: 0 },
+            event: event(0),
         });
     };
     if seconds == 0 {
@@ -321,15 +386,14 @@ fn count_down<C: CredentialStores>(
         let mut left = seconds;
         while left > 0 {
             thread::sleep(tick);
-            if attempts_in[Wait::Retry as usize].load(Ordering::SeqCst) != attempt {
+            if attempts_in[wait as usize].load(Ordering::SeqCst) != attempt {
                 return;
             }
             left -= 1;
-            let event = SignInEvent::RetryAfter { seconds: left };
             let tick = Answer {
-                wait: Wait::Retry,
+                wait,
                 attempt,
-                event,
+                event: event(left),
             };
             if answers_in.send(tick).is_err() {
                 return;
@@ -518,6 +582,31 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
             move |engine| match engine.unlock_vault_with_password(password) {
                 Ok(next) => SignInEvent::VaultUnlocked(Ok(map_next(next))),
                 Err(problem) => SignInEvent::VaultUnlocked(Err(map_problem(problem))),
+            },
+        );
+    }
+
+    /// The screen lock's password: counted tries and the server's proof that makes no session
+    /// ([`Engine::unlock_screen_with_password`]). The session's turn is read HERE, at the press: an answer that
+    /// outlived a lock, a sign-out or another sign-in is dropped (`Overtaken`), and a press that was superseded
+    /// has its answer dropped by `poll`. A password the person left behind that opened the screen locks it again
+    /// (`undo_left_step`). `AccountUpgradeNeeded` closes the vault so the strong unlock's screen follows.
+    fn begin_screen_password(&mut self, password: &str) {
+        let password = secret(password);
+        let asked_at = self.engine.session_turn();
+        *lock(&self.unlocking) = Some(LockState::ScreenLocked);
+        self.ask(
+            Wait::ScreenPassword,
+            SignInEvent::ScreenPassword(ScreenPasswordOutcome::Failed),
+            move |engine| {
+                if engine.session_turn() != asked_at {
+                    return SignInEvent::ScreenPassword(ScreenPasswordOutcome::Overtaken);
+                }
+                let outcome = map_screen_unlock(engine.unlock_screen_with_password(password));
+                if outcome == ScreenPasswordOutcome::AccountUpgradeNeeded {
+                    let _ = engine.lock_vault();
+                }
+                SignInEvent::ScreenPassword(outcome)
             },
         );
     }

@@ -11,7 +11,7 @@
 //! Which of the two holds is the source's word ([`SignInSource::gate`]); the shell's gate says only "locked".
 //! A lock that goes (the engine opened it, a sign-out) takes everything typed here with it.
 
-use super::source::{GateState as SourceGate, HelloOutcome};
+use super::source::{GateState as SourceGate, HelloOutcome, ScreenPasswordOutcome};
 use super::{PASSWORD_KEY, Screen, Ui};
 
 /// The key of the lock screen's Unlock button (`before_files`).
@@ -51,6 +51,10 @@ pub(super) struct Lock {
     said: Option<Said>,
     /// The password screen is in front of the lock screen (the screen lock's other way in).
     password: bool,
+    /// What the screen lock's password path said last (`Ui::lock_password_sentence`), and the seconds of its wait that
+    /// are left (Unlock stays disabled while any are).
+    password_said: Option<ScreenPasswordOutcome>,
+    wait_left: u32,
     /// Windows Hello was asked by itself once for this lock (DW-0009: "starts by itself when the window opens").
     auto_asked: bool,
 }
@@ -84,6 +88,82 @@ impl Ui {
         self.lock.level.filter(|_| self.lock_shows_password())
     }
 
+    /// The sentence under the screen lock's password field: this app's own words (no board frame:
+    /// `FRAMES.md`, "Screen lock: password"). `None`: nothing to say.
+    pub fn lock_password_sentence(&self) -> Option<String> {
+        if self.lock.level != Some(Level::Screen) {
+            return None;
+        }
+        let left = u64::from(self.lock.wait_left) * 1_000;
+        let wait = |text: &str| format!("{text} Try again in {}.", wait_words(left));
+        Some(match self.lock.password_said? {
+            ScreenPasswordOutcome::Opened | ScreenPasswordOutcome::Overtaken => return None,
+            ScreenPasswordOutcome::Wrong { .. } if left == 0 => "That password isn't right.".to_string(),
+            ScreenPasswordOutcome::Wrong { .. } => wait("That password isn't right."),
+            ScreenPasswordOutcome::Wait { .. } if left == 0 => return None,
+            ScreenPasswordOutcome::Wait { .. } => wait("Too many wrong tries."),
+            ScreenPasswordOutcome::ServerLimit { wait_ms: Some(ms) } => format!(
+                "Beebeeb is checking too many passwords right now. Try again in {}.",
+                wait_words(ms)
+            ),
+            ScreenPasswordOutcome::ServerLimit { wait_ms: None } => {
+                "Beebeeb is checking too many passwords right now. Try again in a moment.".to_string()
+            }
+            ScreenPasswordOutcome::LocalCheckOff => "That password isn't right. This PC no longer checks your password offline: connect to the internet or use Windows Hello.".to_string(),
+            ScreenPasswordOutcome::OfflineNoRecord => "Beebeeb can't be reached, and this PC can't check your password offline yet. Connect to the internet or use Windows Hello.".to_string(),
+            // These two move to the vault level, whose screen carries the sentence (`lock_notice`).
+            ScreenPasswordOutcome::AccountUpgradeNeeded | ScreenPasswordOutcome::SessionEnded => return None,
+            ScreenPasswordOutcome::Failed => super::view::GENERIC_FAILURE.to_string(),
+        })
+    }
+
+    /// A wait after wrong tries is running: Unlock is disabled.
+    pub fn lock_password_waiting(&self) -> bool {
+        self.lock.level == Some(Level::Screen) && self.lock.wait_left > 0
+    }
+
+    /// The sentence the vault level's screen starts with after the screen's password path sent the person there.
+    pub fn lock_notice(&self) -> Option<&'static str> {
+        self.lock_notice.filter(|_| self.lock.level == Some(Level::Vault))
+    }
+
+    /// Unlock on the screen lock's password screen: the typed password is sent to the screen path and wiped at
+    /// once. `true`: this was a screen-lock press (the vault level keeps its own).
+    pub(super) fn lock_submit_password(&mut self) -> bool {
+        if self.lock.level != Some(Level::Screen) || !self.lock.password {
+            return false;
+        }
+        self.unlocking = true;
+        self.unlock_problem = None;
+        self.lock.password_said = None;
+        self.source.begin_screen_password(&self.password.text);
+        self.password.clear();
+        true
+    }
+
+    /// The screen path answered. `Opened` moves nothing here (the engine opened the lock, and the gate says so);
+    /// the two answers that send the person to the vault level leave their sentence for its screen.
+    pub(super) fn lock_screen_password_answered(&mut self, outcome: ScreenPasswordOutcome) {
+        self.unlocking = false;
+        self.lock_notice = match outcome {
+            ScreenPasswordOutcome::SessionEnded => {
+                Some("Your session ended. Enter your password to unlock and resume sync.")
+            }
+            ScreenPasswordOutcome::AccountUpgradeNeeded => Some("Sign in again to finish updating your account."),
+            _ => self.lock_notice,
+        };
+        self.lock.password_said = Some(outcome);
+        if let ScreenPasswordOutcome::Wait { wait_ms } | ScreenPasswordOutcome::Wrong { wait_ms } = outcome {
+            self.lock.wait_left = u32::try_from(wait_ms.div_ceil(1_000)).unwrap_or(u32::MAX);
+        }
+        self.focus = Some(PASSWORD_KEY);
+    }
+
+    /// One second of the wait is over (`0`: it is).
+    pub(super) fn lock_wait_left(&mut self, seconds: u32) {
+        self.lock.wait_left = seconds;
+    }
+
     /// The shell's gate was read: `locked` while a lock closes it. The level is the source's. `true`: what the
     /// window shows changed.
     pub(super) fn follow_lock(&mut self, locked: bool) -> bool {
@@ -98,6 +178,9 @@ impl Ui {
             None
         };
         let before = std::mem::replace(&mut self.lock.level, level);
+        if level.is_none() {
+            self.lock_notice = None;
+        }
         if before == level {
             return false;
         }
@@ -215,6 +298,17 @@ impl Ui {
         if self.lock.said.is_some() {
             self.focus = Some(UNLOCK_KEY);
         }
+    }
+}
+
+/// A wait in words, rounded up: "30 seconds", "1 minute", "5 minutes", "15 minutes", "1 hour".
+pub fn wait_words(wait_ms: u64) -> &'static str {
+    match wait_ms {
+        0..=30_000 => "30 seconds",
+        30_001..=60_000 => "1 minute",
+        60_001..=300_000 => "5 minutes",
+        300_001..=900_000 => "15 minutes",
+        _ => "1 hour",
     }
 }
 
