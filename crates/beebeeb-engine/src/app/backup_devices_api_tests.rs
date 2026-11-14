@@ -553,3 +553,70 @@ fn a_device_this_pc_has_not_synced_yet_and_the_root_are_refused_with_nothing_sen
     ));
     assert_eq!(routes(&rig), Vec::<String>::new(), "nothing was sent");
 }
+
+/// Everything `body` logs through `tracing`, at every level, on this thread (as `share_invite_api_tests`).
+fn capture_logs<T>(body: impl FnOnce() -> T) -> (T, String) {
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buffer: Arc<Mutex<Vec<u8>>> = Arc::default();
+    let writer = Capture(buffer.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let out = body();
+    drop(guard);
+    let text = String::from_utf8_lossy(&buffer.lock().unwrap()).into_owned();
+    (out, text)
+}
+
+#[test]
+fn no_password_name_or_manifest_text_reaches_the_logs() {
+    let mut listings = HashMap::new();
+    listings.insert(GLUE_ROOT.to_string(), vec![folder_json(DEV_OWN), folder_json(DEV_MAC)]);
+    let rig = rig(
+        Answers {
+            listings,
+            ..Answers::default()
+        },
+        true,
+    );
+    let ((), logs) = capture_logs(|| {
+        // The capture itself is proven to read this thread's lines.
+        tracing::info!("capture-sentinel");
+        let _ = rig.engine.backup_devices_for(rig.session);
+        let _ = rig
+            .engine
+            .delete_device_backup_for(rig.session, DEV_MAC, b"a wrong invented password");
+        let _ = rig
+            .engine
+            .delete_device_backup_for(rig.session, DEV_MAC, PASSWORD.as_bytes());
+    });
+    assert!(logs.contains("capture-sentinel"), "the capture reads this thread");
+    let token = account().session_token.clone();
+    for secret in [
+        PASSWORD,
+        "a wrong invented password",
+        "Invented PC",
+        "Invented Studio",
+        token.as_str(),
+    ] {
+        assert!(!logs.contains(secret), "a log line carries a secret or a name");
+    }
+    assert_eq!(
+        *rig.deleted.lock().unwrap(),
+        [DEV_MAC],
+        "the calls ran: the capture saw real work"
+    );
+}
