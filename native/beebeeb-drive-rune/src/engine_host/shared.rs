@@ -285,9 +285,7 @@ impl<C: CredentialStores> EngineSharedSource<C> {
                     return;
                 }
                 let result = invite_result(&answer);
-                if let InviteResult::Refused(_) = result
-                    && let InviteAnswer::Refused(kind) = answer
-                {
+                if let InviteAnswer::Refused(kind) = answer {
                     log(format!("shared: an invitation was not sent ({kind})"));
                 }
                 // The person is on the share now (a changed key's invite stays too): the lists are Beebeeb's again.

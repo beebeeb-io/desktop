@@ -445,8 +445,8 @@ fn canonical(id: &str) -> Option<&str> {
 }
 
 /// One of the account's own items, from its local state: `Some(is_folder)`. `None` for an item that is gone or
-/// going, a received share's, anything in the Backups tree or with a system role, and a file whose key this computer
-/// cannot have (a foreign id with no owned-key record).
+/// going, a received share's, the Backups root and anything in its tree, and a file whose key this computer cannot
+/// have (a foreign id with no owned-key record).
 fn own_item(db: &StateDb, id: &str) -> rusqlite::Result<Option<bool>> {
     let Some(entry) = db.get_file(id)?.filter(|e| e.status != FileStatus::Trashing) else {
         return Ok(None);
@@ -455,9 +455,6 @@ fn own_item(db: &StateDb, id: &str) -> rusqlite::Result<Option<bool>> {
         .get_file_contract_state(id)?
         .is_some_and(|c| c.namespace == Namespace::SharedWithMe)
     {
-        return Ok(None);
-    }
-    if db.system_role(id)?.is_some() {
         return Ok(None);
     }
     // A row may be stored with a leading slash (`/Backups/x`): both forms are the tree.
