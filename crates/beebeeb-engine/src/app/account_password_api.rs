@@ -189,15 +189,15 @@ impl<C: CredentialStores> Engine<C> {
                             return Err(PasswordChangeError::SessionEnded);
                         }
                         Ok(response) => response,
-                        // The finish left and no answer came: it may have been taken.
-                        Err(_) if is_finish => return Err(PasswordChangeError::Unconfirmed),
+                        // The finish left (now or on an earlier leg) and no answer came: it may have been taken.
+                        Err(_) if finish_sent => return Err(PasswordChangeError::Unconfirmed),
                         Err(error) => return Err(error),
                     };
                     // Only a refusal said in so many words proves a finish changed nothing.
                     let refused_outright = (400..500).contains(&response.status);
                     step = match flow.resume(response) {
                         Ok(step) => step,
-                        Err(_) if is_finish && !refused_outright => return Err(PasswordChangeError::Unconfirmed),
+                        Err(_) if finish_sent && !refused_outright => return Err(PasswordChangeError::Unconfirmed),
                         Err(error) => {
                             let error = PasswordChangeError::of(&error);
                             if error == PasswordChangeError::SessionEnded {
