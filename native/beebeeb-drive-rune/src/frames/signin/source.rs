@@ -213,6 +213,11 @@ pub trait SignInSource {
     fn begin_two_factor(&mut self, code: &str, kind: CodeKind);
     /// Engine: `auth_v2::unlock_with_recovery_phrase`.
     fn begin_restore(&mut self, words: &[&str]);
+    /// `false` (the default): sign-in with a passkey is not available here, and the "Use a
+    /// passkey" door is not drawn. A source that binds `begin_passkey` says `true`.
+    fn passkey_available(&self) -> bool {
+        false
+    }
     /// Engine: the system passkey prompt (WebAuthn), then `auth_v2::passkey_sign_in`.
     fn begin_passkey(&mut self);
     /// Engine: `auth_v2::unlock_vault` with the password, after a passkey.
@@ -340,6 +345,8 @@ pub struct Script {
     pub hello: HelloOutcome,
     pub device: Option<DeviceStatus>,
     pub passkey: PasskeyOutcome,
+    /// Whether the source offers sign-in with a passkey (the door is drawn only then).
+    pub passkey_available: bool,
     /// What a two-factor code gets instead of the check against the board's code (DW-A27 draws
     /// the board's own six digits as the wrong ones).
     pub two_factor_problem: Option<TwoFactorProblem>,
@@ -365,6 +372,7 @@ impl Default for Script {
             hello: HelloOutcome::Succeeded(NextAfterSignIn::Drive),
             device: None,
             passkey: PasskeyOutcome::NeedsPassword,
+            passkey_available: true,
             two_factor_problem: None,
             hold: false,
             sign_up: SignUpScript::default(),
@@ -498,6 +506,10 @@ impl SignInSource for FixtureSignInSource {
         self.queue.push_back(SignInEvent::PhraseRestored(
             check_phrase(words).map(|()| self.after_proof()),
         ));
+    }
+
+    fn passkey_available(&self) -> bool {
+        self.script.passkey_available
     }
 
     fn begin_passkey(&mut self) {

@@ -309,7 +309,7 @@ fn general_and_storage_location_draw_what_beebeeb_says_by_country() {
         "no updater: never says a newer version exists"
     );
     assert!(source.wired(Pane::General) && source.wired(Pane::StorageLocation));
-    assert!(!source.wired(Pane::About));
+    assert!(source.wired(Pane::About), "About answers from the build itself");
     assert!(source.wired(Pane::Notifications) && source.wired(Pane::Recent));
     assert!(
         !source.opens("DW-0782"),
@@ -927,21 +927,34 @@ fn the_running_apps_settings_show_no_sample_value() {
     let samples = [
         "0.9.1", "0.9.2", "311", "2084927", "09:12", "Anna", "Lotte", "Priya", "2 new", "240 GB",
     ];
-    let check = |rt: &Runtime<State>, place: &str| {
+    // `skip`: a sample that a real value of the pane may contain by chance (a commit's hex digits).
+    let check_but = |rt: &Runtime<State>, place: &str, skip: &[&str]| {
         for e in rt.elements() {
             let words = format!("{} {}", e.text.unwrap_or_default(), e.label.unwrap_or_default());
-            for sample in samples {
+            for sample in samples.iter().filter(|s| !skip.contains(s)) {
                 assert!(!words.contains(sample), "{place} says {sample}: {words}");
             }
         }
     };
+    let check = |rt: &Runtime<State>, place: &str| check_but(rt, place, &[]);
     check(&rt, "General");
     // Notifications is the engine's (`settings::notifications`): drawn, with no sample value in it.
     rt.update(|s, _| crate::frames::settings::go(s, "DW-0750"));
     rt.frame(0.016);
     assert!(shows(&rt, "Allow notifications"), "Notifications is drawn");
     check(&rt, "Notifications");
-    for (frame, pane) in [("DW-0751", "About"), ("DW-0712", "Storage")] {
+    // About is the build's own (`build_about`): the real core revision is drawn, and no update row is.
+    rt.update(|s, _| crate::frames::settings::go(s, "DW-0751"));
+    rt.frame(0.016);
+    assert!(
+        !rt.elements().iter().any(|e| e.key.as_deref() == Some("not-built")),
+        "About is drawn, not the shell's not-built frame"
+    );
+    assert!(shows(&rt, "Encryption core"), "About draws the versions");
+    assert!(!shows(&rt, "Check now"), "no updater runs: no Check now");
+    assert!(!shows(&rt, "Release channel"), "no updater runs: no channel");
+    check_but(&rt, "About", &["311"]);
+    for (frame, pane) in [("DW-0712", "Storage")] {
         rt.update(move |s, _| crate::frames::settings::go(s, frame));
         rt.frame(0.016);
         assert!(
@@ -950,4 +963,41 @@ fn the_running_apps_settings_show_no_sample_value() {
         );
         check(&rt, pane);
     }
+}
+
+/// About says what this build is: the version words, the commit it was built from, and the revision of core the
+/// engine's manifest pins. Nothing of the board.
+#[test]
+fn about_is_the_builds_own_and_names_the_core_the_engine_pins() {
+    let about = super::build_about();
+    let manifest = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../crates/beebeeb-engine/Cargo.toml"
+    ))
+    .expect("the engine's manifest");
+    let pinned = manifest
+        .lines()
+        .find(|l| l.trim_start().starts_with("beebeeb-core"))
+        .and_then(|l| l.split("rev = \"").nth(1))
+        .and_then(|r| r.split('"').next())
+        .expect("core's pin");
+    assert_eq!(about.core, pinned[..7], "the pin, short");
+    assert!(!about.version.is_empty() && !about.build.is_empty());
+    assert!(
+        about.version == "test build" || option_env!("BEEBEEB_RELEASE_VERSION") == Some(about.version.as_str()),
+        "{}",
+        about.version
+    );
+    for sample in ["0.9.1", "0.9.2", "2084927"] {
+        assert!(
+            ![&about.version, &about.build, &about.core]
+                .iter()
+                .any(|v| v.contains(sample))
+        );
+    }
+    // The pane is the engine's, and no update row is drawn where no updater runs.
+    let account = account("settings-about@example.eu");
+    let source = EngineSettingsSource::new(signed_in(&account));
+    assert!(!source.updates_available());
+    assert!(!source.opens("DW-0789") && !source.opens("DW-0789b"));
 }

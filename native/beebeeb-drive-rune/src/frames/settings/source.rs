@@ -291,6 +291,10 @@ pub trait SettingsSource {
         let _ = pane;
         true
     }
+    /// `false` where no updater runs: About then draws the versions only (no Check now, channel or notes).
+    fn updates_available(&self) -> bool {
+        true
+    }
     /// `false` for a frame over a wired pane (a dialog) that this source has nothing real behind
     /// yet: settings asks the shell for it, as for a frame it has not built.
     fn opens(&self, frame: &str) -> bool {

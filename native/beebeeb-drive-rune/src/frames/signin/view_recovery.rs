@@ -78,21 +78,11 @@ pub fn forgot(k: &mut Keys, t: &Theme) -> El {
         .child(option(
             k,
             &icons::KEY,
-            "I have my recovery phrase",
-            "The 12 words from account setup. Use them to set a new password.",
-            "Recover with phrase",
+            "I have my recovery phrase or a signed-in device",
+            "Recovering an account replaces the password and re-wraps your keys, so it happens on the web. Your 12 words are typed there, never here.",
+            "Open the recovery page",
             ButtonKind::Primary,
-            Ui::recover_with_phrase,
-            t,
-        ))
-        .child(option(
-            k,
-            &icons::PHONE,
-            "I have another device signed in",
-            "Approve this PC from a device where you're already signed in. No phrase needed.",
-            "Sign in with another device",
-            ButtonKind::Outline,
-            Ui::ask_other_device,
+            Ui::open_recovery_page,
             t,
         ))
         .child(option(

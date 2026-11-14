@@ -220,28 +220,6 @@ fn continue_card(session: &SharedSession, ui: &Ui, k: &mut Keys, t: &Theme) -> E
         .child(hello)
 }
 
-fn other_device_button(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
-    let state = if ui.busy || ui.passkey_waiting() {
-        ButtonState::Busy
-    } else {
-        ButtonState::Enabled
-    };
-    let b = au::button(
-        k,
-        "Sign in with another device",
-        Some(&icons::PHONE),
-        ButtonKind::Outline,
-        ButtonSize::Md,
-        state,
-        t,
-    );
-    if state == ButtonState::Busy {
-        b
-    } else {
-        b.on_press_tx(act(Ui::ask_other_device))
-    }
-}
-
 fn sign_in(ui: &Ui, name: &str, k: &mut Keys, t: &Theme) -> El {
     let offline = ui.problem == Some(SignInProblem::Offline);
     let message = if ui.deleted() {
@@ -266,7 +244,6 @@ fn sign_in(ui: &Ui, name: &str, k: &mut Keys, t: &Theme) -> El {
     if let Some(session) = ui.shared() {
         c = c
             .child(continue_card(session, ui, k, t))
-            .child(other_device_button(ui, k, t))
             .child(au::or_divider(k, "or use email and password", t));
     }
     c = c.child(au::field(
@@ -334,20 +311,23 @@ fn sign_in(ui: &Ui, name: &str, k: &mut Keys, t: &Theme) -> El {
             t.text_secondary,
         );
     }
-    c = c.child(
-        row()
-            .key("au-links")
-            .w_full()
-            .h(15.0)
-            .center_y()
-            .justify_between()
-            .child(way_out(au::link(k, "Forgot password?", None, t), ui, Ui::forgot))
-            .child(way_out(
-                au::link(k, "Use a passkey", Some(&icons::PASSKEY), t),
-                ui,
-                Ui::use_passkey,
-            )),
-    );
+    // "Use a passkey" is drawn only where the source can sign in with one (a door that answers
+    // "Unavailable" is a dead door).
+    let mut links = row()
+        .key("au-links")
+        .w_full()
+        .h(15.0)
+        .center_y()
+        .justify_between()
+        .child(way_out(au::link(k, "Forgot password?", None, t), ui, Ui::forgot));
+    if ui.passkey_available() {
+        links = links.child(way_out(
+            au::link(k, "Use a passkey", Some(&icons::PASSKEY), t),
+            ui,
+            Ui::use_passkey,
+        ));
+    }
+    c = c.child(links);
 
     let with_card = ui.shared().is_some();
     let (label, state) = if ui.busy {
@@ -375,12 +355,7 @@ fn sign_in(ui: &Ui, name: &str, k: &mut Keys, t: &Theme) -> El {
     if matches!(state, ButtonState::Enabled | ButtonState::Dim) {
         submit = submit.on_press_tx(act(Ui::submit)).default_button();
     }
-    let mut foot = actions(if with_card { 4.0 } else { 0.0 }).child(submit);
-    if !with_card {
-        foot = foot
-            .child(au::or_divider(k, "or", t))
-            .child(other_device_button(ui, k, t));
-    }
+    let foot = actions(if with_card { 4.0 } else { 0.0 }).child(submit);
     c.child(
         foot.child(
             au::sentence_link(k, "New to Beebeeb?", "Create an account", t, |link| {

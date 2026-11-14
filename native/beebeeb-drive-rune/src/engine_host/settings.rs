@@ -10,8 +10,9 @@
 //!   that writes account state) and shown only after Beebeeb took them; a refusal leaves the old choice and says so.
 //! - Notifications (DW-0750) and Recent notifications (DW-0791): [`notifications`], its own part (the account's
 //!   alert switches and notifications from Beebeeb, this PC's switches from its settings file).
-//! - Not wired here (the shell's "not built yet" frame in their place): About and the release notes (no updater
-//!   yet), Report a problem (no support bundle is built here yet).
+//! - About (DW-0751): the versions of this build ([`build_about`]); no updater runs, so no update check, channel or
+//!   notes are drawn.
+//! - Not wired here (the shell's "not built yet" frame in their place): Report a problem (no support bundle is built here yet).
 //!
 //! Thread rule (task 2470 W5): nothing here waits for Beebeeb or for the settings file's write lock on the window's
 //! thread. Each call and each write runs on a worker thread of its own and sends its answer down one channel, which
@@ -37,8 +38,8 @@ use beebeeb_engine::identity::EngineIdentity;
 use super::log;
 use crate::frames::settings::Pane;
 use crate::frames::settings::source::{
-    About, Channel, General, Location, Locations, Notifications, Pumped, ReadState, RecentAlert, SettingsSource,
-    ThemeChoice, Unwired, Update,
+    About, Channel, General, Location, Locations, Notifications, Pumped, ReadState, RecentAlert, ReleaseNotes,
+    SettingsSource, ThemeChoice, Unwired, Update, UpdateCheck,
 };
 
 mod notifications;
@@ -163,6 +164,41 @@ pub fn version_words() -> String {
             Some(commit) if !commit.is_empty() => format!("test build {}", commit.get(..7).unwrap_or(commit)),
             _ => "test build".to_string(),
         },
+    }
+}
+
+/// About, from the build itself: the version (a release's number, else "test build"), the commit it was built from,
+/// and the revision of core this engine links. Nothing here is read from a file or the network, and none of it is a
+/// sample. No updater runs in this build, so the update check and the channel are left at their rest values and
+/// About does not draw them (`updates_available`).
+pub fn build_about() -> About {
+    let short = |full: &str| full.get(..7).unwrap_or(full).to_string();
+    let version = match option_env!("BEEBEEB_RELEASE_VERSION").filter(|v| !v.is_empty()) {
+        Some(version) => version.to_string(),
+        None => "test build".to_string(),
+    };
+    let build = option_env!("BEEBEEB_BUILD_COMMIT")
+        .filter(|c| !c.is_empty())
+        .map_or_else(|| "unknown".to_string(), short);
+    let core = option_env!("BEEBEEB_CORE_REV")
+        .filter(|c| !c.is_empty())
+        .map_or_else(|| "unknown".to_string(), short);
+    About {
+        product: "Beebeeb Drive".into(),
+        tagline: "End-to-end encrypted storage".into(),
+        version,
+        build,
+        core,
+        check: UpdateCheck::Failed,
+        channel: Channel::Stable,
+        older: None,
+        notes: ReleaseNotes {
+            version: String::new(),
+            channel: Channel::Stable,
+            released: String::new(),
+            lines: Vec::new(),
+        },
+        company: "Initlabs B.V.".into(),
     }
 }
 
@@ -390,7 +426,7 @@ impl<C: CredentialStores + 'static> EngineSettingsSource<C> {
 
     /// The panes of this source that draw only what it has read.
     fn answers_for(pane: Pane) -> bool {
-        matches!(pane, Pane::General | Pane::StorageLocation) || NotificationsPart::<C>::answers_for(pane)
+        matches!(pane, Pane::General | Pane::About | Pane::StorageLocation) || NotificationsPart::<C>::answers_for(pane)
     }
 
     /// The one writer of the theme: each change in the order chosen, merge-only (the theme alone).
@@ -428,7 +464,12 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
 
     /// Report a problem (DW-0782) is a dialog over General with no support bundle behind it yet.
     fn opens(&self, frame: &str) -> bool {
-        frame != "DW-0782"
+        // The release notes and the channel menu need an updater, which this build does not have.
+        !matches!(frame, "DW-0782" | "DW-0789" | "DW-0789b")
+    }
+
+    fn updates_available(&self) -> bool {
+        false
     }
 
     fn opened(&mut self, pane: Pane) {
@@ -650,7 +691,7 @@ impl<C: CredentialStores + 'static> SettingsSource for EngineSettingsSource<C> {
     }
 
     fn about(&self) -> About {
-        self.rest.about()
+        build_about()
     }
     fn set_channel(&mut self, channel: Channel) {
         self.rest.set_channel(channel);

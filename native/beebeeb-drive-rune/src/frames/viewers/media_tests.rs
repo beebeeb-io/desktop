@@ -44,6 +44,9 @@ impl ViewerSource for Recording {
         self.calls.borrow_mut().push(format!("find {id} {words}"));
         self.inner.find(id, words)
     }
+    fn can_play(&self) -> bool {
+        true
+    }
     fn play(&mut self, id: &str, on: bool) -> bool {
         self.calls.borrow_mut().push(format!("play {id} {on}"));
         true
@@ -309,8 +312,17 @@ fn a_source_without_pictures_gets_plain_tiles_and_no_sample() {
         let mut rt = runtime_of(state, false);
         assert!(has(&rt, key), "{id}");
         if id == board::AUDIO {
-            click(&mut rt, "pause");
-            assert_eq!(info(&rt, "pause").label.as_deref(), Some("Pause"));
+            // A source that cannot play draws no Play button, and offers the recording to another app instead.
+            assert!(!has(&rt, "pause"), "no Play where nothing can play");
+            assert_eq!(
+                info(&rt, "tool-1").label.as_deref(),
+                Some("Open in another app\u{2026}")
+            );
+            assert!(!words(&rt, "audio-caption").contains("keeps playing"));
+            assert!(!words(&rt, "status-details").contains("Playing"));
+            // Space does nothing either.
+            press(&mut rt, Key::Text(" ".into()));
+            assert!(!words(&rt, "status-details").contains("Paused"));
         }
         if id == board::PDF_FIND {
             ctrl(&mut rt, Key::Command('f'));

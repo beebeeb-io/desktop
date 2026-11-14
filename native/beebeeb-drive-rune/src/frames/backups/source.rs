@@ -163,6 +163,11 @@ pub trait BackupsSource {
     fn devices(&self) -> Vec<Device>;
     fn not_backed_up(&self) -> Vec<NotBackedUp>;
     fn mail_backup_on(&self) -> bool;
+    /// `true` where the section lists Mail Backup. `false` (the default): no mail engine runs in this build, so
+    /// the "Beebeeb services" list is not drawn at all (the page's code stays).
+    fn mail_backup_offered(&self) -> bool {
+        false
+    }
     fn back_up_now(&mut self);
     /// Start or stop backing up one of the six known folders.
     fn set_folder(&mut self, id: &str, on: bool);
@@ -387,6 +392,10 @@ impl BackupsSource for FixtureSource {
 
     fn not_backed_up(&self) -> Vec<NotBackedUp> {
         self.failures.clone()
+    }
+
+    fn mail_backup_offered(&self) -> bool {
+        true
     }
 
     fn mail_backup_on(&self) -> bool {

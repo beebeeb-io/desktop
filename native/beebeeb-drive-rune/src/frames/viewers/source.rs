@@ -548,6 +548,11 @@ pub trait ViewerSource {
     fn find(&mut self, _file_id: &str, _words: &str) -> Vec<Match> {
         Vec::new()
     }
+    /// `true`: this source can play a recording. `false` (the default): the player draws no Play
+    /// button and offers "Open in another app" instead.
+    fn can_play(&self) -> bool {
+        false
+    }
     /// Play or pause the open recording. `false`: not done.
     fn play(&mut self, _file_id: &str, _on: bool) -> bool {
         false
@@ -827,6 +832,10 @@ impl ViewerSource for FixtureViewerSource {
     fn find(&mut self, file_id: &str, words: &str) -> Vec<Match> {
         self.calls.push(format!("find {file_id} {words}"));
         super::fixture_media::find(file_id, words)
+    }
+
+    fn can_play(&self) -> bool {
+        true
     }
 
     fn play(&mut self, file_id: &str, on: bool) -> bool {

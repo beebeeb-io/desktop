@@ -156,15 +156,17 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         t,
     );
 
-    let children = vec![
+    let mut children = vec![
         shell::crumb("General", t, |s: &mut State| super::go(s, "DW-0701")),
         shell::heading("About Beebeeb", None, t),
         product,
         versions,
-        updates,
-        open_source,
-        more,
     ];
+    // No updater runs in this build: Check now, the channel and the notes are not drawn (nothing answers them).
+    if ui.source.updates_available() {
+        children.push(updates);
+    }
+    children.extend([open_source, more]);
 
     let overlay = match ui.dialog {
         Some(Dialog::ReleaseNotes) => Some(release_notes(ui, t)),

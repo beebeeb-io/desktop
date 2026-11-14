@@ -133,6 +133,8 @@ pub enum Intent {
     /// DW-A35's rows: the page opens in the browser, not in the app.
     OpenTerms,
     OpenPrivacy,
+    /// "Trouble signing in?": the web's recovery page opens in the browser.
+    OpenRecoveryPage,
     /// DW-A39: a save dialog for a text file of the phrase, and a print-ready page. No word
     /// travels in the intent: whoever acts on it asks the engine.
     SavePhraseAsFile,
