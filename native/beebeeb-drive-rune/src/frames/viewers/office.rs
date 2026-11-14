@@ -736,13 +736,7 @@ fn status(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, t: &Theme) -
         }
         None => {
             bar = bar
-                .child(
-                    el().key("status-dot")
-                        .size(7.0, 7.0)
-                        .radius(3.5)
-                        .pixel_snap(false)
-                        .fill(style::warn(t)),
-                )
+                .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(style::warn(t)))
                 .child(kit::label("status-text", PREPARING, STATUS_STATE, t.text_secondary));
             PREPARING.to_string()
         }
@@ -885,8 +879,6 @@ fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
                     .label("Unsaved changes")
                     .size(7.0, 7.0)
                     .radius(3.5)
-                    // After the name, wherever its last letter ends.
-                    .pixel_snap(false)
                     .fill(t.text),
             )
     } else {

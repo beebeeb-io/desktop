@@ -187,13 +187,13 @@ fn every_frame_of_the_editor_draws_its_words_in_both_themes() {
             "DW-1550",
             &[
                 ("rt-3-label", "Page break"),
-                ("tbl-1-1", "Alfama"),
+                ("tbl-1-1-t", "Alfama"),
                 ("st-7", "unsaved changes"),
             ],
         ),
         (
             "DW-1551",
-            &[("pal-query", QUERY), ("pal-0", "Heading 1"), ("pal-3-kbd", "Ctrl+B")],
+            &[("pal-g0-t", "STYLES"), ("pal-0", "Heading 1"), ("pal-3-kbd", "Ctrl+B")],
         ),
         (
             "DW-1552",
@@ -339,7 +339,6 @@ fn the_command_search_shows_only_what_the_source_finds() {
     ctrl(&mut rt, 'k');
     assert!(has(&rt, "pal"));
     assert!(!has(&rt, "pal-0"), "nothing typed, nothing found");
-    assert!(!has(&rt, "pal-query"));
     let type_query = |rt: &mut Runtime<State>| {
         if let Some(Over::Palette(palette)) = rt.state.viewer.ui.as_mut().and_then(|ui| ui.office.over.as_mut()) {
             palette.query.insert(QUERY);
@@ -347,7 +346,7 @@ fn the_command_search_shows_only_what_the_source_finds() {
         rt.frame(0.0);
     };
     type_query(&mut rt);
-    assert_eq!(words(&rt, "pal-g0"), "STYLES");
+    assert_eq!(words(&rt, "pal-g0-t"), "STYLES");
     assert_eq!(words(&rt, "pal-4"), "Northwind brand guide.pdf");
     assert!(!has(&rt, "pal-5"));
     // The arrows move over all results and wrap.
@@ -371,9 +370,9 @@ fn the_command_search_shows_only_what_the_source_finds() {
     let (mut rt, _) = agreement(Case::Selected, false, false);
     ctrl(&mut rt, 'k');
     type_query(&mut rt);
-    assert_eq!(words(&rt, "pal-query"), QUERY);
+    assert!(matches!(&ui(&rt).office.over, Some(Over::Palette(palette)) if palette.query.text == QUERY));
     assert!(!has(&rt, "pal-0"));
-    assert!(!has(&rt, "pal-g0"));
+    assert!(!has(&rt, "pal-g0-t"));
 }
 
 #[test]

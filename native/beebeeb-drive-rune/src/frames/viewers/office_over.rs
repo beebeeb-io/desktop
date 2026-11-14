@@ -328,7 +328,6 @@ fn palette(ui: &Ui, palette: &Palette, t: &Theme) -> El {
         .child(
             el().key("pal-caret-at")
                 .absolute(typed_w + 1.0, 1.0)
-                .pixel_snap(false)
                 .child(caret_mark("pal-caret".into(), 15.0, t)),
         );
     let head = row()
