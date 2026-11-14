@@ -104,9 +104,6 @@ impl Ui {
         if !self.word().is_some_and(|doc| doc.kept == office::Kept::Unsaved) {
             return;
         }
-        if let Some(Over::Conflict(_)) = self.office.over {
-            return;
-        }
         let outcome = self.source.save_document(&self.file.id, self.file.version);
         self.office_outcome(outcome);
     }
@@ -143,9 +140,10 @@ impl Ui {
         self.focus = Some("rib-find");
     }
 
-    /// Ctrl+K, or a press on the ribbon's search.
+    /// Ctrl+K, or a press on the ribbon's search (both are the editor's frame's only: [`on_key`],
+    /// and the ribbon takes no press without an editor).
     pub fn office_palette(&mut self) {
-        if self.word().is_some() && self.office.over.is_none() {
+        if self.office.over.is_none() {
             self.office.over = Some(Over::Palette(Palette::new()));
             self.focus = Some("pal-input");
         }
