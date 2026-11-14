@@ -298,4 +298,4 @@ fn webp(bytes: &[u8]) -> Option<Declared> {
 
 #[cfg(test)]
 #[path = "viewer_picture_tests.rs"]
-mod tests;
+pub(crate) mod tests;
