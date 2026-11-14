@@ -533,9 +533,9 @@ fn a_late_delete_keeps_the_dialog_until_the_answer_and_a_refusal_shows_under_the
 
     click(&mut rt, "item-2-0");
     assert_eq!(rt.state.backups.dialog, Some(Dialog::DeleteDevice("pc".into())));
-    rt.state.backups.code.replace_text("an invented password");
-    settle(&mut rt);
-    press(&mut rt, Key::Enter);
+    click(&mut rt, super::view::PASSWORD_KEY);
+    type_text(&mut rt, "an invented password");
+    click(&mut rt, "btn-0");
     assert_eq!(*asked.lock().unwrap(), [("pc".to_string(), 20)]);
     assert_eq!(
         rt.state.backups.dialog,
@@ -544,9 +544,16 @@ fn a_late_delete_keeps_the_dialog_until_the_answer_and_a_refusal_shows_under_the
     );
     assert_eq!(rt.state.backups.code_len(), 0, "the password is wiped once handed over");
     assert!(texts(&rt).iter().any(|t| t == "Deleting\u{2026}"));
-    // A second press while it is on its way sends nothing.
-    rt.state.backups.code.replace_text("again");
-    press(&mut rt, Key::Enter);
+    // A second press while it is on its way sends nothing: the button is off, and the call refuses too.
+    click(&mut rt, super::view::PASSWORD_KEY);
+    type_text(&mut rt, "again");
+    assert_eq!(rt.state.backups.code_len(), 5, "typed into the field");
+    assert!(
+        !info(&rt, "btn-0").focusable,
+        "Delete backup is off while one is on its way"
+    );
+    click(&mut rt, "btn-0");
+    assert!(!rt.state.backups.delete_device());
     assert_eq!(asked.lock().unwrap().len(), 1);
 
     // Refused: the words under the field, the dialog open, the device still listed.
@@ -564,8 +571,11 @@ fn a_late_delete_keeps_the_dialog_until_the_answer_and_a_refusal_shows_under_the
     assert_eq!(source(&rt).devices().len(), 1);
 
     // Done: the dialog closes and the section shows (the source reads its list again).
-    rt.state.backups.code.replace_text("an invented password");
-    press(&mut rt, Key::Enter);
+    rt.state.backups.code.clear();
+    click(&mut rt, super::view::PASSWORD_KEY);
+    type_text(&mut rt, "an invented password");
+    assert_eq!(rt.state.backups.code_len(), 20, "typed into the field");
+    click(&mut rt, "btn-0");
     assert_eq!(asked.lock().unwrap().len(), 2);
     deleting.store(false, std::sync::atomic::Ordering::SeqCst);
     rt.state.backups.delete_answered(Ok(()));

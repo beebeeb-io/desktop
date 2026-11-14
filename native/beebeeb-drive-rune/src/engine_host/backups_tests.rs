@@ -216,15 +216,11 @@ fn the_root_and_the_folders_come_from_the_engines_answer() {
     ] {
         assert!(source.wired(part), "{part:?} is bound");
     }
-    for part in [
-        Part::Devices,
-        Part::MailBackup,
-        Part::AddFolder,
-        Part::RemoveFolder,
-        Part::DeleteDevice,
-    ] {
+    for part in [Part::MailBackup, Part::AddFolder, Part::RemoveFolder, Part::OpenDevice] {
         assert!(!source.wired(part), "{part:?} is not bound");
     }
+    // Other devices and Delete this backup are `backups_devices`'s.
+    assert!(source.wired(Part::Devices) && source.wired(Part::DeleteDevice));
 }
 
 #[test]

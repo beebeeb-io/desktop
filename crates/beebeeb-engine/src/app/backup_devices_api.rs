@@ -324,8 +324,13 @@ impl<C: CredentialStores> Engine<C> {
         let me = crate::backup::device::device_self(self.identity);
         let read = state
             .with_shared(|db| {
-                let cached = db.backup_root();
-                let this_pc = db.backup_layout().ok().flatten().map(|layout| layout.device_folder_id);
+                // The root: the layout's (this PC resolved it), else the one cached on its own, else the server's.
+                let layout = db.backup_layout().ok().flatten();
+                let this_pc = layout.as_ref().map(|layout| layout.device_folder_id.clone());
+                let cached = match layout {
+                    Some(layout) => Ok(Some(layout.root_id)),
+                    None => db.backup_root(),
+                };
                 let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token, *key));
                 let bridge = EngineBridge::new(self.identity, db, api);
                 self.runtime.block_on(async {

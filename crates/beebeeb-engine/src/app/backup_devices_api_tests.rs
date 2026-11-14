@@ -34,27 +34,23 @@ struct Tree {
 }
 
 impl Tree {
+    /// A folder's listing, complete until `cut_short` says otherwise.
+    fn listing(&mut self, folder: &str) -> &mut (Vec<BackupChild>, bool) {
+        self.children.entry(folder.into()).or_insert_with(|| (Vec::new(), true))
+    }
     fn folder(&mut self, parent: &str, id: &str, name: Option<&str>) {
-        self.children
-            .entry(parent.into())
-            .or_default()
-            .0
-            .push(child(id, name, true));
-        self.children.entry(id.into()).or_insert((Vec::new(), true));
+        self.listing(parent).0.push(child(id, name, true));
+        self.listing(id);
     }
     fn file(&mut self, parent: &str, id: &str, name: Option<&str>, plain: Option<&str>) {
-        self.children
-            .entry(parent.into())
-            .or_default()
-            .0
-            .push(child(id, name, false));
+        self.listing(parent).0.push(child(id, name, false));
         self.files.insert(id.into(), plain.map(|text| text.as_bytes().to_vec()));
     }
     fn manifest(&mut self, folder: &str, id: &str, text: &str) {
         self.file(folder, id, Some(MANIFEST_NAME), Some(text));
     }
     fn cut_short(&mut self, folder: &str) {
-        self.children.entry(folder.into()).or_default().1 = false;
+        self.listing(folder).1 = false;
     }
 }
 
