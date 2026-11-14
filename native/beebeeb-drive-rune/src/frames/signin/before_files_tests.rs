@@ -298,3 +298,19 @@ fn the_window_shows_files_when_the_engines_gate_opens() {
         assert!(find(&rt, "column-headers").is_some(), "{gate:?}: the list is back");
     }
 }
+
+#[test]
+fn the_lock_screens_line_follows_the_engine() {
+    use crate::shell::tray::{EngineState, TrayInputs};
+    let (engine, mut rt) = window(GateState::Locked, false);
+    assert_eq!(says(&rt, "status-text"), "Locked \u{00B7} sync keeps running");
+    engine.set_inputs(TrayInputs {
+        engine: EngineState::NotRunning,
+        locked: true,
+        signed_in: true,
+        ..Default::default()
+    });
+    rt.frame(1.0);
+    rt.frame(0.016);
+    assert_eq!(says(&rt, "status-text"), "Locked \u{00B7} nothing syncs");
+}

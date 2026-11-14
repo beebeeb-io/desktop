@@ -95,6 +95,11 @@ pub struct Shell {
 }
 
 impl Shell {
+    /// The engine's sync is running (or finishing a check): the lock screen's line says so.
+    pub fn sync_runs(&self) -> bool {
+        self.tray_inputs.engine != EngineState::NotRunning
+    }
+
     pub fn new(actions: Arc<dyn ShellActions>, platform: Arc<dyn Platform>, wiring: Wiring) -> Shell {
         let app = AppMachine::for_session(actions.session());
         let window_kind = surfaces::kind_for(&app.screen());

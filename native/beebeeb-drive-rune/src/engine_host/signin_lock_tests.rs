@@ -263,3 +263,39 @@ fn an_unlock_that_was_left_and_finished_anyway_is_locked_again_at_its_level_neve
         assert_eq!(source.poll(), None, "an answer of a step that was left is dropped");
     }
 }
+
+/// A left password step that ended at the code step opened and stored nothing: it locks nothing.
+#[test]
+fn a_left_password_step_that_ended_at_the_code_locks_nothing() {
+    let fake = fake("left-code");
+    let (engine, _source, _prompts) = open_with_prompts(&fake);
+    assert_eq!(engine.lock_screen(), Ok(()));
+    let (answers, _unread) = mpsc::channel();
+    let event = SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::TwoFactor));
+    undo_left_step(&engine, &answers, &event, Some(LockState::ScreenLocked));
+    assert_eq!(
+        engine.lock_state(),
+        LockState::ScreenLocked,
+        "the screen lock stays a screen lock"
+    );
+    // A keyless unlock stored a session: it is locked, as before.
+    let event = SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::RecoveryPhrase));
+    undo_left_step(&engine, &answers, &event, Some(LockState::ScreenLocked));
+    assert_eq!(
+        engine.lock_state(),
+        LockState::VaultClosed,
+        "a stored session is still locked"
+    );
+}
+
+/// A left twelve-words step that opened is put back at the level it had.
+#[test]
+fn a_left_twelve_words_step_is_put_back() {
+    let fake = fake("left-words");
+    let (engine, _source, _prompts) = open_with_prompts(&fake);
+    assert_eq!(engine.lock_state(), LockState::Open);
+    let (answers, _unread) = mpsc::channel();
+    let event = SignInEvent::PhraseRestored(Ok(NextAfterSignIn::Drive));
+    undo_left_step(&engine, &answers, &event, Some(LockState::ScreenLocked));
+    assert_eq!(engine.lock_state(), LockState::ScreenLocked);
+}

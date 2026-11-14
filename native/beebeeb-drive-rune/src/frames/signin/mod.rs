@@ -193,6 +193,8 @@ pub struct Ui {
     pub(super) create: create::Create,
     /// The session's gate as the last poll saw it (`follow_gate`).
     gate_seen: Option<GateState>,
+    /// The window got the focus before any poll followed a gate (B5): the poll starts the lock's prompt.
+    focus_before_first_poll: bool,
     /// What the window keeps while a lock closes the gate (`lock`).
     lock: lock::Lock,
     /// The device request was asked from the twelve words (a session without a key is waiting behind it): leaving
@@ -244,6 +246,7 @@ impl Ui {
             set_problem: None,
             create: create::Create::new(),
             gate_seen: None,
+            focus_before_first_poll: false,
             lock: lock::Lock::default(),
             words_behind: false,
         }
@@ -711,27 +714,36 @@ pub fn frame(s: &State, cx: &mut Cx<State>) -> El {
 
 /// The engine's answers that arrive between presses (a tick, the other device's answer, a
 /// sign-in that took a second). `true`: the view must run again. For `shell::host::poll`.
-#[cfg_attr(not(test), allow(dead_code))] // waits for its one line in `shell/host.rs` (PR body)
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let gate = s.shell.app.gate();
     let Some(ui) = ui(s) else { return false };
     let mut changed = ui.pump();
     changed |= ui.follow_gate(gate);
     changed |= ui.follow_lock(gate == GateState::Locked);
+    // A focus that came before the first poll followed the lock: the prompt starts now (once per lock).
+    if std::mem::take(&mut ui.focus_before_first_poll) {
+        ui.lock_window_focused();
+    }
     ui.settle(tx);
     changed
 }
 
 /// The window lost or got focus. Leaving it hides a password that was shown, so the app
 /// switcher's picture of the window holds bullets (DW-A02). For `App::on_focus` in the shell.
-#[cfg_attr(not(test), allow(dead_code))] // waits for its one line in `shell/mod.rs` (PR body)
 pub fn on_window_focus(s: &mut State, focused: bool) {
     let Some(ui) = ui(s) else { return };
     if focused {
-        // DW-0009: "Windows Hello starts by itself when the window opens".
+        // DW-0009: "Windows Hello starts by itself when the window opens". A focus before the first poll waits
+        // for the poll to follow the lock; a lock that begins later never starts a prompt by itself.
+        if ui.gate_seen.is_none() {
+            ui.focus_before_first_poll = true;
+        }
         ui.lock_window_focused();
-    } else if ui.password.is_revealed() {
-        ui.password.set_revealed(false);
+    } else {
+        ui.focus_before_first_poll = false;
+        if ui.password.is_revealed() {
+            ui.password.set_revealed(false);
+        }
     }
 }
 

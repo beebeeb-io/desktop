@@ -229,7 +229,9 @@ fn undo_left_step<C: CredentialStores>(
 ) {
     let opened = matches!(
         event,
-        SignInEvent::TwoFactor(Ok(NextAfterSignIn::Drive)) | SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::Drive))
+        SignInEvent::TwoFactor(Ok(NextAfterSignIn::Drive))
+            | SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::Drive))
+            | SignInEvent::PhraseRestored(Ok(_))
     );
     match (event, unlocking) {
         (_, Some(LockState::ScreenLocked)) if opened => {
@@ -238,7 +240,9 @@ fn undo_left_step<C: CredentialStores>(
         (_, Some(_)) if opened => {
             let _ = engine.lock_vault();
         }
-        (SignInEvent::VaultUnlocked(Ok(_)), _) => {
+        // A left password step that ended at the code step opened and stored nothing: it locks nothing (the queued
+        // discard forgets the half-done step). Every other `Ok` (the keyless case: a session WAS stored) locks.
+        (SignInEvent::VaultUnlocked(Ok(next)), _) if *next != NextAfterSignIn::TwoFactor => {
             let _ = engine.lock_vault();
         }
         (SignInEvent::TwoFactor(Ok(_)) | SignInEvent::PhraseRestored(Ok(_)), None) => {

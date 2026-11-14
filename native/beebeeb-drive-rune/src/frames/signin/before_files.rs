@@ -264,6 +264,15 @@ fn status(words: &str, dot: Color, t: &Theme) -> El {
         .child(kit::label("status-details", "", type_::STATUS, t.text_tertiary).w(0.0))
 }
 
+/// The lock screen's sync line: the tray's words (`frames/tray/source.rs`), true to what the engine does.
+pub(super) fn locked_line(running: bool) -> &'static str {
+    if running {
+        "Locked \u{00B7} sync keeps running"
+    } else {
+        "Locked \u{00B7} nothing syncs"
+    }
+}
+
 /// The main window while the gate is `Locked` or `NoPlan`.
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     if password_in_front(s) {
@@ -283,7 +292,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 sub: None,
             },
             locked(lock_said, &t),
-            "Locked \u{00B7} sync keeps running",
+            locked_line(s.shell.sync_runs()),
             t.text_tertiary,
         )
     } else {

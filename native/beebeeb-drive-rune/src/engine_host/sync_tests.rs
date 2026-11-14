@@ -335,3 +335,19 @@ fn sync_may_start_behind_a_locked_screen_and_never_without_the_keys() {
     .collect();
     assert_eq!(may, [EngineGate::Ready, EngineGate::ScreenLocked]);
 }
+
+/// B-R6: the session watcher starts once, where the real app opens its engine, and no test helper starts it:
+/// the tests open engines through `engine_host::open::open` and some end a session on purpose.
+#[test]
+fn the_session_watcher_starts_once_where_the_real_app_opens_its_engine() {
+    let shell = source("shell/mod.rs");
+    assert_eq!(shell.matches("watch_session()").count(), 1, "shell/mod.rs");
+    let at = shell.find("fn open_engine(").expect("open_engine");
+    let end = shell[at..].find("\n}\n").expect("end of open_engine") + at;
+    assert!(shell[at..end].contains("watch_session()"), "inside open_engine's body");
+    assert_eq!(
+        source("engine_host/open.rs").matches("watch_session").count(),
+        0,
+        "open.rs"
+    );
+}

@@ -87,10 +87,16 @@ impl Ui {
     /// The shell's gate was read: `locked` while a lock closes it. The level is the source's. `true`: what the
     /// window shows changed.
     pub(super) fn follow_lock(&mut self, locked: bool) -> bool {
-        let level = locked.then(|| match self.source.gate() {
-            SourceGate::VaultClosed => Level::Vault,
-            _ => Level::Screen,
-        });
+        // The level is the source's word only: every other gate is no lock, also while the shell still says locked.
+        let level = if locked {
+            match self.source.gate() {
+                SourceGate::Locked => Some(Level::Screen),
+                SourceGate::VaultClosed => Some(Level::Vault),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let before = std::mem::replace(&mut self.lock.level, level);
         if before == level {
             return false;
@@ -116,6 +122,11 @@ impl Ui {
                 };
                 self.screen = Screen::UnlockVault;
                 self.focus = Some(PASSWORD_KEY);
+            }
+            // The lock went while the twelve words are in front: they are the strong proof core asks of a session
+            // whose key is not on this computer, so they stay.
+            None if matches!(self.screen, Screen::Phrase | Screen::NoPhrase) => {
+                self.lock = Lock::default();
             }
             Some(Level::Screen) | None => {
                 self.forget_steps();

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use super::source::{
     CodeKind, GateState as SourceGate, HelloOutcome, NextAfterSignIn, SharedSession, SignInEvent, SignInProblem,
-    SignInSource,
+    SignInSource, TwoFactorProblem,
 };
 use super::{PASSWORD_KEY, Ui, lock};
 use crate::State;
@@ -25,6 +25,8 @@ use rune::{Env, Key, KeyEvent, Mods, Runtime};
 struct Script {
     /// The level the source names; the shell's gate says only "locked".
     vault: Rc<Cell<bool>>,
+    /// A gate the source names instead of the two above (the engine's own word, before the shell follows).
+    gate_override: Rc<Cell<Option<SourceGate>>>,
     calls: Rc<RefCell<Vec<&'static str>>>,
     answers: Rc<RefCell<VecDeque<SignInEvent>>>,
 }
@@ -40,7 +42,9 @@ impl Script {
 
 impl SignInSource for Script {
     fn gate(&self) -> SourceGate {
-        if self.vault.get() {
+        if let Some(gate) = self.gate_override.get() {
+            gate
+        } else if self.vault.get() {
             SourceGate::VaultClosed
         } else {
             SourceGate::Locked
@@ -424,4 +428,118 @@ fn the_shell_asks_for_sync_when_the_gate_closes_by_a_lock() {
     rt.frame(1.0);
     settle(&mut rt);
     assert_eq!(starts(&engine), before + 1);
+}
+
+/// Both levels: the code step's partial sign-in ran out.
+fn an_expired_code_returns_to_the_locks_password(vault: bool) {
+    let (_, script, mut rt) = window(vault);
+    if !vault {
+        click(&mut rt, lock::UNLOCK_KEY);
+        answer(&mut rt, &script, SignInEvent::Hello(HelloOutcome::Unavailable));
+        click(&mut rt, "gate-btn-1");
+    }
+    type_password(&mut rt, "the password");
+    rt.update(|s, _| s.signin.as_mut().unwrap().unlock());
+    answer(
+        &mut rt,
+        &script,
+        SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::TwoFactor)),
+    );
+    assert_eq!(ui(&rt).screen, super::Screen::TwoFactor { backup: false });
+    rt.update(|s, _| {
+        let ui = s.signin.as_mut().unwrap();
+        ui.code.text = "123456".into();
+        ui.verify_code();
+    });
+    answer(&mut rt, &script, SignInEvent::TwoFactor(Err(TwoFactorProblem::Expired)));
+    assert_eq!(ui(&rt).screen, super::Screen::UnlockVault);
+    assert!(find(&rt, PASSWORD_KEY).is_some(), "the lock's password screen");
+    assert!(find(&rt, super::EMAIL_KEY).is_none(), "never the sign-in form");
+    assert!(ui(&rt).unlock_problem().is_some(), "a problem line says it ran out");
+    assert!(ui(&rt).password.text.is_empty());
+    if !vault {
+        press(&mut rt, Key::Escape);
+        assert!(find(&rt, lock::UNLOCK_KEY).is_some(), "Escape shows the lock screen");
+        assert!(find(&rt, super::EMAIL_KEY).is_none());
+    }
+}
+
+#[test]
+fn an_expired_code_under_a_closed_vault_returns_to_the_locks_password() {
+    an_expired_code_returns_to_the_locks_password(true);
+}
+
+#[test]
+fn an_expired_code_under_a_locked_screen_returns_to_the_locks_password() {
+    an_expired_code_returns_to_the_locks_password(false);
+}
+
+/// A strong unlock that ends keyless: the engine's gate is `NeedsRecoveryPhrase` (core's `VaultClosed`) and the
+/// twelve words stay in front whichever of the shell's gate and the source's gate moves first.
+#[test]
+fn a_keyless_strong_unlock_keeps_the_twelve_words_in_front() {
+    for shell_first in [false, true] {
+        let (engine, script, mut rt) = window(true);
+        type_password(&mut rt, "the password");
+        rt.update(|s, _| s.signin.as_mut().unwrap().unlock());
+        if shell_first {
+            engine.set_gate(GateState::NeedsRecoveryPhrase);
+        }
+        script.gate_override.set(Some(SourceGate::NeedsRecoveryPhrase));
+        answer(
+            &mut rt,
+            &script,
+            SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::RecoveryPhrase)),
+        );
+        let words_in_front = |rt: &Runtime<State>| {
+            find(rt, super::steps::WORD_KEYS[0]).is_some() && find(rt, super::EMAIL_KEY).is_none()
+        };
+        assert!(words_in_front(&rt), "after the answer (shell_first {shell_first})");
+        if !shell_first {
+            engine.set_gate(GateState::NeedsRecoveryPhrase);
+        }
+        for frame in 0..2 {
+            rt.frame(1.0);
+            settle(&mut rt);
+            assert!(words_in_front(&rt), "frame {frame} (shell_first {shell_first})");
+        }
+    }
+}
+
+#[test]
+fn windows_hello_starts_by_itself_when_the_focus_came_before_the_first_poll() {
+    // The window is built WITHOUT the initial frames: the focus comes first.
+    let engine = Arc::new(FixtureEngine::ready());
+    engine.set_gate(GateState::Locked);
+    let script = Script::default();
+    let mut state = state::init_with(Shell::fixture_on(engine.clone(), Arc::new(FakePlatform::default())));
+    state.signin = Some(Ui::new(Box::new(script.clone())));
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, registry::view, (1278.0, 798.0), env);
+    rt.on_key = Some(host::on_key);
+    rt.poll = Some(host::poll);
+    rt.update(|s, _| super::on_window_focus(s, true));
+    assert_eq!(script.count("hello"), 0, "nothing follows the lock yet");
+    rt.frame(1.0);
+    settle(&mut rt);
+    assert_eq!(script.count("hello"), 1, "the first poll starts the prompt");
+    rt.frame(1.0);
+    rt.frame(1.0);
+    settle(&mut rt);
+    assert_eq!(script.count("hello"), 1, "once per lock");
+
+    // A window that polled unlocked and has the focus: a lock that begins later starts nothing by itself.
+    let (engine, script, mut rt) = window(false);
+    engine.set_gate(GateState::Ready);
+    rt.frame(1.0);
+    settle(&mut rt);
+    rt.update(|s, _| super::on_window_focus(s, true));
+    engine.set_gate(GateState::Locked);
+    rt.frame(1.0);
+    settle(&mut rt);
+    assert_eq!(ui(&rt).lock_level(), Some(lock::Level::Screen));
+    assert_eq!(script.count("hello"), 0);
 }

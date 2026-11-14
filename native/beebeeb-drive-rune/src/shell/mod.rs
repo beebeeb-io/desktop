@@ -544,6 +544,9 @@ fn open_engine(
             }
         },
     )?;
+    // The real app only (never in `engine_host::open::open`, which tests use): a session the server ended closes
+    // the vault by itself, as core says.
+    opened.engine.watch_session();
     let live = Arc::new(crate::engine_host::LiveEngine::new(&opened, messages));
     Ok((opened, live))
 }
