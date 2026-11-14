@@ -40,6 +40,9 @@ pub struct SearchUi {
     /// A board frame's focused field: the board draws the field focused, with its caret, and a
     /// headless render has no focus to draw either. Only a scene sets it; the first key clears it.
     pub pictured: bool,
+    /// The list-on-this-PC view of the board (DW-1105): the status line holds the note of what
+    /// search can't do, and no details panel opens beside the results. Only a scene sets it.
+    pub plain_note: bool,
     /// The gate and account the last poll saw: a change drops every name the source holds at once.
     seen: Option<(crate::shell::app::GateState, Option<String>)>,
     /// Whether search was open at the last poll.
@@ -60,6 +63,7 @@ impl Default for SearchUi {
             narrow: Narrow::All,
             selected: None,
             pictured: false,
+            plain_note: false,
             seen: None,
             was_open: false,
             asked: None,
@@ -513,6 +517,12 @@ pub fn dw_0801(s: &mut State) {
 /// Results for "Contr": the pills, three rows with Where, the first one's details.
 pub fn dw_0802(s: &mut State) {
     scene(s, "Contr", BoardSearch::new());
+}
+/// Instant search on the list on this PC (DW-1105): the results as DW-0802 has them, with the note of what
+/// search can't do in the status line and no details panel. Called by `files::scenes_waveb`.
+pub fn dw_1105(s: &mut State) {
+    scene(s, "Contr", BoardSearch::new());
+    s.frames.find.plain_note = true;
 }
 /// The same during a first sign-in: the note with the live count.
 pub fn dw_0802b(s: &mut State) {

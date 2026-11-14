@@ -90,6 +90,7 @@ fn menu_layer(s: &State, t: &Theme) -> Option<El> {
         MenuKind::File => ("File", menus::FILE_MENU_W),
         MenuKind::Sort => ("Sort", menus::SORT_MENU_W),
         MenuKind::New => ("New", menus::NEW_MENU_W),
+        MenuKind::Background => ("List", super::background_menu::MENU_W),
     };
     // The menu is modal, so what is outside it hears no key: its keys are heard on the menu itself.
     let surface =
@@ -100,7 +101,33 @@ fn menu_layer(s: &State, t: &Theme) -> Option<El> {
         // and 36 more with the Open in File Explorer button beside it; of New: 42 pt.
         MenuKind::Sort => layer(226.0 + 36.0, surface),
         MenuKind::New => layer(42.0, surface),
+        MenuKind::Background => surface.absolute(open.at.0, open.at.1),
     })
+}
+
+/// Sort by's choices beside the background menu (DW-1103), while "Sort by" is the highlighted entry.
+fn background_sort_layer(s: &State, t: &Theme) -> Option<El> {
+    let (x, y) = s.background_sort_at()?;
+    let entries = super::background_menu::sort_entries(s);
+    // Its own keys, `menu-1`: the board names the second menu so.
+    Some(
+        menu::menu(
+            "menu-1",
+            "Sort by",
+            super::background_menu::SUB_W,
+            &entries,
+            None,
+            t,
+            pick_sort,
+            |_, _| {},
+            close,
+        )
+        .absolute(x, y),
+    )
+}
+
+fn pick_sort(s: &mut State, index: usize, tx: &mut Tx) {
+    s.pick_background_sort(index, tx);
 }
 
 /// `again`: does a failure's message offer Try again (`State::offers_try_again`)?
@@ -244,7 +271,15 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         }));
         if s.show_detail_pane {
             let selected = s.selected.and_then(|i| s.listing.items.get(i));
-            let facts = selected.map(|item| (item, s.actions.source.details(item, &s.listing.folder.name)));
+            let facts = selected.map(|item| {
+                let mut facts = s.actions.source.details(item, &s.listing.folder.name);
+                // A copy on its way down says so on the Available offline card (DW-0412).
+                if let Some(d) = s.download_of(&item.id) {
+                    facts.offline_note = d.panel_words();
+                    facts.kept_offline = true;
+                }
+                (item, facts)
+            });
             body = body.child(details::details_pane(facts, &t));
         }
     }
@@ -340,6 +375,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     // What lies over the window: the open menu, the reason a name cannot be given, a dialog.
     let layers: Vec<El> = [
         menu_layer(s, &t),
+        background_sort_layer(s, &t),
         rename::tip_layer(s, &t),
         super::uploads::drop_layer(s, &t),
         super::uploads::layer(s, &t),

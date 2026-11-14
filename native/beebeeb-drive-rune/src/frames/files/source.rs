@@ -15,8 +15,7 @@
 //! The engine's implementation is another lane's.
 
 pub use super::actions_data::Read;
-use crate::source::{DriveItem, format_size};
-use crate::ui::file_list::format_date;
+use crate::source::DriveItem;
 
 /// What the details panel shows of one item. `None`: the source does not know, and the row is left out.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -341,6 +340,11 @@ pub trait FilesSource: Send + 'static {
     fn keep_version(&mut self, _file: &str, _keep: super::actions_data::Keep) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
     }
+    /// The copies coming down now, each with how far it has come (DW-0412). Empty: none is, or this
+    /// source cannot tell.
+    fn downloads(&self) -> Vec<super::keeping::Download> {
+        Vec::new()
+    }
     /// What uploads now: what stopped, what moves, what waits (DW-0426, DW-0427). `None`: nothing.
     fn uploads(&self) -> Option<super::uploads::Uploads> {
         None
@@ -393,67 +397,7 @@ fn ids(items: &[DriveItem]) -> Vec<String> {
     items.iter().map(|i| i.id.clone()).collect()
 }
 
-/// What a row itself says about the item, for a source that knows no more.
-pub fn details_of_row(item: &DriveItem, folder: &str) -> Details {
-    let size = if item.is_folder {
-        item.child_count.map(|c| format!("{c} items")).unwrap_or_default()
-    } else {
-        item.size.map(format_size).unwrap_or_default()
-    };
-    let kept = item.pc_status.as_deref() == Some("available_offline");
-    let place = match item.pc_status.as_deref() {
-        Some("online_only") => "Online only now",
-        Some("on_this_pc") => "Downloaded",
-        Some("available_offline") => "Kept on this PC",
-        _ => "",
-    };
-    let offline_note = match (place.is_empty(), size.is_empty()) {
-        (false, false) => format!("{place} \u{00B7} {size}"),
-        (false, true) => place.to_string(),
-        (true, _) => size.clone(),
-    };
-    let shared = if item.shared_type.is_some() {
-        "Anyone with the link".to_string()
-    } else if item.shared_badges.is_empty() {
-        "Only you".to_string()
-    } else {
-        item.shared_badges
-            .iter()
-            .map(|b| b.initials.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    Details {
-        kind: kind_of(item).to_string(),
-        size,
-        changed: format_date(&item.modified_at),
-        changed_on: None,
-        added: None,
-        where_: folder.to_string(),
-        versions: None,
-        shared,
-        offline_note,
-        kept_offline: kept,
-        picture: item.has_thumbnail,
-    }
-}
-
-pub fn kind_of(item: &DriveItem) -> &'static str {
-    if item.is_folder {
-        return "Folder";
-    }
-    match item.mime.as_deref() {
-        Some("application/pdf") => "PDF document",
-        Some(m) if m.contains("spreadsheet") => "Spreadsheet",
-        Some(m) if m.contains("presentation") || m.contains("keynote") => "Presentation",
-        Some(m) if m.starts_with("image/heic") || m.starts_with("image/heif") => "HEIC image",
-        Some(m) if m.starts_with("image/") => "Image",
-        Some(m) if m.starts_with("video/") => "Video",
-        Some(m) if m.starts_with("audio/") => "Audio",
-        Some(m) if m.contains("document") => "Document",
-        _ => "File",
-    }
-}
+pub use super::row_facts::{details_of_row, kind_of};
 
 /// "Contract draft.pdf" → "Contract draft copy.pdf"; taken → "Contract draft copy 2.pdf" (DW-0406).
 pub fn copy_name(name: &str, taken: &[&str]) -> String {
@@ -667,7 +611,11 @@ impl FilesSource for FilesFixture {
     }
 
     fn sync_state(&self) -> Option<String> {
-        Some("Up to date".into())
+        Some(super::keeping::sync_word(&self.more.downloads))
+    }
+
+    fn downloads(&self) -> Vec<super::keeping::Download> {
+        self.more.downloads.clone()
     }
 
     fn details(&self, item: &DriveItem, folder: &str) -> Details {
