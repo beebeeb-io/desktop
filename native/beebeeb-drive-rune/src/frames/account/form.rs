@@ -38,6 +38,8 @@ pub enum Problem {
     LinkNotUsed,
     /// Beebeeb did not take the new name (it answered with an error, or no longer accepts the session).
     NameRefused,
+    /// A password change whose end is not known: it may have been made.
+    Unconfirmed,
 }
 
 pub struct Form {

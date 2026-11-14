@@ -137,7 +137,10 @@ impl<C: CredentialStores> PasswordCalls<C> {
 }
 
 /// The form's words for each way a change is refused: only what the form can say. The engine's kinds that are not
-/// the password or its strength say "Beebeeb can't be reached. Nothing was changed.": nothing was.
+/// the password or its strength say "Beebeeb can't be reached. Nothing was changed.": each of them comes before the
+/// change's finish left, so nothing was. A finish that left and was not refused outright is
+/// [`PasswordChangeError::Unconfirmed`]: the password may have changed, and the form says so (review of desktop#423,
+/// P2 #9).
 fn refusal(error: PasswordChangeError) -> Refused {
     match error {
         PasswordChangeError::WrongPassword => Refused::WrongPassword,
@@ -151,6 +154,7 @@ fn refusal(error: PasswordChangeError) -> Refused {
         | PasswordChangeError::RateLimited
         | PasswordChangeError::Offline
         | PasswordChangeError::Failed(_) => Refused::Offline,
+        PasswordChangeError::Unconfirmed => Refused::Unconfirmed,
     }
 }
 

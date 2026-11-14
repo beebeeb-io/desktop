@@ -45,8 +45,8 @@ pub fn password_strength(password: &str) -> PasswordStrength {
     evaluate_password(password, &PasswordPolicy::from_server(0)).strength
 }
 
-/// Why a password was not changed. The password is as it was in each of these (see [`Engine::change_password_for`]
-/// for the one answer that may have been lost on its way).
+/// Why a password change did not end as a change this PC holds. The password is as it was in each of these except
+/// [`Self::Unconfirmed`], where it may have changed (see [`Engine::change_password_for`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PasswordChangeError {
     /// The current password is not the account's.
@@ -71,6 +71,11 @@ pub enum PasswordChangeError {
     Offline,
     /// Beebeeb answered something this client does not read, or an error. A stable code, never the server's words.
     Failed(&'static str),
+    /// The finish was sent and no answer said it was refused: no answer came, the server answered an error of its
+    /// own (5xx) or something this client could not read; or the server took it and the session moved on before the
+    /// new session could be kept. The password MAY have changed (in the last case it did): never "nothing changed".
+    /// Review of desktop#423, P2 #9.
+    Unconfirmed,
 }
 
 impl PasswordChangeError {
@@ -100,9 +105,10 @@ impl<C: CredentialStores> Engine<C> {
     /// one changes nothing. On `Ok` the new session token is stored and in memory, the server has ended every other
     /// session, and sync runs again on the new token when it was running.
     ///
-    /// `Err` leaves the password as it was, except one case the server decides: a finish whose answer never came
-    /// (`Offline` after the second leg) may have been taken; the next call that is refused 401 says so, and the
-    /// person signs in again with the new password.
+    /// `Err` leaves the password as it was, except [`PasswordChangeError::Unconfirmed`]: once the finish has left,
+    /// only a refusal the server said in so many words (a 4xx answer) proves nothing changed; no answer, a server
+    /// error, an answer this client cannot read, or a change taken while the session moved on may have changed the
+    /// password (the next call refused 401 says so, and the person signs in again with the new password).
     pub fn change_password_for(
         &self,
         session: SessionGeneration,
@@ -162,12 +168,17 @@ impl<C: CredentialStores> Engine<C> {
         drop(breach);
 
         let mut step = flow.start().map_err(|error| PasswordChangeError::of(&error))?;
+        // Once the finish has left, the server may have changed the password whatever comes back next.
+        let mut finish_sent = false;
         let new_token = loop {
             match step {
                 Step::Done(AccountOutcome::PasswordChanged { session_token }) => break session_token,
+                Step::Done(_) if finish_sent => return Err(PasswordChangeError::Unconfirmed),
                 Step::Done(_) => return Err(PasswordChangeError::Failed("protocol")),
                 Step::Send(request) => {
                     let is_step_up_start = request.path.ends_with("/confirm-opaque-start");
+                    let is_finish = request.path.ends_with("/change-password-finish");
+                    finish_sent |= is_finish;
                     let response = self.send_password_call(&base, &held.token, &request).await;
                     drop(request);
                     let response = match response {
@@ -178,22 +189,32 @@ impl<C: CredentialStores> Engine<C> {
                             return Err(PasswordChangeError::SessionEnded);
                         }
                         Ok(response) => response,
+                        // The finish left (now or on an earlier leg) and no answer came: it may have been taken.
+                        Err(_) if finish_sent => return Err(PasswordChangeError::Unconfirmed),
                         Err(error) => return Err(error),
                     };
-                    step = flow.resume(response).map_err(|error| {
-                        let error = PasswordChangeError::of(&error);
-                        if error == PasswordChangeError::SessionEnded {
-                            self.note_session_refused(session);
+                    // Only a refusal said in so many words proves a finish changed nothing.
+                    let refused_outright = (400..500).contains(&response.status);
+                    step = match flow.resume(response) {
+                        Ok(step) => step,
+                        Err(_) if finish_sent && !refused_outright => return Err(PasswordChangeError::Unconfirmed),
+                        Err(error) => {
+                            let error = PasswordChangeError::of(&error);
+                            if error == PasswordChangeError::SessionEnded {
+                                self.note_session_refused(session);
+                            }
+                            return Err(error);
                         }
-                        error
-                    })?;
+                    };
                 }
             }
         };
         drop(current);
 
-        // The password is changed on the server and the old token is ended there: keep the new one.
+        // The password is changed on the server and the old token is ended there: keep the new one. A session that
+        // moved on meanwhile keeps nothing, and the change was made all the same.
         self.keep_new_session(session, &held.token, &new_token)
+            .map_err(|_| PasswordChangeError::Unconfirmed)
     }
 
     /// The token and the key of the session in memory, when it is the one `session` names.

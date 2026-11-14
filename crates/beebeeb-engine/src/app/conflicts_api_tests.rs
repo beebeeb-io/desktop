@@ -219,23 +219,173 @@ fn a_session_that_moved_on_lists_and_resolves_nothing() {
     );
 }
 
+/// This account's folder of replaced versions, as the engine names it.
+fn replaced_folder(rig: &Rig) -> PathBuf {
+    replaced_folder_in(
+        &crate::state_paths::init_for_test(),
+        &Identity::new(Some(&rig.account.user_id), Some(&rig.account.email)),
+    )
+    .expect("an account has a folder")
+}
+
 #[test]
-fn the_replaced_copy_is_made_beside_the_file_and_never_over_another() {
+fn a_safety_copy_is_one_per_file_and_a_failed_try_leaves_the_earlier_one() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("Invented draft.txt");
-    std::fs::write(&file, b"only copy").unwrap();
-    let first = keep_replaced_copy(&file).unwrap();
-    let second = keep_replaced_copy(&file).unwrap();
-    assert_eq!(first.file_name().unwrap(), "Invented draft (replaced on this PC).txt");
-    assert_eq!(
-        second.file_name().unwrap(),
-        "Invented draft (replaced on this PC) 2.txt"
-    );
-    assert_eq!(std::fs::read(&first).unwrap(), b"only copy");
-    assert_eq!(std::fs::read(&second).unwrap(), b"only copy");
+    let folder = dir.path().join("replaced").join("a-file-id");
+    std::fs::write(&file, b"first edit").unwrap();
+    let kept = SafetyCopy::make(&file, &folder).unwrap().keep().unwrap();
+    assert_eq!(kept, folder.join("Invented draft.txt"));
+    // A later Keep there of the same file that fails, with this PC's file untouched: the new copy goes, the
+    // earlier one stays as it was.
+    std::fs::write(&file, b"second edit").unwrap();
+    assert!(SafetyCopy::make(&file, &folder).unwrap().discard_if_unchanged(&file));
+    assert_eq!(std::fs::read(&kept).unwrap(), b"first edit");
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1, "one copy per file");
+    // One that works replaces it: still one copy.
+    let kept = SafetyCopy::make(&file, &folder).unwrap().keep().unwrap();
+    assert_eq!(std::fs::read(&kept).unwrap(), b"second edit");
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1, "one copy per file");
     assert_eq!(
         std::fs::read(&file).unwrap(),
-        b"only copy",
+        b"second edit",
         "the file itself is untouched"
+    );
+}
+
+#[test]
+fn a_failed_keep_there_that_already_replaced_the_file_keeps_the_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("Invented draft.txt");
+    let folder = dir.path().join("replaced").join("a-file-id");
+    std::fs::write(&file, b"this PC's only copy").unwrap();
+    let copy = SafetyCopy::make(&file, &folder).unwrap();
+    // The server's version landed, then something after it failed: the copy is all that is left of the edit.
+    std::fs::write(&file, b"the server's version").unwrap();
+    assert!(!copy.discard_if_unchanged(&file));
+    assert_eq!(
+        std::fs::read(folder.join("Invented draft.txt")).unwrap(),
+        b"this PC's only copy"
+    );
+    // So does a file that cannot be read any more.
+    let copy = SafetyCopy::make(&folder.join("Invented draft.txt"), &dir.path().join("other")).unwrap();
+    assert!(!copy.discard_if_unchanged(&dir.path().join("gone.txt")));
+    assert!(dir.path().join("other").join("Invented draft.txt").is_file());
+}
+
+#[test]
+fn a_copy_left_by_a_run_that_ended_early_is_never_thrown_away_unread() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("Invented draft.txt");
+    let folder = dir.path().join("replaced").join("a-file-id");
+    // A run that ended after the server's version landed and before its copy was put in place.
+    std::fs::write(&file, b"this PC's replaced edit").unwrap();
+    let _left_behind = SafetyCopy::make(&file, &folder).unwrap();
+    std::fs::write(&file, b"the server's version").unwrap();
+    // The next Keep there of the file keeps that copy, then copies the file as it is now.
+    let next = SafetyCopy::make(&file, &folder).unwrap();
+    assert_eq!(
+        std::fs::read(folder.join("Invented draft.txt")).unwrap(),
+        b"this PC's replaced edit"
+    );
+    assert!(next.discard_if_unchanged(&file));
+    assert_eq!(
+        std::fs::read(folder.join("Invented draft.txt")).unwrap(),
+        b"this PC's replaced edit"
+    );
+    // A leftover that is what the file still is, is a spare: it goes.
+    let _left_behind = SafetyCopy::make(&file, &folder).unwrap();
+    let again = SafetyCopy::make(&file, &folder).unwrap();
+    assert!(again.discard_if_unchanged(&file));
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1, "the kept copy only");
+}
+
+#[test]
+fn a_kept_copys_folder_names_no_id_and_stays_inside_the_accounts_folder() {
+    let account = std::path::Path::new("replaced-account");
+    for id in [WAITING, "../../outside", r"..\..\outside", "/abs/path", "C:\\Windows"] {
+        let folder = replaced_folder_of(account, id);
+        assert_eq!(folder.parent(), Some(account), "{id}");
+        let name = folder.file_name().unwrap().to_str().unwrap();
+        assert_eq!(name.len(), 16, "{id}");
+        assert!(name.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
+    }
+}
+
+/// What the sync folder holds, by name, sorted.
+fn names_in(root: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Review of desktop#423, P2 #8: a Keep there that fails (here the server has no bytes to send for the file) leaves
+/// the sync folder as it was, every time it is tried: no safety copy stays behind to be uploaded as a new file.
+#[test]
+fn a_keep_there_that_fails_leaves_the_sync_folder_as_it_was_every_time() {
+    let rig = rig();
+    let before = names_in(&rig.root);
+    for _ in 0..2 {
+        // A failed download marks the row; the file waits for a choice again when the conflict is found again.
+        put(
+            &StateDb::open(&rig._dir.path().join("state.db")).unwrap(),
+            WAITING,
+            "Invented draft.txt",
+            FileStatus::Conflict,
+        );
+        assert_eq!(
+            rig.engine
+                .resolve_conflict_for(rig.session, WAITING, ConflictChoice::KeepThere)
+                .unwrap_err(),
+            ResolveRefused::Failed
+        );
+    }
+    assert_eq!(names_in(&rig.root), before, "a copy is left in the sync folder");
+    assert_eq!(
+        std::fs::read(rig.root.join("Invented draft.txt")).unwrap(),
+        b"my edit on this pc"
+    );
+    assert!(
+        !replaced_folder_of(&replaced_folder(&rig), WAITING).exists(),
+        "no copy is kept of a file that was not replaced"
+    );
+}
+
+const WITH_BYTES: &str = "a0000000-0000-4000-8000-000000000904";
+
+/// Review of desktop#423, P2 #8: Keep there that works ends as Keep there, not as Keep both: the sync folder holds
+/// the server's version under the file's name and no second file (which would be uploaded as a new one).
+#[test]
+fn keep_there_never_leaves_a_second_file_in_the_sync_folder() {
+    let rig = rig();
+    rig.account
+        .add_file_with_content(WITH_BYTES, None, "Invented plan.txt", b"the server's version");
+    std::fs::write(rig.root.join("Invented plan.txt"), b"this PC's edit, never sent").unwrap();
+    {
+        let db = StateDb::open(&rig._dir.path().join("state.db")).unwrap();
+        put(&db, WITH_BYTES, "Invented plan.txt", FileStatus::Conflict);
+    }
+    let before = names_in(&rig.root);
+    rig.engine
+        .resolve_conflict_for(rig.session, WITH_BYTES, ConflictChoice::KeepThere)
+        .expect("keep there works");
+    assert_eq!(
+        std::fs::read(rig.root.join("Invented plan.txt")).unwrap(),
+        b"the server's version"
+    );
+    assert_eq!(
+        names_in(&rig.root),
+        before,
+        "the replaced version was left in the sync folder"
+    );
+    // This PC's version is where nothing syncs: the account's folder of replaced versions, one copy for the file.
+    let kept = replaced_folder_of(&replaced_folder(&rig), WITH_BYTES);
+    assert_eq!(names_in(&kept), vec!["Invented plan.txt".to_string()]);
+    assert_eq!(
+        std::fs::read(kept.join("Invented plan.txt")).unwrap(),
+        b"this PC's edit, never sent"
     );
 }

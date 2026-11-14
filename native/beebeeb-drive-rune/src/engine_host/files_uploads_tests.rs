@@ -320,8 +320,13 @@ fn cancel_is_for_a_new_file_only_and_says_what_was_done() {
     let changes = take_until(&mut calls, |_| false);
     assert!(matches!(
         changes.as_slice(),
-        [Change::Failed(Action::CancelUpload, ActionError::Failed)]
+        [Change::Failed(Action::CancelUpload, ActionError::NotToRecycleBin)]
     ));
+    // Review of desktop#423, P1 #1: said as it is, never as a cancel, never as "nothing could do it".
+    assert_eq!(
+        crate::frames::files::Toast::failure(Action::CancelUpload, ActionError::NotToRecycleBin),
+        "Couldn't cancel the upload. This file can't go to the Recycle Bin, so it was left as it is."
+    );
 }
 
 #[test]

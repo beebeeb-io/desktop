@@ -272,3 +272,85 @@ fn cancel_for_a_session_that_moved_on_changes_nothing() {
     );
     assert_eq!(db.unsent_changes(0, 10, unix_now()).unwrap().total, 3);
 }
+
+/// Review of desktop#423, P1 #2: the runner's own claim, on its own connection, at the moment the copy goes to the
+/// bin (the `recycle` closure is the hook between the cancel's steps). It must find nothing it can run: the cancel
+/// holds the queued change, or has dropped it, before the copy moves. A claim that waited would only find it gone,
+/// so the connection waits for nothing (no timing in the test).
+#[test]
+fn the_engine_cannot_take_the_upload_while_its_copy_goes_to_the_bin() {
+    let (engine, _board) = engine("an-invented-uploads-slot-8");
+    signed_in(&engine, "uploads-one@example.eu");
+    let (_dir, db) = local_state(&engine, "uploads-one@example.eu", three);
+    db.hold_lock_for_test().busy_timeout(std::time::Duration::ZERO).unwrap();
+    let claimed = std::cell::RefCell::new(None);
+    let recycle = |_: &Path| {
+        *claimed.borrow_mut() = Some(db.claim_operation("op-f-waits", unix_now()));
+        Ok(())
+    };
+    let outcome = engine
+        .cancel_upload_for(engine.session_turn(), "op-f-waits", &recycle)
+        .unwrap();
+    let claimed = claimed.into_inner().expect("the copy was asked to go to the bin");
+    assert!(
+        !matches!(claimed, Ok(crate::state_db::ClaimOutcome::Claimed(_))),
+        "the engine took the upload of a file whose copy is in the bin (cancel answered {outcome:?})"
+    );
+    assert_eq!(
+        outcome,
+        CancelOutcome::Cancelled,
+        "the copy went to the bin: the upload is cancelled"
+    );
+    let ids: Vec<String> = db
+        .unsent_changes(0, 10, unix_now())
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
+    assert!(!ids.contains(&"op-f-waits".to_string()), "{ids:?}");
+}
+
+/// `C:\a\b` as the computer's own admin share, `\\localhost\C$\a\b`: the same file, on a path with no Recycle Bin.
+#[cfg(target_os = "windows")]
+fn on_the_admin_share(path: &Path) -> std::path::PathBuf {
+    let text = path.to_str().expect("a temp path is text");
+    let text = text.strip_prefix(r"\\?\").unwrap_or(text);
+    let (drive, rest) = text.split_once(':').expect("a drive letter");
+    std::path::PathBuf::from(format!(r"\\localhost\{drive}${rest}"))
+}
+
+/// Review of desktop#423, P1 #1 (Windows rung): a file whose volume has no Recycle Bin is never deleted for good.
+/// The share is the computer's own `C$`, which the build VM serves; elsewhere it may not be reachable.
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "needs the computer's own admin share (\\\\localhost\\C$): run on the Windows build VM with --ignored"]
+fn a_copy_on_a_path_without_a_recycle_bin_is_refused_and_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let local = dir.path().join("Invented only copy.txt");
+    std::fs::write(&local, b"the only copy").unwrap();
+    let share = on_the_admin_share(&local);
+    assert!(
+        std::fs::metadata(&share).is_ok(),
+        "the admin share is not reachable here: this rung proves nothing"
+    );
+    let moved = move_to_recycle_bin(&share);
+    assert!(
+        local.exists(),
+        "the only copy was deleted for good (the move answered {moved:?})"
+    );
+    assert!(moved.is_err(), "a refusal must be said");
+}
+
+/// The same rung's other half: on this PC's own drive the copy goes to the Recycle Bin.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_copy_on_this_pcs_drive_goes_to_the_recycle_bin() {
+    let dir = tempfile::tempdir().unwrap();
+    let local = dir.path().join("Invented to the bin.txt");
+    std::fs::write(&local, b"recoverable").unwrap();
+    move_to_recycle_bin(&local).expect("moved to the bin");
+    assert!(!local.exists());
+    // A copy that is already gone counts as moved.
+    move_to_recycle_bin(&local).expect("already gone");
+}

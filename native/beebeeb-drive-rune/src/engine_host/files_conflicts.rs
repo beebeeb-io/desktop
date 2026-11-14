@@ -10,7 +10,8 @@
 //! - An answer ([`Engine::resolve_conflict_for`]) goes out once per press, on a worker, bound to the session AND the
 //!   account of its press. It is accepted at once; while it runs the file is not offered again; if it did not work
 //!   the file waits again and the window is told ([`Change::Failed`]). Keep there replaces a file on this PC: the
-//!   engine keeps the replaced copy beside it first.
+//!   engine first keeps this PC's version where nothing syncs, in its own app data (`REPLACED_FOLDER`), one copy per
+//!   file, and the dialog's line says where.
 //! - What is held, and every answer on its way, goes the moment the session or the account moves; an answer that
 //!   lands under another session or account is dropped.
 //!

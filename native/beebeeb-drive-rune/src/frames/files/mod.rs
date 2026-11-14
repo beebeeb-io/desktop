@@ -185,6 +185,7 @@ impl Toast {
             }
             ActionError::NotSent => " It has changes that are not uploaded yet.",
             ActionError::HoldsKept => " Something in it is kept on this PC.",
+            ActionError::NotToRecycleBin => " This file can't go to the Recycle Bin, so it was left as it is.",
             _ => "",
         };
         format!("Couldn't {}.{fix}", action.words())

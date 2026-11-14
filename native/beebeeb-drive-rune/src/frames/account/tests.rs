@@ -580,6 +580,19 @@ fn the_password_changes_through_the_step_up_and_is_in_no_request() {
     }
 }
 
+/// Review of desktop#423, P2 #9: a change whose end is not known (its finish left and no answer refused it) is said
+/// as such under the current password, never as "Nothing was changed".
+#[test]
+fn a_password_change_that_may_have_been_made_says_so() {
+    let mut rt = runtime("DW-A67");
+    rt.update(|s, _| s.account.form.problem = Some(form::Problem::Unconfirmed));
+    settle(&mut rt);
+    assert_eq!(
+        says(&rt, "field-0-msg"),
+        "We couldn't confirm the change. Try signing in with your new password; if that fails, use your old one."
+    );
+}
+
 /// Name and email: an empty name is refused in the board's words; the email changes only once
 /// the code from the new address is entered.
 #[test]
