@@ -267,11 +267,7 @@ fn closing_a_dialog_wipes_what_was_typed_and_drops_the_sign_in() {
     assert_eq!(connection(&rt), Connection::Idle);
 
     let mut rt = runtime("DW-1404");
-    // A press on the scrim, beside the dialog.
-    let r = info(&rt, "scrim").rect;
-    rt.pointer_down(r[0] + 8.0, r[1] + 8.0);
-    rt.pointer_up(r[0] + 8.0, r[1] + 8.0);
-    settle(&mut rt);
+    press(&mut rt, Key::Escape);
     assert_eq!(rt.state.backups.dialog, None);
     assert!(rt.state.backups.mail.picked.is_empty());
     assert_eq!(connection(&rt), Connection::Idle);
@@ -337,6 +333,11 @@ fn turning_off_takes_a_code_the_engine_accepts_then_asks_about_the_files() {
     // Five digits: nothing is asked.
     type_text(&mut rt, "51720");
     assert!(!rt.state.backups.mail_turn_off());
+    assert_eq!(
+        rt.state.backups.code_len(),
+        5,
+        "nothing was asked, so nothing was wiped"
+    );
     assert_eq!(mail_of(&rt).state, MailState::On);
     type_text(&mut rt, "4");
     click(&mut rt, "btn-0");

@@ -759,7 +759,7 @@ fn keep_files(used: &str, first_button: usize, t: &Theme) -> El {
         foot,
         t,
     )
-    // Keeping is the answer that changes nothing: it is what Esc and a press outside mean.
+    // Keeping is the answer that changes nothing: it is what Esc means.
     .modal(false, |s: &mut State| {
         s.backups.mail_keep_files(true);
     })

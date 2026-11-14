@@ -424,7 +424,7 @@ impl BackupsSource for FixtureSource {
         let Connection::Folders { address, .. } = &self.connection else {
             return false;
         };
-        if folders.is_empty() || self.mail.is_none() {
+        if self.mail.is_none() {
             return false;
         }
         let mut first = mail::board::first();
