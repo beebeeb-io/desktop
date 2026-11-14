@@ -503,7 +503,7 @@ fn a_late_answer_is_asked_once_and_taken_on_the_next_window_key() {
     assert_eq!(rt.state.backups.dialog, Some(Dialog::MailAccount));
     assert!(!info(&rt, "btn-1").focusable);
     // The next key that reaches the window takes it: Choose folders, the password wiped.
-    press(&mut rt, Key::ArrowDown);
+    press(&mut rt, Key::Down);
     assert_eq!(rt.state.backups.dialog, Some(Dialog::MailFolders));
     assert!(rt.state.backups.mail.password.text.is_empty());
     assert_eq!(asked.get(), 1);
