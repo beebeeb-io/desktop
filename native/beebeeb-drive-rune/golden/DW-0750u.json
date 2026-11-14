@@ -1,0 +1,2059 @@
+{
+ "elements": {
+  "Account": {
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Account",
+   "tracking": 0.0,
+   "w": 160.5,
+   "weight": 500,
+   "x": 44.0,
+   "y": 135.5
+  },
+  "Account-icon": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 19.0,
+   "y": 136.0
+  },
+  "Account-row": {
+   "h": 28.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 130.0
+  },
+  "Back to Drive": {
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Back to Drive",
+   "tracking": 0.0,
+   "w": 161.5,
+   "weight": 500,
+   "x": 43.0,
+   "y": 49.5
+  },
+  "Back to Drive-icon": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "filled": false,
+   "h": 15.0,
+   "icon": [
+    "M15 5l-7 7 7 7"
+   ],
+   "kind": "icon",
+   "w": 15.0,
+   "x": 19.0,
+   "y": 50.5
+  },
+  "Back to Drive-row": {
+   "h": 28.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 44.0
+  },
+  "Backups": {
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Backups",
+   "tracking": 0.0,
+   "w": 160.5,
+   "weight": 500,
+   "x": 44.0,
+   "y": 308.5
+  },
+  "Backups-icon": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 19.0,
+   "y": 309.0
+  },
+  "Backups-row": {
+   "h": 28.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 303.0
+  },
+  "Bandwidth": {
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Bandwidth",
+   "tracking": 0.0,
+   "w": 160.5,
+   "weight": 500,
+   "x": 44.0,
+   "y": 395.5
+  },
+  "Bandwidth-icon": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 19.0,
+   "y": 396.0
+  },
+  "Bandwidth-row": {
+   "h": 28.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 390.0
+  },
+  "Devices and sessions": {
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Devices and sessions",
+   "tracking": 0.0,
+   "w": 160.5,
+   "weight": 500,
+   "x": 44.0,
+   "y": 193.5
+  },
+  "Devices and sessions-icon": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M5 6.5A1.5 1.5 0 0 1 6.5 5h11A1.5 1.5 0 0 1 19 6.5V15H5z",
+    "M2.5 18.5h19"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 19.0,
+   "y": 194.0
+  },
+  "Devices and sessions-row": {
+   "h": 28.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 188.0
+  },
+  "General": {
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "General",
+   "tracking": 0.0,
+   "w": 160.5,
+   "weight": 500,
+   "x": 44.0,
+   "y": 106.5
+  },
+  "General-icon": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 19.0,
+   "y": 107.0
+  },
+  "General-row": {
+   "h": 28.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 101.0
+  },
+  "Notifications": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Notifications",
+   "tracking": 0.0,
+   "w": 160.5,
+   "weight": 500,
+   "x": 44.0,
+   "y": 222.5
+  },
+  "Notifications-icon": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 19.0,
+   "y": 223.0
+  },
+  "Notifications-row": {
+   "bg": [
+    21,
+    17,
+    13,
+    23
+   ],
+   "h": 28.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 217.0
+  },
+  "Security": {
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Security",
+   "tracking": 0.0,
+   "w": 160.5,
+   "weight": 500,
+   "x": 44.0,
+   "y": 164.5
+  },
+  "Security-icon": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 19.0,
+   "y": 165.0
+  },
+  "Security-row": {
+   "h": 28.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 159.0
+  },
+  "Storage": {
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Storage",
+   "tracking": 0.0,
+   "w": 160.5,
+   "weight": 500,
+   "x": 44.0,
+   "y": 279.5
+  },
+  "Storage-icon": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 19.0,
+   "y": 280.0
+  },
+  "Storage-row": {
+   "h": 28.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 274.0
+  },
+  "Sync and File Explorer": {
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Sync and File Explorer",
+   "tracking": 0.0,
+   "w": 160.5,
+   "weight": 500,
+   "x": 44.0,
+   "y": 337.5
+  },
+  "Sync and File Explorer-icon": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 19.0,
+   "y": 338.0
+  },
+  "Sync and File Explorer-row": {
+   "h": 28.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 332.0
+  },
+  "Thumbnails and previews": {
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Thumbnails and previews",
+   "tracking": 0.0,
+   "w": 160.5,
+   "weight": 500,
+   "x": 44.0,
+   "y": 366.5
+  },
+  "Thumbnails and previews-icon": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "kind": "icon",
+   "w": 16.0,
+   "x": 19.0,
+   "y": 367.0
+  },
+  "Thumbnails and previews-row": {
+   "h": 28.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 361.0
+  },
+  "body": {
+   "h": 606.0,
+   "kind": "box",
+   "w": 958.0,
+   "x": 0.0,
+   "y": 32.0
+  },
+  "cap-buttons": {
+   "h": 31.0,
+   "kind": "box",
+   "w": 138.0,
+   "x": 820.0,
+   "y": 0.0
+  },
+  "cap-close": {
+   "h": 31.0,
+   "kind": "box",
+   "w": 46.0,
+   "x": 912.0,
+   "y": 0.0
+  },
+  "cap-close-icon": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "filled": false,
+   "h": 10.0,
+   "icon": [
+    "M.5.5l9 9M9.5.5l-9 9"
+   ],
+   "kind": "icon",
+   "w": 10.0,
+   "x": 930.0,
+   "y": 10.5
+  },
+  "cap-mark": {
+   "filled": false,
+   "h": 16.0,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "kind": "icon",
+   "mark": true,
+   "w": 16.0,
+   "x": 12.0,
+   "y": 7.5
+  },
+  "cap-max": {
+   "h": 31.0,
+   "kind": "box",
+   "w": 46.0,
+   "x": 866.0,
+   "y": 0.0
+  },
+  "cap-max-icon": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "filled": false,
+   "h": 10.0,
+   "icon": [
+    "rect:x=.5,y=.5,width=9,height=9,rx=1.5"
+   ],
+   "kind": "icon",
+   "w": 10.0,
+   "x": 884.0,
+   "y": 10.5
+  },
+  "cap-min": {
+   "h": 31.0,
+   "kind": "box",
+   "w": 46.0,
+   "x": 820.0,
+   "y": 0.0
+  },
+  "cap-min-icon": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "filled": false,
+   "h": 10.0,
+   "icon": [
+    "M0 5.5h10"
+   ],
+   "kind": "icon",
+   "w": 10.0,
+   "x": 838.0,
+   "y": 10.5
+  },
+  "cap-title": {
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "family": "sans",
+   "h": 16.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "Beebeeb Drive",
+   "tracking": 0.0,
+   "w": 774.0,
+   "weight": 400,
+   "x": 37.0,
+   "y": 7.5
+  },
+  "caption-bar": {
+   "bg": [
+    246,
+    244,
+    240,
+    255
+   ],
+   "h": 32.0,
+   "kind": "box",
+   "w": 958.0,
+   "x": 0.0,
+   "y": 0.0
+  },
+  "item-0-0": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 96.0
+  },
+  "item-0-0-icon": {
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "filled": false,
+   "h": 18.0,
+   "icon": [
+    "M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"
+   ],
+   "kind": "icon",
+   "w": 18.0,
+   "x": 270.0,
+   "y": 107.0
+  },
+  "item-0-0-icon-box": {
+   "h": 18.0,
+   "kind": "box",
+   "w": 30.0,
+   "x": 264.0,
+   "y": 107.0
+  },
+  "item-0-0-knob": {
+   "bg": [
+    251,
+    250,
+    247,
+    255
+   ],
+   "h": 14.0,
+   "kind": "box",
+   "w": 14.0,
+   "x": 767.0,
+   "y": 109.0
+  },
+  "item-0-0-sub": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 15.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "Also controlled in Windows Settings",
+   "tracking": 0.0,
+   "w": 438.0,
+   "weight": 400,
+   "x": 302.0,
+   "y": 117.5
+  },
+  "item-0-0-switch": {
+   "bg": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "h": 20.0,
+   "kind": "box",
+   "w": 36.0,
+   "x": 748.0,
+   "y": 106.0
+  },
+  "item-0-0-text": {
+   "h": 33.0,
+   "kind": "box",
+   "w": 438.0,
+   "x": 302.0,
+   "y": 99.5
+  },
+  "item-0-0-title": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Allow notifications",
+   "tracking": -0.06,
+   "w": 438.0,
+   "weight": 500,
+   "x": 302.0,
+   "y": 99.5
+  },
+  "item-1-0": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 172.0
+  },
+  "item-1-0-chev": {
+   "color": [
+    155,
+    152,
+    147,
+    255
+   ],
+   "filled": false,
+   "h": 14.0,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "kind": "icon",
+   "w": 14.0,
+   "x": 770.0,
+   "y": 185.0
+  },
+  "item-1-0-icon": {
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "filled": false,
+   "h": 18.0,
+   "icon": [
+    "M4 13l2.5-7.5A1.5 1.5 0 0 1 7.9 4.5h8.2a1.5 1.5 0 0 1 1.4 1L20 13",
+    "M4 13v5.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V13",
+    "M4 13h4.5l1.5 2.5h4l1.5-2.5H20"
+   ],
+   "kind": "icon",
+   "w": 18.0,
+   "x": 270.0,
+   "y": 183.0
+  },
+  "item-1-0-icon-box": {
+   "h": 18.0,
+   "kind": "box",
+   "w": 30.0,
+   "x": 264.0,
+   "y": 183.0
+  },
+  "item-1-0-sub": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 15.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "Sign-ins, shares and storage warnings from your account",
+   "tracking": 0.0,
+   "w": 414.5,
+   "weight": 400,
+   "x": 302.0,
+   "y": 193.5
+  },
+  "item-1-0-text": {
+   "h": 33.0,
+   "kind": "box",
+   "w": 414.5,
+   "x": 302.0,
+   "y": 175.5
+  },
+  "item-1-0-title": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Recent notifications",
+   "tracking": -0.06,
+   "w": 414.5,
+   "weight": 500,
+   "x": 302.0,
+   "y": 175.5
+  },
+  "item-1-0-value": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "2 new",
+   "tracking": 0.0,
+   "w": 37.5,
+   "weight": 400,
+   "x": 724.5,
+   "y": 183.5
+  },
+  "item-2-0": {
+   "h": 28.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 245.0
+  },
+  "item-2-0-icon": {
+   "color": [
+    70,
+    66,
+    61,
+    255
+   ],
+   "filled": false,
+   "h": 18.0,
+   "icon": [
+    "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
+   ],
+   "kind": "icon",
+   "w": 18.0,
+   "x": 270.0,
+   "y": 250.0
+  },
+  "item-2-0-icon-box": {
+   "h": 18.0,
+   "kind": "box",
+   "w": 30.0,
+   "x": 264.0,
+   "y": 250.0
+  },
+  "item-2-0-text": {
+   "h": 17.0,
+   "kind": "box",
+   "w": 410.5,
+   "x": 302.0,
+   "y": 250.5
+  },
+  "item-2-0-title": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "New sign-ins and security changes",
+   "tracking": -0.06,
+   "w": 410.5,
+   "weight": 500,
+   "x": 302.0,
+   "y": 250.5
+  },
+  "item-2-0-value": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Always on",
+   "tracking": 0.0,
+   "w": 63.5,
+   "weight": 400,
+   "x": 720.5,
+   "y": 250.5
+  },
+  "item-3-0": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 328.0
+  },
+  "item-3-0-knob": {
+   "bg": [
+    251,
+    250,
+    247,
+    255
+   ],
+   "h": 14.0,
+   "kind": "box",
+   "w": 14.0,
+   "x": 767.0,
+   "y": 341.0
+  },
+  "item-3-0-sub": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 15.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "When someone shares a file with you",
+   "tracking": 0.0,
+   "w": 476.0,
+   "weight": 400,
+   "x": 264.0,
+   "y": 349.5
+  },
+  "item-3-0-switch": {
+   "bg": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "h": 20.0,
+   "kind": "box",
+   "w": 36.0,
+   "x": 748.0,
+   "y": 338.0
+  },
+  "item-3-0-text": {
+   "h": 33.0,
+   "kind": "box",
+   "w": 476.0,
+   "x": 264.0,
+   "y": 331.5
+  },
+  "item-3-0-title": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Shared with you",
+   "tracking": -0.06,
+   "w": 476.0,
+   "weight": 500,
+   "x": 264.0,
+   "y": 331.5
+  },
+  "item-3-1": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 368.0
+  },
+  "item-3-1-knob": {
+   "bg": [
+    255,
+    255,
+    255,
+    255
+   ],
+   "h": 14.0,
+   "kind": "box",
+   "w": 14.0,
+   "x": 751.0,
+   "y": 381.0
+  },
+  "item-3-1-rule": {
+   "bg": [
+    21,
+    17,
+    13,
+    23
+   ],
+   "h": 0.5,
+   "kind": "box",
+   "w": 530.0,
+   "x": 264.0,
+   "y": 368.0
+  },
+  "item-3-1-sub": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 15.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "When a file changes on another device",
+   "tracking": 0.0,
+   "w": 476.0,
+   "weight": 400,
+   "x": 264.0,
+   "y": 389.5
+  },
+  "item-3-1-switch": {
+   "bg": [
+    238,
+    235,
+    229,
+    255
+   ],
+   "h": 20.0,
+   "kind": "box",
+   "w": 36.0,
+   "x": 748.0,
+   "y": 378.0
+  },
+  "item-3-1-text": {
+   "h": 33.0,
+   "kind": "box",
+   "w": 476.0,
+   "x": 264.0,
+   "y": 371.5
+  },
+  "item-3-1-title": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "File updates",
+   "tracking": -0.06,
+   "w": 476.0,
+   "weight": 500,
+   "x": 264.0,
+   "y": 371.5
+  },
+  "item-3-2": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 408.0
+  },
+  "item-3-2-knob": {
+   "bg": [
+    251,
+    250,
+    247,
+    255
+   ],
+   "h": 14.0,
+   "kind": "box",
+   "w": 14.0,
+   "x": 767.0,
+   "y": 421.0
+  },
+  "item-3-2-rule": {
+   "bg": [
+    21,
+    17,
+    13,
+    23
+   ],
+   "h": 0.5,
+   "kind": "box",
+   "w": 530.0,
+   "x": 264.0,
+   "y": 408.0
+  },
+  "item-3-2-sub": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 15.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "When you're close to your limit",
+   "tracking": 0.0,
+   "w": 476.0,
+   "weight": 400,
+   "x": 264.0,
+   "y": 429.5
+  },
+  "item-3-2-switch": {
+   "bg": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "h": 20.0,
+   "kind": "box",
+   "w": 36.0,
+   "x": 748.0,
+   "y": 418.0
+  },
+  "item-3-2-text": {
+   "h": 33.0,
+   "kind": "box",
+   "w": 476.0,
+   "x": 264.0,
+   "y": 411.5
+  },
+  "item-3-2-title": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Storage warnings",
+   "tracking": -0.06,
+   "w": 476.0,
+   "weight": 500,
+   "x": 264.0,
+   "y": 411.5
+  },
+  "item-4-0": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 481.0
+  },
+  "item-4-0-knob": {
+   "bg": [
+    251,
+    250,
+    247,
+    255
+   ],
+   "h": 14.0,
+   "kind": "box",
+   "w": 14.0,
+   "x": 767.0,
+   "y": 494.0
+  },
+  "item-4-0-sub": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 15.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "When files couldn't upload",
+   "tracking": 0.0,
+   "w": 476.0,
+   "weight": 400,
+   "x": 264.0,
+   "y": 502.5
+  },
+  "item-4-0-switch": {
+   "bg": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "h": 20.0,
+   "kind": "box",
+   "w": 36.0,
+   "x": 748.0,
+   "y": 491.0
+  },
+  "item-4-0-text": {
+   "h": 33.0,
+   "kind": "box",
+   "w": 476.0,
+   "x": 264.0,
+   "y": 484.5
+  },
+  "item-4-0-title": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Sync stopped",
+   "tracking": -0.06,
+   "w": 476.0,
+   "weight": 500,
+   "x": 264.0,
+   "y": 484.5
+  },
+  "item-4-1": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 521.0
+  },
+  "item-4-1-knob": {
+   "bg": [
+    251,
+    250,
+    247,
+    255
+   ],
+   "h": 14.0,
+   "kind": "box",
+   "w": 14.0,
+   "x": 767.0,
+   "y": 534.0
+  },
+  "item-4-1-rule": {
+   "bg": [
+    21,
+    17,
+    13,
+    23
+   ],
+   "h": 0.5,
+   "kind": "box",
+   "w": 530.0,
+   "x": 264.0,
+   "y": 521.0
+  },
+  "item-4-1-sub": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 15.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "When a file changed in two places",
+   "tracking": 0.0,
+   "w": 476.0,
+   "weight": 400,
+   "x": 264.0,
+   "y": 542.5
+  },
+  "item-4-1-switch": {
+   "bg": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "h": 20.0,
+   "kind": "box",
+   "w": 36.0,
+   "x": 748.0,
+   "y": 531.0
+  },
+  "item-4-1-text": {
+   "h": 33.0,
+   "kind": "box",
+   "w": 476.0,
+   "x": 264.0,
+   "y": 524.5
+  },
+  "item-4-1-title": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Files need a decision",
+   "tracking": -0.06,
+   "w": 476.0,
+   "weight": 500,
+   "x": 264.0,
+   "y": 524.5
+  },
+  "item-4-2": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 561.0
+  },
+  "item-4-2-knob": {
+   "bg": [
+    255,
+    255,
+    255,
+    255
+   ],
+   "h": 14.0,
+   "kind": "box",
+   "w": 14.0,
+   "x": 751.0,
+   "y": 574.0
+  },
+  "item-4-2-rule": {
+   "bg": [
+    21,
+    17,
+    13,
+    23
+   ],
+   "h": 0.5,
+   "kind": "box",
+   "w": 530.0,
+   "x": 264.0,
+   "y": 561.0
+  },
+  "item-4-2-sub": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 15.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "When everything on this PC has synced. Off by default",
+   "tracking": 0.0,
+   "w": 476.0,
+   "weight": 400,
+   "x": 264.0,
+   "y": 582.5
+  },
+  "item-4-2-switch": {
+   "bg": [
+    238,
+    235,
+    229,
+    255
+   ],
+   "h": 20.0,
+   "kind": "box",
+   "w": 36.0,
+   "x": 748.0,
+   "y": 571.0
+  },
+  "item-4-2-text": {
+   "h": 33.0,
+   "kind": "box",
+   "w": 476.0,
+   "x": 264.0,
+   "y": 564.5
+  },
+  "item-4-2-title": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Sync finished",
+   "tracking": -0.06,
+   "w": 476.0,
+   "weight": 500,
+   "x": 264.0,
+   "y": 564.5
+  },
+  "item-4-3-knob": {
+   "bg": [
+    251,
+    250,
+    247,
+    255
+   ],
+   "h": 14.0,
+   "kind": "box",
+   "w": 14.0,
+   "x": 767.0,
+   "y": 614.0
+  },
+  "item-4-3-rule": {
+   "bg": [
+    21,
+    17,
+    13,
+    23
+   ],
+   "h": 0.5,
+   "kind": "box",
+   "w": 530.0,
+   "x": 264.0,
+   "y": 601.0
+  },
+  "item-4-3-sub": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 15.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "When downloaded files near their limit",
+   "tracking": 0.0,
+   "w": 476.0,
+   "weight": 400,
+   "x": 264.0,
+   "y": 622.5
+  },
+  "item-4-3-switch": {
+   "bg": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "h": 20.0,
+   "kind": "box",
+   "w": 36.0,
+   "x": 748.0,
+   "y": 611.0
+  },
+  "item-4-3-text": {
+   "h": 33.0,
+   "kind": "box",
+   "w": 476.0,
+   "x": 264.0,
+   "y": 604.5
+  },
+  "item-4-3-title": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 13.0,
+   "text": "Space on this PC",
+   "tracking": -0.06,
+   "w": 476.0,
+   "weight": 500,
+   "x": 264.0,
+   "y": 604.5
+  },
+  "list-0": {
+   "h": 62.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 96.0
+  },
+  "list-0-body": {
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ],
+   "h": 40.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 96.0
+  },
+  "list-0-foot": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 16.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "No marketing, ever.",
+   "tracking": 0.0,
+   "w": 110.5,
+   "weight": 400,
+   "x": 270.0,
+   "y": 142.0
+  },
+  "list-0-foot-box": {
+   "h": 16.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 142.0
+  },
+  "list-0-rows": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 96.0
+  },
+  "list-1": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 172.0
+  },
+  "list-1-body": {
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ],
+   "h": 40.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 172.0
+  },
+  "list-1-rows": {
+   "h": 40.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 172.0
+  },
+  "list-2": {
+   "h": 69.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 226.0
+  },
+  "list-2-body": {
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ],
+   "h": 28.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 245.0
+  },
+  "list-2-foot": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 16.0,
+   "kind": "text",
+   "size": 12.0,
+   "text": "These can't be turned off here, so you always hear if someone else gets in.",
+   "tracking": 0.0,
+   "w": 426.5,
+   "weight": 400,
+   "x": 270.0,
+   "y": 279.0
+  },
+  "list-2-foot-box": {
+   "h": 16.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 279.0
+  },
+  "list-2-rows": {
+   "h": 28.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 245.0
+  },
+  "list-2-title": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 13.0,
+   "kind": "text",
+   "size": 10.0,
+   "text": "Security",
+   "tracking": 0.1,
+   "w": 41.5,
+   "weight": 600,
+   "x": 268.0,
+   "y": 226.0
+  },
+  "list-2-title-box": {
+   "h": 13.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 226.0
+  },
+  "list-3": {
+   "h": 139.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 309.0
+  },
+  "list-3-body": {
+   "bg": [
+    254,
+    253,
+    252,
+    255
+   ],
+   "h": 120.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 328.0
+  },
+  "list-3-rows": {
+   "h": 120.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 328.0
+  },
+  "list-3-title": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 13.0,
+   "kind": "text",
+   "size": 10.0,
+   "text": "Your account",
+   "tracking": 0.1,
+   "w": 65.5,
+   "weight": 600,
+   "x": 268.0,
+   "y": 309.0
+  },
+  "list-3-title-box": {
+   "h": 13.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 309.0
+  },
+  "list-4-title": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 13.0,
+   "kind": "text",
+   "size": 10.0,
+   "text": "Sync on this PC",
+   "tracking": 0.1,
+   "w": 77.5,
+   "weight": 600,
+   "x": 268.0,
+   "y": 462.0
+  },
+  "list-4-title-box": {
+   "h": 13.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 462.0
+  },
+  "mark-b": {
+   "h": 16.0,
+   "kind": "box",
+   "w": 16.0,
+   "x": 12.0,
+   "y": 7.5
+  },
+  "mark-dot": {
+   "h": 16.0,
+   "kind": "box",
+   "w": 16.0,
+   "x": 12.0,
+   "y": 7.5
+  },
+  "mark-folder": {
+   "h": 16.0,
+   "kind": "box",
+   "w": 16.0,
+   "x": 12.0,
+   "y": 7.5
+  },
+  "mark-ring": {
+   "h": 16.0,
+   "kind": "box",
+   "w": 16.0,
+   "x": 12.0,
+   "y": 7.5
+  },
+  "notice": {
+   "bg": [
+    251,
+    250,
+    247,
+    184
+   ],
+   "h": 34.0,
+   "kind": "box",
+   "w": 541.75,
+   "x": 320.13,
+   "y": 562.0
+  },
+  "notice-action": {
+   "bg": [
+    21,
+    17,
+    13,
+    23
+   ],
+   "h": 24.0,
+   "kind": "box",
+   "w": 72.5,
+   "x": 780.88,
+   "y": 567.0
+  },
+  "notice-action-text": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 12.5,
+   "text": "Try again",
+   "tracking": 0.0,
+   "w": 56.5,
+   "weight": 600,
+   "x": 788.88,
+   "y": 570.5
+  },
+  "notice-icon": {
+   "color": [
+    234,
+    60,
+    63,
+    255
+   ],
+   "filled": false,
+   "h": 15.0,
+   "icon": [
+    "M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17z",
+    "M12 8v4.6",
+    "M12 15.9v.1"
+   ],
+   "kind": "icon",
+   "w": 15.0,
+   "x": 334.63,
+   "y": 571.5
+  },
+  "notice-line": {
+   "h": 34.0,
+   "kind": "box",
+   "w": 734.0,
+   "x": 224.0,
+   "y": 562.0
+  },
+  "notice-text": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 12.5,
+   "text": "Couldn't check with Beebeeb. What's shown here may be out of date.",
+   "tracking": 0.0,
+   "w": 418.0,
+   "weight": 550,
+   "x": 359.63,
+   "y": 570.5
+  },
+  "said-over": {
+   "h": 606.0,
+   "kind": "box",
+   "w": 958.0,
+   "x": 0.0,
+   "y": 32.0
+  },
+  "set-h": {
+   "h": 28.0,
+   "kind": "box",
+   "w": 540.0,
+   "x": 254.0,
+   "y": 54.0
+  },
+  "set-main": {
+   "bg": [
+    246,
+    244,
+    240,
+    255
+   ],
+   "h": 606.0,
+   "kind": "box",
+   "w": 734.0,
+   "x": 224.0,
+   "y": 32.0
+  },
+  "set-title": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "family": "sans",
+   "h": 28.0,
+   "kind": "text",
+   "size": 22.0,
+   "text": "Notifications",
+   "tracking": -0.48,
+   "w": 540.0,
+   "weight": 650,
+   "x": 254.0,
+   "y": 54.0
+  },
+  "settings-nav": {
+   "h": 493.5,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 84.0
+  },
+  "side-foot": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 28.0,
+   "kind": "text",
+   "size": 11.0,
+   "text": "Settings open inside the app. Esc goes back.",
+   "tracking": 0.0,
+   "w": 174.5,
+   "weight": 500,
+   "x": 16.0,
+   "y": 600.0
+  },
+  "side-foot-box": {
+   "h": 38.5,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 589.5
+  },
+  "side-sec-drive": {
+   "h": 161.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 257.0
+  },
+  "side-sec-settings": {
+   "h": 161.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 84.0
+  },
+  "side-title-box-drive": {
+   "h": 16.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 257.0
+  },
+  "side-title-box-settings": {
+   "h": 16.0,
+   "kind": "box",
+   "w": 203.5,
+   "x": 10.0,
+   "y": 84.0
+  },
+  "side-title-drive": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 13.0,
+   "kind": "text",
+   "size": 10.0,
+   "text": "DRIVE",
+   "tracking": 0.7,
+   "w": 33.5,
+   "weight": 600,
+   "x": 20.0,
+   "y": 257.0
+  },
+  "side-title-settings": {
+   "color": [
+    108,
+    104,
+    99,
+    255
+   ],
+   "family": "sans",
+   "h": 13.0,
+   "kind": "text",
+   "size": 10.0,
+   "text": "SETTINGS",
+   "tracking": 0.7,
+   "w": 56.0,
+   "weight": 600,
+   "x": 20.0,
+   "y": 84.0
+  },
+  "sidebar": {
+   "bg": [
+    246,
+    244,
+    240,
+    255
+   ],
+   "h": 606.0,
+   "kind": "box",
+   "w": 224.0,
+   "x": 0.0,
+   "y": 32.0
+  },
+  "toast-0": {
+   "bg": [
+    251,
+    250,
+    247,
+    184
+   ],
+   "h": 34.0,
+   "kind": "box",
+   "w": 399.5,
+   "x": 391.25,
+   "y": 520.0
+  },
+  "toast-0-icon": {
+   "color": [
+    234,
+    60,
+    63,
+    255
+   ],
+   "filled": false,
+   "h": 15.0,
+   "icon": [
+    "M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17z",
+    "M12 8v4.6",
+    "M12 15.9v.1"
+   ],
+   "kind": "icon",
+   "w": 15.0,
+   "x": 405.75,
+   "y": 529.5
+  },
+  "toast-0-line": {
+   "h": 34.0,
+   "kind": "box",
+   "w": 734.0,
+   "x": 224.0,
+   "y": 520.0
+  },
+  "toast-0-text": {
+   "color": [
+    21,
+    17,
+    13,
+    255
+   ],
+   "family": "sans",
+   "h": 17.0,
+   "kind": "text",
+   "size": 12.5,
+   "text": "Couldn't change the notification setting. Nothing changed.",
+   "tracking": 0.0,
+   "w": 351.5,
+   "weight": 550,
+   "x": 430.75,
+   "y": 528.5
+  },
+  "window": {
+   "bg": [
+    246,
+    244,
+    240,
+    255
+   ],
+   "h": 638.0,
+   "kind": "box",
+   "w": 958.0,
+   "x": 0.0,
+   "y": 0.0
+  }
+ },
+ "frame": "DW-0750u",
+ "height": 638,
+ "source": "the app's own render (no board frame): scripts/golden-from-native.py",
+ "theme": "light",
+ "width": 958
+}

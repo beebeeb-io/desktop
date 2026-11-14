@@ -614,6 +614,11 @@ fn a_refused_account_switch_stays_and_an_unknown_result_is_read_again() {
         [ALERT_UNKNOWN, ALERT_SAVED],
         "checking, and then the check's answer: the change had landed"
     );
+    assert_eq!(
+        asked(&fake.fake, SWITCHES),
+        before + 1,
+        "what Beebeeb has is read again"
+    );
     // The same, and nothing was stored: the check says the switch is as it was. Never "updated".
     fake.put_mode.store(UNREADABLE_NOT_TAKEN, Ordering::SeqCst);
     let held = switch(&source, 0, 1);
@@ -625,11 +630,6 @@ fn a_refused_account_switch_stays_and_an_unknown_result_is_read_again() {
     );
     assert_eq!(switch(&source, 0, 1), held);
     fake.put_mode.store(UNREADABLE, Ordering::SeqCst);
-    assert_eq!(
-        asked(&fake.fake, SWITCHES),
-        before + 1,
-        "what Beebeeb has is read again"
-    );
     assert!(
         !switch(&source, 0, 0),
         "the fake stored it before the unreadable answer: the re-read shows it"
