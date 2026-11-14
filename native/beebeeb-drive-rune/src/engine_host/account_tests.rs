@@ -419,12 +419,7 @@ fn only_the_three_sections_answer_every_page_under_them_is_unwired() {
     let source = Source::new(signed_in(&server));
     for pane in [
         Pane::Name,
-        Pane::Email,
-        Pane::EmailCode,
         Pane::Password,
-        Pane::TwoFactor,
-        Pane::TwoFactorSetup,
-        Pane::BackupCodes,
         Pane::Passkeys,
         Pane::Activity,
         Pane::Delete,

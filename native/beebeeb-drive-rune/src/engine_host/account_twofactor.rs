@@ -283,3 +283,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "account_twofactor_tests.rs"]
+mod tests;
