@@ -51,6 +51,7 @@ pub mod backups_api;
 mod explorer_api;
 pub mod kept_api;
 pub mod owned_state;
+pub mod passkeys_api;
 pub mod photos_api;
 pub mod settings_api;
 pub mod setup_api;
