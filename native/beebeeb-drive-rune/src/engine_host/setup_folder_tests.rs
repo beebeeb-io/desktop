@@ -440,11 +440,10 @@ fn a_refused_start_shows_the_modal_in_the_first_run_and_another_folder_can_be_ch
     assert_eq!(rt.state.shell.sync_off_opened(), 1);
     assert_eq!(rt.state.shell.app.gate(), ShellGate::FirstRun, "in the first run");
     assert!(
-        rt.elements()
-            .iter()
-            .any(|e| !e.exiting && e.key.as_deref() == Some("dialog-layer")),
-        "the modal is drawn over the first-run window"
+        rt.find("sync-off").is_some() && rt.state.shell.app.dialog().is_some(),
+        "the modal's card is drawn over the first-run window"
     );
+    assert!(says(&rt, "Beebeeb in File Explorer"), "the first run is behind it");
     for _ in 0..5 {
         rt.frame(0.1);
     }

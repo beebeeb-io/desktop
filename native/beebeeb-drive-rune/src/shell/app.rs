@@ -364,12 +364,12 @@ impl AppMachine {
         &self.current
     }
 
-    /// The dialog in front, if the gate is open.
+    /// The dialog in front, if the gate is open. The first run has one: the refusal modal (see `apply`).
     pub fn dialog(&self) -> Option<&Dialog> {
-        if self.gate == GateState::Ready {
-            self.dialog.as_ref()
-        } else {
-            None
+        match self.gate {
+            GateState::Ready => self.dialog.as_ref(),
+            GateState::FirstRun => self.dialog.as_ref().filter(|dialog| **dialog == Dialog::SyncOff),
+            _ => None,
         }
     }
 
@@ -406,6 +406,17 @@ impl AppMachine {
             Event::Gate(gate) => self.set_gate(gate),
             Event::Session(session) => self.set_session(session),
             Event::Request(intent) => self.request(intent),
+            // The first run is signed in and unlocked, and sync starts in it: a start that is refused there
+            // opens the same refusal modal ("the first run uses the same modal", the sync-start contract's S2),
+            // and Esc closes it. Nothing else moves while the gate is not Ready.
+            Event::OpenDialog(Dialog::SyncOff) if self.gate == GateState::FirstRun => {
+                self.dialog = Some(Dialog::SyncOff);
+                Outcome::Changed
+            }
+            Event::Escape if self.gate == GateState::FirstRun && self.dialog.is_some() => {
+                self.dialog = None;
+                Outcome::Changed
+            }
             _ if self.gate != GateState::Ready => Outcome::Refused,
             Event::Escape => self.escape(),
             // A dialog is modal: it closes first.
