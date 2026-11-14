@@ -220,22 +220,19 @@ fn vp8l(bytes: &[u8], at: usize) -> Option<(u32, u32)> {
     Some(((packed & 0x3FFF) + 1, ((packed >> 14) & 0x3FFF) + 1))
 }
 
-/// The RIFF chunks in `bytes[from..to]`: for each, its name and where its data begins and ends (cut at `to`).
-/// A chunk is a name, a length, and the data padded to an even length.
-fn chunks(bytes: &[u8], from: usize, to: usize) -> Vec<([u8; 4], usize, usize)> {
+/// The RIFF chunks of `bytes` from `from` on: for each, its name, where its data begins and the length it states
+/// (which may run past the end of the file). A chunk is a name, a length, and the data padded to an even length.
+fn chunks(bytes: &[u8], from: usize) -> Vec<([u8; 4], usize, usize)> {
     let mut found = Vec::new();
     let mut at = from;
     while let (Some(name), Some(length)) = (bytes.get(at..at + 4), le32(bytes, at + 4)) {
-        if at + 8 > to {
-            break;
-        }
-        let Some(end) = usize::try_from(length)
+        let Some((length, end)) = usize::try_from(length)
             .ok()
-            .and_then(|length| (at + 8).checked_add(length))
+            .and_then(|length| Some((length, (at + 8).checked_add(length)?)))
         else {
             break;
         };
-        found.push(([name[0], name[1], name[2], name[3]], at + 8, end.min(to)));
+        found.push(([name[0], name[1], name[2], name[3]], at + 8, length));
         match end.checked_add(end & 1) {
             Some(next) if next > at => at = next,
             _ => break,
@@ -244,11 +241,59 @@ fn chunks(bytes: &[u8], from: usize, to: usize) -> Vec<([u8; 4], usize, usize)> 
     found
 }
 
+/// The two sizes one animation frame states: its own, and its bitstream's. `at`: where the frame's data begins;
+/// `length`: the length the frame states. `None`: a frame this check cannot account for byte for byte.
+///
+/// The decoder does not look for a frame's bitstream by name. It reads the chunk after the frame's 16 bytes of
+/// placement and timing: a lossy or a lossless bitstream is decoded as that, and after an alpha chunk WHATEVER
+/// comes next is decoded as a lossy bitstream. It then steps to the next frame by this frame's length as stated,
+/// not padded. So a frame is accounted for only when
+/// - its length is even (the decoder's next frame is then where the chunk walk's next chunk is),
+/// - it lies wholly inside the file,
+/// - it holds exactly one bitstream chunk named lossy or lossless, or an alpha chunk and then one chunk named
+///   lossy, each with its header inside its own chunk,
+/// - and those chunks, padded, end exactly where the frame ends: no byte is left over or missing.
+fn frame(bytes: &[u8], at: usize, length: usize) -> Option<[(u32, u32); 2]> {
+    if length & 1 == 1 {
+        return None;
+    }
+    let end = at.checked_add(length).filter(|end| *end <= bytes.len())?;
+    let three = |at: usize| Some(le32(bytes, at)? & 0x00FF_FFFF);
+    let own = (three(at + 6)? + 1, three(at + 9)? + 1);
+    // The chunk at `at` inside the frame: its name, its data (cut at the chunk's own end, so a header is never
+    // read from what follows it), where the data begins, and where the next chunk begins.
+    let inner = |at: usize| {
+        let name = bytes.get(at..at.checked_add(4)?)?;
+        let length = usize::try_from(le32(bytes, at + 4)?).ok()?;
+        let data_end = at.checked_add(8)?.checked_add(length)?;
+        let next = data_end.checked_add(length & 1)?;
+        if next > end {
+            return None;
+        }
+        Some((name, bytes.get(..data_end)?, at + 8, next))
+    };
+    let (name, within, data, next) = inner(at.checked_add(16)?)?;
+    let (stated, next) = match name {
+        b"VP8 " => (vp8(within, data)?, next),
+        b"VP8L" => (vp8l(within, data)?, next),
+        b"ALPH" => {
+            let (name, within, data, next) = inner(next)?;
+            if name != b"VP8 " {
+                return None;
+            }
+            (vp8(within, data)?, next)
+        }
+        _ => return None,
+    };
+    (next == end).then_some([own, stated])
+}
+
 /// A plain file: the size in its one bitstream. An extended file (`VP8X`): the LARGEST of the canvas and of
 /// every size stated inside it, because a decoder decodes each bitstream at the size that bitstream states and
-/// compares it with the canvas only afterwards. Counted: the canvas, every animation frame's own size (`ANMF`),
-/// and every lossy or lossless bitstream, at the top level and inside a frame. A bitstream whose header cannot
-/// be read makes the file not a picture: nothing whose size is unknown reaches a decoder.
+/// compares it with the canvas only afterwards. Counted: the canvas, every lossy or lossless bitstream at the
+/// top level, and for every animation frame (`ANMF`) its own size and its bitstream's ([`frame`]). A bitstream
+/// whose header cannot be read, or a frame whose bytes are not all accounted for the way the decoder walks
+/// them, makes the file not a picture: nothing whose size is unknown reaches a decoder.
 fn webp(bytes: &[u8]) -> Option<Declared> {
     let data = 20usize;
     let still = |(width, height)| Declared {
@@ -265,23 +310,15 @@ fn webp(bytes: &[u8]) -> Option<Declared> {
                 width = width.max(w);
                 height = height.max(h);
             };
-            let stated = |name: &[u8; 4], at: usize| match name {
-                b"VP8 " => Some(vp8(bytes, at)),
-                b"VP8L" => Some(vp8l(bytes, at)),
-                _ => None,
-            };
-            for (name, at, end) in chunks(bytes, 12, bytes.len()) {
-                if let Some(size) = stated(&name, at) {
-                    widen(size?);
-                } else if &name == b"ANMF" {
-                    frames = frames.saturating_add(1);
-                    // The frame's own size (after its offset), then its chunks: alpha, and a bitstream.
-                    widen((three(at + 6)? + 1, three(at + 9)? + 1));
-                    for (inner, inner_at, _) in chunks(bytes, at + 16, end) {
-                        if let Some(size) = stated(&inner, inner_at) {
-                            widen(size?);
-                        }
+            for (name, at, length) in chunks(bytes, 12) {
+                match &name {
+                    b"VP8 " => widen(vp8(bytes, at)?),
+                    b"VP8L" => widen(vp8l(bytes, at)?),
+                    b"ANMF" => {
+                        frames = frames.saturating_add(1);
+                        frame(bytes, at, length)?.into_iter().for_each(&mut widen);
                     }
+                    _ => {}
                 }
             }
             Some(Declared {
