@@ -16,8 +16,70 @@ pub enum Explorer {
     Adding,
     /// DW-0206.
     Added,
-    /// DW-0280. `code`: what `CfRegisterSyncRoot` returned, for support ("0x8007017C").
+    /// DW-0280. `code`: what `CfRegisterSyncRoot` returned, for support ("0x8007017C"); empty when Windows
+    /// gave none.
     Failed { code: String },
+    /// Sync did not start on this PC, so Windows was not asked to add the folder at all. Drawn as DW-0280 with
+    /// its own sentence and no code: it is not Windows that refused.
+    NotSyncing,
+}
+
+/// The sync folder, while the first run still has to ask for it (the sync-start contract's ruling Q2: the first
+/// run asks for the folder before the first start). The board has no frame for it: it is the first state of the
+/// File Explorer step.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum FolderAsk {
+    /// Nothing to ask: the settings name the folder, or it was chosen in this first run.
+    #[default]
+    Settled,
+    Ask {
+        /// The folder that is suggested, as the person's own PC writes it. Shown, never logged.
+        folder: String,
+        /// Why the last choice was not taken.
+        said: Option<FolderSaid>,
+        /// A choice is being checked, or Windows' folder picker is open: no second one is asked.
+        busy: bool,
+    },
+}
+
+/// Why a folder was not taken as the sync folder. Nothing was created or written for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderSaid {
+    /// A folder on the network.
+    Network,
+    /// A drive itself, or a folder of Windows or its programs.
+    System,
+    /// The home folder itself, or the folder apps keep their data in.
+    Home,
+    /// Beebeeb's own data.
+    OwnData,
+    /// Not a folder.
+    NotAFolder,
+    /// Another app's sync folder.
+    AnotherApps,
+    /// The folder could not be read.
+    Unreadable,
+    /// Not a full path to a folder on this PC.
+    NotAFullPath,
+    /// Windows' folder picker could not be opened.
+    NoPicker,
+}
+
+/// A switch of setup whose change is answered after the press ([`SetupSource::take_outcomes`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Switch {
+    Notifications,
+    OpenAtLogin,
+}
+
+/// How a change asked through the source ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Outcome {
+    pub switch: Switch,
+    /// The change was made.
+    pub done: bool,
+    /// What the switch is now, when that is known (after a change that failed it may not be).
+    pub now: Option<bool>,
 }
 
 /// One folder the Windows app can back up (DW-0203), in the app's own order.
@@ -111,6 +173,40 @@ pub struct Sample {
 pub const BUNDLED_SAMPLE_PNG: &[u8] = include_bytes!("../../../../assets/sample/compare-sample.png");
 
 pub trait SetupSource {
+    /// Whether something answers for a step. `false`: the step keeps its place in the list (the first run has
+    /// its seven steps), says that it is not available in this version yet, and turns nothing on; its row of
+    /// "You're set up" says so too. Never a step that looks done while nothing was set. The fixture answers for
+    /// all of them (the board).
+    fn available(&self, _step: super::Step) -> bool {
+        true
+    }
+    /// Whether the first run still has to ask for the sync folder, and what it suggests.
+    fn folder_ask(&self) -> FolderAsk {
+        FolderAsk::Settled
+    }
+    /// "Use this folder": the suggested folder is the sync folder, if it may be; then sync starts.
+    fn keep_folder(&mut self) {}
+    /// "Choose another folder": Windows' folder picker; the folder picked there is the sync folder, if it may
+    /// be; then sync starts.
+    fn choose_folder(&mut self) {}
+    /// Whether another folder can still be chosen after a start that was refused: only while no folder was
+    /// kept in the settings (no start has worked yet).
+    fn can_choose_again(&self) -> bool {
+        false
+    }
+    /// Whether a row of "You're set up" leads to its setting. `false`: the rows are values, not links.
+    fn opens_settings(&self) -> bool {
+        true
+    }
+    /// `true`: a switch this source changes is answered after the press ([`SetupSource::take_outcomes`]), and
+    /// "You're set up" draws its value only then. The fixture's changes are made at once.
+    fn answers_later(&self) -> bool {
+        false
+    }
+    /// The changes that were answered since the last call, oldest first.
+    fn take_outcomes(&mut self) -> Vec<Outcome> {
+        Vec::new()
+    }
     fn explorer(&self) -> Explorer;
     /// The six known folders with their sizes. Engine: `known_folder::list` + a size scan.
     fn folders(&self) -> Vec<Folder>;
@@ -165,6 +261,12 @@ pub struct Script {
     pub explorer_after_retry: Explorer,
     /// `false`: Windows' passkey dialog was cancelled.
     pub passkey_added: bool,
+    /// The sync folder's question (the board has none: `Settled`).
+    pub folder: FolderAsk,
+    /// The steps nothing answers for (the board has none).
+    pub not_available: &'static [super::Step],
+    /// Another folder can be chosen after a start that was refused (the board has no such state).
+    pub choose_again: bool,
 }
 
 impl Default for Script {
@@ -173,6 +275,9 @@ impl Default for Script {
             explorer: Explorer::Adding,
             explorer_after_retry: Explorer::Added,
             passkey_added: true,
+            folder: FolderAsk::Settled,
+            not_available: &[],
+            choose_again: false,
         }
     }
 }
@@ -206,6 +311,28 @@ impl FixtureSetupSource {
 }
 
 impl SetupSource for FixtureSetupSource {
+    fn available(&self, step: super::Step) -> bool {
+        !self.script.not_available.contains(&step)
+    }
+
+    fn folder_ask(&self) -> FolderAsk {
+        self.script.folder.clone()
+    }
+
+    fn keep_folder(&mut self) {
+        self.note("keep_folder".into());
+        self.script.folder = FolderAsk::Settled;
+        self.changed = true;
+    }
+
+    fn choose_folder(&mut self) {
+        self.note("choose_folder".into());
+    }
+
+    fn can_choose_again(&self) -> bool {
+        self.script.choose_again
+    }
+
     fn explorer(&self) -> Explorer {
         self.script.explorer.clone()
     }
