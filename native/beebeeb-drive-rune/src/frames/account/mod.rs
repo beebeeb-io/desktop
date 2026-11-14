@@ -409,19 +409,7 @@ fn notice_toast(source: &dyn AccountSource, t: &Theme) -> Option<El> {
             }
         },
     });
-    Some(
-        row()
-            .key("toast-0-line")
-            .pin(Some(set::SIDEBAR_W), None, Some(0.0), Some(42.0))
-            .justify_center()
-            .child(crate::ui::toast::toast(
-                &crate::theme::icons_settings::WARN_CIRCLE,
-                crate::ui::toast::Tone::Failed,
-                words,
-                again,
-                t,
-            )),
-    )
+    Some(crate::ui::settings_notice::standing("toast", words, again, 0, t))
 }
 
 /// How soon the window looks again while an answer is out (the worker also wakes it).

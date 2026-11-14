@@ -21,6 +21,8 @@ Status after the Bandwidth lane (2026-11-12): Bandwidth's 6 and the speed test's
 | `DW-0716b` | App lock is off: no time choice. The same pane as DW-A52. | built on the account pane (DW-A52 with the lock off); the board draws them in the Drive settings kit: board follow-up task 2480 (`frames/account/FRAMES.md` has the counts) |
 | `DW-0750` | Which alerts Beebeeb sends on this PC. | built (light and dark: 0 failing on all six lines) |
 | `DW-0750b` | Notifications are off for Beebeeb in Windows: say so, and that nothing arrives. | built (light and dark: 0 failing on all six lines) |
+| `DW-0750n` | The account's switches could not be read: the rows say so, and the pane says it over itself with Try again, in view at any window size. A state of this app's own (no board frame); its golden is the app's own render (`scripts/golden-from-native.py`). | built (light and dark: 0 failing on all six lines) |
+| `DW-0750u` | The switches are drawn but could not be confirmed with Beebeeb: said over the pane with Try again, and above it the toast of a change that was refused meanwhile. A state of this app's own (no board frame); golden as `DW-0750n`. | built (light and dark: 0 failing on all six lines) |
 
 ## Settings: Drive's own sections (5)
 

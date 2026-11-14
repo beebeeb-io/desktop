@@ -371,8 +371,8 @@ fn a_failure_is_not_hidden_by_a_later_success_and_each_toast_has_its_time() {
     later(&mut source, STAYS_FAILED);
     assert_eq!(
         source.notice(),
-        Some(NOT_SIGNED_OUT),
-        "the second refusal, after the first had its time"
+        Some(NOT_SIGNED_OUT_ANOTHER),
+        "the second refusal, after the first had its time, in words of its own"
     );
     server.refused_ids.lock().unwrap().clear();
     source.run_notice_action();

@@ -377,6 +377,8 @@ pub struct BoardSettings {
     locations: Option<Locations>,
     notifications: Notifications,
     recent: Vec<(String, Vec<RecentAlert>)>,
+    /// DW-0750u: what is drawn of the account could not be confirmed.
+    unconfirmed: bool,
 }
 
 impl BoardSettings {
@@ -413,6 +415,7 @@ impl BoardSettings {
             locations: Some(board_locations()),
             notifications: board_notifications(),
             recent: board_recent(),
+            unconfirmed: false,
         }
     }
 
@@ -535,12 +538,17 @@ fn board_notifications() -> Notifications {
 
 impl BoardSettings {
     /// The account's switches without a value, from a source that says nothing about why (`alerts_state` is the
-    /// trait's default): the pane must still draw no switch.
-    #[cfg(test)]
+    /// trait's default): the pane must still draw no switch. Also the scene DW-0750n.
     pub fn with_account_alerts_not_read(mut self) -> Self {
         for alert in &mut self.notifications.groups[0].1 {
             alert.on = None;
         }
+        self
+    }
+
+    /// DW-0750u: the account's switches are drawn, and could not be confirmed with Beebeeb.
+    pub fn with_notifications_unconfirmed(mut self) -> Self {
+        self.unconfirmed = true;
         self
     }
 
@@ -620,6 +628,9 @@ impl BoardSettings {
 impl SettingsSource for BoardSettings {
     fn sample(&self) -> bool {
         true
+    }
+    fn notifications_unconfirmed(&self) -> bool {
+        self.unconfirmed
     }
     fn mark_recent_seen(&mut self) {
         for (_, alerts) in &mut self.recent {
