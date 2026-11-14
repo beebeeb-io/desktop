@@ -27,6 +27,10 @@ pub trait ThumbSource: Send + 'static {
     fn sample(&self, _id: &str) -> Option<u8> {
         None
     }
+    /// The arrived thumbnail as pixels. Only a source of real thumbnails answers; a board fixture names a sample.
+    fn pixels(&self, _id: &str) -> Option<rune::Pixels> {
+        None
+    }
 }
 
 /// Nothing is connected that hands over thumbnails: every picture stays a plain tile.
@@ -204,6 +208,7 @@ pub fn grid_body(s: &State, t: &Theme) -> Option<El> {
                     name: &item.name,
                     sub: &sub,
                     thumb: thumb_of(item, thumbs),
+                    pixels: pictured(item).then(|| thumbs.pixels(&item.id)).flatten(),
                     length: length.as_deref(),
                     selected: s.is_selected(i),
                 },

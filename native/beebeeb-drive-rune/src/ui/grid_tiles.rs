@@ -60,6 +60,8 @@ pub struct Tile<'a> {
     /// The line under the name: a size, or how many items a folder holds.
     pub sub: &'a str,
     pub thumb: Thumb,
+    /// The arrived thumbnail's pixels, from a source of real thumbnails (`Thumb::Picture` draws them).
+    pub pixels: Option<rune::Pixels>,
     /// A video's length ("0:41").
     pub length: Option<&'a str>,
     pub selected: bool,
@@ -88,7 +90,11 @@ pub fn tile(i: usize, item: &Tile, t: &Theme) -> El {
                 .child(kit::glyph(format!("{k}-icon"), ic, size, t.text_tertiary))
         }
         Thumb::Plain => thumb.fill(t.text.alpha(0.08)),
-        Thumb::Picture => file_list::thumbnail(thumb),
+        Thumb::Picture => match &item.pixels {
+            // The real picture, covering the tile (the toolkit crops what does not fit).
+            Some(pixels) => thumb.pixels_fit(pixels, rune::SurfaceFit::Fill),
+            None => file_list::thumbnail(thumb),
+        },
         Thumb::Sample(n) => sample(thumb, n),
     };
     if let Some(length) = item.length {

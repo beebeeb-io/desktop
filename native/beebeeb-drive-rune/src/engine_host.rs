@@ -50,6 +50,7 @@ pub mod files;
 mod files_trash;
 pub mod guide;
 pub mod open;
+pub mod photos;
 pub mod search;
 pub mod settings;
 pub mod shared;
@@ -59,6 +60,7 @@ pub mod sync;
 #[cfg(test)]
 pub(crate) mod tests;
 pub mod this_pc;
+pub mod thumbs;
 pub mod trash;
 pub mod tray;
 // An open file: its facts from the local state, its content decrypted in memory (`viewer`).
