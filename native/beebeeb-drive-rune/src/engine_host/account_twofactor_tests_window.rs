@@ -85,8 +85,17 @@ fn codes_shown(rt: &Runtime<State>) -> Option<usize> {
 /// The Two-factor page, "Make new backup codes", a current code, the press: the request is out.
 fn ask_for_new_codes(fake: &Fake, rt: &mut Runtime<State>) {
     fake.disable_delay_ms.store(600, Ordering::SeqCst);
+    let read = |rt: &Runtime<State>| {
+        !rt.elements().iter().any(|e| {
+            !e.exiting
+                && e.text
+                    .as_deref()
+                    .is_some_and(|text| text.contains("Asking Beebeeb for your account"))
+        })
+    };
+    wait_for(rt, "the account is read", read);
     rt.update(|s, _| crate::frames::account::go(s, "DW-A71"));
-    rt.frame(0.016);
+    wait_for(rt, "the Two-factor page is read", read);
     rt.update(|s, _| {
         s.account.dialog = Some(Dialog::Code(CodeFor::NewBackupCodes));
         s.account.form.code.text = "123456".into();
