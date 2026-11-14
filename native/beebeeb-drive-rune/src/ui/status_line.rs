@@ -3,8 +3,8 @@
 //! `status-text`, `status-details`. `state` is the sync state's word ("Up to date"); `None` when
 //! nothing syncs here: then there is no dot and no word, never a sample.
 //!
-//! The dot is green only for the two words of a sync that runs and is fine ([`SYNCING`],
-//! [`UP_TO_DATE`]); every other word has the grey dot of `status_offline` (`--color-ink-4`).
+//! The dot is green only for [`UP_TO_DATE`]; [`SYNCING`] has the board's grey (`--color-ink-3`, DW-0412);
+//! every other word has the lighter grey dot of `status_offline` (`--color-ink-4`).
 
 use crate::theme::tokens::{Theme, type_};
 use rune::{El, el, row};
@@ -26,8 +26,11 @@ pub const SIGN_IN_AGAIN: &str = "Sign in again";
 pub fn status_line(state: Option<&str>, details: &str, t: &Theme) -> El {
     let mut left = row().key("status-left").center_y().gap(7.0);
     if let Some(state) = state {
-        let dot = if matches!(state, SYNCING | UP_TO_DATE) {
+        // Green only for a sync that is done; a copy still coming down has the board's darker grey (DW-0412).
+        let dot = if state == UP_TO_DATE {
             t.green
+        } else if state == SYNCING {
+            t.text_tertiary
         } else {
             t.text_quaternary
         };

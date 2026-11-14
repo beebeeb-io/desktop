@@ -8,6 +8,7 @@
 //! with `-label`, `-shortcut`, `-check`; per separator `menu-sep-<j>`.
 
 use crate::State;
+use crate::theme::icons;
 use crate::theme::icons_files as glyphs;
 use crate::theme::tokens::{Theme, radius};
 use rune::{Color, El, TextStyle, Tx, col, el, row};
@@ -123,6 +124,9 @@ impl Entry {
     }
 }
 
+/// In place of a shortcut: this entry opens another menu beside this one (`Entry::keyed(id, label, SUBMENU)`).
+pub const SUBMENU: &str = "\u{203A}";
+
 /// How tall a menu of these entries is, so its owner can keep it inside the window.
 pub fn height(entries: &[Entry]) -> f32 {
     2.0 * PAD
@@ -188,6 +192,38 @@ pub fn menu(
     hover: fn(&mut State, usize),
     close: fn(&mut State, &mut Tx),
 ) -> El {
+    surface(true, key, name, width, entries, hot, t, pick, hover, close)
+}
+
+/// A menu that opens beside another one (Sort by's choices): the same surface, not modal itself. It is
+/// drawn inside the menu it belongs to, whose modal reaches it.
+#[allow(clippy::too_many_arguments)]
+pub fn flyout(
+    key: &'static str,
+    name: &'static str,
+    width: f32,
+    entries: &[Entry],
+    t: &Theme,
+    pick: fn(&mut State, usize, &mut Tx),
+    hover: fn(&mut State, usize),
+    close: fn(&mut State, &mut Tx),
+) -> El {
+    surface(false, key, name, width, entries, None, t, pick, hover, close)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn surface(
+    modal: bool,
+    key: &'static str,
+    name: &'static str,
+    width: f32,
+    entries: &[Entry],
+    hot: Option<usize>,
+    t: &Theme,
+    pick: fn(&mut State, usize, &mut Tx),
+    hover: fn(&mut State, usize),
+    close: fn(&mut State, &mut Tx),
+) -> El {
     let mut surface = col()
         .key(key)
         .role("menu")
@@ -197,8 +233,10 @@ pub fn menu(
         .radius(8.0)
         .fill(raised(t))
         .box_shadow(kit::drop(8.0, 28.0, Color::BLACK.alpha(0.20)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .modal_tx(true, close);
+        .box_shadow(kit::ring(kit::HAIR, t.separator));
+    if modal {
+        surface = surface.modal_tx(true, close);
+    }
     let (mut n_item, mut n_sep) = (0, 0);
     for (i, entry) in entries.iter().enumerate() {
         match *entry {
@@ -255,8 +293,8 @@ pub fn menu(
                     .radius(radius::SM)
                     .fill(if is_hot { t.press } else { Color::TRANSPARENT })
                     .child(tick)
-                    .child(
-                        kit::label(
+                    .child({
+                        let name = kit::label(
                             format!("{k}-label"),
                             label,
                             ITEM,
@@ -269,9 +307,11 @@ pub fn menu(
                             },
                         )
                         .grow(1.0)
-                        .min_w(0.0)
-                        .truncate(),
-                    );
+                        .min_w(0.0);
+                        // A label with a shortcut is as wide as the menu was made for: its text is
+                        // never cut for the sub-point its measure may differ by.
+                        if shortcut.is_none() { name.truncate() } else { name }
+                    });
                 // A dimmed item is read as unavailable; it takes no focus, no pointer and no pick.
                 item = if off {
                     item.disabled(true)
@@ -285,7 +325,12 @@ pub fn menu(
                 if checked {
                     item = item.checked(true);
                 }
-                if let Some(keys) = shortcut {
+                if shortcut == Some(SUBMENU) {
+                    // A choice that opens a menu beside this one: its mark, where a shortcut would stand.
+                    item = item.child(
+                        kit::glyph(format!("{k}-chevron"), &icons::CHEVRON_RIGHT, 11.0, t.text_tertiary).ml(24.0),
+                    );
+                } else if let Some(keys) = shortcut {
                     item = item.shortcut_hint(keys).child(
                         kit::label(
                             format!("{k}-shortcut"),

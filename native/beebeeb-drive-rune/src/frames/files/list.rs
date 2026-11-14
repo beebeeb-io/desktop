@@ -47,6 +47,12 @@ pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
         .py(4.0)
         .px(6.0)
         .scroll(rune::ScrollSpec { stick_bottom: false })
+        // A right-click on the empty space: the menu of the list (DW-1103). A row's own right-click
+        // opens the file menu and is heard first.
+        .on_secondary_press(|s: &mut State, at: PointerPress, tx: &mut Tx| {
+            tx.focus("rows", false);
+            s.open_background_menu((at.x, at.y));
+        })
         // Files dragged in from File Explorer upload into the folder shown (DW-0481: "Drop on empty space").
         .on_drop_files(|s: &mut State, files: &[std::path::PathBuf], tx: &mut Tx| {
             let folder = s.listing.folder.id.clone();
@@ -95,6 +101,8 @@ pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
                                 .source
                                 .uploads()
                                 .and_then(|u| u.of(&item.id).map(|u| u.state.clone()));
+                            // A copy on its way down: its words and bar (DW-0412).
+                            let downloading = s.download_of(&item.id);
                             // A folder a drag is over: outlined, on the selection's tint (DW-0481).
                             let dropping = s.drop_row() == Some(i);
                             // A protected folder draws its own rows (`protected.rs`).
@@ -104,7 +112,7 @@ pub fn rows(s: &State, _cx: &mut Cx<State>, t: &Theme) -> El {
                                     let k = format!("row-{shown}");
                                     let tile = super::long_list::picture_tile(s, &k, item, &t);
                                     let lit = s.is_selected(i) || dropping;
-                                    file_row_full(shown, item, lit, date, field, tile, uploading, &t)
+                                    file_row_full(shown, item, lit, date, field, tile, uploading, downloading, &t)
                                 }
                             };
                             if dropping {
@@ -244,7 +252,7 @@ pub fn column_headers(sort: super::Sort, t: &Theme) -> El {
 /// One row (`.mk-row`). `date`: the source's own words for the date, else the list's.
 /// `renaming`: the field that stands where the name is while it is being typed (DW-0410).
 /// "Two versions" where a date stands (`.mk-row` with `modSans`): 12/400 on a 14.5 pt line.
-const TWO_VERSIONS: rune::TextStyle = rune::TextStyle::new(12.0, 400.0).lh(14.5);
+pub(super) const TWO_VERSIONS: rune::TextStyle = rune::TextStyle::new(12.0, 400.0).lh(14.5);
 
 pub fn file_row(
     i: usize,
@@ -255,7 +263,7 @@ pub fn file_row(
     uploading: Option<super::uploads::UploadState>,
     t: &Theme,
 ) -> El {
-    file_row_full(i, item, selected, date, renaming, None, uploading, t)
+    file_row_full(i, item, selected, date, renaming, None, uploading, None, t)
 }
 
 /// [`file_row`], with the tile to draw in place of the kind's own (a fixture's picture).
@@ -268,7 +276,7 @@ pub fn file_row_with(
     tile: Option<El>,
     t: &Theme,
 ) -> El {
-    file_row_full(i, item, selected, date, renaming, tile, None, t)
+    file_row_full(i, item, selected, date, renaming, tile, None, None, t)
 }
 
 /// The row with everything it can show: `tile` in place of the kind's own, and `uploading`,
@@ -282,6 +290,7 @@ fn file_row_full(
     renaming: Option<El>,
     tile: Option<El>,
     uploading: Option<super::uploads::UploadState>,
+    downloading: Option<super::keeping::Download>,
     t: &Theme,
 ) -> El {
     let k = format!("row-{i}");
@@ -341,13 +350,27 @@ fn file_row_full(
             ));
         }
         _ => {
-            if let Some(state) = PcState::of(item.pc_status.as_deref()) {
+            if downloading.is_some() {
+                pc = pc
+                    .child(super::keeping::pc_mark(format!("{k}-pc"), t))
+                    // The board's export keeps the date's cell here, holding nothing: the date and size gave
+                    // way to the words and the bar.
+                    .child(
+                        kit::label(format!("{k}-date"), "", type_::META_MONO, meta)
+                            .absolute(0.0, 0.0)
+                            .w(COL_PC_W)
+                            .h(14.0),
+                    );
+            } else if let Some(state) = PcState::of(item.pc_status.as_deref()) {
                 pc = pc.child(pc_glyph(format!("{k}-pc"), state, surface, t));
             }
         }
     }
     // An upload that moves: its words and its bar where the date and the size stand.
     let progress = match &uploading {
+        _ if downloading.is_some() && uploading.is_none() => downloading
+            .as_ref()
+            .map(|d| super::keeping::progress(&k, item, d, COL_DATE_W + COL_GAP + COL_SIZE_W, t)),
         Some(UploadState::Uploading { row: words, done, .. }) => Some(
             col()
                 .key(format!("{k}-upload"))

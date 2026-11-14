@@ -7,12 +7,14 @@
 
 pub mod action_scenes;
 pub mod actions_data;
+pub mod background_menu;
 pub mod browse_states;
 pub mod changes;
 pub mod conflict;
 pub mod details;
 pub mod dialogs;
 pub mod facts;
+pub mod keeping;
 pub mod keys;
 pub mod list;
 pub mod local;
@@ -26,6 +28,9 @@ pub mod protected_fixture;
 pub mod rename;
 pub mod reset;
 pub mod retry;
+mod row_facts;
+pub mod scenes_waveb;
+pub mod select_bar;
 pub mod session;
 pub mod share;
 pub mod sidebar;
@@ -48,6 +53,8 @@ mod protected_tests;
 mod rest_tests;
 #[cfg(test)]
 mod review_tests;
+#[cfg(test)]
+mod scenes_waveb_tests;
 #[cfg(test)]
 mod session_tests;
 #[cfg(test)]
@@ -81,6 +88,8 @@ pub enum MenuKind {
     Sort,
     /// The toolbar's New (DW-0414).
     New,
+    /// A right-click on the list's empty space (DW-1103): `background_menu.rs`.
+    Background,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -863,12 +872,16 @@ impl State {
                     .collect()
             }
             MenuKind::New => menus::new_menu(),
+            MenuKind::Background => background_menu::entries(self),
         }
     }
 
     /// Run the entry `index` of the open menu. A dimmed entry does nothing and the menu stays.
     pub fn pick_menu(&mut self, index: usize, tx: &mut Tx) {
         let Some(open) = self.actions.menu else { return };
+        if open.kind == MenuKind::Background {
+            return self.pick_background(index, tx);
+        }
         let entries = self.menu_entries(open.kind);
         let Some(id) = entries.get(index).filter(|e| !e.is_off()).and_then(|e| e.id()) else {
             return;
