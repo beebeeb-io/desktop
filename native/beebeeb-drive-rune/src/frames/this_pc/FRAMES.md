@@ -48,8 +48,11 @@ Built: 25 of 26. Not built: DW-0738 (system UI). Gate, 50 runs (25 frames, light
 
 States the board gives a rule and no drawing, built from the rule's words (tests only): a filter or
 a search that matches nothing draws an empty list (no invented copy); "Remove all from this PC"
-emits `Intent::AskRemoveAll` and removes only after `Ui::remove_all_confirmed` (the ask has no
-frame); the history's right-click menu (Show in File Explorer · Show in Beebeeb · Copy name) has
+asks once in the window's dialog card ("Remove all from this PC?", Remove all · Cancel; the ask has
+no frame) and removes only on the yes; while the engine has no lists for a section it says why in
+the section's empty state ("Reading this PC", "Couldn't read this PC", "Not available for this
+account"; no frame), never "No changes yet"; on a real PC the status line says the window's own
+sync word and the section's words, the board's sample counts only in the scenes; the history's right-click menu (Show in File Explorer · Show in Beebeeb · Copy name) has
 no frame and is not built; a code the engine does not accept (DW-0742) empties the boxes and the
 dialog stays, with no words (the board draws none); the password instead of a code ("or the
 password without two-factor") has no frame and is not built; a folder the picker returns that
