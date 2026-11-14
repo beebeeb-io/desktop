@@ -303,11 +303,11 @@ impl BackupsUi {
     }
 
     /// The source may have an answer to the sign-in: on "accepted" the password is wiped and
-    /// Choose folders shows (DW-1404). A refusal stays in the account step (DW-1403). Called
-    /// after Connect, on every key and on every change of route; while an accepted answer has
-    /// not been taken the step keeps Connect off, so nothing is asked twice. (A source that
-    /// answers late also needs the window's poll to call this: Backups has no poll yet, as for
-    /// [`source::BackupsSource::pump`].)
+    /// Choose folders is the step (DW-1404). A refusal stays in the account step (DW-1403).
+    /// Called after Connect and before every act on the folders. The view does not wait for
+    /// it: it draws Choose folders as soon as the source's answer says "accepted", so a late
+    /// answer shows with the next draw and is taken (the password wiped) with the first press.
+    /// (A window poll for Backups, as for [`source::BackupsSource::pump`], would wipe sooner.)
     pub fn mail_answered(&mut self) {
         if self.dialog != Some(Dialog::MailAccount) {
             return;
@@ -323,6 +323,7 @@ impl BackupsUi {
 
     /// Tick or untick a folder of the mailbox, by its name.
     pub fn mail_toggle_folder(&mut self, name: &str) {
+        self.mail_answered();
         if self.dialog != Some(Dialog::MailFolders) {
             return;
         }
@@ -337,6 +338,7 @@ impl BackupsUi {
     /// Start backup: the ticked folders, by name. `false`: nothing ticked, or the source did
     /// not start; the dialog stays.
     pub fn mail_start(&mut self) -> bool {
+        self.mail_answered();
         if self.dialog != Some(Dialog::MailFolders) {
             return false;
         }
@@ -367,6 +369,7 @@ impl BackupsUi {
     /// Back, in Choose folders: the account step again. The sign-in is dropped; the password
     /// was wiped when the server accepted it, so it is asked again.
     pub fn mail_back(&mut self) {
+        self.mail_answered();
         if self.dialog != Some(Dialog::MailFolders) {
             return;
         }

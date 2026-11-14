@@ -460,7 +460,7 @@ impl BackupsSource for LateSource {
 }
 
 #[test]
-fn a_late_answer_is_asked_once_and_taken_on_the_next_window_key() {
+fn a_late_answer_is_asked_once_drawn_at_once_and_taken_with_the_first_press() {
     let late = std::rc::Rc::new(std::cell::RefCell::new(Connection::Idle));
     let asked = std::rc::Rc::new(std::cell::Cell::new(0));
     let mut rt = runtime("DW-0740b");
@@ -493,18 +493,25 @@ fn a_late_answer_is_asked_once_and_taken_on_the_next_window_key() {
         !rt.state.backups.mail.password.text.is_empty(),
         "kept until the server answers"
     );
-    // The answer is in but not taken yet: Connect stays off.
+    // The answer arrives: the next draw shows Choose folders, with the mailbox's suggestion.
     *late.borrow_mut() = Connection::Folders {
         address: board::ADDRESS.into(),
         folders: board::folders(),
         size: board::SIZE.into(),
     };
     settle(&mut rt);
-    assert_eq!(rt.state.backups.dialog, Some(Dialog::MailAccount));
-    assert!(!info(&rt, "btn-1").focusable);
-    // The next key that reaches the window takes it: Choose folders, the password wiped.
-    press(&mut rt, Key::Down);
+    assert_eq!(text(&rt, "dlg-title"), "Choose folders");
+    assert!(
+        info(&rt, "btn-1").focusable,
+        "Start backup is on: four folders are suggested"
+    );
+    // The first press takes the answer (the password is wiped) and then acts on it.
+    click(&mut rt, "item-1-4");
     assert_eq!(rt.state.backups.dialog, Some(Dialog::MailFolders));
     assert!(rt.state.backups.mail.password.text.is_empty());
+    assert_eq!(
+        rt.state.backups.mail.picked,
+        ["Inbox", "Sent", "Archive", "Clients", "Newsletters"]
+    );
     assert_eq!(asked.get(), 1);
 }

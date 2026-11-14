@@ -571,8 +571,7 @@ fn turn_on(list: usize, first_button: usize, t: &Theme) -> El {
 fn account(ui: &BackupsUi, connection: &Connection, banners: usize, first_button: usize, t: &Theme) -> El {
     let typed = &ui.mail;
     let refused = matches!(connection, Connection::Refused { .. });
-    // An accepted answer the section has not taken yet is still "no answer" to the person.
-    let checking = matches!(connection, Connection::Checking | Connection::Folders { .. });
+    let checking = *connection == Connection::Checking;
     let mut body = Vec::new();
     if let Connection::Refused { server } = connection {
         body.push(banner_red(
@@ -662,6 +661,16 @@ fn account(ui: &BackupsUi, connection: &Connection, banners: usize, first_button
         .modal(false, |s: &mut State| s.backups.close_dialog())
 }
 
+/// Whether a folder shows ticked: the person's ticks once the answer was taken
+/// ([`BackupsUi::mail_answered`]), the mailbox's suggestion while it was not.
+fn ticked(ui: &BackupsUi, folder: &MailFolder) -> bool {
+    if ui.dialog == Some(Dialog::MailFolders) {
+        ui.mail.picked.contains(&folder.name)
+    } else {
+        folder.suggested
+    }
+}
+
 /// DW-1404: which folders of the mailbox to archive.
 #[allow(clippy::too_many_arguments)]
 fn folders(
@@ -677,7 +686,7 @@ fn folders(
         .iter()
         .enumerate()
         .map(|(i, folder)| {
-            let on = ui.mail.picked.contains(&folder.name);
+            let on = ticked(ui, folder);
             let name = folder.name.clone();
             let messages = if folder.messages == 1 {
                 "1 message".to_string()
@@ -696,7 +705,7 @@ fn folders(
                 .on_press(move |s: &mut State| s.backups.mail_toggle_folder(&name))
         })
         .collect();
-    let any = all.iter().any(|folder| ui.mail.picked.contains(&folder.name));
+    let any = all.iter().any(|folder| ticked(ui, folder));
     let body = vec![
         lists::list(list, None, rows, None, t),
         dialogs::caption(
@@ -796,19 +805,21 @@ pub fn overlay(
 ) -> Option<El> {
     match ui.dialog.as_ref()? {
         Dialog::MailTurnOn => Some(turn_on(lists_drawn, buttons, t)),
-        Dialog::MailAccount => Some(account(
-            ui,
-            &source.mail_connection(),
-            usize::from(mail.failure.is_some()),
-            buttons,
-            t,
-        )),
-        Dialog::MailFolders => match source.mail_connection() {
+        // The step follows the source's answer, not the section's memory of it: "accepted"
+        // draws Choose folders at once, anything else the account step.
+        step @ (Dialog::MailAccount | Dialog::MailFolders) => match source.mail_connection() {
             Connection::Folders {
                 address,
                 folders: all,
                 size,
             } => Some(folders(ui, &address, &all, &size, lists_drawn, buttons, t)),
+            connection if *step == Dialog::MailAccount => Some(account(
+                ui,
+                &connection,
+                usize::from(mail.failure.is_some()),
+                buttons,
+                t,
+            )),
             _ => None,
         },
         Dialog::MailTurnOff => Some(turn_off(ui, buttons, t)),
