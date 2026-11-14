@@ -508,7 +508,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                     // is read again while the pane shows, and when it opens otherwise.
                     Ok(_) if changes != self.changes => {
                         self.sessions_reads.read_at = None;
-                        if self.showing == Some(Kind::Sessions) || self.counting_devices {
+                        if self.showing == Some(Kind::Sessions) {
                             self.read(Kind::Sessions);
                         }
                     }
@@ -531,7 +531,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                         self.read_failed(Kind::Sessions, made_for, error);
                         // A sign-out was answered while this read was out: the read after that answer has
                         // not been made yet (the Ok arm above makes it the same way).
-                        if changes != self.changes && (self.showing == Some(Kind::Sessions) || self.counting_devices) {
+                        if changes != self.changes && self.showing == Some(Kind::Sessions) {
                             self.read(Kind::Sessions);
                         }
                     }
