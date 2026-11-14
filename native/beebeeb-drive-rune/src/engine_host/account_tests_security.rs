@@ -224,7 +224,6 @@ fn a_list_read_before_a_sign_out_is_not_the_security_pages_count() {
     source.reload(Pane::Sessions);
     seen.recv_timeout(Duration::from_secs(5))
         .expect("the read reached Beebeeb");
-    server.read_delay_ms.store(0, Ordering::SeqCst);
     assert!(source.sign_out_device("s-phone"));
     source.opened(Pane::Security);
     // Beebeeb takes the sign-out while that read is still out.
@@ -237,6 +236,8 @@ fn a_list_read_before_a_sign_out_is_not_the_security_pages_count() {
         source.pump();
         std::thread::sleep(Duration::from_millis(10));
     }
+    // (Only now: the slow read took its delay long ago; the read after it is quick.)
+    server.read_delay_ms.store(0, Ordering::SeqCst);
     settle(&mut source);
     assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone"]);
     assert_eq!(
