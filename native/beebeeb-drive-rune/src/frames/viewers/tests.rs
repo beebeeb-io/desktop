@@ -466,7 +466,7 @@ fn a_note_is_read_rendered_or_as_source_and_its_links_and_panel_work_from_the_ke
 }
 
 #[test]
-fn a_route_to_a_file_opens_it_and_an_unknown_file_leaves_the_placeholder() {
+fn a_route_to_a_file_opens_it_and_an_unknown_file_says_it_is_no_longer_here() {
     // What Files does for Enter on a file: the shell's event, nothing of this group's.
     let mut state = init();
     crate::shell::host::dispatch(&mut state, Event::OpenItem(board::NOTES.to_string()));
@@ -476,8 +476,14 @@ fn a_route_to_a_file_opens_it_and_an_unknown_file_leaves_the_placeholder() {
     let mut state = init();
     crate::shell::host::dispatch(&mut state, Event::OpenItem("no-such-file".to_string()));
     let rt = runtime_of(state, false);
-    assert!(rt.state.viewer.ui.is_none());
-    assert!(!has(&rt, "viewer-body"));
+    // Not the shell's "not built yet" frame: the window says the file is not there, and holds nothing of one.
+    let said = viewer(&rt);
+    assert_eq!(said.file.body, Body::Stopped(super::source::Stopped::Gone));
+    assert!(said.file.name.is_empty());
+    assert_eq!(
+        info(&rt, "state-title").text.as_deref(),
+        Some("This file is no longer here")
+    );
 }
 
 #[test]

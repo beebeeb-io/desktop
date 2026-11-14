@@ -201,7 +201,14 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
         s.frames.find.source = Box::new(crate::engine_host::search::EngineSearchSource::new(engine.clone()));
     }
     s.frames.pc = Box::new(crate::frames::UnwiredPc);
-    s.photos = crate::frames::photos::Ui::new(Box::new(crate::frames::photos::source::Unwired));
+    // Photos and every grid of thumbnails read the engine (`engine_host::photos`, `engine_host::thumbs`): one store
+    // of thumbnails for both, in memory only, the session's alone.
+    let thumbs = crate::engine_host::thumbs::EngineThumbStore::new(engine.clone());
+    s.global.grid.thumbs = Box::new(crate::engine_host::thumbs::EngineThumbs::new(thumbs.clone()));
+    s.photos = crate::frames::photos::Ui::new(Box::new(crate::engine_host::photos::EnginePhotos::new(
+        engine.clone(),
+        thumbs,
+    )));
     // This PC: the `Unwired` source while its constant is off (nothing of the adapter runs then).
     s.this_pc = crate::frames::this_pc::Ui::new(crate::engine_host::this_pc::source_for(engine));
     s

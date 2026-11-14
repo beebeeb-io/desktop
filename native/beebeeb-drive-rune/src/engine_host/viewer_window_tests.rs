@@ -48,7 +48,23 @@ const LONG_NAME: &str = "long-of-the-first-account-viewer.txt";
 const PICTURE_NAME: &str = "harbour-of-the-first-account-viewer.png";
 /// The last line of the long file, far below one window of lines.
 const LONG_END: &str = "the-very-last-line-of-the-long-file";
-const PLAN_NAME: &str = "plan-of-the-first-account-viewer.pdf";
+/// A kind this app has no viewer for.
+const PLAN_NAME: &str = "plan-of-the-first-account-viewer.zip";
+const REPORT: &str = "b0000000-0000-4000-8000-000000000605";
+const REPORT_NAME: &str = "report-of-the-first-account-viewer.pdf";
+
+fn report_pdf() -> Vec<u8> {
+    super::viewer_pdf::tests::sample_pdf(2, 612, 792)
+}
+
+const LETTER: &str = "b0000000-0000-4000-8000-000000000606";
+const LETTER_NAME: &str = "letter-of-the-first-account-viewer.pdf";
+
+/// A PDF whose first page writes in a font that is not in the file; its second page has no text.
+fn letter_pdf() -> Vec<u8> {
+    use super::viewer_pdf::tests::{Writes, fonts_pdf};
+    fonts_pdf(&[Writes::Japanese, Writes::Nothing])
+}
 /// Words found nowhere else in the app.
 const NOTE_WORDS: &str = "harbourlight-words-of-the-first-account";
 
@@ -213,7 +229,9 @@ fn window(tag: &str) -> Window {
     let (second, _) = FakeAccount::register(&format!("second-viewer-{tag}@example.eu"), PASSWORD, OTHER_PHRASE);
     let (first, second) = (Arc::new(first), Arc::new(second));
     first.add_file_with_content(NOTE, None, NOTE_NAME, note_text().as_bytes());
-    first.add_file_with_content(PLAN, None, PLAN_NAME, b"%PDF-1.7 invented");
+    first.add_file_with_content(PLAN, None, PLAN_NAME, b"PK invented");
+    first.add_file_with_content(REPORT, None, REPORT_NAME, &report_pdf());
+    first.add_file_with_content(LETTER, None, LETTER_NAME, &letter_pdf());
     first.add_file_with_content(LONG, None, LONG_NAME, long_text().as_bytes());
     first.add_file_with_content(PICTURE, None, PICTURE_NAME, &super::tests::png_bytes(8, 6));
     let hold = Arc::new(Hold::default());
@@ -235,7 +253,9 @@ fn window(tag: &str) -> Window {
     let db_path = dir.path().join("state.db");
     let db = StateDb::open(&db_path).unwrap();
     put(&db, NOTE, NOTE_NAME, note_text().len() as i64);
-    put(&db, PLAN, PLAN_NAME, 17);
+    put(&db, PLAN, PLAN_NAME, 11);
+    put(&db, REPORT, REPORT_NAME, report_pdf().len() as i64);
+    put(&db, LETTER, LETTER_NAME, letter_pdf().len() as i64);
     put(&db, LONG, LONG_NAME, long_text().len() as i64);
     put(&db, PICTURE, PICTURE_NAME, super::tests::png_bytes(8, 6).len() as i64);
     db.set_owner(&Identity::new(Some(&first.user_id), Some(&first.email)))
@@ -314,7 +334,11 @@ impl Window {
             if self.drawn().contains(words) {
                 return;
             }
-            assert!(began.elapsed() < Duration::from_secs(15), "{words:?} was never drawn");
+            assert!(
+                began.elapsed() < Duration::from_secs(15),
+                "{words:?} was never drawn; the window draws:\n{}",
+                self.drawn()
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -372,6 +396,8 @@ impl Window {
             NOTE_WORDS,
             NOTE_NAME,
             PLAN_NAME,
+            REPORT_NAME,
+            LETTER_NAME,
             LONG_NAME,
             PICTURE_NAME,
             "the last line",
@@ -507,10 +533,10 @@ fn a_lock_closes_the_open_file_and_a_download_on_its_way_shows_nothing_later() {
 
 #[test]
 fn a_kind_with_no_viewer_stays_its_own_apps_and_a_route_to_it_says_so_with_two_buttons_that_answer() {
-    let mut w = window("pdf");
+    let mut w = window("zip");
     sign_in(&w.engine, &w.first, TEST_PHRASE);
     w.settle();
-    // The Files window's Open on a PDF: not this viewer's (the Files window opens it in its own app, as before;
+    // The Files window's Open on an archive: not this viewer's (the Files window opens it in its own app, as before;
     // with no sync running here that is refused by the Files window itself).
     w.open_row(PLAN_NAME);
     assert_eq!(
@@ -529,7 +555,8 @@ fn a_kind_with_no_viewer_stays_its_own_apps_and_a_route_to_it_says_so_with_two_b
     assert_eq!(w.route_item().as_deref(), Some(PLAN));
     let drawn = w.drawn();
     assert!(drawn.contains("No preview for this kind of file yet"), "{drawn}");
-    assert!(drawn.contains("Open in another app\u{2026}") && drawn.contains("Save a copy\u{2026}"));
+    // "Save a copy…" has nowhere to go on this source: it is not drawn (never a button that only says "not built").
+    assert!(drawn.contains("Open in another app\u{2026}") && !drawn.contains("Save a copy"));
     assert!(!drawn.contains("Decrypting on this PC"));
     w.settle();
     assert_eq!(w.chunk_requests(), 0, "nothing was downloaded");
@@ -538,14 +565,11 @@ fn a_kind_with_no_viewer_stays_its_own_apps_and_a_route_to_it_says_so_with_two_b
     // refusal is said, in its own words, on screen.
     w.click("state-btn-0");
     assert!(w.drawn().contains(viewers::NEEDS_SYNC_ELSEWHERE), "{}", w.drawn());
-    // Save a copy is not built: the press says so.
-    w.click("state-btn-1");
-    assert!(w.drawn().contains("Not built yet: Save a copy"), "{}", w.drawn());
     assert_eq!(w.chunk_requests(), 0);
 }
 
 #[test]
-fn a_route_to_a_file_that_is_not_there_is_asked_of_the_local_state_once_not_on_every_frame() {
+fn a_route_to_a_file_that_is_not_there_says_it_is_no_longer_here_and_close_goes_back() {
     let mut w = window("gone");
     sign_in(&w.engine, &w.first, TEST_PHRASE);
     w.settle();
@@ -555,18 +579,194 @@ fn a_route_to_a_file_that_is_not_there_is_asked_of_the_local_state_once_not_on_e
     for _ in 0..10 {
         w.settle();
     }
-    assert!(w.rt.state.viewer.ui.is_none());
-    assert_eq!(
-        w.rt.state.viewer.unopened_for_test().as_deref(),
-        Some("b0000000-0000-4000-8000-00000000ffff"),
-        "the window remembers what did not open instead of asking again"
+    let drawn = w.drawn();
+    assert!(drawn.contains("This file is no longer here"), "{drawn}");
+    assert!(
+        !drawn.contains("Not built yet") && !drawn.contains("Try again"),
+        "{drawn}"
     );
-    // Another route: forgotten, and a file that is there opens.
-    w.press(Key::Escape, Mods::default());
-    w.settle();
-    assert_eq!(w.rt.state.viewer.unopened_for_test(), None);
+    assert_eq!(
+        w.rt.state.viewer.unopened_for_test(),
+        None,
+        "it is a state on screen, not a memo"
+    );
+    assert_eq!(w.chunk_requests(), 0);
+    // Close: back to the folder, and a file that is there opens.
+    w.click("state-btn-0");
+    assert_eq!(w.route_item(), None);
+    assert!(w.rt.state.viewer.ui.is_none());
     w.open_row(NOTE_NAME);
     w.until_drawn(NOTE_WORDS);
+}
+
+/// The engine's own glue, in a window: a file whose bytes are in the account's folder on this PC opens from
+/// there with Beebeeb unreachable for its chunks, shows what is on disk (an edit that is not sent yet), and says
+/// where it came from.
+#[test]
+fn a_file_kept_on_this_pc_opens_from_its_copy_without_a_download_and_says_so() {
+    let mut w = window("local");
+    sign_in(&w.engine, &w.first, TEST_PHRASE);
+    w.settle();
+    // The local state says an upload of the note is on its way; the folder holds the edited file.
+    let folder = tempfile::tempdir().unwrap();
+    std::fs::write(folder.path().join(NOTE_NAME), "edited-on-this-pc-words, not sent yet\n").unwrap();
+    w.engine.use_sync_root_for_test(folder.path().to_path_buf());
+    w.engine
+        .local_state_for_changes()
+        .unwrap()
+        .with(|db| db.set_status(NOTE, FileStatus::Uploading).unwrap())
+        .unwrap();
+    // Every chunk request would fail: nothing may be downloaded.
+    w.hold.fails.store(true, Ordering::SeqCst);
+
+    w.rt.update(|s, _| {
+        host::dispatch(s, Event::OpenItem(NOTE.to_string()));
+    });
+    w.until_drawn("edited-on-this-pc-words");
+    let drawn = w.drawn();
+    assert!(
+        !drawn.contains(NOTE_WORDS),
+        "the older version Beebeeb has is not what is shown"
+    );
+    assert!(drawn.contains(viewers::FROM_THIS_PC_UNSENT), "{drawn}");
+    assert!(!drawn.contains("Decrypted on this PC"), "{drawn}");
+    assert_eq!(w.chunk_requests(), 0, "nothing was downloaded");
+
+    // In sync, and the copy is what Beebeeb has: said as the copy on this PC, without the warning.
+    w.press(Key::Escape, Mods::default());
+    std::fs::write(folder.path().join(NOTE_NAME), note_text()).unwrap();
+    w.engine
+        .local_state_for_changes()
+        .unwrap()
+        .with(|db| db.set_status(NOTE, FileStatus::Local).unwrap())
+        .unwrap();
+    w.rt.update(|s, _| {
+        host::dispatch(s, Event::OpenItem(NOTE.to_string()));
+    });
+    w.until_drawn(NOTE_WORDS);
+    let drawn = w.drawn();
+    assert!(drawn.contains(viewers::FROM_THIS_PC), "{drawn}");
+    assert!(!drawn.contains("aren't in Beebeeb yet"), "{drawn}");
+    assert_eq!(w.chunk_requests(), 0);
+
+    // After a lock nothing of it is left, as for a downloaded file.
+    w.engine.lock();
+    w.settle();
+    w.assert_nothing_of_the_file("after a lock");
+}
+
+/// "Open in its app" on the preview panel hands the file to its own app, never to the window's viewer, also
+/// for a file the viewer shows. (No sync runs here, so the Files window's own open refuses and says so.)
+#[test]
+fn open_in_its_app_never_opens_the_windows_viewer() {
+    let mut w = window("itsapp");
+    sign_in(&w.engine, &w.first, TEST_PHRASE);
+    w.settle();
+    let row =
+        w.rt.state
+            .listing
+            .items
+            .iter()
+            .position(|item| item.name == NOTE_NAME)
+            .expect("the note is listed");
+    w.click(&format!("row-{row}-date"));
+    w.rt.update(|s, tx| {
+        assert!(s.preview(), "the preview panel opens");
+        s.open_from_preview(tx);
+    });
+    w.settle();
+    assert_eq!(w.route_item(), None, "the route did not go to the viewer");
+    assert!(w.rt.state.viewer.ui.is_none());
+    assert_eq!(w.chunk_requests(), 0);
+    // Enter on the same row is the viewer's (the file is not on this PC).
+    w.press(Key::Enter, Mods::default());
+    w.until_drawn(NOTE_WORDS);
+    assert_eq!(w.route_item().as_deref(), Some(NOTE));
+}
+
+/// A PDF, end to end on the real engine: downloaded and decrypted in memory, its page rendered on this PC and
+/// drawn, and nothing of it left after a lock.
+#[test]
+fn a_pdf_opened_from_the_files_window_shows_its_page_rendered_here() {
+    let mut w = window("pdfpage");
+    sign_in(&w.engine, &w.first, TEST_PHRASE);
+    w.settle();
+    w.open_row(REPORT_NAME);
+    assert_eq!(w.route_item().as_deref(), Some(REPORT));
+    w.until_drawn("Page 1 of 2");
+    // The page is asked for when it is drawn, says so meanwhile, and then has its picture.
+    let began = Instant::now();
+    loop {
+        w.settle();
+        let page =
+            w.rt.elements()
+                .into_iter()
+                .find(|e| e.key.as_deref() == Some("page") && !e.exiting)
+                .expect("the page");
+        // A Letter page in its own proportions (the blank page of the board is 3:4): its picture is drawn.
+        let ratio = page.rect[3] / page.rect[2];
+        if (ratio - 792.0 / 612.0).abs() < 0.01 && !w.drawn().contains(viewers::PAGE_RENDERING) {
+            break;
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the page was never drawn: {}",
+            w.drawn()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let drawn = w.drawn();
+    assert!(drawn.contains("Decrypted on this PC"), "{drawn}");
+    assert!(!drawn.contains(viewers::PAGE_FAILED), "{drawn}");
+    // Page Down: the second page, rendered when it is shown.
+    w.press(Key::PageDown, Mods::default());
+    w.until_drawn("Page 2 of 2");
+
+    w.engine.lock();
+    w.settle();
+    w.assert_nothing_of_the_file("after a lock");
+}
+
+/// A page that is drawn without some of its text says so in the status line, and the next page does not.
+#[test]
+fn a_pdf_page_that_may_lack_text_says_so_under_the_page_and_a_page_that_does_not_is_as_before() {
+    let mut w = window("pdffont");
+    sign_in(&w.engine, &w.first, TEST_PHRASE);
+    w.settle();
+    w.open_row(LETTER_NAME);
+    assert_eq!(w.route_item().as_deref(), Some(LETTER));
+    w.until_drawn("Page 1 of 2");
+    // Not said while the page is on its way; said once its picture is there.
+    assert!(
+        !w.drawn().contains(viewers::PAGE_LACKS_TEXT) || !w.drawn().contains(viewers::PAGE_RENDERING),
+        "{}",
+        w.drawn()
+    );
+    w.until_drawn(viewers::PAGE_LACKS_TEXT);
+    let drawn = w.drawn();
+    assert!(!drawn.contains(viewers::PAGE_RENDERING), "{drawn}");
+    assert!(
+        !drawn.contains("Space for Preview"),
+        "the note takes the hint's place: {drawn}"
+    );
+    assert!(drawn.contains("Decrypted on this PC"), "{drawn}");
+    // The second page lacks nothing: the hint is back, the note is gone.
+    w.press(Key::PageDown, Mods::default());
+    w.until_drawn("Page 2 of 2");
+    let began = Instant::now();
+    while w.drawn().contains(viewers::PAGE_RENDERING) {
+        assert!(began.elapsed() < Duration::from_secs(20), "page 2 never came");
+        std::thread::sleep(Duration::from_millis(10));
+        w.settle();
+    }
+    let drawn = w.drawn();
+    assert!(!drawn.contains(viewers::PAGE_LACKS_TEXT), "{drawn}");
+    assert!(drawn.contains("Space for Preview"), "{drawn}");
+    // And a lock leaves nothing of it.
+    w.engine.lock();
+    w.settle();
+    w.assert_nothing_of_the_file("after a lock");
+    assert!(!w.drawn().contains(viewers::PAGE_LACKS_TEXT));
 }
 
 #[test]

@@ -24,6 +24,17 @@ impl<C: CredentialStores> Engine<C> {
     /// one signed in with the vault open, the local state is another account's (task 2488), no sync folder set,
     /// nothing synced yet, or the change was refused.
     pub fn set_kept(&self, file_id: &str, kept: bool) -> Result<(), String> {
+        self.set_kept_in(None, file_id, kept)
+    }
+
+    /// [`Self::set_kept`]; with `only_for`, nothing is changed unless the account-bound handle is that session's
+    /// (`Engine::set_kept_for`, the session of a press).
+    pub(super) fn set_kept_in(
+        &self,
+        only_for: Option<crate::account::SessionGeneration>,
+        file_id: &str,
+        kept: bool,
+    ) -> Result<(), String> {
         if self.view().gate != GateState::Ready {
             return Err(NOT_SIGNED_IN.to_string());
         }
@@ -40,6 +51,9 @@ impl<C: CredentialStores> Engine<C> {
                 NO_LOCAL_STATE.to_string()
             }
         })?;
+        if only_for.is_some_and(|session| state.session() != session) {
+            return Err(NOT_SIGNED_IN.to_string());
+        }
         state
             .with_shared(|db| pin(self.identity, &self.config.api_base, db, &sync_root, file_id, kept))
             .map_err(|_| NOT_SIGNED_IN.to_string())?
