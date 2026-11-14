@@ -338,6 +338,11 @@ fn the_command_search_shows_only_what_the_source_finds() {
     let (mut rt, _) = agreement(Case::Selected, false, true);
     ctrl(&mut rt, 'k');
     assert!(has(&rt, "pal"));
+    assert_eq!(
+        focused(&rt).as_deref(),
+        Some("pal-input"),
+        "the search takes the keyboard"
+    );
     assert!(!has(&rt, "pal-0"), "nothing typed, nothing found");
     let type_query = |rt: &mut Runtime<State>| {
         rt.update(|s, _| {
