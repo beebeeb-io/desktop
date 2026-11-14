@@ -762,6 +762,10 @@ fn share_invite_goes_once_per_share_answers_from_the_engine_and_a_late_answer_is
     fake.delay_ms.store(0, Ordering::SeqCst);
     let reads_then = sent_reads(&fake.fake);
     settle(&mut source);
+    // The account change may have emptied the source before the worker answered: give the worker time to answer
+    // (its request was held 150 ms at the fake), then take in what came.
+    std::thread::sleep(Duration::from_millis(500));
+    let _ = source.pump();
     assert_eq!(
         source.invite_answer(),
         None,
