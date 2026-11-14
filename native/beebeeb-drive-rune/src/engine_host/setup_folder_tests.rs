@@ -833,10 +833,8 @@ fn the_window_says_a_folder_that_was_not_saved_and_never_added() {
         Start::Refused(SyncStartRefused::RegistrationFailed { code: None }),
         EngineExplorer::Unknown,
     );
-    wait_for(&mut rt, "the refusal", |rt| {
-        !says(rt, "Couldn't save your folder choice")
-    });
-    assert!(says(&rt, "Sync didn't start"));
+    wait_for(&mut rt, "the refusal", |rt| says(rt, "Sync didn't start"));
+    assert!(!says(&rt, "Couldn't save your folder choice"));
     engine.set(Start::Running, EngineExplorer::Added);
     wait_for(&mut rt, "unsaved again", |rt| {
         says(rt, "Couldn't save your folder choice")
