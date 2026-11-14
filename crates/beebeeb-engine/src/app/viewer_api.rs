@@ -401,7 +401,12 @@ impl<C: CredentialStores> Engine<C> {
 /// data access; macOS: not dataless). A link, a folder, a pipe or a device is not a plain file.
 fn is_plain_and_wholly_here(metadata: &std::fs::Metadata) -> bool {
     let attrs = beebeeb_backup::attrs_of(metadata);
-    !(attrs.is_dir || attrs.is_link || attrs.not_local)
+    is_read_here(attrs.is_dir, attrs.is_link, attrs.not_local)
+}
+
+/// The rule over what core read: only a plain file (no folder, no link or special file) whose bytes are here.
+fn is_read_here(is_dir: bool, is_link: bool, not_local: bool) -> bool {
+    !(is_dir || is_link || not_local)
 }
 
 /// The length of the plain file at `path` when every byte of it is on disk, asked from its attributes alone

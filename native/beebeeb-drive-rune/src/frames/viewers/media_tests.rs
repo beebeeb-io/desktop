@@ -710,6 +710,14 @@ fn a_long_pdf_builds_only_the_thumbnails_near_the_window_and_its_column_and_its_
     });
     settle(&mut rt);
     assert_eq!(words(&rt, "item-count"), "Page 1 of 2000 \u{00B7} 2.3 MB");
+    // At 100 % the page fits: it stands in the middle of its area, 24 points under its top.
+    let (area, page) = (info(&rt, "page-area").rect, info(&rt, "page").rect);
+    assert_eq!(
+        page[0] + page[2] / 2.0,
+        area[0] + area[2] / 2.0,
+        "centred: {page:?} in {area:?}"
+    );
+    assert_eq!(page[1], area[1] + 24.0);
     // 2,000 pages: the thumbnails in and near the window, not all of them.
     let first = thumbs_built(&rt);
     assert_eq!(first.first(), Some(&1));
@@ -760,6 +768,29 @@ fn a_long_pdf_builds_only_the_thumbnails_near_the_window_and_its_column_and_its_
         let page = info(rt, "page").rect;
         page[1] + page[3]
     };
+    // Its left edge is inside the area at rest (a page wider than the area starts at its left, where scrolling
+    // can reach all of it: centred, its left part would lie where no scroll goes).
+    assert!(
+        page[0] >= area[0],
+        "the page's left edge can be seen: {page:?} in {area:?}"
+    );
+    let right = |rt: &Runtime<State>| {
+        let page = info(rt, "page").rect;
+        page[0] + page[2]
+    };
+    let right_before = right(&rt);
+    for dx in [900.0, -1800.0] {
+        if right(&rt) < right_before {
+            break;
+        }
+        rt.wheel_xy(area[0] + area[2] / 2.0, area[1] + area[3] / 2.0, dx, 0.0);
+        settle(&mut rt);
+    }
+    assert!(
+        right(&rt) < right_before,
+        "the page scrolls sideways: {} from {right_before}",
+        right(&rt)
+    );
     let before = bottom(&rt);
     assert!(before > area[1] + area[3], "the page's foot is below the window");
     wheel_until(&mut rt, "page-area", |rt| bottom(rt) < before);

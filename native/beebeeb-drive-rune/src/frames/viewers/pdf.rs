@@ -425,7 +425,6 @@ pub fn body(ui: &Ui, doc: &PdfDoc, t: &Theme) -> El {
                 .h_full()
                 .pt(24.0)
                 .pb(24.0)
-                .justify_center()
                 .items_start()
                 .fill(style::stage(t))
                 .clip_rounded(0.0)
@@ -435,6 +434,9 @@ pub fn body(ui: &Ui, doc: &PdfDoc, t: &Theme) -> El {
                 .scroll_xy()
                 // A turned page is scrolled back to its top with the area's own 24 points over it.
                 .scroll_margin(24.0)
-                .child(page(ui)),
+                // The page is centred while it fits. Wider than the area, it starts at the area's left edge,
+                // where scrolling reaches all of it (centred there, its left part would lie where no scroll
+                // goes): the holder is as wide as the area, or as the page when that is wider.
+                .child(row().key("page-holder").w_full().justify_center().child(page(ui))),
         )
 }

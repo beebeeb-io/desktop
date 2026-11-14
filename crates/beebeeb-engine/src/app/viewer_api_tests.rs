@@ -645,6 +645,12 @@ fn what_was_put_at_the_path_after_the_check_is_asked_again_through_the_open_file
         read_bounded(dir.path(), 20, 5_000, &never, &always),
         Err(ReadStopped::Unreadable)
     ));
+    // What core reads of an entry, each alone: a folder, a link or special file, bytes that are not on this
+    // computer (which no file on this test's file system can say). Only none of the three is read.
+    assert!(is_read_here(false, false, false));
+    assert!(!is_read_here(true, false, false));
+    assert!(!is_read_here(false, true, false));
+    assert!(!is_read_here(false, false, true));
     // The plain file is read.
     assert_eq!(
         read_bounded(&dir.path().join("other.txt"), 20, 5_000, &never, &always)
