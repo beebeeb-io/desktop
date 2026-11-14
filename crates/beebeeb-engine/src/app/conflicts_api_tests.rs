@@ -273,6 +273,33 @@ fn a_failed_keep_there_that_already_replaced_the_file_keeps_the_copy() {
     assert!(dir.path().join("other").join("Invented draft.txt").is_file());
 }
 
+#[test]
+fn a_copy_left_by_a_run_that_ended_early_is_never_thrown_away_unread() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("Invented draft.txt");
+    let folder = dir.path().join("replaced").join("a-file-id");
+    // A run that ended after the server's version landed and before its copy was put in place.
+    std::fs::write(&file, b"this PC's replaced edit").unwrap();
+    let _left_behind = SafetyCopy::make(&file, &folder).unwrap();
+    std::fs::write(&file, b"the server's version").unwrap();
+    // The next Keep there of the file keeps that copy, then copies the file as it is now.
+    let next = SafetyCopy::make(&file, &folder).unwrap();
+    assert_eq!(
+        std::fs::read(folder.join("Invented draft.txt")).unwrap(),
+        b"this PC's replaced edit"
+    );
+    assert!(next.discard_if_unchanged(&file));
+    assert_eq!(
+        std::fs::read(folder.join("Invented draft.txt")).unwrap(),
+        b"this PC's replaced edit"
+    );
+    // A leftover that is what the file still is, is a spare: it goes.
+    let _left_behind = SafetyCopy::make(&file, &folder).unwrap();
+    let again = SafetyCopy::make(&file, &folder).unwrap();
+    assert!(again.discard_if_unchanged(&file));
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1, "the kept copy only");
+}
+
 /// What the sync folder holds, by name, sorted.
 fn names_in(root: &std::path::Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(root)

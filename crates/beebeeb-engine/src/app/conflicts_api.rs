@@ -188,8 +188,9 @@ fn sha256_of(file: &Path) -> std::io::Result<[u8; 32]> {
 }
 
 impl SafetyCopy {
-    /// Copy `file` into `folder` (made when missing) as the incoming copy; an incoming copy a run that ended early
-    /// left behind is replaced. The file's earlier kept copy, if any, is not touched yet.
+    /// Copy `file` into `folder` (made when missing) as the incoming copy. The file's earlier kept copy, if any, is
+    /// not touched yet. An incoming copy a run that ended early left behind goes only when it holds what `file` still
+    /// is; otherwise it is the only copy of a version that was replaced, and it becomes the kept copy first.
     fn make(file: &Path, folder: &Path) -> std::io::Result<Self> {
         use sha2::Digest as _;
         use std::io::{Read, Write};
@@ -199,9 +200,22 @@ impl SafetyCopy {
             .to_os_string();
         std::fs::create_dir_all(folder)?;
         let incoming = folder.join(INCOMING);
-        match std::fs::remove_file(&incoming) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
-            _ => {}
+        match std::fs::symlink_metadata(&incoming) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+            Ok(_) => {
+                let spare = matches!((sha256_of(&incoming), sha256_of(file)), (Ok(left), Ok(now)) if left == now);
+                if spare {
+                    std::fs::remove_file(&incoming)?;
+                } else {
+                    Self {
+                        incoming: incoming.clone(),
+                        kept: folder.join(&name),
+                        digest: [0; 32],
+                    }
+                    .keep()?;
+                }
+            }
         }
         let mut source = std::fs::File::open(file)?;
         let mut out = std::fs::OpenOptions::new()
