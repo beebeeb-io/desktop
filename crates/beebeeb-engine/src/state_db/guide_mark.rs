@@ -4,7 +4,9 @@
 //! skipped it does not get it again here, also after a sign-out and a sign-in; another account on the same
 //! computer gets it once. So the row is keyed by the account's own id, a sign-out keeps it (as it keeps the share
 //! rows, `share_marks::SHARE_TRUST_ROWS`), it is not counted as account data (a kept row must not make a signed-out
-//! database read as somebody's), and a reset of local data removes it (`StateDb::forget_share_trust_rows`).
+//! database read as somebody's). `StateDb::forget_share_trust_rows` removes the marks of every account with the
+//! share rows: the 0.8 app calls it when it resets this computer's local data for another account. The engine
+//! handle of the native app has no reset of its own, so there the marks stay until that reset exists.
 //!
 //! The key holds the user id and nothing else: never an email. Who may read which row is the engine handle's
 //! (`app::owned_state::guide_mark`): only the session's own.

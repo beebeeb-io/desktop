@@ -110,6 +110,9 @@ pub struct Guide {
     /// The last poll saw a tip on screen. A tip that comes back (what was in front of it closed) takes the
     /// keyboard again.
     shown: bool,
+    /// A lock ended the guide for this account before it was finished or skipped: when the same account is
+    /// back, the mark is asked for again (it was not done, so the guide starts again).
+    pub(super) resume_for: Option<String>,
 }
 
 /// The row tip 2 points at: the file that was selected when the guide started (the board points
@@ -172,8 +175,9 @@ pub fn skip(s: &mut State) {
 /// Whether the place under a tip has something of its own in front: a menu, a dialog, a name
 /// being typed in a row, an opened photo, search. It gets the keys (Esc closes it), not the tip.
 fn in_front(s: &State, place: Section) -> bool {
-    // Search takes Esc for itself ("Esc: ends search") on every place it shows.
-    if crate::frames::search::is_open(s) {
+    // Search takes Esc for itself ("Esc: ends search") on every place it shows; so does the panel that says a
+    // file needs a connection (`frames::global`), which is drawn over the place's body.
+    if crate::frames::search::is_open(s) || s.global.blocked_preview.is_some() {
         return true;
     }
     match place {
@@ -248,13 +252,26 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         let gone = matches!(s.shell.app.gate(), GateState::SignedOut | GateState::Locked)
             || s.shell.app.account() != s.guide.account.as_deref();
         if gone {
-            s.guide = Guide::default();
+            // Only a lock of the same account leaves something to come back to; a sign-out or another account
+            // ends it for good (nothing was kept: the next first run asks again).
+            let locked = s.shell.app.gate() == GateState::Locked && s.shell.app.account() == s.guide.account.as_deref();
+            s.guide = Guide {
+                resume_for: if locked { s.guide.account.take() } else { None },
+                ..Guide::default()
+            };
             changed = true;
         }
     }
     let account = s.shell.app.account().map(str::to_string);
+    let open = s.shell.app.gate() == GateState::Ready;
     // The first run's own flag, not its `Intent::OpenDrive`: that intent stays for the shell.
-    if s.setup.as_mut().is_some_and(super::Ui::just_finished) {
+    let mut ask = s.setup.as_mut().is_some_and(super::Ui::just_finished);
+    // The account a lock interrupted is back; any other way out of the lock forgets it.
+    if s.guide.resume_for.is_some() && s.shell.app.gate() != GateState::Locked {
+        ask |= open && s.guide.resume_for == account;
+        s.guide.resume_for = None;
+    }
+    if ask {
         s.guide_marks.ask(account.as_deref());
     }
     // Also the source's poll. Only "not done", said of the account that is signed in now, starts the guide.
@@ -268,6 +285,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
             account,
             focus: true,
             shown: false,
+            resume_for: None,
         };
         changed = true;
     }

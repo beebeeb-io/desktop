@@ -56,21 +56,21 @@ fn retry(s: &mut State, tx: &mut Tx) {
     s.retry(tx);
 }
 
-/// The open menu, where the board puts it: the file menu at its point, Sort and New under the toolbar.
 /// Whether the Files window has something of its own over its list: the same list [`view`] builds its layers
-/// from (a menu, a name being typed, a drop hovering, Uploads and its menu, a dialog, the protected-folder
+/// from (a menu, a name being typed, a drop hovering, Uploads while it is drawn, a dialog, the protected-folder
 /// message). What is in front has the keyboard; the first-time guide draws no tip over it.
 pub fn has_in_front(s: &State) -> bool {
     let a = &s.actions;
     a.menu.is_some()
         || a.rename.is_some()
         || a.drop_hover.is_some()
-        || a.uploads_open
-        || a.upload_menu.is_some()
+        // Uploads is drawn only while something uploads (`uploads::layer`): its flag alone can outlive the panel.
+        || ((a.uploads_open || a.upload_menu.is_some()) && a.source.uploads().is_some())
         || a.dialog.is_some()
         || a.protected.alert.is_some()
 }
 
+/// The open menu, where the board puts it: the file menu at its point, Sort and New under the toolbar.
 fn menu_layer(s: &State, t: &Theme) -> Option<El> {
     let open = s.actions.menu?;
     let layer = |right: f32, surface: El| {

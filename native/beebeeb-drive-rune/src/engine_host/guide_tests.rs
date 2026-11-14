@@ -152,7 +152,10 @@ fn done_once_per_account_across_a_sign_out_and_never_another_accounts() {
     assert_eq!(asked(&mut marks), Some(Known::NotKnown));
     marks.mark_done(None);
     settled(&mut marks);
-    assert!(marks.owes(), "it could not be kept, and is still owed to that account");
+    assert!(
+        !marks.owes(),
+        "it cannot be kept in another account's state, now or later: it is not held"
+    );
     let db = StateDb::open(dir.path().join("state.db")).unwrap();
     assert!(db.guide_done(&fake.first.user_id).unwrap());
     assert!(
@@ -200,6 +203,14 @@ fn a_mark_that_cannot_be_kept_yet_is_held_for_the_account_and_asked_again() {
         !marks.busy(),
         "the first account's mark is not sent under the second account's session"
     );
+    // The second account's own mark is held beside the first one's.
+    marks.mark_done(None);
+    settled(&mut marks);
+    assert_eq!(
+        asked(&mut marks),
+        Some(Known::Done),
+        "the second account is done in this run"
+    );
     engine.sign_out_keeping_local_data().expect("signed out");
 
     // The first account again, and by now its state is there: the held mark is kept on the next try.
@@ -209,7 +220,12 @@ fn a_mark_that_cannot_be_kept_yet_is_held_for_the_account_and_asked_again() {
     let _ = marks.answer(None);
     assert!(marks.busy(), "tried again once the wait is over");
     settled(&mut marks);
-    assert!(!marks.owes(), "kept now");
+    assert!(marks.owes(), "the second account's is still held");
+    assert_eq!(
+        asked(&mut marks),
+        Some(Known::Done),
+        "the first account's mark was not lost to the second one's"
+    );
     assert!(StateDb::open(&path).unwrap().guide_done(&fake.first.user_id).unwrap());
     assert!(!StateDb::open(&path).unwrap().guide_done(&fake.second.user_id).unwrap());
     assert_eq!(asked(&mut Marks::new(engine.clone())), Some(Known::Done));

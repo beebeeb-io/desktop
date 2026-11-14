@@ -365,9 +365,11 @@ fn the_guide_is_done_once_per_account() {
         assert_eq!(rt.state.guide.step, None, "{ending}: the lock ended it");
         engine.set_gate(GateState::Ready);
         tick(&mut rt);
-        assert!(
-            a_first_run_ends(&mut rt),
-            "{ending}: a guide the lock ended was not done"
+        tick(&mut rt);
+        assert_eq!(
+            rt.state.guide.step,
+            Some(Step::Tray),
+            "{ending}: a guide the lock ended was not done: it starts again when the account is back"
         );
 
         match ending {
@@ -443,7 +445,7 @@ fn the_guide_ends_when_the_account_locks_signs_out_or_changes() {
             host::dispatch(s, Event::Gate(gate));
             guide::poll(s, tx);
         });
-        assert_eq!(rt.state.guide, guide::Guide::default(), "{gate:?}");
+        assert_eq!(rt.state.guide.step, None, "{gate:?}");
         // Back in: no tip resumes.
         rt.update(|s, _| {
             host::dispatch(s, Event::Gate(GateState::Ready));
@@ -700,8 +702,13 @@ fn esc_right_after_ctrl_n_does_not_end_the_guide() {
 fn every_layer_of_the_files_window_is_in_front_of_a_tip() {
     type Put = fn(&mut State);
     let layers: [(&str, Put); 4] = [
-        ("Uploads", |s| s.actions.uploads_open = true),
-        ("an upload's menu", |s| s.actions.upload_menu = Some("u-1".into())),
+        ("Uploads", |s| {
+            s.actions.uploads_open = true;
+            assert!(s.actions.source.uploads().is_some(), "the board's window has uploads");
+        }),
+        ("the panel that says a file needs a connection", |s| {
+            s.global.blocked_preview = Some(("f-1".into(), "An invented name.txt".into()));
+        }),
         ("a drop hovering", |s| {
             s.actions.drop_hover = Some(crate::frames::files::uploads::DropHover {
                 row: Some(0),
@@ -720,7 +727,6 @@ fn every_layer_of_the_files_window_is_in_front_of_a_tip() {
         assert!(guide::showing(&rt.state).is_some());
         rt.update(|s, _| put(s));
         rt.frame(0.0);
-        assert!(crate::frames::files::has_in_front(&rt.state), "{name}");
         assert_eq!(guide::showing(&rt.state), None, "{name} is in front of the tip");
         assert!(
             rect(&rt, COACH_KEY).is_none() && rect(&rt, RING_KEY).is_none(),

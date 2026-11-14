@@ -7,9 +7,11 @@
 //! session and account are still the engine's. The engine functions take no account: whose mark it is, is the
 //! session's.
 //!
-//! A mark that could not be kept (nothing has synced on this PC yet, so there is no state proven to be the
-//! account's to write into) is held for that ACCOUNT and asked again, at most once per [`RETRY_AFTER`], while a
-//! session of the same account is in memory. It is not kept across a restart of the app: see the PR record.
+//! A mark that could not be kept YET (nothing has synced on this PC, so there is no state proven to be the
+//! account's to write into; or the session changed under the write) is held for that ACCOUNT, each account its
+//! own, and asked again at most once per [`RETRY_AFTER`] while a session of that account is in memory. A refusal
+//! that waiting does not change (the state is another account's, or nobody's with data in it, or the account's id
+//! is not known) is not held. A held mark is not kept across a restart of the app: see the PR record.
 //!
 //! Thread rule: every engine call runs on a worker of its own; the window's poll ([`GuideMarks::answer`]) takes the
 //! answers in. Must not: log an account, an id or a path; only a refusal's fixed word.
@@ -42,8 +44,8 @@ pub struct EngineGuideMarks<C: CredentialStores> {
     engine: Arc<Engine<C>>,
     /// The answer to the last question, for the session and account it was asked under.
     known: Option<(Stamp, Known)>,
-    /// The account whose mark is still to be kept, and when it was last tried.
-    owed: Option<(String, Instant)>,
+    /// The accounts whose mark is still to be kept, each with when it was last tried.
+    owed: Vec<(String, Instant)>,
     /// A mark is on its way.
     keeping: bool,
     answers: mpsc::Sender<Answer>,
@@ -56,7 +58,7 @@ impl<C: CredentialStores + 'static> EngineGuideMarks<C> {
         Self {
             engine,
             known: None,
-            owed: None,
+            owed: Vec::new(),
             keeping: false,
             answers,
             inbox,
@@ -84,7 +86,8 @@ impl<C: CredentialStores + 'static> EngineGuideMarks<C> {
         if !self.engine.has_session() || asked.1.as_deref() != Some(account) {
             return;
         }
-        self.owed = Some((account.to_string(), Instant::now()));
+        self.owed.retain(|(owed, _)| owed != account);
+        self.owed.push((account.to_string(), Instant::now()));
         let session = asked.0;
         self.keeping = self.spawn("guide-mark", move |engine| Answer::Kept {
             result: engine.mark_guide_done_for(session),
@@ -114,14 +117,24 @@ impl<C: CredentialStores + 'static> EngineGuideMarks<C> {
                 }
                 Answer::Kept { asked, result } => {
                     self.keeping = false;
-                    match result {
-                        // Kept: nothing is owed for that account any more.
-                        Ok(()) => {
-                            if self.owed.as_ref().map(|(account, _)| account.as_str()) == asked.1.as_deref() {
-                                self.owed = None;
-                            }
+                    let later = match result {
+                        Ok(()) => false,
+                        Err(refused) => {
+                            log(format!("guide: the mark was not kept ({})", refused.kind()));
+                            // Only what waiting can change is tried again.
+                            matches!(
+                                refused,
+                                LocalStateRefused::NothingSynced
+                                    | LocalStateRefused::SessionChanged
+                                    | LocalStateRefused::Locked
+                                    | LocalStateRefused::Unreadable
+                            )
                         }
-                        Err(refused) => log(format!("guide: the mark was not kept ({})", refused.kind())),
+                    };
+                    // Kept, or never to be kept: nothing is owed for that account any more.
+                    if !later {
+                        self.owed
+                            .retain(|(account, _)| Some(account.as_str()) != asked.1.as_deref());
                     }
                 }
             }
@@ -137,7 +150,11 @@ impl<C: CredentialStores + 'static> GuideMarks for EngineGuideMarks<C> {
         }
         let asked = stamp(&self.engine);
         // The account finished the guide in this run and the mark is still to be kept: it is done.
-        if self.owed.as_ref().map(|(account, _)| account.as_str()) == asked.1.as_deref() && asked.1.is_some() {
+        if self
+            .owed
+            .iter()
+            .any(|(account, _)| Some(account.as_str()) == asked.1.as_deref())
+        {
             self.known = Some((asked, Known::Done));
             return;
         }
@@ -153,12 +170,17 @@ impl<C: CredentialStores + 'static> GuideMarks for EngineGuideMarks<C> {
 
     fn answer(&mut self, _account: Option<&str>) -> Option<Known> {
         self.take_in();
-        // A mark still owed: asked again while a session of its account is here, not more often than the wait.
-        if !self.keeping
-            && let Some((account, tried)) = self.owed.clone()
-            && tried.elapsed() >= RETRY_AFTER
-        {
-            self.keep(&account);
+        // A mark still owed to the account that is signed in: asked again, not more often than the wait.
+        if !self.keeping && !self.owed.is_empty() && self.engine.has_session() {
+            let here = account_of(&self.engine);
+            let due = self
+                .owed
+                .iter()
+                .find(|(account, tried)| Some(account.as_str()) == here.as_deref() && tried.elapsed() >= RETRY_AFTER)
+                .map(|(account, _)| account.clone());
+            if let Some(account) = due {
+                self.keep(&account);
+            }
         }
         let (asked, known) = self.known.take()?;
         self.is_now(&asked).then_some(known)
@@ -177,14 +199,14 @@ impl<C: CredentialStores + 'static> GuideMarks for EngineGuideMarks<C> {
 impl<C: CredentialStores + 'static> EngineGuideMarks<C> {
     /// Whether a mark is still to be kept.
     pub(crate) fn owes(&self) -> bool {
-        self.owed.is_some()
+        !self.owed.is_empty()
     }
     pub(crate) fn busy(&self) -> bool {
         self.keeping
     }
     /// The wait before the next try is over.
     pub(crate) fn wait_is_over(&mut self) {
-        if let Some((_, tried)) = &mut self.owed {
+        for (_, tried) in &mut self.owed {
             *tried = Instant::now() - RETRY_AFTER;
         }
     }

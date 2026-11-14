@@ -3,7 +3,9 @@
 //! Owner ruling 2026-11-13: the guide is done once per ACCOUNT on each computer (an account that finished or
 //! skipped it does not get it again here, also after a sign-out and a sign-in; another account on the same computer
 //! gets it once). The mark is a row of the account's local state keyed by the account's own user id
-//! (`state_db::guide_mark`); a sign-out keeps it.
+//! (`state_db::guide_mark`); a sign-out keeps it. The owner proof below is `Engine::owned_state`'s, with one case
+//! more (a state that is nobody's): the two are kept side by side in this module's parent on purpose, and a change
+//! to one is a change to the other.
 //!
 //! Neither function takes an account: whose mark is read or written is the session's, as the engine knows it. Both
 //! take the session ([`Engine::session_turn`]) the host asked under, and answer nothing for another.
@@ -50,10 +52,16 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     fn read_guide_mark(&self, session: SessionGeneration) -> Result<bool, LocalStateRefused> {
+        // As the handle's own question (`OwnedState::still_this_session`): the session in memory is the one that
+        // asked, with no session change half done, and the server has not ended it.
         let still = || {
             self.acct
                 .while_session_is(&self.writes, session, |_| ())
-                .ok_or(LocalStateRefused::SessionChanged)
+                .ok_or(LocalStateRefused::SessionChanged)?;
+            if self.acct.auth_health.is_expired() {
+                return Err(LocalStateRefused::SessionEnded);
+            }
+            Ok(())
         };
         still()?;
         let identity = self.session_identity()?;
