@@ -1,13 +1,14 @@
 // keymap-mail.js: the gate keys of Mail Backup inside Backups (DW-0740, DW-0740b, DW-1401 to
 // DW-1406, DW-0743, DW-0743b) beyond what keymap.js and keymap-backups.js key for every settings
 // pane. Runs after them, in the same scope (`win`, `api`, `q`, `qa`). Only where the settings
-// sidebar has Backups selected AND the pane has Mail Backup's head (a tile beside a title): no
+// sidebar has Backups selected AND the pane has Mail Backup's head (a tile beside a `.t-title`,
+// not a card): no
 // other frame's golden changes. By the board's class names, in document order.
 {
   const setM = q('.mk-set');
   const onM = setM && qa('.mk-side-item', setM).find((i) => i.classList.contains('on'));
   const headM = setM && q('.mk-set-col > .flex.items-center.gap-3', setM);
-  if (onM && onM.textContent.trim() === 'Backups' && headM && q(':scope > .kit-tile', headM)) {
+  if (onM && onM.textContent.trim() === 'Backups' && headM && !headM.classList.contains('kit-card') && q(':scope > .kit-tile', headM) && q('.t-title', headM)) {
     api.text('mail-title', q('.t-title', headM));
     api.text('mail-sub', q('.t-sub', headM));
     // What Mail Backup is, under the kept folder (off).
