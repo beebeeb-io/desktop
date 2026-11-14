@@ -613,8 +613,11 @@ fn recovery_proves_the_phrase_then_sets_a_new_password_from_the_keyboard() {
     let (mut rt, calls) = form(Script::default());
     click(&mut rt, "link-0-box");
     // The twelve-word recovery screens are kept but have no door in this build (recovery is the web's).
-    ui(&mut rt).recover_with_phrase();
-    rt.invalidate();
+    rt.update(|s, tx| {
+        let ui = s.signin.as_mut().expect("the sign-in window is open");
+        ui.recover_with_phrase();
+        ui.settle(tx);
+    });
     rt.settle_all();
     rt.frame(0.0);
     assert_eq!(ui(&mut rt).screen, Screen::Recover);
