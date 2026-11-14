@@ -191,6 +191,56 @@ fn f2_turns_the_name_into_a_field_with_the_extension_left_out_of_the_selection()
     assert!(names(&rt).contains(&"Signed contract.pdf".to_string()));
 }
 
+/// The drawn caret (`rename-caret`) is a mark placed from the field's own edit state, because the
+/// input's caret is transparent. Where the text edit's caret is, the mark must be: after typing,
+/// after Left, and after a click at the end of the name.
+#[test]
+fn the_drawn_rename_caret_follows_the_inputs_caret() {
+    use crate::ui::field;
+    let (mut rt, _, _) = wired();
+    press(&mut rt, Key::Function(2), NONE);
+    let caret_x = |rt: &Runtime<State>| info(rt, "rename-caret").rect[0];
+    let advance_to_caret = |rt: &Runtime<State>| {
+        let edit = &rt.state.actions.name_edit;
+        let (from, to) = edit.range();
+        field::advance(&edit.text[..to.max(from)], field::VALUE)
+    };
+    // The reference: the caret of the opening state (selection 0..14), then each move is measured
+    // against it, so the board's origin offset cancels.
+    let (x0, a0) = (caret_x(&rt), advance_to_caret(&rt));
+    let mut seen = vec![(x0, a0)];
+    let mut check = |rt: &Runtime<State>, what: &str| {
+        let (x, a) = (caret_x(rt), advance_to_caret(rt));
+        assert!(
+            ((x - x0) - (a - a0)).abs() < 0.01,
+            "{what}: drawn caret moved {} but the input's caret moved {}",
+            x - x0,
+            a - a0
+        );
+        seen.push((x, a));
+    };
+    type_text(&mut rt, "Q");
+    check(&rt, "after typing");
+    press(&mut rt, Key::Left, NONE);
+    check(&rt, "after Left");
+    type_text(&mut rt, "ab");
+    check(&rt, "after typing in the middle");
+    // A click at the right end of the field puts the caret at the end of the name.
+    let r = info(&rt, RENAME_INPUT).rect;
+    let (x, y) = (r[0] + r[2] - 1.0, r[1] + r[3] / 2.0);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(&mut rt);
+    let edit = &rt.state.actions.name_edit;
+    assert_eq!(edit.range().1, edit.text.len(), "the click put the caret at the end");
+    check(&rt, "after a click at the end");
+    // Four different places were measured: the test is not a constant.
+    let mut xs: Vec<i32> = seen.iter().map(|(x, _)| (x * 100.0) as i32).collect();
+    xs.sort();
+    xs.dedup();
+    assert!(xs.len() >= 4, "the caret stood in {} distinct places", xs.len());
+}
+
 #[test]
 fn escape_keeps_the_old_name_and_a_click_elsewhere_saves() {
     let (mut rt, calls, _) = wired();
