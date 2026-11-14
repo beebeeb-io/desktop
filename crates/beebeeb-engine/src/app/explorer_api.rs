@@ -13,6 +13,7 @@ use std::sync::{Arc, Weak};
 use super::{CredentialStores, Engine, LocalStateRefused};
 use crate::explorer_command::{self, ExplorerBinding, OsExplorerBinding, ReclaimOwner};
 use crate::identity::EngineIdentity;
+use crate::sync_view::Explorer;
 
 /// What the handle keeps for Explorer's command: the binding it removes, and the folder an engine started in.
 pub(super) struct ExplorerSeat {
@@ -77,6 +78,44 @@ impl<C: CredentialStores> Engine<C> {
         }
     }
 
+    /// Ask Windows again for the File Explorer entry of the folder an engine runs in, and say what it answered.
+    /// Never stops, starts, registers the Cloud Files root or touches a file: it asks nothing unless an engine runs
+    /// in a known folder (`false`). BLOCKS (the transition lock): a worker's, never the UI thread's.
+    pub fn add_to_file_explorer_again(&self) -> bool {
+        #[cfg(not(target_os = "windows"))]
+        {
+            false
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let explorer = self.runtime.block_on(async {
+                let _step = self.transition.lock().await;
+                let running = self
+                    .acct
+                    .engine
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(crate::runner::EngineRunner::is_running);
+                let started_in = self.seat().started_in.clone();
+                entry_after(running, started_in.as_deref(), |root| {
+                    crate::windows_cf::register_shell_sync_root(self.identity, root)
+                        .map_err(|error| crate::sync_root_port::hresult_of(&error))
+                })
+            });
+            let Some(explorer) = explorer else {
+                return false;
+            };
+            self.view.write(|view| {
+                if view.start == crate::sync_view::Start::Running {
+                    view.explorer = explorer;
+                }
+            });
+            self.publish();
+            true
+        }
+    }
+
     /// The sync folder the settings name (`None`: none is set).
     pub(super) fn configured_sync_root(&self) -> Result<Option<PathBuf>, String> {
         #[cfg(any(test, feature = "test-support"))]
@@ -101,6 +140,24 @@ impl<C: CredentialStores> Engine<C> {
     fn seat(&self) -> std::sync::MutexGuard<'_, ExplorerSeat> {
         self.explorer.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+/// What Windows answered when asked again: nothing is asked unless an engine `running` in a known folder.
+/// A function of its inputs, so the rule is tested on every OS.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(super) fn entry_after(
+    running: bool,
+    started_in: Option<&Path>,
+    register: impl FnOnce(&Path) -> Result<(), Option<i32>>,
+) -> Option<Explorer> {
+    if !running {
+        return None;
+    }
+    let root = started_in?;
+    Some(match register(root) {
+        Ok(()) => Explorer::Added,
+        Err(code) => Explorer::Failed { code },
+    })
 }
 
 #[cfg(test)]
