@@ -36,6 +36,8 @@ struct Fake {
     wakes: AtomicUsize,
     /// A write waits here until the test lets it go (a change that is on its way).
     held: Mutex<()>,
+    /// The next write panics on its worker.
+    panics: AtomicBool,
 }
 
 fn session(number: u64) -> SessionGeneration {
@@ -57,6 +59,7 @@ fn fake() -> Arc<Fake> {
         stops: AtomicUsize::new(0),
         wakes: AtomicUsize::new(0),
         held: Mutex::new(()),
+        panics: AtomicBool::new(false),
     })
 }
 
@@ -83,6 +86,10 @@ impl SetupEngine for Fake {
     }
     // As the engine: a write for a session that is not the one in memory writes nothing.
     fn mark_done_for(&self, session: SessionGeneration) -> Result<(), SetupRefused> {
+        assert!(
+            !self.panics.swap(false, Ordering::SeqCst),
+            "a test asked this worker to panic"
+        );
         let _held = self.held.lock().unwrap();
         if session != self.stamp().0 {
             return Err(SetupRefused::SessionMoved);
@@ -91,6 +98,10 @@ impl SetupEngine for Fake {
         *self.writes.lock().unwrap()
     }
     fn set_notifications_for(&self, session: SessionGeneration, on: bool) -> Result<(), SetupRefused> {
+        assert!(
+            !self.panics.swap(false, Ordering::SeqCst),
+            "a test asked this worker to panic"
+        );
         let _held = self.held.lock().unwrap();
         if session != self.stamp().0 {
             return Err(SetupRefused::SessionMoved);
@@ -437,6 +448,29 @@ fn open_my_beebeeb_marks_the_first_run_done_and_only_then_lets_the_main_window_t
     set.engine.view.lock().unwrap().gate = GateState::Locked;
     set.source.poll();
     assert!(!set.first_run.due());
+}
+
+/// A worker that panics answers as a press that was refused: a switch says "not done" (never "Saving" for ever),
+/// and "Open my Beebeeb" still lets the person in.
+#[test]
+fn a_worker_that_panics_still_answers() {
+    let mut set = set();
+    set.engine.panics.store(true, Ordering::SeqCst);
+    set.source.set_notifications(true);
+    settle(&mut set, 1);
+    assert_eq!(
+        set.source.take_outcomes(),
+        [Outcome {
+            switch: Switch::Notifications,
+            done: false,
+            now: None
+        }]
+    );
+    set.engine.panics.store(true, Ordering::SeqCst);
+    set.source.finish();
+    settle(&mut set, 2);
+    assert!(set.engine.marked.lock().unwrap().is_empty(), "nothing was written");
+    assert!(!set.first_run.due(), "the person is not held on the last page");
 }
 
 #[test]
