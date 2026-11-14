@@ -77,6 +77,14 @@ impl<C: CredentialStores> Engine<C> {
         }
     }
 
+    /// STUB.
+    pub fn add_to_file_explorer_again(&self) -> bool {
+        self.view
+            .write(|view| view.explorer = crate::sync_view::Explorer::Added);
+        self.publish();
+        true
+    }
+
     /// The sync folder the settings name (`None`: none is set).
     pub(super) fn configured_sync_root(&self) -> Result<Option<PathBuf>, String> {
         #[cfg(any(test, feature = "test-support"))]
@@ -101,6 +109,15 @@ impl<C: CredentialStores> Engine<C> {
     fn seat(&self) -> std::sync::MutexGuard<'_, ExplorerSeat> {
         self.explorer.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+/// STUB.
+pub(super) fn entry_after(
+    _running: bool,
+    _started_in: Option<&Path>,
+    _register: impl FnOnce(&Path) -> Result<(), Option<i32>>,
+) -> Option<crate::sync_view::Explorer> {
+    None
 }
 
 #[cfg(test)]

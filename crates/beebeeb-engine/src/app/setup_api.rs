@@ -95,11 +95,41 @@ impl<C: CredentialStores> Engine<C> {
     /// Whether `folder` may be the sync folder (`crate::sync_folder_rule`): asked before the first start, for the
     /// folder a person chose. Reads the disk and asks the OS; creates, registers and writes nothing.
     pub fn check_sync_folder(&self, folder: &Path) -> Result<(), SyncFolderRefused> {
-        let Some(text) = folder.to_str() else {
+        self.check_sync_folder_among(folder, &self.places())
+    }
+
+    /// The places the rule keeps a sync folder out of, as this computer names them (not yet resolved).
+    pub(crate) fn places(&self) -> Places {
+        let settings = DesktopConfig::path_for(self.identity)
+            .ok()
+            .and_then(|file| file.parent().map(Path::to_path_buf));
+        Places {
+            home: dirs::home_dir(),
+            system: system_folders().into_iter().map(PathBuf::from).collect(),
+            own: [Some(self.config.state_dir.clone()), settings]
+                .into_iter()
+                .flatten()
+                .collect(),
+            other_builds: vec![crate::config::default_sync_root_suggestion(self.identity.other_build())],
+        }
+    }
+
+    /// [`Engine::check_sync_folder`] against `places`. The text the person gave is read first; then the rule is
+    /// asked with the FINAL path of the folder and of every place (links, junctions and short names resolved).
+    pub(crate) fn check_sync_folder_among(&self, folder: &Path, places: &Places) -> Result<(), SyncFolderRefused> {
+        let Some(given) = folder.to_str() else {
             return Err(SyncFolderRefused::NotAFullPath);
         };
-        let facts = self.sync_folder_facts(folder);
-        match sync_folder_rule::refusal(text, &facts) {
+        let resolved = final_path(folder);
+        let resolved_text = match &resolved {
+            Some(path) => match path.to_str() {
+                Some(text) => Some(text),
+                None => return Err(SyncFolderRefused::NotAFullPath),
+            },
+            None => None,
+        };
+        let facts = self.sync_folder_facts(folder, resolved.as_deref(), places);
+        match sync_folder_rule::refusal_resolved(given, resolved_text, &facts) {
             Some(refused) => {
                 tracing::warn!(kind = refused.kind(), "a folder was refused as the sync folder");
                 Err(refused)
@@ -108,9 +138,10 @@ impl<C: CredentialStores> Engine<C> {
         }
     }
 
-    /// What the OS says about `folder` and this computer, for the rule.
-    fn sync_folder_facts(&self, folder: &Path) -> Facts {
-        let text = |path: PathBuf| path.to_str().map(str::to_string);
+    /// What the OS says about `folder` and this computer, for the rule. Places are read by their final path; a
+    /// place that cannot be resolved still protects by its own text.
+    fn sync_folder_facts(&self, folder: &Path, resolved: Option<&Path>, places: &Places) -> Facts {
+        let resolved_text = |path: &PathBuf| final_path(path).as_deref().unwrap_or(path).to_str().map(str::to_string);
         let on_disk = match std::fs::symlink_metadata(folder) {
             Ok(found) if found.file_type().is_dir() => OnDisk::Folder,
             Ok(_) => OnDisk::NotAFolder,
@@ -127,22 +158,13 @@ impl<C: CredentialStores> Engine<C> {
             (Registration::Unreadable, Some(_)) => Owner::Unreadable,
             (_, Some(_)) => Owner::Another,
         };
-        let settings = DesktopConfig::path_for(self.identity)
-            .ok()
-            .and_then(|file| file.parent().map(Path::to_path_buf));
         Facts {
             windows: cfg!(target_os = "windows"),
-            home: dirs::home_dir().and_then(text),
-            system: system_folders(),
-            own: [Some(self.config.state_dir.clone()), settings]
-                .into_iter()
-                .flatten()
-                .filter_map(text)
-                .collect(),
-            other_builds: text(crate::config::default_sync_root_suggestion(self.identity.other_build()))
-                .into_iter()
-                .collect(),
-            remote_drive: on_a_network_drive(folder),
+            home: places.home.as_ref().and_then(resolved_text),
+            system: places.system.iter().filter_map(resolved_text).collect(),
+            own: places.own.iter().filter_map(resolved_text).collect(),
+            other_builds: places.other_builds.iter().filter_map(resolved_text).collect(),
+            remote_drive: on_a_network_drive(folder) || resolved.is_some_and(on_a_network_drive),
             on_disk,
             owner,
         }
@@ -170,6 +192,23 @@ impl<C: CredentialStores> Engine<C> {
             .ok_or(SetupRefused::SessionMoved)?;
         DesktopConfig::update_for(self.identity, |config| (change(config), ())).map_err(|_| SetupRefused::Settings)
     }
+}
+
+/// The places a sync folder must stay out of, as paths (the rule reads their final form). A test passes its own.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Places {
+    pub home: Option<PathBuf>,
+    pub system: Vec<PathBuf>,
+    pub own: Vec<PathBuf>,
+    pub other_builds: Vec<PathBuf>,
+}
+
+/// The folder `path` really is: links, junctions and (Windows) short names resolved. A path that is not there yet
+/// is resolved from the deepest folder that is, and the names below it are joined back on. `None`: it could not be
+/// resolved (never read as "free").
+fn final_path(path: &Path) -> Option<PathBuf> {
+    // STUB: the path as given.
+    Some(path.to_path_buf())
 }
 
 /// WRITES the settings file, once per computer: decide whether the native app's first run is still to do here

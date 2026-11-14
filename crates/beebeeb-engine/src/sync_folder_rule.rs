@@ -221,6 +221,15 @@ const UNIX_SYSTEM: [&str; 13] = [
 const WINDOWS_HOMES: [&str; 1] = ["users"];
 const UNIX_HOMES: [&str; 2] = ["home", "Users"];
 
+/// [`refusal`] for a folder `given` as text and reached as `resolved` (its final path: links, junctions and short
+/// names resolved). The text given is read first; then the rule judges the final path; one that could not be
+/// resolved is `Unreadable`, never let through.
+pub fn refusal_resolved(given: &str, resolved: Option<&str>, facts: &Facts) -> Option<SyncFolderRefused> {
+    // STUB: judges `given`.
+    let _ = resolved;
+    refusal(given, facts)
+}
+
 /// Why `folder` cannot be the sync folder, or `None` when it may. See the module's doc for the order.
 pub fn refusal(folder: &str, facts: &Facts) -> Option<SyncFolderRefused> {
     let place = match place(folder, facts.windows) {

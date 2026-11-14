@@ -222,3 +222,45 @@ fn the_served_handle_is_asked_each_time_and_a_dropped_one_disables_the_command()
     assert!(served().is_none(), "the slot keeps no engine alive");
     assert_eq!(invoke(served().as_deref()), Invoked::Refused("no_engine"));
 }
+
+#[test]
+fn windows_is_asked_again_only_for_an_engine_that_runs_in_a_known_folder() {
+    use super::entry_after;
+    use crate::sync_view::Explorer;
+    use std::cell::Cell;
+    let folder = std::path::Path::new("/a/sync/folder");
+    let calls = Cell::new(0);
+    let counted = |result: Result<(), Option<i32>>| {
+        let calls = &calls;
+        move |_: &std::path::Path| {
+            calls.set(calls.get() + 1);
+            result
+        }
+    };
+    assert_eq!(entry_after(false, Some(folder), counted(Ok(()))), None);
+    assert_eq!(entry_after(true, None, counted(Ok(()))), None);
+    assert_eq!(calls.get(), 0, "Windows was not asked");
+    assert_eq!(entry_after(true, Some(folder), counted(Ok(()))), Some(Explorer::Added));
+    assert_eq!(
+        entry_after(true, Some(folder), counted(Err(Some(-2147024516)))),
+        Some(Explorer::Failed {
+            code: Some(-2147024516)
+        })
+    );
+    assert_eq!(calls.get(), 2);
+}
+
+#[test]
+fn asking_windows_again_with_no_engine_changes_nothing() {
+    let state_dir = crate::state_paths::init_for_test();
+    let (host, _messages) = ChannelHost::new(|| {});
+    let config = EngineConfig {
+        account_id: "an-invented-slot".into(),
+        state_dir,
+        api_base: "http://127.0.0.1:9".into(),
+    };
+    let engine = Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens");
+    let before = engine.view();
+    assert!(!engine.add_to_file_explorer_again(), "nothing runs: nothing was asked");
+    assert_eq!(engine.view(), before);
+}
