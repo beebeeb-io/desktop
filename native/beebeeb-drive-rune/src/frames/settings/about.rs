@@ -149,8 +149,8 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         3,
         Some("More"),
         vec![
-            web(3, 0, "About audits", "about-audits", false),
-            web(3, 1, "beebeeb.io", "beebeeb.io", true),
+            // "About audits" is not drawn: the site has no audits page to send to (`shell::web_pages`).
+            web(3, 0, "beebeeb.io", "beebeeb.io", true),
         ],
         Some(&a.company),
         t,

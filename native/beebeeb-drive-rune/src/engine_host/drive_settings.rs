@@ -81,7 +81,7 @@ use crate::shell::platform::Platform;
 #[path = "drive_settings_reads.rs"]
 mod reads;
 #[path = "drive_settings_tools.rs"]
-mod tools;
+pub(crate) mod tools;
 pub(crate) use reads::*;
 use tools::Os;
 pub use tools::SPEED_TEST_ON;

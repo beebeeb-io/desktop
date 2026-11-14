@@ -523,15 +523,34 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
     }
 }
 
-/// Opens one of our own web pages in the browser (a fixed `https://` address, never a typed one), by the same
-/// OS call a file opens with: the address is one argument, never a command line.
-pub fn open_web_page(url: &'static str) -> Result<(), ()> {
-    debug_assert!(url.starts_with("https://"));
-    // A test run opens nothing on the machine it runs on.
-    if cfg!(test) {
-        return Ok(());
+/// Opens one of our own addresses by the same OS call a file opens with: the address is one argument, never a
+/// command line. Only three schemes open (`https://`, `mailto:`, `ms-settings:`); anything else is refused in
+/// every build. The addresses come from `shell::web_pages` only, never from the server, a file or a typed string.
+pub fn open_web_page(url: &str) -> Result<(), ()> {
+    if !is_allowed_address(url) {
+        return Err(());
     }
+    // A test run opens nothing on the machine it runs on; it records what it was asked to open.
+    #[cfg(test)]
+    {
+        OPENED.with(|o| o.borrow_mut().push(url.to_string()));
+        Ok(())
+    }
+    #[cfg(not(test))]
     super::open_path(std::path::Path::new(url)).map_err(|_| ())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The addresses `open_web_page` accepted on this thread, oldest first (tests only).
+    pub(crate) static OPENED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Whether `url` starts with one of the three schemes the opener allows.
+pub fn is_allowed_address(url: &str) -> bool {
+    ["https://", "mailto:", "ms-settings:"]
+        .iter()
+        .any(|scheme| url.starts_with(scheme))
 }
 
 #[cfg(test)]

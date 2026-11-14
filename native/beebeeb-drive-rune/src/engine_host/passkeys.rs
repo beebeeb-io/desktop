@@ -30,7 +30,7 @@ use zeroize::Zeroizing;
 use super::log;
 use super::stamp::{Stamp, stamp};
 use crate::frames::account::Pane;
-use crate::frames::account::source::{PaneState, Passkey, Password};
+use crate::frames::account::source::{PaneState, Passkey, Password, Refused};
 use crate::frames::signin::source::PasskeyOutcome;
 
 /// What the pane holds is not read again, when it opens, for this long.
@@ -543,53 +543,31 @@ pub fn wiping(password: &Password<'_>) -> Option<Zeroizing<String>> {
     Some(buffer)
 }
 
-/// The passkey methods of `AccountSource`, for `EngineAccountSource` (which keeps a `passkeys: PasskeyCalls<C>`):
-/// one line there, so its file stays inside the size limit and every passkey rule is in this file.
-macro_rules! passkey_methods {
-    () => {
-        fn passkeys(&self) -> Vec<$crate::frames::account::source::Passkey> {
-            self.passkeys.passkeys()
-        }
-        /// Adding needs the password (`add_passkey_confirmed`): the pane asks for it, so this is not reached.
-        fn add_passkey(&mut self) -> Result<(), $crate::frames::account::source::Refused> {
-            Err($crate::frames::account::source::Refused::NotConfirmed)
-        }
-        /// Beebeeb has no route to rename a passkey: the menu does not offer it (`can_rename_passkey`).
-        fn rename_passkey(&mut self, _id: &str, _name: &str) -> bool {
-            false
-        }
-        fn remove_passkey(&mut self, _id: &str) -> bool {
-            false
-        }
-        fn passkeys_need_password(&self) -> bool {
-            true
-        }
-        fn can_add_passkey(&self) -> bool {
-            self.passkeys.can_add()
-        }
-        fn can_rename_passkey(&self) -> bool {
-            self.passkeys.can_rename()
-        }
-        fn add_passkey_confirmed(
-            &mut self,
-            password: $crate::frames::account::source::Password<'_>,
-        ) -> Result<(), $crate::frames::account::source::Refused> {
-            let started = $crate::engine_host::passkeys::wiping(&password).map(|password| self.passkeys.add(password));
-            match started {
-                Some(true) => Ok(()),
-                _ => Err($crate::frames::account::source::Refused::Offline),
-            }
-        }
-        fn remove_passkey_confirmed(
-            &mut self,
-            id: &str,
-            password: $crate::frames::account::source::Password<'_>,
-        ) -> bool {
-            $crate::engine_host::passkeys::wiping(&password).is_some_and(|password| self.passkeys.remove(id, password))
-        }
-    };
+/// Adding takes the password (`add_passkey_confirmed`): the pane asks for it, so `add_passkey` is not reached.
+pub(super) fn add_without_password() -> Result<(), Refused> {
+    Err(Refused::NotConfirmed)
 }
-pub(super) use passkey_methods;
+
+/// Adds a passkey under the account password: one wiping buffer into the engine call. An empty password or a
+/// call that did not start is `Offline` (nothing was changed).
+pub(super) fn add_confirmed<C: CredentialStores + 'static>(
+    calls: &mut PasskeyCalls<C>,
+    password: Password<'_>,
+) -> Result<(), Refused> {
+    match wiping(&password).map(|password| calls.add(password)) {
+        Some(true) => Ok(()),
+        _ => Err(Refused::Offline),
+    }
+}
+
+/// Removes passkey `id` under the account password; `false` when the call did not start.
+pub(super) fn remove_confirmed<C: CredentialStores + 'static>(
+    calls: &mut PasskeyCalls<C>,
+    id: &str,
+    password: Password<'_>,
+) -> bool {
+    wiping(&password).is_some_and(|password| calls.remove(id, password))
+}
 
 #[cfg(test)]
 #[path = "passkeys_tests.rs"]
