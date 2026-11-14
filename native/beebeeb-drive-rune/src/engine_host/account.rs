@@ -223,7 +223,6 @@ pub struct EngineAccountSource<C: CredentialStores> {
     actions: actions::Actions<C>,
     /// Sign-in activity (`account_activity.rs`).
     activity: activity::ActivityPart<C>,
-    /// Two-factor's added / last used / backup codes (`account_twofactor_status.rs`).
     two_factor_status: twofactor_status::StatusPart<C>,
     passkeys: PasskeyCalls<C>,
     notices: Line,
@@ -844,6 +843,10 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
+        // A wait before "Send again" counts down: look again every second while it does.
+        let resend_tick = self.resend_tick();
+        changed |= resend_tick.is_some();
+        let wake_in = [wake_in, resend_tick].into_iter().flatten().min();
         self.dirty = false;
         let (passkeys_changed, passkeys_busy, passkeys_wake) = self.passkeys.pump();
         let (changed, wake_in) = (
@@ -1085,9 +1088,12 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         Err(CodeRefused::Offline)
     }
     fn resend_wait(&self) -> u32 {
-        0
+        self.resend_left()
     }
     fn send_again(&mut self) -> bool {
+        false
+    }
+    fn can_send_again_deletion(&self) -> bool {
         false
     }
     fn password_strength(&self, candidate: &Password<'_>) -> Strength {
@@ -1129,7 +1135,6 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn add_passkey(&mut self) -> Result<(), Refused> {
         super::passkeys::add_without_password()
     }
-    /// Rename (no password): started on a worker; the new name shows when the rows are read again.
     fn rename_passkey(&mut self, id: &str, name: &str) -> bool {
         self.passkeys.rename(id, name)
     }
@@ -1151,8 +1156,6 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn remove_passkey_confirmed(&mut self, id: &str, password: Password<'_>) -> bool {
         super::passkeys::remove_confirmed(&mut self.passkeys, id, password)
     }
-    /// The code dialog is not how this source stops the recording (it asks the password: `stop_activity_confirmed`);
-    /// never reached from a drawn control.
     fn stop_activity(&mut self, _code: &str) -> Result<(), CodeRefused> {
         Err(CodeRefused::Offline)
     }

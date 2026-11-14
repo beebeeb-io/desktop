@@ -4,7 +4,7 @@
 //! nothing; a page that was left drops the wait and the answer with it.
 
 use super::form::{self, Problem};
-use super::source::{Answered, CallKind, CodeRefused, EmailRefused};
+use super::source::{Answered, CallKind, CodeRefused, EmailRefused, Resend};
 use super::{AccountUi, Pane};
 
 /// Starts `kind`. `true`: it is out (the page waits for its answer); `false`: the source answers the sync methods.
@@ -54,6 +54,23 @@ pub fn settle(ui: &mut AccountUi, kind: CallKind, answered: Answered) -> Option<
             None
         }
         (CallKind::ConfirmEmail, Answered::Done) => Some("DW-A51"),
+        (CallKind::ResendEmail, Answered::Done) => {
+            f.problem = None;
+            None
+        }
+        // The change is gone: back to step 1.
+        (CallKind::ResendEmail, Answered::Resend(Resend::Gone)) => {
+            f.problem = None;
+            Some("DW-A65")
+        }
+        (CallKind::ResendEmail, Answered::Resend(why)) => {
+            f.problem = Some(match why {
+                Resend::Wait(_) => Problem::ResendWait,
+                Resend::Limit => Problem::ResendLimit,
+                _ => Problem::Offline,
+            });
+            None
+        }
         (CallKind::BeginTwoFactor, Answered::Setup(setup)) => {
             f.setup = Some(setup);
             None

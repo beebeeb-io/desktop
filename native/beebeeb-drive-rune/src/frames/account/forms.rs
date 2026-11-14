@@ -238,8 +238,13 @@ pub(super) fn code_error(words: &str, t: &Theme) -> El {
 }
 
 /// "Didn't get it? Send again in 42 s" (DW-A66, DW-A81).
-pub(super) fn send_again(source: &dyn AccountSource, t: &Theme) -> El {
-    if !source.can_send_again() {
+pub(super) fn send_again(source: &dyn AccountSource, email: bool, t: &Theme) -> El {
+    let offered = if email {
+        source.can_send_again()
+    } else {
+        source.can_send_again_deletion()
+    };
+    if !offered {
         // Nothing sends it again: no link that does nothing.
         return rune::el().key("resend-none");
     }
@@ -248,7 +253,12 @@ pub(super) fn send_again(source: &dyn AccountSource, t: &Theme) -> El {
     let link = if wait > 0 {
         link
     } else {
-        link.on_press(|s: &mut State| {
+        link.on_press(move |s: &mut State| {
+            // The email's code is sent on the source's worker (the answer settles on the page); a source that
+            // answers at once, and the deletion's code, use `send_again`.
+            if email && super::calls::start(&mut s.account, CallKind::ResendEmail, "", "") {
+                return;
+            }
             if let Some(source) = s.account.source.as_deref_mut() {
                 source.send_again();
             }
@@ -284,17 +294,21 @@ pub fn email_code(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
             t,
         ),
     ];
-    if f.problem.is_some() {
-        children.push(code_error(
-            if f.problem == Some(Problem::Offline) {
-                OFFLINE
-            } else {
-                "That code is wrong or has expired. Check it, or send a new one."
-            },
-            t,
-        ));
+    let words = match f.problem {
+        None => None,
+        Some(Problem::Offline) => Some(OFFLINE.to_string()),
+        // The wait counts down on the source's clock; at 0 there is nothing left to say.
+        Some(Problem::ResendWait) => {
+            let wait = source.resend_wait();
+            (wait > 0).then(|| format!("Wait {wait} s before asking again."))
+        }
+        Some(Problem::ResendLimit) => Some("No more codes for this change. Start again.".to_string()),
+        Some(_) => Some("That code is wrong or has expired. Check it, or send a new one.".to_string()),
+    };
+    if let Some(words) = words {
+        children.push(code_error(&words, t));
     }
-    children.push(send_again(source, t));
+    children.push(send_again(source, true, t));
     children.push(fm::actions(vec![
         (back.on_press(|s: &mut State| super::go(s, "DW-A65")), back_b),
         (confirm, confirm_b),

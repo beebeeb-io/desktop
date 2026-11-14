@@ -48,6 +48,7 @@ use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
 pub mod account_actions_api;
 pub mod account_api;
 pub mod account_email_api;
+pub mod account_email_resend_api;
 pub mod account_password_api;
 pub mod account_twofactor_api;
 pub mod account_twofactor_status_api;

@@ -544,6 +544,18 @@ pub enum EmailRefused {
     Offline,
 }
 
+/// Why the email's code was not sent again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resend {
+    /// Too soon: seconds to wait (Beebeeb's `Retry-After`).
+    Wait(u32),
+    /// No more codes for this change: start again.
+    Limit,
+    /// No change is waiting any more: back to step 1.
+    Gone,
+    Offline,
+}
+
 /// The calls of the Account pages that are answered later: a source that sends them on a worker starts one with
 /// [`AccountSource::start_call`] and the window takes the answer with [`AccountSource::call_answer`]; nothing of the
 /// answer is drawn before it came.
@@ -563,6 +575,8 @@ pub enum CallKind {
     CheckCode,
     /// A current code: 8 new backup codes.
     NewBackupCodes,
+    /// "Send again": the email's code once more.
+    ResendEmail,
 }
 
 /// How a started call ended.
@@ -573,6 +587,7 @@ pub enum Answered {
     NewKey(Setup),
     Codes(Vec<Secret>),
     Email(EmailRefused),
+    Resend(Resend),
     Code(CodeRefused),
     Refused(Refused),
 }
@@ -737,6 +752,11 @@ pub trait AccountSource {
 
     /// Whether "Send again" is offered for the email's code: `false` when Beebeeb has no route that sends it again.
     fn can_send_again(&self) -> bool {
+        true
+    }
+    /// Whether "Send again" is offered for the account deletion's code (DW-A81): `false` when Beebeeb has no route
+    /// that sends it again. A fixture says `true` (the board).
+    fn can_send_again_deletion(&self) -> bool {
         true
     }
     /// Engine: `core::password::strength` on this device, and the leak check by hashed prefix.

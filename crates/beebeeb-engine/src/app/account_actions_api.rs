@@ -204,7 +204,7 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// Whether the session in memory is, now, the one `session` names (asked with no session change half done).
-    fn session_is_in_memory(&self, session: SessionGeneration) -> bool {
+    pub(super) fn session_is_in_memory(&self, session: SessionGeneration) -> bool {
         self.acct.while_session_is(&self.writes, session, |_| ()).is_some()
     }
 
