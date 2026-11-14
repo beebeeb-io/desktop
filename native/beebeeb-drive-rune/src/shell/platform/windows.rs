@@ -199,6 +199,10 @@ impl Platform for WindowsPlatform {
         read_taskbar_theme()
     }
 
+    fn pick_folder(&self, title: &str, start: &std::path::Path) -> Result<Option<std::path::PathBuf>, PlatformError> {
+        super::windows_folder::pick_folder(title, start)
+    }
+
     fn autostart_enabled(&self) -> Result<bool, PlatformError> {
         let run = reg_read_string(autostart::RUN_KEY, run_value_name())?;
         let approved = reg_read(autostart::STARTUP_APPROVED_KEY, run_value_name(), RRF_RT_REG_BINARY).unwrap_or(None);

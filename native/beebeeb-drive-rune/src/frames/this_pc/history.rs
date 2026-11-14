@@ -15,7 +15,7 @@ use crate::ui::kit;
 const SEARCH_PLACEHOLDER: &str = "Search history";
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
-    // Nothing answers for This PC yet (a build that ships before the engine lane wires it):
+    // This PC turned off (`engine_host::this_pc::TURNED_ON`):
     // the shell's "not built yet" frame, never sample sync history.
     if !s.this_pc.wired() {
         return crate::shell::placeholder::window(s, cx, crate::shell::registry::group_for(&s.shell.app));
@@ -47,8 +47,14 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         main = main.child(problems_bar(&t));
     }
     main = main
-        .child(if ui.no_history() { empty(&t) } else { list(ui, &t) })
+        .child(match super::offline::not_ready(ui.standing()) {
+            // No lists: the section says why, never "No changes yet".
+            Some((title, words)) => super::offline::empty_state(&base::SYNC_HISTORY, title, words, &t),
+            None if ui.no_history() => empty(&t),
+            None => list(ui, &t),
+        })
         .child(chrome::status_line(
+            s,
             ui,
             "History of the last 30 days, on this PC only".into(),
             &t,

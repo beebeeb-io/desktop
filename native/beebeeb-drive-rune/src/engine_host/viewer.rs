@@ -135,6 +135,12 @@ pub struct LiveViewerEngine<C: CredentialStores> {
     engine: Arc<Engine<C>>,
 }
 
+impl<C: CredentialStores> LiveViewerEngine<C> {
+    pub(super) fn new(engine: Arc<Engine<C>>) -> Self {
+        Self { engine }
+    }
+}
+
 impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
     fn session_turn(&self) -> SessionGeneration {
         self.engine.session_turn()
@@ -321,13 +327,13 @@ pub struct EngineViewerSource<E: ViewerEngine> {
 impl<C: CredentialStores + 'static> EngineViewerSource<LiveViewerEngine<C>> {
     /// Starts no thread and reads nothing until a file is opened.
     pub fn new(engine: Arc<Engine<C>>) -> Self {
-        Self::on(Arc::new(LiveViewerEngine { engine }))
+        Self::on(Arc::new(LiveViewerEngine::new(engine)))
     }
 }
 
 /// How a file is shown here, by its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Shows {
+pub(super) enum Shows {
     Text,
     Markdown,
     Picture,
@@ -336,7 +342,7 @@ enum Shows {
     Nothing,
 }
 
-fn shows(name: &str) -> Shows {
+pub(super) fn shows(name: &str) -> Shows {
     let ext = name
         .rsplit_once('.')
         .map(|(_, ext)| ext.to_ascii_lowercase())
@@ -353,7 +359,7 @@ fn shows(name: &str) -> Shows {
 }
 
 /// "Markdown" of "Markdown · 1.4 KB": the kind in a word, by the name.
-fn kind_word(name: &str) -> &'static str {
+pub(super) fn kind_word(name: &str) -> &'static str {
     match kinds::viewer_of(name) {
         Some(Viewer::Markdown) => "Markdown",
         Some(Viewer::Text) => "Text",

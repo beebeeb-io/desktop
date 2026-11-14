@@ -6,6 +6,7 @@
 //! Must not: be reachable from a release build, or hold anything a test did not put there.
 
 pub mod fake_account;
+pub mod fake_signup;
 pub mod server;
 
 use std::collections::HashMap;

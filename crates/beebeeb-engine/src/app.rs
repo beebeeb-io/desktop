@@ -50,18 +50,27 @@ pub mod account_api;
 pub mod backups_api;
 // Explorer's "Free up space" command asks this handle, and a stop removes its binding (task 2490).
 mod explorer_api;
+// The sidebar's figures for the native Files window: files kept on this PC, the storage split.
+pub mod files_facts_api;
 pub mod kept_api;
 // The two-level lock, bound to core's rules (`beebeeb_api::flows::lock`).
 pub mod lock_api;
 pub mod owned_state;
+// What the app window may change of the rows of the Backups tree, for the native Files window.
+pub mod backup_places_api;
 pub mod photos_api;
 pub mod settings_api;
+pub mod setup_api;
 // What the account shares and what is shared with it, for the native Shared window.
 pub mod shares_api;
 pub mod signin_api;
+pub mod signup_api;
 // Is the local state the signed-in account's (task 2488): a read-only check for windows that show it.
 pub mod state_owner;
+pub mod transfer_limits_api;
 pub mod trash_api;
+// A file's versions and the restore of one, for the native Files window.
+pub mod versions_api;
 // An open file for the native viewer: its facts, and its content decrypted in memory.
 pub mod viewer_api;
 
@@ -392,24 +401,6 @@ impl<C: CredentialStores> Engine<C> {
         });
         self.publish();
         self.view.read().gate
-    }
-
-    fn restore_key(&self, turn: SessionGeneration, vault: AuthVault<C::Store>) {
-        match store::load_session_from_vault(vault, None) {
-            Ok(Some(session)) => {
-                if let Ok(_write) = self.claim(turn)
-                    && let Ok(mut guard) = self.acct.session.lock()
-                {
-                    if let Ok(mut email) = self.acct.auth_email.lock() {
-                        email.clone_from(&session.email);
-                    }
-                    *guard = Some(session);
-                    self.acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);
-                }
-            }
-            Ok(None) => {}
-            Err(_) => tracing::info!("startup restore: signed in, the vault stays locked"),
-        }
     }
 
     /// Which screen the window shows (`gate::decide_gate`). The plan check is not made here: a signed-in, unlocked

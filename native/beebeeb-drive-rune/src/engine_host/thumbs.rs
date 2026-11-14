@@ -20,10 +20,13 @@
 //! that look is noted with it, on the window's thread. A few workers fetch, in the order the tiles were drawn, and
 //! wake the window ([`Engine::wake_host`]) when an answer is here. A wish no draw repeated for [`WISH_LIVES`] is for
 //! a tile that left the screen: it is dropped unfetched. A picture some draw still looks at is never dropped for
-//! room: when the store is full of those, a new one is not even asked for.
+//! room: when the store is full of those, a new one is not even asked for. A picture that arrives and cannot stay
+//! is not reported, and stops further asks for new pictures until there is room again (a held picture is still
+//! refreshed): a folder with more pictures than the store holds is not fetched again and again.
 //!
-//! How old: a file with no picture is asked again after [`ASK_AGAIN_AFTER`], a fetch that failed (offline, a busy
-//! database) after [`TRY_AGAIN_AFTER`]; a picture held longer than [`REFRESH_AFTER`] is still shown and fetched
+//! How old: a file with no picture is asked again after [`ASK_AGAIN_AFTER`]; a fetch that failed (offline, a busy
+//! database) owes ONE redraw of its own, [`TRY_AGAIN_AFTER`] later, and if that fails too it is tried again only
+//! when something else redraws, never on a timer again; a picture held longer than [`REFRESH_AFTER`] is still shown and fetched
 //! again, so a picture of a file that changed does not stay for the session. The Photos source also drops the
 //! pictures of a file whose version or time changed in its library ([`EngineThumbStore::drop_file`]).
 //!
@@ -90,7 +93,18 @@ enum Held {
     /// A video's length in seconds.
     Length(u32),
     /// Nothing to show: not asked again before `until`.
-    Nothing { until: Instant },
+    Nothing { until: Instant, again: Again },
+}
+
+/// Whether a failure owes a redraw of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Again {
+    /// Nothing is owed (no picture exists, or it cannot be read).
+    No,
+    /// One redraw is owed once `until` has passed.
+    Once,
+    /// The redraw was given (or the failure came after one): nothing more on a timer.
+    Done,
 }
 
 #[derive(Default)]
@@ -106,6 +120,8 @@ struct Inner {
     workers: usize,
     /// Something arrived since the window last asked.
     arrived: bool,
+    /// A picture arrived and could not stay: nothing new is asked until a picture leaves.
+    full: bool,
     /// Tests only: the next fetch for this file waits on the first before it asks the engine, and says on the
     /// second that its answer was taken in (or dropped).
     #[cfg(test)]
@@ -119,6 +135,7 @@ impl Inner {
         self.wishes.clear();
         self.in_flight.clear();
         self.arrived = false;
+        self.full = false;
     }
 
     /// Everything here is `now`'s, or it goes.
@@ -131,10 +148,16 @@ impl Inner {
 
     /// The next wish to fetch: the one wished first that a draw still repeats. A wish no draw repeated for
     /// `WISH_LIVES` is for a tile that left the screen: dropped, unfetched.
+    /// While the store is full, a wish for a picture the key does not hold is dropped too (a held one is refreshed).
     fn next_wish(&mut self, now: Instant) -> Option<(Key, Stamp)> {
         loop {
             match self.wishes.pop_front()? {
                 (_, _, at) if now.duration_since(at) >= WISH_LIVES => {}
+                (key, _, _)
+                    if self.full
+                        && matches!(key.1, Ask::Picture(_))
+                        && !matches!(self.held.get(&key), Some(Held::Picture { .. }))
+                        && self.stale(now).is_none() => {}
                 (key, stamp, _) => return Some((key, stamp)),
             }
         }
@@ -165,7 +188,7 @@ impl Inner {
 
     /// Is there room for one more picture, now or by dropping one no draw looks at any more?
     fn has_room(&self, now: Instant) -> bool {
-        (self.pictures() < MAX_PICTURES && self.bytes < MAX_BYTES) || self.stale(now).is_some()
+        (!self.full && self.pictures() < MAX_PICTURES && self.bytes < MAX_BYTES) || self.stale(now).is_some()
     }
 
     fn drop_picture(&mut self, key: &Key) {
@@ -180,8 +203,122 @@ impl Inner {
         while self.over() {
             let Some(key) = self.stale(now) else { return false };
             self.drop_picture(&key);
+            self.full = false;
         }
         true
+    }
+
+    /// The tail of a look: wish for `key` unless it is in flight, already wished (then it lives on), without room,
+    /// or the line is full. `shows`: an answer is already held. `true`: a new wish was queued.
+    fn wish(&mut self, key: Key, stamped: Stamp, now: Instant, shows: bool) -> bool {
+        if self.in_flight.contains(&key) {
+            return false;
+        }
+        // Repeated by this draw: it keeps its place and lives on.
+        if let Some(wish) = self.wishes.iter_mut().find(|(wished, _, _)| *wished == key) {
+            wish.1 = stamped;
+            wish.2 = now;
+            return false;
+        }
+        // No room, and every picture held is still looked at: asking would only push one of those out.
+        if !shows && matches!(key.1, Ask::Picture(_)) && !self.has_room(now) {
+            return false;
+        }
+        // The line is full: this one waits for a later draw (the ones wished first are fetched first).
+        if self.wishes.len() >= MAX_WISHES {
+            return false;
+        }
+        self.wishes.push_back((key, stamped, now));
+        true
+    }
+
+    /// Everything held of the file `id` goes; a picture that leaves makes room.
+    fn drop_file(&mut self, id: &str) {
+        let keys: Vec<Key> = self.held.keys().filter(|key| key.0 == id).cloned().collect();
+        for key in keys {
+            self.drop_picture(&key);
+            self.held.remove(&key);
+            self.full = false;
+        }
+    }
+
+    /// An answer of a fetch that is current is taken in at `at`.
+    fn take_in(&mut self, key: Key, answer: Result<Held, ThumbRefused>, at: Instant) {
+        match answer {
+            Ok(held) => {
+                // A refresh replaces what was held; if the newcomer cannot stay, what was held comes back.
+                let before = self.held.remove(&key);
+                if let Some(Held::Picture { bytes, .. }) = &before {
+                    self.bytes = self.bytes.saturating_sub(*bytes);
+                }
+                let is_picture = matches!(held, Held::Picture { .. });
+                if let Held::Picture { bytes, .. } = &held {
+                    self.bytes += bytes;
+                }
+                self.held.insert(key.clone(), held);
+                // Full of pictures that are looked at: this one does not stay either, and is not reported.
+                if !self.make_room(at) && is_picture {
+                    self.drop_picture(&key);
+                    if let Some(old @ Held::Picture { .. }) = before {
+                        if let Held::Picture { bytes, .. } = &old {
+                            self.bytes += bytes;
+                        }
+                        self.held.insert(key, old);
+                    }
+                    // After the removal: `drop_picture` does not touch it, and `make_room` may have cleared it.
+                    self.full = true;
+                    return;
+                }
+                self.arrived = true;
+            }
+            // The session is not there for it: nothing is kept, not even "no picture".
+            Err(ThumbRefused::NotSignedIn | ThumbRefused::SessionEnded | ThumbRefused::NotYours) => {}
+            Err(refused) => {
+                // A picture that is held (a refresh that failed) stays.
+                if matches!(self.held.get(&key), Some(Held::Picture { .. })) {
+                    return;
+                }
+                let (wait, again) = match refused {
+                    ThumbRefused::NoThumbnail | ThumbRefused::Unreadable => (ASK_AGAIN_AFTER, Again::No),
+                    _ => match self.held.get(&key) {
+                        Some(Held::Nothing {
+                            again: Again::Once | Again::Done,
+                            ..
+                        }) => (TRY_AGAIN_AFTER, Again::Done),
+                        _ => (TRY_AGAIN_AFTER, Again::Once),
+                    },
+                };
+                self.held.insert(
+                    key,
+                    Held::Nothing {
+                        until: at + wait,
+                        again,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Every redraw owed by a failure that is due becomes given. `true` if there was one.
+    fn retry_due(&mut self, now: Instant) -> bool {
+        let mut due = false;
+        for held in self.held.values_mut() {
+            if let Held::Nothing { until, again } = held
+                && *again == Again::Once
+                && *until <= now
+            {
+                *again = Again::Done;
+                due = true;
+            }
+        }
+        due
+    }
+
+    /// Is a redraw owed by a failure that is not given yet?
+    fn retry_pending(&self) -> bool {
+        self.held
+            .values()
+            .any(|held| matches!(held, Held::Nothing { again: Again::Once, .. }))
     }
 }
 
@@ -220,7 +357,7 @@ impl<C: CredentialStores> EngineThumbStore<C> {
         let key = (id.to_string(), ask);
         let mut answer = None;
         match inner.held.get_mut(&key) {
-            Some(Held::Nothing { until }) if *until > now => return None,
+            Some(Held::Nothing { until, .. }) if *until > now => return None,
             Some(Held::Nothing { .. }) | None => {}
             Some(held) => {
                 let fresh = match held {
@@ -236,26 +373,10 @@ impl<C: CredentialStores> EngineThumbStore<C> {
                 }
             }
         }
-        if inner.in_flight.contains(&key) {
-            return answer;
+        if inner.wish(key, stamped, now, answer.is_some()) {
+            self.start_workers(&mut inner);
+            self.wake.notify_one();
         }
-        // Repeated by this draw: it keeps its place and lives on.
-        if let Some(wish) = inner.wishes.iter_mut().find(|(wished, _, _)| *wished == key) {
-            wish.1 = stamped;
-            wish.2 = now;
-            return answer;
-        }
-        // No room, and every picture held is still looked at: asking would only push one of those out.
-        if answer.is_none() && matches!(ask, Ask::Picture(_)) && !inner.has_room(now) {
-            return None;
-        }
-        // The line is full: this one waits for a later draw (the ones wished first are fetched first).
-        if inner.wishes.len() >= MAX_WISHES {
-            return answer;
-        }
-        inner.wishes.push_back((key, stamped, now));
-        self.start_workers(&mut inner);
-        self.wake.notify_one();
         answer
     }
 
@@ -278,12 +399,7 @@ impl<C: CredentialStores> EngineThumbStore<C> {
 
     /// The file `id` changed: what is held of it goes, and is asked for again at the next look.
     pub fn drop_file(&self, id: &str) {
-        let mut inner = self.inner();
-        let keys: Vec<Key> = inner.held.keys().filter(|key| key.0 == id).cloned().collect();
-        for key in keys {
-            inner.drop_picture(&key);
-            inner.held.remove(&key);
-        }
+        self.inner().drop_file(id);
     }
 
     /// Tests only: the next fetch for the file `id` waits, on its worker, before it asks the engine anything, until
@@ -314,13 +430,17 @@ impl<C: CredentialStores> EngineThumbStore<C> {
 
     /// Did something arrive since the last call?
     pub fn take_arrived(&self) -> bool {
-        std::mem::take(&mut self.inner().arrived)
+        let mut inner = self.inner();
+        let arrived = std::mem::take(&mut inner.arrived);
+        // Both are evaluated: the owed redraws are marked given whether or not something arrived.
+        let owed = inner.retry_due(Instant::now());
+        arrived | owed
     }
 
     /// Is something still on its way?
     pub fn busy(&self) -> bool {
         let inner = self.inner();
-        !inner.wishes.is_empty() || !inner.in_flight.is_empty()
+        !inner.wishes.is_empty() || !inner.in_flight.is_empty() || inner.retry_pending()
     }
 
     fn start_workers(self: &Arc<Self>, inner: &mut Inner) {
@@ -389,32 +509,7 @@ impl<C: CredentialStores> EngineThumbStore<C> {
         let current = self.engine.has_session() && wished_under == now && inner.stamp.as_ref() == Some(&now);
         if current {
             let at = Instant::now();
-            match answer {
-                Ok(held) => {
-                    inner.drop_picture(&key);
-                    if let Held::Picture { bytes, .. } = &held {
-                        inner.bytes += bytes;
-                    }
-                    inner.held.insert(key.clone(), held);
-                    // Full of pictures that are looked at: this one does not stay either.
-                    if !inner.make_room(at) {
-                        inner.drop_picture(&key);
-                    }
-                    inner.arrived = true;
-                }
-                // The session is not there for it: nothing is kept, not even "no picture".
-                Err(ThumbRefused::NotSignedIn | ThumbRefused::SessionEnded | ThumbRefused::NotYours) => {}
-                Err(refused) => {
-                    let wait = match refused {
-                        ThumbRefused::NoThumbnail | ThumbRefused::Unreadable => ASK_AGAIN_AFTER,
-                        _ => TRY_AGAIN_AFTER,
-                    };
-                    // A picture that is held (a refresh that failed) stays.
-                    if !matches!(inner.held.get(&key), Some(Held::Picture { .. })) {
-                        inner.held.insert(key, Held::Nothing { until: at + wait });
-                    }
-                }
-            }
+            inner.take_in(key, answer, at);
         }
         drop(inner);
         #[cfg(test)]

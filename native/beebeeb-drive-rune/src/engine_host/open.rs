@@ -430,6 +430,9 @@ pub fn open<C: CredentialStores>(
     let identity = crate::shell::identity::engine_identity();
     beebeeb_engine::state_paths::init_from_app_local_data_dir(identity, local_data)?;
     let state_dir = beebeeb_engine::state_paths::beebeeb_state_dir_for(identity)?;
+    // Before anything else writes the settings (contract §5.1): an install whose settings already name a sync
+    // folder was set up by 0.8.x and never sees the native first run; any other has it to do.
+    beebeeb_engine::app::setup_api::decide_first_run(identity)?;
     let account_id = beebeeb_engine::config::DesktopConfig::ensure_account_id_for(identity)?;
     // Before the engine reads a stored session or `state.db`. The real app never talks to another server, so its data
     // gets no record.

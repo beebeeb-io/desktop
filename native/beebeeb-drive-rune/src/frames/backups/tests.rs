@@ -105,7 +105,11 @@ fn source(rt: &Runtime<State>) -> &dyn BackupsSource {
 
 #[test]
 fn the_six_built_frames_show_the_boards_words() {
-    assert_eq!(FRAMES.len(), 6, "the Backups frames this lane built");
+    assert_eq!(
+        FRAMES.len(),
+        16,
+        "the Backups frames built: 6 of Backups, 10 of Mail Backup"
+    );
     let rt = runtime("DW-0737");
     assert_eq!(rt.state.shell.app.screen(), Screen::Settings(SettingsPane::Backups));
     assert_eq!(text(&rt, "set-title"), "Backups");

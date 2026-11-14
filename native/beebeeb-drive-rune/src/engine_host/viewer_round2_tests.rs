@@ -426,6 +426,42 @@ fn every_webp_an_encoder_writes_is_still_decoded_and_shown() {
 }
 
 #[test]
+fn a_webp_whose_last_chunk_has_no_pad_byte_is_decoded_and_shown() {
+    let (_, still, (width, height)) = viewer_picture::tests::webps_an_encoder_writes()
+        .into_iter()
+        .find(|(which, ..)| *which == "a lossy still with alpha")
+        .expect("the fixture");
+    let restate = |bytes: &mut Vec<u8>| {
+        let stated = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&stated.to_le_bytes());
+    };
+    // One odd-length metadata chunk with no pad byte after it.
+    let mut unpadded = still.clone();
+    unpadded.extend_from_slice(b"EXIF");
+    unpadded.extend_from_slice(&3u32.to_le_bytes());
+    unpadded.extend_from_slice(&[1, 2, 3]);
+    restate(&mut unpadded);
+    // A 2 MiB metadata chunk, padded, with the length right.
+    let mut large = still;
+    large.extend_from_slice(b"EXIF");
+    large.extend_from_slice(&((2u32 << 20) as u32).to_le_bytes());
+    large.extend(std::iter::repeat(0u8).take(2 << 20));
+    restate(&mut large);
+    for (which, bytes) in [("no pad byte", unpadded), ("2 MiB of metadata", large)] {
+        assert!(viewer_picture::check(&bytes).is_ok(), "{which}");
+        let before = DECODES.with(|count| count.get());
+        let content = picture_body(&bytes, &AtomicBool::new(false));
+        assert_eq!(DECODES.with(|count| count.get()), before + 1, "{which}");
+        assert!(matches!(content.body, Some(Body::Photo(_))), "{which}");
+        assert_eq!(
+            content.picture.as_ref().expect(which).size(),
+            (width, height),
+            "{which}"
+        );
+    }
+}
+
+#[test]
 fn a_file_named_as_a_picture_that_is_another_format_by_its_content_never_reaches_a_decoder() {
     let fake = Fake::new();
     // The toolkit picks a decoder by content and HAS one for this: an icon container with a PNG inside. The viewer

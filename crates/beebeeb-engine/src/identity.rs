@@ -84,6 +84,12 @@ impl EngineIdentity {
         }
     }
 
+    /// The other build of this app (the test build for the real app, and the other way around): the one whose
+    /// folders this one must never sync into.
+    pub fn other_build(&self) -> &'static EngineIdentity {
+        if self.is_real() { &TEST } else { &REAL }
+    }
+
     /// Whether this is the released app.
     pub const fn is_real(&self) -> bool {
         bytes_equal(self.bundle_identifier.as_bytes(), REAL.bundle_identifier.as_bytes())

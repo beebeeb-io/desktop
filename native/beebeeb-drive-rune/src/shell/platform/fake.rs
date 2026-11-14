@@ -26,6 +26,10 @@ pub struct FakePlatform {
     pub capture_exclusions: Mutex<Vec<bool>>,
     /// When true, `set_capture_exclusion` fails with `PlatformError::Os`.
     pub capture_exclusion_fails: AtomicBool,
+    /// What the folder picker answers, one per call, oldest first; with none left it was closed without a folder.
+    pub picks: Mutex<std::collections::VecDeque<Result<Option<std::path::PathBuf>, PlatformError>>>,
+    /// The title and the start folder of every `pick_folder` call, in order.
+    pub pick_asks: Mutex<Vec<(String, std::path::PathBuf)>>,
 }
 
 impl Default for FakePlatform {
@@ -41,6 +45,8 @@ impl Default for FakePlatform {
             tray_handler: Mutex::default(),
             capture_exclusions: Mutex::default(),
             capture_exclusion_fails: AtomicBool::new(false),
+            picks: Mutex::default(),
+            pick_asks: Mutex::default(),
         }
     }
 }
@@ -125,6 +131,17 @@ impl Platform for FakePlatform {
         state.0 = enabled;
         state.1.push(enabled);
         Ok(())
+    }
+
+    fn pick_folder(&self, title: &str, start: &std::path::Path) -> Result<Option<std::path::PathBuf>, PlatformError> {
+        if self.unbuilt {
+            return Err(PlatformError::NotBuilt("the folder picker"));
+        }
+        self.pick_asks
+            .lock()
+            .unwrap()
+            .push((title.to_string(), start.to_path_buf()));
+        self.picks.lock().unwrap().pop_front().unwrap_or(Ok(None))
     }
 
     fn show_start_refusal(&self, title: &str, message: &str) {

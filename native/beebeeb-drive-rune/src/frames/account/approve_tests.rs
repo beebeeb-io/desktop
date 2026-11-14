@@ -801,3 +801,37 @@ fn a_hostile_device_name_is_bounded_in_the_heading_the_accessible_name_and_the_t
         );
     }
 }
+
+/// Under the review, the number beside "Devices and sessions" is the count the source read. A source that has
+/// not counted them (being read, not known) draws the row without a number: never a count nobody read.
+#[test]
+fn the_page_under_the_review_draws_no_count_that_was_not_read() {
+    use super::source::Count;
+    let rt = runtime("DW-A13");
+    assert_eq!(says(&rt, "item-0-0-value"), "4", "the board's four devices");
+    for count in [Count::Reading, Count::NotKnown] {
+        let mut state = init();
+        assert!(super::scene("DW-A13", &mut state));
+        let unread: fn(super::source::SecurityFacts) -> super::source::SecurityFacts = match count {
+            Count::Reading => |facts| super::source::SecurityFacts {
+                sessions: Count::Reading,
+                ..facts
+            },
+            _ => |facts| super::source::SecurityFacts {
+                sessions: Count::NotKnown,
+                ..facts
+            },
+        };
+        state.account.source = Some(Box::new(BoardAccount::new().knowing(unread)));
+        let rt = window(state);
+        assert_eq!(says(&rt, "item-0-0-title"), "Devices and sessions", "{count:?}");
+        assert!(
+            find(&rt, "item-0-0-value").is_none(),
+            "{count:?}: no number beside the row"
+        );
+        assert!(
+            find(&rt, "item-1-0").is_some(),
+            "{count:?}: the review is still over it"
+        );
+    }
+}

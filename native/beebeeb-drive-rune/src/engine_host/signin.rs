@@ -13,8 +13,8 @@
 //!
 //! What it does not bind answers AT ONCE with the refusal its screen draws, never with silence: the Continue-as
 //! card (no shared session store exists for this app yet, so Windows Hello is asked for the lock screen only), a
-//! device request, a passkey, "Forgot password?" with the phrase (core's `recovery_flow` has no engine step yet) and sign-up (the
-//! trait's defaults: `sign_up_available` stays `false`).
+//! device request, a passkey and "Forgot password?" with the phrase (core's `recovery_flow` has no engine step yet).
+//! Creating an account is bound in `signup.rs` (owner ruling 2026-11-14: sign-up in any app).
 //!
 //! Threads: nothing here waits for Beebeeb on the window's thread. Every step is a job on ONE worker, run in the
 //! order the person asked (leaving a step, then signing in again, happen in that order); its answer goes down a
@@ -42,6 +42,11 @@ use beebeeb_engine::app::{CredentialStores, Engine};
 
 use super::hello::{HelloCancel, HelloDone, HelloPrompter, HelloResult, NoHello};
 use super::{log, map_gate_signin, map_next, map_problem, phrase_problem, two_factor_problem};
+use beebeeb_engine::app::signup_api::SignupAttempt;
+
+#[path = "signup.rs"]
+mod signup;
+use crate::frames::signin::create_source::{PasswordVerdict, SignUpEvent};
 use crate::frames::signin::source::{
     CodeKind, GateState, HelloOutcome, NextAfterSignIn, PasskeyOutcome, PhraseProblem, SharedSession, SignInEvent,
     SignInProblem, SignInSource,
@@ -58,11 +63,18 @@ enum Wait {
     Retry,
     /// The lock screen's Windows Hello prompt.
     Hello,
+    /// Sign-up's steps and the wait for a new code (`signup.rs`).
+    SignUpCode,
+    SignUpVerify,
+    SignUpPassword,
+    SignUpConfirm,
+    SignUpCreate,
+    SignUpTick,
     /// A call this source does not bind: answered at once, never stale.
     Unbound,
 }
 
-const WAITS: usize = 7;
+const WAITS: usize = Wait::Unbound as usize + 1;
 
 /// One answer: the wait it belongs to, which attempt of it, and the event for the screen.
 struct Answer {
@@ -90,6 +102,8 @@ pub struct EngineSignInSource<C: CredentialStores> {
     /// The lock a password is opening, as it was when the password was sent; shared with the worker, which
     /// puts that lock back when the person left the step and it finished anyway. `None`: a sign-in.
     unlocking: Arc<Mutex<Option<LockState>>>,
+    /// The account being created, if any: owned here, wiped when sign-up is left (`signup.rs`).
+    signup: Arc<SignupAttempt>,
 }
 
 impl<C: CredentialStores> EngineSignInSource<C> {
@@ -128,6 +142,7 @@ impl<C: CredentialStores> EngineSignInSource<C> {
             hello: Box::new(NoHello),
             hello_up: None,
             unlocking: Arc::new(Mutex::new(None)),
+            signup: Arc::new(SignupAttempt::new()),
         }
     }
 
@@ -164,7 +179,14 @@ impl<C: CredentialStores> EngineSignInSource<C> {
                 SignInEvent::SignedIn(Err(SignInProblem::RateLimited { seconds })) => Some(*seconds),
                 _ => None,
             };
+            let resend_seconds = match &event {
+                SignInEvent::SignUp(SignUpEvent::CodeSent(Ok(sent))) => Some(sent.resend_seconds),
+                _ => None,
+            };
             let _ = answers.send(Answer { wait, attempt, event });
+            if let Some(seconds) = resend_seconds {
+                signup::count_down_resend(engine, &answers, &attempts, seconds, tick);
+            }
             // After the answer is in the channel: no tick can come before the problem it counts down.
             if let Some(seconds) = wait_seconds {
                 count_down(engine, &answers, &attempts, seconds, tick);
@@ -245,7 +267,12 @@ fn undo_left_step<C: CredentialStores>(
         (SignInEvent::VaultUnlocked(Ok(next)), _) if *next != NextAfterSignIn::TwoFactor => {
             let _ = engine.lock_vault();
         }
-        (SignInEvent::TwoFactor(Ok(_)) | SignInEvent::PhraseRestored(Ok(_)), None) => {
+        (
+            SignInEvent::TwoFactor(Ok(_))
+            | SignInEvent::PhraseRestored(Ok(_))
+            | SignInEvent::SignUp(SignUpEvent::Created(Ok(_))),
+            None,
+        ) => {
             if engine.sign_out_keeping_local_data().is_err() {
                 still_signed_in(answers);
             }
@@ -459,6 +486,61 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
             "begin_set_password",
             SignInEvent::PasswordSet(Err(SignInProblem::Other)),
         );
+    }
+
+    fn sign_up_available(&self) -> bool {
+        self.signup_available()
+    }
+
+    fn sign_up_web_address(&self) -> Option<String> {
+        self.signup.web_address()
+    }
+
+    fn begin_sign_up_code(&mut self, email: &str) {
+        self.signup_begin_code(email);
+    }
+
+    fn begin_sign_up_verify(&mut self, code: &str) {
+        self.signup_begin_verify(code);
+    }
+
+    fn sign_up_password(&self, password: &str) -> Option<PasswordVerdict> {
+        Some(self.signup_password_verdict(password))
+    }
+
+    fn begin_sign_up_password(&mut self, password: &str) {
+        self.signup_begin_password(password);
+    }
+
+    fn with_sign_up_phrase(&self, show: &mut dyn FnMut(&[&str])) {
+        self.signup.with_phrase(show);
+    }
+
+    /// The window holds none of the words, so leaving the screen that shows them has nothing to wipe here.
+    fn sign_up_phrase_left(&mut self) {}
+
+    fn sign_up_confirm_positions(&self) -> Option<[usize; crate::frames::signin::create_source::CONFIRM_WORDS]> {
+        self.signup.confirm_positions()
+    }
+
+    fn sign_up_suggestions(&self, typed: &str) -> Vec<&'static str> {
+        self.signup_suggestions(typed)
+    }
+
+    fn begin_sign_up_confirm(&mut self, words: &[&str]) {
+        self.signup_begin_confirm(words);
+    }
+
+    fn sign_up_device_name(&self) -> String {
+        self.signup_device_name()
+    }
+
+    fn begin_sign_up_create(&mut self, device_name: &str) {
+        self.signup_begin_create(device_name);
+    }
+
+    fn cancel_sign_up(&mut self) {
+        self.signup_cancel();
     }
 
     /// The next answer that is still waited for; an answer of a step the person left is dropped here.

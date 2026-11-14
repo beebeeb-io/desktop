@@ -204,6 +204,15 @@ pub struct DesktopConfig {
     #[serde(default)]
     pub known_folder_onboarding_seen: bool,
 
+    /// The native app's first run on this computer (sync-start contract §5.1): `Some(true)` once it is done,
+    /// `Some(false)` while it is still to do, absent until the native app first opened here. The native app's
+    /// `open()` decides an absent one once, before anything else writes: done when the settings already name a
+    /// sync folder (an install that was set up by 0.8.x never sees the first run), to do otherwise. Read as "to
+    /// do" unless it says done. Like `known_folder_onboarding_seen` it is not in `DesktopSettings`: a Settings
+    /// save must never flip it. Absent, it is not written: a file the native app never opened stays as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_setup_done: Option<bool>,
+
     /// `true` once the person has dismissed the Beebeeb window's one-time hint on Home, "Beebeeb lives in the menu bar"
     /// (two-surface spec §7.6, task 1683 slice 6). Defaults `false`: a fresh install shows it once, and so does an install
     /// that predates it (one tip, one tap, and it explains that the window is optional). Like
@@ -440,6 +449,7 @@ impl Default for DesktopConfig {
             known_folder_backup: Vec::new(),
             known_folder_source: std::collections::BTreeMap::new(),
             known_folder_onboarding_seen: false,
+            native_setup_done: None,
             menu_bar_hint_seen: false,
             finder_install_status: None,
             finder_install_last_error: None,

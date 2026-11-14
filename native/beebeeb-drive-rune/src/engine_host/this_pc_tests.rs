@@ -6,7 +6,7 @@
 
 use beebeeb_engine::app::LocalStateRefused;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -30,6 +30,12 @@ struct Fake {
     account: Mutex<Option<String>>,
     /// What `set_kept` was asked, in order.
     kept_calls: Mutex<Vec<(String, bool)>>,
+    /// The engine's session: a test moves it on as a sign-in, a lock or a sign-out does.
+    session: AtomicU64,
+    /// Runs inside the next read of the local state, on the worker (a test changes the session under it).
+    during_read: Mutex<Option<Box<dyn FnOnce(&Fake) + Send>>>,
+    /// Runs after the next `set_kept`, on the worker.
+    after_kept: Mutex<Option<Box<dyn FnOnce(&Fake) + Send>>>,
 }
 
 impl Fake {
@@ -51,6 +57,9 @@ impl Fake {
             broken: AtomicBool::new(false),
             account: Mutex::new(Some(email.to_string())),
             kept_calls: Mutex::new(Vec::new()),
+            session: AtomicU64::new(1),
+            during_read: Mutex::new(None),
+            after_kept: Mutex::new(None),
         })
     }
 
@@ -66,7 +75,14 @@ impl ThisPcEngine for Fake {
     fn account(&self) -> Option<String> {
         self.account.lock().unwrap().clone()
     }
+    fn session(&self) -> SessionGeneration {
+        SessionGeneration::for_test(self.session.load(Ordering::SeqCst))
+    }
     fn local_state<T>(&self, read: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused> {
+        let hook = self.during_read.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook(self);
+        }
         if self.broken.load(Ordering::SeqCst) {
             return Err(LocalStateRefused::Unreadable);
         }
@@ -85,18 +101,24 @@ impl ThisPcEngine for Fake {
     }
     fn set_kept(&self, file_id: &str, kept: bool) -> Result<(), String> {
         self.kept_calls.lock().unwrap().push((file_id.to_string(), kept));
-        self.db()
+        let done = self
+            .db()
             .set_recursive_pin(file_id, kept, now())
             .map(|_| ())
-            .map_err(|_| "refused".to_string())
+            .map_err(|_| "refused".to_string());
+        let hook = self.after_kept.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook(self);
+        }
+        done
     }
 }
 
-fn now() -> i64 {
+pub(super) fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
-fn file(db: &StateDb, id: &str, path: &str, status: FileStatus, size: i64, folder: bool) {
+pub(super) fn file(db: &StateDb, id: &str, path: &str, status: FileStatus, size: i64, folder: bool) {
     // The parent, as the existing `put` sets it: the folder whose path holds this one, by id `d-<name>`.
     let parent = path.rsplit_once('/').map(|(p, _)| format!("d-{}", p.to_lowercase()));
     let entry = FileEntry {
@@ -365,10 +387,16 @@ fn a_read_that_fails_keeps_the_last_answer() {
     let fake = busy_pc();
     fake.broken.store(true, Ordering::SeqCst);
     let mut source = EngineThisPcSource::new(fake.clone());
+    assert_eq!(source.standing(), Standing::Reading, "before the first pump: no answer");
     settle(&mut source);
     assert!(
         source.history().is_empty() && source.kept().is_empty(),
         "no answer yet: nothing"
+    );
+    assert_eq!(
+        source.standing(),
+        Standing::Unreadable,
+        "and the section says it could not be read, never an empty PC"
     );
 
     fake.broken.store(false, Ordering::SeqCst);
@@ -416,6 +444,7 @@ fn a_change_of_account_clears_the_held_answer() {
     // The source asked for a new read; account B's state DB is not theirs, so nothing shows.
     settle(&mut source);
     assert!(source.kept().is_empty(), "B owns no local state of A's DB");
+    assert_eq!(source.standing(), Standing::AnotherAccounts);
 }
 
 /// Task 2488: a local state database owned by another account reads as nothing.
@@ -434,6 +463,285 @@ fn another_accounts_local_state_reads_as_nothing() {
     assert!(source.kept().is_empty(), "A never sees B's kept items");
     assert!(source.history().is_empty(), "A never sees B's history");
     assert_eq!(source.kept_count(), 0);
+    assert_eq!(
+        source.standing(),
+        Standing::AnotherAccounts,
+        "said as what it is, never as a PC with nothing on it"
+    );
+}
+
+/// Lists that are held and then turn out to be another account's (the owner changed under the same sign-in name)
+/// go at that answer: nothing of them stays on screen beside "another account's".
+#[test]
+fn another_accounts_answer_drops_what_was_held() {
+    let fake = busy_pc();
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
+    assert_eq!(source.kept_count(), 2);
+    fake.db()
+        .set_owner(&Identity::new(None, Some("other@beebeeb.io")))
+        .unwrap();
+    source.ask_read();
+    settle(&mut source);
+    assert_eq!(source.kept_count(), 0);
+    assert!(source.history().is_empty());
+    assert_eq!(source.standing(), Standing::AnotherAccounts);
+}
+
+/// The first answer makes the lists the PC's own; a PC with nothing synced is `Ready` with empty lists.
+#[test]
+fn standing_is_ready_once_an_answer_is_held() {
+    let fake = Fake::new();
+    let mut source = EngineThisPcSource::new(fake.clone());
+    assert_eq!(source.standing(), Standing::Reading);
+    settle(&mut source);
+    assert_eq!(source.standing(), Standing::Ready);
+    // A lock: nothing is held for the window, so nothing is "ready".
+    fake.unlocked.store(false, Ordering::SeqCst);
+    assert_eq!(source.standing(), Standing::Reading);
+}
+
+/// Holds the worker inside its next read until the returned sender is used (or dropped).
+fn hold_next_read(fake: &Fake) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    *fake.during_read.lock().unwrap() = Some(Box::new(move |_| {
+        let _ = entered_tx.send(());
+        let _ = released.recv_timeout(Duration::from_secs(10));
+    }));
+    (entered, release)
+}
+
+/// The session moves on under the SAME account (a lock and an unlock, a sign-out and a sign-in): what was held
+/// goes at the next pump, before the new read answers, and comes back only from a read of the new session.
+#[test]
+fn a_new_session_of_the_same_account_drops_the_held_answer() {
+    let fake = busy_pc();
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
+    assert_eq!(source.kept_count(), 2);
+
+    let (entered, release) = hold_next_read(&fake);
+    fake.session.fetch_add(1, Ordering::SeqCst);
+    assert_eq!(source.kept_count(), 0, "at once: the readers ask the engine's session");
+    let pumped = source.pump();
+    assert!(pumped.changed);
+    entered
+        .recv_timeout(Duration::from_secs(10))
+        .expect("a new read was asked");
+    assert!(source.held.is_none(), "dropped by the pump, not by the answer");
+    assert_eq!(source.standing(), Standing::Reading);
+    release.send(()).unwrap();
+    settle(&mut source);
+    assert_eq!(source.kept_count(), 2, "the new session's own read");
+}
+
+/// A read that was out while the session moved on: its answer names no session (the worker's check after the
+/// work), so no rule of the window could keep it.
+#[test]
+fn a_read_that_outlived_its_session_answers_for_no_one() {
+    let fake = busy_pc();
+    let whose = whose_now(&*fake).expect("signed in");
+    *fake.during_read.lock().unwrap() = Some(Box::new(|fake: &Fake| {
+        fake.session.fetch_add(1, Ordering::SeqCst);
+    }));
+    let (answers, inbox) = mpsc::channel();
+    run(
+        &*fake,
+        &answers,
+        Job {
+            ask: Ask::Read,
+            whose: whose.clone(),
+            generation: 7,
+        },
+    );
+    let answer = inbox.try_recv().expect("every job answers");
+    assert_eq!(answer.generation, 7);
+    assert_eq!(answer.whose, None, "the session moved on during the read");
+
+    // The same job with no change under it answers for its session.
+    run(
+        &*fake,
+        &answers,
+        Job {
+            ask: Ask::Read,
+            whose: whose_now(&*fake).unwrap(),
+            generation: 8,
+        },
+    );
+    let answer = inbox.try_recv().unwrap();
+    assert_eq!(answer.whose, whose_now(&*fake));
+    assert!(answer.read.is_ok());
+}
+
+/// The window's generation alone: an answer asked before the account went away and came back (the same account,
+/// the same engine session in this fake) is a stale one, and its refusal is never said.
+#[test]
+fn an_answer_of_an_earlier_generation_is_dropped_even_for_the_same_session() {
+    let fake = busy_pc();
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
+    fake.syncing.store(false, Ordering::SeqCst);
+    let (entered, release) = hold_next_read(&fake);
+    // Refused (sync does not run), then held in the read that follows every change.
+    source.remove_from_pc("f-sheet");
+    entered.recv_timeout(Duration::from_secs(10)).expect("the job runs");
+
+    *fake.account.lock().unwrap() = None;
+    source.pump();
+    *fake.account.lock().unwrap() = Some("invented@beebeeb.io".into());
+    source.pump();
+    release.send(()).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut said = None;
+    loop {
+        let pumped = source.pump();
+        said = said.or(pumped.refusal);
+        if source.idle() {
+            said = said.or(source.pump().refusal);
+            break;
+        }
+        assert!(Instant::now() < deadline, "the worker did not finish");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(said, None, "a refusal of an earlier generation is not this window's");
+    assert_eq!(source.kept_count(), 2, "the current generation's own read is held");
+}
+
+/// A worker that ends early says "could not be read" for the session that asked: the section never waits forever.
+#[test]
+fn a_job_that_ends_early_is_said_as_unreadable() {
+    let fake = Fake::new();
+    *fake.during_read.lock().unwrap() = Some(Box::new(|_| panic!("an invented failure inside a read")));
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
+    assert_eq!(source.standing(), Standing::Unreadable);
+    // Opening the section asks again, and the read that works is held.
+    source.opened();
+    settle(&mut source);
+    assert_eq!(source.standing(), Standing::Ready);
+}
+
+/// A read refused because the session was not one to read under just then is not "could not be read": what is
+/// held stays, and the next opening asks again.
+#[test]
+fn a_read_refused_for_the_session_keeps_what_is_held_and_is_asked_again() {
+    assert_eq!(
+        read_for(
+            &*busy_pc(),
+            &Whose {
+                account: "invented@beebeeb.io".into(),
+                session: SessionGeneration::for_test(99),
+            }
+        ),
+        Err(NoRead::NotNow),
+        "a session that is not the engine's"
+    );
+    let fake = busy_pc();
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
+    source.inbox_for_test(Answer {
+        generation: source.generation,
+        whose: source.seen.clone(),
+        refused: None,
+        read: Err(NoRead::NotNow),
+    });
+    source.pump();
+    assert_eq!(source.standing(), Standing::Ready, "the lists stay");
+    assert_eq!(source.kept_count(), 2);
+    assert!(source.read_at.is_none(), "and the next opening reads again");
+}
+
+/// The one rule, by its parts: the generation, an answer that names a session, and that session being the window's.
+#[test]
+fn counts_needs_the_generation_and_the_same_session() {
+    let a = Whose {
+        account: "invented@beebeeb.io".into(),
+        session: SessionGeneration::for_test(1),
+    };
+    let later = Whose {
+        session: SessionGeneration::for_test(2),
+        ..a.clone()
+    };
+    let other = Whose {
+        account: "other@beebeeb.io".into(),
+        ..a.clone()
+    };
+    assert!(counts(3, 3, Some(&a), Some(&a)));
+    assert!(!counts(2, 3, Some(&a), Some(&a)), "an earlier generation");
+    assert!(!counts(3, 3, None, Some(&a)), "an answer for no one");
+    assert!(!counts(3, 3, None, None), "nobody signed in");
+    assert!(
+        !counts(3, 3, Some(&a), Some(&later)),
+        "the same account, a later session"
+    );
+    assert!(!counts(3, 3, Some(&a), Some(&other)), "another account");
+}
+
+/// Remove from this PC, item by item, under the session of the press: once the session moves on, no further item
+/// is touched, and the window is told not everything was removed.
+#[test]
+fn remove_stops_when_the_session_moves_on() {
+    let fake = busy_pc();
+    let whose = whose_now(&*fake).unwrap();
+    *fake.after_kept.lock().unwrap() = Some(Box::new(|fake: &Fake| {
+        fake.session.fetch_add(1, Ordering::SeqCst);
+    }));
+    let (answers, inbox) = mpsc::channel();
+    run(
+        &*fake,
+        &answers,
+        Job {
+            ask: Ask::Release(vec!["f-sheet".into(), "d-shoot".into()]),
+            whose,
+            generation: 1,
+        },
+    );
+    assert_eq!(
+        *fake.kept_calls.lock().unwrap(),
+        [("f-sheet".to_string(), false)],
+        "the second item is not touched under a later session"
+    );
+    let answer = inbox.try_recv().unwrap();
+    assert_eq!(answer.refused, Some(NOT_REMOVED));
+    assert_eq!(answer.whose, None);
+}
+
+/// Try again under a session that moved on changes nothing in the queue.
+#[test]
+fn retry_under_a_later_session_changes_nothing() {
+    let fake = busy_pc();
+    let whose = whose_now(&*fake).unwrap();
+    fake.session.fetch_add(1, Ordering::SeqCst);
+    assert_eq!(retry(&*fake, &whose, &["op-1".to_string()]), None);
+    let due = fake.db().unsent_changes(0, 10, now()).unwrap().items;
+    assert_eq!(
+        status::sync_problems(&due).len(),
+        1,
+        "still a problem: nothing was retried"
+    );
+    // Under its own session it is retried.
+    assert_eq!(
+        retry(&*fake, &whose_now(&*fake).unwrap(), &["op-1".to_string()]),
+        Some(0)
+    );
+}
+
+/// A snapshot in a log line or a failed assertion: counts only, never a name, a folder or an id.
+#[test]
+fn a_snapshot_prints_counts_and_no_name() {
+    let fake = busy_pc();
+    let snapshot = read(&fake.db(), now()).unwrap();
+    assert!(!snapshot.history.is_empty() && !snapshot.kept.is_empty());
+    let printed = format!("{snapshot:?} {:?}", Some(&snapshot));
+    for secret in ["Report", "Rates", "Invented", "Shoot", "f-sheet", "op-1", "Loose"] {
+        assert!(!printed.contains(secret), "a snapshot's Debug names {secret}");
+    }
+    assert!(
+        printed.contains("history: 4") && printed.contains("kept: 2"),
+        "{printed}"
+    );
 }
 
 /// A refused Remove from this PC (sync not running) sends a refusal the window can draw (P2-6).
@@ -504,15 +812,27 @@ fn opened_reads_again_when_the_answer_is_stale() {
     assert!(source.reading, "stale: a new read is asked");
 }
 
-/// `source_for` with `TURNED_ON = false` gives `Unwired`: no worker, no read, no sidebar count (P2-1).
+/// The switch decides the source, both ways: off gives `Unwired` (no worker, no read, no sidebar count, P2-1), on
+/// gives the engine's, which reads. The running app's is on.
 #[test]
-fn source_for_gives_unwired_when_the_constant_is_off() {
-    let fake = busy_pc();
-    let source = source_for(fake);
-    // TURNED_ON is false, so the source is Unwired.
-    assert!(!source.wired());
-    assert!(source.kept().is_empty());
-    assert_eq!(source.kept_count(), 0);
+fn the_switch_decides_the_source() {
+    let mut off = source_when(false, busy_pc());
+    off.pump();
+    assert!(!off.wired());
+    assert!(off.kept().is_empty());
+    assert_eq!(off.kept_count(), 0);
+
+    let mut on = source_when(true, busy_pc());
+    assert!(on.wired());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while on.kept_count() != 2 {
+        on.pump();
+        assert!(Instant::now() < deadline, "the engine's source did not read");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    assert!(TURNED_ON, "This PC answers in the running app");
+    assert!(source_for(busy_pc()).wired());
 }
 
 /// The words for where a path is, and the glyph for a name: a picture is a document (never the sample picture).

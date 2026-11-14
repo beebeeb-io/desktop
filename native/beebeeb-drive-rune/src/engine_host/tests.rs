@@ -171,8 +171,9 @@ fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() 
     assert_eq!(
         state.this_pc.wired(),
         crate::engine_host::this_pc::TURNED_ON,
-        "This PC: held off until its chrome is honest"
+        "This PC answers from the engine"
     );
+    assert!(state.this_pc.wired(), "This PC is on in the running app");
     assert_eq!(state.this_pc.changes().len() + state.this_pc.kept_count(), 0);
     assert_eq!(started.live.drain(), 0, "nothing reported, nothing queued");
 }
@@ -632,7 +633,7 @@ fn photos_shows_0_fixture_days_on_a_live_engine() {
 #[test]
 fn this_pc_shows_0_fixture_changes_on_a_live_engine() {
     let s = engine_state();
-    // Engine-backed (`engine_host::this_pc`), held off until its chrome is honest; no name shows either way.
+    // Engine-backed (`engine_host::this_pc`); with no session it holds nothing, and never a sample.
     assert_eq!(s.this_pc.wired(), crate::engine_host::this_pc::TURNED_ON);
     assert_eq!(s.this_pc.changes().len(), 0);
     assert_eq!(s.this_pc.kept_count(), 0);

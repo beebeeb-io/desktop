@@ -7,7 +7,7 @@
 //! Tests only (`test` or the `test-support` feature). Every key, name and id is invented.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -15,6 +15,22 @@ use serde_json::{Value, json};
 use super::{FakeApi, Handler, OpaqueAccount, Reply, Request};
 
 // ── The vault tree ──────────────────────────────────────────────────────────────
+
+/// One version of a file in the fake vault (`GET /api/v1/files/{id}/versions`).
+#[derive(Debug, Clone)]
+struct FakeVersion {
+    id: String,
+    number: i64,
+    created_at: String,
+    size_bytes: u64,
+}
+
+/// The versions of one file: in the order they were made, and which number is the current one.
+#[derive(Debug, Clone, Default)]
+struct FakeVersions {
+    list: Vec<FakeVersion>,
+    current: i64,
+}
 
 /// One item in the fake vault: a folder or a file, with its encrypted name produced by core's `encrypt_name_for`.
 #[derive(Debug, Clone)]
@@ -85,6 +101,14 @@ pub struct FakeAccount {
     devices: Mutex<Vec<Value>>,
     /// Client sync sessions.
     sessions: Mutex<Vec<Value>>,
+    /// The versions of the files that have some ([`Self::add_version`]), by file id.
+    versions: Mutex<HashMap<String, FakeVersions>>,
+    /// How many version restores reached this account (a request with its token), whatever the answer.
+    restores: AtomicUsize,
+    /// The status the next version restore is answered with, without being made.
+    restore_refusal: Mutex<Option<u16>>,
+    /// The next version restore is read and made, and the connection is closed without an answer.
+    restore_hangs_up: AtomicBool,
 }
 
 impl FakeAccount {
@@ -114,6 +138,10 @@ impl FakeAccount {
             quota_bytes: 10 * 1024 * 1024 * 1024, // 10 GiB
             devices: Mutex::new(Vec::new()),
             sessions: Mutex::new(Vec::new()),
+            versions: Mutex::new(HashMap::new()),
+            restores: AtomicUsize::new(0),
+            restore_refusal: Mutex::new(None),
+            restore_hangs_up: AtomicBool::new(false),
         };
         (account, recovery_phrase.to_string())
     }
@@ -230,6 +258,86 @@ impl FakeAccount {
         let master = beebeeb_core::kdf::MasterKey::from_bytes(self.master_key);
         let key = beebeeb_core::kdf::derive_file_key(&master, id.as_bytes());
         beebeeb_core::encrypt::encrypt_thumbnail(&key, plain).expect("a sealed picture")
+    }
+
+    /// Add a version to the file `file_id` (made after the ones it has; it becomes the current one), as the server
+    /// lists it: its id, when it was made and its size. The server's list order is the order they were added.
+    pub fn add_version(&self, file_id: &str, version_id: &str, created_at: &str, size_bytes: u64) {
+        let mut all = self.versions.lock().expect("versions");
+        let versions = all.entry(file_id.to_string()).or_default();
+        let number = versions.list.len() as i64 + 1;
+        versions.list.push(FakeVersion {
+            id: version_id.to_string(),
+            number,
+            created_at: created_at.to_string(),
+            size_bytes,
+        });
+        versions.current = number;
+    }
+
+    /// The id of the current version of `file_id`, and how many versions it has. `None`: it has none.
+    pub fn version_state(&self, file_id: &str) -> Option<(String, usize)> {
+        let all = self.versions.lock().expect("versions");
+        let versions = all.get(file_id)?;
+        let current = versions.list.iter().find(|v| v.number == versions.current)?;
+        Some((current.id.clone(), versions.list.len()))
+    }
+
+    /// How many version restores reached this account (with its token), whatever they were answered.
+    pub fn restore_requests(&self) -> usize {
+        self.restores.load(Ordering::SeqCst)
+    }
+
+    /// Answer the next version restore with this status, without making it.
+    pub fn refuse_next_restore_with(&self, status: u16) {
+        *self.restore_refusal.lock().expect("restore switch") = Some(status);
+    }
+
+    /// Read the next version restore, make it, then close the connection without an answer.
+    pub fn make_next_restore_then_hang_up(&self) {
+        self.restore_hangs_up.store(true, Ordering::SeqCst);
+    }
+
+    /// `GET /api/v1/files/{id}/versions`. `None`: no such file.
+    fn versions_payload(&self, file_id: &str) -> Option<Value> {
+        self.items.lock().expect("vault items").get(file_id)?;
+        let all = self.versions.lock().expect("versions");
+        let empty = FakeVersions::default();
+        let versions = all.get(file_id).unwrap_or(&empty);
+        let list: Vec<Value> = versions
+            .list
+            .iter()
+            .map(|v| {
+                json!({
+                    "id": v.id,
+                    "version_number": v.number,
+                    "created_at": v.created_at,
+                    "size_bytes": v.size_bytes,
+                })
+            })
+            .collect();
+        Some(json!({ "versions": list, "current_version": versions.current }))
+    }
+
+    /// Make `version_id` the current version of `file_id`: one more version is minted from it, as the server's
+    /// restore does. Returns false: no such file or version.
+    fn restore_version(&self, file_id: &str, version_id: &str) -> bool {
+        let mut all = self.versions.lock().expect("versions");
+        let Some(versions) = all.get_mut(file_id) else {
+            return false;
+        };
+        let Some(source) = versions.list.iter().find(|v| v.id == version_id).cloned() else {
+            return false;
+        };
+        let number = versions.list.len() as i64 + 1;
+        versions.list.push(FakeVersion {
+            id: format!("restored-{number}-of-{}", source.id),
+            number,
+            created_at: format!("2026-11-14T12:{:02}:00Z", number.min(59)),
+            size_bytes: source.size_bytes,
+        });
+        versions.current = number;
+        true
     }
 
     /// Trash an item by id. Returns true if found and not already trashed.
@@ -436,6 +544,48 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                 } else {
                     Reply::error(404, "not_found")
                 }
+            }
+
+            // ── A file's versions, and the restore of one ───────────────
+            route_str if route_str.starts_with("GET /api/v1/files/") && route_str.ends_with("/versions") => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                let path_only = req.path.split('?').next().unwrap_or("");
+                let id = path_only
+                    .strip_prefix("/api/v1/files/")
+                    .and_then(|rest| rest.strip_suffix("/versions"))
+                    .unwrap_or("");
+                match account.versions_payload(id) {
+                    Some(payload) => Reply::ok(payload),
+                    None => Reply::error(404, "not_found"),
+                }
+            }
+            route_str
+                if route_str.starts_with("POST /api/v1/files/")
+                    && route_str.contains("/versions/")
+                    && route_str.ends_with("/restore") =>
+            {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                account.restores.fetch_add(1, Ordering::SeqCst);
+                let path_only = req.path.split('?').next().unwrap_or("");
+                let (id, version) = path_only
+                    .strip_prefix("/api/v1/files/")
+                    .and_then(|rest| rest.strip_suffix("/restore"))
+                    .and_then(|rest| rest.split_once("/versions/"))
+                    .unwrap_or(("", ""));
+                if let Some(status) = account.restore_refusal.lock().expect("restore switch").take() {
+                    return Reply::error(status, "a refusal");
+                }
+                if !account.restore_version(id, version) {
+                    return Reply::error(404, "not_found");
+                }
+                if account.restore_hangs_up.swap(false, Ordering::SeqCst) {
+                    return Reply::hang_up();
+                }
+                Reply::ok(json!({ "success": true }))
             }
 
             // ── Restore ─────────────────────────────────────────────────

@@ -10,7 +10,7 @@ use crate::shell::app::{Event, Route};
 
 fn open(s: &mut State, section: Section, source: FixtureSource) {
     crate::shell::host::dispatch(s, Event::Navigate(Route::section(section)));
-    s.this_pc = Ui::new(Box::new(source));
+    s.this_pc = Ui::sample(source);
     s.this_pc.first_place = true;
 }
 

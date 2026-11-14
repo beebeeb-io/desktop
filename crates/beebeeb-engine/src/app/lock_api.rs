@@ -108,6 +108,25 @@ impl SessionMoved {
 }
 
 impl<C: CredentialStores> Engine<C> {
+    /// The stored key of this account, loaded through the guarded loader at the start.
+    pub(super) fn restore_key(&self, turn: SessionGeneration, vault: AuthVault<C::Store>) {
+        match store::load_session_from_vault(vault, None) {
+            Ok(Some(session)) => {
+                if let Ok(_write) = self.claim(turn)
+                    && let Ok(mut guard) = self.acct.session.lock()
+                {
+                    if let Ok(mut email) = self.acct.auth_email.lock() {
+                        email.clone_from(&session.email);
+                    }
+                    *guard = Some(session);
+                    self.acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            Ok(None) => {}
+            Err(_) => tracing::info!("startup restore: signed in, the vault stays locked"),
+        }
+    }
+
     fn flow<T>(&self, step: impl FnOnce(&mut LockFlow) -> T) -> T {
         step(&mut self.lock_flow.lock().unwrap_or_else(|p| p.into_inner()))
     }

@@ -32,15 +32,37 @@ light and dark. The gate lines per frame are in the PR body.
 | DW-0739 | Another device's backup (Anna's iPad) | built, 0 |
 | DW-0742 | Delete this backup? with the authenticator code | built; 1 pixel line open in each theme (`code-2`, the lit box's stroke on a half pixel, edge 32 > 9) |
 | DW-0741 | Couldn't back up: three failures with Try again, one exclusion without | built, 0 |
+| DW-0740 | Mail Backup (proposal): on, its status, accounts, Turn off | built, 0 |
+| DW-0740b | Mail Backup is off: the kept folder, Turn on… | built, 0 |
+| DW-1401 | Turn on Mail Backup: what it does, before anything is asked | built, 0 |
+| DW-1402 | Add a mail account: address, IMAP server, port, app password | built; light 0, dark 1 pixel line open (`field-3`, the focused field's ring on the dialog's quarter point, edge 12 > 9) |
+| DW-1403 | Add a mail account: the server refused the password, nothing was saved | built, 0 |
+| DW-1404 | Choose folders of the mailbox that signed in | built, 0 |
+| DW-1405 | The first archive runs: 6,912 of 17,480 messages, Pause | built, 0 |
+| DW-1406 | Couldn't back up: the app password was changed or revoked; Update password | built, 0 |
+| DW-0743 | Turn off Mail Backup? with the authenticator code | built; light 0, dark 2 pixel lines open (`list-1-body`, `item-1-0` under the dialog's shadow, edge 9 > 9) |
+| DW-0743b | Keep Mail Backup's files? Keep them, or Move to Trash | built, 0 |
 
-Built: 15 of 16. Not built: DW-0738 (system UI). Gate, 30 runs (15 frames, light and dark):
-21 with every line at 0, 9 with open lines, all named above.
+Built: 25 of 26. Not built: DW-0738 (system UI). Gate, 50 runs (25 frames, light and dark):
+39 with every line at 0, 11 with open lines, all named above.
 
 States the board gives a rule and no drawing, built from the rule's words (tests only): a filter or
 a search that matches nothing draws an empty list (no invented copy); "Remove all from this PC"
-emits `Intent::AskRemoveAll` and removes only after `Ui::remove_all_confirmed` (the ask has no
-frame); the history's right-click menu (Show in File Explorer · Show in Beebeeb · Copy name) has
+asks once in the window's dialog card ("Remove all from this PC?", Remove all · Cancel; the ask has
+no frame) and removes only on the yes; while the engine has no lists for a section it says why in
+the section's empty state ("Reading this PC", "Couldn't read this PC", "Not available for this
+account"; no frame), never "No changes yet"; on a real PC the status line says the window's own
+sync word and the section's words, the board's sample counts only in the scenes; the history's right-click menu (Show in File Explorer · Show in Beebeeb · Copy name) has
 no frame and is not built; a code the engine does not accept (DW-0742) empties the boxes and the
 dialog stays, with no words (the board draws none); the password instead of a code ("or the
 password without two-factor") has no frame and is not built; a folder the picker returns that
 Beebeeb cannot back up changes nothing (no frame for the refusal).
+
+Mail Backup (lane gbb-d, 2026-11-14) is the board's proposal, drawn from `BackupsSource`'s mail methods, whose
+defaults answer "nothing" (no mail engine exists): only a source that answers `mail()` gets the page, so a build
+that ships keeps asking the shell (`Intent::MailBackup`) and draws no sample values. States built from a rule's
+words with no drawing (tests only): Connect and Start backup are off (half strength) until they can act; the
+account step while the server has not answered says "Connecting…"; the first archive paused says "Mail backup is
+paused" with Resume. Not built: the other refusals of DW-1403 (server not found, port closed, TLS refused: the
+board gives no sentences), filling the server from the address's domain (DW-1402's rule: it needs a lookup), and
+an account row's own page (the board draws its chevron and no frame for it: the row is drawn and takes no press).

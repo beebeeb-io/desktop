@@ -499,7 +499,7 @@ pub fn sidebar_in(s: &State, t: &Theme, standing: Standing) -> El {
 }
 
 /// Format bytes as "240 GB", "1 TB" (base 10, as the board shows storage).
-fn format_storage(bytes: i64) -> String {
+pub(crate) fn format_storage(bytes: i64) -> String {
     const GB: i64 = 1_000_000_000;
     const TB: i64 = 1_000_000_000_000;
 
