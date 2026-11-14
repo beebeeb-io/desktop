@@ -47,11 +47,11 @@ pub struct Purged {
 }
 
 /// A server file id as the listing gives it: a canonical lower-case UUID, never normalized (it goes into a URL).
-fn is_file_id(id: &str) -> bool {
+pub(super) fn is_file_id(id: &str) -> bool {
     matches!(uuid::Uuid::parse_str(id), Ok(u) if u.hyphenated().to_string() == id)
 }
 
-fn step_up_error(e: AuthFlowError) -> PurgeError {
+pub(super) fn step_up_error(e: AuthFlowError) -> PurgeError {
     match e {
         AuthFlowError::InvalidCredentials | AuthFlowError::InvalidInput(_) => PurgeError::WrongPassword,
         AuthFlowError::RateLimited { retry_after_secs } => PurgeError::RateLimited(retry_after_secs),
@@ -66,6 +66,31 @@ fn permanent_request(id: &str) -> HttpRequest {
     req
 }
 
+/// Prove `password` for the session `token`: core's OPAQUE step-up, which mints ONE single-use confirmation token.
+pub(super) async fn prove(
+    api_base: &str,
+    client: &reqwest::Client,
+    token: &str,
+    password: &[u8],
+) -> Result<beebeeb_core::auth_flow::step_up::ConfirmToken, PurgeError> {
+    let (mut flow, mut req) = StepUp::start(password, StepUpPurpose::Generic).map_err(step_up_error)?;
+    let mut first_leg = true;
+    loop {
+        let resp = auth_transport::send_to(api_base, client, Some(token), req)
+            .await
+            .map_err(|_| PurgeError::Offline)?;
+        // The first leg carries no proof of the password: a 401 there is about the session, not the password.
+        if first_leg && resp.status == 401 {
+            return Err(PurgeError::SessionEnded);
+        }
+        first_leg = false;
+        match flow.on_response(resp).map_err(step_up_error)? {
+            StepUpStep::Send(next) => req = next,
+            StepUpStep::Confirmed(grant) => return Ok(grant),
+        }
+    }
+}
+
 /// Prove `password` for the session `token`, then delete `file_id` for good with the one token the proof minted.
 /// `api_base` has no trailing slash. A 404 is "already gone": done.
 pub async fn purge_one(
@@ -78,22 +103,7 @@ pub async fn purge_one(
     if !is_file_id(file_id) {
         return Err(PurgeError::Failed);
     }
-    let (mut flow, mut req) = StepUp::start(password, StepUpPurpose::Generic).map_err(step_up_error)?;
-    let mut first_leg = true;
-    let grant = loop {
-        let resp = auth_transport::send_to(api_base, client, Some(token), req)
-            .await
-            .map_err(|_| PurgeError::Offline)?;
-        // The first leg carries no proof of the password: a 401 there is about the session, not the password.
-        if first_leg && resp.status == 401 {
-            return Err(PurgeError::SessionEnded);
-        }
-        first_leg = false;
-        match flow.on_response(resp).map_err(step_up_error)? {
-            StepUpStep::Send(next) => req = next,
-            StepUpStep::Confirmed(grant) => break grant,
-        }
-    };
+    let grant = prove(api_base, client, token, password).await?;
     let resp = auth_transport::send_to(api_base, client, Some(token), grant.attach(permanent_request(file_id)))
         .await
         .map_err(|_| PurgeError::Offline)?;
