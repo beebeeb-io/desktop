@@ -19,6 +19,11 @@ pub const UNCONFIRMED: &str = "Couldn't check with Beebeeb. What's shown here ma
 /// The account's switches could not be read: the rows say so, and this offers the way to ask again. Nothing
 /// about the other switches: whether they can be pressed is theirs to show.
 pub const NOT_READ: &str = "Couldn't load your account's alerts.";
+/// What the source says after a change Beebeeb took, and after a check that confirmed what is drawn: the two
+/// toasts of these panes that say something worked. Every other one says something was not done, and is drawn
+/// so (never with the mark of a thing that worked).
+pub const SAVED: &str = "Notification setting updated";
+pub const CHECKED: &str = "Checked. The switches show what Beebeeb has.";
 /// What the source says when a read of the account's notifications failed. These panes say that themselves (the
 /// rows, Recent's card, what stands over the pane), so it is never drawn as a toast as well (`super::poll`).
 pub const NOT_LOADED: &str = "Couldn't load your notifications. Try again in a moment.";
@@ -52,7 +57,8 @@ fn ask_again(s: &mut State) {
 /// What is said over Notifications and Recent notifications, where the toast sits (so it is in view however far
 /// the pane is scrolled, and no row moves when it comes or goes): `standing`, what the pane could not read or
 /// confirm, for as long as that holds, with "Try again"; and above it, or in its place when nothing stands, the
-/// toast of the last thing that was done. Keys: `notice-line` (in it `toast`, `toast-action`), `toast-0`.
+/// toast of the last thing that was done: the settings toast when it worked, the failure toast when it did not.
+/// Keys: `notice` (`notice-line`, `notice-text`, `notice-action`), `toast-0` (`toast-0-line`, `toast-0-text`).
 pub fn said_over(ui: &SettingsUi, standing: Option<&'static str>, t: &Theme) -> Option<El> {
     let again = crate::ui::toast::ToastAction {
         text: "Try again",
@@ -60,10 +66,15 @@ pub fn said_over(ui: &SettingsUi, standing: Option<&'static str>, t: &Theme) -> 
         shortcut: None,
         run: |s: &mut State, _: &mut rune::Tx| ask_again(s),
     };
-    let notice = standing.map(|words| notices::standing("notice-line", words, Some(again), 0, t));
-    let toast = ui
-        .toast
-        .map(|words| notices::toast_on(0, words, usize::from(notice.is_some()), t));
+    let notice = standing.map(|words| notices::standing("notice", words, Some(again), 0, t));
+    let line = usize::from(notice.is_some());
+    let toast = ui.toast.map(|words| {
+        if words == SAVED || words == CHECKED {
+            notices::toast_on(0, words, line, t)
+        } else {
+            notices::standing("toast-0", words, None, line, t)
+        }
+    });
     match (notice, toast) {
         (None, None) => None,
         (Some(one), None) | (None, Some(one)) => Some(one),

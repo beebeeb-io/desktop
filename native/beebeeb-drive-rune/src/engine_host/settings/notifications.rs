@@ -77,14 +77,14 @@ mod tests;
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
 
 /// What the toasts say.
-pub const ALERT_SAVED: &str = "Notification setting updated";
+pub const ALERT_SAVED: &str = crate::frames::settings::notifications::SAVED;
 /// Only after an HTTP refusal (a status Beebeeb answered): the switch stands as it was.
 pub const ALERT_NOT_SAVED: &str = "Couldn't change the notification setting. Nothing changed.";
 /// A timeout, a transport error mid-flight, or an unreadable 2xx: the change may have landed.
 pub const ALERT_UNKNOWN: &str = "Couldn't confirm the change. Checking what the server has.";
 pub const SWITCH_NOT_SAVED: &str = "Couldn't save the notification setting on this PC.";
 /// The check after [`ALERT_UNKNOWN`] answered: "checking" is over, and the switches are Beebeeb's own.
-pub const ALERT_CHECKED: &str = "Checked. The switches show what Beebeeb has.";
+pub const ALERT_CHECKED: &str = crate::frames::settings::notifications::CHECKED;
 /// The frame's word: its panes say a failed read themselves, and never draw this as a toast beside that.
 pub const NOT_LOADED: &str = crate::frames::settings::notifications::NOT_LOADED;
 pub const NOT_MARKED: &str = "Couldn't mark your notifications as seen.";

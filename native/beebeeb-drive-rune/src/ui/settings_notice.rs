@@ -122,11 +122,11 @@ const TOAST_LINE: f32 = 42.0;
 /// Something that was not done, or that a pane could not read or confirm, said where the toast sits
 /// (`ui::toast`: its own mark, read at once), with its button when there is a way to go on. The one rule of the
 /// account's panes and of Notifications: it is over the pane, so it is in view however far the pane is scrolled,
-/// and no row moves when it comes or goes. `key`: the line's key; `line`: 0 is the toast's own place, 1 the line
-/// above it.
+/// and no row moves when it comes or goes. `key`: the toast's key (its line is `<key>-line`, its parts
+/// `<key>-icon`, `<key>-text`, `<key>-action`); `line`: 0 is the toast's own place, 1 the line above it.
 pub fn standing(key: &str, words: &str, action: Option<crate::ui::toast::ToastAction>, line: usize, t: &Theme) -> El {
     row()
-        .key(key.to_string())
+        .key(format!("{key}-line"))
         .pin(
             Some(super::settings_shell::SIDEBAR_W),
             None,
@@ -134,7 +134,8 @@ pub fn standing(key: &str, words: &str, action: Option<crate::ui::toast::ToastAc
             Some(42.0 + TOAST_LINE * line as f32),
         )
         .justify_center()
-        .child(crate::ui::toast::toast(
+        .child(crate::ui::toast::toast_keyed(
+            key,
             &ic::WARN_CIRCLE,
             crate::ui::toast::Tone::Failed,
             words,

@@ -572,10 +572,10 @@ fn an_account_switch_without_a_value_is_never_drawn_as_a_switch() {
         info(&board, "item-4-0-switch").rect,
         "this PC's switches are where they were"
     );
-    let said = info(&rt, "toast");
+    let said = info(&rt, "notice");
     assert_eq!(said.role, "alert");
     assert_eq!(said.label.as_deref(), Some(super::notifications::NOT_READ));
-    for key in ["toast", "toast-action"] {
+    for key in ["notice", "notice-action"] {
         let r = info(&rt, key).rect;
         assert!(
             r[1] >= 0.0 && r[1] + r[3] <= 638.0 && r[0] >= 0.0 && r[0] + r[2] <= 958.0,
@@ -596,8 +596,8 @@ fn an_account_switch_without_a_value_is_never_drawn_as_a_switch() {
     rt.pointer_up(at[0] + at[2] / 2.0, at[1] + at[3] / 2.0);
     settle(&mut rt);
     assert_eq!(rt.state.settings.source.notifications().groups[0].1[1].on, None);
-    tab_to(&mut rt, "toast-action");
-    assert_eq!(info(&rt, "toast-action").label.as_deref(), Some("Try again"));
+    tab_to(&mut rt, "notice-action");
+    assert_eq!(info(&rt, "notice-action").label.as_deref(), Some("Try again"));
 }
 
 #[test]
