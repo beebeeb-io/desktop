@@ -156,7 +156,7 @@ impl<C: CredentialStores> Engine<C> {
                 .copied()
                 .filter(|e| *e == ActionError::SessionEnded),
         );
-        result
+        result.map(StepUpGrant)
     }
 
     /// WRITES: set the name the account shows (`PUT /api/v1/me/profile`, core's `AccountFlow::set_display_name`:
