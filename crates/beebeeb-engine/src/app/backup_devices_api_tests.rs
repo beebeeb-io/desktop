@@ -296,6 +296,8 @@ const PASSWORD: &str = "an invented password";
 const DEV_MAC: &str = "00000000-0000-4000-8000-0000000000c2";
 const DEV_OWN: &str = "00000000-0000-4000-8000-0000000000c1";
 const NOT_SYNCED: &str = "00000000-0000-4000-8000-0000000000c9";
+/// A folder of this PC's device-folder name, under no layout.
+const DEV_NAMED: &str = "00000000-0000-4000-8000-0000000000c3";
 const GLUE_ROOT: &str = "00000000-0000-4000-8000-0000000000c0";
 
 type TestEngine = Engine<MemoryCredentials>;
@@ -568,6 +570,98 @@ fn a_device_this_pc_has_not_synced_yet_and_the_root_are_refused_with_nothing_sen
         Err(DeleteBackupError::Refused(_))
     ));
     assert_eq!(routes(&rig), Vec::<String>::new(), "nothing was sent");
+}
+
+// ---- review of desktop#425: a locked screen, and this PC's own folder ----------------------------------------------
+
+/// Red at 073aeafb by the refusal's KIND (and the census in `lock_api_tests`): the base copied the token with
+/// `while_session_is`, which does not ask the screen lock, and only `local_state()` refused after it (the delete as
+/// `Failed("state")`). Now both copy through `person_session`, which refuses the locked screen before anything leaves
+/// the session's lock. Nothing is sent in either.
+#[test]
+fn a_locked_screen_reads_and_deletes_nothing() {
+    let rig = rig(Answers::default(), true);
+    // The lock's start rule on a stored session (as `explorer_api_tests`): the screen is locked, the turn is the one
+    // read while it is, as a press drawn over the lock screen would read it.
+    *rig.engine.lock_flow.lock().unwrap() = beebeeb_api::flows::LockFlow::at_start(beebeeb_api::flows::StartFacts {
+        session_stored: true,
+        ask_password_at_start: Some(false),
+        vault_closed: Some(false),
+    });
+    assert_eq!(rig.engine.lock_state(), super::super::lock_api::LockState::ScreenLocked);
+    let session = rig.engine.session_turn();
+    assert_eq!(session, rig.session);
+    assert_eq!(
+        rig.engine.backup_devices_for(session).unwrap_err(),
+        DevicesRefused::Local(LocalStateRefused::Locked)
+    );
+    assert_eq!(
+        rig.engine
+            .delete_device_backup_for(session, DEV_MAC, PASSWORD.as_bytes())
+            .unwrap_err(),
+        DeleteBackupError::SignedOut
+    );
+    assert_eq!(routes(&rig), Vec::<String>::new(), "nothing was sent");
+    assert!(rig.deleted.lock().unwrap().is_empty());
+}
+
+/// Red at 073aeafb: the base sent the DELETE of this PC's own device folder behind the password (the list was the
+/// only guard). The engine refuses it now, before the password is proven.
+#[test]
+fn this_pcs_own_folder_is_never_deleted_when_the_layout_names_it() {
+    let rig = rig(Answers::default(), true);
+    assert!(matches!(
+        rig.engine
+            .delete_device_backup_for(rig.session, DEV_OWN, PASSWORD.as_bytes()),
+        Err(DeleteBackupError::Refused(_))
+    ));
+    assert_eq!(routes(&rig), Vec::<String>::new(), "nothing was sent");
+    assert!(rig.deleted.lock().unwrap().is_empty());
+}
+
+/// Red at 073aeafb: with no layout yet (a reset PC's first sync), a folder of this PC's device-folder name whose
+/// manifest does not open was deleted behind the password. The engine reads its manifest first and refuses it,
+/// before the password is proven; a folder of another name whose manifest does not open either is still deleted.
+#[test]
+fn a_folder_that_may_be_this_pcs_is_not_deleted_while_no_layout_names_it() {
+    let me = crate::backup::device::device_self(&REAL).expect("a name and a machine id");
+    let named = beebeeb_core::backup::device_folder_name(&me.name, &me.device_id, &[]);
+    // Its only file has a name that does not open here: it may be the manifest.
+    let mut unopened = folder_json("00000000-0000-4000-8000-0000000000d1");
+    unopened["is_folder"] = serde_json::json!(false);
+    let mut listings = HashMap::new();
+    listings.insert(DEV_NAMED.to_string(), vec![unopened.clone()]);
+    listings.insert(DEV_MAC.to_string(), vec![unopened]);
+    let rig = rig(
+        Answers {
+            listings,
+            ..Answers::default()
+        },
+        false,
+    );
+    let db = StateDb::open(&rig._dir.path().join("state.db")).unwrap();
+    row(&db, DEV_NAMED, &format!("Backups/{named}"), Some(GLUE_ROOT));
+    drop(db);
+    assert!(matches!(
+        rig.engine
+            .delete_device_backup_for(rig.session, DEV_NAMED, PASSWORD.as_bytes()),
+        Err(DeleteBackupError::Refused(_))
+    ));
+    assert!(
+        !routes(&rig)
+            .iter()
+            .any(|r| r.starts_with("DELETE ") || r.contains("confirm-opaque")),
+        "no proof and no delete: {:?}",
+        routes(&rig)
+    );
+    assert!(rig.deleted.lock().unwrap().is_empty());
+    // Another name: the same unreadable manifest does not make it this PC's.
+    assert_eq!(
+        rig.engine
+            .delete_device_backup_for(rig.session, DEV_MAC, PASSWORD.as_bytes()),
+        Ok(())
+    );
+    assert_eq!(*rig.deleted.lock().unwrap(), [DEV_MAC]);
 }
 
 /// Everything `body` logs through `tracing`, at every level, on this thread (as `share_invite_api_tests`).
