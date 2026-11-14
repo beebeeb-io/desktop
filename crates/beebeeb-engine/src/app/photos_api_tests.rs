@@ -351,7 +351,7 @@ fn a_thumbnail_is_decrypted_in_memory_and_cut_as_asked() {
         .filter(|req| is_thumbnail(req))
         .map(|req| req.path.rsplit('/').next().unwrap().to_string())
         .collect();
-    assert_eq!(asked, ["medium", "small", "large"]);
+    assert_eq!(asked, ["medium", "medium", "large"]);
 
     // Nothing about the file is recorded, and a `{:?}` prints no pixel.
     assert_eq!(db.get_file(HARBOUR).unwrap().unwrap().status, FileStatus::CloudOnly);
@@ -471,6 +471,34 @@ fn a_thumbnail_whose_session_ends_while_it_is_fetched_is_not_handed_over() {
     assert!(
         matches!(answer, Err(ThumbRefused::NotSignedIn)),
         "nothing of the first session is handed over: {answer:?}"
+    );
+}
+
+#[test]
+fn a_file_this_pc_is_uploading_has_no_picture_yet_and_nothing_is_asked() {
+    let fake = fake("uploading");
+    let engine = engine_at(&fake.api.base);
+    signed_in(&engine, &fake.first);
+    let (_dir, db) = local_state(&engine, &fake.first);
+    row(
+        &db,
+        HARBOUR,
+        "Trip/Invented harbour.jpg",
+        300,
+        FileStatus::Uploading,
+        false,
+    );
+    let session = engine.session_turn();
+    assert_eq!(
+        engine
+            .thumbnail_pixels_for(session, HARBOUR, ThumbCut::Square)
+            .map(|_| ()),
+        Err(ThumbRefused::NoThumbnail)
+    );
+    assert_eq!(
+        thumbnail_requests(&fake),
+        0,
+        "the previous version's picture is not fetched"
     );
 }
 

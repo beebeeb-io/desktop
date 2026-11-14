@@ -6,8 +6,10 @@
 //! Where it comes from: the library is read from the signed-in account's local state, through the account-bound
 //! handle (task 2488): a state that is not the session's answers nothing. A thumbnail is the encrypted blob another
 //! client stored with the file, fetched and decrypted IN MEMORY by the path every other thumbnail uses
-//! (`EngineBridge::finder_thumbnail`: the same keys, and never the previous version's picture while a new version
-//! is on its way). No crypto of its own.
+//! (`EngineBridge::finder_thumbnail`: the same keys). No crypto of its own. While this PC is uploading a change
+//! of the file, no picture is handed over (the stored one is the previous version's). Between that upload and the
+//! upload of the new version's pictures the previous picture can still be fetched: the sync engine's own mark for
+//! that moment is not visible from here, so a host must not hold a picture for ever (it asks again).
 //!
 //! Session rule: a thumbnail is asked FOR a session (the one the host read at its press or when the tile came into
 //! view). The token and the vault key leave the session's lock only while that session is the one in memory, and the
@@ -106,14 +108,15 @@ impl std::fmt::Debug for PhotosLibrary {
 pub enum ThumbCut {
     /// The middle of the picture as a square (the stored medium picture), at most `MAX_SQUARE` a side.
     Square,
-    /// The middle of the picture as an upright strip of 36 by 52 (the stored small picture).
+    /// The middle of the picture as an upright strip of 36 by 52 (from the stored medium picture: the one every
+    /// client stores; a small one is not always there).
     Strip,
     /// The whole stored large picture, at its own proportions, at most `MAX_WHOLE` a side.
     Whole,
 }
 
 /// A square is handed over no larger than this a side.
-pub const MAX_SQUARE: u32 = 512;
+pub const MAX_SQUARE: u32 = 320;
 
 /// A whole picture is handed over no wider and no higher than this.
 pub const MAX_WHOLE: u32 = 2048;
@@ -123,7 +126,7 @@ impl ThumbCut {
     pub fn variant(self) -> &'static str {
         match self {
             ThumbCut::Square => "medium",
-            ThumbCut::Strip => "small",
+            ThumbCut::Strip => "medium",
             ThumbCut::Whole => "large",
         }
     }
@@ -289,16 +292,21 @@ impl<C: CredentialStores> Engine<C> {
         // The account-bound handle first (it answers nothing for a session the server ended), then the token and
         // the key of the session asked for: copied under the session's lock, and only while it is that session.
         let state = self.local_state_for_changes().map_err(refused)?;
-        let (token, key) = {
-            let guard = self.acct.session.lock().map_err(|_| ThumbRefused::NotSignedIn)?;
-            let current = guard.as_ref().ok_or(ThumbRefused::NotSignedIn)?;
-            if !self.acct.session_unchanged_since(session) {
-                return Err(ThumbRefused::NotSignedIn);
-            }
-            (current.token.clone(), Zeroizing::new(current.master_key))
-        };
+        if self.acct.session.is_poisoned() {
+            return Err(ThumbRefused::NotSignedIn);
+        }
+        let (token, key) = self
+            .acct
+            .while_session_is(&self.writes, session, |current| {
+                (current.token.clone(), Zeroizing::new(current.master_key))
+            })
+            .ok_or(ThumbRefused::NotSignedIn)?;
         let fetched = state
             .with_shared(|db| {
+                // A file this PC is uploading a change of: the stored picture is the previous version's. Not yet.
+                if matches!(db.get_file(file_id), Ok(Some(row)) if row.status == FileStatus::Uploading) {
+                    return Ok(Err(anyhow::Error::new(ThumbnailNotYet)));
+                }
                 let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token, *key));
                 let bridge = EngineBridge::new(self.identity, db, api);
                 self.runtime.block_on(async {

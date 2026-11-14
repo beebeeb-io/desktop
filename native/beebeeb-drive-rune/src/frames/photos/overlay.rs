@@ -156,8 +156,9 @@ pub fn toast_layer(toast: &Toast, bottom: f32, over_photos: bool, t: &Theme) -> 
     let (ic, words): (&'static Icon, &str) = match toast {
         Toast::Kept => (&icons::OFFLINE, "Keeping the original on this PC"),
         Toast::Trashed(_) => (&icons::TRASH, "Moved to Trash"),
-        Toast::Left { what, why, again } => {
-            left_words = Toast::left_words(*what, *why, again.len());
+        Toast::NotYet => (&icons::MORE, "Not available in this version yet"),
+        Toast::Left { what, why, count, .. } => {
+            left_words = Toast::left_words(*what, *why, *count);
             let ic = match what {
                 super::session::What::Keep(_) => &icons::OFFLINE,
                 _ => &icons::TRASH,

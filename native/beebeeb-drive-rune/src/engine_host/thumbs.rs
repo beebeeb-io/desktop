@@ -17,8 +17,15 @@
 //! after a lock.
 //!
 //! Thread rule: a look never waits. A draw only says what it wants ([`EngineThumbStore::picture`]); the session of
-//! that look is noted with it, on the window's thread. A few workers fetch, newest wish first, and wake the window
-//! ([`Engine::wake_host`]) when a picture is here. A file with no picture is not asked again for [`ASK_AGAIN_AFTER`].
+//! that look is noted with it, on the window's thread. A few workers fetch, in the order the tiles were drawn, and
+//! wake the window ([`Engine::wake_host`]) when an answer is here. A wish no draw repeated for [`WISH_LIVES`] is for
+//! a tile that left the screen: it is dropped unfetched. A picture some draw still looks at is never dropped for
+//! room: when the store is full of those, a new one is not even asked for.
+//!
+//! How old: a file with no picture is asked again after [`ASK_AGAIN_AFTER`], a fetch that failed (offline, a busy
+//! database) after [`TRY_AGAIN_AFTER`]; a picture held longer than [`REFRESH_AFTER`] is still shown and fetched
+//! again, so a picture of a file that changed does not stay for the session. The Photos source also drops the
+//! pictures of a file whose version or time changed in its library ([`EngineThumbStore::drop_file`]).
 //!
 //! Must not: log an id, a name or a pixel; hand out a picture without comparing the stamp.
 
@@ -42,12 +49,18 @@ mod tests;
 pub const MAX_PICTURES: usize = 600;
 /// At most this many bytes of pixels are held.
 pub const MAX_BYTES: usize = 160 * 1024 * 1024;
-/// At most this many wishes wait; older ones are dropped (a tile that is still on screen asks again).
-pub const MAX_WISHES: usize = 240;
+/// At most this many wishes wait; the oldest are dropped (a tile that is still on screen asks again).
+pub const MAX_WISHES: usize = 400;
 /// How many fetches run at once.
 const WORKERS: usize = 3;
-/// A file that had no picture, or whose picture could not be fetched, is asked again after this.
+/// A file that had no picture is asked again after this.
 pub const ASK_AGAIN_AFTER: Duration = Duration::from_secs(60);
+/// A fetch that failed for another reason (offline, a busy database) is tried again after this.
+pub const TRY_AGAIN_AFTER: Duration = Duration::from_secs(5);
+/// A picture held this long is shown and fetched again.
+pub const REFRESH_AFTER: Duration = Duration::from_secs(600);
+/// A wish no draw repeated for this long is dropped; a picture no draw looked at for this long may go for room.
+pub const WISH_LIVES: Duration = Duration::from_secs(2);
 /// How long an idle worker sleeps before it looks whether the store is still there.
 const IDLE: Duration = Duration::from_millis(500);
 
@@ -65,14 +78,15 @@ enum Held {
     Picture {
         pixels: Pixels,
         bytes: usize,
-        used: u64,
+        /// When a draw last looked at it.
+        used: Instant,
+        /// When it was fetched.
+        fetched: Instant,
     },
-    /// A video's length in seconds (`None`: this PC cannot say).
-    Length(Option<u32>),
-    /// No picture: not asked again before `until`.
-    Nothing {
-        until: Instant,
-    },
+    /// A video's length in seconds.
+    Length(u32),
+    /// Nothing to show: not asked again before `until`.
+    Nothing { until: Instant },
 }
 
 #[derive(Default)]
@@ -81,11 +95,10 @@ struct Inner {
     stamp: Option<Stamp>,
     held: HashMap<Key, Held>,
     bytes: usize,
-    /// What is wished for and not fetched yet, oldest first, each with the stamp of its look.
-    wishes: VecDeque<(Key, Stamp)>,
+    /// What is wished for and not fetched yet, in the order it was first wished, each with the stamp of its look
+    /// and when a draw last repeated it.
+    wishes: VecDeque<(Key, Stamp, Instant)>,
     in_flight: Vec<Key>,
-    /// Counts the looks: the picture with the lowest number goes first.
-    looks: u64,
     workers: usize,
     /// Something arrived since the window last asked.
     arrived: bool,
@@ -112,30 +125,59 @@ impl Inner {
         }
     }
 
-    /// Room for one more: the pictures not looked at for longest go.
-    fn make_room(&mut self) {
+    /// The next wish to fetch: the one wished first that a draw still repeats. A wish no draw repeated for
+    /// `WISH_LIVES` is for a tile that left the screen: dropped, unfetched.
+    fn next_wish(&mut self, now: Instant) -> Option<(Key, Stamp)> {
         loop {
-            let pictures = self
-                .held
-                .values()
-                .filter(|held| matches!(held, Held::Picture { .. }))
-                .count();
-            if pictures <= MAX_PICTURES && self.bytes <= MAX_BYTES {
-                return;
-            }
-            let oldest = self
-                .held
-                .iter()
-                .filter_map(|(key, held)| match held {
-                    Held::Picture { used, .. } => Some((*used, key.clone())),
-                    _ => None,
-                })
-                .min_by_key(|(used, _)| *used);
-            let Some((_, key)) = oldest else { return };
-            if let Some(Held::Picture { bytes, .. }) = self.held.remove(&key) {
-                self.bytes = self.bytes.saturating_sub(bytes);
+            match self.wishes.pop_front()? {
+                (_, _, at) if now.duration_since(at) >= WISH_LIVES => {}
+                (key, stamp, _) => return Some((key, stamp)),
             }
         }
+    }
+
+    fn pictures(&self) -> usize {
+        self.held
+            .values()
+            .filter(|held| matches!(held, Held::Picture { .. }))
+            .count()
+    }
+
+    fn over(&self) -> bool {
+        self.pictures() > MAX_PICTURES || self.bytes > MAX_BYTES
+    }
+
+    /// The picture no draw looked at for longest, if no draw looked at it since `WISH_LIVES` ago.
+    fn stale(&self, now: Instant) -> Option<Key> {
+        self.held
+            .iter()
+            .filter_map(|(key, held)| match held {
+                Held::Picture { used, .. } if now.duration_since(*used) >= WISH_LIVES => Some((*used, key.clone())),
+                _ => None,
+            })
+            .min_by_key(|(used, _)| *used)
+            .map(|(_, key)| key)
+    }
+
+    /// Is there room for one more picture, now or by dropping one no draw looks at any more?
+    fn has_room(&self, now: Instant) -> bool {
+        (self.pictures() < MAX_PICTURES && self.bytes < MAX_BYTES) || self.stale(now).is_some()
+    }
+
+    fn drop_picture(&mut self, key: &Key) {
+        if let Some(Held::Picture { bytes, .. }) = self.held.remove(key) {
+            self.bytes = self.bytes.saturating_sub(bytes);
+        }
+    }
+
+    /// Back under the caps: the pictures no draw looks at any more go, longest unseen first. `false`: the store
+    /// is full of pictures that are looked at, and stays over.
+    fn make_room(&mut self, now: Instant) -> bool {
+        while self.over() {
+            let Some(key) = self.stale(now) else { return false };
+            self.drop_picture(&key);
+        }
+        true
     }
 }
 
@@ -160,60 +202,83 @@ impl<C: CredentialStores> EngineThumbStore<C> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// What is held for `key` under the session that is here, or a wish for it. Never waits.
-    fn held_or_wish<T>(
-        self: &Arc<Self>,
-        id: &str,
-        ask: Ask,
-        read: impl FnOnce(&mut Held, u64) -> Option<T>,
-    ) -> Option<T> {
+    /// What is held for `key` under the session that is here, and a wish for it when it is missing or old. Never
+    /// waits.
+    fn held_or_wish<T>(self: &Arc<Self>, id: &str, ask: Ask, read: impl FnOnce(&Held) -> Option<T>) -> Option<T> {
         // The session and account of this look, read before anything is handed out.
-        let now = stamp(&self.engine);
+        let stamped = stamp(&self.engine);
         let mut inner = self.inner();
-        inner.look(&now);
+        inner.look(&stamped);
         if !self.engine.has_session() {
             return None;
         }
-        inner.looks += 1;
-        let looks = inner.looks;
+        let now = Instant::now();
         let key = (id.to_string(), ask);
+        let mut answer = None;
         match inner.held.get_mut(&key) {
-            Some(Held::Nothing { until }) if *until > Instant::now() => return None,
+            Some(Held::Nothing { until }) if *until > now => return None,
             Some(Held::Nothing { .. }) | None => {}
-            Some(held) => return read(held, looks),
+            Some(held) => {
+                let fresh = match held {
+                    Held::Picture { used, fetched, .. } => {
+                        *used = now;
+                        now.duration_since(*fetched) < REFRESH_AFTER
+                    }
+                    _ => true,
+                };
+                answer = read(held);
+                if fresh {
+                    return answer;
+                }
+            }
         }
         if inner.in_flight.contains(&key) {
+            return answer;
+        }
+        // Repeated by this draw: it keeps its place and lives on.
+        if let Some(wish) = inner.wishes.iter_mut().find(|(wished, _, _)| *wished == key) {
+            wish.1 = stamped;
+            wish.2 = now;
+            return answer;
+        }
+        // No room, and every picture held is still looked at: asking would only push one of those out.
+        if answer.is_none() && matches!(ask, Ask::Picture(_)) && !inner.has_room(now) {
             return None;
         }
-        // Wished again: it moves to the front (the newest wish is fetched first).
-        inner.wishes.retain(|(wished, _)| *wished != key);
-        inner.wishes.push_back((key, now));
+        inner.wishes.push_back((key, stamped, now));
         while inner.wishes.len() > MAX_WISHES {
             inner.wishes.pop_front();
         }
         self.start_workers(&mut inner);
         self.wake.notify_one();
-        None
+        answer
     }
 
     /// The thumbnail of the file `id`, cut as `cut` says, if it is here; otherwise it is wished for, and the window
     /// is woken when it arrives.
     pub fn picture(self: &Arc<Self>, id: &str, cut: ThumbCut) -> Option<Pixels> {
-        self.held_or_wish(id, Ask::Picture(cut), |held, looks| match held {
-            Held::Picture { pixels, used, .. } => {
-                *used = looks;
-                Some(pixels.clone())
-            }
+        self.held_or_wish(id, Ask::Picture(cut), |held| match held {
+            Held::Picture { pixels, .. } => Some(pixels.clone()),
             _ => None,
         })
     }
 
     /// The length of the video `id` in seconds, if this PC can say; asked for otherwise.
     pub fn length(self: &Arc<Self>, id: &str) -> Option<u32> {
-        self.held_or_wish(id, Ask::Length, |held, _| match held {
-            Held::Length(seconds) => *seconds,
+        self.held_or_wish(id, Ask::Length, |held| match held {
+            Held::Length(seconds) => Some(*seconds),
             _ => None,
         })
+    }
+
+    /// The file `id` changed: what is held of it goes, and is asked for again at the next look.
+    pub fn drop_file(&self, id: &str) {
+        let mut inner = self.inner();
+        let keys: Vec<Key> = inner.held.keys().filter(|key| key.0 == id).cloned().collect();
+        for key in keys {
+            inner.drop_picture(&key);
+            inner.held.remove(&key);
+        }
     }
 
     /// Tests only: the next fetch for the file `id` waits, on its worker, before it asks the engine anything, until
@@ -223,6 +288,16 @@ impl<C: CredentialStores> EngineThumbStore<C> {
         let ((release, hold), (ended, has_ended)) = (std::sync::mpsc::channel(), std::sync::mpsc::channel());
         self.inner().next_fetch = Some((id.to_string(), hold, ended));
         (release, has_ended)
+    }
+
+    /// Tests only: every picture held was fetched `by` longer ago.
+    #[cfg(test)]
+    pub(super) fn age_pictures(&self, by: Duration) {
+        for held in self.inner().held.values_mut() {
+            if let Held::Picture { fetched, .. } = held {
+                *fetched = fetched.checked_sub(by).expect("a clock that has run this long");
+            }
+        }
     }
 
     /// Nothing of the session that was here is kept.
@@ -257,11 +332,11 @@ impl<C: CredentialStores> EngineThumbStore<C> {
         }
     }
 
-    /// On a worker: the newest wish, fetched and taken in. `false`: there was none.
+    /// On a worker: the next wish that a draw still repeats, fetched and taken in. `false`: there was none.
     fn fetch_one(&self) -> bool {
         let (key, wished_under) = {
             let mut inner = self.inner();
-            let Some(wish) = inner.wishes.pop_back() else {
+            let Some(wish) = inner.next_wish(Instant::now()) else {
                 return false;
             };
             inner.in_flight.push(wish.0.clone());
@@ -278,19 +353,22 @@ impl<C: CredentialStores> EngineThumbStore<C> {
         let (id, ask) = (&key.0, key.1);
         let session = wished_under.0;
         let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match ask {
-            Ask::Picture(cut) => match self.engine.thumbnail_pixels_for(session, id, cut) {
-                Ok(picture) => {
-                    let pixels = Pixels::new();
-                    let bytes = picture.rgba.len();
-                    pixels.set(picture.width, picture.height, picture.rgba.to_vec());
-                    Ok(Held::Picture { pixels, bytes, used: 0 })
+            Ask::Picture(cut) => self.engine.thumbnail_pixels_for(session, id, cut).map(|picture| {
+                let pixels = Pixels::new();
+                let bytes = picture.rgba.len();
+                pixels.set(picture.width, picture.height, picture.rgba.to_vec());
+                let now = Instant::now();
+                Held::Picture {
+                    pixels,
+                    bytes,
+                    used: now,
+                    fetched: now,
                 }
-                Err(refused) => Err(refused),
-            },
+            }),
             Ask::Length => match self.engine.video_seconds_for(session, id) {
-                Ok(seconds) => Ok(Held::Length(
-                    seconds.map(|seconds| u32::try_from(seconds).unwrap_or(u32::MAX)),
-                )),
+                Ok(Some(seconds)) => Ok(Held::Length(u32::try_from(seconds).unwrap_or(u32::MAX))),
+                // This PC cannot say (online only): asked again later, once a copy may be here.
+                Ok(None) => Err(ThumbRefused::NoThumbnail),
                 Err(_) => Err(ThumbRefused::NotSignedIn),
             },
         }))
@@ -305,34 +383,31 @@ impl<C: CredentialStores> EngineThumbStore<C> {
         let now = stamp(&self.engine);
         let current = self.engine.has_session() && wished_under == now && inner.stamp.as_ref() == Some(&now);
         if current {
-            let looks = inner.looks;
+            let at = Instant::now();
             match answer {
-                Ok(Held::Picture { pixels, bytes, .. }) => {
-                    inner.bytes += bytes;
-                    inner.held.insert(
-                        key,
-                        Held::Picture {
-                            pixels,
-                            bytes,
-                            used: looks,
-                        },
-                    );
-                    inner.make_room();
-                    inner.arrived = true;
-                }
                 Ok(held) => {
-                    inner.held.insert(key, held);
+                    inner.drop_picture(&key);
+                    if let Held::Picture { bytes, .. } = &held {
+                        inner.bytes += bytes;
+                    }
+                    inner.held.insert(key.clone(), held);
+                    // Full of pictures that are looked at: this one does not stay either.
+                    if !inner.make_room(at) {
+                        inner.drop_picture(&key);
+                    }
                     inner.arrived = true;
                 }
                 // The session is not there for it: nothing is kept, not even "no picture".
                 Err(ThumbRefused::NotSignedIn | ThumbRefused::SessionEnded | ThumbRefused::NotYours) => {}
-                Err(_) => {
-                    inner.held.insert(
-                        key,
-                        Held::Nothing {
-                            until: Instant::now() + ASK_AGAIN_AFTER,
-                        },
-                    );
+                Err(refused) => {
+                    let wait = match refused {
+                        ThumbRefused::NoThumbnail | ThumbRefused::Unreadable => ASK_AGAIN_AFTER,
+                        _ => TRY_AGAIN_AFTER,
+                    };
+                    // A picture that is held (a refresh that failed) stays.
+                    if !matches!(inner.held.get(&key), Some(Held::Picture { .. })) {
+                        inner.held.insert(key, Held::Nothing { until: at + wait });
+                    }
                 }
             }
         }

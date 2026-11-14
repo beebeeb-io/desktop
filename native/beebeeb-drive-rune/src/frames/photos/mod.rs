@@ -136,12 +136,15 @@ pub enum Toast {
     Kept,
     /// "Moved to Trash", with Undo (DW-0610).
     Trashed(Vec<PhotoId>),
-    /// Something asked for was not done, and why; Try again is for `again` alone.
+    /// Something asked for was not done, and why, for `count` items; Try again is for `again` alone.
     Left {
         what: session::What,
         why: source::Left,
+        count: usize,
         again: Vec<PhotoId>,
     },
+    /// A control whose work is not connected in this build yet was pressed: it says so, and nothing else happens.
+    NotYet,
 }
 
 /// One row of the grid: a day's heading, if this is its first row, and up to `across` tiles.
@@ -603,7 +606,7 @@ impl Ui {
     }
 }
 
-pub use session::poll;
+pub use session::{after_a_check, poll};
 
 /// The group's state in a new window: the board's library until the engine's source is wired.
 pub fn start() -> Ui {
@@ -638,7 +641,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             viewer::bar(ui, &viewing, &t),
             None,
             viewer::stage(ui, &viewing, &t),
-            &viewer::status(&viewing),
+            &session::status(ui, &viewing),
             front,
         ),
         None => chrome::window(

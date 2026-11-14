@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use rune::{Env, Key, KeyEvent, Mods, Pixels, Runtime};
 
 use super::super::source::{
-    Answered, BackupStatus, Day, Detail, Device, FixturePhotos, Folder, Left, Loaded, Photo, PhotoId, PhotosSource,
-    Pumped, Shape, SourceRef, Totals, Viewing, board,
+    Answered, BackupStatus, Day, Detail, Device, FixturePhotos, Folder, Kind, Left, Loaded, Photo, PhotoId,
+    PhotosSource, Pumped, Shape, SourceRef, Totals, Viewing, board,
 };
 use super::super::{Toast, Ui};
 use super::What;
@@ -25,10 +25,13 @@ struct Script {
     /// What the next pump hands over.
     answers: Vec<Answered>,
     loaded: Loaded,
+    /// No video's length is known (an engine that has no copy on this PC).
+    no_length: bool,
     /// The next pump says the library changed.
     dirty: bool,
     opened: usize,
     forgot: usize,
+    refreshed: usize,
 }
 
 struct Later {
@@ -59,6 +62,9 @@ impl PhotosSource for Later {
     }
     fn forget(&mut self) {
         self.script.lock().unwrap().forgot += 1;
+    }
+    fn refresh(&mut self) {
+        self.script.lock().unwrap().refreshed += 1;
     }
     fn pump(&mut self) -> Pumped {
         let (answered, dirty) = {
@@ -112,13 +118,21 @@ impl PhotosSource for Later {
         self.library.days(device)
     }
     fn photo(&self, device: Option<usize>, day: usize, index: usize) -> Option<Photo> {
-        self.library.photo(device, day, index)
+        let mut photo = self.library.photo(device, day, index)?;
+        if self.script.lock().unwrap().no_length && matches!(photo.kind, Kind::Video(_)) {
+            photo.kind = Kind::Video(0);
+        }
+        Some(photo)
     }
     fn thumbnail(&self, id: PhotoId, shape: Shape) -> Option<Pixels> {
         self.library.thumbnail(id, shape)
     }
     fn viewing(&self, id: PhotoId) -> Option<Viewing> {
-        self.library.viewing(id)
+        let mut viewing = self.library.viewing(id)?;
+        if self.script.lock().unwrap().no_length && matches!(viewing.kind, Kind::Video(_)) {
+            viewing.kind = Kind::Video(0);
+        }
+        Some(viewing)
     }
     fn details(&self, id: PhotoId) -> Vec<Detail> {
         self.library.details(id)
@@ -126,8 +140,8 @@ impl PhotosSource for Later {
     fn kept_offline(&self, id: PhotoId) -> bool {
         self.library.kept_offline(id)
     }
-    fn keep_offline(&mut self, id: PhotoId, _keep: bool) -> Result<(), Left> {
-        self.ask("keep", &[id])
+    fn keep_offline(&mut self, id: PhotoId, keep: bool) -> Result<(), Left> {
+        self.ask(if keep { "keep" } else { "stop keeping" }, &[id])
     }
     fn trash(&mut self, ids: &[PhotoId]) -> Result<(), Left> {
         self.ask("trash", ids)
@@ -212,6 +226,13 @@ fn answer(rt: &mut Runtime<State>, script: &Arc<Mutex<Script>>, answer: Answered
     rt.frame(0.0);
 }
 
+/// The view runs again (a state the test set by hand is drawn).
+fn redraw(rt: &mut Runtime<State>, script: &Arc<Mutex<Script>>) {
+    script.lock().unwrap().dirty = true;
+    rt.frame(0.0);
+    rt.frame(0.0);
+}
+
 fn asked(script: &Arc<Mutex<Script>>) -> Vec<(&'static str, Vec<PhotoId>)> {
     script.lock().unwrap().asked.clone()
 }
@@ -279,6 +300,7 @@ fn a_selection_leaves_only_when_beebeeb_said_so_and_what_was_left_can_be_tried_a
         Some(Toast::Left {
             what: What::Trash,
             why: Left::Failed,
+            count: 1,
             again: vec![b]
         })
     );
@@ -448,4 +470,142 @@ fn another_account_finds_nothing_of_the_one_before_in_the_window() {
     let asks = asked(&script).len();
     assert!(!ui.undo());
     assert_eq!(asked(&script).len(), asks);
+}
+
+#[test]
+fn what_was_left_is_counted_and_reasoned_by_what_asking_again_can_change() {
+    let (mut rt, script) = window();
+    let (a, b, c) = (id((0, 0)), id((0, 3)), id((1, 2)));
+    for (day, index) in [(0, 0), (0, 3), (1, 2)] {
+        rt.state.photos.check_tile(day, index);
+    }
+    rt.frame(0.0);
+    click(&mut rt, "ph-bulk-btn-3");
+    // One is protected, two could not be reached: the message is about the two, and Try again is for them.
+    answer(
+        &mut rt,
+        &script,
+        Answered::Trashed(vec![
+            (a, Some(Left::Protected)),
+            (b, Some(Left::Offline)),
+            (c, Some(Left::Offline)),
+        ]),
+    );
+    assert_eq!(
+        text(&rt, "ph-toast-text"),
+        "Couldn\u{2019}t move 2 to Trash \u{00B7} you\u{2019}re offline"
+    );
+    click(&mut rt, "ph-toast-action");
+    assert_eq!(asked(&script)[1], ("trash", vec![b, c]));
+    // Only protected ones left: said of all of them, and there is nothing to try again.
+    answer(
+        &mut rt,
+        &script,
+        Answered::Trashed(vec![(b, Some(Left::Protected)), (c, Some(Left::Protected))]),
+    );
+    assert_eq!(
+        text(&rt, "ph-toast-text"),
+        "Couldn\u{2019}t move 2 to Trash \u{00B7} backups can\u{2019}t be changed here"
+    );
+    assert!(!has(&rt, "ph-toast-action"));
+}
+
+#[test]
+fn a_control_whose_work_is_not_connected_says_so_and_what_the_source_can_do_is_done() {
+    let (mut rt, script) = window();
+    let harbour = id(board::HARBOUR);
+    rt.state.photos.open(harbour);
+    rt.frame(0.0);
+    // Original: no download is started, and the tab does not say one runs.
+    rt.state.photos.show_original();
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(rt.state.photos.toast, Some(Toast::NotYet));
+    assert_eq!(text(&rt, "ph-toast-text"), "Not available in this version yet");
+    assert_eq!(
+        rt.state.photos.viewer.as_ref().map(|v| v.original),
+        Some(super::super::Original::Preview)
+    );
+    assert_eq!(
+        rt.state.photos.take_intents(),
+        vec![],
+        "nothing waits for a shell that never takes it"
+    );
+
+    // "On this PC", pressed on a kept photo: it stops being kept, asked of the source.
+    answer(
+        &mut rt,
+        &script,
+        Answered::Kept {
+            id: harbour,
+            keep: true,
+            left: None,
+        },
+    );
+    rt.state.photos.press_offline();
+    rt.frame(0.0);
+    assert_eq!(asked(&script), [("stop keeping", vec![harbour])]);
+
+    // A video: the line does not say it streams, and an unknown length is not written as 0:00.
+    script.lock().unwrap().no_length = true;
+    rt.state.photos.close_viewer();
+    rt.state.photos.open(id(board::VIDEO));
+    redraw(&mut rt, &script);
+    assert!(
+        rt.elements().iter().any(|e| e
+            .text
+            .as_deref()
+            .is_some_and(|t| t.contains("playing it here is not available"))),
+        "the open video's line says what is"
+    );
+    assert!(
+        !rt.elements()
+            .iter()
+            .any(|e| e.text.as_deref().is_some_and(|t| t.contains("Streaming")))
+    );
+    assert!(!rt.elements().iter().any(|e| e.text.as_deref() == Some("0:00")));
+    rt.state.photos.close_viewer();
+    redraw(&mut rt, &script);
+    assert!(has(&rt, "ph-tile-0-2-badge-icon"), "the video's mark is there");
+    assert!(!has(&rt, "ph-tile-0-2-badge-label"), "without a length");
+
+    // Keep on a selection: asked per photo.
+    rt.state.photos.check_tile(0, 3);
+    rt.state.photos.check_tile(0, 5);
+    rt.frame(0.0);
+    click(&mut rt, "ph-bulk-btn-1");
+    // The next poll takes what the press asked for.
+    rt.frame(0.0);
+    assert_eq!(
+        asked(&script)[1..],
+        [("keep", vec![id((0, 3))]), ("keep", vec![id((0, 5))])]
+    );
+}
+
+#[test]
+fn a_checked_photo_that_left_the_library_is_no_longer_checked_and_a_finished_check_reads_again() {
+    let (mut rt, script) = window();
+    rt.state.photos.check_tile(0, 0);
+    rt.state.photos.check_tile(0, 3);
+    rt.frame(0.0);
+    // It left some other way (moved to Trash on the phone): the next read no longer lists it.
+    answer(&mut rt, &script, Answered::Trashed(vec![(id((0, 0)), None)]));
+    assert_eq!(
+        rt.state.photos.selected.keys().copied().collect::<Vec<_>>(),
+        [id((0, 3))]
+    );
+
+    let before = script.lock().unwrap().refreshed;
+    super::after_a_check(&mut rt.state);
+    assert_eq!(script.lock().unwrap().refreshed, before + 1);
+
+    // On screen with nothing read and nothing on its way: the library is asked for again.
+    let opened = script.lock().unwrap().opened;
+    {
+        let mut script = script.lock().unwrap();
+        script.loaded = Loaded::Loading;
+        script.dirty = true;
+    }
+    rt.frame(0.0);
+    assert!(script.lock().unwrap().opened > opened);
 }

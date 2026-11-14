@@ -214,6 +214,8 @@ pub trait PhotosSource {
     }
     /// The Photos section came on screen: read the library if it is missing or old. Never called from a draw.
     fn opened(&mut self) {}
+    /// What this PC knows of the account changed (a sync check finished): read the library again.
+    fn refresh(&mut self) {}
     /// The gate or the account changed: nothing of the earlier one is kept.
     fn forget(&mut self) {}
     /// Take in what arrived since the last call (the window's poll).

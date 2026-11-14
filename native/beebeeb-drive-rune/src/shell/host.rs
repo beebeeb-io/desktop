@@ -470,6 +470,10 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // A refused sync start says so, once per attempt (the refusal modal, Q3).
     changed |= open_sync_refusal(s);
     // The first sync's files, once a check finished (R1.1).
+    // Photos reads its library again once a check finished (`frames::photos::after_a_check`).
+    if s.shell.check_finished {
+        crate::frames::photos::after_a_check(s);
+    }
     changed |= read_again_after_a_check(s);
     // A lock, a sign-out or another account ends what was open inside the account sections: a
     // review of another device's sign-in, a typed code or password, a Windows Hello that is up.

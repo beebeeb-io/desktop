@@ -12,14 +12,16 @@
 //!   `restore_items_for`), bound to the session and the account of the press; Undo sends the stamp of the move.
 //! - Keep on this PC: [`Engine::set_kept_for`], for the session of the press.
 //! - not bound (the PR lists why): `folders` and a folder's `set_shown` (the engine has no "folder Photos shows"),
-//!   `backup_status` (this PC does not know what another device's backup is doing).
+//!   `backup_status` (this PC does not know what another device's backup is doing). The window's controls whose
+//!   work no source method carries (Original, playing a video, Share, Move, Rename, Search, Version history) say
+//!   "not available in this version yet" (`frames/photos/session.rs`).
 //!
 //! Nothing is drawn before the engine answered: a change is only asked in the call; what it did arrives through
 //! [`PhotosSource::pump`], per item. A photo Beebeeb moved to Trash leaves the library here at that answer (the
 //! local state follows later), and is put back at the answer of its Undo.
 //!
-//! When it reads: when the Photos section opens and the library is missing or older than [`FRESH_FOR`], and after
-//! a change was answered. Never from a draw call: every accessor only reads what is here.
+//! When it reads: when the Photos section opens and the library is missing or older than [`FRESH_FOR`], after a
+//! change was answered, and when a sync check finished (`PhotosSource::refresh`). Never from a draw call: every accessor only reads what is here.
 //!
 //! Session rule: the library carries the session it was read for; every accessor compares it with
 //! [`Engine::session_turn`] before it hands out a name or an id, and `forget` (the window's poll, on a gate or
@@ -126,6 +128,8 @@ pub struct EnginePhotos<C: CredentialStores> {
     reads: u64,
     /// A read was asked for while one was on its way: start it when that one lands.
     again: bool,
+    /// The Photos section was opened in this session: a change elsewhere is worth a read.
+    asked: bool,
     /// A read with a number up to this began before a change was answered: its library is not taken.
     stale_up_to: u64,
     /// The numbers handed out, by file id. A number is never handed out twice (`next_id` only grows).
@@ -169,6 +173,7 @@ impl<C: CredentialStores> EnginePhotos<C> {
             reading: None,
             reads: 0,
             again: false,
+            asked: false,
             stale_up_to: 0,
             numbers: HashMap::new(),
             next_id: 1,
@@ -203,6 +208,7 @@ impl<C: CredentialStores> EnginePhotos<C> {
         self.read_at = None;
         self.reading = None;
         self.again = false;
+        self.asked = false;
         self.stale_up_to = self.reads;
         // The numbers go; `next_id` stays, so none of them is ever handed out again.
         self.numbers.clear();
@@ -290,6 +296,22 @@ impl<C: CredentialStores> EnginePhotos<C> {
         self.back.retain(|id, _| !photos.iter().any(|photo| photo.id == *id));
         photos.retain(|photo| !self.hidden.contains(&photo.id));
         photos.extend(self.back.values().cloned());
+        // A file that changed since the last read: its pictures are the earlier version's.
+        if let Some(before) = &self.library {
+            let was: HashMap<&str, (i64, i64, u64)> = before
+                .photos
+                .iter()
+                .map(|photo| (photo.id.as_str(), (photo.modified_at, photo.versions, photo.bytes)))
+                .collect();
+            for photo in &photos {
+                if was
+                    .get(photo.id.as_str())
+                    .is_some_and(|was| *was != (photo.modified_at, photo.versions, photo.bytes))
+                {
+                    self.thumbs.drop_file(&photo.id);
+                }
+            }
+        }
         self.take_in(session, photos);
     }
 
@@ -568,9 +590,21 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
     fn opened(&mut self) {
         let now = stamp(&self.engine);
         self.look(&now);
+        self.asked = true;
         let fresh = self.current().is_some() && self.read_at.is_some_and(|at| at.elapsed() < FRESH_FOR);
         if !fresh {
             self.read();
+        }
+    }
+
+    fn refresh(&mut self) {
+        let now = stamp(&self.engine);
+        self.look(&now);
+        // Only a library someone looked at in this session is read again; the next opening reads otherwise.
+        if self.asked {
+            self.read();
+        } else {
+            self.read_at = None;
         }
     }
 

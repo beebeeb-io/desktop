@@ -14,7 +14,7 @@ use rune::{El, Tx, col};
 
 use super::chrome::style;
 use super::source::{Answered, Left, Loaded, PhotoId, Viewing};
-use super::{Original, Toast, Ui, Viewer};
+use super::{Intent, Original, Toast, Ui, Viewer};
 use crate::State;
 use crate::shell::app::GateState;
 use crate::theme::tokens::Theme;
@@ -57,6 +57,7 @@ impl Ui {
                 self.toast = Some(Toast::Left {
                     what: What::Trash,
                     why,
+                    count: ids.len(),
                     again: ids.to_vec(),
                 });
                 false
@@ -139,6 +140,7 @@ impl Ui {
             self.toast = Some(Toast::Left {
                 what: What::Restore,
                 why,
+                count: ids.len(),
                 again: ids,
             });
             return true;
@@ -164,7 +166,7 @@ impl Ui {
             return;
         };
         if self.source.kept_offline(id) {
-            self.ask(super::Intent::OfferRemoveFromPc(id));
+            self.ask(Intent::OfferRemoveFromPc(id));
         } else {
             self.keep(id, true);
         }
@@ -176,6 +178,7 @@ impl Ui {
                 self.toast = Some(Toast::Left {
                     what: What::Keep(keep),
                     why,
+                    count: 1,
                     again: vec![id],
                 });
             }
@@ -288,6 +291,7 @@ impl Ui {
                     self.toast = Some(Toast::Left {
                         what: What::Keep(keep),
                         why,
+                        count: 1,
                         again: vec![id],
                     });
                 }
@@ -300,24 +304,48 @@ impl Ui {
         self.relayout();
     }
 
-    /// One message per answer: where some were left, that is the one (Ctrl+Z still undoes the rest).
+    /// One message per answer: where some were left, that is the one (Ctrl+Z still undoes the rest). It counts and
+    /// gives the reason of what asking again can change; where every one left is protected, of those.
     fn say_left(&mut self, what: What, left: &[(PhotoId, Left)]) {
-        let Some(first) = left.first() else { return };
-        let why = if left.iter().any(|item| item.1 == Left::Protected) {
-            Left::Protected
-        } else {
-            first.1
+        let again: Vec<(PhotoId, Left)> = left.iter().copied().filter(|item| item.1 != Left::Protected).collect();
+        let Some(first) = again.first().or(left.first()) else {
+            return;
         };
         self.toast = Some(Toast::Left {
             what,
-            why,
-            // Try again is for what asking again can change: not a protected item.
-            again: left
-                .iter()
-                .filter(|item| item.1 != Left::Protected)
-                .map(|item| item.0)
-                .collect(),
+            why: first.1,
+            count: if again.is_empty() { left.len() } else { again.len() },
+            again: again.iter().map(|item| item.0).collect(),
         });
+    }
+
+    /// What the group asked of the shell, on a source that answers later: what this source can do is done, and a
+    /// control whose work is not connected in this build says so instead of doing nothing.
+    fn take_in_intents(&mut self) -> bool {
+        let intents = self.take_intents();
+        let any = !intents.is_empty();
+        for intent in intents {
+            match intent {
+                // "On this PC", pressed again: it stops being kept (asked; said once this PC answered).
+                Intent::OfferRemoveFromPc(id) => self.keep(id, false),
+                Intent::KeepSeveral(ids) => {
+                    for id in ids {
+                        self.keep(id, true);
+                    }
+                }
+                // Kept in this window for as long as it is open.
+                Intent::RememberAcross(_) | Intent::StopOriginal(_) => {}
+                Intent::DownloadOriginal(_) => {
+                    // No download was started: the tab does not say one is running.
+                    if let Some(viewer) = &mut self.viewer {
+                        viewer.original = Original::Preview;
+                    }
+                    self.toast = Some(Toast::NotYet);
+                }
+                _ => self.toast = Some(Toast::NotYet),
+            }
+        }
+        any
     }
 
     /// Nothing that names a photo of the account that was here stays.
@@ -363,7 +391,23 @@ impl Toast {
 
     /// Whether the message offers Try again.
     pub(super) fn can_retry(&self) -> bool {
-        matches!(self, Toast::Left { why, again, .. } if !again.is_empty() && !matches!(why, Left::InFlight | Left::Protected))
+        matches!(self, Toast::Left { why, again, .. } if !again.is_empty() && *why != Left::InFlight)
+    }
+}
+
+/// The status line's words for an open item. A video on a source that answers later: playing it here is not
+/// connected in this build, and the line says so instead of "Streaming".
+pub(super) fn status(ui: &Ui, viewing: &Viewing) -> String {
+    if ui.source.answers_later() && matches!(viewing.kind, super::source::Kind::Video(_)) {
+        return "Video \u{00B7} playing it here is not available in this version yet".into();
+    }
+    super::viewer::status(viewing)
+}
+
+/// A sync check finished (`shell::host::poll`): what this PC knows of the account may have changed.
+pub fn after_a_check(s: &mut State) {
+    if s.shell.app.gate() == GateState::Ready {
+        s.photos.source.refresh();
     }
 }
 
@@ -439,6 +483,10 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         changed = true;
     }
     ui.later.was_open = open;
+    let later = ui.source.answers_later();
+    if later {
+        changed |= ui.take_in_intents();
+    }
     let pumped = ui.source.pump();
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
@@ -451,15 +499,23 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     for answer in pumped.answered {
         ui.answered(answer);
     }
-    // An open photo that is no longer in the library (it left some other way) closes.
-    if pumped.changed
-        && ui.source.answers_later()
-        && ui
+    if pumped.changed && later {
+        // An open photo that is no longer in the library (it left some other way) closes, and a checked one is
+        // no longer checked: a change asked for it would be refused for all of them.
+        if ui
             .viewer
             .as_ref()
             .is_some_and(|viewer: &Viewer| viewer.gone.is_none() && ui.source.viewing(viewer.id).is_none())
-    {
-        ui.viewer = None;
+        {
+            ui.viewer = None;
+        }
+        let Ui { selected, source, .. } = ui;
+        selected.retain(|id, _| source.viewing(*id).is_some());
+    }
+    // On screen with nothing read and nothing on its way (the session moved on under an unchanged gate): read.
+    if open && later && !pumped.busy && ui.source.loaded() == Loaded::Loading {
+        ui.source.opened();
+        changed = true;
     }
     changed
 }

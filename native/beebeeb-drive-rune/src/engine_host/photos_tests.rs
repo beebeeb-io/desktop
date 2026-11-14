@@ -598,6 +598,68 @@ fn a_thumbnail_arrives_in_memory_once_and_a_file_without_one_is_not_asked_again(
 }
 
 #[test]
+fn a_picture_does_not_stay_for_the_session_of_a_file_that_changes() {
+    let fake = fake("stale");
+    let (engine, mut source, store, _dir) = signed_in(&fake);
+    open(&mut source);
+    let harbour = shown(&source)[0][0];
+    settle(&mut source);
+    fetch(&store, HARBOUR, || {
+        assert!(source.thumbnail(harbour, Shape::Square).is_none())
+    });
+    assert!(source.thumbnail(harbour, Shape::Square).is_some());
+    assert_eq!(thumbnail_requests(&fake), 1);
+
+    // Held for long: it is still shown, and fetched again.
+    store.age_pictures(crate::engine_host::thumbs::REFRESH_AFTER);
+    fetch(&store, HARBOUR, || {
+        assert!(source.thumbnail(harbour, Shape::Square).is_some(), "shown meanwhile")
+    });
+    assert_eq!(thumbnail_requests(&fake), 2);
+    assert!(source.thumbnail(harbour, Shape::Square).is_some());
+    assert_eq!(thumbnail_requests(&fake), 2, "fresh again: not asked a third time");
+
+    // The file changed (a sync check found a new version): its picture goes at the next read of the library.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.db");
+    let db = StateDb::open(&path).unwrap();
+    row(&db, HARBOUR, "Trip/Invented harbour.jpg", noon(0, 0) + 30, false);
+    row(&db, OLD, "Invented old.png", noon(10, 0), false);
+    db.set_owner(&Identity::new(Some(&fake.first.user_id), Some(&fake.first.email)))
+        .unwrap();
+    drop(db);
+    engine.use_local_state_for_test(path);
+    source.refresh();
+    pump_until(&mut source, |source, _| source.days(None)[0].len == 1);
+    assert_eq!(shown(&source)[0], [harbour], "the same file keeps its number");
+    let (release, ended) = store.hold_next_fetch(HARBOUR);
+    assert!(
+        source.thumbnail(harbour, Shape::Square).is_none(),
+        "the earlier version's picture is not shown"
+    );
+    release.send(()).unwrap();
+    ended.recv_timeout(WAIT).expect("it is fetched again");
+    assert_eq!(thumbnail_requests(&fake), 3);
+}
+
+#[test]
+fn a_change_elsewhere_reads_the_library_again_only_once_someone_looked_at_it() {
+    let fake = fake("refresh");
+    let (_engine, mut source, _store, _dir) = signed_in(&fake);
+    // Never opened: a finished check reads nothing.
+    source.refresh();
+    assert!(!source.pump().busy);
+    assert_eq!(source.days(None), []);
+    // Opened and fresh: a finished check reads again all the same.
+    open(&mut source);
+    settle(&mut source);
+    source.refresh();
+    assert!(source.pump().busy, "a read is on its way");
+    settle(&mut source);
+    assert_eq!(source.days(None)[0].len, 3);
+}
+
+#[test]
 fn a_thumbnail_wished_under_one_account_is_never_fetched_or_kept_under_another() {
     let fake = fake("thumb-whose");
     let (engine, mut source, store, _dir) = signed_in(&fake);
