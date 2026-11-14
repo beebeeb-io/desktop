@@ -20,6 +20,7 @@ fn runtime(engine: FixtureEngine) -> Runtime<State> {
     let state = state::init_with(Shell::fixture_on(Arc::new(engine), Arc::new(FakePlatform::default())));
     let mut rt = Runtime::new(state, registry::view, (1280.0, 800.0), ENV);
     rt.poll = Some(poll);
+    super::intents::poll_drains_for_this_test();
     rt.frame(0.0);
     rt
 }

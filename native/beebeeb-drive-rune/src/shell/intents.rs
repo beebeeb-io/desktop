@@ -17,6 +17,27 @@ fn open(s: &mut State, address: &str) {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static POLL_DRAINS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tests only: let the shell's poll act on Settings' queue. By default a test's window leaves the queue
+/// alone, because the frames' own tests read what a press asked for (`settings.intents`).
+#[cfg(test)]
+pub fn poll_drains_for_this_test() {
+    POLL_DRAINS.set(true);
+}
+
+/// The shell's poll: acts on the queue (in a test, only where the test asked for it).
+pub fn drain_in_poll(s: &mut State, tx: &mut Tx) -> bool {
+    #[cfg(test)]
+    if !POLL_DRAINS.get() {
+        return false;
+    }
+    drain_settings_intents(s, tx)
+}
+
 /// Takes every intent Settings queued and acts on it. `true`: something was taken.
 pub fn drain_settings_intents(s: &mut State, tx: &mut Tx) -> bool {
     let intents = s.settings.take_intents();

@@ -460,7 +460,7 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // What the sign-in screens asked the shell for.
     changed |= drain_signin_intents(s);
     // What Settings asked for: web pages, the clipboard, Windows Settings.
-    changed |= super::intents::drain_settings_intents(s, tx);
+    changed |= super::intents::drain_in_poll(s, tx);
     // "Open my Beebeeb" at the end of the first run starts the first-time guide (DW-0380).
     changed |= crate::frames::signin::setup::guide::poll(s, tx);
     // The first run's answers (File Explorer finished, a switch was set, the first run ended).
