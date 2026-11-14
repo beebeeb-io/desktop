@@ -78,6 +78,8 @@ struct Server {
     /// `Some(on)`: the flag's value; `None`: the flag read fails.
     flags: Option<bool>,
     approve_status: u16,
+    /// What a withdrawal (`DELETE` of the invite) answers.
+    cancel_status: u16,
     /// The folder's custody record, as the last PUT stored it.
     custody: Option<String>,
     /// Hang up once on this route.
@@ -136,7 +138,7 @@ fn handler(server: Arc<Mutex<Server>>, probe: Arc<StateDb>) -> crate::test_api::
                 None => Reply::json(201, json!({ "invite_id": INVITE, "status": "pending" })),
             },
             APPROVE => Reply::json(s.approve_status, json!({})),
-            CANCEL => Reply::ok(json!({})),
+            CANCEL => Reply::json(s.cancel_status, json!({})),
             FLAGS_ROUTE => match s.flags {
                 Some(on) => Reply::ok(json!({ "flags": { "shared_folders_v1": on } })),
                 None => Reply::error(503, "unavailable"),
@@ -205,6 +207,7 @@ fn fixture(recipient: Option<[u8; 32]>) -> Fixture {
         recipient,
         flags: Some(true),
         approve_status: 200,
+        cancel_status: 200,
         custody: None,
         hang_once: None,
         seen: Vec::new(),
@@ -471,6 +474,36 @@ fn share_invite_of_a_folder_remembers_its_custody_before_the_request_that_uses_i
         .map(|k| k["file_id"].as_str().unwrap())
         .collect();
     assert_eq!(wraps, [FOLDER, CHILD], "the root's own name key, then its child");
+
+    // A device that never saw this folder, and the server holds its custody record (the one registered above, under
+    // the same vault key): the record is opened, remembered before the listing that uses its key, and no key is made.
+    let record = f
+        .server
+        .lock()
+        .unwrap()
+        .custody
+        .clone()
+        .expect("a record was registered");
+    let g = fixture(None);
+    g.server.lock().unwrap().custody = Some(record);
+    assert!(!g.db.has_seen_folder_custody(FOLDER).unwrap());
+    assert_eq!(
+        g.invite(FOLDER),
+        InviteAnswer::Invited {
+            invite_id: INVITE.into()
+        }
+    );
+    let seen = g.server.lock().unwrap().seen.clone();
+    let at = |route: &str| seen.iter().find(|(r, _)| r == route).map(|(_, remembered)| *remembered);
+    assert_eq!(at(CUSTODY), Some(false), "read while not remembered yet");
+    assert_eq!(at(LISTING), Some(true));
+    assert_eq!(at(INVITES), Some(true));
+    assert_eq!(at(CUSTODY_PUT), None, "the record's key is used: no new one");
+    assert_eq!(
+        g.bodies(INVITES)[0]["folder_key_id"],
+        f.bodies(INVITES)[0]["folder_key_id"],
+        "the same folder key"
+    );
 }
 
 #[test]
@@ -594,7 +627,9 @@ fn share_invite_for_a_session_that_is_over_sends_nothing() {
 fn share_invite_answers_and_logs_carry_no_key_material() {
     let them = person(47);
     let f = fixture(Some(them.public));
+    // Approvals fail and so do the withdrawals: the module logs its warning, so the capture has a line to read.
     f.server.lock().unwrap().approve_status = 500;
+    f.server.lock().unwrap().cancel_status = 500;
     let (answers, logs) = capture_logs(|| {
         vec![
             f.invite(FILE),
@@ -603,6 +638,11 @@ fn share_invite_answers_and_logs_carry_no_key_material() {
         ]
     });
     assert_eq!(answers[2], InviteAnswer::Refused(InviteRefused::InvalidEmail));
+    assert_eq!(answers[0], InviteAnswer::Refused(InviteRefused::Failed));
+    assert!(
+        logs.contains("an invite that holds no key could not be withdrawn"),
+        "the capture reads this module's lines"
+    );
     let mut secrets = vec![
         b64(&f.owner_master),
         hexfmt::encode(&f.owner_master),
