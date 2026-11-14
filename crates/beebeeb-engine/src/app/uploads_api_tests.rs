@@ -48,11 +48,11 @@ fn file(db: &StateDb, id: &str, path: &str, size: i64) {
     let entry = FileEntry {
         file_id: id.into(),
         path: path.into(),
-        status: FileStatus::Local,
+        status: FileStatus::Uploading,
         size_bytes: size,
         modified_at: 1,
         content_hash: None,
-        remote_updated_at: 1,
+        remote_updated_at: 0,
         parent_id: None,
         item_kind: ItemKind::File,
     };
@@ -72,7 +72,7 @@ fn queued(db: &StateDb, id: &str, new: bool, attempts: i64, at: i64) {
             r#"{{"operation":"{}"}}"#,
             if new { "create_file" } else { "update_file" }
         )),
-        payload_path: None,
+        payload_path: std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned()),
         base_version: None,
         base_object_version_id: None,
         attempts,
@@ -93,6 +93,7 @@ fn local_state(engine: &TestEngine, owner: &str, build: impl FnOnce(&StateDb)) -
     build(&db);
     db.set_owner(&Identity::new(None, Some(owner))).unwrap();
     engine.use_local_state_for_test(path);
+    engine.use_sync_root_for_test(dir.path().join("sync"));
     (dir, db)
 }
 

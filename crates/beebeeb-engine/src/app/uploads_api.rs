@@ -236,7 +236,10 @@ impl<C: CredentialStores> Engine<C> {
             CancelNew::NotNew => return Ok(CancelOutcome::NotNew),
             CancelNew::Busy => return Ok(CancelOutcome::Busy),
         };
-        let sync_root = self.sync_root().map_err(|_| LocalStateRefused::Unreadable)?;
+        let sync_root = self
+            .configured_sync_root()
+            .map_err(|_| LocalStateRefused::Unreadable)?
+            .unwrap_or_else(|| crate::config::default_sync_root_suggestion(self.identity));
         let path = state
             .with(|db| {
                 crate::file_ops::resolve(db, &file_id)
