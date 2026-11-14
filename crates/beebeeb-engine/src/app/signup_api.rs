@@ -208,6 +208,10 @@ impl SignupAttempt {
     /// all when there is no phrase (not made yet, or already confirmed) or the worker is busy with the flow.
     /// Each word is a wiping buffer; none is kept.
     pub fn with_phrase(&self, show: &mut dyn FnMut(&[&str])) {
+        // Only a phrase the worker made (it records the positions then): never one made here, on the window's thread.
+        if locked(&self.positions).is_none() {
+            return;
+        }
         let Ok(mut guard) = self.flow.try_lock() else { return };
         let Some(flow) = guard.as_mut() else { return };
         let Ok(words) = flow.phrase_words() else { return };
