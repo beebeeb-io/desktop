@@ -516,6 +516,10 @@ fn signed_out_shows_nothing_and_another_account_sees_nothing_of_the_first() {
     // The second account signs in on the same PC (the local state is still the first's).
     sign_in(&engine, &fake.second, &fake.second_phrase);
     assert_eq!(source.days(None), [], "before any poll");
+    assert!(
+        !EngineThumbs::new(store.clone()).arrived(HARBOUR),
+        "the Files grid, by the file's id: the first account's picture is not there for the second"
+    );
     assert_eq!(source.viewing(harbour), None);
     assert!(
         source.thumbnail(harbour, Shape::Square).is_none(),

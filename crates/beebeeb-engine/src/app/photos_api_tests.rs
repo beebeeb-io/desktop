@@ -6,6 +6,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::time::Duration;
 
 use super::super::{Engine, EngineConfig};
 use super::*;
@@ -390,6 +391,11 @@ fn a_picture_too_wide_or_that_does_not_decode_is_refused() {
     let ask = |id: &str| engine.thumbnail_pixels_for(session, id, ThumbCut::Square).map(|_| ());
     assert_eq!(ask(WIDE), Err(ThumbRefused::Unreadable));
     assert_eq!(ask(BROKEN), Err(ThumbRefused::Unreadable));
+    // A picture that decodes, in more bytes than are read at all.
+    let mut padded = picture(4, 4);
+    padded.resize(MAX_ENCODED + 1, 0);
+    assert!(cut_pixels(&padded[..MAX_ENCODED], ThumbCut::Whole).is_some());
+    assert!(cut_pixels(&padded, ThumbCut::Whole).is_none());
     // At the limit it decodes.
     assert!(cut_pixels(&picture(MAX_SIDE, 2), ThumbCut::Whole).is_some());
     // A square is handed over no larger than its cap.
@@ -455,19 +461,24 @@ fn a_thumbnail_whose_session_ends_while_it_is_fetched_is_not_handed_over() {
     *fake.hold.arrived.lock().unwrap() = Some(arrived);
     fake.hold.on.store(true, Ordering::SeqCst);
 
+    let (done, has_ended) = mpsc::channel();
     let worker = {
         let engine = engine.clone();
         std::thread::spawn(move || {
-            engine
+            let answer = engine
                 .thumbnail_pixels_for(session, HARBOUR, ThumbCut::Square)
-                .map(|_| ())
+                .map(|_| ());
+            let _ = done.send(());
+            answer
         })
     };
     at_server.recv().expect("the request reached the server");
-    // Another account signs in while the server holds the answer.
+    // Another account signs in while the server holds the answer: the fetch is dropped without waiting for it.
     signed_in(&engine, &fake.second);
-    let answer = worker.join().unwrap();
+    let dropped = has_ended.recv_timeout(Duration::from_secs(10)).is_ok();
     fake.hold.release();
+    let answer = worker.join().unwrap();
+    assert!(dropped, "the fetch ended while the server still held its answer");
     assert!(
         matches!(answer, Err(ThumbRefused::NotSignedIn)),
         "nothing of the first session is handed over: {answer:?}"
