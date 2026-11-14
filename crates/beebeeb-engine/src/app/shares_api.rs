@@ -159,6 +159,9 @@ type SessionParts = (
 
 impl<C: CredentialStores> Engine<C> {
     fn share_session(&self) -> Option<SessionParts> {
+        if self.screen_refuses_a_person() {
+            return None;
+        }
         let guard = self.acct.session.lock().ok()?;
         let current = guard.as_ref()?;
         Some((

@@ -44,12 +44,15 @@ use crate::sync_root_owner::Registration;
 use crate::sync_root_port::{OsSyncRoots, SyncRootPort};
 use crate::sync_view::{Explorer, Start, SyncView, ViewCell, ViewHost};
 use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
+use lock_api::SessionMoved;
 
 pub mod account_api;
 pub mod backups_api;
 // Explorer's "Free up space" command asks this handle, and a stop removes its binding (task 2490).
 mod explorer_api;
 pub mod kept_api;
+// The two-level lock, bound to core's rules (`beebeeb_api::flows::lock`).
+pub mod lock_api;
 pub mod owned_state;
 pub mod settings_api;
 // What the account shares and what is shared with it, for the native Shared window.
@@ -226,6 +229,8 @@ pub struct Engine<C: CredentialStores> {
     pending_2fa: Mutex<Option<(PendingSecondFactor, Zeroizing<String>)>>,
     /// Wrong passwords in a row, for the lock hint.
     failures: AtomicU32,
+    /// The two-level lock: core's state machine, moved only by `lock_api`.
+    lock_flow: Mutex<beebeeb_api::flows::LockFlow>,
     /// What a window reads without waiting ([`Engine::view`]); `host` writes the engine's reports into it.
     view: Arc<ViewCell>,
     /// The user id the server named for the session: from the profile at a sign-in, from the record beside the stored
@@ -285,6 +290,7 @@ impl<C: CredentialStores> Engine<C> {
             auth_present: Mutex::new(false),
             pending_2fa: Mutex::new(None),
             failures: AtomicU32::new(0),
+            lock_flow: Mutex::new(beebeeb_api::flows::LockFlow::at_start(lock_api::NO_SESSION)),
             view,
             session_user_id: Mutex::new(None),
             explorer: Mutex::new(explorer_api::ExplorerSeat::new(identity)),
@@ -356,9 +362,11 @@ impl<C: CredentialStores> Engine<C> {
         Ok(writes)
     }
 
-    /// Session restore at start: a stored token means signed in; a stored key that is this account's
-    /// (`store::load_session_from_vault`, the owner check of task 2447 before the key is read) unlocks. A key that is
-    /// not provably this account's is left where it is and not loaded. No network.
+    /// Session restore at start: a stored token means signed in, and core's start rule (`lock_api`) says how: the
+    /// app starts SCREEN-LOCKED with the stored key that is this account's in memory
+    /// (`store::load_session_from_vault`, the owner check of task 2447 before the key is read), or with the vault
+    /// CLOSED (the start setting, the closed mark, or a flag that cannot be read) and the key entry not read at all.
+    /// A key that is not provably this account's is left where it is and not loaded. No network.
     pub fn restore(&self) -> GateState {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
@@ -370,35 +378,52 @@ impl<C: CredentialStores> Engine<C> {
                 // Whose the stored session is, as its sign-in recorded it (unknown stays unknown).
                 self.remember_session_user_id(vault.session_owner().ok().flatten());
             }
-            if present && !self.unlocked() {
-                match store::load_session_from_vault(vault, None) {
-                    Ok(Some(session)) => {
-                        if let Ok(_write) = self.claim(turn)
-                            && let Ok(mut guard) = self.acct.session.lock()
-                        {
-                            if let Ok(mut email) = self.acct.auth_email.lock() {
-                                email.clone_from(&session.email);
-                            }
-                            *guard = Some(session);
-                            self.acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(_) => tracing::info!("startup restore: signed in, the vault stays locked"),
+            if !self.unlocked() {
+                let flow = self.lock_start_rule(&vault, present);
+                if present && beebeeb_api::flows::key_may_be_loaded(flow.state()) {
+                    self.restore_key(turn, vault);
                 }
+                self.lock_started(flow);
             }
         });
         self.publish();
         self.view.read().gate
     }
 
+    fn restore_key(&self, turn: SessionGeneration, vault: AuthVault<C::Store>) {
+        match store::load_session_from_vault(vault, None) {
+            Ok(Some(session)) => {
+                if let Ok(_write) = self.claim(turn)
+                    && let Ok(mut guard) = self.acct.session.lock()
+                {
+                    if let Ok(mut email) = self.acct.auth_email.lock() {
+                        email.clone_from(&session.email);
+                    }
+                    *guard = Some(session);
+                    self.acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            Ok(None) => {}
+            Err(_) => tracing::info!("startup restore: signed in, the vault stays locked"),
+        }
+    }
+
     /// Which screen the window shows (`gate::decide_gate`). The plan check is not made here: a signed-in, unlocked
     /// account answers `Ready`.
     pub fn gate(&self) -> GateState {
         let unlocked = self.unlocked();
+        if unlocked && self.lock_state() == beebeeb_api::flows::LockState::ScreenLocked {
+            return GateState::ScreenLocked;
+        }
         let present = self.auth_present.lock().map(|p| *p).unwrap_or(false);
-        let stored = if (present || unlocked) && !unlocked {
-            key_owner::stored_key_state(&self.vault())
+        let stored = if present && !unlocked {
+            // A vault marked closed: the key entry is not read, also not to ask whether it is there.
+            let vault = self.vault();
+            if self.marked_closed(&vault) {
+                StoredKey::Usable
+            } else {
+                key_owner::stored_key_state(&vault)
+            }
         } else {
             StoredKey::Absent
         };
@@ -431,21 +456,24 @@ impl<C: CredentialStores> Engine<C> {
     /// Password sign-in (OPAQUE in core's `auth_flow`). `TwoFactor`: call [`Engine::two_factor`] next.
     /// `RecoveryPhrase`: signed in, this computer holds no key of the account. `Drive`: signed in and unlocked.
     pub fn sign_in_password(&self, email: &str, password: Zeroizing<String>) -> Result<NextAfterSignIn, SignInProblem> {
-        let result = self.sign_in_password_step(email, password);
+        let result = self.sign_in_password_step(email, password, false);
         self.publish();
         result
     }
 
+    /// `unlocking`: the strong unlock of the account whose session is stored (`lock_api`), not a first sign-in.
     fn sign_in_password_step(
         &self,
         email: &str,
         password: Zeroizing<String>,
+        unlocking: bool,
     ) -> Result<NextAfterSignIn, SignInProblem> {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             let turn = self.acct.session_generation();
-            if self.auth_present.lock().map(|p| *p).unwrap_or(true) {
-                // One account at a time: sign out first (the shell's Windows rule, here on every OS).
+            if self.auth_present.lock().map(|p| *p).unwrap_or(!unlocking) != unlocking {
+                // One account at a time: sign out first (the shell's Windows rule, here on every OS). And only a
+                // stored session is unlocked.
                 return Err(SignInProblem::Other);
             }
             let email = account_binding::canonical_email(email);
@@ -540,21 +568,40 @@ impl<C: CredentialStores> Engine<C> {
             "" => typed_email,
             named => named.to_string(),
         };
+        // A stored session this sign-in replaces (the strong unlock): it must be this account's, and the key and
+        // the engine of the old session leave first (`lock_api`).
+        let (turn, replaced) = match self.prepare_replacement(turn, &profile).await {
+            Ok(ready) => ready,
+            Err(error) => {
+                revoke(&self.client, base, &token).await;
+                return Err(error);
+            }
+        };
         let stored = self.store_first_sign_in(turn, &token, &email, &profile);
         if let Err(error) = stored {
             revoke(&self.client, base, &token).await;
             return Err(error);
         }
         self.failures.store(0, Ordering::SeqCst);
-        // A key of this same account may still be here (a sign-out that kept it is not this handle's, but an older
-        // build's lock is): load it through the guarded loader.
+        // The stored key of this same account (a vault that was closed, a locked screen, an older build's lock) is
+        // loaded through the guarded loader. The password was proven to the server: the lock opens in the same
+        // hold as the key's install, or stays closed for a session whose key is not here.
         let turn = self.acct.session_generation();
-        if let Ok(Some(session)) = store::load_session_from_vault(self.vault(), Some(email))
-            && let Ok(_write) = self.claim(turn)
-            && let Ok(mut guard) = self.acct.session.lock()
-        {
-            *guard = Some(session);
-            self.acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);
+        let loaded = store::load_session_from_vault(self.vault(), Some(email)).ok().flatten();
+        if let Ok(_write) = self.claim(turn) {
+            match (loaded, self.acct.session.lock()) {
+                (Some(session), Ok(mut guard)) => {
+                    *guard = Some(session);
+                    drop(guard);
+                    self.acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);
+                    self.lock_follows(SessionMoved::StrongProof);
+                }
+                _ => self.lock_follows(SessionMoved::Keyless),
+            }
+        }
+        if let Some(replaced) = replaced.filter(|old| old.as_str() != token.as_str()) {
+            // The session the strong unlock replaced is ended at the server, best effort.
+            revoke(&self.client, base, &replaced).await;
         }
         Ok(gate::next_after_sign_in(false, self.unlocked(), false, false))
     }
@@ -650,6 +697,8 @@ impl<C: CredentialStores> Engine<C> {
                 });
                 drop(guard);
                 self.acct.auth_resume_asked.fetch_add(1, Ordering::SeqCst);
+                // The twelve words, proven by the server for this session, are a strong proof.
+                self.lock_follows(SessionMoved::StrongProof);
             }
             Ok(())
         })
@@ -896,17 +945,10 @@ impl<C: CredentialStores> Engine<C> {
         }
     }
 
-    /// Lock: stop the engine, then forget the keys in memory (the stored token and key stay). Every sign-in step
-    /// that began before this is refused at its write.
+    /// The vault lock ([`Engine::lock_vault`]): the closed mark, then the engine stops and the keys leave memory
+    /// (the stored token and key stay). Every sign-in step that began before this is refused at its write.
     pub fn lock(&self) -> SyncStop {
-        let stopped = self.runtime.block_on(async {
-            let _step = self.transition.lock().await;
-            let stopped = self.stop_holding_step().await;
-            self.forget_session(SessionTransition::Lock);
-            stopped
-        });
-        self.publish();
-        stopped
+        self.lock_vault().stopped
     }
 
     fn forget_session(&self, by: SessionTransition) {
@@ -925,6 +967,12 @@ impl<C: CredentialStores> Engine<C> {
         }
         let mut guard = self.acct.session.lock().unwrap_or_else(|p| p.into_inner());
         *guard = None;
+        drop(guard);
+        self.lock_follows(if by == SessionTransition::SignOut {
+            SessionMoved::SignedOut
+        } else {
+            SessionMoved::KeyDropped
+        });
         if let Ok(mut pending) = self.pending_2fa.lock() {
             *pending = None;
         }
@@ -1020,8 +1068,11 @@ impl<C: CredentialStores> Engine<C> {
             .unwrap_or_else(|| crate::config::default_sync_root_suggestion(self.identity)))
     }
 
-    /// The session token (cloned for a single API call). `Err` when locked or signed out.
+    /// The session token (cloned for a person's single API call). `Err` when locked (either level) or signed out.
     fn session_token(&self) -> Result<String, String> {
+        if self.screen_refuses_a_person() {
+            return Err("locked".to_string());
+        }
         self.acct
             .session
             .lock()

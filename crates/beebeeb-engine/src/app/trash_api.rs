@@ -63,6 +63,9 @@ impl<C: CredentialStores> Engine<C> {
         // The token, the key and the session's generation leave the session's lock together, as copies of their own,
         // wiped when this call ends (the token inside the call's client, which wipes it on drop; the key in a
         // `Zeroizing`).
+        if self.screen_refuses_a_person() {
+            return Err(AccountCallError::NotSignedIn);
+        }
         let (token, key, session) = {
             let guard = self.acct.session.lock().map_err(|_| AccountCallError::NotSignedIn)?;
             let current = guard.as_ref().ok_or(AccountCallError::NotSignedIn)?;

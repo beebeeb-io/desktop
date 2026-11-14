@@ -196,7 +196,8 @@ impl<C: CredentialStores> Engine<C> {
         Fut: Future<Output = anyhow::Result<T>>,
     {
         // A session mutex a panic poisoned: nothing is sent (as before the helper, which reads through poison).
-        if self.acct.session.is_poisoned() {
+        // A locked screen sends nothing for a person (core's `call_may_run`), as a session that is not there.
+        if self.acct.session.is_poisoned() || self.screen_refuses_a_person() {
             return Err(AccountCallError::NotSignedIn);
         }
         let token = self

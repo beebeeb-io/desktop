@@ -148,14 +148,33 @@ impl OwnedState<'_> {
 
 impl<C: CredentialStores> Engine<C> {
     /// The signed-in account's local state, for reading. See the module's doc for when it is refused.
+    ///
+    /// For what a PERSON reads through the window: a locked screen is refused as `Locked` (core's `call_may_run`;
+    /// core cannot see the local state, so the host's side applies its rule). The work and the operating system's
+    /// file manager, which reach the sync folder on a locked screen by design, use [`Self::local_state_for_work`].
     pub fn local_state(&self) -> Result<OwnedState<'_>, LocalStateRefused> {
+        self.person_asks()?;
         self.owned_state(Mode::Read)
+    }
+
+    fn person_asks(&self) -> Result<(), LocalStateRefused> {
+        if self.screen_refuses_a_person() {
+            return Err(LocalStateRefused::Locked);
+        }
+        Ok(())
+    }
+
+    /// The account's local state for a change that no person drives through the window (Explorer's own command):
+    /// not asked of the screen lock; every other refusal is [`Self::local_state_for_changes`]'s.
+    pub(super) fn local_state_for_work(&self) -> Result<OwnedState<'_>, LocalStateRefused> {
+        self.owned_state(Mode::Change)
     }
 
     /// The signed-in account's local state, for an operation that writes (a rename, a move, a request to the sync
     /// engine). The owner is proven on a read-only connection first: nothing is written into a state that is not
     /// the session's, not even a schema migration.
     pub fn local_state_for_changes(&self) -> Result<OwnedState<'_>, LocalStateRefused> {
+        self.person_asks()?;
         self.owned_state(Mode::Change)
     }
 

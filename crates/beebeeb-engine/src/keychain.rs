@@ -225,6 +225,18 @@ impl AuthSecretStore for MacOsKeychainStore {
     fn delete_session_owner(&self) -> AuthResult<()> {
         macos_keychain::delete(self.service, &self.account_path(KeychainAccount::SessionOwner))
     }
+
+    fn save_lock_flag(&self, flag: LockFlag, bytes: &[u8]) -> AuthResult<()> {
+        macos_keychain::save(self.service, &flag_path(self.account_prefix.as_ref(), flag), bytes)
+    }
+
+    fn load_lock_flag(&self, flag: LockFlag) -> AuthResult<Option<Vec<u8>>> {
+        macos_keychain::load(self.service, &flag_path(self.account_prefix.as_ref(), flag))
+    }
+
+    fn delete_lock_flag(&self, flag: LockFlag) -> AuthResult<()> {
+        macos_keychain::delete(self.service, &flag_path(self.account_prefix.as_ref(), flag))
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -462,6 +474,18 @@ impl AuthSecretStore for WindowsCredentialStore {
     fn delete_session_owner(&self) -> AuthResult<()> {
         windows_credentials::delete(self.service, &self.account_path(KeychainAccount::SessionOwner))
     }
+
+    fn save_lock_flag(&self, flag: LockFlag, bytes: &[u8]) -> AuthResult<()> {
+        windows_credentials::save(self.service, &flag_path(self.account_prefix.as_ref(), flag), bytes)
+    }
+
+    fn load_lock_flag(&self, flag: LockFlag) -> AuthResult<Option<Vec<u8>>> {
+        windows_credentials::load(self.service, &flag_path(self.account_prefix.as_ref(), flag))
+    }
+
+    fn delete_lock_flag(&self, flag: LockFlag) -> AuthResult<()> {
+        windows_credentials::delete(self.service, &flag_path(self.account_prefix.as_ref(), flag))
+    }
 }
 
 // ── In-memory store for unit tests (macOS test builds) ───────────────────────
@@ -688,6 +712,30 @@ impl AuthSecretStore for TestKeychainStore {
 
     fn delete_session_owner(&self) -> AuthResult<()> {
         self.delete(KeychainAccount::SessionOwner)
+    }
+
+    fn save_lock_flag(&self, flag: LockFlag, bytes: &[u8]) -> AuthResult<()> {
+        let key = item_name(self.service, &flag_path(self.account_prefix.as_ref(), flag));
+        TEST_KEYCHAIN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, bytes.to_vec());
+        Ok(())
+    }
+
+    fn load_lock_flag(&self, flag: LockFlag) -> AuthResult<Option<Vec<u8>>> {
+        let key = item_name(self.service, &flag_path(self.account_prefix.as_ref(), flag));
+        Ok(TEST_KEYCHAIN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned())
+    }
+
+    fn delete_lock_flag(&self, flag: LockFlag) -> AuthResult<()> {
+        let key = item_name(self.service, &flag_path(self.account_prefix.as_ref(), flag));
+        TEST_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+        Ok(())
     }
 }
 
@@ -1059,7 +1107,7 @@ pub use session::SessionToken;
 
 #[path = "../src/keychain/vault.rs"]
 mod vault;
-pub use vault::{AuthSecretStore, AuthVault};
+pub use vault::{AuthSecretStore, AuthVault, LockFlag};
 /// The non-Windows trace and "what is left of this account" paths ask these, and so do the keychain tests.
 #[cfg(any(any(test, feature = "test-support"), not(target_os = "windows")))]
 pub use vault::{holds_account_email, holds_session_token, holds_vault_key};

@@ -51,10 +51,20 @@ impl<C: CredentialStores> Engine<C> {
     /// (the account-bound handle, task 2488): the bytes freed. Nothing is touched for a state that is not handed
     /// out. BLOCKS: a worker's.
     pub fn free_up_space(&self) -> Result<u64, String> {
+        self.free_up_space_in(self.local_state_for_changes())
+    }
+
+    /// [`Self::free_up_space`] for Explorer's own command: the operating system's file manager reaches the sync
+    /// folder on a locked screen by design (core's lock contract, section 3), so the screen lock is not asked.
+    pub(super) fn free_up_space_from_explorer(&self) -> Result<u64, String> {
+        self.free_up_space_in(self.local_state_for_work())
+    }
+
+    fn free_up_space_in(&self, state: Result<super::OwnedState<'_>, super::LocalStateRefused>) -> Result<u64, String> {
         let Some(sync_root) = self.configured_sync_root()? else {
             return Ok(0);
         };
-        let state = match self.local_state_for_changes() {
+        let state = match state {
             Ok(state) => state,
             // Nothing synced on this computer: nothing to free (as the unbound reclaim answers a missing database).
             Err(super::LocalStateRefused::NothingSynced) => return Ok(0),
