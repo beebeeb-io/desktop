@@ -6,14 +6,34 @@ use crate::theme::icons_settings as ic;
 use crate::theme::tokens::Theme;
 use crate::ui::settings_controls::{self as controls, Emphasis};
 use crate::ui::settings_list::{self as lists, Item, Trailing};
+use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::settings_shell as shell;
 use rune::El;
 
 use super::source::ReadState;
 use super::{Intent, SettingsUi};
 
+/// What is drawn of the account could not be confirmed with Beebeeb (a change or a mark failed, and so did the
+/// read after it): said in the pane, with "Try again". Also Recent notifications' words.
+pub const UNCONFIRMED: (&str, &str) = ("Couldn't check with Beebeeb.", "What's shown here may be out of date.");
+/// The account's switches could not be read: the rows say so, and this offers the way to ask again.
+pub const NOT_READ: (&str, &str) = (
+    "Couldn't load your account's alerts.",
+    "The switches on this PC still work.",
+);
+/// The index of the "Try again" button (`btn-1`; `btn-0` is "Open Windows Settings").
+const AGAIN: usize = 1;
+
+/// "Try again" for what the account's notifications say: asks Beebeeb again.
+pub fn try_again(index: usize, t: &Theme) -> El {
+    controls::button(index, "Try again", None, Emphasis::Plain, t)
+        .on_press(|s: &mut State| s.settings.source.reload_notifications())
+}
+
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let n = ui.source.notifications();
+    // An account row whose switch was not read, and no answer on its way.
+    let mut not_read = false;
     let mut children = vec![shell::heading("Notifications", None, t)];
     let mut list = 0;
 
@@ -85,14 +105,10 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     list += 1;
 
     for (g, (title, alerts)) in n.groups.iter().enumerate() {
-        // Not read yet (or the read failed): the rows hold their places, so nothing below them moves when the
-        // answer lands, but no switch is drawn: a value that was not read is never shown, and there is nothing
-        // to press.
-        let unread = match ui.source.alerts_state(g) {
-            ReadState::Ready => None,
-            ReadState::Loading => Some("Loading\u{2026}"),
-            ReadState::Failed => Some("Couldn't load"),
-        };
+        // A row whose switch is not read (`on` is `None`: on its way, or the read failed) holds its place, so
+        // nothing below it moves when the answer lands, but no switch is drawn: there is no value to draw, and
+        // nothing to press. The source only chooses the words; a source that says nothing reads as failed.
+        let loading = ui.source.alerts_state(g) == ReadState::Loading;
         let rows = alerts
             .iter()
             .enumerate()
@@ -101,11 +117,11 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 if i > 0 {
                     it = it.ruled();
                 }
-                if let Some(words) = unread {
+                let Some(on) = alert.on else {
+                    let words = if loading { "Loading\u{2026}" } else { "Couldn't load" };
                     return lists::item(list, i, &it.trailing(Trailing::Value(words.into())), t).disabled(true);
-                }
+                };
                 let key = format!("item-{list}-{i}");
-                let on = alert.on;
                 let mut switch = lists::switch(&key, &alert.title, on, t);
                 switch = if n.allowed_in_windows {
                     switch.on_press(move |s: &mut State| s.settings.source.set_alert(g, i, !on))
@@ -123,6 +139,27 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             group.opacity(0.45)
         });
         list += 1;
+        not_read |= !loading && alerts.iter().any(|alert| alert.on.is_none());
+    }
+    // Below the last group, so no switch moves under the pointer when this appears: what the rows above could
+    // not say (failed), or what they show that could not be confirmed, each with the way to ask again.
+    let said = if not_read {
+        Some((Tone::Red, NOT_READ))
+    } else if ui.source.notifications_unconfirmed() {
+        Some((Tone::Warn, UNCONFIRMED))
+    } else {
+        None
+    };
+    if let Some((tone, (strong, words))) = said {
+        children.push(notices::note_with(
+            0,
+            tone,
+            &ic::WARN_CIRCLE,
+            strong,
+            words,
+            Some(try_again(AGAIN, t)),
+            t,
+        ));
     }
     (shell::pane(children, t), None)
 }

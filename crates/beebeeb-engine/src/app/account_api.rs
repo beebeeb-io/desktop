@@ -9,6 +9,13 @@
 //! for the session the host read its list under: another generation, or a session Beebeeb no longer accepts, sends
 //! nothing.
 //!
+//! One rule for "Beebeeb no longer accepts this session", for the engine's own loop and for these calls: every
+//! call here that was sent notes how it ended in the engine's run of 401s (`AuthHealth`), once per call and only
+//! while the session is still the one it was asked with. One 401 is a call that failed; a run of them makes the
+//! engine hold the session as ended ([`Engine::account_session_refused`]), and then nothing more is asked
+//! ([`AccountCallError::SessionEnded`] without a request); a call that works clears the run. A host draws "your
+//! session ended" from that one flag, never from a single answer.
+//!
 //! The vault key is never handed to a call here: none of them decrypts anything. A failure is an
 //! [`AccountCallError`], a kind with fixed words. Must not: log anything a call sends or receives (an email, a
 //! device's name, an id).
@@ -77,21 +84,31 @@ impl<C: CredentialStores> Engine<C> {
     /// (`GET /api/v1/auth/me`), the name the account shows (`GET /api/v1/me/profile`) and the plan
     /// (`GET /api/v1/billing/subscription`). A profile that does not answer fails the call; the other two fail
     /// alone, each with its kind.
+    ///
+    /// The three requests are ONE call for the run of 401s: a 401 on any of them is one refusal (and the call
+    /// answers [`AccountCallError::SessionEnded`], with nothing of the account), never three.
     pub fn account_basics(&self) -> Result<Stamped<AccountBasics>, AccountCallError> {
-        self.account_read(|api| async move {
-            let (profile, display_name, subscription) =
-                futures_util::future::join3(api.account_profile(), api.account_display_name(), api.subscription())
-                    .await;
-            Ok(AccountBasics {
-                profile: profile?,
-                display_name: display_name.map_err(|error| kind_of(&error)),
-                subscription: subscription.map_err(|error| kind_of(&error)),
-            })
-        })
+        self.account_read_noting(
+            |api| async move {
+                let (profile, display_name, subscription) =
+                    futures_util::future::join3(api.account_profile(), api.account_display_name(), api.subscription())
+                        .await;
+                Ok(AccountBasics {
+                    profile: profile?,
+                    display_name: display_name.map_err(|error| kind_of(&error)),
+                    subscription: subscription.map_err(|error| kind_of(&error)),
+                })
+            },
+            |basics| {
+                basics.display_name == Err(AccountCallError::SessionEnded)
+                    || matches!(basics.subscription, Err(AccountCallError::SessionEnded))
+            },
+        )
     }
 
-    /// Whether the engine holds this session as one Beebeeb no longer accepts (its calls were answered 401 again
-    /// and again). It is cleared by the engine's next call that works. In memory: a window may ask on every poll.
+    /// Whether the engine holds this session as one Beebeeb no longer accepts (its calls, this file's among them,
+    /// were answered 401 again and again). It is cleared by the engine's next call that works. In memory: a
+    /// window may ask on every poll.
     pub fn account_session_refused(&self) -> bool {
         self.acct.auth_health.is_expired()
     }
@@ -180,8 +197,45 @@ impl<C: CredentialStores> Engine<C> {
         self.acct.while_session_is(&self.writes, generation, |_| ()).is_some()
     }
 
+    /// How one call of this file ended, for the engine's run of 401s: a 401 advances it, an answer clears it, any
+    /// other failure (offline, a 5xx, an answer that does not read) leaves it as it is. Decided from the call's
+    /// kind, never from an error's text.
+    fn note_account_call(&self, failed_as: Option<AccountCallError>) {
+        match failed_as {
+            None => self.acct.auth_health.note_result(None),
+            Some(AccountCallError::SessionEnded) => {
+                let refusal = anyhow::anyhow!("401 Unauthorized");
+                self.acct.auth_health.note_result(Some(&refusal));
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// [`Engine::note_account_call`], only while the session in memory is still `session` (asked with no session
+    /// change half done): a late answer of an earlier session never counts for, or clears, the next one's run.
+    /// `false`: the session moved on, and nothing was noted.
+    fn note_for_session(&self, session: SessionGeneration, failed_as: Option<AccountCallError>) -> bool {
+        self.acct
+            .while_session_is(&self.writes, session, |_| self.note_account_call(failed_as))
+            .is_some()
+    }
+
     /// The one path of this file's reads: the answer is handed over only for the session it was asked with.
     fn account_read<T, F, Fut>(&self, call: F) -> Result<Stamped<T>, AccountCallError>
+    where
+        F: FnOnce(ApiClient) -> Fut,
+        Fut: Future<Output = anyhow::Result<T>>,
+    {
+        self.account_read_noting(call, |_| false)
+    }
+
+    /// [`Engine::account_read`] for a call of several requests: `refused` says whether a part of an answer was a
+    /// 401, which makes the whole call one refusal.
+    fn account_read_noting<T, F, Fut>(
+        &self,
+        call: F,
+        refused: impl FnOnce(&T) -> bool,
+    ) -> Result<Stamped<T>, AccountCallError>
     where
         F: FnOnce(ApiClient) -> Fut,
         Fut: Future<Output = anyhow::Result<T>>,
@@ -190,11 +244,15 @@ impl<C: CredentialStores> Engine<C> {
         // No vault key: these calls decrypt nothing. The token is moved (not copied) into the client, which wipes
         // it when it is dropped.
         let api = ApiClient::new(self.config.api_base.clone(), std::mem::take(&mut *token), [0; 32]);
-        let value = self.runtime.block_on(call(api)).map_err(|error| kind_of(&error))?;
-        if !self.account_session_is_still(session) {
+        let answer = match self.runtime.block_on(call(api)) {
+            Ok(value) if refused(&value) => Err(AccountCallError::SessionEnded),
+            Ok(value) => Ok(value),
+            Err(error) => Err(kind_of(&error)),
+        };
+        if !self.note_for_session(session, answer.as_ref().err().copied()) {
             return Err(AccountCallError::NotSignedIn);
         }
-        Ok(Stamped { session, value })
+        answer.map(|value| Stamped { session, value })
     }
 
     /// The one path of this file's changes: sent only while the session in memory is `listed_under`.
@@ -208,6 +266,10 @@ impl<C: CredentialStores> Engine<C> {
             return Err(AccountCallError::NotSignedIn);
         }
         let api = ApiClient::new(self.config.api_base.clone(), std::mem::take(&mut *token), [0; 32]);
-        self.runtime.block_on(call(api)).map_err(|error| kind_of(&error))
+        let answer = self.runtime.block_on(call(api)).map_err(|error| kind_of(&error));
+        // How the change ended is the caller's whatever the session did since; only the run of 401s is not
+        // touched for a session that moved on.
+        self.note_for_session(listed_under, answer.as_ref().err().copied());
+        answer
     }
 }

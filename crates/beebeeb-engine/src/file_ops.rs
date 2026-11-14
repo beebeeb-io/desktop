@@ -655,21 +655,27 @@ mod tests {
     // The check_trashable function validates BEFORE the API call happens; the actual delete is
     // done by the API's `DELETE /api/v1/files/{id}` which is a soft delete (Trash). A hard delete
     // uses a DIFFERENT endpoint (`DELETE /api/v1/files/{id}/permanent` with a confirm token).
-    // The Engine::trash_items method calls the delete endpoint without a confirm token, which the
-    // server treats as Trash. To verify: the API call in app.rs uses `DELETE /api/v1/files/{id}`,
-    // not the permanent endpoint.
+    // `Engine::trash_items_for` (the only trash call the handle has) sends `ApiClient::trash_file_sent`, which is the
+    // file endpoint without a confirm token: the server treats that as Trash.
     #[test]
     fn the_trash_api_call_is_not_a_hard_delete() {
-        let source = include_str!("app.rs");
-        let trash_fn = &source[source.find("pub fn trash_items").unwrap()..];
+        let source = include_str!("app/trash_api.rs");
+        let trash_fn = &source[source.find("pub fn trash_items_for").unwrap()..];
         let trash_fn = &trash_fn[..trash_fn.find("\n    }").unwrap()];
-        assert!(trash_fn.contains("/api/v1/files/{id}"), "trash uses the file endpoint");
+        assert!(
+            trash_fn.contains("api.trash_file_sent("),
+            "trash uses the file endpoint's call"
+        );
         assert!(
             !trash_fn.contains("permanent"),
             "trash does NOT use the permanent endpoint"
         );
+        let client = include_str!("api_client/files.rs");
+        let call = &client[client.find("pub async fn trash_file_sent").unwrap()..];
+        let call = &call[..call.find("\n    }").unwrap()];
+        assert!(call.contains(".delete(self.file_url("), "the file endpoint");
         assert!(
-            !trash_fn.contains("X-Confirm-Token"),
+            !call.contains("permanent") && !call.contains("X-Confirm-Token"),
             "trash does NOT send a confirm token"
         );
     }

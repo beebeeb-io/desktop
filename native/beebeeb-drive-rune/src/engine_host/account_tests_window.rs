@@ -52,6 +52,19 @@ fn wait_for(rt: &mut Runtime<State>, what: &str, done: impl Fn(&Runtime<State>) 
     }
 }
 
+/// [`wait_for`], for something that takes a toast's whole time.
+fn wait_long_for(rt: &mut Runtime<State>, what: &str, done: impl Fn(&Runtime<State>) -> bool) {
+    let began = Instant::now();
+    while !done(rt) {
+        assert!(
+            began.elapsed() < STAYS_FAILED + Duration::from_secs(10),
+            "never: {what}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        rt.frame(0.1);
+    }
+}
+
 fn click(rt: &mut Runtime<State>, key: &str) {
     let rect = rt
         .elements()
@@ -239,7 +252,7 @@ fn a_cancelled_plan_is_drawn_as_ending_not_as_renewing() {
     *server.plan_status.lock().unwrap() = "cancelling";
     let mut rt = window_on(signed_in(&server), SettingsPane::Account);
     wait_for(&mut rt, "the account", |rt| shows(rt, FIRST));
-    assert!(says_anywhere(&rt, "cancels on 14 Mar 2027"));
+    assert!(says_anywhere(&rt, "cancels on 14 Mar 2099"));
     rt.update(|s, _| crate::frames::account::go(s, "DW-0708"));
     rt.frame(0.016);
     rt.frame(0.4);
@@ -323,6 +336,10 @@ fn a_sign_out_in_the_window_is_confirmed_sent_once_and_said() {
     assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone"]);
     wait_for(&mut rt, "the row goes", |rt| !says_anywhere(rt, PHONE));
     assert!(shows(&rt, BROWSER));
+    // The toast goes by itself after its time.
+    wait_long_for(&mut rt, "the toast fades", |rt| {
+        !shows(rt, SIGNED_OUT) && !has(rt, "toast-0")
+    });
 
     // A sign-out Beebeeb did not take is drawn with a way to send it again, and the row stands.
     server.change_mode.store(SERVER_ERROR, Ordering::SeqCst);
@@ -393,4 +410,70 @@ fn a_refusal_with_nothing_to_try_again_is_still_drawn_as_a_failure() {
     assert!(!has(&rt, "toast-action") && !has(&rt, "toast-0"));
     wait_for(&mut rt, "the sign-out lands", |rt| shows(rt, SIGNED_OUT));
     assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone"], "sent once");
+}
+
+/// An `active` plan Beebeeb says nothing is charged for: the card says what is used, and nowhere "renews".
+#[test]
+fn a_plan_nothing_is_charged_for_is_not_drawn_as_renewing() {
+    for mock in [Some(true), None] {
+        let server = server();
+        *server.plan_mock.lock().unwrap() = mock;
+        let mut rt = window_on(signed_in(&server), SettingsPane::Account);
+        wait_for(&mut rt, "the account", |rt| shows(rt, FIRST));
+        assert!(says_anywhere(&rt, "Drive plan"), "{mock:?}: the card is drawn");
+        for words in ["renews", "Renews", "2099"] {
+            assert!(!says_anywhere(&rt, words), "{mock:?}: {words}");
+        }
+    }
+    // The control: a plan that is charged again says so.
+    let server = server();
+    let mut rt = window_on(signed_in(&server), SettingsPane::Account);
+    wait_for(&mut rt, "the account", |rt| shows(rt, FIRST));
+    assert!(says_anywhere(&rt, "renews 14 Mar 2099"));
+}
+
+/// An outage: the sign-out is refused and the list cannot be read again. The rows that were drawn stay, the
+/// toast's Try again still sends; the toast goes by itself after its time, and then the pane says what it draws
+/// could not be refreshed, with a Try again that reads.
+#[test]
+fn in_an_outage_the_list_stays_try_again_works_and_the_pane_says_it_could_not_refresh() {
+    let server = server();
+    let mut rt = window_on(signed_in(&server), SettingsPane::DevicesAndSessions);
+    wait_for(&mut rt, "the sessions", |rt| shows(rt, PHONE));
+    server.change_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    let lists = server.asked("GET /api/v1/account/sessions");
+    click(&mut rt, "btn-0");
+    click(&mut rt, "btn-2");
+    wait_for(&mut rt, "the refusal, and the list read after it", |rt| {
+        shows(rt, NOT_SIGNED_OUT) && server.asked("GET /api/v1/account/sessions") > lists
+    });
+    rt.frame(0.1);
+    assert!(
+        shows(&rt, PHONE) && shows(&rt, BROWSER),
+        "the rows that were drawn stay"
+    );
+    assert!(!says_anywhere(&rt, "Couldn't load this"));
+    // Try again still sends that sign-out.
+    click(&mut rt, "toast-action");
+    wait_for(&mut rt, "sent again", |_| server.deleted.lock().unwrap().len() == 2);
+    assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone", "s-phone"]);
+    wait_for(&mut rt, "the refusal again", |rt| {
+        shows(rt, NOT_SIGNED_OUT) && has(rt, "toast-action")
+    });
+    // The toast goes by itself. What is left is the pane's word about what it draws.
+    wait_long_for(&mut rt, "the toast has had its time", |rt| {
+        !shows(rt, NOT_SIGNED_OUT) && shows(rt, NOT_REFRESHED)
+    });
+    assert!(has(&rt, "toast-action") && shows(&rt, PHONE));
+    assert_eq!(server.deleted.lock().unwrap().len(), 2, "nothing more was sent");
+    // Its Try again reads; Beebeeb answers; nothing is said any more.
+    server.change_mode.store(ANSWER, Ordering::SeqCst);
+    server.read_mode.store(ANSWER, Ordering::SeqCst);
+    click(&mut rt, "toast-action");
+    wait_for(&mut rt, "read again", |rt| {
+        !shows(rt, NOT_REFRESHED) && !has(rt, "toast-action")
+    });
+    assert_eq!(server.deleted.lock().unwrap().len(), 2, "a read, not a sign-out");
+    assert!(shows(&rt, PHONE));
 }
