@@ -76,6 +76,7 @@ fn bodies(account: &FakeAccount) -> [Value; 4] {
             { "id": INV_A, "title": "Invented request", "files_received": 3, "max_files": 50, "closed": false,
               "token": SECRETS[0], "wrapped_private_key": SECRETS[2], "expires_at": "2026-11-14T00:00:00Z" },
             { "id": INV_B, "title": "Closed one", "max_files": 0, "closed": true },
+            { "id": INV_OVER, "title": "Taken off the list", "closed": true, "hidden": true },
         ] }),
     ]
 }
@@ -357,7 +358,7 @@ fn ending_a_share_is_the_requests_core_builds_one_per_item_and_an_unlisted_one_i
     assert_eq!(
         share_routes(&fake),
         [
-            format!("POST /api/v1/shares/invites/{INV_IN}/hide"),
+            format!("POST /api/v1/shares/invites/{INV_IN}/decline"),
             format!("DELETE /api/v1/shares/invites/{INV_A}"),
             format!("DELETE /api/v1/shares/invites/{INV_B}"),
             format!("DELETE /api/v1/shares/{INV_MINE}"),
@@ -400,4 +401,45 @@ fn ending_a_share_is_the_requests_core_builds_one_per_item_and_an_unlisted_one_i
         .map(|l| (l.share_id.as_str(), l.share_ids.len()))
         .collect();
     assert_eq!(ids, [(INV_OVER, 2), (INV_A, 1)]);
+}
+
+#[test]
+fn declining_uses_the_decline_route_and_hiding_a_request_never_deletes_it() {
+    let fake = fake("hide", false);
+    let engine = engine(&fake, true);
+    let session = engine.session_turn();
+    let hide = ShareChange::HideRequest {
+        request_id: INV_B.into(),
+    };
+    let decline = ShareChange::Decline {
+        invite_id: INV_IN.into(),
+    };
+    assert_eq!(engine.share_change(session, &hide), Ok(()));
+    assert_eq!(engine.share_change(session, &decline), Ok(()));
+    assert_eq!(
+        share_routes(&fake),
+        [
+            format!("POST /api/v1/file-requests/{INV_B}/hide"),
+            format!("POST /api/v1/shares/invites/{INV_IN}/decline"),
+        ]
+    );
+    // Counts, not absence: one POST to /hide, and no request of any kind with the DELETE method.
+    let sent = fake.api.requests();
+    assert_eq!(sent.iter().filter(|r| r.route().ends_with("/hide")).count(), 1);
+    assert_eq!(sent.iter().filter(|r| r.method == "DELETE").count(), 0);
+
+    // 409: an invitation accepted meanwhile, a request that is still open.
+    fake.status.store(409, Ordering::SeqCst);
+    assert_eq!(
+        engine.share_change(session, &decline),
+        Err(ShareChangeError::AlreadyAccepted)
+    );
+    assert_eq!(engine.share_change(session, &hide), Err(ShareChangeError::RequestOpen));
+    // Not an id: nothing is sent.
+    let count = share_routes(&fake).len();
+    let bad = ShareChange::HideRequest {
+        request_id: "../x".into(),
+    };
+    assert_eq!(engine.share_change(session, &bad), Err(ShareChangeError::NotFound));
+    assert_eq!(share_routes(&fake).len(), count);
 }

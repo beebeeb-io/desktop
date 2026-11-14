@@ -119,7 +119,7 @@ pub enum ShareChange {
     SetAccess { invite_id: String, can_edit: bool },
     /// Take one person off a share of the account's.
     RemoveMember { invite_id: String },
-    /// Decline an invitation (hide it from the account's inbox, as the web does).
+    /// Decline an invitation (`POST /shares/invites/{id}/decline`): it leaves the inbox and the sender sees it declined.
     Decline { invite_id: String },
     /// End a share with people: cancel each of its invites (one already gone counts as done).
     CancelInvites { invite_ids: Vec<String> },
@@ -127,6 +127,9 @@ pub enum ShareChange {
     RevokeLinks { share_ids: Vec<String> },
     /// Close a file request of the account's: no new uploads, what arrived stays.
     CloseRequest { request_id: String },
+    /// Take a CLOSED file request off the account's list (`POST /file-requests/{id}/hide`): the row stays on the
+    /// server with its key, so what arrived can still be opened. Never the DELETE route, which destroys the key.
+    HideRequest { request_id: String },
 }
 
 /// Why a change was not made. Fixed words only.
@@ -141,6 +144,10 @@ pub enum ShareChangeError {
     NotFound,
     /// Beebeeb refused or failed.
     Refused,
+    /// A declined invitation had been accepted already (409).
+    AlreadyAccepted,
+    /// A file request that is still open cannot be taken off the list (409): close it first.
+    RequestOpen,
 }
 
 impl ShareChangeError {
@@ -151,6 +158,8 @@ impl ShareChangeError {
             Self::SessionEnded => "the session ended",
             Self::NotFound => "not found",
             Self::Refused => "refused",
+            Self::AlreadyAccepted => "already accepted",
+            Self::RequestOpen => "request open",
         }
     }
 }
@@ -241,6 +250,13 @@ impl<C: CredentialStores> Engine<C> {
                 // Taking off a person or a link that is already off: done.
                 404 if gone_is_done => {}
                 404 => return Err(ShareChangeError::NotFound),
+                409 => {
+                    return Err(match change {
+                        ShareChange::Decline { .. } => ShareChangeError::AlreadyAccepted,
+                        ShareChange::HideRequest { .. } => ShareChangeError::RequestOpen,
+                        _ => ShareChangeError::Refused,
+                    });
+                }
                 401 => return Err(ShareChangeError::SessionEnded),
                 _ => return Err(ShareChangeError::Refused),
             }
@@ -255,7 +271,11 @@ fn change_requests(change: &ShareChange) -> Result<(Vec<HttpRequest>, bool), Sha
     let not_found = |_| ShareChangeError::NotFound;
     match change {
         ShareChange::Decline { invite_id } => {
-            let path = format!("/api/v1/shares/invites/{}/hide", canonical(invite_id)?);
+            let path = format!("/api/v1/shares/invites/{}/decline", canonical(invite_id)?);
+            Ok((vec![request(Method::Post, path)], false))
+        }
+        ShareChange::HideRequest { request_id } => {
+            let path = format!("/api/v1/file-requests/{}/hide", canonical(request_id)?);
             Ok((vec![request(Method::Post, path)], false))
         }
         ShareChange::CancelInvites { invite_ids } => {
@@ -453,6 +473,10 @@ fn owned_links(mine: &Value, by_me: &[SentShare]) -> Vec<OwnedLink> {
 }
 
 fn request_row(r: &Value) -> Option<FileRequestRow> {
+    // A request the person took off their list stays on the server (with its key): it is not listed.
+    if flag(r, "hidden") {
+        return None;
+    }
     Some(FileRequestRow {
         id: text(r, "id")?.to_string(),
         title: text(r, "title")?.to_string(),

@@ -477,8 +477,8 @@ fn what_is_not_bound_sends_nothing_and_says_not_available() {
     let fake = fake("unbound");
     let mut source = EngineSharedSource::new(signed_in(&fake));
     opened(&mut source);
-    let unbound: [&dyn Fn(&mut EngineSharedSource<MemoryCredentials>) -> bool; 3] =
-        [&|s| s.keep_offline(OTHERS), &|s| s.remove_request(INV_B), &|s| {
+    let unbound: [&dyn Fn(&mut EngineSharedSource<MemoryCredentials>) -> bool; 2] =
+        [&|s| s.keep_offline(OTHERS), &|s| {
             s.invite(TRIP, "new@example.eu", Access::View)
         }];
     for act in unbound {
@@ -524,7 +524,7 @@ fn decline_stop_sharing_and_close_request_go_out_once_by_id_and_nothing_is_drawn
     let mut sent = changes(&fake.fake);
     sent.sort();
     let mut expected = vec![
-        format!("POST /api/v1/shares/invites/{INV_IN}/hide"),
+        format!("POST /api/v1/shares/invites/{INV_IN}/decline"),
         format!("DELETE /api/v1/shares/invites/{INV_A}"),
         format!("DELETE /api/v1/shares/invites/{INV_B}"),
         format!("DELETE /api/v1/shares/{REQ}"),
@@ -778,5 +778,40 @@ fn share_invite_goes_once_per_share_answers_from_the_engine_and_a_late_answer_is
         sent_reads(&fake.fake),
         reads_then,
         "nothing is read for a dropped answer"
+    );
+}
+
+#[test]
+fn remove_from_my_list_is_the_hide_route_never_the_delete_and_each_409_has_its_words() {
+    let fake = fake("hide");
+    let mut source = EngineSharedSource::new(signed_in(&fake));
+    // Before the lists are here, and for a row that is not one: nothing is sent.
+    assert!(!source.remove_request(INV_B));
+    opened(&mut source);
+    assert!(!source.remove_request(OTHERS) && !source.remove_request("../x"));
+    assert!(changes(&fake.fake).is_empty());
+
+    let before = source.held.clone();
+    assert!(source.remove_request(INV_B));
+    assert!(!source.remove_request(INV_B), "an answer is on its way");
+    assert_eq!(
+        source.held, before,
+        "nothing is drawn as removed before Beebeeb answered"
+    );
+    assert!(settle(&mut source).is_empty());
+    let sent = changes(&fake.fake);
+    assert_eq!(sent, [format!("POST /api/v1/file-requests/{INV_B}/hide")]);
+    assert_eq!(sent.iter().filter(|r| r.starts_with("DELETE ")).count(), 0);
+
+    // 409: the request is still open; an invitation that was accepted meanwhile.
+    fake.read_status.store(200, Ordering::SeqCst);
+    fake.status.store(409, Ordering::SeqCst);
+    assert!(source.remove_request(REQ));
+    assert_eq!(settle(&mut source), [Notice::RequestStillOpen]);
+    assert!(source.decline(INV_IN));
+    assert_eq!(settle(&mut source), [Notice::AlreadyAccepted]);
+    assert_eq!(
+        changes(&fake.fake).iter().filter(|r| r.starts_with("DELETE ")).count(),
+        0
     );
 }

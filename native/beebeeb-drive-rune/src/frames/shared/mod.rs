@@ -125,6 +125,8 @@ fn notice_words(notice: Notice) -> &'static str {
     match notice {
         Notice::NotAvailable => "Not available yet in this version. Nothing was changed.",
         Notice::ChangeRefused => "Couldn\u{2019}t make that change. Nothing was changed.",
+        Notice::AlreadyAccepted => "Already accepted.",
+        Notice::RequestStillOpen => "Close the request first.",
         Notice::RefreshFailed => "Couldn\u{2019}t refresh Shared. What\u{2019}s shown may be out of date.",
     }
 }
