@@ -151,7 +151,7 @@ pub fn not_ready(standing: Standing) -> Option<(&'static str, &'static str)> {
         Standing::Unreadable => Some(("Couldn't read this PC", "Open this section again to try once more.")),
         Standing::AnotherAccounts => Some((
             "Not available for this account",
-            "This PC still holds the synced files of another account, so nothing is shown here.",
+            "The synced files on this PC aren't confirmed as this account's, so nothing is shown here.",
         )),
     }
 }

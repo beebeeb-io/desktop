@@ -175,8 +175,11 @@ impl std::fmt::Debug for Snapshot {
 pub(crate) enum NoRead {
     /// The local state could not be opened or read.
     Unreadable,
-    /// This PC's local state is another account's (task 2488): nothing of it is read.
+    /// This PC's local state is not provably this account's (task 2488): nothing of it is read.
     AnotherAccounts,
+    /// The session was not one to read under at that moment (it changed, ended, or a change of it was under way):
+    /// nothing is known, nothing held changes, and the next opening asks again.
+    NotNow,
 }
 
 /// Whose session something was asked under, or read under.
@@ -264,6 +267,12 @@ impl<E: ThisPcEngine> EngineThisPcSource<E> {
         }
     }
 
+    /// Put an answer in the inbox as the worker would (tests of what `pump` does with one).
+    #[cfg(test)]
+    fn inbox_for_test(&self, answer: Answer) {
+        let _ = self.answers.send(answer);
+    }
+
     /// No job is waiting or running (tests wait on it).
     #[cfg(test)]
     pub(crate) fn idle(&self) -> bool {
@@ -281,13 +290,14 @@ impl<E: ThisPcEngine> EngineThisPcSource<E> {
             let started = std::thread::Builder::new().name("this-pc".into()).spawn(move || {
                 // Ends when the source is dropped (its sender with it).
                 for job in rx {
-                    let generation = job.generation;
+                    let (generation, whose) = (job.generation, job.whose.clone());
                     let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&*engine, &answers, job)));
                     if done.is_err() {
                         log("this pc: a read or a change ended early");
+                        // Said as "could not be read" (for the session that asked, if it is still the window's).
                         let _ = answers.send(Answer {
                             generation,
-                            whose: None,
+                            whose: Some(whose),
                             refused: None,
                             read: Err(NoRead::Unreadable),
                         });
@@ -412,7 +422,7 @@ fn owns_state<E: ThisPcEngine>(engine: &E, whose: &Whose) -> bool {
 fn read_for<E: ThisPcEngine>(engine: &E, whose: &Whose) -> Result<Snapshot, NoRead> {
     if !still_for(engine, whose) {
         // Dropped by `counts` (the session moved on); nothing is read for it.
-        return Err(NoRead::Unreadable);
+        return Err(NoRead::NotNow);
     }
     match engine.local_state(|db| read(db, chrono::Utc::now().timestamp())) {
         Ok(read) => read.map_err(|_| {
@@ -421,6 +431,13 @@ fn read_for<E: ThisPcEngine>(engine: &E, whose: &Whose) -> Result<Snapshot, NoRe
         }),
         Err(LocalStateRefused::NothingSynced) => Ok(Snapshot::default()),
         Err(refused) if refused.not_this_accounts() => Err(NoRead::AnotherAccounts),
+        // Signed out, locked, ended or changing: not a failure to read, and not this answer's to say.
+        Err(
+            LocalStateRefused::SessionChanged
+            | LocalStateRefused::SessionEnded
+            | LocalStateRefused::SignedOut
+            | LocalStateRefused::Locked,
+        ) => Err(NoRead::NotNow),
         Err(_) => {
             log("this pc: the local state could not be opened");
             Err(NoRead::Unreadable)
@@ -663,6 +680,8 @@ impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
                 }
                 // A read that failed keeps what is held of this account (before the first answer: it says so).
                 Err(NoRead::Unreadable) => self.no_read = Some(NoRead::Unreadable),
+                // Nothing was learned: what is held and what is said stay; the next opening asks again.
+                Err(NoRead::NotNow) => self.read_at = None,
             }
         }
         pumped.busy |= self.pending.load(Ordering::SeqCst) > 0;
@@ -678,7 +697,7 @@ impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
             (Some(_), _) => Standing::Ready,
             (None, Some(NoRead::AnotherAccounts)) => Standing::AnotherAccounts,
             (None, Some(NoRead::Unreadable)) => Standing::Unreadable,
-            (None, None) => Standing::Reading,
+            (None, Some(NoRead::NotNow) | None) => Standing::Reading,
         }
     }
 

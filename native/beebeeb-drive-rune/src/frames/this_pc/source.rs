@@ -207,7 +207,8 @@ pub enum Standing {
     Reading,
     /// This PC's local state could not be read.
     Unreadable,
-    /// This PC still holds the local state of another account: nothing of it is shown.
+    /// This PC's local state is not provably the signed-in account's (another account's, or no record of whose):
+    /// nothing of it is shown.
     AnotherAccounts,
 }
 

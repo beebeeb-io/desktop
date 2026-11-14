@@ -112,8 +112,9 @@ pub struct Ui {
     sample: bool,
     /// A change the source refused, and when: the window's toast says it for [`REFUSAL_FOR`].
     pub refusal: Option<(&'static str, std::time::Instant)>,
-    /// A section of this group was on screen at the last poll: the next arrival is an opening.
-    was_open: bool,
+    /// The section of this group that was on screen at the last poll: arriving at one, also from the other, is an
+    /// opening.
+    was_open: Option<Section>,
 }
 
 /// How long a refusal's toast stays.
@@ -134,7 +135,7 @@ impl Ui {
             confirm_remove_all: false,
             sample: false,
             refusal: None,
-            was_open: false,
+            was_open: None,
         }
     }
 
@@ -412,10 +413,11 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         ui.confirm_remove_all = false;
     }
     // A section that just opened: the source reads again when what it holds is old.
-    if open && !ui.was_open {
+    let here = open.then(|| s.shell.app.route().section);
+    if here.is_some() && here != ui.was_open {
         ui.source.opened();
     }
-    ui.was_open = open;
+    ui.was_open = here;
     let pumped = ui.source.pump();
     let mut changed = pumped.changed || asked;
     if let Some(words) = pumped.refusal {
@@ -437,12 +439,17 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let section = s.shell.app.route().section;
     let ui = &mut s.this_pc;
-    // The ask before Remove all takes every key while it is up: Esc says no, nothing else reaches the list.
+    // The ask before Remove all: Esc says no, and the list under it hears no key. Tab, Enter and Space are the
+    // ask's own buttons' (not handled here, so focus moves and the focused button presses).
     if ui.confirm_remove_all {
-        if ev.key == Key::Escape {
-            ui.remove_all_cancelled();
-        }
-        return true;
+        return match ev.key {
+            Key::Escape => {
+                ui.remove_all_cancelled();
+                true
+            }
+            Key::Up | Key::Down | Key::ContextMenu => true,
+            _ => false,
+        };
     }
     if ev.is_command('f') {
         tx.focus(crate::ui::keys::SEARCH_KEY, true);

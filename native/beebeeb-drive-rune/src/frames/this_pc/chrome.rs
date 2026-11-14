@@ -162,13 +162,8 @@ fn foot(s: &State, t: &Theme) -> El {
         None => ((storage.used_bytes as f64 / quota) as f32, 0.0),
     };
     let track_w = SIDEBAR_W - 2.0 * (10.0 + 6.0 + 4.0) - kit::HAIR;
-    let gb = |bytes: i64| {
-        if bytes >= 1_000_000_000_000 {
-            format!("{} TB", bytes / 1_000_000_000_000)
-        } else {
-            format!("{} GB", bytes / 1_000_000_000)
-        }
-    };
+    // The figures as every other section's sidebar writes them (a real account is rarely a round number).
+    let gb = crate::ui::sidebar::format_storage;
     let value = if s.storage_known {
         format!("{} of {}", gb(storage.used_bytes), gb(storage.quota_bytes))
     } else {

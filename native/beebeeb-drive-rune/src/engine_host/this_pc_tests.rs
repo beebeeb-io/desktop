@@ -609,6 +609,50 @@ fn an_answer_of_an_earlier_generation_is_dropped_even_for_the_same_session() {
     assert_eq!(source.kept_count(), 2, "the current generation's own read is held");
 }
 
+/// A worker that ends early says "could not be read" for the session that asked: the section never waits forever.
+#[test]
+fn a_job_that_ends_early_is_said_as_unreadable() {
+    let fake = Fake::new();
+    *fake.during_read.lock().unwrap() = Some(Box::new(|_| panic!("an invented failure inside a read")));
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
+    assert_eq!(source.standing(), Standing::Unreadable);
+    // Opening the section asks again, and the read that works is held.
+    source.opened();
+    settle(&mut source);
+    assert_eq!(source.standing(), Standing::Ready);
+}
+
+/// A read refused because the session was not one to read under just then is not "could not be read": what is
+/// held stays, and the next opening asks again.
+#[test]
+fn a_read_refused_for_the_session_keeps_what_is_held_and_is_asked_again() {
+    assert_eq!(
+        read_for(
+            &*busy_pc(),
+            &Whose {
+                account: "invented@beebeeb.io".into(),
+                session: SessionGeneration::for_test(99),
+            }
+        ),
+        Err(NoRead::NotNow),
+        "a session that is not the engine's"
+    );
+    let fake = busy_pc();
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
+    source.inbox_for_test(Answer {
+        generation: source.generation,
+        whose: source.seen.clone(),
+        refused: None,
+        read: Err(NoRead::NotNow),
+    });
+    source.pump();
+    assert_eq!(source.standing(), Standing::Ready, "the lists stay");
+    assert_eq!(source.kept_count(), 2);
+    assert!(source.read_at.is_none(), "and the next opening reads again");
+}
+
 /// The one rule, by its parts: the generation, an answer that names a session, and that session being the window's.
 #[test]
 fn counts_needs_the_generation_and_the_same_session() {

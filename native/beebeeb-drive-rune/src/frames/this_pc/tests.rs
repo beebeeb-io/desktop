@@ -536,8 +536,9 @@ fn remove_all_shows_its_ask_and_removes_only_on_the_yes() {
     );
     assert_eq!(rt.state.this_pc.kept_count(), 3, "nothing is removed before the answer");
 
-    // Esc says no; so does Cancel. Nothing is removed, and a list key does not reach the list under the ask.
-    press(&mut rt, Key::Escape);
+    // Cancel says no; so does Esc. Nothing is removed, and a list key does not reach the list under the ask.
+    click(&mut rt, "btn-remove-all-cancel");
+    assert!(!rt.state.this_pc.confirm_remove_all, "Cancel was heard");
     assert!(!has(&rt, "dlg"));
     assert_eq!(rt.state.this_pc.kept_count(), 3);
     click(&mut rt, "btn-remove-all-from-this-pc");
@@ -545,17 +546,66 @@ fn remove_all_shows_its_ask_and_removes_only_on_the_yes() {
     let selected = rt.state.this_pc.selected;
     press(&mut rt, Key::Down);
     assert_eq!(rt.state.this_pc.selected, selected, "the list is under the ask");
-    click(&mut rt, "btn-remove-all-cancel");
+    press(&mut rt, Key::Escape);
     assert!(!has(&rt, "dlg"));
     assert_eq!(rt.state.this_pc.kept_count(), 3);
 
-    // Yes: everything goes, the ask with it.
+    // The keyboard reaches the ask's own buttons: Tab to Cancel, Enter presses it.
     click(&mut rt, "btn-remove-all-from-this-pc");
     poll(&mut rt);
-    click(&mut rt, "btn-remove-all-yes");
+    tab_to(&mut rt, "btn-remove-all-cancel");
+    press(&mut rt, Key::Enter);
+    assert!(!has(&rt, "dlg"), "Enter on Cancel says no");
+    assert_eq!(rt.state.this_pc.kept_count(), 3);
+
+    // Yes, from the keyboard: everything goes, the ask with it.
+    click(&mut rt, "btn-remove-all-from-this-pc");
+    poll(&mut rt);
+    tab_to(&mut rt, "btn-remove-all-yes");
+    press(&mut rt, Key::Enter);
     assert!(!has(&rt, "dlg"));
     assert_eq!(rt.state.this_pc.kept_count(), 0);
     assert_eq!(text(&rt, "empty-title"), "Nothing available offline");
+}
+
+#[test]
+fn going_from_one_section_to_the_other_asks_the_source_again() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Counts(std::sync::Arc<AtomicUsize>);
+    impl ThisPcSource for Counts {
+        fn opened(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn today(&self) -> chrono::NaiveDate {
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()
+        }
+        fn history(&self) -> Vec<Change> {
+            Vec::new()
+        }
+        fn problems(&self) -> Vec<Change> {
+            Vec::new()
+        }
+        fn retry(&mut self, _: &str) {}
+        fn retry_all(&mut self) {}
+        fn kept(&self) -> Vec<Kept> {
+            Vec::new()
+        }
+        fn remove_from_pc(&mut self, _: &str) {}
+        fn remove_all_from_pc(&mut self) {}
+    }
+    let opened = std::sync::Arc::new(AtomicUsize::new(0));
+    let mut rt = with_source(super::Section::SyncHistory, Box::new(Counts(opened.clone())));
+    poll(&mut rt);
+    poll(&mut rt);
+    assert_eq!(opened.load(Ordering::SeqCst), 1, "once per arrival, not per frame");
+    rt.update(|s, _| {
+        crate::shell::host::dispatch(
+            s,
+            crate::shell::app::Event::Navigate(crate::shell::app::Route::section(super::Section::AvailableOffline)),
+        );
+    });
+    poll(&mut rt);
+    assert_eq!(opened.load(Ordering::SeqCst), 2, "the other section is an opening too");
 }
 
 #[test]
