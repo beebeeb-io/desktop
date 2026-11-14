@@ -391,6 +391,7 @@ fn a_session_the_server_ended_sends_the_screens_password_to_the_vault_levels_scr
     type_password(&mut rt, "the password");
     rt.update(|s, _| s.signin.as_mut().unwrap().unlock());
     assert_eq!(script.count("unlock"), 1);
+    settle(&mut rt);
     assert!(!shows(&rt, "Your session ended."));
 }
 
