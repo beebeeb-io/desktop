@@ -31,10 +31,14 @@ fn refused(why: Refused) -> Problem {
         Refused::Locked => Problem::Locked,
         Refused::Offline => Problem::Offline,
         Refused::Weak => Problem::Weak,
+        Refused::Unconfirmed => Problem::Unconfirmed,
     }
 }
 
 const OFFLINE: &str = "Beebeeb can't be reached. Nothing was changed.";
+/// A password change that may have been made (review of desktop#423, P2 #9): never "nothing was changed".
+pub(super) const UNCONFIRMED: &str =
+    "We couldn't confirm the change. Try signing in with your new password; if that fails, use your old one.";
 
 /// Name (DW-A64): one name for every product. Enter saves, Esc cancels.
 pub fn name(f: &Form, t: &Theme) -> El {
@@ -327,6 +331,7 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
         Some(Problem::WrongPassword) => Some("Current password is incorrect. Nothing was changed."),
         Some(Problem::Locked) => Some("Unlock first, then change your password."),
         Some(Problem::Offline) => Some(OFFLINE),
+        Some(Problem::Unconfirmed) => Some(UNCONFIRMED),
         _ => None,
     };
     let weak = f.problem == Some(Problem::Weak);

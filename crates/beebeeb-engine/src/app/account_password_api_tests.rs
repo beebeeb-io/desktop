@@ -376,6 +376,11 @@ fn an_answer_lost_after_the_finish_is_not_the_answer_of_nothing_changed() {
             at_start, at_finish,
             "a finish that may have changed the password is answered like one that changed nothing"
         );
+        assert_eq!(at_finish, PasswordChangeError::Unconfirmed);
+        assert!(
+            matches!(at_start, PasswordChangeError::Offline | PasswordChangeError::Failed(_)),
+            "{at_start:?}"
+        );
         // The token this PC holds is untouched either way: no answer named a new one.
         assert_eq!(stored_token(&engine), OLD_TOKEN);
     }
@@ -399,6 +404,7 @@ fn a_change_taken_after_the_session_moved_on_is_not_the_answer_of_nothing_change
         PasswordChangeError::NotSignedIn,
         "a change the server took is answered as a press that sent nothing"
     );
+    assert_eq!(answer, PasswordChangeError::Unconfirmed);
     assert_ne!(
         stored_token(&engine),
         NEW_TOKEN,

@@ -1,11 +1,13 @@
 //! What the Uploads panel needs beyond the list: the sizes of the files it names, and the cancel of an upload of a
-//! NEW file (one never in Beebeeb): its queued change and its row go, in one transaction, and nothing is sent.
-//! The local copy is the caller's (it goes to the Recycle Bin first). Task: bind-all, files-uploads.
+//! NEW file (one never in Beebeeb): its queued change and its row go, and its copy goes to the Recycle Bin, in ONE
+//! write transaction ([`StateDb::cancel_new_upload`]). Nothing is sent. Task: bind-all, files-uploads; review of
+//! desktop#423, P1 #2.
 
 use super::*;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
-/// What [`StateDb::new_upload_target`] and [`StateDb::drop_new_upload`] say of a change.
+/// What the decision of [`StateDb::cancel_new_upload`] says of a change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CancelNew {
     /// A new file's upload, not being sent, with nothing else queued for its row: `file_id`'s row.
@@ -35,20 +37,35 @@ impl StateDb {
         rows.collect()
     }
 
-    /// Is this change the upload of a NEW file that may be cancelled? A read; [`Self::drop_new_upload`] decides again.
-    pub fn new_upload_target(&self, op_id: &str) -> Result<CancelNew> {
-        let conn = self.0.lock().expect("state_db mutex poisoned");
-        decide_conn(&conn, op_id)
-    }
-
-    /// Cancel the upload of a NEW file: its change, its resume row and the file's row go, in one transaction, the
-    /// staged copy is released to the journal. Decided again inside it ([`CancelNew::Ready`] was dropped), so a
-    /// change that moved since is left as it is. Nothing is sent to Beebeeb.
-    pub fn drop_new_upload(&self, op_id: &str) -> Result<CancelNew> {
+    /// Cancel the upload of a NEW file, in ONE write transaction (the lock the engine's own claim of a change takes,
+    /// `BEGIN IMMEDIATE`): the change is decided cancellable, its change, its resume row and the file's row are
+    /// dropped, its staged copy is released to the journal, THEN `recycle` moves the file at the path `path_of`
+    /// makes of the row's path; the transaction is committed only when the move worked. A refused move rolls it all
+    /// back: every row is as it was and the change is still queued. No claim can come between the decision and the
+    /// move, since a claim waits for this transaction and then finds the change gone.
+    ///
+    /// `recycle` runs while the write lock is held: it must be one move of one file, and must not touch this
+    /// database. A commit that fails after the move leaves the change queued for a file in the Recycle Bin (the
+    /// upload then stops on a missing file; nothing is lost).
+    pub fn cancel_new_upload(
+        &self,
+        op_id: &str,
+        path_of: impl FnOnce(&str) -> Option<PathBuf>,
+        recycle: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> Result<CancelDone> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let CancelNew::Ready { file_id } = decide_conn(&tx, op_id)? else {
-            return decide_conn(&tx, op_id);
+        let file_id = match decide_conn(&tx, op_id)? {
+            CancelNew::Ready { file_id } => file_id,
+            left => return Ok(CancelDone::Left(left)),
+        };
+        let rel: Option<String> = tx
+            .query_row("SELECT path FROM files WHERE file_id = ?1", params![file_id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let Some(path) = rel.as_deref().and_then(path_of) else {
+            return Ok(CancelDone::NoPath);
         };
         let payload: Option<String> = tx
             .query_row(
@@ -68,9 +85,27 @@ impl StateDb {
             )?;
         }
         delete_file_conn(&tx, &file_id)?;
+        if recycle(&path).is_err() {
+            tx.rollback()?;
+            return Ok(CancelDone::NotMoved);
+        }
         tx.commit()?;
-        Ok(CancelNew::Ready { file_id })
+        Ok(CancelDone::Cancelled)
     }
+}
+
+/// What [`StateDb::cancel_new_upload`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CancelDone {
+    /// The copy was moved, and the change, its resume row and the file's row are gone: committed together.
+    Cancelled,
+    /// Not cancellable ([`CancelNew::Unknown`], [`CancelNew::NotNew`] or [`CancelNew::Busy`]): nothing was asked of
+    /// the file, nothing was changed.
+    Left(CancelNew),
+    /// The file's row names no path that can be moved: nothing was changed.
+    NoPath,
+    /// The move was refused: rolled back, every row is as it was.
+    NotMoved,
 }
 
 fn decide_conn(conn: &Connection, op_id: &str) -> Result<CancelNew> {

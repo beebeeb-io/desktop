@@ -10,8 +10,11 @@
 //!   [`Conflicts::unread`] and left out.
 //! - An answer writes. Keep here uploads this PC's file as a new version (the server's stays in the history); Keep
 //!   both renames this PC's file beside the original and downloads the server's; Keep there REPLACES this PC's
-//!   file, whose edit was never sent and is in no history: its bytes are copied beside the file first
-//!   ([`replaced_copy_name`]), and when that copy cannot be made nothing is replaced.
+//!   file, whose edit was never sent and is in no history: its bytes are copied first to where nothing syncs, the
+//!   engine's own app data, per account and one copy per file ([`REPLACED_FOLDER`], review of desktop#423, P2 #8),
+//!   and when that copy cannot be made nothing is replaced. When Keep there works the copy stays there (a later Keep
+//!   there of the same file replaces it); when it fails the copy goes, but only when this PC's file is still
+//!   byte for byte what was copied; otherwise it stays there too.
 //! - A session that moved on is [`ConflictsRefused::NotSignedIn`] / [`ResolveRefused::NotSignedIn`], with nothing
 //!   sent and nothing handed over.
 //!
@@ -139,52 +142,128 @@ fn iso(time: SystemTime) -> String {
     chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// The name this PC's file is kept under before the server's version replaces it: `name (replaced on this PC)`,
-/// then ` 2`, ` 3` while the name is taken; the extension stays last.
-pub fn replaced_copy_name(original: &str, n: u32) -> String {
-    let suffix = if n <= 1 {
-        " (replaced on this PC)".to_string()
-    } else {
-        format!(" (replaced on this PC) {n}")
-    };
-    crate::sign_out::kept_names::with_suffix(original, &suffix)
+/// The folder, in the engine's own app data (never in the sync folder: nothing in it is uploaded), where Keep there
+/// keeps this PC's version of a file before the server's version replaces it:
+/// `<app data>/Replaced on this PC/<account>/<file id>/<the file's name>`. One copy per file: a later Keep there of the
+/// same file replaces it. `<account>` is a digest of the account's user id (its email when no id is known), never
+/// the id itself. Sign-out leaves it: it is the person's own data.
+pub const REPLACED_FOLDER: &str = "Replaced on this PC";
+
+/// The name of the copy being made, beside the kept one, until Keep there is known to have worked.
+const INCOMING: &str = ".incoming";
+
+/// `<state dir>/Replaced on this PC/<account digest>`: the account's folder of replaced versions.
+pub fn replaced_folder_in(state_dir: &Path, account: &crate::account_binding::Identity) -> Option<PathBuf> {
+    use sha2::Digest as _;
+    let who = account.user_id.as_deref().or(account.email.as_deref())?;
+    let digest = sha2::Sha256::digest(who.as_bytes());
+    let name: String = digest.iter().take(8).map(|byte| format!("{byte:02x}")).collect();
+    Some(state_dir.join(REPLACED_FOLDER).join(name))
 }
 
-/// Copy `file` beside itself under [`replaced_copy_name`], never over another file.
-fn keep_replaced_copy(file: &Path) -> std::io::Result<PathBuf> {
-    use std::io::{Read, Write};
-    let name = file
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| std::io::Error::other("no file name"))?;
+/// This PC's version of one file, copied aside before Keep there replaces it (see [`REPLACED_FOLDER`]).
+struct SafetyCopy {
+    /// The copy as made, not yet the file's kept copy.
+    incoming: PathBuf,
+    /// Where it is kept once Keep there worked (or when it is the only copy left).
+    kept: PathBuf,
+    /// What was copied (SHA-256 of the bytes), to tell whether this PC's file is still that.
+    digest: [u8; 32],
+}
+
+fn sha256_of(file: &Path) -> std::io::Result<[u8; 32]> {
+    use sha2::Digest as _;
+    use std::io::Read;
     let mut source = std::fs::File::open(file)?;
-    for n in 1u32..=100 {
-        let target = file.with_file_name(replaced_copy_name(name, n));
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&target) {
-            Ok(mut out) => {
-                let copied = (|| -> std::io::Result<()> {
-                    let mut buffer = vec![0u8; 256 * 1024];
-                    loop {
-                        let read = source.read(&mut buffer)?;
-                        if read == 0 {
-                            break;
-                        }
-                        out.write_all(&buffer[..read])?;
-                    }
-                    out.sync_all()
-                })();
-                if let Err(e) = copied {
-                    drop(out);
-                    let _ = std::fs::remove_file(&target);
-                    return Err(e);
-                }
-                return Ok(target);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = vec![0u8; 256 * 1024];
+    loop {
+        let read = source.read(&mut buffer)?;
+        if read == 0 {
+            break;
         }
+        hasher.update(&buffer[..read]);
     }
-    Err(std::io::Error::other("no free name for the copy"))
+    Ok(hasher.finalize().into())
+}
+
+impl SafetyCopy {
+    /// Copy `file` into `folder` (made when missing) as the incoming copy; an incoming copy a run that ended early
+    /// left behind is replaced. The file's earlier kept copy, if any, is not touched yet.
+    fn make(file: &Path, folder: &Path) -> std::io::Result<Self> {
+        use sha2::Digest as _;
+        use std::io::{Read, Write};
+        let name = file
+            .file_name()
+            .ok_or_else(|| std::io::Error::other("no file name"))?
+            .to_os_string();
+        std::fs::create_dir_all(folder)?;
+        let incoming = folder.join(INCOMING);
+        match std::fs::remove_file(&incoming) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        let mut source = std::fs::File::open(file)?;
+        let mut out = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&incoming)?;
+        let mut hasher = sha2::Sha256::new();
+        let copied = (|| -> std::io::Result<()> {
+            let mut buffer = vec![0u8; 256 * 1024];
+            loop {
+                let read = source.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+                out.write_all(&buffer[..read])?;
+            }
+            out.sync_all()
+        })();
+        drop(out);
+        if let Err(e) = copied {
+            let _ = std::fs::remove_file(&incoming);
+            return Err(e);
+        }
+        Ok(Self {
+            incoming,
+            kept: folder.join(name),
+            digest: hasher.finalize().into(),
+        })
+    }
+
+    /// Keep there worked (or this copy is the only one left): it becomes the file's one kept copy, and an earlier
+    /// copy of the file (under its old name too) goes.
+    fn keep(self) -> std::io::Result<PathBuf> {
+        let folder = self.kept.parent().ok_or_else(|| std::io::Error::other("no folder"))?;
+        for entry in std::fs::read_dir(folder)? {
+            let path = entry?.path();
+            if path != self.incoming && path != self.kept {
+                std::fs::remove_file(&path)?;
+            }
+        }
+        std::fs::rename(&self.incoming, &self.kept)?;
+        Ok(self.kept)
+    }
+
+    /// Keep there failed: the copy goes only when this PC's `file` is still byte for byte what was copied. When it
+    /// is not (it was replaced before the failure, or cannot be read), the copy is kept as [`Self::keep`] keeps it.
+    /// Whether the copy went.
+    fn discard_if_unchanged(self, file: &Path) -> bool {
+        if sha256_of(file).is_ok_and(|now| now == self.digest) {
+            let _ = std::fs::remove_file(&self.incoming);
+            if let Some(folder) = self.incoming.parent() {
+                // Empty only: an earlier kept copy of the file stays.
+                let _ = std::fs::remove_dir(folder);
+            }
+            return true;
+        }
+        if self.keep().is_err() {
+            tracing::warn!("keep there failed and this PC's version could not be put at its kept place");
+        }
+        false
+    }
 }
 
 impl<C: CredentialStores> Engine<C> {
@@ -274,14 +353,21 @@ impl<C: CredentialStores> Engine<C> {
             .ok()
             .flatten()
             .ok_or(ResolveRefused::NoSyncFolder)?;
-        if choice == ConflictChoice::KeepThere {
-            // The edit on this PC was never sent: it is in no version history. Keep its bytes before they go.
-            if let Ok(path) = local_file_path_under_sync_root(&root, &entry.path)
-                && path.is_file()
-                && keep_replaced_copy(&path).is_err()
-            {
-                return Err(ResolveRefused::CopyFailed);
-            }
+        // The edit on this PC was never sent: it is in no version history. Keep its bytes, where nothing syncs, before
+        // they go.
+        let mut safety = None;
+        if choice == ConflictChoice::KeepThere
+            && let Ok(path) = local_file_path_under_sync_root(&root, &entry.path)
+            && path.is_file()
+        {
+            let folder = self
+                .session_identity()
+                .ok()
+                .and_then(|account| replaced_folder_in(&self.config.state_dir, &account))
+                .ok_or(ResolveRefused::CopyFailed)?
+                .join(file_id);
+            let copy = SafetyCopy::make(&path, &folder).map_err(|_| ResolveRefused::CopyFailed)?;
+            safety = Some((copy, path));
         }
         let done = state
             .with_shared(|db| {
@@ -296,8 +382,18 @@ impl<C: CredentialStores> Engine<C> {
                 })
             })
             // The session moved while the call ran.
-            .map_err(local::<ResolveRefused>)?;
-        match done {
+            .map_err(local::<ResolveRefused>);
+        let worked = matches!(done, Ok(Ok(())));
+        if let Some((copy, path)) = safety {
+            if worked {
+                if copy.keep().is_err() {
+                    tracing::warn!("keep there worked; this PC's version stays in the incoming copy");
+                }
+            } else {
+                copy.discard_if_unchanged(&path);
+            }
+        }
+        match done? {
             Ok(()) => {
                 self.request_resnapshot();
                 Ok(())

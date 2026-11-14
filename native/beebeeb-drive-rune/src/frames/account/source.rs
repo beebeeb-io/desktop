@@ -377,6 +377,9 @@ pub enum Refused {
     Offline,
     /// The new password is not accepted: below the minimum, the same as the current one, or in a known breach.
     Weak,
+    /// The change was sent and how it ended is not known: the password may have changed. Never told as "nothing
+    /// changed" (review of desktop#423, P2 #9).
+    Unconfirmed,
 }
 
 /// A secret a pane shows once (the two-factor key, a backup code). It cannot be printed, copied

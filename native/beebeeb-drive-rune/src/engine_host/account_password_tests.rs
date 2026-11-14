@@ -147,6 +147,8 @@ fn each_refusal_of_the_engine_is_the_forms_own_word() {
     ] {
         assert_eq!(refusal(nothing_changed), Refused::Offline);
     }
+    // Review of desktop#423, P2 #9: a finish whose end is not known is never told as "nothing was changed".
+    assert_eq!(refusal(E::Unconfirmed), Refused::Unconfirmed);
 }
 
 #[test]
