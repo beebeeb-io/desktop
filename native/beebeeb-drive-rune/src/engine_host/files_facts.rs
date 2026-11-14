@@ -119,9 +119,8 @@ impl<C: CredentialStores> Facts<C> {
     pub fn set_sort(&mut self, folder: Option<&str>, sort: Sort) {
         let now = stamp(&self.engine);
         self.look(&now);
-        if self.engine.has_session() {
-            self.sorts.insert(folder.map(str::to_string), sort);
-        }
+        // Signed out it is kept for nobody: `sort_of` answers nothing, and a sign-in is another session.
+        self.sorts.insert(folder.map(str::to_string), sort);
     }
 
     /// The session or the account is not the one the last look saw: nothing of the earlier one is kept.
@@ -151,12 +150,13 @@ impl<C: CredentialStores> Facts<C> {
             }
             self.reading = false;
             match facts {
-                Some(facts) if facts.session == now.0 => {
+                // The read's own session is looked at where the figures are handed out (`current`).
+                Some(facts) => {
                     drawn |= self.held != Some(facts);
                     self.held = Some(facts);
                 }
                 // Not read: nothing is kept, and the next change or sync asks again.
-                _ => {
+                None => {
                     drawn |= self.held.take().is_some();
                 }
             }

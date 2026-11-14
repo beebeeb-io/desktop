@@ -220,6 +220,8 @@ fn signed_out_nothing_is_read_and_nothing_is_known() {
     assert!(source.facts.next_read.is_some(), "no read was started");
     source.set_sort(None, by_size());
     assert_eq!(source.sort_of(None), None, "a sort set signed out is nobody's");
+    sign_in(&world, &world.first, &world.first_phrase);
+    assert_eq!(source.sort_of(None), None, "and no account that signs in after gets it");
 }
 
 #[test]
@@ -279,6 +281,11 @@ fn another_account_never_sees_the_first_ones_figures_or_sorts() {
     assert_eq!(source.counts(), None, "signed out, before any poll");
     assert_eq!(source.storage_split(), None);
     assert_eq!(source.sort_of(Some("d-trip")), None);
+    source.changes();
+    assert!(
+        source.facts.held.is_none(),
+        "the first one's figures are not kept in memory"
+    );
 
     sign_in(&world, &world.second, &world.second_phrase);
     assert_eq!(source.counts(), None, "the second account, before any poll");
