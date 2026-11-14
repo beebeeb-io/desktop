@@ -136,13 +136,8 @@ fn the_running_apps_security_page_says_what_is_known_and_guesses_nothing() {
     ] {
         assert!(!says_anywhere(&rt, sample), "a sample or a guess shows: {sample}");
     }
-    // Nothing that is not bound can be pressed: no switch, and a press on such a row changes nothing.
+    // Nothing that is not bound can be pressed: no switch. (The password and two-factor rows open their pages now.)
     assert!(!has(&rt, "item-1-0-switch"));
-    for row in ["item-0-0", "item-0-1"] {
-        click(&mut rt, row);
-        assert!(shows(&rt, "Security score not known yet"), "{row}: the page stays");
-        assert!(!has(&rt, "dlg") && !has(&rt, "not-built"), "{row}");
-    }
     // Devices and sessions is bound: its row opens it.
     click(&mut rt, "item-1-1");
     wait_for(&mut rt, "the sessions", |rt| shows(rt, PHONE));
@@ -170,11 +165,10 @@ fn the_security_page_drops_the_first_account_when_another_signs_in() {
     assert!(!has(&rt, "item-0-1-check") && !says_anywhere(&rt, "3 signed in"));
 }
 
-/// The name and the email rows of the live Account pane: nothing answers for the pages behind them, so they
-/// are not links, a press does nothing, and no route ends on the full-window "not built yet" frame (which has
-/// no way back to Account).
+/// The name and the email rows of the live Account pane: the pages behind them answer, so both are links, and
+/// no route ends on the full-window "not built yet" frame (which has no way back to Account).
 #[test]
-fn the_name_row_is_a_link_and_the_email_row_is_not_while_nothing_answers_for_its_page() {
+fn the_name_and_the_email_rows_are_links_now_their_pages_answer() {
     let server = server();
     let mut rt = window_on(signed_in(&server), SettingsPane::Account);
     wait_for(&mut rt, "the account", |rt| shows(rt, FIRST));
@@ -184,22 +178,10 @@ fn the_name_row_is_a_link_and_the_email_row_is_not_while_nothing_answers_for_its
             .find(|e| !e.exiting && e.label.as_deref() == Some(label))
             .unwrap_or_else(|| panic!("no row labelled {label}"))
     };
-    // The Name page answers (it opens); the email page does not (the value alone).
+    // The Name page and the email page answer: both rows are links.
     assert_eq!(row(&rt, &format!("Name, {FIRST_NAME}")).role, "link");
-    for label in [format!("Sign-in email, {FIRST}")] {
-        let it = row(&rt, &label);
-        assert_eq!(it.role, "listitem", "{label}: the value alone, not a link");
-        let (x, y) = (it.rect[0] + it.rect[2] / 2.0, it.rect[1] + it.rect[3] / 2.0);
-        rt.pointer_down(x, y);
-        rt.pointer_up(x, y);
-        rt.frame(0.016);
-        rt.frame(0.4);
-        assert!(!has(&rt, "not-built"), "{label}: a press leads nowhere");
-        assert!(
-            shows(&rt, FIRST) && shows(&rt, "240 GB"),
-            "{label}: Account still shows"
-        );
-    }
+    assert_eq!(row(&rt, &format!("Sign-in email, {FIRST}")).role, "link");
+    assert!(!has(&rt, "not-built"));
 }
 
 /// Any other way to the pages nothing answers for (a link, a key) stays on Account too: only the section
@@ -209,18 +191,8 @@ fn no_route_from_a_live_pane_ends_on_the_not_built_frame() {
     let server = server();
     let mut rt = window_on(signed_in(&server), SettingsPane::Account);
     wait_for(&mut rt, "the account", |rt| shows(rt, FIRST));
-    for frame in ["DW-A65", "DW-A66"] {
-        rt.update(move |s, _| crate::frames::account::go(s, frame));
-        rt.frame(0.016);
-        rt.frame(0.4);
-        assert!(!has(&rt, "not-built"), "{frame}");
-        assert!(
-            shows(&rt, FIRST) && shows(&rt, "240 GB"),
-            "{frame}: Account still shows"
-        );
-    }
     // The pages under Security that nothing answers for do not open either: the person stays on Account.
-    for frame in ["DW-A67", "DW-A83"] {
+    for frame in ["DW-A58", "DW-A80", "DW-A81", "DW-A82", "DW-A83"] {
         rt.update(move |s, _| crate::frames::account::go(s, frame));
         rt.frame(0.016);
         rt.frame(0.4);

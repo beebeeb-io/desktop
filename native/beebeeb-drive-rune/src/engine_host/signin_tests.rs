@@ -675,8 +675,7 @@ fn what_is_not_bound_answers_its_screens_refusal_at_once_and_asks_the_server_not
     );
     source.begin_set_password("an invented new password");
     assert_eq!(source.poll(), Some(SignInEvent::PasswordSet(Err(SignInProblem::Other))));
-    source.begin_passkey();
-    assert_eq!(source.poll(), Some(SignInEvent::Passkey(PasskeyOutcome::Unavailable)));
+    // The passkey sign-in is bound (the system's dialog on a thread of its own): its tests are `passkeys_tests`.
     source.begin_device_request();
     assert_eq!(
         source.poll(),
@@ -685,9 +684,9 @@ fn what_is_not_bound_answers_its_screens_refusal_at_once_and_asks_the_server_not
     source.begin_hello();
     assert_eq!(source.poll(), Some(SignInEvent::Hello(HelloOutcome::Cancelled)));
     // Leaving a step does not drop these: they belong to no step that can be left.
-    source.begin_passkey();
+    source.begin_hello();
     source.discard_partial_sign_in();
-    assert_eq!(source.poll(), Some(SignInEvent::Passkey(PasskeyOutcome::Unavailable)));
+    assert_eq!(source.poll(), Some(SignInEvent::Hello(HelloOutcome::Cancelled)));
     assert_eq!(fake.fake.routes().len(), 0, "nothing was asked of the server");
 }
 

@@ -55,7 +55,8 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     }
     explorer.push(lists::item_with(0, 0, &place, show.into_iter().collect(), t));
     let on = sy.status_on_files;
-    if ui.drive.shows(Control::StatusOnFiles) {
+    let status_row = ui.drive.shows(Control::StatusOnFiles);
+    if status_row {
         explorer.push(lists::item_with(
             0,
             1,
@@ -72,7 +73,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         (!repairing).then(|| button("Repair…").on_press(|s: &mut State| s.settings.dialog = Some(Dialog::Repair)));
     explorer.push(lists::item_with(
         0,
-        1,
+        if status_row { 2 } else { 1 },
         &Item::new(Some(&ic::REBUILD), "Repair Beebeeb in File Explorer")
             .sub(if repairing {
                 "Repairing…"

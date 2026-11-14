@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 
 use super::*;
 
-#[path = "account_tests_bound.rs"]
+#[path = "account_bound_tests.rs"]
 mod bound;
 #[path = "account_tests_engine.rs"]
 mod engine;
@@ -420,8 +420,6 @@ fn only_the_three_sections_answer_every_page_under_them_is_unwired() {
     let server = server();
     let source = Source::new(signed_in(&server));
     for pane in [
-        Pane::Password,
-        Pane::Passkeys,
         Pane::Delete,
         Pane::DeleteFactor,
         Pane::DeleteLink,
@@ -438,6 +436,9 @@ fn only_the_three_sections_answer_every_page_under_them_is_unwired() {
     // The Name page and Sign-in activity answer too (`account_actions.rs`, `account_activity.rs`).
     assert_ne!(source.pane_state(Pane::Name), PaneState::Unwired);
     assert_ne!(source.pane_state(Pane::Activity), PaneState::Unwired);
+    // The password change and the passkeys answer too (`account_password.rs`, `passkeys.rs`).
+    assert_ne!(source.pane_state(Pane::Password), PaneState::Unwired);
+    assert_ne!(source.pane_state(Pane::Passkeys), PaneState::Unwired);
 }
 
 #[test]

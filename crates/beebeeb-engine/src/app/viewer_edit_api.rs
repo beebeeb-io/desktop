@@ -5,7 +5,7 @@
 //! - [`Engine::edit_facts_for`]: the version the local state holds, whether the file is kept on this PC and
 //!   whether the account may write it. Local state only, no network.
 //! - [`Engine::save_text_for`]: the text as the file's next version, bound to the version it was edited from. It
-//!   goes through the one write path every local edit takes (`EngineBridge::queue_finder_modify_from`: the staged
+//!   goes through the one write path every local edit takes (`EngineBridge::queue_file_provider_modify_from`: the staged
 //!   copy, the queued upload, the sync's own conflict handling). A file whose version here is already past the
 //!   base is [`SaveEnd::Conflict`] and nothing is written.
 //! - [`Engine::save_text_copy_for`]: Keep both: the text as a new file next to the first, under the
@@ -140,7 +140,9 @@ impl<C: CredentialStores> Engine<C> {
         let outcome = state
             .with_shared(|db| {
                 let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token, *key));
-                EngineBridge::new(self.identity, db, api).queue_finder_modify_from(target, Some(&held))
+                EngineBridge::new(self.identity, db, api)
+                    .queue_file_provider_modify_from(target, Some(&held))
+                    .map(|write| write.outcome)
             })
             .map_err(|_| EditRefused::NotSignedIn)?
             .map_err(|_| EditRefused::Failed)?;
@@ -219,7 +221,9 @@ impl<C: CredentialStores> Engine<C> {
         let outcome = state
             .with_shared(|db| {
                 let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token, *key));
-                EngineBridge::new(self.identity, db, api).queue_finder_create_from(target, Some(&held))
+                EngineBridge::new(self.identity, db, api)
+                    .queue_file_provider_create_from(target, Some(&held))
+                    .map(|write| write.outcome)
             })
             .map_err(|_| EditRefused::NotSignedIn)?
             .map_err(|_| EditRefused::Failed)?;

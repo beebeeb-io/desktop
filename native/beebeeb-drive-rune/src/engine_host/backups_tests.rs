@@ -341,7 +341,11 @@ fn the_unbound_parts_answer_nothing_and_send_nothing() {
     let fake = Fake::new();
     let mut source = EngineBackupsSource::new(fake.clone());
     settle(&mut source);
-    assert!(source.devices().is_empty() && source.not_backed_up().is_empty() && !source.mail_backup_on());
+    assert!(source.devices().is_empty() && !source.mail_backup_on());
+    // What cannot back up is the engine's own list: only folders that stopped themselves, each with its reason.
+    let stopped = source.not_backed_up();
+    assert_eq!(stopped.len(), 1, "one folder stopped itself in the fake");
+    assert!(stopped.iter().all(|row| !row.why.is_empty() && !row.excluded));
     assert!(
         !source.mail_backup_offered(),
         "no Mail Backup entry where no mail engine runs"

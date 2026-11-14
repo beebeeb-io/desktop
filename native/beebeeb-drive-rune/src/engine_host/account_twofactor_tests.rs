@@ -255,6 +255,8 @@ fn the_panes_of_email_and_two_factor_are_reachable_and_two_factor_waits_for_the_
         "what Beebeeb does not say is not drawn"
     );
     assert!(!source.can_send_again(), "no route sends the email's code again");
-    assert_eq!(source.pane_state(Pane::Name), PaneState::Unwired);
-    assert_eq!(source.pane_state(Pane::Password), PaneState::Unwired);
+    // The Name page and the password change answer too (`account_actions.rs`, `account_password.rs`).
+    assert_ne!(source.pane_state(Pane::Name), PaneState::Unwired);
+    assert_ne!(source.pane_state(Pane::Password), PaneState::Unwired);
+    assert_eq!(source.pane_state(Pane::Delete), PaneState::Unwired);
 }
