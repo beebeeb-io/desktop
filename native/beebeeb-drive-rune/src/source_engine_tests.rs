@@ -221,33 +221,67 @@ fn timings_and_query_plan_for_5000_children_in_a_70000_row_db() {
     let small = dir.path().join("small.db");
     build(&small);
     let big = dir.path().join("big.db");
-    build(&big);
+    // The 5,204 rows again: a copy of the closed database (no write-ahead log is left beside it), not a second build.
+    assert!(!dir.path().join("small.db-wal").exists());
+    std::fs::copy(&small, &big).unwrap();
     {
-        // 64,796 more rows in 13 other folders: 70,000 in all.
-        let db = StateDb::open(&big).unwrap();
-        let mut n = 0;
-        'fill: for folder in 0..13 {
-            let id = format!("d-bulk-{folder:02}");
-            put(&db, row(&id, &format!("/Bulk {folder:02}"), None, true, folder));
-            n += 1;
-            for i in 0..5_000 {
-                if n == 64_796 {
-                    break 'fill;
-                }
-                let file = format!("b-{folder:02}-{i:04}");
-                put(
-                    &db,
-                    row(
+        // 64,796 more rows in 13 other folders: 70,000 in all. Written in ONE transaction on one connection with
+        // the same two statements `StateDb::upsert_file_with_contract` runs (the row, then its parent and kind): a
+        // commit per row wrote 4.7 GB and held the whole suite for half an hour on the build VM. The file-change
+        // records the sync writes are left out: nothing here reads them.
+        let mut conn = rusqlite::Connection::open(&big).unwrap();
+        conn.execute_batch("PRAGMA synchronous = OFF;").unwrap();
+        let tx = conn.transaction().unwrap();
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO files (file_id, path, status, size_bytes, modified_at, content_hash, remote_updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?5)",
+                )
+                .unwrap();
+            let mut place = tx
+                .prepare("UPDATE files SET parent_id = ?2, item_kind = ?3 WHERE file_id = ?1")
+                .unwrap();
+            let mut put_row = |entry: FileEntry| {
+                insert
+                    .execute(rusqlite::params![
+                        entry.file_id,
+                        entry.path,
+                        entry.status.as_str(),
+                        entry.size_bytes,
+                        entry.remote_updated_at
+                    ])
+                    .unwrap();
+                place
+                    .execute(rusqlite::params![
+                        entry.file_id,
+                        entry.parent_id,
+                        entry.item_kind.as_str()
+                    ])
+                    .unwrap();
+            };
+            let mut n = 0;
+            'fill: for folder in 0..13 {
+                let id = format!("d-bulk-{folder:02}");
+                put_row(row(&id, &format!("/Bulk {folder:02}"), None, true, folder));
+                n += 1;
+                for i in 0..5_000 {
+                    if n == 64_796 {
+                        break 'fill;
+                    }
+                    let file = format!("b-{folder:02}-{i:04}");
+                    put_row(row(
                         &file,
                         &format!("/Bulk {folder:02}/item-{i:04}.bin"),
                         Some(&id),
                         false,
                         i,
-                    ),
-                );
-                n += 1;
+                    ));
+                    n += 1;
+                }
             }
         }
+        tx.commit().unwrap();
     }
     for (label, path, rows) in [("5,204-row db", &small, 5_204i64), ("70,000-row db", &big, 70_000)] {
         let conn = rusqlite::Connection::open(path).unwrap();

@@ -290,6 +290,26 @@ fn upload_waiting(f: &Fixture) {
         .unwrap();
 }
 
+/// A start that must not be reached: a test never starts a real sync (that binds the shared state folder to an account).
+fn never_starts(_root: PathBuf) -> Result<super::SyncStart, super::SyncStartRefused> {
+    panic!("this test must not start sync");
+}
+
+/// Sync that ran and cannot start again is said to be stopped; sync that was not running was not changed.
+#[test]
+fn a_restart_that_fails_says_sync_is_stopped_only_when_it_ran() {
+    use super::{ExplorerChangeRefused as R, SyncStart, SyncStartRefused, SyncStop, sync_back};
+    let refused = || Err(SyncStartRefused::StopUnconfirmed);
+    assert_eq!(sync_back(SyncStop::Stopped, refused()), Err(R::SyncStopped));
+    assert_eq!(sync_back(SyncStop::WasNotRunning, refused()), Err(R::Failed));
+    assert_eq!(sync_back(SyncStop::Stopped, Ok(SyncStart::Started)), Ok(()));
+    assert_eq!(
+        sync_back(SyncStop::Stopped, Ok(SyncStart::NoSession)),
+        Err(R::NotSignedIn)
+    );
+    assert!(R::SyncStopped.words().starts_with("Sync is stopped"));
+}
+
 /// Turn off: with nothing waiting, sync stops (its binding goes) and the folder's registration is removed, once.
 #[test]
 fn turn_off_removes_the_registration_of_the_configured_folder_once_nothing_waits() {
@@ -298,16 +318,20 @@ fn turn_off_removes_the_registration_of_the_configured_folder_once_nothing_waits
     signed_in(&f.engine, "user-a", "a@example.eu");
     let session = f.engine.session_turn();
     let asked = Mutex::new(Vec::new());
-    let done = f.engine.turn_off_explorer_with(session, &|root| {
-        asked.lock().unwrap().push(root.to_path_buf());
-        Ok(())
-    });
+    let done = f.engine.turn_off_explorer_with(
+        session,
+        &|root| {
+            asked.lock().unwrap().push(root.to_path_buf());
+            Ok(())
+        },
+        &never_starts,
+    );
     assert_eq!(done, Ok(()));
     assert_eq!(*asked.lock().unwrap(), [f.root.clone()]);
     assert_eq!(f.removed.take(), [f.root.clone()], "sync stopped first");
 
     // The OS refused: nothing was removed, and the refusal is said.
-    let refused = f.engine.turn_off_explorer_with(session, &|_| Err(()));
+    let refused = f.engine.turn_off_explorer_with(session, &|_| Err(()), &never_starts);
     assert_eq!(refused, Err(ExplorerChangeRefused::Failed));
 }
 
@@ -320,10 +344,14 @@ fn turn_off_is_refused_while_a_change_waits_to_upload() {
     upload_waiting(&f);
     let session = f.engine.session_turn();
     let asked = Mutex::new(0u32);
-    let refused = f.engine.turn_off_explorer_with(session, &|_| {
-        *asked.lock().unwrap() += 1;
-        Ok(())
-    });
+    let refused = f.engine.turn_off_explorer_with(
+        session,
+        &|_| {
+            *asked.lock().unwrap() += 1;
+            Ok(())
+        },
+        &never_starts,
+    );
     assert_eq!(refused, Err(ExplorerChangeRefused::ChangesWait));
     assert_eq!(*asked.lock().unwrap(), 0, "the registration was not asked to go");
     assert!(f.removed.take().is_empty(), "sync was not stopped");
@@ -338,14 +366,18 @@ fn turn_off_and_repair_under_an_earlier_session_change_nothing() {
     let pressed_in = f.engine.session_turn();
     signed_in(&f.engine, "user-a", "a@example.eu");
     let asked = Mutex::new(0u32);
-    let refused = f.engine.turn_off_explorer_with(pressed_in, &|_| {
-        *asked.lock().unwrap() += 1;
-        Ok(())
-    });
+    let refused = f.engine.turn_off_explorer_with(
+        pressed_in,
+        &|_| {
+            *asked.lock().unwrap() += 1;
+            Ok(())
+        },
+        &never_starts,
+    );
     assert_eq!(refused, Err(ExplorerChangeRefused::NotSignedIn));
     assert_eq!(*asked.lock().unwrap(), 0);
     assert_eq!(
-        f.engine.repair_explorer_for(pressed_in),
+        f.engine.repair_explorer_with(pressed_in, &never_starts),
         Err(ExplorerChangeRefused::NotSignedIn)
     );
     assert!(f.removed.take().is_empty(), "neither stopped sync");

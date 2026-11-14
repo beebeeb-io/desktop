@@ -938,6 +938,8 @@ impl<C: CredentialStores> Engine<C> {
     /// through here.
     async fn stop_holding_step(&self) -> SyncStop {
         let stopped = self.stop_runner().await;
+        // No pass runs and none is asked for once sync stopped, for this account or the next.
+        crate::backup::scheduler::clear_pass_flags();
         self.remove_explorer_command();
         stopped
     }
