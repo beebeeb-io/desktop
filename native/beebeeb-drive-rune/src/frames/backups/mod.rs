@@ -100,10 +100,16 @@ pub struct BackupsUi {
     pub page: Page,
     pub dialog: Option<Dialog>,
     /// The authenticator code being typed. Secure: wiped on drop, on close and after use.
-    code: TextEdit,
+    pub(crate) code: TextEdit,
+    /// Whether the password field of "Delete this backup?" still has to take the focus (set when it opens).
+    focus_password: bool,
     /// What is typed in Mail Backup's dialogs. The app password is its one secret.
     pub mail: mail::MailUi,
     intents: Vec<Intent>,
+    /// The section was open at the last poll (it reads again when it opens).
+    was_open: bool,
+    /// What the source refused to do, said in the section for a few seconds.
+    notice: Option<(&'static str, std::time::Instant)>,
 }
 
 impl BackupsUi {
@@ -119,8 +125,11 @@ impl BackupsUi {
             page: Page::Section,
             dialog: None,
             code: TextEdit::new("").secure(),
+            focus_password: false,
             mail: mail::MailUi::default(),
             intents: Vec::new(),
+            was_open: false,
+            notice: None,
         }
     }
 
@@ -443,6 +452,7 @@ impl BackupsUi {
     pub fn ask_delete_device(&mut self, id: &str) {
         self.close_dialog();
         self.dialog = Some(Dialog::DeleteDevice(id.to_string()));
+        self.focus_password = true;
     }
 
     /// How many digits are typed. (The digits themselves leave this type only to be drawn
@@ -473,13 +483,14 @@ impl BackupsUi {
         }
     }
 
-    /// "Delete backup": off until six digits. The engine checks the code; a code it does not
-    /// accept empties the boxes and the dialog stays (the board draws no words for it).
+    /// "Delete backup": off until a password is typed. Deleting a backup proves the ACCOUNT PASSWORD (owner ruling
+    /// Q4: the engine's `backup_delete::delete_backup` steps up with the password, there is no authenticator
+    /// code here). One the engine does not accept empties the field and the dialog stays.
     pub fn delete_device(&mut self) -> bool {
         let Some(Dialog::DeleteDevice(id)) = self.dialog.clone() else {
             return false;
         };
-        if self.code_len() != CODE_LEN {
+        if self.code_len() == 0 {
             return false;
         }
         let accepted = self
@@ -521,6 +532,55 @@ pub fn sync(s: &mut State) {
     s.backups.mail_answered();
 }
 
+/// How long a refusal stays in the section.
+const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(6);
+/// How often the section looks at the engine while it is open (a pass that ends, a switch that was answered).
+const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+
+impl BackupsUi {
+    /// What the source refused to do and has not yet been said for long enough.
+    pub(crate) fn notice(&self) -> Option<&'static str> {
+        self.notice
+            .filter(|(_, at)| at.elapsed() < NOTICE_FOR)
+            .map(|(words, _)| words)
+    }
+}
+
+/// The shell's poll (every frame): a gate or account change drops what the source holds, the section opening reads
+/// again, and the workers' answers come in. `true`: draw again. The source's part never calls the engine and never
+/// waits (`engine_host::backups`).
+pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
+    let open = routed(s);
+    let ui = &mut s.backups;
+    if ui.focus_password && ui.dialog.as_ref().is_some_and(|d| matches!(d, Dialog::DeleteDevice(_))) {
+        ui.focus_password = false;
+        tx.focus(view::PASSWORD_KEY, true);
+    }
+    let Some(source) = ui.source.as_mut() else {
+        return false;
+    };
+    if open && !ui.was_open {
+        source.opened();
+    }
+    ui.was_open = open;
+    let pumped = source.pump();
+    let mut changed = pumped.changed;
+    if let Some(words) = pumped.refusal {
+        ui.notice = Some((words, std::time::Instant::now()));
+        changed = true;
+    }
+    if ui.notice.is_some_and(|(_, at)| at.elapsed() >= NOTICE_FOR) {
+        ui.notice = None;
+        changed = true;
+    }
+    if open && (pumped.busy || ui.notice.is_some()) {
+        tx.wake_after(POLL_EVERY);
+    } else if pumped.busy {
+        tx.wake_after(POLL_EVERY * 4);
+    }
+    changed
+}
+
 /// Backups' keyboard. Esc closes what is open, innermost first: the dialog, the page, then
 /// settings. The code dialog takes digits, Backspace and Enter. Everything else is Rune's.
 pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
@@ -528,7 +588,16 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     ui.mail_answered();
     let m = ev.mods;
     let plain = !m.cmd && !m.ctrl && !m.alt && !m.logo;
-    let code_dialog = matches!(ui.dialog, Some(Dialog::DeleteDevice(_) | Dialog::MailTurnOff));
+    // Delete this backup takes a password in a text field of its own (the field has the keys); Mail Backup's
+    // turn-off still takes the code boxes.
+    if ui.dialog.as_ref().is_some_and(|d| matches!(d, Dialog::DeleteDevice(_)))
+        && ev.key == Key::Enter
+        && ui.code_len() > 0
+    {
+        ui.delete_device();
+        return true;
+    }
+    let code_dialog = matches!(ui.dialog, Some(Dialog::MailTurnOff));
     if code_dialog && plain {
         match &ev.key {
             Key::Text(typed) if typed.chars().all(|c| c.is_ascii_digit()) && !typed.is_empty() => {
@@ -540,11 +609,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
                 return true;
             }
             Key::Enter if ui.code_len() == CODE_LEN => {
-                if ui.dialog == Some(Dialog::MailTurnOff) {
-                    ui.mail_turn_off();
-                } else {
-                    ui.delete_device();
-                }
+                ui.mail_turn_off();
                 return true;
             }
             _ => {}
@@ -594,7 +659,7 @@ fn dw_0739(s: &mut State) {
 fn dw_0742(s: &mut State) {
     dw_0739(s);
     s.backups.ask_delete_device("ipad");
-    s.backups.type_code("51");
+    s.backups.code.replace_text("correct horse");
 }
 
 fn dw_0741(s: &mut State) {

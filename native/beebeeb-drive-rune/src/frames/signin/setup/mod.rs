@@ -371,6 +371,7 @@ impl Ui {
             match outcome.switch {
                 Switch::Notifications => self.results.notifications = now,
                 Switch::OpenAtLogin => self.results.open_at_login = now,
+                Switch::Backup => {}
             }
         }
         match (outcome.done, outcome.now) {
@@ -442,6 +443,7 @@ impl Ui {
                 }
                 self.source.start_backup(&on);
                 self.results.backup = on;
+                self.asked(Switch::Backup);
             }
             Step::Previews => self.source.set_previews(self.size, self.format),
             Step::Explorer => {
@@ -626,6 +628,9 @@ impl Ui {
         }
         for outcome in self.source.take_outcomes() {
             self.take_in(outcome);
+        }
+        if let Some(folders) = self.source.fresh_folders() {
+            self.folders = folders;
         }
         self.explorer = self.source.explorer();
         self.folder = self.source.folder_ask();

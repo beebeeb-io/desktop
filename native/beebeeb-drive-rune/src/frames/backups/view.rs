@@ -3,7 +3,7 @@
 
 use rune::{Cx, El, col, row};
 
-use super::source::{BackupsSource, Device, DeviceKind, FileKind, Folder, NotBackedUp, Status};
+use super::source::{BackupsSource, Device, DeviceKind, FileKind, Folder, NotBackedUp, Part, Status};
 use super::{BackupsUi, Dialog, Page, mail_view};
 use crate::State;
 use crate::frames::settings;
@@ -80,7 +80,12 @@ fn sidebar(t: &Theme) -> El {
 fn status_card(status: &Status, t: &Theme) -> (El, usize) {
     match status {
         Status::AllBackedUp { last, from_this_pc } => {
-            let words = format!("Last backup {last} \u{00B7} {from_this_pc} from this PC");
+            // A source that has no count of the files says nothing of them (never "from this PC" with nothing before it).
+            let words = if from_this_pc.is_empty() {
+                format!("Last backup {last}")
+            } else {
+                format!("Last backup {last} \u{00B7} {from_this_pc} from this PC")
+            };
             let at = "Last backup ".len();
             let card = bk::card(0, t)
                 .child(bk::tile(0, TileTone::Green, &ic::CHECK, 34.0, t))
@@ -97,6 +102,25 @@ fn status_card(status: &Status, t: &Theme) -> (El, usize) {
                         .on_press(|s: &mut State| s.backups.back_up_now()),
                 );
             (card, 1)
+        }
+        Status::Plain { title, sub, can_run } => {
+            let mut card = bk::card(0, t)
+                .child(bk::tile(0, TileTone::Neutral, &ic::SYNC, 34.0, t))
+                .child(
+                    col()
+                        .key("card-0-words")
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .child(cards::head(0, title, t))
+                        .child(bk::sub_rich(0, sub, &[], t)),
+                );
+            if *can_run {
+                card = card.child(
+                    controls::button(0, "Back up now", None, Emphasis::Plain, t)
+                        .on_press(|s: &mut State| s.backups.back_up_now()),
+                );
+            }
+            (card, usize::from(*can_run))
         }
         Status::Running {
             folder,
@@ -191,10 +215,37 @@ fn device_row(index: usize, device: &Device, t: &Theme) -> El {
 
 /// DW-0737, DW-1411. Returns the pane's children and how many buttons they hold.
 fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
-    let (card, mut buttons) = status_card(&source.status(), t);
-    let mut children = vec![shell::heading("Backups", None, t), card];
+    // Nothing is drawn as read before the engine answered: the loading state, then the answer or why there is none.
+    if source.loading() {
+        return (vec![shell::heading("Backups", Some("Reading this PC's backup."), t)], 0);
+    }
+    let refusal = source.refusal();
+    if let (Some(words), true) = (refusal, source.folders().is_empty()) {
+        return (vec![shell::heading("Backups", Some(words), t)], 0);
+    }
+    let (mut children, mut buttons) = if source.wired(Part::Status) {
+        let (card, buttons) = status_card(&source.status(), t);
+        (vec![shell::heading("Backups", None, t), card], buttons)
+    } else {
+        (vec![shell::heading("Backups", None, t)], 0)
+    };
+    if let Some(words) = refusal {
+        children.push(controls::banner_toned(
+            0,
+            true,
+            &ic::WARN_CIRCLE,
+            words,
+            "What is shown below was read before.",
+            None,
+            t,
+        ));
+    }
 
-    let failures = source.not_backed_up().iter().filter(|f| !f.excluded).count();
+    let failures = if source.wired(Part::NotBackedUp) {
+        source.not_backed_up().iter().filter(|f| !f.excluded).count()
+    } else {
+        0
+    };
     if failures > 0 {
         let strong = if failures == 1 {
             "1 item".to_string()
@@ -213,15 +264,18 @@ fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
         rows.push(folder_row(i, folder, buttons, t));
         buttons += usize::from(folder.chosen_by_you);
     }
-    rows.push(
-        lists::item(
-            0,
-            folders.len(),
-            &Item::new(Some(&drive_icons::PLUS), "Add a folder\u{2026}").role(Role::Link),
-            t,
-        )
-        .on_press(|s: &mut State| s.backups.add_folder()),
-    );
+    // "Add a folder" is drawn only where a source adds one (the engine's settings hold the six known folders only).
+    if source.wired(Part::AddFolder) {
+        rows.push(
+            lists::item(
+                0,
+                folders.len(),
+                &Item::new(Some(&drive_icons::PLUS), "Add a folder\u{2026}").role(Role::Link),
+                t,
+            )
+            .on_press(|s: &mut State| s.backups.add_folder()),
+        );
+    }
     let root = source.root();
     children.push(lists::list(
         0,
@@ -233,16 +287,22 @@ fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
         )),
         t,
     ));
-    children.push(controls::banner(
-        0,
-        &ic::CLOUD,
-        "OneDrive may back up Desktop, Documents and Pictures too",
-        "With OneDrive's folder backup on, these folders live in the OneDrive folder: add it with Add a folder\u{2026} to back it up.",
-        None,
-        t,
-    ));
+    if source.wired(Part::AddFolder) {
+        children.push(controls::banner(
+            0,
+            &ic::CLOUD,
+            "OneDrive may back up Desktop, Documents and Pictures too",
+            "With OneDrive's folder backup on, these folders live in the OneDrive folder: add it with Add a folder\u{2026} to back it up.",
+            None,
+            t,
+        ));
+    }
 
-    let devices = source.devices();
+    let devices = if source.wired(Part::Devices) {
+        source.devices()
+    } else {
+        Vec::new()
+    };
     if !devices.is_empty() {
         children.push(lists::list(
             1,
@@ -487,7 +547,10 @@ fn stop_folder(folder: &Folder, first_button: usize, t: &Theme) -> El {
     .modal(false, |s: &mut State| s.backups.close_dialog())
 }
 
-/// DW-0742: deleting a device's backup is a risky action, a code first.
+/// The password field of "Delete this backup?" (focus, tests).
+pub(super) const PASSWORD_KEY: &str = "delete-password";
+
+/// DW-0742: deleting a device's backup is a risky action, the account password first (owner ruling Q4).
 fn delete_device(ui: &BackupsUi, device: &Device, first_button: usize, t: &Theme) -> El {
     let photos = format!("{} photos", thousands(device.photos));
     let rest = format!(
@@ -501,10 +564,20 @@ fn delete_device(ui: &BackupsUi, device: &Device, first_button: usize, t: &Theme
         }
         None => (format!("{photos}{rest}"), Vec::new()),
     };
-    let ready = ui.code_len() == bk::CODE_LEN;
+    let ready = ui.code_len() > 0;
     let body = vec![
         bk::para(0, &words, &mono, t),
-        bk::code_boxes("Authenticator code", ui.code_digits(), t),
+        crate::ui::account_form::field(
+            0,
+            &crate::ui::account_form::Field {
+                label: "Account password",
+                input_key: PASSWORD_KEY,
+                ..Default::default()
+            },
+            &ui.code,
+            |s: &mut State| &mut s.backups.code,
+            t,
+        ),
     ];
     let mut delete = bk::button_md(first_button, "Delete backup", None, Md::Danger(ready), t);
     if ready {
@@ -552,6 +625,14 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         },
         Page::Section => section(source, &t),
     };
+    let mut children = children;
+    if let (Page::Section, Some(words)) = (&ui.page, ui.notice()) {
+        // What the source refused to do (a folder that did not switch): said in the section, for a few seconds.
+        children.insert(
+            1,
+            controls::banner_toned(1, true, &ic::WARN_CIRCLE, words, "Nothing was changed.", None, &t),
+        );
+    }
     let overlay = match &ui.dialog {
         Some(
             Dialog::MailTurnOn

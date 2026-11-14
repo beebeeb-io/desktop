@@ -22,8 +22,10 @@
 //!   shell's gate lets the main window through ([`FirstRun`]).
 //!
 //! What it does NOT answer (each is a step that keeps its place and says it is not in this version yet,
-//! [`SetupSource::available`], never a step that looks done): a passkey, the app lock, backing up folders,
-//! previews. See each method's own line below.
+//! [`SetupSource::available`], never a step that looks done): a passkey, the app lock, previews. Backing up
+//! folders (step 3) is answered once the engine read this PC's known folders (`SetupEngine::backup_choices`, on a
+//! worker); each chosen folder is then switched on through `Engine::set_backup_folder`. See each method's own
+//! line below.
 //!
 //! Session rule: the source is made for one session of one account ([`SetupEngine::stamp`] when it was made). A
 //! press under any other session or account sends nothing; a change is sent for the session of the press; an
@@ -289,7 +291,34 @@ pub trait SetupEngine: Send + Sync + 'static {
     fn keep_folder(&self, folder: &Path) -> Result<bool, SetupRefused>;
     /// Ask Windows again for the folder's entry in File Explorer; never stops or starts sync. BLOCKS.
     fn ask_explorer_again(&self);
+    /// Stop sync and wait until it ended (`Engine::stop`). BLOCKS.
+    fn stop_sync(&self);
+    /// The known folders this PC has, for step 3 (`Engine::backups_overview`). BLOCKS (a disk walk). Empty when
+    /// they cannot be read: the step then says it is not available.
+    fn backup_choices(&self) -> Vec<BackupChoice> {
+        Vec::new()
+    }
+    /// Switch one known folder's backup on (`Engine::set_backup_folder`). BLOCKS. `false`: it did not happen.
+    fn switch_backup_on(&self, _key: &str) -> bool {
+        false
+    }
+    /// Whether this engine reads step 3's folders at all (the real one does; a fake that does not asks nothing).
+    fn reads_backup_choices(&self) -> bool {
+        false
+    }
 }
+
+/// One folder step 3 offers: the engine's key, its name, whether it starts on, and a bounded count of its files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupChoice {
+    pub key: String,
+    pub name: String,
+    pub on: bool,
+    pub items: Option<u64>,
+}
+
+/// The folders step 3 starts switched on (the board: Desktop, Documents, Pictures).
+const BACKUP_DEFAULT_ON: [&str; 3] = ["desktop", "documents", "pictures"];
 
 impl<C: CredentialStores> SetupEngine for Engine<C> {
     fn view(&self) -> SyncView {
@@ -331,6 +360,30 @@ impl<C: CredentialStores> SetupEngine for Engine<C> {
     fn ask_explorer_again(&self) {
         let _ = self.add_to_file_explorer_again();
     }
+    fn backup_choices(&self) -> Vec<BackupChoice> {
+        use beebeeb_engine::app::backups_api::FolderState;
+        self.backups_overview()
+            .map(|overview| {
+                overview
+                    .folders
+                    .into_iter()
+                    .filter(|row| row.state != FolderState::Unavailable)
+                    .map(|row| BackupChoice {
+                        key: row.key.to_string(),
+                        name: row.name.to_string(),
+                        on: row.on || BACKUP_DEFAULT_ON.contains(&row.key),
+                        items: row.items,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    fn switch_backup_on(&self, key: &str) -> bool {
+        self.set_backup_folder(key, true).is_ok()
+    }
+    fn reads_backup_choices(&self) -> bool {
+        true
+    }
 }
 
 /// What the adapter asks of the shell around it.
@@ -369,6 +422,8 @@ enum Answer {
     Retried,
     /// A write of the unsaved folder was tried.
     Saved,
+    /// The folders step 3 offers, read on a worker.
+    Backups(Vec<BackupChoice>),
 }
 
 /// The first run on the real engine. See the module's doc.
@@ -401,6 +456,10 @@ pub struct EngineSetupSource<E: SetupEngine> {
     #[cfg(test)]
     spawned: usize,
     outcomes: Vec<Outcome>,
+    /// The folders step 3 offers (empty until the read answered, and when it could not read them).
+    backups: Vec<BackupChoice>,
+    /// A read of them arrived and has not been handed to the window yet.
+    backups_fresh: bool,
     changed: bool,
     answers: mpsc::Sender<(Stamp, Answer)>,
     inbox: mpsc::Receiver<(Stamp, Answer)>,
@@ -451,13 +510,28 @@ impl<E: SetupEngine> EngineSetupSource<E> {
             #[cfg(test)]
             spawned: 0,
             outcomes: Vec::new(),
+            backups: Vec::new(),
+            backups_fresh: false,
             changed: false,
             answers,
             inbox,
         };
         source.look_after_the_grace();
         source.read_folder();
+        source.read_backups();
         source
+    }
+
+    /// Step 3's folders, read on a worker (a disk walk); the window gets them with `fresh_folders`.
+    fn read_backups(&mut self) {
+        if !super::backups::TURNED_ON || !self.engine.reads_backup_choices() {
+            return;
+        }
+        self.ask(
+            "first-run-backups",
+            |engine, _| Answer::Backups(engine.backup_choices()),
+            Some(Answer::Backups(Vec::new())),
+        );
     }
 
     /// A start was asked for now: the view may say "not asked" for a moment longer. When the grace is over the
@@ -530,7 +604,8 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
             Step::Explorer => self.hooks.explorer_step,
             Step::Notifications | Step::Login => true,
             // Passkey, Lock, Backup, Previews: see the methods below. Done is not a step of the list.
-            Step::Passkey | Step::Lock | Step::Backup | Step::Previews | Step::Done => false,
+            Step::Backup => super::backups::TURNED_ON && !self.backups.is_empty(),
+            Step::Passkey | Step::Lock | Step::Previews | Step::Done => false,
         }
     }
 
@@ -746,6 +821,10 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
                 Answer::Looked => {}
                 Answer::Retried => self.retrying = false,
                 Answer::Saved => self.saving = false,
+                Answer::Backups(choices) => {
+                    self.backups = choices;
+                    self.backups_fresh = true;
+                }
             }
         }
         let unsaved = self.folder_unsaved();
@@ -761,15 +840,52 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
         changed
     }
 
+    fn folders(&self) -> Vec<Folder> {
+        self.backups
+            .iter()
+            .map(|choice| Folder {
+                name: choice.name.clone(),
+                // A bounded count of the files; the engine has no size of a folder (never a guess).
+                summary: choice.items.map_or_else(String::new, |n| format!("{n} items")),
+                on: choice.on,
+            })
+            .collect()
+    }
+
+    fn fresh_folders(&mut self) -> Option<Vec<Folder>> {
+        std::mem::take(&mut self.backups_fresh).then(|| self.folders())
+    }
+
+    /// "Turn on backup" (step 3): each chosen folder is switched on through the engine, on a worker, for this
+    /// first run's session. The answer says whether every one was; a folder that did not switch is said in "You're
+    /// set up" ("Couldn't change backup"), never drawn as on.
+    fn start_backup(&mut self, folders: &[String]) {
+        let keys: Vec<String> = self
+            .backups
+            .iter()
+            .filter(|choice| folders.contains(&choice.name))
+            .map(|choice| choice.key.clone())
+            .collect();
+        let not_done = Outcome {
+            switch: Switch::Backup,
+            done: false,
+            now: None,
+        };
+        self.ask(
+            "first-run-backup",
+            move |engine, _| {
+                let all = !keys.is_empty() && keys.iter().all(|key| engine.switch_backup_on(key));
+                if !all {
+                    log("first run: a backup folder was not switched on");
+                }
+                Answer::Switched(Outcome { done: all, ..not_done })
+            },
+            Some(Answer::Switched(not_done)),
+        );
+    }
+
     // ---- Not bound. Each belongs to a step this source says is not available (`available`): the step says so
     // and its controls are not drawn, so nothing reaches these; each does nothing and claims nothing.
-
-    /// Backing up folders (step 3): Backups is switched off in the running app (`engine_host::backups::TURNED_ON`),
-    /// so a backup turned on here could not be seen or stopped afterwards. Binds with that section.
-    fn folders(&self) -> Vec<Folder> {
-        Vec::new()
-    }
-    fn start_backup(&mut self, _folders: &[String]) {}
 
     /// Previews (step 4, and the compare view): the engine has no function that measures a preview, estimates
     /// the account's photos, or hands out one of them. No weight, no estimate and no limit is made up.
