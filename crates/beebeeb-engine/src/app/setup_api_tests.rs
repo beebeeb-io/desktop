@@ -1,7 +1,7 @@
 //! The first run's settings and the sync-folder check with the engine's own parts: a real settings file in a
 //! folder of the test's own (`CONFIG_DIR_OVERRIDE`), a real handle, the real disk. Every name is invented.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::super::{Engine, EngineConfig};
 use super::decide_first_run;
@@ -10,6 +10,11 @@ use crate::host::ChannelHost;
 use crate::identity::REAL;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::sync_folder_rule::SyncFolderRefused;
+
+/// A full path on this OS (the settings drop any other when they are read) that nothing makes.
+fn invented(name: &str) -> PathBuf {
+    std::env::temp_dir().join("invented-sync").join(name)
+}
 
 fn file() -> DesktopConfig {
     DesktopConfig::load_for(&REAL).expect("the settings read")
@@ -38,7 +43,7 @@ fn a_new_pc_has_its_first_run_to_do_and_it_is_decided_once() {
         // Quitting in the middle of the first run, after the first start kept its folder: the next open still
         // has the first run to do. The settings said so already; a folder that came later does not change it.
         DesktopConfig::update_for(&REAL, |config| {
-            config.sync_root = Some(PathBuf::from("/invented/Beebeeb"));
+            config.sync_root = Some(invented("Beebeeb"));
             (true, ())
         })
         .unwrap();
@@ -53,7 +58,7 @@ fn an_08x_install_never_sees_the_first_run() {
     CONFIG_DIR_OVERRIDE.sync_scope(dir.path().to_path_buf(), || {
         // What 0.8.x left: a sync folder, and no word about the native first run.
         DesktopConfig::update_for(&REAL, |config| {
-            config.sync_root = Some(PathBuf::from("/invented/Beebeeb"));
+            config.sync_root = Some(invented("Beebeeb"));
             (true, ())
         })
         .unwrap();
@@ -81,9 +86,9 @@ fn the_sync_folder_is_kept_once_and_the_first_run_reads_its_flag() {
         let (engine, _) = engine();
         assert_eq!(engine.settings_sync_root(), Ok(None));
         assert_eq!(engine.first_run_due(), Ok(true));
-        assert_eq!(engine.keep_sync_root(Path::new("/invented/first")), Ok(true));
-        assert_eq!(engine.keep_sync_root(Path::new("/invented/second")), Ok(false));
-        assert_eq!(engine.settings_sync_root(), Ok(Some(PathBuf::from("/invented/first"))));
+        assert_eq!(engine.keep_sync_root(&invented("first")), Ok(true));
+        assert_eq!(engine.keep_sync_root(&invented("second")), Ok(false));
+        assert_eq!(engine.settings_sync_root(), Ok(Some(invented("first"))));
         // Keeping a folder says nothing about the first run.
         assert_eq!(file().native_setup_done, None);
         assert_eq!(engine.first_run_due(), Ok(true));
@@ -104,7 +109,7 @@ fn the_folder_check_asks_the_real_disk_and_this_computer() {
     let (dir, place) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     CONFIG_DIR_OVERRIDE.sync_scope(dir.path().to_path_buf(), || {
         let (engine, state_dir) = engine();
-        let check = |folder: &Path| engine.check_sync_folder(folder);
+        let check = |folder: &std::path::Path| engine.check_sync_folder(folder);
 
         let folder = place.path().join("Beebeeb");
         assert_eq!(check(&folder), Ok(()), "a folder that is not there yet");
@@ -129,9 +134,15 @@ fn the_folder_check_asks_the_real_disk_and_this_computer() {
             "the settings' folder"
         );
 
-        assert_eq!(check(Path::new("Beebeeb")), Err(SyncFolderRefused::NotAFullPath));
-        assert_eq!(check(Path::new("/")), Err(SyncFolderRefused::System));
-        assert_eq!(check(Path::new("/usr/share/sync")), Err(SyncFolderRefused::System));
+        assert_eq!(
+            check(std::path::Path::new("Beebeeb")),
+            Err(SyncFolderRefused::NotAFullPath)
+        );
+        assert_eq!(check(std::path::Path::new("/")), Err(SyncFolderRefused::System));
+        assert_eq!(
+            check(std::path::Path::new("/usr/share/sync")),
+            Err(SyncFolderRefused::System)
+        );
         if let Some(home) = dirs::home_dir() {
             assert_eq!(check(&home), Err(SyncFolderRefused::Home));
             // The real app never syncs into the test build's folder.

@@ -127,7 +127,8 @@ fn an_08x_install_never_sees_the_first_run() {
     let live = live_on(&engine, messages);
     in_own_settings(|| {
         DesktopConfig::update_for(&TEST, |config| {
-            config.sync_root = Some(PathBuf::from("/invented/home/Beebeeb"));
+            // A full path on this OS: the settings drop any other when they are read.
+            config.sync_root = Some(std::env::temp_dir().join("invented-home").join("Beebeeb"));
             (true, ())
         })
         .expect("written");
@@ -186,16 +187,19 @@ fn the_folder_calls_reach_the_engine() {
         );
         // The rule is the engine's: the settings' own folder is Beebeeb's data.
         let settings = DesktopConfig::path_for(&TEST).expect("the settings file's place");
-        assert_eq!(
-            SetupEngine::check_folder(&*engine, settings.parent().expect("its folder")),
-            Err(SyncFolderRefused::OwnData)
+        let refused = SetupEngine::check_folder(&*engine, settings.parent().expect("its folder"));
+        // (Windows' temp folder is inside the folder apps keep their data in, which the rule says first.)
+        assert!(
+            matches!(refused, Err(SyncFolderRefused::OwnData | SyncFolderRefused::Home)),
+            "{refused:?}"
         );
         assert_eq!(
             SetupEngine::check_folder(&*engine, Path::new("not-a-full-path")),
             Err(SyncFolderRefused::NotAFullPath)
         );
         // Written once: the first folder stays.
-        let (first, second) = (PathBuf::from("/invented/first"), PathBuf::from("/invented/second"));
+        let invented = std::env::temp_dir().join("invented-sync");
+        let (first, second) = (invented.join("first"), invented.join("second"));
         assert_eq!(SetupEngine::keep_folder(&*engine, &first), Ok(true));
         assert_eq!(SetupEngine::keep_folder(&*engine, &second), Ok(false));
         assert_eq!(SetupEngine::settings_folder(&*engine), Ok(Some(first.clone())));
