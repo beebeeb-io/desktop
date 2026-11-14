@@ -77,6 +77,8 @@ mod backups;
 mod files;
 mod search;
 mod shares;
+mod tracking;
+pub use tracking::{MyActivity, MyActivityEvent};
 mod upload;
 
 #[cfg(any(test, feature = "test-support"))]

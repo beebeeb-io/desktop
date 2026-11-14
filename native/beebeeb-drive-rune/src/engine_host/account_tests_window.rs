@@ -138,7 +138,7 @@ fn the_running_apps_security_page_says_what_is_known_and_guesses_nothing() {
     }
     // Nothing that is not bound can be pressed: no switch, and a press on such a row changes nothing.
     assert!(!has(&rt, "item-1-0-switch"));
-    for row in ["item-0-0", "item-0-1", "item-3-0", "item-4-0"] {
+    for row in ["item-0-0", "item-0-1"] {
         click(&mut rt, row);
         assert!(shows(&rt, "Security score not known yet"), "{row}: the page stays");
         assert!(!has(&rt, "dlg") && !has(&rt, "not-built"), "{row}");

@@ -186,7 +186,7 @@ fn factors_that_came_back_empty_are_no_score_either() {
 fn nothing_that_is_not_bound_can_be_pressed() {
     let mut rt = page_knowing(nothing_known, true);
     // Pages nothing answers for: their rows are text that says so.
-    for row in ["item-0-0", "item-0-1", "item-0-2", "item-1-2", "item-2-0", "item-4-0"] {
+    for row in ["item-0-0", "item-0-1", "item-0-2", "item-2-0"] {
         assert_eq!(info(&rt, row).role, "listitem", "{row}");
         assert!(
             name(&rt, row).ends_with("Not available yet"),
@@ -196,8 +196,29 @@ fn nothing_that_is_not_bound_can_be_pressed() {
         click(&mut rt, row);
         assert_eq!(rt.state.account.pane, Pane::Security, "{row}: a press leads nowhere");
     }
-    // Deleting is not drawn as a danger while it leads nowhere.
-    assert_eq!(name(&rt, "item-4-0"), "Delete your Beebeeb account, Not available yet");
+    // Deleting and approving have no flow here: each says so, with the web as the way (never a row that leads
+    // nowhere, never drawn as a danger).
+    assert!(
+        name(&rt, "item-4-0").starts_with("Delete your account on the web"),
+        "{}",
+        name(&rt, "item-4-0")
+    );
+    assert_eq!(info(&rt, "item-4-0").role, "link");
+    assert!(
+        name(&rt, "item-1-2").ends_with("Not available in this version yet. Approve on the web."),
+        "{}",
+        name(&rt, "item-1-2")
+    );
+    assert_eq!(info(&rt, "item-1-2").role, "listitem");
+    click(&mut rt, "item-1-2");
+    assert_eq!(rt.state.account.pane, Pane::Security, "a press leads nowhere");
+    assert_eq!(asked(&rt), Vec::new());
+    click(&mut rt, "item-4-0");
+    assert_eq!(
+        asked(&rt),
+        vec![crate::frames::settings::Intent::Web("delete-account")],
+        "the web's page, by name"
+    );
     // App lock that cannot be set: no switch, no delay.
     assert!(find(&rt, "item-1-0-switch").is_none() && find(&rt, "item-1-0-pop").is_none());
     assert_eq!(says(&rt, "item-1-0-value"), "Not available yet");
