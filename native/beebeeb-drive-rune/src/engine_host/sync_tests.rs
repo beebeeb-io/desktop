@@ -317,3 +317,21 @@ fn nothing_reads_local_state_before_the_server_binding() {
     assert!(entries.contains("holds_session_token()"), "{entries}");
     assert!(!entries.contains("load_"), "the count reads a value:\n{entries}");
 }
+
+/// Sync starts with the keys in memory, a locked screen included, and under no other gate.
+#[test]
+fn sync_may_start_behind_a_locked_screen_and_never_without_the_keys() {
+    let may: Vec<EngineGate> = [
+        EngineGate::Ready,
+        EngineGate::ScreenLocked,
+        EngineGate::Locked,
+        EngineGate::SignedOut,
+        EngineGate::NeedsRecoveryPhrase,
+        EngineGate::NoPlan,
+        EngineGate::KeyStoreUnavailable,
+    ]
+    .into_iter()
+    .filter(|gate| may_start(*gate))
+    .collect();
+    assert_eq!(may, [EngineGate::Ready, EngineGate::ScreenLocked]);
+}

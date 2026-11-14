@@ -69,6 +69,13 @@ impl StartWorker {
     }
 }
 
+/// May sync be asked to start under this gate? Sync is the app's work, not a person's action: it starts behind a
+/// locked screen too (core's lock contract, section 1: "the stored key is loaded, sync starts, the app window
+/// opens screen-locked"). A closed vault, a session without its key and no session have no key: nothing starts.
+pub fn may_start(gate: EngineGate) -> bool {
+    matches!(gate, EngineGate::Ready | EngineGate::ScreenLocked)
+}
+
 /// Start sync into the folder the settings name, else the identity's suggestion (`Engine::sync_root`), and keep its
 /// name for the modal. Blocks: a `start-sync` worker's. The log line names the refusal's kind only.
 pub fn start_sync_now<C: CredentialStores>(engine: &Engine<C>, folder: &Mutex<Option<String>>) {

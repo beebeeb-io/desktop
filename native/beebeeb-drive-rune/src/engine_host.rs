@@ -369,12 +369,8 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     /// `Ok` means "asked"; the view says where the start got to, and a refusal opens the modal. Without a session
     /// nothing is asked.
     fn start_sync(&self) -> Result<(), actions::ActionError> {
-        // Sync is the app's work, not a person's action: it starts behind a locked screen too (core's lock
-        // contract, section 1). A closed vault has no key: nothing starts.
-        if !matches!(self.engine.view().gate, EngineGate::Ready | EngineGate::ScreenLocked) {
-            return Err(actions::ActionError::NotAvailable(
-                "not signed in with the keys in memory",
-            ));
+        if !sync::may_start(self.engine.view().gate) {
+            return Err(actions::ActionError::NotAvailable("not signed in and unlocked"));
         }
         let (engine, folder) = (self.engine.clone(), self.starts.folder());
         self.starts

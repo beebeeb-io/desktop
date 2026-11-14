@@ -347,7 +347,10 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     // The first sync: the snapshot's rows land with their real, nested names.
     assert_eq!(host.engine.start_sync(sync_root.clone()), Ok(SyncStart::Started));
     assert_eq!(host.engine.start_sync(sync_root.clone()), Ok(SyncStart::AlreadyRunning));
-    wait_for("the first snapshot", || names(&host, None).len() == 3);
+    // The snapshot's rows land one after another: the last one is the folder's child.
+    wait_for("the first snapshot", || {
+        names(&host, None).len() == 3 && names(&host, Some(DOCS)).len() == 1
+    });
     // The Backups root first, then by name.
     assert_eq!(names(&host, None), ["Backups", "Docs", "apple.txt"]);
     assert_eq!(names(&host, Some(DOCS)), ["Report.pdf"]);
@@ -471,6 +474,11 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     assert_eq!(again.engine.lock_screen(), Ok(()));
     assert_eq!(again.engine.gate(), GateState::ScreenLocked);
     assert!(again.engine.is_syncing());
+    // The lock moved the session's turn on; the work is not refused for it: the engine keeps asking the server.
+    let synced_at_the_lock = sync_requests();
+    wait_for("the engine asks the server after the screen was locked by hand", || {
+        sync_requests() > synced_at_the_lock
+    });
     assert_ne!(
         again.engine.session_turn(),
         asked,

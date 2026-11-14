@@ -334,13 +334,14 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
         );
     }
 
-    /// The lock screen's Unlock. The session's turn and the account are read HERE, at the press: a yes that
-    /// outlives a lock, an unlock, a sign-out or another sign-in opens nothing (the engine refuses a turn that
-    /// moved on; an account that changed is not even asked). Only a verified prompt reaches the engine.
+    /// The lock screen's Unlock. The session's turn is read HERE, at the press: a yes that outlives a lock, an
+    /// unlock, a sign-out or another account's sign-in opens nothing (the engine refuses a turn that moved on,
+    /// under the session's lock; every one of those moves it, so the turn names the account too). Only a
+    /// verified prompt reaches the engine.
     fn begin_hello(&mut self) {
         let attempt = self.next_attempt(Wait::Hello);
         self.hello_up = None;
-        let (asked_at, account) = (self.engine.session_turn(), self.engine.user_id());
+        let asked_at = self.engine.session_turn();
         let answer = move |event| Answer {
             wait: Wait::Hello,
             attempt,
@@ -356,10 +357,7 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
             let outcome = match result {
                 HelloResult::Verified => {
                     let still_asked = attempts[Wait::Hello as usize].load(Ordering::SeqCst) == attempt;
-                    if still_asked
-                        && engine.user_id() == account
-                        && engine.unlock_screen_platform_verified(asked_at).is_ok()
-                    {
+                    if still_asked && engine.unlock_screen_platform_verified(asked_at).is_ok() {
                         HelloOutcome::Succeeded(NextAfterSignIn::Drive)
                     } else {
                         // Late, or refused by core's rule: nothing opened, and the button works again.

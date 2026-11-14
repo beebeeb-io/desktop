@@ -395,3 +395,33 @@ fn windows_hello_starts_by_itself_once_per_lock_when_the_window_comes_forward() 
     rt.update(|s, _| super::on_window_focus(s, true));
     assert_eq!(script.count("hello"), 0);
 }
+
+/// Sync is the app's work: the shell asks for it when a lock closes the gate too (the engine starts it behind a
+/// locked screen and refuses it for a closed vault).
+#[test]
+fn the_shell_asks_for_sync_when_the_gate_closes_by_a_lock() {
+    use crate::shell::actions::FixtureCall;
+    let engine = Arc::new(FixtureEngine::ready());
+    engine.set_gate(GateState::SignedOut);
+    let state = state::init_with(Shell::fixture_on(engine.clone(), Arc::new(FakePlatform::default())));
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, registry::view, (1278.0, 798.0), env);
+    rt.poll = Some(host::poll);
+    rt.frame(0.0);
+    settle(&mut rt);
+    let starts = |engine: &FixtureEngine| engine.calls().iter().filter(|c| **c == FixtureCall::StartSync).count();
+    let before = starts(&engine);
+    // The app starts with a stored session: the first gate the window sees after "signed out" is the lock.
+    engine.set_gate(GateState::Locked);
+    rt.frame(1.0);
+    settle(&mut rt);
+    assert_eq!(starts(&engine), before + 1, "asked once, behind the lock");
+    // A gate that closes for another reason asks for nothing.
+    engine.set_gate(GateState::NoPlan);
+    rt.frame(1.0);
+    settle(&mut rt);
+    assert_eq!(starts(&engine), before + 1);
+}

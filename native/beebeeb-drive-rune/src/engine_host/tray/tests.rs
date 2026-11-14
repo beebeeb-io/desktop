@@ -567,6 +567,36 @@ fn a_real_account_from_signed_out_to_locked_shows_what_the_engine_knows() {
     );
     assert_no_sample_data(&locked, "locked");
     assert!(live.tray_inputs().locked);
+    assert_eq!(
+        live.start_sync(),
+        Err(crate::shell::actions::ActionError::NotAvailable(
+            "not signed in and unlocked"
+        )),
+        "a closed vault starts no sync"
+    );
+
+    // The password opens it; then the SCREEN locks: the keys stay, the b says locked, and still nothing names a
+    // file or is read for the flyout.
+    assert_eq!(
+        engine.unlock_vault_with_password(Zeroizing::new(PASSWORD.into())),
+        Ok(beebeeb_engine::signin::gate::NextAfterSignIn::Drive)
+    );
+    assert!(!live.tray_inputs().locked);
+    assert_eq!(engine.lock_screen(), Ok(()));
+    assert_eq!(engine.gate(), EngineGate::ScreenLocked);
+    assert!(live.tray_inputs().locked, "a locked screen is the b's locked too");
+    let screen_locked = tray.snapshot();
+    assert_eq!(
+        (&screen_locked.status, &screen_locked.changes),
+        (&Status::LockedSyncOff, &Changes::Hidden(Hidden::Locked)),
+        "sync does not run in this test: never \"sync keeps running\" without a running engine"
+    );
+    let facts = tray.facts();
+    assert!(
+        facts.local.is_none(),
+        "behind a locked screen the database is not read for the flyout"
+    );
+    assert_no_sample_data(&screen_locked, "screen locked");
 }
 
 /// The b and the flyout on a running engine, signed in and unlocked on the fake API (review of #334, P2-1):
