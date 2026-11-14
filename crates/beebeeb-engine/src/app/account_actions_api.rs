@@ -90,7 +90,7 @@ impl ActionError {
     }
 }
 
-fn from_call(error: AccountCallError) -> ActionError {
+pub(super) fn from_call(error: AccountCallError) -> ActionError {
     match error {
         AccountCallError::NotSignedIn => ActionError::NotSignedIn,
         AccountCallError::Offline => ActionError::Offline,
@@ -209,7 +209,7 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// The token and the generation of the session in memory, taken under one lock. The copy wipes itself.
-    fn own_session(&self) -> Result<(Zeroizing<String>, SessionGeneration), ActionError> {
+    pub(super) fn own_session(&self) -> Result<(Zeroizing<String>, SessionGeneration), ActionError> {
         let pair = {
             let guard = self.acct.session.lock().map_err(|_| ActionError::NotSignedIn)?;
             let current = guard.as_ref().ok_or(ActionError::NotSignedIn)?;
@@ -223,7 +223,7 @@ impl<C: CredentialStores> Engine<C> {
 
     /// How one call ended, for the engine's run of 401s: a 401 advances it, an answer clears it, any other failure
     /// leaves it. Only while the session in memory is still `session`; `false`: it moved on, nothing was noted.
-    fn note_action(&self, session: SessionGeneration, failed_as: Option<ActionError>) -> bool {
+    pub(super) fn note_action(&self, session: SessionGeneration, failed_as: Option<ActionError>) -> bool {
         self.acct
             .while_session_is(&self.writes, session, |_| match failed_as {
                 None => self.acct.auth_health.note_result(None),

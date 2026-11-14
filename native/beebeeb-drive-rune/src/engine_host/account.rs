@@ -78,6 +78,8 @@ mod sign_out_session;
 mod tests;
 #[path = "account_twofactor.rs"]
 mod twofactor;
+#[path = "account_twofactor_status.rs"]
+mod twofactor_status;
 #[path = "account_values.rs"]
 mod values;
 
@@ -221,6 +223,8 @@ pub struct EngineAccountSource<C: CredentialStores> {
     actions: actions::Actions<C>,
     /// Sign-in activity (`account_activity.rs`).
     activity: activity::ActivityPart<C>,
+    /// Two-factor's added / last used / backup codes (`account_twofactor_status.rs`).
+    two_factor_status: twofactor_status::StatusPart<C>,
     passkeys: PasskeyCalls<C>,
     notices: Line,
     /// How sign-outs ended that the person has not been told: answered after they left Devices and sessions,
@@ -251,6 +255,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         Self {
             actions: actions::Actions::new(engine.clone()),
             activity: activity::ActivityPart::new(engine.clone()),
+            two_factor_status: twofactor_status::StatusPart::new(engine.clone()),
             passkeys: PasskeyCalls::new(engine.clone()),
             engine,
             overview: None,
@@ -705,6 +710,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
 
     fn opened(&mut self, pane: Pane) {
         self.activity.opened(pane);
+        self.two_factor_status.opened(pane);
         self.password.forget();
         self.passkeys.opened(pane);
         self.showing = Kind::of(pane);
@@ -741,6 +747,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
 
     fn closed(&mut self) {
         self.activity.closed();
+        self.two_factor_status.closed();
         self.password.forget();
         self.passkeys.closed();
         self.showing = None;
@@ -831,7 +838,8 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         changed |= self.notices.len() + self.later.len() != before;
         // The other parts: sign-in activity, and the confirmations and waits of what the window asks to do.
         let (log_changed, log_busy, log_wake) = self.activity.pump();
-        changed |= log_changed | self.actions.pump();
+        let (status_changed, status_busy) = self.two_factor_status.pump();
+        changed |= log_changed | status_changed | self.actions.pump();
         let wake_in = match (wake_in, log_wake) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -848,6 +856,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
                 || self.sessions_reads.reading.is_some()
                 || !self.changing.is_empty()
                 || log_busy
+                || status_busy
                 || self.actions.busy()
                 || passkeys_busy,
             // Nothing wakes the window when the engine's flag clears: look again while a pane says so.

@@ -245,6 +245,10 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             };
             if changed {
                 crate::frames::account::source::AccountSource::reload(self, Pane::Account);
+                if !matches!(kind, CallKind::ConfirmEmail) {
+                    // Two-factor was changed: what the status holds is out of date.
+                    self.two_factor_status.stale();
+                }
             }
             return Some((kind, answered));
         }
@@ -268,8 +272,12 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         })
     }
 
-    /// Two-factor as far as it is known: on or off from the profile's mark, and nothing invented.
+    /// Two-factor as far as it is known: Beebeeb's own status when it was read for this session (added, last used,
+    /// backup codes), else on or off from the profile's mark, and nothing invented.
     pub(super) fn two_factor_known(&self) -> TwoFactor {
+        if let Some(status) = self.two_factor_status.known() {
+            return status;
+        }
         let on = self
             .current(&self.overview)
             .and_then(|overview| overview.two_factor)
