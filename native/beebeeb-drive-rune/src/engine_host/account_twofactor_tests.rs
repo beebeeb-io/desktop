@@ -58,6 +58,10 @@ fn fake() -> Fake {
                 std::thread::sleep(Duration::from_millis(delay.load(Ordering::SeqCst)));
                 Reply::ok(json!({}))
             }
+            "POST /api/v1/auth/2fa/backup-codes" => {
+                std::thread::sleep(Duration::from_millis(delay.load(Ordering::SeqCst)));
+                Reply::ok(json!({ "backup_codes": ["11111111", "22222222"] }))
+            }
             "POST /api/v1/auth/verify-email" if verify_in.load(Ordering::SeqCst) => Reply::ok(json!({})),
             "POST /api/v1/auth/verify-email" => Reply::json(400, json!({ "error": "invalid_code" })),
             "POST /api/v1/me/email/resend" => match resend_in.load(Ordering::SeqCst) {
@@ -374,4 +378,28 @@ fn a_confirmed_email_change_replaces_the_mirrored_address_and_the_answer_is_not_
         Some((CallKind::ConfirmEmail, Answered::Code(CodeRefused::Wrong)))
     ));
     assert_eq!(engine.account_email().as_deref(), Some("new.address@example.eu"));
+}
+
+/// Review of desktop#424, delta: new backup codes Beebeeb already made reach the pane when the screen locks while the
+/// request is out (the session's turn moves, the account is the same); the codes are shown once and then wiped. The
+/// first test's other half: another account's, or an ended session's, answer is still dropped (the test above).
+#[test]
+fn new_backup_codes_reach_the_pane_when_the_screen_locks_while_the_request_is_out() {
+    let fake = fake();
+    let engine = signed_in(&fake);
+    let mut source = Source::new(engine.clone());
+    fake.disable_delay_ms.store(500, Ordering::SeqCst);
+    assert!(source.start_call(CallKind::NewBackupCodes, "123456", ""));
+    std::thread::sleep(Duration::from_millis(150));
+    engine.lock_screen().expect("an open lock locks the screen");
+    let (kind, answered) = answer(&mut source).expect("the codes Beebeeb made are answered, not wiped unseen");
+    assert_eq!(kind, CallKind::NewBackupCodes);
+    let Answered::Codes(codes) = answered else {
+        panic!("the codes reach the pane");
+    };
+    assert_eq!(codes.len(), 2);
+    assert!(
+        source.call_answer().is_none(),
+        "shown once: nothing is held for a second look"
+    );
 }

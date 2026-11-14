@@ -214,6 +214,7 @@ fn new_backup_codes_reach_the_person_when_the_turn_moves_while_the_request_is_ou
     let engine = engine(&base);
     let session = signed_in(&engine);
     *engine.acct.auth_email.lock().unwrap() = Some("a@example.eu".into());
+    engine.remember_session_user_id(Some("user-a".into()));
     let moved = |engine: &TestEngine| {
         let _writes = engine.writes.write().unwrap();
         engine
@@ -245,8 +246,25 @@ fn new_backup_codes_reach_the_person_when_the_turn_moves_while_the_request_is_ou
         let call = scope.spawn(|| engine.two_factor_new_backup_codes(session, "123456"));
         waited(&seen);
         moved(&engine);
-        *engine.acct.auth_email.lock().unwrap() = Some("b@example.eu".into());
+        // Another account signed in under the same address: told apart by its id, never by the email.
+        engine.remember_session_user_id(Some("user-b".into()));
         call.join().unwrap()
     });
+    assert_eq!(answer.err(), Some(AccountFlowFailure::NotSignedIn));
+
+    // The session Beebeeb no longer accepts (401 again and again) while the request was out: dropped too.
+    engine.remember_session_user_id(Some("user-a".into()));
+    let session = engine.session_turn();
+    seen.lock().unwrap().clear();
+    let answer = std::thread::scope(|scope| {
+        let call = scope.spawn(|| engine.two_factor_new_backup_codes(session, "123456"));
+        waited(&seen);
+        moved(&engine);
+        for _ in 0..3 {
+            engine.note_call_for_test(true);
+        }
+        call.join().unwrap()
+    });
+    assert!(engine.account_session_refused());
     assert_eq!(answer.err(), Some(AccountFlowFailure::NotSignedIn));
 }

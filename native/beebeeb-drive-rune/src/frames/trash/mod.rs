@@ -244,7 +244,7 @@ impl TrashUi {
 }
 
 /// The words of a notice.
-fn notice_words(notice: &Notice) -> String {
+pub(crate) fn notice_words(notice: &Notice) -> String {
     match notice {
         Notice::RestoreRefused(name) => {
             format!("Couldn\u{2019}t restore \u{201C}{name}\u{201D}. It\u{2019}s still in Trash.")

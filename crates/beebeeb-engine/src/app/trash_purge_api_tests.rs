@@ -138,3 +138,29 @@ fn a_connection_that_drops_after_the_delete_left_is_not_confirmed() {
         "the delete did leave"
     );
 }
+
+/// Review of desktop#424, delta: a gateway error (502, 503, 504) after the DELETE left is as unknown as a dropped
+/// connection: the proxy may have passed the delete on.
+#[test]
+fn a_gateway_error_after_the_delete_left_is_not_confirmed() {
+    for status in [502u16, 503, 504] {
+        let account = account();
+        let tokens = Arc::new(ConfirmTokens::default());
+        let api = FakeApi::start(Arc::new(move |request: &Request| match request.route().as_str() {
+            "POST /api/v1/auth/confirm-opaque-start" => account.login_start(&request.json()),
+            "POST /api/v1/auth/confirm-opaque-finish" => {
+                if account.login_finish(&request.json()) {
+                    Reply::ok(serde_json::json!({ "confirmation_token": tokens.mint(), "expires_at": "soon" }))
+                } else {
+                    Reply::error(401, "invalid_credentials")
+                }
+            }
+            _ => Reply::error(status, "a gateway's words"),
+        }));
+        let error = run(&api, "any-session", ONE, PASSWORD).unwrap_err();
+        assert_eq!(format!("{error:?}"), "NotConfirmed", "{status}");
+    }
+    // A refusal in so many words (a 500 from the app itself, a 403) is still just refused.
+    let (api, _, _) = server();
+    assert_eq!(run(&api, SESSION, ONE, PASSWORD), Ok(()));
+}

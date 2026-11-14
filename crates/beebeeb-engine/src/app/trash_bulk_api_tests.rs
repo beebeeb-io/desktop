@@ -171,6 +171,15 @@ fn the_answer_of_each_status_is_read_without_the_servers_words() {
         Some(PurgeError::Failed)
     );
     assert_eq!(r(403, serde_json::json!({})).error, Some(PurgeError::Failed));
+    // A gateway error after the bulk delete left: the proxy may have passed it on (review of desktop#424).
+    for status in [502, 503, 504] {
+        assert_eq!(
+            format!("{:?}", r(status, serde_json::json!({})).error),
+            "Some(NotConfirmed)",
+            "{status}"
+        );
+    }
+    assert_eq!(r(500, serde_json::json!({})).error, Some(PurgeError::Failed));
     assert_eq!(r(401, serde_json::json!({})).error, Some(PurgeError::SessionEnded));
 }
 

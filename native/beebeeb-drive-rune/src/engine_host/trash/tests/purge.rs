@@ -11,6 +11,10 @@ use super::*;
 
 const OK: u8 = 0;
 const REFUSE: u8 = 1;
+/// The connection drops after the delete request was read.
+const HANG_UP: u8 = 2;
+/// A gateway error after the delete request left.
+const GATEWAY: u8 = 3;
 
 /// The fake's permanent delete: the two step-up legs (the account's own OPAQUE record), the single-use tokens, and
 /// the ids it deleted for good.
@@ -58,6 +62,11 @@ impl PurgeFake {
                 if self.mode.load(Ordering::SeqCst) == REFUSE {
                     return Some(Reply::json(500, json!({ "error": "a server body" })));
                 }
+                match self.mode.load(Ordering::SeqCst) {
+                    HANG_UP => return Some(Reply::hang_up()),
+                    GATEWAY => return Some(Reply::json(503, json!({ "error": "a server body" }))),
+                    _ => {}
+                }
                 if !self.tokens.spend(req) {
                     return Some(Reply::json(403, json!({ "error": "step_up_required" })));
                 }
@@ -90,6 +99,11 @@ impl PurgeFake {
                     .to_string();
                 if self.mode.load(Ordering::SeqCst) == REFUSE {
                     return Some(Reply::json(500, json!({ "error": "a server body" })));
+                }
+                match self.mode.load(Ordering::SeqCst) {
+                    HANG_UP => return Some(Reply::hang_up()),
+                    GATEWAY => return Some(Reply::json(503, json!({ "error": "a server body" }))),
+                    _ => {}
                 }
                 if !self.tokens.spend(req) {
                     return Some(Reply::json(403, json!({ "error": "step_up_required" })));
@@ -306,4 +320,54 @@ fn a_bulk_refusal_of_the_whole_call_stops_and_deletes_nothing() {
         }]
     );
     assert_eq!(names(&source).len(), 3);
+}
+
+/// The words the window draws for a notice (`frames::trash`).
+fn said(notice: &Notice) -> String {
+    crate::frames::trash::notice_words(notice)
+}
+
+/// Review of desktop#424, delta: a delete that left and was not confirmed is never "Nothing was deleted" and never
+/// "The rest are still in Trash": the items may be gone.
+fn assert_says_not_confirmed(words: &str) {
+    assert!(!words.contains("Nothing was deleted"), "{words}");
+    assert!(!words.contains("still in Trash"), "{words}");
+    assert!(words.contains("check Trash"), "{words}");
+}
+
+#[test]
+fn a_delete_that_left_and_was_not_confirmed_is_said_so_for_one_item_and_for_all() {
+    for (mode, label) in [(HANG_UP, "dropped"), (GATEWAY, "gateway")] {
+        for one in [true, false] {
+            let fake = fake(&format!("purge-unconfirmed-{label}-{one}"));
+            fake.purge.mode.store(mode, Ordering::SeqCst);
+            let engine = signed_in(&fake);
+            let mut source = EngineTrashSource::new(engine);
+            opened(&mut source);
+            assert!(source.purge(one.then_some(CONTRACT), PASSWORD));
+            let (ends, notices) = settle_purge(&mut source);
+            assert_eq!(ends, vec![PurgeEnd::Stopped], "{label} {one}");
+            assert_eq!(notices.len(), 1, "{label} {one}: {notices:?}");
+            assert_says_not_confirmed(&said(&notices[0]));
+        }
+    }
+}
+
+#[test]
+fn a_not_confirmed_delete_after_some_items_went_says_so_too() {
+    let fake = fake("purge-unconfirmed-some");
+    let engine = signed_in(&fake);
+    let mut source = EngineTrashSource::new(engine.clone());
+    opened(&mut source);
+    let pressed = super::super::stamp(&engine);
+    source.purge_ended(
+        pressed,
+        beebeeb_engine::app::trash_purge_api::Purged {
+            done: 2,
+            error: Some(beebeeb_engine::app::trash_purge_api::PurgeError::NotConfirmed),
+        },
+    );
+    let (_, notices) = settle_purge(&mut source);
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_says_not_confirmed(&said(&notices[0]));
 }
