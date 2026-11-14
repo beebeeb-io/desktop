@@ -92,7 +92,7 @@ pub fn progress(k: &str, item: &DriveItem, d: &Download, width: f32, t: &Theme) 
             kit::label(
                 format!("{k}-download-words"),
                 words.clone(),
-                super::list::TWO_VERSIONS.lh(13.5),
+                type_::CAPTION.lh(13.5),
                 t.text_secondary,
             )
             .truncate(),
