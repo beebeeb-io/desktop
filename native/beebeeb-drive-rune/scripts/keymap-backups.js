@@ -16,7 +16,8 @@
       if (bar) { api.box(`card-${i}-bar`, bar); api.box(`card-${i}-bar-fill`, q('i', bar)); }
     });
     // The one-time code (`.kit-fieldwrap` in a dialog): its label, the six boxes, the caret.
-    const wrap = q('.wn-dlg .kit-fieldwrap', setB);
+    // (A field wrap that holds a text field is Mail Backup's: `keymap-mail.js`.)
+    const wrap = qa('.wn-dlg .kit-fieldwrap', setB).find((w) => !q('.kit-field', w));
     if (wrap) {
       api.text('code-label', q('.kit-field-outer', wrap));
       qa(':scope > div > span', wrap).forEach((b, i) => api.box(`code-${i}`, b));
