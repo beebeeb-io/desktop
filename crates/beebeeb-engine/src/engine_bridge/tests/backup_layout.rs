@@ -700,7 +700,9 @@ async fn other_devices_are_read_through_their_sealed_manifests() {
         chunk[last] ^= 0x01;
     }
 
-    let (devices, complete) = read_devices(&*fx.bridge, &root, None, Some(&glegion())).await.unwrap();
+    let (devices, complete) = read_devices(&*fx.bridge, &root, None, Some(&glegion()), None)
+        .await
+        .unwrap();
     assert!(complete);
     let mut by_id: std::collections::HashMap<&str, &DeviceRead> =
         devices.iter().map(|d| (d.folder_id.as_str(), &d.read)).collect();
