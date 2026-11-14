@@ -814,13 +814,15 @@ pub(super) fn write_owner(conn: &Connection, owner: &crate::account_binding::Ide
 /// custody memory (`shared_folder_custody_seen:%`, task 2279 N1). That memory is device-wide and survives every
 /// local-state wipe, so counting it would keep `has_account_data` true after a completed sign-out — permanently,
 /// because the set only grows — and the next engine start would want a reset or refuse on Windows. B05e's share
-/// rows (`share_marks::SHARE_TRUST_ROWS`) survive a sign-out for the same reason and are not counted either.
+/// rows (`share_marks::SHARE_TRUST_ROWS`) survive a sign-out for the same reason and are not counted either, nor
+/// are the first-time guide marks (`guide_mark`).
 pub(super) fn account_rows(conn: &Connection) -> Result<i64> {
     let mut rows: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM sync_state
-             WHERE key NOT IN (?1, ?2, ?3, ?4, ?5) AND key NOT LIKE 'shared_folder_custody_seen:%'{}",
-            super::share_marks::keep_share_trust_rows_sql()
+             WHERE key NOT IN (?1, ?2, ?3, ?4, ?5) AND key NOT LIKE 'shared_folder_custody_seen:%'{}{}",
+            super::share_marks::keep_share_trust_rows_sql(),
+            super::guide_mark::keep_guide_rows_sql()
         ),
         params![
             OWNER_USER_ID_KEY,
