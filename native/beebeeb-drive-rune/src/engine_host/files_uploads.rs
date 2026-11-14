@@ -333,7 +333,10 @@ impl<E: UploadsEngine> UploadCalls<E> {
                         Ok(CancelOutcome::NotNew) => self
                             .changes
                             .push(Change::Failed(Action::CancelUpload, ActionError::Unavailable)),
-                        Ok(CancelOutcome::Unknown | CancelOutcome::RecycleFailed) => self
+                        Ok(CancelOutcome::RecycleFailed) => self
+                            .changes
+                            .push(Change::Failed(Action::CancelUpload, ActionError::NotToRecycleBin)),
+                        Ok(CancelOutcome::Unknown) => self
                             .changes
                             .push(Change::Failed(Action::CancelUpload, ActionError::Failed)),
                         Err(_) => self

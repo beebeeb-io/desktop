@@ -36,8 +36,14 @@ pub enum Problem {
     WrongCode,
     /// "I've opened the link", and the link has not been used.
     LinkNotUsed,
+    /// "Send again" was asked too soon: the page says how long to wait (the source counts it down).
+    ResendWait,
+    /// No more codes for this change.
+    ResendLimit,
     /// Beebeeb did not take the new name (it answered with an error, or no longer accepts the session).
     NameRefused,
+    /// A password change whose end is not known: it may have been made.
+    Unconfirmed,
 }
 
 pub struct Form {

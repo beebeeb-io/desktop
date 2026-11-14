@@ -21,6 +21,7 @@ use crate::test_api::{ConfirmTokens, FakeApi, OpaqueAccount, Reply, Request};
 
 const PASSWORD: &str = "an invented password for passkeys";
 const PASSKEY: &str = "c0000000-0000-4000-8000-000000000001";
+const OTHER_ACCOUNT: &str = "c0000000-0000-4000-8000-000000000099";
 const OTHER: &str = "c0000000-0000-4000-8000-000000000002";
 const CREDENTIAL: [u8; 3] = [1, 2, 3];
 const PRF: [u8; 32] = [7; 32];
@@ -73,6 +74,15 @@ fn fake(tag: &str) -> Fake {
                 200 => Reply::error(401, "unauthorized"),
                 status => Reply::error(status, "refused"),
             },
+            route if route.starts_with("PATCH /api/v1/auth/passkeys/") => {
+                let name = req.json()["name"].as_str().unwrap_or_default().to_string();
+                match (signed, name.as_str()) {
+                    (false, _) => Reply::error(401, "unauthorized"),
+                    (_, "refused name") => Reply::error(400, "invalid_passkey_name"),
+                    _ if route.ends_with(OTHER_ACCOUNT) => Reply::error(404, "not_found"),
+                    _ => Reply::ok(json!({ "id": PASSKEY, "name": name })),
+                }
+            }
             "POST /api/v1/auth/passkey/register-start" if tokens.spend(req) => Reply::ok(json!({
                 "reg_id": "a-registration",
                 "publicKey": {
@@ -431,6 +441,28 @@ fn a_passkey_sign_in_with_prf_opens_the_vault_and_without_it_asks_for_the_words(
         .expect("the passkey signs in");
     assert_eq!(next, NextAfterSignIn::Drive);
     assert_eq!(engine.gate(), GateState::Ready);
+    // A PRF passkey that opened the vault key is the strong proof (lead decision 2026-11-14, as the twelve words
+    // are): the lock is Open, the screen can be locked, and a session the server ended closes the vault.
+    assert_eq!(engine.lock_state(), super::super::lock_api::LockState::Open);
+    engine.lock_screen().expect("an open lock can lock the screen");
+    assert_eq!(engine.lock_state(), super::super::lock_api::LockState::ScreenLocked);
+    // (the screen is unlocked again by the platform call the host makes; here the close is asked on an open lock)
+    let fake_open = self::fake("signin-prf-close");
+    let open = self::engine(&fake_open, false);
+    open.sign_in_passkey_with(
+        &Platform {
+            cancel: false,
+            prf: true,
+        },
+        &fake_open.account.email,
+    )
+    .expect("the passkey signs in");
+    assert!(
+        open.close_session_the_server_refused(Some(open.session_turn()))
+            .is_some(),
+        "the ended session closes the vault: the lock was open"
+    );
+    assert_ne!(open.lock_state(), super::super::lock_api::LockState::Open);
 
     let fake = self::fake("signin-no-prf");
     let engine = self::engine(&fake, false);
@@ -510,4 +542,54 @@ fn off_windows_the_platform_is_not_supported() {
     assert!(!engine.passkeys_supported());
     #[cfg(target_os = "windows")]
     let _ = engine.passkeys_supported();
+}
+
+#[test]
+fn a_passkey_is_renamed_for_its_own_session_with_the_servers_refusals_as_kinds() {
+    let fake = fake("rename");
+    let engine = engine(&fake, true);
+    let session = engine.session_turn();
+    assert_eq!(engine.rename_passkey(session, PASSKEY, "  Work laptop "), Ok(()));
+    let sent: Vec<_> = fake
+        .api
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "PATCH")
+        .collect();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].route(), format!("PATCH /api/v1/auth/passkeys/{PASSKEY}"));
+    assert_eq!(sent[0].json()["name"], "Work laptop");
+    assert_eq!(sent[0].bearer(), Some(fake.account.session_token.as_str()));
+    // The server's 400 and 404; a name or an id that is not one is not sent.
+    assert_eq!(
+        engine.rename_passkey(session, PASSKEY, "refused name"),
+        Err(PasskeyProblem::InvalidInput)
+    );
+    assert_eq!(
+        engine.rename_passkey(session, OTHER_ACCOUNT, "Fine"),
+        Err(PasskeyProblem::Refused)
+    );
+    let count = fake.api.requests().iter().filter(|r| r.method == "PATCH").count();
+    assert_eq!(
+        engine.rename_passkey(session, PASSKEY, "   "),
+        Err(PasskeyProblem::InvalidInput)
+    );
+    assert_eq!(
+        engine.rename_passkey(session, "../x", "Fine"),
+        Err(PasskeyProblem::Refused)
+    );
+    assert_eq!(
+        fake.api.requests().iter().filter(|r| r.method == "PATCH").count(),
+        count
+    );
+    // Another session: nothing is sent.
+    let stale = crate::account::SessionGeneration::for_test(1);
+    assert_eq!(
+        engine.rename_passkey(stale, PASSKEY, "Fine"),
+        Err(PasskeyProblem::NotSignedIn)
+    );
+    assert_eq!(
+        fake.api.requests().iter().filter(|r| r.method == "PATCH").count(),
+        count
+    );
 }

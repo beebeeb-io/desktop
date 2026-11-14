@@ -9,15 +9,17 @@
 //! - `check_code` (moving to a new authenticator): a current code starts the set-up of the new key
 //!   (`two_factor_begin` with the code); the key waits here for `begin_two_factor`.
 //! - `new_backup_codes`, `turn_off_two_factor`: a current code each.
-//! - `two_factor()`: only whether it is on (the profile's mark). When it was added, when it was last used and how
-//!   many backup codes are left are NOT known: Beebeeb has no route that says (see the PR record).
+//! - `two_factor()`: Beebeeb's status when it was read for this session (`account_twofactor_status.rs`: added, last
+//!   used, backup codes left); before that, or when the read failed, only whether it is on (the profile's mark).
 //!
 //! Session rule: a worker is stamped with the session and account of the press; an answer, and a held key, that is
 //! not the engine's session and account now is dropped (a held key is wiped). A press while the same call is out
 //! sends nothing new. Must not: log a code, a key, a backup code or an address.
 
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
+use beebeeb_engine::app::account_email_resend_api::EmailResendError;
 use beebeeb_engine::app::account_twofactor_api::{AccountFlowFailure, PendingEnrollment};
 use beebeeb_engine::app::{CredentialStores, Engine};
 use zeroize::Zeroizing;
@@ -25,11 +27,15 @@ use zeroize::Zeroizing;
 use super::{EngineAccountSource, Stamp, stamp};
 use crate::frames::account::Pane;
 use crate::frames::account::source::{
-    Answered, CallKind, CodeRefused, EmailRefused, PaneState, Refused, Secret, Setup, TwoFactor,
+    Answered, CallKind, CodeRefused, EmailRefused, PaneState, Refused, Resend, Secret, Setup, TwoFactor,
 };
 
 /// A key made for one session and account, waiting for its first code.
 type Held = Arc<Mutex<Option<(Stamp, PendingEnrollment)>>>;
+
+/// The address Beebeeb named for the email change that waits for its code, for the session and account it was made
+/// for.
+type Pending = Arc<Mutex<Option<(Stamp, String)>>>;
 
 /// One call's answer, with the session and account it was made for.
 type Done = (Stamp, CallKind, Answered);
@@ -38,6 +44,9 @@ pub(super) struct Calls {
     /// The calls that are out: a second press of the same call sends nothing.
     out: Vec<CallKind>,
     held: Held,
+    pending_email: Pending,
+    /// A wait Beebeeb asked for before the email's code is sent again.
+    resend: super::email::Waiting,
     answers: mpsc::Sender<Done>,
     inbox: mpsc::Receiver<Done>,
 }
@@ -48,6 +57,8 @@ impl Calls {
         Self {
             out: Vec::new(),
             held: Arc::default(),
+            pending_email: Arc::default(),
+            resend: super::email::Waiting::default(),
             answers,
             inbox,
         }
@@ -118,10 +129,17 @@ fn hold(held: &Held, stamp: Stamp, pending: PendingEnrollment) -> Option<Setup> 
     Some(setup)
 }
 
+fn remember(pending: &Pending, made_for: Stamp, address: String) {
+    if let Ok(mut held) = pending.lock() {
+        *held = Some((made_for, address));
+    }
+}
+
 /// The work of one call, on its worker.
 fn work<C: CredentialStores>(
     engine: &Engine<C>,
     held: &Held,
+    pending_email: &Pending,
     made_for: Stamp,
     kind: CallKind,
     input: Zeroizing<String>,
@@ -131,8 +149,27 @@ fn work<C: CredentialStores>(
     let code = input.as_str();
     match kind {
         CallKind::StartEmail => match engine.email_change_start(session, code, password.as_str()) {
-            Ok(_) => Answered::Done,
+            Ok(address) => {
+                remember(pending_email, made_for, address);
+                Answered::Done
+            }
             Err(why) => Answered::Email(email_why(why)),
+        },
+        CallKind::ResendEmail => match engine.email_change_resend(session) {
+            Ok(sent) => {
+                // The server's own word for where the code went.
+                remember(pending_email, made_for, sent.pending_email);
+                Answered::Done
+            }
+            Err(why) => Answered::Resend(match why {
+                EmailResendError::Wait(seconds) => Resend::Wait(seconds.min(u64::from(u32::MAX)) as u32),
+                EmailResendError::Limit => Resend::Limit,
+                EmailResendError::Gone => Resend::Gone,
+                EmailResendError::NotSignedIn | EmailResendError::SessionEnded | EmailResendError::Offline => {
+                    Resend::Offline
+                }
+                EmailResendError::Failed => Resend::Offline,
+            }),
         },
         CallKind::ConfirmEmail => match engine.email_change_confirm(session, code) {
             Ok(()) => Answered::Done,
@@ -210,12 +247,13 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         }
         let made_for = stamp(&self.engine);
         let (engine, held, answers) = (self.engine.clone(), self.calls.held.clone(), self.calls.answers.clone());
+        let pending = self.calls.pending_email.clone();
         let (input, password) = (Zeroizing::new(input.to_string()), Zeroizing::new(password.to_string()));
         let started = std::thread::Builder::new()
             .name("account-call".into())
             .spawn(move || {
                 let answered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    work(&engine, &held, made_for.clone(), kind, input, password)
+                    work(&engine, &held, &pending, made_for.clone(), kind, input, password)
                 }))
                 .unwrap_or(Answered::Refused(Refused::Offline));
                 let _ = answers.send((made_for, kind, answered));
@@ -232,10 +270,40 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     pub(super) fn a_call_answer(&mut self) -> Option<(CallKind, Answered)> {
         while let Ok((made_for, kind, answered)) = self.calls.inbox.try_recv() {
             self.calls.out.retain(|k| *k != kind);
-            if stamp(&self.engine) != made_for || !self.open() {
-                // A session or an account that is over: its answer (and a code it holds) is wiped here.
+            // The turn may have moved since the press (a screen lock moves it) while the request was out and Beebeeb
+            // may already have changed the account: an answer for the SAME account still reaches the pane, once (new
+            // backup codes are never wiped unseen). Another account's, or an ended session's, is dropped (wiped) here.
+            let now = stamp(&self.engine);
+            if now.1 != made_for.1 || !self.open() {
                 self.calls.drop_held();
                 continue;
+            }
+            if now != made_for {
+                // What is held under the old turn (a key that waits) is the old turn's: wiped. The answer stays.
+                self.calls.drop_held();
+            }
+            // A wait Beebeeb asked for counts down from now; a new change or a confirmed one starts clean.
+            match (&kind, &answered) {
+                (CallKind::ResendEmail, Answered::Resend(Resend::Wait(seconds))) => {
+                    self.calls.resend.start(made_for.clone(), *seconds);
+                }
+                (CallKind::StartEmail | CallKind::ConfirmEmail, Answered::Done) => self.calls.resend.clear(),
+                _ => {}
+            }
+            // The code was taken: the address Beebeeb named replaces the one this engine mirrors. After the stamp was
+            // checked above (the mirror moves the session on); the page reads the account again below.
+            if let (CallKind::ConfirmEmail, Answered::Done) = (&kind, &answered) {
+                let address = self
+                    .calls
+                    .pending_email
+                    .lock()
+                    .ok()
+                    .and_then(|mut held| held.take())
+                    .filter(|(held_for, _)| *held_for == made_for)
+                    .map(|(_, address)| address);
+                if let Some(address) = address {
+                    self.engine.email_changed_for(made_for.0, &address);
+                }
             }
             // What changed on the account is read again, so what the pages say is Beebeeb's.
             let changed = match (&kind, &answered) {
@@ -245,10 +313,24 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             };
             if changed {
                 crate::frames::account::source::AccountSource::reload(self, Pane::Account);
+                if !matches!(kind, CallKind::ConfirmEmail) {
+                    // Two-factor was changed: what the status holds is out of date.
+                    self.two_factor_status.stale();
+                }
             }
             return Some((kind, answered));
         }
         None
+    }
+
+    /// Whole seconds before "Send again" may be pressed (Beebeeb's `Retry-After`, counted down); 0: now.
+    pub(super) fn resend_left(&self) -> u32 {
+        self.calls.resend.left(&stamp(&self.engine))
+    }
+
+    /// While a wait counts down the window looks again every second (never from a draw).
+    pub(super) fn resend_tick(&self) -> Option<Duration> {
+        (self.resend_left() > 0).then_some(Duration::from_secs(1))
     }
 
     /// The panes of this file: ready while a session is open. Two-factor's own status needs the profile's mark.
@@ -268,8 +350,12 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         })
     }
 
-    /// Two-factor as far as it is known: on or off from the profile's mark, and nothing invented.
+    /// Two-factor as far as it is known: Beebeeb's own status when it was read for this session (added, last used,
+    /// backup codes), else on or off from the profile's mark, and nothing invented.
     pub(super) fn two_factor_known(&self) -> TwoFactor {
+        if let Some(status) = self.two_factor_status.known() {
+            return status;
+        }
         let on = self
             .current(&self.overview)
             .and_then(|overview| overview.two_factor)

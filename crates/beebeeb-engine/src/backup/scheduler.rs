@@ -9,7 +9,7 @@
 //! Logs carry counts and categories, never paths or names.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -29,42 +29,60 @@ pub const PASS_BUDGET: PassBudget = PassBudget {
     max_bytes: 4 << 30,
 };
 
-/// A pass is being prepared or run now (set around the runner's pass, cleared when it ends however it ends).
-static PASS_RUNNING: AtomicBool = AtomicBool::new(false);
-/// "Back up now" was asked: the next tick runs a pass of every folder that is on, without waiting for the cadence.
-static RUN_NOW: AtomicBool = AtomicBool::new(false);
+/// Which sign-in the two flags below belong to: moved on whenever sync stops (a stop, a lock, a sign-out), so a flag
+/// stamped with an earlier value belongs to no one now and reads as not set.
+static FLAGS_EPOCH: AtomicU64 = AtomicU64::new(1);
+/// A pass is being prepared or run now: the epoch it began in (0: none). Cleared when it ends however it ends.
+static PASS_RUNNING: AtomicU64 = AtomicU64::new(0);
+/// "Back up now" was asked: the epoch it was asked in (0: none). The next tick runs a pass of every folder that is on,
+/// without waiting for the cadence.
+static RUN_NOW: AtomicU64 = AtomicU64::new(0);
+
+fn epoch() -> u64 {
+    FLAGS_EPOCH.load(Ordering::SeqCst)
+}
+
+/// Sync stopped (a stop, a lock, a sign-out): no pass is running and none is asked for, for whoever signs in next.
+pub fn clear_pass_flags() {
+    FLAGS_EPOCH.fetch_add(1, Ordering::SeqCst);
+    PASS_RUNNING.store(0, Ordering::SeqCst);
+    RUN_NOW.store(0, Ordering::SeqCst);
+}
 
 /// Holds [`PASS_RUNNING`] while a pass runs; cleared on drop, so a pass that ends early or is cancelled never leaves
 /// the card saying "Backing up".
-struct RunningGuard;
+struct RunningGuard(u64);
 
 impl RunningGuard {
     fn start() -> Self {
-        PASS_RUNNING.store(true, Ordering::SeqCst);
-        Self
+        let stamp = epoch();
+        PASS_RUNNING.store(stamp, Ordering::SeqCst);
+        Self(stamp)
     }
 }
 
 impl Drop for RunningGuard {
     fn drop(&mut self) {
-        PASS_RUNNING.store(false, Ordering::SeqCst);
+        // Only this pass's own flag: a later sign-in's pass keeps its own.
+        let _ = PASS_RUNNING.compare_exchange(self.0, 0, Ordering::SeqCst, Ordering::SeqCst);
     }
 }
 
 /// Whether the runner is passing the backed-up folders now.
 pub fn pass_running() -> bool {
-    PASS_RUNNING.load(Ordering::SeqCst)
+    PASS_RUNNING.load(Ordering::SeqCst) == epoch()
 }
 
 /// Ask the runner for a pass of every folder that is on at its next tick ("Back up now"). The runner honours it in
-/// [`BackupScheduler::due`]; with no folder on, or no runner, the ask is dropped at the next tick, never kept.
+/// [`BackupScheduler::due`]; with no folder on, or no runner, the ask is dropped at the next tick, never kept; a stop
+/// or a sign-out drops it too ([`clear_pass_flags`]).
 pub fn request_pass_now() {
-    RUN_NOW.store(true, Ordering::SeqCst);
+    RUN_NOW.store(epoch(), Ordering::SeqCst);
 }
 
 /// Whether a "run now" is waiting for the runner's next tick.
 pub fn pass_requested() -> bool {
-    RUN_NOW.load(Ordering::SeqCst)
+    RUN_NOW.load(Ordering::SeqCst) == epoch()
 }
 
 /// The last pass's count of items whose bytes are not on this device (`NotLocal`), per category: the follow-up note
@@ -197,13 +215,13 @@ impl BackupScheduler {
         bridge.abandon_orphaned_backup_sessions().await;
         if sources.is_empty() {
             // Nothing is on: a "Back up now" has nothing to run and is not kept for a folder switched on later.
-            RUN_NOW.store(false, Ordering::SeqCst);
+            RUN_NOW.store(0, Ordering::SeqCst);
             return None;
         }
         if !self.due(now) {
             return None;
         }
-        RUN_NOW.store(false, Ordering::SeqCst);
+        RUN_NOW.store(0, Ordering::SeqCst);
         if let Ok(mut at) = self.changed.lock() {
             *at = None;
         }
@@ -485,4 +503,31 @@ pub async fn rebuild_records_if_empty(
         "backup: records rebuilt from the server"
     );
     Ok(stored)
+}
+
+#[cfg(test)]
+mod pass_flag_tests {
+    use super::*;
+
+    /// One test: the flags are process-wide, so two tests would race on them.
+    #[test]
+    fn a_stop_or_sign_out_clears_an_ask_and_a_running_pass() {
+        request_pass_now();
+        let guard = RunningGuard::start();
+        assert!(pass_requested() && pass_running());
+        clear_pass_flags();
+        assert!(!pass_requested(), "the ask belonged to the sign-in that ended");
+        assert!(!pass_running());
+        // The old pass ending late does not clear the next sign-in's own pass.
+        let next = RunningGuard::start();
+        drop(guard);
+        assert!(pass_running());
+        drop(next);
+        assert!(!pass_running());
+        // An ask of the next sign-in is its own.
+        request_pass_now();
+        assert!(pass_requested());
+        clear_pass_flags();
+        assert!(!pass_requested());
+    }
 }

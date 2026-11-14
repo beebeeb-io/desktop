@@ -177,8 +177,18 @@ pub(super) mod flows {
 }
 
 impl<C: CredentialStores> Engine<C> {
+    /// The signed-in account's id: the one the session was made with, else the one the server named.
+    fn account_id_now(&self) -> Option<String> {
+        self.session_user_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .or_else(|| self.user_id())
+    }
+
     /// Runs `work` over the real transport for `session`: nothing is sent when the session in memory is another
-    /// one, and an answer made while it moved on is dropped.
+    /// one, and an answer made while it moved on is dropped, unless the same account is still signed in (the request
+    /// has left, and Beebeeb may have changed the account).
     pub(super) fn account_flow<T>(
         &self,
         session: SessionGeneration,
@@ -190,6 +200,9 @@ impl<C: CredentialStores> Engine<C> {
         if now != session || !self.account_session_is_still(session) {
             return Err(AccountFlowFailure::NotSignedIn);
         }
+        // Who this call is for, by the account's ID (never its email: an address can be another account's), to tell a
+        // turn that moved for the same account from another account's.
+        let account = self.account_id_now();
         let mut transport = FlowTransport {
             runtime: &self.runtime,
             api_base: &self.config.api_base,
@@ -199,8 +212,21 @@ impl<C: CredentialStores> Engine<C> {
         let answer = work(&mut transport);
         let offline = transport.offline;
         if !self.account_session_is_still(session) {
-            // The answer belongs to a session that is over: its secrets are dropped (wiped) here.
-            return Err(AccountFlowFailure::NotSignedIn);
+            // The request has gone out and Beebeeb may have changed the account (new backup codes, two-factor on):
+            // a turn that moved for the SAME account (a screen lock, a session write) must not wipe what Beebeeb
+            // made unseen (review of desktop#424). The answer is dropped only when the session ended or another
+            // account is signed in: its secrets are wiped here.
+            // `person_session` says whether a session is still in memory: a locked screen keeps it (the case this
+            // exists for), a session that was forgotten or never there does not.
+            let still_held = !matches!(
+                self.person_session(|_, _| ()),
+                Err(super::lock_api::PersonRefused::NoSession)
+            );
+            let same_account =
+                account.is_some() && self.account_id_now() == account && !self.account_session_refused() && still_held;
+            if !same_account {
+                return Err(AccountFlowFailure::NotSignedIn);
+            }
         }
         answer.map_err(|error| {
             if offline {

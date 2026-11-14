@@ -33,6 +33,8 @@ struct Fake {
     running: AtomicBool,
     requested: AtomicBool,
     run_requests: Mutex<u32>,
+    /// Sync runs (a runner exists to take a pass).
+    syncing: AtomicBool,
 }
 
 impl Fake {
@@ -50,6 +52,7 @@ impl Fake {
             running: AtomicBool::new(false),
             requested: AtomicBool::new(false),
             run_requests: Mutex::new(0),
+            syncing: AtomicBool::new(true),
         })
     }
 
@@ -95,6 +98,9 @@ impl BackupsEngine for Fake {
     }
     fn pass_requested(&self) -> bool {
         self.requested.load(Ordering::SeqCst)
+    }
+    fn sync_running(&self) -> bool {
+        self.syncing.load(Ordering::SeqCst)
     }
     fn request_pass(&self) {
         *self.run_requests.lock().unwrap() += 1;
@@ -431,6 +437,22 @@ fn the_card_says_what_the_engine_knows_and_never_a_value_it_did_not_read() {
     // A pass the runner is running says so, whatever the folders say.
     fake.running.store(true, Ordering::SeqCst);
     assert!(matches!(source.status(), Status::Plain { ref title, .. } if title == "Backing up"));
+}
+
+/// With sync not running no runner would ever take the ask: nothing is asked, and the card says sync is not running
+/// instead of "Backing up" for good.
+#[test]
+fn back_up_now_with_sync_not_running_asks_nothing_and_says_so() {
+    let fake = Fake::new();
+    fake.syncing.store(false, Ordering::SeqCst);
+    let mut source = EngineBackupsSource::new(fake.clone());
+    settle(&mut source);
+    source.back_up_now();
+    settle(&mut source);
+    assert_eq!(*fake.run_requests.lock().unwrap(), 0);
+    assert!(
+        matches!(source.status(), crate::frames::backups::source::Status::Plain { ref title, can_run: false, .. } if title == "Sync is not running")
+    );
 }
 
 #[test]

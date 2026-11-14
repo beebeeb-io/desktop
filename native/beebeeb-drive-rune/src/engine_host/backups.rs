@@ -94,8 +94,13 @@ pub trait BackupsEngine: DevicesEngine + Send + Sync + 'static {
     fn pass_running(&self) -> bool;
     /// A "Back up now" is waiting for the runner's next tick. Never waits.
     fn pass_requested(&self) -> bool;
-    /// Ask the runner for a pass now (`scheduler::request_pass_now`). Never waits.
+    /// Ask the runner for a pass now (`scheduler::request_pass_now`). Never waits. Does nothing while sync is not
+    /// running: no runner would ever clear the ask.
     fn request_pass(&self);
+    /// Sync runs now (a runner exists to take a pass). Never waits.
+    fn sync_running(&self) -> bool {
+        true
+    }
 }
 
 impl<C: CredentialStores> BackupsEngine for Engine<C> {
@@ -112,13 +117,18 @@ impl<C: CredentialStores> BackupsEngine for Engine<C> {
         self.set_backup_folder(key, on)
     }
     fn pass_running(&self) -> bool {
-        beebeeb_engine::backup::scheduler::pass_running()
+        self.sync_running() && beebeeb_engine::backup::scheduler::pass_running()
     }
     fn pass_requested(&self) -> bool {
-        beebeeb_engine::backup::scheduler::pass_requested()
+        self.sync_running() && beebeeb_engine::backup::scheduler::pass_requested()
     }
     fn request_pass(&self) {
-        beebeeb_engine::backup::scheduler::request_pass_now();
+        if self.sync_running() {
+            beebeeb_engine::backup::scheduler::request_pass_now();
+        }
+    }
+    fn sync_running(&self) -> bool {
+        self.view().start == beebeeb_engine::sync_view::Start::Running
     }
 }
 
@@ -537,6 +547,13 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
             return plain("Backing up", "Beebeeb is checking your folders for changes.", false);
         }
         let on: Vec<&&BackupFolderRow> = rows.iter().filter(|row| self.effective_on(row)).collect();
+        if !on.is_empty() && !self.engine.sync_running() {
+            return plain(
+                "Sync is not running",
+                "Your folders are not backing up until Beebeeb syncs again. Unlock Beebeeb or check Sync in Settings.",
+                false,
+            );
+        }
         let stopped = rows.iter().filter(|row| row.state == FolderState::Stopped).count();
         if on.is_empty() && stopped == 0 {
             return plain("Nothing is backing up", "Turn on a folder below to back it up.", false);
@@ -619,7 +636,12 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
     /// asked while nothing is on, or while a pass or an ask is already out.
     fn back_up_now(&mut self) {
         let any_on = self.rows().any(|row| self.effective_on(row));
-        if any_on && !self.run_out && !self.engine.pass_running() && !self.engine.pass_requested() {
+        if any_on
+            && self.engine.sync_running()
+            && !self.run_out
+            && !self.engine.pass_running()
+            && !self.engine.pass_requested()
+        {
             self.run_out = self.send(Ask::RunNow);
         }
     }

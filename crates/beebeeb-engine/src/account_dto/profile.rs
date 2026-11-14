@@ -48,6 +48,10 @@ pub struct AccountProfile {
     /// Set only inside an admin impersonation session.
     #[serde(default)]
     pub admin_user_id: Option<String>,
+    /// The account's count of password changes (core's `routes::auth::User.password_counter`): binds the screen
+    /// lock's local check record to this password. Absent from a server that does not send it.
+    #[serde(default)]
+    pub password_counter: Option<u64>,
 }
 
 impl AccountProfile {

@@ -86,6 +86,7 @@ fn clear_cached_profile_drops_stale_identity() {
             totp_enabled: Some(false),
             is_impersonation: Some(false),
             admin_user_id: None,
+            password_counter: None,
         });
     }
     assert!(acct.cached_profile.lock().unwrap().is_some());

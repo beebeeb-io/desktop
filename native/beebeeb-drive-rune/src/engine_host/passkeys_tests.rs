@@ -35,6 +35,8 @@ struct Server {
     /// How long the list takes to answer.
     list_delay_ms: Arc<AtomicU64>,
     deleted: Arc<Mutex<Vec<String>>>,
+    /// The names the server was asked to give, by PATCH.
+    renamed: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 fn server() -> Server {
@@ -46,6 +48,8 @@ fn server() -> Server {
     let list_status = Arc::new(AtomicU16::new(200));
     let list_delay_ms = Arc::new(AtomicU64::new(0));
     let deleted = Arc::new(Mutex::new(Vec::new()));
+    let renamed = Arc::new(Mutex::new(Vec::new()));
+    let renamed_in = renamed.clone();
     let (account_in, status_in, delay_in, deleted_in) = (
         account.clone(),
         list_status.clone(),
@@ -74,6 +78,15 @@ fn server() -> Server {
                     status => Reply::error(status, "refused"),
                 }
             }
+            other if other.starts_with("PATCH /api/v1/auth/passkeys/") => {
+                let name = req.json()["name"].as_str().unwrap_or_default().to_string();
+                if name == "refused name" {
+                    return Reply::error(400, "invalid_passkey_name");
+                }
+                let id = other.trim_start_matches("PATCH /api/v1/auth/passkeys/").to_string();
+                renamed_in.lock().unwrap().push((id.clone(), name.clone()));
+                Reply::ok(json!({ "id": id, "name": name }))
+            }
             other if other.starts_with("DELETE /api/v1/auth/passkeys/") => {
                 if tokens.spend(req) {
                     deleted_in
@@ -95,6 +108,7 @@ fn server() -> Server {
         list_status,
         list_delay_ms,
         deleted,
+        renamed,
     }
 }
 
@@ -278,18 +292,17 @@ fn adding_with_no_dialog_to_show_says_so_and_sends_nothing() {
     assert!(!calls.add(pw(PASSWORD)));
     assert_eq!(calls.notice(), Some((NO_DIALOG, true)));
     assert_eq!(server.asked("POST /api/v1/auth/confirm-opaque-start"), 0);
-    assert!(!calls.can_rename(), "Beebeeb has no route to rename a passkey");
+    assert!(calls.can_rename());
 }
 
 #[test]
-fn the_account_source_asks_for_the_password_and_never_offers_a_rename() {
+fn the_account_source_asks_for_the_password_to_add_and_remove_but_not_to_rename() {
     let server = server();
     let mut source = EngineAccountSource::new(signed_in(&server));
     assert!(source.passkeys_need_password());
-    assert!(!source.can_rename_passkey());
+    assert!(source.can_rename_passkey());
     // The calls with no password are not a way in: they claim nothing.
     assert_eq!(source.add_passkey(), Err(Refused::NotConfirmed));
-    assert!(!source.rename_passkey(ONE, "A new name"));
     assert!(!source.remove_passkey(ONE));
     assert_eq!(server.asked("POST /api/v1/auth/confirm-opaque-start"), 0);
     source.opened(Pane::Passkeys);
@@ -347,4 +360,48 @@ fn the_sign_in_door_is_there_only_where_the_dialog_is_and_a_left_attempt_is_neve
         );
     }
     assert_eq!(server.asked("POST /api/v1/auth/passkey/login-finish"), 0);
+}
+
+#[test]
+fn renaming_sends_one_patch_without_a_password_and_the_name_shows_after_the_read() {
+    let server = server();
+    let mut calls = PasskeyCalls::new(signed_in(&server));
+    // Before the rows are here, and for a row that is not one: nothing is sent.
+    assert!(!calls.rename(ONE, "Early"));
+    opened(&mut calls);
+    assert!(!calls.rename("not-a-row", "Name"));
+    assert!(calls.rename(ONE, "  Work laptop "));
+    assert!(!calls.rename(TWO, "Second press"), "a change is on its way");
+    settle(&mut calls);
+    assert_eq!(
+        *server.renamed.lock().unwrap(),
+        [(ONE.to_string(), "Work laptop".to_string())]
+    );
+    assert_eq!(calls.notice(), Some((RENAMED, false)));
+    assert_eq!(
+        server.asked("POST /api/v1/auth/confirm-opaque-start"),
+        0,
+        "no password for a rename"
+    );
+    assert_eq!(server.asked("GET /api/v1/auth/passkeys"), 2, "the rows are read again");
+    // The server refuses a name: its words, and nothing changed.
+    assert!(calls.rename(ONE, "refused name"));
+    settle(&mut calls);
+    assert_eq!(calls.notice(), Some((BAD_NAME, true)));
+    assert_eq!(server.renamed.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_rename_answer_after_the_session_moved_on_is_dropped_and_a_press_on_old_rows_sends_nothing() {
+    let server = server();
+    let engine = signed_in(&server);
+    let mut calls = PasskeyCalls::new(engine.clone());
+    opened(&mut calls);
+    engine.lock();
+    engine
+        .unlock_with_phrase(Zeroizing::new(server.phrase.clone()))
+        .expect("the phrase unlocks");
+    assert!(!calls.rename(ONE, "Late"));
+    assert!(server.renamed.lock().unwrap().is_empty());
+    assert_eq!(calls.notice(), None);
 }

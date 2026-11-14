@@ -66,6 +66,10 @@ pub enum ActionError {
     /// Copy link left it: the file already has a link, and that link cannot be copied again yet. No second link
     /// was made, and Try again would change nothing.
     HasLink,
+    /// Cancel upload left it: its copy (the only one: it was never uploaded) cannot go to the Recycle Bin (none on
+    /// its drive, too big for it, or the move failed), and it is never deleted for good. The file and its upload
+    /// stay as they were.
+    NotToRecycleBin,
 }
 
 /// What a person asked for, in the words the failure message uses (DW-0109: "Couldn't rename.").

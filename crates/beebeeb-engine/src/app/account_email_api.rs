@@ -10,8 +10,8 @@
 //! Session rule and 401 rule: as `account_twofactor_api`. The signed-in session is unlocked by definition (it holds
 //! the vault key), so there is no "locked" answer here.
 //!
-//! Known gap: this engine does not rewrite the email it mirrors for the session (`account_email`) after step 2; it
-//! follows at the next sign-in. Beebeeb has no route to send the code again, so there is no resend.
+//! After step 2 the host stores the address the server named as the one this engine mirrors, and asks for the code
+//! again when the person wants it: both in `account_email_resend_api`.
 //!
 //! Must not: log an address, a password or a code.
 
@@ -33,10 +33,9 @@ impl<C: CredentialStores> Engine<C> {
         password: &str,
     ) -> Result<String, AccountFlowFailure> {
         let password = Zeroizing::new(password.to_string());
-        let key = {
-            let guard = self.acct.session.lock().map_err(|_| AccountFlowFailure::NotSignedIn)?;
-            Zeroizing::new(guard.as_ref().ok_or(AccountFlowFailure::NotSignedIn)?.master_key)
-        };
+        let key = self
+            .person_session(|current, _| Zeroizing::new(current.master_key))
+            .map_err(|_| AccountFlowFailure::NotSignedIn)?;
         self.account_flow(session, |transport| {
             let binding = AccountBinding::from_master_key(&MasterKey::from_bytes(*key));
             match drive(

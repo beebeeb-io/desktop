@@ -627,7 +627,7 @@ mod unsent;
 mod unsent_cancel;
 use unsent::{NOT_DOWNLOADED_SQL, UNSENT_KINDS_SQL};
 pub use unsent::{RetryOutcome, UnsentChange, UnsentPage};
-pub use unsent_cancel::CancelNew;
+pub use unsent_cancel::{CancelDone, CancelNew};
 
 mod types;
 use types::*;

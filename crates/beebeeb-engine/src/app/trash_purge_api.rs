@@ -33,8 +33,11 @@ pub enum PurgeError {
     WrongPassword,
     /// Too many tries; seconds to wait.
     RateLimited(u64),
-    /// Beebeeb could not be reached.
+    /// Beebeeb could not be reached: nothing was sent that deletes (the proof did not go through).
     Offline,
+    /// The delete request LEFT and no answer came back (the connection dropped after it was sent): the item may be
+    /// gone for good. Never worded as "nothing was deleted" (review of desktop#424).
+    NotConfirmed,
     /// The id is not a file id, or Beebeeb refused or answered something else.
     Failed,
 }
@@ -47,11 +50,11 @@ pub struct Purged {
 }
 
 /// A server file id as the listing gives it: a canonical lower-case UUID, never normalized (it goes into a URL).
-fn is_file_id(id: &str) -> bool {
+pub(super) fn is_file_id(id: &str) -> bool {
     matches!(uuid::Uuid::parse_str(id), Ok(u) if u.hyphenated().to_string() == id)
 }
 
-fn step_up_error(e: AuthFlowError) -> PurgeError {
+pub(super) fn step_up_error(e: AuthFlowError) -> PurgeError {
     match e {
         AuthFlowError::InvalidCredentials | AuthFlowError::InvalidInput(_) => PurgeError::WrongPassword,
         AuthFlowError::RateLimited { retry_after_secs } => PurgeError::RateLimited(retry_after_secs),
@@ -66,6 +69,31 @@ fn permanent_request(id: &str) -> HttpRequest {
     req
 }
 
+/// Prove `password` for the session `token`: core's OPAQUE step-up, which mints ONE single-use confirmation token.
+pub(super) async fn prove(
+    api_base: &str,
+    client: &reqwest::Client,
+    token: &str,
+    password: &[u8],
+) -> Result<beebeeb_core::auth_flow::step_up::ConfirmToken, PurgeError> {
+    let (mut flow, mut req) = StepUp::start(password, StepUpPurpose::Generic).map_err(step_up_error)?;
+    let mut first_leg = true;
+    loop {
+        let resp = auth_transport::send_to(api_base, client, Some(token), req)
+            .await
+            .map_err(|_| PurgeError::Offline)?;
+        // The first leg carries no proof of the password: a 401 there is about the session, not the password.
+        if first_leg && resp.status == 401 {
+            return Err(PurgeError::SessionEnded);
+        }
+        first_leg = false;
+        match flow.on_response(resp).map_err(step_up_error)? {
+            StepUpStep::Send(next) => req = next,
+            StepUpStep::Confirmed(grant) => return Ok(grant),
+        }
+    }
+}
+
 /// Prove `password` for the session `token`, then delete `file_id` for good with the one token the proof minted.
 /// `api_base` has no trailing slash. A 404 is "already gone": done.
 pub async fn purge_one(
@@ -78,29 +106,16 @@ pub async fn purge_one(
     if !is_file_id(file_id) {
         return Err(PurgeError::Failed);
     }
-    let (mut flow, mut req) = StepUp::start(password, StepUpPurpose::Generic).map_err(step_up_error)?;
-    let mut first_leg = true;
-    let grant = loop {
-        let resp = auth_transport::send_to(api_base, client, Some(token), req)
-            .await
-            .map_err(|_| PurgeError::Offline)?;
-        // The first leg carries no proof of the password: a 401 there is about the session, not the password.
-        if first_leg && resp.status == 401 {
-            return Err(PurgeError::SessionEnded);
-        }
-        first_leg = false;
-        match flow.on_response(resp).map_err(step_up_error)? {
-            StepUpStep::Send(next) => req = next,
-            StepUpStep::Confirmed(grant) => break grant,
-        }
-    };
+    let grant = prove(api_base, client, token, password).await?;
     let resp = auth_transport::send_to(api_base, client, Some(token), grant.attach(permanent_request(file_id)))
         .await
-        .map_err(|_| PurgeError::Offline)?;
+        .map_err(|_| PurgeError::NotConfirmed)?;
     match resp.status {
         200..=299 | 404 => Ok(()),
         401 => Err(PurgeError::SessionEnded),
         429 => Err(PurgeError::RateLimited(resp.retry_after_secs.unwrap_or(30))),
+        // A gateway that answers for a server that may have done it: as unknown as a dropped connection.
+        502..=504 => Err(PurgeError::NotConfirmed),
         _ => Err(PurgeError::Failed),
     }
 }
@@ -145,9 +160,10 @@ impl<C: CredentialStores> Engine<C> {
         self.purged(done, None)
     }
 
-    /// Ask the sync engine to take the server's list again when anything was deleted (also when a later item failed).
+    /// Ask the sync engine to take the server's list again when anything was deleted (also when a later item failed),
+    /// and when the last delete is not confirmed (it may have gone through).
     fn purged(&self, done: usize, error: Option<PurgeError>) -> Purged {
-        if done > 0 {
+        if done > 0 || error == Some(PurgeError::NotConfirmed) {
             self.request_resnapshot();
         }
         Purged { done, error }

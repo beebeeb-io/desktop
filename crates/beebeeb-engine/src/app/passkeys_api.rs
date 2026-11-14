@@ -296,6 +296,43 @@ impl<C: CredentialStores> Engine<C> {
         answer
     }
 
+    /// WRITES: rename a passkey (`PATCH /api/v1/auth/passkeys/{id}` `{name}`; Beebeeb's name for it only, no
+    /// step-up). Core's passkey flow has no PATCH, so the engine sends it itself, with the session's token for
+    /// `listed_under` only. A name that is empty, too long or refused (400) is [`PasskeyProblem::InvalidInput`]; an id
+    /// that is not one, or another account's (404), is [`PasskeyProblem::Refused`]. Nothing is logged.
+    pub fn rename_passkey(&self, listed_under: SessionGeneration, id: &str, name: &str) -> Result<(), PasskeyProblem> {
+        let name = clean_name(name).ok_or(PasskeyProblem::InvalidInput)?;
+        // The id goes into a URL: only a canonical id the list gave is sent.
+        if !matches!(uuid::Uuid::parse_str(id), Ok(u) if u.hyphenated().to_string() == id) {
+            return Err(PasskeyProblem::Refused);
+        }
+        let (token, _) = self.passkey_secrets(listed_under, false)?;
+        let url = format!(
+            "{}/api/v1/auth/passkeys/{id}",
+            self.config.api_base.trim_end_matches('/')
+        );
+        let (client, body) = (self.client.clone(), serde_json::json!({ "name": name }));
+        let answer = self.runtime.block_on(async move {
+            let response = client
+                .patch(&url)
+                .bearer_auth(token.as_str())
+                .json(&body)
+                .send()
+                .await
+                .map_err(|_| PasskeyProblem::Offline)?;
+            match response.status().as_u16() {
+                200..=299 => Ok(()),
+                400 => Err(PasskeyProblem::InvalidInput),
+                401 => Err(PasskeyProblem::SessionEnded),
+                429 => Err(PasskeyProblem::RateLimited),
+                503 => Err(PasskeyProblem::Offline),
+                _ => Err(PasskeyProblem::Refused),
+            }
+        });
+        self.note_passkey_call(listed_under, answer.as_ref().err().copied());
+        answer
+    }
+
     /// Sign in with a passkey for `email` over `authenticator`: core proves the account (a challenge only the
     /// passkey answers), the new session is stored as a password sign-in stores it, and a vault key the passkey's
     /// PRF opened is stored with it. A passkey without PRF (or without an escrow) signs in but opens nothing:
@@ -397,9 +434,13 @@ impl<C: CredentialStores> Engine<C> {
                 master_key: **key,
                 email,
             });
+            drop(guard);
             self.acct
                 .auth_resume_asked
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // A PRF passkey that opened the vault key is the strong proof, as the twelve words are (lead decision
+            // 2026-11-14, review of desktop#424): the lock opens in the same hold as the key's install.
+            self.lock_follows(super::lock_api::SessionMoved::StrongProof);
         }
     }
 

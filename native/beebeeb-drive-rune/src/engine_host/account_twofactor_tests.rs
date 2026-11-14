@@ -3,7 +3,7 @@
 //! step (a password proof and an OPAQUE registration under the new address) has no fake server: only its checks that
 //! need none are tested here.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use super::*;
-use crate::frames::account::source::AccountSource;
+use crate::frames::account::source::{AccountSource, Resend};
 
 const PASSWORD: &str = "an invented password for the account";
 const SETUP: &str = r#"{"secret":"JBSWY3DPEHPK3PXP","qr_uri":"otpauth://totp/Beebeeb:x?secret=JBSWY3DPEHPK3PXP","backup_codes":["11111111","22222222"]}"#;
@@ -29,6 +29,10 @@ struct Fake {
     /// The disable route waits this many milliseconds before it answers.
     disable_delay_ms: Arc<AtomicU64>,
     asked: Arc<Mutex<Vec<String>>>,
+    /// The status the email's resend answers with (200: sent; 404; 429 wait; 500).
+    resend_status: Arc<AtomicU16>,
+    /// The email's code is taken (200) or refused (400).
+    verify_ok: Arc<AtomicBool>,
     account: Arc<FakeAccount>,
     phrase: String,
 }
@@ -41,6 +45,8 @@ fn fake() -> Fake {
     let disable_delay_ms = Arc::new(AtomicU64::new(0));
     let asked: Arc<Mutex<Vec<String>>> = Arc::default();
     let (wrong, delay, log) = (wrong_code.clone(), disable_delay_ms.clone(), asked.clone());
+    let (resend_status, verify_ok) = (Arc::new(AtomicU16::new(200)), Arc::new(AtomicBool::new(false)));
+    let (resend_in, verify_in) = (resend_status.clone(), verify_ok.clone());
     let api = FakeApi::start(Arc::new(move |req| {
         let route = format!("{} {}", req.method, req.path);
         log.lock().unwrap().push(route.clone());
@@ -52,7 +58,19 @@ fn fake() -> Fake {
                 std::thread::sleep(Duration::from_millis(delay.load(Ordering::SeqCst)));
                 Reply::ok(json!({}))
             }
+            "POST /api/v1/auth/2fa/backup-codes" => {
+                std::thread::sleep(Duration::from_millis(delay.load(Ordering::SeqCst)));
+                Reply::ok(json!({ "backup_codes": ["11111111", "22222222"] }))
+            }
+            "POST /api/v1/auth/verify-email" if verify_in.load(Ordering::SeqCst) => Reply::ok(json!({})),
             "POST /api/v1/auth/verify-email" => Reply::json(400, json!({ "error": "invalid_code" })),
+            "POST /api/v1/me/email/resend" => match resend_in.load(Ordering::SeqCst) {
+                200 => Reply::ok(
+                    json!({ "pending_email": "new.address@example.eu", "code_expires_in": 900, "resends_left": 2 }),
+                ),
+                429 => Reply::error(429, "email_code_resend_wait").retry_after(42),
+                status => Reply::error(status, "refused"),
+            },
             "GET /api/v1/auth/me" => {
                 // The profile says two-factor is on.
                 let mut reply = rest(req);
@@ -70,6 +88,8 @@ fn fake() -> Fake {
         wrong_code,
         disable_delay_ms,
         asked,
+        resend_status,
+        verify_ok,
         account,
         phrase,
     }
@@ -254,9 +274,132 @@ fn the_panes_of_email_and_two_factor_are_reachable_and_two_factor_waits_for_the_
         ("", "", 0, 0),
         "what Beebeeb does not say is not drawn"
     );
-    assert!(!source.can_send_again(), "no route sends the email's code again");
+    assert!(
+        source.can_send_again(),
+        "Beebeeb has the route that sends the email's code again"
+    );
+    assert!(
+        !source.can_send_again_deletion(),
+        "no route sends the deletion's code again"
+    );
     // The Name page and the password change answer too (`account_actions.rs`, `account_password.rs`).
     assert_ne!(source.pane_state(Pane::Name), PaneState::Unwired);
     assert_ne!(source.pane_state(Pane::Password), PaneState::Unwired);
     assert_eq!(source.pane_state(Pane::Delete), PaneState::Unwired);
+}
+
+fn resends(fake: &Fake) -> usize {
+    fake.asked
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.ends_with("/me/email/resend"))
+        .count()
+}
+
+#[test]
+fn send_again_is_one_request_per_press_and_each_answer_is_its_state() {
+    let fake = fake();
+    let mut source = Source::new(signed_in(&fake));
+    assert_eq!(
+        source.resend_wait(),
+        0,
+        "no wait is invented before Beebeeb asks for one"
+    );
+    assert!(source.start_call(CallKind::ResendEmail, "", ""));
+    assert!(matches!(
+        answer(&mut source),
+        Some((CallKind::ResendEmail, Answered::Done))
+    ));
+    assert_eq!(resends(&fake), 1);
+
+    // The change is gone: the page goes back to step 1.
+    fake.resend_status.store(404, Ordering::SeqCst);
+    assert!(source.start_call(CallKind::ResendEmail, "", ""));
+    assert!(matches!(
+        answer(&mut source),
+        Some((CallKind::ResendEmail, Answered::Resend(Resend::Gone)))
+    ));
+    // Too soon: the wait is Beebeeb's Retry-After, counted down by the source, which wakes the window each second.
+    fake.resend_status.store(429, Ordering::SeqCst);
+    assert!(source.start_call(CallKind::ResendEmail, "", ""));
+    assert!(matches!(
+        answer(&mut source),
+        Some((CallKind::ResendEmail, Answered::Resend(Resend::Wait(42))))
+    ));
+    assert!((41..=42).contains(&source.resend_wait()), "{}", source.resend_wait());
+    let pumped = source.pump();
+    assert!(pumped.changed && pumped.wake_in == Some(Duration::from_secs(1)));
+    assert_eq!(resends(&fake), 3, "three presses, three requests, no hidden retry");
+    // Another failure is offline, not a wait.
+    fake.resend_status.store(500, Ordering::SeqCst);
+    assert!(source.start_call(CallKind::ResendEmail, "", ""));
+    assert!(matches!(
+        answer(&mut source),
+        Some((CallKind::ResendEmail, Answered::Resend(Resend::Offline)))
+    ));
+}
+
+#[test]
+fn a_confirmed_email_change_replaces_the_mirrored_address_and_the_answer_is_not_lost() {
+    let fake = fake();
+    let engine = signed_in(&fake);
+    let mut source = Source::new(engine.clone());
+    let old = engine.account_email();
+    assert!(old.is_some());
+    // A confirm with no address Beebeeb named leaves the mirrored address alone.
+    fake.verify_ok.store(true, Ordering::SeqCst);
+    assert!(source.start_call(CallKind::ConfirmEmail, "12345678", ""));
+    assert!(matches!(
+        answer(&mut source),
+        Some((CallKind::ConfirmEmail, Answered::Done))
+    ));
+    assert_eq!(engine.account_email(), old);
+
+    // A resend names the address; the confirm then makes it the account's.
+    assert!(source.start_call(CallKind::ResendEmail, "", ""));
+    assert!(matches!(
+        answer(&mut source),
+        Some((CallKind::ResendEmail, Answered::Done))
+    ));
+    assert!(source.start_call(CallKind::ConfirmEmail, "12345678", ""));
+    assert!(
+        matches!(answer(&mut source), Some((CallKind::ConfirmEmail, Answered::Done))),
+        "the answer is not dropped by the address it changed"
+    );
+    assert_eq!(engine.account_email().as_deref(), Some("new.address@example.eu"));
+    // A refused code changes nothing.
+    fake.verify_ok.store(false, Ordering::SeqCst);
+    assert!(source.start_call(CallKind::ResendEmail, "", ""));
+    let _ = answer(&mut source);
+    assert!(source.start_call(CallKind::ConfirmEmail, "12345678", ""));
+    assert!(matches!(
+        answer(&mut source),
+        Some((CallKind::ConfirmEmail, Answered::Code(CodeRefused::Wrong)))
+    ));
+    assert_eq!(engine.account_email().as_deref(), Some("new.address@example.eu"));
+}
+
+/// Review of desktop#424, delta: new backup codes Beebeeb already made reach the pane when the screen locks while the
+/// request is out (the session's turn moves, the account is the same); the codes are shown once and then wiped. The
+/// first test's other half: another account's, or an ended session's, answer is still dropped (the test above).
+#[test]
+fn new_backup_codes_reach_the_pane_when_the_screen_locks_while_the_request_is_out() {
+    let fake = fake();
+    let engine = signed_in(&fake);
+    let mut source = Source::new(engine.clone());
+    fake.disable_delay_ms.store(500, Ordering::SeqCst);
+    assert!(source.start_call(CallKind::NewBackupCodes, "123456", ""));
+    std::thread::sleep(Duration::from_millis(150));
+    engine.lock_screen().expect("an open lock locks the screen");
+    let (kind, answered) = answer(&mut source).expect("the codes Beebeeb made are answered, not wiped unseen");
+    assert_eq!(kind, CallKind::NewBackupCodes);
+    let Answered::Codes(codes) = answered else {
+        panic!("the codes reach the pane");
+    };
+    assert_eq!(codes.len(), 2);
+    assert!(
+        source.call_answer().is_none(),
+        "shown once: nothing is held for a second look"
+    );
 }

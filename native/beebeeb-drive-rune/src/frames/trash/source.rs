@@ -50,6 +50,12 @@ pub enum Notice {
     /// Deleting for good stopped before it was done (what is still in Trash stays there). `done`: how many are gone;
     /// `why`: the reason in words, never a server's.
     PurgeStopped { done: usize, why: String },
+    /// A delete for good took what it could and kept `folders` folders, which hold `inside` items that are not in
+    /// Trash (`done`: how many are gone). The kept folders are still listed.
+    FoldersKept { done: usize, folders: usize, inside: u64 },
+    /// The delete request left and Beebeeb never confirmed it (the connection dropped, or a gateway answered): some
+    /// items may be gone for good. `done`: how many are known to be gone. Never "nothing was deleted".
+    PurgeNotConfirmed { done: usize },
 }
 
 /// How a delete for good (Empty Trash, Delete permanently) ended, for the dialog that asked for it.
@@ -123,6 +129,11 @@ pub trait TrashSource {
     /// A delete for good is on its way (the dialog's button waits).
     fn purging(&self) -> bool {
         false
+    }
+    /// What Empty Trash deletes in ONE go: the count and size of the first batch, and how many items stay for
+    /// another Empty Trash (a batch is at most 500 under one password proof). The dialog says both before the press.
+    fn purge_batch(&self) -> (TrashTotals, usize) {
+        (self.totals(), 0)
     }
 }
 

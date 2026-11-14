@@ -342,7 +342,10 @@ impl Ui {
     }
 
     pub fn can_unlock(&self) -> bool {
-        self.screen == Screen::UnlockVault && !self.unlocking && !self.password.text.is_empty()
+        self.screen == Screen::UnlockVault
+            && !self.unlocking
+            && !self.password.text.is_empty()
+            && !self.lock_password_waiting()
     }
 
     /// Unlock, and Enter in the password field (DW-A30).
@@ -350,9 +353,14 @@ impl Ui {
         if !self.can_unlock() {
             return;
         }
-        self.unlocking = true;
-        self.unlock_problem = None;
-        self.source.begin_unlock(&self.password.text);
+        self.lock_notice = None;
+        // The screen lock's password goes to its own path (counted tries, no new session); the vault level's is
+        // the strong unlock.
+        if !self.lock_submit_password() {
+            self.unlocking = true;
+            self.unlock_problem = None;
+            self.source.begin_unlock(&self.password.text);
+        }
         self.pump();
     }
 
