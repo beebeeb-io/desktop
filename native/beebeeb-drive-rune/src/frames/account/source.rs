@@ -783,7 +783,7 @@ pub trait AccountSource {
     fn can_add_passkey(&self) -> bool {
         true
     }
-    /// `false`: Beebeeb has no route to rename a passkey, so the menu draws no "Rename".
+    /// `false`: this source cannot rename a passkey, so the menu draws no "Rename".
     fn can_rename_passkey(&self) -> bool {
         true
     }

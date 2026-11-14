@@ -1120,9 +1120,9 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn add_passkey(&mut self) -> Result<(), Refused> {
         super::passkeys::add_without_password()
     }
-    /// Beebeeb has no route to rename a passkey: the menu does not offer it (`can_rename_passkey`).
-    fn rename_passkey(&mut self, _id: &str, _name: &str) -> bool {
-        false
+    /// Rename (no password): started on a worker; the new name shows when the rows are read again.
+    fn rename_passkey(&mut self, id: &str, name: &str) -> bool {
+        self.passkeys.rename(id, name)
     }
     fn remove_passkey(&mut self, _id: &str) -> bool {
         false

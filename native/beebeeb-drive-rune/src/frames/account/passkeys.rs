@@ -192,7 +192,7 @@ fn menu(passkey: &Passkey, at: usize, can_rename: bool, t: &Theme) -> El {
     let remove = fm::pop_item(if can_rename { 1 } else { 0 }, "Remove", true, t)
         .on_press(move |s: &mut State| super::ask(s, Dialog::RemovePasskey(remove_id.clone())));
     let mut items = Vec::new();
-    // Beebeeb has no route to rename a passkey: a source that says so gets no "Rename" (never a button that cannot work).
+    // A source that cannot rename (no route, or not bound) gets no "Rename" (never a button that cannot work).
     if can_rename {
         items.push(fm::pop_item(0, "Rename", false, t).on_press(move |s: &mut State| {
             s.account.dialog = None;
