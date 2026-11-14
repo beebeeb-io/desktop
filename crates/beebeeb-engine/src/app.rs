@@ -57,6 +57,7 @@ pub mod setup_api;
 // What the account shares and what is shared with it, for the native Shared window.
 pub mod shares_api;
 pub mod signin_api;
+pub mod signup_api;
 // Is the local state the signed-in account's (task 2488): a read-only check for windows that show it.
 pub mod state_owner;
 pub mod transfer_limits_api;
