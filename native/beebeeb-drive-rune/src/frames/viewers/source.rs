@@ -813,8 +813,16 @@ impl ViewerSource for FixtureViewerSource {
                 version: base + 1,
             });
         }
+        let table = self.office == super::office::board::Case::Table;
         self.office = super::office::board::Case::Selected;
-        Self::agreement_saved(base + 1, None)
+        let mut outcome = Self::agreement_saved(base + 1, None);
+        // What was saved is what was on screen: the inserted table stays.
+        if let (true, SaveOutcome::Saved { file, .. }) = (table, &mut outcome)
+            && let Body::Word(doc) = &mut file.body
+        {
+            doc.sections = super::office::board::service_agreement_as(super::office::board::Case::Table).sections;
+        }
+        outcome
     }
 
     fn resolve_document(&mut self, file_id: &str, keep: Keep) -> SaveOutcome {

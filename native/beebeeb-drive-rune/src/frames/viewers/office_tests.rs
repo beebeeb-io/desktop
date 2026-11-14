@@ -383,6 +383,46 @@ fn the_command_search_shows_only_what_the_source_finds() {
 }
 
 #[test]
+fn back_under_the_question_closes_the_question_and_keeps_the_document() {
+    let (mut rt, calls) = agreement(Case::Unsaved, true, true);
+    ctrl(&mut rt, 's');
+    assert!(has(&rt, "dlg"));
+    press_with(
+        &mut rt,
+        Key::Left,
+        Mods {
+            alt: true,
+            ..Mods::default()
+        },
+    );
+    press(&mut rt, Key::Tab);
+    assert!(
+        on_a_file(&rt),
+        "Alt+Left under the question does not leave the document"
+    );
+    assert!(has(&rt, "page"));
+    assert!(!has(&rt, "dlg"));
+    assert_eq!(calls.borrow().len(), 1, "nothing was resolved");
+}
+
+#[test]
+fn enter_with_nothing_found_runs_nothing_and_a_failed_answer_is_said_over_the_question() {
+    let (mut rt, _) = agreement(Case::Selected, false, false);
+    ctrl(&mut rt, 'k');
+    press(&mut rt, Key::Enter);
+    assert!(has(&rt, "pal"), "nothing found: Enter leaves the search open");
+    assert!(!has(&rt, "toast"));
+    // A save in the table case keeps the table.
+    let (mut rt, _) = agreement(Case::Table, false, true);
+    ctrl(&mut rt, 's');
+    assert_eq!(words(&rt, "tbl-1-1-t"), "Alfama");
+    assert_eq!(version(&rt), 8);
+    // The outline has no way back yet, so its button does not take it away.
+    operate(&mut rt, "ol-close");
+    assert!(has(&rt, "ol"));
+}
+
+#[test]
 fn the_editors_keys_belong_to_the_editors_frame_only() {
     let mut state = init();
     set_scene(&mut state, "DW-1513");

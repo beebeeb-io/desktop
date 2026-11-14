@@ -7,7 +7,7 @@ replaced by the owner on 2026-11-12: the editor is in 0.9.0, contract `docs/supe
 
 Built = drawn from `viewers::Ui` (or, for DW-1520 to DW-1522, from `viewers::new_file` over the Files
 window), reachable by its controls, a scene, gated in light and dark.
-21 of 23 are built (lanes f-viewers, 2472 and b19-viewers, 2026-11-12; the count is the two lanes' lists joined
+21 of 23 were built by those lanes (lanes f-viewers, 2472 and b19-viewers, 2026-11-12; the count is the two lanes' lists joined
 at their merge): not at 0: see the integration ledger; the viewers still draw their own toolbar. The other 2
 (DW-1504, DW-1507) were not built by those lanes; DW-1507 is built since (below). Each line is the checklist and why.
 
@@ -103,12 +103,12 @@ trait's defaults answer "not saved" and "nothing found", and the frame draws exa
 | DW-1507 | A text document: ribbon, outline, page, a selection with its tools, status line | built; open: light `pg-3`, `rib`, `rib-tools` (tile), dark `float` (edge) |
 | DW-1511 | An older Word file (.doc): the banner, saved in its own format | built; open: light `rib`, `rib-tools` (tile) and 2 frame tiles; dark 0 |
 | DW-1550 | The Insert tab, a table on the page | built; open: `crumb-dot` (edge) in both themes |
-| DW-1551 | The command search (Ctrl+K) with "head" typed | built; open: light `rt-11`, `ft-0`, `rt-12`; dark `pal-caret`, `ol-4-row`, `ol-6-row`, `rt-11` (edges under the scrim) |
+| DW-1551 | The command search (Ctrl+K) with "head" typed | built; open: light `rt-11`, `ft-0`, `rt-12`; dark `pal-caret`, `ol-4-row`, `ol-6-row`, `rt-11` (covered by the search) |
 | DW-1552 | Changes that are not saved: the dot, Save on | built; open: `crumb-dot` both themes; light `rib`, `rib-tools` |
 | DW-1553 | Saved: the next version, the toast | built; open: light `rib`, `rib-tools`; dark 0 |
 | DW-1554 | Someone else saved first: four ways on | built; open: light `crumb-dot`; dark 0 |
 | DW-1556 | The editor did not start | built; open: text `empty-text` both themes (the export records the paragraph's colour, the words inside are a shade darker and drawn so; pixels 0 on it), light `status-dot` (edge) |
-| DW-1234 | Commands and keyboard shortcuts over the document | built (scene in `tray/`); open: `ol-close` both themes, dark `ol-4-row` to `ol-6-row` (edges under the scrim) |
+| DW-1234 | Commands and keyboard shortcuts over the document | built (scene in `tray/`); open: `ol-close` both themes, dark `ol-4-row` to `ol-6-row` (covered by the dialog) |
 | DW-1555, DW-1557 | "Preparing the editor" (a 257 MB download) and the licence notice of a bundled office suite | NOT built, held for a ruling: the board draws a downloaded third-party editor, the merged contract builds on in-house engines with nothing to download |
 | DW-1508, DW-1509, DW-1559, DW-1560, DW-1561 | Sheets and Slides | NOT built |
 | DW-1558, DW-1562 | New document from a template; Open With | NOT built (DW-1558's four templates differ from the contract's "Blank only"; DW-1562's menu is shorter than DW-0402's file menu: both need a ruling) |
@@ -118,7 +118,9 @@ Why the open lines stay:
   span's background has a fixed 3-point corner where the board's selection has 2.
 - `crumb-dot`, `status-dot`, `pal-caret`: 7-point and 1.5-point marks at a fractional place after text; Rune puts
   them on the device pixel. Taking them off the grid measured worse (edge 69 against 15), so they stay on it.
-- Under a scrim (`ol-*`, `rt-*`, `ft-0`): the dialog's and the search's shadow falls differently on what is behind.
+- Keys covered by the search or the dialog (`ol-*`, `rt-*`, `ft-0`): what is compared at their place is what lies
+  over them (the search's `esc` keycap at a fractional place, the dialog's title and rows), a fraction of a pixel off.
+- DW-1511 light, 2 frame tiles: not diagnosed.
 - DW-1556's status line says "Preparing the editor on this PC…" beside "We couldn't prepare the editor": the board's
   own words, kept as drawn; they belong to the held "preparing" flow and want the same ruling.
 

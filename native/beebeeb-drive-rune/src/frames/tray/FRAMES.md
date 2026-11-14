@@ -65,7 +65,7 @@ dark 3, 13, 11 (text, icons, fills 0).
 
 **DW-1234.** Gated since 2026-11-14 (lane gbb-d): the scene opens the text document in the office editor's frame
 (`viewers/FRAMES.md`, "The office editor's frame"), nothing selected, the dialog in front; goldens in both themes,
-geometry 0 failing; open pixel lines: `ol-close` (both themes) and three outline rows in dark, all under the scrim.
+geometry 0 failing; open pixel lines: `ol-close` (both themes) and three outline rows in dark, all covered by the dialog (its own text is what is compared there).
 - The dialog shares DW-1232's card.
 - The lists are also held by tests: their names and counts (`the_three_contents_hold_the_boards_lists_and_counts`), and the first and last command of each (the scene's test).
 

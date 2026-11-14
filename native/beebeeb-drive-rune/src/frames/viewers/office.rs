@@ -504,14 +504,11 @@ fn outline(doc: &WordDoc, t: &Theme) -> El {
         "Hide the outline",
         Face::Glyph(&oi::CLOSE_PANE, 13.0),
         Tool::Idle,
-        "",
+        // Not hidden here: its way back (Show outline, in Layout) is not built, and a pane that
+        // cannot be shown again is not taken away.
+        "Hide the outline",
         t,
-    )
-    .on_press(|s: &mut State| {
-        if let Some(ui) = super::ui(s) {
-            ui.office.outline = false;
-        }
-    });
+    );
     let mut pane = col()
         .key("ol")
         .role("navigation")
@@ -1002,11 +999,12 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: Option<&WordDoc>) -> 
             .child(sidebar::sidebar(s, &t))
             .child(main),
     );
-    if let Some(words) = &ui.toast {
-        under = under.child(super::dialogs::toast(words, &t));
-    }
     if let Some(over) = super::office_over::over(ui, &t) {
         under = under.child(over);
+    }
+    // Over the question too: "not saved" is said where it is read.
+    if let Some(words) = &ui.toast {
+        under = under.child(super::dialogs::toast(words, &t));
     }
     col()
         .key("window")

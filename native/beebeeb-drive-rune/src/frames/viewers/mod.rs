@@ -376,6 +376,10 @@ impl Ui {
     /// Put `file` in place of the open one, whose decrypted text is overwritten first.
     fn replace(&mut self, file: OpenFile) {
         self.file.wipe();
+        // What was open over a document goes with the document (its keys with it).
+        if !matches!(file.body, Body::Word(_)) {
+            self.office.over = None;
+        }
         self.file = file;
     }
 
@@ -522,6 +526,9 @@ impl Ui {
                 // open PDF arrived) keeps the page, the zoom and the find bar where the person has them.
                 if another_kind {
                     self.media = media::Media::of(&self.file);
+                    if !matches!(self.file.body, Body::Word(_)) {
+                        self.office.over = None;
+                    }
                 }
                 true
             }
@@ -735,6 +742,10 @@ pub fn sync(s: &mut State) {
         let held = s.viewer.ui.as_mut().is_some_and(|ui| {
             if ui.dialog.is_some() {
                 ui.keep_editing();
+                true
+            } else if ui.office.over.is_some() {
+                // Back under the question or the command search closes that, not the document.
+                ui.office_close_over();
                 true
             } else {
                 // Esc and Back close find, or step out of an archive's folder, before the file.

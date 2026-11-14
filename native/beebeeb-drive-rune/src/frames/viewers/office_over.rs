@@ -163,12 +163,18 @@ impl Ui {
         if let Some(Over::Palette(palette)) = &mut self.office.over
             && count > 0
         {
-            palette.hot = (palette.hot as isize + by).rem_euclid(count as isize) as usize;
+            // From where the mark is drawn (fewer results than before keep it on the list).
+            let at = palette.hot.min(count - 1) as isize;
+            palette.hot = (at + by).rem_euclid(count as isize) as usize;
         }
     }
 
     /// Enter or a press on a result: the editor takes the command; until it does the press says so.
     fn office_run(&mut self) {
+        // Nothing found: nothing to run.
+        if self.office_found().iter().all(|group| group.commands.is_empty()) {
+            return;
+        }
         self.office.over = None;
         self.intent(Intent::Office("this command"));
     }
@@ -205,7 +211,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         (Some(Over::Palette(_)), Key::Up) => ui.office_step(-1),
         (Some(Over::Palette(_)), Key::Enter) => ui.office_run(),
         (None, Key::Command('k')) if !ev.mods.alt && !ev.mods.shift => ui.office_palette(),
-        (None, Key::Command('s')) if !ev.mods.alt && !ev.mods.shift && ui.word().is_some() => ui.office_save(),
+        (None, Key::Command('s')) if !ev.mods.alt && !ev.mods.shift => ui.office_save(),
         _ => return false,
     }
     true
@@ -319,11 +325,11 @@ fn palette(ui: &Ui, palette: &Palette, t: &Theme) -> El {
         .single_line()
         .color(t.text)
         .caret(Color::TRANSPARENT, t.selection)
-        // The palette's own words; the window's search box when it closed under the key.
+        // The palette's own words; a key that arrives after it closed goes nowhere.
         .on_edit(
             |s: &mut State| match s.viewer.ui.as_mut().map(|ui| &mut ui.office.over) {
                 Some(Some(Over::Palette(palette))) => &mut palette.query,
-                _ => &mut s.search,
+                _ => &mut s.viewer.stray,
             },
         )
         .on_input_key(|s: &mut State, ev: &KeyEvent, tx: &mut Tx| {
