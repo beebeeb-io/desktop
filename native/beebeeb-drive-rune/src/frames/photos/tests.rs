@@ -617,14 +617,14 @@ impl PhotosSource for NoThumbnails {
     fn kept_offline(&self, id: PhotoId) -> bool {
         self.0.kept_offline(id)
     }
-    fn keep_offline(&mut self, id: PhotoId, keep: bool) {
-        self.0.keep_offline(id, keep);
+    fn keep_offline(&mut self, id: PhotoId, keep: bool) -> Result<(), super::source::Left> {
+        self.0.keep_offline(id, keep)
     }
-    fn trash(&mut self, ids: &[PhotoId]) {
-        self.0.trash(ids);
+    fn trash(&mut self, ids: &[PhotoId]) -> Result<(), super::source::Left> {
+        self.0.trash(ids)
     }
-    fn restore(&mut self, ids: &[PhotoId]) {
-        self.0.restore(ids);
+    fn restore(&mut self, ids: &[PhotoId]) -> Result<(), super::source::Left> {
+        self.0.restore(ids)
     }
 }
 

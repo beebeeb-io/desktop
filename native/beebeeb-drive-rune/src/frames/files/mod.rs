@@ -62,7 +62,7 @@ use crate::source::DriveItem;
 use rune::Tx;
 use source::{Action, ActionError, FilesFixture, FilesSource, NoEngine};
 
-pub use window::view;
+pub use window::{has_in_front, view};
 
 /// The design system's own Files window and keyboard, which these frames supersede (same pieces,
 /// plus menus, selection and toasts; the shell's Files line draws these frames). Named here so they
@@ -138,6 +138,9 @@ pub enum Toast {
     FreedUp,
     /// "Couldn't rename. Check your connection." with Try again (DW-0109).
     Failed(Action, ActionError),
+    /// Several files were opened and some of them are only ever read in the window (source code, scripts, web
+    /// pages): those were not handed to another app.
+    ReadOneAtATime,
 }
 
 impl Toast {
@@ -145,10 +148,14 @@ impl Toast {
     pub fn stays(self) -> std::time::Duration {
         std::time::Duration::from_secs(match self {
             Toast::Trashed => 6,
-            Toast::Failed(..) => 8,
+            Toast::Failed(..) | Toast::ReadOneAtATime => 8,
             _ => 3,
         })
     }
+
+    /// What [`Toast::ReadOneAtATime`] says.
+    pub const READ_ONE_AT_A_TIME: &'static str =
+        "Scripts, web pages and code open here to be read: open those one at a time.";
 
     /// The sentence of a failure: what did not happen and, where there is one, the way to fix it.
     /// Never a code (DW-0109).
@@ -644,6 +651,12 @@ impl State {
     /// Open the selection: one folder opens in place; files go to their apps, all of them.
     /// Returns whether the folder shown changed.
     pub fn open_selection(&mut self, tx: &mut Tx) -> bool {
+        self.open_selection_with(tx, true)
+    }
+
+    /// [`Self::open_selection`]. `viewer`: one file of a type the window shows itself may open in the window's
+    /// viewer. `false` ("Open in its app"): every file goes to its own app, as the button says.
+    pub(crate) fn open_selection_with(&mut self, tx: &mut Tx, viewer: bool) -> bool {
         if self.needs_session(tx) {
             return false;
         }
@@ -676,12 +689,24 @@ impl State {
             return false;
         }
         // One file of a type the window shows itself: its viewer (`frames::viewers`, the router).
-        if matches!(&files[..], [only] if crate::frames::viewers::open_item(self, only)) {
+        if viewer && matches!(&files[..], [only] if crate::frames::viewers::open_item(self, only)) {
             return true;
         }
+        // Several files: source code, scripts and web pages are never handed to another app (one alone opens in
+        // the window's viewer, where it is read and not run). The others open as before, and the toast says
+        // which were left.
+        let (read_here, files): (Vec<DriveItem>, Vec<DriveItem>) = files
+            .into_iter()
+            .partition(|file| viewer && crate::frames::viewers::only_read_here(self, file));
         self.forget_undo();
-        if let Err(why) = self.actions.source.open(&files) {
-            self.failed(Action::Open, why, tx);
+        if !files.is_empty() {
+            if let Err(why) = self.actions.source.open(&files) {
+                self.failed(Action::Open, why, tx);
+                return false;
+            }
+        }
+        if !read_here.is_empty() {
+            self.show_toast(Toast::ReadOneAtATime, tx);
         }
         false
     }

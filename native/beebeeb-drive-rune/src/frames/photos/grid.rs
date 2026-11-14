@@ -255,6 +255,8 @@ fn tile(ui: &Ui, day: usize, index: usize, photo: Photo, t: &Theme) -> El {
     let side = ui.tile_side();
     let mut name = match photo.kind {
         Kind::Photo => format!("Photo, {day_title}"),
+        // A length this PC cannot say (0) is not said.
+        Kind::Video(0) => format!("Video, {day_title}"),
         Kind::Video(seconds) => format!("Video, {}, {day_title}", length(seconds)),
     };
     if photo.uploading {
@@ -308,16 +310,16 @@ fn tile(ui: &Ui, day: usize, index: usize, photo: Photo, t: &Theme) -> El {
     if photo.uploading {
         tile = tile.child(badge(true).child(kit::glyph(format!("{key}-badge-icon"), &icons::UPLOADING, 10.0, white)));
     } else if let Kind::Video(seconds) = photo.kind {
-        tile = tile.child(
-            badge(false)
-                .child(kit::glyph(format!("{key}-badge-icon"), &icons::PLAY, 9.0, white))
-                .child(kit::label(
-                    format!("{key}-badge-label"),
-                    length(seconds),
-                    style::BADGE,
-                    white,
-                )),
-        );
+        let mut mark = badge(false).child(kit::glyph(format!("{key}-badge-icon"), &icons::PLAY, 9.0, white));
+        if seconds > 0 {
+            mark = mark.child(kit::label(
+                format!("{key}-badge-label"),
+                length(seconds),
+                style::BADGE,
+                white,
+            ));
+        }
+        tile = tile.child(mark);
     }
     if ui.selecting {
         // Checked: the white ring is a disc under the ink one (Rune draws a 1.5 pt spread ring

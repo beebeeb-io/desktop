@@ -6,20 +6,100 @@ use super::*;
 pub(crate) enum InMemoryOpen {
     /// The whole file, decrypted. Wiped when dropped.
     Opened(Zeroizing<Vec<u8>>),
-    /// The version that would be downloaded is larger than the caller holds in memory: nothing of it was fetched.
+    /// The file is larger than the caller holds in memory, by the size its metadata states: `size`. Nothing of
+    /// it was downloaded.
     TooLarge { size: u64 },
+    /// The download passed the caller's limit although the metadata said it would not: it was given up, and
+    /// what had been decrypted was wiped. The file's size is not known. `held`: how much plaintext was in
+    /// memory when it was given up. `body_given_up`: a chunk's body was given up while it streamed (it was never
+    /// read whole); otherwise a decrypted chunk was dropped before it was added to what is held.
+    OverLimit { held: u64, body_given_up: bool },
+}
+
+/// A limited download passed its limit ([`EngineBridge::hydrate_whole_file_within`]). What was decrypted until
+/// then (`held` bytes) is wiped with the download. How large the file is, is not known: no size is made up
+/// here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct OverInMemoryLimit {
+    pub(super) held: u64,
+    /// A chunk's body was given up while it streamed; `false`: a decrypted chunk was dropped before it was added.
+    pub(super) body_given_up: bool,
+}
+
+impl std::fmt::Display for OverInMemoryLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the file is larger than its caller holds in memory")
+    }
+}
+
+impl std::error::Error for OverInMemoryLimit {}
+
+/// What a chunk's body may be longer than its plaintext: the chunk's own framing (header, nonce, tag), with
+/// room to spare for a later chunk format. The plaintext total is held to the limit exactly, after decryption.
+pub(super) const CAPPED_FRAME_ROOM: u64 = 64 * 1024;
+
+/// The longest body a chunk with no manifest may have while `held` bytes of plaintext are in memory under
+/// `limit`.
+/// - A binary chunk: what is left of the limit plus [`CAPPED_FRAME_ROOM`].
+/// - A body that begins as a JSON object: that, with what is left of the limit times
+///   [`ENVELOPE_BYTES_PER_BYTE`]. A file with no version named is an old one, and an old chunk may be the JSON
+///   envelope (`content_frame`), which writes every byte as a decimal number and a comma: the binary cap would
+///   refuse a file that is within the limit. That room is on the wire only: the plaintext a chunk decrypts to
+///   is held to what is left of the limit before it is added (`download_and_decrypt_chunk_range`).
+pub(super) fn body_cap(limit: u64, held: u64) -> crate::api_client::BodyCap {
+    let left = limit.saturating_sub(held);
+    crate::api_client::BodyCap {
+        raw: left.saturating_add(CAPPED_FRAME_ROOM),
+        enveloped: left
+            .saturating_mul(ENVELOPE_BYTES_PER_BYTE)
+            .saturating_add(CAPPED_FRAME_ROOM),
+    }
+}
+
+/// The most bytes the JSON envelope spends on one byte of a chunk: "255,".
+const ENVELOPE_BYTES_PER_BYTE: u64 = 4;
+
+/// What the metadata of a file with no `download_version` says about its size, before a chunk is asked for:
+/// the size it states and the size its chunk count implies (every chunk but the last is a full stride; with no
+/// stride named, every chunk but the last holds at least one byte), whichever is larger. `None`: it says nothing
+/// usable, and the download's own caps are the bound.
+fn unpinned_size_floor(meta: &serde_json::Value) -> Result<Option<u64>, EngineError> {
+    let stated = meta.get("size_bytes").and_then(|v| v.as_u64());
+    let Some(count) = meta.get("chunk_count") else {
+        return Ok(stated);
+    };
+    // A count that is not a chunk index range (negative, or past `u32`) is not downloaded at all.
+    let count = count
+        .as_u64()
+        .and_then(|count| u32::try_from(count).ok())
+        .ok_or_else(|| anyhow::anyhow!("server response has a chunk_count that is not a count"))?;
+    let stride = meta
+        .get("chunk_size_bytes")
+        .and_then(|v| v.as_u64())
+        .filter(|stride| *stride > 0)
+        .unwrap_or(1);
+    let implied = u64::from(count.saturating_sub(1)).saturating_mul(stride);
+    Ok(Some(stated.map_or(implied, |stated| stated.max(implied))))
 }
 
 impl EngineBridge {
     /// A file for a viewer (the native app's open file): the whole file, downloaded and decrypted IN MEMORY by the
-    /// one download path every hydrate uses ([`Self::hydrate_whole_file_metered`]: the same keys, the same pin to
+    /// one download path every hydrate uses ([`Self::hydrate_whole_file_within`]: the same keys, the same pin to
     /// the version, the same per-chunk checks, one restart when the version goes away), and nothing else. Unlike a
     /// hydrate it records nothing about the file: no status, no cache row, no fetched version, no file on disk, so
     /// what this PC holds of the file and what sync believes about it are untouched.
     ///
-    /// The size is read from the metadata of the version that would be downloaded BEFORE a chunk is asked for: a
-    /// file over `max_bytes` is [`InMemoryOpen::TooLarge`] and costs the metadata request alone. `progress` is
-    /// `(decrypted bytes, bytes in all)`, called from the download loop.
+    /// `max_bytes` bounds what is held, whatever the metadata says:
+    /// - a pinned version (`download_version`): its manifest's size is checked BEFORE a chunk is asked for, and
+    ///   the download path holds every chunk body and the total to that manifest;
+    /// - no version named: the size the metadata states, and the size its chunk count implies, are checked
+    ///   before a chunk is asked for; then every chunk body is given up while it streams once it passes what a
+    ///   chunk of the plaintext still allowed may be on the wire ([`body_cap`]), and a decrypted chunk that
+    ///   would pass the limit is dropped BEFORE it is added to what is held. A file that understates its size
+    ///   never has more than the limit of plaintext held, plus one capped body and one chunk being checked,
+    ///   and answers [`InMemoryOpen::OverLimit`].
+    ///
+    /// `progress` is `(decrypted bytes, bytes in all)`, called from the download loop.
     pub(crate) async fn open_in_memory(
         &self,
         file_id: &str,
@@ -33,19 +113,24 @@ impl EngineBridge {
         self.with_one_restart(file_id, meta, |meta| async move {
             let size = match crate::download_pin::PinnedVersion::from_metadata(&meta)? {
                 Some(pin) => Some(pin.plaintext_size_bytes),
-                None => meta.get("size_bytes").and_then(|v| v.as_u64()),
+                None => unpinned_size_floor(&meta)?,
             };
             if let Some(size) = size.filter(|size| *size > max_bytes) {
                 return Ok(InMemoryOpen::TooLarge { size });
             }
-            let (plaintext, _) = self.hydrate_whole_file_metered(file_id, &meta, progress, None).await?;
-            // A legacy file whose metadata named no size: held to the same limit once its size is known.
-            if plaintext.len() as u64 > max_bytes {
-                return Ok(InMemoryOpen::TooLarge {
-                    size: plaintext.len() as u64,
-                });
+            match self
+                .hydrate_whole_file_within(file_id, &meta, progress, None, Some(max_bytes))
+                .await
+            {
+                Ok((plaintext, _)) => Ok(InMemoryOpen::Opened(plaintext)),
+                Err(e) => match e.caused_by::<OverInMemoryLimit>() {
+                    Some(over) => Ok(InMemoryOpen::OverLimit {
+                        held: over.held,
+                        body_given_up: over.body_given_up,
+                    }),
+                    None => Err(e),
+                },
             }
-            Ok(InMemoryOpen::Opened(plaintext))
         })
         .await
     }

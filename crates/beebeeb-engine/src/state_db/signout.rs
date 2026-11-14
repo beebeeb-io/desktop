@@ -3,12 +3,14 @@
 use super::*;
 
 /// The `sync_state` purge of a sign-out and of an account's rows: every row but the device's custody memory (L7d)
-/// and B05e's share rows (`share_marks::SHARE_TRUST_ROWS`; lead ruling 2026-11-09). A reset of local data removes
-/// the share rows first ([`StateDb::forget_share_trust_rows`]).
+/// and B05e's share rows (`share_marks::SHARE_TRUST_ROWS`; lead ruling 2026-11-09), and each account's first-time
+/// guide mark (`guide_mark`; owner ruling 2026-11-13: done once per account, also after a sign-out). A reset of
+/// local data removes the share rows and the guide marks first ([`StateDb::forget_share_trust_rows`]).
 fn sign_out_sync_state_purge() -> String {
     format!(
-        "DELETE FROM sync_state WHERE key NOT LIKE 'shared_folder_custody_seen:%'{}",
-        share_marks::keep_share_trust_rows_sql()
+        "DELETE FROM sync_state WHERE key NOT LIKE 'shared_folder_custody_seen:%'{}{}",
+        share_marks::keep_share_trust_rows_sql(),
+        guide_mark::keep_guide_rows_sql()
     )
 }
 
@@ -674,13 +676,20 @@ impl StateDb {
         Ok(())
     }
     /// B05e: a reset of local data (R10's `reset`) removes the share marks, sealed, offered and accepted keys that a
-    /// sign-out keeps (`share_marks::SHARE_TRUST_ROWS`), of every account on this PC, in one statement.
+    /// sign-out keeps (`share_marks::SHARE_TRUST_ROWS`), of every account on this PC, in one statement. The
+    /// first-time guide marks (`guide_mark`) are the other rows a sign-out keeps, and go with them: after a reset
+    /// nothing of an earlier account is left here.
     pub fn forget_share_trust_rows(&self) -> Result<()> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
-        let any = vec!["key LIKE ?"; share_marks::SHARE_TRUST_ROWS.len()].join(" OR ");
+        let kept: Vec<&str> = share_marks::SHARE_TRUST_ROWS
+            .iter()
+            .copied()
+            .chain([guide_mark::GUIDE_DONE_ROWS])
+            .collect();
+        let any = vec!["key LIKE ?"; kept.len()].join(" OR ");
         conn.execute(
             &format!("DELETE FROM sync_state WHERE {any}"),
-            rusqlite::params_from_iter(share_marks::SHARE_TRUST_ROWS),
+            rusqlite::params_from_iter(kept),
         )?;
         Ok(())
     }

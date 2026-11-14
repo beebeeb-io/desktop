@@ -235,6 +235,18 @@ impl EngineError {
         }
         false
     }
+
+    /// The `E` in this error's source chain, if one sits there ([`Self::is_caused_by`], handing it out).
+    pub(crate) fn caused_by<E: std::error::Error + 'static>(&self) -> Option<&E> {
+        let mut current: Option<&(dyn std::error::Error + 'static)> = Some(self);
+        while let Some(error) = current {
+            if let Some(found) = error.downcast_ref::<E>() {
+                return Some(found);
+            }
+            current = error.source();
+        }
+        None
+    }
 }
 
 /// A Finder write for an id this Mac never knew and no alias resolves (spec §7.3). The
