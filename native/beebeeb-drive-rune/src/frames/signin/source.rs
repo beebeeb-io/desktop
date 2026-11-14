@@ -22,8 +22,12 @@ pub enum GateState {
     Ready,
     /// DW-A02 / DW-A03.
     SignedOut,
-    /// DW-0009.
+    /// DW-0009: the SCREEN is locked (core's `ScreenLocked`). The key is in memory and sync runs; Windows Hello
+    /// opens it.
     Locked,
+    /// The vault is closed (core's `VaultClosed`): no key in this app, nothing syncs. The account's password,
+    /// proven to the server, opens it (DW-A30's screen, with the lock's words).
+    VaultClosed,
     /// DW-A23.
     NeedsRecoveryPhrase,
     /// DW-0014.
@@ -91,6 +95,9 @@ pub enum HelloOutcome {
     NotRecognized,
     /// DW-A06.
     Cancelled,
+    /// Added by the lock lane: no prompt could be shown (Windows Hello is not set up, not present, or turned off
+    /// on this PC). The lock screen then offers the password.
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

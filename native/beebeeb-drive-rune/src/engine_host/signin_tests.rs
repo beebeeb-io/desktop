@@ -442,50 +442,6 @@ fn too_many_tries_is_said_with_the_servers_wait_and_counted_down_to_zero() {
 }
 
 #[test]
-fn a_locked_vault_opens_with_the_password_and_with_nothing_else() {
-    let fake = fake("lock");
-    let (engine, mut source) = signed_in(&fake);
-    let _ = engine.lock();
-    assert_eq!(source.gate(), GateState::Locked);
-
-    source.begin_unlock("not the password");
-    assert_eq!(
-        next(&mut source),
-        SignInEvent::VaultUnlocked(Err(SignInProblem::Invalid))
-    );
-    assert_eq!(source.gate(), GateState::Locked);
-
-    fake.step_up.store(RATE_LIMITED, Ordering::SeqCst);
-    source.begin_unlock(PASSWORD);
-    assert_eq!(
-        next(&mut source),
-        SignInEvent::VaultUnlocked(Err(SignInProblem::RateLimited { seconds: 30 }))
-    );
-    fake.step_up.store(NO_ANSWER, Ordering::SeqCst);
-    source.begin_unlock(PASSWORD);
-    assert_eq!(
-        next(&mut source),
-        SignInEvent::VaultUnlocked(Err(SignInProblem::Offline))
-    );
-    assert_eq!(
-        source.gate(),
-        GateState::Locked,
-        "a proof that was not made unlocks nothing"
-    );
-    fake.step_up.store(ANSWERS, Ordering::SeqCst);
-
-    source.begin_unlock(PASSWORD);
-    assert_eq!(
-        next(&mut source),
-        SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::Drive))
-    );
-    assert_eq!(source.gate(), GateState::Ready);
-    assert_eq!(engine.account_email().as_deref(), Some(fake.first.email.as_str()));
-    // Lock, then unlock: the account's local state is handed out for the new session.
-    assert!(engine.keys_for_engine_start().is_ok());
-}
-
-#[test]
 fn another_account_signs_in_after_the_first_and_gets_only_its_own_session() {
     let fake = fake("other");
     let (engine, mut source) = signed_in(&fake);
@@ -697,3 +653,7 @@ fn a_secret_reaches_the_engine_as_it_was_typed_and_the_words_as_one_phrase() {
     assert_eq!(phrase_of(&words(TEST_PHRASE)).as_str(), TEST_PHRASE);
     assert_eq!(phrase_of(&[]).as_str(), "");
 }
+
+// The two-level lock through this source: Windows Hello for a locked screen, the password for either level.
+#[path = "signin_lock_tests.rs"]
+mod lock;

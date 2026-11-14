@@ -169,6 +169,12 @@ impl Shell {
         self.sync_off_opened
     }
 
+    /// The slot the main window's native handle is put in once it exists: the lock screen's Windows Hello
+    /// prompt is owned by that window (`engine_host::hello`).
+    pub(crate) fn main_window_slot(&self) -> Arc<Mutex<Option<WindowHandle>>> {
+        self.wiring.window.clone()
+    }
+
     /// Asks the engine to start syncing; refused while another agent holds the profile.
     pub fn start_sync(&self) {
         if let Err(error) = self.actions.start_sync() {
@@ -625,7 +631,11 @@ fn on_gate_change(s: &mut State) {
     s.listing = listing;
     s.list_error = list_error;
     s.selected = None;
-    if s.shell.app.gate() == super::app::GateState::Ready {
+    // Sync is the app's work: it also starts behind a lock (the engine refuses it for a closed vault).
+    if matches!(
+        s.shell.app.gate(),
+        super::app::GateState::Ready | super::app::GateState::Locked
+    ) {
         s.shell.start_sync();
     }
 }

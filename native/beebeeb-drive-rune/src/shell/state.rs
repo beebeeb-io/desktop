@@ -164,8 +164,10 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
         engine.clone(),
         crate::shell::platform::current(),
     ));
+    // The lock screen's Windows Hello prompt is owned by the main window.
+    let hello = crate::engine_host::hello::WindowHello::new(s.shell.main_window_slot());
     s.signin = Some(crate::frames::signin::Ui::new(Box::new(
-        crate::engine_host::EngineSignInSource::new(engine.clone()),
+        crate::engine_host::EngineSignInSource::with_hello(engine.clone(), Box::new(hello)),
     )));
     // An open file: read from the engine, decrypted in memory (`engine_host::viewer`); one source per opened file.
     let viewer_engine = engine.clone();

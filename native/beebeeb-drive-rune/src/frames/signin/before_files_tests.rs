@@ -165,22 +165,18 @@ fn the_scenes_are_the_two_gate_states() {
     }
 }
 
+/// Unlock is bound (`lock_tests.rs` has its answers): a press raises no "Not available yet", and the gate stays
+/// the engine's.
 #[test]
-fn unlock_shows_not_available_by_press_and_by_enter() {
+fn unlock_is_not_a_not_built_button_and_changes_no_gate_by_itself() {
     let (_, mut rt) = window(GateState::Locked, false);
-    assert!(notice(&rt).is_none(), "no notice before a press");
     click(&mut rt, "gate-btn-0");
-    let n = notice(&rt).expect("a press sets the notice");
-    assert_eq!(n.message, "Not available yet");
-    assert_eq!(n.gate, GateState::Locked, "stamped with the gate it was raised under");
-    // Enter is Unlock (the default button): the notice is still set.
     key(&mut rt, Key::Enter);
-    assert!(notice(&rt).is_some());
-    assert_eq!(
-        rt.state.shell.app.screen(),
-        Screen::Gate(GateState::Locked),
-        "a not-built action changes nothing"
+    assert!(
+        notice(&rt).is_none(),
+        "Unlock asks Windows Hello; it is not a not-built action"
     );
+    assert_eq!(rt.state.shell.app.screen(), Screen::Gate(GateState::Locked));
 }
 
 #[test]

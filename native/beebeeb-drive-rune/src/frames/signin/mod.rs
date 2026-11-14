@@ -22,6 +22,8 @@ pub mod create;
 mod create_kit;
 pub mod create_source;
 pub mod icons;
+// The two lock levels in the window: the lock screen's Windows Hello and the password in front of it.
+pub mod lock;
 pub mod qr;
 pub mod setup;
 pub mod source;
@@ -35,6 +37,8 @@ mod view_steps;
 
 #[cfg(test)]
 mod create_tests;
+#[cfg(test)]
+mod lock_tests;
 #[cfg(test)]
 mod steps_tests;
 #[cfg(test)]
@@ -189,6 +193,8 @@ pub struct Ui {
     pub(super) create: create::Create,
     /// The session's gate as the last poll saw it (`follow_gate`).
     gate_seen: Option<GateState>,
+    /// What the window keeps while a lock closes the gate (`lock`).
+    lock: lock::Lock,
     /// The device request was asked from the twelve words (a session without a key is waiting behind it): leaving
     /// the request, or its refusal, goes back to the words, and the session is not discarded.
     words_behind: bool,
@@ -238,6 +244,7 @@ impl Ui {
             set_problem: None,
             create: create::Create::new(),
             gate_seen: None,
+            lock: lock::Lock::default(),
             words_behind: false,
         }
     }
@@ -354,7 +361,8 @@ impl Ui {
     }
 
     pub fn open_sign_in(&mut self) {
-        if self.step_running() {
+        // While a lock holds the window, back leads to the lock's own screens, never to the form.
+        if self.lock_back() || self.step_running() {
             return;
         }
         if self.words_behind && matches!(self.screen, Screen::Device { .. }) {
@@ -593,11 +601,13 @@ impl Ui {
                     self.problem = (seconds > 0).then_some(SignInProblem::RateLimited { seconds });
                 }
             }
+            SignInEvent::Hello(outcome) if self.lock_hello_waiting() => self.lock_hello_answered(outcome),
             SignInEvent::Hello(outcome) if self.hello_waiting && self.screen == Screen::ContinueAs(None) => {
                 self.hello_waiting = false;
                 match outcome {
                     HelloOutcome::Succeeded(next) => self.proceed(next),
-                    HelloOutcome::NotRecognized => {
+                    // No prompt at all is not "you cancelled": the frame that says nothing was signed in.
+                    HelloOutcome::NotRecognized | HelloOutcome::Unavailable => {
                         self.screen = Screen::ContinueAs(Some(HelloFailure::NotRecognized));
                         // "Focus returns to Try again" (DW-A05).
                         self.focus = Some(FIRST_BUTTON_KEY);
@@ -707,6 +717,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let Some(ui) = ui(s) else { return false };
     let mut changed = ui.pump();
     changed |= ui.follow_gate(gate);
+    changed |= ui.follow_lock(gate == GateState::Locked);
     ui.settle(tx);
     changed
 }
@@ -715,9 +726,11 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
 /// switcher's picture of the window holds bullets (DW-A02). For `App::on_focus` in the shell.
 #[cfg_attr(not(test), allow(dead_code))] // waits for its one line in `shell/mod.rs` (PR body)
 pub fn on_window_focus(s: &mut State, focused: bool) {
-    if let (false, Some(ui)) = (focused, ui(s))
-        && ui.password.is_revealed()
-    {
+    let Some(ui) = ui(s) else { return };
+    if focused {
+        // DW-0009: "Windows Hello starts by itself when the window opens".
+        ui.lock_window_focused();
+    } else if ui.password.is_revealed() {
         ui.password.set_revealed(false);
     }
 }

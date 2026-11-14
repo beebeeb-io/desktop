@@ -85,7 +85,12 @@ pub(super) fn actions(top: f32) -> El {
 }
 
 pub(super) fn back(t: &Theme) -> El {
-    au::back_link("Sign in", &icons::BACK, t).on_press_tx(act(Ui::open_sign_in))
+    back_as("Sign in", t)
+}
+
+/// The back link under another name: "Back" while a lock holds the window (it leads to the lock's own screens).
+pub(super) fn back_as(label: &str, t: &Theme) -> El {
+    au::back_link(label, &icons::BACK, t).on_press_tx(act(Ui::open_sign_in))
 }
 
 fn use_password_instead(k: &mut Keys, label: &str, t: &Theme) -> El {

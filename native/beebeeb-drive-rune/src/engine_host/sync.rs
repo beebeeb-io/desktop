@@ -123,7 +123,7 @@ pub fn tray_inputs_of(sync: &SyncView, status: &EngineStatusView) -> TrayInputs 
     TrayInputs {
         signed_in: gate != EngineGate::SignedOut && !session_expired,
         session_expired,
-        locked: gate == EngineGate::Locked,
+        locked: matches!(gate, EngineGate::Locked | EngineGate::ScreenLocked),
         paused: sync.paused,
         explorer_ready: running && sync.explorer == Explorer::Added,
         engine: if running {

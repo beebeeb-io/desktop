@@ -11,6 +11,11 @@
 //! The window moves on when the engine's gate does (Windows Hello recognised the person, a plan
 //! arrived).
 //!
+//! The lock screen's Unlock asks for Windows Hello (`super::lock`: the prompt, its answer as a
+//! sentence under the button, and "Use your password" when Windows Hello cannot answer). The
+//! lock's password screen (the screen lock's other way in, and a closed vault) is the sign-in
+//! group's DW-A30 with the lock's words, drawn here in place of the lock screen.
+//!
 //! DW-0009 shows no file name anywhere, and it is in the capture-exclusion decision as a whole
 //! (`FrameGroup::Locked`, `shell::registry`).
 
@@ -29,10 +34,11 @@ use rune::{Align, Color, Cx, El, Icon, TextStyle, col, el, row};
 
 /// The action each button names, for tests and the log. None of these is wired to an engine
 /// action yet: each button shows [`NOT_AVAILABLE`].
-pub const UNLOCK: &str = "unlock";
 pub const OPEN_PLANS: &str = "open-plans";
 pub const CHECK_PLAN: &str = "check-plan";
 pub const SIGN_OUT: &str = "sign-out";
+/// The lock screen's second button, shown once Windows Hello could not answer.
+pub const USE_PASSWORD_KEY: &str = "gate-btn-1";
 
 /// `.kit-btn-lg`'s words: 13px/500 on 19.5px.
 const BUTTON_LG: TextStyle = TextStyle::new(13.0, 500.0).lh(19.5).tracking(-0.065);
@@ -45,7 +51,7 @@ const NO_PLAN_W: f32 = 380.0;
 pub const LOCKED: Frame = Frame {
     group: FrameGroup::Locked,
     view,
-    on_key: None,
+    on_key: Some(on_key),
     feedback: FeedbackPolicy::Denied("the window is locked"),
 };
 pub const NO_PLAN: Frame = Frame {
@@ -145,28 +151,54 @@ fn head(icon: &'static Icon, title: &str, words: &str, fill: bool, t: &Theme) ->
     ]
 }
 
-/// DW-0009: "Beebeeb is locked", and Unlock, which starts Windows Hello again.
-fn locked(t: &Theme) -> El {
+/// The lock's password screen is in front (the screen lock's other way in, or a closed vault).
+fn password_in_front(s: &State) -> bool {
+    s.shell.app.screen() == Screen::Gate(GateState::Locked)
+        && s.signin.as_ref().is_some_and(super::Ui::lock_shows_password)
+}
+
+/// The lock's password screen takes the sign-in group's keys (Escape goes back); the lock screen has none.
+fn on_key(s: &mut State, ev: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
+    password_in_front(s) && super::on_key(s, ev, tx)
+}
+
+/// DW-0009: "Beebeeb is locked", and Unlock, which starts Windows Hello again. `said`: Windows Hello's last
+/// answer, when it was not a yes; "Use your password" shows with it, never before (the board's frame has one
+/// button).
+fn locked(said: Option<super::lock::Said>, t: &Theme) -> El {
     let mut block = col().key("gate").items_center().gap(8.0);
     for child in head(&ic::PADLOCK, "Beebeeb is locked", "Unlock to see your files.", false, t) {
         block = block.child(child);
     }
-    block.child(
-        el().key("gate-actions").mt(8.0).child(
+    let mut actions = row().key("gate-actions").mt(8.0).gap(8.0).child(
+        button(
+            super::lock::UNLOCK_KEY,
+            "Unlock",
+            Some(&ic::APP_LOCK),
+            Look::Primary,
+            28.0,
+            crate::ui::settings_dialog::BUTTON_MD,
+            t,
+        )
+        .default_button()
+        .autofocus()
+        .on_press_tx(super::act(super::Ui::unlock_screen)),
+    );
+    if said.is_some() {
+        actions = actions.child(
             button(
-                "gate-btn-0",
-                "Unlock",
-                Some(&ic::APP_LOCK),
-                Look::Primary,
+                USE_PASSWORD_KEY,
+                "Use your password",
+                None,
+                Look::Plain,
                 28.0,
                 crate::ui::settings_dialog::BUTTON_MD,
                 t,
             )
-            .default_button()
-            .autofocus()
-            .on_press(not_built(UNLOCK)),
-        ),
-    )
+            .on_press_tx(super::act(super::Ui::lock_use_password)),
+        );
+    }
+    block.child(actions)
 }
 
 /// DW-0014: where to get a plan (only on the website), Check again, Sign out.
@@ -234,10 +266,15 @@ fn status(words: &str, dot: Color, t: &Theme) -> El {
 
 /// The main window while the gate is `Locked` or `NoPlan`.
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
+    if password_in_front(s) {
+        return super::frame(s, cx);
+    }
     let t = tokens::theme(cx.system_dark());
     cx.web_focus();
     let is_locked = s.shell.app.screen() == Screen::Gate(GateState::Locked);
     let current_gate = s.shell.app.gate();
+    // Windows Hello's last answer on the lock screen, when it was not a yes (`super::lock`).
+    let lock_said = s.signin.as_ref().and_then(super::Ui::lock_said).filter(|_| is_locked);
     let (standing, closed, block, words, dot) = if is_locked {
         (
             Standing::Locked,
@@ -245,7 +282,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 title: "Beebeeb is locked",
                 sub: None,
             },
-            locked(&t),
+            locked(lock_said, &t),
             "Locked \u{00B7} sync keeps running",
             t.text_tertiary,
         )
@@ -263,12 +300,13 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     };
     // The notice a button raised: drawn under the buttons, shown only while the gate that
     // raised it still holds (a gate change is the engine's answer to the person's action).
-    let notice_text = s
-        .frames
-        .gate_notice
-        .as_ref()
-        .filter(|n| n.gate == current_gate)
-        .map(|n| n.message);
+    let notice_text = lock_said.map(super::lock::Said::words).or_else(|| {
+        s.frames
+            .gate_notice
+            .as_ref()
+            .filter(|n| n.gate == current_gate)
+            .map(|n| n.message)
+    });
     let mut gate_block = col()
         .key("gate-area")
         .grow(1.0)
