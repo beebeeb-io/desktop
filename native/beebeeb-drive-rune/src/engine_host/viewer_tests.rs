@@ -72,6 +72,18 @@ struct Inner {
     local_waits: bool,
     /// The session ends while the facts are read (the read that is refused finds none after it).
     session_ends_at_facts: bool,
+    /// What the local state says of every file for the editor and the switch (`None`: not read).
+    edit: Option<EditFacts>,
+    /// Every Available offline change asked of the engine, and whether the engine refuses them.
+    kept_calls: Vec<(String, bool)>,
+    kept_refused: bool,
+    /// Every save asked of the engine (file, text, base) and what it answers.
+    saves: Vec<(String, String, i64)>,
+    save_answer: Result<SaveEnd, EditRefused>,
+    /// Every Keep both asked of the engine.
+    copies: Vec<(String, String)>,
+    /// The next change waits here until the test lets it go (a change "on its way").
+    change_waits: bool,
 }
 
 struct Fake {
@@ -108,6 +120,17 @@ impl Fake {
                 facts_error: None,
                 session_ends_at_facts: false,
                 local_waits: false,
+                edit: Some(EditFacts {
+                    version: 3,
+                    kept: false,
+                    can_write: true,
+                }),
+                kept_calls: Vec::new(),
+                kept_refused: false,
+                saves: Vec::new(),
+                save_answer: Ok(SaveEnd::Saved { version: 4 }),
+                copies: Vec::new(),
+                change_waits: false,
             }),
             door: Mutex::new(()),
         };
@@ -277,6 +300,52 @@ impl ViewerEngine for Fake {
 
     fn wake(&self) {
         self.s().wakes += 1;
+    }
+
+    fn edit_facts(&self, _session: SessionGeneration, _file_id: &str) -> Option<EditFacts> {
+        self.s().edit
+    }
+
+    fn set_kept(&self, session: SessionGeneration, file_id: &str, kept: bool) -> Result<(), ()> {
+        self.hold();
+        let mut s = self.s();
+        if SessionGeneration::for_test(s.turn) != session || s.kept_refused {
+            return Err(());
+        }
+        s.kept_calls.push((file_id.to_string(), kept));
+        Ok(())
+    }
+
+    fn save_text(&self, _: SessionGeneration, file_id: &str, text: &str, base: i64) -> Result<SaveEnd, EditRefused> {
+        self.hold();
+        let mut s = self.s();
+        s.saves.push((file_id.to_string(), text.to_string(), base));
+        s.save_answer
+    }
+
+    fn save_copy(
+        &self,
+        _: SessionGeneration,
+        file_id: &str,
+        text: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<NewCopy, EditRefused> {
+        self.hold();
+        self.s().copies.push((file_id.to_string(), text.to_string()));
+        Ok(NewCopy {
+            id: "f-copy".into(),
+            name: "Invented harbour note (This PC, 09:41).txt".into(),
+        })
+    }
+}
+
+impl Fake {
+    /// A change waits at the door while a test holds it.
+    fn hold(&self) {
+        if self.s().change_waits {
+            drop(self.door.lock().unwrap());
+        }
     }
 }
 
@@ -1059,3 +1128,6 @@ fn a_source_that_cannot_save_or_keep_offline_says_so_on_the_press() {
 
 #[path = "viewer_round2_tests.rs"]
 mod round2;
+
+#[path = "viewer_change_tests.rs"]
+mod change;

@@ -57,6 +57,7 @@ use std::sync::{Arc, mpsc};
 
 use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::app::viewer_api::{LocalCopy, OnThisPc, OpenFileError, OpenFileFacts, OpenedFile};
+use beebeeb_engine::app::viewer_edit_api::{EditFacts, EditRefused, NewCopy, SaveEnd};
 use beebeeb_engine::app::{CredentialStores, Engine};
 use beebeeb_engine::file_ops;
 use zeroize::Zeroize;
@@ -64,8 +65,8 @@ use zeroize::Zeroize;
 use super::log;
 use crate::frames::viewers::kinds::{self, PdfDoc, PhotoDoc, Picture, Viewer};
 use crate::frames::viewers::source::{
-    Body, Cut, Details, Elsewhere, MdDoc, NoPreview, OpenError, OpenFile, Origin, PageState, Stopped, TextDoc,
-    Truncated, ViewerSource, plain_lines,
+    Body, Cut, Details, Elsewhere, Keep, MdDoc, NoPreview, OpenError, OpenFile, Origin, PageState, SaveOutcome,
+    Settled, Stopped, TextDoc, Truncated, ViewerSource, plain_lines,
 };
 
 #[path = "viewer_pdf.rs"]
@@ -75,6 +76,9 @@ pub(crate) mod viewer_picture;
 
 /// How many rendered pages of the open PDF are kept (the page on screen and the ones just left).
 pub const PAGES_KEPT: usize = 6;
+
+#[path = "viewer_change.rs"]
+mod change;
 
 #[cfg(test)]
 #[path = "viewer_tests.rs"]
@@ -128,6 +132,35 @@ pub trait ViewerEngine: Send + Sync + 'static {
     fn open_elsewhere(&self, file_id: &str) -> Elsewhere;
     /// Wake the window's loop: an answer or progress is waiting.
     fn wake(&self);
+    /// [`Engine::edit_facts_for`]. `None`: not read (the switch and the editor are not offered).
+    fn edit_facts(&self, _session: SessionGeneration, _file_id: &str) -> Option<EditFacts> {
+        None
+    }
+    /// [`Engine::set_kept_for`]. A worker's.
+    fn set_kept(&self, _session: SessionGeneration, _file_id: &str, _kept: bool) -> Result<(), ()> {
+        Err(())
+    }
+    /// [`Engine::save_text_for`]. A worker's.
+    fn save_text(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+        _text: &str,
+        _base: i64,
+    ) -> Result<SaveEnd, EditRefused> {
+        Err(EditRefused::Failed)
+    }
+    /// [`Engine::save_text_copy_for`]. A worker's.
+    fn save_copy(
+        &self,
+        _session: SessionGeneration,
+        _file_id: &str,
+        _text: &str,
+        _device: &str,
+        _hhmm: &str,
+    ) -> Result<NewCopy, EditRefused> {
+        Err(EditRefused::Failed)
+    }
 }
 
 /// The engine handle, as the viewer asks it.
@@ -197,6 +230,35 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
     fn wake(&self) {
         self.engine.wake_host();
     }
+
+    fn edit_facts(&self, session: SessionGeneration, file_id: &str) -> Option<EditFacts> {
+        self.engine.edit_facts_for(session, file_id).ok()
+    }
+
+    fn set_kept(&self, session: SessionGeneration, file_id: &str, kept: bool) -> Result<(), ()> {
+        self.engine.set_kept_for(session, file_id, kept).map_err(|_| ())
+    }
+
+    fn save_text(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        text: &str,
+        base: i64,
+    ) -> Result<SaveEnd, EditRefused> {
+        self.engine.save_text_for(session, file_id, text, base)
+    }
+
+    fn save_copy(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+        text: &str,
+        device: &str,
+        hhmm: &str,
+    ) -> Result<NewCopy, EditRefused> {
+        self.engine.save_text_copy_for(session, file_id, text, device, hhmm)
+    }
 }
 
 /// What the worker made of the decrypted file, for the view. Its text is overwritten if nobody takes it (the
@@ -249,6 +311,12 @@ struct Opening {
     origin: Origin,
     /// The session moved on and the view was told: nothing more comes from this opening.
     ended: bool,
+    /// What the local state said at the open: the version, whether the file is kept, whether it may be changed.
+    /// `None`: not read.
+    edit: Option<EditFacts>,
+    /// How the file is shown, and its name (a Keep both names the copy after it).
+    shows: Shows,
+    name: String,
 }
 
 /// One page's answer from the worker: the page (from 1), its pixels or `None` when it could not be rendered, and
@@ -316,6 +384,8 @@ struct PdfEnds {
 pub struct EngineViewerSource<E: ViewerEngine> {
     engine: Arc<E>,
     open: Option<Opening>,
+    /// A change handed to a worker (Available offline, a save) and the answers that come back.
+    changes: change::Changes,
 }
 
 impl<C: CredentialStores + 'static> EngineViewerSource<LiveViewerEngine<C>> {
@@ -663,7 +733,11 @@ impl Opening {
 
 impl<E: ViewerEngine> EngineViewerSource<E> {
     pub(crate) fn on(engine: Arc<E>) -> Self {
-        Self { engine, open: None }
+        Self {
+            engine,
+            open: None,
+            changes: change::Changes::default(),
+        }
     }
 
     /// Whether the session in memory is the one `opening` was made for: the same generation, the same account,
@@ -726,6 +800,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             pages,
             origin: Origin::Beebeeb,
             ended: false,
+            // Read for the session of this open, from the local state alone.
+            edit: self.engine.edit_facts(session, file_id),
+            shows,
+            name: facts.name.clone(),
         };
         let body = if shows == Shows::Nothing {
             Body::NotPreviewable(NoPreview::NoViewer)
@@ -744,8 +822,9 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             log("viewer: could not start a thread for an open file");
             Body::Failed
         };
+        let edit = opening.edit;
         self.open = Some(opening);
-        Ok(file_of(file_id, facts, body))
+        Ok(file_of(file_id, facts, body, edit))
     }
 
     /// The facts of `file_id` for the session in memory, with the session they are for. Each refusal keeps its
@@ -856,7 +935,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
 }
 
 /// The file as the view draws it. The path starts at "Files", as the window's own crumbs do.
-fn file_of(file_id: &str, facts: OpenFileFacts, body: Body) -> OpenFile {
+fn file_of(file_id: &str, facts: OpenFileFacts, body: Body, edit: Option<EditFacts>) -> OpenFile {
     // The size as the Files window writes it.
     let size = crate::source::format_size(i64::try_from(facts.size).unwrap_or(i64::MAX));
     let kind = kind_word(&facts.name);
@@ -865,15 +944,15 @@ fn file_of(file_id: &str, facts: OpenFileFacts, body: Body) -> OpenFile {
     OpenFile {
         id: file_id.to_string(),
         facts: format!("{kind} \u{00B7} {size}"),
-        // Not read: the reader shows no version (the editor would, and it does not open here).
-        version: 0,
+        // The version the local state holds (0: not read, and the editor is not offered).
+        version: edit.map_or(0, |edit| u32::try_from(edit.version).unwrap_or(0)),
         body,
         details: Details {
             kind: kind.to_string(),
             size,
             facts: vec![("Where", path.join(" \u{203A} "), false)],
-            // Not read here, and not drawn (`knows_offline`).
-            offline: false,
+            // Read from the local state; not drawn when it was not read (`knows_offline`).
+            offline: edit.is_some_and(|edit| edit.kept),
         },
         newer: None,
         path,
@@ -1043,14 +1122,39 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
         false
     }
 
-    /// Saving an edit is not bound: the editor does not open.
+    /// The editor opens for a text or a note the account may change, whose version was read.
     fn can_save(&self) -> bool {
-        false
+        self.change_facts()
+            .is_some_and(|(_, edit)| edit.can_write && edit.version > 0)
+            && self
+                .open
+                .as_ref()
+                .is_some_and(|opening| matches!(opening.shows, Shows::Text | Shows::Markdown))
     }
 
-    /// Whether the file is kept on this PC is not read here: the details panel draws no switch for it.
+    /// Whether the file is kept on this PC was read from the local state.
     fn knows_offline(&self) -> bool {
-        false
+        self.change_facts().is_some()
+    }
+
+    fn set_offline(&mut self, file_id: &str, on: bool) -> bool {
+        self.start_offline(file_id, on)
+    }
+
+    fn save(&mut self, file_id: &str, text: &str, base: u32) -> SaveOutcome {
+        self.start_save(file_id, text, base)
+    }
+
+    fn resolve(&mut self, file_id: &str, text: &str, keep: Keep) -> SaveOutcome {
+        self.start_resolve(file_id, text, keep)
+    }
+
+    fn settled(&mut self, file_id: &str) -> Option<Settled> {
+        self.take_settled(file_id)
+    }
+
+    fn answers_later(&self) -> bool {
+        true
     }
 }
 

@@ -63,6 +63,7 @@ pub mod transfer_limits_api;
 pub mod trash_api;
 // An open file for the native viewer: its facts, and its content decrypted in memory.
 pub mod viewer_api;
+pub mod viewer_edit_api;
 
 pub use owned_state::{LocalStateRefused, OwnedState};
 
