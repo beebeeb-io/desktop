@@ -206,3 +206,33 @@ impl Ui {
         }
     }
 }
+
+/// Scenes of the lock's states the board has no frame for (core's contract, section 7: "no frame yet"), for a
+/// render to look at: `--scene LOCK-...`. Fixture data only; none has a golden, so none is gated.
+pub const SCENES: &[(&str, fn(&mut crate::State))] = &[
+    ("LOCK-hello-unavailable", |s| lock_scene(s, false, false)),
+    ("LOCK-screen-password", |s| lock_scene(s, false, true)),
+    ("LOCK-vault-closed", |s| lock_scene(s, true, false)),
+];
+
+fn lock_scene(s: &mut crate::State, vault: bool, password: bool) {
+    use super::source::{FixtureSignInSource, Script};
+    crate::shell::host::dispatch(s, crate::shell::app::Event::Gate(crate::shell::app::GateState::Locked));
+    let mut ui = Ui::new(Box::new(FixtureSignInSource::new(Script {
+        gate: if vault {
+            SourceGate::VaultClosed
+        } else {
+            SourceGate::Locked
+        },
+        hello: HelloOutcome::Unavailable,
+        ..Script::default()
+    })));
+    ui.follow_lock(true);
+    if !vault {
+        ui.unlock_screen();
+    }
+    if password {
+        ui.lock_use_password();
+    }
+    s.signin = Some(ui);
+}
