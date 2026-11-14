@@ -132,6 +132,8 @@ enum Answer {
     PurgeProgress(Stamp, usize),
     /// A delete for good ended, under the session and account of its press.
     Purged(Stamp, beebeeb_engine::app::trash_purge_api::Purged),
+    /// A delete of many for good (one proof, one call) ended, under the session and account of its press.
+    BulkPurged(Stamp, beebeeb_engine::app::trash_bulk_api::BulkPurged),
 }
 
 /// The session and the account a restore was pressed under.
@@ -298,6 +300,7 @@ impl<C: CredentialStores> EngineTrashSource<C> {
             }
             Answer::PurgeProgress(pressed, done) => self.purge_progress(pressed, done),
             Answer::Purged(pressed, result) => self.purge_ended(pressed, result),
+            Answer::BulkPurged(pressed, result) => self.bulk_purge_ended(pressed, result),
         }
     }
 }
@@ -497,6 +500,10 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
     /// Empty Trash and Delete permanently: the engine's permanent delete, after the account password is proven.
     fn purge_available(&self) -> bool {
         true
+    }
+
+    fn purge_batch(&self) -> (TrashTotals, usize) {
+        self.first_batch()
     }
 
     fn purge(&mut self, id: Option<&str>, password: &str) -> bool {

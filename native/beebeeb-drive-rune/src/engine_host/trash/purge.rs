@@ -1,8 +1,10 @@
 //! Delete for good on the real engine: "Empty Trash" and "Delete permanently" of [`EngineTrashSource`].
 //!
 //! The press (the dialog's Empty Trash / Delete permanently button, with the account password typed) stamps the
-//! session and the account, then ONE worker proves the password for each item in turn and deletes it
-//! ([`Engine::purge_trash_for`]: session-bound, one single-use token per item). An answer that lands under another
+//! session and the account, then ONE worker deletes. One item: [`Engine::purge_trash_for`] (its own route, one proof).
+//! More than one: ONE password proof and ONE call for the first 500 ([`Engine::purge_trash_bulk_for`]); the dialog
+//! says before the press when more than 500 are listed, and a call never deletes a row it did not name.
+//! Both are session-bound. An answer that lands under another
 //! session or account than its press touches no row and says nothing; the list is read again instead.
 //!
 //! Rows leave the list only as the engine reports them gone (a read that began before cannot bring them back), so
@@ -11,11 +13,12 @@
 //! Must not: log the password, a name, an id or a server's words; keep the password past the worker's call.
 
 use beebeeb_engine::app::CredentialStores;
+use beebeeb_engine::app::trash_bulk_api::{BulkPurged, MAX_BULK_IDS};
 use beebeeb_engine::app::trash_purge_api::{PurgeError, Purged};
 use zeroize::Zeroizing;
 
 use super::{Answer, EngineTrashSource, Stamp, log, stamp};
-use crate::frames::trash::source::{Emptying, Notice, PurgeEnd};
+use crate::frames::trash::source::{Emptying, Notice, PurgeEnd, TrashSource, TrashTotals};
 
 /// A delete for good on its way.
 pub(super) struct Purging {
@@ -62,10 +65,30 @@ impl<C: CredentialStores> EngineTrashSource<C> {
         if ids.is_empty() {
             return false;
         }
+        // More than one item: one proof and one call for the first batch (the dialog said so before the press).
+        let bulk = ids.len() > 1;
+        let ids: Vec<String> = if bulk {
+            ids.into_iter().take(MAX_BULK_IDS).collect()
+        } else {
+            ids
+        };
         let proof = Zeroizing::new(password.to_string());
         let (engine, answers, stamped, work) =
             (self.engine.clone(), self.answers.clone(), pressed.clone(), ids.clone());
         let started = std::thread::Builder::new().name("trash-purge".into()).spawn(move || {
+            if bulk {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    engine.purge_trash_bulk_for(stamped.0, &work, proof.as_bytes())
+                }))
+                .unwrap_or(BulkPurged {
+                    error: Some(PurgeError::Failed),
+                    ..BulkPurged::default()
+                });
+                drop(proof);
+                let _ = answers.send(Answer::BulkPurged(stamped, result));
+                engine.wake_host();
+                return;
+            }
             let progress_to = answers.clone();
             let (progress_stamp, wake) = (stamped.clone(), engine.clone());
             // A panic in this worker must not leave the delete "on its way" for good: it answers as a failure.
@@ -95,6 +118,19 @@ impl<C: CredentialStores> EngineTrashSource<C> {
         });
         self.dirty = true;
         true
+    }
+
+    /// What Empty Trash deletes in one go: the first batch (count, size) and how many stay for another Empty Trash.
+    pub(super) fn first_batch(&self) -> (TrashTotals, usize) {
+        let Some(listing) = self.current() else {
+            return (self.totals(), 0);
+        };
+        let batch = &listing.rows[..listing.rows.len().min(MAX_BULK_IDS)];
+        let totals = TrashTotals {
+            items: batch.len(),
+            size: crate::source::format_size(batch.iter().map(|listed| listed.bytes).sum()),
+        };
+        (totals, listing.rows.len() - batch.len())
     }
 
     /// Whether `pressed` is the session and account the window is under now.
@@ -148,6 +184,62 @@ impl<C: CredentialStores> EngineTrashSource<C> {
                 self.purge_end = Some(PurgeEnd::Stopped);
             }
         }
+        self.read();
+    }
+}
+
+impl<C: CredentialStores> EngineTrashSource<C> {
+    /// The answer of a bulk delete. What the engine reports deleted leaves the list now (and no read that began
+    /// before can bring it back); a folder Beebeeb kept stays listed, with its reason in a notice. A wrong password
+    /// deletes nothing and keeps the dialog.
+    pub(super) fn bulk_purge_ended(&mut self, pressed: Stamp, result: BulkPurged) {
+        if let Some(error) = result.error {
+            log(format!("trash: a delete for good stopped ({})", words_of(error)));
+        }
+        if self.purging.as_ref().is_some_and(|p| p.stamp == pressed) {
+            self.purging = None;
+        }
+        // Under another session or account than its press: no row is touched and nothing of it is drawn.
+        if !self.is_current(&pressed) {
+            self.read_at = None;
+            if !result.deleted.is_empty() && (self.current().is_some() || self.reading.is_some()) {
+                self.read();
+            }
+            return;
+        }
+        for id in &result.deleted {
+            if let Some(listing) = self.listing.as_mut() {
+                listing.rows.retain(|listed| &listed.row.id != id);
+            }
+            self.restored.insert(id.clone(), self.reads);
+        }
+        self.purge_end = Some(match result.error {
+            Some(PurgeError::WrongPassword) => PurgeEnd::WrongPassword,
+            Some(error) => {
+                self.notice = Some(Notice::PurgeStopped {
+                    done: 0,
+                    why: why_of(error),
+                });
+                PurgeEnd::Stopped
+            }
+            None if result.kept.is_empty() => PurgeEnd::Done,
+            None => {
+                let inside = result
+                    .kept
+                    .iter()
+                    .map(|kept| match kept.why {
+                        beebeeb_engine::app::trash_bulk_api::KeptWhy::HoldsLiveItems(n) => n,
+                        beebeeb_engine::app::trash_bulk_api::KeptWhy::Loop => 0,
+                    })
+                    .sum();
+                self.notice = Some(Notice::FoldersKept {
+                    done: result.deleted.len(),
+                    folders: result.kept.len(),
+                    inside,
+                });
+                PurgeEnd::Stopped
+            }
+        });
         self.read();
     }
 }
