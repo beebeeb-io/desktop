@@ -453,7 +453,7 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
     );
     let drawn = w.drawn();
     assert!(drawn.contains("Where: Files"), "{drawn}");
-    assert!(!drawn.contains("Online only now"), "{drawn}");
+    assert!(drawn.contains("Online only now"), "the state that was read: {drawn}");
     assert!(
         w.rt.elements().iter().any(|e| e.key.as_deref() == Some("offline")),
         "the switch for a state that was read"
