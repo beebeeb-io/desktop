@@ -263,6 +263,7 @@ impl State {
     /// The status line was pressed: Uploads while something uploads (DW-0427), else the b's
     /// flyout (DW-1201).
     pub fn status_pressed(&mut self) {
+        self.actions.source.ask_uploads();
         if self.actions.source.uploads().is_some() {
             self.actions.uploads_open = !self.actions.uploads_open;
         } else {
@@ -303,13 +304,15 @@ impl State {
         }
     }
 
-    /// Cancel upload, from a row's menu: asked once; nothing is left half-uploaded.
+    /// Cancel upload, from a row's menu: asked once. A source that answers later says what it did
+    /// (`Change::Cancelled`); the row leaves the folder then, not before.
     pub fn cancel_one_upload(&mut self, id: &str, tx: &mut Tx) {
         self.actions.upload_menu = None;
         if self.needs_session(tx) {
             return;
         }
         match self.actions.source.cancel_upload(id) {
+            Ok(()) if self.actions.source.answers_later() => {}
             Ok(()) => {
                 // Its row in the folder goes with it. What was selected stays selected BY ITEM:
                 // the rows under the one that went move up, and the selection moves with them.
@@ -524,7 +527,12 @@ pub fn layer(s: &State, t: &Theme) -> Option<El> {
         }
         panel = panel.child(heading(&format!("uploads-group-{g}"), title, top, t));
         for (i, upload) in rows {
-            panel = panel.child(upload_row(i, upload, menu == Some(upload.id.as_str()), t));
+            panel = panel.child(upload_row(
+                i,
+                upload,
+                menu == Some(upload.id.as_str()) && s.actions.source.cancels_upload(&upload.id),
+                t,
+            ));
         }
     }
     let pause = if uploads.paused { "Resume all" } else { "Pause all" };
