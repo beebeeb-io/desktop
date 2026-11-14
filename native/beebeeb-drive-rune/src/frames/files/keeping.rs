@@ -11,7 +11,7 @@ use crate::source::DriveItem;
 use crate::theme::icons_settings;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::kit;
-use rune::{El, col};
+use rune::{El, col, el};
 
 /// One copy on its way down.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,12 +87,12 @@ pub fn progress(k: &str, item: &DriveItem, d: &Download, width: f32, t: &Theme) 
     col()
         .key(format!("{k}-download"))
         .w(width)
-        .gap(3.0)
+        .gap(4.0)
         .child(
             kit::label(
                 format!("{k}-download-words"),
                 words.clone(),
-                super::list::TWO_VERSIONS,
+                super::list::TWO_VERSIONS.lh(13.5),
                 t.text_secondary,
             )
             .truncate(),
@@ -121,4 +121,24 @@ pub fn scene(s: &mut State) {
     s.actions.source = Box::new(fixture);
     s.actions.toast = Some(super::Toast::Keeping);
     let _ = Action::KeepOffline;
+}
+
+/// The bar of a copy coming down (`.mk-prog`): the ink's own grey on the faint track. Amber is for
+/// encryption state and primary actions, and an upload's bar (`uploads::bar`); a download is neither.
+fn bar(key: &str, done: f32, name: &str, t: &Theme) -> El {
+    el().key(key.to_string())
+        .role("progressbar")
+        .label(name)
+        .w_full()
+        .h(4.0)
+        .radius(2.0)
+        .clip_rounded(2.0)
+        .fill(t.text.alpha(0.09))
+        .child(
+            el().key(format!("{key}-fill"))
+                .h(4.0)
+                .w_frac(done.clamp(0.0, 1.0))
+                .radius(2.0)
+                .fill(t.text_tertiary),
+        )
 }

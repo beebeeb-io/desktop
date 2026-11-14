@@ -101,28 +101,35 @@ fn menu_layer(s: &State, t: &Theme) -> Option<El> {
         // and 36 more with the Open in File Explorer button beside it; of New: 42 pt.
         MenuKind::Sort => layer(226.0 + 36.0, surface),
         MenuKind::New => layer(42.0, surface),
-        MenuKind::Background => surface.absolute(open.at.0, open.at.1),
+        MenuKind::Background => {
+            // Sort by's choices belong to the menu: a press on them is a press inside it.
+            let surface = match background_sort_flyout(s, t) {
+                Some(flyout) => surface.child(flyout),
+                None => surface,
+            };
+            surface.absolute(open.at.0, open.at.1)
+        }
     })
 }
 
 /// Sort by's choices beside the background menu (DW-1103), while "Sort by" is the highlighted entry.
-fn background_sort_layer(s: &State, t: &Theme) -> Option<El> {
+fn background_sort_flyout(s: &State, t: &Theme) -> Option<El> {
     let (x, y) = s.background_sort_at()?;
+    let at = s.actions.menu?.at;
     let entries = super::background_menu::sort_entries(s);
     // Its own keys, `menu-1`: the board names the second menu so.
     Some(
-        menu::menu(
+        menu::flyout(
             "menu-1",
             "Sort by",
             super::background_menu::SUB_W,
             &entries,
-            None,
             t,
             pick_sort,
             |_, _| {},
             close,
         )
-        .absolute(x, y),
+        .absolute(x - at.0, y - at.1),
     )
 }
 
@@ -398,7 +405,6 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     // What lies over the window: the open menu, the reason a name cannot be given, a dialog.
     let layers: Vec<El> = [
         menu_layer(s, &t),
-        background_sort_layer(s, &t),
         rename::tip_layer(s, &t),
         super::uploads::drop_layer(s, &t),
         super::uploads::layer(s, &t),

@@ -140,8 +140,9 @@ fn a_right_click_on_the_empty_list_opens_the_menu_and_a_choice_of_sort_by_sorts(
         find(&rt, "menu-1").is_none(),
         "Sort by is not open until it is highlighted"
     );
-    rt.state.actions.menu.as_mut().unwrap().hot = Some(super::background_menu::SORT_BY);
-    settle(&mut rt);
+    // Sort by is picked: its choices open and the menu stays.
+    click(&mut rt, "menu-item-4");
+    assert!(rt.state.actions.menu.is_some());
     click(&mut rt, "menu-1-item-2");
     assert_eq!(rt.state.actions.sort.by, super::SortBy::Size);
     assert!(rt.state.actions.menu.is_none());

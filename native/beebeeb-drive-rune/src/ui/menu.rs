@@ -192,6 +192,38 @@ pub fn menu(
     hover: fn(&mut State, usize),
     close: fn(&mut State, &mut Tx),
 ) -> El {
+    surface(true, key, name, width, entries, hot, t, pick, hover, close)
+}
+
+/// A menu that opens beside another one (Sort by's choices): the same surface, not modal itself. It is
+/// drawn inside the menu it belongs to, whose modal reaches it.
+#[allow(clippy::too_many_arguments)]
+pub fn flyout(
+    key: &'static str,
+    name: &'static str,
+    width: f32,
+    entries: &[Entry],
+    t: &Theme,
+    pick: fn(&mut State, usize, &mut Tx),
+    hover: fn(&mut State, usize),
+    close: fn(&mut State, &mut Tx),
+) -> El {
+    surface(false, key, name, width, entries, None, t, pick, hover, close)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn surface(
+    modal: bool,
+    key: &'static str,
+    name: &'static str,
+    width: f32,
+    entries: &[Entry],
+    hot: Option<usize>,
+    t: &Theme,
+    pick: fn(&mut State, usize, &mut Tx),
+    hover: fn(&mut State, usize),
+    close: fn(&mut State, &mut Tx),
+) -> El {
     let mut surface = col()
         .key(key)
         .role("menu")
@@ -201,8 +233,10 @@ pub fn menu(
         .radius(8.0)
         .fill(raised(t))
         .box_shadow(kit::drop(8.0, 28.0, Color::BLACK.alpha(0.20)))
-        .box_shadow(kit::ring(kit::HAIR, t.separator))
-        .modal_tx(true, close);
+        .box_shadow(kit::ring(kit::HAIR, t.separator));
+    if modal {
+        surface = surface.modal_tx(true, close);
+    }
     let (mut n_item, mut n_sep) = (0, 0);
     for (i, entry) in entries.iter().enumerate() {
         match *entry {
