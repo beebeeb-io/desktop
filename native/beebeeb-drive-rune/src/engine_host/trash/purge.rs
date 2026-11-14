@@ -18,7 +18,7 @@ use beebeeb_engine::app::trash_purge_api::{PurgeError, Purged};
 use zeroize::Zeroizing;
 
 use super::{Answer, EngineTrashSource, Stamp, log, stamp};
-use crate::frames::trash::source::{Emptying, Notice, PurgeEnd, TrashTotals};
+use crate::frames::trash::source::{Emptying, Notice, PurgeEnd, TrashSource, TrashTotals};
 
 /// A delete for good on its way.
 pub(super) struct Purging {
