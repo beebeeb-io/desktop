@@ -733,7 +733,7 @@ fn the_pane_says_it_in_view_with_try_again_and_no_row_moves() {
     assert_eq!(row_rects(&rt), rows, "no row moved when the notice came");
     assert!(
         find(&rt, "toast-0").is_none(),
-        "\"checking\" does not stay beside the check's failure: {seen}"
+        "\"checking\" is over with the check: it does not stay beside its failure: {seen}"
     );
     in_view(&rt, "notice");
     // A press Beebeeb refuses while that stands: said above the notice, both in view.

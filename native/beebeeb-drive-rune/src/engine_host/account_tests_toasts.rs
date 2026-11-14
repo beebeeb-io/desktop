@@ -183,7 +183,7 @@ fn only_a_toast_with_the_same_button_about_another_session_changes_its_words() {
     let turn = SessionGeneration::for_test(1);
     let now = Instant::now();
     let mut line = Line::new();
-    let mut drawn = None;
+    let mut drawn = Drawn::default();
     for id in ["a", "b", "c"] {
         line_up(&mut line, turn, Said::failed(NOT_SENT, Some(about(id)), true));
     }
@@ -215,7 +215,7 @@ fn only_a_toast_with_the_same_button_about_another_session_changes_its_words() {
     );
     // About the SAME session again (the list put the toast in the line anew): the words it had.
     let mut line = Line::new();
-    let mut drawn = None;
+    let mut drawn = Drawn::default();
     line_up(&mut line, turn, Said::failed(NOT_SIGNED_OUT, Some(about("a")), true));
     line_up(&mut line, turn, Said::failed(NOT_SIGNED_OUT, Some(about("b")), true));
     fade(&mut line, now, false, &mut drawn);
@@ -320,6 +320,23 @@ fn everywhere_else_one_by_one_stops_at_a_call_that_gets_no_answer() {
     );
     assert_eq!(source.notice(), Some(NOT_ALL_SIGNED_OUT));
     assert_eq!(ids(&source), ["s-this", "s-phone"]);
+
+    // An answered error for one, then no answer for the next: the outcome is NOT known (that one may have
+    // landed), whatever the first was answered. With the list unreadable too it is said so, never as a refusal.
+    let server = self::server();
+    let mut source = Source::new(signed_in(&server));
+    opened(&mut source, Pane::Sessions);
+    server.change_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    source.sign_out_everywhere_else();
+    settle(&mut source);
+    *server.refused_ids.lock().unwrap() = vec!["s-phone"];
+    server.change_mode.store(DROP_CONNECTION, Ordering::SeqCst);
+    server.read_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    source.run_notice_action();
+    settle(&mut source);
+    assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone", "s-web"]);
+    assert_eq!(source.notice(), Some(UNCONFIRMED_SIGN_OUT));
+    assert_eq!(source.notice_action(), None, "not known is not \"send it again\"");
 }
 
 /// One by one: Beebeeb answered "no such session" for the first, and the engine refused the next before

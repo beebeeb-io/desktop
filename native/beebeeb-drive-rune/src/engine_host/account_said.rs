@@ -264,8 +264,9 @@ pub(super) fn check_failed(lines: [&mut Line; 2]) {
 }
 
 /// The toast with a button for ONE session's sign-out that was drawn last: that session, and the form of its
-/// sentence. No `Debug`: it holds a session's id.
-pub(super) type Drawn = Option<(String, u8)>;
+/// sentence. A type of its own, with no `Debug`: it holds a session's id.
+#[derive(Default)]
+pub(super) struct Drawn(Option<(String, u8)>);
 
 /// The poll's part of the line: the first toast shows, for its time from the moment it first showed, and then
 /// the next. "Checking what Beebeeb has" stays while the check is out (`check_out`): the list's answer has the
@@ -278,13 +279,13 @@ pub(super) fn fade(notices: &mut Line, now: Instant, check_out: bool, drawn: &mu
     while let Some((_, said)) = notices.front_mut() {
         if said.shown_at.is_none() && said.sends_one_again() {
             let key = said.about.as_ref().map(|about| about.key.clone()).unwrap_or_default();
-            said.turn = match drawn {
+            said.turn = match &drawn.0 {
                 Some((before, turn)) if *before == key => *turn,
                 Some((_, 1)) => 2,
                 Some(_) => 1,
                 None => 0,
             };
-            *drawn = Some((key, said.turn));
+            drawn.0 = Some((key, said.turn));
         }
         let shown_at = *said.shown_at.get_or_insert(now);
         let left = said.stays().saturating_sub(now.saturating_duration_since(shown_at));
@@ -295,7 +296,7 @@ pub(super) fn fade(notices: &mut Line, now: Instant, check_out: bool, drawn: &mu
         }
     }
     // Nothing shows: the next toast is not "another" one.
-    *drawn = None;
+    drawn.0 = None;
     None
 }
 

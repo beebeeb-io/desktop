@@ -19,14 +19,30 @@ pub const UNCONFIRMED: &str = "Couldn't check with Beebeeb. What's shown here ma
 /// The account's switches could not be read: the rows say so, and this offers the way to ask again. Nothing
 /// about the other switches: whether they can be pressed is theirs to show.
 pub const NOT_READ: &str = "Couldn't load your account's alerts.";
-/// What the source says after a change Beebeeb took, and after a check that confirmed what is drawn: the two
-/// toasts of these panes that say something worked. Every other one says something was not done, and is drawn
-/// so (never with the mark of a thing that worked).
+/// What the source's toasts about the account's notifications say. They are these panes' own: drawn only over
+/// Notifications and Recent notifications (`super::poll`), each as what it is ([`toast_worked`]).
 pub const SAVED: &str = "Notification setting updated";
-pub const CHECKED: &str = "Checked. The switches show what Beebeeb has.";
-/// What the source says when a read of the account's notifications failed. These panes say that themselves (the
-/// rows, Recent's card, what stands over the pane), so it is never drawn as a toast as well (`super::poll`).
+/// Beebeeb refused, or the check after an unknown result shows the switch as it was.
+pub const NOT_SAVED: &str = "Couldn't change the notification setting. Nothing changed.";
+/// A timeout, a transport error mid-flight, or an unreadable 2xx: the change may have landed. Over when the
+/// check is: its answer is said in its place ([`SAVED`], [`NOT_SAVED`]), or the pane says it could not check.
+pub const UNKNOWN: &str = "Couldn't confirm the change. Checking what the server has.";
+pub const PC_NOT_SAVED: &str = "Couldn't save the notification setting on this PC.";
+/// A read failed. The panes say that themselves (the rows, Recent's card, [`NOT_READ`] over the pane), so this
+/// is drawn only where nothing else changes: "Try again" pressed under [`UNCONFIRMED`], and failing again.
 pub const NOT_LOADED: &str = "Couldn't load your notifications. Try again in a moment.";
+pub const NOT_MARKED: &str = "Couldn't mark your notifications as seen.";
+pub const STILL_SAVING: &str = "Still saving the last change. Try again in a moment.";
+
+/// Whether a toast of these panes says something worked. `None`: not one of theirs (another pane's sentence
+/// that landed late): drawn as that pane draws it.
+pub fn toast_worked(words: &str) -> Option<bool> {
+    match words {
+        SAVED => Some(true),
+        NOT_SAVED | UNKNOWN | PC_NOT_SAVED | NOT_LOADED | NOT_MARKED | STILL_SAVING => Some(false),
+        _ => None,
+    }
+}
 
 /// What stands over the Notifications pane: an account row whose switch was not read and no answer on its way
 /// ([`NOT_READ`]), or switches that are drawn but could not be confirmed ([`UNCONFIRMED`]).
@@ -68,13 +84,14 @@ pub fn said_over(ui: &SettingsUi, standing: Option<&'static str>, t: &Theme) -> 
     };
     let notice = standing.map(|words| notices::standing("notice", words, Some(again), 0, t));
     let line = usize::from(notice.is_some());
-    let toast = ui.toast.map(|words| {
-        if words == SAVED || words == CHECKED {
-            notices::toast_on(0, words, line, t)
-        } else {
-            notices::standing("toast-0", words, None, line, t)
-        }
-    });
+    // Something that was not done is never drawn with the mark of a thing that worked.
+    let toast = ui
+        .toast
+        .filter(|words| *words != NOT_LOADED || standing == Some(UNCONFIRMED))
+        .map(|words| match toast_worked(words) {
+            Some(false) => notices::standing("toast-0", words, None, line, t),
+            _ => notices::toast_on(0, words, line, t),
+        });
     match (notice, toast) {
         (None, None) => None,
         (Some(one), None) | (None, Some(one)) => Some(one),

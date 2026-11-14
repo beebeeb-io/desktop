@@ -33,6 +33,30 @@ use crate::shell::app::{Event, SettingsPane};
 mod orders;
 mod states;
 
+/// Test hooks of the part (here, not beside it: the part's file is at its size limit).
+impl<C: CredentialStores + 'static> NotificationsPart<C> {
+    /// What it holds is old: the next opening reads again.
+    pub(super) fn expire(&mut self) {
+        self.read_at = None;
+    }
+
+    /// The next write (a switch's change, a mark) waits on its worker, before it calls the engine, until the
+    /// returned sender is sent to or dropped.
+    pub(super) fn hold_next_write(&mut self) -> mpsc::Sender<()> {
+        let (release, held) = mpsc::channel();
+        self.hold_next_write = Some(held);
+        release
+    }
+
+    /// The next read waits on its worker, before it calls the engine, until the returned sender is sent to or
+    /// dropped.
+    pub(super) fn hold_next_read(&mut self) -> mpsc::Sender<()> {
+        let (release, held) = mpsc::channel();
+        self.hold_next_read = Some(held);
+        release
+    }
+}
+
 const PASSWORD: &str = "an invented password for notifications";
 
 const ANSWER: u8 = 0;
@@ -40,6 +64,8 @@ const SERVER_ERROR: u8 = 1;
 const SESSION_ENDED: u8 = 2;
 const EMPTY: u8 = 3;
 const UNREADABLE: u8 = 4;
+/// A change only: something in front of Beebeeb answers what does not read, and nothing was stored.
+const UNREADABLE_NOT_TAKEN: u8 = 5;
 /// The switches' read answers as the list's does.
 const AS_THE_LIST: u8 = 255;
 
@@ -104,7 +130,7 @@ fn mode_reply(mode: u8) -> Option<Reply> {
     match mode {
         SERVER_ERROR => Some(Reply::json(500, json!({ "error": "a server body" }))),
         SESSION_ENDED => Some(Reply::json(401, json!({ "error": "a server body" }))),
-        UNREADABLE => Some(Reply::ok(json!("not the expected shape"))),
+        UNREADABLE | UNREADABLE_NOT_TAKEN => Some(Reply::ok(json!("not the expected shape"))),
         _ => None,
     }
 }
@@ -585,9 +611,20 @@ fn a_refused_account_switch_stays_and_an_unknown_result_is_read_again() {
     source.set_alert(0, 0, false);
     assert_eq!(
         settle(&mut source),
-        [ALERT_UNKNOWN, ALERT_CHECKED],
-        "checking, and then the check's answer: the first toast does not stand for ever"
+        [ALERT_UNKNOWN, ALERT_SAVED],
+        "checking, and then the check's answer: the change had landed"
     );
+    // The same, and nothing was stored: the check says the switch is as it was. Never "updated".
+    fake.put_mode.store(UNREADABLE_NOT_TAKEN, Ordering::SeqCst);
+    let held = switch(&source, 0, 1);
+    source.set_alert(0, 1, !held);
+    assert_eq!(
+        settle(&mut source),
+        [ALERT_UNKNOWN, ALERT_NOT_SAVED],
+        "checking, and then the check's answer: nothing changed"
+    );
+    assert_eq!(switch(&source, 0, 1), held);
+    fake.put_mode.store(UNREADABLE, Ordering::SeqCst);
     assert_eq!(
         asked(&fake.fake, SWITCHES),
         before + 1,

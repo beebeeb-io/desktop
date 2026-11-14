@@ -243,7 +243,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             counted_at: 0,
             notices: Line::new(),
             later: Line::new(),
-            drawn: None,
+            drawn: Drawn::default(),
             dirty: false,
             #[cfg(test)]
             panic_next: Arc::default(),
@@ -407,7 +407,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         self.changing.clear();
         self.notices.clear();
         self.later.clear();
-        self.drawn = None;
+        self.drawn = Drawn::default();
         self.dirty = true;
     }
 
@@ -701,9 +701,20 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                             Ok(SessionEnd::AlreadyGone) => gone = true,
                             Err(error) => {
                                 left.push(id.clone());
-                                first.get_or_insert(error);
-                                if error != AccountCallError::ServerError {
-                                    break;
+                                match error {
+                                    AccountCallError::ServerError => {
+                                        first.get_or_insert(error);
+                                    }
+                                    AccountCallError::NotSignedIn | AccountCallError::SessionEnded => {
+                                        first.get_or_insert(error);
+                                        break;
+                                    }
+                                    // No answer: that sign-out may have landed, whatever an earlier one was
+                                    // answered. It is the outcome: not known, and the list is read to find out.
+                                    _ => {
+                                        first = Some(error);
+                                        break;
+                                    }
                                 }
                             }
                         }

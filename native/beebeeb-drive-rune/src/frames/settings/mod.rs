@@ -183,9 +183,6 @@ pub struct SettingsUi {
     pub dialog: Option<Dialog>,
     /// What a toast over the pane says, until the next thing happens.
     pub toast: Option<&'static str>,
-    /// What stood over Notifications at the last poll (`notifications::standing`): when it changes, it is the
-    /// newer word, and a toast from before it goes.
-    pub standing: Option<&'static str>,
     pub source: Box<dyn SettingsSource>,
     pub intents: Vec<Intent>,
     /// What Drive's own panes show (Storage, Sync and File Explorer, Bandwidth, ...).
@@ -207,7 +204,6 @@ impl Default for SettingsUi {
             menu: None,
             dialog: None,
             toast: None,
-            standing: None,
             // Sample content only where tooling runs; a build that ships starts unwired.
             source: source::first(instance::DEV_BUILD),
             intents: Vec::new(),
@@ -402,10 +398,8 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-0750u", |s| {
         s.settings.source = Box::new(BoardSettings::new().with_notifications_unconfirmed());
         open_on(s, "DW-0750");
-        // A change Beebeeb refused while that stands: its toast, above the notice (which the poll has seen:
-        // a toast from BEFORE a notice goes when the notice comes).
-        s.settings.standing = notifications::standing(&*s.settings.source);
-        s.settings.toast = Some("Couldn't change the notification setting. Nothing changed.");
+        // A change Beebeeb refused while that stands: its toast, above the notice.
+        s.settings.toast = Some(notifications::NOT_SAVED);
     }),
     ("DW-0791", |s| open_on(s, "DW-0791")),
     ("DW-0791b", |s| {
@@ -592,28 +586,26 @@ pub const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(100
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let pumped = s.settings.source.pump();
     // A refusal of Drive's panes (Keep, Free up space, Pause) is the same toast.
-    // A failed read of the account's notifications is said by its panes themselves, never as a toast as well.
+    // A toast about the account's notifications belongs to their two panes: one that lands after the person
+    // went elsewhere is not said over another pane.
+    let showing = matches!(s.settings.pane, Pane::Notifications | Pane::Recent);
     let toast = pumped
         .toast
-        .filter(|words| *words != notifications::NOT_LOADED)
+        .filter(|words| showing || notifications::toast_worked(words).is_none())
         .or_else(|| s.settings.drive.take_toast());
     if let Some(toast) = toast {
         s.settings.toast = Some(toast);
     }
-    // What stands over Notifications changed (a check failed, or it was confirmed): that is the newer word, so
-    // a toast from before it ("checking") does not stay beside it.
-    let standing = notifications::standing(&*s.settings.source);
-    let turned = standing != s.settings.standing;
-    if turned {
-        s.settings.standing = standing;
-        if toast.is_none() {
-            s.settings.toast = None;
-        }
+    // "Checking what the server has" is over when nothing is out any more. The check's answer took its place
+    // above, or the check failed and the pane says so itself: either way it does not stay.
+    let checked = toast.is_none() && !pumped.busy && s.settings.toast == Some(notifications::UNKNOWN);
+    if checked {
+        s.settings.toast = None;
     }
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
     }
-    pumped.changed || toast.is_some() || turned
+    pumped.changed || toast.is_some() || checked
 }
 
 /// The frame a recent alert leads to.
