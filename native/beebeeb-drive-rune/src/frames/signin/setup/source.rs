@@ -27,7 +27,7 @@ pub enum Explorer {
 /// The sync folder, while the first run still has to ask for it (the sync-start contract's ruling Q2: the first
 /// run asks for the folder before the first start). The board has no frame for it: it is the first state of the
 /// File Explorer step.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub enum FolderAsk {
     /// Nothing to ask: the settings name the folder, or it was chosen in this first run.
     #[default]
@@ -40,6 +40,24 @@ pub enum FolderAsk {
         /// A choice is being checked, or Windows' folder picker is open: no second one is asked.
         busy: bool,
     },
+    /// A start already worked in the folder chosen first, and a later pick was not taken: the step says that
+    /// moving the folder isn't available in this version, with one "OK".
+    AlreadySyncs,
+}
+
+/// Never prints the folder: a path is shown to the person who chose it and nowhere else.
+impl std::fmt::Debug for FolderAsk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Settled => f.write_str("Settled"),
+            Self::Ask { said, busy, .. } => f
+                .debug_struct("Ask")
+                .field("said", said)
+                .field("busy", busy)
+                .finish_non_exhaustive(),
+            Self::AlreadySyncs => f.write_str("AlreadySyncs"),
+        }
+    }
 }
 
 /// Why a folder was not taken as the sync folder. Nothing was created or written for it.
@@ -194,6 +212,14 @@ pub trait SetupSource {
     fn can_choose_again(&self) -> bool {
         false
     }
+    /// A start worked and its folder could not be written to the settings, while sync runs.
+    fn folder_unsaved(&self) -> bool {
+        false
+    }
+    /// "Try again" on a folder that was not saved: write it.
+    fn save_folder(&mut self) {}
+    /// "OK" on the note that the folder cannot be moved yet.
+    fn dismiss_folder_note(&mut self) {}
     /// Whether a row of "You're set up" leads to its setting. `false`: the rows are values, not links.
     fn opens_settings(&self) -> bool {
         true

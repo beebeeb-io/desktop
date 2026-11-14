@@ -12,9 +12,9 @@
 //!   folder's entry in File Explorer ([`SetupEngine::view`], which never waits). Windows refusing to register
 //!   the folder is DW-0280 with Windows' code; any other start the engine refused is said as "sync didn't
 //!   start" ([`Explorer::NotSyncing`]), never as "adding"; the shell's refusal modal says what happened. "Try
-//!   again" asks for a start through the shell's one start path; when sync runs and only Windows refused the
-//!   entry, sync is stopped and started again (a start is what asks Windows). "Show in File Explorer" opens the
-//!   sync folder.
+//!   again": while sync runs it asks Windows again for the entry and leaves sync running; while it does not
+//!   run, one start is asked for through the shell's one start path. "Show in File Explorer" opens the sync
+//!   folder.
 //! - Notifications (DW-0207): this PC's "show notifications at all" switch in the settings file
 //!   ([`Engine::set_notifications_allowed_for`]).
 //! - Open at login (DW-0281): the platform's start-at-login entry, the one Drive's settings switch.
@@ -34,12 +34,12 @@
 //! its own; its answer comes down one channel, taken in by `poll`, and the worker wakes the window. A switch's
 //! value is drawn only once its change was answered ([`SetupSource::take_outcomes`]).
 //!
-//! Must not: log or show a path (the folder is opened, never named), an email or an id. Nothing but the engine
-//! and the platform write to disk.
+//! Must not: log a path, an email or an id. A path is shown to the person who chose it (the step and its label)
+//! and is never logged or printed by `Debug`. Nothing but the engine and the platform write to disk.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::account::SessionGeneration;
@@ -78,6 +78,57 @@ pub struct FirstRun {
     wired: AtomicBool,
     /// The folder, and whose choice it was (the account: a lock and an unlock keep the person's choice).
     folder: Mutex<Option<(Option<String>, PathBuf)>>,
+    /// The turn between a folder choice and a start, and what started and what was not saved.
+    turn: Mutex<Turn>,
+    turn_changed: Condvar,
+}
+
+/// How long a choice waits for a start that is on its way.
+pub const TURN_WAIT: Duration = Duration::from_secs(30);
+
+/// The state behind [`FirstRun::choosing`] and [`FirstRun::starting`]. Counts and lists, never flags: a guard
+/// that is released late must not clear another's mark.
+#[derive(Default)]
+struct Turn {
+    /// The accounts a folder is being chosen under, one entry per choice.
+    choosers: Vec<Option<String>>,
+    /// Starts on their way.
+    starting: usize,
+    /// A start was held back by a choice.
+    held_back: bool,
+    /// Choices blocked on a start right now.
+    waiting: usize,
+    /// The accounts a start worked for in this run of the app.
+    started: Vec<String>,
+    /// A started folder the settings did not take, and whose it is.
+    unsaved: Option<(String, PathBuf)>,
+}
+
+/// A folder is being chosen under an account: no start of that account is made until it drops.
+pub struct Choosing<'a> {
+    first_run: &'a FirstRun,
+    account: Option<String>,
+}
+
+/// A start is on its way: no choice is made until it drops.
+pub struct Starting<'a>(&'a FirstRun);
+
+impl Drop for Choosing<'_> {
+    fn drop(&mut self) {
+        let mut turn = self.first_run.turn();
+        if let Some(at) = turn.choosers.iter().position(|account| *account == self.account) {
+            turn.choosers.remove(at);
+        }
+        self.first_run.turn_changed.notify_all();
+    }
+}
+
+impl Drop for Starting<'_> {
+    fn drop(&mut self) {
+        let mut turn = self.0.turn();
+        turn.starting = turn.starting.saturating_sub(1);
+        self.0.turn_changed.notify_all();
+    }
 }
 
 impl FirstRun {
@@ -103,6 +154,90 @@ impl FirstRun {
 
     fn end(&self) {
         self.due.store(false, Ordering::SeqCst);
+    }
+
+    fn turn(&self) -> MutexGuard<'_, Turn> {
+        self.turn.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A folder is about to be chosen under the account of `stamp`: BLOCKS (a worker's) until no start is on its
+    /// way, at most [`TURN_WAIT`] (`None` after that). Until the guard drops, no start of that account is made.
+    pub fn choosing(&self, stamp: &Stamp) -> Option<Choosing<'_>> {
+        let mut turn = self.turn();
+        turn.waiting += 1;
+        let (mut turn, _) = self
+            .turn_changed
+            .wait_timeout_while(turn, TURN_WAIT, |turn| turn.starting > 0)
+            .unwrap_or_else(PoisonError::into_inner);
+        turn.waiting -= 1;
+        if turn.starting > 0 {
+            return None;
+        }
+        turn.choosers.push(stamp.1.clone());
+        Some(Choosing {
+            first_run: self,
+            account: stamp.1.clone(),
+        })
+    }
+
+    /// A start is about to be made for the account of `stamp`. Never waits: `None` while a folder is being
+    /// chosen under the same account (and the start is noted as held back).
+    pub fn starting(&self, stamp: &Stamp) -> Option<Starting<'_>> {
+        let mut turn = self.turn();
+        if stamp.1.is_some() && turn.choosers.contains(&stamp.1) {
+            turn.held_back = true;
+            return None;
+        }
+        turn.starting += 1;
+        Some(Starting(self))
+    }
+
+    /// Whether a start was held back since the last call (it is then asked once the choice ends).
+    pub fn take_held_back(&self) -> bool {
+        std::mem::take(&mut self.turn().held_back)
+    }
+
+    /// How many `choosing` calls are blocked right now.
+    #[cfg(test)]
+    pub fn choosers_waiting(&self) -> usize {
+        self.turn().waiting
+    }
+
+    /// A start worked for the account of `stamp` in this run of the app.
+    pub fn note_started(&self, stamp: &Stamp) {
+        if let Some(account) = &stamp.1 {
+            let mut turn = self.turn();
+            if !turn.started.contains(account) {
+                turn.started.push(account.clone());
+            }
+        }
+    }
+
+    pub fn started_for(&self, stamp: &Stamp) -> bool {
+        stamp
+            .1
+            .as_ref()
+            .is_some_and(|account| self.turn().started.contains(account))
+    }
+
+    /// The folder a start worked in could not be written to the settings.
+    pub fn note_unsaved(&self, stamp: &Stamp, folder: PathBuf) {
+        if let Some(account) = &stamp.1 {
+            self.turn().unsaved = Some((account.clone(), folder));
+        }
+    }
+
+    pub fn unsaved_for(&self, stamp: &Stamp) -> Option<PathBuf> {
+        let turn = self.turn();
+        turn.unsaved
+            .as_ref()
+            .filter(|(account, _)| stamp.1.as_ref() == Some(account))
+            .map(|(_, folder)| folder.clone())
+    }
+
+    /// The settings took the folder.
+    pub fn saved(&self) {
+        self.turn().unsaved = None;
     }
 
     /// The folder was chosen, by the account of this stamp. An account that is not known chooses nothing.
@@ -152,8 +287,8 @@ pub trait SetupEngine: Send + Sync + 'static {
     fn start(&self, folder: PathBuf) -> Result<SyncStart, SyncStartRefused>;
     /// Write the folder to the settings when they name none (`Engine::keep_sync_root`). BLOCKS.
     fn keep_folder(&self, folder: &Path) -> Result<bool, SetupRefused>;
-    /// Stop sync and wait until it ended (`Engine::stop`). BLOCKS.
-    fn stop_sync(&self);
+    /// Ask Windows again for the folder's entry in File Explorer; never stops or starts sync. BLOCKS.
+    fn ask_explorer_again(&self);
 }
 
 impl<C: CredentialStores> SetupEngine for Engine<C> {
@@ -193,8 +328,8 @@ impl<C: CredentialStores> SetupEngine for Engine<C> {
     fn keep_folder(&self, folder: &Path) -> Result<bool, SetupRefused> {
         self.keep_sync_root(folder)
     }
-    fn stop_sync(&self) {
-        let _ = self.stop();
+    fn ask_explorer_again(&self) {
+        let _ = self.add_to_file_explorer_again();
     }
 }
 
@@ -232,6 +367,8 @@ enum Answer {
     Looked,
     /// "Try again" did its work.
     Retried,
+    /// A write of the unsaved folder was tried.
+    Saved,
 }
 
 /// The first run on the real engine. See the module's doc.
@@ -256,6 +393,13 @@ pub struct EngineSetupSource<E: SetupEngine> {
     choosing: bool,
     /// A "Try again" is on its way: no second one is asked.
     retrying: bool,
+    /// A write of the unsaved folder is on its way.
+    saving: bool,
+    /// What `folder_unsaved` said at the last poll: a change draws again.
+    unsaved_seen: bool,
+    /// Workers started by `ask` (a test's proof that a press started none).
+    #[cfg(test)]
+    spawned: usize,
     outcomes: Vec<Outcome>,
     changed: bool,
     answers: mpsc::Sender<(Stamp, Answer)>,
@@ -302,6 +446,10 @@ impl<E: SetupEngine> EngineSetupSource<E> {
             ran: false,
             choosing: false,
             retrying: false,
+            saving: false,
+            unsaved_seen: false,
+            #[cfg(test)]
+            spawned: 0,
             outcomes: Vec::new(),
             changed: false,
             answers,
@@ -360,7 +508,18 @@ impl<E: SetupEngine> EngineSetupSource<E> {
         if started.is_err() {
             log("first run: could not start a thread");
             refuse(self);
+        } else {
+            #[cfg(test)]
+            {
+                self.spawned += 1;
+            }
         }
+    }
+
+    /// How many workers `ask` has started: read on the window's thread, never "after a moment".
+    #[cfg(test)]
+    pub(super) fn workers_started(&self) -> usize {
+        self.spawned
     }
 }
 
@@ -409,12 +568,54 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
     /// After a start that was refused, while this first run asked for the folder and sync never ran in it: the
     /// settings name no folder yet, and the folder may be what was refused.
     fn can_choose_again(&self) -> bool {
-        self.asked_folder && !self.ran && matches!(self.engine.view().start, Start::Refused(_))
+        self.asked_folder
+            && !self.ran
+            && !self.hooks.first_run.started_for(&self.made_for)
+            && matches!(self.engine.view().start, Start::Refused(_))
     }
 
-    /// "Try again" (DW-0280). Sync does not run: one start is asked for, the shell's way. Sync runs and Windows
-    /// refused the entry: only a start asks Windows, so sync is stopped and started again.
-    /// One at a time: a second press while the first is on its way would stop what the first just started.
+    /// A start worked, its folder could not be written to the settings, and sync runs: the step says so. While
+    /// sync does not run the step shows what the engine says; the folder stays noted and the next start that
+    /// finds sync running writes it.
+    fn folder_unsaved(&self) -> bool {
+        self.hooks.first_run.unsaved_for(&self.made_for).is_some() && self.engine.view().start == Start::Running
+    }
+
+    /// "Try again" on the unsaved folder: write it. One at a time.
+    fn save_folder(&mut self) {
+        if self.saving || !self.mine() {
+            return;
+        }
+        self.saving = true;
+        let (first_run, stamp) = (self.hooks.first_run.clone(), self.made_for.clone());
+        self.ask(
+            "first-run-save",
+            move |engine, _| {
+                if let Some(folder) = first_run.unsaved_for(&stamp) {
+                    match engine.keep_folder(&folder) {
+                        Ok(_) => first_run.saved(),
+                        Err(refused) => log(format!(
+                            "first run: the sync folder could not be written ({})",
+                            refused.kind()
+                        )),
+                    }
+                }
+                Answer::Saved
+            },
+            Some(Answer::Saved),
+        );
+    }
+
+    fn dismiss_folder_note(&mut self) {
+        if self.folder == FolderAsk::AlreadySyncs {
+            self.folder = FolderAsk::Settled;
+            self.changed = true;
+        }
+    }
+
+    /// "Try again" (DW-0280). Sync runs: Windows is asked again for the entry and sync keeps running (nothing
+    /// here can stop it). Sync does not run: one start is asked for, the shell's way.
+    /// One at a time: a second press while the first is on its way asks nothing.
     fn retry_explorer(&mut self) {
         if self.retrying || !self.mine() {
             return;
@@ -426,9 +627,8 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
             "first-run-explorer",
             move |engine, _| {
                 if engine.view().start == Start::Running {
-                    engine.stop_sync();
-                }
-                if !start() {
+                    engine.ask_explorer_again();
+                } else if !start() {
                     log("first run: a sync start could not be asked for");
                 }
                 Answer::Retried
@@ -545,7 +745,12 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
                 Answer::Finished => self.hooks.first_run.end(),
                 Answer::Looked => {}
                 Answer::Retried => self.retrying = false,
+                Answer::Saved => self.saving = false,
             }
+        }
+        let unsaved = self.folder_unsaved();
+        if unsaved != std::mem::replace(&mut self.unsaved_seen, unsaved) {
+            changed = true;
         }
         self.ran |= mine && self.engine.view().start == Start::Running;
         let now = self.explorer();
