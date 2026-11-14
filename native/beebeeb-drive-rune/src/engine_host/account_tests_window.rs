@@ -138,7 +138,7 @@ fn the_running_apps_security_page_says_what_is_known_and_guesses_nothing() {
     }
     // Nothing that is not bound can be pressed: no switch, and a press on such a row changes nothing.
     assert!(!has(&rt, "item-1-0-switch"));
-    for row in ["item-0-0", "item-0-1", "item-3-0", "item-4-0"] {
+    for row in ["item-0-0", "item-0-1"] {
         click(&mut rt, row);
         assert!(shows(&rt, "Security score not known yet"), "{row}: the page stays");
         assert!(!has(&rt, "dlg") && !has(&rt, "not-built"), "{row}");
@@ -174,7 +174,7 @@ fn the_security_page_drops_the_first_account_when_another_signs_in() {
 /// are not links, a press does nothing, and no route ends on the full-window "not built yet" frame (which has
 /// no way back to Account).
 #[test]
-fn the_name_and_email_rows_are_not_links_while_nothing_answers_for_their_pages() {
+fn the_name_row_is_a_link_and_the_email_row_is_not_while_nothing_answers_for_its_page() {
     let server = server();
     let mut rt = window_on(signed_in(&server), SettingsPane::Account);
     wait_for(&mut rt, "the account", |rt| shows(rt, FIRST));
@@ -184,7 +184,9 @@ fn the_name_and_email_rows_are_not_links_while_nothing_answers_for_their_pages()
             .find(|e| !e.exiting && e.label.as_deref() == Some(label))
             .unwrap_or_else(|| panic!("no row labelled {label}"))
     };
-    for label in [format!("Name, {FIRST_NAME}"), format!("Sign-in email, {FIRST}")] {
+    // The Name page answers (it opens); the email page does not (the value alone).
+    assert_eq!(row(&rt, &format!("Name, {FIRST_NAME}")).role, "link");
+    for label in [format!("Sign-in email, {FIRST}")] {
         let it = row(&rt, &label);
         assert_eq!(it.role, "listitem", "{label}: the value alone, not a link");
         let (x, y) = (it.rect[0] + it.rect[2] / 2.0, it.rect[1] + it.rect[3] / 2.0);
@@ -207,7 +209,7 @@ fn no_route_from_a_live_pane_ends_on_the_not_built_frame() {
     let server = server();
     let mut rt = window_on(signed_in(&server), SettingsPane::Account);
     wait_for(&mut rt, "the account", |rt| shows(rt, FIRST));
-    for frame in ["DW-A64", "DW-A65", "DW-A66"] {
+    for frame in ["DW-A65", "DW-A66"] {
         rt.update(move |s, _| crate::frames::account::go(s, frame));
         rt.frame(0.016);
         rt.frame(0.4);
@@ -476,4 +478,46 @@ fn in_an_outage_the_list_stays_try_again_works_and_the_pane_says_it_could_not_re
     });
     assert_eq!(server.deleted.lock().unwrap().len(), 2, "a read, not a sign-out");
     assert!(shows(&rt, PHONE));
+}
+
+// ---- The window ----------------------------------------------------------------------------------------------
+
+#[test]
+fn the_running_app_signs_out_of_drive_from_its_confirm_and_has_no_all_apps_row() {
+    let server = super::bound::bound();
+    let engine = server.signed_in();
+    let mut rt = window_on(engine.clone(), SettingsPane::Security);
+    wait_for(&mut rt, "the page", |rt| shows(rt, "Sign out of Drive"));
+    assert!(
+        !shows(&rt, "Sign out of all Beebeeb apps"),
+        "Drive is the one app on this PC"
+    );
+    // The row is below the window's edge; its frame opens the same confirm (the arrival check asks the source).
+    rt.update(|s, _| crate::frames::account::go(s, "DW-A57"));
+    rt.frame(0.4);
+    assert!(has(&rt, "dlg"), "the confirm opens");
+    click(&mut rt, "btn-1");
+    wait_for(&mut rt, "the sign-out", |_| !engine.has_session());
+}
+
+#[test]
+fn the_running_app_saves_the_name_and_draws_it_after_beebeeb_has_it() {
+    let server = super::bound::bound();
+    server.delay_ms.store(200, Ordering::SeqCst);
+    let engine = server.signed_in();
+    let mut rt = window_on(engine, SettingsPane::Account);
+    wait_for(&mut rt, "the account", |rt| shows(rt, FIRST_NAME));
+    click(&mut rt, "item-0-0");
+    wait_for(&mut rt, "the Name page", |rt| rt.state.account.pane == Pane::Name);
+    rt.update(|s, _| {
+        let edit = &mut s.account.form.name;
+        edit.text = super::bound::NEW_NAME.to_string();
+        edit.anchor = edit.text.len();
+        edit.focus = edit.text.len();
+    });
+    rt.frame(0.016);
+    click(&mut rt, "btn-1");
+    let named = format!("Name, {}", super::bound::NEW_NAME);
+    wait_for(&mut rt, "the new name on Account", |rt| shows(rt, &named));
+    assert_eq!(server.name.lock().unwrap().as_deref(), Some(super::bound::NEW_NAME));
 }

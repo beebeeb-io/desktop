@@ -12,7 +12,7 @@ use crate::ui::au::{self, Keys, Tone};
 use rune::El;
 
 use super::form::{self, Form, Problem};
-use super::source::{AccountSource, CodeRefused, EmailRefused, Password, Purpose, Refused};
+use super::source::{AccountSource, CodeRefused, EmailRefused, NameAnswer, NameWhy, Password, Purpose, Refused};
 use super::{AccountUi, icons};
 
 /// A 28 pt button of a form's foot, and whether it has a drawn border.
@@ -38,10 +38,17 @@ pub fn name(f: &Form, t: &Theme) -> El {
     let message = match f.problem {
         Some(Problem::EmptyName) => Some("A name can't be empty."),
         Some(Problem::Offline) => Some(OFFLINE),
+        Some(Problem::NameRefused) => Some("Beebeeb did not take the new name. Nothing was changed."),
         _ => None,
     };
-    let (cancel, cancel_b) = button(0, "Cancel", Look::Plain, false, t);
-    let (save, save_b) = button(1, "Save", Look::Primary, false, t);
+    let (mut cancel, cancel_b) = button(0, "Cancel", Look::Plain, f.saving_name, t);
+    let (mut save, save_b) = button(1, "Save", Look::Primary, f.saving_name, t);
+    // While the name is out the page takes no press (a second save, a way out): nothing is drawn as saved before
+    // Beebeeb answered, and its answer finds the page it is for.
+    if !f.saving_name {
+        cancel = cancel.on_press(|s: &mut State| super::go(s, "DW-A51"));
+        save = save.default_button().on_press(super::act(save_name));
+    }
     set::pane(
         vec![
             set::heading(
@@ -63,10 +70,7 @@ pub fn name(f: &Form, t: &Theme) -> El {
                 |s: &mut State| &mut s.account.form.name,
                 t,
             ),
-            fm::actions(vec![
-                (cancel.on_press(|s: &mut State| super::go(s, "DW-A51")), cancel_b),
-                (save.default_button().on_press(super::act(save_name)), save_b),
-            ]),
+            fm::actions(vec![(cancel, cancel_b), (save, save_b)]),
         ],
         t,
     )
@@ -78,11 +82,49 @@ fn save_name(ui: &mut AccountUi) -> Option<&'static str> {
         ui.form.problem = Some(Problem::EmptyName);
         return None;
     }
-    if ui.source.as_deref_mut()?.set_name(name) {
-        Some("DW-A51")
-    } else {
-        ui.form.problem = Some(Problem::Offline);
-        None
+    match ui.source.as_deref_mut()?.save_name(name) {
+        NameAnswer::Saved => Some("DW-A51"),
+        NameAnswer::NotSaved(why) => {
+            ui.form.problem = Some(not_saved(why));
+            None
+        }
+        // The answer is taken in by the window's poll (`take_in_name`).
+        NameAnswer::Pending => {
+            ui.form.problem = None;
+            ui.form.saving_name = true;
+            None
+        }
+    }
+}
+
+fn not_saved(why: NameWhy) -> Problem {
+    match why {
+        NameWhy::Offline => Problem::Offline,
+        NameWhy::Refused => Problem::NameRefused,
+    }
+}
+
+/// The poll's side of a save that was `Pending`: what Beebeeb answered, when it has. `Some(frame)`: the save
+/// worked and the page goes back to Account. The answer settles the page only while the Name page still shows.
+pub(super) fn take_in_name(ui: &mut AccountUi) -> Option<&'static str> {
+    if !ui.form.saving_name {
+        return None;
+    }
+    let answer = ui.source.as_deref_mut()?.name_result()?;
+    ui.form.saving_name = false;
+    let showing = ui.pane == super::Pane::Name;
+    match answer {
+        NameAnswer::Saved => showing.then_some("DW-A51"),
+        NameAnswer::NotSaved(why) => {
+            if showing {
+                ui.form.problem = Some(not_saved(why));
+            }
+            None
+        }
+        NameAnswer::Pending => {
+            ui.form.saving_name = true;
+            None
+        }
     }
 }
 

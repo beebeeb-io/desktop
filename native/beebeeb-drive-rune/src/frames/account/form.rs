@@ -36,6 +36,8 @@ pub enum Problem {
     WrongCode,
     /// "I've opened the link", and the link has not been used.
     LinkNotUsed,
+    /// Beebeeb did not take the new name (it answered with an error, or no longer accepts the session).
+    NameRefused,
 }
 
 pub struct Form {
@@ -64,6 +66,8 @@ pub struct Form {
     pub copied: Option<SecretCopy>,
     /// The file the backup codes were saved to, or why not: said under the buttons.
     pub saved: Option<Result<String, String>>,
+    /// The new name was sent and Beebeeb has not answered: Save waits and takes no press.
+    pub saving_name: bool,
 }
 
 fn secure() -> TextEdit {
@@ -92,6 +96,7 @@ impl Default for Form {
             renaming: None,
             copied: None,
             saved: None,
+            saving_name: false,
         }
     }
 }

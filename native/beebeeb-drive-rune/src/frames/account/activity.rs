@@ -6,7 +6,7 @@
 use crate::State;
 use crate::theme::tokens::Theme;
 use crate::ui::account_form as fm;
-use crate::ui::account_set::{self as set, Lead, Row};
+use crate::ui::account_set::{self as set, Lead, Row, Tail};
 use crate::ui::settings_list as lists;
 use rune::El;
 
@@ -35,6 +35,8 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     let sub = confirm
         .is_none()
         .then_some("Sign-ins and security changes on your account. Never which files or items you open.");
+    // A source that cannot stop the recording from here shows it as a value, not as a switch that would not turn.
+    let fixed_on = on && !source.can_stop_activity();
     // Turning it off asks first; turning it on starts a new log at once.
     let switch = lists::switch("item-0-0", "Record sign-in activity", on, t).on_press(move |s: &mut State| {
         if on {
@@ -48,14 +50,26 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
         lists::list(
             0,
             None,
-            vec![set::item(
-                0,
-                0,
-                &Row::new(Lead::Icon(&icons::ACTIVITY), "Record sign-in activity"),
-                vec![switch],
-                t,
-            )],
-            Some(if on {
+            vec![if fixed_on {
+                set::item(
+                    0,
+                    0,
+                    &Row::new(Lead::Icon(&icons::ACTIVITY), "Record sign-in activity").tail(Tail::Value("On".into())),
+                    Vec::new(),
+                    t,
+                )
+            } else {
+                set::item(
+                    0,
+                    0,
+                    &Row::new(Lead::Icon(&icons::ACTIVITY), "Record sign-in activity"),
+                    vec![switch],
+                    t,
+                )
+            }],
+            Some(if fixed_on {
+                "Turning this off is not available in this version yet. Turn it off on the web."
+            } else if on {
                 "Keeps the address and country of each sign-in and security change, so you can see if someone else got in."
             } else {
                 "Off: nothing is recorded. Security alerts still arrive."

@@ -141,8 +141,11 @@ pub struct SecurityFacts {
     pub activity: Option<Option<Vec<Event>>>,
     /// The checkup's factors. `None` or empty: there is no score, and the page says so.
     pub factors: Option<Vec<Factor>>,
-    /// This source can sign this app out (`sign_out_this_app`, `sign_out_all_apps`).
+    /// This source can sign this app out (`sign_out_this_app`).
     pub can_sign_out: bool,
+    /// This source can also sign every Beebeeb app on this PC out (`sign_out_all_apps`). A source whose app is
+    /// the only Beebeeb app on this PC has nothing to mean by it: the row is not drawn.
+    pub can_sign_out_all: bool,
 }
 
 /// A count the page shows: read, being read, or not known. A list that is older than a change the source
@@ -153,6 +156,26 @@ pub enum Count {
     /// Asked, not answered yet: the row says so (the rest of the page does not wait for it).
     Reading,
     NotKnown,
+}
+
+/// How saving the name ended, or stands ([`AccountSource::save_name`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameAnswer {
+    /// Beebeeb has the new name.
+    Saved,
+    /// Not saved, and nothing changed.
+    NotSaved(NameWhy),
+    /// Sent, not answered yet: the answer comes through [`AccountSource::name_result`].
+    Pending,
+}
+
+/// Why a name was not saved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameWhy {
+    /// Beebeeb could not be reached.
+    Offline,
+    /// Beebeeb (or the session) did not take it.
+    Refused,
 }
 
 /// How a sign-out of this app ended, or stands.
@@ -179,6 +202,7 @@ impl SecurityFacts {
             activity: None,
             factors: None,
             can_sign_out: false,
+            can_sign_out_all: false,
         }
     }
 }
@@ -635,6 +659,20 @@ pub trait AccountSource {
     /// Engine: `PATCH /api/v1/account` `{display_name}`; 1 to 64 characters, trimmed. `false`:
     /// refused (empty, too long, or Beebeeb could not be reached); nothing changed.
     fn set_name(&mut self, name: &str) -> bool;
+    /// What the Name page asks: [`AccountSource::set_name`] for a source that answers at once, or `Pending` for
+    /// one that asks Beebeeb on a worker (the answer comes through [`AccountSource::name_result`]).
+    fn save_name(&mut self, name: &str) -> NameAnswer {
+        if self.set_name(name) {
+            NameAnswer::Saved
+        } else {
+            NameAnswer::NotSaved(NameWhy::Offline)
+        }
+    }
+    /// How a save that answered `Pending` ended, once; `None` while it is out. A source drops an answer that
+    /// belongs to a session or an account that is over.
+    fn name_result(&mut self) -> Option<NameAnswer> {
+        None
+    }
     /// Engine: `POST /api/v1/account/email-change` with the step-up's token and the new address;
     /// the server sends an 8-digit code there. The old address stays until the code is entered.
     fn start_email_change(&mut self, confirmation: StepUp, new_email: &str) -> Result<(), EmailRefused>;
@@ -688,6 +726,12 @@ pub trait AccountSource {
     /// Engine: the same, off, with a current two-factor code (the step-up when two-factor is
     /// off): recording stops and what was recorded is deleted within 30 days.
     fn stop_activity(&mut self, code: &str) -> Result<(), CodeRefused>;
+    /// Whether this source can stop the recording from the pane. A source that cannot (Beebeeb asks for the
+    /// password's own proof to stop it, which the pane's code dialog does not give) shows the switch as a value,
+    /// with the way on the web.
+    fn can_stop_activity(&self) -> bool {
+        true
+    }
 
     /// Engine: `GET /api/v1/account/deletion`.
     fn deletion(&self) -> Deletion;
@@ -763,6 +807,7 @@ pub fn all_known<S: AccountSource + ?Sized>(source: &S) -> SecurityFacts {
         ),
         factors: Some(source.factors()),
         can_sign_out: true,
+        can_sign_out_all: true,
     }
 }
 
