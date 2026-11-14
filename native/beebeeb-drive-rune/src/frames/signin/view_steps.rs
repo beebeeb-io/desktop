@@ -6,8 +6,8 @@ use rune::{El, Key, Tx, col, edit_access, el, row, text};
 
 use super::source::{PhraseProblem, SignInProblem, TwoFactorProblem};
 use super::steps::{BACKUP_DIGITS, BACKUP_KEY, CODE_DIGITS, CODE_KEY, Pictured, WORD_KEYS};
-use super::view::{GENERIC_FAILURE, actions, back};
-use super::{PASSWORD_KEY, Ui, act, icons};
+use super::view::{GENERIC_FAILURE, actions, back, back_as};
+use super::{PASSWORD_KEY, Ui, act, icons, lock};
 use crate::State;
 use crate::theme::tokens::{Theme, type_};
 use crate::ui::au::{self, ButtonKind, ButtonSize, ButtonState, Keys, Tone};
@@ -116,7 +116,11 @@ pub fn two_factor(ui: &Ui, backup: bool, k: &mut Keys, t: &Theme) -> El {
         "Your account is protected with two-factor. Enter the 6-digit code from your authenticator app."
     };
     let mut c = au::column()
-        .child(back(t))
+        .child(if ui.lock_words().is_some() {
+            back_as("Back", t)
+        } else {
+            back(t)
+        })
         .child(au::heading("Two-factor authentication", Some(subtitle), false, t));
     let problem = ui.code_problem();
     if backup {
@@ -356,8 +360,15 @@ pub fn phrase(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
 // ---------------------------------------------------------------------------
 
 pub fn unlock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
-    // The board gives this step no error of its own: the sign-in form's general words.
-    let message = ui.unlock_problem().map(|_: SignInProblem| GENERIC_FAILURE);
+    // The lock's words (`lock`): the same screen, for a locked app. The board draws the passkey step only.
+    let lock = ui.lock_words();
+    let message = ui.unlock_problem().map(|problem| match (lock, problem) {
+        // The board gives the passkey step no error of its own: the sign-in form's general words.
+        (None, _) | (Some(_), SignInProblem::StaleKey | SignInProblem::Other) => GENERIC_FAILURE,
+        (Some(_), SignInProblem::Invalid | SignInProblem::LockedHint) => "That password isn't right.",
+        (Some(_), SignInProblem::Offline) => "You're offline. Beebeeb can't unlock until it can reach the server.",
+        (Some(_), SignInProblem::RateLimited { .. }) => "Too many tries. Wait a moment, then try again.",
+    });
     let eye = au::field_action(
         "field-0",
         if ui.password.is_revealed() {
@@ -369,30 +380,49 @@ pub fn unlock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         t,
     )
     .on_press_tx(act(Ui::toggle_password));
-    let (label, state) = if ui.unlocking() {
-        ("Unlocking vault\u{2026}", ButtonState::Busy)
-    } else if ui.can_unlock() {
-        ("Unlock", ButtonState::Enabled)
-    } else {
-        ("Unlock", ButtonState::Disabled)
+    let (label, state) = match (ui.unlocking(), ui.can_unlock(), lock) {
+        (true, _, None) => ("Unlocking vault\u{2026}", ButtonState::Busy),
+        (true, _, Some(_)) => ("Unlocking\u{2026}", ButtonState::Busy),
+        (false, true, _) => ("Unlock", ButtonState::Enabled),
+        (false, false, _) => ("Unlock", ButtonState::Disabled),
     };
-    au::column()
-        .child(back(t))
-        .child(au::heading(
-            "Unlock your vault",
-            Some("Passkey verified. Enter your password to decrypt your data on this PC."),
+    let mut column = au::column();
+    // A closed vault has nothing behind it to go back to.
+    if lock != Some(lock::Level::Vault) {
+        column = column.child(if lock.is_some() { back_as("Back", t) } else { back(t) });
+    }
+    column = match lock {
+        None => column
+            .child(au::heading(
+                "Unlock your vault",
+                Some("Passkey verified. Enter your password to decrypt your data on this PC."),
+                false,
+                t,
+            ))
+            .child(au::banner(
+                k,
+                Tone::Green,
+                &icons::CHECK,
+                Some("Identity confirmed with your passkey"),
+                Some("Your vault still needs your password to unlock here."),
+                false,
+                t,
+            )),
+        // Neither level encrypts anything on this PC: the words say locked and paused, nothing more.
+        Some(lock::Level::Vault) => column.child(au::heading(
+            "Beebeeb is locked",
+            Some("Sync is paused until you unlock. Enter your account password; Beebeeb checks it with the server."),
             false,
             t,
-        ))
-        .child(au::banner(
-            k,
-            Tone::Green,
-            &icons::CHECK,
-            Some("Identity confirmed with your passkey"),
-            Some("Your vault still needs your password to unlock here."),
+        )),
+        Some(lock::Level::Screen) => column.child(au::heading(
+            "Unlock with your password",
+            Some("Enter your account password. Beebeeb checks it with the server, so this needs a connection."),
             false,
             t,
-        ))
+        )),
+    };
+    column
         .child(au_entry::focused_field(
             k,
             FocusedSpec {

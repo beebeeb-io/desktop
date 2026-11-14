@@ -195,7 +195,8 @@ fn account_of<C: CredentialStores>(engine: &Engine<C>) -> Option<String> {
 fn gate_of(gate: EngineGate) -> Gate {
     match gate {
         EngineGate::SignedOut => Gate::SignedOut,
-        EngineGate::Locked => Gate::Locked,
+        // Either lock level hides every name; the flyout says "sync keeps running" only while it runs.
+        EngineGate::Locked | EngineGate::ScreenLocked => Gate::Locked,
         EngineGate::NeedsRecoveryPhrase => Gate::NeedsRecoveryPhrase,
         EngineGate::NoPlan => Gate::NoPlan,
         EngineGate::KeyStoreUnavailable => Gate::KeyStoreUnavailable,

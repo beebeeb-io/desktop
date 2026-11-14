@@ -466,8 +466,17 @@ impl Ui {
                     // The partial sign-in ran out: back to the password.
                     Err(TwoFactorProblem::Expired) => {
                         self.drop_steps();
-                        self.screen = Screen::SignIn;
-                        self.problem = Some(SignInProblem::Other);
+                        if self.lock_level().is_some() {
+                            // A lock holds the window: back to the lock's own password screen, never the
+                            // sign-in form (an account is signed in; the form could only refuse).
+                            self.screen = Screen::UnlockVault;
+                            self.password.clear();
+                            self.unlock_problem = Some(SignInProblem::Other);
+                            self.code_problem = None;
+                        } else {
+                            self.screen = Screen::SignIn;
+                            self.problem = Some(SignInProblem::Other);
+                        }
                         self.focus = Some(PASSWORD_KEY);
                     }
                     Err(problem) => {

@@ -21,7 +21,11 @@ pub enum GateState {
     Ready,
     /// No session token at all: show sign-in (DW-A02/A03).
     SignedOut,
-    /// Signed in, vault key IS in the keychain: show the lock screen (DW-0009, Windows Hello).
+    /// Signed in, the key is in memory and sync runs; the SCREEN is locked (core's `LockState::ScreenLocked`):
+    /// show the lock screen (DW-0009, Windows Hello) and nothing of the account.
+    ScreenLocked,
+    /// Signed in, the vault is CLOSED: the key is in the credential store and not in memory, nothing syncs. The
+    /// account's password, proven to the server, opens it (DW-A30).
     Locked,
     /// Signed in, but no vault key in keychain at all: show the recovery phrase (DW-A23).
     /// A first sign-in by password ends here; the 12 words (or another device) provision the key.

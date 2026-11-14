@@ -165,22 +165,18 @@ fn the_scenes_are_the_two_gate_states() {
     }
 }
 
+/// Unlock is bound (`lock_tests.rs` has its answers): a press raises no "Not available yet", and the gate stays
+/// the engine's.
 #[test]
-fn unlock_shows_not_available_by_press_and_by_enter() {
+fn unlock_is_not_a_not_built_button_and_changes_no_gate_by_itself() {
     let (_, mut rt) = window(GateState::Locked, false);
-    assert!(notice(&rt).is_none(), "no notice before a press");
     click(&mut rt, "gate-btn-0");
-    let n = notice(&rt).expect("a press sets the notice");
-    assert_eq!(n.message, "Not available yet");
-    assert_eq!(n.gate, GateState::Locked, "stamped with the gate it was raised under");
-    // Enter is Unlock (the default button): the notice is still set.
     key(&mut rt, Key::Enter);
-    assert!(notice(&rt).is_some());
-    assert_eq!(
-        rt.state.shell.app.screen(),
-        Screen::Gate(GateState::Locked),
-        "a not-built action changes nothing"
+    assert!(
+        notice(&rt).is_none(),
+        "Unlock asks Windows Hello; it is not a not-built action"
     );
+    assert_eq!(rt.state.shell.app.screen(), Screen::Gate(GateState::Locked));
 }
 
 #[test]
@@ -301,4 +297,23 @@ fn the_window_shows_files_when_the_engines_gate_opens() {
         assert!(find(&rt, "gate-title").is_none(), "{gate:?}: the block is gone");
         assert!(find(&rt, "column-headers").is_some(), "{gate:?}: the list is back");
     }
+}
+
+#[test]
+fn the_lock_screens_line_follows_the_engine() {
+    use crate::shell::tray::{EngineState, TrayInputs};
+    let (engine, mut rt) = window(GateState::Locked, false);
+    assert_eq!(says(&rt, "status-text"), "Locked \u{00B7} sync keeps running");
+    engine.set_inputs(TrayInputs {
+        engine: EngineState::NotRunning,
+        locked: true,
+        signed_in: true,
+        ..Default::default()
+    });
+    rt.update(|s, _| {
+        s.shell.refresh();
+    });
+    rt.frame(1.0);
+    rt.frame(0.016);
+    assert_eq!(says(&rt, "status-text"), "Locked \u{00B7} nothing syncs");
 }

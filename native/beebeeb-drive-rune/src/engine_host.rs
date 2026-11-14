@@ -59,6 +59,8 @@ mod files_versions;
 #[path = "engine_host/files_window_support.rs"]
 mod files_window_support;
 pub mod guide;
+// The Windows Hello prompt of the lock screen, behind one seam.
+pub mod hello;
 pub mod open;
 pub mod photos;
 pub mod search;
@@ -90,7 +92,9 @@ fn map_gate_shell(g: EngineGate) -> ShellGate {
     match g {
         EngineGate::Ready => ShellGate::Ready,
         EngineGate::SignedOut => ShellGate::SignedOut,
-        EngineGate::Locked => ShellGate::Locked,
+        // Both lock levels close the window's gate; which one holds is the sign-in source's word
+        // (`map_gate_signin`), and the lock screens are drawn from it (`frames::signin::lock`).
+        EngineGate::ScreenLocked | EngineGate::Locked => ShellGate::Locked,
         EngineGate::NeedsRecoveryPhrase => ShellGate::NeedsRecoveryPhrase,
         EngineGate::NoPlan => ShellGate::NoPlan,
         EngineGate::KeyStoreUnavailable => ShellGate::KeyStoreUnavailable,
@@ -101,7 +105,8 @@ fn map_gate_signin(g: EngineGate) -> GateState {
     match g {
         EngineGate::Ready => GateState::Ready,
         EngineGate::SignedOut => GateState::SignedOut,
-        EngineGate::Locked => GateState::Locked,
+        EngineGate::ScreenLocked => GateState::Locked,
+        EngineGate::Locked => GateState::VaultClosed,
         EngineGate::NeedsRecoveryPhrase => GateState::NeedsRecoveryPhrase,
         EngineGate::NoPlan => GateState::NoPlan,
         EngineGate::KeyStoreUnavailable => GateState::KeyStoreUnavailable,
@@ -460,7 +465,7 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     /// `Ok` means "asked"; the view says where the start got to, and a refusal opens the modal. Without a session
     /// nothing is asked.
     fn start_sync(&self) -> Result<(), actions::ActionError> {
-        if self.engine.view().gate != EngineGate::Ready {
+        if !sync::may_start(self.engine.view().gate) {
             return Err(actions::ActionError::NotAvailable("not signed in and unlocked"));
         }
         let (engine, folder, first_run) = (self.engine.clone(), self.starts.folder(), self.first_run.clone());
