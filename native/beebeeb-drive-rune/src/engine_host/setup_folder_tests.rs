@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use super::*;
 use crate::frames::global::sync_off::{Refused, SyncOff};
 use crate::frames::signin::setup::source::FolderSaid;
-use folder::{PICKER_TITLE, start_now};
+use folder::{Found, PICKER_TITLE, start_now};
 
 const PICKED: &str = "/invented/disk/Cloud";
 
