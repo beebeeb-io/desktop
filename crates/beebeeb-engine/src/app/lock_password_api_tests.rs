@@ -548,7 +548,7 @@ fn a_password_confirmed_online_changes_no_lock_and_waits_like_any_try() {
     assert_eq!(failures(&credentials), 5);
     assert_eq!(
         engine.confirm_password_online_at(secret(PASSWORD), T0 + 20),
-        Err(StartSettingRefused::Wait { wait_ms: 29_990 })
+        Err(StartSettingRefused::Wait { wait_ms: 29_994 })
     );
 }
 
