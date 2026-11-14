@@ -614,6 +614,7 @@ fn recovery_proves_the_phrase_then_sets_a_new_password_from_the_keyboard() {
     click(&mut rt, "link-0-box");
     // The twelve-word recovery screens are kept but have no door in this build (recovery is the web's).
     ui(&mut rt).recover_with_phrase();
+    rt.settle_all();
     rt.frame(0.0);
     assert_eq!(ui(&mut rt).screen, Screen::Recover);
     assert_eq!(info(&rt, EMAIL_KEY).label.as_deref(), Some("Email"));

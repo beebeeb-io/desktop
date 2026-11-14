@@ -301,6 +301,7 @@ fn another_device_asks_waits_and_ends_in_each_answer() {
     let calls = source.calls.clone();
     let mut rt = runtime_of(Ui::new(Box::new(source)), false);
     ui(&mut rt).ask_other_device();
+    rt.settle_all();
     rt.frame(0.0);
     assert_eq!(ui(&mut rt).screen, Screen::Device { expired: false });
     assert_eq!(
@@ -751,6 +752,7 @@ fn a_waiting_request_reconnects_counts_on_and_ends_on_the_heading() {
     let (ui_, queue, calls) = late();
     let mut rt = runtime_of(ui_, false);
     ui(&mut rt).ask_other_device();
+    rt.settle_all();
     rt.frame(0.0);
     ctrl_c(&mut rt);
     assert!(rt.copy_request.is_none(), "no code yet: nothing to copy");
@@ -813,6 +815,7 @@ fn approved_without_keys_signs_nobody_in_and_offers_to_ask_again() {
     let (ui_, queue, calls) = late();
     let mut rt = runtime_of(ui_, false);
     ui(&mut rt).ask_other_device();
+    rt.settle_all();
     rt.frame(0.0);
     deliver(
         &mut rt,
@@ -852,6 +855,7 @@ fn answers_of_a_request_already_left_change_nothing() {
     let (ui_, queue, calls) = late();
     let mut rt = runtime_of(ui_, false);
     ui(&mut rt).ask_other_device();
+    rt.settle_all();
     rt.frame(0.0);
     click(&mut rt, "back-link");
     assert_eq!(*calls.borrow(), ["device_request", "cancel_device_request"]);
