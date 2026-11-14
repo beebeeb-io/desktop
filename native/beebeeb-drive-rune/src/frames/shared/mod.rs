@@ -101,6 +101,11 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if let Some(notice) = pumped.notice {
         ui.notice = Some(notice);
     }
+    // Invite someone's answers (DW-0514): the dialog that sent one closes or says why not.
+    while let Some((share, result)) = ui.source.invite_answer() {
+        ui.invite_answered(&share, result);
+        changed = true;
+    }
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
     }

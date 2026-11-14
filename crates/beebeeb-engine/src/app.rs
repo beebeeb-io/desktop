@@ -69,6 +69,8 @@ pub mod speed_test_api;
 pub mod support_bundle_api;
 // What the account shares and what is shared with it, for the native Shared window.
 pub mod shares_api;
+// Invite someone (DW-0514): share an own item with a person, for the native Shared window.
+pub mod share_invite_api;
 pub mod signin_api;
 pub mod signup_api;
 // Is the local state the signed-in account's (task 2488): a read-only check for windows that show it.

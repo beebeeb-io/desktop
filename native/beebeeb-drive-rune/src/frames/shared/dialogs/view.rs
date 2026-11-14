@@ -444,9 +444,13 @@ fn stopped(s: &State, share: &PeopleShare, member: &Member, number: &SafetyNumbe
     kit::card(&format!("Sharing with {first} is stopped"), 440.0, None, body, foot, t)
 }
 
-/// Invite someone (DW-0514): their email, what they may do, and the first share's trust step.
-fn invite(s: &State, share: &PeopleShare, access: Access, t: &Theme) -> El {
+/// Invite someone (DW-0514): their email, what they may do, and the first share's trust step. `share` is the
+/// share's id (an item's), `name` what the title says. Access: Beebeeb gives a new invitation Can view and the
+/// invitation carries no other choice, so Can edit is drawn where the board has it but cannot be chosen; it is
+/// changed afterwards, on the person (DW-0512).
+fn invite(s: &State, share: &str, name: &str, t: &Theme) -> El {
     let ui = &s.frames.shared;
+    let sending = ui.fields.sending;
     let email = kit::field(
         &Field {
             key: "field-0",
@@ -460,11 +464,12 @@ fn invite(s: &State, share: &PeopleShare, access: Access, t: &Theme) -> El {
         |input| input.on_submit(send_invite),
         t,
     );
-    let tabs = access_tabs(access);
-    let switch = kit::seg(1, "Access", &tabs, t, |i, tab| {
-        tab.on_press(move |s: &mut State| set_invite_access(s, ACCESS[i]))
+    let tabs = access_tabs(Access::View);
+    let switch = kit::seg(1, "Access", &tabs, t, |i, tab| match ACCESS[i] {
+        Access::View => tab,
+        Access::Edit => tab.focusable(false).disabled(true).opacity(0.4),
     });
-    let body = vec![
+    let mut body = vec![
         email,
         col()
             .key("access-wrap")
@@ -479,46 +484,58 @@ fn invite(s: &State, share: &PeopleShare, access: Access, t: &Theme) -> El {
             t,
         ),
     ];
-    let back = share.id.clone();
+    // Why the last try shared nothing (a changed key, a refusal), until the next try.
+    if let Some(problem) = ui.fields.problem {
+        body.push(
+            ui_kit::label("invite-problem", problem, kit::NOTE, t.red)
+                .role("alert")
+                .label(problem)
+                .w_full(),
+        );
+    }
+    let send = if sending {
+        button_keyed(
+            "btn-send-invite".into(),
+            "Sending\u{2026}",
+            ButtonKind::Amber,
+            ButtonSize::Medium,
+            None,
+            t,
+        )
+        .disabled(true)
+        .opacity(0.5)
+    } else {
+        button_md("Send invite", ButtonKind::Amber, None, t).on_press_tx(send_invite)
+    };
+    let back = share.to_string();
     let foot = trailing(vec![
-        button_md("Send invite", ButtonKind::Amber, None, t).on_press_tx(send_invite),
+        send,
         button_md("Cancel", ButtonKind::Ghost, None, t).on_press(move |s: &mut State| {
-            s.frames.shared.show_people(&back);
+            if !s.frames.shared.show_people(&back) {
+                s.frames.shared.close_dialog();
+            }
         }),
     ]);
-    standard(
-        "Invite someone",
-        INVITE_W,
-        "Invite someone",
-        Some(&share.name),
-        body,
-        foot,
-        t,
-    )
+    standard("Invite someone", INVITE_W, "Invite someone", Some(name), body, foot, t)
 }
 
-/// Send invite: sent, and People shows them as invited. Nothing typed, or they are on the share
-/// already: nothing is sent, and the address field takes the keyboard to type or correct it.
+/// Send invite: on its way, the dialog says so until Beebeeb answers. Nothing typed, or they are on the share
+/// already: nothing is sent, and the address field takes the keyboard to type or correct it. A second press while
+/// one is on its way does nothing.
 fn send_invite(s: &mut State, tx: &mut Tx) {
-    if !s.frames.shared.send_invite() {
+    if !s.frames.shared.send_invite() && !s.frames.shared.fields.sending {
         tx.focus(EMAIL_INPUT, true);
     }
 }
 
-fn set_invite_access(s: &mut State, to: Access) {
-    if let Some(Dialog::Invite { access, .. }) = s.frames.shared.dialog.as_mut() {
-        *access = to;
-    }
-}
-
-/// Left and Right on a switch: the other access (a person's: at once; an invite's: its own).
+/// Left and Right on a switch: the other access of a person (at once). A new invitation's switch has one choice.
 pub(super) fn step_access(s: &mut State, right: bool, tx: &mut Tx) {
     let to = if right { Access::Edit } else { Access::View };
     match s.frames.shared.dialog.clone() {
         Some(Dialog::Person { share, person }) => {
             s.frames.shared.set_access(&share, &person, to);
         }
-        Some(Dialog::Invite { .. }) => set_invite_access(s, to),
+        // A new invitation has one access (Can view): nothing to step to there.
         _ => return,
     }
     tx.focus(kit::tab_key(1, to.words()), true);
@@ -710,9 +727,11 @@ pub fn layers(s: &State, t: &Theme) -> Vec<El> {
         Dialog::Stopped { share, person, number } => share_and(share, person)
             .map(|(share, member)| vec![modal("stopped", stopped(s, &share, &member, number, t))])
             .unwrap_or_default(),
-        Dialog::Invite { share, access } => ui
+        Dialog::Invite { share, .. } => ui
             .share(share)
-            .map(|share| vec![modal("invite", invite(s, &share, *access, t))])
+            .map(|listed| listed.name)
+            .or_else(|| ui.fields.unlisted.clone())
+            .map(|name| vec![modal("invite", invite(s, share, &name, t))])
             .unwrap_or_default(),
     }
 }

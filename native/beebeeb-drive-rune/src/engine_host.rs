@@ -772,6 +772,12 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.open_with_by(item, choose_app)
     }
 
+    /// Invite someone… (DW-0514): the item's own id while it is one of the account's own (`Engine::share_target_of`,
+    /// the account-bound local state only: nothing is asked of the server on the press).
+    fn share_of(&self, item: &DriveItem) -> Option<String> {
+        self.engine.share_target_of(self.engine.session_turn(), &item.id)
+    }
+
     fn versions(&self, item: &DriveItem) -> Vec<crate::frames::files::actions_data::Version> {
         self.versions.versions(item)
     }

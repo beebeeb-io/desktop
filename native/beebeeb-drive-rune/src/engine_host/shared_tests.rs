@@ -30,6 +30,9 @@ const INV_B: &str = "b0000000-0000-4000-8000-000000000102";
 const INV_IN: &str = "b0000000-0000-4000-8000-000000000103";
 const INV_GOT: &str = "b0000000-0000-4000-8000-000000000104";
 const REQ: &str = "b0000000-0000-4000-8000-000000000105";
+/// A file of the first account's, shared with no one yet (it is only in the local state).
+const PLAN: &str = "a0000000-0000-4000-8000-000000000504";
+const INV_NEW: &str = "b0000000-0000-4000-8000-000000000106";
 
 struct Fake {
     fake: FakeApi,
@@ -93,8 +96,11 @@ const PATHS: [&str; 4] = [
 ];
 
 fn fake(tag: &str) -> Fake {
-    let (first, first_phrase) = FakeAccount::register(&format!("{tag}-one@example.eu"), PASSWORD, TEST_PHRASE);
-    let (second, second_phrase) = FakeAccount::register(&format!("{tag}-two@example.eu"), PASSWORD, TEST_PHRASE);
+    let (mut first, first_phrase) = FakeAccount::register(&format!("{tag}-one@example.eu"), PASSWORD, TEST_PHRASE);
+    let (mut second, second_phrase) = FakeAccount::register(&format!("{tag}-two@example.eu"), PASSWORD, TEST_PHRASE);
+    // Account ids as the server writes them (UUIDs): an invitation keeps its safety-number marks under the account's.
+    first.user_id = "d0000000-0000-4000-8000-000000000601".into();
+    second.user_id = "d0000000-0000-4000-8000-000000000602".into();
     let (first, second) = (Arc::new(first), Arc::new(second));
     let (one, two): (Handler, Handler) = (account_handler(first.clone()), account_handler(second.clone()));
     let (second_email, second_token) = (second.email.clone(), second.session_token.clone());
@@ -121,6 +127,10 @@ fn fake(tag: &str) -> Fake {
             (0, _) | (_, None) => code.load(Ordering::SeqCst),
             (read, Some(_)) => read,
         };
+        // An invitation to someone without an account yet (DW-0514).
+        if code == 200 && route == "POST /api/v1/shares/invites" {
+            return Reply::json(201, json!({ "invite_id": INV_NEW, "status": "pending" }));
+        }
         match (code, at) {
             (200, Some(at)) => Reply::ok(if theirs { &theirs_lists } else { &ours }[at].clone()),
             (200, None) => Reply::ok(json!({})),
@@ -673,4 +683,100 @@ fn the_window_draws_the_lists_its_states_a_notice_and_nothing_of_the_account_bef
     assert!(words(&rt).contains("Loading Shared"));
     assert!(!words(&rt).contains("You haven\u{2019}t shared anything"));
     poll(&mut rt);
+}
+
+/// The first account's local state: [`PLAN`], one of its own files, and nothing else.
+fn own_plan(engine: &Engine<MemoryCredentials>, account: &FakeAccount) -> tempfile::TempDir {
+    use beebeeb_engine::account_binding::Identity;
+    use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.db");
+    let db = StateDb::open(&path).unwrap();
+    let entry = FileEntry {
+        file_id: PLAN.into(),
+        path: "/Invented plan.pdf".into(),
+        status: FileStatus::CloudOnly,
+        size_bytes: 2_048,
+        modified_at: 1_794_000_000,
+        content_hash: None,
+        remote_updated_at: 1_794_000_000,
+        parent_id: None,
+        item_kind: ItemKind::File,
+    };
+    db.upsert_file_with_contract(&entry, |contract| contract.item_kind = entry.item_kind.clone())
+        .unwrap();
+    db.set_owner(&Identity::new(Some(&account.user_id), Some(&account.email)))
+        .unwrap();
+    drop(db);
+    engine.use_local_state_for_test(path);
+    dir
+}
+
+#[test]
+fn share_invite_goes_once_per_share_answers_from_the_engine_and_a_late_answer_is_dropped() {
+    let fake = fake("invite");
+    let engine = signed_in(&fake);
+    let _state = own_plan(&engine, &fake.first);
+    let mut source = EngineSharedSource::new(engine.clone());
+    opened(&mut source);
+    let sent_reads = |fake: &FakeApi| fake.routes().iter().filter(|r| *r == PATHS[1]).count();
+    let invites = |fake: &FakeApi| {
+        changes(fake)
+            .iter()
+            .filter(|r| *r == "POST /api/v1/shares/invites")
+            .count()
+    };
+    let before = sent_reads(&fake.fake);
+
+    assert!(!source.start_invite(PLAN, "  "), "nothing typed: nothing is sent");
+    // An item shared with no one yet: the engine decides it is the account's own.
+    assert!(source.start_invite(PLAN, "new@example.eu"));
+    assert!(
+        !source.start_invite(PLAN, "new@example.eu"),
+        "one invitation per share at a time: a second press sends nothing"
+    );
+    assert!(source.busy());
+    settle(&mut source);
+    assert_eq!(source.invite_answer(), Some((PLAN.to_string(), InviteResult::Sent)));
+    assert_eq!(source.invite_answer(), None, "each answer once");
+    assert_eq!(invites(&fake.fake), 1);
+    // The person is never inserted here: the lists were read again (the invite's own read of the sent list, then
+    // the lists after the answer).
+    assert_eq!(sent_reads(&fake.fake), before + 2);
+
+    // Refused, in words: not one of the account's own items on this computer. Nothing was sent.
+    assert!(source.start_invite(THEIRS, "new@example.eu"));
+    settle(&mut source);
+    assert_eq!(
+        source.invite_answer(),
+        Some((
+            THEIRS.to_string(),
+            InviteResult::Refused(refusal_words(InviteRefused::NotYours))
+        ))
+    );
+    assert_eq!(invites(&fake.fake), 1);
+
+    // An answer that lands after another account signed in is dropped: nothing opens, nothing is read for it.
+    fake.delay_ms.store(150, Ordering::SeqCst);
+    assert!(source.start_invite(PLAN, "late@example.eu"));
+    std::thread::sleep(Duration::from_millis(40));
+    engine.sign_out_keeping_local_data().expect("signed out");
+    sign_in(&engine, &fake.second, &fake.second_phrase);
+    fake.delay_ms.store(0, Ordering::SeqCst);
+    let reads_then = sent_reads(&fake.fake);
+    settle(&mut source);
+    // The account change may have emptied the source before the worker answered: give the worker time to answer
+    // (its request was held 150 ms at the fake), then take in what came.
+    std::thread::sleep(Duration::from_millis(500));
+    let _ = source.pump();
+    assert_eq!(
+        source.invite_answer(),
+        None,
+        "an answer of another session is never handed out"
+    );
+    assert_eq!(
+        sent_reads(&fake.fake),
+        reads_then,
+        "nothing is read for a dropped answer"
+    );
 }

@@ -4,7 +4,7 @@
 use super::Dialog;
 use crate::frames::Intent;
 use crate::frames::shared::scenes;
-use crate::frames::shared::source::Access;
+use crate::frames::shared::source::{Access, InviteResult, Notice};
 use crate::frames::shared::tests::{click, focused, info, press, press_with, runtime, settle};
 use crate::shell::app::Section;
 use crate::{State, init};
@@ -244,22 +244,43 @@ fn an_invite_adds_the_address_as_invited_and_refuses_someone_already_there() {
         assert_eq!(focused(&rt).as_deref(), Some(super::EMAIL_INPUT));
     }
     press(&mut rt, Key::Text(".studio".into()));
+    // A new invitation carries Beebeeb's default access only: Can edit is drawn where the board has it, and is no
+    // choice (it is changed afterwards, on the person).
     click(&mut rt, "seg-1-can-edit");
     assert!(matches!(
         dialog(&rt),
         Some(Dialog::Invite {
-            access: Access::Edit,
+            access: Access::View,
             ..
         })
     ));
-    // Enter in the field sends it.
+    // Enter in the field sends it: nothing is drawn as sent before the answer, and no second press goes out.
     click(&mut rt, super::EMAIL_INPUT);
     press(&mut rt, Key::Enter);
+    assert!(
+        matches!(dialog(&rt), Some(Dialog::Invite { .. })),
+        "open until the answer"
+    );
+    assert_eq!(text(&rt, "btn-send-invite-label").as_deref(), Some("Sending\u{2026}"));
+    let people_now = rt.state.frames.shared.source.members(LISBON).len();
+    click(&mut rt, "btn-send-invite");
+    rt.state.frames.shared.fields.email = rune::TextEdit::new("max@northwind.studio");
+    assert!(
+        !rt.state.frames.shared.send_invite(),
+        "a second press while one is on its way"
+    );
+    assert_eq!(
+        rt.state.frames.shared.source.members(LISBON).len(),
+        people_now,
+        "sent once"
+    );
+    // The answer: People shows them as invited, with the access a new invitation gets.
+    shared_poll(&mut rt);
     assert_eq!(dialog(&rt), Some(people()));
     assert_eq!(text(&rt, "item-2-3-title").as_deref(), Some("lea@northwind.studio"));
     assert_eq!(
         text(&rt, "item-2-3-sub").as_deref(),
-        Some("Can edit \u{00B7} Invited, waiting")
+        Some("Can view \u{00B7} Invited, waiting")
     );
     assert_eq!(
         rt.state.frames.shared.source.people_shares()[0].names,
@@ -574,4 +595,104 @@ fn a_dialog_whose_share_went_closes_and_the_list_has_its_keys_again() {
     press(&mut rt, Key::Down);
     assert_eq!(dialog(&rt), None);
     assert_eq!(rt.state.frames.shared.selected, Some(1), "the list moves again");
+}
+
+/// The window's poll of Shared (`shell::host` calls `frames::shared::poll`), then a draw.
+fn shared_poll(rt: &mut Runtime<State>) {
+    rt.update(|s, tx| {
+        crate::frames::shared::poll(s, tx);
+    });
+    settle(rt);
+}
+
+fn any_text(rt: &Runtime<State>, words: &str) -> bool {
+    rt.elements()
+        .into_iter()
+        .any(|e| !e.exiting && e.text.as_deref() == Some(words))
+}
+
+#[test]
+fn share_invite_closes_only_on_an_answer_that_sent_and_says_why_nothing_was_shared() {
+    let mut rt = runtime(scenes::dw_0511);
+    click(&mut rt, "btn-invite-someone");
+    press(&mut rt, Key::Text("lea@northwind.studio".into()));
+    click(&mut rt, "btn-send-invite");
+    assert!(rt.state.frames.shared.fields.sending);
+
+    // A changed key: open, its words, and Send invite back.
+    rt.state.frames.shared.invite_answered(LISBON, InviteResult::KeyChanged);
+    settle(&mut rt);
+    assert!(matches!(dialog(&rt), Some(Dialog::Invite { .. })));
+    assert_eq!(text(&rt, "invite-problem").as_deref(), Some(super::KEY_CHANGED));
+    assert_eq!(text(&rt, "btn-send-invite-label").as_deref(), Some("Send invite"));
+
+    // A refusal: open, with the source's words.
+    rt.state.frames.shared.fields.sending = true;
+    rt.state.frames.shared.invite_answered(
+        LISBON,
+        InviteResult::Refused("Can\u{2019}t reach Beebeeb. Nothing was shared."),
+    );
+    settle(&mut rt);
+    assert!(matches!(dialog(&rt), Some(Dialog::Invite { .. })));
+    assert_eq!(
+        text(&rt, "invite-problem").as_deref(),
+        Some("Can\u{2019}t reach Beebeeb. Nothing was shared.")
+    );
+
+    // An answer for another share is not this dialog's.
+    rt.state.frames.shared.fields.sending = true;
+    rt.state.frames.shared.invite_answered("p-invoices", InviteResult::Sent);
+    assert!(matches!(dialog(&rt), Some(Dialog::Invite { .. })));
+
+    // Sent, and the two other answers that reached Beebeeb: People.
+    for answer in [
+        InviteResult::Sent,
+        InviteResult::HasAccess,
+        InviteResult::WaitingForApproval,
+    ] {
+        rt.state.frames.shared.start_invite(LISBON);
+        rt.state.frames.shared.fields.sending = true;
+        rt.state.frames.shared.invite_answered(LISBON, answer);
+        settle(&mut rt);
+        assert_eq!(dialog(&rt), Some(people()), "{answer:?}");
+    }
+
+    // The dialog went before its answer came: a refusal still says so, over the lists; a send says nothing.
+    rt.state.frames.shared.close_dialog();
+    rt.state.frames.shared.notice = None;
+    rt.state.frames.shared.invite_answered(LISBON, InviteResult::Sent);
+    assert_eq!(rt.state.frames.shared.notice, None);
+    rt.state.frames.shared.invite_answered(LISBON, InviteResult::KeyChanged);
+    assert_eq!(rt.state.frames.shared.notice, Some(Notice::ChangeRefused));
+}
+
+#[test]
+fn share_invite_for_an_item_shared_with_no_one_yet_is_titled_by_its_name() {
+    let mut rt = runtime(scenes::dw_0511);
+    rt.state.frames.shared.close_dialog();
+    rt.state
+        .frames
+        .shared
+        .start_invite_named("an-item-of-its-own", "Invented notes.txt");
+    settle(&mut rt);
+    assert!(rt.state.frames.shared.dialog_drawn());
+    assert!(
+        any_text(&rt, "Invented notes.txt"),
+        "the item's name, as the title's line"
+    );
+    // No People to go back to: Esc and Cancel close it.
+    press(&mut rt, Key::Escape);
+    assert_eq!(dialog(&rt), None);
+    rt.state
+        .frames
+        .shared
+        .start_invite_named("an-item-of-its-own", "Invented notes.txt");
+    settle(&mut rt);
+    click(&mut rt, "btn-cancel");
+    assert_eq!(dialog(&rt), None);
+    // A share it lists: its own dialog, titled by the share.
+    rt.state.frames.shared.start_invite_named(LISBON, "another name");
+    settle(&mut rt);
+    assert_eq!(rt.state.frames.shared.fields.unlisted, None);
+    assert!(any_text(&rt, "Lisbon trip") && !any_text(&rt, "another name"));
 }
