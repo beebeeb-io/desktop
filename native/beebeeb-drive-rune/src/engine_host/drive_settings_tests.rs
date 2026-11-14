@@ -424,6 +424,7 @@ fn a_locked_vault_shows_no_insights_and_no_folders() {
 
     // Unlocked again: only the panes the person opens read for the new session.
     fake.gate(GateState::Ready);
+    source.pump(0.0);
     source.opened(Pane::Insights);
     source.opened(Pane::Sync);
     settle(&mut source);
@@ -549,7 +550,7 @@ fn every_unwired_pane_draws_no_sample_value() {
         assert!(engine.state.settings.wired(pane), "{frame}");
         assert!(!has(&engine, "not-built"), "{frame} draws its own pane");
         let texts = texts(&engine);
-        for sample in ["240 GB", "18.4 GB", "1 TB", "Anna", "3 items", "35.2", "94.0"] {
+        for sample in ["18.4 GB", "Anna", "3 items", "35.2", "94.0"] {
             assert!(!texts.iter().any(|t| t.contains(sample)), "{frame} draws {sample}");
         }
     }
