@@ -210,7 +210,8 @@ pub fn switch(key: &str, name: &str, on: bool, t: &Theme) -> El {
             el().key(format!("{key}-knob"))
                 .size(14.0, 14.0)
                 .radius(7.0)
-                .fill(t.white)
+                // The knob of a switch that is on is the paper's colour (DW-0412's board).
+                .fill(if on { t.paper } else { t.white })
                 .box_shadow(kit::drop(1.0, 3.0, t.shadow))
                 .ml(if on { 18.0 } else { 2.0 }),
         )

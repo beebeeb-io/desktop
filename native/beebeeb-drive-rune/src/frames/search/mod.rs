@@ -18,6 +18,7 @@ pub mod source;
 #[cfg(test)]
 mod tests;
 mod view;
+pub use view::PLAIN_NOTE;
 
 use rune::{El, Key, KeyEvent, TextEdit, Tx};
 

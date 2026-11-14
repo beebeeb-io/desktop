@@ -357,7 +357,7 @@ fn file_row_full(
                     // way to the words and the bar.
                     .child(
                         kit::label(format!("{k}-date"), "", type_::META_MONO, meta)
-                            .absolute(0.0, 8.0)
+                            .absolute(0.0, 0.0)
                             .w(COL_PC_W)
                             .h(14.0),
                     );

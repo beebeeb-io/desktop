@@ -167,7 +167,7 @@ fn stack(t: &Theme) -> El {
     let front = page("front-page", 3, 3, t);
     el().key("preview-stack")
         .size(251.5, 152.0)
-        .child(back.absolute(125.75 - 12.05 - 48.0, 76.0 + 15.0 - 62.0))
+        .child(back.absolute(125.75 - 12.0 - 48.0, 76.0 + 15.0 - 62.0))
         .child(front.absolute(125.75 + 12.0 - 48.0, 76.0 + 7.0 - 62.0))
 }
 
@@ -202,15 +202,24 @@ pub fn panel(items: &[&DriveItem], t: &Theme) -> El {
             col()
                 .key("detail-name-group")
                 .child(kit::label("detail-name", format!("{} items", items.len()), type_::HEAD, t.text).truncate())
-                .child(
+                .child({
+                    // The size is a figure: JetBrains Mono, as the one item's line has it.
+                    let size = crate::source::format_size(bytes);
+                    let mono = Span {
+                        start: 0,
+                        end: size.len() as u32,
+                        mono: true,
+                        ..Span::default()
+                    };
                     kit::label(
                         "detail-kind",
-                        crate::source::format_size(bytes),
+                        size,
                         TextStyle::new(11.0, 500.0).lh(14.0),
                         t.text_tertiary,
                     )
-                    .mt(2.0),
-                ),
+                    .spans(vec![mono])
+                    .mt(2.0)
+                }),
         )
         .child(encrypted_badge(t))
         .child(

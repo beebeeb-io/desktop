@@ -54,6 +54,8 @@ mod rest_tests;
 #[cfg(test)]
 mod review_tests;
 #[cfg(test)]
+mod scenes_waveb_tests;
+#[cfg(test)]
 mod session_tests;
 #[cfg(test)]
 mod tests;
