@@ -164,7 +164,10 @@ fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() 
         (0, crate::frames::trash::source::Loaded::SignedOut),
         "Trash on a real engine without a session: signed out, no row"
     );
-    assert!(!state.photos.source.wired(), "Photos is unwired on a real engine");
+    assert!(
+        state.photos.source.wired() && state.photos.source.days(None).is_empty(),
+        "Photos on a real engine without a session: the engine's source, no day"
+    );
     assert_eq!(
         state.this_pc.wired(),
         crate::engine_host::this_pc::TURNED_ON,
@@ -614,9 +617,17 @@ fn trash_shows_0_fixture_rows_on_a_live_engine() {
 #[test]
 fn photos_shows_0_fixture_days_on_a_live_engine() {
     let s = engine_state();
-    assert!(!s.photos.source.wired());
+    // Photos is the engine's source: wired, and with nobody signed in it holds nothing, never the board's days.
+    assert!(s.photos.source.wired() && s.photos.source.answers_later());
+    assert_eq!(
+        s.photos.source.loaded(),
+        crate::frames::photos::source::Loaded::SignedOut
+    );
     assert_eq!(s.photos.source.days(None).len(), 0);
     assert_eq!(s.photos.source.devices().len(), 0);
+    // The grid's thumbnails are the engine's too: no board sample, nothing arrived.
+    assert!(!s.global.grid.thumbs.arrived("an-invented-id"));
+    assert_eq!(s.global.grid.thumbs.sample("an-invented-id"), None);
 }
 
 #[test]

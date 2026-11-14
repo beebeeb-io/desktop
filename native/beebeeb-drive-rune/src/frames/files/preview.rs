@@ -75,10 +75,11 @@ impl State {
         true
     }
 
-    /// Open in its app, from the panel: the panel closes and the file is opened as Enter opens it.
+    /// Open in its app, from the panel: the panel closes and the file goes to its own app, never to the window's
+    /// viewer (the button names where it opens).
     pub fn open_from_preview(&mut self, tx: &mut Tx) {
         self.close_dialog(tx);
-        self.open_selection(tx);
+        self.open_selection_with(tx, false);
     }
 
     /// Open in another app…: Windows' app chooser; the file is decrypted for the app picked.

@@ -8,8 +8,9 @@
 //! where the board shows data.
 //!
 //! An open file holds a decrypted name and decrypted content: a `{:?}` of [`OpenFile`], [`Body`],
-//! [`TextDoc`], [`MdDoc`] or [`Run`] prints counts and kinds, never a name or a word of the file,
-//! and [`OpenFile::wipe`] overwrites the text it holds when the file is left.
+//! [`Details`], [`Newer`], [`TextDoc`], [`MdDoc`] or [`Run`] prints counts and kinds, never a name, a
+//! folder or a word of the file, and [`OpenFile::wipe`] overwrites the text, the name, the path and
+//! the details it holds when the file is left.
 
 use std::fmt;
 
@@ -44,15 +45,27 @@ impl fmt::Debug for OpenFile {
 }
 
 impl OpenFile {
-    /// Overwrite the decrypted text this file holds (the note, the lines) before it is dropped: the file was
-    /// closed, the route left it, or its session ended. Pictures are the source's to release.
+    /// Overwrite what this file holds that was decrypted (the note, the lines, the name, the folders above it,
+    /// the details' values) before it is dropped: the file was closed, the route left it, or its session ended.
+    /// Pictures are the source's to release.
     pub fn wipe(&mut self) {
         self.body.wipe();
+        self.name.zeroize();
+        self.facts.zeroize();
+        for folder in &mut self.path {
+            folder.zeroize();
+        }
+        for (_, value, _) in &mut self.details.facts {
+            value.zeroize();
+        }
+        if let Some(newer) = self.newer.as_mut() {
+            newer.from.zeroize();
+        }
     }
 }
 
 /// The details panel's facts (`.mk-det`).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Details {
     /// "Markdown" of "Markdown · 1.4 KB".
     pub kind: String,
@@ -64,13 +77,30 @@ pub struct Details {
     pub offline: bool,
 }
 
+/// How many facts, never a value: the "Where" line is the decrypted folder path.
+impl fmt::Debug for Details {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Details")
+            .field("facts", &self.facts.len())
+            .field("offline", &self.offline)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A newer version saved elsewhere.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Newer {
     /// "Anna's iPhone".
     pub from: String,
     /// "09:14".
     pub at: String,
+}
+
+/// That there is one, never the device's name (it holds a person's).
+impl fmt::Debug for Newer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Newer")
+    }
 }
 
 /// Why a file that is in Beebeeb is not shown here. Either way there is a way out: another app, or a copy.
@@ -80,8 +110,32 @@ pub enum NoPreview {
     NoViewer,
     /// Larger than a preview holds in memory (`limit`). Nothing was downloaded.
     TooBig { size: u64, limit: u64 },
+    /// It passed what a preview holds in memory (`limit`) while it was read, although it was said to be
+    /// smaller: the read was given up and what was held was dropped. Its size is not known.
+    OverLimit { limit: u64 },
     /// Decrypted, and not what its name says (text that is not text, a picture that does not decode).
     Unreadable,
+    /// A picture that declares more pixels than a preview decodes. It was not decoded.
+    PictureTooBig { width: u32, height: u32 },
+    /// A PDF that asks for a password. It stays closed here.
+    PdfLocked,
+    /// A PDF this app cannot read: damaged, cut short, or protected in a way it does not open.
+    PdfUnreadable,
+    /// A PDF with more pages than the viewer lists.
+    PdfTooLong { pages: u32 },
+}
+
+/// What there is of one page of the open PDF.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageState {
+    /// Its picture is there, or this source has none to wait for (the frame draws its plain page).
+    Ready,
+    /// It is being rendered on this PC: its picture comes.
+    Rendering,
+    /// It could not be rendered.
+    Failed,
+    /// Its picture is there; text whose font the PDF names and does not carry may be missing from it.
+    LacksText,
 }
 
 /// Why opening stopped, when it is not a failed decryption (DW-1518 is that).
@@ -95,13 +149,48 @@ pub enum Stopped {
     SessionChanged,
     /// The file is no longer in Beebeeb.
     Gone,
+    /// What this PC knows about the file could not be read at this moment. Trying again may work.
+    NotNow,
+    /// Nothing has synced on this PC yet, so it knows no file: this says nothing about the file, which may
+    /// well be in Beebeeb. Trying again after the first sync works.
+    NothingSynced,
+    /// What this PC holds of Beebeeb is not provably the signed-in account's, so nothing of it is read. It
+    /// says nothing about the file. Trying again may work (once sync has set this PC up for this account).
+    NotThisAccounts,
+    /// This PC holds a change to the file that is not in Beebeeb yet, and its copy could not be read just now.
+    /// The older version Beebeeb has is not shown in its place. Trying again may work.
+    CopyNotReadable,
 }
 
 impl Stopped {
     /// Opening again may work as things are.
     pub fn can_retry(self) -> bool {
-        matches!(self, Stopped::Offline | Stopped::SessionChanged)
+        matches!(
+            self,
+            Stopped::Offline
+                | Stopped::SessionChanged
+                | Stopped::NotNow
+                | Stopped::CopyNotReadable
+                | Stopped::NothingSynced
+                | Stopped::NotThisAccounts
+        )
     }
+}
+
+/// Where the content on screen was read from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// Downloaded from Beebeeb and decrypted in memory.
+    Beebeeb,
+    /// The copy kept on this PC. `unsent`: it has a change that is not in Beebeeb yet, so it is NOT the
+    /// version Beebeeb has; the view says so.
+    ThisPc { unsent: bool },
+    /// The copy kept on this PC, read while sync is not running here: the local state calls it in sync, and
+    /// nothing has checked that since sync stopped. Beebeeb may have a newer version; the view says so.
+    ThisPcSyncOff,
+    /// Downloaded from Beebeeb, for a file whose copy on this PC is not settled with it (two versions to choose
+    /// from, or a sync of this file that failed): what is shown may not be what is on this PC; the view says so.
+    BeebeebNotThisPcs,
 }
 
 /// What the content area shows.
@@ -321,11 +410,38 @@ pub fn plain_lines(text: &str) -> Vec<Vec<Run>> {
         .collect()
 }
 
-/// Why a file could not be opened at all.
+/// Why a file could not be opened at all. Each is a state the window draws (`Ui::unopened`), except
+/// [`OpenError::SignedOut`], which the shell's session gate draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenError {
-    /// The engine has no such item (deleted elsewhere, or not this account's).
+    /// The engine has no such item (deleted elsewhere).
     NotFound,
+    /// Nothing has synced on this PC yet: it knows no file, this one included.
+    NothingSynced,
+    /// What this PC holds of Beebeeb is not provably this account's: nothing of it is read.
+    NotThisAccounts,
+    /// No session in memory (signed out, or locked): nothing is read.
+    SignedOut,
+    /// Beebeeb no longer accepts this session.
+    SessionEnded,
+    /// It could not be read at this moment (the local state was busy, or the session changed during the
+    /// read). Asking again may work.
+    NotNow,
+}
+
+impl OpenError {
+    /// The state the window draws for a file that did not open. `None`: nothing of this group (the shell's
+    /// gate says it).
+    pub fn stopped(self) -> Option<Stopped> {
+        match self {
+            OpenError::NotFound => Some(Stopped::Gone),
+            OpenError::NothingSynced => Some(Stopped::NothingSynced),
+            OpenError::NotThisAccounts => Some(Stopped::NotThisAccounts),
+            OpenError::SessionEnded => Some(Stopped::SessionEnded),
+            OpenError::NotNow => Some(Stopped::NotNow),
+            OpenError::SignedOut => None,
+        }
+    }
 }
 
 /// What became of "Open in another app…".
@@ -385,6 +501,29 @@ pub trait ViewerSource {
     /// Whether a file of this name is shown HERE (decrypted and drawn). `false`: a list's Open leaves it to its
     /// own app, as before (`viewers::open_item`); a route that names it anyway gets the source's honest state.
     fn previews(&self, _name: &str) -> bool {
+        true
+    }
+    /// Whether the file's bytes are kept on this PC, where the system can open them with the file's own app.
+    /// `true`: a list's Open hands the file to that app (`viewers::open_item`), as it did before there was a
+    /// viewer here; the viewer is for files that are not on this PC, where it saves a download to disk.
+    fn kept_on_this_pc(&self, _file_id: &str) -> bool {
+        false
+    }
+    /// Where the content on screen was read from. Asked when it is drawn.
+    fn origin(&self, _file_id: &str) -> Origin {
+        Origin::Beebeeb
+    }
+    /// What there is of page `page` (from 1) of the open PDF, for the page the frame draws without a picture.
+    fn page_state(&self, _file_id: &str, _page: u32) -> PageState {
+        PageState::Ready
+    }
+    /// Whether [`ViewerSource::find`] searches the open PDF's text. `false`: Find says it is not built, never
+    /// "No matches" for words that were not looked for.
+    fn finds(&self) -> bool {
+        true
+    }
+    /// Whether "Save a copy…" has somewhere to go. `false`: the button is not drawn.
+    fn saves_copies(&self) -> bool {
         true
     }
     /// Whether [`ViewerSource::save`] can store an edit. `false`: the editor does not open (an edit that cannot

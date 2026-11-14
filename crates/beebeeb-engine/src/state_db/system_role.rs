@@ -77,6 +77,12 @@ impl StateDb {
     /// keeps one per account (a unique index); a list keeps this answer honest if a database ever holds
     /// two (each is protected). Served by `idx_files_system_role`, so a Cloud Files callback that asks
     /// on every delete reads a handful of index entries, never the whole table.
+    /// Test builds only: marks `file_id` as the Backups root, for a host's tests that cannot name the role's type.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn mark_backups_root_for_test(&self, file_id: &str) -> Result<bool> {
+        self.set_system_role(file_id, Some(SystemRole::BackupsRoot))
+    }
+
     pub fn backups_roots(&self) -> Result<Vec<(String, String)>> {
         let conn = self.0.lock().expect("state_db mutex poisoned");
         let mut stmt =

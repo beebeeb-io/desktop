@@ -224,6 +224,14 @@ impl FakeAccount {
             .collect()
     }
 
+    /// A stored picture of the file `id` as the server holds it: `plain` (an encoded picture) sealed by core's
+    /// thumbnail sealer under this account's key for that file. A test's own handler serves it.
+    pub fn seal_thumbnail(&self, id: &str, plain: &[u8]) -> Vec<u8> {
+        let master = beebeeb_core::kdf::MasterKey::from_bytes(self.master_key);
+        let key = beebeeb_core::kdf::derive_file_key(&master, id.as_bytes());
+        beebeeb_core::encrypt::encrypt_thumbnail(&key, plain).expect("a sealed picture")
+    }
+
     /// Trash an item by id. Returns true if found and not already trashed.
     pub fn trash_item(&self, id: &str) -> bool {
         let mut items = self.items.lock().expect("vault items");
