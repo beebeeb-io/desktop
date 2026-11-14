@@ -323,16 +323,26 @@ pub fn page(mail: &Mail, over: bool, t: &Theme) -> (Vec<El>, usize, usize) {
             ));
             let count = format!("{} of {}", thousands(*done), thousands(*total));
             let words = format!("{count} messages");
+            // Whole per cents, as the board draws 6,912 of 17,480 at 40 %.
             let fraction = if *total == 0 {
                 0.0
             } else {
-                (f64::from(*done) / f64::from(*total)) as f32
+                (f64::from(*done) * 100.0 / f64::from(*total)).round() as f32 / 100.0
             };
+            let left = format!("about {minutes_left} min left");
+            // The line as one text too: the gate's key for a card's small print (`card-<N>-sub`).
+            kit::note_text(
+                "card-0-sub",
+                "card-0-sub",
+                &format!("{words}{left}"),
+                SUB,
+                t.text_tertiary,
+            );
             children.push(
                 cards::column(0, 12.0, 8.0, t)
                     .child(
                         row()
-                            .key("mail-progress-words")
+                            .key("card-0-sub")
                             .w_full()
                             .justify_between()
                             .child(words_rich(
@@ -342,12 +352,7 @@ pub fn page(mail: &Mail, over: bool, t: &Theme) -> (Vec<El>, usize, usize) {
                                 SUB,
                                 t.text_tertiary,
                             ))
-                            .child(kit::label(
-                                "mail-left",
-                                format!("about {minutes_left} min left"),
-                                SUB,
-                                t.text_tertiary,
-                            )),
+                            .child(kit::label("mail-left", left, SUB, t.text_tertiary)),
                     )
                     .child(bk::bar(
                         "card-0-bar",
@@ -457,7 +462,11 @@ fn field(
         inner = inner.child(
             el().key(format!("{key}-caret"))
                 .a11y_hidden()
-                .absolute(rune::text::advance(&shown[..end], style) + 1.0, 4.0)
+                // On a whole device pixel at 200 %, where the board's browser paints it.
+                .absolute(
+                    ((rune::text::advance(&shown[..end], style) + 1.0) * 2.0).round() / 2.0,
+                    4.0,
+                )
                 .size(1.5, 17.0)
                 .radius(1.0)
                 .fill(t.accent_deep),
@@ -597,11 +606,14 @@ fn account(ui: &BackupsUi, connection: &Connection, first_button: usize, t: &The
         }),
         t,
     ));
-    body.push(dialogs::caption(
-        0,
-        "Connected over TLS. The password stays in Windows Credential Manager on this PC.",
-        t,
-    ));
+    if !refused {
+        // The refusal's notice takes this line's place (DW-1403).
+        body.push(dialogs::caption(
+            0,
+            "Connected over TLS. The password stays in Windows Credential Manager on this PC.",
+            t,
+        ));
+    }
     let ready = typed.complete() && !checking;
     let mut connect = dialogs::button(
         first_button,

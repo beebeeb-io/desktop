@@ -237,7 +237,7 @@ pub mod board {
     pub const SERVER: &str = "mail.northwind.studio";
     /// Fourteen characters, as the board's fourteen bullets. Not a real password.
     pub const APP_PASSWORD: &str = "sample-0000000";
-    pub const CODE: &str = "517284";
+    pub const CODE: &str = "517204";
     pub const SIZE: &str = "6.2 GB";
 
     fn account() -> Account {
