@@ -1,0 +1,412 @@
+//! The account's OTHER devices' backups, for a host without a UI toolkit (the native Backups section), and "Delete
+//! this backup" of one of them (DW-0737, DW-0739, DW-0742).
+//!
+//! - [`Engine::backup_devices_for`] lists the device folders under the account's Backups root and reads each one's
+//!   manifest (`.device.json`) the way the backup pass reads this PC's own (`backup::layout`): the listing and the
+//!   download through the bridge, the item's key and the content's decryption in core (`owned_key_and_pin`,
+//!   `ContentRecord::decryptor`), the text parsed by core's `parse_manifest`. No crypto of its own; the plaintext is
+//!   wiped once parsed.
+//! - This PC is never listed: its folder (the layout's `device_folder_id`) and any folder whose manifest is this PC's
+//!   (core's `same_device_id`) are left out.
+//! - A device whose manifest this PC cannot open (no key, no record, a name that does not open, not JSON) is a row
+//!   that says so ([`DeviceRead::Unreadable`]), never hidden and never guessed. A device folder that could not be
+//!   listed or downloaded is [`DeviceRead::NotReached`] for that row only.
+//! - What a manifest says, and nothing more: desktops write theirs once (the folders on at setup, no pass time), iOS
+//!   writes its model and never its sync time. So a row counts the backed-up folders ACTUALLY listed in the device's
+//!   folder, and has a last backup only where the file names one.
+//! - The root is the cached one, else read with `GET /backups/root`. Never claimed or created here (that is the
+//!   backup pass's, `layout::resolve_root_id`). No root: no other devices.
+//!
+//! [`Engine::delete_device_backup_for`] is `backup_delete::delete_backup` for the session of the press: the rule
+//! (`backup_actions::check`: only a row that answers `NeedsPassword` is sent), core's OPAQUE step-up with the account
+//! PASSWORD, one single-use token, one `DELETE /api/v1/files/{id}` (a move to Trash). The engine's rule is followed as
+//! it is: it refuses this PC's actively backed-up folders and allows a device folder (this PC's included) behind the
+//! password; the Backups section only offers the devices [`Engine::backup_devices_for`] listed, so this PC's folder
+//! never reaches it from there.
+//!
+//! Session rule: the token (and, for the read, the vault key) leave the session's lock together, only while the
+//! session in memory is the press's (`AccountRuntime::while_session_is`); the local state is read through the
+//! account-bound handle of that same session, and the answer is handed over only while it is still that session.
+//!
+//! Both BLOCK on the handle's runtime: a worker's, never the UI thread's.
+//!
+//! Must not: log a name, an id, a manifest's text, the password or a token; list this PC; draw a device it could not
+//! read as read; delete before the password is proven; retry a delete.
+
+use std::sync::Arc;
+
+use beebeeb_core::backup::{DeviceManifest, DeviceSelf, MANIFEST_NAME, parse_manifest, same_device_id};
+use beebeeb_types::backup::Platform;
+use zeroize::Zeroizing;
+
+use super::settings_api::{AccountCallError, kind_of};
+use super::{CredentialStores, Engine, LocalStateRefused};
+use crate::account::SessionGeneration;
+use crate::api_client::ApiClient;
+use crate::backup_delete::{self, DeleteBackupError};
+use crate::engine_bridge::{BackupChild, EngineBridge, EngineError};
+
+#[cfg(test)]
+#[path = "backup_devices_api_tests.rs"]
+mod tests;
+
+/// The longest device model kept from a manifest (`device_model`): a label, never a document.
+const MODEL_MAX: usize = 64;
+
+/// What kind of device a manifest describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceClass {
+    Computer,
+    Phone,
+    Tablet,
+    /// The manifest names no platform and no model.
+    Unknown,
+}
+
+/// What one device's manifest says, as far as it says it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DeviceSummary {
+    /// The device's own name (`device_name`); `None` when the manifest's is empty.
+    pub name: Option<String>,
+    pub class: DeviceClass,
+    /// The phone's or tablet's model (`device_model`, iOS), for a sentence ("Photos still on the iPhone ...").
+    pub model: Option<String>,
+    /// The backed-up folders listed in the device's folder now (not the manifest's setup-time list).
+    pub folders: u32,
+    /// The newest pass time the manifest names (milliseconds); `None` when it names none (today: always, see the
+    /// module doc).
+    pub last_backup_ms: Option<i64>,
+}
+
+impl std::fmt::Debug for DeviceSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceSummary")
+            .field("name", &self.name.as_ref().map(|_| "<redacted>"))
+            .field("class", &self.class)
+            .field("model", &self.model.as_ref().map(|_| "<redacted>"))
+            .field("folders", &self.folders)
+            .field("last_backup_ms", &self.last_backup_ms)
+            .finish()
+    }
+}
+
+/// How one device's manifest was read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceRead {
+    Read(DeviceSummary),
+    /// The device's folder holds no manifest (an old mirror's folder).
+    NoStatusFile,
+    /// It is there and does not open on this PC (no key, no record, a name or a frame that does not open, not JSON).
+    Unreadable,
+    /// The device's folder could not be listed, or its manifest could not be downloaded, now.
+    NotReached,
+}
+
+/// Another device's backup: its folder under the Backups root.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BackupDevice {
+    /// The device folder's file id: what "Delete this backup" names.
+    pub folder_id: String,
+    /// The folder's name, opened on this PC; `None` when it does not open.
+    pub folder_name: Option<String>,
+    pub read: DeviceRead,
+}
+
+impl std::fmt::Debug for BackupDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackupDevice")
+            .field("folder_id", &"<redacted>")
+            .field("folder_name", &self.folder_name.as_ref().map(|_| "<redacted>"))
+            .field("read", &self.read)
+            .finish()
+    }
+}
+
+/// The account's other devices, read for one session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupDevices {
+    pub session: SessionGeneration,
+    pub devices: Vec<BackupDevice>,
+    /// `false`: the Backups listing was cut short; there may be devices it did not list.
+    pub complete: bool,
+}
+
+/// Why the other devices were not read. Nothing is shown of them in any of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevicesRefused {
+    /// No session in memory, or not the session of the ask: nothing was sent.
+    NotSignedIn,
+    /// The local state is not handed out (another account's, locked, nothing synced, ...).
+    Local(LocalStateRefused),
+    /// The root could not be read or listed.
+    Call(AccountCallError),
+}
+
+impl DevicesRefused {
+    /// The refusal's name, for a log line.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::NotSignedIn => "not_signed_in",
+            Self::Local(refused) => refused.kind(),
+            Self::Call(AccountCallError::SessionEnded) => "session_ended",
+            Self::Call(AccountCallError::Offline) => "offline",
+            Self::Call(_) => "failed",
+        }
+    }
+}
+
+/// The part of the bridge the read uses: a folder's live children, a small file's plaintext.
+pub(crate) trait DeviceTree {
+    async fn children(&self, parent: &str) -> Result<(Vec<BackupChild>, bool), EngineError>;
+    async fn small_file(&self, file: &BackupChild) -> Result<Option<Vec<u8>>, EngineError>;
+}
+
+impl DeviceTree for EngineBridge {
+    async fn children(&self, parent: &str) -> Result<(Vec<BackupChild>, bool), EngineError> {
+        self.backup_list_children(parent).await
+    }
+    async fn small_file(&self, file: &BackupChild) -> Result<Option<Vec<u8>>, EngineError> {
+        self.backup_read_small_file(&file.id, file.record, file.chunk_count, file.size)
+            .await
+    }
+}
+
+fn call_error(error: &EngineError) -> AccountCallError {
+    match error {
+        EngineError::Api(error) => kind_of(error),
+        _ => AccountCallError::ServerError,
+    }
+}
+
+/// A short label from a manifest's free text, or `None`.
+fn label(text: &str) -> Option<String> {
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.chars().take(MODEL_MAX).collect())
+}
+
+/// The iOS camera-roll categories' `last_sync` (RFC 3339), newest first, when a manifest names one.
+fn ios_last_sync_ms(manifest: &DeviceManifest) -> Option<i64> {
+    manifest
+        .other
+        .get("backups")?
+        .as_object()?
+        .values()
+        .filter_map(|category| category.get("last_sync")?.as_str())
+        .filter_map(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+        .map(|at| at.timestamp_millis())
+        .max()
+}
+
+/// What `manifest` says, with the backed-up folders listed beside it (`folders`). Pure.
+pub fn summary_of(manifest: &DeviceManifest, folders: usize) -> DeviceSummary {
+    let model = manifest
+        .other
+        .get("device_model")
+        .and_then(|model| model.as_str())
+        .and_then(label);
+    let tablet = model.as_deref().is_some_and(|model| model.contains("iPad"));
+    let class = match manifest.platform {
+        Some(Platform::Windows | Platform::Macos | Platform::Linux | Platform::Cli) => DeviceClass::Computer,
+        Some(Platform::Ios | Platform::Android) | None if tablet => DeviceClass::Tablet,
+        Some(Platform::Ios | Platform::Android) => DeviceClass::Phone,
+        None if model.is_some() => DeviceClass::Phone,
+        None => DeviceClass::Unknown,
+    };
+    let desktop_pass = manifest
+        .folders
+        .iter()
+        .filter_map(|folder| folder.last_pass_at_ms)
+        .max();
+    DeviceSummary {
+        name: label(&manifest.device_name),
+        class,
+        model: model.filter(|_| matches!(class, DeviceClass::Phone | DeviceClass::Tablet)),
+        folders: u32::try_from(folders).unwrap_or(u32::MAX),
+        last_backup_ms: desktop_pass.into_iter().chain(ios_last_sync_ms(manifest)).max(),
+    }
+}
+
+/// One device folder: its manifest read and parsed, and whether it is this PC's.
+async fn read_device<T: DeviceTree>(tree: &T, folder_id: &str, me: Option<&DeviceSelf>) -> (DeviceRead, bool) {
+    let Ok((children, complete)) = tree.children(folder_id).await else {
+        return (DeviceRead::NotReached, false);
+    };
+    let folders = children.iter().filter(|child| child.is_folder).count();
+    // A file whose name does not open could be the manifest: then the device is unreadable, never "no status file".
+    let unopened = children.iter().any(|child| !child.is_folder && child.name.is_none());
+    let mut parsed = Vec::new();
+    let mut failed = false;
+    for file in children
+        .iter()
+        .filter(|child| !child.is_folder && child.name.as_deref() == Some(MANIFEST_NAME))
+    {
+        match tree.small_file(file).await {
+            Err(_) => return (DeviceRead::NotReached, false),
+            Ok(None) => failed = true,
+            Ok(Some(bytes)) => {
+                let bytes = Zeroizing::new(bytes);
+                match std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|text| parse_manifest(text).ok())
+                {
+                    Some(manifest) => parsed.push(manifest),
+                    None => failed = true,
+                }
+            }
+        }
+    }
+    let is_me = |manifest: &DeviceManifest| {
+        me.is_some_and(|me| {
+            manifest
+                .device_id
+                .as_deref()
+                .is_some_and(|id| same_device_id(id, &me.device_id))
+        })
+    };
+    if let Some(mine) = parsed.iter().find(|manifest| is_me(manifest)) {
+        return (DeviceRead::Read(summary_of(mine, folders)), true);
+    }
+    match parsed.first() {
+        Some(manifest) => (DeviceRead::Read(summary_of(manifest, folders)), false),
+        None if failed || unopened => (DeviceRead::Unreadable, false),
+        // The manifest may be in the part that was not listed.
+        None if !complete => (DeviceRead::NotReached, false),
+        None => (DeviceRead::NoStatusFile, false),
+    }
+}
+
+/// Every device folder under `root_id` but this PC's (`this_pc`, and any whose manifest is `me`'s), each read.
+/// `Err`: the root itself could not be listed. The second value is `false` when the root's listing was cut short.
+pub(crate) async fn read_devices<T: DeviceTree>(
+    tree: &T,
+    root_id: &str,
+    this_pc: Option<&str>,
+    me: Option<&DeviceSelf>,
+) -> Result<(Vec<BackupDevice>, bool), AccountCallError> {
+    let (children, complete) = tree.children(root_id).await.map_err(|error| call_error(&error))?;
+    let mut devices = Vec::new();
+    for folder in children.iter().filter(|child| child.is_folder) {
+        if this_pc == Some(folder.id.as_str()) {
+            continue;
+        }
+        let (read, mine) = read_device(tree, &folder.id, me).await;
+        if mine {
+            continue;
+        }
+        devices.push(BackupDevice {
+            folder_id: folder.id.clone(),
+            folder_name: folder.name.clone(),
+            read,
+        });
+    }
+    Ok((devices, complete))
+}
+
+impl<C: CredentialStores> Engine<C> {
+    /// The account's other devices' backups, for the session a person opened the section under (`session` is
+    /// [`Engine::session_turn`] as the host read it). See the module's doc. BLOCKS: a worker's.
+    pub fn backup_devices_for(&self, session: SessionGeneration) -> Result<BackupDevices, DevicesRefused> {
+        // A session mutex a panic poisoned: nothing is sent.
+        if self.acct.session.is_poisoned() {
+            return Err(DevicesRefused::NotSignedIn);
+        }
+        // The token and the vault key leave the session's lock together, as copies wiped when this call ends.
+        let (token, key) = self
+            .acct
+            .while_session_is(&self.writes, session, |current| {
+                (current.token.clone(), Zeroizing::new(current.master_key))
+            })
+            .ok_or(DevicesRefused::NotSignedIn)?;
+        let state = self.local_state().map_err(DevicesRefused::Local)?;
+        if state.session() != session {
+            return Err(DevicesRefused::NotSignedIn);
+        }
+        let me = crate::backup::device::device_self(self.identity);
+        let read = state
+            .with_shared(|db| {
+                let cached = db.backup_root();
+                let this_pc = db.backup_layout().ok().flatten().map(|layout| layout.device_folder_id);
+                let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token, *key));
+                let bridge = EngineBridge::new(self.identity, db, api);
+                self.runtime.block_on(async {
+                    let root = match cached {
+                        Ok(Some(root)) => Some(root),
+                        // Never claimed or created here: the server's flagged root, or none.
+                        Ok(None) => bridge.backup_root_flagged().await.map_err(|error| call_error(&error))?,
+                        Err(_) => return Err(AccountCallError::ServerError),
+                    };
+                    match root {
+                        Some(root) => read_devices(&bridge, &root, this_pc.as_deref(), me.as_ref()).await,
+                        None => Ok((Vec::new(), true)),
+                    }
+                })
+            })
+            // The session moved while the read ran: nothing of it is handed over.
+            .map_err(|_| DevicesRefused::NotSignedIn)?;
+        let (devices, complete) = read.map_err(DevicesRefused::Call)?;
+        Ok(BackupDevices {
+            session,
+            devices,
+            complete,
+        })
+    }
+
+    /// WRITES (a move to Trash): delete the backup `folder_id` after proving `password`, for the session a person
+    /// pressed under and no other. Sent at most once. Any delete that reached Beebeeb asks the sync engine to take the
+    /// server's list again. See the module's doc for the rule. BLOCKS: a worker's.
+    pub fn delete_device_backup_for(
+        &self,
+        session: SessionGeneration,
+        folder_id: &str,
+        password: &[u8],
+    ) -> Result<(), DeleteBackupError> {
+        if self.acct.session.is_poisoned() {
+            return Err(DeleteBackupError::SignedOut);
+        }
+        let token = self
+            .acct
+            .while_session_is(&self.writes, session, |current| current.token.clone())
+            .ok_or(DeleteBackupError::SignedOut)?;
+        let state = self.local_state().map_err(|refused| match refused {
+            LocalStateRefused::SessionChanged | LocalStateRefused::SignedOut | LocalStateRefused::SessionEnded => {
+                DeleteBackupError::SignedOut
+            }
+            _ => DeleteBackupError::Failed("state"),
+        })?;
+        if state.session() != session {
+            return Err(DeleteBackupError::SignedOut);
+        }
+        let base = self.config.api_base.trim_end_matches('/').to_string();
+        let identity = self.identity;
+        let deleted = state
+            .with(|db| {
+                // What this PC backs up now, read fresh; a settings file that cannot be read keeps the runner's last
+                // answer (a read error never lifts a protection).
+                let own = crate::backup::own_backups(identity, db).unwrap_or_else(crate::backup_protect::own_backups);
+                self.runtime.block_on(backup_delete::delete_backup(
+                    &base,
+                    &self.client,
+                    token.as_str(),
+                    db,
+                    &own,
+                    folder_id,
+                    password,
+                ))
+            })
+            // The session moved while the delete ran: whatever it answered is not handed over.
+            .map_err(|_| DeleteBackupError::SignedOut)?;
+        if sent(&deleted) {
+            self.request_resnapshot();
+        }
+        deleted
+    }
+}
+
+/// Whether the delete may have reached Beebeeb (then the sync engine takes the server's list again).
+fn sent(result: &Result<(), DeleteBackupError>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(DeleteBackupError::Offline | DeleteBackupError::Failed("server") | DeleteBackupError::NotFound) => true,
+        Err(_) => false,
+    }
+}

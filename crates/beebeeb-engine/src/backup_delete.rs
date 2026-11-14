@@ -94,10 +94,17 @@ pub async fn delete_backup(
 ) -> Result<(), DeleteBackupError> {
     allowed(db, own, file_id)?;
     let (mut flow, mut req) = StepUp::start(password, StepUpPurpose::Generic).map_err(step_up_error)?;
+    let mut first_leg = true;
     let token = loop {
         let resp = auth_transport::send_to(api_base, client, Some(session), req)
             .await
             .map_err(transport_error)?;
+        // The first leg carries no proof of the password: a 401 there is about the session, not the password (core
+        // reads every 401 as invalid credentials; `trash_purge_api::purge_one` does the same).
+        if first_leg && resp.status == 401 {
+            return Err(DeleteBackupError::SignedOut);
+        }
+        first_leg = false;
         match flow.on_response(resp).map_err(step_up_error)? {
             StepUpStep::Send(next) => req = next,
             StepUpStep::Confirmed(token) => break token,

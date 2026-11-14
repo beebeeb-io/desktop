@@ -648,3 +648,79 @@ async fn first_pass_writes_manifest_and_adopts_legacy_glegion_folder() {
     );
     assert_eq!(fx.names(&legacy).iter().filter(|n| *n == MANIFEST_NAME).count(), 1);
 }
+
+/// The Backups section's read of OTHER devices (`app::backup_devices_api::read_devices`) through real sealed names
+/// and encrypted chunks: two devices' manifests open and are summarised, this PC's folder (found by its manifest) is
+/// left out, and a manifest whose content does not open (one byte changed on the server) is an unreadable row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn other_devices_are_read_through_their_sealed_manifests() {
+    use crate::app::backup_devices_api::{DeviceClass, DeviceRead, read_devices};
+    let fx = Fixture::new();
+    let root = fx.add(None, "Backups", true, 0, "2026-01-01T10:00:00Z");
+    fx.flag(&root);
+    let write = |folder: String, text: String| {
+        let bridge = fx.bridge.clone();
+        async move {
+            bridge
+                .backup_write_small_file(&folder, MANIFEST_NAME, text.as_bytes(), "application/json")
+                .await
+                .unwrap();
+        }
+    };
+    let mac_self = DeviceSelf {
+        device_id: beebeeb_core::backup::device_id_from_machine_id("4c4c4544-0000-0000-0000-00000000bbbb"),
+        name: "Invented Studio".into(),
+        platform: Platform::Macos,
+    };
+    let mac = fx.add(Some(&root), "Invented Studio", true, 0, "2026-02-01T10:00:00Z");
+    write(
+        mac.clone(),
+        beebeeb_core::backup::serialize_manifest(&device_manifest(&mac_self, &[Category::Pictures])),
+    )
+    .await;
+    fx.add(Some(&mac), "Pictures", true, 0, "2026-02-01T10:00:00Z");
+    let phone = fx.add(Some(&root), "Invented phone", true, 0, "2026-03-01T10:00:00Z");
+    let phone_manifest = serde_json::json!({
+        "version": 1, "device_id": "ios-invented-02", "device_name": "Invented phone", "device_model": "iPhone 17",
+    });
+    write(phone.clone(), phone_manifest.to_string()).await;
+    let mine = fx.add(Some(&root), "GLegion", true, 0, "2026-04-01T10:00:00Z");
+    write(
+        mine.clone(),
+        beebeeb_core::backup::serialize_manifest(&device_manifest(&glegion(), &[Category::Documents])),
+    )
+    .await;
+    let broken = fx.add(Some(&root), "Invented tablet", true, 0, "2026-05-01T10:00:00Z");
+    write(broken.clone(), phone_manifest.to_string()).await;
+    let (manifest_id, _) = fx.child(Some(&broken), MANIFEST_NAME).expect("written");
+    {
+        let mut nodes = fx.server.nodes.lock().unwrap();
+        let chunk = &mut nodes.get_mut(&manifest_id).unwrap().chunks[0];
+        let last = chunk.len() - 1;
+        chunk[last] ^= 0x01;
+    }
+
+    let (devices, complete) = read_devices(&*fx.bridge, &root, None, Some(&glegion())).await.unwrap();
+    assert!(complete);
+    let mut by_id: std::collections::HashMap<&str, &DeviceRead> =
+        devices.iter().map(|d| (d.folder_id.as_str(), &d.read)).collect();
+    assert_eq!(devices.len(), 3, "this PC's folder is left out by its manifest");
+    assert!(!by_id.contains_key(mine.as_str()));
+    let Some(DeviceRead::Read(mac_read)) = by_id.remove(mac.as_str()) else {
+        panic!("the Mac's manifest opens");
+    };
+    assert_eq!(
+        (mac_read.name.as_deref(), mac_read.class, mac_read.folders),
+        (Some("Invented Studio"), DeviceClass::Computer, 1)
+    );
+    let Some(DeviceRead::Read(phone_read)) = by_id.remove(phone.as_str()) else {
+        panic!("the phone's manifest opens");
+    };
+    assert_eq!(
+        (phone_read.class, phone_read.model.as_deref()),
+        (DeviceClass::Phone, Some("iPhone 17"))
+    );
+    assert_eq!(by_id.remove(broken.as_str()), Some(&DeviceRead::Unreadable));
+    let names: Vec<Option<&str>> = devices.iter().map(|d| d.folder_name.as_deref()).collect();
+    assert!(names.contains(&Some("Invented phone")), "folder names open on this PC");
+}
