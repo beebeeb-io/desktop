@@ -722,7 +722,18 @@ fn the_pane_says_it_in_view_with_try_again_and_no_row_moves() {
     assert!(!seen.contains("Couldn't load"), "nothing was dropped: {seen}");
     assert!(find(&rt, "item-3-1-switch").is_some(), "the switches stay drawn");
     assert_eq!(row_rects(&rt), rows, "no row moved when the notice came");
-    assert_eq!(text_of(&rt, "toast-0-text").as_deref(), Some(ALERT_UNKNOWN));
+    assert!(
+        find(&rt, "toast-0").is_none(),
+        "\"checking\" does not stay beside the check's failure: {seen}"
+    );
+    in_view(&rt, "toast");
+    // A press Beebeeb refuses while that stands: said above the notice, both in view.
+    fake.put_mode.store(SERVER_ERROR, Ordering::SeqCst);
+    press_in_view(&mut rt, "item-3-1-switch");
+    poll_until(&mut rt, "the refusal was never said", |rt| {
+        find(rt, "toast-0").is_some()
+    });
+    assert_eq!(text_of(&rt, "toast-0-text").as_deref(), Some(ALERT_NOT_SAVED));
     let (notice, toast) = (in_view(&rt, "toast"), in_view(&rt, "toast-0"));
     assert!(
         toast[1] + toast[3] <= notice[1],
@@ -746,6 +757,10 @@ fn the_pane_says_it_in_view_with_try_again_and_no_row_moves() {
     fake.read_mode.store(ANSWER, Ordering::SeqCst);
     press_in_view(&mut rt, "toast-action");
     poll_until(&mut rt, "never confirmed", |rt| find(rt, "notice-line").is_none());
+    assert!(
+        find(&rt, "toast-0").is_none(),
+        "the refusal's toast went with the press"
+    );
     assert_eq!(
         rt.state.settings.source.notifications().groups[0].1[1].on,
         on.map(|on| !on),

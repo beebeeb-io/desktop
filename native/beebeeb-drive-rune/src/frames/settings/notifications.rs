@@ -19,6 +19,35 @@ pub const UNCONFIRMED: &str = "Couldn't check with Beebeeb. What's shown here ma
 /// The account's switches could not be read: the rows say so, and this offers the way to ask again. Nothing
 /// about the other switches: whether they can be pressed is theirs to show.
 pub const NOT_READ: &str = "Couldn't load your account's alerts.";
+/// What the source says when a read of the account's notifications failed. These panes say that themselves (the
+/// rows, Recent's card, what stands over the pane), so it is never drawn as a toast as well (`super::poll`).
+pub const NOT_LOADED: &str = "Couldn't load your notifications. Try again in a moment.";
+
+/// What stands over the Notifications pane: an account row whose switch was not read and no answer on its way
+/// ([`NOT_READ`]), or switches that are drawn but could not be confirmed ([`UNCONFIRMED`]).
+pub fn standing(source: &dyn super::source::SettingsSource) -> Option<&'static str> {
+    let not_read = source
+        .notifications()
+        .groups
+        .iter()
+        .enumerate()
+        .any(|(g, (_, alerts))| {
+            source.alerts_state(g) != ReadState::Loading && alerts.iter().any(|alert| alert.on.is_none())
+        });
+    if not_read {
+        Some(NOT_READ)
+    } else if source.notifications_unconfirmed() {
+        Some(UNCONFIRMED)
+    } else {
+        None
+    }
+}
+
+/// Ask Beebeeb again. What the last toast said is over: the answer says what is so now.
+fn ask_again(s: &mut State) {
+    s.settings.toast = None;
+    s.settings.source.reload_notifications();
+}
 
 /// What is said over Notifications and Recent notifications, where the toast sits (so it is in view however far
 /// the pane is scrolled, and no row moves when it comes or goes): `standing`, what the pane could not read or
@@ -29,7 +58,7 @@ pub fn said_over(ui: &SettingsUi, standing: Option<&'static str>, t: &Theme) -> 
         text: "Try again",
         name: "Try again",
         shortcut: None,
-        run: |s: &mut State, _: &mut rune::Tx| s.settings.source.reload_notifications(),
+        run: |s: &mut State, _: &mut rune::Tx| ask_again(s),
     };
     let notice = standing.map(|words| notices::standing("notice-line", words, Some(again), 0, t));
     let toast = ui
@@ -52,21 +81,20 @@ pub fn said_over(ui: &SettingsUi, standing: Option<&'static str>, t: &Theme) -> 
 
 /// "Try again" in a pane's own card (Recent notifications that could not be read): asks Beebeeb again.
 pub fn try_again(index: usize, t: &Theme) -> El {
-    controls::button(index, "Try again", None, Emphasis::Plain, t)
-        .on_press(|s: &mut State| s.settings.source.reload_notifications())
+    controls::button(index, "Try again", None, Emphasis::Plain, t).on_press(ask_again)
 }
 
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     let n = ui.source.notifications();
-    // An account row whose switch was not read, and no answer on its way.
-    let mut not_read = false;
     let mut children = vec![shell::heading("Notifications", None, t)];
     let mut list = 0;
 
     if n.allowed_in_windows {
         let on = n.allow;
-        let switch = lists::switch("item-0-0", "Allow notifications", on, t)
-            .on_press(move |s: &mut State| s.settings.source.set_allow_notifications(!on));
+        let switch = lists::switch("item-0-0", "Allow notifications", on, t).on_press(move |s: &mut State| {
+            s.settings.toast = None;
+            s.settings.source.set_allow_notifications(!on)
+        });
         children.push(lists::list(
             list,
             None,
@@ -150,7 +178,11 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 let key = format!("item-{list}-{i}");
                 let mut switch = lists::switch(&key, &alert.title, on, t);
                 switch = if n.allowed_in_windows {
-                    switch.on_press(move |s: &mut State| s.settings.source.set_alert(g, i, !on))
+                    // What the last toast said is over with this press: its own answer is said next.
+                    switch.on_press(move |s: &mut State| {
+                        s.settings.toast = None;
+                        s.settings.source.set_alert(g, i, !on)
+                    })
                 } else {
                     switch.disabled(true).focusable(false)
                 };
@@ -165,18 +197,11 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
             group.opacity(0.45)
         });
         list += 1;
-        not_read |= !loading && alerts.iter().any(|alert| alert.on.is_none());
     }
     // Over the pane, where the toast sits: what the rows above could not say (failed), or what they show that
     // could not be confirmed, each with the way to ask again. In view at any window size, and no switch moves
     // under the pointer when it comes or goes; the room under the last group lets it be scrolled clear.
-    let standing = if not_read {
-        Some(NOT_READ)
-    } else if ui.source.notifications_unconfirmed() {
-        Some(UNCONFIRMED)
-    } else {
-        None
-    };
+    let standing = standing(&*ui.source);
     if standing.is_some() {
         children.push(notices::toast_room(1));
     }

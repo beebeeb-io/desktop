@@ -83,7 +83,10 @@ pub const ALERT_NOT_SAVED: &str = "Couldn't change the notification setting. Not
 /// A timeout, a transport error mid-flight, or an unreadable 2xx: the change may have landed.
 pub const ALERT_UNKNOWN: &str = "Couldn't confirm the change. Checking what the server has.";
 pub const SWITCH_NOT_SAVED: &str = "Couldn't save the notification setting on this PC.";
-pub const NOT_LOADED: &str = "Couldn't load your notifications. Try again in a moment.";
+/// The check after [`ALERT_UNKNOWN`] answered: "checking" is over, and the switches are Beebeeb's own.
+pub const ALERT_CHECKED: &str = "Checked. The switches show what Beebeeb has.";
+/// The frame's word: its panes say a failed read themselves, and never draw this as a toast beside that.
+pub const NOT_LOADED: &str = crate::frames::settings::notifications::NOT_LOADED;
 pub const NOT_MARKED: &str = "Couldn't mark your notifications as seen.";
 pub const STILL_SAVING: &str = "Still saving the last change. Try again in a moment.";
 
@@ -422,6 +425,8 @@ pub(super) struct NotificationsPart<C: CredentialStores> {
     unsure_since: u64,
     /// Such a read failed: what is held is drawn as possibly out of date ([`Self::unconfirmed`]).
     stale: bool,
+    /// [`ALERT_UNKNOWN`] said "checking": the read that confirms says so, so that toast does not stand for ever.
+    checking: bool,
     /// The read on its way was asked for by the person (a pane opened, "Try again"): when it fails and what is
     /// held stays, the toast says so all the same. A write's failure takes it back: that toast stands alone.
     loud: bool,
@@ -478,6 +483,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
             write_answers: 0,
             unsure_since: 0,
             stale: false,
+            checking: false,
             loud: false,
             recheck: false,
             writes_of: None,
@@ -752,6 +758,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
         self.again = false;
         self.unconfirmed = None;
         self.stale = false;
+        self.checking = false;
         self.loud = false;
         self.recheck = false;
         self.switches = None;
@@ -832,6 +839,9 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                         if writes >= self.unsure_since {
                             self.unconfirmed = None;
                             self.stale = false;
+                            if std::mem::take(&mut self.checking) {
+                                *toast = Some(ALERT_CHECKED);
+                            }
                         }
                         if !self.again {
                             self.loud = false;
@@ -849,6 +859,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                             // Kept after a failed write: that write's words stand, and the panes say "may be out
                             // of date"; only a read the person asked for says it failed too.
                             self.stale = unconfirmed;
+                            self.checking = false;
                             if !unconfirmed || self.loud {
                                 *toast = Some(NOT_LOADED);
                             }
@@ -898,6 +909,7 @@ impl<C: CredentialStores + 'static> NotificationsPart<C> {
                                     // It may have landed: say the result is unknown and read what Beebeeb has.
                                     // If that read fails too, what is held stays, said to be unconfirmed.
                                     *toast = Some(ALERT_UNKNOWN);
+                                    self.checking = true;
                                     self.unconfirmed = mine.map(|(session, _)| session);
                                     self.unsure_since = self.write_answers;
                                     self.loud = false;

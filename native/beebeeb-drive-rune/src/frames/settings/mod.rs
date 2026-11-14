@@ -183,6 +183,9 @@ pub struct SettingsUi {
     pub dialog: Option<Dialog>,
     /// What a toast over the pane says, until the next thing happens.
     pub toast: Option<&'static str>,
+    /// What stood over Notifications at the last poll (`notifications::standing`): when it changes, it is the
+    /// newer word, and a toast from before it goes.
+    pub standing: Option<&'static str>,
     pub source: Box<dyn SettingsSource>,
     pub intents: Vec<Intent>,
     /// What Drive's own panes show (Storage, Sync and File Explorer, Bandwidth, ...).
@@ -204,6 +207,7 @@ impl Default for SettingsUi {
             menu: None,
             dialog: None,
             toast: None,
+            standing: None,
             // Sample content only where tooling runs; a build that ships starts unwired.
             source: source::first(instance::DEV_BUILD),
             intents: Vec::new(),
@@ -575,14 +579,28 @@ pub const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(100
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let pumped = s.settings.source.pump();
     // A refusal of Drive's panes (Keep, Free up space, Pause) is the same toast.
-    let toast = pumped.toast.or_else(|| s.settings.drive.take_toast());
+    // A failed read of the account's notifications is said by its panes themselves, never as a toast as well.
+    let toast = pumped
+        .toast
+        .filter(|words| *words != notifications::NOT_LOADED)
+        .or_else(|| s.settings.drive.take_toast());
     if let Some(toast) = toast {
         s.settings.toast = Some(toast);
+    }
+    // What stands over Notifications changed (a check failed, or it was confirmed): that is the newer word, so
+    // a toast from before it ("checking") does not stay beside it.
+    let standing = notifications::standing(&*s.settings.source);
+    let turned = standing != s.settings.standing;
+    if turned {
+        s.settings.standing = standing;
+        if toast.is_none() {
+            s.settings.toast = None;
+        }
     }
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
     }
-    pumped.changed || toast.is_some()
+    pumped.changed || toast.is_some() || turned
 }
 
 /// The frame a recent alert leads to.
