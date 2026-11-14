@@ -304,10 +304,7 @@ fn palette(ui: &Ui, palette: &Palette, t: &Theme) -> El {
         // The palette's own words; the window's search box when it closed under the key.
         .on_edit(
             |s: &mut State| match s.viewer.ui.as_mut().map(|ui| &mut ui.office.over) {
-                Some(Some(Over::Palette(palette))) => {
-                    palette.hot = 0;
-                    &mut palette.query
-                }
+                Some(Some(Over::Palette(palette))) => &mut palette.query,
                 _ => &mut s.search,
             },
         )
@@ -341,8 +338,12 @@ fn palette(ui: &Ui, palette: &Palette, t: &Theme) -> El {
         .child(field)
         .child(kbd("pal-esc", "esc", t));
     let mut list = col().key("pal-list").role("listbox").label("Results").w_full().py(8.0);
+    let found = ui.office_found();
+    // Fewer results than before: the mark stays on the list.
+    let last = found.iter().map(|g| g.commands.len()).sum::<usize>().saturating_sub(1);
+    let marked = palette.hot.min(last);
     let mut n = 0;
-    for (g, group) in ui.office_found().iter().enumerate() {
+    for (g, group) in found.iter().enumerate() {
         let title = group.title.to_uppercase();
         kit::note_text(
             &format!("pal-g{g}"),
@@ -361,7 +362,7 @@ fn palette(ui: &Ui, palette: &Palette, t: &Theme) -> El {
         );
         for command in &group.commands {
             let key = format!("pal-{n}");
-            let hot = n == palette.hot;
+            let hot = n == marked;
             let mut line = row()
                 .key(format!("{key}-row"))
                 .role("option")
