@@ -212,7 +212,7 @@ fn account_says_who_is_signed_in_and_the_phrase_row_is_text() {
 
 #[test]
 fn signing_out_is_confirmed_and_enter_is_cancel() {
-    let mut rt = runtime("DW-A52");
+    let mut rt = runtime("DW-S01");
     // Destructive rows are announced as such.
     assert_eq!(name(&rt, "item-3-0"), "Sign out of Drive, destructive");
     assert_eq!(name(&rt, "item-4-0"), "Delete your Beebeeb account, destructive");
@@ -249,7 +249,7 @@ fn signing_out_is_confirmed_and_enter_is_cancel() {
 
 #[test]
 fn signing_out_of_all_apps_is_its_own_confirm() {
-    let mut rt = runtime("DW-A57a");
+    let mut rt = runtime("DW-S02a");
     assert_eq!(name(&rt, "dlg"), "Sign out of all Beebeeb apps on this PC?");
     assert_eq!(says(&rt, "btn-1-label"), "Sign out of all");
     click(&mut rt, "btn-2");
@@ -265,7 +265,7 @@ fn signing_out_of_all_apps_is_its_own_confirm() {
 
 #[test]
 fn app_lock_turns_by_keyboard_and_without_it_there_is_no_time_choice() {
-    let mut rt = runtime("DW-A52");
+    let mut rt = runtime("DW-S01");
     let sw = info(&rt, "item-1-0-switch");
     assert_eq!(sw.role, "switch");
     assert_eq!(sw.label.as_deref(), Some("Lock Beebeeb"));
@@ -341,7 +341,7 @@ fn signing_out_everywhere_else_keeps_this_pc() {
 
 #[test]
 fn nothing_stays_open_across_leaving_the_section_and_coming_back() {
-    let mut rt = runtime("DW-A57");
+    let mut rt = runtime("DW-S02");
     assert!(find(&rt, "dlg").is_some());
     key(&mut rt, Key::Escape); // the confirm
     key(&mut rt, Key::Escape); // settings
@@ -872,7 +872,7 @@ fn a_plan_nobody_can_describe_opens_the_website_instead_of_an_empty_dialog() {
 
 #[test]
 fn the_delay_menu_opens_on_the_current_choice_and_the_keys_choose() {
-    let mut rt = runtime("DW-A52");
+    let mut rt = runtime("DW-S01");
     tab_to(&mut rt, "item-1-0-pop-button");
     key(&mut rt, Key::Enter);
     assert_eq!(
@@ -915,7 +915,7 @@ fn the_delay_menu_opens_on_the_current_choice_and_the_keys_choose() {
 
 #[test]
 fn the_delay_menu_takes_a_press_and_esc_changes_nothing() {
-    let mut rt = runtime("DW-0716");
+    let mut rt = runtime("DW-S03");
     assert_eq!(rt.state.account.dialog, Some(Dialog::LockDelay(Some(1))));
     key(&mut rt, Key::Home);
     assert_eq!(
@@ -935,7 +935,7 @@ fn the_delay_menu_takes_a_press_and_esc_changes_nothing() {
 
 #[test]
 fn with_the_lock_off_there_is_no_delay_and_turning_it_on_brings_it_back() {
-    let mut rt = runtime("DW-0716b");
+    let mut rt = runtime("DW-S03b");
     assert!(!source(&rt).security().app_lock);
     assert!(find(&rt, "item-1-0-pop").is_none(), "no time choice");
     assert!(find(&rt, "menu-0").is_none());
@@ -952,7 +952,7 @@ fn with_the_lock_off_there_is_no_delay_and_turning_it_on_brings_it_back() {
 
 #[test]
 fn neither_the_plan_nor_the_delay_menu_is_a_secret_screen() {
-    for frame in ["DW-0708", "DW-0716", "DW-0716b"] {
+    for frame in ["DW-0708", "DW-S03", "DW-S03b"] {
         let rt = runtime(frame);
         assert!(!rt.state.account.shows_secret(), "{frame}");
         // No field of any kind: nothing is typed on these three.
@@ -967,7 +967,7 @@ fn neither_the_plan_nor_the_delay_menu_is_a_secret_screen() {
 fn a_stored_delay_the_menu_does_not_have_checks_no_row() {
     // Another build's value: the pop-up button shows it, and the menu must not contradict it
     // by checking a delay of its own (least of all "Immediately", the strictest).
-    let mut rt = runtime("DW-A52");
+    let mut rt = runtime("DW-S01");
     rt.update(|s, _| {
         if let Some(source) = s.account.source.as_mut() {
             source.set_lock_after("15 min");

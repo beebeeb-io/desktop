@@ -42,30 +42,33 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::account::SessionGeneration;
-use beebeeb_engine::account_dto::{AccountSession, Subscription};
+use beebeeb_engine::account_dto::AccountSession;
+#[cfg(test)]
+use beebeeb_engine::account_dto::Subscription;
 use beebeeb_engine::app::account_api::{AccountBasics, SessionEnd};
 use beebeeb_engine::app::settings_api::AccountCallError;
 use beebeeb_engine::app::{CredentialStores, Engine};
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Utc};
 
 use super::log;
 use crate::frames::account::Pane;
 use crate::frames::account::approve::{Approval, Denial, Lookup, SignInRequest};
-// ONE size formatter: the one behind the app's storage figure.
 use crate::frames::account::source::{
-    AccountSource, CodeRefused, Deletion, DeletionRefused, DeviceKind, EmailRefused, Event, Factor, Identity,
+    AccountSource, CodeRefused, Count, Deletion, DeletionRefused, DeviceKind, EmailRefused, Event, Factor, Identity,
     PaneState, Passkey, Password, Plan, PlanDetails, ProductKind, ProductState, Pumped, Purpose, Refused, Secret,
-    Security, SecurityFacts, Session, Setup, StepUp, Strength, TwoFactor,
+    Security, SecurityFacts, Session, Setup, SignOutAnswer, StepUp, Strength, TwoFactor,
 };
-use crate::frames::global::source::size_words;
 
 #[cfg(test)]
 #[path = "account_tests.rs"]
 mod tests;
 #[path = "account_words.rs"]
 mod words;
-use words::kind_of;
 pub(crate) use words::{ago, initials_of};
+use words::{kind_of, plan_of};
+
+/// What a sign-out of this app answers here: it is not bound, and the page draws no control for it.
+const NOT_BOUND: &str = "Signing out is not available here yet. Nothing was signed out.";
 
 /// What a pane holds is not read again, when it opens, for this long.
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
@@ -269,55 +272,6 @@ fn row_of(session: AccountSession) -> Row {
     }
 }
 
-/// The plan as Account and the plan dialog draw it. `None`: Beebeeb named no size.
-///
-/// How the period ends is said from `status`, in Beebeeb's own words for it (`active`, `trialing`, `cancelling`,
-/// `paused`, `past_due`, `cancelled`), and only for the ones this function knows: a plan that renews, a plan
-/// that was cancelled and runs to the end of its period, a trial (Beebeeb sets the period's end to the trial's
-/// end), a paused plan. Any other status, or no day: "used" and nothing more. Never "renews" for a plan that
-/// does not.
-fn plan_of(plan: &Subscription) -> Option<(Plan, Option<PlanDetails>)> {
-    if plan.quota_bytes <= 0 {
-        return None;
-    }
-    let size_of = |bytes: i64| size_words(bytes.max(0) as u64);
-    let (size, used) = (size_of(plan.quota_bytes), size_of(plan.used_bytes));
-    let day = plan
-        .current_period_end
-        .as_deref()
-        .and_then(|end| DateTime::parse_from_rfc3339(end).ok())
-        .map(|end| end.with_timezone(&Local).format("%-d %b %Y").to_string());
-    // The card's words, and the dialog's row (its label and the day).
-    let (rest, dated) = match (plan.status.as_str(), day) {
-        ("active", Some(day)) => (format!("used \u{b7} renews {day}"), Some(("Renews", day))),
-        ("cancelling", Some(day)) => (format!("used \u{b7} cancels on {day}"), Some(("Cancels on", day))),
-        ("trialing", Some(day)) => (format!("used \u{b7} trial ends {day}"), Some(("Trial ends", day))),
-        ("paused", _) => ("used \u{b7} paused".into(), None),
-        _ => ("used".into(), None),
-    };
-    let billing = match plan.billing_cycle.to_ascii_lowercase().as_str() {
-        "yearly" | "annual" | "year" => Some("Yearly"),
-        "monthly" | "month" => Some("Monthly"),
-        _ => None,
-    };
-    let card = Plan {
-        title: format!("Drive plan \u{b7} {size}"),
-        used: used.clone(),
-        rest,
-    };
-    // The dialog draws a day and a billing period: without both it is not opened (the card then leads to the
-    // plan page on the website, as the trait says).
-    let details = dated.zip(billing).map(|((day_label, renews), billing)| PlanDetails {
-        size,
-        used,
-        share: (plan.used_bytes.max(0) as f32 / plan.quota_bytes as f32).clamp(0.0, 1.0),
-        day_label,
-        renews,
-        billing: billing.into(),
-    });
-    Some((card, details))
-}
-
 /// What Account draws, from the one read. The profile answered (else the read failed). A name that could not be
 /// read is "no name": the email stands in. A plan that could not be read hides the card (never a guessed plan).
 /// A 401 on either ends the pane as a 401 does.
@@ -388,6 +342,8 @@ pub struct EngineAccountSource<C: CredentialStores> {
     showing: Option<Kind>,
     /// Sign-in and security is on screen: it says how many are signed in, so the sessions are read with it.
     counting_devices: bool,
+    /// The count of sign-outs Beebeeb had taken when the held list was read: a list behind `changes` is not counted.
+    counted_at: u64,
     notice: Option<(SessionGeneration, Said)>,
     /// How a sign-out ended that was answered after the person left Devices and sessions, when it was not
     /// done: said when that pane shows again (a toast belongs to the pane it is about).
@@ -416,6 +372,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             ended: None,
             showing: None,
             counting_devices: false,
+            counted_at: 0,
             notice: None,
             later: None,
             dirty: false,
@@ -693,6 +650,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                             account,
                             value,
                         });
+                        self.counted_at = self.changes;
                         self.sessions_reads.read_at = Some(Instant::now());
                         self.sessions_reads.failed_for = None;
                     }
@@ -857,11 +815,6 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
             Kind::Sessions => (self.current(&self.sessions).is_some(), &self.sessions_reads),
         };
         if held {
-            // The Security page's count: while its first read is out the page loads (never "Not known").
-            if pane == Pane::Security && self.current(&self.sessions).is_none() && self.sessions_reads.reading.is_some()
-            {
-                return PaneState::Loading;
-            }
             PaneState::Ready
         } else if reads.reading.is_none() && reads.failed_for == Some(turn) {
             PaneState::Failed
@@ -1070,7 +1023,12 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn security_facts(&self) -> SecurityFacts {
         SecurityFacts {
             two_factor: self.current(&self.overview).and_then(|overview| overview.two_factor),
-            sessions: self.current(&self.sessions).map(Vec::len),
+            // Never the length of a list read before a sign-out Beebeeb took: that one is being read again.
+            sessions: match self.current(&self.sessions) {
+                Some(rows) if self.counted_at == self.changes => Count::Known(rows.len()),
+                _ if self.sessions_reads.reading.is_some() => Count::Reading,
+                _ => Count::NotKnown,
+            },
             ..SecurityFacts::unknown()
         }
     }
@@ -1095,8 +1053,12 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     /// App lock: a lane of its own (Windows Hello).
     fn set_app_lock(&mut self, _on: bool) {}
     /// Signing this app out lives on the unbound Security pane; the sign-in lane owns it.
-    fn sign_out_this_app(&mut self) {}
-    fn sign_out_all_apps(&mut self) {}
+    fn sign_out_this_app(&mut self) -> SignOutAnswer {
+        SignOutAnswer::Refused(NOT_BOUND)
+    }
+    fn sign_out_all_apps(&mut self) -> SignOutAnswer {
+        SignOutAnswer::Refused(NOT_BOUND)
+    }
     /// The step-up, and everything it guards (email, password, two-factor, deletion): security lanes of their own.
     fn step_up(&mut self, _password: Password<'_>, _purpose: Purpose) -> Result<StepUp, Refused> {
         Err(Refused::Offline)

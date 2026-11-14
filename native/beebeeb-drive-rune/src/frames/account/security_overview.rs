@@ -17,7 +17,7 @@ use crate::ui::kit;
 use crate::ui::settings_list as lists;
 use rune::{El, TextStyle, col, el, row};
 
-use super::source::{AccountSource, Factor, FactorKind, PaneState, SecurityFacts, score};
+use super::source::{AccountSource, Count, Factor, FactorKind, PaneState, SecurityFacts, SignOutAnswer, score};
 use super::{Dialog, icons};
 
 /// The score's line: larger than a list's head, smaller than the pane's title.
@@ -58,24 +58,32 @@ fn answered(source: &dyn AccountSource, frame: &str) -> bool {
     super::local(frame).is_none_or(|(pane, _)| source.pane_state(pane) != PaneState::Unwired)
 }
 
-/// A row that opens `frame`, with its own `mark` at the trailing edge (a value, the mark of a thing done).
-/// While nothing answers for that page it is the row alone: no press, no chevron (never a row that leads to a
-/// page that is not there). It then keeps a mark it has (the state is still true), and says "Not available
-/// yet" only where it has none: never both, which would read as the state not being available.
+/// What a row says of its own state: nothing, a state that was read, or a read state with something at the
+/// trailing edge (a value, the mark of a thing done).
+enum State_ {
+    None,
+    Read,
+    Marked(Tail),
+}
+
+/// A row that opens `frame`. While nothing answers for that page it is the row alone: no press, no chevron
+/// (never a row that leads to a page that is not there). A row with a READ state then says that state and
+/// nothing more; "Not available yet" is only on a row that has none (never both, which would read as the
+/// state itself not being available).
 fn leads(
     list: usize,
     index: usize,
     it: Row,
-    mark: Option<Tail>,
+    state: State_,
     frame: &'static str,
     source: &dyn AccountSource,
     t: &Theme,
 ) -> El {
     let open = answered(source, frame);
-    let it = match mark {
-        Some(mark) => it.tail(mark),
-        None if !open => it.tail(Tail::Value(NOT_YET.into())),
-        None => it,
+    let it = match state {
+        State_::Marked(mark) => it.tail(mark),
+        State_::None if !open => it.tail(Tail::Value(NOT_YET.into())),
+        State_::Read | State_::None => it,
     };
     if !open {
         return set::item(list, index, &it, Vec::new(), t);
@@ -137,7 +145,7 @@ fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> E
     };
     let (ok, of) = score(factors);
     let says = match of - ok {
-        0 => "Nothing to do. Checked each time you open this page.".to_string(),
+        0 => "Nothing to do.".to_string(),
         1 => "One thing left to do.".to_string(),
         n => format!("{n} things left to do."),
     };
@@ -212,9 +220,14 @@ fn score_card(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> E
     card
 }
 
-/// The mark of a row whose state is good AND was read. Nothing else gets it.
-fn checked(good: bool) -> Option<Tail> {
-    good.then_some(Tail::Check)
+/// The state of a row whose value was read (`known`), with the mark when it is good AND was read. Nothing
+/// else gets the mark.
+fn checked(known: bool, good: bool) -> State_ {
+    match (known, good) {
+        (_, true) => State_::Marked(Tail::Check),
+        (true, false) => State_::Read,
+        (false, false) => State_::None,
+    }
 }
 
 fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
@@ -222,7 +235,10 @@ fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
         Some(when) => format!("Changed {when}"),
         None => "Last change not known".into(),
     });
-    let password_ok = checked(done(facts, FactorKind::StrongPassword) && done(facts, FactorKind::PasswordNotInBreach));
+    let password_ok = checked(
+        facts.password_changed.is_some(),
+        done(facts, FactorKind::StrongPassword) && done(facts, FactorKind::PasswordNotInBreach),
+    );
     let two = Row::new(Lead::Icon(&icons::SHIELD), "Two-factor authentication").sub(
         match (facts.two_factor, facts.backup_codes) {
             (Some(true), Some((left, of))) => format!("On · {left} of {of} backup codes left"),
@@ -231,14 +247,14 @@ fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
             (None, _) => NOT_KNOWN.into(),
         },
     );
-    let two_ok = checked(facts.two_factor == Some(true));
+    let two_ok = checked(facts.two_factor.is_some(), facts.two_factor == Some(true));
     let passkeys = Row::new(Lead::Icon(&icons::PASSKEY), "Passkeys").sub(match facts.passkeys {
         Some(0) => "None added".into(),
         Some(1) => "1 passkey".into(),
         Some(n) => format!("{n} passkeys"),
         None => NOT_KNOWN.into(),
     });
-    let passkeys_ok = checked(facts.passkeys.is_some_and(|n| n > 0));
+    let passkeys_ok = checked(facts.passkeys.is_some(), facts.passkeys.is_some_and(|n| n > 0));
     lists::list(
         0,
         Some("Sign-in"),
@@ -311,20 +327,21 @@ fn devices(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
     let sessions =
         Row::new(Lead::Icon(&icons::DEVICE_PHONE), "Devices and sessions").sub("Where your account is signed in");
     let signed_in = Tail::Value(match facts.sessions {
-        Some(n) => format!("{n} signed in"),
-        None => NOT_KNOWN.into(),
+        Count::Known(n) => format!("{n} signed in"),
+        Count::Reading => "Loading".into(),
+        Count::NotKnown => NOT_KNOWN.into(),
     });
     lists::list(
         1,
         Some("This PC and your devices"),
         vec![
             app_lock_row(facts, t),
-            leads(1, 1, sessions, Some(signed_in), "DW-A55", source, t),
+            leads(1, 1, sessions, State_::Marked(signed_in), "DW-A55", source, t),
             leads(
                 1,
                 2,
                 Row::new(Lead::Icon(&icons::SCAN), "Approve a sign-in").sub("Let another device sign in"),
-                None,
+                State_::None,
                 "DW-A12",
                 source,
                 t,
@@ -343,22 +360,15 @@ fn activity(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El 
             2,
             index,
             Row::new(Lead::Icon(&icons::ACTIVITY), "All sign-in activity").sub(sub),
-            None,
+            State_::None,
             "DW-A77",
             source,
             t,
         )
     };
     let rows = match &facts.activity {
-        None => vec![set::item(
-            2,
-            0,
-            &Row::new(Lead::Icon(&icons::ACTIVITY), "Sign-in activity")
-                .sub(NOT_KNOWN)
-                .tail(Tail::Value(NOT_YET.into())),
-            Vec::new(),
-            t,
-        )],
+        // Not read: the way to the page stays, when the page answers.
+        None => vec![all(0, NOT_KNOWN)],
         Some(None) => vec![all(0, "Security logging is off: nothing is recorded")],
         Some(Some(events)) if events.is_empty() => vec![all(0, "Recording is on. Nothing recorded yet")],
         Some(Some(events)) => {
@@ -394,8 +404,10 @@ fn sign_out(facts: &SecurityFacts, t: &Theme) -> El {
         if !able {
             return set::item(3, index, &it.tail(Tail::Value(NOT_YET.into())), Vec::new(), t);
         }
-        set::item(3, index, &it.danger().link(false), Vec::new(), t)
-            .on_press(move |s: &mut State| s.account.dialog = Some(dialog.clone()))
+        set::item(3, index, &it.danger().link(false), Vec::new(), t).on_press(move |s: &mut State| {
+            s.account.dialog = Some(dialog.clone());
+            arrive(&mut s.account);
+        })
     };
     lists::list(
         3,
@@ -424,7 +436,7 @@ fn delete(source: &dyn AccountSource, t: &Theme) -> El {
     lists::list(
         4,
         Some("Delete"),
-        vec![leads(4, 0, it, None, "DW-A58", source, t)],
+        vec![leads(4, 0, it, State_::None, "DW-A58", source, t)],
         Some("Deletes every product's data after 72 hours to undo. After that it cannot be undone."),
         t,
     )
@@ -433,6 +445,10 @@ fn delete(source: &dyn AccountSource, t: &Theme) -> El {
 /// A confirm was just asked for over the page (`go`): one this source cannot act on does not open at all, so
 /// nothing that is not drawn holds the keyboard.
 pub fn arrive(ui: &mut super::AccountUi) {
+    // A confirm that opens starts clean: what an earlier one said (a refusal) is not this one's.
+    if ui.signing_out.waiting.is_none() {
+        ui.signing_out = SigningOut::default();
+    }
     if matches!(ui.dialog, Some(Dialog::SignOutApp | Dialog::SignOutAllApps))
         && !ui.source.as_deref().is_some_and(|s| s.security_facts().can_sign_out)
     {
@@ -440,8 +456,9 @@ pub fn arrive(ui: &mut super::AccountUi) {
     }
 }
 
-/// The page, and the confirm or the menu over it when one is open.
-pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, t: &Theme) -> (El, Option<El>) {
+/// The page, and the confirm or the menu over it when one is open. `signing`: where a sign-out asked from the
+/// confirm stands.
+pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, signing: &SigningOut, t: &Theme) -> (El, Option<El>) {
     let facts = source.security_facts();
     let over = match dialog {
         Some(Dialog::SignOutApp) if facts.can_sign_out => Some(sign_out_confirm(
@@ -449,6 +466,7 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, t: &Theme) -> (
             "This signs out Drive on this PC only. Drive, VPN, Chat and Mail stay signed in. Your data stays encrypted on this PC; signing in again opens it.",
             "Sign out",
             false,
+            signing,
             t,
         )),
         Some(Dialog::SignOutAllApps) if facts.can_sign_out => Some(sign_out_confirm(
@@ -456,6 +474,7 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, t: &Theme) -> (
             "Drive, Pass, VPN, Chat and Mail on this PC are signed out. Their data stays encrypted on this PC; signing in again opens it. Your other devices stay signed in.",
             "Sign out of all",
             true,
+            signing,
             t,
         )),
         Some(Dialog::LockDelay(hot)) => match &facts.app_lock {
@@ -476,33 +495,68 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, t: &Theme) -> (
     (set::pane(children, t), over)
 }
 
-/// DW-A57 and DW-A57a: the scope sentence is read before the buttons; Enter is Cancel.
-fn sign_out_confirm(title: &str, words: &str, action: &str, all: bool, t: &Theme) -> El {
-    let foot = vec![
-        (
-            set::button("btn-1", action, None, Look::Danger, Size::Medium, false, t)
-                .label(format!("{action}, destructive"))
-                .on_press(move |s: &mut State| {
-                    if let Some(source) = s.account.source.as_mut() {
-                        if all {
-                            source.sign_out_all_apps();
-                        } else {
-                            source.sign_out_this_app();
-                        }
-                    }
-                    s.account.dialog = None;
-                    // Sign in: with the Continue as card after one app (DW-A02), without it
-                    // after all of them (DW-A03).
-                    super::go(s, if all { "DW-A03" } else { "DW-A02" });
-                }),
-            false,
-        ),
-        (
-            set::button("btn-2", "Cancel", None, Look::Plain, Size::Medium, false, t)
-                .default_button()
-                .on_press(|s: &mut State| s.account.dialog = None),
-            true,
-        ),
-    ];
-    set::dialog(title, 440.0, title, words, Vec::new(), foot, t).modal(false, |s: &mut State| s.account.dialog = None)
+/// Where a sign-out asked from the confirm stands. Nothing of a sign-out is drawn before its answer: the
+/// window leaves for the sign-in screen only on `SignOutAnswer::Done`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SigningOut {
+    /// Sent, not answered yet: all apps (`true`) or this one. The confirm waits and takes no press.
+    pub waiting: Option<bool>,
+    /// It was refused: the confirm says why, and that nothing was signed out.
+    pub refused: Option<&'static str>,
+}
+
+/// What the confirm says while its sign-out is out.
+pub(super) const SIGNING_OUT: &str = "Signing out. Nothing is signed out until Beebeeb has answered.";
+
+/// Take in how a sign-out ended: done leaves for the sign-in screen (with the Continue as card after one app,
+/// DW-A02; without it after all of them, DW-A03); refused stays on the confirm and says why.
+pub(super) fn settle_sign_out(s: &mut State, all: bool, answer: SignOutAnswer) {
+    match answer {
+        SignOutAnswer::Done => {
+            s.account.signing_out = SigningOut::default();
+            s.account.dialog = None;
+            super::go(s, if all { "DW-A03" } else { "DW-A02" });
+        }
+        SignOutAnswer::Refused(why) => {
+            s.account.signing_out = SigningOut {
+                waiting: None,
+                refused: Some(why),
+            };
+        }
+        SignOutAnswer::Pending => s.account.signing_out.waiting = Some(all),
+    }
+}
+
+/// DW-A57 and DW-A57a: the scope sentence is read before the buttons; Enter is Cancel. While the sign-out is
+/// out the confirm says so and neither button takes a press; it closes only with the answer.
+fn sign_out_confirm(title: &str, words: &str, action: &str, all: bool, signing: &SigningOut, t: &Theme) -> El {
+    let waiting = signing.waiting.is_some();
+    let words = match (waiting, signing.refused) {
+        (true, _) => SIGNING_OUT,
+        (false, Some(why)) => why,
+        (false, None) => words,
+    };
+    let mut act = set::button("btn-1", action, None, Look::Danger, Size::Medium, waiting, t)
+        .label(format!("{action}, destructive"));
+    let mut cancel = set::button("btn-2", "Cancel", None, Look::Plain, Size::Medium, waiting, t).default_button();
+    if !waiting {
+        act = act.on_press(move |s: &mut State| {
+            let Some(source) = s.account.source.as_mut() else {
+                return;
+            };
+            let answer = if all {
+                source.sign_out_all_apps()
+            } else {
+                source.sign_out_this_app()
+            };
+            settle_sign_out(s, all, answer);
+        });
+        cancel = cancel.on_press(|s: &mut State| s.account.dialog = None);
+    }
+    let foot = vec![(act, false), (cancel, true)];
+    set::dialog(title, 440.0, title, words, Vec::new(), foot, t).modal(false, |s: &mut State| {
+        if s.account.signing_out.waiting.is_none() {
+            s.account.dialog = None;
+        }
+    })
 }

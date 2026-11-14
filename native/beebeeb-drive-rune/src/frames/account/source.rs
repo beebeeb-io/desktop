@@ -135,7 +135,7 @@ pub struct SecurityFacts {
     pub backup_codes: Option<(usize, usize)>,
     pub passkeys: Option<usize>,
     /// How many are signed in: devices or sessions, as the source lists them (the page says "N signed in").
-    pub sessions: Option<usize>,
+    pub sessions: Count,
     /// Sign-ins and security changes, newest first (the page shows the first `RECENT_EVENTS`). `Some(None)`:
     /// security logging is off.
     pub activity: Option<Option<Vec<Event>>>,
@@ -143,6 +143,27 @@ pub struct SecurityFacts {
     pub factors: Option<Vec<Factor>>,
     /// This source can sign this app out (`sign_out_this_app`, `sign_out_all_apps`).
     pub can_sign_out: bool,
+}
+
+/// A count the page shows: read, being read, or not known. A list that is older than a change the source
+/// knows of is never `Known`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Count {
+    Known(usize),
+    /// Asked, not answered yet: the row says so (the rest of the page does not wait for it).
+    Reading,
+    NotKnown,
+}
+
+/// How a sign-out of this app ended, or stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignOutAnswer {
+    /// Signed out: only now does the window leave for the sign-in screen.
+    Done,
+    /// Not signed out, and why, in words for the person. Nothing changed.
+    Refused(&'static str),
+    /// Sent, not answered yet: the answer comes through [`AccountSource::sign_out_result`].
+    Pending,
 }
 
 impl SecurityFacts {
@@ -154,7 +175,7 @@ impl SecurityFacts {
             two_factor: None,
             backup_codes: None,
             passkeys: None,
-            sessions: None,
+            sessions: Count::NotKnown,
             activity: None,
             factors: None,
             can_sign_out: false,
@@ -590,11 +611,17 @@ pub trait AccountSource {
     fn sign_out_device(&mut self, id: &str) -> bool;
     /// Engine: `DELETE /api/v1/account/sessions?except=current`.
     fn sign_out_everywhere_else(&mut self);
-    /// Engine: `session.sign_out()`: ends this app's session and clears its keys from memory.
-    fn sign_out_this_app(&mut self);
+    /// Engine: `session.sign_out()`: ends this app's session and clears its keys from memory. The answer says
+    /// whether it was done: the page draws nothing of a sign-out before it.
+    fn sign_out_this_app(&mut self) -> SignOutAnswer;
     /// Engine: `session.sign_out_all_on_this_pc()`: ends every Beebeeb session this PC holds
     /// and removes the shared 'Continue as' entry.
-    fn sign_out_all_apps(&mut self);
+    fn sign_out_all_apps(&mut self) -> SignOutAnswer;
+    /// How a sign-out that answered `Pending` ended, once (`Done` or `Refused`); `None` while it is out. A
+    /// source drops an answer that belongs to a session or an account that is over.
+    fn sign_out_result(&mut self) -> Option<SignOutAnswer> {
+        None
+    }
 
     /// Engine: `core::opaque` step-up (`POST /api/v1/auth/step-up/start` + `/finish`, both
     /// carrying OPAQUE messages only). The one call that takes a password.
@@ -711,7 +738,9 @@ pub trait AccountSource {
     }
 }
 
-/// The Security page's facts of a source that knows every part: taken from its accessors.
+/// The Security page's facts of a source that knows every part: taken from its accessors. For a fixture: a
+/// source that reads from Beebeeb fills `SecurityFacts::unknown()` with what it read (a score only once it
+/// may be said).
 pub fn all_known<S: AccountSource + ?Sized>(source: &S) -> SecurityFacts {
     let sec = source.security();
     let two = source.two_factor();
@@ -721,7 +750,7 @@ pub fn all_known<S: AccountSource + ?Sized>(source: &S) -> SecurityFacts {
         password_changed: Some(sec.password_changed),
         two_factor: Some(sec.two_factor),
         passkeys: Some(sec.passkeys),
-        sessions: Some(sec.sessions),
+        sessions: Count::Known(sec.sessions),
         activity: Some(
             source
                 .activity()
@@ -740,7 +769,9 @@ pub fn score(factors: &[Factor]) -> (usize, usize) {
 mod board;
 // Every public item of the fixture keeps its path here; `BOARD_BACKUP_CODE` has no reader outside it yet.
 #[allow(unused_imports)]
-pub use board::{BOARD_BACKUP_CODE, BOARD_CODE, BOARD_EMAIL_CODE, BOARD_PASSWORD, BoardAccount};
+pub use board::{
+    BOARD_BACKUP_CODE, BOARD_CODE, BOARD_EMAIL_CODE, BOARD_PASSWORD, BOARD_SIGN_OUT_REFUSED, BoardAccount, SignOutMode,
+};
 
 /// The source the account panes start on. A development build (and every test and headless
 /// render) starts on the board's sample content; a build that ships starts with none, so
