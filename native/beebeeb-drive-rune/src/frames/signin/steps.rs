@@ -322,6 +322,13 @@ impl Ui {
         }
     }
 
+    /// The doors the engine does not bind in the app (another device, the 12 words): they open the web's page.
+    pub(super) fn open_recovery_page_from_any(&mut self) {
+        if !self.busy && !self.passkey_waiting {
+            self.go(Intent::OpenRecoveryPage);
+        }
+    }
+
     /// "Use a passkey": Windows asks; the app never sees the passkey.
     pub fn use_passkey(&mut self) {
         if self.busy || self.passkey_waiting || self.screen != Screen::SignIn || !self.passkey_available() {
@@ -364,6 +371,10 @@ impl Ui {
     /// "Recover with phrase" (DW-A45), and Back from the new password: recovery's first step,
     /// the email and the twelve words (DW-A47).
     pub fn recover_with_phrase(&mut self) {
+        if !self.in_app_doors() && matches!(self.screen, Screen::Forgot | Screen::NewPassword) {
+            self.open_recovery_page_from_any();
+            return;
+        }
         if !matches!(self.screen, Screen::Forgot | Screen::NewPassword) || self.setting {
             return;
         }

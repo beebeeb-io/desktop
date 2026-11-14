@@ -956,29 +956,24 @@ fn the_passkey_door_is_drawn_only_where_the_source_can_sign_in_with_one() {
 }
 
 #[test]
-fn where_the_source_has_no_in_app_doors_the_web_recovery_page_is_the_one_door() {
+fn where_the_source_has_no_in_app_doors_the_board_doors_open_the_web_recovery_page() {
     let (mut rt, calls) = form(Script {
         in_app_doors: false,
         ..Script::default()
     });
     assert!(
-        !a11y(&rt).contains("Sign in with another device"),
-        "no dead device door"
+        a11y(&rt).contains("Sign in with another device"),
+        "the board's door stays"
     );
+    click(&mut rt, "btn-1");
+    assert_eq!(ui(&mut rt).take_intents(), vec![Intent::OpenRecoveryPage]);
+    assert_eq!(ui(&mut rt).screen, Screen::SignIn, "the window stays where it was");
     click(&mut rt, "link-0-box");
     assert_eq!(ui(&mut rt).screen, Screen::Forgot);
-    let tree = a11y(&rt).to_lowercase();
-    assert!(
-        !tree.contains("sign in with another device"),
-        "no door to another device"
-    );
-    assert_eq!(
-        info(&rt, "card-0").label.as_deref(),
-        Some("I have my recovery phrase or a signed-in device")
-    );
-    tab_to(&mut rt, "btn-0");
-    press(&mut rt, Key::Enter);
-    assert_eq!(ui(&mut rt).take_intents(), vec![Intent::OpenRecoveryPage]);
-    assert_eq!(ui(&mut rt).screen, Screen::Forgot, "the window stays where it was");
+    for card in ["btn-0", "btn-1"] {
+        click(&mut rt, card);
+        assert_eq!(ui(&mut rt).take_intents(), vec![Intent::OpenRecoveryPage], "{card}");
+        assert_eq!(ui(&mut rt).screen, Screen::Forgot);
+    }
     assert!(calls.borrow().is_empty(), "nothing was asked of the engine");
 }

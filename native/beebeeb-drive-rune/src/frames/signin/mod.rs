@@ -401,6 +401,11 @@ impl Ui {
 
     /// "Sign in with another device", "Ask again" and "Get a new code".
     pub fn ask_other_device(&mut self) {
+        if !self.in_app_doors() {
+            // Approving this PC from another device is the web's here: the door stays, and opens that page.
+            self.open_recovery_page_from_any();
+            return;
+        }
         if self.step_running() || self.passkey_waiting {
             return;
         }
