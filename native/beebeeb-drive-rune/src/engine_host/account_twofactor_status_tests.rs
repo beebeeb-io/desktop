@@ -176,10 +176,13 @@ fn what_beebeeb_does_not_give_stays_empty_and_dates_use_the_lists_words() {
         two_factor_of(&on(Some(&yesterday), None, None), now).last_used,
         "Yesterday, 18:00"
     );
-    let long_ago = (now - chrono::Duration::days(40)).with_timezone(&Utc).to_rfc3339();
+    // The words come from the local clock: 40 days back can cross a change of summer time, so the expectation is
+    // read from the same local time, never a fixed hour.
+    let long_ago_local = now - chrono::Duration::days(40);
+    let long_ago = long_ago_local.with_timezone(&Utc).to_rfc3339();
     assert_eq!(
         two_factor_of(&on(Some(&long_ago), None, None), now).last_used,
-        "5 Oct, 18:00"
+        long_ago_local.format("%-d %b, %H:%M").to_string()
     );
     // Never used, no counts: those rows are empty (the page hides them); a count above its total is clamped.
     let bare = two_factor_of(&on(None, None, None), now);
