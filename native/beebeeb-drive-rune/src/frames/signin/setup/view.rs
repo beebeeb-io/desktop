@@ -759,10 +759,11 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         Explorer::Adding => "Adding\u{2026}",
         Explorer::Failed { .. } | Explorer::NotSyncing => "Off",
     };
-    let backup = if r.backup.is_empty() {
-        "Off".to_string()
-    } else {
-        r.backup.join(", ")
+    let backup = match ui.answered(Switch::Backup) {
+        Some(Answered::Waiting) => "Saving\u{2026}".to_string(),
+        Some(Answered::NotKnown | Answered::NotChanged) => "Not changed".to_string(),
+        _ if r.backup.is_empty() => "Off".to_string(),
+        _ => r.backup.join(", "),
     };
     // A switch whose change is answered after the press draws no value before the answer, and never the value
     // that was asked for when the change did not happen.
@@ -830,6 +831,7 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let not_changed: Vec<&str> = [
         (Switch::Notifications, "notifications"),
         (Switch::OpenAtLogin, "open at login"),
+        (Switch::Backup, "backup"),
     ]
     .into_iter()
     .filter(|(switch, _)| matches!(ui.answered(*switch), Some(Answered::NotChanged | Answered::NotKnown)))

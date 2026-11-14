@@ -70,6 +70,8 @@ pub enum FolderSaid {
 pub enum Switch {
     Notifications,
     OpenAtLogin,
+    /// Step 3: the folders chosen to back up (done when every one was switched on).
+    Backup,
 }
 
 /// How a change asked through the source ended.
@@ -210,6 +212,11 @@ pub trait SetupSource {
     fn explorer(&self) -> Explorer;
     /// The six known folders with their sizes. Engine: `known_folder::list` + a size scan.
     fn folders(&self) -> Vec<Folder>;
+    /// The folders, when a source reads them late: `Some` once, when a read arrived since the last call (the first
+    /// run then draws the new list). The fixture has them from the start.
+    fn fresh_folders(&mut self) -> Option<Vec<Folder>> {
+        None
+    }
     /// The original's weight: "30.9 MB". Engine: the chosen photo's size.
     fn original_weight(&self) -> String;
     /// What a preview at this size and format weighs for the chosen photo ("1.0 MB"), if it has
