@@ -55,6 +55,8 @@ pub struct State {
     pub(crate) setup: Option<crate::frames::signin::setup::Ui>,
     /// The first-time guide over the main window (DW-0380, DW-0301 to DW-0305).
     pub(crate) guide: crate::frames::signin::setup::guide::Guide,
+    /// Where the guide's "done" is kept, once per account (`guide_marks`).
+    pub(crate) guide_marks: Box<dyn crate::frames::signin::setup::guide_marks::GuideMarks>,
     /// Sync history and Available offline (`frames::this_pc`).
     pub(crate) this_pc: crate::frames::this_pc::Ui,
     /// Backups, a section of settings (`frames::backups`).
@@ -130,6 +132,7 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
         shortcuts: Default::default(),
         setup: None,
         guide: Default::default(),
+        guide_marks: crate::frames::signin::setup::guide_marks::first(crate::shell::instance::DEV_BUILD),
         this_pc: crate::frames::this_pc::Ui::fixture(),
         backups: crate::frames::backups::BackupsUi::first(crate::shell::instance::DEV_BUILD),
     }
@@ -185,6 +188,8 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
         engine.clone(),
     )));
     s.storage_split = None;
+    // The first-time guide's "done", once per account: the engine keeps it in the account's own local state.
+    s.guide_marks = Box::new(crate::engine_host::guide::EngineGuideMarks::new(engine.clone()));
     // Shared reads the engine (`engine_host::shared`): from Beebeeb only, for the session in memory.
     s.frames.shared.source = Box::new(crate::engine_host::shared::EngineSharedSource::new(engine.clone()));
     // Trash reads the engine (`engine_host::trash`); Search only when `SEARCH_ON_ENGINE` (task 2488).

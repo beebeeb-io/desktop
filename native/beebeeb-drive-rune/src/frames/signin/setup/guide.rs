@@ -14,7 +14,10 @@
 //! While a tip shows, the keyboard is the card's: focus goes to its button, Tab moves between
 //! Skip and Next, Enter presses the focused one, Esc is Skip.
 //!
-//! The guide ends when the account signs out, locks or changes: another account never resumes it.
+//! The guide ends when the account signs out, locks or changes: another account never resumes it,
+//! and nothing is kept. Finished ("Done") or skipped (Skip, Esc), it is done for that ACCOUNT on this
+//! PC and does not start by itself again (`guide_marks`; owner ruling 2026-11-13, a deviation from
+//! the board's "Shown once per PC", recorded in `FRAMES.md`).
 //!
 //! Nothing here is a secret.
 
@@ -22,6 +25,7 @@ use std::f32::consts::FRAC_PI_4;
 
 use rune::{Color, Cx, El, Key, KeyEvent, Shadow, TextStyle, Tx, col, el, row};
 
+use super::guide_marks;
 use crate::State;
 use crate::shell::app::{GateState, Screen, Section};
 use crate::theme::tokens::{self, Theme, type_};
@@ -103,6 +107,9 @@ pub struct Guide {
     pub(super) account: Option<String>,
     /// The step changed: focus goes to the card's button once it is drawn ([`poll`]).
     focus: bool,
+    /// The last poll saw a tip on screen. A tip that comes back (what was in front of it closed) takes the
+    /// keyboard again.
+    shown: bool,
 }
 
 /// The row tip 2 points at: the file that was selected when the guide started (the board points
@@ -151,21 +158,34 @@ pub fn next(s: &mut State) {
     }
 }
 
-/// "Skip" and Esc: the whole guide ends; the window stays where it is.
+/// "Skip", Esc and "Done": the whole guide ends; the window stays where it is. The person saw it or chose not to:
+/// that is kept for the account the guide ran for (`guide_marks`: once per account on this PC). Only here: a guide
+/// that ends because the account locked, signed out or changed ([`poll`]) keeps nothing.
 pub fn skip(s: &mut State) {
+    if s.guide.step.is_some() && s.guide.account.as_deref() == s.shell.app.account() {
+        let account = s.guide.account.take();
+        s.guide_marks.mark_done(account.as_deref());
+    }
     s.guide = Guide::default();
 }
 
 /// Whether the place under a tip has something of its own in front: a menu, a dialog, a name
-/// being typed in a row, an opened photo. It gets the keys (Esc closes it), not the tip.
+/// being typed in a row, an opened photo, search. It gets the keys (Esc closes it), not the tip.
 fn in_front(s: &State, place: Section) -> bool {
+    // Search takes Esc for itself ("Esc: ends search") on every place it shows.
+    if crate::frames::search::is_open(s) {
+        return true;
+    }
     match place {
-        // The New file dialog (DW-1521) is the Files window's too, drawn by `viewers::new_file`.
+        // The Files window's own list of what lies over it, and the New file dialog (DW-1521), which is the
+        // Files window's too and drawn by `viewers::new_file`: open, or asked for and opened by the next poll (a
+        // key that arrives in between is not the tip's).
         Section::Files => {
-            s.actions.menu.is_some()
-                || s.actions.dialog.is_some()
-                || s.actions.rename.is_some()
+            crate::frames::files::has_in_front(s)
                 || s.viewer.new_file.is_some()
+                || s.actions
+                    .intents
+                    .contains(&crate::frames::files::Intent::Frame("DW-1521"))
         }
         Section::Shared => s.frames.shared.menu.is_some() || s.frames.shared.dialog.is_some(),
         Section::Photos => s.photos.menu.is_some() || s.photos.dialog.is_some() || s.photos.viewer.is_some(),
@@ -180,7 +200,9 @@ pub fn showing(s: &State) -> Option<Step> {
     let app = &s.shell.app;
     let on_place =
         matches!(app.screen(), Screen::Drive(route) if route.section == step.place() && route.item.is_none());
-    (on_place && app.dialog().is_none() && s.tray.is_none() && !in_front(s, step.place())).then_some(step)
+    // A session the server ended draws its own state over the window (DW-1109): no tip over that, and no step.
+    (on_place && !s.session_ended() && app.dialog().is_none() && s.tray.is_none() && !in_front(s, step.place()))
+        .then_some(step)
 }
 
 /// The keys of a tip that shows: Esc is Skip, Tab moves between the card's buttons (it stays in
@@ -216,9 +238,10 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 /// Runs every frame (`shell::host::poll`). The guide ends when the account signs out, locks or
-/// changes; it starts when the first run ends ("Open my Beebeeb": "then the guide (DW-0380)")
-/// unless this PC has shown it; and focus goes to the card's button after a step changed.
-/// `true`: something changed.
+/// changes (nothing is kept then); when the first run ends ("Open my Beebeeb": "then the guide
+/// (DW-0380)") it asks whether the signed-in account has done the guide, and starts it on a definite
+/// "not done" for that account; and focus goes to the card's button after a step changed, and when a
+/// tip comes back from behind what was in front of it. `true`: something changed.
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let mut changed = false;
     if s.guide.step.is_some() {
@@ -229,20 +252,31 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
             changed = true;
         }
     }
+    let account = s.shell.app.account().map(str::to_string);
     // The first run's own flag, not its `Intent::OpenDrive`: that intent stays for the shell.
-    if s.setup.as_mut().is_some_and(super::Ui::guide_due) {
+    if s.setup.as_mut().is_some_and(super::Ui::just_finished) {
+        s.guide_marks.ask(account.as_deref());
+    }
+    // Also the source's poll. Only "not done", said of the account that is signed in now, starts the guide.
+    if s.guide_marks.answer(account.as_deref()) == Some(guide_marks::Known::NotDone)
+        && account.is_some()
+        && s.guide.step.is_none()
+    {
         s.guide = Guide {
             step: Some(Step::Tray),
             row: None,
-            account: s.shell.app.account().map(str::to_string),
+            account,
             focus: true,
+            shown: false,
         };
         changed = true;
     }
-    if s.guide.focus && showing(s).is_some() {
+    let shows = showing(s).is_some();
+    if shows && (s.guide.focus || !s.guide.shown) {
         s.guide.focus = false;
         tx.focus(NEXT_KEY, tx.focus_visible());
     }
+    s.guide.shown = shows;
     changed
 }
 

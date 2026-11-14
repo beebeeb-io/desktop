@@ -91,18 +91,30 @@ A coach card over the main window with a ring around the real control each tip e
 control's key: the ring follows it). State: `State::guide`. It starts when the first run ends ("Open my Beebeeb",
 `guide::poll`) and from Settings › General › "Show the guide again" (`settings::go("DW-0380")`). Got it, Next and Done
 step; Skip and Esc end it; the window under a tip takes every press, and whatever the section has in front (a menu,
-a dialog, the New file dialog, an opened photo) hides the tip and gets Esc first. The keyboard is the card's while a tip shows (focus on
-its button, Tab stays in the card, Enter presses). It ends when the account locks, signs out or changes. "Once per
-PC" is `SetupSource::guide_shown` / `mark_guide_shown` (not wired: the guide follows each first run). Tests:
-`setup/guide_tests.rs`. Not built: the second way back the board names ("and Help"); the card's 22 pt button is
+a dialog, the New file dialog (open, or asked for and opened by the next poll), Uploads, a drop hovering, the
+protected-folder message, search, an opened photo) hides the tip and gets Esc first: for Files that list is the Files
+window's own (`files::has_in_front`, the list its layers are built from). The keyboard is the card's while a tip shows
+(focus on its button, Tab stays in the card, Enter presses), also when a tip comes back from behind what was in front
+of it. No tip is drawn over a session the server ended. It ends when the account locks, signs out or changes, and
+nothing is kept then.
+
+**Deviation from the board (owner ruling, 2026-11-13).** The board says "Shown once per PC". The guide is done once
+per ACCOUNT on each PC: an account that finished it (Done) or skipped it (Skip, Esc) does not get it again on this
+PC, also after a sign-out and a sign-in; another account on the same PC gets it once. The mark is set when the guide
+is finished or skipped, not when it starts (a guide a lock ended was not done). It is kept by the engine in the
+account's own local state, keyed by the account's id, and read only for the signed-in account
+(`setup/guide_marks.rs`, `engine_host/guide.rs`; the engine's `app/guide_mark.rs`). Only a definite "not done" starts
+the guide; "not known" starts nothing. In a build on the real engine the first run is not bound yet, so today nothing
+starts the guide by itself there: Settings › General › "Show the guide again" does. Tests: `setup/guide_tests.rs`,
+`engine_host/guide_tests.rs`. Not built: the second way back the board names ("and Help"); the card's 22 pt button is
 drawn here, not by the kit (a design-system need).
 
 | Frame | What | State |
 | --- | --- | --- |
-| DW-0380 | Where the b is: "Beebeeb lives in the notification area", Got it | built in the main window (its lower right corner, clear of the details panel's buttons). Red on every dimension but text, icons and fills (225 of 225 geometry keys): the board composes a desktop with the window at 0.72 scale at (18, 18), the taskbar and the card by the tray; the app draws its window at full size. Follow-up task 2479 (the card in a window of its own by the notification area) |
+| DW-0380 | Where the b is: "Beebeeb lives in the notification area", Got it | built in the main window (its lower right corner, clear of the details panel's buttons). Red on every dimension but text, icons and fills (225 of 225 geometry keys): the board composes a desktop with the window at 0.72 scale at (18, 18), the taskbar and the card by the tray; the app draws its window at full size. Its arrow points at nothing in the window until then: the card stands in the window's corner and the b is on the taskbar. Follow-up task 2479 (the card in a window of its own by the notification area) |
 | DW-0301 | Tip 1: New | built; geometry, text, icons, fills, frame tiles 0; 3 pixel keys open: `coach-ring` (New's top edge at 40.75 pt: the board paints it from device row 81, Rune from 82, a 1 px step inside the ring), `coach-dot-0`, `coach-dots` |
 | DW-0302 | Tip 2: a file's row (left out when the folder shows no file) | built; 1 pixel key open (`coach-dot-1`) |
-| DW-0303 | Tip 3: Shared, on the Shared view | built; 2 pixel keys open: `coach-dot-2`, and `card-0-tile` (under the card: the card stands 0.54 low with the sidebar's rows; in dark also the tip's words, which Rune draws heavier light-on-dark than the board: 4,208 against 3,731 bright pixels in the crop's text rows) |
+| DW-0303 | Tip 3: Shared, on the Shared view | built; 2 pixel keys open: `coach-dot-2`, and `card-0-tile` (under the card: the card stands 0.54 low, measured; 0.5 of that is the sidebar's rows, see below, and the other 0.04 has no cause found yet; in dark also the tip's words, which Rune draws heavier light-on-dark than the board: 4,208 against 3,731 bright pixels in the crop's text rows) |
 | DW-0304 | Tip 4: Photos, on the Photos view | built; 1 pixel key open (`coach-dot-3`) |
 | DW-0305 | Tip 5: the gear | built; 2 pixel keys open (`coach-dot-4`, `coach-dots`) |
 
@@ -112,7 +124,7 @@ Measured on the Linux build VM, light and dark the same keys (2026-11-13). The o
 sidebar's rows stand 0.5 pt low in every Files-window frame (`drive-label` is 12 high, the board's 11.5: `ui/sidebar.rs`),
 and the ring and card of tips 3 and 4 follow them. Measured: with `drive-label` at 11.5 (an experiment in the VM's
 checkout, not committed) DW-0303 light has 1 pixel key open (`card-0-tile` passes), dark still 2 (the words above).
-`coach-ring` in DW-0301 is New's fill inside the ring (`viewers/chrome.rs` draws New; Rune rounds its 40.75 pt top
+`coach-ring` in DW-0301 is New's fill inside the ring (the Files window's New is `ui/toolbar.rs`, key `new-btn`; `viewers/chrome.rs` has the open-file window's own copy, which is not on screen here; Rune rounds its 40.75 pt top
 edge to the next device row); the ring itself matches the board row for row. The words of DW-0380 are the board drawing's (`guide::TRAY_TEXT`); the
 frame's note in `frames.json` has other words (decision 2478).
 
