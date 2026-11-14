@@ -184,6 +184,30 @@ fn a_read_refused_once_because_the_session_changed_under_it_is_read_again_and_no
     assert_eq!(source.open(NOTE).err(), Some(OpenError::SignedOut));
 }
 
+/// Every read of a copy on this PC and every download, for every kind the viewer shows, is asked to hold at most
+/// 64 MiB: the engine's limit is this figure, whatever the file.
+#[test]
+fn every_read_and_every_download_is_asked_to_hold_at_most_64_mib() {
+    assert_eq!(IN_MEMORY_MAX, 64 * 1024 * 1024);
+    let fake = Fake::new();
+    fake.put("f-l-png", "Invented limit.png", &png_bytes(4, 4));
+    fake.put("f-l-pdf", "Invented limit.pdf", &sample_pdf(1, 300, 300));
+    fake.put("f-l-md", "Invented limit.md", b"# invented");
+    for id in [NOTE, "f-l-png", "f-l-pdf", "f-l-md"] {
+        let _ = opened(&fake, id);
+    }
+    // A kept file: the read of its copy. And one whose copy turns out not to be here: the read, then the download.
+    fake.put("f-l-here", "Invented here.txt", b"invented");
+    fake.keep("f-l-here", OnThisPc::InSync, Some(LOCAL_WORDS.as_bytes()));
+    let _ = opened(&fake, "f-l-here");
+    fake.keep(NOTE, OnThisPc::InSync, None);
+    let _ = opened(&fake, NOTE);
+    let limits = fake.s().limits.clone();
+    // 4 downloads, 1 read of a copy, and 1 read that found no copy with the download after it.
+    assert_eq!(limits.len(), 4 + 1 + 2, "{limits:?}");
+    assert!(limits.iter().all(|limit| *limit == 64 * 1024 * 1024), "{limits:?}");
+}
+
 // ── An answer that comes late ───────────────────────────────────────────────────────────────────────
 
 /// Every way a file's content is fetched, held at the fake's door: a text, a picture and a PDF by download, a

@@ -62,6 +62,8 @@ struct Inner {
     syncing: bool,
     /// Reads of the copy on this PC that were asked for.
     local_calls: Vec<String>,
+    /// The most bytes each read of a copy and each download was asked to hold.
+    limits: Vec<u64>,
     /// What the next reads of the copy on this PC answer instead of content.
     local_error: Option<OpenFileError>,
     /// What the next reads of the facts answer instead of facts, and how many of them (`usize::MAX`: all).
@@ -101,6 +103,7 @@ impl Fake {
                 returned: 0,
                 syncing: true,
                 local_calls: Vec::new(),
+                limits: Vec::new(),
                 local_error: None,
                 facts_error: None,
                 session_ends_at_facts: false,
@@ -188,6 +191,7 @@ impl ViewerEngine for Fake {
     fn local(&self, file_id: &str, max_bytes: u64, cancel: &AtomicBool) -> Result<LocalCopy, OpenFileError> {
         let mut s = self.s();
         s.local_calls.push(file_id.to_string());
+        s.limits.push(max_bytes);
         if let Some(error) = s.local_error {
             return Err(error);
         }
@@ -233,6 +237,7 @@ impl ViewerEngine for Fake {
         let (bytes, began) = {
             let mut s = self.s();
             s.fetches.push(file_id.to_string());
+            s.limits.push(max_bytes);
             assert!(!s.panics, "an invented panic in the download");
             (s.files.get(file_id).map(|stored| stored.bytes.clone()), s.turn)
         };
