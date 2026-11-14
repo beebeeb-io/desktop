@@ -246,14 +246,14 @@ impl<C: CredentialStores> Engine<C> {
 
     /// The token and the vault key of `session`, while it is the session in memory.
     fn invite_session(&self, session: SessionGeneration) -> Option<(Zeroizing<String>, Zeroizing<[u8; 32]>)> {
-        let (token, key) = {
-            let guard = self.acct.session.lock().ok()?;
-            let current = guard.as_ref()?;
-            (
-                Zeroizing::new(current.token.clone()),
-                Zeroizing::new(current.master_key),
-            )
-        };
+        let (token, key) = self
+            .person_session(|current, _| {
+                (
+                    Zeroizing::new(current.token.clone()),
+                    Zeroizing::new(current.master_key),
+                )
+            })
+            .ok()?;
         self.session_is_still(session, &key).then_some((token, key))
     }
 

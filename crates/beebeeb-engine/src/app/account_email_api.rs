@@ -33,10 +33,9 @@ impl<C: CredentialStores> Engine<C> {
         password: &str,
     ) -> Result<String, AccountFlowFailure> {
         let password = Zeroizing::new(password.to_string());
-        let key = {
-            let guard = self.acct.session.lock().map_err(|_| AccountFlowFailure::NotSignedIn)?;
-            Zeroizing::new(guard.as_ref().ok_or(AccountFlowFailure::NotSignedIn)?.master_key)
-        };
+        let key = self
+            .person_session(|current, _| Zeroizing::new(current.master_key))
+            .map_err(|_| AccountFlowFailure::NotSignedIn)?;
         self.account_flow(session, |transport| {
             let binding = AccountBinding::from_master_key(&MasterKey::from_bytes(*key));
             match drive(

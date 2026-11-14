@@ -219,16 +219,16 @@ impl<C: CredentialStores> Engine<C> {
 
     /// The token and the key of the session in memory, when it is the one `session` names.
     fn held_session(&self, session: SessionGeneration) -> Result<Held, PasswordChangeError> {
-        let held = {
-            let guard = self.acct.session.lock().map_err(|_| PasswordChangeError::NotSignedIn)?;
-            match guard.as_ref() {
-                Some(current) if self.acct.session_generation() == session => Some(Held {
-                    token: Zeroizing::new(current.token.clone()),
-                    master_key: Zeroizing::new(current.master_key),
-                }),
-                Some(_) => return Err(PasswordChangeError::NotSignedIn),
-                None => None,
-            }
+        let held = match self.person_session(|current, generation| {
+            (generation == session).then(|| Held {
+                token: Zeroizing::new(current.token.clone()),
+                master_key: Zeroizing::new(current.master_key),
+            })
+        }) {
+            Ok(Some(held)) => Some(held),
+            Ok(None) => return Err(PasswordChangeError::NotSignedIn),
+            Err(super::lock_api::PersonRefused::ScreenLocked) => return Err(PasswordChangeError::Locked),
+            Err(super::lock_api::PersonRefused::NoSession) => None,
         };
         match held {
             Some(held) if self.acct.auth_health.is_expired() => {

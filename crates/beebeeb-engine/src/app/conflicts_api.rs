@@ -13,8 +13,8 @@
 //!   file, whose edit was never sent and is in no history: its bytes are copied first to where nothing syncs, the
 //!   engine's own app data, per account and one copy per file ([`REPLACED_FOLDER`], review of desktop#423, P2 #8),
 //!   and when that copy cannot be made nothing is replaced. When Keep there works the copy stays there (a later Keep
-//!   there of the same file replaces it); when it fails the copy goes, but only when this PC's file is still
-//!   byte for byte what was copied; otherwise it stays there too.
+//!   there of the same file replaces it); when it fails the copy stays there too (data safety over disk: a failure
+//!   may have replaced the file first).
 //! - A session that moved on is [`ConflictsRefused::NotSignedIn`] / [`ResolveRefused::NotSignedIn`], with nothing
 //!   sent and nothing handed over.
 //!
@@ -178,10 +178,8 @@ pub fn replaced_folder_of(account_folder: &Path, file_id: &str) -> PathBuf {
 struct SafetyCopy {
     /// The copy as made, not yet the file's kept copy.
     incoming: PathBuf,
-    /// Where it is kept once Keep there worked (or when it is the only copy left).
+    /// Where it is kept once Keep there ran (it worked or failed: the copy stays either way).
     kept: PathBuf,
-    /// What was copied (SHA-256 of the bytes), to tell whether this PC's file is still that.
-    digest: [u8; 32],
 }
 
 fn sha256_of(file: &Path) -> std::io::Result<[u8; 32]> {
@@ -224,7 +222,6 @@ impl SafetyCopy {
                     Self {
                         incoming: incoming.clone(),
                         kept: folder.join(&name),
-                        digest: [0; 32],
                     }
                     .keep()?;
                 }
@@ -235,7 +232,6 @@ impl SafetyCopy {
             .write(true)
             .create_new(true)
             .open(&incoming)?;
-        let mut hasher = sha2::Sha256::new();
         let copied = (|| -> std::io::Result<()> {
             let mut buffer = vec![0u8; 256 * 1024];
             loop {
@@ -243,7 +239,6 @@ impl SafetyCopy {
                 if read == 0 {
                     break;
                 }
-                hasher.update(&buffer[..read]);
                 out.write_all(&buffer[..read])?;
             }
             out.sync_all()
@@ -256,7 +251,6 @@ impl SafetyCopy {
         Ok(Self {
             incoming,
             kept: folder.join(name),
-            digest: hasher.finalize().into(),
         })
     }
 
@@ -272,24 +266,6 @@ impl SafetyCopy {
         }
         std::fs::rename(&self.incoming, &self.kept)?;
         Ok(self.kept)
-    }
-
-    /// Keep there failed: the copy goes only when this PC's `file` is still byte for byte what was copied. When it
-    /// is not (it was replaced before the failure, or cannot be read), the copy is kept as [`Self::keep`] keeps it.
-    /// Whether the copy went.
-    fn discard_if_unchanged(self, file: &Path) -> bool {
-        if sha256_of(file).is_ok_and(|now| now == self.digest) {
-            let _ = std::fs::remove_file(&self.incoming);
-            if let Some(folder) = self.incoming.parent() {
-                // Empty only: an earlier kept copy of the file stays.
-                let _ = std::fs::remove_dir(folder);
-            }
-            return true;
-        }
-        if self.keep().is_err() {
-            tracing::warn!("keep there failed and this PC's version could not be put at its kept place");
-        }
-        false
     }
 }
 
@@ -410,15 +386,12 @@ impl<C: CredentialStores> Engine<C> {
             })
             // The session moved while the call ran.
             .map_err(local::<ResolveRefused>);
-        let worked = matches!(done, Ok(Ok(())));
-        if let Some((copy, path)) = safety {
-            if worked {
-                if copy.keep().is_err() {
-                    tracing::warn!("keep there worked; this PC's version stays in the incoming copy");
-                }
-            } else {
-                copy.discard_if_unchanged(&path);
-            }
+        // Data safety over disk (lead, 2026-11-14 21:20): the copy is kept whether Keep there worked or not. A failure
+        // may have replaced this PC's file before it failed, and the copy is then all that is left of the edit.
+        if let Some((copy, _)) = safety
+            && copy.keep().is_err()
+        {
+            tracing::warn!("keep there ran; this PC's version stays in the incoming copy");
         }
         match done? {
             Ok(()) => {

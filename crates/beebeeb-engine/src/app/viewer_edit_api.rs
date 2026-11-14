@@ -296,15 +296,12 @@ impl<C: CredentialStores> Engine<C> {
 
     /// The token and the key of the session `session` is, copied while it still is.
     fn edit_credentials(&self, session: SessionGeneration) -> Result<(String, Zeroizing<[u8; 32]>), EditRefused> {
-        if !self.acct.session_unchanged_since(session) {
-            return Err(EditRefused::NotSignedIn);
-        }
-        let guard = self.acct.session.lock().map_err(|_| EditRefused::NotSignedIn)?;
-        let current = guard.as_ref().ok_or(EditRefused::NotSignedIn)?;
-        if !self.acct.session_unchanged_since(session) {
-            return Err(EditRefused::NotSignedIn);
-        }
-        Ok((current.token.clone(), Zeroizing::new(current.master_key)))
+        self.person_session(|current, generation| {
+            (generation == session).then(|| (current.token.clone(), Zeroizing::new(current.master_key)))
+        })
+        .ok()
+        .flatten()
+        .ok_or(EditRefused::NotSignedIn)
     }
 }
 

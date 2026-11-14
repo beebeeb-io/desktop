@@ -210,11 +210,9 @@ impl<C: CredentialStores> Engine<C> {
 
     /// The token and the generation of the session in memory, taken under one lock. The copy wipes itself.
     pub(super) fn own_session(&self) -> Result<(Zeroizing<String>, SessionGeneration), ActionError> {
-        let pair = {
-            let guard = self.acct.session.lock().map_err(|_| ActionError::NotSignedIn)?;
-            let current = guard.as_ref().ok_or(ActionError::NotSignedIn)?;
-            (Zeroizing::new(current.token.clone()), self.acct.session_generation())
-        };
+        let pair = self
+            .person_session(|current, generation| (Zeroizing::new(current.token.clone()), generation))
+            .map_err(|_| ActionError::NotSignedIn)?;
         if self.acct.auth_health.is_expired() {
             return Err(ActionError::SessionEnded);
         }
