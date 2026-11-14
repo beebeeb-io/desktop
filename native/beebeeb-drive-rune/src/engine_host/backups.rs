@@ -171,6 +171,8 @@ pub struct EngineBackupsSource<E: BackupsEngine> {
     switching: BTreeMap<String, (bool, u32)>,
     /// What `pass_running` said at the last `pump`: a pass that just ended is read again (its time changed).
     was_running: bool,
+    /// A "Back up now" was sent and its read has not come back: no second one is sent.
+    run_out: bool,
 }
 
 impl<E: BackupsEngine> EngineBackupsSource<E> {
@@ -191,6 +193,7 @@ impl<E: BackupsEngine> EngineBackupsSource<E> {
             reading: false,
             switching: BTreeMap::new(),
             was_running: false,
+            run_out: false,
         }
     }
 
@@ -388,6 +391,7 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
             self.read_at = None;
             self.reading = false;
             self.switching.clear();
+            self.run_out = false;
             self.generation += 1;
             pumped.changed = true;
             self.ask_read();
@@ -414,6 +418,7 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
                         continue;
                     }
                     self.reading = false;
+                    self.run_out = false;
                     pumped.changed = true;
                     // The switch this read follows is read back: what it asked for is now what the engine has.
                     if let Some(key) = switched {
@@ -589,8 +594,8 @@ impl<E: BackupsEngine> BackupsSource for EngineBackupsSource<E> {
     /// asked while nothing is on, or while a pass or an ask is already out.
     fn back_up_now(&mut self) {
         let any_on = self.rows().any(|row| self.effective_on(row));
-        if any_on && !self.engine.pass_running() && !self.engine.pass_requested() {
-            self.send(Ask::RunNow);
+        if any_on && !self.run_out && !self.engine.pass_running() && !self.engine.pass_requested() {
+            self.run_out = self.send(Ask::RunNow);
         }
     }
 

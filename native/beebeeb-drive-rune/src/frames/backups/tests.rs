@@ -158,7 +158,7 @@ fn the_six_built_frames_show_the_boards_words() {
     let rt = runtime("DW-0742");
     assert_eq!(text(&rt, "dlg-title"), "Delete this backup?");
     assert!(text(&rt, "dlg-text-0").starts_with("4,120 photos and 38 GB will be moved to Trash."));
-    assert_eq!(rt.state.backups.code_len(), 2);
+    assert_eq!(rt.state.backups.code_len(), 13);
 
     let rt = runtime("DW-0741");
     assert_eq!(text(&rt, "set-title"), "Couldn't back up");
@@ -319,7 +319,7 @@ fn deleting_a_devices_backup_needs_the_account_password_the_engine_accepts() {
     click(&mut refused, "item-2-0");
     click(&mut refused, super::view::PASSWORD_KEY);
     type_text(&mut refused, "wrong password");
-    press(&mut refused, Key::Enter);
+    click(&mut refused, "btn-0");
     assert_eq!(source(&refused).devices().len(), 3);
     assert_eq!(refused.state.backups.code_len(), 0);
     assert!(refused.state.backups.dialog.is_some());

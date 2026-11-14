@@ -165,6 +165,10 @@ pub trait SetupEngine: Send + Sync + 'static {
     fn switch_backup_on(&self, _key: &str) -> bool {
         false
     }
+    /// Whether this engine reads step 3's folders at all (the real one does; a fake that does not asks nothing).
+    fn reads_backup_choices(&self) -> bool {
+        false
+    }
 }
 
 /// One folder step 3 offers: the engine's key, its name, whether it starts on, and a bounded count of its files.
@@ -239,6 +243,9 @@ impl<C: CredentialStores> SetupEngine for Engine<C> {
     }
     fn switch_backup_on(&self, key: &str) -> bool {
         self.set_backup_folder(key, true).is_ok()
+    }
+    fn reads_backup_choices(&self) -> bool {
+        true
     }
 }
 
@@ -367,7 +374,7 @@ impl<E: SetupEngine> EngineSetupSource<E> {
 
     /// Step 3's folders, read on a worker (a disk walk); the window gets them with `fresh_folders`.
     fn read_backups(&mut self) {
-        if !super::backups::TURNED_ON {
+        if !super::backups::TURNED_ON || !self.engine.reads_backup_choices() {
             return;
         }
         self.ask(

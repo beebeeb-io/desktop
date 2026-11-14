@@ -640,9 +640,9 @@ fn this_pc_shows_0_fixture_changes_on_a_live_engine() {
 }
 
 #[test]
-fn backups_has_no_source_on_a_live_engine() {
+fn backups_has_the_engines_source_on_a_live_engine() {
     let s = engine_state();
-    assert!(!s.backups.has_source());
+    assert!(s.backups.has_source());
 }
 
 #[test]
