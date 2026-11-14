@@ -230,6 +230,11 @@ pub trait DriveSettings {
     /// Limit a direction to so many megabits per second on this PC, or not at all. It
     /// applies straight away and stays until changed (DW-0785c).
     fn set_speed_limit(&mut self, _direction: Direction, _mbps: Option<u32>) {}
+    /// `true` where something detects a metered network and honours the switch. `false` (the default): "Sync on
+    /// metered connections" is not drawn.
+    fn metered_control(&self) -> bool {
+        false
+    }
     /// Sync on networks Windows marks as metered, or wait on them (DW-0785f).
     fn set_sync_on_metered(&mut self, _on: bool) {}
     /// Start the speed test against Beebeeb's own servers; one test at a time (DW-0786).
@@ -498,6 +503,9 @@ impl BoardDrive {
 }
 
 impl DriveSettings for BoardDrive {
+    fn metered_control(&self) -> bool {
+        true
+    }
     fn storage(&self) -> Storage {
         self.storage.clone()
     }

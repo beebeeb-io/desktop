@@ -946,8 +946,9 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
             return chrome::window(s, cx, ui, head, tools, None, body, &status, &t);
         }
         Body::Audio(doc) => {
-            let (tools, body) = (audio::tools(&t), audio::body(ui, doc, &t));
-            return chrome::window(s, cx, ui, head, tools, None, body, &audio::status(doc), &t);
+            let can_play = ui.can_play();
+            let (tools, body) = (audio::tools(can_play, &t), audio::body(ui, doc, &t));
+            return chrome::window(s, cx, ui, head, tools, None, body, &audio::status(doc, can_play), &t);
         }
         Body::Pdf(doc) => {
             let (tools, bar, body) = (pdf::tools(ui, &t), pdf::find_bar(ui, &t), pdf::body(ui, doc, &t));

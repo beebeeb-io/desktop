@@ -594,6 +594,17 @@ fn poll_capture(s: &mut State, tx: &mut Tx) -> bool {
     leaving
 }
 
+/// The web pages 0.9.0 sends to for what the app does not do itself (recovery replaces the password and
+/// re-wraps the keys; creating an account has no screens in this build).
+const RECOVERY_PAGE: &str = "https://app.beebeeb.io/forgot-password";
+const SIGN_UP_PAGE: &str = "https://app.beebeeb.io/signup";
+
+fn open_web_page(url: &'static str) {
+    if crate::engine_host::signin::open_web_page(url).is_err() {
+        log("a web page did not open");
+    }
+}
+
 /// Takes every intent the sign-in screens queued (`signin::Ui::take_intents`) and acts on it. A finished
 /// sign-in is not routed from here: the session's gate is the one authority on which screen shows, and
 /// [`on_gate_change`] runs when it opens. What the shell cannot do yet is logged, never dropped silently.
@@ -610,9 +621,11 @@ pub fn drain_signin_intents(s: &mut State) -> bool {
             // Sign-up is a set of screens of the same window (DW-A31 to DW-A44), where the source has it.
             SignIn::CreateAccount => {
                 if !s.signin.as_mut().is_some_and(crate::frames::signin::Ui::start_create) {
-                    log("NotWired(sign-in: create an account)");
+                    // No sign-up screens in this build: the web page creates the account.
+                    open_web_page(SIGN_UP_PAGE);
                 }
             }
+            SignIn::OpenRecoveryPage => open_web_page(RECOVERY_PAGE),
             SignIn::OpenTerms | SignIn::OpenPrivacy => log("NotWired(sign-up: open a page in the browser)"),
             SignIn::SavePhraseAsFile | SignIn::PrintPhrase => log("NotWired(sign-up: save or print the phrase)"),
             SignIn::WriteToSupport => log("NotWired(sign-in: write to support)"),

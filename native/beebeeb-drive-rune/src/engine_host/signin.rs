@@ -396,6 +396,13 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
     }
 }
 
+/// Opens one of our own web pages in the browser (a fixed `https://` address, never a typed one), by the same
+/// OS call a file opens with: the address is one argument, never a command line.
+pub fn open_web_page(url: &'static str) -> Result<(), ()> {
+    debug_assert!(url.starts_with("https://"));
+    super::open_path(std::path::Path::new(url)).map_err(|_| ())
+}
+
 #[cfg(test)]
 #[path = "signin_tests.rs"]
 mod tests;

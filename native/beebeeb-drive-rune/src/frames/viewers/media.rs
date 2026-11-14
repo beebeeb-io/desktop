@@ -293,9 +293,17 @@ impl Ui {
 
     // ---- Audio ----
 
+    /// Whether the player draws Play (the source can play); else "Open in another app".
+    pub fn can_play(&self) -> bool {
+        self.source.can_play()
+    }
+
     /// Space and the round button: play or pause.
     pub fn toggle_play(&mut self) {
         let Body::Audio(doc) = &self.file.body else { return };
+        if !self.source.can_play() {
+            return;
+        }
         let on = !doc.playing;
         if self.source.play(&self.file.id, on) {
             if let Body::Audio(doc) = &mut self.file.body {

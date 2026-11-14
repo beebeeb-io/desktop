@@ -252,27 +252,29 @@ fn section(source: &dyn BackupsSource, t: &Theme) -> (Vec<El>, usize) {
             t,
         ));
     }
-    children.push(lists::list(
-        2,
-        Some("Beebeeb services"),
-        vec![
-            lists::item(
-                2,
-                0,
-                &Item::new(Some(&ic::MAIL), "Mail Backup")
-                    .trailing(Trailing::Value(
-                        if source.mail_backup_on() { "On" } else { "Off" }.into(),
-                    ))
-                    .opens(),
-                t,
-            )
-            .on_press(|s: &mut State| s.backups.mail_backup()),
-        ],
-        Some(
-            "Each service is off until you turn it on, and keeps its files in its own protected folder inside Backups.",
-        ),
-        t,
-    ));
+    if source.mail_backup_offered() {
+        children.push(lists::list(
+            2,
+            Some("Beebeeb services"),
+            vec![
+                lists::item(
+                    2,
+                    0,
+                    &Item::new(Some(&ic::MAIL), "Mail Backup")
+                        .trailing(Trailing::Value(
+                            if source.mail_backup_on() { "On" } else { "Off" }.into(),
+                        ))
+                        .opens(),
+                    t,
+                )
+                .on_press(|s: &mut State| s.backups.mail_backup()),
+            ],
+            Some(
+                "Each service is off until you turn it on, and keeps its files in its own protected folder inside Backups.",
+            ),
+            t,
+        ));
+    }
     (children, buttons)
 }
 

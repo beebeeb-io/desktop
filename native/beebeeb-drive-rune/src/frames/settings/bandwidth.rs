@@ -167,7 +167,7 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         list += 1;
     }
     if crop != Crop::Head {
-        children.push(limits(list, &bw, ui.menu, t));
+        children.push(limits(list, &bw, ui.menu, ui.drive.metered_control(), t));
         list += 1;
     }
     if matches!(crop, Crop::Whole | Crop::FromDevices) {
@@ -620,7 +620,7 @@ fn devices(list: usize, devices: &[Device], t: &Theme) -> El {
 }
 
 /// Limits: the two pop-up buttons and the metered switch.
-fn limits(list: usize, bw: &Bandwidth, menu: Option<Menu>, t: &Theme) -> El {
+fn limits(list: usize, bw: &Bandwidth, menu: Option<Menu>, metered_control: bool, t: &Theme) -> El {
     let pop = |index: usize, direction: Direction, limit: Option<u32>| {
         let kind = MenuKind::SpeedLimit(direction);
         let icon = match direction {
@@ -651,10 +651,13 @@ fn limits(list: usize, bw: &Bandwidth, menu: Option<Menu>, t: &Theme) -> El {
             "Off: sync waits on networks Windows marks as metered"
         })
         .ruled();
-    let rows = vec![
+    let mut rows = vec![
         pop(0, Direction::Upload, bw.upload_limit),
         pop(1, Direction::Download, bw.download_limit),
-        lists::item_with(
+    ];
+    // No switch where nothing detects a metered network: it would store a choice nothing honours.
+    if metered_control {
+        rows.push(lists::item_with(
             list,
             2,
             &metered,
@@ -663,8 +666,8 @@ fn limits(list: usize, bw: &Bandwidth, menu: Option<Menu>, t: &Theme) -> El {
                     .on_press(move |s: &mut State| s.settings.drive.set_sync_on_metered(!on)),
             ],
             t,
-        ),
-    ];
+        ));
+    }
     lists::list(
         list,
         Some("Limits"),

@@ -2,7 +2,7 @@
 //! words (DW-A23, DW-A24) and the vault password after a passkey (DW-A30). Every string is the
 //! board's; a state the board gives a rule and no words for uses words the board has elsewhere.
 
-use rune::{El, Key, Tx, col, edit_access, el, row, text};
+use rune::{El, Key, Tx, col, edit_access, el, row};
 
 use super::source::{PhraseProblem, SignInProblem, TwoFactorProblem};
 use super::steps::{BACKUP_DIGITS, BACKUP_KEY, CODE_DIGITS, CODE_KEY, Pictured, WORD_KEYS};
@@ -204,31 +204,17 @@ pub fn two_factor(ui: &Ui, backup: bool, k: &mut Keys, t: &Theme) -> El {
 // DW-A23, DW-A24
 // ---------------------------------------------------------------------------
 
-/// DW-A23's hint: a sentence that ends in a link, on the board's two lines.
+/// DW-A23's hint. The board's sentence ends in a link to approving from another device; that door is not
+/// drawn in 0.9.0 (the approval is the web's), so the sentence ends after the boxes.
 fn paste_hint(k: &mut Keys, t: &Theme) -> El {
-    const LINE_1: &str = "Your password is right. Enter your 12 words (paste all 12 into any";
-    const LINE_2: &str = "box), or ";
-    const LINK: &str = "approve from another device";
-    let note = k.next("note");
-    let note_box = format!("{note}-box");
-    kit::note_text(
-        &note,
-        &note_box,
-        &format!("{LINE_1} {LINE_2}{LINK}."),
+    kit::label(
+        k.next("note"),
+        "Your password is right. Enter your 12 words (paste all 12 into any box).",
         type_::CAPTION,
         t.text_tertiary,
-    );
-    let words = |s: &str| text(s).font(type_::CAPTION).color(t.text_tertiary);
-    // 11px Inter on a 14px line: the baseline is 11 down, the underline 2 below it.
-    let link_el = au_entry::link_in(k, LINK, type_::CAPTION, 13.0, 0.8, t)
-        // The other device hands the keys over: it replaces this step (DW-A23's rule).
-        .on_press_tx(act(Ui::ask_other_device));
-    col().key(note_box).w_full().child(words(LINE_1)).child(
-        row()
-            .child(words(LINE_2).w(rune::text::advance(LINE_2, type_::CAPTION)))
-            .child(link_el)
-            .child(words(".")),
     )
+    .wrap()
+    .w_full()
 }
 
 /// The banner over the boxes when the words did not restore the keys. The board draws the

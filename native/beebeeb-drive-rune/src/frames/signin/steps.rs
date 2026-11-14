@@ -304,9 +304,22 @@ impl Ui {
         self.unlock_problem
     }
 
+    /// Whether the "Use a passkey" door is drawn: only where the source can sign in with one.
+    pub fn passkey_available(&self) -> bool {
+        self.source.passkey_available()
+    }
+
+    /// "Open the recovery page" on "Trouble signing in?": recovery replaces the password and
+    /// re-wraps the keys, so the web does it (the shell opens the page).
+    pub fn open_recovery_page(&mut self) {
+        if self.screen == Screen::Forgot {
+            self.go(Intent::OpenRecoveryPage);
+        }
+    }
+
     /// "Use a passkey": Windows asks; the app never sees the passkey.
     pub fn use_passkey(&mut self) {
-        if self.busy || self.passkey_waiting || self.screen != Screen::SignIn {
+        if self.busy || self.passkey_waiting || self.screen != Screen::SignIn || !self.passkey_available() {
             return;
         }
         self.passkey_waiting = true;
