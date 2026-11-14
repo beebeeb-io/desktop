@@ -43,8 +43,12 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
         (Step::Explorer, _) => match &ui.explorer {
             Explorer::Added => explorer_added(&mut k, &t),
             Explorer::Adding => explorer_adding(&mut k, &t),
-            Explorer::Failed { code } => explorer_failed(WINDOWS_REFUSED, code, ui.can_choose_again(), &mut k, &t),
-            Explorer::NotSyncing => explorer_failed(SYNC_DID_NOT_START, "", ui.can_choose_again(), &mut k, &t),
+            Explorer::Failed { code } => {
+                explorer_failed(WINDOWS_REFUSED, WINDOW_WORKS, code, ui.can_choose_again(), &mut k, &t)
+            }
+            Explorer::NotSyncing => {
+                explorer_failed(SYNC_DID_NOT_START, NOTHING_SYNCS, "", ui.can_choose_again(), &mut k, &t)
+            }
         },
         (Step::Notifications, _) => notifications(&mut k, &t),
         (Step::Login, _) => login(ui, &mut k, &t),
@@ -583,9 +587,14 @@ const WINDOWS_REFUSED: &str = "Windows didn't finish adding Beebeeb to File Expl
 /// The banner's title when sync did not start, so Windows was never asked (`Explorer::NotSyncing`).
 const SYNC_DID_NOT_START: &str = "Sync didn't start on this PC, so Beebeeb isn't in File Explorer yet";
 
+/// DW-0280's sentence under the heading: true when only the File Explorer entry failed.
+const WINDOW_WORKS: &str = "Your files are safe, and the Beebeeb window works without File Explorer.";
+/// The sentence when sync itself did not start (the contract's ruling Q3: the board's sentence is not true then).
+const NOTHING_SYNCS: &str = "Your files are safe in Beebeeb. Nothing syncs with this PC until sync starts.";
+
 /// `code`: Windows' code for support; empty when there is none (the sentence then stands alone). `another`: no
 /// folder was kept yet, so another one can be chosen (the folder may be what was refused).
-fn explorer_failed(title: &str, code: &str, another: bool, k: &mut Keys, t: &Theme) -> El {
+fn explorer_failed(title: &str, sub: &str, code: &str, another: bool, k: &mut Keys, t: &Theme) -> El {
     let (mark, _, wash) = au::tone(Tone::Red, t);
     let key = k.next("banner");
     let lead = "Try again in a moment.";
@@ -658,7 +667,7 @@ fn explorer_failed(title: &str, code: &str, another: bool, k: &mut Keys, t: &The
     setup::column()
         .child(au::heading(
             "Couldn't add Beebeeb to File Explorer",
-            Some("Your files are safe, and the Beebeeb window works without File Explorer."),
+            Some(sub),
             false,
             t,
         ))

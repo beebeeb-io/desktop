@@ -224,6 +224,15 @@ fn another_folder_can_be_chosen_after_a_refused_start_only_when_none_was_kept() 
         ui_.step = Step::Explorer;
         let mut rt = runtime_at(ui_, 2.0, false);
         assert!(says(&rt, words));
+        // Only a File Explorer entry that failed leaves a window that works: sync that did not start does not.
+        assert_eq!(
+            says(&rt, "the Beebeeb window works without File Explorer"),
+            explorer != Explorer::NotSyncing
+        );
+        assert_eq!(
+            says(&rt, "Nothing syncs with this PC"),
+            explorer == Explorer::NotSyncing
+        );
         assert!(has_button(&rt, "Try again") && has_button(&rt, "Continue without File Explorer"));
         click(&mut rt, "btn-1");
         assert_eq!(log.borrow().clone(), ["choose_folder"], "{explorer:?}");
