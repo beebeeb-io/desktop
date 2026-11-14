@@ -559,7 +559,7 @@ impl<C: CredentialStores> Engine<C> {
         self.store_first_sign_in(turn, token, &email, &profile)?;
         self.failures.store(0, Ordering::SeqCst);
         let turn = self.acct.session_generation();
-        let kept = {
+        let kept = (|| -> Result<(), String> {
             let _write = self.claim(turn)?;
             let vault = self.vault();
             vault
@@ -582,8 +582,8 @@ impl<C: CredentialStores> Engine<C> {
             self.acct
                 .auth_resume_asked
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok::<(), String>(())
-        };
+            Ok(())
+        })();
         if kept.is_err() {
             // Signed in without its key is the half-way state sign-in's "twelve words" screen is for; a new account
             // has its phrase confirmed, but the key is lost to this computer, so end the session too.
