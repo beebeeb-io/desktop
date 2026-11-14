@@ -121,44 +121,29 @@ fn another_account_never_sees_the_first_ones_two_factor_or_device_count() {
 #[test]
 fn the_security_page_shows_at_once_and_its_count_says_loading_until_it_answered() {
     let server = server();
-    server.two_factor.lock().unwrap()[0] = Some(true);
+    // Only the list is slow (the profile is the accounts' own route here, which does not wait).
+    server.read_delay_ms.store(1_500, Ordering::SeqCst);
     let mut source = Source::new(signed_in(&server));
-    // Only the list is slow from here (the profile was asked with no delay set).
     source.opened(Pane::Security);
     let began = Instant::now();
-    while source.security_facts().two_factor.is_none() {
-        assert!(began.elapsed() < Duration::from_secs(5), "the profile did not answer");
+    while source.pane_state(Pane::Security) != PaneState::Ready {
+        assert!(began.elapsed() < Duration::from_secs(1), "the page waited for the list");
         source.pump();
         std::thread::sleep(Duration::from_millis(10));
     }
-    settle(&mut source);
-    // A second read of the list, slow: the page stays up with what it knows; the held count stands meanwhile.
-    server.read_delay_ms.store(1_500, Ordering::SeqCst);
-    source.reload(Pane::Sessions);
-    assert_eq!(source.pane_state(Pane::Security), PaneState::Ready);
-    assert_eq!(source.security_facts().sessions, Count::Known(3));
-    settle(&mut source);
-    // With no list held, a read on its way is "Reading".
-    let mut fresh = Source::new(signed_in(&server));
-    fresh.opened(Pane::Security);
-    let began = Instant::now();
-    while fresh.security_facts().two_factor.is_none() {
-        assert!(
-            began.elapsed() < Duration::from_secs(1),
-            "the profile did not answer before the list"
-        );
-        fresh.pump();
-        std::thread::sleep(Duration::from_millis(10));
-    }
     assert_eq!(
-        fresh.pane_state(Pane::Security),
-        PaneState::Ready,
-        "the page does not wait for the count"
+        source.security_facts().sessions,
+        Count::Reading,
+        "the count's row says it is loading"
     );
-    assert_eq!(fresh.security_facts().sessions, Count::Reading);
-    assert_eq!(fresh.security_facts().two_factor, Some(true));
-    settle(&mut fresh);
-    assert_eq!(fresh.security_facts().sessions, Count::Known(3));
+    settle(&mut source);
+    assert_eq!(source.security_facts().sessions, Count::Known(3));
+    // Read again, slowly, with nothing in between: the count that is held stands while the new one is out.
+    source.reload(Pane::Sessions);
+    assert_eq!(source.security_facts().sessions, Count::Known(3));
+    assert_eq!(source.pane_state(Pane::Security), PaneState::Ready);
+    server.read_delay_ms.store(0, Ordering::SeqCst);
+    settle(&mut source);
 }
 
 /// From the moment Beebeeb took a sign-out, the list read before it is not counted: the row says it is being

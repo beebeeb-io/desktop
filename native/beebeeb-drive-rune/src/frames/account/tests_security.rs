@@ -358,13 +358,15 @@ fn a_sign_out_on_its_way_waits_on_the_confirm() {
 /// The answer arrives later: only then does the window leave for the sign-in screen.
 #[test]
 fn a_sign_out_leaves_for_sign_in_only_when_its_answer_came() {
-    let mut rt = sign_out_page(SignOutMode::After(3));
-    let r = info(&rt, "btn-1").rect;
-    rt.pointer_down(r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
-    rt.pointer_up(r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
-    assert_eq!(asked(&rt), Vec::new(), "at the press: nothing yet");
+    let mut rt = sign_out_page(SignOutMode::After(60));
+    click(&mut rt, "btn-1");
+    assert_eq!(asked(&rt), Vec::new(), "after the press: nothing yet");
     assert_eq!(rt.state.account.signing_out.waiting, Some(false));
-    for _ in 0..20 {
+    assert_eq!(says(&rt, "dlg-text-0"), super::security_overview::SIGNING_OUT);
+    for _ in 0..400 {
+        if !asked(&rt).is_empty() {
+            break;
+        }
         rt.frame(0.3);
     }
     assert_eq!(asked(&rt), vec![Intent::Show("DW-A02")]);

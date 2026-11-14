@@ -220,6 +220,9 @@ fn no_route_from_a_live_pane_ends_on_the_not_built_frame() {
     wait_for(&mut rt, "the Security page", |rt| {
         shows(rt, "Security score not known yet")
     });
+    // (Each page has a scroller of its own, so the page that was left leaves the tree over a frame or two.)
+    rt.frame(0.016);
+    rt.frame(0.4);
     assert!(!has(&rt, "not-built"));
     assert!(shows(&rt, "Back to Drive") && shows(&rt, "Devices and sessions"));
     assert!(!says_anywhere(&rt, FIRST) && !says_anywhere(&rt, "deletion"));
