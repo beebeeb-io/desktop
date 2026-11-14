@@ -48,12 +48,25 @@ fn wait_for(rt: &mut Runtime<State>, what: &str, done: impl Fn(&Runtime<State>) 
     }
 }
 
+/// Presses the control that says `words` (its text or its label), the one drawn last (a confirm is over its page).
 fn click_text(rt: &mut Runtime<State>, words: &str) {
     let rect = rt
         .elements()
         .into_iter()
-        .find(|e| !e.exiting && e.text.as_deref() == Some(words))
-        .unwrap_or_else(|| panic!("nothing says {words}"))
+        .filter(|e| {
+            !e.exiting
+                && (e.text.as_deref() == Some(words) || e.label.as_deref().is_some_and(|label| label.contains(words)))
+        })
+        .last()
+        .unwrap_or_else(|| {
+            let drawn: Vec<String> = rt
+                .elements()
+                .iter()
+                .filter(|e| !e.exiting)
+                .filter_map(|e| e.text.clone().or_else(|| e.label.clone()))
+                .collect();
+            panic!("nothing says {words}; drawn: {drawn:?}")
+        })
         .rect;
     let (x, y) = (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0);
     rt.pointer_down(x, y);
