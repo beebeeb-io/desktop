@@ -545,14 +545,14 @@ fn remove_all_shows_its_ask_and_removes_only_on_the_yes() {
     let selected = rt.state.this_pc.selected;
     press(&mut rt, Key::Down);
     assert_eq!(rt.state.this_pc.selected, selected, "the list is under the ask");
-    click(&mut rt, "btn-1");
+    click(&mut rt, "btn-remove-all-cancel");
     assert!(!has(&rt, "dlg"));
     assert_eq!(rt.state.this_pc.kept_count(), 3);
 
     // Yes: everything goes, the ask with it.
     click(&mut rt, "btn-remove-all-from-this-pc");
     poll(&mut rt);
-    click(&mut rt, "btn-0");
+    click(&mut rt, "btn-remove-all-yes");
     assert!(!has(&rt, "dlg"));
     assert_eq!(rt.state.this_pc.kept_count(), 0);
     assert_eq!(text(&rt, "empty-title"), "Nothing available offline");
@@ -600,12 +600,18 @@ impl ThisPcSource for NoLists {
 }
 
 fn with_source(section: super::Section, source: Box<dyn ThisPcSource>) -> Runtime<State> {
+    with_state(section, source, |_| {})
+}
+
+/// A window on `section` with `source`, its state prepared before the first frame (nothing animates in).
+fn with_state(section: super::Section, source: Box<dyn ThisPcSource>, prepare: fn(&mut State)) -> Runtime<State> {
     let mut state = init();
     crate::shell::host::dispatch(
         &mut state,
         crate::shell::app::Event::Navigate(crate::shell::app::Route::section(section)),
     );
     state.this_pc = super::Ui::new(source);
+    prepare(&mut state);
     let env = Env {
         system_dark: false,
         scale: 2.0,
@@ -689,13 +695,11 @@ fn the_sidebar_foot_draws_the_account_and_the_storage_the_window_read() {
     assert_eq!(text(&rt, "storage-files"), "Files 24 GB");
 
     // A window whose source names no account and has read no storage: no sample name, no figure, no breakdown.
-    let mut rt = with_source(super::Section::SyncHistory, Box::new(NoLists(Standing::Ready)));
-    rt.update(|s, _| {
+    let rt = with_state(super::Section::SyncHistory, Box::new(NoLists(Standing::Ready)), |s| {
         s.actions.source = Box::new(crate::frames::files::source::NoEngine);
         s.storage_known = false;
         s.storage_split = None;
     });
-    rt.frame(0.0);
     assert_eq!(text(&rt, "account-name"), "");
     assert!(has(&rt, "account-email-off") && !has(&rt, "account-email") && !has(&rt, "avatar"));
     assert_eq!(text(&rt, "storage-value"), "Unavailable");
@@ -713,8 +717,13 @@ fn the_sidebar_foot_draws_the_account_and_the_storage_the_window_read() {
     }
 
     // Storage read, no split from the source: the total, one segment, no Files/Photos line.
-    rt.update(|s, _| s.storage_known = true);
-    rt.frame(0.0);
+    let rt = with_state(super::Section::SyncHistory, Box::new(NoLists(Standing::Ready)), |s| {
+        s.actions.source = Box::new(crate::frames::files::source::NoEngine);
+        s.storage_known = true;
+        s.storage_split = None;
+        s.storage.used_bytes = 240_000_000_000;
+        s.storage.quota_bytes = 1_000_000_000_000;
+    });
     assert!(text(&rt, "storage-value").contains(" of "));
     assert!(!has(&rt, "storage-breakdown"));
     assert!(info(&rt, "meter-fill-0").rect[2] > 0.0);

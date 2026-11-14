@@ -171,10 +171,14 @@ fn ask_remove_all(count: usize, t: &Theme) -> El {
         Some(&sub),
         Vec::new(),
         vec![
-            button(0, "Remove all", Weight::Primary, t).on_press(|s: &mut State| s.this_pc.remove_all_confirmed()),
-            button(1, "Cancel", Weight::Quiet, t).on_press(|s: &mut State| {
-                s.this_pc.remove_all_cancelled();
-            }),
+            button(0, "Remove all", Weight::Primary, t)
+                .key("btn-remove-all-yes")
+                .on_press(|s: &mut State| s.this_pc.remove_all_confirmed()),
+            button(1, "Cancel", Weight::Quiet, t)
+                .key("btn-remove-all-cancel")
+                .on_press(|s: &mut State| {
+                    s.this_pc.remove_all_cancelled();
+                }),
         ],
         t,
     );
@@ -183,6 +187,10 @@ fn ask_remove_all(count: usize, t: &Theme) -> El {
         .pin(Some(0.0), Some(32.0), Some(0.0), Some(0.0))
         .child(card)
         .on_key(super::on_key)
+        // A press outside the card does nothing; the way out is Cancel or Esc.
+        .modal(false, |s: &mut State| {
+            s.this_pc.remove_all_cancelled();
+        })
 }
 
 /// A row as Files' actions take it (`FilesSource::open`, `show_in_file_explorer`): they find the file by its id.
