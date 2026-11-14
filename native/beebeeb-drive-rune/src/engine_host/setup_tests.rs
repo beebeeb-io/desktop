@@ -359,7 +359,7 @@ fn open_at_login_is_the_platforms_entry_and_the_answer_is_what_the_entry_is() {
     assert_eq!(set.source.take_outcomes()[0].now, Some(false));
 
     // A platform that cannot change the entry: not done, and what is drawn is not the value that was asked for.
-    let mut set = set_on(fake(), FakePlatform::without_notification_area());
+    let mut set = set_on(fake(), FakePlatform::unbuilt());
     set.source.set_open_at_login(true);
     settle(&mut set, 1);
     let outcome = set.source.take_outcomes()[0];
@@ -599,7 +599,7 @@ fn the_first_run_in_the_window_shows_its_real_steps_and_ends_in_the_main_window(
 /// A change that did not happen is said on the last page, and the row never shows the value that was asked for.
 #[test]
 fn a_switch_that_could_not_be_set_is_said_and_not_drawn_as_set() {
-    let set = set_on(fake(), FakePlatform::without_notification_area());
+    let set = set_on(fake(), FakePlatform::unbuilt());
     set.engine.set(Start::Running, EngineExplorer::Added);
     *set.engine.writes.lock().unwrap() = Err(SetupRefused::Settings);
     let (mut rt, _engine, fixture, ..) = window(set);
