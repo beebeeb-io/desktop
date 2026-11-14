@@ -194,7 +194,7 @@ impl<C: CredentialStores> Engine<C> {
         // device. A version past it is.
         let base = base_after_own_landed_save(file_id, session, base, contract.current_version, |queued| {
             state
-                .with_shared(|db| landed_version(db, file_id, queued))
+                .with_shared(|db| landed_version(&db, file_id, queued))
                 .ok()
                 .flatten()
         });
