@@ -10,6 +10,7 @@ mod chrome;
 mod grid;
 mod icons;
 mod overlay;
+mod session;
 pub mod source;
 #[cfg(test)]
 mod tests;
@@ -135,6 +136,12 @@ pub enum Toast {
     Kept,
     /// "Moved to Trash", with Undo (DW-0610).
     Trashed(Vec<PhotoId>),
+    /// Something asked for was not done, and why; Try again is for `again` alone.
+    Left {
+        what: session::What,
+        why: source::Left,
+        again: Vec<PhotoId>,
+    },
 }
 
 /// One row of the grid: a day's heading, if this is its first row, and up to `across` tiles.
@@ -161,6 +168,8 @@ pub struct Ui {
     pub viewer: Option<Viewer>,
     pub toast: Option<Toast>,
     intents: Vec<Intent>,
+    /// What is kept for a source that answers later (`session.rs`).
+    later: session::Later,
     pub(crate) days: Vec<source::Day>,
     pub(crate) lines: Vec<Line>,
     /// The grid's width in points, as last laid out.
@@ -181,6 +190,7 @@ impl Ui {
             viewer: None,
             toast: None,
             intents: Vec::new(),
+            later: session::Later::default(),
             days: Vec::new(),
             lines: Vec::new(),
             // The content area of the 1280 x 800 window; the first layout corrects it.
@@ -584,80 +594,6 @@ impl Ui {
         }
     }
 
-    /// Offline: keeps the original on this PC; pressed again, asks to offer its removal.
-    pub fn press_offline(&mut self) {
-        let Some(id) = self.viewer.as_ref().map(|v| v.id) else {
-            return;
-        };
-        if self.source.kept_offline(id) {
-            self.ask(Intent::OfferRemoveFromPc(id));
-        } else {
-            self.source.keep_offline(id, true);
-            self.toast = Some(Toast::Kept);
-        }
-    }
-
-    /// Trash on an open photo: no question, the next one comes in, Undo is offered.
-    pub fn trash_open(&mut self) {
-        let Some(viewer) = &self.viewer else { return };
-        if viewer.gone.is_some() {
-            return;
-        }
-        let Some(was) = self.source.viewing(viewer.id) else {
-            return;
-        };
-        let at = was.strip.iter().position(|item| item.current).unwrap_or(0);
-        let next = was
-            .strip
-            .get(at + 1)
-            .or_else(|| at.checked_sub(1).and_then(|i| was.strip.get(i)));
-        let (id, next) = (was.id, next.map(|item| item.id));
-        self.source.trash(&[id]);
-        self.selected.remove(&id);
-        self.toast = Some(Toast::Trashed(vec![id]));
-        self.menu = None;
-        match (next, &mut self.viewer) {
-            (Some(next), Some(viewer)) => {
-                viewer.id = next;
-                viewer.original = Original::Preview;
-                viewer.gone = Some(was);
-            }
-            // The last one: back to the grid, where Undo is still offered.
-            _ => {
-                self.viewer = None;
-            }
-        }
-        self.relayout();
-    }
-
-    /// Move to Trash on a selection.
-    pub fn trash_selected(&mut self) {
-        let ids = self.selected_ids();
-        if ids.is_empty() {
-            return;
-        }
-        self.source.trash(&ids);
-        self.end_selecting();
-        self.toast = Some(Toast::Trashed(ids));
-        self.relayout();
-    }
-
-    /// Undo, Ctrl+Z: brings back what the message is about.
-    pub fn undo(&mut self) -> bool {
-        let Some(Toast::Trashed(ids)) = self.toast.clone() else {
-            return false;
-        };
-        self.source.restore(&ids);
-        self.toast = None;
-        if let Some(viewer) = &mut self.viewer
-            && let Some(was) = viewer.gone.take()
-        {
-            viewer.id = was.id;
-        }
-        self.relayout();
-        true
-    }
-
     pub fn play_pause(&mut self) {
         if let Some(viewer) = &mut self.viewer {
             viewer.playing = !viewer.playing;
@@ -666,6 +602,8 @@ impl Ui {
         }
     }
 }
+
+pub use session::poll;
 
 /// The group's state in a new window: the board's library until the engine's source is wired.
 pub fn start() -> Ui {
@@ -709,7 +647,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             &t,
             grid::bar(ui, &t),
             ui.selecting.then(|| grid::bulk(ui, &t)),
-            grid::body(ui, &t),
+            // While there is no library: why, in words; never an empty library that is not one.
+            session::not_here_body(ui, &t).unwrap_or_else(|| grid::body(ui, &t)),
             &ui.source.origin(),
             front,
         ),

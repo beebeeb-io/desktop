@@ -94,8 +94,8 @@ pub struct StripItem {
     pub current: bool,
 }
 
-/// One open photo or video, as the viewer shows it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One open photo or video, as the viewer shows it. Holds a name: its `Debug` prints none of its words.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Viewing {
     pub id: PhotoId,
     pub kind: Kind,
@@ -116,6 +116,15 @@ pub struct Viewing {
     pub played_ms: u32,
 }
 
+impl std::fmt::Debug for Viewing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Viewing")
+            .field("id", &self.id)
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
 /// One line of the Details dialog. `mono`: a figure, drawn in the machine face.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Detail {
@@ -133,11 +142,83 @@ pub enum SourceRef {
     Folder(usize),
 }
 
+/// Why a change was not made, or was not even asked. The window says it in words, never as a code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Left {
+    /// Backups and service folders cannot change.
+    Protected,
+    /// It needs a connection, and there is none.
+    Offline,
+    /// Nothing is connected that could do it: no session, or an item this source does not hold.
+    Unavailable,
+    /// It was tried and did not work.
+    Failed,
+    /// A change of one of these is still on its way: nothing was sent a second time.
+    InFlight,
+}
+
+/// What a source that answers later says a change did, once Beebeeb or this PC answered. Per item: `None`: it was
+/// made; otherwise why this item was left as it was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Answered {
+    Trashed(Vec<(PhotoId, Option<Left>)>),
+    Restored(Vec<(PhotoId, Option<Left>)>),
+    Kept {
+        id: PhotoId,
+        keep: bool,
+        left: Option<Left>,
+    },
+}
+
+/// What the window draws in the library's place while there is none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Loaded {
+    /// The library is here (it may be empty).
+    #[default]
+    Ready,
+    Loading,
+    /// Nobody is signed in, or the vault is locked.
+    SignedOut,
+    SessionEnded,
+    /// Nothing has synced to this PC yet: Photos shows what this PC knows of the account.
+    NothingSynced,
+    /// What this PC holds is another account's.
+    NotThisAccounts,
+    Failed,
+}
+
+/// What [`PhotosSource::pump`] took in.
+#[derive(Debug, Default)]
+pub struct Pumped {
+    /// Something the window draws changed: read the days again.
+    pub changed: bool,
+    /// Something is still on its way: look again soon.
+    pub busy: bool,
+    pub answered: Vec<Answered>,
+}
+
 pub trait PhotosSource {
     /// `false`: nothing answers yet (`Unwired`), and the view draws the shell's "not built yet"
     /// frame instead of a library of sample photos.
     fn wired(&self) -> bool {
         true
+    }
+    /// `true`: a change is only ASKED in the call; what it did arrives through [`Self::pump`], and the window draws
+    /// nothing before that. `false` (a fixture): the change is made in the call.
+    fn answers_later(&self) -> bool {
+        false
+    }
+    /// What stands in the library's place.
+    fn loaded(&self) -> Loaded {
+        Loaded::Ready
+    }
+    /// The Photos section came on screen: read the library if it is missing or old. Never called from a draw.
+    fn opened(&mut self) {}
+    /// The gate or the account changed: nothing of the earlier one is kept.
+    fn forget(&mut self) {}
+    /// Take in what arrived since the last call (the window's poll).
+    fn pump(&mut self) -> Pumped {
+        Pumped::default()
     }
     fn devices(&self) -> Vec<Device>;
     fn folders(&self) -> Vec<Folder>;
@@ -158,10 +239,11 @@ pub trait PhotosSource {
     fn details(&self, id: PhotoId) -> Vec<Detail>;
     /// Whether the original is kept on this PC.
     fn kept_offline(&self, id: PhotoId) -> bool;
-    fn keep_offline(&mut self, id: PhotoId, keep: bool);
-    /// Moves items to Beebeeb's Trash; `restore` brings them back (Undo).
-    fn trash(&mut self, ids: &[PhotoId]);
-    fn restore(&mut self, ids: &[PhotoId]);
+    /// `Ok`: made (a fixture) or accepted ([`Self::answers_later`]). `Err`: nothing was asked.
+    fn keep_offline(&mut self, id: PhotoId, keep: bool) -> Result<(), Left>;
+    /// Moves items to Beebeeb's Trash; `restore` brings them back (Undo). `Ok` and `Err` as [`Self::keep_offline`].
+    fn trash(&mut self, ids: &[PhotoId]) -> Result<(), Left>;
+    fn restore(&mut self, ids: &[PhotoId]) -> Result<(), Left>;
 }
 
 // ---------------------------------------------------------------------------
@@ -513,23 +595,26 @@ impl PhotosSource for FixturePhotos {
         self.kept.contains(&id)
     }
 
-    fn keep_offline(&mut self, id: PhotoId, keep: bool) {
+    fn keep_offline(&mut self, id: PhotoId, keep: bool) -> Result<(), Left> {
         self.kept.retain(|other| *other != id);
         if keep {
             self.kept.push(id);
         }
+        Ok(())
     }
 
-    fn trash(&mut self, ids: &[PhotoId]) {
+    fn trash(&mut self, ids: &[PhotoId]) -> Result<(), Left> {
         for id in ids {
             if !self.trashed.contains(id) {
                 self.trashed.push(*id);
             }
         }
+        Ok(())
     }
 
-    fn restore(&mut self, ids: &[PhotoId]) {
+    fn restore(&mut self, ids: &[PhotoId]) -> Result<(), Left> {
         self.trashed.retain(|id| !ids.contains(id));
+        Ok(())
     }
 }
 
@@ -599,13 +684,20 @@ impl PhotosSource for LargePhotos {
     fn kept_offline(&self, _: PhotoId) -> bool {
         false
     }
-    fn keep_offline(&mut self, _: PhotoId, _: bool) {}
-    fn trash(&mut self, _: &[PhotoId]) {}
-    fn restore(&mut self, _: &[PhotoId]) {}
+    fn keep_offline(&mut self, _: PhotoId, _: bool) -> Result<(), Left> {
+        Ok(())
+    }
+    fn trash(&mut self, _: &[PhotoId]) -> Result<(), Left> {
+        Ok(())
+    }
+    fn restore(&mut self, _: &[PhotoId]) -> Result<(), Left> {
+        Ok(())
+    }
 }
 
 /// The source of a build that ships before the engine lane has wired Photos: it answers
 /// nothing, and the view draws the shell's "not built yet" frame instead of sample photos.
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct Unwired;
 
 impl PhotosSource for Unwired {
@@ -646,7 +738,13 @@ impl PhotosSource for Unwired {
     fn kept_offline(&self, _id: PhotoId) -> bool {
         false
     }
-    fn keep_offline(&mut self, _id: PhotoId, _keep: bool) {}
-    fn trash(&mut self, _ids: &[PhotoId]) {}
-    fn restore(&mut self, _ids: &[PhotoId]) {}
+    fn keep_offline(&mut self, _id: PhotoId, _keep: bool) -> Result<(), Left> {
+        Err(Left::Unavailable)
+    }
+    fn trash(&mut self, _ids: &[PhotoId]) -> Result<(), Left> {
+        Err(Left::Unavailable)
+    }
+    fn restore(&mut self, _ids: &[PhotoId]) -> Result<(), Left> {
+        Err(Left::Unavailable)
+    }
 }

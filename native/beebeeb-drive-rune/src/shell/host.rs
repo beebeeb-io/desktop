@@ -447,6 +447,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= crate::frames::trash::poll(s, tx);
     // Shared: the same rule (`frames::shared::poll`).
     changed |= crate::frames::shared::poll(s, tx);
+    // Photos: the same rule (`frames::photos::poll`); the library is read when the section opens.
+    changed |= crate::frames::photos::poll(s, tx);
     // Search: a gate or account change drops its names; opening it and a new query ask the source; answers come in.
     changed |= crate::frames::search::poll(s, tx);
     // This PC's answers and refusals (`frames::this_pc::poll`).

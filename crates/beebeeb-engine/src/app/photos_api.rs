@@ -1,6 +1,6 @@
 //! Photos and thumbnails, for a host without a UI toolkit (the native Photos window and every grid of thumbnails):
 //! the photos and videos of the signed-in account ([`Engine::photos_library`]), one thumbnail as pixels
-//! ([`Engine::thumbnail_pixels_for`]), a video's length where a copy is on this PC ([`Engine::media_facts_for`]) and
+//! ([`Engine::thumbnail_pixels_for`]), a video's length where a copy is on this PC ([`Engine::video_seconds_for`]) and
 //! Keep on this PC for the session of a press ([`Engine::set_kept_for`]).
 //!
 //! Where it comes from: the library is read from the signed-in account's local state, through the account-bound
@@ -108,12 +108,15 @@ pub enum ThumbCut {
     Square,
     /// The middle of the picture as an upright strip of 36 by 52 (the stored small picture).
     Strip,
-    /// The whole stored large picture, at its own proportions.
+    /// The whole stored large picture, at its own proportions, at most `MAX_WHOLE` a side.
     Whole,
 }
 
 /// A square is handed over no larger than this a side.
 pub const MAX_SQUARE: u32 = 512;
+
+/// A whole picture is handed over no wider and no higher than this.
+pub const MAX_WHOLE: u32 = 2048;
 
 impl ThumbCut {
     /// The server's variant this cut is made from.
@@ -239,8 +242,17 @@ fn cut_pixels(encoded: &[u8], cut: ThumbCut) -> Option<(u32, u32, Zeroizing<Vec<
         }
     };
     let part = image::imageops::crop(&mut whole, (w - keep_w) / 2, (h - keep_h) / 2, keep_w, keep_h).to_image();
-    let out = if cut == ThumbCut::Square && keep_w > MAX_SQUARE {
-        let small = image::imageops::thumbnail(&part, MAX_SQUARE, MAX_SQUARE);
+    // Scaled down to the cut's cap, keeping its proportions.
+    let cap = match cut {
+        ThumbCut::Square => MAX_SQUARE,
+        ThumbCut::Strip | ThumbCut::Whole => MAX_WHOLE,
+    };
+    let out = if keep_w > cap || keep_h > cap {
+        let small = image::imageops::thumbnail(
+            &part,
+            (u64::from(keep_w) * u64::from(cap) / u64::from(keep_w.max(keep_h))).max(1) as u32,
+            (u64::from(keep_h) * u64::from(cap) / u64::from(keep_w.max(keep_h))).max(1) as u32,
+        );
         let mut part = part.into_raw();
         part.zeroize();
         small
@@ -317,10 +329,14 @@ impl<C: CredentialStores> Engine<C> {
         })
     }
 
-    /// What the head of the copy ON THIS PC says about the photo or video `file_id` (a video's length, a picture's
-    /// size and camera), for `session`. A file that is online only is never downloaded for this: every field stays
-    /// absent. Reads at most [`photo_meta::HEAD_BYTES`] of the file. No network.
-    pub fn media_facts_for(&self, session: SessionGeneration, file_id: &str) -> Result<PhotoMeta, LocalStateRefused> {
+    /// The length in whole seconds of the video `file_id`, read from the head of the copy ON THIS PC, for `session`.
+    /// `None`: it is no video, it is online only (it is never downloaded for this), or its head does not say.
+    /// Reads at most [`photo_meta::HEAD_BYTES`] of the file. No network.
+    pub fn video_seconds_for(
+        &self,
+        session: SessionGeneration,
+        file_id: &str,
+    ) -> Result<Option<u64>, LocalStateRefused> {
         let state = self.local_state()?;
         if state.session() != session {
             return Err(LocalStateRefused::SessionChanged);
@@ -329,20 +345,21 @@ impl<C: CredentialStores> Engine<C> {
             .with(|db| db.get_file(file_id))?
             .map_err(|_| LocalStateRefused::Unreadable)?;
         let Some(entry) = entry.filter(|entry| !entry.is_dir() && entry.status == FileStatus::Local) else {
-            return Ok(PhotoMeta::default());
+            return Ok(None);
         };
-        let name = leaf_name(&entry);
-        let video = mime_for_name(&name).is_some_and(|mime| mime.starts_with("video/"));
+        if !mime_for_name(&leaf_name(&entry)).is_some_and(|mime| mime.starts_with("video/")) {
+            return Ok(None);
+        }
         let Some(sync_root) = crate::config::DesktopConfig::load_for(self.identity)
             .ok()
             .and_then(|config| config.sync_root)
         else {
-            return Ok(PhotoMeta::default());
+            return Ok(None);
         };
-        let facts = facts_of_copy(&sync_root, &entry.path, video);
+        let facts = facts_of_copy(&sync_root, &entry.path, true);
         // Handed over only for the session it was read for.
         state.still_this_session()?;
-        Ok(facts)
+        Ok(facts.duration_seconds)
     }
 
     /// [`Engine::set_kept`] for the session of a press: nothing is changed unless the session in memory is still

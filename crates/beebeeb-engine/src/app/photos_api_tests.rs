@@ -54,9 +54,7 @@ fn picture(w: u32, h: u32) -> Vec<u8> {
 
 /// The stored picture of `id`, sealed under `account`'s key for that file.
 fn sealed(account: &FakeAccount, id: &str, plain: &[u8]) -> Vec<u8> {
-    let master = beebeeb_core::kdf::MasterKey::from_bytes(account.master_key);
-    let key = beebeeb_core::kdf::derive_file_key(&master, id.as_bytes());
-    beebeeb_core::encrypt::encrypt_thumbnail(&key, plain).expect("a sealed picture")
+    account.seal_thumbnail(id, plain)
 }
 
 /// Holds every thumbnail request until released, and says when one arrived.
@@ -397,6 +395,9 @@ fn a_picture_too_wide_or_that_does_not_decode_is_refused() {
     // A square is handed over no larger than its cap.
     let (w, h, _) = cut_pixels(&picture(MAX_SQUARE * 2, MAX_SQUARE * 3), ThumbCut::Square).unwrap();
     assert_eq!((w, h), (MAX_SQUARE, MAX_SQUARE));
+    // And a whole picture no wider than its cap, at its own proportions.
+    let (w, h, _) = cut_pixels(&picture(MAX_WHOLE * 2, MAX_WHOLE / 2), ThumbCut::Whole).unwrap();
+    assert_eq!((w, h), (MAX_WHOLE, MAX_WHOLE / 4));
 }
 
 #[test]
@@ -474,18 +475,19 @@ fn a_thumbnail_whose_session_ends_while_it_is_fetched_is_not_handed_over() {
 }
 
 #[test]
-fn media_facts_read_only_a_copy_on_this_pc_and_only_for_the_session_asked() {
-    let fake = fake("facts");
+fn a_videos_length_is_read_only_from_a_copy_on_this_pc_and_only_for_the_session_asked() {
+    let fake = fake("length");
     let engine = engine_at(&fake.api.base);
     signed_in(&engine, &fake.first);
     let _state = local_state(&engine, &fake.first);
     let session = engine.session_turn();
-    // Online only: nothing is read, nothing is downloaded.
-    assert_eq!(engine.media_facts_for(session, HARBOUR), Ok(PhotoMeta::default()));
+    // Online only, and a photo that is on this PC: nothing is read, nothing is downloaded.
+    assert_eq!(engine.video_seconds_for(session, TRAM), Ok(None));
+    assert_eq!(engine.video_seconds_for(session, PHONE_SHOT), Ok(None));
     assert_eq!(fake.api.requests().len(), 0);
     signed_in(&engine, &fake.first);
     assert_eq!(
-        engine.media_facts_for(session, HARBOUR),
+        engine.video_seconds_for(session, TRAM),
         Err(LocalStateRefused::SessionChanged)
     );
 }

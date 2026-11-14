@@ -152,9 +152,18 @@ pub fn menu(ui: &Ui, open: OpenMenu, t: &Theme) -> El {
 
 /// A message over the content, `bottom` points above its lower edge.
 pub fn toast_layer(toast: &Toast, bottom: f32, over_photos: bool, t: &Theme) -> El {
+    let left_words;
     let (ic, words): (&'static Icon, &str) = match toast {
         Toast::Kept => (&icons::OFFLINE, "Keeping the original on this PC"),
         Toast::Trashed(_) => (&icons::TRASH, "Moved to Trash"),
+        Toast::Left { what, why, again } => {
+            left_words = Toast::left_words(*what, *why, again.len());
+            let ic = match what {
+                super::session::What::Keep(_) => &icons::OFFLINE,
+                _ => &icons::TRASH,
+            };
+            (ic, left_words.as_str())
+        }
     };
     let glass = if t.dark {
         chrome::rgb(25, 21, 16).alpha(173.0 / 255.0)
@@ -212,6 +221,28 @@ pub fn toast_layer(toast: &Toast, bottom: f32, over_photos: bool, t: &Theme) -> 
                 .child(kit::label(
                     "ph-toast-action-label",
                     "Undo Ctrl+Z",
+                    style::TOAST_ACTION,
+                    t.text,
+                )),
+        );
+    }
+    if toast.can_retry() {
+        pill = pill.child(
+            row()
+                .key("ph-toast-action")
+                .role("button")
+                .label("Try again")
+                .ml(3.37)
+                .h(15.5)
+                .w(chrome::advance("Try again", style::TOAST_ACTION))
+                .center_y()
+                .focusable(true)
+                .on_press(|s: &mut State| {
+                    s.photos.try_again();
+                })
+                .child(kit::label(
+                    "ph-toast-action-label",
+                    "Try again",
                     style::TOAST_ACTION,
                     t.text,
                 )),
