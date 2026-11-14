@@ -461,7 +461,7 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
         "the switch for a state that was read"
     );
 
-    // Edit is offered where the version was read and the account may change the file: the editor opens.
+    // Edit is not offered where the file's version was not recorded here: the press says so, no editor opens.
     w.press(
         Key::Command('e'),
         Mods {
@@ -470,8 +470,12 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
             ..Mods::default()
         },
     );
-    assert!(w.rt.state.viewer.ui.as_ref().unwrap().editor.is_some());
-    w.rt.state.viewer.ui.as_mut().unwrap().discard();
+    assert!(w.rt.state.viewer.ui.as_ref().unwrap().editor.is_none());
+    assert!(
+        w.drawn().contains("Not built yet: Edit and save from here"),
+        "{}",
+        w.drawn()
+    );
 
     // The account leaves and another signs in: nothing of the open file is drawn or held.
     w.engine.sign_out_keeping_local_data().expect("the sign-out");
