@@ -239,3 +239,63 @@ fn the_replaced_copy_is_made_beside_the_file_and_never_over_another() {
         "the file itself is untouched"
     );
 }
+
+/// What the sync folder holds, by name, sorted.
+fn names_in(root: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Review of desktop#423, P2 #8: a Keep there that fails (here the server has no bytes to send for the file) leaves
+/// the sync folder as it was, every time it is tried: no safety copy stays behind to be uploaded as a new file.
+#[test]
+fn a_keep_there_that_fails_leaves_the_sync_folder_as_it_was_every_time() {
+    let rig = rig();
+    let before = names_in(&rig.root);
+    for _ in 0..2 {
+        assert_eq!(
+            rig.engine
+                .resolve_conflict_for(rig.session, WAITING, ConflictChoice::KeepThere)
+                .unwrap_err(),
+            ResolveRefused::Failed
+        );
+    }
+    assert_eq!(names_in(&rig.root), before, "a copy is left in the sync folder");
+    assert_eq!(
+        std::fs::read(rig.root.join("Invented draft.txt")).unwrap(),
+        b"my edit on this pc"
+    );
+}
+
+const WITH_BYTES: &str = "a0000000-0000-4000-8000-000000000904";
+
+/// Review of desktop#423, P2 #8: Keep there that works ends as Keep there, not as Keep both: the sync folder holds
+/// the server's version under the file's name and no second file (which would be uploaded as a new one).
+#[test]
+fn keep_there_never_leaves_a_second_file_in_the_sync_folder() {
+    let rig = rig();
+    rig.account
+        .add_file_with_content(WITH_BYTES, None, "Invented plan.txt", b"the server's version");
+    std::fs::write(rig.root.join("Invented plan.txt"), b"this PC's edit, never sent").unwrap();
+    {
+        let db = StateDb::open(&rig._dir.path().join("state.db")).unwrap();
+        put(&db, WITH_BYTES, "Invented plan.txt", FileStatus::Conflict);
+    }
+    let before = names_in(&rig.root);
+    rig.engine
+        .resolve_conflict_for(rig.session, WITH_BYTES, ConflictChoice::KeepThere)
+        .expect("keep there works");
+    assert_eq!(
+        std::fs::read(rig.root.join("Invented plan.txt")).unwrap(),
+        b"the server's version"
+    );
+    assert_eq!(
+        names_in(&rig.root),
+        before,
+        "the replaced version was left in the sync folder"
+    );
+}

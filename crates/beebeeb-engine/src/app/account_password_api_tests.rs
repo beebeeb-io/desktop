@@ -31,7 +31,17 @@ const OWNER: &str = "11111111-1111-4111-8111-111111111111";
 const ANSWERS: u8 = 0;
 const SESSION_ENDED: u8 = 1;
 const BREACH_LISTS_NEW: u8 = 2;
+/// The change's first leg gets no answer (the connection closes): nothing was changed.
+const START_LOST: u8 = 3;
+/// The change's finish is taken, and its answer never comes: the password WAS changed.
+const FINISH_LOST: u8 = 4;
+/// The first leg is answered with a server error.
+const START_FAILS: u8 = 5;
+/// The finish is answered with a server error (it may have been taken before the error).
+const FINISH_FAILS: u8 = 6;
 static MODE: AtomicU8 = AtomicU8::new(ANSWERS);
+/// An engine whose session moves on the moment the fake takes the finish (a lock or a sign-in elsewhere in the app).
+static MOVE_ON_AT_FINISH: Mutex<Option<Arc<TestEngine>>> = Mutex::new(None);
 
 fn b64() -> base64::engine::general_purpose::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
@@ -75,6 +85,14 @@ fn server(mode: &'static AtomicU8) -> (FakeApi, Arc<Mutex<Vec<(bool, bool)>>>) {
         if request.bearer() != Some(OLD_TOKEN) || mode.load(Ordering::SeqCst) == SESSION_ENDED {
             return Reply::error(401, "unauthorized");
         }
+        let mode_now = mode.load(Ordering::SeqCst);
+        if route == "POST /api/v1/auth/change-password-start" && matches!(mode_now, START_LOST | START_FAILS) {
+            return if mode_now == START_LOST {
+                Reply::hang_up()
+            } else {
+                Reply::error(500, "internal")
+            };
+        }
         match route.as_str() {
             "POST /api/v1/auth/confirm-opaque-start" => account.login_start(&body),
             "POST /api/v1/auth/confirm-opaque-finish" => {
@@ -106,7 +124,17 @@ fn server(mode: &'static AtomicU8) -> (FakeApi, Arc<Mutex<Vec<(bool, bool)>>>) {
                     body["recovery_check"].is_string(),
                     body["x25519_public_key"].is_string(),
                 ));
-                Reply::ok(json!({ "session_token": NEW_TOKEN }))
+                if let Some(engine) = MOVE_ON_AT_FINISH.lock().unwrap().take() {
+                    let _writes = engine.writes.write().unwrap();
+                    engine
+                        .acct
+                        .advance_session_generation_holding_session_write_lock(SessionTransition::Write);
+                }
+                match mode.load(Ordering::SeqCst) {
+                    FINISH_LOST => Reply::hang_up(),
+                    FINISH_FAILS => Reply::error(500, "internal"),
+                    _ => Reply::ok(json!({ "session_token": NEW_TOKEN })),
+                }
             }
             "POST /api/v1/auth/change-password-start" | "POST /api/v1/auth/change-password-finish" => {
                 Reply::error(403, "step_up_required")
@@ -322,4 +350,58 @@ fn the_strength_is_cores_and_needs_no_network() {
     assert_eq!(password_strength("alllowercaseletters"), PasswordStrength::Fair);
     assert_eq!(password_strength("MixedCaseLettersOnly"), PasswordStrength::Good);
     assert_eq!(password_strength("Mixed Case Letters 42"), PasswordStrength::Strong);
+}
+
+/// Review of desktop#423, P2 #9: an answer lost on the change's first leg and one lost on its finish are not the
+/// same answer: after the first leg nothing changed, after the finish the password may have (here it did).
+#[test]
+fn an_answer_lost_after_the_finish_is_not_the_answer_of_nothing_changed() {
+    let _one = serial();
+    let (api, taken) = server(&MODE);
+    let engine = engine(&api.base);
+    let turn = signed_in(&engine);
+    for (before, after) in [(START_LOST, FINISH_LOST), (START_FAILS, FINISH_FAILS)] {
+        MODE.store(before, Ordering::SeqCst);
+        let at_start = engine
+            .change_password_for(turn, secret(PASSWORD), secret(NEW_PASSWORD))
+            .unwrap_err();
+        assert!(taken.lock().unwrap().is_empty(), "the finish was never sent");
+        MODE.store(after, Ordering::SeqCst);
+        let at_finish = engine
+            .change_password_for(turn, secret(PASSWORD), secret(NEW_PASSWORD))
+            .unwrap_err();
+        assert_eq!(taken.lock().unwrap().len(), 1, "the finish was taken");
+        taken.lock().unwrap().clear();
+        assert_ne!(
+            at_start, at_finish,
+            "a finish that may have changed the password is answered like one that changed nothing"
+        );
+        // The token this PC holds is untouched either way: no answer named a new one.
+        assert_eq!(stored_token(&engine), OLD_TOKEN);
+    }
+}
+
+/// Review of desktop#423, P2 #9: the finish was taken (the password changed) and the session moved on before the new
+/// token could be kept. That is never the answer of a press that changed nothing.
+#[test]
+fn a_change_taken_after_the_session_moved_on_is_not_the_answer_of_nothing_changed() {
+    let _one = serial();
+    let (api, taken) = server(&MODE);
+    let engine = engine(&api.base);
+    let turn = signed_in(&engine);
+    *MOVE_ON_AT_FINISH.lock().unwrap() = Some(engine.clone());
+    let answer = engine
+        .change_password_for(turn, secret(PASSWORD), secret(NEW_PASSWORD))
+        .unwrap_err();
+    assert_eq!(taken.lock().unwrap().len(), 1, "the finish was taken");
+    assert_ne!(
+        answer,
+        PasswordChangeError::NotSignedIn,
+        "a change the server took is answered as a press that sent nothing"
+    );
+    assert_ne!(
+        stored_token(&engine),
+        NEW_TOKEN,
+        "no token is kept for a session that moved on"
+    );
 }
