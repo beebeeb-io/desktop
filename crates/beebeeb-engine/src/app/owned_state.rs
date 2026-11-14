@@ -17,12 +17,14 @@
 
 use std::path::PathBuf;
 
+use super::lock_api::{Call, CallRefused, LockedAction};
 use super::{CredentialStores, Engine};
 use crate::account::{AccountRuntime, SessionGeneration};
 use crate::account_binding::{self, Binding, BindingKind, Identity};
 use crate::signin::start;
 use crate::state_db::{ReadOnlyOpenError, StateDb};
 use crate::state_paths;
+use beebeeb_api::flows::call_may_run;
 
 /// Why the local state is not handed out. A fixed word each: none carries a name, a path, an email or an id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +153,9 @@ impl OwnedState<'_> {
     }
 }
 
+/// What a person asks through the window (core's `Call::Person`): a locked screen refuses it.
+const PERSON: Call = Call::Person(LockedAction::ViewStatus);
+
 impl<C: CredentialStores> Engine<C> {
     /// The signed-in account's local state, for reading. See the module's doc for when it is refused.
     ///
@@ -158,12 +163,12 @@ impl<C: CredentialStores> Engine<C> {
     /// core cannot see the local state, so the host's side applies its rule). The work and the operating system's
     /// file manager, which reach the sync folder on a locked screen by design, use [`Self::local_state_for_work`].
     pub fn local_state(&self) -> Result<OwnedState<'_>, LocalStateRefused> {
-        self.person_asks()?;
-        self.owned_state(Mode::Read)
+        self.owned_state(Mode::Read, PERSON)
     }
 
-    fn person_asks(&self) -> Result<(), LocalStateRefused> {
-        if self.screen_refuses_a_person() {
+    /// A locked screen refuses `call` as `Locked` (core's `call_may_run`); the work is not refused.
+    pub(super) fn person_asks(&self, call: Call) -> Result<(), LocalStateRefused> {
+        if call_may_run(self.lock_state(), call) == Err(CallRefused::ScreenLocked) {
             return Err(LocalStateRefused::Locked);
         }
         Ok(())
@@ -172,15 +177,20 @@ impl<C: CredentialStores> Engine<C> {
     /// The account's local state for a change that no person drives through the window (Explorer's own command):
     /// not asked of the screen lock; every other refusal is [`Self::local_state_for_changes`]'s.
     pub(super) fn local_state_for_work(&self) -> Result<OwnedState<'_>, LocalStateRefused> {
-        self.owned_state(Mode::Change)
+        self.owned_state(Mode::Change, Call::Work)
+    }
+
+    /// Explorer's command-state question: a read-only connection, no schema check under a write lock, so it never
+    /// waits on the sync engine's writes. Not refused behind a locked screen (the work).
+    pub(super) fn local_state_work_refusal(&self) -> Option<LocalStateRefused> {
+        self.owned_state(Mode::Read, Call::Work).err()
     }
 
     /// The signed-in account's local state, for an operation that writes (a rename, a move, a request to the sync
     /// engine). The owner is proven on a read-only connection first: nothing is written into a state that is not
     /// the session's, not even a schema migration.
     pub fn local_state_for_changes(&self) -> Result<OwnedState<'_>, LocalStateRefused> {
-        self.person_asks()?;
-        self.owned_state(Mode::Change)
+        self.owned_state(Mode::Change, PERSON)
     }
 
     /// Why the local state is not handed out now, for a shell that says so; `None` while it is.
@@ -256,9 +266,10 @@ impl<C: CredentialStores> Engine<C> {
         identity
     }
 
-    fn owned_state(&self, mode: Mode) -> Result<OwnedState<'_>, LocalStateRefused> {
+    fn owned_state(&self, mode: Mode, call: Call) -> Result<OwnedState<'_>, LocalStateRefused> {
         // First, so a transition during anything below turns the handle into a refusal at its first read.
         let generation = self.acct.session_generation();
+        self.person_asks(call)?;
         let session = self.session_identity()?;
         let path = self.local_state_path(&session);
         if !path.exists() {

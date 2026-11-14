@@ -222,3 +222,30 @@ fn the_served_handle_is_asked_each_time_and_a_dropped_one_disables_the_command()
     assert!(served().is_none(), "the slot keeps no engine alive");
     assert_eq!(invoke(served().as_deref()), Invoked::Refused("no_engine"));
 }
+
+/// Explorer's question is asked on a read-only connection: another connection that holds a write transaction on the
+/// state database (the sync engine, mid-batch) neither delays it nor refuses it, and a locked screen does not either
+/// (the command is the work, not a person's call).
+#[test]
+fn explorers_question_is_answered_while_the_state_is_being_written() {
+    let f = fixture();
+    signed_in(&f.engine, "user-a", "a@example.eu");
+    let writer = rusqlite::Connection::open(&f.db).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(ReclaimOwner::refusal(&*f.engine), None);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "answered at once, not after the busy timeout: {:?}",
+        started.elapsed()
+    );
+    // The same behind a locked screen: the lock's start rule on a stored session.
+    *f.engine.lock_flow.lock().unwrap() = beebeeb_api::flows::LockFlow::at_start(beebeeb_api::flows::StartFacts {
+        session_stored: true,
+        ask_password_at_start: Some(false),
+        vault_closed: Some(false),
+    });
+    assert_eq!(f.engine.lock_state(), super::super::lock_api::LockState::ScreenLocked);
+    assert_eq!(ReclaimOwner::refusal(&*f.engine), None);
+    writer.execute_batch("ROLLBACK").unwrap();
+}

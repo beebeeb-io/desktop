@@ -180,14 +180,9 @@ impl<C: CredentialStores> Engine<C> {
     /// A session Beebeeb no longer accepts: `SessionEnded`, and nothing is asked. The copy of the token wipes
     /// itself when it is dropped: a refusal after this point leaves none behind.
     fn token_of_this_session(&self) -> Result<(Zeroizing<String>, SessionGeneration), AccountCallError> {
-        if self.screen_refuses_a_person() {
-            return Err(AccountCallError::NotSignedIn);
-        }
-        let stamped = {
-            let guard = self.acct.session.lock().map_err(|_| AccountCallError::NotSignedIn)?;
-            let current = guard.as_ref().ok_or(AccountCallError::NotSignedIn)?;
-            (Zeroizing::new(current.token.clone()), self.acct.session_generation())
-        };
+        let stamped = self
+            .person_session(|session, generation| (Zeroizing::new(session.token.clone()), generation))
+            .map_err(|_| AccountCallError::NotSignedIn)?;
         if self.acct.auth_health.is_expired() {
             return Err(AccountCallError::SessionEnded);
         }

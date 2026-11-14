@@ -35,7 +35,7 @@ impl ExplorerSeat {
 
 impl<C: CredentialStores> ReclaimOwner for Engine<C> {
     fn refusal(&self) -> Option<LocalStateRefused> {
-        self.local_state_for_work().err()
+        self.local_state_work_refusal()
     }
 
     fn free_up_space(&self) -> Result<u64, String> {

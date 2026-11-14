@@ -18,7 +18,7 @@
 //! the local state by any way but the account-bound handle (`owned_state`, task 2488).
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use zeroize::Zeroizing;
@@ -230,6 +230,8 @@ pub struct Engine<C: CredentialStores> {
     pending_2fa: Mutex<Option<(PendingSecondFactor, Zeroizing<String>)>>,
     /// Wrong passwords in a row, for the lock hint.
     failures: AtomicU32,
+    /// [`Engine::watch_session`] ran on this handle.
+    session_watch_started: AtomicBool,
     /// The two-level lock: core's state machine, moved only by `lock_api`.
     lock_flow: Mutex<beebeeb_api::flows::LockFlow>,
     /// What a window reads without waiting ([`Engine::view`]); `host` writes the engine's reports into it.
@@ -291,6 +293,7 @@ impl<C: CredentialStores> Engine<C> {
             auth_present: Mutex::new(false),
             pending_2fa: Mutex::new(None),
             failures: AtomicU32::new(0),
+            session_watch_started: AtomicBool::new(false),
             lock_flow: Mutex::new(beebeeb_api::flows::LockFlow::at_start(lock_api::NO_SESSION)),
             view,
             session_user_id: Mutex::new(None),
@@ -953,6 +956,11 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     fn forget_session(&self, by: SessionTransition) {
+        self.forget_session_as(by, SessionMoved::after(by));
+    }
+
+    /// [`Self::forget_session`], with what the lock follows named by the caller.
+    fn forget_session_as(&self, by: SessionTransition, moved: SessionMoved) {
         let _writes = self.writes.write().unwrap_or_else(|p| p.into_inner());
         self.acct.advance_session_generation_holding_session_write_lock(by);
         #[cfg(any(test, feature = "test-support"))]
@@ -969,11 +977,7 @@ impl<C: CredentialStores> Engine<C> {
         let mut guard = self.acct.session.lock().unwrap_or_else(|p| p.into_inner());
         *guard = None;
         drop(guard);
-        self.lock_follows(if by == SessionTransition::SignOut {
-            SessionMoved::SignedOut
-        } else {
-            SessionMoved::KeyDropped
-        });
+        self.lock_follows(moved);
         if let Ok(mut pending) = self.pending_2fa.lock() {
             *pending = None;
         }
@@ -1071,16 +1075,11 @@ impl<C: CredentialStores> Engine<C> {
 
     /// The session token (cloned for a person's single API call). `Err` when locked (either level) or signed out.
     fn session_token(&self) -> Result<String, String> {
-        if self.screen_refuses_a_person() {
-            return Err("locked".to_string());
-        }
-        self.acct
-            .session
-            .lock()
-            .map_err(|_| "session mutex poisoned".to_string())?
-            .as_ref()
-            .map(|s| s.token.clone())
-            .ok_or_else(|| "not signed in".to_string())
+        self.person_session(|session, _| session.token.clone())
+            .map_err(|refused| match refused {
+                lock_api::PersonRefused::ScreenLocked => "locked".to_string(),
+                lock_api::PersonRefused::NoSession => "not signed in".to_string(),
+            })
     }
 
     /// Storage use and quota from the server (`/api/v1/billing/usage`).

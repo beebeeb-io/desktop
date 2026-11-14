@@ -11,7 +11,9 @@
 //!   cannot be read starts the vault closed, and a start that is closed writes the mark;
 //! - a vault lock writes the mark BEFORE the key leaves memory, and reads it back after;
 //! - only a strong proof (the password accepted by the server, or the twelve words) clears the mark;
-//! - while the vault is marked closed the key entry is not read at all, not even to ask whether it is there.
+//! - while the vault is marked closed the key entry is not read at all, not even to ask whether it is there;
+//! - a session the server no longer accepts closes the vault ([`Engine::close_ended_session`], asked every second by
+//!   [`Engine::watch_session`]); a person's call reaches the session only through [`Engine::person_session`].
 //!
 //! Neither level encrypts anything on this computer: the key stays in the credential store. The screen lock gates
 //! the window (sync keeps running); the vault lock takes the key out of this process and stops the work.
@@ -22,15 +24,18 @@ pub use beebeeb_api::flows::{Call, CallRefused, LockState, LockedAction};
 use beebeeb_api::flows::{FlowError, LockFlow, LockLevel, StartFacts, call_may_run, key_may_be_loaded};
 use zeroize::Zeroizing;
 
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
 use super::{CredentialStores, Engine, SyncStop};
 use crate::account::{SessionGeneration, SessionTransition};
 use crate::keychain::{AuthVault, LockFlag};
+use crate::session::Session;
 use crate::signin::gate::{NextAfterSignIn, SignInProblem};
 
-/// Core's switch for the password path of the lock (`ClientConfig::lock_password_path`): the offline password
-/// check of the screen lock and the start setting. Off until the server's half is deployed; while it is off both
-/// answer [`LockRefused::PasswordCheckUnavailable`], as core does.
-pub const LOCK_PASSWORD_PATH: bool = false;
+/// How often the session watcher asks whether the server still accepts the session.
+pub(super) const SESSION_WATCH_EVERY: Duration = Duration::from_secs(1);
 
 /// What a handle knows before its start read anything: no session.
 pub(super) const NO_SESSION: StartFacts = StartFacts {
@@ -49,7 +54,7 @@ pub enum LockRefused {
     NeedsThePassword,
     /// The session or the lock moved since the press this step answers: a late answer opens nothing.
     Overtaken,
-    /// The password path is off in this build ([`LOCK_PASSWORD_PATH`]).
+    /// The password path is off in this build until the server's half is deployed.
     PasswordCheckUnavailable,
 }
 
@@ -58,6 +63,13 @@ fn refused(error: FlowError) -> LockRefused {
         FlowError::StepNotRequired => LockRefused::NotAtThisLevel,
         FlowError::StepOutOfOrder | FlowError::NotReady => LockRefused::NeedsThePassword,
     }
+}
+
+/// Why a person's call got no session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PersonRefused {
+    ScreenLocked,
+    NoSession,
 }
 
 /// What [`Engine::lock_vault`] did.
@@ -79,6 +91,20 @@ pub(super) enum SessionMoved {
     /// The key left memory; the stored session stays.
     KeyDropped,
     SignedOut,
+    /// The server no longer accepts the session: the key is dropped and only a fresh password sign-in opens it.
+    Ended,
+}
+
+impl SessionMoved {
+    /// What a session transition that ended the session in memory means for the lock: a sign-out signs out, every
+    /// other one drops the key.
+    pub(super) fn after(by: SessionTransition) -> Self {
+        if by == SessionTransition::SignOut {
+            Self::SignedOut
+        } else {
+            Self::KeyDropped
+        }
+    }
 }
 
 impl<C: CredentialStores> Engine<C> {
@@ -97,9 +123,31 @@ impl<C: CredentialStores> Engine<C> {
         call_may_run(self.lock_state(), call)
     }
 
-    /// A person's read or change (anything but unlock, lock vault and sign out) is refused by the lock now.
-    pub(super) fn screen_refuses_a_person(&self) -> bool {
-        self.check_call(Call::Person(LockedAction::ViewStatus)) == Err(CallRefused::ScreenLocked)
+    /// THE way a person's call reaches the session in memory: the lock is asked and `with` runs in ONE hold of the
+    /// session-write lock (the read side, which never waits: a session change under way answers
+    /// [`PersonRefused::NoSession`]). Every lock move holds that lock for writing, so the check and the copy
+    /// cannot be split. `with` must only copy or compare: every session change waits for it.
+    pub(super) fn person_session<T>(
+        &self,
+        with: impl FnOnce(&Session, SessionGeneration) -> T,
+    ) -> Result<T, PersonRefused> {
+        let _writes = match self.writes.try_read() {
+            Ok(writes) => writes,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(PersonRefused::NoSession),
+        };
+        if call_may_run(self.lock_state(), Call::Person(LockedAction::ViewStatus)).is_err() {
+            return Err(PersonRefused::ScreenLocked);
+        }
+        let guard = self
+            .acct
+            .session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match guard.as_ref() {
+            Some(session) => Ok(with(session, self.acct.session_generation())),
+            None => Err(PersonRefused::NoSession),
+        }
     }
 
     /// The start rule, for a start that found no key in memory. A closed start writes the mark, so every later
@@ -154,6 +202,7 @@ impl<C: CredentialStores> Engine<C> {
                 let _ = flow.lock(LockLevel::Vault);
             }),
             SessionMoved::SignedOut => self.flow(LockFlow::signed_out),
+            SessionMoved::Ended => self.flow(LockFlow::session_ended),
         }
     }
 
@@ -193,8 +242,8 @@ impl<C: CredentialStores> Engine<C> {
         Ok(())
     }
 
-    /// The screen lock's password path. Off in this build ([`LOCK_PASSWORD_PATH`]): nothing is checked, nothing is
-    /// counted, and the typed password is wiped.
+    /// The screen lock's password path. Off in this build until the server's half is deployed: nothing is checked,
+    /// nothing is counted, and the typed password is wiped.
     pub fn unlock_screen_with_password(&self, password: Zeroizing<String>) -> Result<(), LockRefused> {
         drop(password);
         Err(LockRefused::PasswordCheckUnavailable)
@@ -233,6 +282,79 @@ impl<C: CredentialStores> Engine<C> {
         });
         self.publish();
         locked
+    }
+
+    /// A session the server no longer accepts closes the vault, as core's lock does. Core's words: "The server no
+    /// longer accepts the session: the key is dropped, and only a fresh password sign-in with the known-device
+    /// unlock opens the app again" (`LockFlow::session_ended`); and its client service: "the key is dropped if it
+    /// was still held, the check record and the wrong-try count are deleted, and the closed mark is written, so the
+    /// next start does not load the key for a session the server no longer accepts" (this engine stores no check
+    /// record and no wrong-try count).
+    ///
+    /// Does nothing (`None`) while the session is accepted, or when no key is held (signed out, or the vault is
+    /// already closed). The stored session and key stay in the credential store; sign-out is not done. The
+    /// refusal run is left alone: a strong unlock clears it before its new session is installed, so a close that
+    /// runs after one finds nothing to close.
+    ///
+    /// Blocks on the engine's runtime: never call it from the window's thread or from a task of that runtime.
+    pub fn close_ended_session(&self) -> Option<VaultLocked> {
+        let may_close = || self.acct.auth_health.is_expired() && key_may_be_loaded(self.lock_state());
+        if !may_close() {
+            return None;
+        }
+        let locked = self.runtime.block_on(async {
+            let _step = self.transition.lock().await;
+            if !may_close() {
+                return None;
+            }
+            let vault = self.vault();
+            let mut survives_restart = vault.set_lock_flag(LockFlag::VaultClosed, true).is_ok();
+            let stopped = self.stop_holding_step().await;
+            self.forget_session_as(SessionTransition::Lock, SessionMoved::Ended);
+            if vault.lock_flag(LockFlag::VaultClosed) != Some(true) {
+                survives_restart = vault.set_lock_flag(LockFlag::VaultClosed, true).is_ok();
+            }
+            Some(VaultLocked {
+                stopped,
+                survives_restart,
+            })
+        });
+        if locked.is_some() {
+            self.publish();
+        }
+        locked
+    }
+
+    /// Start the session watcher: ONE thread (`session-watch`) that asks [`Self::close_ended_session`] every
+    /// [`SESSION_WATCH_EVERY`]. It holds only a `Weak` to this handle: it ends with it. A second call starts nothing.
+    pub fn watch_session(self: &Arc<Self>) {
+        self.watch_session_every_inner(SESSION_WATCH_EVERY);
+    }
+
+    /// [`Self::watch_session`] with its own period, for a test.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn watch_session_every(self: &Arc<Self>, every: Duration) {
+        self.watch_session_every_inner(every);
+    }
+
+    fn watch_session_every_inner(self: &Arc<Self>, every: Duration) {
+        if self.session_watch_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let engine = Arc::downgrade(self);
+        let spawned = std::thread::Builder::new()
+            .name("session-watch".to_string())
+            .spawn(move || {
+                loop {
+                    let Some(engine) = engine.upgrade() else { return };
+                    engine.close_ended_session();
+                    drop(engine);
+                    std::thread::sleep(every);
+                }
+            });
+        if let Err(error) = spawned {
+            tracing::warn!("the session watcher did not start: {error}");
+        }
     }
 
     /// The strong unlock: the account's password, proven to the server in a new sign-in for the account whose
@@ -290,3 +412,7 @@ impl<C: CredentialStores> Engine<C> {
         Ok((self.acct.session_generation(), Some(old)))
     }
 }
+
+#[cfg(test)]
+#[path = "lock_api_tests.rs"]
+mod tests;
