@@ -23,7 +23,7 @@ fn runtime(id: &str) -> Runtime<State> {
         system_dark: false,
         scale: 2.0,
     };
-    let mut rt = Runtime::new(state, view, (958.0, 638.0), env);
+    let mut rt = Runtime::new(state, view, (958.0, 958.0), env);
     rt.on_key = Some(crate::shell::host::on_key);
     rt.frame(0.0);
     rt
@@ -267,7 +267,11 @@ fn closing_a_dialog_wipes_what_was_typed_and_drops_the_sign_in() {
     assert_eq!(connection(&rt), Connection::Idle);
 
     let mut rt = runtime("DW-1404");
-    click(&mut rt, "scrim");
+    // A press on the scrim, beside the dialog.
+    let r = info(&rt, "scrim").rect;
+    rt.pointer_down(r[0] + 8.0, r[1] + 8.0);
+    rt.pointer_up(r[0] + 8.0, r[1] + 8.0);
+    settle(&mut rt);
     assert_eq!(rt.state.backups.dialog, None);
     assert!(rt.state.backups.mail.picked.is_empty());
     assert_eq!(connection(&rt), Connection::Idle);
@@ -346,7 +350,7 @@ fn turning_off_takes_a_code_the_engine_accepts_then_asks_about_the_files() {
     press(&mut rt, Key::Escape);
     assert_eq!(rt.state.backups.dialog, None);
     assert_eq!(mail_of(&rt).used.as_deref(), Some("6.2 GB"));
-    assert_eq!(text(&rt, "list-0-title"), "KEPT FOLDER");
+    assert_eq!(text(&rt, "list-0-title"), "Kept folder");
     assert_eq!(text(&rt, "btn-0-label"), "Turn on\u{2026}");
 }
 
