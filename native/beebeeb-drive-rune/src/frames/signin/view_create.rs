@@ -65,6 +65,7 @@ pub(super) fn state(busy: bool, can: bool) -> ButtonState {
 fn send_words(problem: SendProblem) -> &'static str {
     match problem {
         SendProblem::RateLimited => "Too many requests for this address. Try again later.",
+        SendProblem::WebOnly => "Create your account on the web for now.",
         SendProblem::Offline | SendProblem::Other => NOT_SENT,
     }
 }
@@ -76,8 +77,13 @@ fn send_words(problem: SendProblem) -> &'static str {
 fn email(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let c = ui.create_state();
     let problem = ui.email_problem().map(|problem| match problem {
-        EmailProblem::NotAnAddress => "Enter a valid email address.",
-        EmailProblem::Send(problem) => send_words(problem),
+        EmailProblem::NotAnAddress => "Enter a valid email address.".to_string(),
+        // The page the server names is written out; this window has no way to open a page in the browser yet.
+        EmailProblem::Send(SendProblem::WebOnly) => match ui.web_signup_address() {
+            Some(address) => format!("{} Open {address} in your browser.", send_words(SendProblem::WebOnly)),
+            None => send_words(SendProblem::WebOnly).to_string(),
+        },
+        EmailProblem::Send(problem) => send_words(problem).to_string(),
     });
     let back = if ui.back_goes_to_sign_in() {
         "Sign in"
@@ -97,7 +103,7 @@ fn email(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
                 label: "Email",
                 name: None,
                 icon: Some(&icons::MAIL),
-                message: Some(problem.unwrap_or("We'll send an 8-digit code to this address.")),
+                message: Some(problem.as_deref().unwrap_or("We'll send an 8-digit code to this address.")),
                 error: problem.is_some(),
                 mono: false,
                 pictured: c.pictured == Some(super::create::Pictured::Email),
