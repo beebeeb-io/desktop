@@ -1,14 +1,15 @@
 # Open files: the frame checklist (lane f-viewers)
 
 The Windows frames of the board's groups "Open files: the viewers" (10), "Open files: states" (4) and "Text and
-Markdown editing" (8): 22 frames, plus the Windows entry state of "Office: Docs, Sheets and Slides" (owner ruling
-2026-11-11: office documents are not edited in the app in 0.9.0; a link that opens the web app).
+Markdown editing" (8): 22 frames, plus the text-document frames of "Office: Docs, Sheets and Slides" (see "The
+office editor's frame" below; the 2026-11-11 note here, "office documents are not edited in the app in 0.9.0", was
+replaced by the owner on 2026-11-12: the editor is in 0.9.0, contract `docs/superpowers/specs/2026-11-12-native-office-editor.md`).
 
 Built = drawn from `viewers::Ui` (or, for DW-1520 to DW-1522, from `viewers::new_file` over the Files
 window), reachable by its controls, a scene, gated in light and dark.
 21 of 23 are built (lanes f-viewers, 2472 and b19-viewers, 2026-11-12; the count is the two lanes' lists joined
 at their merge): not at 0: see the integration ledger; the viewers still draw their own toolbar. The other 2
-(DW-1504, DW-1507) are not built; each line is the checklist and why.
+(DW-1504, DW-1507) were not built by those lanes; DW-1507 is built since (below). Each line is the checklist and why.
 
 The Files toolbar under DW-1520 to DW-1522 has the Open in File Explorer button the board does not draw
 yet (task 2445, B23): its 10 keys (`view-toggle`, `view-list`, `view-grid` and their icons, `sort-btn`,
@@ -40,7 +41,7 @@ yet (task 2445, B23): its 10 keys (`view-toggle`, `view-list`, `view-grid` and t
 | DW-1515 | An archive's list, without unpacking; a folder's row steps into it | built; open reds: the toolbar's |
 | DW-1503 | The audio player with the folder as the queue | built; open reds: the toolbar's |
 | DW-1504 | Playback in Windows' media controls (Windows draws Quick Settings) | not built |
-| DW-1507 (entry) | An office document: the entry state with the link that opens the web app | not built: the entry state is an owner ruling (2026-11-11), not a board drawing, so there is no golden to gate it against |
+| DW-1507 | A text document in the editor's frame | built as a frame: see "The office editor's frame" |
 
 ## The photo, audio, PDF, table and archive viewers (lane b19-viewers, 2026-11-12)
 
@@ -88,3 +89,39 @@ yet (task 2445, B23): its 10 keys (`view-toggle`, `view-list`, `view-grid` and t
   Available offline is not read (`knows_offline`): the details panel draws no switch and the photo no action for it.
 - **Leaving a file** overwrites the decrypted text it held (`OpenFile::wipe`, `Ui`'s drop); a `{:?}` of an open
   file prints kinds and counts, never a name or a word of it.
+
+## The office editor's frame: a text document (lane gbb-d, 2026-11-14)
+
+The FRAME of the editor, drawn from `ViewerSource` (`office.rs`, `office_over.rs`; the board's samples in
+`office_board.rs`, the gate's keys in `scripts/keymap-office.js`). No editing engine stands behind it: a save is asked
+of `ViewerSource::save_document`, a conflict's answer of `resolve_document`, the command search of `commands`; the
+trait's defaults answer "not saved" and "nothing found", and the frame draws exactly that. Every other control says
+"Not built yet". Gate at the lane's last run, light and dark: geometry 0 failing in 18 of 18 runs.
+
+| Frame | What it is | State |
+|---|---|---|
+| DW-1507 | A text document: ribbon, outline, page, a selection with its tools, status line | built; open: light `pg-3`, `rib`, `rib-tools` (tile), dark `float` (edge) |
+| DW-1511 | An older Word file (.doc): the banner, saved in its own format | built; open: light `rib`, `rib-tools` (tile) and 2 frame tiles; dark 0 |
+| DW-1550 | The Insert tab, a table on the page | built; open: `crumb-dot` (edge) in both themes |
+| DW-1551 | The command search (Ctrl+K) with "head" typed | built; open: light `rt-11`, `ft-0`, `rt-12`; dark `pal-caret`, `ol-4-row`, `ol-6-row`, `rt-11` (edges under the scrim) |
+| DW-1552 | Changes that are not saved: the dot, Save on | built; open: `crumb-dot` both themes; light `rib`, `rib-tools` |
+| DW-1553 | Saved: the next version, the toast | built; open: light `rib`, `rib-tools`; dark 0 |
+| DW-1554 | Someone else saved first: four ways on | built; open: light `crumb-dot`; dark 0 |
+| DW-1556 | The editor did not start | built; open: text `empty-text` both themes (the export records the paragraph's colour, the words inside are a shade darker and drawn so; pixels 0 on it), light `status-dot` (edge) |
+| DW-1234 | Commands and keyboard shortcuts over the document | built (scene in `tray/`); open: `ol-close` both themes, dark `ol-4-row` to `ol-6-row` (edges under the scrim) |
+| DW-1555, DW-1557 | "Preparing the editor" (a 257 MB download) and the licence notice of a bundled office suite | NOT built, held for a ruling: the board draws a downloaded third-party editor, the merged contract builds on in-house engines with nothing to download |
+| DW-1508, DW-1509, DW-1559, DW-1560, DW-1561 | Sheets and Slides | NOT built |
+| DW-1558, DW-1562 | New document from a template; Open With | NOT built (DW-1558's four templates differ from the contract's "Blank only"; DW-1562's menu is shorter than DW-0402's file menu: both need a ruling) |
+
+Why the open lines stay:
+- `rib` / `rib-tools` (light), `pg-3`: the board's Italic "I" is a serif italic the app does not ship, and a text
+  span's background has a fixed 3-point corner where the board's selection has 2.
+- `crumb-dot`, `status-dot`, `pal-caret`: 7-point and 1.5-point marks at a fractional place after text; Rune puts
+  them on the device pixel. Taking them off the grid measured worse (edge 69 against 15), so they stay on it.
+- Under a scrim (`ol-*`, `rt-*`, `ft-0`): the dialog's and the search's shadow falls differently on what is behind.
+- DW-1556's status line says "Preparing the editor on this PC…" beside "We couldn't prepare the editor": the board's
+  own words, kept as drawn; they belong to the held "preparing" flow and want the same ruling.
+
+Not done here: typing in the document, Layout's and Review's tools (on no board frame), the unsaved-changes question
+when a document with changes is left (there is no edit to lose until an editor exists), zoom, the About link.
+

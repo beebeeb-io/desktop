@@ -39,7 +39,7 @@ board are Windows' (`scripts/capture-golden.mjs`, `OWN_WINDOW`).
 | DW-1231b | The b's menu while paused | OS-drawn, verified by a real-window capture (same) |
 | DW-1232 | Commands and keyboard shortcuts: Beebeeb, File, Edit | built (`shortcuts.rs`, `registry::DIALOGS`); gate NOT at 0: light geometry 2, pixels 8, frame tiles 4; dark 2, 10, 1 (text, icons, fills 0). Every failing key is, or lies under, "New ▾" (2 rows): the board's ▾ is the capture machine's fallback font (see the PR, "Gate not at 0") |
 | DW-1233 | Commands and keyboard shortcuts: View, Go, Window, Help | built (the dialog's second page: Page Down); gate NOT at 0: light geometry 1, pixels 7, frame tiles 8; dark 1, 10, 4. Every failing key is, or lies under, "Alt+←", "Alt+→" or "the □ caption button": the same fallback fonts |
-| DW-1234 | Commands and keyboard shortcuts while a document is open | the dialog is built: the editor's four lists (`commands::EDITOR`), shown while the window is on an open file, a scene (`DW-1234`: the note open in the text editor, the dialog in front) held by the test `the_scene_of_dw_1234_is_the_editors_four_lists_over_an_open_document`. NOT gated and no golden: see "DW-1201 and DW-1234: what is left" |
+| DW-1234 | Commands and keyboard shortcuts while a document is open | the dialog is built: the editor's four lists (`commands::EDITOR`), shown while the window is on an open file, a scene (`DW-1234`: the text document in the office editor's frame, the dialog in front) held by the test `the_scene_of_dw_1234_is_the_editors_four_lists_over_an_open_document`. gated since 2026-11-14: see "DW-1201 and DW-1234: what is left" |
 
 Measured on 2026-11-12 at `b6df6207` (the base of the tray's engine wiring) and at its head, the same both times:
 DW-1232 light geometry 12, pixels 19, frame tiles 44, dark 12, 20, 12; DW-1233 light 11, 18, 50, dark 11, 20, 13
@@ -63,14 +63,11 @@ dark 3, 13, 11 (text, icons, fills 0).
   (`Intent::Frame("DW-1201")` in their own queues); each needs the one call `tray::show_from_window`.
 - "The b pressed while the flyout is open" is Windows' drawing of the notification area button.
 
-**DW-1234.** The dialog and its words are done; the frame is not gated.
-- The board draws the dialog over the document editor (Docs, with its ribbon). No lane has built that editor, and
-  whether it can be native is an open decision (the office editor needs a web view). A golden captured today would
-  gate the dialog's keys at their place and fail on every key of the editor behind the scrim.
-- When the editor exists: capture `golden/DW-1234*` (keymap-tray.js keys the dialog already, as for DW-1232), point
-  the scene at the document the board has open instead of the note, and gate it light and dark.
-- The dialog shares DW-1232's card, so its known reds apply here too once gated (the fallback font of "▾", "←", "→").
-- Until then the lists are held by tests: their names and counts (`the_three_contents_hold_the_boards_lists_and_counts`), and the first and last command of each (the scene's test).
+**DW-1234.** Gated since 2026-11-14 (lane gbb-d): the scene opens the text document in the office editor's frame
+(`viewers/FRAMES.md`, "The office editor's frame"), nothing selected, the dialog in front; goldens in both themes,
+geometry 0 failing; open pixel lines: `ol-close` (both themes) and three outline rows in dark, all under the scrim.
+- The dialog shares DW-1232's card.
+- The lists are also held by tests: their names and counts (`the_three_contents_hold_the_boards_lists_and_counts`), and the first and last command of each (the scene's test).
 
 ## The engine calls each action needs
 

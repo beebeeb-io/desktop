@@ -261,8 +261,7 @@ fn in_the_smallest_window_the_card_stays_inside_it_and_the_lists_scroll() {
     );
 }
 
-/// DW-1234 has no golden (the document editor behind it is not built), so its scene is held by
-/// this test instead of the frame gate: a document open, the dialog in front, the editor's four
+/// DW-1234's scene, held here besides the frame gate: a document open, the dialog in front, the editor's four
 /// lists in the board's order with the board's first and last commands, and Close and Esc go
 /// back to the document.
 #[test]
