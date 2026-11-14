@@ -522,11 +522,19 @@ fn new_goes_to_files_with_its_new_menu_open() {
     );
 }
 
+/// Presses "Remove all from this PC" and lets the ask settle: the dialog comes in with an animation, and a press
+/// before it is done reaches nothing (a frame at 0.0 seconds never ends it).
+fn open_ask(rt: &mut Runtime<State>) {
+    click(rt, "btn-remove-all-from-this-pc");
+    poll(rt);
+    rt.settle_all();
+    rt.frame(0.016);
+}
+
 #[test]
 fn remove_all_shows_its_ask_and_removes_only_on_the_yes() {
     let (mut rt, _, _) = recording(scenes::dw_0715);
-    click(&mut rt, "btn-remove-all-from-this-pc");
-    poll(&mut rt);
+    open_ask(&mut rt);
     assert!(has(&rt, "dlg"), "the ask is on screen");
     assert_eq!(info(&rt, "dlg").role, "dialog");
     assert_eq!(text(&rt, "dlg-title"), "Remove all from this PC?");
@@ -541,8 +549,7 @@ fn remove_all_shows_its_ask_and_removes_only_on_the_yes() {
     assert!(!rt.state.this_pc.confirm_remove_all, "Cancel was heard");
     assert!(!has(&rt, "dlg"));
     assert_eq!(rt.state.this_pc.kept_count(), 3);
-    click(&mut rt, "btn-remove-all-from-this-pc");
-    poll(&mut rt);
+    open_ask(&mut rt);
     let selected = rt.state.this_pc.selected;
     press(&mut rt, Key::Down);
     assert_eq!(rt.state.this_pc.selected, selected, "the list is under the ask");
@@ -551,16 +558,14 @@ fn remove_all_shows_its_ask_and_removes_only_on_the_yes() {
     assert_eq!(rt.state.this_pc.kept_count(), 3);
 
     // The keyboard reaches the ask's own buttons: Tab to Cancel, Enter presses it.
-    click(&mut rt, "btn-remove-all-from-this-pc");
-    poll(&mut rt);
+    open_ask(&mut rt);
     tab_to(&mut rt, "btn-remove-all-cancel");
     press(&mut rt, Key::Enter);
     assert!(!has(&rt, "dlg"), "Enter on Cancel says no");
     assert_eq!(rt.state.this_pc.kept_count(), 3);
 
     // Yes, from the keyboard: everything goes, the ask with it.
-    click(&mut rt, "btn-remove-all-from-this-pc");
-    poll(&mut rt);
+    open_ask(&mut rt);
     tab_to(&mut rt, "btn-remove-all-yes");
     press(&mut rt, Key::Enter);
     assert!(!has(&rt, "dlg"));
