@@ -137,6 +137,13 @@ impl State {
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let landed = std::mem::take(&mut s.actions.link.landed);
     let any = !landed.is_empty();
+    // Nothing landed and the source has no link on its way any more: the answer of that press was dropped with
+    // its session (a lock and an unlock between two frames reset nothing here). The press is forgotten, so the
+    // next one is asked for.
+    if !any && s.link_on_its_way() && !s.actions.source.link_pending() {
+        s.actions.link.asked = None;
+        s.actions.link.share = None;
+    }
     for (action, answer) in landed {
         let asked = match action {
             Action::ShareLink => None,

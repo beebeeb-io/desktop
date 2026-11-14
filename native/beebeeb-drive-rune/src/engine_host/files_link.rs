@@ -203,6 +203,12 @@ impl<C: CredentialStores> LinkCalls<C> {
         }
     }
 
+    /// Is a link still on its way for the session that is here? Asked after [`Self::take`], which drops the
+    /// marks of an earlier session.
+    pub fn pending(&self) -> bool {
+        !self.in_flight.is_empty()
+    }
+
     /// What the links that were asked for answered since the last call, oldest first.
     pub fn take(&mut self) -> Vec<Change> {
         self.pump();

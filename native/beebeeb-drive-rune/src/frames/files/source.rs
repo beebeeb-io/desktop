@@ -61,8 +61,7 @@ pub enum ActionError {
     /// This system cannot do it at all (Free up space for a selection, off Windows): nothing was changed, and
     /// Try again would change nothing either.
     NotOnThisSystem,
-    /// This app cannot do it yet (a link to a folder or to several items, a view-only link): nothing was sent,
-    /// and Try again would change nothing.
+    /// This app cannot do it yet (a link to a folder, to several items, a view-only link): nothing was sent.
     NotYet,
     /// Copy link left it: the file already has a link, and that link cannot be copied again yet. No second link
     /// was made, and Try again would change nothing.
@@ -273,9 +272,8 @@ pub trait FilesSource: Send + 'static {
     /// `taken`: the folder's names as the window shows them.
     fn duplicate(&mut self, items: &[DriveItem], taken: &[&str]) -> Result<(), ActionError>;
     fn keep_offline(&mut self, items: &[DriveItem], keep: bool) -> Result<(), ActionError>;
-    /// Put the share link of these on the clipboard. `Ok`: it is there. From a source that answers later, `Ok`
-    /// is "accepted": the link, or why there is none, arrives through [`FilesSource::changes`] (`Change::Link`),
-    /// and the WINDOW puts it on the clipboard then (only a handler's `Tx` can).
+    /// Put the share link of these on the clipboard. `Ok`: it is there, or (a source that answers later)
+    /// accepted: the link arrives as `Change::Link` and the WINDOW copies it (only a handler's `Tx` can).
     fn copy_link(&mut self, items: &[DriveItem]) -> Result<(), ActionError>;
     /// Open these files in their apps (downloaded and decrypted on this PC first).
     fn open(&mut self, items: &[DriveItem]) -> Result<(), ActionError>;
@@ -298,9 +296,8 @@ pub trait FilesSource: Send + 'static {
     /// What accepted actions changed since the last call, oldest first.
     fn changes(&mut self) -> Vec<Change>;
     /// Does this source answer `keep_offline`, `free_up_space`, `trash`, `restore`, `copy_link` and `share_link`
-    /// LATER (`Ok` is "accepted", what happened arrives through [`FilesSource::changes`] as `Change::Local`,
-    /// `Change::Trash`, `Change::Link` or `Change::Failed`)? Then the window draws nothing of the change before that, and asks `changes` every
-    /// frame. Default: answered in the call.
+    /// LATER (`Ok` is "accepted"; what happened arrives through [`FilesSource::changes`])? Then the window draws
+    /// nothing of the change before that, and asks `changes` every frame. Default: answered in the call.
     fn answers_later(&self) -> bool {
         false
     }
@@ -317,9 +314,12 @@ pub trait FilesSource: Send + 'static {
     // ---- The action dialogs (lane files-actions). Each has a default for a source that knows
     // nothing: no sample data in a build that ships, and every action refused. ----
 
-    /// Make a link to these with these options and put it on the clipboard (DW-0407). The link is not drawn
-    /// anywhere. A source that answers in the call never hands it to the window; one that answers later hands
-    /// it over once, as a `link::LinkText` in `Change::Link`, for the clipboard only (see `copy_link`).
+    /// Is an accepted link still unanswered? `false`: its answer was dropped, and the window forgets the press.
+    fn link_pending(&self) -> bool {
+        true
+    }
+    /// Make a link to these with these options and put it on the clipboard (DW-0407). The link is never drawn;
+    /// a source that answers later hands it over once, in `Change::Link`, for the clipboard only.
     fn share_link(
         &mut self,
         _items: &[DriveItem],

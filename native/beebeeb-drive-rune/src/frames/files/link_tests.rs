@@ -32,6 +32,8 @@ struct Spy {
     asked: Arc<Mutex<Vec<(Action, Vec<String>)>>>,
     /// The next link is refused at once with this.
     refuse: Arc<Mutex<Option<ActionError>>>,
+    /// The source has no link on its way any more (the answer of the last press was dropped).
+    dropped: Arc<Mutex<bool>>,
 }
 
 impl Spy {
@@ -82,6 +84,7 @@ impl FilesSource for Later {
     fn open_in_file_explorer(&mut self, _: Option<&str>) -> R { Ok(()) }
     fn changes(&mut self) -> Vec<Change> { std::mem::take(&mut self.0.later.lock().unwrap()) }
     fn answers_later(&self) -> bool { true }
+    fn link_pending(&self) -> bool { !*self.0.dropped.lock().unwrap() }
     fn wake_after(&mut self, _: Duration) {}
 }
 
@@ -225,6 +228,38 @@ fn while_a_link_is_on_its_way_no_second_one_is_asked_for_and_its_answer_is_the_f
     // Answered: the next press asks again.
     rt.update(|s, tx| assert!(s.copy_link(tx)));
     assert_eq!(spy.asked(), [(Action::CopyLink, vec![ids[1].clone()])]);
+}
+
+#[test]
+fn a_press_whose_answer_was_dropped_does_not_keep_the_next_one_from_being_asked() {
+    let (mut rt, spy, clipboard, ids) = window();
+    rt.update(|s, tx| assert!(s.copy_link(tx)));
+    spy.asked();
+    // A lock and an unlock between two frames: the source dropped the answer, and nothing reset the window.
+    *spy.dropped.lock().unwrap() = true;
+    frame(&mut rt);
+    assert_eq!(rt.state.actions.toast, None, "nothing is said of it");
+    assert_eq!(copied(&clipboard), BEFORE);
+    *spy.dropped.lock().unwrap() = false;
+    rt.update(|s, tx| assert!(s.copy_link(tx)));
+    assert_eq!(
+        spy.asked(),
+        [(Action::CopyLink, vec![ids[0].clone()])],
+        "the next press was refused as still on its way"
+    );
+    // The same for the dialog's link.
+    spy.answer(Action::CopyLink, Ok(LINK));
+    frame(&mut rt);
+    rt.update(|s, tx| {
+        assert!(s.begin_share());
+        s.share_copy_link(tx);
+    });
+    spy.asked();
+    *spy.dropped.lock().unwrap() = true;
+    frame(&mut rt);
+    *spy.dropped.lock().unwrap() = false;
+    rt.update(|s, tx| assert!(s.copy_link(tx)));
+    assert_eq!(spy.asked(), [(Action::CopyLink, vec![ids[0].clone()])]);
 }
 
 #[test]

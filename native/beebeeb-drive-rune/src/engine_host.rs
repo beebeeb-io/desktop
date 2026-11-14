@@ -616,6 +616,10 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.links.copy(items)
     }
 
+    fn link_pending(&self) -> bool {
+        self.links.pending()
+    }
+
     /// The Share dialog's link: as `copy_link`, a new link with the choices.
     fn share_link(
         &mut self,

@@ -388,12 +388,15 @@ fn a_link_pressed_before_a_lock_is_not_asked_for_after_the_unlock() {
     let (release, ended) = hold_next_call(&mut source);
     assert_eq!(source.copy_link(&file(NOTES)), Ok(()));
 
+    assert!(source.link_pending(), "a link is on its way");
     let _ = engine.lock();
     unlock(&engine, &fake.first_phrase);
     release.send(()).expect("the worker waits");
     ended.recv_timeout(WAIT).expect("the call ended");
     assert_eq!(sent(&fake), [], "the same account, another session: not sent");
     assert_eq!(answers(&mut source), []);
+    // Its answer was dropped: the source says nothing is on its way, so the window forgets the press.
+    assert!(!source.link_pending());
 
     // Nothing of the earlier session stands in the way of the next press.
     copy_now(&mut source, NOTES);
