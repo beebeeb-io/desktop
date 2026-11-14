@@ -583,7 +583,11 @@ fn a_refused_account_switch_stays_and_an_unknown_result_is_read_again() {
     fake.put_mode.store(UNREADABLE, Ordering::SeqCst);
     let before = asked(&fake.fake, SWITCHES);
     source.set_alert(0, 0, false);
-    assert_eq!(settle(&mut source), [ALERT_UNKNOWN]);
+    assert_eq!(
+        settle(&mut source),
+        [ALERT_UNKNOWN, ALERT_CHECKED],
+        "checking, and then the check's answer: the first toast does not stand for ever"
+    );
     assert_eq!(
         asked(&fake.fake, SWITCHES),
         before + 1,

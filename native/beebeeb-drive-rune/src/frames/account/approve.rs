@@ -530,11 +530,16 @@ pub fn code_pane(a: &Approve, t: &Theme) -> El {
 }
 
 /// What lies under the review and its results, as the board draws it: Sign-in and security,
-/// its Devices list.
+/// its Devices list. The number beside "Devices and sessions" is the one the Security page shows
+/// (`security_facts`): drawn only when the source has counted them, never a number nobody read.
 fn behind(source: &dyn AccountSource, t: &Theme) -> El {
     let opens = |index: usize, it: Row, frame: &'static str| {
         set::item(0, index, &it.link(true), Vec::new(), t).on_press(move |s: &mut State| super::go(s, frame))
     };
+    let mut devices = Row::new(Lead::Icon(&icons::DEVICE_PHONE), "Devices and sessions");
+    if let super::source::Count::Known(count) = source.security_facts().sessions {
+        devices = devices.tail(Tail::Value(count.to_string()));
+    }
     set::pane(
         vec![
             set::heading("Sign-in and security", None, None, t),
@@ -542,12 +547,7 @@ fn behind(source: &dyn AccountSource, t: &Theme) -> El {
                 0,
                 Some("Devices"),
                 vec![
-                    opens(
-                        0,
-                        Row::new(Lead::Icon(&icons::DEVICE_PHONE), "Devices and sessions")
-                            .tail(Tail::Value(source.security().sessions.to_string())),
-                        "DW-A55",
-                    ),
+                    opens(0, devices, "DW-A55"),
                     opens(
                         1,
                         Row::new(Lead::Icon(&icons::SCAN), "Approve a sign-in").sub("Let another device sign in"),
