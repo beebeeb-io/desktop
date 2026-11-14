@@ -51,6 +51,7 @@ mod files_link;
 mod files_trash;
 pub mod guide;
 pub mod open;
+pub mod photos;
 pub mod search;
 pub mod settings;
 pub mod shared;
@@ -60,7 +61,10 @@ pub mod sync;
 #[cfg(test)]
 pub(crate) mod tests;
 pub mod this_pc;
+pub mod thumbs;
 pub mod trash;
+// The first run's steps that have an engine function behind them (`setup`).
+pub mod setup;
 pub mod tray;
 // An open file: its facts from the local state, its content decrypted in memory (`viewer`).
 pub mod viewer;
@@ -255,6 +259,9 @@ pub struct LiveEngine<C: CredentialStores> {
     status: Mutex<EngineStatusView>,
     /// One start at a time, and the name of the folder it asked for ([`sync::StartWorker`]).
     starts: sync::StartWorker,
+    /// Whether this PC still has its first run to do. Not due until the app's start reads it
+    /// ([`LiveEngine::wire_first_run`]): a handle nobody wired never shows one.
+    first_run: Arc<setup::FirstRun>,
 }
 
 impl<C: CredentialStores> LiveEngine<C> {
@@ -265,6 +272,42 @@ impl<C: CredentialStores> LiveEngine<C> {
             messages: Mutex::new(messages),
             status: Mutex::new(EngineStatusView::default()),
             starts: sync::StartWorker::default(),
+            first_run: Arc::default(),
+        }
+    }
+
+    /// At the app's start, before the window's first frame: read whether this PC still has its first run to do
+    /// (the settings file, once). From then on a session that is signed in and unlocked shows the first-run steps
+    /// until they end ([`EngineActions::session`]).
+    pub fn wire_first_run(&self) {
+        self.first_run.read(&*self.engine);
+    }
+
+    /// What the first-run source asks of the shell: the one start path, the folder opener, the start-at-login
+    /// entry and the gate's flag.
+    pub fn setup_hooks(self: &Arc<Self>, platform: Arc<dyn crate::shell::platform::Platform>) -> setup::Hooks
+    where
+        C: 'static,
+    {
+        let live = self.clone();
+        setup::Hooks {
+            start_sync: Arc::new(move || live.start_sync().is_ok()),
+            open_folder: |folder| open_path(folder).is_ok(),
+            platform,
+            first_run: self.first_run.clone(),
+            explorer_step: cfg!(target_os = "windows"),
+            look_later: {
+                let engine = self.engine.clone();
+                Arc::new(move |after| {
+                    let engine = engine.clone();
+                    let _ = std::thread::Builder::new()
+                        .name("first-run-look".into())
+                        .spawn(move || {
+                            std::thread::sleep(after);
+                            engine.wake_host();
+                        });
+                })
+            },
         }
     }
 
@@ -323,7 +366,11 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     /// The gate from the handle's view (read without waiting: the UI thread asks it on every frame).
     fn session(&self) -> Session {
         self.drain();
-        let gate = map_gate_shell(self.engine.view().gate);
+        let gate = match map_gate_shell(self.engine.view().gate) {
+            // Signed in and unlocked, and this PC has not had its first run: its steps, not the main window.
+            ShellGate::Ready if self.first_run.due() => ShellGate::FirstRun,
+            gate => gate,
+        };
         // Whose session: the email is known from the stored session at start, the user id only once the
         // server named it in this run. One of them, always the same one for one account in one run.
         let account = self
@@ -368,9 +415,9 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
         if self.engine.view().gate != EngineGate::Ready {
             return Err(actions::ActionError::NotAvailable("not signed in and unlocked"));
         }
-        let (engine, folder) = (self.engine.clone(), self.starts.folder());
+        let (engine, folder, first_run) = (self.engine.clone(), self.starts.folder(), self.first_run.clone());
         self.starts
-            .ask(move || sync::start_sync_now(&engine, &folder))
+            .ask(move || sync::start_sync_now(&engine, &folder, &first_run))
             .map(|_| ())
             .map_err(|_| actions::ActionError::Failed("could not start a thread".into()))
     }
@@ -505,6 +552,18 @@ fn not_wired(what: &str) -> ActionError {
     ActionError::Unavailable
 }
 
+/// The path the system is asked to open for the item `id`, read under the account-bound handle: below the
+/// account's folder on this PC, and never a file of a kind that is not opened for safety. The ONE check behind
+/// every hand-over of a file to another app (the Files window's Open, a viewer's "Open in another app…").
+fn path_the_system_opens(db: &StateDb, sync_root: &Path, id: &str) -> Result<std::path::PathBuf, ActionError> {
+    let entry = file_ops::resolve(db, id).map_err(map_drive_err)?;
+    let path = file_ops::item_path(sync_root, &entry).map_err(map_drive_err)?;
+    if !entry.is_dir() && file_ops::is_dangerous_executable(&path) {
+        return Err(ActionError::Failed);
+    }
+    Ok(path)
+}
+
 /// Map a `DriveError` to the UI's `ActionError`.
 fn map_drive_err(e: DriveError) -> ActionError {
     match e {
@@ -633,16 +692,10 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     fn open(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
         // The paths are resolved under the handle; the OS is asked after it answered.
         let paths = self.local(|db, sync_root| {
-            let mut paths = Vec::with_capacity(items.len());
-            for item in items {
-                let entry = file_ops::resolve(db, &item.id).map_err(map_drive_err)?;
-                let path = file_ops::item_path(sync_root, &entry).map_err(map_drive_err)?;
-                if !entry.is_dir() && file_ops::is_dangerous_executable(&path) {
-                    return Err(ActionError::Failed);
-                }
-                paths.push(path);
-            }
-            Ok(paths)
+            items
+                .iter()
+                .map(|item| path_the_system_opens(db, sync_root, &item.id))
+                .collect::<Result<Vec<_>, _>>()
         })?;
         paths.iter().try_for_each(|path| open_path(path))
     }

@@ -447,6 +447,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= crate::frames::trash::poll(s, tx);
     // Shared: the same rule (`frames::shared::poll`).
     changed |= crate::frames::shared::poll(s, tx);
+    // Photos: the same rule (`frames::photos::poll`); the library is read when the section opens.
+    changed |= crate::frames::photos::poll(s, tx);
     // Search: a gate or account change drops its names; opening it and a new query ask the source; answers come in.
     changed |= crate::frames::search::poll(s, tx);
     // This PC's answers and refusals (`frames::this_pc::poll`).
@@ -457,9 +459,26 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= drain_signin_intents(s);
     // "Open my Beebeeb" at the end of the first run starts the first-time guide (DW-0380).
     changed |= crate::frames::signin::setup::guide::poll(s, tx);
+    // The first run's answers (File Explorer finished, a switch was set, the first run ended).
+    changed |= crate::frames::signin::setup::poll(s, tx);
     // The session and the tray: the engine may have changed since the last frame.
     let gate_before = s.shell.app.gate();
+    // (Only while a first run shows: whose it is.)
+    let first_run_of = s.setup.is_some().then(|| s.shell.app.account().map(str::to_string));
     changed |= s.shell.refresh();
+    let first_run_shows = s.shell.app.gate() == super::app::GateState::FirstRun;
+    if s.shell.app.gate() == gate_before && s.setup_source.is_some() {
+        // Another account under the same gate: the first run is the new session's, from its first step. And a
+        // gate that was moved by a refresh outside this poll (the b's menu) still gets, or loses, its first run.
+        let another_account = first_run_of.is_some_and(|before| before.as_deref() != s.shell.app.account());
+        if another_account || s.setup.is_some() != first_run_shows {
+            start_first_run(s);
+            if first_run_shows {
+                s.shell.start_sync();
+            }
+            changed = true;
+        }
+    }
     let read_by_the_gate = s.shell.app.gate() != gate_before;
     if read_by_the_gate {
         on_gate_change(s);
@@ -468,6 +487,10 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // A refused sync start says so, once per attempt (the refusal modal, Q3).
     changed |= open_sync_refusal(s);
     // The first sync's files, once a check finished (R1.1).
+    // Photos reads its library again once a check finished (`frames::photos::after_a_check`).
+    if s.shell.check_finished {
+        crate::frames::photos::after_a_check(s);
+    }
     changed |= read_again_after_a_check(s);
     // A lock, a sign-out or another account ends what was open inside the account sections: a
     // review of another device's sign-in, a typed code or password, a Windows Hello that is up.
@@ -627,15 +650,31 @@ fn on_gate_change(s: &mut State) {
     s.listing = listing;
     s.list_error = list_error;
     s.selected = None;
-    if s.shell.app.gate() == super::app::GateState::Ready {
+    let gate = s.shell.app.gate();
+    start_first_run(s);
+    // The first run's File Explorer step is about the sync folder: a start is asked for with it, as when the main
+    // window opens (the start worker holds it back until the first run has a folder). A start refused during
+    // the first run is said by that step and by the refusal modal (`open_sync_refusal`).
+    if gate == super::app::GateState::Ready || gate == super::app::GateState::FirstRun {
         s.shell.start_sync();
     }
 }
 
+/// The first run's state follows the gate, in the running app (a scene sets its own): made for the session that
+/// is signed in when the gate shows the first run, dropped the moment the gate shows anything else, and made
+/// again when the account under it changed. Nothing of one session's first run is drawn or pressed in another.
+fn start_first_run(s: &mut State) {
+    let Some(make) = &s.setup_source else {
+        return;
+    };
+    s.setup =
+        (s.shell.app.gate() == super::app::GateState::FirstRun).then(|| crate::frames::signin::setup::Ui::new(make()));
+}
+
 /// The refusal modal (the owner's ruling Q3 on the sync-start contract): it opens once per refused start attempt,
-/// over whatever the window shows, only while the gate is Ready. An attempt refused while the gate is closed is
-/// never shown later (a stale refusal); another dialog in front keeps it waiting until that one closes. `true`: it
-/// opened.
+/// over whatever the window shows, only while the gate is Ready or the first run shows ("the first run uses the
+/// same modal", S2). An attempt refused while the gate is closed is never shown later (a stale refusal); another
+/// dialog in front keeps it waiting until that one closes. `true`: it opened.
 fn open_sync_refusal(s: &mut State) -> bool {
     let Some(refusal) = s.shell.actions.sync_refusal() else {
         return false;
@@ -643,7 +682,8 @@ fn open_sync_refusal(s: &mut State) -> bool {
     if s.shell.refusal_seen == Some(refusal.attempt) {
         return false;
     }
-    if s.shell.app.gate() != super::app::GateState::Ready {
+    let gate = s.shell.app.gate();
+    if gate != super::app::GateState::Ready && gate != super::app::GateState::FirstRun {
         s.shell.refusal_seen = Some(refusal.attempt);
         return false;
     }

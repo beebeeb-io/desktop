@@ -153,9 +153,9 @@ const LITERALS_ALLOWED: &[(&str, &[&str], &str)] = &[
 const NAMING_ALLOWED: [(&str, usize, &str); 4] = [
     (
         "crates/beebeeb-engine/src/identity.rs",
-        7,
-        "where the two values are made (`pub static REAL`, `pub static TEST`) and compared (`is_real`, the bundle \
-         identifier's lookup)",
+        9,
+        "where the two values are made (`pub static REAL`, `pub static TEST`), compared (`is_real`, the bundle \
+         identifier's lookup) and told apart (`other_build`)",
     ),
     ("real_app.rs", 1, "the Tauri shell is the real app: `APP`"),
     (
@@ -182,7 +182,7 @@ const CONSUMERS: &[(&str, &str, usize)] = &[
     ("config/store.rs", "config_dir_name", 1),
     ("engine_bridge/staging_bases.rs", "config_dir_name", 1),
     ("free_up_space.rs", "config_dir_name", 1),
-    ("identity.rs", "is_real", 1),
+    ("identity.rs", "is_real", 2),
     ("identity.rs", "state_dir_in", 1),
     ("ipc_socket.rs", "daemon_socket_name", 1),
     ("ipc_socket/hydrate.rs", "scratch_dir_in", 1),

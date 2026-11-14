@@ -280,11 +280,9 @@ fn a_row_that_names_no_size_is_held_to_the_limit_once_its_bytes_are_counted() {
     signed_in(&engine, &fake.first);
     let _state = local_state(&engine, &fake.first);
     fake.no_size.store(true, Ordering::SeqCst);
-    // Nothing says how large it is before it is downloaded: it is, and then it is not handed over.
-    assert_eq!(
-        kind(open(&engine, NOTE, 3_499)),
-        OpenFileError::TooLarge { size: 3_500 }
-    );
+    // Nothing says how large it is before it is downloaded: it is, and then it is not handed over. No size is
+    // claimed for it.
+    assert_eq!(kind(open(&engine, NOTE, 3_499)), OpenFileError::OverLimit);
     assert_eq!(chunk_requests(&fake), 4);
     assert_eq!(open(&engine, NOTE, 3_500).unwrap().bytes.len(), 3_500);
 }
@@ -337,6 +335,25 @@ fn signed_out_or_locked_nothing_is_read_and_nothing_is_asked() {
     assert_eq!(engine.open_file_facts(NOTE), Err(OpenFileError::NotSignedIn));
     assert_eq!(kind(open(&engine, NOTE, NO_LIMIT)), OpenFileError::NotSignedIn);
     assert_eq!(fake.api.requests().len(), 0, "nothing was asked of Beebeeb");
+}
+
+#[test]
+fn a_computer_where_nothing_has_synced_yet_says_that_and_never_that_the_file_is_not_there() {
+    let fake = fake("nothingyet");
+    let engine = engine_at(&fake.api.base);
+    // Signed in, and no local state was ever made here.
+    signed_in(&engine, &fake.first);
+    assert_eq!(engine.open_file_facts(NOTE), Err(OpenFileError::NothingSynced));
+    assert_eq!(
+        local(&engine, NOTE, NO_LIMIT).map(|_| ()).unwrap_err(),
+        OpenFileError::NothingSynced
+    );
+    assert_eq!(OpenFileError::NothingSynced.kind(), "nothing_synced");
+    assert_eq!(fake.api.requests().len(), 0, "nothing was asked of Beebeeb");
+    // Once it has synced, a file it does not list is "no such file".
+    let _state = local_state(&engine, &fake.first);
+    assert!(engine.open_file_facts(NOTE).is_ok());
+    assert_eq!(engine.open_file_facts("no-such-file"), Err(OpenFileError::NotFound));
 }
 
 #[test]
@@ -442,4 +459,326 @@ fn content_decrypted_across_a_session_change_is_never_handed_over() {
     assert_eq!(kind(result), OpenFileError::NotSignedIn);
     // The same account, signed in again, opens it.
     assert_eq!(open(&engine, NOTE, NO_LIMIT).unwrap().bytes.len(), 3_500);
+}
+
+// ── The copy on this computer ───────────────────────────────────────────────────────────────────────
+
+/// The account's folder on this computer for a test, with the first account's rows in the local state; the row of
+/// `NOTE` says `status`, and the file is on disk when `on_disk` names its content.
+fn with_folder(
+    engine: &TestEngine,
+    owner: &FakeAccount,
+    status: FileStatus,
+    on_disk: Option<&[u8]>,
+) -> (tempfile::TempDir, tempfile::TempDir, StateDb) {
+    let (dir, db) = local_state(engine, owner);
+    db.set_status(NOTE, status).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    engine.use_sync_root_for_test(root.path().to_path_buf());
+    if let Some(content) = on_disk {
+        let folder = root.path().join("Invented folder").join("Deeper");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("Invented note.txt"), content).unwrap();
+    }
+    (dir, root, db)
+}
+
+fn local(engine: &TestEngine, id: &str, max: u64) -> Result<LocalCopy, OpenFileError> {
+    engine.open_local_copy_in_memory(id, max, &AtomicBool::new(false))
+}
+
+fn opened(result: Result<LocalCopy, OpenFileError>) -> OpenedLocalCopy {
+    match result.expect("the copy is read") {
+        LocalCopy::Opened(copy) => copy,
+        LocalCopy::NotHere => panic!("the copy on this computer was not read"),
+    }
+}
+
+#[test]
+fn a_file_kept_on_this_computer_opens_from_its_copy_with_beebeeb_out_of_reach() {
+    let fake = fake("local");
+    // A closed loopback port: nothing can be downloaded.
+    let engine = engine_at("http://127.0.0.1:9");
+    signed_in(&engine, &fake.first);
+    let _kept = with_folder(&engine, &fake.first, FileStatus::Local, Some(&note_text()));
+
+    assert_eq!(engine.open_file_facts(NOTE).unwrap().on_this_pc, Some(OnThisPc::InSync));
+    let copy = opened(local(&engine, NOTE, NO_LIMIT));
+    assert_eq!(&*copy.bytes, &note_text()[..]);
+    assert_eq!(copy.copy, OnThisPc::InSync);
+    assert_eq!(copy.session, engine.session_turn());
+    // A `{:?}` prints how many bytes, never one.
+    let printed = format!("{copy:?}");
+    assert!(printed.contains("3500") && !printed.contains("abc"), "{printed}");
+}
+
+#[test]
+fn a_change_made_here_that_is_not_sent_yet_is_what_the_copy_answers_and_it_says_so() {
+    let fake = fake("unsent");
+    let engine = engine_at(&fake.api.base);
+    signed_in(&engine, &fake.first);
+    // The row says an upload is on its way; the file on disk is the edited one, not what Beebeeb has.
+    let _kept = with_folder(
+        &engine,
+        &fake.first,
+        FileStatus::Uploading,
+        Some(b"edited here, not sent yet"),
+    );
+    assert_eq!(
+        engine.open_file_facts(NOTE).unwrap().on_this_pc,
+        Some(OnThisPc::NotSentYet)
+    );
+    let copy = opened(local(&engine, NOTE, NO_LIMIT));
+    assert_eq!(&*copy.bytes, b"edited here, not sent yet");
+    assert_eq!(copy.copy, OnThisPc::NotSentYet);
+    assert_eq!(fake.api.requests().len(), 0, "nothing was asked of Beebeeb");
+}
+
+#[test]
+fn a_copy_whose_length_is_not_the_synced_size_is_not_called_in_sync() {
+    let fake = fake("drift");
+    let engine = engine_at(&fake.api.base);
+    signed_in(&engine, &fake.first);
+    // The row still says in sync (the change was not noticed yet): the copy's own length says otherwise.
+    let _kept = with_folder(
+        &engine,
+        &fake.first,
+        FileStatus::Local,
+        Some(b"shorter than 3,500 bytes"),
+    );
+    assert_eq!(opened(local(&engine, NOTE, NO_LIMIT)).copy, OnThisPc::NotSentYet);
+}
+
+#[test]
+fn a_file_that_is_not_wholly_here_is_not_read_and_nothing_is_fetched() {
+    let fake = fake("nothere");
+    let engine = engine_at(&fake.api.base);
+    signed_in(&engine, &fake.first);
+    // Each state that is not a copy to show, with a file on disk all the same: it is not read.
+    for status in [
+        FileStatus::CloudOnly,
+        FileStatus::Downloading,
+        FileStatus::Conflict,
+        FileStatus::Error,
+        FileStatus::Trashing,
+    ] {
+        let _kept = with_folder(&engine, &fake.first, status.clone(), Some(&note_text()));
+        let facts = engine.open_file_facts(NOTE).unwrap();
+        assert_eq!(facts.on_this_pc, None, "{status:?}");
+        // Two versions, or a sync that failed: the facts say this computer's copy is not settled with Beebeeb's.
+        assert_eq!(
+            facts.unsettled_here,
+            matches!(status, FileStatus::Conflict | FileStatus::Error),
+            "{status:?}"
+        );
+        assert!(
+            matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::NotHere)),
+            "{status:?}"
+        );
+    }
+    // The row says here, and no file is on disk (or a folder is where the file should be): not read.
+    let _kept = with_folder(&engine, &fake.first, FileStatus::Local, None);
+    assert!(matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::NotHere)));
+    let (_dir, root, _db) = with_folder(&engine, &fake.first, FileStatus::Local, None);
+    std::fs::create_dir_all(root.path().join("Invented folder/Deeper/Invented note.txt")).unwrap();
+    assert!(matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::NotHere)));
+    assert_eq!(fake.api.requests().len(), 0, "nothing was asked of Beebeeb");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_where_the_file_should_be_is_never_followed() {
+    let fake = fake("link");
+    let engine = engine_at(&fake.api.base);
+    signed_in(&engine, &fake.first);
+    let (_dir, root, _db) = with_folder(&engine, &fake.first, FileStatus::Local, None);
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::write(elsewhere.path().join("other.txt"), b"another file's words").unwrap();
+    let folder = root.path().join("Invented folder").join("Deeper");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::os::unix::fs::symlink(elsewhere.path().join("other.txt"), folder.join("Invented note.txt")).unwrap();
+    assert!(matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::NotHere)));
+    // The check of the file itself, without the check of its name before it: a link and a folder are not a plain
+    // file, the file the link leads to is.
+    assert_eq!(wholly_here(&folder.join("Invented note.txt")), None);
+    assert_eq!(wholly_here(&folder), None);
+    assert_eq!(wholly_here(&elsewhere.path().join("other.txt")), Some(20));
+}
+
+/// What is at the path may change between the check of its attributes and the open: the read asks the file it
+/// opened, and never waits on something that is not a plain file.
+#[cfg(unix)]
+#[test]
+fn what_was_put_at_the_path_after_the_check_is_asked_again_through_the_open_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let (never, always) = (AtomicBool::new(false), || true);
+    // A pipe nobody writes to: an open or a read of it would wait for ever.
+    let pipe = dir.path().join("pipe");
+    let name = std::ffi::CString::new(pipe.to_str().unwrap()).unwrap();
+    // SAFETY: `name` is a NUL-terminated path that lives for the call.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    assert_eq!(wholly_here(&pipe), None);
+    let (said, heard) = std::sync::mpsc::channel();
+    let at = pipe.clone();
+    std::thread::spawn(move || {
+        let (never, always) = (AtomicBool::new(false), || true);
+        let _ = said.send(matches!(
+            read_bounded(&at, 20, 5_000, &never, &always),
+            Err(ReadStopped::Unreadable)
+        ));
+    });
+    assert_eq!(
+        heard.recv_timeout(std::time::Duration::from_secs(20)),
+        Ok(true),
+        "a pipe is refused at once, never waited on"
+    );
+    // A link to a real file: the read does not follow it.
+    std::fs::write(dir.path().join("other.txt"), b"another file's words").unwrap();
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink(dir.path().join("other.txt"), &link).unwrap();
+    assert!(matches!(
+        read_bounded(&link, 20, 5_000, &never, &always),
+        Err(ReadStopped::Unreadable)
+    ));
+    // A folder.
+    assert!(matches!(
+        read_bounded(dir.path(), 20, 5_000, &never, &always),
+        Err(ReadStopped::Unreadable)
+    ));
+    // What core reads of an entry, each alone: a folder, a link or special file, bytes that are not on this
+    // computer (which no file on this test's file system can say). Only none of the three is read.
+    assert!(is_read_here(false, false, false));
+    assert!(!is_read_here(true, false, false));
+    assert!(!is_read_here(false, true, false));
+    assert!(!is_read_here(false, false, true));
+    // The plain file is read.
+    assert_eq!(
+        read_bounded(&dir.path().join("other.txt"), 20, 5_000, &never, &always)
+            .ok()
+            .map(|bytes| bytes.len()),
+        Some(20)
+    );
+}
+
+#[test]
+fn a_copy_with_a_change_that_is_not_sent_and_cannot_be_read_is_never_answered_as_not_here() {
+    let fake = fake("unsentunread");
+    let engine = engine_at(&fake.api.base);
+    signed_in(&engine, &fake.first);
+    // The row says a change made here is on its way, and no file is where it says: "not here" would send the
+    // caller to the older version Beebeeb has.
+    let _kept = with_folder(&engine, &fake.first, FileStatus::Uploading, None);
+    assert_eq!(
+        local(&engine, NOTE, NO_LIMIT).map(|_| ()).unwrap_err(),
+        OpenFileError::CopyNotReadable
+    );
+    // A folder where the file should be: the same.
+    let (_dir, root, _db) = with_folder(&engine, &fake.first, FileStatus::Uploading, None);
+    std::fs::create_dir_all(root.path().join("Invented folder/Deeper/Invented note.txt")).unwrap();
+    assert_eq!(
+        local(&engine, NOTE, NO_LIMIT).map(|_| ()).unwrap_err(),
+        OpenFileError::CopyNotReadable
+    );
+    // The same row for a copy in sync is "not here": Beebeeb has that version, the download is the way.
+    let _kept = with_folder(&engine, &fake.first, FileStatus::Local, None);
+    assert!(matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::NotHere)));
+    assert_eq!(fake.api.requests().len(), 0, "nothing was asked of Beebeeb");
+    // In sync, the facts do not call the copy unsettled.
+    assert!(!engine.open_file_facts(NOTE).unwrap().unsettled_here);
+}
+
+#[test]
+fn a_copy_over_the_limit_is_refused_from_its_length_and_at_the_limit_it_opens() {
+    let fake = fake("localbig");
+    let engine = engine_at(&fake.api.base);
+    signed_in(&engine, &fake.first);
+    let _kept = with_folder(&engine, &fake.first, FileStatus::Local, Some(&note_text()));
+    // The size is the copy's own length (asked before anything is read), not where a bounded read would stop.
+    assert_eq!(
+        local(&engine, NOTE, 1_000).map(|_| ()).unwrap_err(),
+        OpenFileError::TooLarge { size: 3_500 }
+    );
+    assert_eq!(
+        local(&engine, NOTE, 3_499).map(|_| ()).unwrap_err(),
+        OpenFileError::TooLarge { size: 3_500 }
+    );
+    assert_eq!(opened(local(&engine, NOTE, 3_500)).bytes.len(), 3_500);
+    // An empty copy is no bytes, not "not here".
+    let _kept = with_folder(&engine, &fake.first, FileStatus::Local, Some(b""));
+    assert!(opened(local(&engine, NOTE, 0)).bytes.is_empty());
+}
+
+#[test]
+fn the_read_is_bounded_by_itself_when_the_file_grows_after_its_length_was_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("grows.bin");
+    std::fs::write(&path, vec![7u8; 5_000]).unwrap();
+    let (never, always) = (AtomicBool::new(false), || true);
+    // Its length was 100 when asked; it is 5,000 now. One byte more than was asked for is read, never the file.
+    assert!(matches!(
+        read_bounded(&path, 100, 5_000, &never, &always),
+        Err(ReadStopped::Grew)
+    ));
+    // Its length was within the limit when asked, and it is past the limit now: refused, with one byte over held.
+    let Err(ReadStopped::Refused(error)) = read_bounded(&path, 1_000, 1_000, &never, &always) else {
+        panic!("a file that grew past the limit was read");
+    };
+    assert_eq!(error, OpenFileError::OverLimit);
+    // As long as it said: read whole. Shorter by now: what is there.
+    assert_eq!(
+        read_bounded(&path, 5_000, 5_000, &never, &always).ok().map(|b| b.len()),
+        Some(5_000)
+    );
+    assert_eq!(
+        read_bounded(&path, 6_000, 6_000, &never, &always).ok().map(|b| b.len()),
+        Some(5_000)
+    );
+    // Cancelled, or the session moved on: nothing.
+    assert!(matches!(
+        read_bounded(&path, 5_000, 5_000, &AtomicBool::new(true), &always),
+        Err(ReadStopped::Refused(OpenFileError::Cancelled))
+    ));
+    assert!(matches!(
+        read_bounded(&path, 5_000, 5_000, &never, &|| false),
+        Err(ReadStopped::Refused(OpenFileError::NotSignedIn))
+    ));
+}
+
+#[test]
+fn the_copy_is_read_for_the_session_only() {
+    let fake = fake("localsession");
+    let engine = engine_at(&fake.api.base);
+    let _kept = with_folder(&engine, &fake.first, FileStatus::Local, Some(&note_text()));
+    // Signed out: nothing is read.
+    assert_eq!(
+        local(&engine, NOTE, NO_LIMIT).map(|_| ()).unwrap_err(),
+        OpenFileError::NotSignedIn
+    );
+    // Another account signed in on the first account's local state: nothing of it is read.
+    signed_in(&engine, &fake.second);
+    assert_eq!(
+        local(&engine, NOTE, NO_LIMIT).map(|_| ()).unwrap_err(),
+        OpenFileError::NotYours
+    );
+    // Its own account: read. Not in the local state, or a folder: no such file.
+    signed_in(&engine, &fake.first);
+    assert_eq!(opened(local(&engine, NOTE, NO_LIMIT)).bytes.len(), 3_500);
+    assert_eq!(
+        local(&engine, "a0000000-0000-4000-8000-00000000ffff", NO_LIMIT)
+            .map(|_| ())
+            .unwrap_err(),
+        OpenFileError::NotFound
+    );
+    assert_eq!(
+        local(&engine, FOLDER, NO_LIMIT).map(|_| ()).unwrap_err(),
+        OpenFileError::NotFound
+    );
+    // Cancelled before the read: nothing.
+    assert_eq!(
+        engine
+            .open_local_copy_in_memory(NOTE, NO_LIMIT, &AtomicBool::new(true))
+            .map(|_| ())
+            .unwrap_err(),
+        OpenFileError::Cancelled
+    );
 }

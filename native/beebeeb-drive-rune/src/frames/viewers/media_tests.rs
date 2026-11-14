@@ -240,16 +240,22 @@ fn a_file_of_each_type_opens_its_viewer_through_the_router() {
         assert_eq!(viewer(&rt).file.name, name);
         assert!(has(&rt, key), "{name}: its viewer draws {key}");
     }
-    // A type with no viewer, a folder, and a file the source does not have: not this group's.
+    // A type with no viewer and a folder: not this group's.
     let mut state = init();
     assert!(!open_item(&mut state, &item("q4plan", "Q4 plan.key")));
-    assert!(!open_item(&mut state, &item("nowhere", "Nowhere.pdf")));
     let folder = DriveItem {
         is_folder: true,
         ..item(board::PDF, "Studio plan.pdf")
     };
     assert!(!open_item(&mut state, &folder));
     assert!(state.viewer.ui.is_none());
+    // A file of a type this group reads that the source does not have IS this group's: the window says it is
+    // gone, and the caller does not hand it to another app instead.
+    assert!(open_item(&mut state, &item("nowhere", "Nowhere.pdf")));
+    assert!(matches!(
+        state.viewer.ui.as_ref().map(|ui| &ui.file.body),
+        Some(Body::Stopped(super::source::Stopped::Gone))
+    ));
 }
 
 #[test]
@@ -649,4 +655,152 @@ fn edit_in_sheets_says_not_built_yet_until_something_takes_it() {
     assert!(!has(&rt, "toast-text"));
     click(&mut rt, "tb-btn-0");
     assert_eq!(words(&rt, "toast-text"), "Not built yet: Edit in Sheets");
+}
+
+fn settle(rt: &mut Runtime<State>) {
+    rt.frame(0.0);
+    rt.frame(0.0);
+    rt.settle_all();
+}
+
+/// The thumbnails that are built: their page numbers.
+fn thumbs_built(rt: &Runtime<State>) -> Vec<u32> {
+    let mut pages: Vec<u32> = rt
+        .elements()
+        .iter()
+        .filter(|e| !e.exiting)
+        .filter_map(|e| {
+            e.key
+                .as_deref()?
+                .strip_prefix("thumb-")?
+                .strip_suffix("-page")?
+                .parse::<u32>()
+                .ok()
+        })
+        .map(|i| i + 1)
+        .collect();
+    pages.sort_unstable();
+    pages
+}
+
+/// The wheel over the middle of `key`, either sign of the toolkit's wheel, until `done`.
+fn wheel_until(rt: &mut Runtime<State>, key: &str, done: impl Fn(&Runtime<State>) -> bool) {
+    let r = info(rt, key).rect;
+    let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    for dy in [600.0, -1200.0] {
+        if done(rt) {
+            return;
+        }
+        rt.wheel(x, y, dy);
+        settle(rt);
+    }
+}
+
+#[test]
+fn a_long_pdf_builds_only_the_thumbnails_near_the_window_and_its_column_and_its_page_scroll() {
+    let (mut rt, _) = recording(board::PDF);
+    rt.update(|s, _| {
+        let ui = s.viewer.ui.as_mut().expect("a file is open");
+        ui.file.body = Body::Pdf(super::source::PdfDoc {
+            pages: 2000,
+            page: 1,
+            size: "2.3 MB".into(),
+        });
+        ui.media.page = 1;
+    });
+    settle(&mut rt);
+    assert_eq!(words(&rt, "item-count"), "Page 1 of 2000 \u{00B7} 2.3 MB");
+    // At 100 % the page fits: it stands in the middle of its area, 24 points under its top.
+    let (area, page) = (info(&rt, "page-area").rect, info(&rt, "page").rect);
+    assert_eq!(
+        page[0] + page[2] / 2.0,
+        area[0] + area[2] / 2.0,
+        "centred: {page:?} in {area:?}"
+    );
+    assert_eq!(page[1], area[1] + 24.0);
+    // 2,000 pages: the thumbnails in and near the window, not all of them.
+    let first = thumbs_built(&rt);
+    assert_eq!(first.first(), Some(&1));
+    assert!(
+        (4..=80).contains(&first.len()),
+        "the thumbnails near the window are built, not 2,000: {}",
+        first.len()
+    );
+    // The column scrolls: the wheel over it brings later pages, and the first leaves the window.
+    let column = info(&rt, "thumb-sidebar").rect;
+    let top_of = |rt: &Runtime<State>, key: &str| info(rt, key).rect[1];
+    let first_top = top_of(&rt, "thumb-0");
+    assert!(first_top >= column[1], "the first thumbnail starts inside the column");
+    wheel_until(&mut rt, "thumb-sidebar", |rt| {
+        !has(rt, "thumb-0") || top_of(rt, "thumb-0") < first_top
+    });
+    assert!(
+        !has(&rt, "thumb-0") || top_of(&rt, "thumb-0") < column[1],
+        "the wheel moved the first thumbnail out of the top of the column"
+    );
+    // A page turned by a key brings its thumbnail into the column, wherever the column stood.
+    rt.update(|s, _| s.viewer.ui.as_mut().expect("a file is open").go_page(899));
+    settle(&mut rt);
+    press(&mut rt, Key::PageDown);
+    assert_eq!(viewer(&rt).media.page, 900);
+    let shown = info(&rt, "thumb-899").rect;
+    assert!(
+        shown[1] >= column[1] && shown[1] + shown[3] <= column[1] + column[3],
+        "page 900's thumbnail is inside the column: {shown:?} in {column:?}"
+    );
+    assert!(thumbs_built(&rt).len() <= 80, "still only the ones near the window");
+    // A press on a thumbnail that was reached by scrolling turns to its page.
+    click(&mut rt, "thumb-899-page");
+    assert_eq!(viewer(&rt).media.page, 900);
+
+    // The page: at 400 % it is larger than its area, and the wheel brings its lower part into view.
+    for _ in 0..9 {
+        ctrl(&mut rt, Key::Command('='));
+    }
+    assert_eq!(words(&rt, "zoom-pct"), "400%");
+    let area = info(&rt, "page-area").rect;
+    let page = info(&rt, "page").rect;
+    assert!(
+        page[3] > area[3] && page[2] > area[2],
+        "the page is larger than its area: {page:?} in {area:?}"
+    );
+    let bottom = |rt: &Runtime<State>| {
+        let page = info(rt, "page").rect;
+        page[1] + page[3]
+    };
+    // Its left edge is inside the area at rest (a page wider than the area starts at its left, where scrolling
+    // can reach all of it: centred, its left part would lie where no scroll goes).
+    assert!(
+        page[0] >= area[0],
+        "the page's left edge can be seen: {page:?} in {area:?}"
+    );
+    let right = |rt: &Runtime<State>| {
+        let page = info(rt, "page").rect;
+        page[0] + page[2]
+    };
+    let right_before = right(&rt);
+    for dx in [900.0, -1800.0] {
+        if right(&rt) < right_before {
+            break;
+        }
+        rt.wheel_xy(area[0] + area[2] / 2.0, area[1] + area[3] / 2.0, dx, 0.0);
+        settle(&mut rt);
+    }
+    assert!(
+        right(&rt) < right_before,
+        "the page scrolls sideways: {} from {right_before}",
+        right(&rt)
+    );
+    let before = bottom(&rt);
+    assert!(before > area[1] + area[3], "the page's foot is below the window");
+    wheel_until(&mut rt, "page-area", |rt| bottom(rt) < before);
+    assert!(
+        bottom(&rt) < before,
+        "the wheel moved the page up: {} from {before}",
+        bottom(&rt)
+    );
+    // The next page is read from its top again.
+    press(&mut rt, Key::PageDown);
+    assert_eq!(viewer(&rt).media.page, 901);
+    assert_eq!(info(&rt, "page").rect[1], page[1], "a turned page starts at its top");
 }

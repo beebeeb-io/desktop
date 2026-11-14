@@ -4,7 +4,7 @@
 use rune::{Cx, El, col, row};
 
 use super::source::{BackupsSource, Device, DeviceKind, FileKind, Folder, NotBackedUp, Status};
-use super::{BackupsUi, Dialog, Page};
+use super::{BackupsUi, Dialog, Page, mail_view};
 use crate::State;
 use crate::frames::settings;
 use crate::frames::this_pc::icons as pc_icons;
@@ -20,7 +20,7 @@ use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
 use crate::ui::{caption, settings_shell as shell};
 
 /// `1820` as "1,820".
-fn thousands(n: u32) -> String {
+pub(super) fn thousands(n: u32) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
@@ -531,15 +531,35 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let t = tokens::theme(s.settings.dark(cx.system_dark()));
     let devices = source.devices();
     let device = |id: &str| devices.iter().find(|d| d.id == id);
+    // Mail Backup's page, while a source answers for it; the section otherwise.
+    let mail = if ui.page == Page::Mail { source.mail() } else { None };
+    let mut mail_lists = 0;
     let (children, buttons) = match &ui.page {
         Page::Device(id) => match device(id) {
             Some(d) => (device_page(d, &t), 0),
             None => section(source, &t),
         },
         Page::Failures => failures_page(source, &t),
+        Page::Mail => match &mail {
+            Some(mail) => {
+                let (children, lists, buttons) = mail_view::page(mail, ui.dialog.is_some(), &t);
+                mail_lists = lists;
+                (children, buttons)
+            }
+            None => section(source, &t),
+        },
         Page::Section => section(source, &t),
     };
     let overlay = match &ui.dialog {
+        Some(
+            Dialog::MailTurnOn
+            | Dialog::MailAccount
+            | Dialog::MailFolders
+            | Dialog::MailTurnOff
+            | Dialog::MailKeepFiles,
+        ) => mail
+            .as_ref()
+            .and_then(|mail| mail_view::overlay(ui, source, mail, mail_lists, buttons, &t)),
         Some(Dialog::StopFolder(id)) => source
             .folders()
             .iter()

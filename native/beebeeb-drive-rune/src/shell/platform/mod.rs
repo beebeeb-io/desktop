@@ -24,6 +24,8 @@ mod macos;
 mod windows;
 #[cfg(windows)]
 mod windows_control;
+#[cfg(windows)]
+mod windows_folder;
 // Waiting on the core two-level lock (decision 2495): nothing calls it yet. Compiled on every platform (a stub
 // off Windows).
 #[allow(dead_code)]
@@ -127,6 +129,12 @@ pub trait Platform: Send + Sync {
     ) -> Result<Box<dyn ControlServer>, ServeError>;
     /// Hands one request to the running instance and waits at most `timeout` for its answer.
     fn send_control(&self, identity: AppIdentity, request: &Request, timeout: Duration) -> Delivery;
+    /// Opens the OS's own folder picker (DW-0738: Windows draws it) with `title`, showing where `start` is.
+    /// BLOCKS until the person closed it: a worker's call, never the window's thread. `Ok(None)`: closed
+    /// without a folder. The folder is the person's own: shown to them, never logged.
+    fn pick_folder(&self, _title: &str, _start: &std::path::Path) -> Result<Option<std::path::PathBuf>, PlatformError> {
+        Err(PlatformError::NotBuilt("the folder picker"))
+    }
     /// Sets or clears the window's capture-exclusion. When set, the window region appears black
     /// (or absent) in screenshots, screen recordings and screen-sharing; clearing restores it.
     /// The default is a no-op (Linux, macOS without the NSWindow bridge). Failure is logged
