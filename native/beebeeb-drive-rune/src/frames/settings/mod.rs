@@ -394,6 +394,17 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         s.settings.source = Box::new(BoardSettings::new().with_notifications_off_in_windows());
         open_on(s, "DW-0750");
     }),
+    // Two states of this app's own (no board frame): what the pane says over itself.
+    ("DW-0750n", |s| {
+        s.settings.source = Box::new(BoardSettings::new().with_account_alerts_not_read());
+        open_on(s, "DW-0750");
+    }),
+    ("DW-0750u", |s| {
+        s.settings.source = Box::new(BoardSettings::new().with_notifications_unconfirmed());
+        open_on(s, "DW-0750");
+        // A change Beebeeb refused while that stands: its toast, above the notice.
+        s.settings.toast = Some("Couldn't change the notification setting. Nothing changed.");
+    }),
     ("DW-0791", |s| open_on(s, "DW-0791")),
     ("DW-0791b", |s| {
         s.settings.source = Box::new(BoardSettings::new().with_no_recent_alerts());
@@ -524,7 +535,7 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>, Option<MenuKind>)> {
         "DW-0751" => (Pane::About, None, None),
         "DW-0789" => (Pane::About, None, Some(MenuKind::Channel)),
         "DW-0789b" => (Pane::About, Some(Dialog::ReleaseNotes), None),
-        "DW-0750" | "DW-0750b" => (Pane::Notifications, None, None),
+        "DW-0750" | "DW-0750b" | "DW-0750n" | "DW-0750u" => (Pane::Notifications, None, None),
         "DW-0791" | "DW-0791b" => (Pane::Recent, None, None),
         "DW-0788" | "DW-0788b" | "DW-0788c" | "DW-0788d" => (Pane::StorageLocation, None, None),
         "DW-0746" | "DW-0746d" | "DW-0746e" => (Pane::Sync, None, None),
