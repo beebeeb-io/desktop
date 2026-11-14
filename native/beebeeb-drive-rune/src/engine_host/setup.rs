@@ -12,9 +12,9 @@
 //!   folder's entry in File Explorer ([`SetupEngine::view`], which never waits). Windows refusing to register
 //!   the folder is DW-0280 with Windows' code; any other start the engine refused is said as "sync didn't
 //!   start" ([`Explorer::NotSyncing`]), never as "adding"; the shell's refusal modal says what happened. "Try
-//!   again" asks for a start through the shell's one start path; when sync runs and only Windows refused the
-//!   entry, sync is stopped and started again (a start is what asks Windows). "Show in File Explorer" opens the
-//!   sync folder.
+//!   again": while sync runs it asks Windows again for the entry and leaves sync running; while it does not
+//!   run, one start is asked for through the shell's one start path. "Show in File Explorer" opens the sync
+//!   folder.
 //! - Notifications (DW-0207): this PC's "show notifications at all" switch in the settings file
 //!   ([`Engine::set_notifications_allowed_for`]).
 //! - Open at login (DW-0281): the platform's start-at-login entry, the one Drive's settings switch.
@@ -152,8 +152,8 @@ pub trait SetupEngine: Send + Sync + 'static {
     fn start(&self, folder: PathBuf) -> Result<SyncStart, SyncStartRefused>;
     /// Write the folder to the settings when they name none (`Engine::keep_sync_root`). BLOCKS.
     fn keep_folder(&self, folder: &Path) -> Result<bool, SetupRefused>;
-    /// Stop sync and wait until it ended (`Engine::stop`). BLOCKS.
-    fn stop_sync(&self);
+    /// Ask Windows again for the folder's entry in File Explorer; never stops or starts sync. BLOCKS.
+    fn ask_explorer_again(&self);
 }
 
 impl<C: CredentialStores> SetupEngine for Engine<C> {
@@ -193,8 +193,8 @@ impl<C: CredentialStores> SetupEngine for Engine<C> {
     fn keep_folder(&self, folder: &Path) -> Result<bool, SetupRefused> {
         self.keep_sync_root(folder)
     }
-    fn stop_sync(&self) {
-        let _ = self.stop();
+    fn ask_explorer_again(&self) {
+        let _ = self.add_to_file_explorer_again();
     }
 }
 
@@ -256,6 +256,9 @@ pub struct EngineSetupSource<E: SetupEngine> {
     choosing: bool,
     /// A "Try again" is on its way: no second one is asked.
     retrying: bool,
+    /// Workers started by `ask` (a test's proof that a press started none).
+    #[cfg(test)]
+    spawned: usize,
     outcomes: Vec<Outcome>,
     changed: bool,
     answers: mpsc::Sender<(Stamp, Answer)>,
@@ -302,6 +305,8 @@ impl<E: SetupEngine> EngineSetupSource<E> {
             ran: false,
             choosing: false,
             retrying: false,
+            #[cfg(test)]
+            spawned: 0,
             outcomes: Vec::new(),
             changed: false,
             answers,
@@ -360,7 +365,18 @@ impl<E: SetupEngine> EngineSetupSource<E> {
         if started.is_err() {
             log("first run: could not start a thread");
             refuse(self);
+        } else {
+            #[cfg(test)]
+            {
+                self.spawned += 1;
+            }
         }
+    }
+
+    /// How many workers `ask` has started: read on the window's thread, never "after a moment".
+    #[cfg(test)]
+    pub(super) fn workers_started(&self) -> usize {
+        self.spawned
     }
 }
 
@@ -412,9 +428,9 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
         self.asked_folder && !self.ran && matches!(self.engine.view().start, Start::Refused(_))
     }
 
-    /// "Try again" (DW-0280). Sync does not run: one start is asked for, the shell's way. Sync runs and Windows
-    /// refused the entry: only a start asks Windows, so sync is stopped and started again.
-    /// One at a time: a second press while the first is on its way would stop what the first just started.
+    /// "Try again" (DW-0280). Sync runs: Windows is asked again for the entry and sync keeps running (nothing
+    /// here can stop it). Sync does not run: one start is asked for, the shell's way.
+    /// One at a time: a second press while the first is on its way asks nothing.
     fn retry_explorer(&mut self) {
         if self.retrying || !self.mine() {
             return;
@@ -426,9 +442,8 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
             "first-run-explorer",
             move |engine, _| {
                 if engine.view().start == Start::Running {
-                    engine.stop_sync();
-                }
-                if !start() {
+                    engine.ask_explorer_again();
+                } else if !start() {
                     log("first run: a sync start could not be asked for");
                 }
                 Answer::Retried

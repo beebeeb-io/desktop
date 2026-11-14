@@ -170,13 +170,14 @@ fn a_picker_that_is_closed_or_does_not_open_changes_nothing() {
 #[test]
 fn one_choice_at_a_time() {
     let mut set = new_pc();
+    let before = set.source.workers_started();
     let held = set.engine.held.lock().unwrap();
     set.source.keep_folder();
     set.source.keep_folder();
     set.source.choose_folder();
+    assert_eq!(set.source.workers_started(), before + 1, "one worker for three presses");
     drop(held);
     settle(&mut set, 1);
-    std::thread::sleep(Duration::from_millis(50));
     assert_eq!(set.engine.checked.lock().unwrap().len(), 1, "one check");
     assert!(set.platform.pick_asks.lock().unwrap().is_empty(), "no picker beside it");
     assert_eq!(starts_asked(&set), 1);
@@ -307,14 +308,24 @@ fn the_choice_is_the_accounts_it_holds_over_a_lock_and_is_never_another_accounts
         (session(1), Some(SECOND.to_string())),
     ] {
         let mut set = new_pc();
+        let before = set.source.workers_started();
         *set.engine.stamp.lock().unwrap() = moved_to.clone();
         set.source.keep_folder();
         set.source.choose_folder();
-        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            set.source.workers_started(),
+            before,
+            "{moved_to:?}: no worker was started"
+        );
         assert!(set.engine.checked.lock().unwrap().is_empty(), "{moved_to:?}");
         assert!(set.platform.pick_asks.lock().unwrap().is_empty(), "{moved_to:?}");
         assert_eq!(set.engine.wakes.load(Ordering::SeqCst), 0, "no worker: {moved_to:?}");
         assert_eq!(starts_asked(&set), 0, "{moved_to:?}");
+        // Control: the right session's press starts one worker.
+        *set.engine.stamp.lock().unwrap() = (session(1), Some(FIRST.into()));
+        set.source.keep_folder();
+        assert_eq!(set.source.workers_started(), before + 1, "{moved_to:?}: control");
+        settle(&mut set, 1);
     }
 }
 
@@ -362,11 +373,16 @@ fn a_second_press_while_the_first_is_on_its_way_asks_nothing() {
         .lock()
         .unwrap()
         .push_back(Ok(Some(PathBuf::from("/invented/second"))));
+    let before = set.source.workers_started();
     set.source.choose_folder();
     set.source.choose_folder();
+    assert_eq!(
+        set.source.workers_started(),
+        before + 1,
+        "one picker worker for two presses"
+    );
     drop(held);
     settle(&mut set, 2);
-    std::thread::sleep(Duration::from_millis(50));
     assert_eq!(set.platform.pick_asks.lock().unwrap().len(), 1, "one picker");
     assert_eq!(chosen(&set), Some(PathBuf::from(PICKED)));
     assert_eq!(starts_asked(&set), 2, "the first choice's start, and this one's");
@@ -375,17 +391,29 @@ fn a_second_press_while_the_first_is_on_its_way_asks_nothing() {
     settle(&mut set, 3);
     assert_eq!(set.platform.pick_asks.lock().unwrap().len(), 2);
 
-    // "Try again" while sync runs stops it and starts it again: two presses at once are one of those.
+    // "Try again" while sync runs asks Windows again and starts nothing: two presses at once are one ask.
     let mut set = set_on(fake(), FakePlatform::default());
     set.engine.set(Start::Running, EngineExplorer::Failed { code: None });
+    let before = set.source.workers_started();
     set.source.retry_explorer();
     set.source.retry_explorer();
+    assert_eq!(set.source.workers_started(), before + 1, "one worker for two presses");
     settle(&mut set, 1);
-    std::thread::sleep(Duration::from_millis(50));
-    assert_eq!((set.engine.stops.load(Ordering::SeqCst), starts_asked(&set)), (1, 1));
+    assert_eq!(
+        (set.engine.entry_asks.load(Ordering::SeqCst), starts_asked(&set)),
+        (1, 0)
+    );
     set.source.retry_explorer();
+    assert_eq!(
+        set.source.workers_started(),
+        before + 2,
+        "the next press after the answer is taken"
+    );
     settle(&mut set, 2);
-    assert_eq!((set.engine.stops.load(Ordering::SeqCst), starts_asked(&set)), (2, 2));
+    assert_eq!(
+        (set.engine.entry_asks.load(Ordering::SeqCst), starts_asked(&set)),
+        (2, 0)
+    );
 }
 
 #[test]

@@ -469,11 +469,13 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     let first_run_shows = s.shell.app.gate() == super::app::GateState::FirstRun;
     if s.shell.app.gate() == gate_before && s.setup_source.is_some() {
         // Another account under the same gate: the first run is the new session's, from its first step. And a
-        // gate that was moved by a refresh outside this poll (the b's menu) still gets, or loses, its first run.
+        // gate that was moved by a refresh outside this poll (the b's menu) still gets, or loses, its first run,
+        // and its start (the same condition `on_gate_change` uses).
         let another_account = first_run_of.is_some_and(|before| before.as_deref() != s.shell.app.account());
         if another_account || s.setup.is_some() != first_run_shows {
             start_first_run(s);
-            if first_run_shows {
+            let gate = s.shell.app.gate();
+            if gate == super::app::GateState::FirstRun || gate == super::app::GateState::Ready {
                 s.shell.start_sync();
             }
             changed = true;
