@@ -93,6 +93,7 @@ fn local_state(engine: &TestEngine, owner: &str, build: impl FnOnce(&StateDb)) -
     build(&db);
     db.set_owner(&Identity::new(None, Some(owner))).unwrap();
     engine.use_local_state_for_test(path);
+    std::fs::create_dir(dir.path().join("sync")).unwrap();
     engine.use_sync_root_for_test(dir.path().join("sync"));
     (dir, db)
 }
