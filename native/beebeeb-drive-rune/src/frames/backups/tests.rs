@@ -594,3 +594,54 @@ fn a_late_delete_keeps_the_dialog_until_the_answer_and_a_refusal_shows_under_the
         ))
     );
 }
+
+#[test]
+fn a_delete_answer_never_lands_in_another_devices_dialog() {
+    use super::source::{Backed, Device, DeviceKind};
+    let device = |id: &str| Device {
+        id: id.into(),
+        name: format!("Invented {id}"),
+        model: "device".into(),
+        kind: DeviceKind::Computer,
+        backed: Backed::Folders(1),
+        size: None,
+        last_backup: None,
+        signed_in: None,
+    };
+    let deleting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut ui = BackupsUi::new(Some(Box::new(Late {
+        devices: vec![device("a"), device("b")],
+        deleting: deleting.clone(),
+        asked: asked.clone(),
+    })));
+    ui.ask_delete_device("a");
+    ui.code.replace_text("an invented password");
+    assert!(ui.delete_device());
+    // Closed while A's is on its way; B's dialog opens.
+    ui.close_dialog();
+    ui.ask_delete_device("b");
+    assert!(
+        ui.deleting_for("a") && !ui.deleting_for("b"),
+        "B's dialog does not say Deleting"
+    );
+    ui.code.replace_text("an invented password");
+    assert!(!ui.delete_device(), "one at a time");
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    // A's refusal: said in the section, never under B's field.
+    deleting.store(false, std::sync::atomic::Ordering::SeqCst);
+    ui.delete_answered(Err("That password isn't right. Nothing was deleted."));
+    assert_eq!(ui.delete_refusal(), None);
+    assert_eq!(
+        ui.dialog,
+        Some(Dialog::DeleteDevice("b".into())),
+        "B's dialog stays open"
+    );
+    assert_eq!(
+        ui.notice().map(|(words, _)| words),
+        Some("That password isn't right. Nothing was deleted.")
+    );
+    // An answer with nothing sent closes nothing.
+    ui.delete_answered(Ok(()));
+    assert_eq!(ui.dialog, Some(Dialog::DeleteDevice("b".into())));
+}

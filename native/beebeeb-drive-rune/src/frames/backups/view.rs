@@ -618,9 +618,9 @@ fn delete_device(ui: &BackupsUi, device: &Device, first_button: usize, t: &Theme
         }
         None => (format!("{what}{rest}"), Vec::new()),
     };
-    // While a delete is on its way the button is off and says so; nothing more is sent.
-    let deleting = ui.deleting();
-    let ready = ui.code_len() > 0 && !deleting;
+    // While a delete is on its way the button is off (one at a time) and, in its own device's dialog, says so.
+    let deleting = ui.deleting_for(&device.id);
+    let ready = ui.code_len() > 0 && !ui.deleting();
     let refusal = ui.delete_refusal();
     let body = vec![
         bk::para(0, &words, &mono, t),

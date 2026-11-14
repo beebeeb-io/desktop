@@ -112,6 +112,9 @@ pub struct BackupsUi {
     notice: Option<(&'static str, &'static str, std::time::Instant)>,
     /// Why the last "Delete this backup" was not done, under the password field while the dialog is open.
     delete_refusal: Option<&'static str>,
+    /// The device a "Delete this backup" was sent for and not answered yet (a source that answers late): its answer
+    /// goes to that device's dialog only.
+    delete_sent: Option<String>,
 }
 
 impl BackupsUi {
@@ -133,6 +136,7 @@ impl BackupsUi {
             was_open: false,
             notice: None,
             delete_refusal: None,
+            delete_sent: None,
         }
     }
 
@@ -511,11 +515,18 @@ impl BackupsUi {
         let late = source.deleting();
         self.code.clear();
         self.delete_refusal = None;
-        if accepted && !late {
+        if accepted && late {
+            self.delete_sent = Some(id);
+        } else if accepted {
             self.dialog = None;
             self.page = Page::Section;
         }
         accepted
+    }
+
+    /// A "Delete this backup" of this device is on its way.
+    pub(crate) fn deleting_for(&self, id: &str) -> bool {
+        self.deleting() && self.delete_sent.as_deref() == Some(id)
     }
 
     /// A "Delete this backup" is on its way.
@@ -532,7 +543,9 @@ impl BackupsUi {
     /// The answer to a "Delete this backup" that was sent. Done: the dialog closes (the source reads the list again).
     /// Refused: the words under the password field, or in the section when the dialog was closed meanwhile.
     fn delete_answered(&mut self, answer: Result<(), &'static str>) {
-        let open = matches!(self.dialog, Some(Dialog::DeleteDevice(_)));
+        // Only the dialog of the device it was sent for: another device's dialog opened meanwhile is not its.
+        let sent = self.delete_sent.take();
+        let open = matches!(&self.dialog, Some(Dialog::DeleteDevice(id)) if sent.as_deref() == Some(id.as_str()));
         match answer {
             Ok(()) if open => {
                 self.close_dialog();

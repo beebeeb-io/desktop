@@ -35,7 +35,10 @@
 
 use std::sync::Arc;
 
-use beebeeb_core::backup::{DeviceManifest, DeviceSelf, MANIFEST_NAME, parse_manifest, same_device_id};
+use beebeeb_core::backup::{
+    DeviceFolderCandidate, DeviceFolderChoice, DeviceManifest, DeviceSelf, FolderManifest, MANIFEST_NAME,
+    find_device_folder, parse_manifest, same_device_id,
+};
 use beebeeb_types::backup::Platform;
 use zeroize::Zeroizing;
 
@@ -226,10 +229,15 @@ pub fn summary_of(manifest: &DeviceManifest, folders: usize) -> DeviceSummary {
     }
 }
 
-/// One device folder: its manifest read and parsed, and whether it is this PC's.
-async fn read_device<T: DeviceTree>(tree: &T, folder_id: &str, me: Option<&DeviceSelf>) -> (DeviceRead, bool) {
+/// One device folder: its manifest read and parsed, whether it is this PC's, and the manifest itself (for core's
+/// choice of this PC's folder).
+async fn read_device<T: DeviceTree>(
+    tree: &T,
+    folder_id: &str,
+    me: Option<&DeviceSelf>,
+) -> (DeviceRead, bool, Option<DeviceManifest>) {
     let Ok((children, complete)) = tree.children(folder_id).await else {
-        return (DeviceRead::NotReached, false);
+        return (DeviceRead::NotReached, false, None);
     };
     let folders = children.iter().filter(|child| child.is_folder).count();
     // A file whose name does not open could be the manifest: then the device is unreadable, never "no status file".
@@ -241,7 +249,7 @@ async fn read_device<T: DeviceTree>(tree: &T, folder_id: &str, me: Option<&Devic
         .filter(|child| !child.is_folder && child.name.as_deref() == Some(MANIFEST_NAME))
     {
         match tree.small_file(file).await {
-            Err(_) => return (DeviceRead::NotReached, false),
+            Err(_) => return (DeviceRead::NotReached, false, None),
             Ok(None) => failed = true,
             Ok(Some(bytes)) => {
                 let bytes = Zeroizing::new(bytes);
@@ -264,19 +272,25 @@ async fn read_device<T: DeviceTree>(tree: &T, folder_id: &str, me: Option<&Devic
         })
     };
     if let Some(mine) = parsed.iter().find(|manifest| is_me(manifest)) {
-        return (DeviceRead::Read(summary_of(mine, folders)), true);
+        return (DeviceRead::Read(summary_of(mine, folders)), true, None);
     }
     match parsed.first() {
-        Some(manifest) => (DeviceRead::Read(summary_of(manifest, folders)), false),
-        None if failed || unopened => (DeviceRead::Unreadable, false),
+        Some(manifest) => (
+            DeviceRead::Read(summary_of(manifest, folders)),
+            false,
+            Some(manifest.clone()),
+        ),
+        None if failed || unopened => (DeviceRead::Unreadable, false, None),
         // The manifest may be in the part that was not listed.
-        None if !complete => (DeviceRead::NotReached, false),
-        None => (DeviceRead::NoStatusFile, false),
+        None if !complete => (DeviceRead::NotReached, false, None),
+        None => (DeviceRead::NoStatusFile, false, None),
     }
 }
 
-/// Every device folder under `root_id` but this PC's (`this_pc`, and any whose manifest is `me`'s), each read.
-/// `Err`: the root itself could not be listed. The second value is `false` when the root's listing was cut short.
+/// Every device folder under `root_id` but this PC's, each read. This PC's folder: `this_pc` (the layout's), any
+/// whose manifest is `me`'s, and, while no layout names it, the folder core's `find_device_folder` would adopt as this
+/// PC's (the old mirror's folder of its exact name, no manifest). `Err`: the root itself could not be listed. The
+/// second value is `false` when the root's listing was cut short.
 pub(crate) async fn read_devices<T: DeviceTree>(
     tree: &T,
     root_id: &str,
@@ -284,22 +298,56 @@ pub(crate) async fn read_devices<T: DeviceTree>(
     me: Option<&DeviceSelf>,
 ) -> Result<(Vec<BackupDevice>, bool), AccountCallError> {
     let (children, complete) = tree.children(root_id).await.map_err(|error| call_error(&error))?;
-    let mut devices = Vec::new();
+    let mut read = Vec::new();
     for folder in children.iter().filter(|child| child.is_folder) {
         if this_pc == Some(folder.id.as_str()) {
             continue;
         }
-        let (read, mine) = read_device(tree, &folder.id, me).await;
-        if mine {
-            continue;
+        let (device, mine, manifest) = read_device(tree, &folder.id, me).await;
+        if !mine {
+            read.push((folder, device, manifest));
         }
-        devices.push(BackupDevice {
+    }
+    let adopted = match (this_pc, me) {
+        (None, Some(me)) => adopted_by_this_pc(me, &read),
+        _ => None,
+    };
+    let devices = read
+        .into_iter()
+        .filter(|(folder, _, _)| adopted.is_none_or(|id| uuid::Uuid::parse_str(&folder.id).ok() != Some(id)))
+        .map(|(folder, read, _)| BackupDevice {
             folder_id: folder.id.clone(),
             folder_name: folder.name.clone(),
             read,
-        });
-    }
+        })
+        .collect();
     Ok((devices, complete))
+}
+
+/// The folder core would take as this PC's (`find_device_folder`) among those read, when no layout names one yet.
+fn adopted_by_this_pc(
+    me: &DeviceSelf,
+    read: &[(&BackupChild, DeviceRead, Option<DeviceManifest>)],
+) -> Option<uuid::Uuid> {
+    let candidates: Vec<DeviceFolderCandidate> = read
+        .iter()
+        .filter_map(|(folder, device, manifest)| {
+            Some(DeviceFolderCandidate {
+                folder_id: uuid::Uuid::parse_str(&folder.id).ok()?,
+                // A name that does not open never matches by name (as `layout::unopened_name`).
+                name: folder.name.clone().unwrap_or_else(|| format!("\u{0}{}", folder.id)),
+                manifest: match (device, manifest) {
+                    (DeviceRead::Read(_), Some(manifest)) => FolderManifest::Parsed(manifest.clone()),
+                    (DeviceRead::NoStatusFile, _) => FolderManifest::Absent,
+                    _ => FolderManifest::Unreadable,
+                },
+            })
+        })
+        .collect();
+    match find_device_folder(me, &candidates) {
+        DeviceFolderChoice::Existing(id) | DeviceFolderChoice::AdoptLegacy(id) => Some(id),
+        DeviceFolderChoice::Create { .. } => None,
+    }
 }
 
 impl<C: CredentialStores> Engine<C> {

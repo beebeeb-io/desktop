@@ -323,6 +323,11 @@ impl<E: DevicesEngine> DeviceCalls<E> {
                 self.held = None;
                 self.note = Some(NOT_SYNCED);
             }
+            // This PC's local state could not be opened: said, never an empty "no other devices".
+            Err(refused @ DevicesRefused::Local(LocalStateRefused::Unreadable)) => {
+                log(format!("backups: other devices not read ({})", refused.kind()));
+                self.note = Some(NOT_READ);
+            }
             // Another account's local state (the section says so), a lock, a session that moved: nothing is shown.
             Err(refused @ (DevicesRefused::Local(_) | DevicesRefused::NotSignedIn)) => {
                 log(format!("backups: other devices not read ({})", refused.kind()));

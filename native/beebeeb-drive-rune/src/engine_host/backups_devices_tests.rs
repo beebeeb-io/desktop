@@ -267,6 +267,14 @@ fn nothing_synced_on_this_pc_and_another_accounts_state_show_no_rows() {
     let calls = opened(&fake);
     assert!(calls.devices().is_empty());
     assert_eq!(calls.note(), None, "the section itself says it is another account's");
+    *fake.read_error.lock().unwrap() = Some(DevicesRefused::Local(LocalStateRefused::Unreadable));
+    let calls = opened(&fake);
+    assert!(calls.devices().is_empty());
+    assert_eq!(
+        calls.note(),
+        Some(NOT_READ),
+        "an unreadable local state is said, never an empty list"
+    );
 }
 
 #[test]

@@ -219,6 +219,24 @@ fn a_device_this_pc_cannot_read_is_a_row_that_says_so() {
 }
 
 #[test]
+fn the_old_mirrors_folder_of_this_pc_is_left_out_while_no_layout_names_this_pcs_folder() {
+    let legacy = "00000000-0000-4000-8000-0000000000b5";
+    let mut tree = Tree::default();
+    // This PC's exact name and no manifest: core adopts it as this PC's (`find_device_folder`).
+    tree.folder(ROOT, legacy, Some("Invented PC"));
+    tree.folder(legacy, "legacy-pictures", Some("Pictures"));
+    tree.folder(ROOT, MAC, Some("Invented Studio"));
+    tree.manifest(MAC, "m-mac", &mac_manifest());
+    let (devices, _) = read(&tree, None).unwrap();
+    let ids: Vec<&str> = devices.iter().map(|d| d.folder_id.as_str()).collect();
+    assert_eq!(ids, [MAC], "never offered for delete as another device");
+    // With a layout, its folder is this PC's; a manifest-less folder of the same name is listed as it is.
+    let (devices, _) = read(&tree, Some(THIS_PC)).unwrap();
+    assert_eq!(devices.len(), 2);
+    assert_eq!(devices[0].read, DeviceRead::NoStatusFile);
+}
+
+#[test]
 fn a_root_that_cannot_be_listed_is_a_refusal_and_a_cut_short_one_says_so() {
     let mut tree = Tree::default();
     tree.unreachable.push(ROOT.into());
