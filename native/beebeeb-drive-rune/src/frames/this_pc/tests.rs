@@ -522,16 +522,20 @@ fn new_goes_to_files_with_its_new_menu_open() {
     );
 }
 
+/// Lets every animation end (a frame at 0.0 seconds never does).
+fn settle(rt: &mut Runtime<State>) {
+    rt.settle_all();
+    rt.frame(0.016);
+}
+
 /// Presses "Remove all from this PC" and lets the ask settle: the dialog comes in and goes out with an animation,
 /// and a press while one is under way reaches nothing (a frame at 0.0 seconds never ends it). So the one that
 /// closed before is finished first.
 fn open_ask(rt: &mut Runtime<State>) {
-    rt.settle_all();
-    rt.frame(0.016);
+    settle(rt);
     click(rt, "btn-remove-all-from-this-pc");
     poll(rt);
-    rt.settle_all();
-    rt.frame(0.016);
+    settle(rt);
 }
 
 #[test]
@@ -564,6 +568,8 @@ fn remove_all_shows_its_ask_and_removes_only_on_the_yes() {
     open_ask(&mut rt);
     tab_to(&mut rt, "btn-remove-all-cancel");
     press(&mut rt, Key::Enter);
+    settle(&mut rt);
+    assert!(!rt.state.this_pc.confirm_remove_all, "Enter on Cancel was heard");
     assert!(!has(&rt, "dlg"), "Enter on Cancel says no");
     assert_eq!(rt.state.this_pc.kept_count(), 3);
 
@@ -571,6 +577,8 @@ fn remove_all_shows_its_ask_and_removes_only_on_the_yes() {
     open_ask(&mut rt);
     tab_to(&mut rt, "btn-remove-all-yes");
     press(&mut rt, Key::Enter);
+    settle(&mut rt);
+    assert!(!rt.state.this_pc.confirm_remove_all, "Enter on Remove all was heard");
     assert!(!has(&rt, "dlg"));
     assert_eq!(rt.state.this_pc.kept_count(), 0);
     assert_eq!(text(&rt, "empty-title"), "Nothing available offline");
