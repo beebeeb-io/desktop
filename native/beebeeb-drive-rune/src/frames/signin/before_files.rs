@@ -151,10 +151,13 @@ fn head(icon: &'static Icon, title: &str, words: &str, fill: bool, t: &Theme) ->
     ]
 }
 
-/// The lock's password screen is in front (the screen lock's other way in, or a closed vault).
+/// The lock's password screen is in front (the screen lock's other way in, or a closed vault), or the twelve words a
+/// strong unlock ended at while the shell's gate has not moved yet (they stay in front, B-R2).
 fn password_in_front(s: &State) -> bool {
     s.shell.app.screen() == Screen::Gate(GateState::Locked)
-        && s.signin.as_ref().is_some_and(super::Ui::lock_shows_password)
+        && s.signin.as_ref().is_some_and(|ui| {
+            ui.lock_shows_password() || matches!(ui.screen, super::Screen::Phrase | super::Screen::NoPhrase)
+        })
 }
 
 /// The lock's password screen takes the sign-in group's keys (Escape goes back); the lock screen has none.

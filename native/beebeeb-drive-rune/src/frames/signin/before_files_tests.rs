@@ -310,6 +310,9 @@ fn the_lock_screens_line_follows_the_engine() {
         signed_in: true,
         ..Default::default()
     });
+    rt.update(|s, _| {
+        s.shell.refresh();
+    });
     rt.frame(1.0);
     rt.frame(0.016);
     assert_eq!(says(&rt, "status-text"), "Locked \u{00B7} nothing syncs");
