@@ -343,11 +343,9 @@ fn a_step_up_proves_the_password_and_its_confirmation_is_spent_once_for_its_purp
         "spent"
     );
 
-    // A wrong password is a wrong password, and holds nothing.
-    let wrong = source.step_up(
-        Password::from_field("an invented wrong password"),
-        Purpose::ChangePassword,
-    );
+    // A wrong password is a wrong password, and holds nothing. (The password change keeps what was typed and
+    // proves it with its own guarded call, so it is not the purpose to test this with.)
+    let wrong = source.step_up(Password::from_field("an invented wrong password"), Purpose::ChangeEmail);
     assert_eq!(wrong.err(), Some(Refused::WrongPassword));
     assert_eq!(source.actions.held(), 0);
 }

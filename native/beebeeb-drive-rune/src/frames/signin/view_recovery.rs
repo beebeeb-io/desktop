@@ -66,16 +66,39 @@ fn option(
         )
 }
 
-pub fn forgot(k: &mut Keys, t: &Theme) -> El {
-    au::column()
+pub fn forgot(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
+    let mut c = au::column()
         .child(back_to("Sign in", Ui::open_sign_in, t))
         .child(au::heading(
             "Trouble signing in?",
             Some("Choose the option that applies to you."),
             false,
             t,
-        ))
-        .child(option(
+        ));
+    if ui.in_app_doors() {
+        c = c
+            .child(option(
+                k,
+                &icons::KEY,
+                "I have my recovery phrase",
+                "The 12 words from account setup. Use them to set a new password.",
+                "Recover with phrase",
+                ButtonKind::Primary,
+                Ui::recover_with_phrase,
+                t,
+            ))
+            .child(option(
+                k,
+                &icons::PHONE,
+                "I have another device signed in",
+                "Approve this PC from a device where you're already signed in. No phrase needed.",
+                "Sign in with another device",
+                ButtonKind::Outline,
+                Ui::ask_other_device,
+                t,
+            ));
+    } else {
+        c = c.child(option(
             k,
             &icons::KEY,
             "I have my recovery phrase or a signed-in device",
@@ -84,17 +107,18 @@ pub fn forgot(k: &mut Keys, t: &Theme) -> El {
             ButtonKind::Primary,
             Ui::open_recovery_page,
             t,
-        ))
-        .child(option(
-            k,
-            &icons::CROSS,
-            "I have neither",
-            "We'll explain what that means for your data.",
-            "Show my options",
-            ButtonKind::Outline,
-            |ui| ui.cannot_recover(true),
-            t,
-        ))
+        ));
+    }
+    c.child(option(
+        k,
+        &icons::CROSS,
+        "I have neither",
+        "We'll explain what that means for your data.",
+        "Show my options",
+        ButtonKind::Outline,
+        |ui| ui.cannot_recover(true),
+        t,
+    ))
 }
 
 // ---------------------------------------------------------------------------

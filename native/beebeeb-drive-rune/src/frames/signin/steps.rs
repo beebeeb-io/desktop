@@ -309,6 +309,11 @@ impl Ui {
         self.source.passkey_available()
     }
 
+    /// Whether the in-app doors are drawn: approval from another device, recovery with the 12 words.
+    pub fn in_app_doors(&self) -> bool {
+        self.source.in_app_doors_available()
+    }
+
     /// "Open the recovery page" on "Trouble signing in?": recovery replaces the password and
     /// re-wraps the keys, so the web does it (the shell opens the page).
     pub fn open_recovery_page(&mut self) {

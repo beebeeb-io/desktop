@@ -213,6 +213,13 @@ pub trait SignInSource {
     fn begin_two_factor(&mut self, code: &str, kind: CodeKind);
     /// Engine: `auth_v2::unlock_with_recovery_phrase`.
     fn begin_restore(&mut self, words: &[&str]);
+    /// `false` (the default): the doors that need another sign-in on this account to approve this PC, and the
+    /// in-app recovery with the 12 words, are not available here: they are not drawn, and "Trouble signing in?"
+    /// opens the web's recovery page. A source that binds `begin_device_request` and `begin_recovery_verify`
+    /// says `true`.
+    fn in_app_doors_available(&self) -> bool {
+        false
+    }
     /// `false` (the default): sign-in with a passkey is not available here, and the "Use a
     /// passkey" door is not drawn. A source that binds `begin_passkey` says `true`.
     fn passkey_available(&self) -> bool {
@@ -342,6 +349,8 @@ pub struct Script {
     pub passkey: PasskeyOutcome,
     /// Whether the source offers sign-in with a passkey (the door is drawn only then).
     pub passkey_available: bool,
+    /// Whether the source offers the in-app doors (approval from another device, recovery with the 12 words).
+    pub in_app_doors: bool,
     /// What a two-factor code gets instead of the check against the board's code (DW-A27 draws
     /// the board's own six digits as the wrong ones).
     pub two_factor_problem: Option<TwoFactorProblem>,
@@ -368,6 +377,7 @@ impl Default for Script {
             device: None,
             passkey: PasskeyOutcome::NeedsPassword,
             passkey_available: true,
+            in_app_doors: true,
             two_factor_problem: None,
             hold: false,
             sign_up: SignUpScript::default(),
@@ -505,6 +515,10 @@ impl SignInSource for FixtureSignInSource {
 
     fn passkey_available(&self) -> bool {
         self.script.passkey_available
+    }
+
+    fn in_app_doors_available(&self) -> bool {
+        self.script.in_app_doors
     }
 
     fn begin_passkey(&mut self) {
