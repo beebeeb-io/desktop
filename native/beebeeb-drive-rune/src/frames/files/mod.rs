@@ -19,6 +19,7 @@ pub mod local;
 pub mod long_list;
 pub mod menus;
 pub mod names;
+mod outcomes;
 pub mod preview;
 pub mod protected;
 pub mod protected_fixture;
@@ -141,6 +142,8 @@ pub enum Toast {
     /// Several files were opened and some of them are only ever read in the window (source code, scripts, web
     /// pages): those were not handed to another app.
     ReadOneAtATime,
+    /// "Upload cancelled. The copy is in the Recycle Bin." (DW-0427)
+    UploadCancelled,
 }
 
 impl Toast {
@@ -148,7 +151,7 @@ impl Toast {
     pub fn stays(self) -> std::time::Duration {
         std::time::Duration::from_secs(match self {
             Toast::Trashed => 6,
-            Toast::Failed(..) | Toast::ReadOneAtATime => 8,
+            Toast::Failed(..) | Toast::ReadOneAtATime | Toast::UploadCancelled => 8,
             _ => 3,
         })
     }

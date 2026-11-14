@@ -623,8 +623,11 @@ mod system_role;
 mod test_hooks;
 // Task 2409: the changes "Not sent" counts, one row each.
 mod unsent;
+// What the Uploads panel cancels: a NEW file never in Beebeeb (its change, its row), and the sizes it shows.
+mod unsent_cancel;
 use unsent::{NOT_DOWNLOADED_SQL, UNSENT_KINDS_SQL};
 pub use unsent::{RetryOutcome, UnsentChange, UnsentPage};
+pub use unsent_cancel::CancelNew;
 
 mod types;
 use types::*;

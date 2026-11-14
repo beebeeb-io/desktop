@@ -66,6 +66,8 @@ pub mod signup_api;
 pub mod state_owner;
 pub mod transfer_limits_api;
 pub mod trash_api;
+// What uploads, Try again on one, and the cancel of a new file's upload, for the native Files window.
+pub mod uploads_api;
 // A file's versions and the restore of one, for the native Files window.
 pub mod versions_api;
 // An open file for the native viewer: its facts, and its content decrypted in memory.

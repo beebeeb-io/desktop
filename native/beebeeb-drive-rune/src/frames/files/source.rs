@@ -195,25 +195,11 @@ pub enum Change {
     /// A move to Trash (`Action::Trash`) or its Undo (`Action::Restore`) was tried: per item asked, whether
     /// Beebeeb made it. Only from a source that answers later.
     Trash { action: Action, items: Vec<TrashOutcome> },
+    /// The upload with this id was cancelled (copy in the Recycle Bin, change dropped).
+    Cancelled { id: String },
 }
 
-/// One item of a [`Change::Trash`]. `left`: `None`: it was made; otherwise why this item was left as it was.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TrashOutcome {
-    pub id: String,
-    pub left: Option<ActionError>,
-}
-
-/// One item of a [`Change::Local`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LocalOutcome {
-    pub id: String,
-    /// The row's `pc_status` as the engine reports it AFTER the work (`Some(None)`: no mark, a folder that is
-    /// not kept). `None`: the engine could not say, and the row stays as it is drawn.
-    pub now: Option<Option<String>>,
-    /// `None`: the change was made. Otherwise why this item was left; Try again is for these alone.
-    pub left: Option<ActionError>,
-}
+pub use super::outcomes::{LocalOutcome, TrashOutcome};
 
 /// The counts beside the sidebar's sections.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -363,13 +349,19 @@ pub trait FilesSource: Send + 'static {
     fn retry_upload(&mut self, _id: &str) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
     }
-    /// Cancel the upload with this id; nothing is left half-uploaded.
+    /// Cancel the upload with this id (a NEW file only): the copy goes to the Recycle Bin, the change is dropped.
+    /// A source that answers later says what it did as [`Change::Cancelled`].
     fn cancel_upload(&mut self, _id: &str) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
     }
-    /// The account that was uploading left (a sign-out, another account): cancel what is in
-    /// flight and forget every upload of it, so that [`FilesSource::uploads`] says nothing of the
-    /// earlier account. Nothing is left half-uploaded. Default: a source that keeps no uploads.
+    /// The Uploads panel opened: read again if what is held is old.
+    fn ask_uploads(&mut self) {}
+    /// Can this source cancel THIS upload? `false` (the default): the row menu does not offer it.
+    fn cancels_upload(&self, _id: &str) -> bool {
+        false
+    }
+    /// The account that was uploading left: forget what is shown of its uploads. Unsent changes are the
+    /// engine's sign-out's, never this call's. Default: a source that keeps no uploads.
     fn forget_uploads(&mut self) {}
     /// Pause every upload, or let them go on.
     fn pause_uploads(&mut self, _pause: bool) -> Result<(), ActionError> {
@@ -989,6 +981,10 @@ impl FilesSource for FilesFixture {
             upload.state = super::uploads::UploadState::Waiting("Waiting to upload".to_string());
         }
         Ok(())
+    }
+
+    fn cancels_upload(&self, _id: &str) -> bool {
+        true
     }
 
     fn cancel_upload(&mut self, id: &str) -> Result<(), ActionError> {

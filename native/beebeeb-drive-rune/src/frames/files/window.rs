@@ -126,6 +126,13 @@ fn toast_of(kind: Toast, again: bool, t: &Theme) -> El {
             None,
             t,
         ),
+        Toast::UploadCancelled => toast::toast(
+            &icons::TRASH,
+            toast::Tone::Neutral,
+            "Upload cancelled. The copy is in the Recycle Bin.",
+            None,
+            t,
+        ),
         Toast::LinkCopied => toast::toast(&icons_files::CHECK, toast::Tone::Done, "Link copied", None, t),
         Toast::ReadOneAtATime => toast::toast(
             &icons_files::ALERT,

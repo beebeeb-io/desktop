@@ -31,6 +31,13 @@ impl State {
                     self.actions.made.push(*item);
                 }
                 Change::Failed(action, why) => failures.push((action, why)),
+                // A cancelled upload: its row leaves the folder now, and the message says where the copy is.
+                Change::Cancelled { id } => {
+                    self.listing.items.retain(|item| item.id != id);
+                    self.selected = self.selected.filter(|&i| i < self.listing.items.len());
+                    self.actions.selection.retain(|&i| i < self.listing.items.len());
+                    self.set_toast(super::Toast::UploadCancelled);
+                }
                 // A move to Trash or its Undo, answered later: drawn now, per item (`to_trash.rs`).
                 Change::Trash { action, items } => self.trash_answered(action, items),
                 Change::Local { action, items } => {
