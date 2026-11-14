@@ -228,6 +228,7 @@ fn room_made_later_lets_the_grid_ask_again() {
     inner.take_in(wished, Ok(picture(MAX_BYTES / 2, Duration::ZERO)), now);
     assert!(inner.held.contains_key(&key(11)) && !inner.held.contains_key(&key(0)));
     assert!(inner.arrived);
+    assert!(!inner.full, "a picture that left made room: the mark is gone");
     // (b) a file that was dropped.
     let mut inner = three_quarters_full();
     arrives(&mut inner, 10, MAX_BYTES / 2, now);
