@@ -80,10 +80,12 @@ fn every_person_accessor_goes_through_the_choke_point() {
         (
             "acct.session.lock()",
             &[
-                ("app.rs", 5),
+                // lock_api.rs: the start restore's key loader, moved out of app.rs with its one lock.
+                ("app.rs", 4),
                 ("owned_state.rs", 1),
-                ("lock_api.rs", 1),
-                ("viewer_api.rs", 2),
+                ("lock_api.rs", 2),
+                // Sign-up has no earlier session: it installs the new one (`signup_api::install_new_account`).
+                ("signup_api.rs", 1),
             ],
         ),
         (
@@ -94,6 +96,13 @@ fn every_person_accessor_goes_through_the_choke_point() {
                 ("trash_api.rs", 1),
                 ("photos_api.rs", 1),
                 ("account_api.rs", 2),
+                // Generation re-checks of the merged v2-native files (a settings write, a versions list and
+                // restore, the viewer's token and key hand-over): each is asked after, or beside, a call that
+                // `local_state()` / `account_call_for` already refuses under a lock.
+                ("setup_api.rs", 1),
+                ("transfer_limits_api.rs", 1),
+                ("versions_api.rs", 2),
+                ("viewer_api.rs", 2),
             ],
         ),
         ("call_may_run(", &[("lock_api.rs", 2), ("owned_state.rs", 1)]),
