@@ -940,7 +940,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         return true;
     }
     // A sign-out that is out cannot be called back: its confirm stays until the answer.
-    if s.account.signing_out.waiting.is_some() {
+    if s.account.signing_out.waiting.is_some() || (s.account.form.saving_name && s.account.pane == Pane::Name) {
         return true;
     }
     if s.account.dialog.take().is_some() {

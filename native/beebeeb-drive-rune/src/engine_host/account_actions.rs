@@ -119,11 +119,7 @@ impl<C: CredentialStores + 'static> Actions<C> {
 
     /// The window's poll: what belongs to a session that is over goes (a confirmation, a wait).
     pub(super) fn pump(&mut self) -> bool {
-        let before = (
-            self.confirmations.len(),
-            self.signing_out.is_some(),
-            self.naming.is_some(),
-        );
+        let before = self.confirmations.len();
         let now = self.now();
         let (session, account) = (self.engine.session_turn(), account_of(&self.engine));
         let open = self.engine.has_session();
@@ -132,25 +128,23 @@ impl<C: CredentialStores + 'static> Actions<C> {
         });
         // A wait for a session that is over is not cleared here: its answer is still taken in, and dropped, by
         // `sign_out_result` and `name_result` (a sign-out that worked is the one answer handed over).
-        before
-            != (
-                self.confirmations.len(),
-                self.signing_out.is_some(),
-                self.naming.is_some(),
-            )
+        before != self.confirmations.len()
     }
 
     /// Something is out: the window keeps looking.
     pub(super) fn busy(&self) -> bool {
-        self.signing_out.is_some() || self.naming.is_some()
+        self.naming.as_ref().is_some_and(|waiting| self.is_now(waiting))
     }
 
     // ---- Sign out of Drive ----------------------------------------------------------------------------------
 
     /// DW-S02: sign THIS app out. `Pending` once sent; the answer comes through [`Actions::sign_out_result`].
     pub(super) fn sign_out_this_app(&mut self) -> SignOutAnswer {
-        if self.signing_out.is_some() {
-            return SignOutAnswer::Pending;
+        // One that is out for this session and account is waited for; one of a session that is over is forgotten
+        // (its answer, when it comes, is for nobody).
+        match &self.signing_out {
+            Some(waiting) if self.is_now(waiting) => return SignOutAnswer::Pending,
+            _ => self.signing_out = None,
         }
         if !self.engine.has_session() {
             return SignOutAnswer::Refused(NO_SESSION);
@@ -202,8 +196,9 @@ impl<C: CredentialStores + 'static> Actions<C> {
     /// DW-A64: save the name the account shows. `Pending` once sent ([`Actions::name_result`]); `NotSaved` when
     /// nothing could be sent.
     pub(super) fn save_name(&mut self, name: &str) -> NameAnswer {
-        if self.naming.is_some() {
-            return NameAnswer::Pending;
+        match &self.naming {
+            Some(waiting) if self.is_now(waiting) => return NameAnswer::Pending,
+            _ => self.naming = None,
         }
         if !self.engine.has_session() || self.engine.account_session_refused() {
             return NameAnswer::NotSaved(NameWhy::Refused);

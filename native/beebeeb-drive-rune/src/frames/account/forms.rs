@@ -41,10 +41,12 @@ pub fn name(f: &Form, t: &Theme) -> El {
         Some(Problem::NameRefused) => Some("Beebeeb did not take the new name. Nothing was changed."),
         _ => None,
     };
-    let (cancel, cancel_b) = button(0, "Cancel", Look::Plain, false, t);
+    let (mut cancel, cancel_b) = button(0, "Cancel", Look::Plain, f.saving_name, t);
     let (mut save, save_b) = button(1, "Save", Look::Primary, f.saving_name, t);
-    // Saving takes no second press: nothing is drawn as saved before Beebeeb answered.
+    // While the name is out the page takes no press (a second save, a way out): nothing is drawn as saved before
+    // Beebeeb answered, and its answer finds the page it is for.
     if !f.saving_name {
+        cancel = cancel.on_press(|s: &mut State| super::go(s, "DW-A51"));
         save = save.default_button().on_press(super::act(save_name));
     }
     set::pane(
@@ -68,10 +70,7 @@ pub fn name(f: &Form, t: &Theme) -> El {
                 |s: &mut State| &mut s.account.form.name,
                 t,
             ),
-            fm::actions(vec![
-                (cancel.on_press(|s: &mut State| super::go(s, "DW-A51")), cancel_b),
-                (save, save_b),
-            ]),
+            fm::actions(vec![(cancel, cancel_b), (save, save_b)]),
         ],
         t,
     )
