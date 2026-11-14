@@ -99,7 +99,7 @@ fn fake(tag: &str, empty: bool) -> Fake {
         let at = [INCOMING, SENT, MINE, FILE_REQUESTS_PATH]
             .iter()
             .position(|path| route == format!("GET {path}"));
-        if at.is_none() && !route.contains("/api/v1/shares/invites/") {
+        if at.is_none() && !route.contains("/api/v1/shares/") && !route.contains("/api/v1/file-requests/") {
             return rest(req);
         }
         match (code.load(Ordering::SeqCst), at) {
@@ -330,4 +330,74 @@ fn a_change_is_one_request_for_the_session_it_was_decided_under() {
         Err(ShareChangeError::NotSignedIn)
     );
     assert_eq!(share_routes(&fake).len(), sent);
+}
+
+#[test]
+fn ending_a_share_is_the_requests_core_builds_one_per_item_and_an_unlisted_one_is_done() {
+    let fake = fake("ends", false);
+    let engine = engine(&fake, true);
+    let session = engine.session_turn();
+    let changes = [
+        ShareChange::Decline {
+            invite_id: INV_IN.into(),
+        },
+        ShareChange::CancelInvites {
+            invite_ids: vec![INV_A.into(), INV_B.into()],
+        },
+        ShareChange::RevokeLinks {
+            share_ids: vec![INV_MINE.into(), INV_OVER.into()],
+        },
+        ShareChange::CloseRequest {
+            request_id: INV_A.into(),
+        },
+    ];
+    for change in &changes {
+        assert_eq!(engine.share_change(session, change), Ok(()));
+    }
+    assert_eq!(
+        share_routes(&fake),
+        [
+            format!("POST /api/v1/shares/invites/{INV_IN}/hide"),
+            format!("DELETE /api/v1/shares/invites/{INV_A}"),
+            format!("DELETE /api/v1/shares/invites/{INV_B}"),
+            format!("DELETE /api/v1/shares/{INV_MINE}"),
+            format!("DELETE /api/v1/shares/{INV_OVER}"),
+            format!("POST /api/v1/file-requests/{INV_A}/close"),
+        ]
+    );
+    // Already gone: ending a share or a link is done; declining or closing what is not there is not found.
+    fake.status.store(404, Ordering::SeqCst);
+    assert_eq!(engine.share_change(session, &changes[1]), Ok(()));
+    assert_eq!(engine.share_change(session, &changes[2]), Ok(()));
+    assert_eq!(
+        engine.share_change(session, &changes[0]),
+        Err(ShareChangeError::NotFound)
+    );
+    assert_eq!(
+        engine.share_change(session, &changes[3]),
+        Err(ShareChangeError::NotFound)
+    );
+    fake.status.store(500, Ordering::SeqCst);
+    assert_eq!(
+        engine.share_change(session, &changes[1]),
+        Err(ShareChangeError::Refused)
+    );
+    fake.status.store(200, Ordering::SeqCst);
+
+    // One bad id among several: nothing at all is sent.
+    let sent = share_routes(&fake).len();
+    let mixed = ShareChange::CancelInvites {
+        invite_ids: vec![INV_A.into(), "../sent".into()],
+    };
+    assert_eq!(engine.share_change(session, &mixed), Err(ShareChangeError::NotFound));
+    assert_eq!(share_routes(&fake).len(), sent);
+
+    // The listing names a link by its own id and keeps every live link of an item.
+    let overview = engine.shares_overview().expect("the overview");
+    let ids: Vec<_> = overview
+        .links
+        .iter()
+        .map(|l| (l.share_id.as_str(), l.share_ids.len()))
+        .collect();
+    assert_eq!(ids, [(INV_OVER, 2), (INV_A, 1)]);
 }

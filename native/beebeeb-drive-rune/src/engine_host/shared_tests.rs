@@ -113,7 +113,7 @@ fn fake(tag: &str) -> Fake {
             req.bearer() == Some(second_token.as_str())
         };
         let at = PATHS.iter().position(|path| route == *path);
-        if at.is_none() && !route.contains("/api/v1/shares/invites/") {
+        if at.is_none() && !route.contains("/api/v1/shares/") && !route.contains("/api/v1/file-requests/") {
             return if theirs { two(req) } else { one(req) };
         }
         std::thread::sleep(Duration::from_millis(delay.load(Ordering::SeqCst)));
@@ -277,8 +277,8 @@ fn the_lists_are_read_when_shared_opens_and_drawn_from_what_beebeeb_answered() {
     assert_eq!(
         links,
         [
-            (TRIP.to_string(), "Invented trip".to_string(), false),
-            (THEIRS.to_string(), "Shared item".to_string(), true)
+            (REQ.to_string(), "Invented trip".to_string(), false),
+            (INV_A.to_string(), "Shared item".to_string(), true)
         ]
     );
     let lines: Vec<_> = source.links().into_iter().map(|l| l.line).collect();
@@ -467,14 +467,10 @@ fn what_is_not_bound_sends_nothing_and_says_not_available() {
     let fake = fake("unbound");
     let mut source = EngineSharedSource::new(signed_in(&fake));
     opened(&mut source);
-    let unbound: [&dyn Fn(&mut EngineSharedSource<MemoryCredentials>) -> bool; 6] = [
-        &|s| s.decline(INV_IN),
-        &|s| s.keep_offline(OTHERS),
-        &|s| s.stop_sharing(TRIP),
-        &|s| s.close_request(REQ),
-        &|s| s.remove_request(INV_B),
-        &|s| s.invite(TRIP, "new@example.eu", Access::View),
-    ];
+    let unbound: [&dyn Fn(&mut EngineSharedSource<MemoryCredentials>) -> bool; 3] =
+        [&|s| s.keep_offline(OTHERS), &|s| s.remove_request(INV_B), &|s| {
+            s.invite(TRIP, "new@example.eu", Access::View)
+        }];
     for act in unbound {
         assert!(!act(&mut source));
         assert_eq!(settle(&mut source), [Notice::NotAvailable]);
@@ -482,6 +478,64 @@ fn what_is_not_bound_sends_nothing_and_says_not_available() {
     assert!(changes(&fake.fake).is_empty());
     assert_eq!(source.invitations().len(), 1);
     assert_eq!(source.people_shares().len(), 1);
+}
+
+#[test]
+fn decline_stop_sharing_and_close_request_go_out_once_by_id_and_nothing_is_drawn_before_beebeeb_answered() {
+    let fake = fake("ends");
+    let mut source = EngineSharedSource::new(signed_in(&fake));
+    // Before the lists are here nothing can be ended.
+    assert!(!source.decline(INV_IN) && !source.stop_sharing(TRIP) && !source.close_request(REQ));
+    opened(&mut source);
+    let before = source.held.clone();
+
+    // Not an invitation, not a row, a request that is closed already: nothing is sent, nothing is said.
+    assert!(!source.decline(INV_A) && !source.decline("owner"));
+    assert!(
+        !source.stop_sharing(OTHERS) && !source.stop_sharing(THEIRS),
+        "an item's id names no link row"
+    );
+    assert!(!source.close_request(INV_B), "closed already");
+    assert!(!source.close_request(INV_A));
+    assert!(settle(&mut source).is_empty());
+    assert!(changes(&fake.fake).is_empty());
+
+    fake.delay_ms.store(150, Ordering::SeqCst);
+    assert!(source.decline(INV_IN));
+    assert!(source.stop_sharing(TRIP), "a share with people: every invite of it");
+    assert!(source.close_request(REQ));
+    assert!(!source.decline(INV_IN), "an answer is on its way");
+    assert!(!source.stop_sharing(TRIP) && !source.close_request(REQ));
+    assert_eq!(source.held, before, "nothing is drawn as ended before Beebeeb said so");
+    assert!(settle(&mut source).is_empty());
+    // (This fake gives a link and a request one id: a link row is named by its link's id.)
+    assert!(source.stop_sharing(REQ), "a link row is named by its link");
+    assert!(settle(&mut source).is_empty());
+    let mut sent = changes(&fake.fake);
+    sent.sort();
+    let mut expected = vec![
+        format!("POST /api/v1/shares/invites/{INV_IN}/hide"),
+        format!("DELETE /api/v1/shares/invites/{INV_A}"),
+        format!("DELETE /api/v1/shares/invites/{INV_B}"),
+        format!("DELETE /api/v1/shares/{REQ}"),
+        format!("POST /api/v1/file-requests/{REQ}/close"),
+    ];
+    expected.sort();
+    assert_eq!(sent, expected);
+    assert_eq!(
+        source.held, before,
+        "the lists are Beebeeb's, read again (this fake still lists everything)"
+    );
+
+    // Refused: the words say it was not made, and the row stays.
+    fake.status.store(500, Ordering::SeqCst);
+    assert!(source.decline(INV_IN));
+    let notices = settle(&mut source);
+    assert!(
+        !notices.is_empty() && notices.iter().all(|n| *n == Notice::ChangeRefused),
+        "{notices:?}"
+    );
+    assert_eq!(source.held, before);
 }
 
 #[test]
@@ -573,7 +627,7 @@ fn the_window_draws_the_lists_its_states_a_notice_and_nothing_of_the_account_bef
     // A control that is not bound says so in the window.
     rt.state.frames.shared.selected = Some(0);
     rt.update(|s, _| {
-        s.frames.shared.source.stop_sharing(TRIP);
+        s.frames.shared.source.keep_offline(OTHERS);
     });
     poll(&mut rt);
     assert!(words(&rt).contains("Not available yet in this version"));
