@@ -304,6 +304,15 @@ fn account() -> Arc<Fake> {
     fake
 }
 
+/// A source whose Insights and Sync panes were just opened, with the reads still out (nothing is read before a pane
+/// opens, so a test that holds a read in flight opens the panes itself).
+fn opened_source(fake: &Arc<Fake>, platform: Arc<FakePlatform>) -> EngineDriveSettings<Fake> {
+    let mut source = EngineDriveSettings::new(fake.clone(), platform);
+    source.opened(Pane::Sync);
+    source.opened(Pane::Insights);
+    source
+}
+
 /// A source whose Sync and Storage insights panes were opened (nothing is read before a pane opens).
 fn source(fake: &Arc<Fake>, platform: Arc<FakePlatform>) -> EngineDriveSettings<Fake> {
     let mut source = EngineDriveSettings::new(fake.clone(), platform);
@@ -413,7 +422,10 @@ fn a_locked_vault_shows_no_insights_and_no_folders() {
     assert_eq!(source.keep, Keep::Failed, "gone from memory");
     assert_eq!(source.sync().downloaded, "");
 
+    // Unlocked again: only the panes the person opens read for the new session.
     fake.gate(GateState::Ready);
+    source.opened(Pane::Insights);
+    source.opened(Pane::Sync);
     settle(&mut source);
     assert_eq!(ready(&source).used, "240 GB");
     assert!(matches!(source.keep(), Keep::Ready { .. }));
@@ -692,7 +704,7 @@ fn insights_landing_after_a_lock_are_dropped() {
     let fake = account();
     // The second read of the local state is the insights' (the first is the local sizes').
     fake.after_read.arm_at(2);
-    let mut source = EngineDriveSettings::new(fake.clone(), Arc::new(FakePlatform::default()));
+    let mut source = opened_source(&fake, Arc::new(FakePlatform::default()));
     fake.after_read.reached();
     fake.gate(GateState::Locked);
     source.pump(0.0);
@@ -716,7 +728,7 @@ fn insights_of_one_account_landing_under_another_are_never_drawn() {
     fake.after_read.arm_at(2);
     // The second ask for the use is the second account's.
     fake.in_usage.arm_at(2);
-    let source = EngineDriveSettings::new(fake.clone(), Arc::new(FakePlatform::default()));
+    let source = opened_source(&fake, Arc::new(FakePlatform::default()));
     let pending = source.pending.clone();
     fake.after_read.reached();
     let mut rt = drawn("DW-0783", Box::new(source));
@@ -767,7 +779,7 @@ fn a_change_asked_by_one_account_is_not_made_for_the_next() {
     let platform = Arc::new(FakePlatform::default());
     // The worker is held in its first read while the changes queue up behind it.
     fake.after_read.arm_at(1);
-    let mut source = EngineDriveSettings::new(fake.clone(), platform.clone());
+    let mut source = opened_source(&fake, platform.clone());
     fake.after_read.reached();
     source.set_paused(true);
     source.set_open_at_login(true);
@@ -801,7 +813,7 @@ fn a_change_the_worker_reaches_after_a_lock_is_not_made() {
     let fake = account();
     let platform = Arc::new(FakePlatform::default());
     fake.after_read.arm_at(1);
-    let mut source = EngineDriveSettings::new(fake.clone(), platform.clone());
+    let mut source = opened_source(&fake, platform.clone());
     fake.after_read.reached();
     source.set_paused(true);
     source.set_open_at_login(true);

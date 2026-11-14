@@ -913,8 +913,15 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
     /// signed-in account's read. Everything the engine has no answer for stays as the empty pane draws it: no live
     /// figure, no device, no speed test; the metered switch is the pane's default and is not the engine's to read.
     fn bandwidth(&self) -> Bandwidth {
-        let Some((limits, history)) = self.bandwidth.clone().filter(|_| self.mine()) else {
+        if !self.mine() {
             return Bandwidth::default();
+        }
+        // The speed test is the source's own state; the limits and the traffic wait for their read.
+        let Some((limits, history)) = self.bandwidth.clone() else {
+            return Bandwidth {
+                test: self.speed.clone(),
+                ..Bandwidth::default()
+            };
         };
         Bandwidth {
             upload_limit: mbps(limits.upload_kib_per_s),
