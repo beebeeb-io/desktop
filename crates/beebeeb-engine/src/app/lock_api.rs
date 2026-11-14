@@ -33,6 +33,7 @@ use crate::account::{SessionGeneration, SessionTransition};
 use crate::keychain::{AuthVault, LockFlag};
 use crate::session::Session;
 use crate::signin::gate::{NextAfterSignIn, SignInProblem};
+use crate::signin::store;
 
 /// How often the session watcher asks whether the server still accepts the session.
 pub(super) const SESSION_WATCH_EVERY: Duration = Duration::from_secs(1);
