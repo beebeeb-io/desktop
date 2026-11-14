@@ -692,6 +692,10 @@ fn the_pane_says_it_in_view_with_try_again_and_no_row_moves() {
     );
     in_view(&rt, "notice");
     assert!(
+        find(&rt, "toast-0").is_none(),
+        "the pane says it: the failed read is not a toast as well"
+    );
+    assert!(
         find(&rt, "toast-room").is_some(),
         "room under the last row to scroll it clear of the notice"
     );
@@ -736,6 +740,14 @@ fn the_pane_says_it_in_view_with_try_again_and_no_row_moves() {
         "\"checking\" is over with the check: it does not stay beside its failure: {seen}"
     );
     in_view(&rt, "notice");
+    // "Try again" under that notice, and the read fails again: nothing else on the pane changes, so THAT is
+    // said, above the notice.
+    press_in_view(&mut rt, "notice-action");
+    poll_until(&mut rt, "the failed retry was never said", |rt| {
+        find(rt, "toast-0").is_some()
+    });
+    assert_eq!(text_of(&rt, "toast-0-text").as_deref(), Some(NOT_LOADED));
+    assert_eq!(find(&rt, "toast-0").map(|e| e.role), Some("alert".into()));
     // A press Beebeeb refuses while that stands: said above the notice, both in view.
     fake.put_mode.store(SERVER_ERROR, Ordering::SeqCst);
     press_in_view(&mut rt, "item-3-1-switch");
@@ -766,6 +778,12 @@ fn the_pane_says_it_in_view_with_try_again_and_no_row_moves() {
     in_view(&rt, "notice-action");
     rt.update(|s, _| crate::frames::settings::go(s, "DW-0750"));
     draw(&mut rt);
+    // (Leaving the pane took the toast.) A refusal again, so one is up when "Try again" is pressed.
+    assert!(find(&rt, "toast-0").is_none());
+    press_in_view(&mut rt, "item-3-1-switch");
+    poll_until(&mut rt, "the refusal was never said", |rt| {
+        find(rt, "toast-0").is_some()
+    });
 
     // "Try again" with an answer: what Beebeeb has, and the notice goes.
     fake.read_mode.store(ANSWER, Ordering::SeqCst);
@@ -781,6 +799,22 @@ fn the_pane_says_it_in_view_with_try_again_and_no_row_moves() {
         "the change had landed"
     );
     assert_eq!(row_rects(&rt), rows);
+
+    // A change answered after the person went to another pane: its toast is these panes' own, and is not
+    // said over General.
+    fake.put_mode.store(ANSWER, Ordering::SeqCst);
+    fake.put_delay_ms.store(300, Ordering::SeqCst);
+    let now = rt.state.settings.source.notifications().groups[0].1[1].on;
+    press_in_view(&mut rt, "item-3-1-switch");
+    rt.update(|s, _| crate::frames::settings::go(s, "DW-0701"));
+    poll_until(&mut rt, "the change was never answered", |rt| {
+        rt.state.settings.source.notifications().groups[0].1[1].on != now
+    });
+    assert_eq!(
+        rt.state.settings.toast, None,
+        "nothing about notifications over General"
+    );
+    assert!(find(&rt, "toast-0").is_none());
 }
 
 fn puts(fake: &Fake) -> usize {
