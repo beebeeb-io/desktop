@@ -303,7 +303,7 @@ fn an_extended_webp_is_as_large_as_the_largest_size_stated_anywhere_inside_it() 
         frame(1, 1, &[(b"ALPH", vec![0; 5]), (b"VP8 ", lossy(16_383, 16_383))]),
     ] {
         let file = riff(&[
-            (b"VP8X", canvas(1, 1)),
+            (b"VP8X", flagged(0x02, 1, 1)),
             (b"ANIM", vec![0; 6]),
             small(),
             small(),
@@ -315,16 +315,16 @@ fn an_extended_webp_is_as_large_as_the_largest_size_stated_anywhere_inside_it() 
     }
     // A bitstream whose header cannot be read: no size is known, so it is not a picture to decode.
     for unreadable in [
-        riff(&[(b"VP8X", canvas(64, 48)), (b"VP8 ", vec![0; 10])]),
-        riff(&[(b"VP8X", canvas(64, 48)), (b"VP8L", vec![0x2F, 0])]),
+        riff(&[(b"VP8X", flagged(0x02, 64, 48)), (b"VP8 ", vec![0; 10])]),
+        riff(&[(b"VP8X", flagged(0x02, 64, 48)), (b"VP8L", vec![0x2F, 0])]),
         riff(&[
-            (b"VP8X", canvas(64, 48)),
+            (b"VP8X", flagged(0x02, 64, 48)),
             (b"ANMF", frame(64, 48, &[(b"VP8 ", vec![0; 4])])),
         ]),
         // After an alpha the decoder reads a lossy bitstream whatever the chunk is named: a lossless one there
         // has no size the check can vouch for.
         riff(&[
-            (b"VP8X", canvas(64, 48)),
+            (b"VP8X", flagged(0x02, 64, 48)),
             (
                 b"ANMF",
                 frame(1, 1, &[(b"ALPH", vec![0; 5]), (b"VP8L", lossless(16_383, 16_383))]),
@@ -334,10 +334,10 @@ fn an_extended_webp_is_as_large_as_the_largest_size_stated_anywhere_inside_it() 
         assert_eq!(check(&unreadable), Err(Refused::NotAPicture));
     }
     // What agrees with its canvas is that canvas, and passes.
-    let agrees = riff(&[(b"VP8X", canvas(640, 480)), (b"VP8 ", lossy(640, 480))]);
+    let agrees = riff(&[(b"VP8X", flagged(0x02, 640, 480)), (b"VP8 ", lossy(640, 480))]);
     assert_eq!(check(&agrees), Ok(still(640, 480)));
     let animated = riff(&[
-        (b"VP8X", canvas(640, 480)),
+        (b"VP8X", flagged(0x02, 640, 480)),
         (b"ANMF", frame(640, 480, &[(b"VP8L", lossless(640, 480))])),
         (b"ANMF", frame(320, 240, &[(b"VP8 ", lossy(320, 240))])),
     ]);
@@ -522,10 +522,6 @@ fn a_webp_frame_is_one_bitstream_after_at_most_an_alpha_and_nothing_else() {
             "an alpha and nothing after it",
             frame(16, 16, &[(b"ALPH", alpha(16, 16))]),
         ),
-        (
-            "a second bitstream",
-            frame(16, 16, &[(b"VP8 ", LOSSY.to_vec()), (b"VP8 ", LOSSY.to_vec())]),
-        ),
         ("bytes after the bitstream", longer),
         ("a bitstream that runs past the frame", cut_short),
         (
@@ -549,6 +545,16 @@ fn a_webp_frame_is_one_bitstream_after_at_most_an_alpha_and_nothing_else() {
             "{which}, first"
         );
     }
+    // A second chunk named like a bitstream after the first is one of the further chunks the WebP spec allows: the
+    // decoder never reads it, so it is only held inside the frame, not sized.
+    assert!(
+        check(&animation(vec![frame(
+            16,
+            16,
+            &[(b"VP8 ", LOSSY.to_vec()), (b"VP8 ", LOSSY.to_vec())]
+        )]))
+        .is_ok()
+    );
     // A last frame that states more bytes than the file has.
     let whole = animation(vec![good(), good()]);
     assert_eq!(check(&whole[..whole.len() - 2]), Err(Refused::NotAPicture));
