@@ -140,6 +140,7 @@ pub fn slider(name: &str, width: f32, at: f32, t: &Theme) -> El {
     let at = at.clamp(0.0, 1.0);
     let f = |n: &str| std::env::var(n).ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
     let (dx, dy, dd) = (f("KNOB_DX"), f("KNOB_DY"), f("KNOB_DD"));
+    let (sa, sb) = (f("KNOB_SA"), f("KNOB_SB"));
     el().key("slider")
         .role("slider")
         .label(name)
@@ -170,7 +171,7 @@ pub fn slider(name: &str, width: f32, at: f32, t: &Theme) -> El {
                 // The knob sits where the value is, between device pixels if need be.
                 .pixel_snap(false)
                 .radius(9.0)
-                .box_shadow(kit::drop(1.0, 3.0, Color::BLACK.alpha(0.30)))
+                .box_shadow(kit::drop(1.0, 3.0 + sb, Color::BLACK.alpha(0.30 + sa)))
                 .box_shadow(kit::ring(kit::HAIR, t.separator)),
         )
 }
