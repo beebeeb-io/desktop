@@ -291,8 +291,6 @@ pub trait SetupEngine: Send + Sync + 'static {
     fn keep_folder(&self, folder: &Path) -> Result<bool, SetupRefused>;
     /// Ask Windows again for the folder's entry in File Explorer; never stops or starts sync. BLOCKS.
     fn ask_explorer_again(&self);
-    /// Stop sync and wait until it ended (`Engine::stop`). BLOCKS.
-    fn stop_sync(&self);
     /// The known folders this PC has, for step 3 (`Engine::backups_overview`). BLOCKS (a disk walk). Empty when
     /// they cannot be read: the step then says it is not available.
     fn backup_choices(&self) -> Vec<BackupChoice> {

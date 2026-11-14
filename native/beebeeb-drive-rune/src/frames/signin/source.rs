@@ -242,11 +242,6 @@ pub trait SignInSource {
     /// Added by lane f-signin-rest (a default): the person left while Windows' passkey dialog
     /// was up: dismiss it. No `Passkey` event of that attempt may arrive after this call.
     fn cancel_passkey(&mut self) {}
-    /// Added by lane bind-acct-d (a default: the board's own door). Whether this source can sign in with a passkey
-    /// at all (this PC has the system's passkey dialog). A window draws the "Use a passkey" door only when it can.
-    fn passkey_available(&self) -> bool {
-        true
-    }
     /// Added by lane bind-acct-d (a default that ignores the address): "Use a passkey" for the address typed in the
     /// form. Beebeeb's passkey sign-in starts from an account's address, so a source that needs it takes it here.
     fn begin_passkey_for(&mut self, _email: &str) {
