@@ -2,7 +2,7 @@
 //! the selected item's own details.
 
 use super::{MenuKind, Toast, details, dialogs, list, menus, rename};
-use super::{sidebar, toolbar};
+use super::{select_bar, sidebar, toolbar};
 use crate::State;
 use crate::theme::tokens::{self, Theme};
 use crate::theme::{icons, icons_files};
@@ -270,17 +270,38 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 })
         }));
         if s.show_detail_pane {
-            let selected = s.selected.and_then(|i| s.listing.items.get(i));
-            let facts = selected.map(|item| {
+            // A copy on its way down is not on this PC yet, and says so on the Available offline card (DW-0412).
+            let selected = s
+                .selected
+                .and_then(|i| s.listing.items.get(i))
+                .map(|item| match s.download_of(&item.id) {
+                    Some(d) => (
+                        crate::source::DriveItem {
+                            pc_status: Some("downloading".into()),
+                            ..item.clone()
+                        },
+                        Some(d),
+                    ),
+                    None => (item.clone(), None),
+                });
+            let facts = selected.as_ref().map(|(item, download)| {
                 let mut facts = s.actions.source.details(item, &s.listing.folder.name);
-                // A copy on its way down says so on the Available offline card (DW-0412).
-                if let Some(d) = s.download_of(&item.id) {
+                if let Some(d) = download {
                     facts.offline_note = d.panel_words();
                     facts.kept_offline = true;
                 }
                 (item, facts)
             });
-            body = body.child(details::details_pane(facts, &t));
+            body = body.child(if s.selects_several() {
+                let items: Vec<_> = s
+                    .selected_rows()
+                    .iter()
+                    .filter_map(|&i| s.listing.items.get(i))
+                    .collect();
+                select_bar::panel(&items, &t)
+            } else {
+                details::details_pane(facts, &t)
+            });
         }
     }
 
@@ -298,6 +319,8 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .or_else(|| crate::frames::global::under_toolbar(s, &t))
                 .or_else(|| super::protected::notice(s, &t)),
         )
+        // Several rows selected: what can be done to all of them (DW-0403).
+        .children(select_bar::bar(s, &t))
         .child(body)
         .child({
             // The sync state is the source's; a click shows the b's flyout (DW-0401 to DW-1201).

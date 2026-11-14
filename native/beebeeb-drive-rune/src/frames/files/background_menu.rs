@@ -27,7 +27,7 @@ pub fn entries(s: &State) -> Vec<Entry> {
         Entry::check("view-list", "as List", !grid),
         Entry::check("view-grid", "as Grid", grid),
         Entry::Sep,
-        Entry::item("sort-by", "Sort by"),
+        Entry::keyed("sort-by", "Sort by", crate::ui::menu::SUBMENU),
         Entry::check("folders-first", "Folders first", s.actions.sort.folders_first),
         Entry::Sep,
         Entry::keyed("details-panel", "Show details panel", "Alt+Shift+P"),

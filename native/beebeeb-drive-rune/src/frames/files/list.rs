@@ -351,7 +351,16 @@ fn file_row_full(
         }
         _ => {
             if downloading.is_some() {
-                pc = pc.child(super::keeping::pc_mark(format!("{k}-pc"), t));
+                pc = pc
+                    .child(super::keeping::pc_mark(format!("{k}-pc"), t))
+                    // The board's export keeps the date's cell here, holding nothing: the date and size gave
+                    // way to the words and the bar.
+                    .child(
+                        kit::label(format!("{k}-date"), "", type_::META_MONO, meta)
+                            .absolute(0.0, 8.0)
+                            .w(COL_PC_W)
+                            .h(14.0),
+                    );
             } else if let Some(state) = PcState::of(item.pc_status.as_deref()) {
                 pc = pc.child(pc_glyph(format!("{k}-pc"), state, surface, t));
             }

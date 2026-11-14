@@ -31,6 +31,9 @@ pub fn lisbon_trip(s: &mut State) {
     s.actions = super::Actions::new(Box::new(TripByDate::files()));
     s.open_folder(Some(TripByDate::FOLDER.to_string()));
     s.clear_selection();
+    // The board lists the rows oldest first under a header that reads "Name": the header is the
+    // window's own sort (Name), the rows stand as the board has them (the sort of the folder above).
+    s.actions.sort = super::Sort::default();
     s.global = crate::frames::global::Ui::default();
     s.global.grid.thumbs = Box::new(super::long_list::TripThumbs);
 }

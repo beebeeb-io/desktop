@@ -30,6 +30,7 @@ pub mod reset;
 pub mod retry;
 mod row_facts;
 pub mod scenes_waveb;
+pub mod select_bar;
 pub mod session;
 pub mod share;
 pub mod sidebar;
