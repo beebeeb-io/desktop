@@ -418,21 +418,21 @@ fn the_guide_is_done_once_per_account() {
     }
 }
 
-/// An answer is for the account it was asked for: asked under one account and taken in under another, it starts
-/// nothing.
+/// An answer is for the account it was asked for: asked under one account and taken in under another, there is
+/// none (so nothing starts); asked and taken in under the same account, there is.
 #[test]
-fn an_answer_asked_under_one_account_starts_nothing_under_another() {
-    let (engine, mut rt) = on_engine();
-    rt.update(|s, _| {
-        let account = s.shell.app.account().map(str::to_string);
-        s.guide_marks.ask(account.as_deref());
-    });
-    engine.set_account("user-b");
-    tick(&mut rt);
-    assert_eq!(
-        rt.state.guide.step, None,
-        "the first account's answer is not the second's"
-    );
+fn an_answer_asked_under_one_account_is_none_under_another() {
+    use super::guide_marks::{FixtureMarks, GuideMarks, Known};
+    let mut marks = FixtureMarks::done_for("account-a");
+    marks.ask(Some("account-b"));
+    assert_eq!(marks.answer(Some("account-a")), None, "asked for b, taken in under a");
+    assert_eq!(marks.answer(Some("account-b")), None, "and an answer is given once");
+    marks.ask(Some("account-b"));
+    assert_eq!(marks.answer(Some("account-b")), Some(Known::NotDone));
+    marks.ask(Some("account-a"));
+    assert_eq!(marks.answer(Some("account-a")), Some(Known::Done));
+    marks.ask(None);
+    assert_eq!(marks.answer(None), Some(Known::NotKnown), "nobody signed in: not known");
 }
 
 #[test]
