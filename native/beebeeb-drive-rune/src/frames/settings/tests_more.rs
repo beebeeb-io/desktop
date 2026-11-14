@@ -526,7 +526,11 @@ fn a_source_that_does_not_know_these_pages_shows_no_sample_values() {
     state.settings.drive = Box::new(Bare(BoardDrive::new()));
     super::go(&mut state, "DW-0790b");
     let rt = window(state);
-    assert!(find(&rt, "item-0-0").is_none(), "no App activity without a measurement");
+    assert_eq!(
+        says(&rt, "item-0-0-title"),
+        "Not available in this version yet.",
+        "no App activity without a measurement: the page says so"
+    );
     assert!(find(&rt, "note-0").is_none(), "no banner without a saved file");
     assert_eq!(says(&rt, "btn-0-label"), "Export…");
     let mut state = init();

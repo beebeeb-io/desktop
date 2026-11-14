@@ -54,7 +54,7 @@ pub mod backups_api;
 // Files in two versions and the answer to one, for the native Files window.
 pub mod conflicts_api;
 // Explorer's "Free up space" command asks this handle, and a stop removes its binding (task 2490).
-mod explorer_api;
+pub(crate) mod explorer_api;
 // The sidebar's figures for the native Files window: files kept on this PC, the storage split.
 pub mod files_facts_api;
 pub mod kept_api;
@@ -65,6 +65,8 @@ pub mod passkeys_api;
 pub mod photos_api;
 pub mod settings_api;
 pub mod setup_api;
+pub mod speed_test_api;
+pub mod support_bundle_api;
 // What the account shares and what is shared with it, for the native Shared window.
 pub mod shares_api;
 pub mod signin_api;
@@ -80,6 +82,7 @@ pub mod versions_api;
 // An open file for the native viewer: its facts, and its content decrypted in memory.
 pub mod viewer_api;
 
+pub use explorer_api::ExplorerChangeRefused;
 pub use owned_state::{LocalStateRefused, OwnedState};
 
 /// Where the handle keeps an account's session token and vault key. The handle names the app on every call

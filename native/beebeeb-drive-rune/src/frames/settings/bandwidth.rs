@@ -24,7 +24,7 @@ use super::bandwidth_data::{
     Bandwidth, Device, DeviceKind, DeviceState, Direction, Flow, History, PRESET_LABELS, PRESETS, STEP_SECONDS,
     SpeedTest, Step, limit_label,
 };
-use super::drive::BoardDrive;
+use super::drive::{BoardDrive, Control};
 use super::{Menu, MenuKind, SettingsUi};
 
 /// Where each limit's menu goes: the point its row marks (the Limits list is the pane's second).
@@ -167,11 +167,19 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         list += 1;
     }
     if crop != Crop::Head {
-        children.push(limits(list, &bw, ui.menu, ui.drive.metered_control(), t));
+        children.push(limits(
+            list,
+            &bw,
+            ui.menu,
+            ui.drive.metered_control() && ui.drive.shows(Control::SyncOnMetered),
+            t,
+        ));
         list += 1;
     }
     if matches!(crop, Crop::Whole | Crop::FromDevices) {
-        children.push(speed_test(list, &bw.test, t));
+        if ui.drive.shows(Control::SpeedTest) {
+            children.push(speed_test(list, &bw.test, t));
+        }
     }
     let overlay = [Direction::Upload, Direction::Download]
         .into_iter()

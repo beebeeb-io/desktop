@@ -11,9 +11,38 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 
 use super::{CredentialStores, Engine, LocalStateRefused};
+use crate::account::SessionGeneration;
 use crate::explorer_command::{self, ExplorerBinding, OsExplorerBinding, ReclaimOwner};
 use crate::identity::EngineIdentity;
 use crate::sync_view::Explorer;
+
+/// Why Repair or Turn off changed nothing. No variant carries a path, a name or an id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExplorerChangeRefused {
+    /// The session of the press is not the one in memory.
+    NotSignedIn,
+    /// No sync folder is set.
+    NoFolder,
+    /// Changes made on this PC have not uploaded yet: turning off would lose them.
+    ChangesWait,
+    /// The local state could not say whether changes wait.
+    CannotTellChanges,
+    /// Windows or the start refused; nothing needs undoing.
+    Failed,
+}
+
+impl ExplorerChangeRefused {
+    /// A fixed sentence for the window.
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::NotSignedIn => "Unlock Beebeeb to change this.",
+            Self::NoFolder => "Beebeeb has no sync folder yet.",
+            Self::ChangesWait => "Changes on this PC have not uploaded yet. Wait for them, then turn it off.",
+            Self::CannotTellChanges => "Couldn't check for changes that have not uploaded yet. Try again.",
+            Self::Failed => "Couldn't change Beebeeb in File Explorer. Nothing was changed that you need to undo.",
+        }
+    }
+}
 
 /// What the handle keeps for Explorer's command: the binding it removes, and the folder an engine started in.
 pub(super) struct ExplorerSeat {
@@ -135,6 +164,77 @@ impl<C: CredentialStores> Engine<C> {
     #[cfg(any(test, feature = "test-support"))]
     pub fn use_sync_root_for_test(&self, root: PathBuf) {
         self.seat().sync_root_for_test = Some(root);
+    }
+
+    /// Settings > Sync > "Repair" (T2-E1): sync is stopped and started again into the configured folder, which is the
+    /// registration path Setup's "Try again" asks too (only a start asks Windows). Nothing is changed unless the
+    /// session in memory is still `session`, the one of the press.
+    pub fn repair_explorer_for(&self, session: SessionGeneration) -> Result<(), ExplorerChangeRefused> {
+        let root = self.explorer_change_root(session)?;
+        self.stop();
+        match self.start_sync(root) {
+            Ok(super::SyncStart::Started | super::SyncStart::AlreadyRunning) => Ok(()),
+            Ok(super::SyncStart::NoSession) => Err(ExplorerChangeRefused::NotSignedIn),
+            Err(_) => Err(ExplorerChangeRefused::Failed),
+        }
+    }
+
+    /// Settings > Sync > "Turn off Beebeeb in File Explorer" (T2-E1): refused while changes wait to upload; else sync
+    /// is stopped and the folder's registration removed (Windows; the placeholders go with it, the files that are
+    /// downloaded stay). Nothing is changed unless the session in memory is still `session`.
+    pub fn turn_off_explorer_for(&self, session: SessionGeneration) -> Result<(), ExplorerChangeRefused> {
+        self.turn_off_explorer_with(session, &|root| self.unregister_in_os(root))
+    }
+
+    /// [`Self::turn_off_explorer_for`] with the registration removal given, so a test can make each answer on any OS.
+    pub(crate) fn turn_off_explorer_with(
+        &self,
+        session: SessionGeneration,
+        unregister: &dyn Fn(&Path) -> Result<(), ()>,
+    ) -> Result<(), ExplorerChangeRefused> {
+        let root = self.explorer_change_root(session)?;
+        // Changes that have not left this PC are lost with the registration's placeholders: refused, not asked.
+        let waiting = self
+            .local_state()
+            .ok()
+            .and_then(|state| state.with(|db| db.queue_hold_summary().ok()).ok().flatten())
+            .ok_or(ExplorerChangeRefused::CannotTellChanges)?;
+        if waiting.waiting + waiting.gave_up + waiting.held.iter().map(|g| g.count).sum::<i64>() > 0 {
+            return Err(ExplorerChangeRefused::ChangesWait);
+        }
+        self.stop();
+        // The session may have moved on while sync stopped.
+        if !self.acct.session_unchanged_since(session) {
+            return Err(ExplorerChangeRefused::NotSignedIn);
+        }
+        if unregister(&root).is_err() {
+            // Nothing was removed: sync starts again, as it was.
+            let _ = self.start_sync(root);
+            return Err(ExplorerChangeRefused::Failed);
+        }
+        Ok(())
+    }
+
+    /// The configured folder, once the session of the press is the one in memory.
+    fn explorer_change_root(&self, session: SessionGeneration) -> Result<PathBuf, ExplorerChangeRefused> {
+        if !self.acct.session_unchanged_since(session) {
+            return Err(ExplorerChangeRefused::NotSignedIn);
+        }
+        match self.configured_sync_root() {
+            Ok(Some(root)) => Ok(root),
+            _ => Err(ExplorerChangeRefused::NoFolder),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn unregister_in_os(&self, root: &Path) -> Result<(), ()> {
+        crate::windows_cf::registration::unregister_sync_root(self.identity, root).map_err(|_| ())
+    }
+
+    /// Only Windows has a registration to remove.
+    #[cfg(not(target_os = "windows"))]
+    fn unregister_in_os(&self, _root: &Path) -> Result<(), ()> {
+        Err(())
     }
 
     fn seat(&self) -> std::sync::MutexGuard<'_, ExplorerSeat> {

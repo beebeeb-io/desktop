@@ -86,6 +86,8 @@ pub(crate) fn source_when<E: ThisPcEngine>(on: bool, engine: Arc<E>) -> Box<dyn 
 
 /// An answer read this recently is not read again when a section opens.
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
+/// How long after a read answered "not now" the next one is asked.
+const RETRY_AFTER: Duration = Duration::from_secs(1);
 /// How far back the history goes (the board: "kept on this PC only", 30 days).
 const HISTORY_DAYS: i64 = 30;
 /// How many queued changes are read (the 0.8 app's Sync history reads as many).
@@ -119,6 +121,9 @@ pub trait ThisPcEngine: Send + Sync + 'static {
     fn syncing(&self) -> bool;
     /// Keep an item on this PC, or stop keeping it. Blocks: a worker's.
     fn set_kept(&self, file_id: &str, kept: bool) -> Result<(), String>;
+    /// [`Self::set_kept`] bound to `session`, the one of the press: nothing is changed once the engine's session
+    /// moved on. Blocks: a worker's.
+    fn set_kept_for(&self, session: SessionGeneration, file_id: &str, kept: bool) -> Result<(), String>;
 }
 
 impl<C: CredentialStores> ThisPcEngine for Engine<C> {
@@ -142,6 +147,9 @@ impl<C: CredentialStores> ThisPcEngine for Engine<C> {
     }
     fn set_kept(&self, file_id: &str, kept: bool) -> Result<(), String> {
         Engine::set_kept(self, file_id, kept)
+    }
+    fn set_kept_for(&self, session: SessionGeneration, file_id: &str, kept: bool) -> Result<(), String> {
+        Engine::set_kept_for(self, session, file_id, kept)
     }
 }
 
@@ -246,6 +254,8 @@ pub struct EngineThisPcSource<E: ThisPcEngine> {
     read_at: Option<Instant>,
     /// A read is out in this generation: no second one is asked.
     reading: bool,
+    /// A read that was answered "not now" is asked again at this time (never in the pump that heard it).
+    retry_at: Option<Instant>,
 }
 
 impl<E: ThisPcEngine> EngineThisPcSource<E> {
@@ -264,6 +274,7 @@ impl<E: ThisPcEngine> EngineThisPcSource<E> {
             generation: 0,
             read_at: None,
             reading: false,
+            retry_at: None,
         }
     }
 
@@ -376,7 +387,7 @@ fn run<E: ThisPcEngine>(engine: &E, answers: &mpsc::Sender<Answer>, job: Job) {
                 // Each item under the session of the press: one that moved on stops the rest.
                 let failed = ids
                     .iter()
-                    .filter(|id| !(owns_state(engine, &whose) && engine.set_kept(id, false).is_ok()))
+                    .filter(|id| !(owns_state(engine, &whose) && engine.set_kept_for(whose.session, id, false).is_ok()))
                     .count();
                 (failed > 0).then(|| {
                     log(format!(
@@ -645,6 +656,7 @@ impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
             self.no_read = None;
             self.read_at = None;
             self.reading = false;
+            self.retry_at = None;
             self.generation += 1;
             pumped.changed = true;
             self.ask_read();
@@ -681,9 +693,18 @@ impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
                 // A read that failed keeps what is held of this account (before the first answer: it says so).
                 Err(NoRead::Unreadable) => self.no_read = Some(NoRead::Unreadable),
                 // Nothing was learned: what is held and what is said stay; the next opening asks again.
-                Err(NoRead::NotNow) => self.read_at = None,
+                // Asked again shortly: with nothing held, the window would say "reading" until it was reopened.
+                Err(NoRead::NotNow) => {
+                    self.read_at = None;
+                    self.retry_at = Some(Instant::now() + RETRY_AFTER);
+                }
             }
         }
+        if self.retry_at.is_some_and(|at| at <= Instant::now()) && !self.reading && self.current() {
+            self.retry_at = None;
+            self.ask_read();
+        }
+        pumped.busy |= self.retry_at.is_some();
         pumped.busy |= self.pending.load(Ordering::SeqCst) > 0;
         pumped
     }
