@@ -149,7 +149,7 @@ impl<C: CredentialStores> Engine<C> {
         let base = self.config.api_base.clone();
 
         // The server's policy, and the breach answer for THIS password when the policy declares a check.
-        let policy = self.signup_policy(&base).await?;
+        let policy = self.password_policy(&base).await?;
         let breach = self.breach_check(&base, &policy, &new).await;
 
         let binding = {
@@ -168,7 +168,7 @@ impl<C: CredentialStores> Engine<C> {
                 Step::Done(_) => return Err(PasswordChangeError::Failed("protocol")),
                 Step::Send(request) => {
                     let is_step_up_start = request.path.ends_with("/confirm-opaque-start");
-                    let response = self.send_account(&base, &held.token, &request).await;
+                    let response = self.send_password_call(&base, &held.token, &request).await;
                     drop(request);
                     let response = match response {
                         // The first leg of a step-up carries no proof of the password: a 401 there is about the
@@ -231,7 +231,7 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// `GET /api/v1/onboarding` (no session): the numbers the server declares, floored by core.
-    async fn signup_policy(&self, base: &str) -> Result<SignupPolicy, PasswordChangeError> {
+    async fn password_policy(&self, base: &str) -> Result<SignupPolicy, PasswordChangeError> {
         let response = auth_transport::send_to(base, &self.client, None, SignupPolicy::request())
             .await
             .map_err(|_| PasswordChangeError::Offline)?;
@@ -271,7 +271,7 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// One request of core's flow, on the session's token. The answer's body is parsed, never logged.
-    async fn send_account(
+    async fn send_password_call(
         &self,
         base: &str,
         token: &str,
