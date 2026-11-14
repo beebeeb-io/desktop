@@ -66,7 +66,7 @@ pub struct Form {
     pub saved: Option<Result<String, String>>,
 }
 
-fn secure() -> TextEdit {
+pub(super) fn secure() -> TextEdit {
     TextEdit::new("").secure()
 }
 
@@ -165,6 +165,12 @@ pub fn arrive(ui: &mut AccountUi) {
     if let Some(dialog) = &ui.dialog {
         if matches!(dialog, Dialog::Code(_)) {
             focus(f, Some(CODE_KEY));
+        }
+        // Removing a passkey asks the password in its confirm (a source that needs it).
+        if matches!(dialog, Dialog::RemovePasskey(_))
+            && ui.source.as_deref().is_some_and(|s| s.passkeys_need_password())
+        {
+            focus(f, Some(CURRENT_KEY));
         }
         return;
     }

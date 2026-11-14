@@ -312,7 +312,7 @@ impl Ui {
         self.passkey_waiting = true;
         self.problem = None;
         self.deleted = false;
-        self.source.begin_passkey();
+        self.source.begin_passkey_for(self.email.text.trim());
         self.pump();
     }
 

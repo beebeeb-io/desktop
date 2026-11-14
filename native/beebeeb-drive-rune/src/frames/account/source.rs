@@ -405,14 +405,19 @@ pub struct Passkey {
     pub added: String,
     /// Whether it can unlock the data on a new device (PRF), or only sign in.
     pub can_unlock: bool,
+    /// Whether the server said which of the two it is. `false`: not known, and the row says only what is true of
+    /// every passkey ("Signs you in"), never "Sign-in only".
+    pub unlock_known: bool,
 }
 
 impl Passkey {
     pub fn does(&self) -> &'static str {
         if self.can_unlock {
             "Can unlock data"
-        } else {
+        } else if self.unlock_known {
             "Sign-in only"
+        } else {
+            "Signs you in"
         }
     }
 }
@@ -679,6 +684,29 @@ pub trait AccountSource {
     fn rename_passkey(&mut self, id: &str, name: &str) -> bool;
     /// Engine: `DELETE /api/v1/account/passkeys/<id>`. The copy in the password manager stays.
     fn remove_passkey(&mut self, id: &str) -> bool;
+    /// Added by lane bind-acct-d (defaults: the board's own flow). Adding and removing a passkey asks the account
+    /// password first (core's step-up: the server requires it): the pane then draws a password field and calls
+    /// `add_passkey_confirmed` / `remove_passkey_confirmed`. A fixture says `false`.
+    fn passkeys_need_password(&self) -> bool {
+        false
+    }
+    /// `false`: this PC has no passkey dialog (no WebAuthn), so the pane draws no "Add a passkey".
+    fn can_add_passkey(&self) -> bool {
+        true
+    }
+    /// `false`: Beebeeb has no route to rename a passkey, so the menu draws no "Rename".
+    fn can_rename_passkey(&self) -> bool {
+        true
+    }
+    /// Engine: `add_passkey` with the password the person typed. `Ok`: it began (the system dialog is up); how it
+    /// ended comes as a toast ([`AccountSource::notice`]) and the list is read again.
+    fn add_passkey_confirmed(&mut self, _password: Password<'_>) -> Result<(), Refused> {
+        self.add_passkey()
+    }
+    /// Engine: `remove_passkey` with the password the person typed; the answer comes as for the add.
+    fn remove_passkey_confirmed(&mut self, id: &str, _password: Password<'_>) -> bool {
+        self.remove_passkey(id)
+    }
 
     /// Engine: `GET /api/v1/account/activity`, by period ("Today", "October", "Earlier");
     /// `None` while security logging is off.

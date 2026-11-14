@@ -394,7 +394,7 @@ impl<C: CredentialStores> Engine<C> {
         if let Ok(mut guard) = self.acct.session.lock() {
             *guard = Some(Session {
                 token: token.to_string(),
-                master_key: *key,
+                master_key: **key,
                 email,
             });
             self.acct

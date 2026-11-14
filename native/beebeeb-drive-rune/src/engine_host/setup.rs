@@ -591,7 +591,9 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
     fn set_previews(&mut self, _size: PreviewSize, _format: PreviewFormat) {}
     fn choose_photo(&mut self) {}
 
-    /// A passkey (step 1): the engine has no call that registers one for the signed-in account.
+    /// A passkey (step 1): not offered (`available`). The engine adds one ([`beebeeb_engine::app::Engine::add_passkey`]),
+    /// but core's flow needs the account password for its step-up, and this step has no password to hand over and
+    /// no field to ask it in: it stays Settings > Passkeys, where the pane asks.
     fn add_passkey(&mut self) -> bool {
         false
     }

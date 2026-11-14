@@ -50,6 +50,7 @@ pub mod files;
 mod files_trash;
 pub mod guide;
 pub mod open;
+pub mod passkeys;
 pub mod photos;
 pub mod search;
 pub mod settings;

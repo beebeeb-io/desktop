@@ -53,6 +53,7 @@ use beebeeb_engine::app::{CredentialStores, Engine};
 use chrono::Utc;
 
 use super::log;
+use super::passkeys::PasskeyCalls;
 use crate::frames::account::Pane;
 use crate::frames::account::approve::{Approval, Denial, Lookup, SignInRequest};
 use crate::frames::account::source::{
@@ -204,6 +205,7 @@ pub struct EngineAccountSource<C: CredentialStores> {
     counting_devices: bool,
     /// The count of sign-outs sent when the held list was read: a list behind `changes` is not counted.
     counted_at: u64,
+    passkeys: PasskeyCalls<C>,
     notices: Line,
     /// How sign-outs ended that the person has not been told: answered after they left Devices and sessions,
     /// or still waiting in the line when they left. Only what was not done: said when that pane shows again (a
@@ -227,6 +229,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     pub fn new(engine: Arc<Engine<C>>) -> Self {
         let (answers, inbox) = mpsc::channel();
         Self {
+            passkeys: PasskeyCalls::new(engine.clone()),
             engine,
             overview: None,
             sessions: None,
@@ -789,6 +792,9 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
 
 impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn pane_state(&self, pane: Pane) -> PaneState {
+        if pane == Pane::Passkeys {
+            return self.passkeys.pane_state();
+        }
         let Some(kind) = Kind::of(pane) else {
             return PaneState::Unwired;
         };
@@ -813,6 +819,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     }
 
     fn opened(&mut self, pane: Pane) {
+        self.passkeys.opened(pane);
         self.showing = Kind::of(pane);
         self.counting_devices = pane == Pane::Security;
         let Some(kind) = self.showing else {
@@ -846,11 +853,15 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     }
 
     fn closed(&mut self) {
+        self.passkeys.closed();
         self.showing = None;
         self.counting_devices = false;
     }
 
     fn reload(&mut self, pane: Pane) {
+        if pane == Pane::Passkeys {
+            self.passkeys.reload();
+        }
         if let Some(kind) = Kind::of(pane) {
             self.read(kind);
         }
@@ -925,11 +936,17 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         );
         changed |= self.notices.len() + self.later.len() != before;
         self.dirty = false;
+        let (passkeys_changed, passkeys_busy, passkeys_wake) = self.passkeys.pump();
+        let (changed, wake_in) = (
+            changed || passkeys_changed,
+            [wake_in, passkeys_wake].into_iter().flatten().min(),
+        );
         Pumped {
             changed,
             busy: self.overview_reads.reading.is_some()
                 || self.sessions_reads.reading.is_some()
-                || !self.changing.is_empty(),
+                || !self.changing.is_empty()
+                || passkeys_busy,
             // Nothing wakes the window when the engine's flag clears: look again while a pane says so.
             watch: self.showing.is_some() && refused,
             wake_in,
@@ -937,6 +954,9 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     }
 
     fn notice(&self) -> Option<&'static str> {
+        if let Some((words, _)) = self.passkeys.notice() {
+            return Some(words);
+        }
         match self.said() {
             Some(said) => Some(said.shown()),
             None => self.stale_words(),
@@ -944,6 +964,9 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     }
 
     fn notice_failed(&self) -> bool {
+        if let Some((_, failed)) = self.passkeys.notice() {
+            return failed;
+        }
         match self.said() {
             Some(said) => said.failed,
             None => self.stale_words().is_some(),
@@ -951,6 +974,9 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     }
 
     fn notice_action(&self) -> Option<&'static str> {
+        if self.passkeys.notice().is_some() {
+            return None;
+        }
         match self.said() {
             Some(said) => (said.again && said.about.is_some()).then_some(TRY_AGAIN),
             None => self.stale_words().map(|_| TRY_AGAIN),
@@ -977,6 +1003,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
 
     /// The window shows another pane: the toasts go (`said::leave` keeps what must still be said).
     fn clear_notice(&mut self) {
+        self.passkeys.clear_notice();
         self.dirty |= !self.notices.is_empty();
         leave(&mut self.notices, &mut self.later);
     }
@@ -1131,18 +1158,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn turn_off_two_factor(&mut self, _code: &str) -> Result<(), CodeRefused> {
         Err(CodeRefused::Offline)
     }
-    fn passkeys(&self) -> Vec<Passkey> {
-        Vec::new()
-    }
-    fn add_passkey(&mut self) -> Result<(), Refused> {
-        Err(Refused::Offline)
-    }
-    fn rename_passkey(&mut self, _id: &str, _name: &str) -> bool {
-        false
-    }
-    fn remove_passkey(&mut self, _id: &str) -> bool {
-        false
-    }
+    super::passkeys::passkey_methods!();
     fn activity(&self) -> Option<Vec<(String, Vec<Event>)>> {
         None
     }
