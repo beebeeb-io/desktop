@@ -219,7 +219,7 @@ impl<E: DevicesEngine> DeviceCalls<E> {
                 engine.wake();
             });
         if started.is_err() {
-            pending.fetch_sub(1, Ordering::SeqCst);
+            self.pending.fetch_sub(1, Ordering::SeqCst);
             log("backups: could not start a worker for other devices");
             return false;
         }
