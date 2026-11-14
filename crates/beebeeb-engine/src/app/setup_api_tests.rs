@@ -145,8 +145,16 @@ fn the_folder_check_asks_the_real_disk_and_this_computer() {
         );
         if let Some(home) = dirs::home_dir() {
             assert_eq!(check(&home), Err(SyncFolderRefused::Home));
-            // The real app never syncs into the test build's folder.
-            assert_eq!(check(&home.join("Beebeeb Test")), Err(SyncFolderRefused::AnotherApps));
+            // The real app never syncs into the test build's folder (wherever this OS puts it: on a Mac it is
+            // inside the folder apps keep their data in, which the rule says first).
+            let others = crate::config::default_sync_root_suggestion(REAL.other_build());
+            let refused = check(&others);
+            assert!(
+                matches!(refused, Err(SyncFolderRefused::AnotherApps | SyncFolderRefused::Home)),
+                "{refused:?}"
+            );
+            #[cfg(target_os = "linux")]
+            assert_eq!(refused, Err(SyncFolderRefused::AnotherApps));
         }
     });
 }
