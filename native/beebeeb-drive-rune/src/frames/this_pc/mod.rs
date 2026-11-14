@@ -161,7 +161,7 @@ impl Ui {
         self.source.standing()
     }
 
-    /// `false`: nothing answers yet (the engine lane has not wired This PC).
+    /// `false`: This PC is turned off (`engine_host::this_pc::TURNED_ON`), and the views draw the shell's frame.
     pub fn wired(&self) -> bool {
         self.source.wired()
     }
@@ -395,8 +395,10 @@ fn open_kept(s: &mut State, id: &str) -> Option<&'static str> {
     s.actions.source.open(&[item]).err().map(|_| NOT_OPENED)
 }
 
-/// What the source's workers answered since the last frame, for the shell's poll: `true` when the window must draw
-/// again. A refusal becomes the window's toast. Never calls the engine, never waits.
+/// What the sections asked of the window ([`carry_out`]) and what the source's workers answered since the last
+/// frame, for the shell's poll: `true` when the window must draw again. A refusal becomes the window's toast. The
+/// source's part never calls the engine and never waits; a file is shown or opened through the Files source, as
+/// Files' own rows do it.
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let asked = carry_out(s, tx);
     let open = matches!(

@@ -35,7 +35,7 @@ fn summary(kept: &[Kept]) -> String {
 }
 
 pub fn view(s: &State, cx: &mut Cx<State>) -> El {
-    // Nothing answers for This PC yet (a build that ships before the engine lane wires it):
+    // This PC turned off (`engine_host::this_pc::TURNED_ON`):
     // the shell's "not built yet" frame, never sample kept items.
     if !s.this_pc.wired() {
         return crate::shell::placeholder::window(s, cx, crate::shell::registry::group_for(&s.shell.app));
