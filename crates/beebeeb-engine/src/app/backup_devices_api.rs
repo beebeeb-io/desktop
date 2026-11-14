@@ -308,6 +308,7 @@ pub(crate) async fn read_devices<T: DeviceTree>(
     root_id: &str,
     this_pc: Option<&str>,
     me: Option<&DeviceSelf>,
+    pc_name: Option<&str>,
 ) -> Result<(Vec<BackupDevice>, bool), AccountCallError> {
     let (children, complete) = tree.children(root_id).await.map_err(|error| call_error(&error))?;
     let mut read = Vec::new();
@@ -333,7 +334,7 @@ pub(crate) async fn read_devices<T: DeviceTree>(
             read,
             // A layout names this PC's folder (left out above): no other row is this PC's.
             may_be_this_pc: this_pc.is_none()
-                && may_be_this_pcs(folder.name.as_deref(), owner(false, manifest.as_ref()), me),
+                && may_be_this_pcs(folder.name.as_deref(), owner(false, manifest.as_ref()), me, pc_name),
         })
         .collect();
     Ok((devices, complete))
@@ -405,19 +406,52 @@ fn is_this_pcs_name(name: &str, me: &DeviceSelf) -> bool {
     }
 }
 
+/// `name` is the device-folder name core makes of this PC's computer name `pc` (`clean_name`), bare or with any
+/// collision suffix: without a device id the suffix this PC would get is not known, so every one counts. Pure.
+fn is_this_pcs_computer_name(name: &str, pc: &str) -> bool {
+    let base = fold_name(&device_folder_name(pc, "", &[]));
+    let folded = fold_name(name);
+    folded == base
+        || folded
+            .strip_prefix(base.as_str())
+            .and_then(|rest| rest.strip_prefix(" ("))
+            .is_some_and(|rest| rest.ends_with(')'))
+}
+
 /// While no layout names this PC's device folder: whether the device folder `name` (`None`: its name does not open
-/// here) may be this PC's own. Its manifest names this PC; or it does not name another device, and the folder has
-/// this PC's device-folder name or a name that does not open. Without `me` (no usable name or machine id on this
-/// PC) nothing can be told apart: every folder may be. Pure.
-pub(crate) fn may_be_this_pcs(name: Option<&str>, owner: Owner, me: Option<&DeviceSelf>) -> bool {
-    let Some(me) = me else {
+/// here) may be this PC's own. Its manifest names this PC; or it names no device, and the folder has this PC's
+/// device-folder name or a name that does not open.
+///
+/// `me` is this PC's device identity; `pc_name` its computer name, asked only without `me` (no machine id: macOS
+/// until its id lands, a Linux without one). Without `me` no backup pass ran on this PC, so no manifest names it: a
+/// manifest naming any device is another device's, and the name alone decides. Without either, nothing can be told
+/// apart: every folder that does not name a device may be this PC's. Pure.
+pub(crate) fn may_be_this_pcs(
+    name: Option<&str>,
+    owner: Owner,
+    me: Option<&DeviceSelf>,
+    pc_name: Option<&str>,
+) -> bool {
+    match owner {
+        Owner::ThisPc => return true,
+        Owner::Another => return false,
+        Owner::Unknown => {}
+    }
+    let Some(name) = name else {
         return true;
     };
-    match owner {
-        Owner::ThisPc => true,
-        Owner::Another => false,
-        Owner::Unknown => name.is_none_or(|name| is_this_pcs_name(name, me)),
+    match (me, pc_name) {
+        (Some(me), _) => is_this_pcs_name(name, me),
+        (None, Some(pc)) => is_this_pcs_computer_name(name, pc),
+        (None, None) => true,
     }
+}
+
+/// This PC's computer name for [`may_be_this_pcs`]: `me`'s, else the OS's (with the identity's suffix, as
+/// `device_self` names it).
+pub(crate) fn this_pc_name(identity: &crate::identity::EngineIdentity, me: Option<&DeviceSelf>) -> Option<String> {
+    me.map(|me| me.name.clone())
+        .or_else(|| crate::runner::device_name().map(|name| format!("{name}{}", identity.backup_device_name_suffix())))
 }
 
 /// Two server ids for the same item (as UUIDs when both are).
@@ -437,6 +471,7 @@ pub(crate) async fn own_folder_refusal<T: DeviceTree>(
     tree: &T,
     folder_id: &str,
     me: Option<&DeviceSelf>,
+    pc_name: Option<&str>,
 ) -> Option<DeleteBackupError> {
     let state = || Some(DeleteBackupError::Failed("state"));
     match db.backup_layout() {
@@ -464,7 +499,8 @@ pub(crate) async fn own_folder_refusal<T: DeviceTree>(
     }
     let name = entry.path.rsplit('/').next().filter(|name| !name.is_empty());
     let (_, mine, manifest) = read_device(tree, folder_id, me).await;
-    may_be_this_pcs(name, owner(mine, manifest.as_ref()), me).then(|| DeleteBackupError::Refused(THIS_PC.into()))
+    may_be_this_pcs(name, owner(mine, manifest.as_ref()), me, pc_name)
+        .then(|| DeleteBackupError::Refused(THIS_PC.into()))
 }
 
 impl<C: CredentialStores> Engine<C> {
@@ -489,6 +525,7 @@ impl<C: CredentialStores> Engine<C> {
             return Err(DevicesRefused::NotSignedIn);
         }
         let me = crate::backup::device::device_self(self.identity);
+        let pc_name = this_pc_name(self.identity, me.as_ref());
         let read = state
             .with_shared(|db| {
                 // The root: the layout's (this PC resolved it), else the one cached on its own, else the server's.
@@ -508,7 +545,9 @@ impl<C: CredentialStores> Engine<C> {
                         Err(_) => return Err(AccountCallError::ServerError),
                     };
                     match root {
-                        Some(root) => read_devices(&bridge, &root, this_pc.as_deref(), me.as_ref()).await,
+                        Some(root) => {
+                            read_devices(&bridge, &root, this_pc.as_deref(), me.as_ref(), pc_name.as_deref()).await
+                        }
                         None => Ok((Vec::new(), true)),
                     }
                 })
@@ -570,7 +609,10 @@ impl<C: CredentialStores> Engine<C> {
                 let bridge = EngineBridge::new(identity, db.clone(), api);
                 self.runtime.block_on(async {
                     // This PC's own device folder: refused before the password is proven.
-                    if let Some(refused) = own_folder_refusal(&db, &bridge, folder_id, me.as_ref()).await {
+                    let pc_name = this_pc_name(identity, me.as_ref());
+                    if let Some(refused) =
+                        own_folder_refusal(&db, &bridge, folder_id, me.as_ref(), pc_name.as_deref()).await
+                    {
                         return Err(refused);
                     }
                     backup_delete::delete_backup(&base, &self.client, token.as_str(), &db, &own, folder_id, password)

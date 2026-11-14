@@ -126,7 +126,7 @@ fn phone_manifest(model: &str, last_sync: Option<&str>) -> String {
 
 fn read(tree: &Tree, this_pc: Option<&str>) -> Result<(Vec<BackupDevice>, bool), AccountCallError> {
     let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
-    runtime.block_on(read_devices(tree, ROOT, this_pc, Some(&me())))
+    runtime.block_on(read_devices(tree, ROOT, this_pc, Some(&me()), None))
 }
 
 #[test]
@@ -282,10 +282,28 @@ fn a_folder_that_may_be_this_pcs_is_marked_while_no_layout_names_this_pcs_folder
     // A layout names this PC's folder: no other row is this PC's.
     let (devices, _) = read(&tree, Some(THIS_PC)).unwrap();
     assert!(devices.iter().all(|d| !d.may_be_this_pc));
-    // No name and no machine id on this PC: nothing can be told apart, every folder may be.
-    assert!(may_be_this_pcs(Some("Invented Studio"), Owner::Another, None));
-    assert!(!may_be_this_pcs(Some("Invented Studio"), Owner::Unknown, Some(&me)));
-    assert!(may_be_this_pcs(Some("Invented Studio"), Owner::ThisPc, Some(&me)));
+    // No machine id (macOS until its id lands): no pass ran here, so a manifest naming any device is another's,
+    // and this PC's computer name alone decides, with any collision suffix.
+    let pc = Some("Invented PC");
+    assert!(!may_be_this_pcs(Some("Invented PC"), Owner::Another, None, pc));
+    assert!(may_be_this_pcs(Some("invented pc"), Owner::Unknown, None, pc));
+    assert!(may_be_this_pcs(Some("Invented PC (1a2b)"), Owner::Unknown, None, pc));
+    assert!(!may_be_this_pcs(Some("Invented PC 2"), Owner::Unknown, None, pc));
+    assert!(!may_be_this_pcs(Some("Invented Studio"), Owner::Unknown, None, pc));
+    assert!(
+        may_be_this_pcs(None, Owner::Unknown, None, pc),
+        "a name that does not open"
+    );
+    // Neither a machine id nor a computer name: every folder that names no device may be.
+    assert!(may_be_this_pcs(Some("Invented Studio"), Owner::Unknown, None, None));
+    assert!(!may_be_this_pcs(Some("Invented Studio"), Owner::Another, None, None));
+    assert!(!may_be_this_pcs(
+        Some("Invented Studio"),
+        Owner::Unknown,
+        Some(&me),
+        None
+    ));
+    assert!(may_be_this_pcs(Some("Invented Studio"), Owner::ThisPc, Some(&me), None));
 }
 
 #[test]
@@ -676,8 +694,16 @@ fn this_pcs_own_folder_is_never_deleted_when_the_layout_names_it() {
 /// before the password is proven; a folder of another name whose manifest does not open either is still deleted.
 #[test]
 fn a_folder_that_may_be_this_pcs_is_not_deleted_while_no_layout_names_it() {
-    let me = crate::backup::device::device_self(&REAL).expect("a name and a machine id");
-    let named = beebeeb_core::backup::device_folder_name(&me.name, &me.device_id, &[]);
+    // This PC as the engine sees it on this host: its device identity, else (no machine id: macOS today) its
+    // computer name alone.
+    let me = crate::backup::device::device_self(&REAL);
+    let named = match &me {
+        Some(me) => beebeeb_core::backup::device_folder_name(&me.name, &me.device_id, &[]),
+        None => {
+            let pc = this_pc_name(&REAL, None).expect("the host gives a computer name");
+            beebeeb_core::backup::device_folder_name(&pc, "", &[])
+        }
+    };
     // Its only file has a name that does not open here: it may be the manifest.
     let mut unopened = folder_json("00000000-0000-4000-8000-0000000000d1");
     unopened["is_folder"] = serde_json::json!(false);
