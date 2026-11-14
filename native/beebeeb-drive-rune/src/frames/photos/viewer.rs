@@ -79,8 +79,9 @@ pub fn bar(ui: &Ui, viewing: &Viewing, t: &Theme) -> Bar {
             .on_press(|s: &mut State| s.photos.toggle_menu(Menu::More)),
     );
     let what = match viewing.kind {
-        Kind::Video(seconds) => length(seconds),
-        Kind::Photo => viewing.name.clone(),
+        // A length this PC cannot say (0): the name, as for a photo.
+        Kind::Video(seconds) if seconds > 0 => length(seconds),
+        _ => viewing.name.clone(),
     };
     Bar {
         title: viewing.taken.clone(),
@@ -208,7 +209,11 @@ pub fn stage(ui: &Ui, viewing: &Viewing, t: &Theme) -> El {
         Some(pixels) => photo.pixels_fit(&pixels, SurfaceFit::Fit),
         None => photo.fill(white.alpha(0.07)),
     };
-    if let Kind::Video(seconds) = shown.kind {
+    // The player's controls are drawn only where playing is connected: a source that answers in the call (the
+    // board's). On the engine's source the stored picture of a video shows, and the status line says why.
+    if let Kind::Video(seconds) = shown.kind
+        && !ui.source.answers_later()
+    {
         photo = photo.child(player(ui, shown, seconds, t));
     }
     stage = stage.child(

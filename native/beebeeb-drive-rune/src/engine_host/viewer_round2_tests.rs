@@ -383,6 +383,49 @@ fn a_picture_that_declares_more_than_the_viewer_decodes_is_refused_from_its_head
 }
 
 #[test]
+fn a_webp_whose_frames_the_check_cannot_account_for_is_refused_and_handed_to_no_decoder() {
+    // Two animations whose frames the decoder reads differently from the check: each is answered "not a picture
+    // to decode" from its bytes alone, and the view says it cannot be shown.
+    for (which, bytes) in viewer_picture::tests::webps_with_a_frame_not_accounted_for() {
+        assert_eq!(
+            viewer_picture::check(&bytes),
+            Err(viewer_picture::Refused::NotAPicture),
+            "{which}"
+        );
+        let before = DECODES.with(|count| count.get());
+        let content = picture_body(&bytes, &AtomicBool::new(false));
+        assert_eq!(
+            DECODES.with(|count| count.get()),
+            before,
+            "{which}: no decoder was started"
+        );
+        assert_eq!(
+            content.body,
+            Some(Body::NotPreviewable(NoPreview::Unreadable)),
+            "{which}"
+        );
+        assert!(content.picture.is_none(), "{which}");
+    }
+}
+
+#[test]
+fn every_webp_an_encoder_writes_is_still_decoded_and_shown() {
+    // Real bitstreams from an encoder, still and animated, lossy and lossless, with and without alpha: the
+    // decoder is started once for each and answers the file's own canvas.
+    for (which, bytes, (width, height)) in viewer_picture::tests::webps_an_encoder_writes() {
+        let before = DECODES.with(|count| count.get());
+        let content = picture_body(&bytes, &AtomicBool::new(false));
+        assert_eq!(DECODES.with(|count| count.get()), before + 1, "{which}");
+        assert!(matches!(content.body, Some(Body::Photo(_))), "{which}");
+        assert_eq!(
+            content.picture.as_ref().expect(which).size(),
+            (width, height),
+            "{which}"
+        );
+    }
+}
+
+#[test]
 fn a_file_named_as_a_picture_that_is_another_format_by_its_content_never_reaches_a_decoder() {
     let fake = Fake::new();
     // The toolkit picks a decoder by content and HAS one for this: an icon container with a PNG inside. The viewer
