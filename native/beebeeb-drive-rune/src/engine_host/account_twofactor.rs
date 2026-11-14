@@ -270,10 +270,17 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     pub(super) fn a_call_answer(&mut self) -> Option<(CallKind, Answered)> {
         while let Ok((made_for, kind, answered)) = self.calls.inbox.try_recv() {
             self.calls.out.retain(|k| *k != kind);
-            if stamp(&self.engine) != made_for || !self.open() {
-                // A session or an account that is over: its answer (and a code it holds) is wiped here.
+            // The turn may have moved since the press (a screen lock moves it) while the request was out and Beebeeb
+            // may already have changed the account: an answer for the SAME account still reaches the pane, once (new
+            // backup codes are never wiped unseen). Another account's, or an ended session's, is dropped (wiped) here.
+            let now = stamp(&self.engine);
+            if now.1 != made_for.1 || !self.open() {
                 self.calls.drop_held();
                 continue;
+            }
+            if now != made_for {
+                // What is held under the old turn (a key that waits) is the old turn's: wiped. The answer stays.
+                self.calls.drop_held();
             }
             // A wait Beebeeb asked for counts down from now; a new change or a confirmed one starts clean.
             match (&kind, &answered) {

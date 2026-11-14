@@ -177,10 +177,7 @@ impl<C: CredentialStores> EngineTrashSource<C> {
             None => self.purge_end = Some(PurgeEnd::Done),
             Some(PurgeError::WrongPassword) if result.done == 0 => self.purge_end = Some(PurgeEnd::WrongPassword),
             Some(error) => {
-                self.notice = Some(Notice::PurgeStopped {
-                    done: result.done,
-                    why: why_of(error),
-                });
+                self.notice = Some(stopped_notice(error, result.done));
                 self.purge_end = Some(PurgeEnd::Stopped);
             }
         }
@@ -216,10 +213,7 @@ impl<C: CredentialStores> EngineTrashSource<C> {
         self.purge_end = Some(match result.error {
             Some(PurgeError::WrongPassword) => PurgeEnd::WrongPassword,
             Some(error) => {
-                self.notice = Some(Notice::PurgeStopped {
-                    done: 0,
-                    why: why_of(error),
-                });
+                self.notice = Some(stopped_notice(error, result.deleted.len()));
                 PurgeEnd::Stopped
             }
             None if result.kept.is_empty() => PurgeEnd::Done,
@@ -254,6 +248,18 @@ fn words_of(error: PurgeError) -> &'static str {
         PurgeError::Offline => "offline",
         PurgeError::NotConfirmed => "not confirmed",
         PurgeError::Failed => "refused",
+    }
+}
+
+/// The notice for a delete that stopped: an unconfirmed one is never worded as "nothing was deleted" or "the rest are
+/// still in Trash" (it may have gone through).
+fn stopped_notice(error: PurgeError, done: usize) -> Notice {
+    match error {
+        PurgeError::NotConfirmed => Notice::PurgeNotConfirmed { done },
+        error => Notice::PurgeStopped {
+            done,
+            why: why_of(error),
+        },
     }
 }
 

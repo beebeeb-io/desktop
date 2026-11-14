@@ -53,6 +53,9 @@ pub enum Notice {
     /// A delete for good took what it could and kept `folders` folders, which hold `inside` items that are not in
     /// Trash (`done`: how many are gone). The kept folders are still listed.
     FoldersKept { done: usize, folders: usize, inside: u64 },
+    /// The delete request left and Beebeeb never confirmed it (the connection dropped, or a gateway answered): some
+    /// items may be gone for good. `done`: how many are known to be gone. Never "nothing was deleted".
+    PurgeNotConfirmed { done: usize },
 }
 
 /// How a delete for good (Empty Trash, Delete permanently) ended, for the dialog that asked for it.

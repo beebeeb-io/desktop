@@ -96,6 +96,8 @@ pub fn parse_answer(resp: &HttpResponse) -> BulkPurged {
         }
         401 => out.error = Some(PurgeError::SessionEnded),
         429 => out.error = Some(PurgeError::RateLimited(resp.retry_after_secs.unwrap_or(30))),
+        // A gateway that answers for a server that may have done it: as unknown as a dropped connection.
+        502..=504 => out.error = Some(PurgeError::NotConfirmed),
         _ => out.error = Some(PurgeError::Failed),
     }
     out

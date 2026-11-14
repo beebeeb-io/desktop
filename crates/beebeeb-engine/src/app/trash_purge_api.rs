@@ -114,6 +114,8 @@ pub async fn purge_one(
         200..=299 | 404 => Ok(()),
         401 => Err(PurgeError::SessionEnded),
         429 => Err(PurgeError::RateLimited(resp.retry_after_secs.unwrap_or(30))),
+        // A gateway that answers for a server that may have done it: as unknown as a dropped connection.
+        502..=504 => Err(PurgeError::NotConfirmed),
         _ => Err(PurgeError::Failed),
     }
 }

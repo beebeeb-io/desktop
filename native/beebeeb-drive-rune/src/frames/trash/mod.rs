@@ -256,6 +256,13 @@ pub(crate) fn notice_words(notice: &Notice) -> String {
         Notice::RefreshFailed => "Couldn\u{2019}t refresh Trash. What\u{2019}s shown may be out of date.".into(),
         Notice::NotAvailable => "Not available yet in this version.".into(),
         Notice::FoldersKept { done, folders, inside } => folders_kept_words(*done, *folders, *inside),
+        Notice::PurgeNotConfirmed { done: 0 } => {
+            "Beebeeb didn\u{2019}t confirm the delete. Some items may be gone; check Trash.".into()
+        }
+        Notice::PurgeNotConfirmed { done } => format!(
+            "{} deleted for good. Beebeeb didn\u{2019}t confirm the rest. Some of them may be gone; check Trash.",
+            plural(*done, "item", "items")
+        ),
         Notice::PurgeStopped { done: 0, why } => format!("Nothing was deleted. {why}"),
         Notice::PurgeStopped { done, why } => format!(
             "{} deleted for good. The rest are still in Trash. {why}",
