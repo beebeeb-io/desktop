@@ -2,7 +2,7 @@
 //! Mac sheet (`WinDialog`, the main action first) and of each Mac alert (`WinAlert`).
 
 use super::kit::{self, Field, Foot};
-use super::{Dialog, EMAIL_INPUT, NOTE_INPUT, SafetyNumber, TITLE_INPUT, ask, close, dismiss};
+use super::{Dialog, EMAIL_INPUT, NOTE_INPUT, PASSWORD_INPUT, SafetyNumber, TITLE_INPUT, ask, close, dismiss};
 use crate::State;
 use crate::frames::Intent;
 use crate::frames::shared::parts::controls::{ButtonKind, ButtonSize, button_keyed, button_md};
@@ -555,56 +555,106 @@ fn key_changed(member: &Member, t: &Theme) -> El {
     )
 }
 
-/// Empty Trash? (DW-0749): how much goes for good, and the authenticator code. Empty Trash is
-/// off until six digits; emptying is the engine's (Trash's source has no call for it yet), so
-/// it stays off: nothing here deletes, or says it did.
-fn empty_trash(s: &State, t: &Theme) -> El {
-    let totals = s.frames.trash.source.totals();
-    let count = match totals.items {
-        1 => "1 item".to_string(),
-        n => format!("{n} items"),
+/// Empty Trash? (DW-0749) and Delete permanently? (DW-0748's warning, for one item): what goes for good, and the
+/// account password that proves it is the person. The button is off until a password is typed, and while the delete
+/// is on its way. Nothing is deleted, or said to be, before the engine answered.
+fn purge(s: &State, target: Option<&str>, t: &Theme) -> Option<El> {
+    let source = &s.frames.trash.source;
+    let (title, words, button, key) = match target {
+        None => {
+            let totals = source.totals();
+            let count = match totals.items {
+                1 => "1 item".to_string(),
+                n => format!("{n} items"),
+            };
+            let lead = format!("{count} and ");
+            let they = if totals.items == 1 { "It" } else { "They" };
+            let words = format!(
+                "{lead}{} will be permanently deleted. {they} can't be restored by you or by Beebeeb, on any device.",
+                totals.size
+            );
+            let paragraph = rich(
+                words,
+                vec![Span::new(lead.len(), lead.len() + totals.size.len()).mono()],
+            );
+            ("Empty Trash?", paragraph, "Empty Trash", "btn-empty-trash-2")
+        }
+        Some(id) => {
+            let row = source.items().into_iter().find(|row| row.id == id)?;
+            let words = format!(
+                "\u{201C}{}\u{201D} will be permanently deleted. It can't be restored by you or by Beebeeb, on any device.",
+                row.name
+            );
+            (
+                "Delete permanently?",
+                rich(words, Vec::new()),
+                "Delete permanently",
+                "btn-delete-forever",
+            )
+        }
     };
-    let lead = format!("{count} and ");
-    let they = if totals.items == 1 { "It" } else { "They" };
-    let words = format!(
-        "{lead}{} will be permanently deleted. {they} can't be restored by you or by Beebeeb, on any device.",
-        totals.size
-    );
-    let paragraph = rich(
-        words.clone(),
-        vec![Span::new(lead.len(), lead.len() + totals.size.len()).mono()],
-    )
-    .key("dlg-text-0")
-    .font(kit::BODY)
-    .color(t.text_secondary)
-    .w_full();
-    let code = kit::code_boxes(
-        "Authenticator code",
-        &s.frames.shared.fields.code.text,
-        |boxes| boxes.on_key(super::on_key),
+    let paragraph = words.key("dlg-text-0").font(kit::BODY).color(t.text_secondary).w_full();
+    let ui = &s.frames.shared;
+    let busy = source.purging();
+    let password = kit::field(
+        &Field {
+            key: "field-0",
+            label: "Your account password",
+            placeholder: "",
+            input_key: PASSWORD_INPUT,
+            inner_w: text_w(PURGE_W),
+        },
+        &ui.fields.password,
+        |s: &mut State| &mut s.frames.shared.fields.password,
+        |input| input.on_submit(submit_purge),
         t,
     );
+    let mut body = vec![paragraph, password];
+    if let Some(problem) = ui.fields.problem {
+        body.push(
+            ui_kit::label("purge-problem", problem, kit::NOTE, t.red)
+                .role("alert")
+                .label(problem)
+                .w_full(),
+        );
+    }
+    let ready = !ui.fields.password.text.is_empty() && !busy;
+    let confirm = if ready {
+        button_keyed(key.into(), button, ButtonKind::Danger, ButtonSize::Medium, None, t).on_press_tx(submit_purge)
+    } else {
+        let shown = if busy { "Deleting\u{2026}" } else { button };
+        button_keyed(key.into(), shown, ButtonKind::DangerOff, ButtonSize::Medium, None, t)
+    };
     let foot = trailing(vec![
-        // The Trash's own Empty Trash… is `btn-empty-trash`: this is the frame's second.
-        button_keyed(
-            "btn-empty-trash-2".into(),
-            "Empty Trash",
-            ButtonKind::DangerOff,
-            ButtonSize::Medium,
-            None,
-            t,
-        ),
+        confirm,
         button_md("Cancel", ButtonKind::Outline, None, t).on_press(close),
     ]);
-    standard(
-        "Empty Trash?",
-        420.0,
-        "Empty Trash?",
-        None,
-        vec![paragraph, code],
-        foot,
-        t,
-    )
+    Some(standard(title, PURGE_W, title, None, body, foot, t))
+}
+
+/// The dialog's width.
+const PURGE_W: f32 = 420.0;
+
+/// Send the delete: the password goes to the source (and out of the field at once); a field with nothing typed takes
+/// the keyboard instead. The dialog stays until the source's answer closes it (Trash's poll).
+fn submit_purge(s: &mut State, tx: &mut Tx) {
+    let target = match &s.frames.shared.dialog {
+        Some(Dialog::EmptyTrash) => None,
+        Some(Dialog::DeleteForever(id)) => Some(id.clone()),
+        _ => return,
+    };
+    let ui = &mut s.frames.shared;
+    if ui.fields.password.text.is_empty() || s.frames.trash.source.purging() {
+        tx.focus(PASSWORD_INPUT, true);
+        return;
+    }
+    ui.fields.problem = None;
+    let started = s.frames.trash.source.purge(target.as_deref(), &ui.fields.password.text);
+    ui.fields.password.clear();
+    if !started {
+        // Nothing was started (the item is gone, the session moved on): the dialog goes, and Trash says what it has.
+        ui.close_dialog();
+    }
 }
 
 /// The open dialog's layers over the section that shows (none over another section): one, or
@@ -621,7 +671,14 @@ pub fn layers(s: &State, t: &Theme) -> Vec<El> {
     let share_and = |share: &str, person: &str| Some((ui.share(share)?, ui.member(share, person)?));
     match dialog {
         Dialog::NewRequest => vec![modal("new-request", new_request(s, t))],
-        Dialog::EmptyTrash => vec![modal("empty-trash", empty_trash(s, t))],
+        Dialog::EmptyTrash => purge(s, None, t)
+            .map(|card| modal("empty-trash", card))
+            .into_iter()
+            .collect(),
+        Dialog::DeleteForever(id) => purge(s, Some(id), t)
+            .map(|card| modal("delete-forever", card))
+            .into_iter()
+            .collect(),
         Dialog::People { share, key_changed } => {
             let Some(share) = ui.share(share) else {
                 return Vec::new();

@@ -11,8 +11,9 @@
 //!   belong to an earlier account, so that column is not bound.
 //! - the sidebar's count: none ([`TrashSource::count`] is `None`): the engine has no count call, and counting means
 //!   reading and decrypting the whole Trash, which the window must not do to draw a badge.
-//! - `restore`: [`Engine::restore_items_for`], one item, for the session of the press. Not bound: `emptying`, and the actions behind Empty Trash,
-//!   Details, Preview and Delete permanently (no engine call; the view says "not available yet").
+//! - `restore`: [`Engine::restore_items_for`], one item, for the session of the press.
+//! - `purge` (Empty Trash, Delete permanently): [`Engine::purge_trash_for`] after the account PASSWORD is proven for
+//!   each item (`purge.rs`). Not bound: Details and Preview (no engine call; the view says "not available yet").
 //!
 //! When it reads: when the Trash section opens and the list is missing or older than [`FRESH_FOR`], and after a
 //! restore was answered. Never from a draw call: `items`, `totals`, `loaded` and `count` only read what is here.
@@ -47,8 +48,9 @@ use chrono::{DateTime, Local, TimeZone};
 
 use super::log;
 use crate::frames::shared::parts::table::{Extra, Kind, Row};
-use crate::frames::trash::source::{Emptying, Loaded, Notice, Pumped, TrashSource, TrashTotals};
+use crate::frames::trash::source::{Emptying, Loaded, Notice, Pumped, PurgeEnd, TrashSource, TrashTotals};
 
+mod purge;
 #[cfg(test)]
 mod tests;
 
@@ -90,6 +92,9 @@ pub struct EngineTrashSource<C: CredentialStores> {
     next_restore: Option<(mpsc::Receiver<()>, mpsc::Sender<()>)>,
     /// Something changed outside an answer (a restore started, a forget): the next pump says so.
     dirty: bool,
+    /// The delete for good on its way, and how the last one ended (told once, by the next pump).
+    purging: Option<purge::Purging>,
+    purge_end: Option<PurgeEnd>,
 }
 
 struct Listing {
@@ -123,6 +128,10 @@ enum Answer {
     Listed(u64, Result<(SessionGeneration, Vec<Listed>), AccountCallError>),
     /// A restore of this item, the session and account of its press, and whether Beebeeb took it.
     Restored(String, Stamp, Result<(), AccountCallError>),
+    /// A delete for good got this far (the number gone), under the session and account of its press.
+    PurgeProgress(Stamp, usize),
+    /// A delete for good ended, under the session and account of its press.
+    Purged(Stamp, beebeeb_engine::app::trash_purge_api::Purged),
 }
 
 /// The session and the account a restore was pressed under.
@@ -160,6 +169,8 @@ impl<C: CredentialStores> EngineTrashSource<C> {
             #[cfg(test)]
             next_restore: None,
             dirty: false,
+            purging: None,
+            purge_end: None,
         }
     }
 
@@ -285,6 +296,8 @@ impl<C: CredentialStores> EngineTrashSource<C> {
                 // Read again what Beebeeb has now.
                 self.read();
             }
+            Answer::PurgeProgress(pressed, done) => self.purge_progress(pressed, done),
+            Answer::Purged(pressed, result) => self.purge_ended(pressed, result),
         }
     }
 }
@@ -348,9 +361,9 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
         }
     }
 
-    /// Not bound: the engine has no empty-Trash call yet.
+    /// While Empty Trash is on its way: how many are gone for good, of how many.
     fn emptying(&self) -> Option<Emptying> {
-        None
+        self.emptying_now()
     }
 
     /// Sent once, on a worker; the row leaves the list at once and comes back only if Beebeeb refuses. `false`: no
@@ -436,6 +449,7 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
             changed = true;
         }
         let mut notice = self.notice.take();
+        let purge = self.purge_end.take();
         // Words for the account that pressed: said once its Trash is listed again under a session of its own (the
         // window is unlocked and Trash is open: a notice handed over earlier is wiped by the window when its gate
         // goes round or Trash opens); never to another account, and dropped when another, or none, is here.
@@ -450,9 +464,10 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
         }
         let waiting_to_say = self.not_done_for.is_some() && self.current().is_some();
         Pumped {
-            changed: changed || notice.is_some(),
-            busy: self.reading.is_some() || !self.restoring.is_empty() || waiting_to_say,
+            changed: changed || notice.is_some() || purge.is_some(),
+            busy: self.reading.is_some() || !self.restoring.is_empty() || waiting_to_say || self.purging.is_some(),
             notice,
+            purge,
         }
     }
 
@@ -463,6 +478,8 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
         self.again = false;
         self.read_at = None;
         self.notice = None;
+        self.purging = None;
+        self.purge_end = None;
         self.loaded = Loaded::Loading;
         self.dirty = true;
     }
@@ -472,9 +489,22 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
         None
     }
 
-    /// Empty Trash, Details, Preview and Delete permanently have no engine call yet.
+    /// Details and Preview have no engine call yet.
     fn actions_available(&self) -> bool {
         false
+    }
+
+    /// Empty Trash and Delete permanently: the engine's permanent delete, after the account password is proven.
+    fn purge_available(&self) -> bool {
+        true
+    }
+
+    fn purge(&mut self, id: Option<&str>, password: &str) -> bool {
+        self.start_purge(id, password)
+    }
+
+    fn purging(&self) -> bool {
+        self.purging.is_some()
     }
 }
 
