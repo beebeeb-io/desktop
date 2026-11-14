@@ -383,6 +383,82 @@ async fn with_no_version_one_oversized_chunk_body_is_given_up_while_it_streams()
     assert_eq!(open(&bridge, 400_000).await, Came::Opened(version.plain.clone()));
 }
 
+/// The limit and the cap on a chunk's body, for each shape a body of a file with no version can have, each run
+/// through the whole open against the loopback API: the binary frame, the old JSON envelope of the same chunk, and
+/// a body that begins with `{` and is no envelope. One chunk of 400,000 bytes behind metadata that says 10 bytes,
+/// so nothing but the download's own caps bounds it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_limit_and_the_cap_hold_for_each_shape_of_a_chunk_body() {
+    const PLAIN: u64 = 400_000;
+    let binary = version_of(PLAIN, PLAIN as usize);
+    assert_eq!(binary.chunk_count(), 1);
+    let frame = binary.frames[0].clone();
+    // The same chunk as the old envelope writes it: every byte a decimal number.
+    let envelope = serde_json::to_vec(
+        &json!({ "cipher_suite": "V1Aes256Gcm", "nonce": &frame[..12], "ciphertext": &frame[12..] }),
+    )
+    .unwrap();
+    assert_eq!(
+        crate::engine_bridge::content::content_frame(&envelope).unwrap(),
+        frame,
+        "the envelope reads back as the chunk's own frame"
+    );
+    assert!(
+        envelope.len() as u64 > 3 * PLAIN && envelope.len() as u64 <= 4 * PLAIN + CAPPED_FRAME_ROOM,
+        "an envelope is three to four times its chunk: {}",
+        envelope.len()
+    );
+    // A body that begins as a JSON object and is none: as long as the binary frame.
+    let mut not_an_envelope = vec![b'{'];
+    not_an_envelope.extend(std::iter::repeat_n(0x41u8, frame.len()));
+
+    let serving = |body: Vec<u8>| {
+        let mut version = binary.clone();
+        version.frames[0] = body;
+        let metadata = unpinned_metadata(&version, |row| {
+            row.insert("size_bytes".into(), json!(10));
+            row.remove("chunk_size_bytes");
+        });
+        unpinned_api(version, metadata)
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let ask = |api: &Mock, limit: u64| {
+        let bridge = bridge_on(dir.path(), &api.base, Transport::Auto);
+        async move { open(&bridge, limit).await }
+    };
+    // What comes of each shape at each limit. `true`: the body was given up while it streamed.
+    let given_up = Came::OverLimit(0, true);
+    let dropped_after_decrypting = Came::OverLimit(0, false);
+
+    // Binary: held to what is left of the limit and a chunk's framing. Within the limit it opens.
+    let api = serving(frame.clone());
+    assert_eq!(ask(&api, PLAIN).await, Came::Opened(binary.plain.clone()));
+    assert_eq!(ask(&api, PLAIN - 1).await, dropped_after_decrypting);
+    assert_eq!(ask(&api, PLAIN - CAPPED_FRAME_ROOM - 1).await, given_up);
+
+    // The old envelope of the same chunk: within the limit it opens (its body is over three times the limit, and
+    // is read). One byte under, the chunk it holds is dropped before it is added. At a limit its body does not
+    // fit four times over, the body is given up while it streams.
+    let api = serving(envelope.clone());
+    assert_eq!(ask(&api, PLAIN).await, Came::Opened(binary.plain.clone()));
+    assert_eq!(ask(&api, PLAIN - 1).await, dropped_after_decrypting);
+    let too_small = (envelope.len() as u64 - CAPPED_FRAME_ROOM) / 4 - 1;
+    assert_eq!(ask(&api, too_small).await, given_up);
+
+    // A body that begins with `{` and is no envelope gets the envelope's room and no more: past four times what
+    // is left it is given up while it streams; within it, it is read, is not a chunk, and nothing of it is content.
+    let api = serving(not_an_envelope.clone());
+    let fits_four_times = (not_an_envelope.len() as u64).div_ceil(4);
+    assert_eq!(ask(&api, fits_four_times).await, Came::Refused(OpenFileError::Failed));
+    assert_eq!(
+        ask(&api, (not_an_envelope.len() as u64 - CAPPED_FRAME_ROOM) / 4 - 1).await,
+        given_up
+    );
+    // The same bytes without the leading `{` are held to the binary cap at that limit.
+    let api = serving(not_an_envelope[1..].to_vec());
+    assert_eq!(ask(&api, fits_four_times).await, given_up);
+}
+
 /// A pinned chunk's body breaks off part-way on every try: the connection was lost during the chunks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_pinned_api_route_says_offline_when_a_chunk_body_breaks_off() {

@@ -184,6 +184,118 @@ fn a_read_refused_once_because_the_session_changed_under_it_is_read_again_and_no
     assert_eq!(source.open(NOTE).err(), Some(OpenError::SignedOut));
 }
 
+// ── An answer that comes late ───────────────────────────────────────────────────────────────────────
+
+/// Every way a file's content is fetched, held at the fake's door: a text, a picture and a PDF by download, a
+/// text read from the copy on this PC, and Try again. For each, the answer comes after the window moved on
+/// (another file was opened; the session changed), from an engine that hands the content over although it was
+/// told to stop: nothing of it is ever shown, for that file or for the one opened after it.
+#[test]
+fn an_answer_that_comes_late_is_dropped_for_every_way_a_file_opens() {
+    const OTHER: &str = "f-other";
+    const OTHER_WORDS: &str = "the other file's words";
+    #[derive(Clone, Copy, Debug)]
+    enum Way {
+        Download,
+        CopyOnThisPc,
+        TryAgain,
+    }
+    let cases: [(&str, &str, Vec<u8>, Way); 5] = [
+        (
+            "f-late-text",
+            "Invented late.txt",
+            b"late words".to_vec(),
+            Way::Download,
+        ),
+        ("f-late-png", "Invented late.png", png_bytes(4, 4), Way::Download),
+        (
+            "f-late-pdf",
+            "Invented late.pdf",
+            sample_pdf(2, 300, 300),
+            Way::Download,
+        ),
+        (
+            "f-late-here",
+            "Invented here.txt",
+            b"late words".to_vec(),
+            Way::CopyOnThisPc,
+        ),
+        (
+            "f-late-again",
+            "Invented again.txt",
+            b"late words".to_vec(),
+            Way::TryAgain,
+        ),
+    ];
+    let mut ran = 0;
+    for (id, name, bytes, way) in &cases {
+        for session_changes in [false, true] {
+            let fake = Fake::new();
+            fake.put(id, name, bytes);
+            fake.put(OTHER, "Invented other.txt", OTHER_WORDS.as_bytes());
+            let mut source = Source::on(fake.clone());
+            match way {
+                Way::Download => {}
+                Way::CopyOnThisPc => {
+                    fake.keep(id, OnThisPc::InSync, Some(bytes));
+                    fake.s().local_waits = true;
+                }
+                // A download that failed first: the state, and Try again from it.
+                Way::TryAgain => {
+                    fake.s().error = Some(OpenFileError::Offline);
+                    source.open(id).expect("the file opens");
+                    assert_eq!(answered(&mut source, id), Body::Stopped(Stopped::Offline));
+                    fake.s().error = None;
+                }
+            }
+            let at_door = fake.s().at_door;
+            let returned = fake.s().returned;
+            // The engine hands the content over although it was told to stop.
+            fake.s().late = true;
+            let door = fake.door.lock().unwrap();
+            let began = match way {
+                Way::TryAgain => source.retry(id),
+                _ => source.open(id),
+            }
+            .expect("it starts");
+            assert!(matches!(began.body, Body::Decrypting { .. }), "{id} {way:?}");
+            until("the read reaches the door", || fake.s().at_door == at_door + 1);
+            let what = format!("{id} {way:?} session_changes={session_changes}");
+            if session_changes {
+                fake.new_session("a@example.eu");
+                assert_eq!(source.poll(id), Some(Body::Stopped(Stopped::SessionChanged)), "{what}");
+                drop(door);
+                until("the read returned", || fake.s().returned == returned + 1);
+            } else {
+                // Another file is opened in the same window while the first is on its way.
+                fake.s().local_waits = false;
+                let other = source.open(OTHER).expect("the other file opens");
+                assert!(matches!(other.body, Body::Decrypting { .. }), "{what}");
+                drop(door);
+                until("both reads returned", || fake.s().returned == returned + 2);
+                // The other file shows its own words, never the first one's content.
+                assert_eq!(words(&answered(&mut source, OTHER)).trim_end(), OTHER_WORDS, "{what}");
+            }
+            // Nothing of the late file arrives, however long the window asks.
+            for _ in 0..25 {
+                assert_eq!(source.poll(id), None, "{what}");
+                assert!(source.picture(id, Picture::Photo).is_none(), "{what}");
+                assert!(source.picture(id, Picture::Page(1)).is_none(), "{what}");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            if !session_changes {
+                assert_eq!(source.poll(OTHER), None, "{what}");
+                assert_eq!(source.origin(OTHER), Origin::Beebeeb, "{what}");
+            }
+            ran += 1;
+        }
+    }
+    assert_eq!(
+        ran, 10,
+        "five ways, each with another file opened and with a session change"
+    );
+}
+
 // ── Pictures: the viewer's own limits ───────────────────────────────────────────────────────────────
 
 /// The first 33 bytes of a PNG that declares `width` x `height`: its signature and IHDR, and no pixel.

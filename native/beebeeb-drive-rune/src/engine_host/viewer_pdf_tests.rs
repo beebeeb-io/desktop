@@ -255,6 +255,42 @@ fn only_the_newest_page_waiting_is_rendered_and_a_page_that_is_not_there_is_said
 }
 
 #[test]
+fn a_page_being_rendered_when_its_session_ends_is_never_delivered_and_the_worker_ends() {
+    let document = open(sample_pdf(3, 300, 300)).unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    // The session ends (a lock, a sign-out) while page 1 is with the renderer.
+    let ends = cancel.clone();
+    *document.as_a_render_starts.lock().unwrap() = Some(Box::new(move || ends.store(true, Ordering::SeqCst)));
+    // The asker stays, with another page waiting: only the session's end stops the worker.
+    let (ask, asks) = mpsc::channel();
+    ask.send(1).unwrap();
+    let delivered = Mutex::new(Vec::new());
+    let more = Mutex::new(Some(ask.clone()));
+    document.serve(&asks, &cancel, &|page, rendered: Option<Rendered>| {
+        delivered.lock().unwrap().push((page, rendered.is_some()));
+        // (Reached only if the page was delivered: the view would ask for the next one.)
+        if let Some(ask) = more.lock().unwrap().as_ref() {
+            let _ = ask.send(2);
+        }
+    });
+    // `serve` returned although the asker is still here (it would wait for the next request otherwise).
+    assert_eq!(
+        document.renders.load(Ordering::SeqCst),
+        1,
+        "the render under way ran to its end, and no other began"
+    );
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        [],
+        "what it made was dropped, not delivered"
+    );
+    drop(ask);
+    // The same document and asks without the session ending: the page is delivered (the test can fail).
+    *document.as_a_render_starts.lock().unwrap() = None;
+    assert_eq!(served(&document, &[1], false).len(), 1);
+}
+
+#[test]
 fn a_cancelled_worker_renders_and_delivers_nothing_and_ends_when_the_asker_goes() {
     let document = open(sample_pdf(2, 300, 300)).unwrap();
     assert!(served(&document, &[1], true).is_empty());

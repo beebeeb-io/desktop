@@ -94,6 +94,10 @@ pub struct Document {
     /// How many pages were handed to the renderer (a test asks that a cancelled worker renders none).
     #[cfg(test)]
     renders: std::sync::atomic::AtomicU32,
+    /// Run when a page has been handed to the renderer, before it draws (a test ends the session there: a
+    /// render that is under way).
+    #[cfg(test)]
+    as_a_render_starts: std::sync::Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
 /// The scale a page of `width` x `height` points is rendered at: [`PAGE_WIDTH_PX`] wide, less when that would
@@ -180,6 +184,8 @@ impl Document {
             pdf,
             #[cfg(test)]
             renders: std::sync::atomic::AtomicU32::new(0),
+            #[cfg(test)]
+            as_a_render_starts: std::sync::Mutex::new(None),
         })
     }
 
@@ -190,6 +196,10 @@ impl Document {
     /// Render the pages asked for down `asks` (from 1), until the asker is gone or `cancel` is set. Each answer
     /// goes to `deliver`: the page, and its pixels or `None` when it could not be rendered. Only the newest
     /// request waiting is rendered.
+    ///
+    /// A render that is under way when `cancel` is set cannot be stopped (the renderer has no way to): it runs
+    /// to its end, bounded by the page limits (8,000 pixels a side, 8 million in all), and what it made is
+    /// dropped here, never delivered. Then this returns, and the caller drops the document and its bytes.
     pub fn serve(&self, asks: &mpsc::Receiver<u32>, cancel: &AtomicBool, deliver: &dyn Fn(u32, Option<Rendered>)) {
         // The renderer asks for a font the file names and does not carry. Where the answer is a Latin stand-in
         // that cannot draw the text, the page says so.
@@ -260,7 +270,18 @@ impl Document {
         let scale = scale_for(width, height)?;
         let lacks_text = writes_in_a_numbered_font_not_in_the_file(page);
         #[cfg(test)]
-        self.renders.fetch_add(1, Ordering::SeqCst);
+        {
+            self.renders.fetch_add(1, Ordering::SeqCst);
+            if let Some(hook) = self
+                .as_a_render_starts
+                .lock()
+                .ok()
+                .as_ref()
+                .and_then(|hook| hook.as_ref())
+            {
+                hook();
+            }
+        }
         let pixmap = hayro::render(
             page,
             cache,

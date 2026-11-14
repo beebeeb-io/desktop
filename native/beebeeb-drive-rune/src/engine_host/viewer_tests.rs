@@ -66,6 +66,8 @@ struct Inner {
     local_error: Option<OpenFileError>,
     /// What the next reads of the facts answer instead of facts, and how many of them (`usize::MAX`: all).
     facts_error: Option<(OpenFileError, usize)>,
+    /// The read of the copy on this PC waits at the door too (as a download does).
+    local_waits: bool,
     /// The session ends while the facts are read (the read that is refused finds none after it).
     session_ends_at_facts: bool,
 }
@@ -102,6 +104,7 @@ impl Fake {
                 local_error: None,
                 facts_error: None,
                 session_ends_at_facts: false,
+                local_waits: false,
             }),
             door: Mutex::new(()),
         };
@@ -188,7 +191,15 @@ impl ViewerEngine for Fake {
         if let Some(error) = s.local_error {
             return Err(error);
         }
-        if cancel.load(Ordering::SeqCst) {
+        if s.local_waits {
+            s.at_door += 1;
+            drop(s);
+            drop(self.door.lock().unwrap());
+            s = self.s();
+            s.returned += 1;
+        }
+        if cancel.load(Ordering::SeqCst) && !s.late {
+            s.cancelled += 1;
             return Err(OpenFileError::Cancelled);
         }
         let turn = s.answers_for.unwrap_or(s.turn);
