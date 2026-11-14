@@ -618,10 +618,6 @@ pub fn sync(s: &mut State) {
             if ui.dialog.is_some() {
                 ui.keep_editing();
                 true
-            } else if ui.office.over.is_some() {
-                // Esc closes the question or the command search before it leaves the document.
-                ui.office_close_over();
-                true
             } else {
                 // Esc and Back close find, or step out of an archive's folder, before the file.
                 ui.hold_for_changes() || (still_drive && ui.close_inner())
