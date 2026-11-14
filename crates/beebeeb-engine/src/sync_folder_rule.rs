@@ -18,9 +18,10 @@
 //! This is the check BEFORE a start. The start has its own (`Engine::start_sync`: another provider's folder again,
 //! under its lock, and whose local data this is), and a folder that passes here can still be refused there.
 //!
-//! What it does not see (said in the PR): a folder reached through a link or a junction in the middle of its
-//! path (only the folder itself is looked at on disk), and, off Windows, a network mount. It is asked on
-//! Windows only today (the first run is wired there).
+//! The rule is asked with the FINAL path ([`refusal_resolved`]): links, junctions and short names are resolved
+//! by `Engine::check_sync_folder`, and the facts (the home, the system folders, Beebeeb's data) are resolved the
+//! same way. What it does not see (said in the PR): off Windows, a network mount. It is asked on Windows only
+//! today (the first run is wired there).
 //!
 //! Must not: log or return a path. A refusal is a kind, never a sentence with the folder in it.
 
@@ -225,9 +226,13 @@ const UNIX_HOMES: [&str; 2] = ["home", "Users"];
 /// names resolved). The text given is read first; then the rule judges the final path; one that could not be
 /// resolved is `Unreadable`, never let through.
 pub fn refusal_resolved(given: &str, resolved: Option<&str>, facts: &Facts) -> Option<SyncFolderRefused> {
-    // STUB: judges `given`.
-    let _ = resolved;
-    refusal(given, facts)
+    if let Err(refused) = place(given, facts.windows) {
+        return Some(refused);
+    }
+    match resolved {
+        Some(resolved) => refusal(resolved, facts),
+        None => Some(SyncFolderRefused::Unreadable),
+    }
 }
 
 /// Why `folder` cannot be the sync folder, or `None` when it may. See the module's doc for the order.

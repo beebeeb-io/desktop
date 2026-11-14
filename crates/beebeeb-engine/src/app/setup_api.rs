@@ -207,8 +207,21 @@ pub(crate) struct Places {
 /// is resolved from the deepest folder that is, and the names below it are joined back on. `None`: it could not be
 /// resolved (never read as "free").
 fn final_path(path: &Path) -> Option<PathBuf> {
-    // STUB: no walk up from a path that is not there.
-    std::fs::canonicalize(path).ok()
+    let mut taken = Vec::new();
+    let mut here = path.to_path_buf();
+    loop {
+        match std::fs::canonicalize(&here) {
+            Ok(mut found) => {
+                found.extend(taken.iter().rev());
+                return Some(found);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                taken.push(here.file_name()?.to_owned());
+                here = here.parent()?.to_path_buf();
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 /// WRITES the settings file, once per computer: decide whether the native app's first run is still to do here
