@@ -7,7 +7,7 @@
 use rune::{Align, Color, Cx, El, Icon, TextStyle, col, el, row};
 
 use super::chrome::{self, FilesControls};
-use super::source::{Kept, Kind};
+use super::source::{Kept, Kind, Standing};
 use super::{MENU_ITEMS, RowMenu, Section, Ui, icons};
 use crate::State;
 use crate::source::{DriveItem, format_size};
@@ -44,6 +44,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let ui = &s.this_pc;
     let focused = chrome::search_focused(cx);
     let kept = ui.kept();
+    let standing = ui.standing();
 
     let mut right = Vec::new();
     // "Remove all is hidden" when nothing is kept (DW-0120).
@@ -57,7 +58,12 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         s,
         ui,
         "Available offline",
-        summary(&kept),
+        // A count only of what was read.
+        if standing == Standing::Ready {
+            summary(&kept)
+        } else {
+            String::new()
+        },
         right,
         FilesControls::Dimmed,
         chrome::search_field(ui, focused, "Search names", &t),
@@ -72,7 +78,12 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .h_full()
         .fill(t.bg)
         .child(toolbar);
-    if kept.is_empty() {
+    if let Some((title, words)) = not_ready(standing) {
+        // No lists: the section says why, and the status line names no count.
+        main = main
+            .child(empty_state(&base::AVAILABLE_OFFLINE, title, words, &t))
+            .child(chrome::status_line(s, ui, String::new(), &t));
+    } else if kept.is_empty() {
         main = main
             .child(empty_state(
                 &base::AVAILABLE_OFFLINE,
@@ -80,16 +91,22 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 "Right-click a file or folder and choose Make available offline to keep it on this PC.",
                 &t,
             ))
-            // The board keeps Files' status line here (PR body, Decision).
-            .child(crate::ui::status_bar::status_bar(&t));
+            // The board keeps Files' sample status line here (PR body, Decision); a real PC says what it read.
+            .child(if ui.is_sample() {
+                crate::ui::status_bar::status_bar(&t)
+            } else {
+                chrome::status_line(s, ui, "Nothing available offline".into(), &t)
+            });
     } else {
         let bytes = kept.iter().map(|k| k.bytes).sum();
         // Two board frames, two status lines (PR body, Decision): DW-0715 names the section's
-        // total, DW-1306 keeps Files' counts under the open row menu.
-        let status = if matches!(ui.menu, Some(open) if open.row < kept.len()) {
+        // total, DW-1306 keeps Files' sample counts under the open row menu. A real PC always
+        // names the section's total: the sample counts are no PC's.
+        let status = if ui.is_sample() && matches!(ui.menu, Some(open) if open.row < kept.len()) {
             crate::ui::status_bar::status_bar(&t)
         } else {
             chrome::status_line(
+                s,
                 ui,
                 format!(
                     "{} available offline \u{00B7} {} on this PC",
@@ -106,6 +123,14 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             .child(status);
     }
     let window = super::window(s, cx, Section::AvailableOffline, main);
+    if ui.confirm_remove_all && !kept.is_empty() {
+        return el()
+            .key("window-with-ask")
+            .w_full()
+            .h_full()
+            .child(window)
+            .child(ask_remove_all(kept.len(), &t));
+    }
     match ui.menu {
         Some(open) if open.row < kept.len() => el()
             .key("window-with-menu")
@@ -114,6 +139,66 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             .child(window)
             .child(menu(open, &t)),
         _ => window,
+    }
+}
+
+/// What a section says in place of its list while the source has none: the title and the sentence. `None`: the
+/// lists are what this PC holds.
+pub fn not_ready(standing: Standing) -> Option<(&'static str, &'static str)> {
+    match standing {
+        Standing::Ready => None,
+        Standing::Reading => Some(("Reading this PC", "This takes a moment.")),
+        Standing::Unreadable => Some(("Couldn't read this PC", "Open this section again to try once more.")),
+        Standing::AnotherAccounts => Some((
+            "Not available for this account",
+            "This PC still holds the synced files of another account, so nothing is shown here.",
+        )),
+    }
+}
+
+/// The ask before "Remove all from this PC": once, before anything is removed. The way out is the last button
+/// and Esc; nothing is removed until the first is pressed.
+fn ask_remove_all(count: usize, t: &Theme) -> El {
+    use crate::ui::settings_dialog::{Weight, button, dialog};
+    let sub = format!(
+        "{count} {} will be online only. Nothing is deleted from Beebeeb.",
+        if count == 1 { "item" } else { "items" }
+    );
+    let card = dialog(
+        "Remove all from this PC",
+        400.0,
+        "Remove all from this PC?",
+        Some(&sub),
+        Vec::new(),
+        vec![
+            button(0, "Remove all", Weight::Primary, t).on_press(|s: &mut State| s.this_pc.remove_all_confirmed()),
+            button(1, "Cancel", Weight::Quiet, t).on_press(|s: &mut State| {
+                s.this_pc.remove_all_cancelled();
+            }),
+        ],
+        t,
+    );
+    el().key("dialog-remove-all-from-this-pc")
+        .pin(Some(0.0), Some(32.0), Some(0.0), Some(0.0))
+        .child(card)
+}
+
+/// A row as Files' actions take it (`FilesSource::open`, `show_in_file_explorer`): they find the file by its id.
+pub fn drive_item(id: &str, name: &str, is_folder: bool) -> DriveItem {
+    DriveItem {
+        id: id.to_string(),
+        parent_id: None,
+        name: name.to_string(),
+        is_folder,
+        size: None,
+        child_count: None,
+        modified_at: String::new(),
+        mime: None,
+        has_thumbnail: false,
+        shared_type: None,
+        shared_badges: Vec::new(),
+        pc_status: None,
+        is_protected: false,
     }
 }
 

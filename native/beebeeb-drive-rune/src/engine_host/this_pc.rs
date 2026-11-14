@@ -14,11 +14,16 @@
 //! in the order asked, and sends each answer down one channel, which [`ThisPcSource::pump`] drains
 //! (`frames::this_pc::poll`, every frame). The window keeps the last answer itself.
 //!
-//! Whose answer (review of desktop#377, P1; the model is `engine_host/settings.rs`): every job carries the account it
-//! was asked for and a generation, and an answer counts only when the account was the same before and after the work
-//! and the generation is still current. The window drops what it holds the moment the gate or the account changes
-//! (in `pump`, never through a worker job that may not be asked), and every reader hands out nothing unless the
-//! vault is open and the signed-in account is the one the answer was read for.
+//! Whose answer (review of desktop#377, P1; the model is `engine_host/settings.rs`): every job carries the account
+//! and the engine's session it was asked under, and a generation. ONE rule decides whether an answer counts
+//! ([`counts`]): its generation is the window's, and the account and the session were the same after the work as at
+//! the ask. The window drops what it holds the moment the gate, the account or the session changes (in `pump`, never
+//! through a worker job that may not be asked), and every reader hands out nothing unless the vault is open and the
+//! signed-in account is the one the answer was read for. A change (Try again, Remove from this PC) runs only while
+//! the session is still the one of the press.
+//!
+//! What the window says when it has no lists ([`ThisPcSource::standing`]): reading, could not be read, or this PC
+//! still holds another account's local state. Never an empty list that reads as "nothing here".
 //!
 //! Whose state (task 2488): the local state database can still belong to an EARLIER account after a sign-out that
 //! keeps local data. Nothing is read from it, and nothing is changed in it, unless its recorded owner is the signed-in
@@ -35,6 +40,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::app::{CredentialStores, Engine, LocalStateRefused};
 use beebeeb_engine::backup_protect::BackupsTree;
 use beebeeb_engine::drive_v2::model;
@@ -46,24 +52,32 @@ use chrono::{NaiveDate, TimeZone};
 
 use super::log;
 use crate::frames::this_pc::source::{
-    Change, Contains, Kept, KeptStatus, Kind, Origin, Pumped, Reason, ThisPcSource, What,
+    Change, Contains, Kept, KeptStatus, Kind, Origin, Pumped, Reason, Standing, ThisPcSource, What,
 };
 
 #[cfg(test)]
 #[path = "this_pc_tests.rs"]
 mod tests;
 
-/// Whether This PC answers in a real build. `false` until the window around it is honest: the This PC chrome
-/// (`frames/this_pc/chrome.rs`) still draws the board's sample account name, email, initials and a fixed Files/Photos
-/// split, which would sit beside a real account (PR body). While it is `false` the shell hands the window the
+#[cfg(test)]
+#[path = "this_pc_engine_tests.rs"]
+mod engine_tests;
+
+/// Whether This PC answers in a real build. It does: the window around it draws the signed-in account and the
+/// storage it read (`frames/this_pc/chrome.rs`), never the board's sample. Turned off, the shell hands the window the
 /// `Unwired` source (`shell/state.rs`), so nothing of this adapter runs: no worker, no read, no sidebar count.
-pub const TURNED_ON: bool = false;
+pub const TURNED_ON: bool = true;
 
 /// The source the running app hands This PC: the engine's while [`TURNED_ON`], else `Unwired` (review of desktop#377,
 /// P2-1: a constant that turns the views off must turn the source off too, or the sidebar's count, the worker and its
 /// reads would still run).
 pub fn source_for<E: ThisPcEngine>(engine: Arc<E>) -> Box<dyn ThisPcSource> {
-    if TURNED_ON {
+    source_when(TURNED_ON, engine)
+}
+
+/// [`source_for`] with the switch as a value, so both of its answers are tested.
+pub(crate) fn source_when<E: ThisPcEngine>(on: bool, engine: Arc<E>) -> Box<dyn ThisPcSource> {
+    if on {
         Box::new(EngineThisPcSource::new(engine))
     } else {
         Box::new(crate::frames::this_pc::source::Unwired)
@@ -93,6 +107,9 @@ pub trait ThisPcEngine: Send + Sync + 'static {
     fn unlocked(&self) -> bool;
     /// Whose account is signed in (the stored email, else the user id the server named). Never waits.
     fn account(&self) -> Option<String>;
+    /// The engine's session, which moves on at every sign-in, lock and sign-out, also back to the same account
+    /// (`Engine::session_turn`). Never waits.
+    fn session(&self) -> SessionGeneration;
     /// Read the signed-in account's local state, through the engine's account-bound handle (task 2488). `Err`: it
     /// is not handed out, and why (nothing synced yet, another account's, the session changed, unreadable).
     fn local_state<T>(&self, read: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused>;
@@ -111,6 +128,9 @@ impl<C: CredentialStores> ThisPcEngine for Engine<C> {
     fn account(&self) -> Option<String> {
         self.account_email().or_else(|| self.user_id())
     }
+    fn session(&self) -> SessionGeneration {
+        self.session_turn()
+    }
     fn local_state<T>(&self, read: impl FnOnce(&StateDb) -> T) -> Result<T, LocalStateRefused> {
         Engine::local_state(self).and_then(|state| state.with(read))
     }
@@ -126,7 +146,7 @@ impl<C: CredentialStores> ThisPcEngine for Engine<C> {
 }
 
 /// What the lists hold, as last read.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Default, Clone, PartialEq)]
 pub(crate) struct Snapshot {
     pub history: Vec<Change>,
     pub problems: Vec<Change>,
@@ -135,29 +155,73 @@ pub(crate) struct Snapshot {
     pub kept: Vec<Kept>,
 }
 
+/// How many of each, never a name, a place or an id: a snapshot that reaches a log line or a failed assertion says
+/// nothing about a person's files.
+impl std::fmt::Debug for Snapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Snapshot {{ history: {}, problems: {}, retryable: {}, kept: {} }}",
+            self.history.len(),
+            self.problems.len(),
+            self.retryable.len(),
+            self.kept.len()
+        )
+    }
+}
+
+/// Why a read has no lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoRead {
+    /// The local state could not be opened or read.
+    Unreadable,
+    /// This PC's local state is another account's (task 2488): nothing of it is read.
+    AnotherAccounts,
+}
+
+/// Whose session something was asked under, or read under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Whose {
+    account: String,
+    session: SessionGeneration,
+}
+
+/// The session the engine is in now: `None` unless someone is signed in with the vault open.
+fn whose_now<E: ThisPcEngine>(engine: &E) -> Option<Whose> {
+    let session = engine.session();
+    let account = engine.account()?;
+    // The session is read before and after the rest: one that moved on in between is no session to answer for.
+    (engine.unlocked() && engine.session() == session).then_some(Whose { account, session })
+}
+
+/// THE rule of what the window keeps of an answer: it was asked in the window's current generation, and the session
+/// it was read under (`after`, as the worker saw it once its work was done) is the one the window is in (`seen`).
+/// Every answer goes through here, a read and a refusal alike.
+fn counts(generation: u64, current: u64, after: Option<&Whose>, seen: Option<&Whose>) -> bool {
+    generation == current && after.is_some() && after == seen
+}
+
 enum Ask {
     Read,
     Retry(Vec<String>),
     Release(Vec<String>),
 }
 
-/// One job: what is asked, for whose account, in which generation.
+/// One job: what is asked, under whose session, in which generation.
 struct Job {
     ask: Ask,
-    account: String,
+    whose: Whose,
     generation: u64,
 }
 
-enum Answer {
-    /// A read: the generation it was asked in, the account it is for (`None`: the account changed, or the vault
-    /// closed, during the work: never shown), and what was read (`Err`: it could not be read).
-    Read {
-        generation: u64,
-        whose: Option<String>,
-        read: Result<Snapshot, ()>,
-    },
-    /// A change that did not happen, in words the window says.
-    Refused { generation: u64, words: &'static str },
+/// One job's answer: the generation it was asked in, the session it is for (`None`: the account or the session
+/// changed, or the vault closed, during the work: never shown), a change that did not happen in words the window
+/// says, and what was read after it (`Err`: no lists, and why).
+struct Answer {
+    generation: u64,
+    whose: Option<Whose>,
+    refused: Option<&'static str>,
+    read: Result<Snapshot, NoRead>,
 }
 
 /// This PC on the real engine. See the module's doc.
@@ -170,8 +234,11 @@ pub struct EngineThisPcSource<E: ThisPcEngine> {
     pending: Arc<AtomicUsize>,
     /// What the window holds, and whose account it was read for (always `seen`'s, or nothing).
     held: Option<Snapshot>,
-    /// The gate and the account the last `pump` saw: a change drops `held` and starts a new generation.
-    seen: (bool, Option<String>),
+    /// Why nothing is held, once an answer said so (`None`: no answer yet).
+    no_read: Option<NoRead>,
+    /// The session the last `pump` saw (`None`: signed out, or locked): a change drops `held` and starts a new
+    /// generation.
+    seen: Option<Whose>,
     generation: u64,
     read_at: Option<Instant>,
     /// A read is out in this generation: no second one is asked.
@@ -189,7 +256,8 @@ impl<E: ThisPcEngine> EngineThisPcSource<E> {
             inbox,
             pending: Arc::default(),
             held: None,
-            seen: (false, None),
+            no_read: None,
+            seen: None,
             generation: 0,
             read_at: None,
             reading: false,
@@ -202,9 +270,9 @@ impl<E: ThisPcEngine> EngineThisPcSource<E> {
         self.pending.load(Ordering::SeqCst) == 0
     }
 
-    /// Send `ask` for the account the window sees now. Nothing is sent while no one is signed in with the vault open.
+    /// Send `ask` for the session the window sees now. Nothing is sent while no one is signed in with the vault open.
     fn send(&mut self, ask: Ask) -> bool {
-        let (true, Some(account)) = self.seen.clone() else {
+        let Some(whose) = self.seen.clone() else {
             return false;
         };
         if self.jobs.is_none() {
@@ -217,10 +285,11 @@ impl<E: ThisPcEngine> EngineThisPcSource<E> {
                     let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&*engine, &answers, job)));
                     if done.is_err() {
                         log("this pc: a read or a change ended early");
-                        let _ = answers.send(Answer::Read {
+                        let _ = answers.send(Answer {
                             generation,
                             whose: None,
-                            read: Err(()),
+                            refused: None,
+                            read: Err(NoRead::Unreadable),
                         });
                     }
                     pending.fetch_sub(1, Ordering::SeqCst);
@@ -237,7 +306,7 @@ impl<E: ThisPcEngine> EngineThisPcSource<E> {
         self.pending.fetch_add(1, Ordering::SeqCst);
         let job = Job {
             ask,
-            account,
+            whose,
             generation: self.generation,
         };
         let sent = self.jobs.as_ref().is_some_and(|tx| tx.send(job).is_ok());
@@ -253,84 +322,77 @@ impl<E: ThisPcEngine> EngineThisPcSource<E> {
         }
     }
 
-    /// What the window holds, while the vault is open and the signed-in account is the one it was read for.
+    /// The session the window saw is still the engine's (the vault open, the same account, the same session).
+    fn current(&self) -> bool {
+        self.seen.is_some() && whose_now(&*self.engine) == self.seen
+    }
+
+    /// What the window holds, while the session is still the one it was read under.
     fn held(&self) -> Option<&Snapshot> {
-        if !self.engine.unlocked() {
-            return None;
-        }
-        let account = self.engine.account();
-        self.held
-            .as_ref()
-            .filter(|_| account.is_some() && account == self.seen.1)
+        self.held.as_ref().filter(|_| self.current())
     }
 }
 
-/// The account `job` was asked for, when it is still the signed-in one with the vault open.
-fn still_for<E: ThisPcEngine>(engine: &E, account: &str) -> bool {
-    engine.unlocked() && engine.account().as_deref() == Some(account)
+/// The session `whose` names is still the engine's, with the vault open.
+fn still_for<E: ThisPcEngine>(engine: &E, whose: &Whose) -> bool {
+    whose_now(engine).as_ref() == Some(whose)
 }
 
-/// One job, on the worker. A change runs only for the account it was asked for, on a state database that account
+/// One job, on the worker. A change runs only under the session it was asked in, on a state database that account
 /// owns; every job ends with a read, so the lists show what the engine has after it.
 fn run<E: ThisPcEngine>(engine: &E, answers: &mpsc::Sender<Answer>, job: Job) {
-    let Job {
-        ask,
-        account,
-        generation,
-    } = job;
-    let refuse = |words| {
-        let _ = answers.send(Answer::Refused { generation, words });
-    };
-    match ask {
-        Ask::Read => {}
-        Ask::Retry(ids) => match retry(engine, &account, &ids) {
+    let Job { ask, whose, generation } = job;
+    let refused = match ask {
+        Ask::Read => None,
+        Ask::Retry(ids) => match retry(engine, &whose, &ids) {
+            Some(0) => None,
             Some(failed) => {
-                if failed > 0 {
-                    log(format!(
-                        "this pc: {failed} of {} changes could not be tried again",
-                        ids.len()
-                    ));
-                    refuse(NOT_RETRIED);
-                }
+                log(format!(
+                    "this pc: {failed} of {} changes could not be tried again",
+                    ids.len()
+                ));
+                Some(NOT_RETRIED)
             }
             None => {
                 log("this pc: nothing tried again (no local state of this account)");
-                refuse(NOT_RETRIED);
+                Some(NOT_RETRIED)
             }
         },
         Ask::Release(ids) => {
             if !engine.syncing() {
                 log("this pc: not removed from this PC: sync does not run");
-                refuse(NOT_SYNCING);
-            } else if !owns_state(engine, &account) {
-                log("this pc: not removed from this PC (no local state of this account)");
-                refuse(NOT_REMOVED);
+                Some(NOT_SYNCING)
             } else {
-                let failed = ids.iter().filter(|id| engine.set_kept(id, false).is_err()).count();
-                if failed > 0 {
+                // Each item under the session of the press: one that moved on stops the rest.
+                let failed = ids
+                    .iter()
+                    .filter(|id| !(owns_state(engine, &whose) && engine.set_kept(id, false).is_ok()))
+                    .count();
+                (failed > 0).then(|| {
                     log(format!(
                         "this pc: {failed} of {} items were not removed from this PC",
                         ids.len()
                     ));
-                    refuse(NOT_REMOVED);
-                }
+                    NOT_REMOVED
+                })
             }
         }
-    }
-    let read = read_for(engine, &account);
-    // The account must be the same after the work as before it: an answer that outlived its session is dropped.
-    let whose = still_for(engine, &account).then_some(account);
-    let _ = answers.send(Answer::Read {
+    };
+    let read = read_for(engine, &whose);
+    // The session must be the same after the work as before it: an answer that outlived its session is dropped.
+    let whose = still_for(engine, &whose).then_some(whose);
+    let _ = answers.send(Answer {
         generation,
         whose,
+        refused,
         read,
     });
 }
 
-/// Tries `ids` again in `account`'s local state: how many could not be. `None`: the vault is not open for
-/// `account`, or the local state is not handed out to it (the account-bound handle, task 2488).
-fn retry<E: ThisPcEngine>(engine: &E, account: &str, ids: &[String]) -> Option<usize> {
-    if !still_for(engine, account) {
+/// Tries `ids` again in the local state of `whose` account: how many could not be. `None`: the session moved on, or
+/// the local state is not handed out to it (the account-bound handle, task 2488).
+fn retry<E: ThisPcEngine>(engine: &E, whose: &Whose, ids: &[String]) -> Option<usize> {
+    if !still_for(engine, whose) {
         return None;
     }
     let now = chrono::Utc::now().timestamp();
@@ -339,24 +401,30 @@ fn retry<E: ThisPcEngine>(engine: &E, account: &str, ids: &[String]) -> Option<u
         .ok()
 }
 
-/// The vault is open for `account` and the local state is handed out to it.
-fn owns_state<E: ThisPcEngine>(engine: &E, account: &str) -> bool {
-    still_for(engine, account) && engine.local_state(|_| ()).is_ok()
+/// The session is still `whose` and the local state is handed out to it.
+fn owns_state<E: ThisPcEngine>(engine: &E, whose: &Whose) -> bool {
+    still_for(engine, whose) && engine.local_state(|_| ()).is_ok()
 }
 
-/// Everything the sections show for `account`. Another account's local state reads as nothing (task 2488); a state
-/// database that could not be opened or read is `Err` (the window keeps what it holds of this account).
-fn read_for<E: ThisPcEngine>(engine: &E, account: &str) -> Result<Snapshot, ()> {
-    if !still_for(engine, account) {
-        return Ok(Snapshot::default());
+/// Everything the sections show under `whose` session. A PC with nothing synced yet reads as empty lists; another
+/// account's local state is never read and says so (task 2488); a state database that could not be opened or read
+/// is `Unreadable` (the window keeps what it holds of this account).
+fn read_for<E: ThisPcEngine>(engine: &E, whose: &Whose) -> Result<Snapshot, NoRead> {
+    if !still_for(engine, whose) {
+        // Dropped by `counts` (the session moved on); nothing is read for it.
+        return Err(NoRead::Unreadable);
     }
     match engine.local_state(|db| read(db, chrono::Utc::now().timestamp())) {
-        Ok(read) => read.map_err(|_| log("this pc: the local history could not be read")),
-        // Not this account's, or read across a lock or a sign-out: nothing of it is shown.
-        Err(refused) if refused.not_this_accounts() || refused == LocalStateRefused::SessionChanged => {
-            Ok(Snapshot::default())
+        Ok(read) => read.map_err(|_| {
+            log("this pc: the local history could not be read");
+            NoRead::Unreadable
+        }),
+        Err(LocalStateRefused::NothingSynced) => Ok(Snapshot::default()),
+        Err(refused) if refused.not_this_accounts() => Err(NoRead::AnotherAccounts),
+        Err(_) => {
+            log("this pc: the local state could not be opened");
+            Err(NoRead::Unreadable)
         }
-        Err(_) => Err(log("this pc: the local state could not be opened")),
     }
 }
 
@@ -545,18 +613,19 @@ impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
         TURNED_ON
     }
 
-    /// The gate or the account changed: what the window held goes now, and an open vault is read again. Then the
-    /// worker's answers: a current one replaces what is held, a refusal is said once.
+    /// The gate, the account or the session changed: what the window held goes now, and an open vault is read
+    /// again. Then the worker's answers: one that [`counts`] replaces what is held, and its refusal is said once.
     fn pump(&mut self) -> Pumped {
         let mut pumped = Pumped {
             // Before the inbox is drained: when nothing is out, every answer is already in it.
             busy: self.pending.load(Ordering::SeqCst) > 0,
             ..Pumped::default()
         };
-        let now = (self.engine.unlocked(), self.engine.account());
+        let now = whose_now(&*self.engine);
         if now != self.seen {
             self.seen = now;
             self.held = None;
+            self.no_read = None;
             self.read_at = None;
             self.reading = false;
             self.generation += 1;
@@ -564,37 +633,53 @@ impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
             self.ask_read();
         }
         while let Ok(answer) = self.inbox.try_recv() {
-            match answer {
-                Answer::Read {
-                    generation,
-                    whose,
-                    read,
-                } => {
-                    if generation != self.generation {
-                        continue;
-                    }
-                    self.reading = false;
-                    pumped.changed = true;
-                    let mine = self.seen.0 && whose.is_some() && whose == self.seen.1;
-                    if !mine {
-                        continue;
-                    }
-                    self.read_at = Some(Instant::now());
-                    // A read that failed keeps what is held of this account (before the first answer: nothing).
-                    if let Ok(snapshot) = read {
-                        self.held = Some(snapshot);
-                    }
+            let Answer {
+                generation,
+                whose,
+                refused,
+                read,
+            } = answer;
+            if generation == self.generation {
+                // The read of this generation is back, whoever it was for: another may be asked.
+                self.reading = false;
+                pumped.changed = true;
+            }
+            if !counts(generation, self.generation, whose.as_ref(), self.seen.as_ref()) {
+                continue;
+            }
+            if let Some(words) = refused {
+                pumped.refusal = Some(words);
+            }
+            self.read_at = Some(Instant::now());
+            match read {
+                Ok(snapshot) => {
+                    self.held = Some(snapshot);
+                    self.no_read = None;
                 }
-                Answer::Refused { generation, words } => {
-                    if generation == self.generation {
-                        pumped.refusal = Some(words);
-                        pumped.changed = true;
-                    }
+                // Another account's local state: nothing of an earlier answer stays either.
+                Err(NoRead::AnotherAccounts) => {
+                    self.held = None;
+                    self.no_read = Some(NoRead::AnotherAccounts);
                 }
+                // A read that failed keeps what is held of this account (before the first answer: it says so).
+                Err(NoRead::Unreadable) => self.no_read = Some(NoRead::Unreadable),
             }
         }
         pumped.busy |= self.pending.load(Ordering::SeqCst) > 0;
         pumped
+    }
+
+    /// What the sections say while there are no lists. Lists that are held win over a later read that failed.
+    fn standing(&self) -> Standing {
+        if !self.current() {
+            return Standing::Reading;
+        }
+        match (&self.held, self.no_read) {
+            (Some(_), _) => Standing::Ready,
+            (None, Some(NoRead::AnotherAccounts)) => Standing::AnotherAccounts,
+            (None, Some(NoRead::Unreadable)) => Standing::Unreadable,
+            (None, None) => Standing::Reading,
+        }
     }
 
     /// A section opened: read again when what is held is older than [`FRESH_FOR`].

@@ -388,3 +388,326 @@ fn day_labels_read_today_yesterday_then_the_day_in_words() {
     assert_eq!(super::history::day_label(d(1, 11), today), "Sunday 1 Nov");
     assert_eq!(super::history::day_label(d(31, 10), today), "Saturday 31 Oct");
 }
+
+// ---- What the sections ask of the window (`carry_out`), and what they say without lists ----
+
+use super::source::{Change, Kept, Standing};
+use crate::frames::files::source::{Action, ActionError, Call, FilesFixture};
+
+type Calls = std::sync::Arc<std::sync::Mutex<Vec<Call>>>;
+type Fails = std::sync::Arc<std::sync::Mutex<Vec<(Action, ActionError)>>>;
+
+/// A scene with a Files source that records what it is asked.
+fn recording(scene: fn(&mut State)) -> (Runtime<State>, Calls, Fails) {
+    let mut rt = runtime(scene, false);
+    let fixture = FilesFixture::default();
+    let (calls, fails) = (fixture.calls.clone(), fixture.fail.clone());
+    rt.state.actions.source = Box::new(fixture);
+    (rt, calls, fails)
+}
+
+/// One poll as the shell runs it, then a frame.
+fn poll(rt: &mut Runtime<State>) {
+    rt.update(|s, tx| {
+        super::poll(s, tx);
+    });
+    rt.frame(0.0);
+}
+
+#[test]
+fn show_in_file_explorer_asks_the_windows_files_source_and_says_a_refusal() {
+    let (mut rt, calls, fails) = recording(scenes::dw_0428);
+    rt.state.this_pc.ask(Intent::ShowInFileExplorer("c-21".into()));
+    poll(&mut rt);
+    assert_eq!(*calls.lock().unwrap(), [Call::ShowInFileExplorer(vec!["c-21".into()])]);
+    assert!(rt.state.this_pc.refusal.is_none());
+    assert!(rt.state.this_pc.take_intents().is_empty(), "carried out once");
+
+    // Refused (sync does not run, the file is not on this PC): the window says so, in fixed words.
+    fails
+        .lock()
+        .unwrap()
+        .push((Action::ShowInFileExplorer, ActionError::Unavailable));
+    rt.state.this_pc.ask(Intent::ShowInFileExplorer("c-21".into()));
+    poll(&mut rt);
+    assert_eq!(rt.state.this_pc.refusal.map(|(words, _)| words), Some(super::NOT_SHOWN));
+    assert!(
+        rt.elements()
+            .iter()
+            .any(|e| e.text.as_deref() == Some(super::NOT_SHOWN) && !e.exiting),
+        "the refusal is on screen"
+    );
+}
+
+#[test]
+fn show_in_beebeeb_goes_to_trash_for_a_trashed_file_and_to_files_otherwise() {
+    let (mut rt, _, _) = recording(scenes::dw_1301);
+    let history = rt.state.this_pc.source.history();
+    let trashed = history
+        .iter()
+        .find(|c| matches!(c.what, super::What::MovedToTrash { .. }))
+        .expect("the board has a file moved to Trash")
+        .id
+        .clone();
+    let other = history
+        .iter()
+        .find(|c| matches!(c.what, super::What::Uploaded { .. }))
+        .expect("the board has an upload")
+        .id
+        .clone();
+    rt.state.this_pc.ask(Intent::ShowInBeebeeb(trashed));
+    poll(&mut rt);
+    assert_eq!(rt.state.shell.app.route().section, super::Section::Trash);
+
+    rt.state.this_pc.ask(Intent::ShowInBeebeeb(other));
+    poll(&mut rt);
+    assert_eq!(rt.state.shell.app.route().section, super::Section::Files);
+}
+
+#[test]
+fn open_goes_into_a_kept_folder_and_opens_a_kept_file_through_the_files_source() {
+    let (mut rt, calls, fails) = recording(scenes::dw_0715);
+    let kept = rt.state.this_pc.kept();
+    let folder = kept
+        .iter()
+        .find(|k| k.kind == super::source::Kind::Folder)
+        .unwrap()
+        .id
+        .clone();
+    let file = kept
+        .iter()
+        .find(|k| k.kind != super::source::Kind::Folder)
+        .unwrap()
+        .id
+        .clone();
+
+    // A file: its own app, through the Files source (no viewer is routed in this section).
+    rt.state.this_pc.ask(Intent::Open(file.clone()));
+    poll(&mut rt);
+    assert_eq!(*calls.lock().unwrap(), [Call::Open(vec![file.clone()])]);
+    assert_eq!(rt.state.shell.app.route().section, super::Section::AvailableOffline);
+
+    // Refused: said.
+    fails.lock().unwrap().push((Action::Open, ActionError::Offline));
+    rt.state.this_pc.ask(Intent::Open(file));
+    poll(&mut rt);
+    assert_eq!(
+        rt.state.this_pc.refusal.map(|(words, _)| words),
+        Some(super::NOT_OPENED)
+    );
+
+    // An id the list does not hold: nothing is asked of anyone.
+    let before = calls.lock().unwrap().len();
+    rt.state.this_pc.ask(Intent::Open("not-kept".into()));
+    poll(&mut rt);
+    assert_eq!(calls.lock().unwrap().len(), before);
+
+    // A folder: Files, inside it.
+    rt.state.this_pc.ask(Intent::Open(folder.clone()));
+    poll(&mut rt);
+    let route = rt.state.shell.app.route();
+    assert_eq!(route.section, super::Section::Files);
+    assert_eq!(route.folder, Some(folder));
+}
+
+#[test]
+fn new_goes_to_files_with_its_new_menu_open() {
+    let (mut rt, _, _) = recording(scenes::dw_1301);
+    rt.state.this_pc.ask(Intent::New);
+    poll(&mut rt);
+    assert_eq!(rt.state.shell.app.route().section, super::Section::Files);
+    assert_eq!(
+        rt.state.actions.menu.map(|m| m.kind),
+        Some(crate::frames::files::MenuKind::New)
+    );
+}
+
+#[test]
+fn remove_all_shows_its_ask_and_removes_only_on_the_yes() {
+    let (mut rt, _, _) = recording(scenes::dw_0715);
+    click(&mut rt, "btn-remove-all-from-this-pc");
+    poll(&mut rt);
+    assert!(has(&rt, "dlg"), "the ask is on screen");
+    assert_eq!(info(&rt, "dlg").role, "dialog");
+    assert_eq!(text(&rt, "dlg-title"), "Remove all from this PC?");
+    assert_eq!(
+        text(&rt, "dlg-sub"),
+        "3 items will be online only. Nothing is deleted from Beebeeb."
+    );
+    assert_eq!(rt.state.this_pc.kept_count(), 3, "nothing is removed before the answer");
+
+    // Esc says no; so does Cancel. Nothing is removed, and a list key does not reach the list under the ask.
+    press(&mut rt, Key::Escape);
+    assert!(!has(&rt, "dlg"));
+    assert_eq!(rt.state.this_pc.kept_count(), 3);
+    click(&mut rt, "btn-remove-all-from-this-pc");
+    poll(&mut rt);
+    let selected = rt.state.this_pc.selected;
+    press(&mut rt, Key::Down);
+    assert_eq!(rt.state.this_pc.selected, selected, "the list is under the ask");
+    click(&mut rt, "btn-1");
+    assert!(!has(&rt, "dlg"));
+    assert_eq!(rt.state.this_pc.kept_count(), 3);
+
+    // Yes: everything goes, the ask with it.
+    click(&mut rt, "btn-remove-all-from-this-pc");
+    poll(&mut rt);
+    click(&mut rt, "btn-0");
+    assert!(!has(&rt, "dlg"));
+    assert_eq!(rt.state.this_pc.kept_count(), 0);
+    assert_eq!(text(&rt, "empty-title"), "Nothing available offline");
+}
+
+#[test]
+fn the_ask_does_not_outlive_its_section() {
+    let (mut rt, _, _) = recording(scenes::dw_0715);
+    click(&mut rt, "btn-remove-all-from-this-pc");
+    poll(&mut rt);
+    assert!(rt.state.this_pc.confirm_remove_all);
+    rt.update(|s, _| {
+        crate::shell::host::dispatch(
+            s,
+            crate::shell::app::Event::Navigate(crate::shell::app::Route::section(super::Section::SyncHistory)),
+        );
+    });
+    poll(&mut rt);
+    assert!(!rt.state.this_pc.confirm_remove_all, "gone with the section");
+}
+
+/// A source with no lists, in one standing; real, not a sample (the status line never says the board's counts).
+struct NoLists(Standing);
+
+impl ThisPcSource for NoLists {
+    fn standing(&self) -> Standing {
+        self.0
+    }
+    fn today(&self) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()
+    }
+    fn history(&self) -> Vec<Change> {
+        Vec::new()
+    }
+    fn problems(&self) -> Vec<Change> {
+        Vec::new()
+    }
+    fn retry(&mut self, _: &str) {}
+    fn retry_all(&mut self) {}
+    fn kept(&self) -> Vec<Kept> {
+        Vec::new()
+    }
+    fn remove_from_pc(&mut self, _: &str) {}
+    fn remove_all_from_pc(&mut self) {}
+}
+
+fn with_source(section: super::Section, source: Box<dyn ThisPcSource>) -> Runtime<State> {
+    let mut state = init();
+    crate::shell::host::dispatch(
+        &mut state,
+        crate::shell::app::Event::Navigate(crate::shell::app::Route::section(section)),
+    );
+    state.this_pc = super::Ui::new(source);
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, view, (958.0, 638.0), env);
+    rt.frame(0.0);
+    rt
+}
+
+#[test]
+fn without_lists_each_section_says_why_and_never_that_the_pc_is_empty() {
+    let cases = [
+        (Standing::Reading, "Reading this PC"),
+        (Standing::Unreadable, "Couldn't read this PC"),
+        (Standing::AnotherAccounts, "Not available for this account"),
+    ];
+    for (standing, title) in cases {
+        for section in [super::Section::SyncHistory, super::Section::AvailableOffline] {
+            let rt = with_source(section, Box::new(NoLists(standing)));
+            assert_eq!(text(&rt, "empty-title"), title, "{standing:?} in {section:?}");
+            assert!(has(&rt, "empty-sub"));
+            for said in rt.elements().iter().filter_map(|e| e.text.clone()) {
+                assert!(
+                    !["No changes yet", "Nothing available offline", "No items"].contains(&said.as_str()),
+                    "{standing:?} in {section:?} reads as an empty PC: {said}"
+                );
+            }
+            assert!(
+                !text(&rt, "status-details").contains("available offline"),
+                "no count of something nobody read"
+            );
+        }
+    }
+    // Ready with nothing: the board's own empty states.
+    let rt = with_source(super::Section::SyncHistory, Box::new(NoLists(Standing::Ready)));
+    assert_eq!(text(&rt, "empty-title"), "No changes yet");
+    let rt = with_source(super::Section::AvailableOffline, Box::new(NoLists(Standing::Ready)));
+    assert_eq!(text(&rt, "empty-title"), "Nothing available offline");
+}
+
+#[test]
+fn a_real_pc_never_draws_the_boards_sample_status_line() {
+    const SAMPLE: &str = "4 on this PC \u{00B7} 3 available offline \u{00B7} 4 online only";
+    // Nothing kept, and kept items with the row menu open: the two places the board keeps Files' sample counts.
+    let rt = with_source(super::Section::AvailableOffline, Box::new(NoLists(Standing::Ready)));
+    assert_eq!(text(&rt, "status-details"), "Nothing available offline");
+    let mut rt = with_source(super::Section::AvailableOffline, Box::new(FixtureSource::synced()));
+    rt.state.this_pc.open_menu(0, (430.0, 190.0));
+    rt.frame(0.0);
+    assert!(has(&rt, "menu"));
+    assert_ne!(text(&rt, "status-details"), SAMPLE);
+    assert!(text(&rt, "status-details").starts_with("3 available offline"));
+}
+
+#[test]
+fn the_status_line_says_the_sources_sync_word_or_none() {
+    // The window's own source has no word for sync (nothing syncs here): no dot, no word, never "Up to date".
+    let mut rt = with_source(super::Section::SyncHistory, Box::new(FixtureSource::board()));
+    rt.state.this_pc = super::Ui::new(Box::new(NoLists(Standing::Ready)));
+    rt.state.actions.source = Box::new(crate::frames::files::source::NoEngine);
+    rt.frame(0.0);
+    assert!(!has(&rt, "status-text") && !has(&rt, "status-dot"));
+
+    // An item that did not sync: "Sync stopped", whatever the source's word.
+    let rt = runtime(scenes::dw_0428, false);
+    assert_eq!(text(&rt, "status-text"), "Sync stopped");
+}
+
+#[test]
+fn the_sidebar_foot_draws_the_account_and_the_storage_the_window_read() {
+    // The board's scene: the fixture's account and split, as before.
+    let rt = runtime(scenes::dw_1301, false);
+    assert_eq!(text(&rt, "account-name"), "Anna Visser");
+    assert_eq!(text(&rt, "storage-files"), "Files 24 GB");
+
+    // A window whose source names no account and has read no storage: no sample name, no figure, no breakdown.
+    let mut rt = with_source(super::Section::SyncHistory, Box::new(NoLists(Standing::Ready)));
+    rt.state.actions.source = Box::new(crate::frames::files::source::NoEngine);
+    rt.state.storage_known = false;
+    rt.state.storage_split = None;
+    rt.frame(0.0);
+    assert_eq!(text(&rt, "account-name"), "");
+    assert!(has(&rt, "account-email-off") && !has(&rt, "account-email") && !has(&rt, "avatar"));
+    assert_eq!(text(&rt, "storage-value"), "Unavailable");
+    assert!(!has(&rt, "storage-breakdown"));
+    assert_eq!(
+        info(&rt, "meter-fill-0").rect[2],
+        0.0,
+        "no fill for storage nobody read"
+    );
+    for said in rt.elements().iter().filter_map(|e| e.text.clone()) {
+        assert!(
+            !said.contains("Anna") && !said.contains("northwind"),
+            "a sample name: {said}"
+        );
+    }
+
+    // Storage read, no split from the source: the total, one segment, no Files/Photos line.
+    rt.state.storage_known = true;
+    rt.frame(0.0);
+    assert!(text(&rt, "storage-value").contains(" of "));
+    assert!(!has(&rt, "storage-breakdown"));
+    assert!(info(&rt, "meter-fill-0").rect[2] > 0.0);
+    assert_eq!(info(&rt, "meter-fill-1").rect[2], 0.0);
+}

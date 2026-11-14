@@ -197,6 +197,20 @@ pub struct Kept {
     pub status: KeptStatus,
 }
 
+/// Whether the source has lists to show, and when not, why ([`ThisPcSource::standing`]). The sections say it in
+/// words of their own, never as an empty list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// The lists are what this PC holds.
+    Ready,
+    /// The first answer is still out.
+    Reading,
+    /// This PC's local state could not be read.
+    Unreadable,
+    /// This PC still holds the local state of another account: nothing of it is shown.
+    AnotherAccounts,
+}
+
 /// What a source's workers answered since the last frame ([`ThisPcSource::pump`]).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Pumped {
@@ -222,6 +236,10 @@ pub trait ThisPcSource {
     /// frame instead of sample sync history.
     fn wired(&self) -> bool {
         true
+    }
+    /// Whether the lists below are what this PC holds, or why there are none yet.
+    fn standing(&self) -> Standing {
+        Standing::Ready
     }
     /// This PC's date, for "Today" and "Yesterday".
     fn today(&self) -> NaiveDate;

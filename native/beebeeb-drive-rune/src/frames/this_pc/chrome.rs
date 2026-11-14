@@ -145,13 +145,22 @@ pub fn sidebar(s: &State, ui: &Ui, here: Section, t: &Theme) -> El {
         .child(foot(s, t))
 }
 
-/// The storage meter and the account row (`.mk-side-foot`), as `ui::sidebar` draws them.
+/// The storage meter and the account row (`.mk-side-foot`), as `ui::sidebar` draws them, from the same answers:
+/// the storage the window read (`State::storage_known`, else "Unavailable" and no fill), the Files/Photos split
+/// only when the source gives one (`State::storage_split`, else one segment and no breakdown), and the signed-in
+/// account as the window's source names it (none known: the row keeps its place and names no one). Never the
+/// board's sample beside a real account.
 fn foot(s: &State, t: &Theme) -> El {
-    const FILES_BYTES: i64 = 24_000_000_000;
     let storage = s.storage;
     let quota = storage.quota_bytes.max(1) as f64;
-    let files_frac = (FILES_BYTES.min(storage.used_bytes) as f64 / quota) as f32;
-    let photos_frac = ((storage.used_bytes - FILES_BYTES).max(0) as f64 / quota) as f32;
+    let (files_frac, photos_frac) = match s.storage_split {
+        _ if !s.storage_known => (0.0, 0.0),
+        Some((files, _)) => (
+            (files.min(storage.used_bytes) as f64 / quota) as f32,
+            ((storage.used_bytes - files).max(0) as f64 / quota) as f32,
+        ),
+        None => ((storage.used_bytes as f64 / quota) as f32, 0.0),
+    };
     let track_w = SIDEBAR_W - 2.0 * (10.0 + 6.0 + 4.0) - kit::HAIR;
     let gb = |bytes: i64| {
         if bytes >= 1_000_000_000_000 {
@@ -194,72 +203,71 @@ fn foot(s: &State, t: &Theme) -> El {
                         .fill(t.text_quaternary),
                 ),
         );
-    if s.storage_known {
+    if let (true, Some((files, _))) = (s.storage_known, s.storage_split) {
         meter = meter.child(
             row()
                 .key("storage-breakdown")
                 .justify_between()
                 .child(kit::label(
                     "storage-files",
-                    format!("Files {}", gb(FILES_BYTES)),
+                    format!("Files {}", gb(files)),
                     type_::KBD,
                     t.text_tertiary,
                 ))
                 .child(kit::label(
                     "storage-photos",
-                    format!("Photos {}", gb((storage.used_bytes - FILES_BYTES).max(0))),
+                    format!("Photos {}", gb((storage.used_bytes - files).max(0))),
                     type_::KBD,
                     t.text_tertiary,
                 )),
         );
     }
-    let account = row()
-        .key("account-row")
-        .center_y()
-        .gap(8.0)
-        .pt(2.0)
-        .px(2.0)
-        .child(kit::avatar(
-            "avatar",
-            "AV",
-            26.0,
-            rune::oklch(0.88, 0.05, 250.0),
-            t.card,
-            t,
-        ))
-        .child(
+    let account = row().key("account-row").center_y().gap(8.0).pt(2.0).px(2.0);
+    let account = match s.actions.source.account() {
+        Some(who) => account
+            .child(kit::avatar(
+                "avatar",
+                &who.initials,
+                26.0,
+                rune::oklch(0.88, 0.05, 250.0),
+                t.card,
+                t,
+            ))
+            .child(
+                col()
+                    .key("account-info")
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .child(kit::label("account-name", &who.name, type_::BODY_SEMI, t.text).truncate())
+                    .child(kit::label("account-email", &who.email, type_::BODY_SM, t.text_tertiary).truncate()),
+            ),
+        // No account known: the row keeps its height and names no one (as `ui::sidebar`).
+        None => account.child(
             col()
                 .key("account-info")
                 .grow(1.0)
                 .min_w(0.0)
-                .child(kit::label("account-name", "Anna Visser", type_::BODY_SEMI, t.text).truncate())
-                .child(
-                    kit::label(
-                        "account-email",
-                        "anna@northwind.studio",
-                        type_::BODY_SM,
-                        t.text_tertiary,
-                    )
-                    .truncate(),
-                ),
-        )
-        .child(
-            el().key("settings-btn")
-                .role("button")
-                .label("Settings")
-                .shortcut_hint("Ctrl+,")
-                .help("Settings  Ctrl+,")
-                .size(26.0, 26.0)
-                .radius(radius::CONTROL)
-                .center()
-                .hover(t.selection)
-                .press(t.press)
-                .focusable(true)
-                .on_press(|s: &mut State| {
-                    host::dispatch(s, Event::OpenSettings(SettingsPane::General));
-                })
-                .child(kit::glyph("settings-icon", &icons::SETTINGS, 15.0, t.text_secondary)),
-        );
+                .child(kit::label("account-name", "", type_::BODY_SEMI, t.text).truncate())
+                .child(el().key("account-email-off")),
+        ),
+    };
+    let account = account.child(
+        el().key("settings-btn")
+            .role("button")
+            .label("Settings")
+            .shortcut_hint("Ctrl+,")
+            .help("Settings  Ctrl+,")
+            .size(26.0, 26.0)
+            .radius(radius::CONTROL)
+            .center()
+            .hover(t.selection)
+            .press(t.press)
+            .focusable(true)
+            .on_press(|s: &mut State| {
+                host::dispatch(s, Event::OpenSettings(SettingsPane::General));
+            })
+            .child(kit::glyph("settings-icon", &icons::SETTINGS, 15.0, t.text_secondary)),
+    );
     col()
         .key("sidebar-foot")
         .gap(10.0)
@@ -460,9 +468,28 @@ pub fn outline_button(key: &str, words: &str, ic: Option<&'static Icon>, t: &The
     ))
 }
 
-/// The status line (`.mk-foot`): the sync state at the left, the section's words at the right.
-pub fn status_line(ui: &Ui, right: String, t: &Theme) -> El {
+/// The status line (`.mk-foot`): the sync state at the left, the section's words at the right. The state is "Sync
+/// stopped" while an item of this PC did not sync, else the word the window's own source has for sync (the one
+/// Files' status line says); a source with none gets no dot and no word, never "Up to date" nobody read.
+pub fn status_line(s: &State, ui: &Ui, right: String, t: &Theme) -> El {
+    use crate::ui::status_line::{SYNC_STOPPED, SYNCING, UP_TO_DATE};
     let stopped = ui.problem_count() > 0;
+    let state = if stopped {
+        Some(SYNC_STOPPED.to_string())
+    } else {
+        s.actions.source.sync_state()
+    };
+    let mut left = row().key("status-left").center_y().gap(7.0);
+    if let Some(state) = state {
+        let dot = match state.as_str() {
+            _ if stopped => t.red,
+            SYNCING | UP_TO_DATE => t.green,
+            _ => t.text_quaternary,
+        };
+        left = left
+            .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(dot))
+            .child(kit::label("status-text", state, type_::STATUS_STRONG, t.text_secondary));
+    }
     row()
         .key("status-bar")
         .role("status")
@@ -474,24 +501,7 @@ pub fn status_line(ui: &Ui, right: String, t: &Theme) -> El {
         .px(16.0)
         .gap(7.0)
         .center_y()
-        .child(
-            row()
-                .key("status-left")
-                .center_y()
-                .gap(7.0)
-                .child(
-                    el().key("status-dot")
-                        .size(7.0, 7.0)
-                        .radius(3.5)
-                        .fill(if stopped { t.red } else { t.green }),
-                )
-                .child(kit::label(
-                    "status-text",
-                    if stopped { "Sync stopped" } else { "Up to date" },
-                    type_::STATUS_STRONG,
-                    t.text_secondary,
-                )),
-        )
+        .child(left)
         .child(el().key("status-spacer").grow(1.0))
         .child(kit::label("status-details", right, type_::STATUS, t.text_tertiary))
 }
