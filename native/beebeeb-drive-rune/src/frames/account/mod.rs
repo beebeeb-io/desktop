@@ -18,6 +18,7 @@ mod app_lock;
 pub mod approve;
 #[cfg(test)]
 mod approve_tests;
+mod calls;
 mod delete;
 mod form;
 mod forms;
@@ -370,6 +371,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         }
     }
     let pumped = source.pump();
+    let call = source.call_answer();
     // A sign-out that is out: its answer, when it came. Only then is anything of it drawn.
     let answered = match ui.signing_out.waiting {
         Some(all) => source.sign_out_result().map(|answer| (all, answer)),
@@ -381,6 +383,15 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     // A toast that goes by itself: look again when its time is up.
     if let Some(stay) = pumped.wake_in {
         tx.wake_after(stay);
+    }
+    if let Some((kind, answered)) = call {
+        // Beebeeb's answer to a call a page started: shown as the press would have shown it, or dropped when the
+        // page no longer waits for it.
+        let frame = calls::settle(&mut s.account, kind, answered);
+        if let Some(frame) = frame {
+            go(s, frame);
+        }
+        return true;
     }
     if let Some((all, answer)) = answered {
         s.account.signing_out.waiting = None;

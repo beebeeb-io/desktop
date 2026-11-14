@@ -23,9 +23,8 @@
 //! - Sign-in and security (the one page): two-factor from the Account read (the profile's mark; absent: not
 //!   known) and how many sessions are signed in (the list's length, never of a list read before a sign-out that
 //!   was sent). Everything else is not known ([`AccountSource::security_facts`]): no mark, no control.
-//! - Every other account pane (all the pages under Sign-in and security, Name, Change email):
-//!   `PaneState::Unwired`. The view does not open them from a live pane (their rows are the values alone).
-//!   Their methods here do nothing and are not reachable from a drawn pane.
+//! - Change email and two-factor (`account_twofactor.rs`, `account_email.rs`): started on a worker, answered later.
+//! - Every other account pane: `PaneState::Unwired`; their methods here do nothing and no drawn pane reaches them.
 //!
 //! Session rule: every answer carries the session ([`Engine::session_turn`]) and the account it was made for; one
 //! that is not the current session's and account's is dropped, every accessor checks before it hands anything
@@ -56,16 +55,20 @@ use super::log;
 use crate::frames::account::Pane;
 use crate::frames::account::approve::{Approval, Denial, Lookup, SignInRequest};
 use crate::frames::account::source::{
-    AccountSource, CodeRefused, Count, Deletion, DeletionRefused, DeviceKind, EmailRefused, Event, Factor, Identity,
-    PaneState, Passkey, Password, Plan, PlanDetails, ProductKind, ProductState, Pumped, Purpose, Refused, Secret,
-    Security, SecurityFacts, Session, Setup, SignOutAnswer, StepUp, Strength, TwoFactor,
+    AccountSource, Answered, CallKind, CodeRefused, Count, Deletion, DeletionRefused, DeviceKind, EmailRefused, Event,
+    Factor, Identity, PaneState, Passkey, Password, Plan, PlanDetails, ProductKind, ProductState, Pumped, Purpose,
+    Refused, Secret, Security, SecurityFacts, Session, Setup, SignOutAnswer, StepUp, Strength, TwoFactor,
 };
 
+#[path = "account_email.rs"]
+mod email;
 #[path = "account_said.rs"]
 mod said;
 #[cfg(test)]
 #[path = "account_tests.rs"]
 mod tests;
+#[path = "account_twofactor.rs"]
+mod twofactor;
 #[path = "account_values.rs"]
 mod values;
 
@@ -95,7 +98,7 @@ impl Kind {
     fn of(pane: Pane) -> Option<Kind> {
         match pane {
             // The Security page stands on the Account read (the profile says whether two-factor is on).
-            Pane::Account | Pane::Security => Some(Kind::Overview),
+            Pane::Account | Pane::Security | Pane::TwoFactor => Some(Kind::Overview),
             Pane::Sessions => Some(Kind::Sessions),
             _ => None,
         }
@@ -220,6 +223,7 @@ pub struct EngineAccountSource<C: CredentialStores> {
     ahead: Duration,
     answers: mpsc::Sender<Answer>,
     inbox: mpsc::Receiver<Answer>,
+    calls: twofactor::Calls,
 }
 
 impl<C: CredentialStores + 'static> EngineAccountSource<C> {
@@ -251,6 +255,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             ahead: Duration::ZERO,
             answers,
             inbox,
+            calls: twofactor::Calls::new(),
         }
     }
 
@@ -400,6 +405,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
 
     /// Drop everything of the account, every mark of a change on its way, and every toast.
     fn forget(&mut self) {
+        self.calls.drop_held();
         self.overview = None;
         self.sessions = None;
         self.overview_reads.read_at = None;
@@ -789,6 +795,9 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
 
 impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn pane_state(&self, pane: Pane) -> PaneState {
+        if let Some(state) = self.wired_pane(pane) {
+            return state;
+        }
         let Some(kind) = Kind::of(pane) else {
             return PaneState::Unwired;
         };
@@ -800,7 +809,11 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
             return PaneState::SessionEnded;
         }
         let (held, reads) = match kind {
-            Kind::Overview => (self.current(&self.overview).is_some(), &self.overview_reads),
+            Kind::Overview => (
+                self.current(&self.overview)
+                    .is_some_and(|overview| pane != Pane::TwoFactor || overview.two_factor.is_some()),
+                &self.overview_reads,
+            ),
             Kind::Sessions => (self.current(&self.sessions).is_some(), &self.sessions_reads),
         };
         if held {
@@ -848,6 +861,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn closed(&mut self) {
         self.showing = None;
         self.counting_devices = false;
+        self.calls.drop_held();
     }
 
     fn reload(&mut self, pane: Pane) {
@@ -1108,13 +1122,16 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         Err(Refused::Offline)
     }
     fn two_factor(&self) -> TwoFactor {
-        TwoFactor {
-            on: false,
-            added: String::new(),
-            last_used: String::new(),
-            codes_left: 0,
-            codes_total: 0,
-        }
+        self.two_factor_known()
+    }
+    fn start_call(&mut self, kind: CallKind, input: &str, password: &str) -> bool {
+        self.start_a_call(kind, input, password)
+    }
+    fn call_answer(&mut self) -> Option<(CallKind, Answered)> {
+        self.a_call_answer()
+    }
+    fn can_send_again(&self) -> bool {
+        email::can_send_again()
     }
     fn begin_two_factor(&mut self, _confirmation: Option<StepUp>) -> Result<Setup, Refused> {
         Err(Refused::Offline)

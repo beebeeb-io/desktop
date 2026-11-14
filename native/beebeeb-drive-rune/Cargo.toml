@@ -21,6 +21,9 @@ beebeeb-engine = { path = "../../crates/beebeeb-engine", default-features = fals
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 # The sign-in source hands secrets to the engine as Zeroizing<String> (wiped on drop).
 zeroize = "1"
+# The QR code of the two-factor set-up (engine_host/account_twofactor.rs): MIT or Apache-2.0, pure Rust, no network;
+# the same crate and version the Tauri app already uses. Only the modules are read, no image or SVG output.
+qrcode = { version = "0.14", default-features = false }
 # Checks `--api-base` (`engine_host/open.rs`) with the parser reqwest connects with; already in the lock through
 # the engine's reqwest, so no new crate is built.
 url = "2"

@@ -513,6 +513,39 @@ pub enum EmailRefused {
     Offline,
 }
 
+/// The calls of the Account pages that are answered later: a source that sends them on a worker starts one with
+/// [`AccountSource::start_call`] and the window takes the answer with [`AccountSource::call_answer`]; nothing of the
+/// answer is drawn before it came.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallKind {
+    /// The new address and the password: Beebeeb mails the 8-digit code.
+    StartEmail,
+    /// The 8 digits of the email's code.
+    ConfirmEmail,
+    /// A new authenticator key (the set-up page).
+    BeginTwoFactor,
+    /// The first 6-digit code: turns two-factor on.
+    TurnOnTwoFactor,
+    /// A current code: turns two-factor off.
+    TurnOffTwoFactor,
+    /// A current code, before moving to a new authenticator.
+    CheckCode,
+    /// A current code: 8 new backup codes.
+    NewBackupCodes,
+}
+
+/// How a started call ended.
+pub enum Answered {
+    Done,
+    Setup(Setup),
+    /// The first code was wrong: the key it belonged to is spent, and this is the new one.
+    NewKey(Setup),
+    Codes(Vec<Secret>),
+    Email(EmailRefused),
+    Code(CodeRefused),
+    Refused(Refused),
+}
+
 /// Where a pane's content stands. A source that answers at once (the board's fixture) is always `Ready`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneState {
@@ -645,6 +678,22 @@ pub trait AccountSource {
     /// Engine: sends the code (email change) or the link (deletion) again. `false`: too soon.
     fn send_again(&mut self) -> bool;
 
+    /// Starts `kind` on a worker: `input` is the address, or the code; `password` goes with the address only (it is
+    /// copied into a wiping buffer for the call). `true`: it is out, and its answer comes through `call_answer`;
+    /// `false`: this source answers the sync methods above instead.
+    fn start_call(&mut self, _kind: CallKind, _input: &str, _password: &str) -> bool {
+        false
+    }
+    /// The answer of a call that was started, once; one that belongs to a session or an account that is over is
+    /// dropped by the source.
+    fn call_answer(&mut self) -> Option<(CallKind, Answered)> {
+        None
+    }
+
+    /// Whether "Send again" is offered for the email's code: `false` when Beebeeb has no route that sends it again.
+    fn can_send_again(&self) -> bool {
+        true
+    }
     /// Engine: `core::password::strength` on this device, and the leak check by hashed prefix.
     fn password_strength(&self, candidate: &Password<'_>) -> Strength;
     /// Engine: core re-wraps the vault key under the new password and registers it with OPAQUE
