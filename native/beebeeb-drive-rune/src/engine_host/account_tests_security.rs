@@ -215,14 +215,28 @@ fn a_list_read_before_a_sign_out_is_not_the_security_pages_count() {
     let server = server();
     let mut source = Source::new(signed_in(&server));
     opened(&mut source, Pane::Sessions);
-    // A slow read of the list starts; then the sign-out, which Beebeeb answers first.
-    server.read_delay_ms.store(700, Ordering::SeqCst);
+    // A slow read of the list is under way at Beebeeb (it has taken its list) when the sign-out is sent.
+    let (under_way, seen) = std::sync::mpsc::channel();
+    *server.during_read.lock().unwrap() = Some(Box::new(move || {
+        let _ = under_way.send(());
+    }));
+    server.read_delay_ms.store(1_500, Ordering::SeqCst);
     source.reload(Pane::Sessions);
-    std::thread::sleep(Duration::from_millis(150));
-    server.change_delay_ms.store(100, Ordering::SeqCst);
+    seen.recv_timeout(Duration::from_secs(5))
+        .expect("the read reached Beebeeb");
+    server.read_delay_ms.store(0, Ordering::SeqCst);
     assert!(source.sign_out_device("s-phone"));
     source.opened(Pane::Security);
-    server.read_delay_ms.store(0, Ordering::SeqCst);
+    // Beebeeb takes the sign-out while that read is still out.
+    let began = Instant::now();
+    while server.deleted.lock().unwrap().is_empty() {
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "the sign-out waited for the read"
+        );
+        source.pump();
+        std::thread::sleep(Duration::from_millis(10));
+    }
     settle(&mut source);
     assert_eq!(server.deleted.lock().unwrap().clone(), ["s-phone"]);
     assert_eq!(
