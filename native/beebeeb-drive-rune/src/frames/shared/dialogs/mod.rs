@@ -330,7 +330,6 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         _ => {}
     }
     let focused = tx.focused().map(str::to_owned);
-    let ui = &mut s.frames.shared;
     match (focused.as_deref(), &ev.key) {
         (Some(key), Key::Left | Key::Right) if key.starts_with("seg-") && plain => {
             view::step_access(s, ev.key == Key::Right, tx);

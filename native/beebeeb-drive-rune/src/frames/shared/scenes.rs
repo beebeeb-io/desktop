@@ -150,7 +150,7 @@ pub fn dw_0515(s: &mut State) {
 pub fn dw_0749(s: &mut State) {
     crate::frames::trash::scenes::dw_0747(s);
     s.frames.shared.open_dialog(Dialog::EmptyTrash);
-    s.frames.shared.fields.password.replace_text("sample".into());
+    s.frames.shared.fields.password.replace_text("sample");
 }
 
 /// The lane's dialogs, by frame id (`frames::scenes`).

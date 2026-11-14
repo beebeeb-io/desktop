@@ -28,7 +28,7 @@ use crate::ui::settings_dialog::{DIALOG_TITLE, scrim_color};
 use crate::ui::settings_list::{FOOT, LIST_TITLE};
 use crate::ui::{field as ui_field, kit};
 use rune::tok::Family;
-use rune::{Color, El, Icon, KeyEvent, Shadow, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
+use rune::{Color, El, Icon, KeyEvent, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
 
 /// `.kit-field-outer`: a field's label above it.
 pub const FIELD_LABEL: TextStyle = TextStyle::new(11.0, 500.0).lh(15.0);
