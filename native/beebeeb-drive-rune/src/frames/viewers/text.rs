@@ -418,6 +418,9 @@ pub fn banner_spans(icon: &'static Icon, words: &str, spans: Vec<Span>, action: 
     b
 }
 
+/// What the status line says at the right for a text that is shown whole by a source that cannot save an edit.
+pub const READ_ONLY_HINT: &str = "Space for Preview \u{00B7} read-only here";
+
 /// The status line of a text file.
 pub fn status(doc: &TextDoc) -> Status {
     Status {
