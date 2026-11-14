@@ -436,9 +436,19 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     );
     assert_eq!(again.engine.local_state_refusal(), Some(LocalStateRefused::Locked));
     assert!(again.engine.listing(None, Sort::default(), 0, 100).is_err());
-    assert!(
-        again.engine.storage_info().is_err(),
-        "nothing is asked of the server for a person"
+    let asked_for_a_person = || {
+        fake_api()
+            .routes()
+            .iter()
+            .filter(|route| route.contains("/billing/usage"))
+            .count()
+    };
+    let before_the_ask = asked_for_a_person();
+    assert!(again.engine.storage_info().is_err());
+    assert_eq!(
+        asked_for_a_person(),
+        before_the_ask,
+        "nothing is asked of the server for a person behind a locked screen"
     );
     // The two things a locked screen allows: unlock and sign out. The password path is off in this build.
     assert_eq!(again.engine.check_call(Call::Person(LockedAction::SignOut)), Ok(()));
