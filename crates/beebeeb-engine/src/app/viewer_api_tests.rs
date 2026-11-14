@@ -782,3 +782,32 @@ fn the_copy_is_read_for_the_session_only() {
         OpenFileError::Cancelled
     );
 }
+
+#[test]
+fn while_a_session_change_is_under_way_nothing_is_copied_opened_or_asked() {
+    let fake = fake("half-done");
+    let engine = engine_at(&fake.api.base);
+    signed_in(&engine, &fake.first);
+    let _state = local_state(&engine, &fake.first);
+    // A lock, a sign-out or a sign-in holds the session-write lock for as long as it takes.
+    let changing = engine.writes.write().unwrap();
+    let (answered, answer) = mpsc::channel();
+    let worker = {
+        let engine = engine.clone();
+        std::thread::spawn(move || {
+            let _ = answered.send(open(&engine, NOTE, NO_LIMIT).map(|opened| opened.bytes.len()));
+        })
+    };
+    // It does not wait for the change to end: it is refused at once.
+    assert_eq!(
+        answer
+            .recv_timeout(Duration::from_secs(10))
+            .expect("refused while the change is under way"),
+        Err(OpenFileError::NotSignedIn)
+    );
+    assert_eq!(fake.api.requests().len(), 0, "nothing was asked of the server");
+    drop(changing);
+    worker.join().unwrap();
+    // The change over, the same session opens the file.
+    assert_eq!(open(&engine, NOTE, NO_LIMIT).unwrap().bytes.len(), 3_500);
+}
