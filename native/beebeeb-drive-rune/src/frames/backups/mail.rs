@@ -42,6 +42,7 @@ pub enum MailState {
 pub struct Account {
     pub address: String,
     pub server: String,
+    pub port: u16,
     pub folders: u32,
     /// "08:40": when it was last read.
     pub last: Option<String>,
@@ -81,6 +82,8 @@ pub struct MailFolder {
 }
 
 /// What a person typed in "Add a mail account". Borrowed: the password is never copied.
+/// IMAP over TLS only (the account step says "Connected over TLS"): a source refuses a server
+/// that offers none, whatever the port, and never signs in in the clear.
 #[allow(dead_code)] // the port is read by a source that reaches a mail server; the fixture has none
 pub struct Entry<'a> {
     pub address: &'a str,
@@ -163,8 +166,9 @@ pub struct MailUi {
     pub port: TextEdit,
     /// Secure: bullets on screen, wiped on drop and by [`MailUi::clear`].
     pub password: TextEdit,
-    /// One per folder of the source's answer, in its order.
-    pub picked: Vec<bool>,
+    /// The ticked folders of the source's answer, by name (a list read again later may have
+    /// another order).
+    pub picked: Vec<String>,
 }
 
 impl Default for MailUi {
@@ -244,6 +248,7 @@ pub mod board {
         Account {
             address: ADDRESS.into(),
             server: SERVER.into(),
+            port: 993,
             folders: 4,
             last: Some("08:40".into()),
         }

@@ -160,14 +160,14 @@ impl BackupsUi {
     }
 
     pub fn close_dialog(&mut self) {
-        if matches!(self.dialog, Some(Dialog::MailAccount | Dialog::MailFolders))
-            && let Some(source) = &mut self.source
-        {
-            source.mail_forget_connection();
+        if matches!(self.dialog, Some(Dialog::MailAccount | Dialog::MailFolders)) {
+            if let Some(source) = &mut self.source {
+                source.mail_forget_connection();
+            }
+            self.mail.clear();
         }
         self.dialog = None;
         self.code.clear();
-        self.mail.clear();
     }
 
     /// What Backups asked of the shell since the last call, oldest first. (The shell lane
@@ -261,7 +261,10 @@ impl BackupsUi {
         self.mail.focus(Some(mail::Field::Email));
     }
 
-    /// Update password (DW-1406): the account step with the address filled in, the password asked again.
+    /// Update password (DW-1406): the account step with the address, server and port filled in,
+    /// the password asked again. It ends as adding an account does (Choose folders): the board
+    /// draws no other end, and the source reads a sign-in to an address it already archives as
+    /// that account's new password.
     pub fn mail_update_password(&mut self) {
         let failing = self.source().and_then(|source| source.mail()).and_then(|m| {
             let failure = m.failure?;
@@ -271,6 +274,7 @@ impl BackupsUi {
         if let Some(account) = failing {
             self.mail.email.replace_text(account.address);
             self.mail.server.replace_text(account.server);
+            self.mail.port.replace_text(account.port.to_string());
             self.mail.focus(Some(mail::Field::Password));
         }
     }
@@ -299,8 +303,11 @@ impl BackupsUi {
     }
 
     /// The source may have an answer to the sign-in: on "accepted" the password is wiped and
-    /// Choose folders shows (DW-1404). A refusal stays in the account step (DW-1403). The
-    /// window's poll calls this for a source that answers late.
+    /// Choose folders shows (DW-1404). A refusal stays in the account step (DW-1403). Called
+    /// after Connect, on every key and on every change of route; while an accepted answer has
+    /// not been taken the step keeps Connect off, so nothing is asked twice. (A source that
+    /// answers late also needs the window's poll to call this: Backups has no poll yet, as for
+    /// [`source::BackupsSource::pump`].)
     pub fn mail_answered(&mut self) {
         if self.dialog != Some(Dialog::MailAccount) {
             return;
@@ -309,16 +316,21 @@ impl BackupsUi {
         if let Some(mail::Connection::Folders { folders, .. }) = answer {
             self.mail.password.clear();
             self.mail.focus(None);
-            self.mail.picked = folders.iter().map(|f| f.suggested).collect();
+            self.mail.picked = folders.iter().filter(|f| f.suggested).map(|f| f.name.clone()).collect();
             self.dialog = Some(Dialog::MailFolders);
         }
     }
 
-    pub fn mail_toggle_folder(&mut self, index: usize) {
-        if self.dialog == Some(Dialog::MailFolders)
-            && let Some(picked) = self.mail.picked.get_mut(index)
-        {
-            *picked = !*picked;
+    /// Tick or untick a folder of the mailbox, by its name.
+    pub fn mail_toggle_folder(&mut self, name: &str) {
+        if self.dialog != Some(Dialog::MailFolders) {
+            return;
+        }
+        match self.mail.picked.iter().position(|picked| picked == name) {
+            Some(at) => {
+                self.mail.picked.remove(at);
+            }
+            None => self.mail.picked.push(name.to_string()),
         }
     }
 
@@ -332,17 +344,20 @@ impl BackupsUi {
         else {
             return false;
         };
+        // Only names the mailbox still lists, in its order.
         let names: Vec<String> = folders
             .iter()
-            .zip(&self.mail.picked)
-            .filter(|(_, picked)| **picked)
-            .map(|(folder, _)| folder.name.clone())
+            .filter(|folder| self.mail.picked.contains(&folder.name))
+            .map(|folder| folder.name.clone())
             .collect();
         if names.is_empty() {
             return false;
         }
         let started = self.source.as_mut().is_some_and(|source| source.mail_start(&names));
         if started {
+            if let Some(source) = &mut self.source {
+                source.mail_forget_connection();
+            }
             self.dialog = None;
             self.mail.clear();
         }
@@ -500,12 +515,14 @@ pub fn sync(s: &mut State) {
     if !routed(s) {
         s.backups.reset();
     }
+    s.backups.mail_answered();
 }
 
 /// Backups' keyboard. Esc closes what is open, innermost first: the dialog, the page, then
 /// settings. The code dialog takes digits, Backspace and Enter. Everything else is Rune's.
 pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     let ui = &mut s.backups;
+    ui.mail_answered();
     let m = ev.mods;
     let plain = !m.cmd && !m.ctrl && !m.alt && !m.logo;
     let code_dialog = matches!(ui.dialog, Some(Dialog::DeleteDevice(_) | Dialog::MailTurnOff));
@@ -617,6 +634,8 @@ fn dw_1403(s: &mut State) {
     let wrong = "0".repeat(mail::board::APP_PASSWORD.len());
     s.backups.mail.password.replace_text(wrong);
     s.backups.mail_connect();
+    // The board draws the refused field without the keyboard in it.
+    s.backups.mail.focus(None);
 }
 
 fn dw_1404(s: &mut State) {

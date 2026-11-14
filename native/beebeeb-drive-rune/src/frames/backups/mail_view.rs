@@ -10,6 +10,7 @@ use rune::{Color, El, Icon, Span, TextEdit, TextStyle, col, el, rich, row, text_
 
 use super::mail::{Connection, Field, Mail, MailFolder, MailState};
 use super::source::BackupsSource;
+use super::view::thousands;
 use super::{BackupsUi, Dialog, Page};
 use crate::State;
 use crate::theme::icons as drive_icons;
@@ -42,19 +43,6 @@ const FIELD_SECURE: TextStyle = TextStyle::new(13.0, 400.0).lh(17.0).tracking(1.
 const FIELD_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(17.0);
 /// 12px/400 on 16px: the words under a field.
 const FIELD_MSG: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0);
-
-/// `6912` as "6,912".
-fn thousands(n: u32) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
 
 /// Words with a machine's value inside them (`mono`: byte ranges), noted for the gate as one text.
 fn words_rich(key: &str, words: &str, mono: &[std::ops::Range<usize>], style: TextStyle, ink: Color) -> El {
@@ -106,10 +94,18 @@ fn head(title: &str, sub: &str, trailing: Option<El>, t: &Theme) -> El {
 
 /// An inline notice in red (`.kit-banner.tone-red`): what failed and what it did not touch,
 /// with a machine's value in the words, and at most one action.
-/// Keys: `banner-0`, `-icon`, `-title`, `-text`.
-fn banner_red(title: &str, words: &str, mono: &[std::ops::Range<usize>], action: Option<El>, t: &Theme) -> El {
+/// Keys: `banner-<N>`, `-icon`, `-title`, `-text`.
+fn banner_red(
+    index: usize,
+    title: &str,
+    words: &str,
+    mono: &[std::ops::Range<usize>],
+    action: Option<El>,
+    t: &Theme,
+) -> El {
+    let key = format!("banner-{index}");
     let mut b = row()
-        .key("banner-0")
+        .key(key.clone())
         .role("alert")
         .label(format!("{title}. {words}"))
         .w_full()
@@ -119,19 +115,20 @@ fn banner_red(title: &str, words: &str, mono: &[std::ops::Range<usize>], action:
         .px(13.0)
         .radius(13.0)
         .fill(t.red.alpha(0.12))
-        .child(
-            el().key("banner-0-icon-box")
-                .pt(1.0)
-                .child(kit::glyph("banner-0-icon", &ic::WARN_CIRCLE, 16.0, t.red)),
-        )
+        .child(el().key(format!("{key}-icon-box")).pt(1.0).child(kit::glyph(
+            format!("{key}-icon"),
+            &ic::WARN_CIRCLE,
+            16.0,
+            t.red,
+        )))
         .child(
             col()
-                .key("banner-0-words")
+                .key(format!("{key}-words"))
                 .grow(1.0)
                 .min_w(0.0)
                 .gap(2.0)
-                .child(kit::label("banner-0-title", title, BANNER_TITLE, t.text).w_full())
-                .child(words_rich("banner-0-text", words, mono, BANNER_TEXT, t.text_secondary).wrap()),
+                .child(kit::label(format!("{key}-title"), title, BANNER_TITLE, t.text).w_full())
+                .child(words_rich(&format!("{key}-text"), words, mono, BANNER_TEXT, t.text_secondary).wrap()),
         );
     if let Some(action) = action {
         b = b.child(action);
@@ -195,6 +192,7 @@ pub fn page(mail: &Mail, over: bool, t: &Theme) -> (Vec<El>, usize, usize) {
         );
         let at = words.len() - 1 - failure.last_at.len();
         children.push(banner_red(
+            0,
             &format!("Couldn't back up {}", failure.address),
             &words,
             &[at..at + failure.last_at.len()],
@@ -400,13 +398,23 @@ fn field(
             t.text,
         );
     }
-    let focused = edit.focused && !error;
+    let focused = edit.focused;
+    // How wide the text may be inside its well (the dialog's column, less the well's padding and
+    // line). Text wider than that scrolls in the input, where only Rune knows the caret's place:
+    // then Rune's own caret shows and the drawn one does not.
+    let inner_w = match which {
+        Field::Email | Field::Password => 394.0,
+        Field::Server => 292.0,
+        Field::Port => 72.0,
+    };
+    let width = shown.as_deref().map_or(0.0, |shown| rune::text::advance(shown, style));
+    let scrolls = width + 2.5 > inner_w;
     let mut input = text_input(edit, style)
         .key(format!("{key}-input"))
         .label(label)
         .single_line()
         .color(t.text)
-        .caret(Color::TRANSPARENT, t.selection)
+        .caret(if scrolls { t.accent_deep } else { Color::TRANSPARENT }, t.selection)
         .invalid(error)
         .on_edit(move |s: &mut State| s.backups.mail.edit(which))
         // Esc and Enter in a field are the dialog's: close it, or connect.
@@ -446,15 +454,24 @@ fn field(
             .box_shadow(kit::ring_inset(t.separator))
     };
     // The typed text's own box, for the gate: as wide as the text Rune draws in the input.
-    let width = shown.as_deref().map_or(0.0, |shown| rune::text::advance(shown, style));
-    let mut inner = row().grow(1.0).min_w(0.0).h_full().center_y().child(input).child(
-        el().key(format!("{key}-value-box"))
-            .a11y_hidden()
-            .absolute(0.0, 0.0)
-            .w(width)
-            .h_full(),
-    );
-    if focused && let Some(shown) = shown.as_deref() {
+    let mut inner = row()
+        .grow(1.0)
+        .min_w(0.0)
+        .h_full()
+        .center_y()
+        .clip_rounded(0.0)
+        .child(input)
+        .child(
+            el().key(format!("{key}-value-box"))
+                .a11y_hidden()
+                .absolute(0.0, 0.0)
+                .w(width.min(inner_w))
+                .h_full(),
+        );
+    if focused
+        && !scrolls
+        && let Some(shown) = shown.as_deref()
+    {
         // The caret as the board draws it (`.kit-caret`: 1.5 x 17, 1 pt after the character it
         // follows). Rune's own caret is 2 pt wide and touches the text, so it is left unseen.
         let before = edit.text[..edit.focus.min(edit.text.len())].chars().count();
@@ -551,13 +568,15 @@ fn turn_on(list: usize, first_button: usize, t: &Theme) -> El {
 }
 
 /// DW-1402, DW-1403: the account step, and the same step after the server refused.
-fn account(ui: &BackupsUi, connection: &Connection, first_button: usize, t: &Theme) -> El {
+fn account(ui: &BackupsUi, connection: &Connection, banners: usize, first_button: usize, t: &Theme) -> El {
     let typed = &ui.mail;
     let refused = matches!(connection, Connection::Refused { .. });
-    let checking = *connection == Connection::Checking;
+    // An accepted answer the section has not taken yet is still "no answer" to the person.
+    let checking = matches!(connection, Connection::Checking | Connection::Folders { .. });
     let mut body = Vec::new();
     if let Connection::Refused { server } = connection {
         body.push(banner_red(
+            banners,
             &format!("Couldn't sign in to {server}"),
             "The server said the password isn't right. Nothing was saved. Check the app password, then try again.",
             &[],
@@ -658,7 +677,8 @@ fn folders(
         .iter()
         .enumerate()
         .map(|(i, folder)| {
-            let on = ui.mail.picked.get(i).copied().unwrap_or(false);
+            let on = ui.mail.picked.contains(&folder.name);
+            let name = folder.name.clone();
             let messages = if folder.messages == 1 {
                 "1 message".to_string()
             } else {
@@ -673,10 +693,10 @@ fn folders(
                 .hover(t.hover)
                 .press(t.press)
                 .focusable(true)
-                .on_press(move |s: &mut State| s.backups.mail_toggle_folder(i))
+                .on_press(move |s: &mut State| s.backups.mail_toggle_folder(&name))
         })
         .collect();
-    let any = ui.mail.picked.iter().any(|picked| *picked);
+    let any = all.iter().any(|folder| ui.mail.picked.contains(&folder.name));
     let body = vec![
         lists::list(list, None, rows, None, t),
         dialogs::caption(
@@ -776,7 +796,13 @@ pub fn overlay(
 ) -> Option<El> {
     match ui.dialog.as_ref()? {
         Dialog::MailTurnOn => Some(turn_on(lists_drawn, buttons, t)),
-        Dialog::MailAccount => Some(account(ui, &source.mail_connection(), buttons, t)),
+        Dialog::MailAccount => Some(account(
+            ui,
+            &source.mail_connection(),
+            usize::from(mail.failure.is_some()),
+            buttons,
+            t,
+        )),
         Dialog::MailFolders => match source.mail_connection() {
             Connection::Folders {
                 address,

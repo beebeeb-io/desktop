@@ -211,10 +211,7 @@ fn turning_on_goes_step_by_step_and_never_ahead_of_the_servers_answer() {
     assert_eq!(rt.state.backups.dialog, Some(Dialog::MailFolders));
     assert!(rt.state.backups.mail.password.text.is_empty());
     assert_eq!(text(&rt, "dlg-sub"), board::ADDRESS);
-    assert_eq!(
-        rt.state.backups.mail.picked,
-        vec![true, true, true, true, false, false, false]
-    );
+    assert_eq!(rt.state.backups.mail.picked, ["Inbox", "Sent", "Archive", "Clients"]);
     assert_eq!(info(&rt, "item-1-0").role, "checkbox");
 
     // Tick Newsletters, untick Sent.
@@ -222,7 +219,7 @@ fn turning_on_goes_step_by_step_and_never_ahead_of_the_servers_answer() {
     click(&mut rt, "item-1-1");
     assert_eq!(
         rt.state.backups.mail.picked,
-        vec![true, false, true, true, true, false, false]
+        ["Inbox", "Archive", "Clients", "Newsletters"]
     );
     assert_eq!(mail_of(&rt).state, MailState::Off, "nothing starts before Start backup");
     click(&mut rt, "btn-1");
@@ -239,7 +236,7 @@ fn start_backup_is_off_with_no_folder_ticked_and_back_asks_the_password_again() 
     for i in 0..4 {
         click(&mut rt, &format!("item-1-{i}"));
     }
-    assert!(rt.state.backups.mail.picked.iter().all(|picked| !picked));
+    assert!(rt.state.backups.mail.picked.is_empty());
     assert!(!info(&rt, "btn-1").focusable);
     click(&mut rt, "btn-1");
     assert!(!rt.state.backups.mail_start());
@@ -386,16 +383,128 @@ fn pause_update_password_and_open_its_folder_do_what_they_say() {
     assert!(matches!(mail_of(&rt).state, MailState::First { paused: false, .. }));
 
     let mut rt = runtime("DW-1406");
+    let mut other_port = board::failed();
+    other_port.accounts[0].port = 1993;
+    rt.state.backups = BackupsUi::fixture(FixtureSource::with_mail(other_port));
+    rt.state.backups.show(Page::Mail);
+    settle(&mut rt);
     click(&mut rt, "btn-0");
     assert_eq!(rt.state.backups.dialog, Some(Dialog::MailAccount));
     let typed = &rt.state.backups.mail;
     assert_eq!(typed.email.text, board::ADDRESS);
     assert_eq!(typed.server.text, board::SERVER);
+    assert_eq!(typed.port.text, "1993", "the account's own port, not the default");
     assert!(typed.password.text.is_empty() && typed.password.focused);
+    // A refusal here: two notices on screen, each with its own key.
+    rt.state.backups.mail.password.replace_text("not-the-password");
+    assert!(rt.state.backups.mail_connect());
+    settle(&mut rt);
+    assert_eq!(text(&rt, "banner-0-title"), "Couldn't back up anna@northwind.studio");
+    assert_eq!(text(&rt, "banner-1-title"), "Couldn't sign in to mail.northwind.studio");
 
     let mut rt = runtime("DW-0740");
     click(&mut rt, "item-0-3");
     assert_eq!(rt.state.backups.take_intents(), vec![Intent::OpenMailFolder]);
     click(&mut rt, "crumb-row");
     assert_eq!(rt.state.backups.page, Page::Section);
+}
+
+/// A source whose mail server answers late: "no answer yet" to every sign-in, until the test
+/// sets the answer.
+struct LateSource {
+    inner: FixtureSource,
+    late: std::rc::Rc<std::cell::RefCell<Connection>>,
+    asked: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl BackupsSource for LateSource {
+    fn root(&self) -> super::source::BackupsRoot {
+        self.inner.root()
+    }
+    fn status(&self) -> super::source::Status {
+        self.inner.status()
+    }
+    fn folders(&self) -> Vec<super::source::Folder> {
+        self.inner.folders()
+    }
+    fn devices(&self) -> Vec<super::source::Device> {
+        self.inner.devices()
+    }
+    fn not_backed_up(&self) -> Vec<super::source::NotBackedUp> {
+        self.inner.not_backed_up()
+    }
+    fn mail_backup_on(&self) -> bool {
+        false
+    }
+    fn back_up_now(&mut self) {}
+    fn set_folder(&mut self, _id: &str, _on: bool) {}
+    fn add_folder(&mut self, _path: &str) -> bool {
+        false
+    }
+    fn remove_folder(&mut self, _id: &str, _move_copy_to_trash: bool) {}
+    fn retry(&mut self, _id: &str) {}
+    fn retry_all(&mut self) {}
+    fn delete_device_backup(&mut self, _id: &str, _code: &str) -> bool {
+        false
+    }
+    fn mail(&self) -> Option<mail::Mail> {
+        Some(board::off())
+    }
+    fn mail_connect(&mut self, _entry: &mail::Entry<'_>) {
+        self.asked.set(self.asked.get() + 1);
+        *self.late.borrow_mut() = Connection::Checking;
+    }
+    fn mail_connection(&self) -> Connection {
+        self.late.borrow().clone()
+    }
+}
+
+#[test]
+fn a_late_answer_is_asked_once_and_taken_on_the_next_key() {
+    let late = std::rc::Rc::new(std::cell::RefCell::new(Connection::Idle));
+    let asked = std::rc::Rc::new(std::cell::Cell::new(0));
+    let mut rt = runtime("DW-0740b");
+    rt.state.backups = BackupsUi::new(Some(Box::new(LateSource {
+        inner: FixtureSource::board(),
+        late: late.clone(),
+        asked: asked.clone(),
+    })));
+    rt.state.backups.show(Page::Mail);
+    rt.state.backups.mail_add_account();
+    let typed = &mut rt.state.backups.mail;
+    typed.email.replace_text(board::ADDRESS);
+    typed.server.replace_text(board::SERVER);
+    typed.password.replace_text(board::APP_PASSWORD);
+    settle(&mut rt);
+    click(&mut rt, "btn-1");
+    assert_eq!(asked.get(), 1);
+    assert_eq!(
+        rt.state.backups.dialog,
+        Some(Dialog::MailAccount),
+        "no answer, no next step"
+    );
+    assert_eq!(text(&rt, "btn-1-label"), "Connecting\u{2026}");
+    assert!(!info(&rt, "btn-1").focusable);
+    // A second press and a second call while the answer is out ask nothing.
+    click(&mut rt, "btn-1");
+    assert!(!rt.state.backups.mail_connect());
+    assert_eq!(asked.get(), 1);
+    assert!(
+        !rt.state.backups.mail.password.text.is_empty(),
+        "kept until the server answers"
+    );
+    // The answer is in but not taken yet: Connect stays off.
+    *late.borrow_mut() = Connection::Folders {
+        address: board::ADDRESS.into(),
+        folders: board::folders(),
+        size: board::SIZE.into(),
+    };
+    settle(&mut rt);
+    assert_eq!(rt.state.backups.dialog, Some(Dialog::MailAccount));
+    assert!(!info(&rt, "btn-1").focusable);
+    // Any key takes it: Choose folders, the password wiped.
+    press(&mut rt, Key::Tab);
+    assert_eq!(rt.state.backups.dialog, Some(Dialog::MailFolders));
+    assert!(rt.state.backups.mail.password.text.is_empty());
+    assert_eq!(asked.get(), 1);
 }

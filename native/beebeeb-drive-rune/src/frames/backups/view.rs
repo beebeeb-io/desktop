@@ -20,7 +20,7 @@ use crate::ui::settings_list::{self as lists, Item, Role, Trailing};
 use crate::ui::{caption, settings_shell as shell};
 
 /// `1820` as "1,820".
-fn thousands(n: u32) -> String {
+pub(super) fn thousands(n: u32) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
