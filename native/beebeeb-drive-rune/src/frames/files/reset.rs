@@ -32,6 +32,9 @@ fn on_files_route(s: &State) -> bool {
 /// name being typed in a row, an open menu. No source is asked anything.
 pub fn close_dialogs(s: &mut State) {
     let a = &mut s.actions;
+    if matches!(a.dialog, Some(super::dialogs::Dialog::Preview(_))) {
+        a.source.cancel_preview();
+    }
     a.dialog = None;
     a.menu = None;
     a.rename = None;

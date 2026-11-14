@@ -319,15 +319,16 @@ impl<C: CredentialStores> Engine<C> {
         let Some(recorded) = on_this_pc(&entry.status) else {
             return Ok(LocalCopy::NotHere);
         };
-        // The key of the session the read is for: the hand-over below asks whether it is still that session.
-        let key = {
-            let guard = self.acct.session.lock().map_err(|_| OpenFileError::NotSignedIn)?;
-            let current = guard.as_ref().ok_or(OpenFileError::NotSignedIn)?;
-            if !self.acct.session_unchanged_since(turn) {
-                return Err(OpenFileError::NotSignedIn);
-            }
-            Zeroizing::new(current.master_key)
-        };
+        // The key of the session the read is for, copied under the session-write lock as every other hand-over
+        // copies it (never while a session change is half done): the hand-over below asks whether it is still
+        // that session.
+        if self.acct.session.is_poisoned() {
+            return Err(OpenFileError::NotSignedIn);
+        }
+        let key = self
+            .acct
+            .while_session_is(&self.writes, turn, |current| Zeroizing::new(current.master_key))
+            .ok_or(OpenFileError::NotSignedIn)?;
         // A copy that is the version Beebeeb has may be downloaded instead; one with a change that is not sent
         // may not.
         let not_read = || match recorded {
@@ -513,20 +514,23 @@ impl<C: CredentialStores> Engine<C> {
         progress: &(dyn Fn(u64, u64) + Send + Sync + 'static),
         cancel: &AtomicBool,
     ) -> Result<OpenedFile, OpenFileError> {
-        let turn = self.acct.session_generation();
-        // The account-bound handle first (it answers nothing for a session the server ended), then the token and the key of the SAME session: copied under the
-        // session's lock, and only while no session change happened since `turn` (the handle is that turn's or it
-        // answers nothing). Both are copies of their own, wiped when this call ends (inside the call's client; the
-        // key also in a `Zeroizing`).
+        let session = self.acct.session_generation();
+        // The token and the key of the session that is in memory now, copied the way every other hand-over copies
+        // them (`AccountRuntime::while_session_is`): under the engine's session-write lock, so never while a lock,
+        // a sign-out or a sign-in is half done, and only while the generation is still `session`. Both are copies
+        // of their own, wiped when this call ends (inside the call's client; the key also in a `Zeroizing`). Then
+        // the account-bound handle (it answers nothing for a session the server ended, and nothing once the
+        // session moved on).
+        if self.acct.session.is_poisoned() {
+            return Err(OpenFileError::NotSignedIn);
+        }
+        let (token, key) = self
+            .acct
+            .while_session_is(&self.writes, session, |current| {
+                (current.token.clone(), Zeroizing::new(current.master_key))
+            })
+            .ok_or(OpenFileError::NotSignedIn)?;
         let state = self.local_state_for_changes().map_err(refused)?;
-        let (token, key, session) = {
-            let guard = self.acct.session.lock().map_err(|_| OpenFileError::NotSignedIn)?;
-            let current = guard.as_ref().ok_or(OpenFileError::NotSignedIn)?;
-            if !self.acct.session_unchanged_since(turn) {
-                return Err(OpenFileError::NotSignedIn);
-            }
-            (current.token.clone(), Zeroizing::new(current.master_key), turn)
-        };
         let fetched = state
             .with_shared(|db| {
                 let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token, *key));

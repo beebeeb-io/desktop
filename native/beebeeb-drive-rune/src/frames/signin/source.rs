@@ -247,6 +247,11 @@ pub trait SignInSource {
     fn sign_up_available(&self) -> bool {
         false
     }
+    /// The web page the server names for creating an account, once it refused sign-up from this app
+    /// (`SendProblem::WebOnly`). `None`: it named none.
+    fn sign_up_web_address(&self) -> Option<String> {
+        None
+    }
     /// Engine: send the email code, the first one and every new one (the old one stops
     /// working). Answers `SignUp(CodeSent)`; `SignUp(ResendTick)` follows once a second.
     fn begin_sign_up_code(&mut self, _email: &str) {}

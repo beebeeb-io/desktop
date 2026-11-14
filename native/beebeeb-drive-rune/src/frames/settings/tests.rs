@@ -374,8 +374,8 @@ fn an_available_update_is_said_once_with_one_primary_action() {
 fn every_built_frame_renders_and_names_no_city_and_no_provider() {
     assert_eq!(
         super::FRAMES.len(),
-        47,
-        "the frames the settings lanes built (28, Bandwidth's 10, Diagnostics' 2, Keep on this PC's 4, Photo previews' 3)"
+        49,
+        "the frames the settings lanes built (28, Bandwidth's 10, Diagnostics' 2, Keep on this PC's 4, Photo previews' 3) and Notifications' 2 own states"
     );
     for (frame, _) in super::FRAMES {
         let rt = runtime(frame);
@@ -543,7 +543,8 @@ fn alert_switches_turn_by_keyboard_and_are_never_amber() {
 }
 
 /// A switch with no value is never drawn, whatever the source says (or does not say) about why: the row says it
-/// could not load, the pane offers "Try again" below the last group, and this PC's switches are as they were.
+/// could not load, the pane says so over itself with "Try again" (in view in the default window, where the last
+/// group is below the fold), and this PC's switches are as they were.
 #[test]
 fn an_account_switch_without_a_value_is_never_drawn_as_a_switch() {
     let board = runtime("DW-0750");
@@ -571,25 +572,32 @@ fn an_account_switch_without_a_value_is_never_drawn_as_a_switch() {
         info(&board, "item-4-0-switch").rect,
         "this PC's switches are where they were"
     );
-    let note = info(&rt, "note-0");
-    assert_eq!(note.role, "status");
+    let said = info(&rt, "notice");
+    assert_eq!(said.role, "alert");
+    assert_eq!(said.label.as_deref(), Some(super::notifications::NOT_READ));
+    for key in ["notice", "notice-action"] {
+        let r = info(&rt, key).rect;
+        assert!(
+            r[1] >= 0.0 && r[1] + r[3] <= 638.0 && r[0] >= 0.0 && r[0] + r[2] <= 958.0,
+            "{key} is in view: {r:?}"
+        );
+    }
     assert!(
-        note.label
-            .as_deref()
-            .is_some_and(|l| l.starts_with(super::notifications::NOT_READ.0)),
-        "{:?}",
-        note.label
+        info(&rt, "item-5-1").rect[1] + info(&rt, "item-5-1").rect[3] > 638.0,
+        "precondition: the last group ends below the fold"
     );
-    assert!(note.rect[1] > info(&rt, "item-5-1").rect[1], "below the last group");
-    assert!(find(&board, "note-0").is_none(), "the board's scene has no such notice");
+    assert!(
+        find(&board, "notice-line").is_none() && find(&board, "toast-room").is_none(),
+        "the board's scene has no such notice"
+    );
     // A press where a switch would be changes nothing.
     let at = info(&board, "item-3-1-switch").rect;
     rt.pointer_down(at[0] + at[2] / 2.0, at[1] + at[3] / 2.0);
     rt.pointer_up(at[0] + at[2] / 2.0, at[1] + at[3] / 2.0);
     settle(&mut rt);
     assert_eq!(rt.state.settings.source.notifications().groups[0].1[1].on, None);
-    tab_to(&mut rt, "btn-1");
-    assert_eq!(info(&rt, "btn-1").label.as_deref(), Some("Try again"));
+    tab_to(&mut rt, "notice-action");
+    assert_eq!(info(&rt, "notice-action").label.as_deref(), Some("Try again"));
 }
 
 #[test]

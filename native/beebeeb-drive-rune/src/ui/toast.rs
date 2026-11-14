@@ -49,6 +49,19 @@ pub fn layer(toast: El) -> El {
 
 /// The toast. A failure is read at once (`alert`); the others when there is a pause (`status`).
 pub fn toast(ic: &'static Icon, tone: Tone, message: &str, action: Option<ToastAction>, t: &Theme) -> El {
+    toast_keyed("toast", ic, tone, message, action, t)
+}
+
+/// [`toast`] under keys of its own (`<key>`, `<key>-icon`, `<key>-text`, `<key>-action`, `<key>-action-text`),
+/// for a window that can show two at once.
+pub fn toast_keyed(
+    key: &str,
+    ic: &'static Icon,
+    tone: Tone,
+    message: &str,
+    action: Option<ToastAction>,
+    t: &Theme,
+) -> El {
     // `.glass`: the board's paper at 72 % (68 % in dark, where its paper is the theme's paper-2) over a blur.
     let glass = if t.dark {
         t.paper2.alpha(0.68)
@@ -56,7 +69,7 @@ pub fn toast(ic: &'static Icon, tone: Tone, message: &str, action: Option<ToastA
         t.paper.alpha(0.72)
     };
     let mut toast = row()
-        .key("toast")
+        .key(key.to_string())
         .role(if tone == Tone::Failed { "alert" } else { "status" })
         .label(message)
         .h(34.0)
@@ -79,7 +92,7 @@ pub fn toast(ic: &'static Icon, tone: Tone, message: &str, action: Option<ToastA
             inset: true,
         })
         .child(kit::glyph(
-            "toast-icon",
+            format!("{key}-icon"),
             ic,
             15.0,
             match tone {
@@ -88,10 +101,10 @@ pub fn toast(ic: &'static Icon, tone: Tone, message: &str, action: Option<ToastA
                 Tone::Failed => t.red,
             },
         ))
-        .child(kit::label("toast-text", message, TEXT, t.text));
+        .child(kit::label(format!("{key}-text"), message, TEXT, t.text));
     if let Some(action) = action {
         let (label, run) = (action.text, action.run);
-        let mut button = el().key("toast-action").role("button").label(action.name);
+        let mut button = el().key(format!("{key}-action")).role("button").label(action.name);
         if let Some(keys) = action.shortcut {
             button = button.shortcut_hint(keys);
         }
@@ -107,7 +120,7 @@ pub fn toast(ic: &'static Icon, tone: Tone, message: &str, action: Option<ToastA
                 .focusable(true)
                 .center()
                 .on_press_tx(move |s: &mut State, tx: &mut Tx| run(s, tx))
-                .child(kit::label("toast-action-text", label, ACTION, t.text)),
+                .child(kit::label(format!("{key}-action-text"), label, ACTION, t.text)),
         );
     } else {
         toast = toast.pr(8.0);

@@ -28,6 +28,8 @@ pub struct CodeSent {
 pub enum SendProblem {
     RateLimited,
     Offline,
+    /// The server does not take sign-ups from this app (yet): the web page is the way.
+    WebOnly,
     Other,
 }
 

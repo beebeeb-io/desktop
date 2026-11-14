@@ -666,7 +666,7 @@ fn what_is_not_bound_answers_its_screens_refusal_at_once_and_asks_the_server_not
     let fake = fake("unbound");
     let (_engine, mut source) = source(&fake);
     assert_eq!(source.shared_session(), None);
-    assert!(!source.sign_up_available());
+    assert!(source.sign_up_available(), "sign-up is bound (owner ruling 2026-11-14)");
 
     source.begin_recovery_verify("someone@example.eu", &words(TEST_PHRASE));
     assert_eq!(

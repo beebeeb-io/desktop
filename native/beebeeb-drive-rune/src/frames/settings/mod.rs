@@ -390,6 +390,17 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         s.settings.source = Box::new(BoardSettings::new().with_notifications_off_in_windows());
         open_on(s, "DW-0750");
     }),
+    // Two states of this app's own (no board frame): what the pane says over itself.
+    ("DW-0750n", |s| {
+        s.settings.source = Box::new(BoardSettings::new().with_account_alerts_not_read());
+        open_on(s, "DW-0750");
+    }),
+    ("DW-0750u", |s| {
+        s.settings.source = Box::new(BoardSettings::new().with_notifications_unconfirmed());
+        open_on(s, "DW-0750");
+        // A change Beebeeb refused while that stands: its toast, above the notice.
+        s.settings.toast = Some(notifications::NOT_SAVED);
+    }),
     ("DW-0791", |s| open_on(s, "DW-0791")),
     ("DW-0791b", |s| {
         s.settings.source = Box::new(BoardSettings::new().with_no_recent_alerts());
@@ -520,7 +531,7 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>, Option<MenuKind>)> {
         "DW-0751" => (Pane::About, None, None),
         "DW-0789" => (Pane::About, None, Some(MenuKind::Channel)),
         "DW-0789b" => (Pane::About, Some(Dialog::ReleaseNotes), None),
-        "DW-0750" | "DW-0750b" => (Pane::Notifications, None, None),
+        "DW-0750" | "DW-0750b" | "DW-0750n" | "DW-0750u" => (Pane::Notifications, None, None),
         "DW-0791" | "DW-0791b" => (Pane::Recent, None, None),
         "DW-0788" | "DW-0788b" | "DW-0788c" | "DW-0788d" => (Pane::StorageLocation, None, None),
         "DW-0746" | "DW-0746d" | "DW-0746e" => (Pane::Sync, None, None),
@@ -575,14 +586,26 @@ pub const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(100
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let pumped = s.settings.source.pump();
     // A refusal of Drive's panes (Keep, Free up space, Pause) is the same toast.
-    let toast = pumped.toast.or_else(|| s.settings.drive.take_toast());
+    // A toast about the account's notifications belongs to their two panes: one that lands after the person
+    // went elsewhere is not said over another pane.
+    let showing = matches!(s.settings.pane, Pane::Notifications | Pane::Recent);
+    let toast = pumped
+        .toast
+        .filter(|words| showing || notifications::toast_worked(words).is_none())
+        .or_else(|| s.settings.drive.take_toast());
     if let Some(toast) = toast {
         s.settings.toast = Some(toast);
+    }
+    // "Checking what the server has" is over when nothing is out any more. The check's answer took its place
+    // above, or the check failed and the pane says so itself: either way it does not stay.
+    let checked = toast.is_none() && !pumped.busy && s.settings.toast == Some(notifications::UNKNOWN);
+    if checked {
+        s.settings.toast = None;
     }
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
     }
-    pumped.changed || toast.is_some()
+    pumped.changed || toast.is_some() || checked
 }
 
 /// The frame a recent alert leads to.

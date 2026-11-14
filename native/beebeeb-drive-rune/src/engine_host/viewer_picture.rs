@@ -223,14 +223,16 @@ fn vp8l(bytes: &[u8], at: usize) -> Option<(u32, u32)> {
 /// One top-level RIFF chunk: its name, where its data begins, and the length it states.
 type Chunk = ([u8; 4], usize, usize);
 
-/// The most a metadata chunk (EXIF, XMP, ICCP) may state: a decoder may copy it whole.
-const METADATA_MAX: usize = 1 << 20;
-
 /// The RIFF chunks of `bytes` from `from` on, one at a time and never collected: the walk stops where the
 /// caller stops, so what it costs does not grow with the number of chunks. A chunk is a name, a length, and the
-/// data padded to an even length. Each item is `Err` for a chunk that cannot be accounted for: its name, data and
-/// padding do not all lie inside the file, or it is metadata stating more than [`METADATA_MAX`]. The walk ends
-/// after an `Err`. Fewer than 8 bytes left at the end are not a chunk and end it quietly.
+/// data padded to an even length. Each item is `Err` for a chunk that cannot be accounted for: its name or its
+/// data does not lie inside the file, or the padding after it does not. The one exception: the pad byte of an
+/// odd-length chunk may be missing when it would be the file's last byte; the chunk is then `Ok` and the walk
+/// ends. The walk ends after an `Err`. Fewer than 8 bytes left at the end are not a chunk and end it quietly.
+///
+/// There is no cap on a metadata chunk (EXIF, XMP, ICCP): every chunk lies wholly inside the file, so a copy a
+/// decoder makes of one is never larger than the file, and the viewer holds no file over `IN_MEMORY_MAX`. A cap
+/// would refuse whole, valid photos (a large colour profile, a long editing history).
 fn chunks(bytes: &[u8], from: usize) -> impl Iterator<Item = Result<Chunk, ()>> + '_ {
     let mut at = Some(from);
     std::iter::from_fn(move || {
@@ -243,10 +245,14 @@ fn chunks(bytes: &[u8], from: usize) -> impl Iterator<Item = Result<Chunk, ()>> 
         let found = (|| {
             let length = usize::try_from(length).ok()?;
             let data = start.checked_add(8)?;
-            let next = data.checked_add(length)?.checked_add(length & 1)?;
-            if next > bytes.len() || (matches!(name, b"EXIF" | b"XMP " | b"ICCP") && length > METADATA_MAX) {
+            let end = data.checked_add(length)?;
+            let next = end.checked_add(length & 1)?;
+            // The data must lie inside the file. A pad byte past the end can only be the file's last byte (the
+            // data ends exactly at the end then): the walk reaches `next`, finds nothing there and ends quietly.
+            if end > bytes.len() {
                 return None;
             }
+            // `next` past the end (the missing pad) leaves `at` where the walk ends quietly.
             at = Some(next);
             Some(([name[0], name[1], name[2], name[3]], data, length))
         })();

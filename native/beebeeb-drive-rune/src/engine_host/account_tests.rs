@@ -27,6 +27,8 @@ mod engine;
 mod security;
 #[path = "account_tests_sign_out.rs"]
 mod sign_out;
+#[path = "account_tests_toasts.rs"]
+mod toasts;
 #[path = "account_tests_window.rs"]
 mod window;
 

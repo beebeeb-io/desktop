@@ -14,6 +14,7 @@
 //! with nothing behind it (`--db`): it knows nothing and refuses every action.
 //! The engine's implementation is another lane's.
 
+pub use super::actions_data::Read;
 use crate::source::{DriveItem, format_size};
 use crate::ui::file_list::format_date;
 
@@ -207,23 +208,7 @@ pub enum Change {
     },
 }
 
-/// One item of a [`Change::Trash`]. `left`: `None`: it was made; otherwise why this item was left as it was.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TrashOutcome {
-    pub id: String,
-    pub left: Option<ActionError>,
-}
-
-/// One item of a [`Change::Local`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LocalOutcome {
-    pub id: String,
-    /// The row's `pc_status` as the engine reports it AFTER the work (`Some(None)`: no mark, a folder that is
-    /// not kept). `None`: the engine could not say, and the row stays as it is drawn.
-    pub now: Option<Option<String>>,
-    /// `None`: the change was made. Otherwise why this item was left; Try again is for these alone.
-    pub left: Option<ActionError>,
-}
+pub use super::outcomes::{LocalOutcome, TrashOutcome};
 
 /// The counts beside the sidebar's sections.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -340,10 +325,22 @@ pub trait FilesSource: Send + 'static {
     fn restore_version(&mut self, _item: &DriveItem, _version: &str) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
     }
+    /// The Versions or the Details dialog of this FILE opened: read its versions if what is held is old.
+    fn ask_versions(&mut self, _item: &DriveItem) {}
+    /// Where the read of a file's versions stands (what [`FilesSource::versions`] is empty for).
+    fn versions_state(&self, _item: &DriveItem) -> Read {
+        Read::Answered
+    }
     /// What Preview shows of a file (DW-0408). `None`: no preview for it (DW-0408b).
     fn preview(&mut self, _item: &DriveItem) -> Option<super::actions_data::PreviewOf> {
         None
     }
+    /// Where the preview of `item` stands, for a source that answers `preview` later (`Shown` is handed over once).
+    fn preview_later(&mut self, _item: &DriveItem) -> Option<super::actions_data::Previewed> {
+        None
+    }
+    /// The panel closed or moved to another file: stop the read, wipe what it decrypted.
+    fn cancel_preview(&mut self) {}
     /// Windows' app chooser for this file; it is decrypted for the app picked (DW-0408b).
     fn open_with(&mut self, _item: &DriveItem) -> Result<(), ActionError> {
         Err(ActionError::Unavailable)
@@ -382,6 +379,8 @@ pub trait FilesSource: Send + 'static {
     fn backups_root(&self) -> Option<String> {
         None
     }
+    /// The window now shows this folder (`None`: the top of Files): read what the source needs for it.
+    fn folder_shown(&mut self, _folder: Option<&str>) {}
     /// Why `item` (with no item: anything in `folder`) cannot be moved, renamed or deleted, with
     /// the core's words for it (DW-0425). `None`: it can.
     fn protection(&self, _folder: Option<&str>, _item: Option<&DriveItem>) -> Option<super::protected::Protection> {

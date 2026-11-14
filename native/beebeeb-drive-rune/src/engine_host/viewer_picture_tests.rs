@@ -610,23 +610,53 @@ fn a_chunk_stating_more_than_the_file_has_is_refused_whatever_its_name() {
     assert!(check(&still_with(b"EXIF", 4, &[0; 4])).is_ok());
 }
 
+/// `body` after the file header, the RIFF length stating the file's real length (no pad is added anywhere).
+fn unpadded_file(body: &[u8]) -> Vec<u8> {
+    file(body)
+}
+
+/// A chunk without any byte of padding after its data.
+fn chunk_unpadded(name: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut out = name.to_vec();
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(data);
+    out
+}
+
 #[test]
-fn a_metadata_chunk_over_a_mebibyte_is_refused_even_when_present() {
+fn a_last_chunk_without_its_pad_byte_is_accepted() {
+    // (a) an extended still whose last chunk is 3 bytes of metadata, no pad after it.
+    let mut body = chunk(b"VP8X", &flagged(0, 16, 16));
+    body.extend(chunk(b"VP8 ", &LOSSY));
+    body.extend(chunk_unpadded(b"EXIF", &[1, 2, 3]));
+    let bytes = unpadded_file(&body);
+    assert_eq!(check(&bytes).map(|d| (d.width, d.height)), Ok((16, 16)));
+    // (b) the same file one byte shorter: the data itself is cut.
+    let mut cut = bytes.clone();
+    cut.pop();
+    let stated = (cut.len() - 8) as u32;
+    cut[4..8].copy_from_slice(&stated.to_le_bytes());
+    assert_eq!(check(&cut), Err(Refused::NotAPicture));
+    // (c) a plain lossless file whose one chunk has an odd length and no pad byte.
+    let mut odd = LOSSLESS.to_vec();
+    if odd.len() % 2 == 0 {
+        odd.push(0);
+    }
+    let plain = unpadded_file(&chunk_unpadded(b"VP8L", &odd));
+    assert_eq!(check(&plain).map(|d| (d.width, d.height)), Ok((8, 6)));
+}
+
+#[test]
+fn a_metadata_chunk_of_any_size_inside_the_file_is_accepted() {
     let two_mib = vec![0u8; 2 << 20];
     for name in [b"EXIF", b"XMP ", b"ICCP"] {
         let bytes = still_with(name, two_mib.len() as u32, &two_mib);
-        assert_eq!(
-            check(&bytes),
-            Err(Refused::NotAPicture),
-            "{}",
-            String::from_utf8_lossy(name)
-        );
+        assert!(check(&bytes).is_ok(), "{}", String::from_utf8_lossy(name));
     }
-    // An unknown chunk of that size is not metadata and is not capped.
+    // An unknown chunk of that size, and exactly 1 MiB, are shown as well.
     assert!(check(&still_with(b"JUNK", two_mib.len() as u32, &two_mib)).is_ok());
-    // Exactly the cap is shown.
-    let cap = vec![0u8; 1 << 20];
-    assert!(check(&still_with(b"EXIF", cap.len() as u32, &cap)).is_ok());
+    let mib = vec![0u8; 1 << 20];
+    assert!(check(&still_with(b"EXIF", mib.len() as u32, &mib)).is_ok());
 }
 
 #[test]

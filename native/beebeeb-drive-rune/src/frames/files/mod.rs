@@ -20,6 +20,7 @@ pub mod local;
 pub mod long_list;
 pub mod menus;
 pub mod names;
+mod outcomes;
 pub mod preview;
 pub mod protected;
 pub mod protected_fixture;
