@@ -370,3 +370,11 @@ impl More {
         })
     }
 }
+
+/// Where a late read stands. `Answered`: this source answers in the call (the default).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Read {
+    Answered,
+    Loading,
+    Failed(super::source::ActionError),
+}

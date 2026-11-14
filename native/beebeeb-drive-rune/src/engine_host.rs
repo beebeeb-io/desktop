@@ -51,8 +51,12 @@ mod files_facts;
 #[cfg(test)]
 #[path = "engine_host/files_open_with_tests.rs"]
 mod files_open_with_tests;
+mod files_places;
 mod files_trash;
 mod files_versions;
+#[cfg(test)]
+#[path = "engine_host/files_window_support.rs"]
+mod files_window_support;
 pub mod guide;
 pub mod open;
 pub mod photos;
@@ -563,6 +567,8 @@ pub struct EngineFilesSource<C: CredentialStores> {
     facts: files_facts::Facts<C>,
     /// A file's versions and the restore of one.
     versions: files_versions::VersionCalls<C>,
+    /// Where each row stands in the Backups tree.
+    places: files_places::Places<C>,
 }
 
 impl<C: CredentialStores> EngineFilesSource<C> {
@@ -573,6 +579,7 @@ impl<C: CredentialStores> EngineFilesSource<C> {
             trash: files_trash::TrashCalls::new(engine.clone()),
             facts: files_facts::Facts::new(engine.clone()),
             versions: files_versions::VersionCalls::new(engine.clone()),
+            places: files_places::Places::new(engine.clone()),
             engine,
             upload_left: None,
         }
@@ -768,6 +775,22 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.versions.restore(item, version)
     }
 
+    fn folder_shown(&mut self, folder: Option<&str>) {
+        self.places.shown(folder);
+    }
+
+    fn protection(
+        &self,
+        folder: Option<&str>,
+        item: Option<&DriveItem>,
+    ) -> Option<crate::frames::files::protected::Protection> {
+        self.places.protection(folder, item)
+    }
+
+    fn backup_entry(&self, item: &DriveItem) -> Option<crate::frames::files::protected::BackupEntry> {
+        self.places.backup_entry(item)
+    }
+
     fn show_in_file_explorer(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
         let paths = self.local(|db, sync_root| {
             let mut paths = Vec::with_capacity(items.len());
@@ -866,6 +889,8 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         let mut changes = self.trash.take();
         changes.extend(self.copies.take());
         changes.extend(self.versions.take());
+        // Where the rows stand in the Backups tree: an arrival redraws by its wake.
+        self.places.pump();
         // The sidebar's figures are read again after a change (`files_facts`); an arrival redraws by its wake.
         self.facts.pump(!changes.is_empty());
         changes

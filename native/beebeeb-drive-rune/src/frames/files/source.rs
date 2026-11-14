@@ -37,13 +37,7 @@ pub struct Details {
     pub picture: bool,
 }
 
-/// Where a late read stands. `Answered`: this source answers in the call (the default).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Read {
-    Answered,
-    Loading,
-    Failed(ActionError),
-}
+pub use super::actions_data::Read;
 
 /// Why an action did not happen. The window says it in words (DW-0109), never as a code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -381,6 +375,9 @@ pub trait FilesSource: Send + 'static {
     fn backups_root(&self) -> Option<String> {
         None
     }
+    /// The window now shows this folder (`None`: the top of Files): read what the source needs for it, once. Told at the
+    /// first frame of a folder and again after the session changed.
+    fn folder_shown(&mut self, _folder: Option<&str>) {}
     /// Why `item` (with no item: anything in `folder`) cannot be moved, renamed or deleted, with
     /// the core's words for it (DW-0425). `None`: it can.
     fn protection(&self, _folder: Option<&str>, _item: Option<&DriveItem>) -> Option<super::protected::Protection> {
