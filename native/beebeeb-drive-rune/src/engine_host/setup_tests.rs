@@ -48,7 +48,10 @@ struct Fake {
     started: Mutex<Vec<PathBuf>>,
     /// Every folder that was written to the settings.
     kept: Mutex<Vec<PathBuf>>,
-    stops: AtomicUsize,
+    /// How often Windows was asked again for the folder's entry.
+    entry_asks: AtomicUsize,
+    /// A start waits here until the test lets it go.
+    start_held: Mutex<()>,
     wakes: AtomicUsize,
     /// A write waits here until the test lets it go (a change that is on its way).
     held: Mutex<()>,
@@ -79,7 +82,8 @@ fn fake() -> Arc<Fake> {
         start_answer: Mutex::new(Ok(SyncStart::Started)),
         started: Mutex::default(),
         kept: Mutex::default(),
-        stops: AtomicUsize::new(0),
+        entry_asks: AtomicUsize::new(0),
+        start_held: Mutex::new(()),
         wakes: AtomicUsize::new(0),
         held: Mutex::new(()),
         panics: AtomicBool::new(false),
@@ -135,8 +139,8 @@ impl SetupEngine for Fake {
     fn sync_folder(&self) -> Option<PathBuf> {
         self.folder.lock().unwrap().clone()
     }
-    fn stop_sync(&self) {
-        self.stops.fetch_add(1, Ordering::SeqCst);
+    fn ask_explorer_again(&self) {
+        self.entry_asks.fetch_add(1, Ordering::SeqCst);
     }
     fn settings_folder(&self) -> Result<Option<PathBuf>, SetupRefused> {
         self.settings_folder.lock().unwrap().clone()
@@ -150,6 +154,7 @@ impl SetupEngine for Fake {
         *self.rule.lock().unwrap()
     }
     fn start(&self, folder: PathBuf) -> Result<SyncStart, SyncStartRefused> {
+        let _held = self.start_held.lock().unwrap();
         self.started.lock().unwrap().push(folder);
         *self.start_answer.lock().unwrap()
     }
@@ -357,9 +362,9 @@ fn step_5_follows_the_view() {
 }
 
 #[test]
-fn try_again_asks_for_one_start_and_restarts_a_sync_that_runs() {
+fn try_again_asks_windows_again_and_never_stops_a_sync_that_runs() {
     let mut set = set();
-    // Sync did not start: one start is asked for, and nothing is stopped.
+    // Sync did not start: one start is asked for, and Windows is not asked.
     set.engine.set(
         Start::Refused(SyncStartRefused::FolderUnreadable),
         EngineExplorer::Unknown,
@@ -369,26 +374,33 @@ fn try_again_asks_for_one_start_and_restarts_a_sync_that_runs() {
     assert_eq!(
         (
             set.asked.starts.load(Ordering::SeqCst),
-            set.engine.stops.load(Ordering::SeqCst)
+            set.engine.entry_asks.load(Ordering::SeqCst)
         ),
         (1, 0)
     );
-    // Sync runs and Windows refused the entry: only a start asks Windows, so it is stopped and started again.
+    // Sync runs and Windows refused the entry: Windows is asked again; no start is asked for.
     set.engine.set(Start::Running, EngineExplorer::Failed { code: None });
     set.source.retry_explorer();
     settle(&mut set, 2);
     assert_eq!(
         (
             set.asked.starts.load(Ordering::SeqCst),
-            set.engine.stops.load(Ordering::SeqCst)
+            set.engine.entry_asks.load(Ordering::SeqCst)
         ),
-        (2, 1)
+        (1, 1)
     );
     // A start that could not be asked for changes nothing here: the view still says what the engine says.
+    set.engine.set(
+        Start::Refused(SyncStartRefused::FolderUnreadable),
+        EngineExplorer::Failed { code: None },
+    );
     set.asked.start_refused.store(true, Ordering::SeqCst);
     set.source.retry_explorer();
     settle(&mut set, 3);
-    assert_eq!(set.source.explorer(), Explorer::Failed { code: String::new() });
+    assert!(matches!(
+        set.source.explorer(),
+        Explorer::Failed { .. } | Explorer::NotSyncing
+    ));
 }
 
 #[test]
@@ -403,7 +415,13 @@ fn show_in_file_explorer_opens_the_sync_folder_and_never_another_sessions() {
             .filter(|folder| folder.as_path() == Path::new("the-folder-of-this-test"))
             .count()
     };
+    let before = set.source.workers_started();
     set.source.show_in_explorer();
+    assert_eq!(
+        set.source.workers_started(),
+        before + 1,
+        "control: this session's press starts a worker"
+    );
     settle(&mut set, 1);
     assert_eq!(opened(), 1);
     // No folder is known: nothing is opened.
@@ -414,8 +432,9 @@ fn show_in_file_explorer_opens_the_sync_folder_and_never_another_sessions() {
     // Another session: nothing is asked at all.
     *set.engine.folder.lock().unwrap() = Some(PathBuf::from("the-folder-of-this-test"));
     *set.engine.stamp.lock().unwrap() = (session(2), Some(FIRST.into()));
+    let before = set.source.workers_started();
     set.source.show_in_explorer();
-    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(set.source.workers_started(), before, "no worker was started");
     assert_eq!((opened(), set.engine.wakes.load(Ordering::SeqCst)), (1, 2));
 }
 
@@ -579,11 +598,16 @@ fn another_session_or_account_is_never_written_for_and_never_answered() {
         // The press itself is under the other session.
         let mut set = set();
         *set.engine.stamp.lock().unwrap() = moved_to.clone();
+        let before = set.source.workers_started();
         set.source.set_notifications(true);
         set.source.set_open_at_login(true);
         set.source.finish();
         set.source.retry_explorer();
-        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            set.source.workers_started(),
+            before,
+            "{moved_to:?}: no worker was started"
+        );
         assert!(set.engine.notified.lock().unwrap().is_empty(), "{moved_to:?}");
         assert!(set.engine.marked.lock().unwrap().is_empty(), "{moved_to:?}");
         assert!(set.platform.autostart_writes().is_empty(), "{moved_to:?}");
@@ -595,6 +619,11 @@ fn another_session_or_account_is_never_written_for_and_never_answered() {
             "nothing is said to another session"
         );
         assert!(set.first_run.due(), "{moved_to:?}: the first run is not ended for it");
+        // Control: a press under the right session starts one worker.
+        *set.engine.stamp.lock().unwrap() = (session(1), Some(FIRST.into()));
+        set.source.set_notifications(true);
+        assert_eq!(set.source.workers_started(), before + 1, "{moved_to:?}: control");
+        settle(&mut set, 1);
 
         // The session moves while the change is on its way: the answer is dropped.
         let mut set = set_on(fake(), FakePlatform::default());
@@ -616,10 +645,16 @@ fn another_session_or_account_is_never_written_for_and_never_answered() {
     // Locked (the gate is not Ready): the same.
     let mut set = set();
     set.engine.view.lock().unwrap().gate = GateState::Locked;
+    let before = set.source.workers_started();
     set.source.set_notifications(true);
     set.source.finish();
-    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(set.source.workers_started(), before, "no worker was started");
     assert!(set.engine.notified.lock().unwrap().is_empty() && set.engine.marked.lock().unwrap().is_empty());
+    // Control: unlocked, the same press starts one worker.
+    set.engine.view.lock().unwrap().gate = GateState::Ready;
+    set.source.set_notifications(true);
+    assert_eq!(set.source.workers_started(), before + 1, "control");
+    settle(&mut set, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -890,6 +925,38 @@ fn a_gate_change_seen_outside_the_poll_still_makes_and_drops_the_first_run() {
         s.shell.refresh();
     });
     wait_for(&mut rt, "dropped", |rt| rt.state.setup.is_none());
+}
+
+/// A first run that ended (the gate went Ready) and is first seen by a refresh outside the poll still asks for
+/// one sync start, as `on_gate_change` does.
+#[test]
+fn a_first_run_that_ended_outside_the_poll_still_asks_for_a_start() {
+    let set = set();
+    set.engine.set(Start::Running, EngineExplorer::Added);
+    let (mut rt, _engine, fixture, ..) = window(set);
+    let starts = |fixture: &FixtureEngine| {
+        fixture
+            .calls()
+            .iter()
+            .filter(|call| **call == crate::shell::actions::FixtureCall::StartSync)
+            .count()
+    };
+    fixture.set_gate_for_scene(ShellGate::FirstRun);
+    rt.update(|s, _| {
+        s.shell.refresh();
+    });
+    wait_for(&mut rt, "the first run", |rt| rt.state.setup.is_some());
+    let before = starts(&fixture);
+    fixture.set_gate_for_scene(ShellGate::Ready);
+    rt.update(|s, _| {
+        s.shell.refresh();
+    });
+    wait_for(&mut rt, "dropped", |rt| rt.state.setup.is_none());
+    assert_eq!(
+        starts(&fixture),
+        before + 1,
+        "one start was asked for when the first run ended"
+    );
 }
 
 /// A window nobody wired a first run into (every scene, every other test) is never moved by this: the frame says

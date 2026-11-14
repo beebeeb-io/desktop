@@ -141,8 +141,11 @@ pub struct SecurityFacts {
     pub activity: Option<Option<Vec<Event>>>,
     /// The checkup's factors. `None` or empty: there is no score, and the page says so.
     pub factors: Option<Vec<Factor>>,
-    /// This source can sign this app out (`sign_out_this_app`, `sign_out_all_apps`).
+    /// This source can sign this app out (`sign_out_this_app`).
     pub can_sign_out: bool,
+    /// This source can also sign every Beebeeb app on this PC out (`sign_out_all_apps`). A source whose app is
+    /// the only Beebeeb app on this PC has nothing to mean by it: the row is not drawn.
+    pub can_sign_out_all: bool,
 }
 
 /// A count the page shows: read, being read, or not known. A list that is older than a change the source
@@ -153,6 +156,26 @@ pub enum Count {
     /// Asked, not answered yet: the row says so (the rest of the page does not wait for it).
     Reading,
     NotKnown,
+}
+
+/// How saving the name ended, or stands ([`AccountSource::save_name`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameAnswer {
+    /// Beebeeb has the new name.
+    Saved,
+    /// Not saved, and nothing changed.
+    NotSaved(NameWhy),
+    /// Sent, not answered yet: the answer comes through [`AccountSource::name_result`].
+    Pending,
+}
+
+/// Why a name was not saved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameWhy {
+    /// Beebeeb could not be reached.
+    Offline,
+    /// Beebeeb (or the session) did not take it.
+    Refused,
 }
 
 /// How a sign-out of this app ended, or stands.
@@ -179,6 +202,7 @@ impl SecurityFacts {
             activity: None,
             factors: None,
             can_sign_out: false,
+            can_sign_out_all: false,
         }
     }
 }
@@ -351,6 +375,11 @@ pub enum Refused {
     Locked,
     /// Beebeeb could not be reached.
     Offline,
+    /// The new password is not accepted: below the minimum, the same as the current one, or in a known breach.
+    Weak,
+    /// The change was sent and how it ended is not known: the password may have changed. Never told as "nothing
+    /// changed" (review of desktop#423, P2 #9).
+    Unconfirmed,
 }
 
 /// A secret a pane shows once (the two-factor key, a backup code). It cannot be printed, copied
@@ -405,14 +434,19 @@ pub struct Passkey {
     pub added: String,
     /// Whether it can unlock the data on a new device (PRF), or only sign in.
     pub can_unlock: bool,
+    /// Whether the server said which of the two it is. `false`: not known, and the row says only what is true of
+    /// every passkey ("Signs you in"), never "Sign-in only".
+    pub unlock_known: bool,
 }
 
 impl Passkey {
     pub fn does(&self) -> &'static str {
         if self.can_unlock {
             "Can unlock data"
-        } else {
+        } else if self.unlock_known {
             "Sign-in only"
+        } else {
+            "Signs you in"
         }
     }
 }
@@ -511,6 +545,54 @@ pub enum EmailRefused {
     NotAnAddress,
     NotConfirmed,
     Offline,
+}
+
+/// Why the email's code was not sent again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resend {
+    /// Too soon: seconds to wait (Beebeeb's `Retry-After`).
+    Wait(u32),
+    /// No more codes for this change: start again.
+    Limit,
+    /// No change is waiting any more: back to step 1.
+    Gone,
+    Offline,
+}
+
+/// The calls of the Account pages that are answered later: a source that sends them on a worker starts one with
+/// [`AccountSource::start_call`] and the window takes the answer with [`AccountSource::call_answer`]; nothing of the
+/// answer is drawn before it came.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallKind {
+    /// The new address and the password: Beebeeb mails the 8-digit code.
+    StartEmail,
+    /// The 8 digits of the email's code.
+    ConfirmEmail,
+    /// A new authenticator key (the set-up page).
+    BeginTwoFactor,
+    /// The first 6-digit code: turns two-factor on.
+    TurnOnTwoFactor,
+    /// A current code: turns two-factor off.
+    TurnOffTwoFactor,
+    /// A current code, before moving to a new authenticator.
+    CheckCode,
+    /// A current code: 8 new backup codes.
+    NewBackupCodes,
+    /// "Send again": the email's code once more.
+    ResendEmail,
+}
+
+/// How a started call ended.
+pub enum Answered {
+    Done,
+    Setup(Setup),
+    /// The first code was wrong: the key it belonged to is spent, and this is the new one.
+    NewKey(Setup),
+    Codes(Vec<Secret>),
+    Email(EmailRefused),
+    Resend(Resend),
+    Code(CodeRefused),
+    Refused(Refused),
 }
 
 /// Where a pane's content stands. A source that answers at once (the board's fixture) is always `Ready`.
@@ -635,6 +717,20 @@ pub trait AccountSource {
     /// Engine: `PATCH /api/v1/account` `{display_name}`; 1 to 64 characters, trimmed. `false`:
     /// refused (empty, too long, or Beebeeb could not be reached); nothing changed.
     fn set_name(&mut self, name: &str) -> bool;
+    /// What the Name page asks: [`AccountSource::set_name`] for a source that answers at once, or `Pending` for
+    /// one that asks Beebeeb on a worker (the answer comes through [`AccountSource::name_result`]).
+    fn save_name(&mut self, name: &str) -> NameAnswer {
+        if self.set_name(name) {
+            NameAnswer::Saved
+        } else {
+            NameAnswer::NotSaved(NameWhy::Offline)
+        }
+    }
+    /// How a save that answered `Pending` ended, once; `None` while it is out. A source drops an answer that
+    /// belongs to a session or an account that is over.
+    fn name_result(&mut self) -> Option<NameAnswer> {
+        None
+    }
     /// Engine: `POST /api/v1/account/email-change` with the step-up's token and the new address;
     /// the server sends an 8-digit code there. The old address stays until the code is entered.
     fn start_email_change(&mut self, confirmation: StepUp, new_email: &str) -> Result<(), EmailRefused>;
@@ -645,6 +741,27 @@ pub trait AccountSource {
     /// Engine: sends the code (email change) or the link (deletion) again. `false`: too soon.
     fn send_again(&mut self) -> bool;
 
+    /// Starts `kind` on a worker: `input` is the address, or the code; `password` goes with the address only (it is
+    /// copied into a wiping buffer for the call). `true`: it is out, and its answer comes through `call_answer`;
+    /// `false`: this source answers the sync methods above instead.
+    fn start_call(&mut self, _kind: CallKind, _input: &str, _password: &str) -> bool {
+        false
+    }
+    /// The answer of a call that was started, once; one that belongs to a session or an account that is over is
+    /// dropped by the source.
+    fn call_answer(&mut self) -> Option<(CallKind, Answered)> {
+        None
+    }
+
+    /// Whether "Send again" is offered for the email's code: `false` when Beebeeb has no route that sends it again.
+    fn can_send_again(&self) -> bool {
+        true
+    }
+    /// Whether "Send again" is offered for the account deletion's code (DW-A81): `false` when Beebeeb has no route
+    /// that sends it again. A fixture says `true` (the board).
+    fn can_send_again_deletion(&self) -> bool {
+        true
+    }
     /// Engine: `core::password::strength` on this device, and the leak check by hashed prefix.
     fn password_strength(&self, candidate: &Password<'_>) -> Strength;
     /// Engine: core re-wraps the vault key under the new password and registers it with OPAQUE
@@ -679,6 +796,29 @@ pub trait AccountSource {
     fn rename_passkey(&mut self, id: &str, name: &str) -> bool;
     /// Engine: `DELETE /api/v1/account/passkeys/<id>`. The copy in the password manager stays.
     fn remove_passkey(&mut self, id: &str) -> bool;
+    /// Added by lane bind-acct-d (defaults: the board's own flow). Adding and removing a passkey asks the account
+    /// password first (core's step-up: the server requires it): the pane then draws a password field and calls
+    /// `add_passkey_confirmed` / `remove_passkey_confirmed`. A fixture says `false`.
+    fn passkeys_need_password(&self) -> bool {
+        false
+    }
+    /// `false`: this PC has no passkey dialog (no WebAuthn), so the pane draws no "Add a passkey".
+    fn can_add_passkey(&self) -> bool {
+        true
+    }
+    /// `false`: this source cannot rename a passkey, so the menu draws no "Rename".
+    fn can_rename_passkey(&self) -> bool {
+        true
+    }
+    /// Engine: `add_passkey` with the password the person typed. `Ok`: it began (the system dialog is up); how it
+    /// ended comes as a toast ([`AccountSource::notice`]) and the list is read again.
+    fn add_passkey_confirmed(&mut self, _password: Password<'_>) -> Result<(), Refused> {
+        self.add_passkey()
+    }
+    /// Engine: `remove_passkey` with the password the person typed; the answer comes as for the add.
+    fn remove_passkey_confirmed(&mut self, id: &str, _password: Password<'_>) -> bool {
+        self.remove_passkey(id)
+    }
 
     /// Engine: `GET /api/v1/account/activity`, by period ("Today", "October", "Earlier");
     /// `None` while security logging is off.
@@ -688,6 +828,22 @@ pub trait AccountSource {
     /// Engine: the same, off, with a current two-factor code (the step-up when two-factor is
     /// off): recording stops and what was recorded is deleted within 30 days.
     fn stop_activity(&mut self, code: &str) -> Result<(), CodeRefused>;
+    /// Stopping the recording asks the account PASSWORD (owner ruling 2026-11-14), not a two-factor code: the dialog
+    /// draws a password field and calls `stop_activity_confirmed`. A fixture says `false` (the board's code dialog).
+    fn stop_activity_needs_password(&self) -> bool {
+        false
+    }
+    /// Engine: stop the recording with the password the person typed. `true`: it began; how it ended comes as a toast
+    /// and the log is read again.
+    fn stop_activity_confirmed(&mut self, _password: Password<'_>) -> bool {
+        false
+    }
+    /// Whether this source can stop the recording from the pane. A source that cannot (Beebeeb asks for the
+    /// password's own proof to stop it, which the pane's code dialog does not give) shows the switch as a value,
+    /// with the way on the web.
+    fn can_stop_activity(&self) -> bool {
+        true
+    }
 
     /// Engine: `GET /api/v1/account/deletion`.
     fn deletion(&self) -> Deletion;
@@ -763,6 +919,7 @@ pub fn all_known<S: AccountSource + ?Sized>(source: &S) -> SecurityFacts {
         ),
         factors: Some(source.factors()),
         can_sign_out: true,
+        can_sign_out_all: true,
     }
 }
 

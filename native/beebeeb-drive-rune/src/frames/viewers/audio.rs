@@ -28,24 +28,43 @@ fn playing_row(t: &Theme) -> Color {
     if t.dark { style::bar_track(t) } else { style::banner(t) }
 }
 
-pub fn tools(t: &Theme) -> Vec<El> {
-    vec![
+pub fn tools(can_play: bool, t: &Theme) -> Vec<El> {
+    let mut tools = vec![
         tool_button("tool-0", "Share", &media_icons::SHARE, 15.0, ToolState::Idle, t).on_press(|s: &mut State| {
             if let Some(ui) = super::ui(s) {
                 ui.intent(Intent::Share);
             }
         }),
-    ]
+    ];
+    // No player in this build: the recording opens in the app the system has for it.
+    if !can_play {
+        tools.push(
+            super::text::tool_action("tool-1", "Open in another app\u{2026}", None, None, t).on_press(
+                |s: &mut State| {
+                    if let Some(ui) = super::ui(s) {
+                        ui.intent(Intent::OpenInAnotherApp);
+                    }
+                },
+            ),
+        );
+    }
+    tools
 }
 
-pub fn status(doc: &AudioDoc) -> Status {
+pub fn status(doc: &AudioDoc, can_play: bool) -> Status {
     let at = doc.queue.iter().position(|t| t.current).map_or(0, |i| i + 1);
     Status {
         dot: Dot::Green,
         text: details::DECRYPTED_HERE.into(),
         details: format!(
-            "{} \u{00B7} {}, {} of {}",
-            if doc.playing { "Playing" } else { "Paused" },
+            "{}{}, {} of {}",
+            if !can_play {
+                ""
+            } else if doc.playing {
+                "Playing \u{00B7} "
+            } else {
+                "Paused \u{00B7} "
+            },
             doc.folder,
             at,
             doc.queue.len()
@@ -158,19 +177,17 @@ fn player(ui: &Ui, doc: &AudioDoc, t: &Theme) -> El {
         );
     let at = doc.queue.iter().position(|t| t.current);
     let (first, last) = (at == Some(0), at.is_none_or(|i| i + 1 >= doc.queue.len()));
-    let transport = row()
-        .key("transport")
-        .center_y()
-        .gap(24.0)
-        .child(skip(
-            "prev",
-            "Previous",
-            &media_icons::BACK,
-            -1,
-            !first && at.is_some(),
-            t,
-        ))
-        .child(
+    let mut transport = row().key("transport").center_y().gap(24.0).child(skip(
+        "prev",
+        "Previous",
+        &media_icons::BACK,
+        -1,
+        !first && at.is_some(),
+        t,
+    ));
+    // No Play where the source cannot play: a button that does nothing is not drawn.
+    if ui.can_play() {
+        transport = transport.child(
             el().key("pause")
                 .role("button")
                 .label(if doc.playing { "Pause" } else { "Play" })
@@ -197,8 +214,9 @@ fn player(ui: &Ui, doc: &AudioDoc, t: &Theme) -> El {
                     20.0,
                     t.paper,
                 )),
-        )
-        .child(skip("next", "Next", &media_icons::FWD, 1, !last, t));
+        );
+    }
+    let transport = transport.child(skip("next", "Next", &media_icons::FWD, 1, !last, t));
     col()
         .key("player")
         .w(360.0)
@@ -211,7 +229,11 @@ fn player(ui: &Ui, doc: &AudioDoc, t: &Theme) -> El {
         .child(
             kit::label(
                 "audio-caption",
-                "Decrypted on this PC \u{00B7} keeps playing when you leave this view \u{00B7} the media keys work",
+                if ui.can_play() {
+                    "Decrypted on this PC \u{00B7} keeps playing when you leave this view \u{00B7} the media keys work"
+                } else {
+                    "Decrypted on this PC \u{00B7} playing needs another app: use Open in another app"
+                },
                 CAP,
                 t.text_tertiary,
             )

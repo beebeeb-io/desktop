@@ -39,6 +39,7 @@ pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
         [
             shell,
             files::SCENES,
+            files::scenes_waveb::SCENES,
             files::protected::SCENES,
             files::long_list::SCENES,
             files::session::SCENES,

@@ -25,6 +25,7 @@ use super::*;
 use crate::State;
 use crate::shell::app::Section;
 
+mod purge;
 mod session;
 
 const PASSWORD: &str = "an invented password for trash";
@@ -56,6 +57,8 @@ struct Fake {
     /// The next restore request says on the first that it reached the fake, then waits on the second before
     /// anything is done with it.
     restore_hold: RestoreHold,
+    /// The permanent deletes of the first account: what the fake purged, and how it answers.
+    purge: purge::PurgeFake,
 }
 
 type RestoreHold = Arc<Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>>;
@@ -85,8 +88,13 @@ fn fake(tag: &str) -> Fake {
     let (list_in, restore_in, delay_in) = (list_mode.clone(), restore_mode.clone(), list_delay_ms.clone());
     let restore_hold = RestoreHold::default();
     let hold_in = restore_hold.clone();
+    let purge = purge::PurgeFake::new(first.clone());
+    let purge_in = purge.clone();
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
         let route = req.route();
+        if let Some(answer) = purge_in.answer(req) {
+            return answer;
+        }
         let sign_in = route.starts_with("POST /api/v1/opaque/");
         let theirs = if sign_in {
             names_email(req, &second_email)
@@ -119,7 +127,7 @@ fn fake(tag: &str) -> Fake {
         // The fake answers `items`; the server (and the engine's client) say `files` and `next_cursor`.
         let body: Value = serde_json::from_slice(&rest(req).body).expect("the fake's listing");
         std::thread::sleep(Duration::from_millis(delay_in.load(Ordering::SeqCst)));
-        Reply::ok(json!({ "files": body["items"], "next_cursor": null }))
+        Reply::ok(json!({ "files": purge_in.without_purged(&body["items"]), "next_cursor": null }))
     }));
     // The first account: a folder, a PDF and a photo in Trash, one file not. The second: one item in Trash.
     first.add_item(DOCS, None, "Invented old invoices", true, 0);
@@ -141,6 +149,7 @@ fn fake(tag: &str) -> Fake {
         restore_mode,
         list_delay_ms,
         restore_hold,
+        purge,
     }
 }
 

@@ -938,3 +938,42 @@ fn a_sign_out_that_did_not_finish_brings_the_words_back() {
     assert!(!ui(&mut rt).follow_gate(GateState::SignedOut));
     assert_eq!(ui(&mut rt).screen, Screen::SignIn);
 }
+
+#[test]
+fn the_passkey_door_is_drawn_only_where_the_source_can_sign_in_with_one() {
+    // A source without passkey sign-in (the engine's default): no door, and no call even from the keyboard.
+    let (mut rt, calls) = form(Script {
+        passkey_available: false,
+        ..Script::default()
+    });
+    assert!(!a11y(&rt).contains("Use a passkey"), "no dead passkey door");
+    ui(&mut rt).use_passkey();
+    assert!(!ui(&mut rt).passkey_waiting());
+    assert!(calls.borrow().is_empty(), "the engine was not asked");
+    // Where it can, the door is there (the board's frames).
+    let (rt, _) = form(Script::default());
+    assert!(a11y(&rt).contains("Use a passkey"));
+}
+
+#[test]
+fn where_the_source_has_no_in_app_doors_the_board_doors_open_the_web_recovery_page() {
+    let (mut rt, calls) = form(Script {
+        in_app_doors: false,
+        ..Script::default()
+    });
+    assert!(
+        a11y(&rt).contains("Sign in with another device"),
+        "the board's door stays"
+    );
+    click(&mut rt, "btn-1");
+    assert_eq!(ui(&mut rt).take_intents(), vec![Intent::OpenRecoveryPage]);
+    assert_eq!(ui(&mut rt).screen, Screen::SignIn, "the window stays where it was");
+    click(&mut rt, "link-0-box");
+    assert_eq!(ui(&mut rt).screen, Screen::Forgot);
+    for card in ["btn-0", "btn-1"] {
+        click(&mut rt, card);
+        assert_eq!(ui(&mut rt).take_intents(), vec![Intent::OpenRecoveryPage], "{card}");
+        assert_eq!(ui(&mut rt).screen, Screen::Forgot);
+    }
+    assert!(calls.borrow().is_empty(), "nothing was asked of the engine");
+}

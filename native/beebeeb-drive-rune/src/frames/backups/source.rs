@@ -46,6 +46,9 @@ pub enum Status {
         /// The first backup of this folder ("the first backup takes longest").
         first: bool,
     },
+    /// A state the engine can say in words and has no numbers for (a pass running, nothing on yet, folders that
+    /// turned themselves off). `can_run`: the card offers "Back up now".
+    Plain { title: String, sub: String, can_run: bool },
 }
 
 /// One folder of this PC.
@@ -163,6 +166,11 @@ pub trait BackupsSource {
     fn devices(&self) -> Vec<Device>;
     fn not_backed_up(&self) -> Vec<NotBackedUp>;
     fn mail_backup_on(&self) -> bool;
+    /// `true` where the section lists Mail Backup. `false` (the default): no mail engine runs in this build, so
+    /// the "Beebeeb services" list is not drawn at all (the page's code stays).
+    fn mail_backup_offered(&self) -> bool {
+        false
+    }
     fn back_up_now(&mut self);
     /// Start or stop backing up one of the six known folders.
     fn set_folder(&mut self, id: &str, on: bool);
@@ -172,8 +180,8 @@ pub trait BackupsSource {
     fn remove_folder(&mut self, id: &str, move_copy_to_trash: bool);
     fn retry(&mut self, id: &str);
     fn retry_all(&mut self);
-    /// Move another device's backup to Trash. It is a risky action: the engine checks the
-    /// second-factor `code` first. `false`: the code was not accepted, nothing changed.
+    /// Move another device's backup to Trash. It is a risky action: the engine proves the ACCOUNT PASSWORD
+    /// (`code` carries it; owner ruling Q4). `false`: it was not accepted, nothing changed.
     fn delete_device_backup(&mut self, id: &str, code: &str) -> bool;
 
     // Mail Backup (the board's proposal, DW-0740 to DW-0743b). Every default is the answer of a
@@ -389,6 +397,10 @@ impl BackupsSource for FixtureSource {
         self.failures.clone()
     }
 
+    fn mail_backup_offered(&self) -> bool {
+        true
+    }
+
     fn mail_backup_on(&self) -> bool {
         self.mail.as_ref().is_none_or(|m| m.state != MailState::Off)
     }
@@ -473,8 +485,8 @@ impl BackupsSource for FixtureSource {
     }
 
     fn delete_device_backup(&mut self, id: &str, code: &str) -> bool {
-        // The fixture's authenticator: six digits pass, except six zeros (so a refusal can be seen).
-        let accepted = code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()) && code != "000000";
+        // The fixture's account password: any password passes, except "wrong password" (so a refusal can be seen).
+        let accepted = !code.is_empty() && code != "wrong password";
         if accepted {
             self.devices.retain(|d| d.id != id);
         }

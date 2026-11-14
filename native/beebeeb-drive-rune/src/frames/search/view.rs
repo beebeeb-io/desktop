@@ -113,6 +113,9 @@ pub fn window(s: &State, cx: &mut Cx<State>) -> El {
 
 /// The status line: the PC's sync state and the Files window's summary, as in Files (DW-0401).
 fn status(s: &State, t: &Theme) -> El {
+    if s.frames.find.plain_note {
+        return plain_note_line(t);
+    }
     let state = s.actions.source.sync_state();
     let details = crate::frames::global::status_words(s).unwrap_or_else(|| crate::frames::files::window::pc_summary(s));
     let name = match &state {
@@ -126,6 +129,24 @@ fn status(s: &State, t: &Theme) -> El {
         .description("Shows sync status")
         .focusable(true)
         .on_press(crate::frames::tray::show_from_window)
+}
+
+/// What the list-on-this-PC search says it can't do (DW-1105), where the status line stands.
+pub const PLAIN_NOTE: &str = "Searches file and folder names on this PC, even offline. It doesn't look inside files.";
+
+fn plain_note_line(t: &Theme) -> El {
+    row()
+        .key("status-bar")
+        .role("status")
+        .label(PLAIN_NOTE)
+        .h(28.0)
+        .w_full()
+        .fill(t.status_bar_bg)
+        .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
+        .border_layout()
+        .px(16.0)
+        .center_y()
+        .child(kit::label("search-note", PLAIN_NOTE, type_::STATUS, t.text_tertiary))
 }
 
 /// The toolbar (`.mk-tb`) while searching: "Search" and what was found, the Files window's
@@ -698,6 +719,7 @@ fn results(s: &State, hits: &[Hit], loading: Option<Loading>, t: &Theme) -> El {
         );
     let mut body = row().key("search-body").w_full().child(list);
     if s.show_detail_pane
+        && !ui.plain_note
         && loading.is_none()
         && let Some(hit) = at.and_then(|i| hits.get(i))
         && let Some(facts) = ui.source.details(&hit.id)

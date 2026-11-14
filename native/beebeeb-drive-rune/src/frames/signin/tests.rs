@@ -546,6 +546,12 @@ impl SignInSource for Late {
     }
     fn begin_two_factor(&mut self, _: &str, _: CodeKind) {}
     fn begin_restore(&mut self, _: &[&str]) {}
+    fn passkey_available(&self) -> bool {
+        true
+    }
+    fn in_app_doors_available(&self) -> bool {
+        true
+    }
     fn begin_passkey(&mut self) {}
     fn begin_unlock(&mut self, _: &str) {}
     fn begin_recovery_verify(&mut self, _: &str, _: &[&str]) {}

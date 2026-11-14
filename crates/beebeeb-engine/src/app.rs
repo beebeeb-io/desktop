@@ -46,36 +46,58 @@ use crate::sync_view::{Explorer, Start, SyncView, ViewCell, ViewHost};
 use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
 use lock_api::SessionMoved;
 
+pub mod account_actions_api;
 pub mod account_api;
+pub mod account_email_api;
+pub mod account_email_resend_api;
+pub mod account_password_api;
+pub mod account_twofactor_api;
+pub mod account_twofactor_status_api;
 pub mod backups_api;
+// Files in two versions and the answer to one, for the native Files window.
+pub mod conflicts_api;
 // Explorer's "Free up space" command asks this handle, and a stop removes its binding (task 2490).
-mod explorer_api;
+pub(crate) mod explorer_api;
 // The sidebar's figures for the native Files window: files kept on this PC, the storage split.
 pub mod files_facts_api;
 pub mod kept_api;
 // The two-level lock, bound to core's rules (`beebeeb_api::flows::lock`).
 pub mod lock_api;
+pub mod lock_password_api;
 pub mod owned_state;
 // What the app window may change of the rows of the Backups tree, for the native Files window.
 pub mod backup_places_api;
+pub mod passkeys_api;
 pub mod photos_api;
 pub mod settings_api;
 pub mod setup_api;
+pub mod speed_test_api;
+// Storage use and quota from the server.
+mod storage_usage_api;
+pub mod support_bundle_api;
 // A link to one of the account's files, for the native Files window's Copy link.
 pub mod share_link_api;
 // What the account shares and what is shared with it, for the native Shared window.
 pub mod shares_api;
+// Invite someone (DW-0514): share an own item with a person, for the native Shared window.
+pub mod share_invite_api;
 pub mod signin_api;
 pub mod signup_api;
 // Is the local state the signed-in account's (task 2488): a read-only check for windows that show it.
 pub mod state_owner;
 pub mod transfer_limits_api;
 pub mod trash_api;
+// What uploads, Try again on one, and the cancel of a new file's upload, for the native Files window.
+pub mod uploads_api;
 // A file's versions and the restore of one, for the native Files window.
+pub mod trash_bulk_api;
+pub mod trash_purge_api;
 pub mod versions_api;
 // An open file for the native viewer: its facts, and its content decrypted in memory.
 pub mod viewer_api;
+pub mod viewer_edit_api;
 
+pub use explorer_api::ExplorerChangeRefused;
 pub use owned_state::{LocalStateRefused, OwnedState};
 
 /// Where the handle keeps an account's session token and vault key. The handle names the app on every call
@@ -239,6 +261,8 @@ pub struct Engine<C: CredentialStores> {
     /// A proven password waiting for its second factor (core holds the partial token, wiped on drop).
     /// The email is wiped with it (the shell's `Pending2fa` does the same).
     pending_2fa: Mutex<Option<(PendingSecondFactor, Zeroizing<String>)>>,
+    /// The screen lock's password check state (`lock_password_api`).
+    lock_password: lock_password_api::LockPassword,
     /// Wrong passwords in a row, for the lock hint.
     failures: AtomicU32,
     /// [`Engine::watch_session`] ran on this handle.
@@ -303,6 +327,7 @@ impl<C: CredentialStores> Engine<C> {
             writes: std::sync::RwLock::new(()),
             auth_present: Mutex::new(false),
             pending_2fa: Mutex::new(None),
+            lock_password: lock_password_api::LockPassword::default(),
             failures: AtomicU32::new(0),
             session_watch_started: AtomicBool::new(false),
             lock_flow: Mutex::new(beebeeb_api::flows::LockFlow::at_start(lock_api::NO_SESSION)),
@@ -481,6 +506,8 @@ impl<C: CredentialStores> Engine<C> {
             )
             .await
             .map_err(|code| self.problem(&code))?;
+            // The server accepted this password: stretch it for the screen lock's check record (`lock_password_api`).
+            self.stretch_for_sign_in(&email, &password);
             drop(password);
             match legs {
                 PasswordLegs::SecondFactor(pending) => {
@@ -561,6 +588,7 @@ impl<C: CredentialStores> Engine<C> {
                 return Err(error);
             }
         };
+        let screen_check = self.take_pending_screen_check(&typed_email);
         let email = match profile.email.trim() {
             "" => typed_email,
             named => named.to_string(),
@@ -579,6 +607,7 @@ impl<C: CredentialStores> Engine<C> {
             revoke(&self.client, base, &token).await;
             return Err(error);
         }
+        self.install_screen_check(screen_check, &profile);
         self.failures.store(0, Ordering::SeqCst);
         // The stored key of this same account (a vault that was closed, a locked screen, an older build's lock) is
         // loaded through the guarded loader. The password was proven to the server: the lock opens in the same
@@ -920,6 +949,8 @@ impl<C: CredentialStores> Engine<C> {
     /// through here.
     async fn stop_holding_step(&self) -> SyncStop {
         let stopped = self.stop_runner().await;
+        // No pass runs and none is asked for once sync stopped, for this account or the next.
+        crate::backup::scheduler::clear_pass_flags();
         self.remove_explorer_command();
         stopped
     }
@@ -974,6 +1005,7 @@ impl<C: CredentialStores> Engine<C> {
         if let Ok(mut pending) = self.pending_2fa.lock() {
             *pending = None;
         }
+        self.lock_password.drop_pending();
     }
 
     /// Sign out and KEEP the local files and the local state: the engine stops, the session is ended on the server
@@ -1073,29 +1105,6 @@ impl<C: CredentialStores> Engine<C> {
                 lock_api::PersonRefused::ScreenLocked => "locked".to_string(),
                 lock_api::PersonRefused::NoSession => "not signed in".to_string(),
             })
-    }
-
-    /// Storage use and quota from the server (`/api/v1/billing/usage`).
-    pub fn storage_info(&self) -> Result<(i64, i64), String> {
-        let token = self.session_token()?;
-        self.runtime.block_on(async {
-            #[derive(serde::Deserialize)]
-            struct Usage {
-                used_bytes: i64,
-                quota_bytes: i64,
-            }
-            let resp = self
-                .client
-                .get(format!("{}/api/v1/billing/usage", self.config.api_base))
-                .bearer_auth(&token)
-                .send()
-                .await
-                .map_err(|_| "offline".to_string())?
-                .error_for_status()
-                .map_err(|_| "could not read storage".to_string())?;
-            let usage: Usage = resp.json().await.map_err(|_| "invalid storage response".to_string())?;
-            Ok((usage.used_bytes.max(0), usage.quota_bytes.max(0)))
-        })
     }
 }
 

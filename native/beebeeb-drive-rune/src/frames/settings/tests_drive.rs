@@ -238,6 +238,8 @@ fn sync_switches_turn_by_keyboard_and_are_never_amber() {
         Screen::Settings(SettingsPane::SyncAndFileExplorer)
     );
     let amber = crate::theme::tokens::theme(false).accent;
+    // The sample source draws every control; an engine source that has nothing behind "Show sync status on files"
+    // does not draw it (`engine_host::drive_settings_tools_tests`).
     for (switch, read) in [
         (
             "item-0-1-switch",
@@ -443,7 +445,20 @@ fn a_section_not_built_yet_is_left_to_the_shell() {
     rt.frame(0.0);
     settle(&mut rt);
     assert!(find(&rt, "set-main").is_some(), "Storage is drawn");
-    press(&mut rt, "Thumbnails and previews-row");
+    // Nothing answers for previews: the pane is not listed.
+    assert!(
+        find(&rt, "Thumbnails and previews-row").is_none(),
+        "the sidebar does not list a pane nothing answers for"
+    );
+    // A deep link to it still lands on the shell's not-built frame, never on a pane of sample values.
+    rt.update(|s, _| {
+        host::request(
+            s,
+            crate::shell::app::Intent::Settings(SettingsPane::ThumbnailsAndPreviews),
+        );
+    });
+    rt.frame(0.016);
+    settle(&mut rt);
     assert_eq!(
         rt.state.shell.app.screen(),
         Screen::Settings(SettingsPane::ThumbnailsAndPreviews)

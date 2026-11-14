@@ -223,6 +223,166 @@ fn the_served_handle_is_asked_each_time_and_a_dropped_one_disables_the_command()
     assert_eq!(invoke(served().as_deref()), Invoked::Refused("no_engine"));
 }
 
+#[test]
+fn windows_is_asked_again_only_for_an_engine_that_runs_in_a_known_folder() {
+    use super::entry_after;
+    use crate::sync_view::Explorer;
+    use std::cell::Cell;
+    let folder = std::path::Path::new("/a/sync/folder");
+    let calls = Cell::new(0);
+    let counted = |result: Result<(), Option<i32>>| {
+        let calls = &calls;
+        move |_: &std::path::Path| {
+            calls.set(calls.get() + 1);
+            result
+        }
+    };
+    assert_eq!(entry_after(false, Some(folder), counted(Ok(()))), None);
+    assert_eq!(entry_after(true, None, counted(Ok(()))), None);
+    assert_eq!(calls.get(), 0, "Windows was not asked");
+    assert_eq!(entry_after(true, Some(folder), counted(Ok(()))), Some(Explorer::Added));
+    assert_eq!(
+        entry_after(true, Some(folder), counted(Err(Some(-2147024516)))),
+        Some(Explorer::Failed {
+            code: Some(-2147024516)
+        })
+    );
+    assert_eq!(calls.get(), 2);
+}
+
+#[test]
+fn asking_windows_again_with_no_engine_changes_nothing() {
+    let state_dir = crate::state_paths::init_for_test();
+    let (host, _messages) = ChannelHost::new(|| {});
+    let config = EngineConfig {
+        account_id: "an-invented-slot".into(),
+        state_dir,
+        api_base: "http://127.0.0.1:9".into(),
+    };
+    let engine = Engine::open(&REAL, config, host, MemoryCredentials::default()).expect("the handle opens");
+    let before = engine.view();
+    assert!(!engine.add_to_file_explorer_again(), "nothing runs: nothing was asked");
+    assert_eq!(engine.view(), before);
+}
+
+fn upload_waiting(f: &Fixture) {
+    use crate::state_db::{OperationKind, PendingOperation};
+    StateDb::open(&f.db)
+        .unwrap()
+        .enqueue_operation(&PendingOperation {
+            op_id: "op-1".into(),
+            kind: OperationKind::UploadFile,
+            file_id: Some("f-1".into()),
+            parent_id: None,
+            target_path: Some("/held.bin".into()),
+            metadata_json: Some(r#"{"operation":"create_file"}"#.into()),
+            payload_path: Some("/staging/op-1".into()),
+            base_version: None,
+            base_object_version_id: None,
+            attempts: 0,
+            max_attempts: 5,
+            next_retry_at: 0,
+            last_error: None,
+            backup_source_key: None,
+            created_at: 100,
+            updated_at: 100,
+        })
+        .unwrap();
+}
+
+/// A start that must not be reached: a test never starts a real sync (that binds the shared state folder to an account).
+fn never_starts(_root: PathBuf) -> Result<super::SyncStart, super::SyncStartRefused> {
+    panic!("this test must not start sync");
+}
+
+/// Sync that ran and cannot start again is said to be stopped; sync that was not running was not changed.
+#[test]
+fn a_restart_that_fails_says_sync_is_stopped_only_when_it_ran() {
+    use super::{ExplorerChangeRefused as R, SyncStart, SyncStartRefused, SyncStop, sync_back};
+    let refused = || Err(SyncStartRefused::StopUnconfirmed);
+    assert_eq!(sync_back(SyncStop::Stopped, refused()), Err(R::SyncStopped));
+    assert_eq!(sync_back(SyncStop::WasNotRunning, refused()), Err(R::Failed));
+    assert_eq!(sync_back(SyncStop::Stopped, Ok(SyncStart::Started)), Ok(()));
+    assert_eq!(
+        sync_back(SyncStop::Stopped, Ok(SyncStart::NoSession)),
+        Err(R::NotSignedIn)
+    );
+    assert!(R::SyncStopped.words().starts_with("Sync is stopped"));
+}
+
+/// Turn off: with nothing waiting, sync stops (its binding goes) and the folder's registration is removed, once.
+#[test]
+fn turn_off_removes_the_registration_of_the_configured_folder_once_nothing_waits() {
+    use super::ExplorerChangeRefused;
+    let f = fixture();
+    signed_in(&f.engine, "user-a", "a@example.eu");
+    let session = f.engine.session_turn();
+    let asked = Mutex::new(Vec::new());
+    let done = f.engine.turn_off_explorer_with(
+        session,
+        &|root| {
+            asked.lock().unwrap().push(root.to_path_buf());
+            Ok(())
+        },
+        &never_starts,
+    );
+    assert_eq!(done, Ok(()));
+    assert_eq!(*asked.lock().unwrap(), [f.root.clone()]);
+    assert_eq!(f.removed.take(), [f.root.clone()], "sync stopped first");
+
+    // The OS refused: nothing was removed, and the refusal is said.
+    let refused = f.engine.turn_off_explorer_with(session, &|_| Err(()), &never_starts);
+    assert_eq!(refused, Err(ExplorerChangeRefused::Failed));
+}
+
+/// Turn off is refused while a change waits to upload: the registration is not touched and sync is not stopped.
+#[test]
+fn turn_off_is_refused_while_a_change_waits_to_upload() {
+    use super::ExplorerChangeRefused;
+    let f = fixture();
+    signed_in(&f.engine, "user-a", "a@example.eu");
+    upload_waiting(&f);
+    let session = f.engine.session_turn();
+    let asked = Mutex::new(0u32);
+    let refused = f.engine.turn_off_explorer_with(
+        session,
+        &|_| {
+            *asked.lock().unwrap() += 1;
+            Ok(())
+        },
+        &never_starts,
+    );
+    assert_eq!(refused, Err(ExplorerChangeRefused::ChangesWait));
+    assert_eq!(*asked.lock().unwrap(), 0, "the registration was not asked to go");
+    assert!(f.removed.take().is_empty(), "sync was not stopped");
+}
+
+/// A press made under an earlier session changes nothing: no stop, no registration change.
+#[test]
+fn turn_off_and_repair_under_an_earlier_session_change_nothing() {
+    use super::ExplorerChangeRefused;
+    let f = fixture();
+    signed_in(&f.engine, "user-a", "a@example.eu");
+    let pressed_in = f.engine.session_turn();
+    signed_in(&f.engine, "user-a", "a@example.eu");
+    let asked = Mutex::new(0u32);
+    let refused = f.engine.turn_off_explorer_with(
+        pressed_in,
+        &|_| {
+            *asked.lock().unwrap() += 1;
+            Ok(())
+        },
+        &never_starts,
+    );
+    assert_eq!(refused, Err(ExplorerChangeRefused::NotSignedIn));
+    assert_eq!(*asked.lock().unwrap(), 0);
+    assert_eq!(
+        f.engine.repair_explorer_with(pressed_in, &never_starts),
+        Err(ExplorerChangeRefused::NotSignedIn)
+    );
+    assert!(f.removed.take().is_empty(), "neither stopped sync");
+}
+
 /// Explorer's question is asked on a read-only connection: another connection that holds a write transaction on the
 /// state database (the sync engine, mid-batch) neither delays it nor refuses it, and a locked screen does not either
 /// (the command is the work, not a person's call).

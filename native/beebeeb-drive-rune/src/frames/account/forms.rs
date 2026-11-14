@@ -12,7 +12,9 @@ use crate::ui::au::{self, Keys, Tone};
 use rune::El;
 
 use super::form::{self, Form, Problem};
-use super::source::{AccountSource, CodeRefused, EmailRefused, Password, Purpose, Refused};
+use super::source::{
+    AccountSource, CallKind, CodeRefused, EmailRefused, NameAnswer, NameWhy, Password, Purpose, Refused,
+};
 use super::{AccountUi, icons};
 
 /// A 28 pt button of a form's foot, and whether it has a drawn border.
@@ -28,20 +30,32 @@ fn refused(why: Refused) -> Problem {
         Refused::WrongPassword | Refused::NotConfirmed => Problem::WrongPassword,
         Refused::Locked => Problem::Locked,
         Refused::Offline => Problem::Offline,
+        Refused::Weak => Problem::Weak,
+        Refused::Unconfirmed => Problem::Unconfirmed,
     }
 }
 
 const OFFLINE: &str = "Beebeeb can't be reached. Nothing was changed.";
+/// A password change that may have been made (review of desktop#423, P2 #9): never "nothing was changed".
+pub(super) const UNCONFIRMED: &str =
+    "We couldn't confirm the change. Try signing in with your new password; if that fails, use your old one.";
 
 /// Name (DW-A64): one name for every product. Enter saves, Esc cancels.
 pub fn name(f: &Form, t: &Theme) -> El {
     let message = match f.problem {
         Some(Problem::EmptyName) => Some("A name can't be empty."),
         Some(Problem::Offline) => Some(OFFLINE),
+        Some(Problem::NameRefused) => Some("Beebeeb did not take the new name. Nothing was changed."),
         _ => None,
     };
-    let (cancel, cancel_b) = button(0, "Cancel", Look::Plain, false, t);
-    let (save, save_b) = button(1, "Save", Look::Primary, false, t);
+    let (mut cancel, cancel_b) = button(0, "Cancel", Look::Plain, f.saving_name, t);
+    let (mut save, save_b) = button(1, "Save", Look::Primary, f.saving_name, t);
+    // While the name is out the page takes no press (a second save, a way out): nothing is drawn as saved before
+    // Beebeeb answered, and its answer finds the page it is for.
+    if !f.saving_name {
+        cancel = cancel.on_press(|s: &mut State| super::go(s, "DW-A51"));
+        save = save.default_button().on_press(super::act(save_name));
+    }
     set::pane(
         vec![
             set::heading(
@@ -63,10 +77,7 @@ pub fn name(f: &Form, t: &Theme) -> El {
                 |s: &mut State| &mut s.account.form.name,
                 t,
             ),
-            fm::actions(vec![
-                (cancel.on_press(|s: &mut State| super::go(s, "DW-A51")), cancel_b),
-                (save.default_button().on_press(super::act(save_name)), save_b),
-            ]),
+            fm::actions(vec![(cancel, cancel_b), (save, save_b)]),
         ],
         t,
     )
@@ -78,11 +89,49 @@ fn save_name(ui: &mut AccountUi) -> Option<&'static str> {
         ui.form.problem = Some(Problem::EmptyName);
         return None;
     }
-    if ui.source.as_deref_mut()?.set_name(name) {
-        Some("DW-A51")
-    } else {
-        ui.form.problem = Some(Problem::Offline);
-        None
+    match ui.source.as_deref_mut()?.save_name(name) {
+        NameAnswer::Saved => Some("DW-A51"),
+        NameAnswer::NotSaved(why) => {
+            ui.form.problem = Some(not_saved(why));
+            None
+        }
+        // The answer is taken in by the window's poll (`take_in_name`).
+        NameAnswer::Pending => {
+            ui.form.problem = None;
+            ui.form.saving_name = true;
+            None
+        }
+    }
+}
+
+fn not_saved(why: NameWhy) -> Problem {
+    match why {
+        NameWhy::Offline => Problem::Offline,
+        NameWhy::Refused => Problem::NameRefused,
+    }
+}
+
+/// The poll's side of a save that was `Pending`: what Beebeeb answered, when it has. `Some(frame)`: the save
+/// worked and the page goes back to Account. The answer settles the page only while the Name page still shows.
+pub(super) fn take_in_name(ui: &mut AccountUi) -> Option<&'static str> {
+    if !ui.form.saving_name {
+        return None;
+    }
+    let answer = ui.source.as_deref_mut()?.name_result()?;
+    ui.form.saving_name = false;
+    let showing = ui.pane == super::Pane::Name;
+    match answer {
+        NameAnswer::Saved => showing.then_some("DW-A51"),
+        NameAnswer::NotSaved(why) => {
+            if showing {
+                ui.form.problem = Some(not_saved(why));
+            }
+            None
+        }
+        NameAnswer::Pending => {
+            ui.form.saving_name = true;
+            None
+        }
     }
 }
 
@@ -153,6 +202,13 @@ fn send_code(ui: &mut AccountUi) -> Option<&'static str> {
         form::focus(f, Some(form::EMAIL_KEY));
         return None;
     }
+    if f.waiting.is_some() {
+        return None;
+    }
+    if source.start_call(CallKind::StartEmail, &address, &f.current.text) {
+        f.waiting = Some(CallKind::StartEmail);
+        return None;
+    }
     let confirmation = match source.step_up(Password::from_field(&f.current.text), Purpose::ChangeEmail) {
         Ok(confirmation) => confirmation,
         Err(why) => {
@@ -186,13 +242,27 @@ pub(super) fn code_error(words: &str, t: &Theme) -> El {
 }
 
 /// "Didn't get it? Send again in 42 s" (DW-A66, DW-A81).
-pub(super) fn send_again(source: &dyn AccountSource, t: &Theme) -> El {
+pub(super) fn send_again(source: &dyn AccountSource, email: bool, t: &Theme) -> El {
+    let offered = if email {
+        source.can_send_again()
+    } else {
+        source.can_send_again_deletion()
+    };
+    if !offered {
+        // Nothing sends it again: no link that does nothing.
+        return rune::el().key("resend-none");
+    }
     let wait = source.resend_wait();
     let link = fm::link(0, "Send again", fm::CAP, wait > 0, t);
     let link = if wait > 0 {
         link
     } else {
-        link.on_press(|s: &mut State| {
+        link.on_press(move |s: &mut State| {
+            // The email's code is sent on the source's worker (the answer settles on the page); a source that
+            // answers at once, and the deletion's code, use `send_again`.
+            if email && super::calls::start(&mut s.account, CallKind::ResendEmail, "", "") {
+                return;
+            }
             if let Some(source) = s.account.source.as_deref_mut() {
                 source.send_again();
             }
@@ -228,17 +298,21 @@ pub fn email_code(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
             t,
         ),
     ];
-    if f.problem.is_some() {
-        children.push(code_error(
-            if f.problem == Some(Problem::Offline) {
-                OFFLINE
-            } else {
-                "That code is wrong or has expired. Check it, or send a new one."
-            },
-            t,
-        ));
+    let words = match f.problem {
+        None => None,
+        Some(Problem::Offline) => Some(OFFLINE.to_string()),
+        // The wait counts down on the source's clock; at 0 there is nothing left to say.
+        Some(Problem::ResendWait) => {
+            let wait = source.resend_wait();
+            (wait > 0).then(|| format!("Wait {wait} s before asking again."))
+        }
+        Some(Problem::ResendLimit) => Some("No more codes for this change. Start again.".to_string()),
+        Some(_) => Some("That code is wrong or has expired. Check it, or send a new one.".to_string()),
+    };
+    if let Some(words) = words {
+        children.push(code_error(&words, t));
     }
-    children.push(send_again(source, t));
+    children.push(send_again(source, true, t));
     children.push(fm::actions(vec![
         (back.on_press(|s: &mut State| super::go(s, "DW-A65")), back_b),
         (confirm, confirm_b),
@@ -248,6 +322,9 @@ pub fn email_code(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
 
 fn confirm_email(ui: &mut AccountUi) -> Option<&'static str> {
     let code = form::code(&ui.form, 8);
+    if ui.form.waiting.is_some() || super::calls::start(ui, CallKind::ConfirmEmail, &code, "") {
+        return None;
+    }
     match ui.source.as_deref_mut()?.confirm_email_change(&code) {
         Ok(()) => Some("DW-A51"),
         Err(why) => {
@@ -268,6 +345,7 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
         Some(Problem::WrongPassword) => Some("Current password is incorrect. Nothing was changed."),
         Some(Problem::Locked) => Some("Unlock first, then change your password."),
         Some(Problem::Offline) => Some(OFFLINE),
+        Some(Problem::Unconfirmed) => Some(UNCONFIRMED),
         _ => None,
     };
     let weak = f.problem == Some(Problem::Weak);

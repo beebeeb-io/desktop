@@ -180,12 +180,14 @@ impl BoardAccount {
                     name: "iCloud Keychain".into(),
                     added: "28 Oct".into(),
                     can_unlock: true,
+                    unlock_known: true,
                 },
                 Passkey {
                     id: "pk-1password".into(),
                     name: "1Password".into(),
                     added: "2 Nov".into(),
                     can_unlock: false,
+                    unlock_known: true,
                 },
             ],
             activity: true,
@@ -559,6 +561,7 @@ impl AccountSource for BoardAccount {
             name: "Windows Hello".into(),
             added: "Today".into(),
             can_unlock: true,
+            unlock_known: true,
         });
         self.wire.push("POST account/passkeys attestation".into());
         Ok(())

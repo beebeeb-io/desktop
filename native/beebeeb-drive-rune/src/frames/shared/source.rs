@@ -189,6 +189,32 @@ pub enum Notice {
     ChangeRefused,
     /// Newer lists could not be read; what is shown may be out of date.
     RefreshFailed,
+    /// Decline met an invitation that had been accepted already.
+    AlreadyAccepted,
+    /// "Remove from my list" met a file request that is still open.
+    RequestStillOpen,
+}
+
+/// How an invitation sent with [`SharedSource::start_invite`] ended (DW-0514).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InviteResult {
+    /// The invitation went out: they show as invited until they accept.
+    Sent,
+    /// They had a key: the item was shared with them at once.
+    HasAccess,
+    /// They accepted; the approval is still to come.
+    WaitingForApproval,
+    /// Their key is not the one the person compared safety numbers against: nothing was shared.
+    KeyChanged,
+    /// Nothing was shared, in the words to show.
+    Refused(&'static str),
+}
+
+impl InviteResult {
+    /// Whether the invitation reached Beebeeb: the dialog closes on these and only on these.
+    pub fn sent(self) -> bool {
+        matches!(self, Self::Sent | Self::HasAccess | Self::WaitingForApproval)
+    }
 }
 
 /// What [`SharedSource::pump`] took in.
@@ -215,7 +241,7 @@ pub trait SharedSource {
     fn requests(&self) -> Vec<Request>;
     /// Accept an invitation: it joins `with_me`. `false`: no such invitation.
     fn accept(&mut self, id: &str) -> bool;
-    /// Decline an invitation: it goes; the sender is not told why.
+    /// Decline an invitation: it goes, and the sender sees that it was declined.
     fn decline(&mut self, id: &str) -> bool;
     /// Keep something shared with the person on this PC.
     fn keep_offline(&mut self, id: &str) -> bool;
@@ -236,6 +262,17 @@ pub trait SharedSource {
     /// Share with someone by their email address (DW-0514); they show as invited until they
     /// accept. `false`: no such share, or they are on it already.
     fn invite(&mut self, share: &str, email: &str, access: Access) -> bool;
+    /// Send an invitation to `email` for the share `share` (an item's id: also one not shared with anyone yet), with
+    /// the access Beebeeb gives a new invitation. Answered later, through [`Self::invite_answer`]. `false`: refused
+    /// at once (nothing typed, one for this share already on its way, or nothing to send it with); nothing was sent.
+    fn start_invite(&mut self, _share: &str, _email: &str) -> bool {
+        false
+    }
+    /// The next answer to a [`Self::start_invite`], with its share. Only answers of the session and account the
+    /// invitation was sent under: any other is dropped before it gets here.
+    fn invite_answer(&mut self) -> Option<(String, InviteResult)> {
+        None
+    }
     /// How far the lists have got. A source that answers at once is always `Ready`.
     fn loaded(&self) -> Loaded {
         Loaded::Ready
@@ -260,6 +297,8 @@ pub struct BoardShared {
     members: Vec<(String, Vec<Member>)>,
     links: Vec<LinkShare>,
     requests: Vec<Request>,
+    /// The answers to invitations sent, in order (the board answers at once).
+    invite_answers: std::collections::VecDeque<(String, InviteResult)>,
 }
 
 fn from(id: &str, name: &str, kind: Kind, date: &str, size: &str, who: (&str, &str, char), pc: PcState) -> Row {
@@ -509,6 +548,7 @@ impl BoardShared {
                     RequestState::Expired,
                 ),
             ],
+            invite_answers: Default::default(),
         }
     }
 
@@ -666,6 +706,18 @@ impl SharedSource for BoardShared {
         });
         self.sync_row(share);
         true
+    }
+    /// The board's invitation: the address joins the share at once, with the access a new invitation gets
+    /// (Can view), and the answer waits for the next poll.
+    fn start_invite(&mut self, share: &str, email: &str) -> bool {
+        if !self.invite(share, email, Access::View) {
+            return false;
+        }
+        self.invite_answers.push_back((share.to_string(), InviteResult::Sent));
+        true
+    }
+    fn invite_answer(&mut self) -> Option<(String, InviteResult)> {
+        self.invite_answers.pop_front()
     }
 }
 

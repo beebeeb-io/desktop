@@ -339,20 +339,22 @@ fn sign_in(ui: &Ui, name: &str, k: &mut Keys, t: &Theme) -> El {
             t.text_secondary,
         );
     }
-    c = c.child(
-        row()
-            .key("au-links")
-            .w_full()
-            .h(15.0)
-            .center_y()
-            .justify_between()
-            .child(way_out(au::link(k, "Forgot password?", None, t), ui, Ui::forgot))
-            .child(way_out(
-                au::link(k, "Use a passkey", Some(&icons::PASSKEY), t),
-                ui,
-                Ui::use_passkey,
-            )),
-    );
+    // "Use a passkey" is drawn only where the source can sign in with one.
+    let mut links = row()
+        .key("au-links")
+        .w_full()
+        .h(15.0)
+        .center_y()
+        .justify_between()
+        .child(way_out(au::link(k, "Forgot password?", None, t), ui, Ui::forgot));
+    if ui.passkey_available() {
+        links = links.child(way_out(
+            au::link(k, "Use a passkey", Some(&icons::PASSKEY), t),
+            ui,
+            Ui::use_passkey,
+        ));
+    }
+    c = c.child(links);
 
     let with_card = ui.shared().is_some();
     let (label, state) = if ui.busy {

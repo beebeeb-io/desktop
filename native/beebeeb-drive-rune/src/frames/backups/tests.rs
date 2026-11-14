@@ -158,7 +158,7 @@ fn the_six_built_frames_show_the_boards_words() {
     let rt = runtime("DW-0742");
     assert_eq!(text(&rt, "dlg-title"), "Delete this backup?");
     assert!(text(&rt, "dlg-text-0").starts_with("4,120 photos and 38 GB will be moved to Trash."));
-    assert_eq!(rt.state.backups.code_len(), 2);
+    assert_eq!(rt.state.backups.code_len(), 13);
 
     let rt = runtime("DW-0741");
     assert_eq!(text(&rt, "set-title"), "Couldn't back up");
@@ -292,31 +292,34 @@ fn what_could_not_back_up_retries_one_or_all_and_never_an_exclusion() {
 }
 
 #[test]
-fn deleting_a_devices_backup_needs_six_digits_and_a_code_the_engine_accepts() {
+fn deleting_a_devices_backup_needs_the_account_password_the_engine_accepts() {
     let mut rt = runtime("DW-0737");
     click(&mut rt, "item-1-1");
     assert_eq!(rt.state.backups.page, Page::Device("ipad".into()));
     click(&mut rt, "item-2-0");
     assert_eq!(info(&rt, "dlg").role, "dialog");
-    assert!(!info(&rt, "btn-0").focusable, "Delete backup is off until six digits");
-    click(&mut rt, "btn-0");
-    assert_eq!(source(&rt).devices().len(), 3);
-
-    type_text(&mut rt, "51x4");
-    assert_eq!(rt.state.backups.code_len(), 3, "digits only");
-    press(&mut rt, Key::Backspace);
-    assert_eq!(rt.state.backups.code_len(), 2);
+    assert!(
+        !info(&rt, "btn-0").focusable,
+        "Delete backup is off until a password is typed"
+    );
+    assert!(
+        !has(&rt, "secure-code"),
+        "no authenticator code boxes: the engine proves the password"
+    );
     press(&mut rt, Key::Enter);
-    assert_eq!(source(&rt).devices().len(), 3, "Enter does nothing before six digits");
-    type_text(&mut rt, "42639");
-    assert_eq!(rt.state.backups.code_len(), 6, "six at most");
+    assert_eq!(source(&rt).devices().len(), 3, "Enter does nothing before a password");
+
+    click(&mut rt, super::view::PASSWORD_KEY);
+    type_text(&mut rt, "pw");
+    assert_eq!(rt.state.backups.code_len(), 2);
     assert!(info(&rt, "btn-0").focusable);
 
-    // A code the engine does not accept: the boxes empty, the dialog stays, nothing is deleted.
+    // A password the engine does not accept: the field empties, the dialog stays, nothing is deleted.
     let mut refused = runtime("DW-0739");
     click(&mut refused, "item-2-0");
-    type_text(&mut refused, "000000");
-    press(&mut refused, Key::Enter);
+    click(&mut refused, super::view::PASSWORD_KEY);
+    type_text(&mut refused, "wrong password");
+    click(&mut refused, "btn-0");
     assert_eq!(source(&refused).devices().len(), 3);
     assert_eq!(refused.state.backups.code_len(), 0);
     assert!(refused.state.backups.dialog.is_some());
@@ -325,42 +328,29 @@ fn deleting_a_devices_backup_needs_six_digits_and_a_code_the_engine_accepts() {
     assert_eq!(source(&rt).devices().len(), 2);
     assert_eq!(rt.state.backups.page, Page::Section);
     assert_eq!(rt.state.backups.dialog, None);
-    assert_eq!(rt.state.backups.code_len(), 0, "the code is wiped after use");
+    assert_eq!(rt.state.backups.code_len(), 0, "the password is wiped after use");
     assert_eq!(text(&rt, "item-1-1-title"), "Old iPhone");
 }
 
 #[test]
-fn the_code_is_in_no_name_and_no_text_of_the_element_tree() {
+fn the_password_is_in_no_name_and_no_text_of_the_element_tree() {
     let mut rt = runtime("DW-0739");
     click(&mut rt, "item-2-0");
-    type_text(&mut rt, "73913");
-    assert_eq!(rt.state.backups.code_len(), 5);
-    assert_eq!(info(&rt, "secure-code").role, "textbox");
-    assert_eq!(label(&rt, "secure-code"), "Authenticator code, 6 digits, 5 entered");
-    assert!(has(&rt, "code-4-digit") && !has(&rt, "code-5-digit"));
-    let dialog = info(&rt, "dlg").rect;
+    click(&mut rt, super::view::PASSWORD_KEY);
+    type_text(&mut rt, "hunter22x");
+    assert_eq!(rt.state.backups.code_len(), 9);
     for e in rt.elements() {
-        // The dialog's own sentences hold the board's "4,120 photos": only what sits inside
-        // the code field is checked for digits, and everything for the whole code.
-        let inside_field = e
-            .key
-            .as_deref()
-            .is_some_and(|k| k.starts_with("code-") || k == "secure-code");
         for words in [e.label.as_deref(), e.text.as_deref(), e.help.as_deref()]
             .into_iter()
             .flatten()
         {
-            assert!(!words.contains("73913"), "{:?} holds the code: {words:?}", e.key);
-            if inside_field && e.key.as_deref() != Some("secure-code") && e.key.as_deref() != Some("code-label") {
-                assert!(
-                    !words.chars().any(|c| c.is_ascii_digit()),
-                    "{:?} shows a digit to the tree: {words:?}",
-                    e.key
-                );
-            }
+            assert!(
+                !words.contains("hunter22x"),
+                "{:?} holds the password: {words:?}",
+                e.key
+            );
         }
     }
-    assert!(dialog[2] > 0.0);
     // Closing the dialog wipes what was typed.
     press(&mut rt, Key::Escape);
     assert_eq!(rt.state.backups.code_len(), 0);
@@ -395,7 +385,7 @@ fn rows_that_lead_elsewhere_ask_the_shell_and_carry_the_devices_id() {
 #[test]
 fn leaving_the_section_forgets_what_was_open_and_wipes_the_code() {
     let mut rt = runtime("DW-0742");
-    assert_eq!(rt.state.backups.code_len(), 2);
+    assert_eq!(rt.state.backups.code_len(), 13);
     rt.update(|s, _| crate::frames::settings::go(s, "DW-0701"));
     rt.frame(0.0);
     assert_eq!(rt.state.backups.dialog, None);

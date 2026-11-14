@@ -37,7 +37,8 @@ use std::time::Duration;
 
 use zeroize::Zeroizing;
 
-use beebeeb_engine::app::lock_api::LockState;
+use beebeeb_engine::app::lock_api::{LockRefused, LockState};
+use beebeeb_engine::app::lock_password_api::ScreenUnlock;
 use beebeeb_engine::app::{CredentialStores, Engine};
 
 use super::hello::{HelloCancel, HelloDone, HelloPrompter, HelloResult, NoHello};
@@ -48,8 +49,8 @@ use beebeeb_engine::app::signup_api::SignupAttempt;
 mod signup;
 use crate::frames::signin::create_source::{PasswordVerdict, SignUpEvent};
 use crate::frames::signin::source::{
-    CodeKind, GateState, HelloOutcome, NextAfterSignIn, PasskeyOutcome, PhraseProblem, SharedSession, SignInEvent,
-    SignInProblem, SignInSource,
+    CodeKind, GateState, HelloOutcome, NextAfterSignIn, PasskeyOutcome, PhraseProblem, ScreenPasswordOutcome,
+    SharedSession, SignInEvent, SignInProblem, SignInSource,
 };
 
 /// The waits an answer can belong to. An attempt of one is over when the person leaves its screen.
@@ -59,8 +60,13 @@ enum Wait {
     TwoFactor,
     Restore,
     Unlock,
+    /// A passkey sign-in: the system's dialog, on a thread of its own.
+    Passkey,
     /// The countdown after "too many tries".
     Retry,
+    /// The screen lock's password check, and the countdown of the wait after it.
+    ScreenPassword,
+    ScreenWait,
     /// The lock screen's Windows Hello prompt.
     Hello,
     /// Sign-up's steps and the wait for a new code (`signup.rs`).
@@ -179,6 +185,12 @@ impl<C: CredentialStores> EngineSignInSource<C> {
                 SignInEvent::SignedIn(Err(SignInProblem::RateLimited { seconds })) => Some(*seconds),
                 _ => None,
             };
+            let screen_wait_seconds = match &event {
+                SignInEvent::ScreenPassword(
+                    ScreenPasswordOutcome::Wait { wait_ms } | ScreenPasswordOutcome::Wrong { wait_ms },
+                ) => Some(seconds_up(*wait_ms)),
+                _ => None,
+            };
             let resend_seconds = match &event {
                 SignInEvent::SignUp(SignUpEvent::CodeSent(Ok(sent))) => Some(sent.resend_seconds),
                 _ => None,
@@ -190,6 +202,17 @@ impl<C: CredentialStores> EngineSignInSource<C> {
             // After the answer is in the channel: no tick can come before the problem it counts down.
             if let Some(seconds) = wait_seconds {
                 count_down(engine, &answers, &attempts, seconds, tick);
+            }
+            if let Some(seconds) = screen_wait_seconds.filter(|seconds| *seconds > 0) {
+                count_down_as(
+                    engine,
+                    &answers,
+                    &attempts,
+                    seconds,
+                    tick,
+                    Wait::ScreenWait,
+                    |seconds| SignInEvent::ScreenWaitLeft { seconds },
+                );
             }
             engine.wake_host();
         });
@@ -212,6 +235,31 @@ impl<C: CredentialStores> EngineSignInSource<C> {
             event,
         });
     }
+}
+
+/// The engine's answer for the window.
+fn map_screen_unlock(answer: Result<ScreenUnlock, LockRefused>) -> ScreenPasswordOutcome {
+    match answer {
+        Ok(ScreenUnlock::Opened) => ScreenPasswordOutcome::Opened,
+        Ok(ScreenUnlock::Wrong { wait_ms }) => ScreenPasswordOutcome::Wrong { wait_ms },
+        Ok(ScreenUnlock::Wait { wait_ms }) => ScreenPasswordOutcome::Wait { wait_ms },
+        Ok(ScreenUnlock::ServerLimit { wait_ms }) => ScreenPasswordOutcome::ServerLimit { wait_ms },
+        Ok(ScreenUnlock::LocalCheckOff) => ScreenPasswordOutcome::LocalCheckOff,
+        Ok(ScreenUnlock::OfflineNoRecord) => ScreenPasswordOutcome::OfflineNoRecord,
+        Ok(ScreenUnlock::AccountUpgradeNeeded) => ScreenPasswordOutcome::AccountUpgradeNeeded,
+        Ok(ScreenUnlock::SessionEnded) => ScreenPasswordOutcome::SessionEnded,
+        Err(LockRefused::Overtaken | LockRefused::NotAtThisLevel | LockRefused::NeedsThePassword) => {
+            ScreenPasswordOutcome::Overtaken
+        }
+        Err(LockRefused::NothingTyped | LockRefused::AlreadyChecking | LockRefused::CouldNotCheck) => {
+            ScreenPasswordOutcome::Failed
+        }
+    }
+}
+
+/// Whole seconds of a wait in milliseconds, rounded up (a wait of 1 ms is a second).
+fn seconds_up(wait_ms: u64) -> u32 {
+    u32::try_from(wait_ms.div_ceil(1_000)).unwrap_or(u32::MAX)
 }
 
 /// A secret as the engine takes it: one wiping buffer, made at its full size so it never moves.
@@ -259,6 +307,10 @@ fn undo_left_step<C: CredentialStores>(
         (_, Some(LockState::ScreenLocked)) if opened => {
             let _ = engine.lock_screen();
         }
+        // A screen password the person left finished anyway and opened the screen: locked again.
+        (SignInEvent::ScreenPassword(ScreenPasswordOutcome::Opened), _) => {
+            let _ = engine.lock_screen();
+        }
         (_, Some(_)) if opened => {
             let _ = engine.lock_vault();
         }
@@ -270,7 +322,8 @@ fn undo_left_step<C: CredentialStores>(
         (
             SignInEvent::TwoFactor(Ok(_))
             | SignInEvent::PhraseRestored(Ok(_))
-            | SignInEvent::SignUp(SignUpEvent::Created(Ok(_))),
+            | SignInEvent::SignUp(SignUpEvent::Created(Ok(_)))
+            | SignInEvent::Passkey(PasskeyOutcome::Succeeded(_)),
             None,
         ) => {
             if engine.sign_out_keeping_local_data().is_err() {
@@ -302,12 +355,27 @@ fn count_down<C: CredentialStores>(
     seconds: u32,
     tick: Duration,
 ) {
-    let attempt = attempts[Wait::Retry as usize].fetch_add(1, Ordering::SeqCst) + 1;
+    count_down_as(engine, answers, attempts, seconds, tick, Wait::Retry, |seconds| {
+        SignInEvent::RetryAfter { seconds }
+    });
+}
+
+/// [`count_down`] for the wait `wait`, its event made by `event`.
+fn count_down_as<C: CredentialStores>(
+    engine: &Arc<Engine<C>>,
+    answers: &mpsc::Sender<Answer>,
+    attempts: &Arc<[AtomicU64; WAITS]>,
+    seconds: u32,
+    tick: Duration,
+    wait: Wait,
+    event: fn(u32) -> SignInEvent,
+) {
+    let attempt = attempts[wait as usize].fetch_add(1, Ordering::SeqCst) + 1;
     let over = || {
         let _ = answers.send(Answer {
-            wait: Wait::Retry,
+            wait,
             attempt,
-            event: SignInEvent::RetryAfter { seconds: 0 },
+            event: event(0),
         });
     };
     if seconds == 0 {
@@ -318,15 +386,14 @@ fn count_down<C: CredentialStores>(
         let mut left = seconds;
         while left > 0 {
             thread::sleep(tick);
-            if attempts_in[Wait::Retry as usize].load(Ordering::SeqCst) != attempt {
+            if attempts_in[wait as usize].load(Ordering::SeqCst) != attempt {
                 return;
             }
             left -= 1;
-            let event = SignInEvent::RetryAfter { seconds: left };
             let tick = Answer {
-                wait: Wait::Retry,
+                wait,
                 attempt,
-                event,
+                event: event(left),
             };
             if answers_in.send(tick).is_err() {
                 return;
@@ -453,8 +520,53 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
         );
     }
 
+    /// Core's passkey sign-in starts from an address: [`SignInSource::begin_passkey_for`] is the call a screen makes.
     fn begin_passkey(&mut self) {
-        self.not_bound("begin_passkey", SignInEvent::Passkey(PasskeyOutcome::Unavailable));
+        self.begin_passkey_for("");
+    }
+
+    fn passkey_available(&self) -> bool {
+        self.engine.passkeys_supported()
+    }
+
+    /// The system's passkey dialog for the address typed, on a thread of its own (it stays up for as long as the
+    /// person takes; the shared worker keeps serving the other steps). The person leaving ([`Self::cancel_passkey`])
+    /// moves the attempt on: its answer is dropped, and a sign-in it completed is undone.
+    fn begin_passkey_for(&mut self, email: &str) {
+        let attempt = self.next_attempt(Wait::Passkey);
+        let (engine, answers, attempts) = (self.engine.clone(), self.answers.clone(), self.attempts.clone());
+        let email = email.to_string();
+        let started = thread::Builder::new().name("signin-passkey".into()).spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::passkeys::sign_in_outcome(&engine, &email)
+            }))
+            .unwrap_or(PasskeyOutcome::Unavailable);
+            let event = SignInEvent::Passkey(outcome);
+            if attempts[Wait::Passkey as usize].load(Ordering::SeqCst) != attempt {
+                undo_left_step(&engine, &answers, &event, None);
+            } else {
+                let _ = answers.send(Answer {
+                    wait: Wait::Passkey,
+                    attempt,
+                    event,
+                });
+            }
+            engine.wake_host();
+        });
+        if started.is_err() {
+            log("sign-in: the passkey thread did not start");
+            let _ = self.answers.send(Answer {
+                wait: Wait::Passkey,
+                attempt,
+                event: SignInEvent::Passkey(PasskeyOutcome::Unavailable),
+            });
+        }
+    }
+
+    /// The person left while the dialog was up. The system's dialog cannot be closed from here: it ends when they
+    /// close it, and nothing it did is kept (an answer of an attempt that was left is undone, never drawn).
+    fn cancel_passkey(&mut self) {
+        self.next_attempt(Wait::Passkey);
     }
 
     /// The account's password for a lock: a closed vault, or a locked screen whose Windows Hello cannot answer.
@@ -470,6 +582,31 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
             move |engine| match engine.unlock_vault_with_password(password) {
                 Ok(next) => SignInEvent::VaultUnlocked(Ok(map_next(next))),
                 Err(problem) => SignInEvent::VaultUnlocked(Err(map_problem(problem))),
+            },
+        );
+    }
+
+    /// The screen lock's password: counted tries and the server's proof that makes no session
+    /// ([`Engine::unlock_screen_with_password`]). The session's turn is read HERE, at the press: an answer that
+    /// outlived a lock, a sign-out or another sign-in is dropped (`Overtaken`), and a press that was superseded
+    /// has its answer dropped by `poll`. A password the person left behind that opened the screen locks it again
+    /// (`undo_left_step`). `AccountUpgradeNeeded` closes the vault so the strong unlock's screen follows.
+    fn begin_screen_password(&mut self, password: &str) {
+        let password = secret(password);
+        let asked_at = self.engine.session_turn();
+        *lock(&self.unlocking) = Some(LockState::ScreenLocked);
+        self.ask(
+            Wait::ScreenPassword,
+            SignInEvent::ScreenPassword(ScreenPasswordOutcome::Failed),
+            move |engine| {
+                if engine.session_turn() != asked_at {
+                    return SignInEvent::ScreenPassword(ScreenPasswordOutcome::Overtaken);
+                }
+                let outcome = map_screen_unlock(engine.unlock_screen_with_password(password));
+                if outcome == ScreenPasswordOutcome::AccountUpgradeNeeded {
+                    let _ = engine.lock_vault();
+                }
+                SignInEvent::ScreenPassword(outcome)
             },
         );
     }
@@ -577,6 +714,36 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
             log("sign-in: leaving the step could not be passed to the engine");
         }
     }
+}
+
+/// Opens one of our own addresses by the same OS call a file opens with: the address is one argument, never a
+/// command line. Only three schemes open (`https://`, `mailto:`, `ms-settings:`); anything else is refused in
+/// every build. The addresses come from `shell::web_pages` only, never from the server, a file or a typed string.
+pub fn open_web_page(url: &str) -> Result<(), ()> {
+    if !is_allowed_address(url) {
+        return Err(());
+    }
+    // A test run opens nothing on the machine it runs on; it records what it was asked to open.
+    #[cfg(test)]
+    {
+        OPENED.with(|o| o.borrow_mut().push(url.to_string()));
+        Ok(())
+    }
+    #[cfg(not(test))]
+    super::open_path(std::path::Path::new(url)).map_err(|_| ())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The addresses `open_web_page` accepted on this thread, oldest first (tests only).
+    pub(crate) static OPENED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Whether `url` starts with one of the three schemes the opener allows.
+pub fn is_allowed_address(url: &str) -> bool {
+    ["https://", "mailto:", "ms-settings:"]
+        .iter()
+        .any(|scheme| url.starts_with(scheme))
 }
 
 #[cfg(test)]

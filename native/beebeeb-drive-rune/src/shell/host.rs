@@ -462,12 +462,16 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= crate::frames::photos::poll(s, tx);
     // Search: a gate or account change drops its names; opening it and a new query ask the source; answers come in.
     changed |= crate::frames::search::poll(s, tx);
+    // Backups: the engine's answers, the section opening, a pass that ended (`frames::backups::poll`).
+    changed |= crate::frames::backups::poll(s, tx);
     // This PC's answers and refusals (`frames::this_pc::poll`).
     changed |= crate::frames::this_pc::poll(s, tx);
     // The speed test's steps (Settings, Bandwidth).
     changed |= crate::frames::settings::bandwidth::poll(s, _seconds, tx);
     // What the sign-in screens asked the shell for.
     changed |= drain_signin_intents(s);
+    // What Settings asked for: web pages, the clipboard, Windows Settings.
+    changed |= super::intents::drain_in_poll(s, tx);
     // "Open my Beebeeb" at the end of the first run starts the first-time guide (DW-0380).
     changed |= crate::frames::signin::setup::guide::poll(s, tx);
     // The first run's answers (File Explorer finished, a switch was set, the first run ended).
@@ -480,11 +484,13 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     let first_run_shows = s.shell.app.gate() == super::app::GateState::FirstRun;
     if s.shell.app.gate() == gate_before && s.setup_source.is_some() {
         // Another account under the same gate: the first run is the new session's, from its first step. And a
-        // gate that was moved by a refresh outside this poll (the b's menu) still gets, or loses, its first run.
+        // gate that was moved by a refresh outside this poll (the b's menu) still gets, or loses, its first run,
+        // and its start (the same condition `on_gate_change` uses).
         let another_account = first_run_of.is_some_and(|before| before.as_deref() != s.shell.app.account());
         if another_account || s.setup.is_some() != first_run_shows {
             start_first_run(s);
-            if first_run_shows {
+            let gate = s.shell.app.gate();
+            if gate == super::app::GateState::FirstRun || gate == super::app::GateState::Ready {
                 s.shell.start_sync();
             }
             changed = true;
@@ -607,6 +613,10 @@ fn poll_capture(s: &mut State, tx: &mut Tx) -> bool {
     leaving
 }
 
+fn open_web_page(url: &str) {
+    super::intents::open_for_signin(url);
+}
+
 /// Takes every intent the sign-in screens queued (`signin::Ui::take_intents`) and acts on it. A finished
 /// sign-in is not routed from here: the session's gate is the one authority on which screen shows, and
 /// [`on_gate_change`] runs when it opens. What the shell cannot do yet is logged, never dropped silently.
@@ -623,12 +633,15 @@ pub fn drain_signin_intents(s: &mut State) -> bool {
             // Sign-up is a set of screens of the same window (DW-A31 to DW-A44), where the source has it.
             SignIn::CreateAccount => {
                 if !s.signin.as_mut().is_some_and(crate::frames::signin::Ui::start_create) {
-                    log("NotWired(sign-in: create an account)");
+                    // No sign-up screens in this build: the web page creates the account.
+                    open_web_page(super::web_pages::SIGN_UP_PAGE);
                 }
             }
-            SignIn::OpenTerms | SignIn::OpenPrivacy => log("NotWired(sign-up: open a page in the browser)"),
+            SignIn::OpenRecoveryPage => open_web_page(super::web_pages::RECOVERY_PAGE),
+            SignIn::OpenTerms => open_web_page(super::web_pages::TERMS_PAGE),
+            SignIn::OpenPrivacy => open_web_page(super::web_pages::PRIVACY_PAGE),
             SignIn::SavePhraseAsFile | SignIn::PrintPhrase => log("NotWired(sign-up: save or print the phrase)"),
-            SignIn::WriteToSupport => log("NotWired(sign-in: write to support)"),
+            SignIn::WriteToSupport => open_web_page(&super::web_pages::support_mailto("Help signing in")),
             SignIn::CancelBilling | SignIn::EraseAllFiles | SignIn::DeleteAccount => {
                 log("NotWired(sign-in: an account dialog)")
             }

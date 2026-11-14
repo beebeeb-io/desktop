@@ -9,7 +9,7 @@
 
 use rune::{SecretCopy, TextEdit};
 
-use super::source::{Secret, Setup, StepUp};
+use super::source::{CallKind, Secret, Setup, StepUp};
 use super::{AccountUi, CodeFor, Dialog, Pane};
 
 /// The text inputs' keys (tests, `Tx::focus`).
@@ -36,6 +36,14 @@ pub enum Problem {
     WrongCode,
     /// "I've opened the link", and the link has not been used.
     LinkNotUsed,
+    /// "Send again" was asked too soon: the page says how long to wait (the source counts it down).
+    ResendWait,
+    /// No more codes for this change.
+    ResendLimit,
+    /// Beebeeb did not take the new name (it answered with an error, or no longer accepts the session).
+    NameRefused,
+    /// A password change whose end is not known: it may have been made.
+    Unconfirmed,
 }
 
 pub struct Form {
@@ -64,10 +72,20 @@ pub struct Form {
     pub copied: Option<SecretCopy>,
     /// The file the backup codes were saved to, or why not: said under the buttons.
     pub saved: Option<Result<String, String>>,
+    /// The new name was sent and Beebeeb has not answered: Save waits and takes no press.
+    pub saving_name: bool,
+    /// The call that is out and not answered yet (`calls`): a press while it is does nothing.
+    pub waiting: Option<CallKind>,
+    /// The first code was wrong and the key it belonged to was replaced: the page says to scan again.
+    pub key_replaced: bool,
 }
 
-fn secure() -> TextEdit {
+pub(super) fn secure() -> TextEdit {
     TextEdit::new("").secure()
+}
+
+pub(super) fn fresh_code() -> TextEdit {
+    code_edit()
 }
 
 fn code_edit() -> TextEdit {
@@ -92,6 +110,9 @@ impl Default for Form {
             renaming: None,
             copied: None,
             saved: None,
+            saving_name: false,
+            waiting: None,
+            key_replaced: false,
         }
     }
 }
@@ -143,6 +164,8 @@ pub fn code(form: &Form, count: usize) -> String {
 pub fn arrive(ui: &mut AccountUi) {
     let f = &mut ui.form;
     f.problem = None;
+    f.waiting = None;
+    f.key_replaced = false;
     f.renaming = None;
     f.saved = None;
     focus(f, None);
@@ -165,6 +188,12 @@ pub fn arrive(ui: &mut AccountUi) {
     if let Some(dialog) = &ui.dialog {
         if matches!(dialog, Dialog::Code(_)) {
             focus(f, Some(CODE_KEY));
+        }
+        // Removing a passkey asks the password in its confirm (a source that needs it).
+        if matches!(dialog, Dialog::RemovePasskey(_))
+            && ui.source.as_deref().is_some_and(|s| s.passkeys_need_password())
+        {
+            focus(f, Some(CURRENT_KEY));
         }
         return;
     }
@@ -191,11 +220,11 @@ pub fn arrive(ui: &mut AccountUi) {
             focus(f, Some(CODE_KEY));
         }
         Pane::TwoFactorSetup => {
-            f.current = secure();
-            if f.setup.is_none() {
-                f.setup = ui.source.as_deref_mut().and_then(|s| s.begin_two_factor(None).ok());
+            ui.form.current = secure();
+            if ui.form.setup.is_none() && !super::calls::start(ui, CallKind::BeginTwoFactor, "", "") {
+                ui.form.setup = ui.source.as_deref_mut().and_then(|s| s.begin_two_factor(None).ok());
             }
-            focus(f, Some(CODE_KEY));
+            focus(&mut ui.form, Some(CODE_KEY));
         }
         _ => f.current = secure(),
     }

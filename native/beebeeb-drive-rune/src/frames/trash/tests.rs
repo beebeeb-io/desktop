@@ -1,6 +1,7 @@
 //! Trash: the list, the empty state, selection and the intents.
 
 use crate::frames::Intent;
+use crate::frames::shared::dialogs::Dialog;
 use crate::frames::shared::tests::{alt, click, focused, info, press, press_with, runtime, space};
 use rune::Key;
 
@@ -26,25 +27,27 @@ fn empty_trash_asks_for_the_warning_and_delete_does_too() {
         (Some("button"), Some("Empty Trash\u{2026}"))
     );
     click(&mut rt, "btn-empty-trash");
-    assert_eq!(rt.state.frames.intents, vec![Intent::Frame("DW-0749")]);
+    assert_eq!(rt.state.frames.shared.dialog, Some(Dialog::EmptyTrash));
+    assert!(
+        rt.state.frames.intents.is_empty(),
+        "the dialog opens here, nothing is left to drain"
+    );
     // The list's keys, with focus nowhere (a focused button keeps the arrows for itself).
     let mut rt = runtime(super::scenes::dw_0747);
-    rt.state.frames.intents.push(Intent::Frame("DW-0749"));
     press(&mut rt, Key::Delete);
     assert_eq!(
-        rt.state.frames.intents.len(),
-        1,
+        rt.state.frames.shared.dialog, None,
         "Delete with nothing selected does nothing"
     );
     press(&mut rt, Key::Down);
     press(&mut rt, Key::Down);
     assert_eq!(rt.state.frames.trash.selected, Some(1));
     press(&mut rt, Key::Enter);
-    assert_eq!(rt.state.frames.intents.len(), 1, "nothing in Trash opens");
+    assert_eq!(rt.state.frames.shared.dialog, None, "nothing in Trash opens");
     press(&mut rt, Key::Delete);
     assert_eq!(
-        rt.state.frames.intents.last(),
-        Some(&Intent::Do("delete-permanently", "t-contract-old".into())),
+        rt.state.frames.shared.dialog,
+        Some(Dialog::DeleteForever("t-contract-old".into())),
         "Delete names the ONE item; Empty Trash names none"
     );
 }
@@ -90,12 +93,12 @@ fn the_trash_menu_restores_asks_for_details_and_for_the_warning() {
     press(&mut rt, Key::Down);
     press(&mut rt, Key::Down);
     press(&mut rt, Key::Enter);
-    // P1-2: one item's permanent delete is not Empty Trash's intent, and names the item.
+    // P1-2: one item's permanent delete is not Empty Trash's dialog, and names the item.
     assert_eq!(
-        rt.state.frames.intents,
-        vec![Intent::Do("delete-permanently", "t-contract-old".into())]
+        rt.state.frames.shared.dialog,
+        Some(Dialog::DeleteForever("t-contract-old".into()))
     );
-    assert!(!rt.state.frames.intents.contains(&Intent::Frame("DW-0749")));
+    assert!(rt.state.frames.intents.is_empty());
     let mut rt = runtime(super::scenes::dw_0748);
     click(&mut rt, "mi-details");
     assert_eq!(

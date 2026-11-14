@@ -441,8 +441,8 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
     assert!(!drawn.contains("Decrypting on this PC"));
     assert!(w.chunk_requests() >= 2, "the content came chunk by chunk from Beebeeb");
 
-    // The details panel (Alt+Shift+P): where the file is, and no Available offline switch, whose state was not
-    // read.
+    // The details panel (Alt+Shift+P): where the file is, and the Available offline switch, whose state the local
+    // state holds.
     w.press(
         Key::Text("p".into()),
         Mods {
@@ -453,13 +453,15 @@ fn a_file_opened_from_the_files_window_is_decrypted_and_shown_and_leaves_with_it
     );
     let drawn = w.drawn();
     assert!(drawn.contains("Where: Files"), "{drawn}");
-    assert!(!drawn.contains("Online only now"), "{drawn}");
+    assert!(drawn.contains("Online only now"), "the state that was read: {drawn}");
     assert!(
-        !w.rt.elements().iter().any(|e| e.key.as_deref() == Some("offline")),
-        "no switch for a state that was not read"
+        w.rt.elements()
+            .iter()
+            .any(|e| e.key.as_deref() == Some("offline-switch")),
+        "the switch for a state that was read"
     );
 
-    // Edit is not offered where an edit cannot be saved: the press says so, no editor opens.
+    // Edit is not offered where the file's version was not recorded here: the press says so, no editor opens.
     w.press(
         Key::Command('e'),
         Mods {
@@ -888,8 +890,8 @@ fn a_picture_is_shown_and_no_action_claims_a_state_that_was_not_read() {
         "{keys:?}"
     );
     assert!(
-        !keys.iter().any(|k| k == "action-1"),
-        "no Offline / On this PC action for a state that was not read"
+        keys.iter().any(|k| k == "action-1"),
+        "the Offline action for a state that was read"
     );
     // The decoded picture is the source's, for this session.
     let ui = w.rt.state.viewer.ui.as_ref().expect("the open file");

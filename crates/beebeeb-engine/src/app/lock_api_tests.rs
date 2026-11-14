@@ -86,6 +86,11 @@ fn every_person_accessor_goes_through_the_choke_point() {
                 ("lock_api.rs", 2),
                 // Sign-up has no earlier session: it installs the new one (`signup_api::install_new_account`).
                 ("signup_api.rs", 1),
+                // Writes inside a `claim` (the session-write lock is held), never a read: a passkey's key kept for
+                // the session just made, the new token after a password change, the new address after a resend.
+                ("passkeys_api.rs", 1),
+                ("account_password_api.rs", 1),
+                ("account_email_resend_api.rs", 1),
             ],
         ),
         (
@@ -103,6 +108,15 @@ fn every_person_accessor_goes_through_the_choke_point() {
                 ("transfer_limits_api.rs", 1),
                 ("versions_api.rs", 2),
                 ("viewer_api.rs", 2),
+                // The same re-checks in the files of the binding run and Wave B/C: each is asked after, or beside, a
+                // call that `person_session` / `account_call_for` already refuses under a lock.
+                ("account_actions_api.rs", 2),
+                ("account_password_api.rs", 1),
+                ("conflicts_api.rs", 2),
+                ("passkeys_api.rs", 1),
+                ("share_link_api.rs", 1),
+                ("trash_bulk_api.rs", 1),
+                ("trash_purge_api.rs", 1),
             ],
         ),
         ("call_may_run(", &[("lock_api.rs", 2), ("owned_state.rs", 1)]),

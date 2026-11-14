@@ -178,7 +178,15 @@ pub fn name_field(s: &State, t: &Theme) -> El {
         .label("Name")
         .single_line()
         .color(t.text)
-        .caret(t.accent_deep, field::selection(t))
+        .caret(
+            // The board's caret is drawn below (`rename-caret`), also where nothing is selected.
+            if edit.focused {
+                rune::Color::TRANSPARENT
+            } else {
+                t.accent_deep
+            },
+            field::selection(t),
+        )
         .selection_style(rune::SelectionStyle::new(field::selection(t)))
         .invalid(error.is_some())
         .on_edit(|s: &mut State| &mut s.actions.name_edit)
@@ -216,15 +224,15 @@ pub fn name_field(s: &State, t: &Theme) -> El {
             s.commit_rename(tx);
         })
         .child(input);
-    if edit.focused && from != to {
-        // Windows draws the caret at the end of a selection.
+    if edit.focused {
+        // Windows draws the caret at the end of a selection, or where the next letter goes.
         let at = field::advance(&edit.text[..to.max(from)], field::VALUE);
         well = well.child(
             // `.kit-caret` in a row: 14 pt, its foot 3 pt under the text line's (`margin: 0 1px -3px`).
             el().key("rename-caret-at")
                 .a11y_hidden()
-                // Between the two letters, where a text field's caret stands: it covers neither.
-                .absolute(field::snap(4.0 + at - 0.5), 5.5)
+                // The board's caret box starts 1 pt after the last letter (`margin: 0 1px -3px`).
+                .absolute(4.0 + at + 1.0, 5.5)
                 .child(field::caret_mark("rename-caret".to_string(), 14.0, t)),
         );
     }

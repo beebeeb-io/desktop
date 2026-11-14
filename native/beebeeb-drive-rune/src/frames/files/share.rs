@@ -215,19 +215,19 @@ impl State {
         };
         self.close_dialog(tx);
         self.intent(Intent::Frame("DW-0514"));
-        let id = share
+        // The item's share (or, for an item not shared with anyone yet, the item itself) and its name for the title.
+        let target = share
             .items
             .first()
-            .and_then(|item| self.actions.source.share_of(item))
-            .filter(|id| self.frames.shared.share(id).is_some());
-        let Some(id) = id else {
-            // There is no share to invite to (the engine makes one; nothing is wired here).
+            .and_then(|item| Some((self.actions.source.share_of(item)?, item.name.clone())));
+        let Some((id, name)) = target else {
+            // Nothing to invite to (not one of the account's own items).
             self.failed(Action::Invite, super::source::ActionError::Unavailable, tx);
             return;
         };
         use crate::shell::app::{Event, Route, Section};
         crate::shell::host::dispatch(self, Event::Navigate(Route::section(Section::Shared)));
-        self.frames.shared.start_invite(&id);
+        self.frames.shared.start_invite_named(&id, &name);
     }
 }
 

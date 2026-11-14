@@ -137,6 +137,8 @@ pub enum Intent {
     /// DW-A35's rows: the page opens in the browser, not in the app.
     OpenTerms,
     OpenPrivacy,
+    /// "Trouble signing in?": the web's recovery page opens in the browser.
+    OpenRecoveryPage,
     /// DW-A39: a save dialog for a text file of the phrase, and a print-ready page. No word
     /// travels in the intent: whoever acts on it asks the engine.
     SavePhraseAsFile,
@@ -180,6 +182,8 @@ pub struct Ui {
     passkey_waiting: bool,
     unlocking: bool,
     unlock_problem: Option<SignInProblem>,
+    /// The sentence the vault level's password screen starts with after the screen path sent the person there.
+    lock_notice: Option<&'static str>,
     /// The field a scene draws holding the keyboard (`steps::Pictured`).
     pictured: Option<Pictured>,
     /// Recovery: the phrase is being verified (DW-A47).
@@ -239,6 +243,7 @@ impl Ui {
             passkey_waiting: false,
             unlocking: false,
             unlock_problem: None,
+            lock_notice: None,
             pictured: None,
             recovering: false,
             confirm: TextEdit::new("").secure(),
@@ -410,6 +415,11 @@ impl Ui {
 
     /// "Sign in with another device", "Ask again" and "Get a new code".
     pub fn ask_other_device(&mut self) {
+        if !self.in_app_doors() {
+            // Approving this PC from another device is the web's here: the door stays, and opens that page.
+            self.open_recovery_page_from_any();
+            return;
+        }
         if self.step_running() || self.passkey_waiting {
             return;
         }
@@ -605,6 +615,8 @@ impl Ui {
                 }
             }
             SignInEvent::Hello(outcome) if self.lock_hello_waiting() => self.lock_hello_answered(outcome),
+            SignInEvent::ScreenPassword(outcome) if self.unlocking => self.lock_screen_password_answered(outcome),
+            SignInEvent::ScreenWaitLeft { seconds } => self.lock_wait_left(seconds),
             SignInEvent::Hello(outcome) if self.hello_waiting && self.screen == Screen::ContinueAs(None) => {
                 self.hello_waiting = false;
                 match outcome {

@@ -18,6 +18,7 @@ mod app_lock;
 pub mod approve;
 #[cfg(test)]
 mod approve_tests;
+mod calls;
 mod delete;
 mod form;
 mod forms;
@@ -370,21 +371,37 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         }
     }
     let pumped = source.pump();
+    let call = source.call_answer();
     // A sign-out that is out: its answer, when it came. Only then is anything of it drawn.
     let answered = match ui.signing_out.waiting {
         Some(all) => source.sign_out_result().map(|answer| (all, answer)),
         None => None,
     };
-    if pumped.busy || pumped.watch || ui.signing_out.waiting.is_some() {
+    // A name that was sent: its answer, when it came.
+    let named = forms::take_in_name(ui);
+    if pumped.busy || pumped.watch || ui.signing_out.waiting.is_some() || ui.form.saving_name {
         tx.wake_after(POLL_EVERY);
     }
     // A toast that goes by itself: look again when its time is up.
     if let Some(stay) = pumped.wake_in {
         tx.wake_after(stay);
     }
+    if let Some((kind, answered)) = call {
+        // Beebeeb's answer to a call a page started: shown as the press would have shown it, or dropped when the
+        // page no longer waits for it.
+        let frame = calls::settle(&mut s.account, kind, answered);
+        if let Some(frame) = frame {
+            go(s, frame);
+        }
+        return true;
+    }
     if let Some((all, answer)) = answered {
         s.account.signing_out.waiting = None;
         security_overview::settle_sign_out(s, all, answer);
+        return true;
+    }
+    if let Some(frame) = named {
+        go(s, frame);
         return true;
     }
     pumped.changed
@@ -934,7 +951,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         return true;
     }
     // A sign-out that is out cannot be called back: its confirm stays until the answer.
-    if s.account.signing_out.waiting.is_some() {
+    if s.account.signing_out.waiting.is_some() || (s.account.form.saving_name && s.account.pane == Pane::Name) {
         return true;
     }
     if s.account.dialog.take().is_some() {

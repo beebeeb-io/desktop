@@ -56,8 +56,51 @@ pub fn said(why: FolderSaid) -> (&'static str, &'static str) {
     }
 }
 
+/// The words of the state "sync started, but the folder could not be written to the settings".
+const UNSAVED_TITLE: &str = "Couldn't save your folder choice";
+const UNSAVED_TEXT: &str =
+    "Sync is running in the folder you chose, but this PC didn't keep the choice. Your files are safe.";
+const UNSAVED_BANNER_TITLE: &str = "Beebeeb's settings couldn't be written";
+const UNSAVED_BANNER_TEXT: &str =
+    "Try again in a moment. Until it is saved, Beebeeb may use another folder after a restart.";
+
+/// A pick after a start worked: moving the folder isn't available yet; nothing changed.
+pub fn already_syncs(k: &mut Keys, t: &Theme) -> El {
+    setup::column()
+        .child(au::heading(
+            "Beebeeb already syncs in another folder",
+            Some("Moving your Beebeeb folder isn't available in this version yet. Your files keep syncing in the folder you chose first."),
+            false,
+            t,
+        ))
+        .child(actions().child(primary(k, "OK", ButtonState::Enabled, t, Ui::go_on)))
+}
+
+/// The File Explorer step when sync runs but the folder was not written to the settings.
+pub fn unsaved(k: &mut Keys, t: &Theme) -> El {
+    setup::column()
+        .child(au::heading(UNSAVED_TITLE, Some(UNSAVED_TEXT), false, t))
+        .child(au::banner(
+            k,
+            Tone::Red,
+            &icons::ALERT,
+            Some(UNSAVED_BANNER_TITLE),
+            Some(UNSAVED_BANNER_TEXT),
+            true,
+            t,
+        ))
+        .child(
+            actions()
+                .child(primary(k, "Try again", ButtonState::Enabled, t, Ui::go_on))
+                .child(ghost(k, "Continue for now", ButtonState::Enabled, t, Ui::not_now)),
+        )
+}
+
 /// The File Explorer step while it asks for the sync folder.
 pub fn ask(ask: &FolderAsk, k: &mut Keys, t: &Theme) -> El {
+    if *ask == FolderAsk::AlreadySyncs {
+        return already_syncs(k, t);
+    }
     let FolderAsk::Ask {
         folder,
         said: why,

@@ -279,3 +279,34 @@ fn a_refusal_names_its_kind_and_never_a_path() {
     unique.dedup();
     assert_eq!(unique.len(), 8, "{kinds:?}");
 }
+
+#[test]
+fn the_given_text_is_read_first_and_the_final_path_is_what_is_judged() {
+    let f = windows();
+    // Why the final path is needed: the short name reads as a harmless folder by its text.
+    assert_eq!(refusal(r"C:\PROGRA~1\Sync", &f), None);
+    assert_eq!(
+        refusal_resolved(r"C:\PROGRA~1\Sync", Some(r"\\?\C:\Program Files\Sync"), &f),
+        Some(SyncFolderRefused::System)
+    );
+    // The text the person gave is read before anything is resolved.
+    assert_eq!(
+        refusal_resolved(r"C:\a\..\b", Some(r"\\?\C:\Sync"), &f),
+        Some(SyncFolderRefused::NotAFullPath)
+    );
+    assert_eq!(
+        refusal_resolved(r"\\server\share\x", Some(r"\\?\C:\Sync"), &f),
+        Some(SyncFolderRefused::Network)
+    );
+    // A path that could not be resolved is never let through.
+    assert_eq!(
+        refusal_resolved(r"C:\Sync", None, &f),
+        Some(SyncFolderRefused::Unreadable)
+    );
+    // A folder that leads to a share is a network folder.
+    assert_eq!(
+        refusal_resolved(r"C:\Sync", Some(r"\\?\UNC\srv\share\x"), &f),
+        Some(SyncFolderRefused::Network)
+    );
+    assert_eq!(refusal_resolved(r"C:\Sync", Some(r"\\?\C:\Sync"), &f), None);
+}

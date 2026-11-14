@@ -362,6 +362,7 @@ pub fn phrase(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
 pub fn unlock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     // The lock's words (`lock`): the same screen, for a locked app. The board draws the passkey step only.
     let lock = ui.lock_words();
+    let screen_sentence = ui.lock_password_sentence();
     let message = ui.unlock_problem().map(|problem| match (lock, problem) {
         // The board gives the passkey step no error of its own: the sign-in form's general words.
         (None, _) | (Some(_), SignInProblem::StaleKey | SignInProblem::Other) => GENERIC_FAILURE,
@@ -369,6 +370,7 @@ pub fn unlock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         (Some(_), SignInProblem::Offline) => "You're offline. Beebeeb can't unlock until it can reach the server.",
         (Some(_), SignInProblem::RateLimited { .. }) => "Too many tries. Wait a moment, then try again.",
     });
+    let message = screen_sentence.as_deref().or(message);
     let eye = au::field_action(
         "field-0",
         if ui.password.is_revealed() {
@@ -411,13 +413,15 @@ pub fn unlock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         // Neither level encrypts anything on this PC: the words say locked and paused, nothing more.
         Some(lock::Level::Vault) => column.child(au::heading(
             "Beebeeb is locked",
-            Some("Sync is paused until you unlock. Enter your account password; Beebeeb checks it with the server."),
+            Some(ui.lock_notice().unwrap_or(
+                "Sync is paused until you unlock. Enter your account password; Beebeeb checks it with the server.",
+            )),
             false,
             t,
         )),
         Some(lock::Level::Screen) => column.child(au::heading(
             "Unlock with your password",
-            Some("Enter your account password. Beebeeb checks it with the server, so this needs a connection."),
+            Some("Enter your account password. Beebeeb checks it with the server; if it can't be reached, this PC checks it itself."),
             false,
             t,
         )),

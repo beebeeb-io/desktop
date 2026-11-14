@@ -206,6 +206,8 @@ pub struct More {
     pub conflicts: Vec<Conflict>,
     /// What uploads (DW-0426). `None` until something was uploaded in this session.
     pub uploads: Option<super::uploads::Uploads>,
+    /// What comes down to this PC now (DW-0412).
+    pub downloads: Vec<super::keeping::Download>,
 }
 
 impl More {

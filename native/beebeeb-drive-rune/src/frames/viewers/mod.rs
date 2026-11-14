@@ -31,6 +31,7 @@ mod media_icons;
 pub mod new_file;
 mod pdf;
 mod photo;
+mod settle;
 pub mod source;
 mod states;
 mod style;
@@ -267,7 +268,7 @@ impl Ui {
             return;
         }
         let on = !self.file.details.offline;
-        if self.source.set_offline(&self.file.id, on) {
+        if self.source.set_offline(&self.file.id, on) && !self.source.answers_later() {
             self.file.details.offline = on;
         }
     }
@@ -414,6 +415,11 @@ impl Ui {
             SaveOutcome::Conflict(other) => self.ask(Dialog::Conflict(other)),
             // Not saved: the edit stays as it is, and so does what the status line says.
             SaveOutcome::Failed => self.dialog = None,
+            // On its way: the edit stays as it is until the engine answers.
+            SaveOutcome::Working => {
+                self.dialog = None;
+                self.toast = Some("Saving\u{2026}".to_string());
+            }
         }
     }
 
@@ -496,6 +502,10 @@ impl Ui {
 
     /// The engine's progress since the last call. `true`: the view must run again.
     pub fn pump(&mut self) -> bool {
+        if let Some(settled) = self.source.settled(&self.file.id) {
+            self.settle(settled);
+            return true;
+        }
         match self.source.poll(&self.file.id) {
             Some(body) => {
                 let another_kind = std::mem::discriminant(&body) != std::mem::discriminant(&self.file.body);
@@ -946,8 +956,9 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
             return chrome::window(s, cx, ui, head, tools, None, body, &status, &t);
         }
         Body::Audio(doc) => {
-            let (tools, body) = (audio::tools(&t), audio::body(ui, doc, &t));
-            return chrome::window(s, cx, ui, head, tools, None, body, &audio::status(doc), &t);
+            let can_play = ui.can_play();
+            let (tools, body) = (audio::tools(can_play, &t), audio::body(ui, doc, &t));
+            return chrome::window(s, cx, ui, head, tools, None, body, &audio::status(doc, can_play), &t);
         }
         Body::Pdf(doc) => {
             let (tools, bar, body) = (pdf::tools(ui, &t), pdf::find_bar(ui, &t), pdf::body(ui, doc, &t));

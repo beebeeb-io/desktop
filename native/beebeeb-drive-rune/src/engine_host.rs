@@ -47,6 +47,7 @@ pub mod backups;
 mod binding_tests;
 pub mod drive_settings;
 pub mod files;
+mod files_conflicts;
 mod files_facts;
 mod files_link;
 #[cfg(test)]
@@ -55,6 +56,7 @@ mod files_open_with_tests;
 mod files_places;
 mod files_preview;
 mod files_trash;
+mod files_uploads;
 mod files_versions;
 #[cfg(test)]
 #[path = "engine_host/files_window_support.rs"]
@@ -63,6 +65,7 @@ pub mod guide;
 // The Windows Hello prompt of the lock screen, behind one seam.
 pub mod hello;
 pub mod open;
+pub mod passkeys;
 pub mod photos;
 pub mod search;
 pub mod settings;
@@ -576,8 +579,12 @@ pub struct EngineFilesSource<C: CredentialStores> {
     facts: files_facts::Facts<C>,
     /// A file's versions and the restore of one.
     versions: files_versions::VersionCalls<C>,
+    /// The files in two versions and the answer to one.
+    conflicts: files_conflicts::ConflictCalls<Engine<C>>,
     /// Where each row stands in the Backups tree.
     places: files_places::Places<C>,
+    /// The Uploads panel: what uploads, Try again, Pause all, Cancel.
+    uploads: files_uploads::UploadCalls<Engine<C>>,
     /// What the Preview panel shows of a file.
     previews: files_preview::Previews<viewer::LiveViewerEngine<C>>,
 }
@@ -588,9 +595,11 @@ impl<C: CredentialStores> EngineFilesSource<C> {
         Self {
             copies: files::LocalCopies::new(engine.clone()),
             trash: files_trash::TrashCalls::new(engine.clone()),
+            uploads: files_uploads::UploadCalls::new(engine.clone()),
             links: files_link::LinkCalls::new(engine.clone()),
             facts: files_facts::Facts::new(engine.clone()),
             versions: files_versions::VersionCalls::new(engine.clone()),
+            conflicts: files_conflicts::ConflictCalls::new(engine.clone()),
             places: files_places::Places::new(engine.clone()),
             previews: files_preview::Previews::new(Arc::new(viewer::LiveViewerEngine::new(engine.clone()))),
             engine,
@@ -787,6 +796,12 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.open_with_by(item, choose_app)
     }
 
+    /// Invite someone… (DW-0514): the item's own id while it is one of the account's own (`Engine::share_target_of`,
+    /// the account-bound local state only: nothing is asked of the server on the press).
+    fn share_of(&self, item: &DriveItem) -> Option<String> {
+        self.engine.share_target_of(self.engine.session_turn(), &item.id)
+    }
+
     fn versions(&self, item: &DriveItem) -> Vec<crate::frames::files::actions_data::Version> {
         self.versions.versions(item)
     }
@@ -801,6 +816,14 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
 
     fn restore_version(&mut self, item: &DriveItem, version: &str) -> Result<(), ActionError> {
         self.versions.restore(item, version)
+    }
+
+    fn conflicts(&self) -> Vec<crate::frames::files::actions_data::Conflict> {
+        self.conflicts.conflicts()
+    }
+
+    fn keep_version(&mut self, file: &str, keep: crate::frames::files::actions_data::Keep) -> Result<(), ActionError> {
+        self.conflicts.keep(file, keep)
     }
 
     fn preview(&mut self, item: &DriveItem) -> Option<crate::frames::files::actions_data::PreviewOf> {
@@ -862,7 +885,39 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         // Also when every file is in and the answer was still refused (the session changed during the last
         // copy): an EMPTY list, which the window reads as "nothing to try again" (`None` would send all again).
         self.upload_left = upload_rest(files, copied, result.is_err());
+        if result.is_ok() {
+            // What was just accepted uploads now: the panel reads it.
+            self.uploads.ask();
+        }
         result
+    }
+
+    fn uploads(&self) -> Option<crate::frames::files::uploads::Uploads> {
+        self.uploads.uploads()
+    }
+
+    fn ask_uploads(&mut self) {
+        self.uploads.ask();
+    }
+
+    fn retry_upload(&mut self, id: &str) -> Result<(), ActionError> {
+        self.uploads.retry(id)
+    }
+
+    fn cancel_upload(&mut self, id: &str) -> Result<(), ActionError> {
+        self.uploads.cancel(id)
+    }
+
+    fn cancels_upload(&self, id: &str) -> bool {
+        self.uploads.cancels(id)
+    }
+
+    fn pause_uploads(&mut self, pause: bool) -> Result<(), ActionError> {
+        self.uploads.pause(pause)
+    }
+
+    fn forget_uploads(&mut self) {
+        self.uploads.forget();
     }
 
     fn upload_left(&mut self) -> Option<Vec<PathBuf>> {
@@ -929,9 +984,11 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     /// engine answered (not an activity feed).
     fn changes(&mut self) -> Vec<Change> {
         let mut changes = self.trash.take();
+        changes.extend(self.uploads.take());
         changes.extend(self.links.take());
         changes.extend(self.copies.take());
         changes.extend(self.versions.take());
+        changes.extend(self.conflicts.take());
         // Where the rows stand in the Backups tree: an arrival redraws by its wake.
         self.places.pump();
         // The sidebar's figures are read again after a change (`files_facts`); an arrival redraws by its wake.

@@ -16,8 +16,8 @@
 //! (it asks `Intent::Frame("DW-0749")`). A button whose action needs the engine records an
 //! [`Intent`] and leaves the dialog as it is: nothing claims to have happened.
 //!
-//! **Secrets.** The authenticator code (DW-0749) lives in ONE secure `TextEdit`, wiped on
-//! every close; it is drawn as secure text inside `secure-code` and is in no label or intent.
+//! **Secrets.** The account password (DW-0749, DW-0748's Delete permanently) lives in ONE secure `TextEdit`, wiped on
+//! every close and when it is sent; it is drawn as dots and is in no label, intent or `Debug`.
 //! A safety number is never computed here: only a scene gives one ([`SafetyNumber`]).
 
 mod kit;
@@ -25,11 +25,10 @@ mod kit;
 mod tests;
 mod view;
 
-pub use kit::CODE_LEN;
 pub use view::layers;
 
 use super::Tab;
-use super::source::{Access, Member, PeopleShare};
+use super::source::{Access, InviteResult, Member, Notice, PeopleShare};
 use crate::State;
 use crate::frames::{self, Intent};
 use crate::shell::app::Section;
@@ -39,6 +38,11 @@ use rune::{Key, KeyEvent, TextEdit, Tx};
 pub const TITLE_INPUT: &str = "request-title-input";
 pub const NOTE_INPUT: &str = "request-note-input";
 pub const EMAIL_INPUT: &str = "invite-email-input";
+/// Empty Trash's and Delete permanently's password field.
+pub const PASSWORD_INPUT: &str = "purge-password-input";
+
+/// What Invite someone says when the person's key is not the one they compared safety numbers against (DW-0514).
+pub const KEY_CHANGED: &str = "Their key changed since you compared safety numbers. Nothing was shared.";
 
 /// A safety number as the board draws it: twelve groups of five digits. Crypto material: in
 /// this build only a scene makes one (the board's sample); nothing here computes, keeps beyond
@@ -74,13 +78,15 @@ pub enum Dialog {
     Invite { share: String, access: Access },
     /// Empty Trash? (DW-0749).
     EmptyTrash,
+    /// Delete permanently? (DW-0748's warning, for the Trash item with this id).
+    DeleteForever(String),
 }
 
 impl Dialog {
     /// The section the dialog belongs to: it shows only over that section.
     pub fn section(&self) -> Section {
         match self {
-            Dialog::EmptyTrash => Section::Trash,
+            Dialog::EmptyTrash | Dialog::DeleteForever(_) => Section::Trash,
             _ => Section::Shared,
         }
     }
@@ -94,8 +100,15 @@ pub struct Fields {
     pub note: TextEdit,
     /// Invite someone's Email.
     pub email: TextEdit,
-    /// Empty Trash's authenticator code: secure, wiped whenever a dialog opens or closes.
-    pub code: TextEdit,
+    /// The account password Empty Trash and Delete permanently ask: secure, wiped whenever a dialog opens or closes
+    /// and when it is sent.
+    pub password: TextEdit,
+    /// What the last try said (the password was not right; an invitation was not sent), shown under the field.
+    pub problem: Option<&'static str>,
+    /// Invite someone: an invitation is on its way, and Send invite takes no second press.
+    pub sending: bool,
+    /// Invite someone for an item not shared with anyone yet (no row in By me): its name, for the title.
+    pub unlisted: Option<String>,
 }
 
 impl Default for Fields {
@@ -104,18 +117,24 @@ impl Default for Fields {
             title: TextEdit::new(""),
             note: TextEdit::new(""),
             email: TextEdit::new(""),
-            code: TextEdit::new("").secure(),
+            password: TextEdit::new("").secure(),
+            problem: None,
+            sending: false,
+            unlisted: None,
         }
     }
 }
 
 impl Fields {
-    /// Empty every field; the code's characters are overwritten, not left behind.
+    /// Empty every field; the password's characters are overwritten, not left behind.
     fn clear(&mut self) {
-        for edit in [&mut self.title, &mut self.note, &mut self.email, &mut self.code] {
+        for edit in [&mut self.title, &mut self.note, &mut self.email, &mut self.password] {
             edit.clear();
             edit.focused = false;
         }
+        self.problem = None;
+        self.sending = false;
+        self.unlisted = None;
     }
 }
 
@@ -125,6 +144,14 @@ impl super::SharedUi {
         self.menu = None;
         self.fields.clear();
         self.dialog = Some(dialog);
+    }
+
+    /// Close Empty Trash's or Delete permanently's dialog (a delete for good ended, or its item is gone). Any other
+    /// dialog stays.
+    pub fn close_purge_dialog(&mut self) {
+        if matches!(self.dialog, Some(Dialog::EmptyTrash | Dialog::DeleteForever(_))) {
+            self.close_dialog();
+        }
     }
 
     /// Close the dialog, and empty its fields (the code is wiped).
@@ -154,8 +181,11 @@ impl super::SharedUi {
         let person_of = |share: &str, person: &str| self.share(share).is_some() && self.member(share, person).is_some();
         match &self.dialog {
             None => false,
-            Some(Dialog::NewRequest | Dialog::EmptyTrash) => true,
-            Some(Dialog::People { share, .. } | Dialog::Invite { share, .. }) => self.share(share).is_some(),
+            // Its row may be gone (Trash's poll closes it then): nothing here knows Trash's list.
+            Some(Dialog::NewRequest | Dialog::EmptyTrash | Dialog::DeleteForever(_)) => true,
+            Some(Dialog::People { share, .. }) => self.share(share).is_some(),
+            // An item not shared with anyone yet has no row: its name is kept with the dialog.
+            Some(Dialog::Invite { share, .. }) => self.share(share).is_some() || self.fields.unlisted.is_some(),
             Some(
                 Dialog::Person { share, person }
                 | Dialog::RemoveAccess { share, person }
@@ -189,7 +219,8 @@ impl super::SharedUi {
             Some(Dialog::RemoveAccess { share, person })
             | Some(Dialog::SafetyNumber { share, person, .. })
             | Some(Dialog::Stopped { share, person, .. }) => Some(Dialog::Person { share, person }),
-            Some(Dialog::Invite { share, .. }) => Some(Dialog::People {
+            // Back to People, when the share has a list of people to go back to.
+            Some(Dialog::Invite { share, .. }) if self.share(&share).is_some() => Some(Dialog::People {
                 share,
                 key_changed: None,
             }),
@@ -247,45 +278,56 @@ impl super::SharedUi {
         self.fields.email.focused = true;
     }
 
-    /// Send invite: shares with the address typed; People then shows them as invited. Not an
-    /// address (`is_address`), or the source refuses (they are on the share already): nothing
-    /// is sent and the dialog stays.
+    /// Invite someone… for an item from Files (DW-0514): its share's dialog when it has one, else the same dialog
+    /// for an item not shared with anyone yet, titled with `name`.
+    pub fn start_invite_named(&mut self, share: &str, name: &str) {
+        self.start_invite(share);
+        if self.share(share).is_none() {
+            self.fields.unlisted = Some(name.to_string());
+        }
+    }
+
+    /// Send invite: hands the address typed to the source, with the access Beebeeb gives a new invitation. The
+    /// dialog says "Sending…" and takes no second press until the answer ([`Self::invite_answered`]); nothing is
+    /// drawn as sent before it. Not an address (`is_address`), one already on its way, or the source refuses at
+    /// once (they are on the share already): nothing is sent and the dialog stays.
     pub fn send_invite(&mut self) -> bool {
-        let Some(Dialog::Invite { share, access }) = self.dialog.clone() else {
+        let Some(Dialog::Invite { share, .. }) = self.dialog.clone() else {
             return false;
         };
-        let email = self.fields.email.text.trim().to_string();
-        if !is_address(&email) || !self.source.invite(&share, &email, access) {
+        if self.fields.sending {
             return false;
         }
-        self.show_people(&share);
+        let email = self.fields.email.text.trim().to_string();
+        if !is_address(&email) || !self.source.start_invite(&share, &email) {
+            return false;
+        }
+        self.fields.sending = true;
+        self.fields.problem = None;
         true
     }
 
-    /// How many digits of the code are typed.
-    pub fn code_len(&self) -> usize {
-        self.fields.code.text.chars().count()
-    }
-
-    /// Type into the code: digits only, six at most. The next code is built in a buffer that
-    /// never grows (no copy left behind by a reallocation); the edit wipes the one it replaces.
-    pub fn type_code(&mut self, typed: &str) {
-        for c in typed.chars().filter(char::is_ascii_digit) {
-            if self.code_len() < CODE_LEN {
-                let mut next = String::with_capacity(CODE_LEN);
-                next.push_str(&self.fields.code.text);
-                next.push(c);
-                self.fields.code.replace_text(next);
+    /// An invitation's answer (the window's poll). The dialog that sent it closes only on an answer that reached
+    /// Beebeeb (People shows the share, when it has a list); a changed key or a refusal keeps it open, with its
+    /// words. An answer whose dialog was closed in the meantime: a refusal says so over the lists.
+    pub fn invite_answered(&mut self, share: &str, result: InviteResult) {
+        let waiting =
+            self.fields.sending && matches!(&self.dialog, Some(Dialog::Invite { share: s, .. }) if s == share);
+        if !waiting {
+            if !result.sent() {
+                self.notice = Some(Notice::ChangeRefused);
             }
+            return;
         }
-    }
-
-    /// Backspace in the code: the last digit goes.
-    pub fn erase_code_digit(&mut self) {
-        let mut next = String::with_capacity(CODE_LEN);
-        next.push_str(&self.fields.code.text);
-        if next.pop().is_some() {
-            self.fields.code.replace_text(next);
+        self.fields.sending = false;
+        match result {
+            InviteResult::KeyChanged => self.fields.problem = Some(KEY_CHANGED),
+            InviteResult::Refused(words) => self.fields.problem = Some(words),
+            _ => {
+                if !self.show_people(share) {
+                    self.close_dialog();
+                }
+            }
         }
     }
 }
@@ -329,7 +371,7 @@ pub(crate) fn ask(s: &mut State, intent: Intent) {
 
 /// The dialog's keys, heard on its layer while focus is inside it (a text field's are the
 /// field's own). Tab, Esc, Enter and Space are Rune's (move focus, dismiss, press). Left and
-/// Right move a switch; the code takes digits and Backspace. Every other key stops here: the
+/// Right move a switch. Every other key stops here: the
 /// list behind a dialog never moves under it.
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let plain = frames::plain(ev);
@@ -340,12 +382,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         _ => {}
     }
     let focused = tx.focused().map(str::to_owned);
-    let ui = &mut s.frames.shared;
     match (focused.as_deref(), &ev.key) {
-        (Some("secure-code"), Key::Text(typed)) if plain || ev.mods.shift => {
-            ui.type_code(typed);
-        }
-        (Some("secure-code"), Key::Backspace) => ui.erase_code_digit(),
         (Some(key), Key::Left | Key::Right) if key.starts_with("seg-") && plain => {
             view::step_access(s, ev.key == Key::Right, tx);
         }

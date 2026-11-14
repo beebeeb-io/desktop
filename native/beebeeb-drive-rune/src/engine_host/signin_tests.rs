@@ -171,6 +171,29 @@ fn fake(tag: &str) -> Fake {
                     Reply::error(401, "invalid_credentials")
                 }
             }
+            "POST /api/v1/auth/password-proof/start" | "POST /api/v1/auth/password-proof/finish" => {
+                // The screen lock's grant-nothing proof: the step-up's OPAQUE legs, minting nothing. The finish
+                // waits at the code door (a step that is on its way), and answers as the server's table does.
+                if let Some(reply) = refused(step_up_in.load(Ordering::SeqCst)) {
+                    return reply;
+                }
+                let Some(account) = [&first_in, &second_in]
+                    .into_iter()
+                    .find(|account| req.bearer() == Some(account.session_token.as_str()))
+                else {
+                    return Reply::error(401, "unauthorized");
+                };
+                if route.ends_with("start") {
+                    account.opaque.login_start(&req.json())
+                } else {
+                    door_in.pass();
+                    if account.opaque.login_finish(&req.json()) {
+                        Reply::ok(json!({ "proven": true, "password_counter": 1 }))
+                    } else {
+                        Reply::error(403, "password_not_proven")
+                    }
+                }
+            }
             "POST /api/v1/auth/verify-recovery-check" => {
                 // The phrase's proof waits at the same door as the code step.
                 door_in.pass();
@@ -631,8 +654,7 @@ fn what_is_not_bound_answers_its_screens_refusal_at_once_and_asks_the_server_not
     );
     source.begin_set_password("an invented new password");
     assert_eq!(source.poll(), Some(SignInEvent::PasswordSet(Err(SignInProblem::Other))));
-    source.begin_passkey();
-    assert_eq!(source.poll(), Some(SignInEvent::Passkey(PasskeyOutcome::Unavailable)));
+    // The passkey sign-in is bound (the system's dialog on a thread of its own): its tests are `passkeys_tests`.
     source.begin_device_request();
     assert_eq!(
         source.poll(),
@@ -641,9 +663,9 @@ fn what_is_not_bound_answers_its_screens_refusal_at_once_and_asks_the_server_not
     source.begin_hello();
     assert_eq!(source.poll(), Some(SignInEvent::Hello(HelloOutcome::Cancelled)));
     // Leaving a step does not drop these: they belong to no step that can be left.
-    source.begin_passkey();
+    source.begin_hello();
     source.discard_partial_sign_in();
-    assert_eq!(source.poll(), Some(SignInEvent::Passkey(PasskeyOutcome::Unavailable)));
+    assert_eq!(source.poll(), Some(SignInEvent::Hello(HelloOutcome::Cancelled)));
     assert_eq!(fake.fake.routes().len(), 0, "nothing was asked of the server");
 }
 

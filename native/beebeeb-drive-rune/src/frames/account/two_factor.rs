@@ -17,7 +17,7 @@ use rune::{El, Tx, row};
 
 use super::form::{self, Form, Problem};
 use super::forms::{button, code_error};
-use super::source::{AccountSource, CodeRefused};
+use super::source::{AccountSource, CallKind, CodeRefused};
 use super::{AccountUi, CodeFor, Dialog, Pane, icons};
 
 /// The clipboard is cleared 60 seconds after a secret was copied (the board's rule).
@@ -37,7 +37,14 @@ pub fn pane(pane: Pane, source: &dyn AccountSource, f: &Form, dialog: Option<&Di
 /// Two-factor authentication (DW-A69): the QR code, the key, the first code.
 fn setup(f: &Form, t: &Theme) -> El {
     let Some(setup) = &f.setup else {
-        return set::pane(Vec::new(), t);
+        // Not made yet: nothing of a key is drawn. When Beebeeb did not make one, the page says so.
+        let said = f.problem.map(|_| {
+            code_error(
+                "Could not start the set-up. Check your connection, go back and try again.",
+                t,
+            )
+        });
+        return set::pane(said.into_iter().collect(), t);
     };
     let complete = form::code(f, 6).len() == 6;
     let copy = fm::link_block(0, "Copy key", fm::CAP, t).on_press_tx(|s: &mut State, tx: &mut Tx| {
@@ -72,7 +79,16 @@ fn setup(f: &Form, t: &Theme) -> El {
         ),
     ];
     if f.problem.is_some() {
-        children.push(code_error("Invalid code. Try again.", t));
+        children.push(code_error(
+            if f.key_replaced {
+                "That code was wrong, so the key changed. Scan the new code and try again."
+            } else if f.problem == Some(Problem::Offline) {
+                "Beebeeb could not be reached. Nothing was changed."
+            } else {
+                "Invalid code. Try again."
+            },
+            t,
+        ));
     }
     children.push(fm::actions(vec![
         (cancel.on_press(|s: &mut State| super::go(s, "DW-A52")), cancel_b),
@@ -84,6 +100,9 @@ fn setup(f: &Form, t: &Theme) -> El {
 /// Checks the first code; on success two-factor is on and the backup codes are shown once.
 pub(super) fn turn_on(ui: &mut AccountUi) -> Option<&'static str> {
     let code = form::code(&ui.form, 6);
+    if ui.form.waiting.is_some() || super::calls::start(ui, CallKind::TurnOnTwoFactor, &code, "") {
+        return None;
+    }
     match ui.source.as_deref_mut()?.turn_on_two_factor(&code) {
         Ok(codes) => {
             ui.form.codes = Some(codes);
@@ -244,31 +263,30 @@ fn status(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &The
             t,
         )
     };
-    children.push(lists::list(
+    // A fact the source does not know (empty, or no codes counted) is not drawn: never an invented date or a 0.
+    let mut facts = vec![set::item(
         0,
-        None,
-        vec![
-            set::item(
-                0,
-                0,
-                &Row::new(Lead::Icon(&icons::SHIELD), "Two-factor authentication")
-                    .tail(Tail::Pill {
-                        label: "On".into(),
-                        tone: Tone::Green,
-                        dot: true,
-                    })
-                    .name("Two-factor on"),
-                Vec::new(),
-                t,
-            ),
-            fact(1, "Added", &two.added),
-            fact(2, "Last used", &two.last_used),
-        ],
-        None,
+        0,
+        &Row::new(Lead::Icon(&icons::SHIELD), "Two-factor authentication")
+            .tail(Tail::Pill {
+                label: "On".into(),
+                tone: Tone::Green,
+                dot: true,
+            })
+            .name("Two-factor on"),
+        Vec::new(),
         t,
-    ));
+    )];
+    if !two.added.is_empty() {
+        facts.push(fact(facts.len(), "Added", &two.added));
+    }
+    if !two.last_used.is_empty() {
+        facts.push(fact(facts.len(), "Last used", &two.last_used));
+    }
+    children.push(lists::list(0, None, facts, None, t));
     // At 2 codes or fewer the row is red and says what to do.
-    let low = two.codes_left <= 2;
+    let counted = two.codes_total > 0;
+    let low = counted && two.codes_left <= 2;
     let mut left = Row::new(Lead::Icon(&icons::KEY), "Codes left")
         .tail(Tail::Value(format!("{} of {}", two.codes_left, two.codes_total)));
     if low {
@@ -280,15 +298,19 @@ fn status(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &The
     children.push(lists::list(
         1,
         Some("Backup codes"),
-        vec![
-            set::item(1, 0, &left, Vec::new(), t),
-            asks(
+        {
+            let mut rows = Vec::new();
+            if counted {
+                rows.push(set::item(1, 0, &left, Vec::new(), t));
+            }
+            rows.push(asks(
                 1,
-                1,
+                rows.len(),
                 Row::new(Lead::Icon(&icons::REFRESH), "Make new backup codes").link(true),
                 CodeFor::NewBackupCodes,
-            ),
-        ],
+            ));
+            rows
+        },
         Some("Each backup code works once. Making new codes stops the old ones working."),
         t,
     ));
@@ -410,6 +432,21 @@ fn confirm_code(ui: &mut AccountUi) -> Option<&'static str> {
         return None;
     };
     let code = form::code(&ui.form, 6);
+    if ui.form.waiting.is_some() {
+        return None;
+    }
+    let started = match code_for {
+        CodeFor::TurnOffTwoFactor => Some(CallKind::TurnOffTwoFactor),
+        CodeFor::MoveAuthenticator => Some(CallKind::CheckCode),
+        CodeFor::NewBackupCodes => Some(CallKind::NewBackupCodes),
+        CodeFor::StopActivity => None,
+    };
+    if let Some(kind) = started
+        && code.len() == 6
+        && super::calls::start(ui, kind, &code, "")
+    {
+        return None;
+    }
     let source = ui.source.as_deref_mut()?;
     let outcome: Result<&'static str, CodeRefused> = if code.len() < 6 {
         Err(CodeRefused::Wrong)

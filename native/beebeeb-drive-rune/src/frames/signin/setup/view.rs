@@ -36,6 +36,8 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
         (step, _) if step != Step::Done && !ui.available(step) => folder::not_yet(step, &mut k, &t),
         // The sync folder is asked for before File Explorer has anything to add.
         (Step::Explorer, _) if ui.asks_folder() => folder::ask(&ui.folder, &mut k, &t),
+        // A start worked, but this PC didn't keep the folder: said as an error, never as "Added".
+        (Step::Explorer, _) if ui.folder_unsaved() => folder::unsaved(&mut k, &t),
         (Step::Passkey, _) => passkey(&mut k, &t),
         (Step::Lock, _) => lock(ui, &mut k, &t),
         (Step::Backup, _) => backup(ui, &mut k, &t),
@@ -75,6 +77,11 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
             icon: &icons::EXPLORER,
             words: &not_yet_words,
             failed: false,
+        },
+        _ if ui.folder_unsaved() => Status {
+            icon: &icons::ALERT,
+            words: "Beebeeb's folder isn't saved on this PC yet",
+            failed: true,
         },
         Explorer::Adding => Status {
             icon: &icons::ADDING,
@@ -759,10 +766,11 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         Explorer::Adding => "Adding\u{2026}",
         Explorer::Failed { .. } | Explorer::NotSyncing => "Off",
     };
-    let backup = if r.backup.is_empty() {
-        "Off".to_string()
-    } else {
-        r.backup.join(", ")
+    let backup = match ui.answered(Switch::Backup) {
+        Some(Answered::Waiting) => "Saving\u{2026}".to_string(),
+        Some(Answered::NotKnown | Answered::NotChanged) => "Not changed".to_string(),
+        _ if r.backup.is_empty() => "Off".to_string(),
+        _ => r.backup.join(", "),
     };
     // A switch whose change is answered after the press draws no value before the answer, and never the value
     // that was asked for when the change did not happen.
@@ -830,6 +838,7 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let not_changed: Vec<&str> = [
         (Switch::Notifications, "notifications"),
         (Switch::OpenAtLogin, "open at login"),
+        (Switch::Backup, "backup"),
     ]
     .into_iter()
     .filter(|(switch, _)| matches!(ui.answered(*switch), Some(Answered::NotChanged | Answered::NotKnown)))

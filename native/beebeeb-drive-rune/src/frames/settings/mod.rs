@@ -795,10 +795,13 @@ const DRIVE_SECTIONS: &[Section] = &[
     },
 ];
 
-fn sidebar(section: Pane, t: &Theme) -> El {
+fn sidebar(section: Pane, previews: bool, t: &Theme) -> El {
     let items = |sections: &'static [Section]| -> Vec<El> {
         sections
             .iter()
+            // Thumbnails and previews is not listed where nothing answers for it (the engine makes no preview
+            // setting yet): a pane that only says "not built yet" is a dead door.
+            .filter(|sec| previews || sec.pane != Some(Pane::Previews))
             .map(|sec| {
                 let frame = sec.frame;
                 shell::nav_item(sec.label, sec.icon, 16.0, sec.pane == Some(section), t)
@@ -857,7 +860,11 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .grow(1.0)
         .min_h(0.0)
         .w_full()
-        .child(sidebar(pane.section(), &t))
+        .child(sidebar(
+            pane.section(),
+            ui.drive.photo_previews() != previews::PhotoPreviews::Unavailable,
+            &t,
+        ))
         .child(pane_el);
     if let Some(overlay) = overlay {
         body = body.child(overlay);

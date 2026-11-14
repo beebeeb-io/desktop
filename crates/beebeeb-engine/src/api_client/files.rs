@@ -292,6 +292,33 @@ impl ApiClient {
         Ok(())
     }
 
+    /// Delete many trashed items for good with ONE confirmation token (`POST /api/v1/files/permanent`, at most 500
+    /// ids). The answer is per item: what was deleted and the folders Beebeeb kept, each with its reason; a refusal
+    /// of the whole call is in [`BulkPurged::error`], never an `Err` (that is only a transport failure).
+    pub async fn bulk_permanent_delete(
+        &self,
+        ids: &[String],
+        confirm_token: &str,
+    ) -> anyhow::Result<crate::app::trash_bulk_api::BulkPurged> {
+        let resp = self
+            .client
+            .post(self.url("/api/v1/files/permanent"))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("X-Confirm-Token", confirm_token)
+            .json(&serde_json::json!({ "ids": ids }))
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok());
+        let text = resp.text().await.unwrap_or_default();
+        let answer = beebeeb_core::auth_flow::HttpResponse::from_text(status, &text, retry_after);
+        Ok(crate::app::trash_bulk_api::parse_answer(&answer))
+    }
+
     pub async fn update_metadata(
         &self,
         file_id: &str,

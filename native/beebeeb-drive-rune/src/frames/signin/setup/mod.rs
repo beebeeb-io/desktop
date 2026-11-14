@@ -212,6 +212,8 @@ pub struct Ui {
     finished: bool,
     /// The sync folder, while it still has to be asked for (the first state of the File Explorer step).
     pub folder: FolderAsk,
+    /// A start worked and its folder could not be saved, while sync runs (`SetupSource::folder_unsaved`).
+    unsaved: bool,
     /// Switches whose change is answered after the press, and where each stands. One that is not listed here was
     /// made (or never asked): `results` says what it is.
     answered: Vec<(Switch, Answered)>,
@@ -250,6 +252,7 @@ impl Ui {
         Ui {
             step: Step::Passkey,
             folder: source.folder_ask(),
+            unsaved: source.folder_unsaved(),
             answered: Vec::new(),
             asked: Vec::new(),
             compare: None,
@@ -327,6 +330,11 @@ impl Ui {
         self.available(Step::Explorer) && self.folder != FolderAsk::Settled
     }
 
+    /// Whether the folder a start worked in could not be saved, while sync runs.
+    pub fn folder_unsaved(&self) -> bool {
+        self.unsaved
+    }
+
     /// Whether another folder can be chosen after a start that was refused.
     pub fn can_choose_again(&self) -> bool {
         self.source.can_choose_again()
@@ -363,6 +371,7 @@ impl Ui {
             match outcome.switch {
                 Switch::Notifications => self.results.notifications = now,
                 Switch::OpenAtLogin => self.results.open_at_login = now,
+                Switch::Backup => {}
             }
         }
         match (outcome.done, outcome.now) {
@@ -434,12 +443,27 @@ impl Ui {
                 }
                 self.source.start_backup(&on);
                 self.results.backup = on;
+                self.asked(Switch::Backup);
             }
             Step::Previews => self.source.set_previews(self.size, self.format),
             Step::Explorer => {
+                // "OK" on the note that the folder cannot be moved yet.
+                if self.folder == FolderAsk::AlreadySyncs {
+                    self.source.dismiss_folder_note();
+                    self.pump();
+                    self.focus = Some(TITLE_KEY);
+                    return;
+                }
                 // "Use this folder" is the amber button while the step asks for the sync folder.
                 if self.asks_folder() {
                     return self.keep_folder();
+                }
+                // "Try again" on a folder that was not saved: write it.
+                if self.unsaved {
+                    self.source.save_folder();
+                    self.pump();
+                    self.focus = Some(TITLE_KEY);
+                    return;
                 }
                 // "Try again" is the amber button while it failed (DW-0280).
                 if matches!(self.explorer, Explorer::Failed { .. } | Explorer::NotSyncing) {
@@ -605,8 +629,12 @@ impl Ui {
         for outcome in self.source.take_outcomes() {
             self.take_in(outcome);
         }
+        if let Some(folders) = self.source.fresh_folders() {
+            self.folders = folders;
+        }
         self.explorer = self.source.explorer();
         self.folder = self.source.folder_ask();
+        self.unsaved = self.source.folder_unsaved();
         let sample = self.source.sample();
         if sample != self.sample {
             self.original = decode(sample.original_png);

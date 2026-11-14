@@ -143,10 +143,7 @@ fn the_start_path_opens_the_test_build_reads_the_session_and_serves_a_listing() 
     assert!(state.listing.items.is_empty());
     assert_eq!(state.list_error, Some(SourceError::Unreadable));
     assert!(state.selected.is_none());
-    assert!(
-        !state.backups.has_source(),
-        "Backups is 'not built yet' on a real engine"
-    );
+    assert!(state.backups.has_source(), "Backups reads the engine on a real engine");
     // Shared, Photos: unwired on a real engine, never sample data. Trash reads the engine
     // (`engine_host::trash`): this handle has no session in memory, so it draws the signed-out state, no row.
     // This PC reads the engine (`engine_host::this_pc`) but is held off until its chrome is honest.
@@ -640,9 +637,9 @@ fn this_pc_shows_0_fixture_changes_on_a_live_engine() {
 }
 
 #[test]
-fn backups_has_no_source_on_a_live_engine() {
+fn backups_has_the_engines_source_on_a_live_engine() {
     let s = engine_state();
-    assert!(!s.backups.has_source());
+    assert!(s.backups.has_source());
 }
 
 #[test]
@@ -650,21 +647,16 @@ fn settings_is_unwired_on_a_live_engine() {
     use crate::frames::settings::Pane;
     let s = engine_state();
     // Task 2473: General and Storage location answer from the engine; so do Notifications and Recent
-    // notifications (`engine_host::settings::notifications`); every other pane is the shell's frame.
+    // notifications (`engine_host::settings::notifications`) and About; every other pane is the shell's frame.
     assert!(s.settings.source.wired(Pane::General) && s.settings.source.wired(Pane::StorageLocation));
     assert!(s.settings.source.wired(Pane::Notifications) && s.settings.source.wired(Pane::Recent));
-    for pane in [Pane::About] {
-        assert!(!s.settings.source.wired(pane), "{pane:?}");
+    assert!(s.settings.source.wired(Pane::About));
+    // Drive's panes (`engine_host::drive_settings`): Storage insights, Sync, Bandwidth and Diagnostics answer; the
+    // rest is the shell's frame.
+    for pane in [Pane::Insights, Pane::Sync, Pane::Bandwidth, Pane::Diagnostics] {
+        assert!(s.settings.drive.wired(pane), "{pane:?}");
     }
-    // Drive's panes (`engine_host::drive_settings`): Storage insights answers; the rest is the shell's frame.
-    assert!(s.settings.drive.wired(Pane::Insights));
-    for pane in [
-        Pane::Storage,
-        Pane::Sync,
-        Pane::Bandwidth,
-        Pane::Previews,
-        Pane::Diagnostics,
-    ] {
+    for pane in [Pane::Storage, Pane::Previews] {
         assert!(!s.settings.drive.wired(pane), "{pane:?}");
     }
     assert!(!s.settings.source.sample());
@@ -680,7 +672,9 @@ fn account_is_the_engines_source_on_a_live_engine_and_unbound_panes_are_unwired(
     assert_ne!(source.pane_state(AccountPane::Account), PaneState::Unwired);
     assert_ne!(source.pane_state(AccountPane::Sessions), PaneState::Unwired);
     assert_ne!(source.pane_state(AccountPane::Security), PaneState::Unwired);
-    assert_eq!(source.pane_state(AccountPane::Password), PaneState::Unwired);
+    // The password change answers too: signed out, it says so, and is not the shell's frame.
+    assert_ne!(source.pane_state(AccountPane::Password), PaneState::Unwired);
+    assert_eq!(source.pane_state(AccountPane::Delete), PaneState::Unwired);
     assert!(source.identity().email.is_empty() && source.sessions().is_empty());
     // Nothing was read: the Security page is told nothing, and may do nothing.
     let facts = source.security_facts();

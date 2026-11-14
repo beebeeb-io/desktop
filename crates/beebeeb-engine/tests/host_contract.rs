@@ -328,6 +328,13 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
         Ok(NextAfterSignIn::RecoveryPhrase)
     );
     assert_eq!(host.engine.gate(), GateState::NeedsRecoveryPhrase);
+    // The strong sign-in made the screen lock's local check record of the typed password, and no wrong-try count.
+    assert_eq!(
+        flag(&credentials, LockFlag::ScreenCheck).map(|record| record.len()),
+        Some(beebeeb_core::screen_lock::RECORD_LEN),
+        "the sign-in writes the record"
+    );
+    assert_eq!(flag(&credentials, LockFlag::Attempts), None);
     assert_eq!(host.engine.account_email().as_deref(), Some(EMAIL));
     assert_eq!(host.engine.user_id().as_deref(), Some(USER));
     assert_eq!(host.engine.keys_for_engine_start(), Err(EngineStartBlocked::NoSession));
@@ -459,15 +466,17 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
         before_the_ask,
         "nothing is asked of the server for a person behind a locked screen"
     );
-    // The two things a locked screen allows: unlock and sign out. The password path is off in this build.
+    // The two things a locked screen allows: unlock and sign out. The password path's own rules are tested in
+    // `lock_password_api_tests`; here only that an empty password checks nothing and the start setting waits for an
+    // open app.
     assert_eq!(again.engine.check_call(Call::Person(LockedAction::SignOut)), Ok(()));
     assert_eq!(
-        again.engine.unlock_screen_with_password(secret(PASSWORD)),
-        Err(LockRefused::PasswordCheckUnavailable)
+        again.engine.unlock_screen_with_password(secret("")),
+        Err(LockRefused::NothingTyped)
     );
     assert_eq!(
-        again.engine.set_ask_password_at_start(true),
-        Err(LockRefused::PasswordCheckUnavailable)
+        again.engine.set_ask_password_at_start(true, None),
+        Err(beebeeb_engine::app::lock_password_api::StartSettingRefused::NotOpen)
     );
     assert_eq!(again.engine.ask_password_at_start(), Some(false), "off by default");
 
@@ -549,7 +558,24 @@ fn a_host_restores_signs_in_unlocks_syncs_lists_and_restarts() {
     );
     drop(third);
     // Sign-out removes the token, the key, their owners and the lock's flags, and keeps the files' state.
+    // A wrong-try count is left behind by a wrong password: a sign-out deletes the record AND the count.
+    credentials
+        .store_for("acct-host-contract")
+        .save_lock_flag(
+            LockFlag::Attempts,
+            &beebeeb_core::screen_lock::AttemptState::new()
+                .counting_try(1)
+                .to_bytes(),
+        )
+        .unwrap();
+    assert!(flag(&credentials, LockFlag::ScreenCheck).is_some());
     assert_eq!(again.engine.sign_out_keeping_local_data(), Ok(()));
+    assert_eq!(
+        flag(&credentials, LockFlag::ScreenCheck),
+        None,
+        "a sign-out deletes the record"
+    );
+    assert_eq!(flag(&credentials, LockFlag::Attempts), None, "and the count");
     assert_eq!(again.engine.gate(), GateState::SignedOut);
     assert!(
         credentials.is_empty(),

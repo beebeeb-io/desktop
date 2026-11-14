@@ -201,3 +201,26 @@ new code" in place of the countdown; a breach check that cannot be reached; "Doe
 three failures (nothing stored with Try again, created but not finished with Sign in only, the code expired
 with the way back to Verify). Words that are NOT the board's: "We could not check the code. Check your
 connection and try again." (a code checked while offline), and the two headings of DW-A43's failures.
+
+## Screen lock: password (app design, no board frame)
+
+Core's contract (`2026-11-13-two-level-lock-design.md`, section 7) has no frame for the screen lock's password
+fallback: it is DW-A30's screen with the lock's words, in front of the lock screen (as #414 built it). The sentences
+under its field are this app's own words, proposed here; each is drawn for its outcome by a test in `lock_tests.rs`
+(`screen_password_*`). `{w}` is "30 seconds", "1 minute", "5 minutes", "15 minutes" or "1 hour", rounded up from the
+engine's wait. While a wait runs, Unlock is disabled and the sentence counts down once a second.
+
+| Outcome (`Engine::unlock_screen_with_password`) | What the lock screen says |
+|---|---|
+| `Opened` | nothing: the window opens |
+| `Wrong`, no wait | "That password isn't right." |
+| `Wrong`, a wait | "That password isn't right. Try again in {w}." |
+| `Wait` | "Too many wrong tries. Try again in {w}." |
+| `ServerLimit` | "Beebeeb is checking too many passwords right now. Try again in {w}." / "... Try again in a moment." |
+| `LocalCheckOff` | "That password isn't right. This PC no longer checks your password offline: connect to the internet or use Windows Hello." |
+| `OfflineNoRecord` | "Beebeeb can't be reached, and this PC can't check your password offline yet. Connect to the internet or use Windows Hello." |
+| `AccountUpgradeNeeded` | the vault level's screen, starting with "Sign in again to finish updating your account." |
+| `SessionEnded` | the vault level's screen, starting with "Your session ended. Enter your password to unlock and resume sync." |
+| the press could not be checked | "Beebeeb couldn't check that password. Nothing was unlocked." |
+
+The typed password is wiped when it is sent, on Back, and when the lock level changes.

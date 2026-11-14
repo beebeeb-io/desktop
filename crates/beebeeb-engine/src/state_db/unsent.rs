@@ -143,7 +143,7 @@ fn unsent_sql_with(with: &str, held_folder_case: &str, tail: &str) -> String {
 }
 
 /// The kind word's key for one queue row. A `create_file` upload is a new file, whichever kind queued it.
-fn change_kind(kind: &str, metadata_json: Option<&str>) -> &'static str {
+pub(super) fn change_kind(kind: &str, metadata_json: Option<&str>) -> &'static str {
     match OperationKind::from_str(kind) {
         OperationKind::UploadFile => "new_file",
         OperationKind::UploadVersion => {

@@ -17,9 +17,14 @@ use rune::{Env, Runtime};
 use super::*;
 use crate::State;
 use crate::frames::settings::drive::BoardDrive;
+use crate::frames::settings::drive::Control;
 use crate::shell::platform::fake::FakePlatform;
 
 const GB: i64 = 1_000_000_000;
+
+/// Repair, turn off, the speed test, the support bundle and the reads that wait for their pane.
+#[path = "drive_settings_tools_tests.rs"]
+mod tools_tests;
 
 /// The transfer limits and the Bandwidth read.
 #[path = "drive_settings_limits_tests.rs"]
@@ -92,6 +97,14 @@ struct Fake {
     limit_changes: Mutex<Vec<TransferLimitsChange>>,
     /// Reads of the limits (the Bandwidth pane's).
     limit_reads: AtomicUsize,
+    /// What the engine answers a repair and a turn-off, and how often each was asked (with the session).
+    explorer_answer: Mutex<Result<(), ExplorerChangeRefused>>,
+    explorer_calls: Mutex<Vec<(&'static str, SessionGeneration)>>,
+    /// What each speed step answers (`None`: the step fails offline), and the steps asked.
+    speed_answers: Mutex<Vec<Option<SpeedFigure>>>,
+    speed_asked: Mutex<Vec<SpeedStep>>,
+    /// What an export answers.
+    bundle_answer: Mutex<Result<SavedBundle, BundleRefused>>,
 }
 
 impl Fake {
@@ -127,6 +140,11 @@ impl Fake {
             limits: Mutex::new(TransferLimits::default()),
             limit_changes: Mutex::new(Vec::new()),
             limit_reads: AtomicUsize::new(0),
+            explorer_answer: Mutex::new(Ok(())),
+            explorer_calls: Mutex::new(Vec::new()),
+            speed_answers: Mutex::new(Vec::new()),
+            speed_asked: Mutex::new(Vec::new()),
+            bundle_answer: Mutex::new(Err(BundleRefused::NoQueue)),
         })
     }
 
@@ -214,6 +232,31 @@ impl DriveEngine for Fake {
         }
         Ok(*limits)
     }
+    fn repair_explorer(&self, session: SessionGeneration) -> Result<(), ExplorerChangeRefused> {
+        self.explorer_calls.lock().unwrap().push(("repair", session));
+        *self.explorer_answer.lock().unwrap()
+    }
+    fn turn_off_explorer(&self, session: SessionGeneration) -> Result<(), ExplorerChangeRefused> {
+        self.explorer_calls.lock().unwrap().push(("turn off", session));
+        *self.explorer_answer.lock().unwrap()
+    }
+    fn speed_step(
+        &self,
+        _session: SessionGeneration,
+        step: SpeedStep,
+        progress: &(dyn Fn(u32, u32) + Sync),
+    ) -> Result<SpeedFigure, AccountCallError> {
+        self.speed_asked.lock().unwrap().push(step);
+        progress(1, 3);
+        let mut answers = self.speed_answers.lock().unwrap();
+        if answers.is_empty() {
+            return Err(AccountCallError::Offline);
+        }
+        answers.remove(0).ok_or(AccountCallError::Offline)
+    }
+    fn export_bundle(&self, _session: SessionGeneration) -> Result<SavedBundle, BundleRefused> {
+        self.bundle_answer.lock().unwrap().clone()
+    }
 }
 
 fn file(db: &StateDb, id: &str, path: &str, size: i64, folder: bool) {
@@ -261,8 +304,20 @@ fn account() -> Arc<Fake> {
     fake
 }
 
+/// A source whose Insights and Sync panes were just opened, with the reads still out (nothing is read before a pane
+/// opens, so a test that holds a read in flight opens the panes itself).
+fn opened_source(fake: &Arc<Fake>, platform: Arc<FakePlatform>) -> EngineDriveSettings<Fake> {
+    let mut source = EngineDriveSettings::new(fake.clone(), platform);
+    source.opened(Pane::Sync);
+    source.opened(Pane::Insights);
+    source
+}
+
+/// A source whose Sync and Storage insights panes were opened (nothing is read before a pane opens).
 fn source(fake: &Arc<Fake>, platform: Arc<FakePlatform>) -> EngineDriveSettings<Fake> {
     let mut source = EngineDriveSettings::new(fake.clone(), platform);
+    source.opened(Pane::Insights);
+    source.opened(Pane::Sync);
     settle(&mut source);
     source
 }
@@ -367,7 +422,11 @@ fn a_locked_vault_shows_no_insights_and_no_folders() {
     assert_eq!(source.keep, Keep::Failed, "gone from memory");
     assert_eq!(source.sync().downloaded, "");
 
+    // Unlocked again: only the panes the person opens read for the new session.
     fake.gate(GateState::Ready);
+    source.pump(0.0);
+    source.opened(Pane::Insights);
+    source.opened(Pane::Sync);
     settle(&mut source);
     assert_eq!(ready(&source).used, "240 GB");
     assert!(matches!(source.keep(), Keep::Ready { .. }));
@@ -464,13 +523,7 @@ fn apply_keep_changes_only_the_folders_named_while_sync_runs() {
 /// panes on the board's fixture draw values (the check can fail). Storage insights draws its own page.
 #[test]
 fn every_unwired_pane_draws_no_sample_value() {
-    for (frame, pane) in [
-        ("DW-0712", Pane::Storage),
-        ("DW-0746", Pane::Sync),
-        ("DW-0785", Pane::Bandwidth),
-        ("DW-0744", Pane::Previews),
-        ("DW-0790", Pane::Diagnostics),
-    ] {
+    for (frame, pane) in [("DW-0712", Pane::Storage), ("DW-0744", Pane::Previews)] {
         let engine = drawn(
             frame,
             Box::new(EngineDriveSettings::new(account(), Arc::new(FakePlatform::default()))),
@@ -484,11 +537,23 @@ fn every_unwired_pane_draws_no_sample_value() {
         let board = drawn(frame, Box::new(BoardDrive::new()));
         assert!(!has(&board, "not-built"), "{frame}: the fixture draws its pane");
     }
-    let insights = drawn(
-        "DW-0783",
-        Box::new(EngineDriveSettings::new(account(), Arc::new(FakePlatform::default()))),
-    );
-    assert!(!has(&insights, "not-built"), "Storage insights draws its own page");
+    for (frame, pane) in [
+        ("DW-0783", Pane::Insights),
+        ("DW-0746", Pane::Sync),
+        ("DW-0785", Pane::Bandwidth),
+        ("DW-0790", Pane::Diagnostics),
+    ] {
+        let engine = drawn(
+            frame,
+            Box::new(EngineDriveSettings::new(account(), Arc::new(FakePlatform::default()))),
+        );
+        assert!(engine.state.settings.wired(pane), "{frame}");
+        assert!(!has(&engine, "not-built"), "{frame} draws its own pane");
+        let texts = texts(&engine);
+        for sample in ["18.4 GB", "Anna", "3 items", "35.2", "94.0"] {
+            assert!(!texts.iter().any(|t| t.contains(sample)), "{frame} draws {sample}");
+        }
+    }
 }
 
 fn drawn(frame: &'static str, drive: Box<dyn DriveSettings>) -> Runtime<State> {
@@ -560,7 +625,7 @@ fn another_accounts_local_state_reads_as_nothing() {
 
     // Sign in as account A.
     *fake.account.lock().unwrap() = Some("invented@beebeeb.io".into());
-    let mut source = source(&fake, Arc::default());
+    let source = source(&fake, Arc::default());
     assert_eq!(source.keep(), Keep::Failed, "A never sees B's folders");
     assert!(source.on_pc.is_none(), "A never sees B's local sizes");
 }
@@ -640,7 +705,7 @@ fn insights_landing_after_a_lock_are_dropped() {
     let fake = account();
     // The second read of the local state is the insights' (the first is the local sizes').
     fake.after_read.arm_at(2);
-    let mut source = EngineDriveSettings::new(fake.clone(), Arc::new(FakePlatform::default()));
+    let mut source = opened_source(&fake, Arc::new(FakePlatform::default()));
     fake.after_read.reached();
     fake.gate(GateState::Locked);
     source.pump(0.0);
@@ -664,7 +729,7 @@ fn insights_of_one_account_landing_under_another_are_never_drawn() {
     fake.after_read.arm_at(2);
     // The second ask for the use is the second account's.
     fake.in_usage.arm_at(2);
-    let source = EngineDriveSettings::new(fake.clone(), Arc::new(FakePlatform::default()));
+    let source = opened_source(&fake, Arc::new(FakePlatform::default()));
     let pending = source.pending.clone();
     fake.after_read.reached();
     let mut rt = drawn("DW-0783", Box::new(source));
@@ -715,7 +780,7 @@ fn a_change_asked_by_one_account_is_not_made_for_the_next() {
     let platform = Arc::new(FakePlatform::default());
     // The worker is held in its first read while the changes queue up behind it.
     fake.after_read.arm_at(1);
-    let mut source = EngineDriveSettings::new(fake.clone(), platform.clone());
+    let mut source = opened_source(&fake, platform.clone());
     fake.after_read.reached();
     source.set_paused(true);
     source.set_open_at_login(true);
@@ -749,7 +814,7 @@ fn a_change_the_worker_reaches_after_a_lock_is_not_made() {
     let fake = account();
     let platform = Arc::new(FakePlatform::default());
     fake.after_read.arm_at(1);
-    let mut source = EngineDriveSettings::new(fake.clone(), platform.clone());
+    let mut source = opened_source(&fake, platform.clone());
     fake.after_read.reached();
     source.set_paused(true);
     source.set_open_at_login(true);

@@ -191,6 +191,14 @@ pub fn meta_row(key: &'static str, label: &'static str, value: &str, mono: bool,
         )
 }
 
+/// `shadow-1` of a knob that is on: the ink at 4 % and 6 %, the same in both themes (DW-0412's board).
+fn knob_ink(alpha: f32) -> Color {
+    Color {
+        a: alpha,
+        ..rune::color::hex("#14110D").unwrap_or(Color::BLACK)
+    }
+}
+
 /// A switch (the kit's Switch): 36 x 20, off is a recessed track, on is ink.
 /// Keys: `<key>-switch`, `<key>-knob`.
 pub fn switch(key: &str, name: &str, on: bool, t: &Theme) -> El {
@@ -210,8 +218,14 @@ pub fn switch(key: &str, name: &str, on: bool, t: &Theme) -> El {
             el().key(format!("{key}-knob"))
                 .size(14.0, 14.0)
                 .radius(7.0)
-                .fill(t.white)
-                .box_shadow(kit::drop(1.0, 3.0, t.shadow))
+                // The knob of a switch that is on is the paper's colour (DW-0412's board).
+                .fill(if on { t.paper } else { t.white })
+                .box_shadow(kit::drop(1.0, 3.0, if on { knob_ink(0.04) } else { t.shadow }))
+                .box_shadow(kit::drop(
+                    1.0,
+                    2.0,
+                    if on { knob_ink(0.06) } else { Color::TRANSPARENT },
+                ))
                 .ml(if on { 18.0 } else { 2.0 }),
         )
 }
