@@ -486,6 +486,51 @@ fn texts(rt: &Runtime<State>) -> Vec<String> {
         .collect()
 }
 
+/// Review of desktop#425: a device that may be this PC's own backup says it cannot read it and why it cannot be
+/// deleted here; no "Delete this backup", and pressing the row opens nothing.
+#[test]
+fn a_device_that_may_be_this_pcs_has_no_delete() {
+    use super::source::{Backed, Device, DeviceKind};
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let late = Late {
+        devices: vec![Device {
+            id: "maybe-me".into(),
+            name: "Invented PC".into(),
+            model: "device".into(),
+            kind: DeviceKind::Unknown,
+            backed: Backed::Unreadable,
+            size: None,
+            last_backup: None,
+            signed_in: None,
+            deletable: false,
+        }],
+        deleting: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        asked: asked.clone(),
+    };
+    let mut state = init();
+    crate::frames::settings::go(&mut state, "DW-0737");
+    state.backups = BackupsUi::new(Some(Box::new(late)));
+    state.backups.show(Page::Device("maybe-me".into()));
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, view, (958.0, 958.0), env);
+    rt.frame(0.0);
+    let page = texts(&rt);
+    for present in [
+        super::view::CANT_READ,
+        super::view::MAY_BE_THIS_PC,
+        "Can't delete this backup here",
+    ] {
+        assert!(page.iter().any(|t| t == present), "{present} is drawn");
+    }
+    assert!(!page.iter().any(|t| t == "Delete this backup"), "never offered");
+    click(&mut rt, "item-2-0");
+    assert_eq!(rt.state.backups.dialog, None, "pressing the row opens nothing");
+    assert!(asked.lock().unwrap().is_empty());
+}
+
 #[test]
 fn a_late_delete_keeps_the_dialog_until_the_answer_and_a_refusal_shows_under_the_field() {
     use super::source::{Backed, Device, DeviceKind};
@@ -501,6 +546,7 @@ fn a_late_delete_keeps_the_dialog_until_the_answer_and_a_refusal_shows_under_the
             size: None,
             last_backup: None,
             signed_in: None,
+            deletable: true,
         }],
         deleting: deleting.clone(),
         asked: asked.clone(),
@@ -607,6 +653,7 @@ fn a_delete_answer_never_lands_in_another_devices_dialog() {
         size: None,
         last_backup: None,
         signed_in: None,
+        deletable: true,
     };
     let deleting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

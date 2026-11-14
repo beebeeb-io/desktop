@@ -7,7 +7,9 @@
 //!   `ContentRecord::decryptor`), the text parsed by core's `parse_manifest`. No crypto of its own; the plaintext is
 //!   wiped once parsed.
 //! - This PC is never listed: its folder (the layout's `device_folder_id`) and any folder whose manifest is this PC's
-//!   (core's `same_device_id`) are left out.
+//!   (core's `same_device_id`) are left out. While no layout names this PC's folder yet (a reset PC's first sync), a
+//!   folder of this PC's device-folder name whose manifest does not name another device MAY be this PC's: it is
+//!   listed as it reads, marked [`BackupDevice::may_be_this_pc`], and never deleted ([`may_be_this_pcs`]).
 //! - A device whose manifest this PC cannot open (no key, no record, a name that does not open, not JSON) is a row
 //!   that says so ([`DeviceRead::Unreadable`]), never hidden and never guessed. A device folder that could not be
 //!   listed or downloaded is [`DeviceRead::NotReached`] for that row only.
@@ -19,14 +21,15 @@
 //!
 //! [`Engine::delete_device_backup_for`] is `backup_delete::delete_backup` for the session of the press: the rule
 //! (`backup_actions::check`: only a row that answers `NeedsPassword` is sent), core's OPAQUE step-up with the account
-//! PASSWORD, one single-use token, one `DELETE /api/v1/files/{id}` (a move to Trash). The engine's rule is followed as
-//! it is: it refuses this PC's actively backed-up folders and allows a device folder (this PC's included) behind the
-//! password; the Backups section only offers the devices [`Engine::backup_devices_for`] listed, so this PC's folder
-//! never reaches it from there.
+//! PASSWORD, one single-use token, one `DELETE /api/v1/files/{id}` (a move to Trash). The engine's rule is followed
+//! (it refuses this PC's actively backed-up folders), and before it this PC's own device folder is refused here, not
+//! only left out of the list: the layout's `device_folder_id`; while there is no layout, a device folder that
+//! [`may_be_this_pcs`] (its manifest is read first). Both before the password is proven, nothing sent.
 //!
-//! Session rule: the token (and, for the read, the vault key) leave the session's lock together, only while the
-//! session in memory is the press's (`AccountRuntime::while_session_is`); the local state is read through the
-//! account-bound handle of that same session, and the answer is handed over only while it is still that session.
+//! Session rule: the token (and the vault key) leave the session's lock together, as a person's call
+//! (`Engine::person_session`: a locked screen is refused there, before anything is copied), only while the session in
+//! memory is the press's; the local state is read through the account-bound handle of that same session, and the
+//! answer is handed over only while it is still that session.
 //!
 //! Both BLOCK on the handle's runtime: a worker's, never the UI thread's.
 //!
@@ -36,18 +39,20 @@
 use std::sync::Arc;
 
 use beebeeb_core::backup::{
-    DeviceFolderCandidate, DeviceFolderChoice, DeviceManifest, DeviceSelf, FolderManifest, MANIFEST_NAME,
-    find_device_folder, parse_manifest, same_device_id,
+    DeviceFolderCandidate, DeviceFolderChoice, DeviceManifest, DeviceSelf, FolderManifest, MANIFEST_NAME, TakenName,
+    device_folder_name, find_device_folder, fold_name, parse_manifest, same_device_id,
 };
 use beebeeb_types::backup::Platform;
 use zeroize::Zeroizing;
 
+use super::lock_api::PersonRefused;
 use super::settings_api::{AccountCallError, kind_of};
 use super::{CredentialStores, Engine, LocalStateRefused};
 use crate::account::SessionGeneration;
 use crate::api_client::ApiClient;
 use crate::backup_delete::{self, DeleteBackupError};
 use crate::engine_bridge::{BackupChild, EngineBridge, EngineError};
+use crate::state_db::StateDb;
 
 #[cfg(test)]
 #[path = "backup_devices_api_tests.rs"]
@@ -55,6 +60,9 @@ mod tests;
 
 /// The longest device model kept from a manifest (`device_model`): a label, never a document.
 const MODEL_MAX: usize = 64;
+
+/// Why a delete of this PC's own device folder is refused (shown, never logged; no name in it).
+const THIS_PC: &str = "This may be this PC's own backup. Nothing was deleted.";
 
 /// What kind of device a manifest describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +121,9 @@ pub struct BackupDevice {
     /// The folder's name, opened on this PC; `None` when it does not open.
     pub folder_name: Option<String>,
     pub read: DeviceRead,
+    /// It may be this PC's own folder (no layout names this PC's yet, see [`may_be_this_pcs`]): never offered for
+    /// delete, and [`Engine::delete_device_backup_for`] refuses it.
+    pub may_be_this_pc: bool,
 }
 
 impl std::fmt::Debug for BackupDevice {
@@ -121,6 +132,7 @@ impl std::fmt::Debug for BackupDevice {
             .field("folder_id", &"<redacted>")
             .field("folder_name", &self.folder_name.as_ref().map(|_| "<redacted>"))
             .field("read", &self.read)
+            .field("may_be_this_pc", &self.may_be_this_pc)
             .finish()
     }
 }
@@ -315,10 +327,13 @@ pub(crate) async fn read_devices<T: DeviceTree>(
     let devices = read
         .into_iter()
         .filter(|(folder, _, _)| adopted.is_none_or(|id| uuid::Uuid::parse_str(&folder.id).ok() != Some(id)))
-        .map(|(folder, read, _)| BackupDevice {
+        .map(|(folder, read, manifest)| BackupDevice {
             folder_id: folder.id.clone(),
             folder_name: folder.name.clone(),
             read,
+            // A layout names this PC's folder (left out above): no other row is this PC's.
+            may_be_this_pc: this_pc.is_none()
+                && may_be_this_pcs(folder.name.as_deref(), owner(false, manifest.as_ref()), me),
         })
         .collect();
     Ok((devices, complete))
@@ -350,6 +365,108 @@ fn adopted_by_this_pc(
     }
 }
 
+/// Whose a device folder's manifest says it is, as [`read_device`] read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Owner {
+    ThisPc,
+    /// A manifest that names a device id, not this PC's.
+    Another,
+    /// No manifest, one that does not open or names no device, or none reached.
+    Unknown,
+}
+
+/// `mine` and the manifest [`read_device`] answered.
+fn owner(mine: bool, manifest: Option<&DeviceManifest>) -> Owner {
+    match manifest {
+        _ if mine => Owner::ThisPc,
+        Some(manifest) if manifest.device_id.is_some() => Owner::Another,
+        _ => Owner::Unknown,
+    }
+}
+
+/// Whether `name` is this PC's device-folder name as core makes it (`device_folder_name`): the bare name or one with
+/// a collision suffix (`GLegion (a3f2)`, widened 4 digits at a time), compared as core folds names. Pure.
+fn is_this_pcs_name(name: &str, me: &DeviceSelf) -> bool {
+    let folded = fold_name(name);
+    let mut taken: Vec<TakenName> = Vec::new();
+    loop {
+        let candidate = device_folder_name(&me.name, &me.device_id, &taken);
+        if fold_name(&candidate) == folded {
+            return true;
+        }
+        // The widest suffix is answered even when taken: every form was asked.
+        if taken.iter().any(|t| t.name == candidate) {
+            return false;
+        }
+        taken.push(TakenName {
+            name: candidate,
+            device_id: None,
+        });
+    }
+}
+
+/// While no layout names this PC's device folder: whether the device folder `name` (`None`: its name does not open
+/// here) may be this PC's own. Its manifest names this PC; or it does not name another device, and the folder has
+/// this PC's device-folder name or a name that does not open. Without `me` (no usable name or machine id on this
+/// PC) nothing can be told apart: every folder may be. Pure.
+pub(crate) fn may_be_this_pcs(name: Option<&str>, owner: Owner, me: Option<&DeviceSelf>) -> bool {
+    let Some(me) = me else {
+        return true;
+    };
+    match owner {
+        Owner::ThisPc => true,
+        Owner::Another => false,
+        Owner::Unknown => name.is_none_or(|name| is_this_pcs_name(name, me)),
+    }
+}
+
+/// Two server ids for the same item (as UUIDs when both are).
+fn same_item(a: &str, b: &str) -> bool {
+    match (uuid::Uuid::parse_str(a), uuid::Uuid::parse_str(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// The refusal for `folder_id` when it is, or may be, this PC's own device folder; `None` otherwise (the rest is the
+/// Backups rule's, in `backup_delete`). With a layout: its `device_folder_id`. Without one: a device folder (a row
+/// directly under a Backups root) is read first ([`read_device`] over `tree`) and refused when it
+/// [`may_be_this_pcs`]. A local state that cannot be read refuses (a read error never lifts a protection).
+pub(crate) async fn own_folder_refusal<T: DeviceTree>(
+    db: &StateDb,
+    tree: &T,
+    folder_id: &str,
+    me: Option<&DeviceSelf>,
+) -> Option<DeleteBackupError> {
+    let state = || Some(DeleteBackupError::Failed("state"));
+    match db.backup_layout() {
+        Err(_) => return state(),
+        Ok(Some(layout)) => {
+            return same_item(&layout.device_folder_id, folder_id).then(|| DeleteBackupError::Refused(THIS_PC.into()));
+        }
+        Ok(None) => {}
+    }
+    let entry = match db.get_file(folder_id) {
+        Err(_) => return state(),
+        // No such row: the rule answers it (nothing is sent).
+        Ok(None) => return None,
+        Ok(Some(entry)) => entry,
+    };
+    let Ok(roots) = db.backups_roots() else {
+        return state();
+    };
+    let device_folder = entry
+        .parent_id
+        .as_deref()
+        .is_some_and(|parent| roots.iter().any(|(root, _)| same_item(root, parent)));
+    if !device_folder {
+        return None;
+    }
+    let name = entry.path.rsplit('/').next().filter(|name| !name.is_empty());
+    let (_, mine, manifest) = read_device(tree, folder_id, me).await;
+    may_be_this_pcs(name, owner(mine, manifest.as_ref()), me).then(|| DeleteBackupError::Refused(THIS_PC.into()))
+}
+
 impl<C: CredentialStores> Engine<C> {
     /// The account's other devices' backups, for the session a person opened the section under (`session` is
     /// [`Engine::session_turn`] as the host read it). See the module's doc. BLOCKS: a worker's.
@@ -358,13 +475,15 @@ impl<C: CredentialStores> Engine<C> {
         if self.acct.session.is_poisoned() {
             return Err(DevicesRefused::NotSignedIn);
         }
-        // The token and the vault key leave the session's lock together, as copies wiped when this call ends.
-        let (token, key) = self
-            .acct
-            .while_session_is(&self.writes, session, |current| {
-                (current.token.clone(), Zeroizing::new(current.master_key))
-            })
-            .ok_or(DevicesRefused::NotSignedIn)?;
+        // The token and the vault key leave the session's lock together, as copies wiped when this call ends, as a
+        // person's call: a locked screen copies nothing.
+        let (token, key) = match self.person_session(|current, generation| {
+            (generation == session).then(|| (current.token.clone(), Zeroizing::new(current.master_key)))
+        }) {
+            Ok(Some(held)) => held,
+            Err(PersonRefused::ScreenLocked) => return Err(DevicesRefused::Local(LocalStateRefused::Locked)),
+            Ok(None) | Err(PersonRefused::NoSession) => return Err(DevicesRefused::NotSignedIn),
+        };
         let state = self.local_state().map_err(DevicesRefused::Local)?;
         if state.session() != session {
             return Err(DevicesRefused::NotSignedIn);
@@ -416,9 +535,19 @@ impl<C: CredentialStores> Engine<C> {
         if self.acct.session.is_poisoned() {
             return Err(DeleteBackupError::SignedOut);
         }
-        let token = self
-            .acct
-            .while_session_is(&self.writes, session, |current| current.token.clone())
+        // The token and the vault key (for the read of a folder that may be this PC's) leave the session's lock
+        // together, as a person's call: a locked screen copies nothing (as the Trash deletes, review of #424).
+        let (token, key) = self
+            .person_session(|current, generation| {
+                (generation == session).then(|| {
+                    (
+                        Zeroizing::new(current.token.clone()),
+                        Zeroizing::new(current.master_key),
+                    )
+                })
+            })
+            .ok()
+            .flatten()
             .ok_or(DeleteBackupError::SignedOut)?;
         let state = self.local_state().map_err(|refused| match refused {
             LocalStateRefused::SessionChanged | LocalStateRefused::SignedOut | LocalStateRefused::SessionEnded => {
@@ -432,19 +561,21 @@ impl<C: CredentialStores> Engine<C> {
         let base = self.config.api_base.trim_end_matches('/').to_string();
         let identity = self.identity;
         let deleted = state
-            .with(|db| {
+            .with_shared(|db| {
                 // What this PC backs up now, read fresh; a settings file that cannot be read keeps the runner's last
                 // answer (a read error never lifts a protection).
-                let own = crate::backup::own_backups(identity, db).unwrap_or_else(crate::backup_protect::own_backups);
-                self.runtime.block_on(backup_delete::delete_backup(
-                    &base,
-                    &self.client,
-                    token.as_str(),
-                    db,
-                    &own,
-                    folder_id,
-                    password,
-                ))
+                let own = crate::backup::own_backups(identity, &db).unwrap_or_else(crate::backup_protect::own_backups);
+                let me = crate::backup::device::device_self(identity);
+                let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token.to_string(), *key));
+                let bridge = EngineBridge::new(identity, db.clone(), api);
+                self.runtime.block_on(async {
+                    // This PC's own device folder: refused before the password is proven.
+                    if let Some(refused) = own_folder_refusal(&db, &bridge, folder_id, me.as_ref()).await {
+                        return Err(refused);
+                    }
+                    backup_delete::delete_backup(&base, &self.client, token.as_str(), &db, &own, folder_id, password)
+                        .await
+                })
             })
             // The session moved while the delete ran: whatever it answered is not handed over.
             .map_err(|_| DeleteBackupError::SignedOut)?;

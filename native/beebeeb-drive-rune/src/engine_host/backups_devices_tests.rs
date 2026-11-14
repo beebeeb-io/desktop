@@ -29,6 +29,7 @@ fn read_device(id: &str, name: &str, class: DeviceClass, model: Option<&str>, fo
             folders,
             last_backup_ms: None,
         }),
+        may_be_this_pc: false,
     }
 }
 
@@ -40,11 +41,13 @@ fn account_a_devices() -> Vec<BackupDevice> {
             folder_id: "old".into(),
             folder_name: Some("Invented old laptop".into()),
             read: DeviceRead::Unreadable,
+            may_be_this_pc: false,
         },
         BackupDevice {
             folder_id: "nameless".into(),
             folder_name: None,
             read: DeviceRead::NotReached,
+            may_be_this_pc: false,
         },
     ]
 }
@@ -378,6 +381,35 @@ fn a_done_delete_removes_nothing_before_the_answer_and_reads_the_list_again() {
         ["phone", "old", "nameless"],
         "the row went with Beebeeb's answer"
     );
+}
+
+/// Review of desktop#425: a folder the engine says may be this PC's own is drawn as it reads, never deletable, and a
+/// delete of it is not sent.
+#[test]
+fn a_device_that_may_be_this_pcs_is_never_deleted() {
+    let fake = Fake::new();
+    fake.devices
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .find(|(account, _)| account == A)
+        .expect("account A's devices")
+        .1
+        .push(BackupDevice {
+            folder_id: "maybe-me".into(),
+            folder_name: Some("Invented PC".into()),
+            read: DeviceRead::Unreadable,
+            may_be_this_pc: true,
+        });
+    let mut calls = opened(&fake);
+    let rows = calls.devices();
+    let row = rows.iter().find(|row| row.id == "maybe-me").expect("listed");
+    assert_eq!((row.backed, row.deletable), (Backed::Unreadable, false));
+    assert!(rows.iter().filter(|row| row.id != "maybe-me").all(|row| row.deletable));
+    assert!(!calls.delete("maybe-me", PASSWORD), "not sent");
+    settle(&mut calls);
+    assert!(fake.deletes.lock().unwrap().is_empty());
+    assert!(calls.delete("mac", PASSWORD), "another device's still is");
 }
 
 #[test]

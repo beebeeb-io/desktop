@@ -236,6 +236,58 @@ fn the_old_mirrors_folder_of_this_pc_is_left_out_while_no_layout_names_this_pcs_
     assert_eq!(devices[0].read, DeviceRead::NoStatusFile);
 }
 
+/// Review of desktop#425: while no layout names this PC's folder, a folder of this PC's device-folder name (bare or
+/// suffixed, any case) whose manifest does not name another device may be this PC's: listed as it reads, marked, and
+/// never offered for delete. A name that does not open is marked too. With a layout, no row is.
+#[test]
+fn a_folder_that_may_be_this_pcs_is_marked_while_no_layout_names_this_pcs_folder() {
+    let me = me();
+    let suffixed = beebeeb_core::backup::device_folder_name(
+        &me.name,
+        &me.device_id,
+        &[beebeeb_core::backup::TakenName {
+            name: me.name.clone(),
+            device_id: None,
+        }],
+    );
+    assert_ne!(suffixed, me.name, "a collision suffix: {suffixed}");
+    let mut tree = Tree::default();
+    // This PC's name, a manifest that does not open: may be this PC's.
+    tree.folder(ROOT, "p-closed", Some("invented pc"));
+    tree.file("p-closed", "m-closed", Some(MANIFEST_NAME), None);
+    // This PC's suffixed name, a listing that fails.
+    tree.folder(ROOT, "p-suffixed", Some(&suffixed));
+    tree.unreachable.push("p-suffixed".into());
+    // This PC's name, a manifest that names another device: that device's.
+    tree.folder(ROOT, "p-other", Some("Invented PC"));
+    tree.manifest("p-other", "m-other", &mac_manifest());
+    // Another name, a manifest that does not open: not this PC's by name.
+    tree.folder(ROOT, "s-closed", Some("Invented Studio"));
+    tree.file("s-closed", "m-s-closed", Some(MANIFEST_NAME), None);
+    // A name that does not open, nothing readable: may be.
+    tree.folder(ROOT, "nameless", None);
+    tree.unreachable.push("nameless".into());
+
+    let (devices, _) = read(&tree, None).unwrap();
+    let marks: Vec<(&str, &DeviceRead, bool)> = devices
+        .iter()
+        .map(|d| (d.folder_id.as_str(), &d.read, d.may_be_this_pc))
+        .collect();
+    assert_eq!(marks.len(), 5, "every folder is listed: {marks:?}");
+    assert_eq!(marks[0], ("p-closed", &DeviceRead::Unreadable, true));
+    assert_eq!(marks[1], ("p-suffixed", &DeviceRead::NotReached, true));
+    assert_eq!((marks[2].0, marks[2].2), ("p-other", false));
+    assert_eq!(marks[3], ("s-closed", &DeviceRead::Unreadable, false));
+    assert_eq!(marks[4], ("nameless", &DeviceRead::NotReached, true));
+    // A layout names this PC's folder: no other row is this PC's.
+    let (devices, _) = read(&tree, Some(THIS_PC)).unwrap();
+    assert!(devices.iter().all(|d| !d.may_be_this_pc));
+    // No name and no machine id on this PC: nothing can be told apart, every folder may be.
+    assert!(may_be_this_pcs(Some("Invented Studio"), Owner::Another, None));
+    assert!(!may_be_this_pcs(Some("Invented Studio"), Owner::Unknown, Some(&me)));
+    assert!(may_be_this_pcs(Some("Invented Studio"), Owner::ThisPc, Some(&me)));
+}
+
 #[test]
 fn a_root_that_cannot_be_listed_is_a_refusal_and_a_cut_short_one_says_so() {
     let mut tree = Tree::default();

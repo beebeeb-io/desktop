@@ -191,6 +191,8 @@ fn folder_row(index: usize, folder: &Folder, button: usize, t: &Theme) -> El {
 
 /// What a device row and page say for a device whose status file this PC cannot read.
 pub(super) const CANT_READ: &str = "Can't read this device's backup.";
+/// Why a device that may be this PC's own backup has no "Delete this backup" (the engine refuses it too).
+pub(super) const MAY_BE_THIS_PC: &str = "This may be this PC's own backup, so it can't be deleted from this PC.";
 
 fn device_icon(kind: DeviceKind) -> &'static rune::Icon {
     match kind {
@@ -434,6 +436,30 @@ fn device_page(device: &Device, links: bool, t: &Theme) -> Vec<El> {
             None,
             t,
         ));
+    }
+    // A folder that may be this PC's own (no layout names this PC's yet): never offered for delete, and said why.
+    if !device.deletable {
+        page.push(lists::list(
+            2,
+            Some("Remove"),
+            vec![bk::row_item(
+                2,
+                0,
+                RowItem {
+                    leading: Leading::Icon(&ic::TRASH),
+                    title: "Can't delete this backup here".into(),
+                    title_color: None,
+                    sub: None,
+                    ruled: false,
+                    link: false,
+                    trailing: Vec::new(),
+                },
+                t,
+            )],
+            Some(MAY_BE_THIS_PC),
+            t,
+        ));
+        return page;
     }
     page.push(lists::list(
         2,

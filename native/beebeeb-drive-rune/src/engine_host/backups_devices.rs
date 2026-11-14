@@ -372,7 +372,7 @@ impl<E: DevicesEngine> DeviceCalls<E> {
 
     /// Delete the backup of the listed device `id` after proving `password`. `true`: sent (the answer comes through
     /// [`Self::pump`]). `false`, nothing sent: no session, a delete already on its way, or an id the list does not
-    /// hold for this session.
+    /// hold for this session (or holds as possibly this PC's own).
     pub fn delete(&mut self, id: &str, password: &str) -> bool {
         // The session and account of the press, read before anything else.
         let pressed = self.engine.stamp();
@@ -382,10 +382,11 @@ impl<E: DevicesEngine> DeviceCalls<E> {
         if !self.engine.has_session() || self.deleting.is_some() || password.is_empty() {
             return false;
         }
+        // Listed, and not a folder the engine says may be this PC's own (it refuses that delete too).
         let listed = self
             .held
             .as_ref()
-            .is_some_and(|rows| rows.iter().any(|row| row.id == id));
+            .is_some_and(|rows| rows.iter().any(|row| row.id == id && row.deletable));
         if !listed {
             return false;
         }
@@ -477,6 +478,7 @@ fn device_of(device: &BackupDevice, today: chrono::NaiveDate) -> Device {
                 size: None,
                 last_backup: summary.last_backup_ms.map(|at| last_backup_words(at, today)),
                 signed_in: None,
+                deletable: !device.may_be_this_pc,
             }
         }
         DeviceRead::NoStatusFile | DeviceRead::Unreadable | DeviceRead::NotReached => Device {
@@ -488,6 +490,7 @@ fn device_of(device: &BackupDevice, today: chrono::NaiveDate) -> Device {
             size: None,
             last_backup: None,
             signed_in: None,
+            deletable: !device.may_be_this_pc,
         },
     }
 }

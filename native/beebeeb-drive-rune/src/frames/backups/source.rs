@@ -104,6 +104,9 @@ pub struct Device {
     pub last_backup: Option<String>,
     /// `None`: this PC cannot know (no server part says whether another device is signed in); no Status is drawn.
     pub signed_in: Option<bool>,
+    /// `false`: it may be this PC's own backup (the engine says so, and refuses its delete): no "Delete this backup",
+    /// its page says why.
+    pub deletable: bool,
 }
 
 /// An item Beebeeb stopped trying, or one it never backs up (DW-0741). Never a raw error code.
@@ -308,6 +311,7 @@ impl FixtureSource {
             size: size.map(str::to_string),
             last_backup: last.map(str::to_string),
             signed_in: Some(signed_in),
+            deletable: true,
         };
         let devices = vec![
             device(
