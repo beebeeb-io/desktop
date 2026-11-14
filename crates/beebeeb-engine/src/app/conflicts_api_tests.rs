@@ -257,6 +257,13 @@ fn a_keep_there_that_fails_leaves_the_sync_folder_as_it_was_every_time() {
     let rig = rig();
     let before = names_in(&rig.root);
     for _ in 0..2 {
+        // A failed download marks the row; the file waits for a choice again when the conflict is found again.
+        put(
+            &StateDb::open(&rig._dir.path().join("state.db")).unwrap(),
+            WAITING,
+            "Invented draft.txt",
+            FileStatus::Conflict,
+        );
         assert_eq!(
             rig.engine
                 .resolve_conflict_for(rig.session, WAITING, ConflictChoice::KeepThere)
