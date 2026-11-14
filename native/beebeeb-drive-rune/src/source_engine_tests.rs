@@ -221,7 +221,9 @@ fn timings_and_query_plan_for_5000_children_in_a_70000_row_db() {
     let small = dir.path().join("small.db");
     build(&small);
     let big = dir.path().join("big.db");
-    build(&big);
+    // The 5,204 rows again: a copy of the closed database (no write-ahead log is left beside it), not a second build.
+    assert!(!dir.path().join("small.db-wal").exists());
+    std::fs::copy(&small, &big).unwrap();
     {
         // 64,796 more rows in 13 other folders: 70,000 in all. Written in ONE transaction on one connection with
         // the same two statements `StateDb::upsert_file_with_contract` runs (the row, then its parent and kind): a
