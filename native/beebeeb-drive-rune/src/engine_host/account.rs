@@ -137,6 +137,8 @@ enum Answer {
         made_for: Option<Stamp>,
         /// How many sessions Beebeeb said it ended, when they were sent by id.
         ended: usize,
+        /// Beebeeb answered "no such session" for one that was sent by id: a request went out.
+        gone: bool,
         /// "Everywhere else", sent again by the toast's button: by id, for the confirmed sessions only.
         one_by_one: bool,
         result: Result<SessionEnd, AccountCallError>,
@@ -207,6 +209,8 @@ pub struct EngineAccountSource<C: CredentialStores> {
     /// or still waiting in the line when they left. Only what was not done: said when that pane shows again (a
     /// toast belongs to the pane it is about).
     later: Line,
+    /// The last toast drawn with a button for one session's sign-out (`said::fade`).
+    drawn: Drawn,
     dirty: bool,
     /// Tests: the next worker panics before it asks anything.
     #[cfg(test)]
@@ -239,6 +243,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             counted_at: 0,
             notices: Line::new(),
             later: Line::new(),
+            drawn: None,
             dirty: false,
             #[cfg(test)]
             panic_next: Arc::default(),
@@ -285,8 +290,9 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     /// A list read after the last answer landed: the toasts about a sign-out follow it (`said::follow`).
     fn words_follow(&mut self, list: &[Row]) {
         follow([&mut self.notices, &mut self.later], self.engine.session_turn(), list);
-        // Only what was not done is said on return.
-        self.later.retain(|(_, said)| said.failed);
+        // Only what was not done is said on return, and what the list answered to a check.
+        self.later
+            .retain(|(_, said)| said.failed || said.stage == Stage::Answered);
         self.dirty = true;
     }
 
@@ -401,6 +407,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         self.changing.clear();
         self.notices.clear();
         self.later.clear();
+        self.drawn = None;
         self.dirty = true;
     }
 
@@ -408,7 +415,10 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     /// engine's word, `refused`). What was drawn for this session and account STAYS, and is not fresh: the pane
     /// says it could not refresh and offers to try again (`stale_words`). With nothing held it is the pane's
     /// "couldn't load" state. One list is never kept: the one from before a sign-out Beebeeb took.
-    fn read_failed(&mut self, kind: Kind, made_for: Option<Stamp>, error: AccountCallError) {
+    ///
+    /// `check_follows` (the list only): a sign-out was answered while this read was out, so the read that checks
+    /// it is still to come, and "checking" stays true.
+    fn read_failed(&mut self, kind: Kind, made_for: Option<Stamp>, error: AccountCallError, check_follows: bool) {
         // Made for a session that went during the call: the poll reads again for the next one. One the engine
         // refused while the session stayed (a session step held the lock for a moment) is a read that failed.
         let Some((session, _)) = made_for.filter(|(s, a)| self.is_now(*s, a)) else {
@@ -419,11 +429,9 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             if self.sessions_as_of != self.taken {
                 self.sessions = None;
             }
-            // The check after a sign-out whose result is not known has itself failed: no longer "checking".
-            for (_, said) in self.notices.iter_mut().chain(self.later.iter_mut()) {
-                if said.stage == Stage::Checking {
-                    (said.words, said.stage) = (UNCONFIRMED_SIGN_OUT, Stage::Unconfirmed);
-                }
+            if !check_follows {
+                check_failed([&mut self.notices, &mut self.later]);
+                self.dirty = true;
             }
         }
         let reads = self.reads_of(kind);
@@ -461,7 +469,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                             value,
                         });
                     }
-                    Err(error) => self.read_failed(Kind::Overview, made_for, error),
+                    Err(error) => self.read_failed(Kind::Overview, made_for, error, false),
                 }
             }
             Answer::Sessions {
@@ -498,10 +506,12 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                         self.sessions_reads.failed_for = None;
                     }
                     Err(error) => {
-                        self.read_failed(Kind::Sessions, made_for, error);
                         // A sign-out was answered while this read was out: the read after that answer has
                         // not been made yet (the Ok arm above makes it the same way).
-                        if changes != self.changes && (self.showing == Some(Kind::Sessions) || self.counting_devices) {
+                        let again =
+                            changes != self.changes && (self.showing == Some(Kind::Sessions) || self.counting_devices);
+                        self.read_failed(Kind::Sessions, made_for, error, again);
+                        if again {
                             self.read(Kind::Sessions);
                         }
                     }
@@ -512,6 +522,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                 sent_for,
                 made_for,
                 ended,
+                gone,
                 one_by_one,
                 result,
             } => {
@@ -532,8 +543,9 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                 }
                 // "Still signing out" is over with the answer.
                 self.notices.retain(|(_, said)| said.stage != Stage::Busy);
-                // Not sent (a session step held the lock for a moment): nothing changed at Beebeeb.
-                let sent = ended > 0 || result != Err(AccountCallError::NotSignedIn);
+                // Not sent (a session step held the lock for a moment): nothing changed at Beebeeb. One that
+                // Beebeeb answered "no such session" WAS sent, whatever the next one met.
+                let sent = ended > 0 || gone || result != Err(AccountCallError::NotSignedIn);
                 let said = match result {
                     Ok(SessionEnd::Ended) if about.elsewhere() => {
                         // Sent one by one for the sessions that were confirmed: "everywhere else" only when
@@ -548,7 +560,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                     // Beebeeb has no such session. That is "signed out" only once its list no longer has
                     // the session (`words_follow`): until then it is not known, and said so.
                     Ok(SessionEnd::AlreadyGone) => Said::checking(about),
-                    Err(AccountCallError::NotSignedIn) if ended == 0 => Said::failed(NOT_SENT, Some(about), true),
+                    Err(AccountCallError::NotSignedIn) if !sent => Said::failed(NOT_SENT, Some(about), true),
                     Err(error) => {
                         log(format!("account: a sign-out was not confirmed ({error})"));
                         let words = if ended > 0 {
@@ -670,15 +682,17 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             self.work(move |engine| {
                 let before = stamp(engine);
                 let mut about = sent;
-                let (result, ended) = if !about.elsewhere() {
+                let (result, ended, gone) = if !about.elsewhere() {
                     let result = engine.end_account_session(session, &about.key);
-                    (result, usize::from(result == Ok(SessionEnd::Ended)))
+                    (result, usize::from(result == Ok(SessionEnd::Ended)), false)
                 } else if !one_by_one {
                     let result = engine.revoke_other_account_sessions(session).map(|_| SessionEnd::Ended);
-                    (result, 0)
+                    (result, 0, false)
                 } else {
                     // Each is checked against the session by the engine as it is sent; each has its own
-                    // outcome. After a refusal that holds for the rest (no session, a 401) nothing more is sent.
+                    // outcome. Only after an error Beebeeb ANSWERED with is the next one sent: a refusal that
+                    // holds for the rest (no session, a 401) or a call that got no answer (each waits its full
+                    // time: five would be minutes without a word) ends it, and the rest count as not done.
                     let (mut ended, mut gone, mut left, mut first) = (0, false, Vec::new(), None);
                     let mut ids = about.ids.iter();
                     for id in ids.by_ref() {
@@ -688,7 +702,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                             Err(error) => {
                                 left.push(id.clone());
                                 first.get_or_insert(error);
-                                if matches!(error, AccountCallError::NotSignedIn | AccountCallError::SessionEnded) {
+                                if error != AccountCallError::ServerError {
                                     break;
                                 }
                             }
@@ -698,11 +712,11 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                     match first {
                         Some(error) => {
                             about.ids = left;
-                            (Err(error), ended)
+                            (Err(error), ended, gone)
                         }
                         // A 404 for one of them: as for one session, the list has the last word.
-                        None if gone => (Ok(SessionEnd::AlreadyGone), ended),
-                        None => (Ok(SessionEnd::Ended), ended),
+                        None if gone => (Ok(SessionEnd::AlreadyGone), ended, gone),
+                        None => (Ok(SessionEnd::Ended), ended, gone),
                     }
                 };
                 Answer::SignedOut {
@@ -710,6 +724,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                     sent_for: session,
                     made_for: still(engine, before),
                     ended,
+                    gone,
                     one_by_one,
                     result,
                 }
@@ -719,6 +734,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                 sent_for: session,
                 made_for: Some(asked_as),
                 ended: 0,
+                gone: false,
                 one_by_one,
                 result: Err(AccountCallError::Offline),
             },
@@ -890,7 +906,12 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         let before = self.notices.len() + self.later.len();
         self.notices.retain(|(session, _)| *session == turn);
         self.later.retain(|(session, _)| *session == turn);
-        let wake_in = fade(&mut self.notices, now, self.sessions_reads.reading.is_some());
+        let wake_in = fade(
+            &mut self.notices,
+            now,
+            self.sessions_reads.reading.is_some(),
+            &mut self.drawn,
+        );
         changed |= self.notices.len() + self.later.len() != before;
         self.dirty = false;
         Pumped {
@@ -906,7 +927,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
 
     fn notice(&self) -> Option<&'static str> {
         match self.said() {
-            Some(said) => Some(said.words),
+            Some(said) => Some(said.shown()),
             None => self.stale_words(),
         }
     }

@@ -20,6 +20,13 @@ pub(super) const IS_SIGNED_OUT: &str = "That session is signed out.";
 /// Beebeeb answered with an error (a 5xx, or a refusal): whether it was taken is not claimed; the list is read
 /// again, and the toast offers to send it again ([`TRY_AGAIN`]).
 pub(super) const NOT_SIGNED_OUT: &str = "Couldn't sign out that session.";
+/// The same two sentences for a toast that takes the place of one about ANOTHER session that had the same
+/// button: the person can tell that Try again is now about a different session ([`Said::shown`]). Two forms, so
+/// a third in a row reads differently from the second. Neither says how the one before ended.
+pub(super) const NOT_SIGNED_OUT_ANOTHER: &str = "Couldn't sign out another session.";
+pub(super) const NOT_SIGNED_OUT_ONE_MORE: &str = "Couldn't sign out one more session.";
+pub(super) const NOT_SENT_ANOTHER: &str = "Couldn't sign out another session. Nothing was sent.";
+pub(super) const NOT_SENT_ONE_MORE: &str = "Couldn't sign out one more session. Nothing was sent.";
 pub(super) const NOT_SIGNED_OUT_ELSEWHERE: &str = "Couldn't sign out your other sessions.";
 /// Refused before anything was sent: the list is not current, the row is gone, or the session was busy.
 pub(super) const NOT_SENT: &str = "Couldn't sign out. Nothing was sent.";
@@ -88,6 +95,8 @@ pub(super) enum Stage {
     Unconfirmed,
     /// A second press while the first is on its way: over with that one's answer.
     Busy,
+    /// What the list answered to a check: said on return to the pane too, as the check was.
+    Answered,
 }
 
 /// What a toast says. It is kept with the session it was said in: a toast is never drawn in another session.
@@ -104,6 +113,8 @@ pub(super) struct Said {
     /// When it first showed (the poll stamps it): it stays for its time from then, never from when it was said,
     /// so one that waited behind another is not gone before it was seen.
     pub(super) shown_at: Option<Instant>,
+    /// 0, or which "another session" form it is drawn in (`fade` decides when it first shows).
+    pub(super) turn: u8,
 }
 
 impl Said {
@@ -115,6 +126,7 @@ impl Said {
             again: false,
             failed: false,
             shown_at: None,
+            turn: 0,
         }
     }
 
@@ -126,6 +138,7 @@ impl Said {
             again,
             failed: true,
             shown_at: None,
+            turn: 0,
         }
     }
 
@@ -150,6 +163,22 @@ impl Said {
             stage: Stage::Busy,
             ..Self::failed(STILL_SIGNING_OUT, None, false)
         }
+    }
+
+    /// The sentence that is drawn.
+    pub(super) fn shown(&self) -> &'static str {
+        match (self.words, self.turn) {
+            (NOT_SIGNED_OUT, 1) => NOT_SIGNED_OUT_ANOTHER,
+            (NOT_SIGNED_OUT, 2) => NOT_SIGNED_OUT_ONE_MORE,
+            (NOT_SENT, 1) => NOT_SENT_ANOTHER,
+            (NOT_SENT, 2) => NOT_SENT_ONE_MORE,
+            (words, _) => words,
+        }
+    }
+
+    /// Its button sends the sign-out of ONE session again.
+    fn sends_one_again(&self) -> bool {
+        self.again && self.about.as_ref().is_some_and(|about| !about.elsewhere())
     }
 
     pub(super) fn stays(&self) -> Duration {
@@ -190,12 +219,20 @@ pub(super) fn follow(lines: [&mut Line; 2], turn: SessionGeneration, list: &[Row
             return said;
         };
         if !about.listed_in(list) {
-            Said::done(match (about.elsewhere(), others) {
+            let words = match (about.elsewhere(), others) {
                 (false, _) => IS_SIGNED_OUT,
                 // The list has sessions that were not confirmed (made since): not "everywhere else".
                 (true, true) => SIGNED_OUT_THOSE,
                 (true, false) => SIGNED_OUT_ELSEWHERE,
-            })
+            };
+            let stage = match said.stage {
+                Stage::Checking | Stage::Unconfirmed => Stage::Answered,
+                _ => Stage::Final,
+            };
+            Said {
+                stage,
+                ..Said::done(words)
+            }
         } else if matches!(said.stage, Stage::Checking | Stage::Unconfirmed) {
             Said::failed(about.not_signed_out(), Some(about), true)
         } else {
@@ -211,11 +248,44 @@ pub(super) fn follow(lines: [&mut Line; 2], turn: SessionGeneration, list: &[Row
     }
 }
 
+/// The check after a sign-out whose result is not known has itself failed: no longer "checking". It is a new
+/// toast, put in the line again: with its own time from when it shows, so the failure is drawn (the old one's
+/// time may be long over: it was held for the check).
+pub(super) fn check_failed(lines: [&mut Line; 2]) {
+    for line in lines {
+        for (session, said) in std::mem::take(line) {
+            let said = match said.stage {
+                Stage::Checking => Said::unconfirmed(said.about),
+                _ => said,
+            };
+            line_up(line, session, said);
+        }
+    }
+}
+
+/// The toast with a button for ONE session's sign-out that was drawn last: that session, and the form of its
+/// sentence. No `Debug`: it holds a session's id.
+pub(super) type Drawn = Option<(String, u8)>;
+
 /// The poll's part of the line: the first toast shows, for its time from the moment it first showed, and then
 /// the next. "Checking what Beebeeb has" stays while the check is out (`check_out`): the list's answer has the
 /// last word, and it must find the toast to give it to. Answers when to look again.
-pub(super) fn fade(notices: &mut Line, now: Instant, check_out: bool) -> Option<Duration> {
+///
+/// `drawn`: a toast whose button sends one session's sign-out again, and that takes the place of one about
+/// ANOTHER session (its time was up, or its button was pressed), is drawn in other words (`Said::shown`): the
+/// same sentence with the same button would read as the same toast. About the same session it keeps its words.
+pub(super) fn fade(notices: &mut Line, now: Instant, check_out: bool, drawn: &mut Drawn) -> Option<Duration> {
     while let Some((_, said)) = notices.front_mut() {
+        if said.shown_at.is_none() && said.sends_one_again() {
+            let key = said.about.as_ref().map(|about| about.key.clone()).unwrap_or_default();
+            said.turn = match drawn {
+                Some((before, turn)) if *before == key => *turn,
+                Some((_, 1)) => 2,
+                Some(_) => 1,
+                None => 0,
+            };
+            *drawn = Some((key, said.turn));
+        }
         let shown_at = *said.shown_at.get_or_insert(now);
         let left = said.stays().saturating_sub(now.saturating_duration_since(shown_at));
         if left.is_zero() && !(said.stage == Stage::Checking && check_out) {
@@ -224,14 +294,21 @@ pub(super) fn fade(notices: &mut Line, now: Instant, check_out: bool) -> Option<
             return (!left.is_zero()).then_some(left);
         }
     }
+    // Nothing shows: the next toast is not "another" one.
+    *drawn = None;
     None
 }
 
-/// The window shows another pane: the toasts go. A sign-out that was not done and whose toast never showed (it
-/// waited behind another) is kept in `later`, for when Devices and sessions shows again.
+/// The window shows another pane: the toasts go. Two kinds are kept in `later`, for when Devices and sessions
+/// shows again: a sign-out that was not done and whose toast never showed (it waited behind another), and one
+/// whose result is still not known, shown or not (the person was told it is being checked, and is told how it
+/// ended). Kept ones show for their whole time again.
 pub(super) fn leave(notices: &mut Line, later: &mut Line) {
-    for (session, said) in std::mem::take(notices) {
-        if said.failed && said.about.is_some() && said.shown_at.is_none() {
+    for (session, mut said) in std::mem::take(notices) {
+        let unseen = said.shown_at.is_none();
+        let open = matches!(said.stage, Stage::Checking | Stage::Unconfirmed);
+        if said.about.is_some() && said.failed && (unseen || open) || said.stage == Stage::Answered && unseen {
+            said.shown_at = None;
             line_up(later, session, said);
         }
     }
