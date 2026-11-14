@@ -9,8 +9,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use super::source::{
-    CodeKind, GateState as SourceGate, HelloOutcome, NextAfterSignIn, SharedSession, SignInEvent, SignInProblem,
-    SignInSource, TwoFactorProblem,
+    CodeKind, GateState as SourceGate, HelloOutcome, NextAfterSignIn, ScreenPasswordOutcome, SharedSession,
+    SignInEvent, SignInProblem, SignInSource, TwoFactorProblem,
 };
 use super::{PASSWORD_KEY, Ui, lock};
 use crate::State;
@@ -71,6 +71,9 @@ impl SignInSource for Script {
     fn begin_passkey(&mut self) {}
     fn begin_unlock(&mut self, _: &str) {
         self.calls.borrow_mut().push("unlock");
+    }
+    fn begin_screen_password(&mut self, _: &str) {
+        self.calls.borrow_mut().push("screen_password");
     }
     fn begin_recovery_verify(&mut self, _: &str, _: &[&str]) {}
     fn begin_set_password(&mut self, _: &str) {}
@@ -276,21 +279,28 @@ fn the_screen_locks_password_is_in_front_of_the_lock_screen_and_back_returns_to_
     assert!(!shows(&rt, "decrypt"), "the lock decrypts nothing");
     assert_eq!(rt.state.shell.app.screen(), Screen::Gate(GateState::Locked));
 
-    // Each refusal has its own words; nothing opens.
-    for (problem, words) in [
-        (SignInProblem::Invalid, "That password isn't right."),
+    // Each outcome has its own words; nothing opens, and nothing goes to the vault level's strong unlock.
+    for (outcome, words) in [
         (
-            SignInProblem::Offline,
-            "You're offline. Beebeeb can't unlock until it can reach the server.",
+            ScreenPasswordOutcome::Wrong { wait_ms: 0 },
+            "That password isn't right.",
         ),
-        (SignInProblem::RateLimited { seconds: 30 }, "Too many tries."),
+        (
+            ScreenPasswordOutcome::ServerLimit { wait_ms: Some(42_000) },
+            "Beebeeb is checking too many passwords right now. Try again in 1 minute.",
+        ),
     ] {
         type_password(&mut rt, "a password");
         rt.update(|s, _| s.signin.as_mut().unwrap().unlock());
-        answer(&mut rt, &script, SignInEvent::VaultUnlocked(Err(problem)));
-        assert!(shows(&rt, words), "{problem:?}");
+        assert!(
+            ui(&rt).password.text.is_empty(),
+            "the password is wiped when it is sent"
+        );
+        answer(&mut rt, &script, SignInEvent::ScreenPassword(outcome));
+        assert!(shows(&rt, words), "{outcome:?}");
     }
-    assert_eq!(script.count("unlock"), 3);
+    assert_eq!(script.count("screen_password"), 2);
+    assert_eq!(script.count("unlock"), 0);
 
     // Escape goes back to the lock screen, never to the sign-in form; what was typed goes.
     press(&mut rt, Key::Escape);
@@ -349,7 +359,7 @@ fn a_closed_vault_shows_the_password_with_the_locks_words_then_the_code_and_neve
 }
 
 #[test]
-fn a_password_on_its_way_keeps_its_screen_when_the_engine_closes_the_vault_under_it() {
+fn a_session_the_server_ended_sends_the_screens_password_to_the_vault_levels_screen_with_its_sentence() {
     let (_, script, mut rt) = window(false);
     click(&mut rt, lock::UNLOCK_KEY);
     answer(&mut rt, &script, SignInEvent::Hello(HelloOutcome::Unavailable));
@@ -357,21 +367,31 @@ fn a_password_on_its_way_keeps_its_screen_when_the_engine_closes_the_vault_under
     type_password(&mut rt, "the password");
     rt.update(|s, _| s.signin.as_mut().unwrap().unlock());
     assert!(ui(&rt).unlocking());
+    assert_eq!(script.count("screen_password"), 1);
 
-    // The strong unlock stops the work and drops the key before it stores the new session: the level moves
-    // to the vault while the answer is still on its way.
+    // The engine closes the vault (the server ended the session) while the answer is still on its way: the level
+    // moves to the vault, and the step is still waited for.
     script.vault.set(true);
     rt.frame(1.0);
     settle(&mut rt);
     assert_eq!(ui(&rt).lock_level(), Some(lock::Level::Vault));
     assert!(ui(&rt).unlocking(), "the step is still waited for");
-    assert_eq!(ui(&rt).password.text, "the password");
     answer(
         &mut rt,
         &script,
-        SignInEvent::VaultUnlocked(Ok(NextAfterSignIn::TwoFactor)),
+        SignInEvent::ScreenPassword(ScreenPasswordOutcome::SessionEnded),
     );
-    assert_eq!(ui(&rt).screen, super::Screen::TwoFactor { backup: false });
+    assert!(!ui(&rt).unlocking());
+    assert!(shows(
+        &rt,
+        "Your session ended. Enter your password to unlock and resume sync."
+    ));
+    assert!(find(&rt, PASSWORD_KEY).is_some(), "the vault level's password screen");
+    // The vault level keeps its own unlock (the strong one), and the sentence goes with the first press.
+    type_password(&mut rt, "the password");
+    rt.update(|s, _| s.signin.as_mut().unwrap().unlock());
+    assert_eq!(script.count("unlock"), 1);
+    assert!(!shows(&rt, "Your session ended."));
 }
 
 #[test]
@@ -434,9 +454,20 @@ fn the_shell_asks_for_sync_when_the_gate_closes_by_a_lock() {
 fn an_expired_code_returns_to_the_locks_password(vault: bool) {
     let (_, script, mut rt) = window(vault);
     if !vault {
+        // A locked screen's strong unlock starts at the vault level: the screen's password path says the account
+        // must sign in again, and the engine closes the vault.
         click(&mut rt, lock::UNLOCK_KEY);
         answer(&mut rt, &script, SignInEvent::Hello(HelloOutcome::Unavailable));
         click(&mut rt, "gate-btn-1");
+        type_password(&mut rt, "the password");
+        rt.update(|s, _| s.signin.as_mut().unwrap().unlock());
+        script.vault.set(true);
+        answer(
+            &mut rt,
+            &script,
+            SignInEvent::ScreenPassword(ScreenPasswordOutcome::AccountUpgradeNeeded),
+        );
+        assert!(shows(&rt, "Sign in again to finish updating your account."));
     }
     type_password(&mut rt, "the password");
     rt.update(|s, _| s.signin.as_mut().unwrap().unlock());
@@ -457,11 +488,6 @@ fn an_expired_code_returns_to_the_locks_password(vault: bool) {
     assert!(find(&rt, super::EMAIL_KEY).is_none(), "never the sign-in form");
     assert!(ui(&rt).unlock_problem().is_some(), "a problem line says it ran out");
     assert!(ui(&rt).password.text.is_empty());
-    if !vault {
-        press(&mut rt, Key::Escape);
-        assert!(find(&rt, lock::UNLOCK_KEY).is_some(), "Escape shows the lock screen");
-        assert!(find(&rt, super::EMAIL_KEY).is_none());
-    }
 }
 
 #[test]
@@ -546,4 +572,113 @@ fn windows_hello_starts_by_itself_when_the_focus_came_before_the_first_poll() {
     settle(&mut rt);
     assert_eq!(ui(&rt).lock_level(), Some(lock::Level::Screen));
     assert_eq!(script.count("hello"), 0);
+}
+
+/// A screen-lock password press, answered by `outcome`.
+fn screen_password(rt: &mut Runtime<State>, script: &Script, outcome: ScreenPasswordOutcome) {
+    type_password(rt, "a password");
+    rt.update(|s, _| s.signin.as_mut().unwrap().unlock());
+    answer(rt, script, SignInEvent::ScreenPassword(outcome));
+}
+
+fn to_the_screen_password(script: &Script, rt: &mut Runtime<State>) {
+    click(rt, lock::UNLOCK_KEY);
+    answer(rt, script, SignInEvent::Hello(HelloOutcome::Unavailable));
+    click(rt, "gate-btn-1");
+}
+
+#[test]
+fn screen_password_each_outcome_draws_its_sentence() {
+    use ScreenPasswordOutcome as O;
+    let rows: [(O, &str); 7] = [
+        (O::Wrong { wait_ms: 0 }, "That password isn't right."),
+        (
+            O::ServerLimit { wait_ms: None },
+            "Beebeeb is checking too many passwords right now. Try again in a moment.",
+        ),
+        (
+            O::ServerLimit { wait_ms: Some(300_000) },
+            "Beebeeb is checking too many passwords right now. Try again in 5 minutes.",
+        ),
+        (
+            O::LocalCheckOff,
+            "That password isn't right. This PC no longer checks your password offline: connect to the internet or use Windows Hello.",
+        ),
+        (
+            O::OfflineNoRecord,
+            "Beebeeb can't be reached, and this PC can't check your password offline yet. Connect to the internet or use Windows Hello.",
+        ),
+        (O::Failed, "Beebeeb couldn't check that password. Nothing was unlocked."),
+        (
+            O::Wrong { wait_ms: 30_000 },
+            "That password isn't right. Try again in 30 seconds.",
+        ),
+    ];
+    for (outcome, words) in rows {
+        let (_, script, mut rt) = window(false);
+        to_the_screen_password(&script, &mut rt);
+        screen_password(&mut rt, &script, outcome);
+        assert!(shows(&rt, words), "{outcome:?}: {:?}", texts(&rt));
+    }
+    // Opened, and an answer that was overtaken, say nothing.
+    for outcome in [O::Opened, O::Overtaken] {
+        let (_, script, mut rt) = window(false);
+        to_the_screen_password(&script, &mut rt);
+        screen_password(&mut rt, &script, outcome);
+        assert!(ui(&rt).lock_password_sentence().is_none(), "{outcome:?}");
+    }
+}
+
+#[test]
+fn screen_password_a_wait_disables_unlock_and_counts_down() {
+    let (_, script, mut rt) = window(false);
+    to_the_screen_password(&script, &mut rt);
+    screen_password(&mut rt, &script, ScreenPasswordOutcome::Wait { wait_ms: 90_000 });
+    assert!(shows(&rt, "Too many wrong tries. Try again in 5 minutes."));
+    assert!(ui(&rt).lock_password_waiting());
+    type_password(&mut rt, "another password");
+    assert!(!ui(&rt).can_unlock(), "Unlock is disabled while the wait runs");
+    rt.update(|s, _| s.signin.as_mut().unwrap().unlock());
+    assert_eq!(
+        script.count("screen_password"),
+        1,
+        "a press during the wait sends nothing"
+    );
+    // One tick a second: the words follow the seconds that are left.
+    answer(&mut rt, &script, SignInEvent::ScreenWaitLeft { seconds: 60 });
+    assert!(shows(&rt, "Too many wrong tries. Try again in 1 minute."));
+    answer(&mut rt, &script, SignInEvent::ScreenWaitLeft { seconds: 0 });
+    assert!(!ui(&rt).lock_password_waiting());
+    assert!(ui(&rt).can_unlock(), "Unlock works again when the wait is over");
+}
+
+#[test]
+fn screen_password_back_and_a_new_lock_wipe_what_was_typed_and_said() {
+    let (engine, script, mut rt) = window(false);
+    to_the_screen_password(&script, &mut rt);
+    screen_password(&mut rt, &script, ScreenPasswordOutcome::Wrong { wait_ms: 0 });
+    type_password(&mut rt, "typed after the refusal");
+    press(&mut rt, Key::Escape);
+    assert!(ui(&rt).password.text.is_empty(), "Back wipes the field");
+    // A lock that goes and comes back keeps nothing.
+    click(&mut rt, "gate-btn-1");
+    screen_password(&mut rt, &script, ScreenPasswordOutcome::Wrong { wait_ms: 0 });
+    type_password(&mut rt, "typed under the first lock");
+    engine.set_gate(GateState::Ready);
+    rt.frame(1.0);
+    settle(&mut rt);
+    engine.set_gate(GateState::Locked);
+    rt.frame(1.0);
+    settle(&mut rt);
+    assert!(ui(&rt).password.text.is_empty());
+    assert!(ui(&rt).lock_password_sentence().is_none());
+}
+
+#[test]
+fn screen_password_a_closed_vault_keeps_the_strong_unlock() {
+    let (_, script, mut rt) = window(true);
+    type_password(&mut rt, "the password");
+    rt.update(|s, _| s.signin.as_mut().unwrap().unlock());
+    assert_eq!(script.count("unlock"), 1);
+    assert_eq!(script.count("screen_password"), 0);
 }

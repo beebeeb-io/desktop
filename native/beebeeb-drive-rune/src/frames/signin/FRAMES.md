@@ -221,6 +221,6 @@ engine's wait. While a wait runs, Unlock is disabled and the sentence counts dow
 | `OfflineNoRecord` | "Beebeeb can't be reached, and this PC can't check your password offline yet. Connect to the internet or use Windows Hello." |
 | `AccountUpgradeNeeded` | the vault level's screen, starting with "Sign in again to finish updating your account." |
 | `SessionEnded` | the vault level's screen, starting with "Your session ended. Enter your password to unlock and resume sync." |
-| the press could not be checked | the sign-in form's general failure words |
+| the press could not be checked | "Beebeeb couldn't check that password. Nothing was unlocked." |
 
 The typed password is wiped when it is sent, on Back, and when the lock level changes.

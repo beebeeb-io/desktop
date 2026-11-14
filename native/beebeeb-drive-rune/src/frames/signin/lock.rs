@@ -113,7 +113,7 @@ impl Ui {
             ScreenPasswordOutcome::OfflineNoRecord => "Beebeeb can't be reached, and this PC can't check your password offline yet. Connect to the internet or use Windows Hello.".to_string(),
             // These two move to the vault level, whose screen carries the sentence (`lock_notice`).
             ScreenPasswordOutcome::AccountUpgradeNeeded | ScreenPasswordOutcome::SessionEnded => return None,
-            ScreenPasswordOutcome::Failed => super::view::GENERIC_FAILURE.to_string(),
+            ScreenPasswordOutcome::Failed => "Beebeeb couldn't check that password. Nothing was unlocked.".to_string(),
         })
     }
 
