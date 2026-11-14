@@ -724,6 +724,70 @@ pub fn scene(frame: &str) -> Option<Ui> {
     })
 }
 
+/// The steps the running app has no answer for yet, as its source says them (`engine_host::setup`).
+const NOT_IN_THIS_VERSION: &[Step] = &[Step::Passkey, Step::Lock, Step::Backup, Step::Previews];
+
+/// The states of the first run the board has no frame for, by a name of their own, for a headless render
+/// (`--scene first-run-folder`): no frame gate, the lane looks at the render. `None`: not one of them.
+pub fn render_scene(name: &str) -> Option<Ui> {
+    let asks = |said| source::FolderAsk::Ask {
+        folder: r"C:\Users\Sam\Beebeeb".into(),
+        said,
+        busy: false,
+    };
+    let script = match name {
+        "first-run-not-yet" => Script::default(),
+        "first-run-folder" => Script {
+            folder: asks(None),
+            ..Script::default()
+        },
+        "first-run-folder-refused" => Script {
+            folder: asks(Some(source::FolderSaid::Network)),
+            ..Script::default()
+        },
+        "first-run-sync-off" => Script {
+            explorer: Explorer::NotSyncing,
+            choose_again: true,
+            ..Script::default()
+        },
+        "first-run-summary" => Script {
+            explorer: Explorer::Added,
+            ..Script::default()
+        },
+        _ => return None,
+    };
+    let mut ui = Ui::new(Box::new(FixtureSetupSource::new(Script {
+        not_available: NOT_IN_THIS_VERSION,
+        ..script
+    })));
+    let to = match name {
+        "first-run-not-yet" => Step::Passkey,
+        "first-run-summary" => Step::Done,
+        _ => Step::Explorer,
+    };
+    while ui.step < to {
+        ui.go_on();
+    }
+    ui.focus = None;
+    Some(ui)
+}
+
+/// The names [`render_scene`] knows, for the shell's list of scenes.
+pub const RENDER_SCENES: &[(&str, fn(&mut State))] = &[
+    ("first-run-not-yet", |s| set_render_scene(s, "first-run-not-yet")),
+    ("first-run-folder", |s| set_render_scene(s, "first-run-folder")),
+    ("first-run-folder-refused", |s| {
+        set_render_scene(s, "first-run-folder-refused")
+    }),
+    ("first-run-sync-off", |s| set_render_scene(s, "first-run-sync-off")),
+    ("first-run-summary", |s| set_render_scene(s, "first-run-summary")),
+];
+
+fn set_render_scene(s: &mut State, name: &str) {
+    host::dispatch(s, Event::Gate(GateState::FirstRun));
+    s.setup = render_scene(name);
+}
+
 /// Every board frame of the first run, for `frames::scenes`.
 pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-0201", |s| set_scene(s, "DW-0201")),

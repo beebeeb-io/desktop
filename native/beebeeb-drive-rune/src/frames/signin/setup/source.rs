@@ -270,6 +270,12 @@ pub struct Script {
     pub passkey_added: bool,
     /// This PC has shown the first-time guide.
     pub guide_shown: bool,
+    /// The sync folder's question (the board has none: `Settled`).
+    pub folder: FolderAsk,
+    /// The steps nothing answers for (the board has none).
+    pub not_available: &'static [super::Step],
+    /// Another folder can be chosen after a start that was refused (the board has no such state).
+    pub choose_again: bool,
 }
 
 impl Default for Script {
@@ -279,6 +285,9 @@ impl Default for Script {
             explorer_after_retry: Explorer::Added,
             passkey_added: true,
             guide_shown: false,
+            folder: FolderAsk::Settled,
+            not_available: &[],
+            choose_again: false,
         }
     }
 }
@@ -312,6 +321,28 @@ impl FixtureSetupSource {
 }
 
 impl SetupSource for FixtureSetupSource {
+    fn available(&self, step: super::Step) -> bool {
+        !self.script.not_available.contains(&step)
+    }
+
+    fn folder_ask(&self) -> FolderAsk {
+        self.script.folder.clone()
+    }
+
+    fn keep_folder(&mut self) {
+        self.note("keep_folder".into());
+        self.script.folder = FolderAsk::Settled;
+        self.changed = true;
+    }
+
+    fn choose_folder(&mut self) {
+        self.note("choose_folder".into());
+    }
+
+    fn can_choose_again(&self) -> bool {
+        self.script.choose_again
+    }
+
     fn explorer(&self) -> Explorer {
         self.script.explorer.clone()
     }

@@ -11,6 +11,9 @@ use super::{Answered, CompareMode, Intent, SHEET, Setting, Step, Ui, scene};
 use crate::shell::app::Event;
 use crate::{State, init, view};
 
+#[path = "folder_tests.rs"]
+mod folder_tests;
+
 /// The first-run window's client area on the board (960 x 640 less the 1 px frame the OS draws).
 const WINDOW: (f32, f32) = (958.0, 638.0);
 
