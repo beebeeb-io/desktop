@@ -66,6 +66,8 @@ mod actions;
 mod activity;
 #[path = "account_email.rs"]
 mod email;
+#[path = "account_password.rs"]
+mod password_change;
 #[path = "account_said.rs"]
 mod said;
 #[path = "account_sign_out_session.rs"]
@@ -232,6 +234,8 @@ pub struct EngineAccountSource<C: CredentialStores> {
     /// Tests: how far the toasts' clock is ahead of the real one.
     #[cfg(test)]
     ahead: Duration,
+    /// Change password: its strength, and the change (`account_password.rs`).
+    password: password_change::PasswordCalls<C>,
     answers: mpsc::Sender<Answer>,
     inbox: mpsc::Receiver<Answer>,
     calls: twofactor::Calls,
@@ -241,6 +245,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     /// Nothing is asked of Beebeeb until a pane opens.
     pub fn new(engine: Arc<Engine<C>>) -> Self {
         let (answers, inbox) = mpsc::channel();
+        let password = password_change::PasswordCalls::new(engine.clone());
         Self {
             actions: actions::Actions::new(engine.clone()),
             activity: activity::ActivityPart::new(engine.clone()),
@@ -266,6 +271,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             panic_next: Arc::default(),
             #[cfg(test)]
             ahead: Duration::ZERO,
+            password,
             answers,
             inbox,
             calls: twofactor::Calls::new(),
@@ -658,6 +664,9 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         if pane == Pane::Activity {
             return self.activity.pane_state();
         }
+        if pane == Pane::Password {
+            return self.password.pane_state(self.refused());
+        }
         if let Some(state) = self.wired_pane(pane) {
             return state;
         }
@@ -690,6 +699,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
 
     fn opened(&mut self, pane: Pane) {
         self.activity.opened(pane);
+        self.password.forget();
         self.showing = Kind::of(pane);
         self.counting_devices = pane == Pane::Security;
         let Some(kind) = self.showing else {
@@ -724,6 +734,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
 
     fn closed(&mut self) {
         self.activity.closed();
+        self.password.forget();
         self.showing = None;
         self.counting_devices = false;
         self.calls.drop_held();
@@ -742,6 +753,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     }
 
     fn pump(&mut self) -> Pumped {
+        self.password.forget_if_moved();
         let mut changed = std::mem::take(&mut self.dirty);
         let refused = self.refused();
         let stale = |held: Option<(SessionGeneration, &Option<String>)>| {
@@ -967,6 +979,9 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
 
     /// Core's step-up for this session, waited for here (see `actions::Actions::step_up`).
     fn step_up(&mut self, password: Password<'_>, purpose: Purpose) -> Result<StepUp, Refused> {
+        if purpose == Purpose::ChangePassword {
+            return self.password.keep(password);
+        }
         self.actions.step_up(password, purpose)
     }
 
@@ -1039,11 +1054,11 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn send_again(&mut self) -> bool {
         false
     }
-    fn password_strength(&self, _candidate: &Password<'_>) -> Strength {
-        Strength::TooShort
+    fn password_strength(&self, candidate: &Password<'_>) -> Strength {
+        self.password.strength(candidate)
     }
-    fn change_password(&mut self, _confirmation: StepUp, _new: Password<'_>) -> Result<(), Refused> {
-        Err(Refused::Offline)
+    fn change_password(&mut self, confirmation: StepUp, new: Password<'_>) -> Result<(), Refused> {
+        self.password.change(confirmation, new)
     }
     fn two_factor(&self) -> TwoFactor {
         self.two_factor_known()
