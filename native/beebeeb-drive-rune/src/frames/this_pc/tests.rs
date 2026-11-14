@@ -522,9 +522,12 @@ fn new_goes_to_files_with_its_new_menu_open() {
     );
 }
 
-/// Presses "Remove all from this PC" and lets the ask settle: the dialog comes in with an animation, and a press
-/// before it is done reaches nothing (a frame at 0.0 seconds never ends it).
+/// Presses "Remove all from this PC" and lets the ask settle: the dialog comes in and goes out with an animation,
+/// and a press while one is under way reaches nothing (a frame at 0.0 seconds never ends it). So the one that
+/// closed before is finished first.
 fn open_ask(rt: &mut Runtime<State>) {
+    rt.settle_all();
+    rt.frame(0.016);
     click(rt, "btn-remove-all-from-this-pc");
     poll(rt);
     rt.settle_all();
