@@ -939,7 +939,9 @@ fn open_in_another_app_asks_the_engine_and_says_when_it_was_refused() {
     fake.s().elsewhere_answers = Elsewhere::Opened;
     assert_eq!(source.open_elsewhere("another"), Elsewhere::Refused);
     assert_eq!(fake.s().elsewhere_calls.len(), 3);
-    // What is not bound says so to the view.
+    // What was not read says so to the view.
+    fake.s().edit = None;
+    let (mut source, _, _) = opened(&fake, NOTE);
     assert!(!source.can_save());
     assert!(!source.knows_offline());
     assert!(!source.set_offline(NOTE, true));
