@@ -32,6 +32,21 @@ pub fn tool_button(
     state: ToolState,
     t: &Theme,
 ) -> El {
+    tool_button_lifted(key, name, ic, icon_size, state, 0.0, t)
+}
+
+/// [`tool_button`] with the glyph drawn `lift` pt higher (a negative top margin in a centred row
+/// moves it by half of it): DW-0408's board draws the details glyph half a device pixel above
+/// where our pixel grid puts it, which the Preview card's top edge shows.
+pub fn tool_button_lifted(
+    key: &'static str,
+    name: &'static str,
+    ic: &'static Icon,
+    icon_size: f32,
+    state: ToolState,
+    lift: f32,
+    t: &Theme,
+) -> El {
     let ink = match state {
         ToolState::Idle => t.text_secondary,
         ToolState::On => t.text,
@@ -61,7 +76,7 @@ pub fn tool_button(
         .hover(t.hover)
         .press(t.press)
         .focusable(state != ToolState::Off)
-        .child(kit::glyph(icon_key, ic, icon_size, ink))
+        .child(kit::glyph(icon_key, ic, icon_size, ink).mt(-lift))
 }
 
 /// One segment of a segmented control (`.mk-tgroup .mk-tbtn`): the chosen one is raised.
@@ -529,7 +544,11 @@ pub fn toolbar_in(s: &State, t: &Theme, trailing_inset: f32, closed: Option<&Clo
         if off { t.text_quaternary } else { t.text_secondary },
     ));
 
-    let panel_btn = tool_button(
+    let previewing = matches!(
+        s.actions.dialog,
+        Some(crate::frames::files::dialogs::Dialog::Preview(_))
+    );
+    let panel_btn = tool_button_lifted(
         "panel-toggle-btn",
         "Details panel",
         &icons::PANEL_TOGGLE,
@@ -541,6 +560,7 @@ pub fn toolbar_in(s: &State, t: &Theme, trailing_inset: f32, closed: Option<&Clo
         } else {
             ToolState::Idle
         },
+        if previewing { 0.5 } else { 0.0 },
         t,
     )
     .shortcut_hint("Alt+Shift+P")
