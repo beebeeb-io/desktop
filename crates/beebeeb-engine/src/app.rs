@@ -49,6 +49,8 @@ pub mod account_api;
 pub mod backups_api;
 // Explorer's "Free up space" command asks this handle, and a stop removes its binding (task 2490).
 mod explorer_api;
+// The sidebar's figures for the native Files window: files kept on this PC, the storage split.
+pub mod files_facts_api;
 pub mod kept_api;
 pub mod owned_state;
 pub mod settings_api;

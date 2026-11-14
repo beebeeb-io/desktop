@@ -47,6 +47,7 @@ pub mod backups;
 mod binding_tests;
 pub mod drive_settings;
 pub mod files;
+mod files_facts;
 mod files_trash;
 pub mod guide;
 pub mod open;
@@ -468,6 +469,8 @@ pub struct EngineFilesSource<C: CredentialStores> {
     trash: files_trash::TrashCalls<C>,
     /// After a refused upload: the files of it that were not copied in.
     upload_left: Option<Vec<PathBuf>>,
+    /// The sidebar's figures and each folder's sort.
+    facts: files_facts::Facts<C>,
 }
 
 impl<C: CredentialStores> EngineFilesSource<C> {
@@ -476,6 +479,7 @@ impl<C: CredentialStores> EngineFilesSource<C> {
         Self {
             copies: files::LocalCopies::new(engine.clone()),
             trash: files_trash::TrashCalls::new(engine.clone()),
+            facts: files_facts::Facts::new(engine.clone()),
             engine,
             upload_left: None,
         }
@@ -542,8 +546,9 @@ impl<C: CredentialStores> EngineFilesSource<C> {
 }
 
 impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
+    /// Files kept on this PC, once read (`files_facts`); the other two counts are not known here (0: no badge).
     fn counts(&self) -> Option<Counts> {
-        None
+        self.facts.counts()
     }
 
     fn account(&self) -> Option<Account> {
@@ -558,7 +563,7 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     }
 
     fn storage_split(&self) -> Option<StorageSplit> {
-        None
+        self.facts.storage_split()
     }
 
     /// The status line's word for the handle's view (`sync::sync_word`): read without waiting, on every frame, and
@@ -571,8 +576,8 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         files_source::details_of_row(item, folder)
     }
 
-    fn changed_label(&self, _: &DriveItem) -> Option<String> {
-        None
+    fn changed_label(&self, item: &DriveItem) -> Option<String> {
+        files_facts::changed_label(item, chrono::Utc::now())
     }
 
     fn can_add(&self, _folder: Option<&str>) -> bool {
@@ -581,12 +586,12 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.engine.view().start == Start::Running
     }
 
-    fn sort_of(&self, _: Option<&str>) -> Option<crate::frames::files::Sort> {
-        None
+    fn sort_of(&self, folder: Option<&str>) -> Option<crate::frames::files::Sort> {
+        self.facts.sort_of(folder)
     }
 
-    fn set_sort(&mut self, _: Option<&str>, _: crate::frames::files::Sort) {
-        log("NotWired(set_sort)");
+    fn set_sort(&mut self, folder: Option<&str>, sort: crate::frames::files::Sort) {
+        self.facts.set_sort(folder, sort);
     }
 
     /// An API call, not a sync-folder operation: not gated by `is_syncing()`. Accepted here, sent on a worker for
@@ -731,6 +736,8 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     fn changes(&mut self) -> Vec<Change> {
         let mut changes = self.trash.take();
         changes.extend(self.copies.take());
+        // The sidebar's figures are read again after a change (`files_facts`); an arrival redraws by its wake.
+        self.facts.pump(!changes.is_empty());
         changes
     }
 }
