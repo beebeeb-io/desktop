@@ -26,11 +26,13 @@ mod overview;
 mod passkeys;
 mod plan;
 mod request;
-mod security;
+mod security_overview;
 mod sessions;
 pub mod source;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_security;
 mod two_factor;
 
 use crate::State;
@@ -48,10 +50,9 @@ use source::AccountSource;
 pub enum Pane {
     /// Account (DW-A51).
     Account,
-    /// Sign-in and security (DW-A52).
+    /// Sign-in and security: ONE page (`security_overview.rs`), in place of DW-A52 and the security checkup
+    /// (DW-A84, DW-A84a). Those three frame ids all show it.
     Security,
-    /// Security › Security checkup (DW-A84, DW-A84a).
-    Checkup,
     /// Devices and sessions (DW-A55).
     Sessions,
     /// Account › Name (DW-A64).
@@ -124,7 +125,6 @@ impl Pane {
             // The rest: overviews, lists, confirmations without key material.
             Pane::Account
             | Pane::Security
-            | Pane::Checkup
             | Pane::Sessions
             | Pane::Name
             | Pane::EmailCode
@@ -275,6 +275,8 @@ pub struct AccountUi {
     pub source: Option<Box<dyn AccountSource>>,
     /// The pane the source was last told is showing (`None`: no account section shows).
     told_open: Option<Pane>,
+    /// A sign-out asked from the Security page's confirm: waiting for its answer, or refused.
+    pub signing_out: security_overview::SigningOut,
 }
 
 impl Default for AccountUi {
@@ -286,6 +288,7 @@ impl Default for AccountUi {
             approve: approve::Approve::default(),
             source: source::first(instance::DEV_BUILD),
             told_open: None,
+            signing_out: security_overview::SigningOut::default(),
         }
     }
 }
@@ -332,6 +335,8 @@ pub fn end_flows(s: &mut State) {
     let ui = &mut s.account;
     approve::leave(ui);
     ui.form = form::Form::default();
+    // A sign-out that waited for its answer: the session it was for is over, its late answer is the source's to drop.
+    ui.signing_out = security_overview::SigningOut::default();
     ui.show(Pane::root(ui.pane.section()).unwrap_or(Pane::Account));
 }
 
@@ -365,12 +370,22 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         }
     }
     let pumped = source.pump();
-    if pumped.busy || pumped.watch {
+    // A sign-out that is out: its answer, when it came. Only then is anything of it drawn.
+    let answered = match ui.signing_out.waiting {
+        Some(all) => source.sign_out_result().map(|answer| (all, answer)),
+        None => None,
+    };
+    if pumped.busy || pumped.watch || ui.signing_out.waiting.is_some() {
         tx.wake_after(POLL_EVERY);
     }
     // A toast that goes by itself: look again when its time is up.
     if let Some(stay) = pumped.wake_in {
         tx.wake_after(stay);
+    }
+    if let Some((all, answer)) = answered {
+        s.account.signing_out.waiting = None;
+        security_overview::settle_sign_out(s, all, answer);
+        return true;
     }
     pumped.changed
 }
@@ -503,7 +518,8 @@ fn local(frame: &str) -> Option<(Pane, Option<Dialog>)> {
         "DW-A52" => (Pane::Security, None),
         "DW-A57" => (Pane::Security, Some(Dialog::SignOutApp)),
         "DW-A57a" => (Pane::Security, Some(Dialog::SignOutAllApps)),
-        "DW-A84" | "DW-A84a" => (Pane::Checkup, None),
+        // The checkup is on the page itself now: its ids lead there, so a link to one still arrives.
+        "DW-A84" | "DW-A84a" => (Pane::Security, None),
         "DW-A55" => (Pane::Sessions, None),
         "DW-A64" => (Pane::Name, None),
         "DW-A65" => (Pane::Email, None),
@@ -559,6 +575,7 @@ pub fn go(s: &mut State, frame: &'static str) {
     s.account.dialog = dialog;
     form::arrive(&mut s.account);
     app_lock::arrive(&mut s.account);
+    security_overview::arrive(&mut s.account);
     if plan::arrive(&mut s.account) {
         // Nothing can say what the plan is: the website can.
         s.settings.ask(settings::Intent::Web(plan::PLAN_PAGE));
@@ -598,9 +615,25 @@ fn open_on(s: &mut State, frame: &'static str) {
 /// a later moment than their opening (fields filled, no field in focus).
 pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-A51", |s| open_on(s, "DW-A51")),
-    ("DW-A52", |s| open_on(s, "DW-A52")),
-    ("DW-A84", |s| open_on(s, "DW-A84")),
-    ("DW-A84a", |s| {
+    // Sign-in and security, the one page (no board frame: `FRAMES.md`, "Sign-in and security, one page"). Its
+    // states have ids of their own, DW-S..; the board ids it replaced (DW-A52, DW-A84, DW-A84a, DW-A57,
+    // DW-A57a, DW-0716, DW-0716b) are retired as frames and stay as names `go` understands.
+    ("DW-S01", |s| open_on(s, "DW-A52")),
+    // The page as a source draws it that knows two-factor and how many are signed in and nothing else (the
+    // running app today).
+    ("DW-S01u", |s| {
+        s.account.source = Some(Box::new(
+            source::BoardAccount::new()
+                .knowing(|all| source::SecurityFacts {
+                    two_factor: all.two_factor,
+                    sessions: all.sessions,
+                    ..source::SecurityFacts::unknown()
+                })
+                .sections_only(),
+        ));
+        go(s, "DW-A52");
+    }),
+    ("DW-S01a", |s| {
         open_on(s, "DW-A84a");
         s.account.source = Some(Box::new(source::BoardAccount::new().without_passkeys()));
     }),
@@ -609,8 +642,19 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         open_on(s, "DW-A55");
         confirm_device(s, "dev-iphone".into());
     }),
-    ("DW-A57", |s| open_on(s, "DW-A57")),
-    ("DW-A57a", |s| open_on(s, "DW-A57a")),
+    ("DW-S02", |s| open_on(s, "DW-A57")),
+    ("DW-S02a", |s| open_on(s, "DW-A57a")),
+    // The confirm while its sign-out is out: it says so and takes no press.
+    ("DW-S02w", |s| {
+        s.account.source = Some(Box::new(
+            source::BoardAccount::new().answering_sign_out(source::SignOutMode::After(u32::MAX)),
+        ));
+        go(s, "DW-A57");
+        if let Some(source) = s.account.source.as_mut() {
+            let answer = source.sign_out_this_app();
+            security_overview::settle_sign_out(s, false, answer);
+        }
+    }),
     ("DW-A64", |s| open_on(s, "DW-A64")),
     ("DW-A65", |s| {
         open_on(s, "DW-A65");
@@ -703,8 +747,8 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     }),
     ("DW-A83", |s| open_on(s, "DW-A83")),
     ("DW-0708", |s| open_on(s, "DW-0708")),
-    ("DW-0716", |s| open_on(s, "DW-0716")),
-    ("DW-0716b", |s| {
+    ("DW-S03", |s| open_on(s, "DW-0716")),
+    ("DW-S03b", |s| {
         open_on(s, "DW-0716b");
         if let Some(source) = s.account.source.as_mut() {
             source.set_app_lock(false);
@@ -835,8 +879,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .and_then(|_| source.plan_details())
                 .map(|plan| plan::overlay(&plan, &t)),
         ),
-        Pane::Security => security::pane(source, dialog, &t),
-        Pane::Checkup => (security::checkup(source, &t), None),
+        Pane::Security => security_overview::pane(source, dialog, &ui.signing_out, &t),
         Pane::Sessions => sessions::pane(source, dialog, &t),
         Pane::Name => (forms::name(form, &t), None),
         Pane::Email => (forms::email(form, &t), None),
@@ -857,7 +900,17 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         .min_h(0.0)
         .w_full()
         .child(sidebar(section, &t))
-        .child(pane_el);
+        // One scroller per pane (Rune keeps a scroller's offset by its path): a page opened from a page that
+        // was scrolled down starts at its own top, never at the other's offset.
+        .child(
+            row()
+                .key(format!("pane-{pane:?}"))
+                .grow(1.0)
+                .min_w(0.0)
+                .min_h(0.0)
+                .h_full()
+                .child(pane_el),
+        );
     if let Some(overlay) = overlay {
         body = body.child(overlay);
     }
@@ -890,6 +943,10 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
         return false;
     }
     if approve::on_escape(s) {
+        return true;
+    }
+    // A sign-out that is out cannot be called back: its confirm stays until the answer.
+    if s.account.signing_out.waiting.is_some() {
         return true;
     }
     if s.account.dialog.take().is_some() {

@@ -65,6 +65,11 @@ node scripts/capture-golden.mjs DW-0401          # golden/DW-0401-board.png + go
 node scripts/capture-golden.mjs DW-0401 --dark   # golden/DW-0401-dark-board.png + golden/DW-0401-dark.json
 ```
 
+A frame the board does not draw (a design of this app's, ruled by the product owner: today the Security page,
+`DW-S..`) gets its golden from the app's own render of the approved scene: `--snap` for the picture and
+`scripts/golden-from-native.py` for the elements. Such a golden records the approved render and fails when the
+frame changes afterwards; it does not say the app matches a design. Never for a frame the board draws.
+
 Chromium (Playwright; `PLAYWRIGHT_DIR` names a `node_modules` that has it) opens the board at a real 200 % device
 scale, with text measured as Windows and macOS measure it (fractional advances, no hinting), and exports the frame's
 client area (the board's 1 px window frame is the OS's, so a 1280x800 board frame is a 1278x798 client area) plus

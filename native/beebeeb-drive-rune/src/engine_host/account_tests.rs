@@ -23,6 +23,8 @@ use super::*;
 
 #[path = "account_tests_engine.rs"]
 mod engine;
+#[path = "account_tests_security.rs"]
+mod security;
 #[path = "account_tests_sign_out.rs"]
 mod sign_out;
 #[path = "account_tests_window.rs"]
@@ -78,6 +80,9 @@ struct Server {
     revoked_all: Arc<AtomicU64>,
     /// Runs once, while the next sessions list is being answered (the call is under way).
     during_read: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    /// Two-factor as each person's profile marks it. `None`: the profile does not say (the accounts' own
+    /// handler answers, without the mark). A profile that says is as slow as `read_delay_ms`.
+    two_factor: Arc<Mutex<[Option<bool>; 2]>>,
     /// Runs once, before the next sessions list that is asked to fail is answered.
     during_failed_read: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
 }
@@ -157,6 +162,8 @@ fn server() -> Server {
     let during_failed_read: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>> = Arc::new(Mutex::new(None));
     let during_failed_in = during_failed_read.clone();
     let signing_in_second = Mutex::new(false);
+    let two_factor: Arc<Mutex<[Option<bool>; 2]>> = Arc::new(Mutex::new([None, None]));
+    let two_factor_in = two_factor.clone();
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
         let who = match req.bearer() {
             Some(token) => usize::from(token == people_in[1].account.session_token),
@@ -179,6 +186,14 @@ fn server() -> Server {
         match route.as_str() {
             // Who is signed in: the accounts' own handler answers it, unless a read is asked to fail.
             "GET /api/v1/auth/me" if authed && failed(read).is_some() => failed(read).expect("checked"),
+            "GET /api/v1/auth/me" if authed && two_factor_in.lock().unwrap()[who].is_some() => {
+                let on = two_factor_in.lock().unwrap()[who];
+                std::thread::sleep(Duration::from_millis(read_delay_in.load(Ordering::SeqCst)));
+                Reply::ok(json!({
+                    "user_id": person.account.user_id, "email": person.account.email, "email_verified": true,
+                    "created_at": "2025-01-01T00:00:00Z", "role": "user", "totp_enabled": on,
+                }))
+            }
             "GET /api/v1/me/profile" => failed(read)
                 .or_else(|| failed(name_in.load(Ordering::SeqCst)))
                 .unwrap_or_else(|| {
@@ -277,6 +292,7 @@ fn server() -> Server {
         deleted,
         revoked_all,
         during_read,
+        two_factor,
         during_failed_read,
     }
 }
@@ -396,12 +412,10 @@ fn account_draws_who_is_signed_in_and_the_plan() {
 }
 
 #[test]
-fn only_account_and_devices_answer_every_other_pane_is_the_shells_frame() {
+fn only_the_three_sections_answer_every_page_under_them_is_unwired() {
     let server = server();
     let source = Source::new(signed_in(&server));
     for pane in [
-        Pane::Security,
-        Pane::Checkup,
         Pane::Name,
         Pane::Email,
         Pane::EmailCode,
@@ -422,6 +436,7 @@ fn only_account_and_devices_answer_every_other_pane_is_the_shells_frame() {
         assert_eq!(source.pane_state(pane), PaneState::Unwired, "{pane:?}");
     }
     assert_ne!(source.pane_state(Pane::Account), PaneState::Unwired);
+    assert_ne!(source.pane_state(Pane::Security), PaneState::Unwired);
     assert_ne!(source.pane_state(Pane::Sessions), PaneState::Unwired);
 }
 

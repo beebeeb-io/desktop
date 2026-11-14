@@ -41,6 +41,8 @@ pub(super) enum Part {
 pub(super) struct Overview {
     pub(super) identity: Identity,
     pub(super) plan: Option<(Plan, Option<PlanDetails>)>,
+    /// Two-factor, as the profile marks it. `None`: Beebeeb did not say.
+    pub(super) two_factor: Option<bool>,
     pub(super) name_from: Part,
     pub(super) plan_from: Part,
 }
@@ -187,12 +189,16 @@ pub(super) fn plan_of(plan: &Subscription, now: DateTime<Utc>) -> Option<(Plan, 
     Some((card, details))
 }
 
+/// What a sign-out of this app answers here: it is not bound, and the page draws no control for it.
+pub(super) const NOT_BOUND: &str = "Signing out is not available here yet. Nothing was signed out.";
+
 /// What Account draws, from the one read. The profile answered (else the read failed). A name that could not be
 /// read is "no name": the email stands in. A plan that could not be read hides the card (never a guessed plan).
 /// (A 401 on either is the whole call's refusal, in the engine.)
 pub(super) fn overview_of(basics: AccountBasics, now: DateTime<Utc>) -> Overview {
     let from = |read: bool| if read { Part::Read } else { Part::Missing };
     let (name_from, plan_from) = (from(basics.display_name.is_ok()), from(basics.subscription.is_ok()));
+    let two_factor = basics.profile.totp_enabled;
     let email = basics.profile.email;
     let name = basics.display_name.ok().flatten();
     // The email standing in for the name gives the initials of its part before the `@`: never a letter of
@@ -208,6 +214,7 @@ pub(super) fn overview_of(basics: AccountBasics, now: DateTime<Utc>) -> Overview
             email,
         },
         plan: basics.subscription.ok().and_then(|plan| plan_of(&plan, now)),
+        two_factor,
         name_from,
         plan_from,
     }
