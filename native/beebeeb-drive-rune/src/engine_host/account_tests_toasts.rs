@@ -270,10 +270,16 @@ fn leaving_while_a_check_shows_still_says_how_the_sign_out_ended() {
     let server = server();
     let mut source = Source::new(signed_in(&server));
     opened(&mut source, Pane::Sessions);
-    server.change_mode.store(TAKEN_BEHIND_A_502, Ordering::SeqCst);
+    // The connection breaks after Beebeeb took it: "checking", and the list answers that it is gone.
+    server.change_mode.store(DROP_CONNECTION, Ordering::SeqCst);
+    server.people[0]
+        .sessions
+        .lock()
+        .unwrap()
+        .retain(|s| s["id"] != json!("s-phone"));
     assert!(source.sign_out_device("s-phone"));
     settle(&mut source);
-    assert_eq!(source.notice(), Some(IS_SIGNED_OUT));
+    assert_eq!(source.notice(), Some(IS_SIGNED_OUT), "the check's answer, and it shows");
     source.pump();
     source.clear_notice();
     opened(&mut source, Pane::Account);
