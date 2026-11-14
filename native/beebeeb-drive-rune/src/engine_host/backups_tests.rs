@@ -102,6 +102,38 @@ impl BackupsEngine for Fake {
     }
 }
 
+/// Other devices are `backups_devices_tests`'s: this fake has none, and deletes nothing.
+impl DevicesEngine for Fake {
+    fn stamp(&self) -> (beebeeb_engine::account::SessionGeneration, Option<String>) {
+        (beebeeb_engine::account::SessionGeneration::for_test(1), self.account())
+    }
+    fn has_session(&self) -> bool {
+        self.unlocked()
+    }
+    fn devices_for(
+        &self,
+        session: beebeeb_engine::account::SessionGeneration,
+    ) -> Result<
+        beebeeb_engine::app::backup_devices_api::BackupDevices,
+        beebeeb_engine::app::backup_devices_api::DevicesRefused,
+    > {
+        Ok(beebeeb_engine::app::backup_devices_api::BackupDevices {
+            session,
+            devices: Vec::new(),
+            complete: true,
+        })
+    }
+    fn delete_for(
+        &self,
+        _session: beebeeb_engine::account::SessionGeneration,
+        _folder_id: &str,
+        _password: &[u8],
+    ) -> Result<(), beebeeb_engine::backup_delete::DeleteBackupError> {
+        Err(beebeeb_engine::backup_delete::DeleteBackupError::SignedOut)
+    }
+    fn wake(&self) {}
+}
+
 fn row(key: &'static str, name: &'static str, on: bool, state: FolderState) -> BackupFolderRow {
     BackupFolderRow {
         key,

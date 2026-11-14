@@ -419,3 +419,168 @@ fn a_build_with_no_source_draws_the_not_built_frame_never_sample_values() {
     // The fixture the scenes use is the board's.
     assert_eq!(FixtureSource::board().folders().len(), 7);
 }
+
+/// A source that answers late, as the engine's does: a delete is sent, then answered; another device's backup that
+/// this PC cannot read; no device links (the shell does not take them).
+struct Late {
+    devices: Vec<super::source::Device>,
+    deleting: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    asked: std::sync::Arc<std::sync::Mutex<Vec<(String, usize)>>>,
+}
+
+impl BackupsSource for Late {
+    fn wired(&self, part: super::source::Part) -> bool {
+        use super::source::Part;
+        matches!(part, Part::Root | Part::Folders | Part::Devices | Part::DeleteDevice)
+    }
+    fn deleting(&self) -> bool {
+        self.deleting.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn root(&self) -> super::source::BackupsRoot {
+        super::source::BackupsRoot {
+            id: String::new(),
+            is_protected: true,
+            device_folder: String::new(),
+        }
+    }
+    fn status(&self) -> Status {
+        Status::Plain {
+            title: String::new(),
+            sub: String::new(),
+            can_run: false,
+        }
+    }
+    fn folders(&self) -> Vec<super::source::Folder> {
+        Vec::new()
+    }
+    fn devices(&self) -> Vec<super::source::Device> {
+        self.devices.clone()
+    }
+    fn not_backed_up(&self) -> Vec<super::source::NotBackedUp> {
+        Vec::new()
+    }
+    fn mail_backup_on(&self) -> bool {
+        false
+    }
+    fn back_up_now(&mut self) {}
+    fn set_folder(&mut self, _id: &str, _on: bool) {}
+    fn add_folder(&mut self, _path: &str) -> bool {
+        false
+    }
+    fn remove_folder(&mut self, _id: &str, _move_copy_to_trash: bool) {}
+    fn retry(&mut self, _id: &str) {}
+    fn retry_all(&mut self) {}
+    fn delete_device_backup(&mut self, id: &str, code: &str) -> bool {
+        // The password's length only: the test never keeps it.
+        self.asked.lock().unwrap().push((id.to_string(), code.len()));
+        self.deleting.store(true, std::sync::atomic::Ordering::SeqCst);
+        true
+    }
+}
+
+fn texts(rt: &Runtime<State>) -> Vec<String> {
+    rt.elements()
+        .into_iter()
+        .filter(|e| !e.exiting)
+        .filter_map(|e| e.text.or(e.label))
+        .collect()
+}
+
+#[test]
+fn a_late_delete_keeps_the_dialog_until_the_answer_and_a_refusal_shows_under_the_field() {
+    use super::source::{Backed, Device, DeviceKind};
+    let deleting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let late = Late {
+        devices: vec![Device {
+            id: "pc".into(),
+            name: "Invented old laptop".into(),
+            model: "device".into(),
+            kind: DeviceKind::Unknown,
+            backed: Backed::Unreadable,
+            size: None,
+            last_backup: None,
+            signed_in: None,
+        }],
+        deleting: deleting.clone(),
+        asked: asked.clone(),
+    };
+    let mut state = init();
+    crate::frames::settings::go(&mut state, "DW-0737");
+    state.backups = BackupsUi::new(Some(Box::new(late)));
+    state.backups.show(Page::Device("pc".into()));
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, view, (958.0, 958.0), env);
+    rt.on_key = Some(crate::shell::host::on_key);
+    rt.frame(0.0);
+    let page = texts(&rt);
+    assert!(
+        page.iter().any(|t| t == super::view::CANT_READ),
+        "the page says it cannot read it"
+    );
+    for absent in [
+        "Open in Photos",
+        "Open in Files",
+        "Status",
+        "Signed in",
+        "Not signed in",
+    ] {
+        assert!(!page.iter().any(|t| t == absent), "{absent} is not drawn");
+    }
+
+    click(&mut rt, "item-2-0");
+    assert_eq!(rt.state.backups.dialog, Some(Dialog::DeleteDevice("pc".into())));
+    rt.state.backups.code.replace_text("an invented password");
+    settle(&mut rt);
+    press(&mut rt, Key::Enter);
+    assert_eq!(*asked.lock().unwrap(), [("pc".to_string(), 20)]);
+    assert_eq!(
+        rt.state.backups.dialog,
+        Some(Dialog::DeleteDevice("pc".into())),
+        "sent: the dialog stays until Beebeeb answers"
+    );
+    assert_eq!(rt.state.backups.code_len(), 0, "the password is wiped once handed over");
+    assert!(texts(&rt).iter().any(|t| t == "Deleting\u{2026}"));
+    // A second press while it is on its way sends nothing.
+    rt.state.backups.code.replace_text("again");
+    press(&mut rt, Key::Enter);
+    assert_eq!(asked.lock().unwrap().len(), 1);
+
+    // Refused: the words under the field, the dialog open, the device still listed.
+    deleting.store(false, std::sync::atomic::Ordering::SeqCst);
+    rt.state
+        .backups
+        .delete_answered(Err("That password isn't right. Nothing was deleted."));
+    settle(&mut rt);
+    assert_eq!(rt.state.backups.dialog, Some(Dialog::DeleteDevice("pc".into())));
+    assert!(
+        texts(&rt)
+            .iter()
+            .any(|t| t == "That password isn't right. Nothing was deleted.")
+    );
+    assert_eq!(source(&rt).devices().len(), 1);
+
+    // Done: the dialog closes and the section shows (the source reads its list again).
+    rt.state.backups.code.replace_text("an invented password");
+    press(&mut rt, Key::Enter);
+    assert_eq!(asked.lock().unwrap().len(), 2);
+    deleting.store(false, std::sync::atomic::Ordering::SeqCst);
+    rt.state.backups.delete_answered(Ok(()));
+    assert_eq!(rt.state.backups.dialog, None);
+    assert_eq!(rt.state.backups.page, Page::Section);
+
+    // An answer after the dialog was closed is said in the section, with what it means for the list.
+    rt.state
+        .backups
+        .delete_answered(Err("This backup could not be found. Nothing was deleted."));
+    assert_eq!(
+        rt.state.backups.notice(),
+        Some((
+            "This backup could not be found. Nothing was deleted.",
+            super::DELETE_NOTICE_SUB
+        ))
+    );
+}
