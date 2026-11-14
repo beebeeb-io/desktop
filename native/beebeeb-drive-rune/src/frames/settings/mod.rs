@@ -402,7 +402,9 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     ("DW-0750u", |s| {
         s.settings.source = Box::new(BoardSettings::new().with_notifications_unconfirmed());
         open_on(s, "DW-0750");
-        // A change Beebeeb refused while that stands: its toast, above the notice.
+        // A change Beebeeb refused while that stands: its toast, above the notice (which the poll has seen:
+        // a toast from BEFORE a notice goes when the notice comes).
+        s.settings.standing = notifications::standing(&*s.settings.source);
         s.settings.toast = Some("Couldn't change the notification setting. Nothing changed.");
     }),
     ("DW-0791", |s| open_on(s, "DW-0791")),
