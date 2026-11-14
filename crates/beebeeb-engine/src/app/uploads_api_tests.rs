@@ -111,7 +111,7 @@ fn uploads_list_this_accounts_stopped_moving_and_waiting_rows() {
     signed_in(&engine, "uploads-one@example.eu");
     let (_dir, _db) = local_state(&engine, "uploads-one@example.eu", three);
     let guard = board.begin_named("f-moves", "Trip/Invented moves.mov", Direction::Up, 9_000);
-    guard.add(4_000);
+    guard.update(4_000);
     let read = engine.uploads_for(engine.session_turn()).expect("the read");
     let seen: Vec<(&str, &str)> = read
         .rows
