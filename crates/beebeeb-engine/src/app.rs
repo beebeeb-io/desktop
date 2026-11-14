@@ -49,8 +49,12 @@ pub mod account_api;
 pub mod backups_api;
 // Explorer's "Free up space" command asks this handle, and a stop removes its binding (task 2490).
 mod explorer_api;
+// The sidebar's figures for the native Files window: files kept on this PC, the storage split.
+pub mod files_facts_api;
 pub mod kept_api;
 pub mod owned_state;
+// What the app window may change of the rows of the Backups tree, for the native Files window.
+pub mod backup_places_api;
 pub mod photos_api;
 pub mod settings_api;
 pub mod setup_api;
@@ -61,6 +65,8 @@ pub mod signin_api;
 pub mod state_owner;
 pub mod transfer_limits_api;
 pub mod trash_api;
+// A file's versions and the restore of one, for the native Files window.
+pub mod versions_api;
 // An open file for the native viewer: its facts, and its content decrypted in memory.
 pub mod viewer_api;
 

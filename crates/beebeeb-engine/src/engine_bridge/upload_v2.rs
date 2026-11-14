@@ -245,6 +245,15 @@ pub(super) fn restore_metadata(
     }
 }
 
+/// Whether a restore request went out before its error ([`EngineBridge::restore_version_staged`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RestoreSent {
+    /// The error came before the request was sent: the server was asked nothing that changes a version.
+    No,
+    /// The error is the restore call's own: the server may or may not have made it.
+    Yes,
+}
+
 impl EngineBridge {
     /// `POST .../versions/{version}/restore` for `file_id`, with the fresh metadata a protected file
     /// needs ([`restore_metadata`]). The server publishes that name in the transaction that makes the
@@ -255,23 +264,40 @@ impl EngineBridge {
         file_id: &str,
         version_id: &str,
     ) -> Result<serde_json::Value, EngineError> {
-        let (key, _, _) = owned_material(&self.db, self.api.master_key(), file_id)?;
-        let row = self.api.get_file(file_id).await?;
+        self.restore_version_staged(file_id, version_id)
+            .await
+            .map_err(|(_, error)| error)
+    }
+
+    /// [`Self::restore_version_checked`], with each error saying whether the restore request was sent: an error
+    /// before `restore_version` is [`RestoreSent::No`] (nothing was asked of the server that could change it), an
+    /// error OF that call is [`RestoreSent::Yes`] (the request went out; a gateway's 502 or a dropped connection can
+    /// follow a restore that was made). A host that restores for a person asks this form.
+    pub(crate) async fn restore_version_staged(
+        &self,
+        file_id: &str,
+        version_id: &str,
+    ) -> Result<serde_json::Value, (RestoreSent, EngineError)> {
+        let before = |error: EngineError| (RestoreSent::No, error);
+        let (key, _, _) = owned_material(&self.db, self.api.master_key(), file_id).map_err(before)?;
+        let row = self.api.get_file(file_id).await.map_err(|e| before(e.into()))?;
         let current_name = row["name_encrypted"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("the file row carries no sealed name"))?;
-        let versions = self.api.list_versions(file_id).await?;
+            .ok_or_else(|| before(anyhow::anyhow!("the file row carries no sealed name").into()))?;
+        let versions = self.api.list_versions(file_id).await.map_err(|e| before(e.into()))?;
         let sealed = restore_metadata(
             &key,
             current_name,
             &versions,
             version_id,
-            self.db.highest_file_version(file_id)?,
-        )?;
+            self.db.highest_file_version(file_id).map_err(|e| before(e.into()))?,
+        )
+        .map_err(before)?;
         let response = self
             .api
             .restore_version(file_id, version_id, sealed.as_ref().map(|(name, _)| name.as_str()))
-            .await?;
+            .await
+            .map_err(|e| (RestoreSent::Yes, e.into()))?;
         if let Some((_, counter)) = sealed {
             // The counter is spent whatever follows. A failure to remember it is logged, never an
             // error: the restore is done, and an error here would run it again.

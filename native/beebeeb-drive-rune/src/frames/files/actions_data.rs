@@ -370,3 +370,28 @@ impl More {
         })
     }
 }
+
+/// Where a late read stands. `Answered`: this source answers in the call (the default).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Read {
+    Answered,
+    Loading,
+    Failed(super::source::ActionError),
+}
+
+/// What the Preview panel holds of its file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Previewed {
+    /// Asked, not answered.
+    Loading,
+    /// DW-0408.
+    Shown(PreviewOf),
+    /// DW-0408b: no preview for this kind of file.
+    NoPreview,
+    /// A kind this version does not preview in the panel (a PDF, a picture).
+    NotYet,
+    /// Over the preview limit.
+    TooLarge,
+    /// Tried, did not work.
+    Failed(super::source::ActionError),
+}

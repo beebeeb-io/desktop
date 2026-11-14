@@ -468,6 +468,7 @@ pub(crate) use types::engine_remove;
 mod open_in_memory;
 pub(crate) use open_in_memory::InMemoryOpen;
 use open_in_memory::{OverInMemoryLimit, body_cap};
+pub(crate) use upload_v2::RestoreSent;
 
 mod errors;
 use errors::*;

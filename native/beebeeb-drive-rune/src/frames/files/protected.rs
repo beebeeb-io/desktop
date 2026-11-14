@@ -92,6 +92,8 @@ pub struct Ui {
     pub alert: Option<Words>,
     /// The section the window showed when this last looked ([`poll`]).
     seen: Option<Section>,
+    /// The window's `session_no` and the folder the source was last told is shown ([`FilesSource::folder_shown`]).
+    told: Option<(u64, Option<String>)>,
 }
 
 /// Contacts in a device's backup (DW-0423).
@@ -275,9 +277,18 @@ pub fn show_backups(s: &mut State) -> bool {
 /// sidebar's Backups (Ctrl+4) shows the Backups folder, opening the Backups row in Files moves
 /// the sidebar to Backups, and Back out of it moves it to Files again.
 pub fn poll(s: &mut State) -> bool {
+    // The source is told which folder is shown, once per folder and per session, before anything else: every way a
+    // folder comes to be shown (a click, Back, a breadcrumb, the sidebar, a reset) ends here.
+    let shown = (s.actions.session_no, s.listing.folder.id.clone());
+    if s.list_error.is_none() && s.actions.protected.told.as_ref() != Some(&shown) {
+        s.actions.source.folder_shown(shown.1.as_deref());
+        s.actions.protected.told = Some(shown);
+    }
     // What a source that answers later did since the last frame (`State::late_changes`).
     let late = s.late_changes();
-    if super::session::poll(s) || late {
+    // A preview that is still being read (a source that answers it later).
+    let previewing = super::preview::poll(s);
+    if super::session::poll(s) || late || previewing {
         return true;
     }
     let Some(root) = s.actions.source.backups_root() else {
@@ -701,3 +712,10 @@ pub const SCENES: &[crate::ui::gate::Scene<State>] = &[
         }
     }),
 ];
+
+#[cfg(test)]
+#[path = "folder_told_tests.rs"]
+mod folder_told_tests;
+#[cfg(test)]
+#[path = "preview_panel_tests.rs"]
+mod preview_panel_tests;

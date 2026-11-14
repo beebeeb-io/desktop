@@ -8,9 +8,9 @@
 //! **Decrypted content.** The page is in the open panel's state and nowhere else: it is asked
 //! of the source when the panel opens and dropped when it closes.
 
-use super::actions_data::{Page, PreviewOf};
+use super::actions_data::{Page, Previewed};
 use super::dialogs::Dialog;
-use super::source::Action;
+use super::source::{Action, ActionError};
 use crate::State;
 use crate::source::{DriveItem, format_size};
 use crate::theme::tokens::{Theme, type_};
@@ -24,8 +24,8 @@ use rune::{Color, El, Key, KeyEvent, Span, TextStyle, Tx, col, el, row};
 #[derive(Clone, Debug)]
 pub struct Panel {
     pub item: DriveItem,
-    /// `None`: no preview for this kind of file (DW-0408b).
-    pub shown: Option<PreviewOf>,
+    /// What there is to show of it: a page, or why not (DW-0408b).
+    pub state: Previewed,
 }
 
 /// The card with a page: 640 x 700, 28 pt under the caption. Without one: 540 x 420, 120 pt under.
@@ -47,8 +47,14 @@ impl State {
             return;
         }
         self.close_menu();
-        let shown = self.actions.source.preview(&item);
-        self.actions.dialog = Some(Dialog::Preview(Box::new(Panel { item, shown })));
+        // The read of an earlier file stops, and what it decrypted is wiped, before the next one starts.
+        self.actions.source.cancel_preview();
+        let now = self.actions.source.preview(&item);
+        let state = self.actions.source.preview_later(&item).unwrap_or(match now {
+            Some(page) => Previewed::Shown(page),
+            None => Previewed::NoPreview,
+        });
+        self.actions.dialog = Some(Dialog::Preview(Box::new(Panel { item, state })));
     }
 
     /// Left and Right in the panel: the previous or next FILE of the list, previewed in turn.
@@ -106,8 +112,30 @@ impl State {
 
     /// Share, from the panel: the Share dialog (DW-0407) for the same file.
     pub fn share_from_preview(&mut self) {
+        self.actions.source.cancel_preview();
         self.actions.dialog = None;
         self.begin_share();
+    }
+}
+
+/// Every frame (`protected::poll`): while the panel waits for a source that answers later, ask where it stands and
+/// keep a changed answer. `true`: the panel changed.
+pub fn poll(s: &mut State) -> bool {
+    let Some(Dialog::Preview(panel)) = &s.actions.dialog else {
+        return false;
+    };
+    if panel.state != Previewed::Loading {
+        return false;
+    }
+    let item = panel.item.clone();
+    match s.actions.source.preview_later(&item) {
+        Some(now) if now != Previewed::Loading => {
+            if let Some(Dialog::Preview(panel)) = &mut s.actions.dialog {
+                panel.state = now;
+            }
+            true
+        }
+        _ => false,
     }
 }
 
@@ -148,7 +176,7 @@ fn head(panel: &Panel, t: &Theme) -> El {
             .level(2)
             .truncate(),
     );
-    if let Some(shown) = &panel.shown {
+    if let Previewed::Shown(shown) = &panel.state {
         title = title.child(kit::label(
             "pv-place",
             shown.place.clone(),
@@ -173,7 +201,7 @@ fn head(panel: &Panel, t: &Theme) -> El {
         .child(
             tool("pv-share", "Share\u{2026}", &icons::SHARE, 15.0, t).on_press(|s: &mut State| s.share_from_preview()),
         );
-    if panel.shown.is_some() {
+    if matches!(panel.state, Previewed::Shown(_)) {
         head = head.child(
             crate::ui::settings_controls::button(
                 0,
@@ -225,16 +253,36 @@ fn page(p: &Page) -> El {
 /// What the panel says of a file it cannot show, and the two ways on (DW-0408b).
 fn blank(panel: &Panel, t: &Theme) -> El {
     let size = panel.item.size.map(format_size).unwrap_or_default();
+    let (title, tail) = match &panel.state {
+        Previewed::Loading => ("Getting the preview\u{2026}", ""),
+        Previewed::NotYet => (
+            "Preview isn't available for this kind of file in this version yet",
+            " Open it to see it, or open it in another app.",
+        ),
+        Previewed::TooLarge => (
+            "Too large to preview here",
+            " Open it to see it, or open it in another app.",
+        ),
+        Previewed::Failed(ActionError::Offline) => (
+            "Preview needs a connection",
+            " Open it to see it, or open it in another app.",
+        ),
+        Previewed::Failed(_) => (
+            "Couldn't show a preview",
+            " Open it to see it, or open it in another app.",
+        ),
+        // No preview for this kind of file (DW-0408b).
+        _ => (
+            "No preview for this kind of file",
+            " Open it in another app, or keep it on this PC to open it offline.",
+        ),
+    };
     let words = if size.is_empty() {
-        format!(
-            "{}. Open it in another app, or keep it on this PC to open it offline.",
-            panel.item.name
-        )
+        format!("{}.{tail}", panel.item.name)
+    } else if tail.is_empty() {
+        format!("{} \u{00B7} {size}", panel.item.name)
     } else {
-        format!(
-            "{} \u{00B7} {size}. Open it in another app, or keep it on this PC to open it offline.",
-            panel.item.name
-        )
+        format!("{} \u{00B7} {size}.{tail}", panel.item.name)
     };
     // The size is a figure: JetBrains Mono inside the Inter line.
     let at = panel.item.name.len() + " \u{00B7} ".len();
@@ -276,15 +324,7 @@ fn blank(panel: &Panel, t: &Theme) -> El {
                     t.text_secondary,
                 )),
         )
-        .child(
-            kit::label(
-                "pv-blank-title",
-                "No preview for this kind of file",
-                DIALOG_TITLE,
-                t.text,
-            )
-            .mt(8.0),
-        )
+        .child(kit::label("pv-blank-title", title, DIALOG_TITLE, t.text).mt(8.0))
         .child(
             kit::label("pv-blank-text", words, SUB, t.text_tertiary)
                 .spans(spans)
@@ -307,15 +347,16 @@ fn blank(panel: &Panel, t: &Theme) -> El {
 }
 
 pub fn view(s: &State, panel: &Panel, t: &Theme) -> El {
-    let (w, h, top) = if panel.shown.is_some() { PAGE_CARD } else { BLANK_CARD };
+    let shown = matches!(panel.state, Previewed::Shown(_));
+    let (w, h, top) = if shown { PAGE_CARD } else { BLANK_CARD };
     let (win_w, win_h) = s.actions.window;
     // A window smaller than the board's: the card stays inside it.
     let area_h = (win_h - crate::TITLEBAR_H).max(0.0);
     let top = top.min((area_h - h).max(0.0) / 2.0);
     let h = h.min((area_h - top - 8.0).max(120.0));
     let left = ((win_w - w) / 2.0 + OFF_CENTRE).max(8.0);
-    let body = match &panel.shown {
-        Some(shown) => row()
+    let body = match &panel.state {
+        Previewed::Shown(shown) => row()
             .key("pv-body")
             .grow(1.0)
             .min_h(0.0)
@@ -325,7 +366,7 @@ pub fn view(s: &State, panel: &Panel, t: &Theme) -> El {
             .fill(t.text.alpha(0.05))
             .clip_rounded(0.0)
             .child(page(&shown.page)),
-        None => blank(panel, t),
+        _ => blank(panel, t),
     };
     let card = col()
         .key("pv-card")

@@ -47,7 +47,17 @@ pub mod backups;
 mod binding_tests;
 pub mod drive_settings;
 pub mod files;
+mod files_facts;
+#[cfg(test)]
+#[path = "engine_host/files_open_with_tests.rs"]
+mod files_open_with_tests;
+mod files_places;
+mod files_preview;
 mod files_trash;
+mod files_versions;
+#[cfg(test)]
+#[path = "engine_host/files_window_support.rs"]
+mod files_window_support;
 pub mod guide;
 pub mod open;
 pub mod photos;
@@ -162,7 +172,8 @@ fn log(message: impl AsRef<str>) {
 // the files). Nothing here routes a path through cmd.exe, PowerShell, bash or
 // any shell. On Windows, `ShellExecuteW` takes the path as one wide string,
 // never a command line. On macOS/Linux, `Command::new("open"/"xdg-open").arg`
-// passes it as a single argv entry, never through a shell.
+// passes it as a single argv entry, never through a shell. The app chooser (`choose_app`) takes the path as one
+// wide string in a struct field, the same way.
 // ---------------------------------------------------------------------------
 
 /// Open a file or folder with the OS's default handler. Never passes the path
@@ -206,6 +217,44 @@ fn open_path(path: &std::path::Path) -> Result<(), files_source::ActionError> {
             .map_err(|_| files_source::ActionError::Failed)?;
     }
     Ok(())
+}
+
+/// Windows' "Open with" chooser for this file, on a thread of its own (the dialog is modal for the thread that
+/// shows it: never the window's). `OAIF_EXEC`: the app picked opens the file; no `OAIF_ALLOW_REGISTRATION`, so
+/// the chooser cannot change the PC's default app. `Ok`: the thread started. Every other system: not there.
+fn choose_app(path: &std::path::Path) -> Result<(), files_source::ActionError> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+        use windows_sys::Win32::UI::Shell::{OAIF_EXEC, OPENASINFO, SHOpenWithDialog};
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        std::thread::Builder::new()
+            .name("files-open-with".into())
+            .spawn(move || {
+                // SAFETY: COM is initialised on this thread and uninitialised before it ends (only when the
+                // initialisation succeeded); `wide` is NUL-ended and outlives the call, `pcszClass` is null.
+                unsafe {
+                    let com = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+                    let info = OPENASINFO {
+                        pcszFile: wide.as_ptr(),
+                        pcszClass: std::ptr::null(),
+                        oaifInFlags: OAIF_EXEC,
+                    };
+                    let _ = SHOpenWithDialog(std::ptr::null_mut(), &info);
+                    if com >= 0 {
+                        CoUninitialize();
+                    }
+                }
+            })
+            .map(|_| ())
+            .map_err(|_| files_source::ActionError::Failed)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Err(files_source::ActionError::NotOnThisSystem)
+    }
 }
 
 /// Reveal a file or folder in File Explorer / Finder / Files. Never passes the
@@ -515,6 +564,14 @@ pub struct EngineFilesSource<C: CredentialStores> {
     trash: files_trash::TrashCalls<C>,
     /// After a refused upload: the files of it that were not copied in.
     upload_left: Option<Vec<PathBuf>>,
+    /// The sidebar's figures and each folder's sort.
+    facts: files_facts::Facts<C>,
+    /// A file's versions and the restore of one.
+    versions: files_versions::VersionCalls<C>,
+    /// Where each row stands in the Backups tree.
+    places: files_places::Places<C>,
+    /// What the Preview panel shows of a file.
+    previews: files_preview::Previews<viewer::LiveViewerEngine<C>>,
 }
 
 impl<C: CredentialStores> EngineFilesSource<C> {
@@ -523,6 +580,10 @@ impl<C: CredentialStores> EngineFilesSource<C> {
         Self {
             copies: files::LocalCopies::new(engine.clone()),
             trash: files_trash::TrashCalls::new(engine.clone()),
+            facts: files_facts::Facts::new(engine.clone()),
+            versions: files_versions::VersionCalls::new(engine.clone()),
+            places: files_places::Places::new(engine.clone()),
+            previews: files_preview::Previews::new(Arc::new(viewer::LiveViewerEngine::new(engine.clone()))),
             engine,
             upload_left: None,
         }
@@ -588,9 +649,26 @@ impl<C: CredentialStores> EngineFilesSource<C> {
     }
 }
 
+impl<C: CredentialStores> EngineFilesSource<C> {
+    /// "Open in another app…": the path is resolved under the account-bound handle FIRST (the one check behind
+    /// every hand-over of a file, [`path_the_system_opens`]); `choose` is asked only after that answered `Ok`.
+    fn open_with_by(
+        &self,
+        item: &DriveItem,
+        choose: impl FnOnce(&Path) -> Result<(), ActionError>,
+    ) -> Result<(), ActionError> {
+        if item.is_folder {
+            return Err(ActionError::Failed);
+        }
+        let path = self.local(|db, sync_root| path_the_system_opens(db, sync_root, &item.id))?;
+        choose(&path)
+    }
+}
+
 impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
+    /// Files kept on this PC, once read (`files_facts`); the other two counts are not known here (0: no badge).
     fn counts(&self) -> Option<Counts> {
-        None
+        self.facts.counts()
     }
 
     fn account(&self) -> Option<Account> {
@@ -605,7 +683,7 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     }
 
     fn storage_split(&self) -> Option<StorageSplit> {
-        None
+        self.facts.storage_split()
     }
 
     /// The status line's word for the handle's view (`sync::sync_word`): read without waiting, on every frame, and
@@ -618,8 +696,8 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         files_source::details_of_row(item, folder)
     }
 
-    fn changed_label(&self, _: &DriveItem) -> Option<String> {
-        None
+    fn changed_label(&self, item: &DriveItem) -> Option<String> {
+        files_facts::changed_label(item, chrono::Utc::now())
     }
 
     fn can_add(&self, _folder: Option<&str>) -> bool {
@@ -628,12 +706,12 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.engine.view().start == Start::Running
     }
 
-    fn sort_of(&self, _: Option<&str>) -> Option<crate::frames::files::Sort> {
-        None
+    fn sort_of(&self, folder: Option<&str>) -> Option<crate::frames::files::Sort> {
+        self.facts.sort_of(folder)
     }
 
-    fn set_sort(&mut self, _: Option<&str>, _: crate::frames::files::Sort) {
-        log("NotWired(set_sort)");
+    fn set_sort(&mut self, folder: Option<&str>, sort: crate::frames::files::Sort) {
+        self.facts.set_sort(folder, sort);
     }
 
     /// An API call, not a sync-folder operation: not gated by `is_syncing()`. Accepted here, sent on a worker for
@@ -679,6 +757,56 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
                 .collect::<Result<Vec<_>, _>>()
         })?;
         paths.iter().try_for_each(|path| open_path(path))
+    }
+
+    fn open_with(&mut self, item: &DriveItem) -> Result<(), ActionError> {
+        self.open_with_by(item, choose_app)
+    }
+
+    fn versions(&self, item: &DriveItem) -> Vec<crate::frames::files::actions_data::Version> {
+        self.versions.versions(item)
+    }
+
+    fn ask_versions(&mut self, item: &DriveItem) {
+        self.versions.ask(item);
+    }
+
+    fn versions_state(&self, item: &DriveItem) -> files_source::Read {
+        self.versions.state(item)
+    }
+
+    fn restore_version(&mut self, item: &DriveItem, version: &str) -> Result<(), ActionError> {
+        self.versions.restore(item, version)
+    }
+
+    fn preview(&mut self, item: &DriveItem) -> Option<crate::frames::files::actions_data::PreviewOf> {
+        // Answered later: the read starts here, and the panel asks `preview_later` until it lands.
+        self.previews.start(item);
+        None
+    }
+
+    fn preview_later(&mut self, item: &DriveItem) -> Option<crate::frames::files::actions_data::Previewed> {
+        Some(self.previews.later(item))
+    }
+
+    fn cancel_preview(&mut self) {
+        self.previews.cancel();
+    }
+
+    fn folder_shown(&mut self, folder: Option<&str>) {
+        self.places.shown(folder);
+    }
+
+    fn protection(
+        &self,
+        folder: Option<&str>,
+        item: Option<&DriveItem>,
+    ) -> Option<crate::frames::files::protected::Protection> {
+        self.places.protection(folder, item)
+    }
+
+    fn backup_entry(&self, item: &DriveItem) -> Option<crate::frames::files::protected::BackupEntry> {
+        self.places.backup_entry(item)
     }
 
     fn show_in_file_explorer(&mut self, items: &[DriveItem]) -> Result<(), ActionError> {
@@ -778,6 +906,11 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     fn changes(&mut self) -> Vec<Change> {
         let mut changes = self.trash.take();
         changes.extend(self.copies.take());
+        changes.extend(self.versions.take());
+        // Where the rows stand in the Backups tree: an arrival redraws by its wake.
+        self.places.pump();
+        // The sidebar's figures are read again after a change (`files_facts`); an arrival redraws by its wake.
+        self.facts.pump(!changes.is_empty());
         changes
     }
 }
