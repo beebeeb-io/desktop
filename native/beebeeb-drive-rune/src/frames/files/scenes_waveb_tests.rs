@@ -134,8 +134,11 @@ fn a_right_click_on_the_empty_list_opens_the_menu_and_a_choice_of_sort_by_sorts(
     state.show_detail_pane = false;
     let mut rt = runtime_of(state);
     settle(&mut rt);
-    rt.state.open_background_menu((560.0, 452.0));
+    // A real right-click, on the list's empty space under the last row.
+    rt.secondary_down(500.0, 600.0);
+    rt.secondary_up(500.0, 600.0);
     settle(&mut rt);
+    assert!(find(&rt, "menu-item-0").is_some(), "the menu opened");
     assert!(
         find(&rt, "menu-1").is_none(),
         "Sort by is not open until it is highlighted"

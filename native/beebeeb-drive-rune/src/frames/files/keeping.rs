@@ -97,7 +97,7 @@ pub fn progress(k: &str, item: &DriveItem, d: &Download, width: f32, t: &Theme) 
             )
             .truncate(),
         )
-        .child(super::uploads::bar(
+        .child(bar(
             &format!("{k}-bar"),
             d.fraction(),
             &format!("{}, {words}", item.name),
