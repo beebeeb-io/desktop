@@ -343,6 +343,14 @@ fn a_long_title_scrolls_and_the_caret_is_runes_where_only_rune_knows_its_place()
     );
 }
 
+/// The window's poll of Trash: takes in what the source answered (the dialog closes when a delete ended).
+fn poll(rt: &mut Runtime<State>) {
+    rt.update(|s, tx| {
+        crate::frames::trash::poll(s, tx);
+    });
+    settle(rt);
+}
+
 #[test]
 fn the_password_shows_to_no_reader_is_sent_once_and_wiped_and_empty_trash_waits_for_one() {
     let mut rt = runtime(scenes::dw_0749);
@@ -368,7 +376,7 @@ fn the_password_shows_to_no_reader_is_sent_once_and_wiped_and_empty_trash_waits_
     settle(&mut rt);
     click(&mut rt, "btn-empty-trash-2");
     assert_eq!(rt.state.frames.shared.fields.password.text, "");
-    settle(&mut rt);
+    poll(&mut rt);
     assert_eq!(dialog(&rt), None);
     assert_eq!(rt.state.frames.trash.source.totals().items, 0);
 }
@@ -394,7 +402,7 @@ fn delete_permanently_names_its_item_and_deletes_only_that_one() {
         .replace_text("another".to_string());
     settle(&mut rt);
     click(&mut rt, "btn-delete-forever");
-    settle(&mut rt);
+    poll(&mut rt);
     assert_eq!(dialog(&rt), None);
     assert_eq!(rt.state.frames.trash.source.totals().items, 11);
     assert!(
