@@ -47,6 +47,8 @@ use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
 
 pub mod account_actions_api;
 pub mod account_api;
+pub mod account_email_api;
+pub mod account_twofactor_api;
 pub mod backups_api;
 // Files in two versions and the answer to one, for the native Files window.
 pub mod conflicts_api;

@@ -9,7 +9,7 @@
 
 use rune::{SecretCopy, TextEdit};
 
-use super::source::{Secret, Setup, StepUp};
+use super::source::{CallKind, Secret, Setup, StepUp};
 use super::{AccountUi, CodeFor, Dialog, Pane};
 
 /// The text inputs' keys (tests, `Tx::focus`).
@@ -68,10 +68,18 @@ pub struct Form {
     pub saved: Option<Result<String, String>>,
     /// The new name was sent and Beebeeb has not answered: Save waits and takes no press.
     pub saving_name: bool,
+    /// The call that is out and not answered yet (`calls`): a press while it is does nothing.
+    pub waiting: Option<CallKind>,
+    /// The first code was wrong and the key it belonged to was replaced: the page says to scan again.
+    pub key_replaced: bool,
 }
 
 fn secure() -> TextEdit {
     TextEdit::new("").secure()
+}
+
+pub(super) fn fresh_code() -> TextEdit {
+    code_edit()
 }
 
 fn code_edit() -> TextEdit {
@@ -97,6 +105,8 @@ impl Default for Form {
             copied: None,
             saved: None,
             saving_name: false,
+            waiting: None,
+            key_replaced: false,
         }
     }
 }
@@ -148,6 +158,8 @@ pub fn code(form: &Form, count: usize) -> String {
 pub fn arrive(ui: &mut AccountUi) {
     let f = &mut ui.form;
     f.problem = None;
+    f.waiting = None;
+    f.key_replaced = false;
     f.renaming = None;
     f.saved = None;
     focus(f, None);
@@ -196,11 +208,11 @@ pub fn arrive(ui: &mut AccountUi) {
             focus(f, Some(CODE_KEY));
         }
         Pane::TwoFactorSetup => {
-            f.current = secure();
-            if f.setup.is_none() {
-                f.setup = ui.source.as_deref_mut().and_then(|s| s.begin_two_factor(None).ok());
+            ui.form.current = secure();
+            if ui.form.setup.is_none() && !super::calls::start(ui, CallKind::BeginTwoFactor, "", "") {
+                ui.form.setup = ui.source.as_deref_mut().and_then(|s| s.begin_two_factor(None).ok());
             }
-            focus(f, Some(CODE_KEY));
+            focus(&mut ui.form, Some(CODE_KEY));
         }
         _ => f.current = secure(),
     }

@@ -179,7 +179,7 @@ impl<C: CredentialStores> Engine<C> {
     /// The token and the generation of the session in memory, taken under one lock. No session: `NotSignedIn`.
     /// A session Beebeeb no longer accepts: `SessionEnded`, and nothing is asked. The copy of the token wipes
     /// itself when it is dropped: a refusal after this point leaves none behind.
-    fn token_of_this_session(&self) -> Result<(Zeroizing<String>, SessionGeneration), AccountCallError> {
+    pub(super) fn token_of_this_session(&self) -> Result<(Zeroizing<String>, SessionGeneration), AccountCallError> {
         let stamped = {
             let guard = self.acct.session.lock().map_err(|_| AccountCallError::NotSignedIn)?;
             let current = guard.as_ref().ok_or(AccountCallError::NotSignedIn)?;
@@ -193,7 +193,7 @@ impl<C: CredentialStores> Engine<C> {
 
     /// Whether the session in memory is, now, the one `generation` names: asked with no session change half done
     /// (the session-write lock is held for the question). Never waits: during a session change the answer is no.
-    fn account_session_is_still(&self, generation: SessionGeneration) -> bool {
+    pub(super) fn account_session_is_still(&self, generation: SessionGeneration) -> bool {
         self.acct.while_session_is(&self.writes, generation, |_| ()).is_some()
     }
 

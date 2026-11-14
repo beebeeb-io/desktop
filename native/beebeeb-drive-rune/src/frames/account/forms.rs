@@ -12,7 +12,9 @@ use crate::ui::au::{self, Keys, Tone};
 use rune::El;
 
 use super::form::{self, Form, Problem};
-use super::source::{AccountSource, CodeRefused, EmailRefused, NameAnswer, NameWhy, Password, Purpose, Refused};
+use super::source::{
+    AccountSource, CallKind, CodeRefused, EmailRefused, NameAnswer, NameWhy, Password, Purpose, Refused,
+};
 use super::{AccountUi, icons};
 
 /// A 28 pt button of a form's foot, and whether it has a drawn border.
@@ -195,6 +197,13 @@ fn send_code(ui: &mut AccountUi) -> Option<&'static str> {
         form::focus(f, Some(form::EMAIL_KEY));
         return None;
     }
+    if f.waiting.is_some() {
+        return None;
+    }
+    if source.start_call(CallKind::StartEmail, &address, &f.current.text) {
+        f.waiting = Some(CallKind::StartEmail);
+        return None;
+    }
     let confirmation = match source.step_up(Password::from_field(&f.current.text), Purpose::ChangeEmail) {
         Ok(confirmation) => confirmation,
         Err(why) => {
@@ -229,6 +238,10 @@ pub(super) fn code_error(words: &str, t: &Theme) -> El {
 
 /// "Didn't get it? Send again in 42 s" (DW-A66, DW-A81).
 pub(super) fn send_again(source: &dyn AccountSource, t: &Theme) -> El {
+    if !source.can_send_again() {
+        // Nothing sends it again: no link that does nothing.
+        return rune::el().key("resend-none");
+    }
     let wait = source.resend_wait();
     let link = fm::link(0, "Send again", fm::CAP, wait > 0, t);
     let link = if wait > 0 {
@@ -290,6 +303,9 @@ pub fn email_code(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
 
 fn confirm_email(ui: &mut AccountUi) -> Option<&'static str> {
     let code = form::code(&ui.form, 8);
+    if ui.form.waiting.is_some() || super::calls::start(ui, CallKind::ConfirmEmail, &code, "") {
+        return None;
+    }
     match ui.source.as_deref_mut()?.confirm_email_change(&code) {
         Ok(()) => Some("DW-A51"),
         Err(why) => {
