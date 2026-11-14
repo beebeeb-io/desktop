@@ -451,6 +451,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= crate::frames::photos::poll(s, tx);
     // Search: a gate or account change drops its names; opening it and a new query ask the source; answers come in.
     changed |= crate::frames::search::poll(s, tx);
+    // Backups: the engine's answers, the section opening, a pass that ended (`frames::backups::poll`).
+    changed |= crate::frames::backups::poll(s, tx);
     // This PC's answers and refusals (`frames::this_pc::poll`).
     changed |= crate::frames::this_pc::poll(s, tx);
     // The speed test's steps (Settings, Bandwidth).

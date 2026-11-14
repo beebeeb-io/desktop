@@ -29,6 +29,10 @@ struct Fake {
     switches: Mutex<Vec<(String, bool, Option<String>)>>,
     /// The next `overview` signs this account in while it reads (an answer that outlives its session).
     swap_during_read: Mutex<Option<String>>,
+    /// The runner is passing now / a "Back up now" waits / how many were asked.
+    running: AtomicBool,
+    requested: AtomicBool,
+    run_requests: Mutex<u32>,
 }
 
 impl Fake {
@@ -43,6 +47,9 @@ impl Fake {
             switch_answer: Mutex::new(Ok(())),
             switches: Mutex::new(Vec::new()),
             swap_during_read: Mutex::new(None),
+            running: AtomicBool::new(false),
+            requested: AtomicBool::new(false),
+            run_requests: Mutex::new(0),
         })
     }
 
@@ -83,6 +90,16 @@ impl BackupsEngine for Fake {
         self.switches.lock().unwrap().push((key.into(), on, self.account()));
         *self.switch_answer.lock().unwrap()
     }
+    fn pass_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+    fn pass_requested(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+    }
+    fn request_pass(&self) {
+        *self.run_requests.lock().unwrap() += 1;
+        self.requested.store(true, Ordering::SeqCst);
+    }
 }
 
 fn row(key: &'static str, name: &'static str, on: bool, state: FolderState) -> BackupFolderRow {
@@ -93,6 +110,7 @@ fn row(key: &'static str, name: &'static str, on: bool, state: FolderState) -> B
         state,
         items: Some(214),
         last_pass_at_ms: Some(1_700_000_000_000),
+        stop_words: (state == FolderState::Stopped).then(|| "Invented-Laptop's Videos folder was removed.".to_string()),
     }
 }
 
@@ -156,16 +174,21 @@ fn the_root_and_the_folders_come_from_the_engines_answer() {
     assert!(folders[0].size.is_empty(), "no size is invented");
     assert!(folders[0].last_backup.is_some());
     assert_eq!(folders[1].last_backup, None, "an off folder has no last backup");
-    assert!(source.wired(Part::Root) && source.wired(Part::Folders));
     for part in [
+        Part::Root,
+        Part::Folders,
         Part::Status,
-        Part::Devices,
         Part::NotBackedUp,
-        Part::MailBackup,
         Part::BackUpNow,
+        Part::Retry,
+    ] {
+        assert!(source.wired(part), "{part:?} is bound");
+    }
+    for part in [
+        Part::Devices,
+        Part::MailBackup,
         Part::AddFolder,
         Part::RemoveFolder,
-        Part::Retry,
         Part::DeleteDevice,
     ] {
         assert!(!source.wired(part), "{part:?} is not bound");
@@ -318,21 +341,185 @@ fn the_unbound_parts_answer_nothing_and_send_nothing() {
     let fake = Fake::new();
     let mut source = EngineBackupsSource::new(fake.clone());
     settle(&mut source);
-    assert!(source.devices().is_empty() && source.not_backed_up().is_empty() && !source.mail_backup_on());
+    assert!(source.devices().is_empty() && !source.mail_backup_on());
     assert!(!source.add_folder("/invented/Projects"));
-    assert!(!source.delete_device_backup("invented-device", "123456"));
+    assert!(!source.delete_device_backup("invented-device", "a password"));
     source.remove_folder("documents", true);
-    source.back_up_now();
-    source.retry_all();
     settle(&mut source);
     assert!(fake.switches.lock().unwrap().is_empty());
+    assert_eq!(*fake.run_requests.lock().unwrap(), 0);
     assert_eq!(source.folders().len(), 3, "nothing was removed");
 }
 
 #[test]
-fn source_for_gives_no_source_while_the_constant_is_off() {
-    assert!(!TURNED_ON);
-    assert!(source_for(Fake::new()).is_none());
+fn the_card_says_what_the_engine_knows_and_never_a_value_it_did_not_read() {
+    use crate::frames::backups::source::Status;
+    let fake = Fake::new();
+    let mut source = EngineBackupsSource::new(fake.clone());
+    assert!(
+        matches!(source.status(), Status::Plain { can_run: false, .. }),
+        "nothing held: no claim"
+    );
+    settle(&mut source);
+    // Videos stopped itself: not "All backed up".
+    assert!(matches!(source.status(), Status::Plain { can_run: true, .. }));
+    // Nothing stopped: the oldest last pass of what is on.
+    let mut ok = laptop();
+    ok.folders.retain(|row| row.state != FolderState::Stopped);
+    fake.answer(A, Ok(ok.clone()));
+    source.read_at = None;
+    source.opened();
+    settle(&mut source);
+    match source.status() {
+        Status::AllBackedUp { last, from_this_pc } => {
+            assert!(!last.is_empty());
+            assert_eq!(from_this_pc, "", "no count of the files is claimed");
+        }
+        other => panic!("{other:?}"),
+    }
+    // A folder that is on and has never passed waits for its first backup.
+    ok.folders[0].last_pass_at_ms = None;
+    fake.answer(A, Ok(ok.clone()));
+    source.read_at = None;
+    source.opened();
+    settle(&mut source);
+    assert!(matches!(source.status(), Status::Plain { ref title, can_run: true, .. } if title.contains("first")));
+    // Nothing on at all.
+    ok.folders[0].on = false;
+    ok.folders[0].state = FolderState::Off;
+    fake.answer(A, Ok(ok));
+    source.read_at = None;
+    source.opened();
+    settle(&mut source);
+    assert!(matches!(source.status(), Status::Plain { ref title, can_run: false, .. } if title.contains("Nothing")));
+    // A pass the runner is running says so, whatever the folders say.
+    fake.running.store(true, Ordering::SeqCst);
+    assert!(matches!(source.status(), Status::Plain { ref title, .. } if title == "Backing up"));
+}
+
+#[test]
+fn back_up_now_asks_the_runner_once_and_a_pass_that_ends_is_read_again() {
+    let fake = Fake::new();
+    let mut source = EngineBackupsSource::new(fake.clone());
+    settle(&mut source);
+    source.back_up_now();
+    source.back_up_now(); // already out: not asked again
+    settle(&mut source);
+    assert_eq!(*fake.run_requests.lock().unwrap(), 1);
+    assert!(
+        matches!(source.status(), crate::frames::backups::source::Status::Plain { ref title, .. } if title == "Backing up"),
+        "the card says it at once"
+    );
+    // The runner took it: running, then ended; the source reads again for the new last pass.
+    fake.requested.store(false, Ordering::SeqCst);
+    fake.running.store(true, Ordering::SeqCst);
+    assert!(source.pump().busy, "a running pass keeps the window looking");
+    fake.running.store(false, Ordering::SeqCst);
+    let pumped = source.pump();
+    assert!(pumped.changed, "the card follows the pass that ended");
+    settle(&mut source);
+    // Nothing on: nothing asked.
+    let mut off = laptop();
+    off.folders[0].on = false;
+    fake.answer(A, Ok(off));
+    source.read_at = None;
+    source.opened();
+    settle(&mut source);
+    fake.requested.store(false, Ordering::SeqCst);
+    source.back_up_now();
+    settle(&mut source);
+    assert_eq!(
+        *fake.run_requests.lock().unwrap(),
+        1,
+        "no folder is on: no pass is asked for"
+    );
+}
+
+#[test]
+fn a_late_back_up_now_for_another_account_is_never_asked() {
+    let fake = Fake::new();
+    let mut source = EngineBackupsSource::new(fake.clone());
+    settle(&mut source);
+    *fake.swap_during_read.lock().unwrap() = Some(B.into());
+    source.read_at = None;
+    source.opened();
+    source.back_up_now();
+    settle(&mut source);
+    assert_eq!(*fake.run_requests.lock().unwrap(), 0, "A's ask did not run under B");
+}
+
+#[test]
+fn what_could_not_back_up_is_the_stopped_folders_in_cores_words_and_try_again_switches_them_on() {
+    let fake = Fake::new();
+    let mut source = EngineBackupsSource::new(fake.clone());
+    settle(&mut source);
+    let items = source.not_backed_up();
+    assert_eq!(items.len(), 1);
+    assert_eq!((items[0].id.as_str(), items[0].name.as_str()), ("videos", "Videos"));
+    assert_eq!(items[0].why, "Invented-Laptop's Videos folder was removed.");
+    assert!(!items[0].excluded);
+    source.retry("music"); // not stopped: nothing
+    source.retry("documents");
+    settle(&mut source);
+    assert!(fake.switches.lock().unwrap().is_empty());
+    source.retry_all();
+    settle(&mut source);
+    assert_eq!(
+        *fake.switches.lock().unwrap(),
+        vec![("videos".to_string(), true, Some(A.to_string()))]
+    );
+}
+
+#[test]
+fn on_then_off_before_the_first_read_sends_both_and_the_list_shows_the_last_ask() {
+    let fake = Fake::new();
+    let mut source = EngineBackupsSource::new(fake.clone());
+    settle(&mut source);
+    source.set_folder("music", true);
+    // The read of the first switch has not landed: the list already shows what was asked, so the next press asks
+    // for the opposite and it is not dropped as "already off" (review of desktop#384, P2).
+    assert!(source.folders().iter().any(|f| f.id == "music" && f.on));
+    source.set_folder("music", false);
+    assert!(source.folders().iter().any(|f| f.id == "music" && !f.on));
+    settle(&mut source);
+    assert_eq!(
+        *fake.switches.lock().unwrap(),
+        vec![
+            ("music".to_string(), true, Some(A.to_string())),
+            ("music".to_string(), false, Some(A.to_string())),
+        ]
+    );
+    // Both reads landed: what the engine has is shown again (the fake's overview never changed: off).
+    assert!(source.folders().iter().any(|f| f.id == "music" && !f.on));
+    assert!(
+        source.switching.is_empty(),
+        "nothing is pending once both were read back"
+    );
+}
+
+#[test]
+fn a_refused_switch_is_not_shown_as_done_once_read_back() {
+    let fake = Fake::new();
+    let mut source = EngineBackupsSource::new(fake.clone());
+    settle(&mut source);
+    *fake.switch_answer.lock().unwrap() = Err(BackupsError::Settings);
+    source.set_folder("music", true);
+    assert!(
+        source.folders().iter().any(|f| f.id == "music" && f.on),
+        "shown as asked until read back"
+    );
+    let pumped = settle(&mut source);
+    assert_eq!(pumped.refusal, Some(NOT_SWITCHED));
+    assert!(
+        source.folders().iter().any(|f| f.id == "music" && !f.on),
+        "the engine's own value again"
+    );
+}
+
+#[test]
+fn source_for_gives_the_engines_source_now_backups_is_on() {
+    assert!(TURNED_ON);
+    assert!(source_for(Fake::new()).is_some());
 }
 
 #[test]

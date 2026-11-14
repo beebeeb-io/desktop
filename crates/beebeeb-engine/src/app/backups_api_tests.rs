@@ -45,6 +45,11 @@ fn the_six_known_folders_read_their_switch_their_stop_and_their_last_pass() {
         }),
         stopped: vec!["music".into()],
         last_pass: BTreeMap::from([("documents".to_string(), 1_700_000_000_000)]),
+        stops: vec![BackupStop {
+            category: "music".into(),
+            reason: "unknown".into(),
+            at_ms: 5,
+        }],
     };
     let enabled = vec!["documents".to_string(), "desktop".to_string()];
     let counted = std::cell::RefCell::new(Vec::new());
@@ -59,6 +64,15 @@ fn the_six_known_folders_read_their_switch_their_stop_and_their_last_pass() {
     assert_eq!(documents.last_pass_at_ms, Some(1_700_000_000_000));
     assert_eq!(documents.items, Some(7));
     assert_eq!(row(&overview, "music").state, FolderState::Stopped);
+    assert!(
+        row(&overview, "music").stop_words.is_some(),
+        "a stopped folder carries core's words for why"
+    );
+    assert_eq!(
+        row(&overview, "documents").stop_words,
+        None,
+        "a folder that is on has none"
+    );
     assert_eq!(row(&overview, "videos").state, FolderState::Off);
     assert_eq!(row(&overview, "videos").last_pass_at_ms, None);
     assert_eq!(
@@ -232,4 +246,55 @@ fn a_handle_with_no_one_signed_in_refuses_the_read_and_the_switch_and_writes_not
     );
     let after = DesktopConfig::load_for(&REAL).ok().map(|c| c.known_folder_backup);
     assert_eq!(before, after, "the settings file is not written for a refusal");
+}
+
+#[test]
+fn a_switch_whose_database_part_fails_puts_the_settings_back() {
+    // The settings file is modelled by a cell: written first, as `set_backup_folder` does, then undone.
+    let file = std::cell::Cell::new(true);
+    let failed = switched_or_undone(
+        || {
+            let was = file.get();
+            file.set(false);
+            Ok(was)
+        },
+        || Err(BackupsError::State),
+        |was| file.set(was),
+    );
+    assert_eq!(failed, Err(BackupsError::State));
+    assert!(
+        file.get(),
+        "a failed purge leaves the folder as it was: on, nothing half done"
+    );
+
+    let session_moved = switched_or_undone(
+        || {
+            let was = file.get();
+            file.set(false);
+            Ok(was)
+        },
+        || Err(BackupsError::Refused(LocalStateRefused::SessionChanged)),
+        |was| file.set(was),
+    );
+    assert!(session_moved.is_err());
+    assert!(file.get(), "a session that changed in between undoes it too");
+
+    let done = switched_or_undone(
+        || {
+            let was = file.get();
+            file.set(false);
+            Ok(was)
+        },
+        || Ok(()),
+        |was| file.set(was),
+    );
+    assert_eq!(done, Ok(()));
+    assert!(!file.get(), "a switch that happened stays");
+
+    let refused_write = switched_or_undone(
+        || Err::<bool, _>(BackupsError::Settings),
+        || panic!("no database work after a write that failed"),
+        |_| panic!("nothing to undo"),
+    );
+    assert_eq!(refused_write, Err(BackupsError::Settings));
 }
