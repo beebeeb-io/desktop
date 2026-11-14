@@ -156,7 +156,14 @@ fn an_answer_that_did_not_work_says_so_and_the_file_waits_again() {
     until(&mut calls, |c| !c.conflicts().is_empty());
     calls.keep("file-1", Keep::Both).expect("accepted");
     let changes = until(&mut calls, |c| c.resolving.is_empty());
-    assert_eq!(changes, [Change::Failed(Action::KeepVersion, ActionError::Offline)]);
+    assert!(
+        matches!(
+            &changes[..],
+            [Change::Failed(Action::KeepVersion, ActionError::Offline)]
+        ),
+        "{} change(s)",
+        changes.len()
+    );
     until(&mut calls, |c| !c.conflicts().is_empty());
 }
 

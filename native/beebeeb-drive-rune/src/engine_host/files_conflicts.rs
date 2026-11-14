@@ -273,7 +273,7 @@ impl<E: ConflictEngine> ConflictCalls<E> {
                         log("files: a read of two versions ended early");
                         Err(ConflictsRefused::NoLocalState)
                     })
-                    .map(|read| read.files.iter().map(shown).collect());
+                    .map(|read| read.files.iter().map(shown).collect::<Vec<Conflict>>());
                 let changed = !matches!(&list, Ok(list) if list.is_empty());
                 let _ = answers.send(Answer::List { pressed, epoch, list });
                 // An empty answer changes nothing on the screen: no redraw for it.
