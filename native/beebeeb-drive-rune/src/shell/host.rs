@@ -459,6 +459,8 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     changed |= crate::frames::settings::bandwidth::poll(s, _seconds, tx);
     // What the sign-in screens asked the shell for.
     changed |= drain_signin_intents(s);
+    // What Settings asked for: web pages, the clipboard, Windows Settings.
+    changed |= super::intents::drain_settings_intents(s, tx);
     // "Open my Beebeeb" at the end of the first run starts the first-time guide (DW-0380).
     changed |= crate::frames::signin::setup::guide::poll(s, tx);
     // The first run's answers (File Explorer finished, a switch was set, the first run ended).
@@ -598,15 +600,8 @@ fn poll_capture(s: &mut State, tx: &mut Tx) -> bool {
     leaving
 }
 
-/// The web pages 0.9.0 sends to for what the app does not do itself (recovery replaces the password and
-/// re-wraps the keys; creating an account has no screens in this build).
-const RECOVERY_PAGE: &str = "https://app.beebeeb.io/forgot-password";
-const SIGN_UP_PAGE: &str = "https://app.beebeeb.io/signup";
-
-fn open_web_page(url: &'static str) {
-    if crate::engine_host::signin::open_web_page(url).is_err() {
-        log("a web page did not open");
-    }
+fn open_web_page(url: &str) {
+    super::intents::open_for_signin(url);
 }
 
 /// Takes every intent the sign-in screens queued (`signin::Ui::take_intents`) and acts on it. A finished
@@ -626,13 +621,14 @@ pub fn drain_signin_intents(s: &mut State) -> bool {
             SignIn::CreateAccount => {
                 if !s.signin.as_mut().is_some_and(crate::frames::signin::Ui::start_create) {
                     // No sign-up screens in this build: the web page creates the account.
-                    open_web_page(SIGN_UP_PAGE);
+                    open_web_page(super::web_pages::SIGN_UP_PAGE);
                 }
             }
-            SignIn::OpenRecoveryPage => open_web_page(RECOVERY_PAGE),
-            SignIn::OpenTerms | SignIn::OpenPrivacy => log("NotWired(sign-up: open a page in the browser)"),
+            SignIn::OpenRecoveryPage => open_web_page(super::web_pages::RECOVERY_PAGE),
+            SignIn::OpenTerms => open_web_page(super::web_pages::TERMS_PAGE),
+            SignIn::OpenPrivacy => open_web_page(super::web_pages::PRIVACY_PAGE),
             SignIn::SavePhraseAsFile | SignIn::PrintPhrase => log("NotWired(sign-up: save or print the phrase)"),
-            SignIn::WriteToSupport => log("NotWired(sign-in: write to support)"),
+            SignIn::WriteToSupport => open_web_page(&super::web_pages::support_mailto("Help signing in")),
             SignIn::CancelBilling | SignIn::EraseAllFiles | SignIn::DeleteAccount => {
                 log("NotWired(sign-in: an account dialog)")
             }

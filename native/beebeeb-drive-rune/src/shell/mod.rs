@@ -31,6 +31,7 @@ pub mod flyout_window;
 pub mod host;
 pub mod identity;
 pub mod instance;
+pub mod intents;
 pub mod placeholder;
 pub mod platform;
 pub mod registry;
@@ -46,6 +47,7 @@ pub mod tray_icon;
 // The pure half of `platform/windows_tray.rs`; tested on every platform.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub mod tray_win;
+pub mod web_pages;
 pub mod window_state;
 
 use std::io::Write as _;

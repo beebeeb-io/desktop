@@ -1114,7 +1114,34 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn turn_off_two_factor(&mut self, _code: &str) -> Result<(), CodeRefused> {
         Err(CodeRefused::Offline)
     }
-    super::passkeys::passkey_methods!();
+    fn passkeys(&self) -> Vec<Passkey> {
+        self.passkeys.passkeys()
+    }
+    fn add_passkey(&mut self) -> Result<(), Refused> {
+        super::passkeys::add_without_password()
+    }
+    /// Beebeeb has no route to rename a passkey: the menu does not offer it (`can_rename_passkey`).
+    fn rename_passkey(&mut self, _id: &str, _name: &str) -> bool {
+        false
+    }
+    fn remove_passkey(&mut self, _id: &str) -> bool {
+        false
+    }
+    fn passkeys_need_password(&self) -> bool {
+        true
+    }
+    fn can_add_passkey(&self) -> bool {
+        self.passkeys.can_add()
+    }
+    fn can_rename_passkey(&self) -> bool {
+        self.passkeys.can_rename()
+    }
+    fn add_passkey_confirmed(&mut self, password: Password<'_>) -> Result<(), Refused> {
+        super::passkeys::add_confirmed(&mut self.passkeys, password)
+    }
+    fn remove_passkey_confirmed(&mut self, id: &str, password: Password<'_>) -> bool {
+        super::passkeys::remove_confirmed(&mut self.passkeys, id, password)
+    }
     /// Stopping the recording is not done from here (`can_stop_activity` is false): Beebeeb wants the password's
     /// own proof for it, which the pane's code dialog does not give. Never reached from a drawn control.
     fn stop_activity(&mut self, _code: &str) -> Result<(), CodeRefused> {
