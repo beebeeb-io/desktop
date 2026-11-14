@@ -307,8 +307,10 @@ struct Rig {
 }
 
 fn folder_json(id: &str) -> serde_json::Value {
-    // A name sealed for no key this PC holds: it does not open (the row is kept, nameless).
-    serde_json::json!({ "id": id, "name_encrypted": "AAAA", "is_folder": true, "is_trashed": false,
+    // A sealed name (an envelope, not plain text: core passes plain text through as a legacy name) that opens under
+    // no key this PC holds: the row is kept, nameless.
+    let sealed = r#"{"nonce":"AAAAAAAAAAAAAAAA","ciphertext":"AAAAAAAAAAAAAAAAAAAAAAAA"}"#;
+    serde_json::json!({ "id": id, "name_encrypted": sealed, "is_folder": true, "is_trashed": false,
         "size_bytes": 0, "chunk_count": 0, "uploaded_at": "2026-11-01T10:00:00Z" })
 }
 
