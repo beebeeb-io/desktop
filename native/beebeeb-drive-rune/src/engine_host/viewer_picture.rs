@@ -220,25 +220,38 @@ fn vp8l(bytes: &[u8], at: usize) -> Option<(u32, u32)> {
     Some(((packed & 0x3FFF) + 1, ((packed >> 14) & 0x3FFF) + 1))
 }
 
-/// The RIFF chunks of `bytes` from `from` on: for each, its name, where its data begins and the length it states
-/// (which may run past the end of the file). A chunk is a name, a length, and the data padded to an even length.
-fn chunks(bytes: &[u8], from: usize) -> Vec<([u8; 4], usize, usize)> {
-    let mut found = Vec::new();
-    let mut at = from;
-    while let (Some(name), Some(length)) = (bytes.get(at..at + 4), le32(bytes, at + 4)) {
-        let Some((length, end)) = usize::try_from(length)
-            .ok()
-            .and_then(|length| Some((length, (at + 8).checked_add(length)?)))
-        else {
-            break;
-        };
-        found.push(([name[0], name[1], name[2], name[3]], at + 8, length));
-        match end.checked_add(end & 1) {
-            Some(next) if next > at => at = next,
-            _ => break,
-        }
-    }
-    found
+/// One top-level RIFF chunk: its name, where its data begins, and the length it states.
+type Chunk = ([u8; 4], usize, usize);
+
+/// The most a metadata chunk (EXIF, XMP, ICCP) may state: a decoder may copy it whole.
+const METADATA_MAX: usize = 1 << 20;
+
+/// The RIFF chunks of `bytes` from `from` on, one at a time and never collected: the walk stops where the
+/// caller stops, so what it costs does not grow with the number of chunks. A chunk is a name, a length, and the
+/// data padded to an even length. Each item is `Err` for a chunk that cannot be accounted for: its name, data and
+/// padding do not all lie inside the file, or it is metadata stating more than [`METADATA_MAX`]. The walk ends
+/// after an `Err`. Fewer than 8 bytes left at the end are not a chunk and end it quietly.
+fn chunks(bytes: &[u8], from: usize) -> impl Iterator<Item = Result<Chunk, ()>> + '_ {
+    let mut at = Some(from);
+    std::iter::from_fn(move || {
+        let start = at?;
+        let (name, length) = (
+            bytes.get(start..start.checked_add(4)?)?,
+            le32(bytes, start.checked_add(4)?)?,
+        );
+        at = None;
+        let found = (|| {
+            let length = usize::try_from(length).ok()?;
+            let data = start.checked_add(8)?;
+            let next = data.checked_add(length)?.checked_add(length & 1)?;
+            if next > bytes.len() || (matches!(name, b"EXIF" | b"XMP " | b"ICCP") && length > METADATA_MAX) {
+                return None;
+            }
+            at = Some(next);
+            Some(([name[0], name[1], name[2], name[3]], data, length))
+        })();
+        Some(found.ok_or(()))
+    })
 }
 
 /// The two sizes one animation frame states: its own, and its bitstream's. `at`: where the frame's data begins;
@@ -252,7 +265,8 @@ fn chunks(bytes: &[u8], from: usize) -> Vec<([u8; 4], usize, usize)> {
 /// - it lies wholly inside the file,
 /// - it holds exactly one bitstream chunk named lossy or lossless, or an alpha chunk and then one chunk named
 ///   lossy, each with its header inside its own chunk,
-/// - and those chunks, padded, end exactly where the frame ends: no byte is left over or missing.
+/// - and those chunks, then any further chunks the frame holds (each wholly inside it), padded, end exactly where
+///   the frame ends: no byte is left over or missing.
 fn frame(bytes: &[u8], at: usize, length: usize) -> Option<[(u32, u32); 2]> {
     if length & 1 == 1 {
         return None;
@@ -285,6 +299,12 @@ fn frame(bytes: &[u8], at: usize, length: usize) -> Option<[(u32, u32); 2]> {
         }
         _ => return None,
     };
+    // The WebP spec allows further chunks after the bitstream: each must lie wholly inside the frame, padded
+    // correctly, and the last must end exactly where the frame ends (the decoder steps by the frame's length).
+    let mut next = next;
+    while next < end {
+        next = inner(next)?.3;
+    }
     (next == end).then_some([own, stated])
 }
 
@@ -310,11 +330,19 @@ fn webp(bytes: &[u8]) -> Option<Declared> {
                 width = width.max(w);
                 height = height.max(h);
             };
-            for (name, at, length) in chunks(bytes, 12) {
+            // The decoder walks `ANMF` chunks differently from `frame()` when the header does not say animation.
+            let animated = *bytes.get(data)? & 0x02 != 0;
+            for found in chunks(bytes, 12) {
+                let (name, at, length) = found.ok()?;
+                // The data of this chunk and no more: a header is never read from what follows it.
+                let within = bytes.get(..at + length)?;
                 match &name {
-                    b"VP8 " => widen(vp8(bytes, at)?),
-                    b"VP8L" => widen(vp8l(bytes, at)?),
+                    b"VP8 " => widen(vp8(within, at)?),
+                    b"VP8L" => widen(vp8l(within, at)?),
                     b"ANMF" => {
+                        if !animated {
+                            return None;
+                        }
                         frames = frames.saturating_add(1);
                         frame(bytes, at, length)?.into_iter().for_each(&mut widen);
                     }
@@ -327,8 +355,15 @@ fn webp(bytes: &[u8]) -> Option<Declared> {
                 frames: frames.max(1),
             })
         }
-        b"VP8 " => vp8(bytes, data).map(still),
-        b"VP8L" => vp8l(bytes, data).map(still),
+        b"VP8 " | b"VP8L" => {
+            let (name, at, length) = chunks(bytes, 12).next()?.ok()?;
+            let within = bytes.get(..at + length)?;
+            match &name {
+                b"VP8 " => vp8(within, at),
+                _ => vp8l(within, at),
+            }
+            .map(still)
+        }
         _ => None,
     }
 }
