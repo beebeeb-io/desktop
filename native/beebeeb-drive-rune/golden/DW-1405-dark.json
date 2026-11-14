@@ -1,0 +1,1139 @@
+{
+ "frame": "DW-1405",
+ "width": 958,
+ "height": 638,
+ "elements": {
+  "caption-bar": {
+   "kind": "box",
+   "x": 0,
+   "y": 0,
+   "w": 958,
+   "h": 32,
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ]
+  },
+  "cap-mark": {
+   "kind": "icon",
+   "x": 12,
+   "y": 7.5,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "rect:width=512,height=512,rx=102",
+    "M754 -19Q663 -19 600.0 12.0Q537 43 497.5 88.5Q458 134 437 179H423V0H128V1490H428V930H437Q457 974 495.5 1021.0Q534 1068 597.5 1100.0Q661 1132 756 1132Q880 1132 983.0 1068.0Q1086 1004 1147.5 876.0Q1209 748 1209 557Q1209 371 1149.0 242.5Q1089 114 986.0 47.5Q883 -19 754 -19ZM662 222Q779 222 840.5 316.0Q902 410 902 558Q902 705 841.0 798.5Q780 892 662 892Q546 892 483.5 801.0Q421 710 421 558Q421 406 484.0 314.0Q547 222 662 222Z",
+    "circle:cx=378,cy=378,r=104",
+    "circle:cx=378,cy=378,r=88",
+    "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+   ],
+   "filled": true,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "mark": true
+  },
+  "cap-title": {
+   "kind": "text",
+   "x": 37,
+   "y": 7.5,
+   "w": 774,
+   "h": 16,
+   "text": "Beebeeb Drive",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "cap-min": {
+   "kind": "box",
+   "x": 820,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-min-icon": {
+   "kind": "icon",
+   "x": 838,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M0 5.5h10"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "cap-max": {
+   "kind": "box",
+   "x": 866,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-max-icon": {
+   "kind": "icon",
+   "x": 884,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "rect:x=.5,y=.5,width=9,height=9,rx=1.5"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "cap-close": {
+   "kind": "box",
+   "x": 912,
+   "y": 0,
+   "w": 46,
+   "h": 31
+  },
+  "cap-close-icon": {
+   "kind": "icon",
+   "x": 930,
+   "y": 10.5,
+   "w": 10,
+   "h": 10,
+   "icon": [
+    "M.5.5l9 9M9.5.5l-9 9"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "sidebar": {
+   "kind": "box",
+   "x": 0,
+   "y": 32,
+   "w": 224,
+   "h": 606,
+   "bg": [
+    16,
+    13,
+    9,
+    255
+   ]
+  },
+  "Back to Drive-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 44,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Back to Drive-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 50.5,
+   "w": 15,
+   "h": 15,
+   "icon": [
+    "M15 5l-7 7 7 7"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Back to Drive": {
+   "kind": "text",
+   "x": 43,
+   "y": 49.5,
+   "w": 161.5,
+   "h": 17,
+   "text": "Back to Drive",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "General-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 101,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "General-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 107,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "General": {
+   "kind": "text",
+   "x": 44,
+   "y": 106.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "General",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "Account-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 130,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Account-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 136,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Account": {
+   "kind": "text",
+   "x": 44,
+   "y": 135.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Account",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "Security-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 159,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Security-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 165,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Security": {
+   "kind": "text",
+   "x": 44,
+   "y": 164.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Security",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "Devices and sessions-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 188,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Devices and sessions-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 194,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M5 6.5A1.5 1.5 0 0 1 6.5 5h11A1.5 1.5 0 0 1 19 6.5V15H5z",
+    "M2.5 18.5h19"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Devices and sessions": {
+   "kind": "text",
+   "x": 44,
+   "y": 193.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Devices and sessions",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "Notifications-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 217,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Notifications-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 223,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Notifications": {
+   "kind": "text",
+   "x": 44,
+   "y": 222.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Notifications",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "Storage-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 274,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Storage-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 280,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Storage": {
+   "kind": "text",
+   "x": 44,
+   "y": 279.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Storage",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "Backups-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 303,
+   "w": 203.5,
+   "h": 28,
+   "bg": [
+    233,
+    233,
+    222,
+    23
+   ],
+   "on": true
+  },
+  "Backups-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 309,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "Backups": {
+   "kind": "text",
+   "x": 44,
+   "y": 308.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Backups",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": 0
+  },
+  "Sync and File Explorer-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 332,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Sync and File Explorer-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 338,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Sync and File Explorer": {
+   "kind": "text",
+   "x": 44,
+   "y": 337.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Sync and File Explorer",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "Thumbnails and previews-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 361,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Thumbnails and previews-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 367,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Thumbnails and previews": {
+   "kind": "text",
+   "x": 44,
+   "y": 366.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Thumbnails and previews",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "Bandwidth-row": {
+   "kind": "box",
+   "x": 10,
+   "y": 390,
+   "w": 203.5,
+   "h": 28,
+   "on": false
+  },
+  "Bandwidth-icon": {
+   "kind": "icon",
+   "x": 19,
+   "y": 396,
+   "w": 16,
+   "h": 16,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "Bandwidth": {
+   "kind": "text",
+   "x": 44,
+   "y": 395.5,
+   "w": 160.5,
+   "h": 17,
+   "text": "Bandwidth",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ],
+   "tracking": 0
+  },
+  "side-title-settings": {
+   "kind": "text",
+   "x": 20,
+   "y": 84.5,
+   "w": 55.72,
+   "h": 12,
+   "text": "SETTINGS",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0.7
+  },
+  "side-title-drive": {
+   "kind": "text",
+   "x": 20,
+   "y": 257.5,
+   "w": 33.34,
+   "h": 12,
+   "text": "DRIVE",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0.7
+  },
+  "side-foot-box": {
+   "kind": "box",
+   "x": 10,
+   "y": 589.5,
+   "w": 203.5,
+   "h": 38.5
+  },
+  "side-foot": {
+   "kind": "text",
+   "x": 16,
+   "y": 600.5,
+   "w": 174.48,
+   "h": 27,
+   "text": "Settings open inside the app. Esc goes back.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 11,
+   "weight": 500,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0
+  },
+  "set-main": {
+   "kind": "box",
+   "x": 224,
+   "y": 32,
+   "w": 734,
+   "h": 606,
+   "bg": [
+    16,
+    13,
+    9,
+    255
+   ]
+  },
+  "crumb-icon": {
+   "kind": "icon",
+   "x": 254,
+   "y": 55,
+   "w": 13,
+   "h": 13,
+   "icon": [
+    "M15 5l-7 7 7 7"
+   ],
+   "filled": false,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ]
+  },
+  "crumb": {
+   "kind": "text",
+   "x": 271,
+   "y": 54,
+   "w": 48.81,
+   "h": 14.5,
+   "text": "Backups",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0
+  },
+  "list-0-title": {
+   "kind": "text",
+   "x": 268,
+   "y": 202.5,
+   "w": 68.69,
+   "h": 12,
+   "text": "Mail accounts",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 10,
+   "weight": 600,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0.1
+  },
+  "list-0-body": {
+   "kind": "box",
+   "x": 254,
+   "y": 221,
+   "w": 540,
+   "h": 68,
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ]
+  },
+  "item-0-0": {
+   "kind": "box",
+   "x": 254,
+   "y": 221,
+   "w": 540,
+   "h": 40,
+   "selected": false
+  },
+  "item-0-0-icon": {
+   "kind": "icon",
+   "x": 270,
+   "y": 232,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2zM22 6l-10 7L2 6"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "item-0-0-title": {
+   "kind": "text",
+   "x": 302,
+   "y": 224.5,
+   "w": 414.49,
+   "h": 17,
+   "text": "anna@northwind.studio",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "item-0-0-sub": {
+   "kind": "text",
+   "x": 302,
+   "y": 242.5,
+   "w": 414.49,
+   "h": 15,
+   "text": "IMAP · mail.northwind.studio · 4 folders",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0
+  },
+  "item-0-0-value": {
+   "kind": "text",
+   "x": 724.49,
+   "y": 232.5,
+   "w": 37.51,
+   "h": 17,
+   "text": "08:40",
+   "family": "mono",
+   "fontFamily": "JetBrains Mono",
+   "size": 12.5,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0
+  },
+  "item-0-0-chev": {
+   "kind": "icon",
+   "x": 770,
+   "y": 234,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M9 18l6-6-6-6"
+   ],
+   "filled": false,
+   "color": [
+    96,
+    93,
+    89,
+    255
+   ]
+  },
+  "item-0-1": {
+   "kind": "box",
+   "x": 254,
+   "y": 261,
+   "w": 540,
+   "h": 28,
+   "selected": false
+  },
+  "item-0-1-icon": {
+   "kind": "icon",
+   "x": 270,
+   "y": 266,
+   "w": 18,
+   "h": 18,
+   "icon": [
+    "M12 5v14M5 12h14"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "item-0-1-title": {
+   "kind": "text",
+   "x": 302,
+   "y": 266.5,
+   "w": 482,
+   "h": 17,
+   "text": "Add a mail account…",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 13,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "btn-0": {
+   "kind": "box",
+   "x": 712.1,
+   "y": 92,
+   "w": 81.9,
+   "h": 22,
+   "bg": [
+    16,
+    13,
+    9,
+    255
+   ]
+  },
+  "btn-0-icon": {
+   "kind": "icon",
+   "x": 725.1,
+   "y": 96,
+   "w": 14,
+   "h": 14,
+   "icon": [
+    "M6 4h4v16H6zM14 4h4v16h-4z"
+   ],
+   "filled": false,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ]
+  },
+  "btn-0-label": {
+   "kind": "text",
+   "x": 746.1,
+   "y": 94.43,
+   "w": 34.9,
+   "h": 17.14,
+   "text": "Pause",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 500,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.06
+  },
+  "card-0": {
+   "kind": "box",
+   "x": 254,
+   "y": 137,
+   "w": 540,
+   "h": 51,
+   "bg": [
+    25,
+    21,
+    16,
+    255
+   ]
+  },
+  "card-0-sub": {
+   "kind": "text",
+   "x": 266,
+   "y": 149,
+   "w": 516,
+   "h": 15,
+   "text": "6,912 of 17,480 messagesabout 40 min left",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0
+  },
+  "tile-0": {
+   "kind": "box",
+   "x": 254,
+   "y": 83,
+   "w": 40,
+   "h": 40,
+   "bg": [
+    227,
+    227,
+    227,
+    18
+   ]
+  },
+  "tile-0-icon": {
+   "kind": "icon",
+   "x": 264,
+   "y": 93,
+   "w": 20,
+   "h": 20,
+   "icon": [
+    "M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2zM22 6l-10 7L2 6"
+   ],
+   "filled": false,
+   "color": [
+    186,
+    183,
+    178,
+    255
+   ]
+  },
+  "card-0-bar": {
+   "kind": "box",
+   "x": 266,
+   "y": 172,
+   "w": 516,
+   "h": 4,
+   "bg": [
+    233,
+    233,
+    222,
+    23
+   ]
+  },
+  "card-0-bar-fill": {
+   "kind": "box",
+   "x": 266,
+   "y": 172,
+   "w": 206.4,
+   "h": 4,
+   "bg": [
+    247,
+    185,
+    0,
+    255
+   ]
+  },
+  "mail-title": {
+   "kind": "text",
+   "x": 306,
+   "y": 84.5,
+   "w": 394.1,
+   "h": 22,
+   "text": "Backing up your mail",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 17,
+   "weight": 600,
+   "color": [
+    230,
+    228,
+    224,
+    255
+   ],
+   "tracking": -0.2
+  },
+  "mail-sub": {
+   "kind": "text",
+   "x": 306,
+   "y": 106.5,
+   "w": 394.1,
+   "h": 15,
+   "text": "The first backup takes longest. You can use your PC as normal.",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0
+  },
+  "mail-count": {
+   "kind": "text",
+   "x": 266,
+   "y": 149,
+   "w": 168.98,
+   "h": 15,
+   "text": "6,912 of 17,480 messages",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0
+  },
+  "mail-left": {
+   "kind": "text",
+   "x": 685.88,
+   "y": 149,
+   "w": 96.12,
+   "h": 15,
+   "text": "about 40 min left",
+   "family": "sans",
+   "fontFamily": "Inter",
+   "size": 12,
+   "weight": 400,
+   "color": [
+    137,
+    134,
+    129,
+    255
+   ],
+   "tracking": 0
+  }
+ },
+ "theme": "dark"
+}
