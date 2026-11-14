@@ -27,6 +27,8 @@ mod md_source;
 pub mod media;
 mod media_icons;
 pub mod new_file;
+pub mod office;
+mod office_icons;
 mod pdf;
 mod photo;
 pub mod source;
@@ -91,6 +93,8 @@ pub enum Intent {
     EditInSheets,
     /// Move this file to Trash (a photo's Trash; Undo is the toast's, in Files).
     Trash,
+    /// A command of the office editor (its name, as the control says it): the editor takes it.
+    Office(&'static str),
 }
 
 /// What a control whose target is not built yet says (the shell's words for it).
@@ -118,6 +122,7 @@ impl Intent {
             Intent::KeepOffline => "Available offline from here",
             Intent::EditInSheets => "Edit in Sheets",
             Intent::VersionHistory => "Version history",
+            Intent::Office(command) => command,
             _ => return None,
         })
     }
@@ -184,6 +189,8 @@ pub struct Ui {
     pub saved_at: Option<String>,
     /// What is open inside a photo, a recording, a PDF, a table or an archive (`media.rs`).
     pub media: media::Media,
+    /// What is open inside the office editor's frame (`office.rs`).
+    pub office: office::OfficeUi,
     /// The element that takes keyboard focus once this change is on screen.
     focus: Option<&'static str>,
     intents: Vec<Intent>,
@@ -196,6 +203,7 @@ impl Ui {
         Ok(Ui {
             source,
             media: media::Media::of(&file),
+            office: office::OfficeUi::default(),
             file,
             show_details: false,
             wrap: false,
@@ -736,6 +744,9 @@ fn kind_word(file: &OpenFile) -> &str {
 }
 
 fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
+    if let Body::Word(doc) = &ui.file.body {
+        return office::window(s, cx, ui, doc);
+    }
     let t = tokens::theme(cx.system_dark());
     if let Some(editor) = &ui.editor {
         let dirty = editor.dirty();
@@ -905,6 +916,7 @@ pub fn scene_file(frame: &str) -> Option<&'static str> {
         "DW-1506" => board::PDF_FIND,
         "DW-1514" => board::CSV,
         "DW-1515" => board::ZIP,
+        "DW-1507" => board::DOCX,
         _ => return None,
     })
 }
@@ -1010,4 +1022,5 @@ pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1506", |s| set_scene(s, "DW-1506")),
     ("DW-1514", |s| set_scene(s, "DW-1514")),
     ("DW-1515", |s| set_scene(s, "DW-1515")),
+    ("DW-1507", |s| set_scene(s, "DW-1507")),
 ];

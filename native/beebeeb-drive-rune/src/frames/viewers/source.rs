@@ -131,6 +131,8 @@ pub enum Body {
     Table(TableDoc),
     /// DW-1515: an archive's list.
     Archive(ArchiveDoc),
+    /// DW-1507: a text document in the office editor's frame.
+    Word(super::office::WordDoc),
 }
 
 /// The kind and its counts, never a word of the content, a name or a title.
@@ -146,6 +148,7 @@ impl fmt::Debug for Body {
             Body::Markdown(doc) => write!(f, "Markdown({doc:?})"),
             Body::Photo(_) => f.write_str("Photo"),
             Body::Audio(_) => f.write_str("Audio"),
+            Body::Word(doc) => write!(f, "Word({doc:?})"),
             Body::Pdf(doc) => write!(f, "Pdf({} pages)", doc.pages),
             Body::Table(doc) => write!(f, "Table({} rows)", doc.rows.len()),
             Body::Archive(doc) => write!(f, "Archive({} entries)", doc.entries.len()),
@@ -159,6 +162,7 @@ impl Body {
         match self {
             Body::Text(doc) => doc.wipe(),
             Body::Markdown(doc) => doc.source.zeroize(),
+            Body::Word(doc) => doc.wipe(),
             _ => {}
         }
     }
@@ -444,6 +448,8 @@ pub mod board {
     pub const CSV: &str = "rates-2026.csv";
     /// DW-1515.
     pub const ZIP: &str = "shoot-selects-export.zip";
+    /// DW-1507.
+    pub const DOCX: &str = "service-agreement.docx";
     /// DW-1513's text, as the note's source (DW-1523 shows it with one more line being typed).
     pub const NOTES_TEXT: &str = "# Meeting notes, 4 Nov\n\nPresent: Anna, Lotte, Jonas\n\n## Harbourlight shoot\n- Final selects due **Friday**\n- Colour grade in `Shoot selects/graded`\n- Send the agreement: [Service agreement](Service agreement.docx)\n\n## Studio\n- Rent goes up in January (see Studio rent 2026.pdf)\n- Book the Lisbon follow-up\n";
 }
@@ -521,6 +527,15 @@ impl FixtureViewerSource {
                     free: 12_400 * MB,
                 },
             ),
+            board::DOCX => OpenFile {
+                version: 7,
+                ..f(
+                    &["Files"],
+                    "Service agreement.docx",
+                    "Word document \u{00B7} 38 KB \u{00B7} opens in the editor",
+                    Body::Word(super::office::board::service_agreement()),
+                )
+            },
             board::FAILED => f(
                 &["Files", "Invoices 2026"],
                 "Invoice 0139.pdf",
