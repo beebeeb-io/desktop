@@ -96,8 +96,11 @@ const PATHS: [&str; 4] = [
 ];
 
 fn fake(tag: &str) -> Fake {
-    let (first, first_phrase) = FakeAccount::register(&format!("{tag}-one@example.eu"), PASSWORD, TEST_PHRASE);
-    let (second, second_phrase) = FakeAccount::register(&format!("{tag}-two@example.eu"), PASSWORD, TEST_PHRASE);
+    let (mut first, first_phrase) = FakeAccount::register(&format!("{tag}-one@example.eu"), PASSWORD, TEST_PHRASE);
+    let (mut second, second_phrase) = FakeAccount::register(&format!("{tag}-two@example.eu"), PASSWORD, TEST_PHRASE);
+    // Account ids as the server writes them (UUIDs): an invitation keeps its safety-number marks under the account's.
+    first.user_id = "d0000000-0000-4000-8000-000000000601".into();
+    second.user_id = "d0000000-0000-4000-8000-000000000602".into();
     let (first, second) = (Arc::new(first), Arc::new(second));
     let (one, two): (Handler, Handler) = (account_handler(first.clone()), account_handler(second.clone()));
     let (second_email, second_token) = (second.email.clone(), second.session_token.clone());
