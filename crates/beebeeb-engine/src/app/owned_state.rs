@@ -281,6 +281,11 @@ impl<C: CredentialStores> Engine<C> {
     }
 }
 
+/// The first-time guide's "done" mark of the session's own account (a child of this module: it resolves the
+/// account's state and proves its owner with this module's own rules).
+#[path = "guide_mark.rs"]
+pub mod guide_mark;
+
 #[cfg(test)]
 #[path = "owned_state_tests.rs"]
 mod tests;

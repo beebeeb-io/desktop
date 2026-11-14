@@ -609,6 +609,7 @@ mod files;
 // What this PC keeps, one query each (the native This PC and Sync pane).
 mod kept;
 pub use kept::KeptSummary;
+mod guide_mark;
 mod landing;
 mod ops;
 mod removals;

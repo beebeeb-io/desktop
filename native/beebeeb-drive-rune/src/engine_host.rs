@@ -49,6 +49,7 @@ pub mod drive_settings;
 pub mod files;
 mod files_link;
 mod files_trash;
+pub mod guide;
 pub mod open;
 pub mod search;
 pub mod settings;

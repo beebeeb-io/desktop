@@ -1,5 +1,5 @@
 //! App lock's delay (DW-0716, DW-0716b): the menu the pop-up button of Sign-in and security's
-//! Lock Beebeeb row drops, and its keyboard. The row itself is `security::pane`'s.
+//! Lock Beebeeb row drops, and its keyboard. The row itself is `security_overview`'s.
 //!
 //! Nothing here is a secret: the menu holds four lengths of time. Turning the lock off or
 //! changing the delay asks for Windows Hello first; that question is the source's
@@ -32,9 +32,10 @@ pub fn arrive(ui: &mut AccountUi) {
     if !matches!(ui.dialog, Some(Dialog::LockDelay(_))) {
         return;
     }
-    let sec = ui.source.as_deref().map(|s| s.security());
-    ui.dialog = match sec {
-        Some(sec) if sec.app_lock => Some(Dialog::LockDelay(chosen(&sec.lock_after))),
+    // From what the page itself draws: a source that cannot set the lock has no row for the menu to hang on.
+    let lock = ui.source.as_deref().and_then(|s| s.security_facts().app_lock);
+    ui.dialog = match lock {
+        Some((true, after)) => Some(Dialog::LockDelay(chosen(&after))),
         _ => None,
     };
 }

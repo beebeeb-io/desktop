@@ -63,7 +63,7 @@ use crate::source::DriveItem;
 use rune::Tx;
 use source::{Action, ActionError, FilesFixture, FilesSource, NoEngine};
 
-pub use window::view;
+pub use window::{has_in_front, view};
 
 /// The design system's own Files window and keyboard, which these frames supersede (same pieces,
 /// plus menus, selection and toasts; the shell's Files line draws these frames). Named here so they

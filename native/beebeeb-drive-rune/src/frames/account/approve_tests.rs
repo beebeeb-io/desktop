@@ -38,8 +38,8 @@ fn runtime(frame: &str) -> Runtime<State> {
 
 /// The window on the empty code page (DW-A12), reached from Sign-in and security by its row.
 fn on_code_page() -> Runtime<State> {
-    let mut rt = runtime("DW-A52");
-    click(&mut rt, "item-2-1");
+    let mut rt = runtime("DW-S01");
+    click(&mut rt, "item-1-2");
     assert_eq!(rt.state.account.pane, Pane::ApproveCode, "the row opens the code page");
     rt
 }
@@ -494,7 +494,7 @@ fn the_screens_that_hold_the_code_are_excluded_from_capture() {
         ("DW-A15", false),
         ("DW-A16", false),
         ("DW-A17", false),
-        ("DW-A52", false),
+        ("DW-S01", false),
     ] {
         let rt = runtime(frame);
         assert_eq!(rt.state.account.shows_secret(), secret, "{frame}");

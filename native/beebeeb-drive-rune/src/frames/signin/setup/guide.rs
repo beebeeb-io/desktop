@@ -14,7 +14,10 @@
 //! While a tip shows, the keyboard is the card's: focus goes to its button, Tab moves between
 //! Skip and Next, Enter presses the focused one, Esc is Skip.
 //!
-//! The guide ends when the account signs out, locks or changes: another account never resumes it.
+//! The guide ends when the account signs out, locks or changes: another account never resumes it,
+//! and nothing is kept. Finished ("Done") or skipped (Skip, Esc), it is done for that ACCOUNT on this
+//! PC and does not start by itself again (`guide_marks`; owner ruling 2026-11-13, a deviation from
+//! the board's "Shown once per PC", recorded in `FRAMES.md`).
 //!
 //! Nothing here is a secret.
 
@@ -22,6 +25,7 @@ use std::f32::consts::FRAC_PI_4;
 
 use rune::{Color, Cx, El, Key, KeyEvent, Shadow, TextStyle, Tx, col, el, row};
 
+use super::guide_marks;
 use crate::State;
 use crate::shell::app::{GateState, Screen, Section};
 use crate::theme::tokens::{self, Theme, type_};
@@ -103,6 +107,12 @@ pub struct Guide {
     pub(super) account: Option<String>,
     /// The step changed: focus goes to the card's button once it is drawn ([`poll`]).
     focus: bool,
+    /// The last poll saw a tip on screen. A tip that comes back (what was in front of it closed) takes the
+    /// keyboard again.
+    shown: bool,
+    /// A lock ended the guide for this account before it was finished or skipped: when the same account is
+    /// back, the mark is asked for again (it was not done, so the guide starts again).
+    pub(super) resume_for: Option<String>,
 }
 
 /// The row tip 2 points at: the file that was selected when the guide started (the board points
@@ -151,21 +161,35 @@ pub fn next(s: &mut State) {
     }
 }
 
-/// "Skip" and Esc: the whole guide ends; the window stays where it is.
+/// "Skip", Esc and "Done": the whole guide ends; the window stays where it is. The person saw it or chose not to:
+/// that is kept for the account the guide ran for (`guide_marks`: once per account on this PC). Only here: a guide
+/// that ends because the account locked, signed out or changed ([`poll`]) keeps nothing.
 pub fn skip(s: &mut State) {
+    if s.guide.step.is_some() && s.guide.account.as_deref() == s.shell.app.account() {
+        let account = s.guide.account.take();
+        s.guide_marks.mark_done(account.as_deref());
+    }
     s.guide = Guide::default();
 }
 
 /// Whether the place under a tip has something of its own in front: a menu, a dialog, a name
-/// being typed in a row, an opened photo. It gets the keys (Esc closes it), not the tip.
+/// being typed in a row, an opened photo, search. It gets the keys (Esc closes it), not the tip.
 fn in_front(s: &State, place: Section) -> bool {
+    // Search takes Esc for itself ("Esc: ends search") on every place it shows; so does the panel that says a
+    // file needs a connection (`frames::global`), which is drawn over the place's body.
+    if crate::frames::search::is_open(s) || s.global.blocked_preview.is_some() {
+        return true;
+    }
     match place {
-        // The New file dialog (DW-1521) is the Files window's too, drawn by `viewers::new_file`.
+        // The Files window's own list of what lies over it, and the New file dialog (DW-1521), which is the
+        // Files window's too and drawn by `viewers::new_file`: open, or asked for and opened by the next poll (a
+        // key that arrives in between is not the tip's).
         Section::Files => {
-            s.actions.menu.is_some()
-                || s.actions.dialog.is_some()
-                || s.actions.rename.is_some()
+            crate::frames::files::has_in_front(s)
                 || s.viewer.new_file.is_some()
+                || s.actions
+                    .intents
+                    .contains(&crate::frames::files::Intent::Frame("DW-1521"))
         }
         Section::Shared => s.frames.shared.menu.is_some() || s.frames.shared.dialog.is_some(),
         Section::Photos => s.photos.menu.is_some() || s.photos.dialog.is_some() || s.photos.viewer.is_some(),
@@ -180,7 +204,9 @@ pub fn showing(s: &State) -> Option<Step> {
     let app = &s.shell.app;
     let on_place =
         matches!(app.screen(), Screen::Drive(route) if route.section == step.place() && route.item.is_none());
-    (on_place && app.dialog().is_none() && s.tray.is_none() && !in_front(s, step.place())).then_some(step)
+    // A session the server ended draws its own state over the window (DW-1109): no tip over that, and no step.
+    (on_place && !s.session_ended() && app.dialog().is_none() && s.tray.is_none() && !in_front(s, step.place()))
+        .then_some(step)
 }
 
 /// The keys of a tip that shows: Esc is Skip, Tab moves between the card's buttons (it stays in
@@ -216,33 +242,59 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 /// Runs every frame (`shell::host::poll`). The guide ends when the account signs out, locks or
-/// changes; it starts when the first run ends ("Open my Beebeeb": "then the guide (DW-0380)")
-/// unless this PC has shown it; and focus goes to the card's button after a step changed.
-/// `true`: something changed.
+/// changes (nothing is kept then); when the first run ends ("Open my Beebeeb": "then the guide
+/// (DW-0380)") it asks whether the signed-in account has done the guide, and starts it on a definite
+/// "not done" for that account; and focus goes to the card's button after a step changed, and when a
+/// tip comes back from behind what was in front of it. `true`: something changed.
 pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let mut changed = false;
     if s.guide.step.is_some() {
         let gone = matches!(s.shell.app.gate(), GateState::SignedOut | GateState::Locked)
             || s.shell.app.account() != s.guide.account.as_deref();
         if gone {
-            s.guide = Guide::default();
+            // Only a lock of the same account leaves something to come back to; a sign-out or another account
+            // ends it for good (nothing was kept: the next first run asks again).
+            let locked = s.shell.app.gate() == GateState::Locked && s.shell.app.account() == s.guide.account.as_deref();
+            s.guide = Guide {
+                resume_for: if locked { s.guide.account.take() } else { None },
+                ..Guide::default()
+            };
             changed = true;
         }
     }
+    let account = s.shell.app.account().map(str::to_string);
+    let open = s.shell.app.gate() == GateState::Ready;
     // The first run's own flag, not its `Intent::OpenDrive`: that intent stays for the shell.
-    if s.setup.as_mut().is_some_and(super::Ui::guide_due) {
+    let mut ask = s.setup.as_mut().is_some_and(super::Ui::just_finished);
+    // The account a lock interrupted is back; any other way out of the lock forgets it.
+    if s.guide.resume_for.is_some() && s.shell.app.gate() != GateState::Locked {
+        ask |= open && s.guide.resume_for == account;
+        s.guide.resume_for = None;
+    }
+    if ask {
+        s.guide_marks.ask(account.as_deref());
+    }
+    // Also the source's poll. Only "not done", said of the account that is signed in now, starts the guide.
+    if s.guide_marks.answer(account.as_deref()) == Some(guide_marks::Known::NotDone)
+        && account.is_some()
+        && s.guide.step.is_none()
+    {
         s.guide = Guide {
             step: Some(Step::Tray),
             row: None,
-            account: s.shell.app.account().map(str::to_string),
+            account,
             focus: true,
+            shown: false,
+            resume_for: None,
         };
         changed = true;
     }
-    if s.guide.focus && showing(s).is_some() {
+    let shows = showing(s).is_some();
+    if shows && (s.guide.focus || !s.guide.shown) {
         s.guide.focus = false;
         tx.focus(NEXT_KEY, tx.focus_visible());
     }
+    s.guide.shown = shows;
     changed
 }
 
@@ -266,6 +318,9 @@ enum Arrow {
 struct Spot {
     target: String,
     out: [f32; 4],
+    /// The ring's own width, where the board gives one: the ring then stands from the target's right edge, and
+    /// its left edge does not move with the target's measured width.
+    width: Option<f32>,
     radius: f32,
     arrow: Arrow,
 }
@@ -273,16 +328,20 @@ struct Spot {
 fn spot(n: u8, s: &State) -> Option<Spot> {
     Some(match n {
         // The board places the ring at whole points (left 964, top 37, 88 x 36) around New
-        // (967.73, 40.75, 80.27 x 28): 3.73 left of it, 3.75 over it, 4 right of it, 4.25 under it.
+        // (967.73, 40.75, 80.27 x 28): 3.73 left of it, 3.75 over it, 4 right of it, 4.25 under it. New's label is
+        // measured by the font at hand (80.5 wide on one machine), so the ring is the board's 88 wide from 4 right
+        // of New: its left edge is the board's 964 whatever the label measures.
         1 => Spot {
             target: "new-btn".into(),
             out: [3.73, 3.75, 4.0, 4.25],
+            width: Some(88.0),
             radius: 10.0,
             arrow: Arrow::Up(202.0),
         },
         2 => Spot {
             target: format!("row-{}", file_row(s)?),
             out: [0.0; 4],
+            width: None,
             radius: 7.0,
             arrow: Arrow::Up(40.0),
         },
@@ -290,12 +349,14 @@ fn spot(n: u8, s: &State) -> Option<Spot> {
         3 => Spot {
             target: "Shared-row".into(),
             out: [2.0, 1.0, 1.5, 3.0],
+            width: None,
             radius: 8.0,
             arrow: Arrow::Left(20.0),
         },
         4 => Spot {
             target: "Photos-row".into(),
             out: [2.0, 1.0, 1.5, 3.0],
+            width: None,
             radius: 8.0,
             arrow: Arrow::Left(20.0),
         },
@@ -303,6 +364,7 @@ fn spot(n: u8, s: &State) -> Option<Spot> {
         _ => Spot {
             target: "settings-btn".into(),
             out: [4.5, 9.5, 3.5, -1.5],
+            width: None,
             radius: 9.0,
             arrow: Arrow::Down(32.0),
         },
@@ -510,6 +572,8 @@ pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
         return layer;
     };
     let [l, top, r, b] = spot.out;
+    // Never narrower than the target with its right-hand distance.
+    let l = spot.width.map_or(l, |width| (width - w - r).max(0.0));
     let rect = [x - l, y - top, w + l + r, h + top + b];
     let card = tip_card(n, spot.arrow, &t);
     // The card's corner, from the ring (the board's distances).
