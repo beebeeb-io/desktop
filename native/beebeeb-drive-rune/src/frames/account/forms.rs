@@ -28,6 +28,7 @@ fn refused(why: Refused) -> Problem {
         Refused::WrongPassword | Refused::NotConfirmed => Problem::WrongPassword,
         Refused::Locked => Problem::Locked,
         Refused::Offline => Problem::Offline,
+        Refused::Weak => Problem::Weak,
     }
 }
 

@@ -61,6 +61,8 @@ use crate::frames::account::source::{
     Security, SecurityFacts, Session, Setup, SignOutAnswer, StepUp, Strength, TwoFactor,
 };
 
+#[path = "account_password.rs"]
+mod password_change;
 #[path = "account_said.rs"]
 mod said;
 #[cfg(test)]
@@ -218,6 +220,8 @@ pub struct EngineAccountSource<C: CredentialStores> {
     /// Tests: how far the toasts' clock is ahead of the real one.
     #[cfg(test)]
     ahead: Duration,
+    /// Change password: its strength, and the change (`account_password.rs`).
+    password: password_change::PasswordCalls<C>,
     answers: mpsc::Sender<Answer>,
     inbox: mpsc::Receiver<Answer>,
 }
@@ -249,6 +253,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             panic_next: Arc::default(),
             #[cfg(test)]
             ahead: Duration::ZERO,
+            password: password_change::PasswordCalls::new(engine.clone()),
             answers,
             inbox,
         }
@@ -789,6 +794,9 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
 
 impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn pane_state(&self, pane: Pane) -> PaneState {
+        if pane == Pane::Password {
+            return self.password.pane_state(self.refused());
+        }
         let Some(kind) = Kind::of(pane) else {
             return PaneState::Unwired;
         };
@@ -813,6 +821,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     }
 
     fn opened(&mut self, pane: Pane) {
+        self.password.forget();
         self.showing = Kind::of(pane);
         self.counting_devices = pane == Pane::Security;
         let Some(kind) = self.showing else {
@@ -846,6 +855,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     }
 
     fn closed(&mut self) {
+        self.password.forget();
         self.showing = None;
         self.counting_devices = false;
     }
@@ -860,6 +870,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     }
 
     fn pump(&mut self) -> Pumped {
+        self.password.forget_if_moved();
         let mut changed = std::mem::take(&mut self.dirty);
         let refused = self.refused();
         let stale = |held: Option<(SessionGeneration, &Option<String>)>| {
@@ -1083,7 +1094,10 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         SignOutAnswer::Refused(NOT_BOUND)
     }
     /// The step-up, and everything it guards (email, password, two-factor, deletion): security lanes of their own.
-    fn step_up(&mut self, _password: Password<'_>, _purpose: Purpose) -> Result<StepUp, Refused> {
+    fn step_up(&mut self, password: Password<'_>, purpose: Purpose) -> Result<StepUp, Refused> {
+        if purpose == Purpose::ChangePassword {
+            return self.password.keep(password);
+        }
         Err(Refused::Offline)
     }
     fn set_name(&mut self, _name: &str) -> bool {
@@ -1101,11 +1115,11 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn send_again(&mut self) -> bool {
         false
     }
-    fn password_strength(&self, _candidate: &Password<'_>) -> Strength {
-        Strength::TooShort
+    fn password_strength(&self, candidate: &Password<'_>) -> Strength {
+        self.password.strength(candidate)
     }
-    fn change_password(&mut self, _confirmation: StepUp, _new: Password<'_>) -> Result<(), Refused> {
-        Err(Refused::Offline)
+    fn change_password(&mut self, confirmation: StepUp, new: Password<'_>) -> Result<(), Refused> {
+        self.password.change(confirmation, new)
     }
     fn two_factor(&self) -> TwoFactor {
         TwoFactor {

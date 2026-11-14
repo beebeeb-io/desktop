@@ -351,6 +351,8 @@ pub enum Refused {
     Locked,
     /// Beebeeb could not be reached.
     Offline,
+    /// The new password is not accepted: below the minimum, the same as the current one, or in a known breach.
+    Weak,
 }
 
 /// A secret a pane shows once (the two-factor key, a backup code). It cannot be printed, copied
