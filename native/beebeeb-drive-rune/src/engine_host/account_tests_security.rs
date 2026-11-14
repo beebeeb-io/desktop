@@ -8,7 +8,7 @@ use super::*;
 fn the_rest_is_not_known(facts: &SecurityFacts) {
     assert!(facts.app_lock.is_none() && facts.password_changed.is_none() && facts.backup_codes.is_none());
     assert!(facts.passkeys.is_none() && facts.activity.is_none() && facts.factors.is_none());
-    assert!(!facts.can_sign_out);
+    assert!(!facts.can_sign_out_all, "Drive is the one app on this PC");
 }
 
 #[test]
@@ -21,11 +21,6 @@ fn the_security_page_says_two_factor_and_the_devices_of_this_account_and_nothing
     assert_eq!((before.two_factor, before.sessions), (None, Count::NotKnown));
     the_rest_is_not_known(&before);
     assert_eq!(source.pane_state(Pane::Security), PaneState::Loading);
-    assert_eq!(
-        source.sign_out_this_app(),
-        SignOutAnswer::Refused(NOT_BOUND),
-        "not bound: refused, never done"
-    );
     opened(&mut source, Pane::Security);
     assert_eq!(source.pane_state(Pane::Security), PaneState::Ready);
     let facts = source.security_facts();

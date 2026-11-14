@@ -477,3 +477,44 @@ fn in_an_outage_the_list_stays_try_again_works_and_the_pane_says_it_could_not_re
     assert_eq!(server.deleted.lock().unwrap().len(), 2, "a read, not a sign-out");
     assert!(shows(&rt, PHONE));
 }
+
+// ---- The window ----------------------------------------------------------------------------------------------
+
+#[test]
+fn the_running_app_signs_out_of_drive_from_its_confirm_and_has_no_all_apps_row() {
+    let server = super::bound::bound();
+    let engine = server.signed_in();
+    let mut rt = window_on(engine.clone(), SettingsPane::Security);
+    wait_for(&mut rt, "the page", |rt| shows(rt, "Sign out of Drive"));
+    assert!(
+        !shows(&rt, "Sign out of all Beebeeb apps"),
+        "Drive is the one app on this PC"
+    );
+    click(&mut rt, "item-3-0");
+    assert!(has(&rt, "dlg"), "the confirm opens");
+    click(&mut rt, "btn-1");
+    wait_for(&mut rt, "the sign-out", |_| !engine.has_session());
+}
+
+#[test]
+fn the_running_app_saves_the_name_and_draws_it_after_beebeeb_has_it() {
+    let server = super::bound::bound();
+    server.delay_ms.store(200, Ordering::SeqCst);
+    let engine = server.signed_in();
+    let mut rt = window_on(engine, SettingsPane::Account);
+    wait_for(&mut rt, "the account", |rt| shows(rt, FIRST_NAME));
+    click(&mut rt, "item-0-0");
+    wait_for(&mut rt, "the Name page", |rt| rt.state.account.pane == Pane::Name);
+    rt.update(|s, _| {
+        let edit = &mut s.account.form.name;
+        edit.text = super::bound::NEW_NAME.to_string();
+        edit.anchor = edit.text.len();
+        edit.focus = edit.text.len();
+    });
+    rt.frame(0.016);
+    click(&mut rt, "btn-1");
+    wait_for(&mut rt, "the new name on Account", |rt| {
+        shows(rt, &format!("Name, {super::bound::NEW_NAME}"))
+    });
+    assert_eq!(server.name.lock().unwrap().as_deref(), Some(super::bound::NEW_NAME));
+}
