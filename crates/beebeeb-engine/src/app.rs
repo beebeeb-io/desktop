@@ -47,6 +47,8 @@ use beebeeb_core::auth_flow::sign_in::PendingSecondFactor;
 
 pub mod account_api;
 pub mod backups_api;
+// Files in two versions and the answer to one, for the native Files window.
+pub mod conflicts_api;
 // Explorer's "Free up space" command asks this handle, and a stop removes its binding (task 2490).
 mod explorer_api;
 // The sidebar's figures for the native Files window: files kept on this PC, the storage split.

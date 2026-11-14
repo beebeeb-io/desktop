@@ -47,6 +47,7 @@ pub mod backups;
 mod binding_tests;
 pub mod drive_settings;
 pub mod files;
+mod files_conflicts;
 mod files_facts;
 #[cfg(test)]
 #[path = "engine_host/files_open_with_tests.rs"]
@@ -569,6 +570,8 @@ pub struct EngineFilesSource<C: CredentialStores> {
     facts: files_facts::Facts<C>,
     /// A file's versions and the restore of one.
     versions: files_versions::VersionCalls<C>,
+    /// The files in two versions and the answer to one.
+    conflicts: files_conflicts::ConflictCalls<Engine<C>>,
     /// Where each row stands in the Backups tree.
     places: files_places::Places<C>,
     /// The Uploads panel: what uploads, Try again, Pause all, Cancel.
@@ -586,6 +589,7 @@ impl<C: CredentialStores> EngineFilesSource<C> {
             uploads: files_uploads::UploadCalls::new(engine.clone()),
             facts: files_facts::Facts::new(engine.clone()),
             versions: files_versions::VersionCalls::new(engine.clone()),
+            conflicts: files_conflicts::ConflictCalls::new(engine.clone()),
             places: files_places::Places::new(engine.clone()),
             previews: files_preview::Previews::new(Arc::new(viewer::LiveViewerEngine::new(engine.clone()))),
             engine,
@@ -783,6 +787,14 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.versions.restore(item, version)
     }
 
+    fn conflicts(&self) -> Vec<crate::frames::files::actions_data::Conflict> {
+        self.conflicts.conflicts()
+    }
+
+    fn keep_version(&mut self, file: &str, keep: crate::frames::files::actions_data::Keep) -> Result<(), ActionError> {
+        self.conflicts.keep(file, keep)
+    }
+
     fn preview(&mut self, item: &DriveItem) -> Option<crate::frames::files::actions_data::PreviewOf> {
         // Answered later: the read starts here, and the panel asks `preview_later` until it lands.
         self.previews.start(item);
@@ -944,6 +956,7 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         changes.extend(self.uploads.take());
         changes.extend(self.copies.take());
         changes.extend(self.versions.take());
+        changes.extend(self.conflicts.take());
         // Where the rows stand in the Backups tree: an arrival redraws by its wake.
         self.places.pump();
         // The sidebar's figures are read again after a change (`files_facts`); an arrival redraws by its wake.
