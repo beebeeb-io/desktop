@@ -528,7 +528,7 @@ fn a_start_is_held_back_while_a_folder_is_being_chosen_and_asked_once_it_ends() 
         "a start of another account is not held back"
     );
     drop(held);
-    settle(&mut set, 2);
+    settle(&mut set, 1);
     assert_eq!(
         starts_asked(&set),
         before + 1,
@@ -830,7 +830,7 @@ fn the_window_says_a_folder_that_was_not_saved_and_never_added() {
     assert!(says(&rt, "Continue for now"));
     // Sync does not run: the step shows what the engine says.
     engine.set(
-        Start::Refused(SyncStartRefused::RegistrationFailed { code: None }),
+        Start::Refused(SyncStartRefused::FolderUnreadable),
         EngineExplorer::Unknown,
     );
     wait_for(&mut rt, "the refusal", |rt| says(rt, "Sync didn't start"));
