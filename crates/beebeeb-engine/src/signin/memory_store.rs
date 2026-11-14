@@ -45,6 +45,11 @@ impl MemoryCredentials {
         self.1.fail_lock_flags.store(fail, Ordering::SeqCst);
     }
 
+    /// From now on a lock entry cannot be written (reads still work), or can again.
+    pub fn fail_lock_writes(&self, fail: bool) {
+        self.1.fail_lock_writes.store(fail, Ordering::SeqCst);
+    }
+
     /// How often a vault key entry was read, over every account.
     pub fn key_reads(&self) -> usize {
         self.1.key_reads.load(Ordering::SeqCst)
@@ -55,6 +60,8 @@ impl MemoryCredentials {
 #[derive(Default)]
 struct Probes {
     fail_lock_flags: AtomicBool,
+    /// Reads work, writes of lock entries are refused.
+    fail_lock_writes: AtomicBool,
     key_reads: AtomicUsize,
 }
 
@@ -130,6 +137,11 @@ impl AuthSecretStore for MemoryStore {
     }
     fn save_lock_flag(&self, flag: LockFlag, bytes: &[u8]) -> AuthResult<()> {
         self.lock_flags_answer()?;
+        if self.all.1.fail_lock_writes.load(Ordering::SeqCst) {
+            return Err(AuthStoreError::Backend(
+                "the test store refuses lock writes".to_string(),
+            ));
+        }
         self.save(flag.leaf(), bytes)
     }
     fn load_lock_flag(&self, flag: LockFlag) -> AuthResult<Option<Vec<u8>>> {

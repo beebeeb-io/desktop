@@ -189,6 +189,12 @@ pub enum SignInEvent {
     PhraseRestored(Result<NextAfterSignIn, PhraseProblem>),
     Passkey(PasskeyOutcome),
     VaultUnlocked(Result<NextAfterSignIn, SignInProblem>),
+    /// The screen lock's password path answered (`begin_screen_password`).
+    ScreenPassword(ScreenPasswordOutcome),
+    /// The wait after a wrong try or a refusal to try, once a second; `0` when it is over.
+    ScreenWaitLeft {
+        seconds: u32,
+    },
     /// Recovery, step 1 (DW-A47): the phrase re-derived this account's key.
     RecoveryPhraseVerified(Result<(), PhraseProblem>),
     /// Recovery, last step (DW-A49).
@@ -199,6 +205,34 @@ pub enum SignInEvent {
     /// belonged to could NOT be ended: this computer is still signed in. The window shows the screen the
     /// session's gate asks for again, never a form that can only refuse.
     StillSignedIn,
+}
+
+/// What the engine's screen-lock password path answered (`Engine::unlock_screen_with_password`), with the two
+/// answers that are not its own: the press could not be checked, and the press was overtaken. Waits are the
+/// engine's, in milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenPasswordOutcome {
+    /// Accepted: the engine opened the lock, and the gate says so.
+    Opened,
+    Wrong {
+        wait_ms: u64,
+    },
+    Wait {
+        wait_ms: u64,
+    },
+    ServerLimit {
+        wait_ms: Option<u64>,
+    },
+    LocalCheckOff,
+    OfflineNoRecord,
+    /// The account must sign in again to finish its upgrade: the vault level's password screen follows.
+    AccountUpgradeNeeded,
+    /// The server ended the session: the vault is closed and its password screen follows.
+    SessionEnded,
+    /// The check could not run (nothing was counted, nothing opened).
+    Failed,
+    /// The session or the lock moved while the check ran: nothing opened, nothing is said.
+    Overtaken,
 }
 
 pub trait SignInSource {
@@ -236,6 +270,10 @@ pub trait SignInSource {
     fn begin_passkey(&mut self);
     /// Engine: `auth_v2::unlock_vault` with the password, after a passkey.
     fn begin_unlock(&mut self, password: &str);
+    /// The SCREEN lock's password (a locked screen whose Windows Hello cannot answer): counted tries and the
+    /// server's proof that makes no session (`Engine::unlock_screen_with_password`); the answer is
+    /// `SignInEvent::ScreenPassword`. The default does nothing: a source that can show a locked screen binds it.
+    fn begin_screen_password(&mut self, _password: &str) {}
     /// Engine: `auth_v2::recovery_verify_phrase`.
     fn begin_recovery_verify(&mut self, email: &str, words: &[&str]);
     /// Engine: `auth_v2::recovery_set_password`.
@@ -352,6 +390,8 @@ pub struct Script {
     pub shared_session: bool,
     pub sign_in: SignInAnswer,
     pub hello: HelloOutcome,
+    /// What the screen lock's password path answers.
+    pub screen_password: ScreenPasswordOutcome,
     pub device: Option<DeviceStatus>,
     pub passkey: PasskeyOutcome,
     /// Whether the source offers sign-in with a passkey (the door is drawn only then).
@@ -381,6 +421,7 @@ impl Default for Script {
             shared_session: true,
             sign_in: SignInAnswer::Next(NextAfterSignIn::TwoFactor),
             hello: HelloOutcome::Succeeded(NextAfterSignIn::Drive),
+            screen_password: ScreenPasswordOutcome::Opened,
             device: None,
             passkey: PasskeyOutcome::NeedsPassword,
             passkey_available: true,
@@ -542,6 +583,12 @@ impl SignInSource for FixtureSignInSource {
                 Err(SignInProblem::Invalid)
             },
         ));
+    }
+
+    fn begin_screen_password(&mut self, _password: &str) {
+        self.called("screen_password");
+        self.queue
+            .push_back(SignInEvent::ScreenPassword(self.script.screen_password));
     }
 
     fn begin_recovery_verify(&mut self, _email: &str, words: &[&str]) {

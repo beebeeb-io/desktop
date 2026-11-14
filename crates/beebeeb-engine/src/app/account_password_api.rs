@@ -341,6 +341,9 @@ impl<C: CredentialStores> Engine<C> {
         if stored.is_err() {
             tracing::warn!("password changed; the new session could not be stored on this computer");
         }
+        // The screen lock's local check record was made from the OLD password: it must never open this PC offline
+        // again. The next online unlock writes a new one (the wrong-try count stays, as core keeps it).
+        let _ = vault.clear_lock_flag(crate::keychain::LockFlag::ScreenCheck);
         if let Ok(mut guard) = self.acct.session.lock()
             && let Some(current) = guard.as_mut()
         {

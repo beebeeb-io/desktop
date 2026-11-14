@@ -299,3 +299,137 @@ fn a_left_twelve_words_step_is_put_back() {
     undo_left_step(&engine, &answers, &event, Some(LockState::ScreenLocked));
     assert_eq!(engine.lock_state(), LockState::ScreenLocked);
 }
+
+// ---- the screen lock's password (`begin_screen_password`) ----
+
+fn locked_screen(fake: &Fake) -> (Arc<Engine<MemoryCredentials>>, Source) {
+    let (engine, source) = signed_in(fake);
+    assert_eq!(engine.lock_screen(), Ok(()));
+    assert_eq!(source.gate(), GateState::Locked);
+    (engine, source)
+}
+
+#[test]
+fn screen_password_the_right_one_opens_through_the_proof_and_makes_no_session() {
+    let fake = fake("screen-right");
+    let (engine, mut source) = locked_screen(&fake);
+    let sign_ins = requests(&fake, "/opaque/login-start");
+    source.begin_screen_password(PASSWORD);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::ScreenPassword(ScreenPasswordOutcome::Opened)
+    );
+    assert_eq!(engine.lock_state(), LockState::Open);
+    assert_eq!(source.gate(), GateState::Ready);
+    assert_eq!(requests(&fake, "/opaque/login-start"), sign_ins, "no sign-in was made");
+    assert_eq!(requests(&fake, "/password-proof/finish"), 1);
+}
+
+#[test]
+fn screen_password_wrong_tries_are_counted_and_the_fifth_waits_while_unlock_counts_down() {
+    let fake = fake("screen-wrong");
+    let (engine, mut source) = locked_screen(&fake);
+    for _ in 0..4 {
+        source.begin_screen_password("not the password at all");
+        assert_eq!(
+            next(&mut source),
+            SignInEvent::ScreenPassword(ScreenPasswordOutcome::Wrong { wait_ms: 0 })
+        );
+    }
+    source.begin_screen_password("not the password at all");
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::ScreenPassword(ScreenPasswordOutcome::Wrong { wait_ms: 30_000 })
+    );
+    // The wait counts down from the answer on, a second per tick (the test's tick is 2 ms).
+    assert_eq!(next(&mut source), SignInEvent::ScreenWaitLeft { seconds: 29 });
+    assert_eq!(next(&mut source), SignInEvent::ScreenWaitLeft { seconds: 28 });
+    // A press during the wait checks nothing and asks the server nothing.
+    let starts = requests(&fake, "/password-proof/start");
+    source.begin_screen_password(PASSWORD);
+    let waited = next_after_ticks(&mut source);
+    assert!(
+        matches!(waited, SignInEvent::ScreenPassword(ScreenPasswordOutcome::Wait { .. })),
+        "{waited:?}"
+    );
+    assert_eq!(requests(&fake, "/password-proof/start"), starts);
+    assert_eq!(engine.lock_state(), LockState::ScreenLocked);
+}
+
+/// The next answer that is not a tick of the wait.
+fn next_after_ticks(source: &mut Source) -> SignInEvent {
+    loop {
+        match next(source) {
+            SignInEvent::ScreenWaitLeft { .. } => {}
+            other => return other,
+        }
+    }
+}
+
+#[test]
+fn screen_password_an_answer_after_the_session_moved_opens_nothing() {
+    let fake = fake("screen-late");
+    let (engine, mut source) = locked_screen(&fake);
+    fake.code_door.shut();
+    source.begin_screen_password(PASSWORD);
+    wait_until("the proof's finish reached the server", || {
+        requests(&fake, "/password-proof/finish") == 1
+    });
+    // The person signed out while the check was on its way.
+    engine.sign_out_keeping_local_data().expect("signed out");
+    fake.code_door.open();
+    assert_eq!(
+        next_after_ticks(&mut source),
+        SignInEvent::ScreenPassword(ScreenPasswordOutcome::Overtaken)
+    );
+    assert_ne!(engine.lock_state(), LockState::Open);
+}
+
+#[test]
+fn screen_password_offline_the_record_the_sign_in_made_decides() {
+    let fake = fake("screen-offline");
+    let (engine, mut source) = locked_screen(&fake);
+    fake.step_up.store(NO_ANSWER, Ordering::SeqCst);
+    source.begin_screen_password("not the password at all");
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::ScreenPassword(ScreenPasswordOutcome::Wrong { wait_ms: 0 })
+    );
+    source.begin_screen_password(PASSWORD);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::ScreenPassword(ScreenPasswordOutcome::Opened)
+    );
+    assert_eq!(engine.lock_state(), LockState::Open);
+}
+
+#[test]
+fn screen_password_the_servers_limit_is_a_limit_and_every_answer_maps() {
+    let fake = fake("screen-limit");
+    let (_engine, mut source) = locked_screen(&fake);
+    fake.step_up.store(RATE_LIMITED, Ordering::SeqCst);
+    source.begin_screen_password(PASSWORD);
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::ScreenPassword(ScreenPasswordOutcome::ServerLimit { wait_ms: None })
+    );
+    use beebeeb_engine::app::lock_api::LockRefused as R;
+    use beebeeb_engine::app::lock_password_api::ScreenUnlock as U;
+    for (answer, outcome) in [
+        (Ok(U::Opened), ScreenPasswordOutcome::Opened),
+        (Ok(U::Wrong { wait_ms: 7 }), ScreenPasswordOutcome::Wrong { wait_ms: 7 }),
+        (Ok(U::Wait { wait_ms: 8 }), ScreenPasswordOutcome::Wait { wait_ms: 8 }),
+        (Ok(U::LocalCheckOff), ScreenPasswordOutcome::LocalCheckOff),
+        (Ok(U::OfflineNoRecord), ScreenPasswordOutcome::OfflineNoRecord),
+        (Ok(U::AccountUpgradeNeeded), ScreenPasswordOutcome::AccountUpgradeNeeded),
+        (Ok(U::SessionEnded), ScreenPasswordOutcome::SessionEnded),
+        (Err(R::Overtaken), ScreenPasswordOutcome::Overtaken),
+        (Err(R::CouldNotCheck), ScreenPasswordOutcome::Failed),
+    ] {
+        assert_eq!(map_screen_unlock(answer), outcome);
+    }
+    assert_eq!(seconds_up(0), 0);
+    assert_eq!(seconds_up(1), 1);
+    assert_eq!(seconds_up(30_000), 30);
+    assert_eq!(seconds_up(30_001), 31);
+}
