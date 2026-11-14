@@ -567,17 +567,22 @@ fn delete_device(ui: &BackupsUi, device: &Device, first_button: usize, t: &Theme
     let ready = ui.code_len() > 0;
     let body = vec![
         bk::para(0, &words, &mono, t),
-        crate::ui::account_form::field(
-            0,
-            &crate::ui::account_form::Field {
-                label: "Account password",
-                input_key: PASSWORD_KEY,
-                ..Default::default()
-            },
-            &ui.code,
-            |s: &mut State| &mut s.backups.code,
-            t,
-        ),
+        // The password field keeps the room the board's code field had (14 pt taller), so the buttons stay where the board has them.
+        col()
+            .key("delete-password-room")
+            .w_full()
+            .pb(14.0)
+            .child(crate::ui::account_form::field(
+                0,
+                &crate::ui::account_form::Field {
+                    label: "Account password",
+                    input_key: PASSWORD_KEY,
+                    ..Default::default()
+                },
+                &ui.code,
+                |s: &mut State| &mut s.backups.code,
+                t,
+            )),
     ];
     let mut delete = bk::button_md(first_button, "Delete backup", None, Md::Danger(ready), t);
     if ready {
