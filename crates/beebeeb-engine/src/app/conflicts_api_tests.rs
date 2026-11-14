@@ -300,6 +300,18 @@ fn a_copy_left_by_a_run_that_ended_early_is_never_thrown_away_unread() {
     assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1, "the kept copy only");
 }
 
+#[test]
+fn a_kept_copys_folder_names_no_id_and_stays_inside_the_accounts_folder() {
+    let account = std::path::Path::new("replaced-account");
+    for id in [WAITING, "../../outside", r"..\..\outside", "/abs/path", "C:\\Windows"] {
+        let folder = replaced_folder_of(account, id);
+        assert_eq!(folder.parent(), Some(account), "{id}");
+        let name = folder.file_name().unwrap().to_str().unwrap();
+        assert_eq!(name.len(), 16, "{id}");
+        assert!(name.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
+    }
+}
+
 /// What the sync folder holds, by name, sorted.
 fn names_in(root: &std::path::Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(root)
@@ -337,7 +349,7 @@ fn a_keep_there_that_fails_leaves_the_sync_folder_as_it_was_every_time() {
         b"my edit on this pc"
     );
     assert!(
-        !replaced_folder(&rig).join(WAITING).exists(),
+        !replaced_folder_of(&replaced_folder(&rig), WAITING).exists(),
         "no copy is kept of a file that was not replaced"
     );
 }
@@ -370,7 +382,7 @@ fn keep_there_never_leaves_a_second_file_in_the_sync_folder() {
         "the replaced version was left in the sync folder"
     );
     // This PC's version is where nothing syncs: the account's folder of replaced versions, one copy for the file.
-    let kept = replaced_folder(&rig).join(WITH_BYTES);
+    let kept = replaced_folder_of(&replaced_folder(&rig), WITH_BYTES);
     assert_eq!(names_in(&kept), vec!["Invented plan.txt".to_string()]);
     assert_eq!(
         std::fs::read(kept.join("Invented plan.txt")).unwrap(),

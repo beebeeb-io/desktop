@@ -144,21 +144,34 @@ fn iso(time: SystemTime) -> String {
 
 /// The folder, in the engine's own app data (never in the sync folder: nothing in it is uploaded), where Keep there
 /// keeps this PC's version of a file before the server's version replaces it:
-/// `<app data>/Replaced on this PC/<account>/<file id>/<the file's name>`. One copy per file: a later Keep there of the
-/// same file replaces it. `<account>` is a digest of the account's user id (its email when no id is known), never
-/// the id itself. Sign-out leaves it: it is the person's own data.
+/// `<app data>/Replaced on this PC/<account>/<file>/<the file's name>`. One copy per file: a later Keep there of the
+/// same file replaces it. `<account>` is a digest of the account's user id (its email when no id is known) and
+/// `<file>` one of the file's id: never an id itself, and never a path a name or an id could lead out of the folder.
+/// Sign-out leaves it: it is the person's own data.
 pub const REPLACED_FOLDER: &str = "Replaced on this PC";
 
 /// The name of the copy being made, beside the kept one, until Keep there is known to have worked.
 const INCOMING: &str = ".incoming";
 
+/// 16 hex characters of the SHA-256 of `text`: a folder name that holds nothing of `text` and cannot be a path.
+fn digest_name(text: &str) -> String {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(text.as_bytes())
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// `<state dir>/Replaced on this PC/<account digest>`: the account's folder of replaced versions.
 pub fn replaced_folder_in(state_dir: &Path, account: &crate::account_binding::Identity) -> Option<PathBuf> {
-    use sha2::Digest as _;
     let who = account.user_id.as_deref().or(account.email.as_deref())?;
-    let digest = sha2::Sha256::digest(who.as_bytes());
-    let name: String = digest.iter().take(8).map(|byte| format!("{byte:02x}")).collect();
-    Some(state_dir.join(REPLACED_FOLDER).join(name))
+    Some(state_dir.join(REPLACED_FOLDER).join(digest_name(who)))
+}
+
+/// `<account's folder>/<file digest>`: the one folder that holds the kept copy of the file with this id.
+pub fn replaced_folder_of(account_folder: &Path, file_id: &str) -> PathBuf {
+    account_folder.join(digest_name(file_id))
 }
 
 /// This PC's version of one file, copied aside before Keep there replaces it (see [`REPLACED_FOLDER`]).
@@ -378,8 +391,8 @@ impl<C: CredentialStores> Engine<C> {
                 .session_identity()
                 .ok()
                 .and_then(|account| replaced_folder_in(&self.config.state_dir, &account))
-                .ok_or(ResolveRefused::CopyFailed)?
-                .join(file_id);
+                .map(|account_folder| replaced_folder_of(&account_folder, file_id))
+                .ok_or(ResolveRefused::CopyFailed)?;
             let copy = SafetyCopy::make(&path, &folder).map_err(|_| ResolveRefused::CopyFailed)?;
             safety = Some((copy, path));
         }
