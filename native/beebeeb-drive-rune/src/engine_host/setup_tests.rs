@@ -539,8 +539,21 @@ fn the_first_run_in_the_window_shows_its_real_steps_and_ends_in_the_main_window(
     set.engine.set(Start::Running, EngineExplorer::Adding);
     let (mut rt, engine, fixture, first_run, platform) = window(set);
     assert!(rt.state.setup.is_none(), "the gate is Ready: no first run");
+    let starts = |fixture: &FixtureEngine| {
+        fixture
+            .calls()
+            .iter()
+            .filter(|call| **call == crate::shell::actions::FixtureCall::StartSync)
+            .count()
+    };
+    let before = starts(&fixture);
     fixture.set_gate_for_scene(ShellGate::FirstRun);
     wait_for(&mut rt, "the first run", |rt| rt.state.setup.is_some());
+    assert_eq!(
+        starts(&fixture),
+        before + 1,
+        "sync is asked to start with the first run: its File Explorer step is about the sync folder"
+    );
     // The list at the left: the three steps, none of the four nothing answers for.
     for step in ["Beebeeb in File Explorer", "Notifications", "Open at login"] {
         assert!(says(&rt, step), "{step}");
@@ -687,12 +700,19 @@ mod glue {
 
     const PASSWORD: &str = "an invented password for setup";
 
+    type Messages = std::sync::mpsc::Receiver<beebeeb_engine::host::HostMessage>;
+
     /// A handle on a fake API of its own, signed in and unlocked.
     fn signed_in() -> (Arc<Engine<MemoryCredentials>>, FakeApi, String) {
+        let (engine, api, phrase, _messages) = signed_in_with_messages();
+        (engine, api, phrase)
+    }
+
+    fn signed_in_with_messages() -> (Arc<Engine<MemoryCredentials>>, FakeApi, String, Messages) {
         let (account, phrase) = FakeAccount::register(FIRST, PASSWORD, TEST_PHRASE);
         let account = Arc::new(account);
         let api = FakeApi::start(account_handler(account.clone()));
-        let (host, _messages) = ChannelHost::new(|| {});
+        let (host, messages) = ChannelHost::new(|| {});
         let config = EngineConfig {
             account_id: "setup-test-slot".into(),
             state_dir: crate::engine_host::tests::process_state_dir(),
@@ -706,7 +726,44 @@ mod glue {
         engine
             .unlock_with_phrase(Zeroizing::new(phrase.clone()))
             .expect("the phrase unlocks");
-        (engine, api, phrase)
+        (engine, api, phrase, messages)
+    }
+
+    /// The gate the shell reads from the live engine: the first-run steps for a signed-in, unlocked session of a
+    /// PC that still has its first run to do, only once the app's start wired it, and the main window after.
+    #[test]
+    fn the_live_engines_gate_shows_the_first_run_only_while_it_is_due_and_wired() {
+        use crate::engine_host::LiveEngine;
+        use crate::engine_host::open::Opened;
+        use crate::shell::actions::EngineActions;
+        let (engine, _api, _phrase, messages) = signed_in_with_messages();
+        let opened = Opened {
+            engine: engine.clone(),
+            identity: &TEST,
+            gate: engine.gate(),
+        };
+        let live = Arc::new(LiveEngine::new(&opened, messages));
+        assert_eq!(live.session().gate, ShellGate::Ready, "nobody wired a first run");
+        in_own_settings(|| live.wire_first_run());
+        assert_eq!(live.session().gate, ShellGate::FirstRun, "due, signed in and unlocked");
+        // Locked: the lock screen, never the first run.
+        engine.lock();
+        assert_eq!(live.session().gate, ShellGate::Locked);
+        // The first run ends (the adapter's flag, through the hooks the app hands it): the main window.
+        let hooks = live.setup_hooks(Arc::new(FakePlatform::default()));
+        hooks.first_run.end();
+        assert_eq!(live.session().gate, ShellGate::Locked);
+        assert!(!hooks.first_run.due());
+        // A PC that had its first run: wiring it shows none.
+        in_own_settings(|| {
+            DesktopConfig::update_for(&TEST, |config| {
+                config.known_folder_onboarding_seen = true;
+                (true, ())
+            })
+            .expect("written");
+            live.wire_first_run();
+        });
+        assert!(!hooks.first_run.due());
     }
 
     /// The settings file of this test alone (the process's is shared with every other test).
