@@ -25,10 +25,14 @@ use crate::frames::signin::setup::source::{FolderAsk, FolderSaid};
 pub const PICKER_TITLE: &str = "Choose Beebeeb's folder";
 
 /// What a worker found out about the sync folder.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Found {
     /// The settings name none: ask, suggesting this folder.
     Ask(String),
+    /// The settings name none, and a folder was chosen already (before a lock): settled; the suggestion's text.
+    ChoseEarlier(String),
+    /// A start already worked in a folder: a later pick is refused with words, nothing changes.
+    AlreadySyncs,
     /// The settings name the folder, or could not be read (the start says so itself): nothing to ask.
     Settled,
     /// A folder was chosen and one start was asked for.
@@ -37,6 +41,21 @@ pub enum Found {
     Refused(FolderSaid),
     /// The picker was closed without a folder.
     Closed,
+}
+
+/// Never prints a folder.
+impl std::fmt::Debug for Found {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ask(_) => f.write_str("Ask(..)"),
+            Self::ChoseEarlier(_) => f.write_str("ChoseEarlier(..)"),
+            Self::AlreadySyncs => f.write_str("AlreadySyncs"),
+            Self::Settled => f.write_str("Settled"),
+            Self::Chosen => f.write_str("Chosen"),
+            Self::Refused(said) => f.debug_tuple("Refused").field(said).finish(),
+            Self::Closed => f.write_str("Closed"),
+        }
+    }
 }
 
 /// The engine's refusal, as the step says it.
@@ -59,10 +78,15 @@ pub fn said_of(refused: SyncFolderRefused) -> FolderSaid {
 /// folder of a start that worked is written to the settings when they name none. `name` keeps the folder's name
 /// for the refusal modal. Blocks: a `start-sync` worker's. The log names a refusal's kind only.
 pub fn start_now<E: SetupEngine>(engine: &E, name: &Mutex<Option<String>>, first_run: &FirstRun) {
+    let stamp = engine.stamp();
+    // A folder being chosen under this account holds the start back; it is asked once the choice ends.
+    let Some(_turn) = first_run.starting(&stamp) else {
+        return log("sync was not started: a folder is being chosen");
+    };
     let (folder, named) = match engine.settings_folder() {
         Err(_) => return log("sync was not started: the settings could not be read"),
         Ok(Some(named)) => (named, true),
-        Ok(None) => match first_run.chosen_for(&engine.stamp()) {
+        Ok(None) => match first_run.chosen_for(&stamp) {
             Some(chosen) => (chosen, false),
             None if first_run.due() => return log("sync was not started: the first run has no folder yet"),
             // Nobody chose (the first run was skipped, or this build has none): the suggestion, as before. Where
@@ -86,34 +110,81 @@ pub fn start_now<E: SetupEngine>(engine: &E, name: &Mutex<Option<String>>, first
     match engine.start(folder.clone()) {
         Ok(SyncStart::Started) => {
             log("sync started");
-            if !named && engine.keep_folder(&folder).is_err() {
-                log("the sync folder could not be written to the settings");
+            first_run.note_started(&stamp);
+            if !named {
+                match engine.keep_folder(&folder) {
+                    Ok(_) => first_run.saved(),
+                    Err(_) => {
+                        first_run.note_unsaved(&stamp, folder);
+                        log("the sync folder could not be written to the settings");
+                    }
+                }
             }
         }
-        Ok(SyncStart::AlreadyRunning) => {}
+        // A later start request writes a folder that was not saved.
+        Ok(SyncStart::AlreadyRunning) => {
+            if let Some(unsaved) = first_run.unsaved_for(&stamp)
+                && engine.keep_folder(&unsaved).is_ok()
+            {
+                first_run.saved();
+            }
+        }
         Ok(SyncStart::NoSession) => log("sync was not started: no session"),
         Err(refused) => log(format!("sync was not started: {}", refused.kind())),
     }
 }
 
-/// On a worker: `folder` is the sync folder of this first run if the engine's rule lets it be; then one start
-/// is asked for.
-fn decide<E: SetupEngine>(
+/// On a worker, under the turn: whether a folder may be chosen at all (no start worked), then the folder, then the
+/// engine's rule. Nothing is asked of the person, checked or chosen once a start worked.
+fn judge<E: SetupEngine>(
     engine: &E,
     first_run: &FirstRun,
-    stamp: super::Stamp,
-    folder: PathBuf,
-    start: &(dyn Fn() -> bool + Send + Sync),
+    stamp: &super::Stamp,
+    get: impl FnOnce() -> Result<PathBuf, Found>,
 ) -> Found {
+    match engine.settings_folder() {
+        // A start worked (here, or the settings already name a folder): a later pick is not taken.
+        Ok(Some(_)) => return Found::AlreadySyncs,
+        // The settings could not be read: the start says so itself.
+        Err(_) => return Found::Settled,
+        Ok(None) if first_run.started_for(stamp) => return Found::AlreadySyncs,
+        Ok(None) => {}
+    }
+    let folder = match get() {
+        Ok(folder) => folder,
+        Err(found) => return found,
+    };
     if let Err(refused) = engine.check_folder(&folder) {
         log(format!("first run: the folder was not taken ({})", refused.kind()));
         return Found::Refused(said_of(refused));
     }
-    first_run.choose(stamp, folder);
-    if !start() {
+    first_run.choose(stamp.clone(), folder);
+    Found::Chosen
+}
+
+/// The whole choice on a worker: wait for the turn, judge, release the turn, and only then ask for the start
+/// (the start worker would be held back by the very choice that asks for it). A chosen folder asks its one
+/// start; any other answer asks one only when a start was held back meanwhile.
+fn choose<E: SetupEngine>(
+    engine: &E,
+    first_run: &FirstRun,
+    stamp: super::Stamp,
+    refused: Found,
+    start: &(dyn Fn() -> bool + Send + Sync),
+    get: impl FnOnce() -> Result<PathBuf, Found>,
+) -> Found {
+    let found = match first_run.choosing(&stamp) {
+        Some(_turn) => judge(engine, first_run, &stamp, get),
+        None => {
+            log("first run: a start did not finish in time");
+            refused
+        }
+    };
+    let held_back = first_run.take_held_back();
+    if (matches!(found, Found::Chosen) || held_back) && !start() {
         log("first run: a sync start could not be asked for");
     }
-    Found::Chosen
+    found
 }
 
 impl<E: SetupEngine> EngineSetupSource<E> {
@@ -137,6 +208,8 @@ impl<E: SetupEngine> EngineSetupSource<E> {
                     Ok(None) if first_run.chosen_for(&stamp).is_none() => {
                         Found::Ask(engine.suggested_folder().display().to_string())
                     }
+                    // Chosen before a lock, not saved yet: the choice holds, the step is settled.
+                    Ok(None) => Found::ChoseEarlier(engine.suggested_folder().display().to_string()),
                     Ok(_) => Found::Settled,
                     Err(refused) => {
                         log(format!("first run: the settings were not read ({})", refused.kind()));
@@ -176,8 +249,14 @@ impl<E: SetupEngine> EngineSetupSource<E> {
         self.ask(
             "first-run-folder",
             move |engine, _| {
-                let folder = engine.suggested_folder();
-                Answer::Folder(decide(engine, &first_run, stamp, folder, &*start))
+                Answer::Folder(choose(
+                    engine,
+                    &first_run,
+                    stamp,
+                    Found::Refused(FolderSaid::Unreadable),
+                    &*start,
+                    || Ok(engine.suggested_folder()),
+                ))
             },
             Some(Answer::Folder(Found::Refused(FolderSaid::Unreadable))),
         );
@@ -200,18 +279,27 @@ impl<E: SetupEngine> EngineSetupSource<E> {
         self.ask(
             "first-run-folder",
             move |engine, _| {
-                let shown = first_run
-                    .chosen_for(&stamp)
-                    .unwrap_or_else(|| engine.suggested_folder());
-                Answer::Folder(match platform.pick_folder(PICKER_TITLE, &shown) {
-                    Ok(Some(folder)) => decide(engine, &first_run, stamp, folder, &*start),
-                    Ok(None) => Found::Closed,
-                    Err(error) => {
-                        // The platform's own words: no path is in them.
-                        log(format!("first run: the folder picker did not open ({error})"));
-                        Found::Refused(FolderSaid::NoPicker)
-                    }
-                })
+                Answer::Folder(choose(
+                    engine,
+                    &first_run,
+                    stamp.clone(),
+                    Found::Refused(FolderSaid::NoPicker),
+                    &*start,
+                    || {
+                        let shown = first_run
+                            .chosen_for(&stamp)
+                            .unwrap_or_else(|| engine.suggested_folder());
+                        match platform.pick_folder(PICKER_TITLE, &shown) {
+                            Ok(Some(folder)) => Ok(folder),
+                            Ok(None) => Err(Found::Closed),
+                            Err(error) => {
+                                // The platform's own words: no path is in them.
+                                log(format!("first run: the folder picker did not open ({error})"));
+                                Err(Found::Refused(FolderSaid::NoPicker))
+                            }
+                        }
+                    },
+                ))
             },
             Some(Answer::Folder(Found::Refused(FolderSaid::NoPicker))),
         );
@@ -231,6 +319,12 @@ impl<E: SetupEngine> EngineSetupSource<E> {
                 };
             }
             Found::Settled => self.folder = FolderAsk::Settled,
+            Found::ChoseEarlier(folder) => {
+                self.asked_folder = true;
+                self.suggested = folder;
+                self.folder = FolderAsk::Settled;
+            }
+            Found::AlreadySyncs => self.folder = FolderAsk::AlreadySyncs,
             Found::Chosen => {
                 self.folder = FolderAsk::Settled;
                 // A start was asked for now: the view may read "not asked" for a moment longer.

@@ -50,6 +50,8 @@ struct Fake {
     kept: Mutex<Vec<PathBuf>>,
     /// How often Windows was asked again for the folder's entry.
     entry_asks: AtomicUsize,
+    /// A start waits here until the test lets it go.
+    start_held: Mutex<()>,
     wakes: AtomicUsize,
     /// A write waits here until the test lets it go (a change that is on its way).
     held: Mutex<()>,
@@ -81,6 +83,7 @@ fn fake() -> Arc<Fake> {
         started: Mutex::default(),
         kept: Mutex::default(),
         entry_asks: AtomicUsize::new(0),
+        start_held: Mutex::new(()),
         wakes: AtomicUsize::new(0),
         held: Mutex::new(()),
         panics: AtomicBool::new(false),
@@ -151,6 +154,7 @@ impl SetupEngine for Fake {
         *self.rule.lock().unwrap()
     }
     fn start(&self, folder: PathBuf) -> Result<SyncStart, SyncStartRefused> {
+        let _held = self.start_held.lock().unwrap();
         self.started.lock().unwrap().push(folder);
         *self.start_answer.lock().unwrap()
     }

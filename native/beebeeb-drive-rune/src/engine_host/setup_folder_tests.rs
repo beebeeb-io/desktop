@@ -321,6 +321,8 @@ fn the_choice_is_the_accounts_it_holds_over_a_lock_and_is_never_another_accounts
         assert!(set.platform.pick_asks.lock().unwrap().is_empty(), "{moved_to:?}");
         assert_eq!(set.engine.wakes.load(Ordering::SeqCst), 0, "no worker: {moved_to:?}");
         assert_eq!(starts_asked(&set), 0, "{moved_to:?}");
+        assert!(!set.first_run.started_for(&set.engine.stamp()), "{moved_to:?}");
+        assert_eq!(set.first_run.unsaved_for(&set.engine.stamp()), None, "{moved_to:?}");
         // Control: the right session's press starts one worker.
         *set.engine.stamp.lock().unwrap() = (session(1), Some(FIRST.into()));
         set.source.keep_folder();
@@ -446,6 +448,210 @@ fn without_a_first_run_the_start_is_as_before() {
     *set.engine.writes.lock().unwrap() = Ok(());
     start(&set);
     assert_eq!(set.engine.kept.lock().unwrap().clone(), [PathBuf::from(SUGGESTED)]);
+}
+
+// ---------------------------------------------------------------------------
+// S-006b: the turn between a choice and a start, the folder that was not saved
+// ---------------------------------------------------------------------------
+
+/// Wait (at most 10 s) until `done` holds.
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let began = Instant::now();
+    while !done() {
+        assert!(began.elapsed() < Duration::from_secs(10), "{what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn refuse_starts(set: &Set) {
+    *set.engine.start_answer.lock().unwrap() = Err(SyncStartRefused::RegistrationFailed { code: None });
+}
+
+#[test]
+fn after_a_lock_a_refused_choice_can_still_be_changed() {
+    let mut set = new_pc();
+    refuse_starts(&set);
+    set.platform
+        .picks
+        .lock()
+        .unwrap()
+        .push_back(Ok(Some(PathBuf::from(PICKED))));
+    set.source.choose_folder();
+    settle(&mut set, 1);
+    set.engine.set(
+        Start::Refused(SyncStartRefused::RegistrationFailed { code: None }),
+        EngineExplorer::Unknown,
+    );
+    start(&set);
+    assert_eq!(started(&set), [PathBuf::from(PICKED)], "the start was refused");
+    assert_eq!(set.engine.settings_folder(), Ok(None));
+    // The lock and the unlock: a second source on the same first run.
+    *set.engine.stamp.lock().unwrap() = (session(2), Some(FIRST.to_string()));
+    let mut again = EngineSetupSource::new(
+        set.engine.clone(),
+        hooks(&set.asked, set.platform.clone(), set.first_run.clone()),
+    );
+    wait_until("the second source did not read the folder", || {
+        again.poll();
+        again.can_choose_again()
+    });
+    set.platform
+        .picks
+        .lock()
+        .unwrap()
+        .push_back(Ok(Some(PathBuf::from("/invented/second"))));
+    let asked = set.platform.pick_asks.lock().unwrap().len();
+    again.choose_folder();
+    wait_until("the picker was not asked", || {
+        set.platform.pick_asks.lock().unwrap().len() == asked + 1
+    });
+}
+
+#[test]
+fn a_start_is_held_back_while_a_folder_is_being_chosen_and_asked_once_it_ends() {
+    let mut set = new_pc();
+    refuse_starts(&set);
+    set.first_run.choose(set.engine.stamp(), PathBuf::from(PICKED));
+    // Control: with nothing being chosen, a start is made in the chosen folder.
+    start(&set);
+    assert_eq!(started(&set), [PathBuf::from(PICKED)], "control");
+    *set.engine.rule.lock().unwrap() = Err(SyncFolderRefused::System);
+    let before = starts_asked(&set);
+    let held = set.engine.held.lock().unwrap();
+    set.source.keep_folder();
+    wait_until("the choice did not begin", || set.first_run.turn().choosers.len() == 1);
+    start(&set);
+    assert_eq!(started(&set).len(), 1, "no start while a folder is being chosen");
+    let other = (session(1), Some(SECOND.to_string()));
+    assert!(
+        set.first_run.starting(&other).is_some(),
+        "a start of another account is not held back"
+    );
+    drop(held);
+    settle(&mut set, 2);
+    assert_eq!(
+        starts_asked(&set),
+        before + 1,
+        "the held back start is asked once the choice ends"
+    );
+}
+
+#[test]
+fn a_choice_waits_for_a_start_and_is_not_made_after_one_that_worked() {
+    let mut set = new_pc();
+    set.first_run.choose(set.engine.stamp(), PathBuf::from(PICKED));
+    let hold = set.engine.start_held.lock().unwrap();
+    let (engine, first_run) = (set.engine.clone(), set.first_run.clone());
+    let starter = std::thread::spawn(move || {
+        let name = Mutex::new(None);
+        start_now(&*engine, &name, &first_run);
+    });
+    wait_until("the start did not begin", || set.first_run.turn().starting == 1);
+    set.platform
+        .picks
+        .lock()
+        .unwrap()
+        .push_back(Ok(Some(PathBuf::from("/invented/second"))));
+    set.source.choose_folder();
+    wait_until("the choice did not wait", || set.first_run.choosers_waiting() == 1);
+    assert!(
+        set.platform.pick_asks.lock().unwrap().is_empty(),
+        "the picker was not asked"
+    );
+    drop(hold);
+    starter.join().unwrap();
+    settle(&mut set, 1);
+    assert_eq!(set.source.folder_ask(), FolderAsk::AlreadySyncs);
+    assert!(
+        set.platform.pick_asks.lock().unwrap().is_empty(),
+        "the picker was never asked"
+    );
+    assert_eq!(chosen(&set), Some(PathBuf::from(PICKED)), "the choice is unchanged");
+    assert_eq!(started(&set), [PathBuf::from(PICKED)]);
+}
+
+#[test]
+fn another_folder_is_not_offered_once_a_start_worked() {
+    let mut set = new_pc();
+    set.source.keep_folder();
+    settle(&mut set, 1);
+    let refused = Start::Refused(SyncStartRefused::RegistrationFailed { code: None });
+    set.engine.set(refused, EngineExplorer::Unknown);
+    assert!(set.source.can_choose_again(), "control: no start worked");
+    start(&set);
+    set.engine.set(refused, EngineExplorer::Unknown);
+    assert!(!set.source.can_choose_again(), "a start worked for this account");
+}
+
+#[test]
+fn a_folder_that_could_not_be_saved_is_said_and_try_again_saves_it() {
+    let mut set = new_pc();
+    *set.engine.writes.lock().unwrap() = Err(SetupRefused::Settings);
+    set.source.keep_folder();
+    settle(&mut set, 1);
+    start(&set);
+    assert!(!set.source.folder_unsaved(), "sync does not run in the view yet");
+    set.engine.set(Start::Running, EngineExplorer::Added);
+    assert!(set.source.folder_unsaved());
+    set.source.save_folder();
+    settle(&mut set, 2);
+    assert!(set.source.folder_unsaved(), "the write failed again");
+    for off in [
+        Start::NotAsked,
+        Start::Refused(SyncStartRefused::RegistrationFailed { code: None }),
+    ] {
+        set.engine.set(off, EngineExplorer::Unknown);
+        assert!(!set.source.folder_unsaved(), "{off:?}");
+    }
+    set.engine.set(Start::Running, EngineExplorer::Added);
+    assert!(set.source.folder_unsaved());
+    *set.engine.writes.lock().unwrap() = Ok(());
+    set.source.save_folder();
+    assert!(settle(&mut set, 3), "the poll said a change");
+    assert_eq!(set.engine.kept.lock().unwrap().clone(), [PathBuf::from(SUGGESTED)]);
+    assert!(!set.source.folder_unsaved());
+}
+
+#[test]
+fn a_later_start_request_saves_a_folder_that_was_not_saved() {
+    let mut set = new_pc();
+    *set.engine.writes.lock().unwrap() = Err(SetupRefused::Settings);
+    set.source.keep_folder();
+    settle(&mut set, 1);
+    start(&set);
+    assert!(set.engine.kept.lock().unwrap().is_empty());
+    *set.engine.writes.lock().unwrap() = Ok(());
+    *set.engine.start_answer.lock().unwrap() = Ok(SyncStart::AlreadyRunning);
+    start(&set);
+    assert_eq!(set.engine.kept.lock().unwrap().clone(), [PathBuf::from(SUGGESTED)]);
+}
+
+#[test]
+fn the_folder_is_never_in_debug_output() {
+    let secret = "/invented/secret-folder";
+    for text in [
+        format!("{:?}", Found::Ask(secret.into())),
+        format!("{:?}", Found::ChoseEarlier(secret.into())),
+        format!(
+            "{:?}",
+            FolderAsk::Ask {
+                folder: secret.into(),
+                said: Some(FolderSaid::Network),
+                busy: true
+            }
+        ),
+    ] {
+        assert!(!text.contains("secret-folder"), "{text}");
+    }
+    let said = format!(
+        "{:?}",
+        FolderAsk::Ask {
+            folder: secret.into(),
+            said: Some(FolderSaid::Network),
+            busy: true
+        }
+    );
+    assert!(said.contains("Network") && said.contains("true"), "{said}");
 }
 
 // ---------------------------------------------------------------------------
@@ -596,4 +802,88 @@ fn a_refused_start_shows_the_modal_in_the_first_run_and_another_folder_can_be_ch
         engine.kept.lock().unwrap().is_empty(),
         "a refused folder was never written"
     );
+}
+
+/// A start worked but the settings did not take the folder, while sync runs: the step says so and never "Added";
+/// while sync does not run those words are not shown; "Try again" writes it.
+#[test]
+fn the_window_says_a_folder_that_was_not_saved_and_never_added() {
+    let set = new_pc();
+    let (mut rt, engine, fixture, first_run, _platform) = window(set);
+    fixture.set_gate_for_scene(ShellGate::FirstRun);
+    wait_for(&mut rt, "the first run", |rt| rt.state.setup.is_some());
+    wait_for(&mut rt, "the folder was read", |rt| {
+        says(rt, "isn't in File Explorer yet")
+    });
+    to_file_explorer(&mut rt);
+    press(&mut rt, "Use this folder");
+    wait_for(&mut rt, "the choice was taken", |rt| {
+        says(rt, "Adding Beebeeb to File Explorer")
+    });
+    *engine.writes.lock().unwrap() = Err(SetupRefused::Settings);
+    start_now(&*engine, &Mutex::new(None), &first_run);
+    engine.set(Start::Running, EngineExplorer::Added);
+    wait_for(&mut rt, "the unsaved folder", |rt| {
+        says(rt, "Couldn't save your folder choice")
+    });
+    assert!(!says(&rt, "is in File Explorer"));
+    assert!(says(&rt, "Continue for now"));
+    // Sync does not run: the step shows what the engine says.
+    engine.set(
+        Start::Refused(SyncStartRefused::RegistrationFailed { code: None }),
+        EngineExplorer::Unknown,
+    );
+    wait_for(&mut rt, "the refusal", |rt| {
+        !says(rt, "Couldn't save your folder choice")
+    });
+    assert!(says(&rt, "Sync didn't start"));
+    engine.set(Start::Running, EngineExplorer::Added);
+    wait_for(&mut rt, "unsaved again", |rt| {
+        says(rt, "Couldn't save your folder choice")
+    });
+    *engine.writes.lock().unwrap() = Ok(());
+    press(&mut rt, "Try again");
+    wait_for(&mut rt, "saved", |rt| says(rt, "is in File Explorer"));
+    assert!(!says(&rt, "Couldn't save your folder choice"));
+    assert_eq!(engine.kept.lock().unwrap().clone(), [PathBuf::from(SUGGESTED)]);
+}
+
+/// A pick after a start worked is not taken: nothing changes, and the step says moving the folder is not here yet.
+#[test]
+fn a_pick_after_a_working_start_changes_nothing_and_says_so() {
+    let set = new_pc();
+    let (mut rt, engine, fixture, first_run, platform) = window(set);
+    fixture.set_gate_for_scene(ShellGate::FirstRun);
+    wait_for(&mut rt, "the first run", |rt| rt.state.setup.is_some());
+    wait_for(&mut rt, "the folder was read", |rt| {
+        says(rt, "isn't in File Explorer yet")
+    });
+    to_file_explorer(&mut rt);
+    // A start worked (the question was still up on the screen).
+    first_run.choose(engine.stamp(), PathBuf::from(SUGGESTED));
+    start_now(&*engine, &Mutex::new(None), &first_run);
+    engine.set(Start::Running, EngineExplorer::Added);
+    platform
+        .picks
+        .lock()
+        .unwrap()
+        .push_back(Ok(Some(PathBuf::from(PICKED))));
+    press(&mut rt, "Choose another folder\u{2026}");
+    wait_for(&mut rt, "the words", |rt| {
+        says(rt, "Beebeeb already syncs in another folder")
+    });
+    assert!(says(
+        &rt,
+        "Moving your Beebeeb folder isn't available in this version yet"
+    ));
+    assert!(
+        platform.pick_asks.lock().unwrap().is_empty(),
+        "the picker was not opened"
+    );
+    assert_eq!(engine.started.lock().unwrap().clone(), [PathBuf::from(SUGGESTED)]);
+    assert_eq!(engine.kept.lock().unwrap().clone(), [PathBuf::from(SUGGESTED)]);
+    press(&mut rt, "OK");
+    wait_for(&mut rt, "back to the step", |rt| {
+        !says(rt, "Beebeeb already syncs in another folder")
+    });
 }
