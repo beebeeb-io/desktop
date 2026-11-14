@@ -411,9 +411,9 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
         if self.engine.view().gate != EngineGate::Ready {
             return Err(actions::ActionError::NotAvailable("not signed in and unlocked"));
         }
-        let (engine, folder) = (self.engine.clone(), self.starts.folder());
+        let (engine, folder, first_run) = (self.engine.clone(), self.starts.folder(), self.first_run.clone());
         self.starts
-            .ask(move || sync::start_sync_now(&engine, &folder))
+            .ask(move || sync::start_sync_now(&engine, &folder, &first_run))
             .map(|_| ())
             .map_err(|_| actions::ActionError::Failed("could not start a thread".into()))
     }

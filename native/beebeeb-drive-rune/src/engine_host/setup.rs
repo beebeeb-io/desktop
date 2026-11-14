@@ -1,19 +1,29 @@
 //! The first run on the real engine: [`EngineSetupSource`], the `SetupSource` of the running app.
 //!
+//! The contract is slice S2 of `docs/superpowers/specs/2026-11-12-native-sync-start-and-sign-out.md`.
+//!
 //! What it answers, and from where:
+//! - The sync folder (the contract's ruling Q2; `setup_folder.rs`): while the settings name none, the first run
+//!   asks for it before the first start. The person keeps the suggestion or picks another folder with Windows'
+//!   own picker; the engine's rule decides whether it may be the sync folder
+//!   ([`Engine::check_sync_folder`]); no start is made before a folder is chosen, and the folder is written to
+//!   the settings by the start that worked, once ([`start_now`]).
 //! - Beebeeb in File Explorer (DW-0206, DW-0206b, DW-0280): the engine's own view of the sync start and of the
-//!   folder's entry in File Explorer ([`SetupEngine::view`], which never waits). A start the engine refused is
-//!   said as "sync didn't start" ([`Explorer::NotSyncing`]), never as "adding". "Try again" asks for a start
-//!   through the shell's one start path; when sync runs and only Windows refused the entry, sync is stopped and
-//!   started again (a start is what asks Windows). "Show in File Explorer" opens the sync folder.
+//!   folder's entry in File Explorer ([`SetupEngine::view`], which never waits). Windows refusing to register
+//!   the folder is DW-0280 with Windows' code; any other start the engine refused is said as "sync didn't
+//!   start" ([`Explorer::NotSyncing`]), never as "adding"; the shell's refusal modal says what happened. "Try
+//!   again" asks for a start through the shell's one start path; when sync runs and only Windows refused the
+//!   entry, sync is stopped and started again (a start is what asks Windows). "Show in File Explorer" opens the
+//!   sync folder.
 //! - Notifications (DW-0207): this PC's "show notifications at all" switch in the settings file
 //!   ([`Engine::set_notifications_allowed_for`]).
 //! - Open at login (DW-0281): the platform's start-at-login entry, the one Drive's settings switch.
 //! - "Open my Beebeeb": the first run is marked done for this PC ([`Engine::mark_first_run_done_for`]), and the
 //!   shell's gate lets the main window through ([`FirstRun`]).
 //!
-//! What it does NOT answer (each is a step the view does not show, [`SetupSource::offers`], never a step that
-//! looks done): a passkey, the app lock, backing up folders, previews. See each method's own line below.
+//! What it does NOT answer (each is a step that keeps its place and says it is not in this version yet,
+//! [`SetupSource::available`], never a step that looks done): a passkey, the app lock, backing up folders,
+//! previews. See each method's own line below.
 //!
 //! Session rule: the source is made for one session of one account ([`SetupEngine::stamp`] when it was made). A
 //! press under any other session or account sends nothing; a change is sent for the session of the press; an
@@ -29,31 +39,43 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::account::SessionGeneration;
 use beebeeb_engine::app::setup_api::SetupRefused;
-use beebeeb_engine::app::{CredentialStores, Engine};
+use beebeeb_engine::app::{CredentialStores, Engine, SyncStart, SyncStartRefused};
 use beebeeb_engine::signin::gate::GateState;
+use beebeeb_engine::sync_folder_rule::SyncFolderRefused;
 use beebeeb_engine::sync_view::{Explorer as EngineExplorer, Start, SyncView};
 
 use super::log;
 use crate::frames::signin::setup::Step;
 use crate::frames::signin::setup::source::{
-    BUNDLED_SAMPLE_PNG, Explorer, Folder, LockAfter, Outcome, PreviewFormat, PreviewSize, Sample, SetupSource, Switch,
+    BUNDLED_SAMPLE_PNG, Explorer, Folder, FolderAsk, LockAfter, Outcome, PreviewFormat, PreviewSize, Sample,
+    SetupSource, Switch,
 };
 use crate::shell::platform::Platform;
 
+#[path = "setup_folder.rs"]
+mod folder;
 #[cfg(test)]
 #[path = "setup_tests.rs"]
 mod tests;
 
+pub use folder::start_now;
+
 /// Whether this PC still has its first run to do, as the shell's gate reads it on every frame: in memory, set
 /// once at start from the settings file (before the window's first frame), cleared when the first run ends.
 /// `false` unless the app's start wired a first run ([`FirstRun::read`]): a window that never asked shows none.
+///
+/// It also holds the sync folder a person chose in this first run, for the start worker ([`start_now`]): with
+/// the session and account it was chosen under, so no other session's start uses it.
 #[derive(Default)]
-pub struct FirstRun(AtomicBool);
+pub struct FirstRun {
+    due: AtomicBool,
+    folder: Mutex<Option<(Stamp, PathBuf)>>,
+}
 
 impl FirstRun {
     /// Read the settings file's flag, once, at the app's start. A file that does not read is "not due": a first
@@ -63,15 +85,29 @@ impl FirstRun {
             log(format!("first run: could not be read ({})", refused.kind()));
             false
         });
-        self.0.store(due, Ordering::SeqCst);
+        self.due.store(due, Ordering::SeqCst);
     }
 
     pub fn due(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.due.load(Ordering::SeqCst)
     }
 
     fn end(&self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.due.store(false, Ordering::SeqCst);
+    }
+
+    /// The folder was chosen, under this session and account.
+    fn choose(&self, stamp: Stamp, folder: PathBuf) {
+        *self.folder.lock().unwrap_or_else(PoisonError::into_inner) = Some((stamp, folder));
+    }
+
+    /// The folder chosen in this first run, when it was chosen under `stamp`.
+    fn chosen_for(&self, stamp: &Stamp) -> Option<PathBuf> {
+        let chosen = self.folder.lock().unwrap_or_else(PoisonError::into_inner);
+        chosen
+            .as_ref()
+            .filter(|(chosen_under, _)| chosen_under == stamp)
+            .map(|(_, folder)| folder.clone())
     }
 }
 
@@ -92,8 +128,18 @@ pub trait SetupEngine: Send + Sync + 'static {
     fn mark_done_for(&self, session: SessionGeneration) -> Result<(), SetupRefused>;
     /// `Engine::set_notifications_allowed_for`. BLOCKS.
     fn set_notifications_for(&self, session: SessionGeneration, on: bool) -> Result<(), SetupRefused>;
-    /// The sync folder (`Engine::sync_root`). BLOCKS. Never logged, never shown.
+    /// The sync folder (`Engine::sync_root`). BLOCKS. Never logged.
     fn sync_folder(&self) -> Option<PathBuf>;
+    /// The sync folder the settings name, if they name one (`Engine::settings_sync_root`). BLOCKS.
+    fn settings_folder(&self) -> Result<Option<PathBuf>, SetupRefused>;
+    /// The folder a first run suggests (`Engine::sync_root_suggestion`).
+    fn suggested_folder(&self) -> PathBuf;
+    /// Whether the folder may be the sync folder (`Engine::check_sync_folder`). BLOCKS.
+    fn check_folder(&self, folder: &Path) -> Result<(), SyncFolderRefused>;
+    /// Start sync into the folder (`Engine::start_sync`). BLOCKS.
+    fn start(&self, folder: PathBuf) -> Result<SyncStart, SyncStartRefused>;
+    /// Write the folder to the settings when they name none (`Engine::keep_sync_root`). BLOCKS.
+    fn keep_folder(&self, folder: &Path) -> Result<bool, SetupRefused>;
     /// Stop sync and wait until it ended (`Engine::stop`). BLOCKS.
     fn stop_sync(&self);
 }
@@ -119,6 +165,21 @@ impl<C: CredentialStores> SetupEngine for Engine<C> {
     }
     fn sync_folder(&self) -> Option<PathBuf> {
         self.sync_root().ok()
+    }
+    fn settings_folder(&self) -> Result<Option<PathBuf>, SetupRefused> {
+        self.settings_sync_root()
+    }
+    fn suggested_folder(&self) -> PathBuf {
+        self.sync_root_suggestion()
+    }
+    fn check_folder(&self, folder: &Path) -> Result<(), SyncFolderRefused> {
+        self.check_sync_folder(folder)
+    }
+    fn start(&self, folder: PathBuf) -> Result<SyncStart, SyncStartRefused> {
+        self.start_sync(folder)
+    }
+    fn keep_folder(&self, folder: &Path) -> Result<bool, SetupRefused> {
+        self.keep_sync_root(folder)
     }
     fn stop_sync(&self) {
         let _ = self.stop();
@@ -147,9 +208,11 @@ pub struct Hooks {
 /// says sync did not start (the start worker sets the view a moment after it was asked).
 pub const START_GRACE: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Answer {
     Switched(Outcome),
+    /// What a worker found out about the sync folder ([`folder::Found`]).
+    Folder(folder::Found),
     /// "Open my Beebeeb" could not be written to the settings file (or its worker did not run): the first run is
     /// over for this session all the same. (A write that worked ends it on the worker, for every session.)
     Finished,
@@ -167,6 +230,14 @@ pub struct EngineSetupSource<E: SetupEngine> {
     seen: Explorer,
     /// When a sync start was last asked for on this first run's behalf (the shell asks one as it opens).
     start_asked_at: Instant,
+    /// The sync folder's question, as the step draws it.
+    folder: FolderAsk,
+    /// The folder the question shows: the suggestion.
+    suggested: String,
+    /// This first run asked for the folder (the settings named none when it began).
+    asked_folder: bool,
+    /// Sync was seen running in this first run: the folder is settled.
+    ran: bool,
     outcomes: Vec<Outcome>,
     changed: bool,
     answers: mpsc::Sender<(Stamp, Answer)>,
@@ -177,14 +248,19 @@ pub struct EngineSetupSource<E: SetupEngine> {
 /// Nor is a start that was never made (`start_due`: none is on its way any more): sync is off, and the step says
 /// so, with its Try again.
 fn explorer_of(view: &SyncView, start_due: bool) -> Explorer {
+    let code = |code: Option<i32>| {
+        // As Windows writes an HRESULT: "0x8007017C".
+        code.map(|code| format!("0x{:08X}", code as u32)).unwrap_or_default()
+    };
     match (view.start, view.explorer) {
+        // Windows refused to register the folder: DW-0280, with Windows' code.
+        (Start::Refused(SyncStartRefused::RegistrationFailed { code: windows }), _) => {
+            Explorer::Failed { code: code(windows) }
+        }
         (Start::Refused(_), _) => Explorer::NotSyncing,
         (Start::NotAsked, _) if !start_due => Explorer::NotSyncing,
         (_, EngineExplorer::Added) => Explorer::Added,
-        (_, EngineExplorer::Failed { code }) => Explorer::Failed {
-            // As Windows writes an HRESULT: "0x8007017C".
-            code: code.map(|code| format!("0x{:08X}", code as u32)).unwrap_or_default(),
-        },
+        (_, EngineExplorer::Failed { code: windows }) => Explorer::Failed { code: code(windows) },
         (Start::NotAsked | Start::Starting | Start::Running, EngineExplorer::Adding | EngineExplorer::Unknown) => {
             Explorer::Adding
         }
@@ -202,12 +278,17 @@ impl<E: SetupEngine> EngineSetupSource<E> {
             made_for,
             seen,
             start_asked_at: Instant::now(),
+            folder: FolderAsk::Settled,
+            suggested: String::new(),
+            asked_folder: false,
+            ran: false,
             outcomes: Vec::new(),
             changed: false,
             answers,
             inbox,
         };
         source.look_after_the_grace();
+        source.read_folder();
         source
     }
 
@@ -233,6 +314,7 @@ impl<E: SetupEngine> EngineSetupSource<E> {
         work: impl FnOnce(&E, SessionGeneration) -> Answer + Send + 'static,
         refused: Option<Answer>,
     ) {
+        let or_else = refused.clone();
         let refuse = |source: &mut Self| {
             if let Some(answer) = refused {
                 let _ = source.answers.send((source.made_for.clone(), answer));
@@ -249,7 +331,7 @@ impl<E: SetupEngine> EngineSetupSource<E> {
             // A worker that panicked answers as a press that was refused: never a switch left on "Saving".
             let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&engine, stamp.0)))
                 .ok()
-                .or(refused);
+                .or(or_else);
             if let Some(answer) = answer {
                 let _ = answers.send((stamp, answer));
             }
@@ -264,7 +346,7 @@ impl<E: SetupEngine> EngineSetupSource<E> {
 
 impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
     /// The steps something answers for: File Explorer (on Windows), notifications, open at login.
-    fn offers(&self, step: Step) -> bool {
+    fn available(&self, step: Step) -> bool {
         match step {
             Step::Explorer => self.hooks.explorer_step,
             Step::Notifications | Step::Login => true,
@@ -290,6 +372,24 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
 
     fn explorer(&self) -> Explorer {
         explorer_of(&self.engine.view(), self.start_asked_at.elapsed() < START_GRACE)
+    }
+
+    fn folder_ask(&self) -> FolderAsk {
+        self.folder.clone()
+    }
+
+    fn keep_folder(&mut self) {
+        self.keep_suggested();
+    }
+
+    fn choose_folder(&mut self) {
+        self.pick_another();
+    }
+
+    /// After a start that was refused, while this first run asked for the folder and sync never ran in it: the
+    /// settings name no folder yet, and the folder may be what was refused.
+    fn can_choose_again(&self) -> bool {
+        self.asked_folder && !self.ran && matches!(self.engine.view().start, Start::Refused(_))
     }
 
     /// "Try again" (DW-0280). Sync does not run: one start is asked for, the shell's way. Sync runs and Windows
@@ -419,10 +519,12 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
             changed = true;
             match answer {
                 Answer::Switched(outcome) => self.outcomes.push(outcome),
+                Answer::Folder(found) => self.take_in_folder(found),
                 Answer::Finished => self.hooks.first_run.end(),
                 Answer::Looked => {}
             }
         }
+        self.ran |= mine && self.engine.view().start == Start::Running;
         let now = self.explorer();
         if now != self.seen {
             self.seen = now;
@@ -431,8 +533,8 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
         changed
     }
 
-    // ---- Not bound. Each belongs to a step this source does not offer (`offers`), so no drawn control reaches
-    // it; each does nothing and claims nothing.
+    // ---- Not bound. Each belongs to a step this source says is not available (`available`): the step says so
+    // and its controls are not drawn, so nothing reaches these; each does nothing and claims nothing.
 
     /// Backing up folders (step 3): Backups is switched off in the running app (`engine_host::backups::TURNED_ON`),
     /// so a backup turned on here could not be seen or stopped afterwards. Binds with that section.

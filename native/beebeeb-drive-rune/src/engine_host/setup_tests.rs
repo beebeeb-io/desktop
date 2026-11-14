@@ -7,7 +7,6 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
 
-use beebeeb_engine::app::SyncStartRefused;
 use rune::{Env, Runtime, Tx};
 
 use super::*;
@@ -17,6 +16,13 @@ use crate::shell::app::GateState as ShellGate;
 use crate::shell::host::{self, Shell};
 use crate::shell::platform::fake::FakePlatform;
 
+#[path = "setup_folder_tests.rs"]
+mod folder_tests;
+#[path = "setup_glue_tests.rs"]
+mod glue;
+
+/// The folder a first run suggests, in these tests.
+const SUGGESTED: &str = "/invented/home/Beebeeb";
 const FIRST: &str = "setup-first@example.eu";
 const SECOND: &str = "setup-second@example.eu";
 
@@ -32,6 +38,16 @@ struct Fake {
     /// Every notifications write: its session and its value.
     notified: Mutex<Vec<(SessionGeneration, bool)>>,
     folder: Mutex<Option<PathBuf>>,
+    /// The sync folder the settings name.
+    settings_folder: Mutex<Result<Option<PathBuf>, SetupRefused>>,
+    /// What the engine's rule answers for a folder, and every folder it was asked about.
+    rule: Mutex<Result<(), SyncFolderRefused>>,
+    checked: Mutex<Vec<PathBuf>>,
+    /// What a start answers, and every folder a start was made in.
+    start_answer: Mutex<Result<SyncStart, SyncStartRefused>>,
+    started: Mutex<Vec<PathBuf>>,
+    /// Every folder that was written to the settings.
+    kept: Mutex<Vec<PathBuf>>,
     stops: AtomicUsize,
     wakes: AtomicUsize,
     /// A write waits here until the test lets it go (a change that is on its way).
@@ -56,6 +72,13 @@ fn fake() -> Arc<Fake> {
         marked: Mutex::default(),
         notified: Mutex::default(),
         folder: Mutex::new(Some(PathBuf::from("an-invented-folder"))),
+        // A PC whose settings name the sync folder: the first run has nothing to ask.
+        settings_folder: Mutex::new(Ok(Some(PathBuf::from("an-invented-folder")))),
+        rule: Mutex::new(Ok(())),
+        checked: Mutex::default(),
+        start_answer: Mutex::new(Ok(SyncStart::Started)),
+        started: Mutex::default(),
+        kept: Mutex::default(),
         stops: AtomicUsize::new(0),
         wakes: AtomicUsize::new(0),
         held: Mutex::new(()),
@@ -115,6 +138,32 @@ impl SetupEngine for Fake {
     fn stop_sync(&self) {
         self.stops.fetch_add(1, Ordering::SeqCst);
     }
+    fn settings_folder(&self) -> Result<Option<PathBuf>, SetupRefused> {
+        self.settings_folder.lock().unwrap().clone()
+    }
+    fn suggested_folder(&self) -> PathBuf {
+        PathBuf::from(SUGGESTED)
+    }
+    fn check_folder(&self, folder: &Path) -> Result<(), SyncFolderRefused> {
+        let _held = self.held.lock().unwrap();
+        self.checked.lock().unwrap().push(folder.to_path_buf());
+        *self.rule.lock().unwrap()
+    }
+    fn start(&self, folder: PathBuf) -> Result<SyncStart, SyncStartRefused> {
+        self.started.lock().unwrap().push(folder);
+        *self.start_answer.lock().unwrap()
+    }
+    // As the engine: written only when the settings name none.
+    fn keep_folder(&self, folder: &Path) -> Result<bool, SetupRefused> {
+        (*self.writes.lock().unwrap())?;
+        let mut named = self.settings_folder.lock().unwrap();
+        if !matches!(*named, Ok(None)) {
+            return Ok(false);
+        }
+        *named = Ok(Some(folder.to_path_buf()));
+        self.kept.lock().unwrap().push(folder.to_path_buf());
+        Ok(true)
+    }
 }
 
 /// What the hooks were asked, for a test to read.
@@ -165,7 +214,16 @@ struct Set {
 fn set_on(engine: Arc<Fake>, platform: FakePlatform) -> Set {
     let (asked, platform, first_run) = (Arc::<Asked>::default(), Arc::new(platform), Arc::<FirstRun>::default());
     first_run.read(&*engine);
-    let source = EngineSetupSource::new(engine.clone(), hooks(&asked, platform.clone(), first_run.clone()));
+    let mut source = EngineSetupSource::new(engine.clone(), hooks(&asked, platform.clone(), first_run.clone()));
+    // The source reads, on a worker, whether the folder has to be asked for: taken in before a test begins, so
+    // a test counts its own workers from zero.
+    let began = Instant::now();
+    while engine.wakes.load(Ordering::SeqCst) < 1 {
+        assert!(began.elapsed() < Duration::from_secs(10), "the folder was not read");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    source.poll();
+    engine.wakes.store(0, Ordering::SeqCst);
     Set {
         engine,
         asked,
@@ -190,19 +248,26 @@ fn settle(set: &mut Set, wakes: usize) -> bool {
 }
 
 #[test]
-fn only_the_steps_something_answers_for_are_offered() {
+fn only_the_steps_something_answers_for_are_available() {
     let set = set();
-    let offered: Vec<Step> = Step::STEPS
+    let available: Vec<Step> = Step::STEPS
         .into_iter()
-        .filter(|step| set.source.offers(*step))
+        .filter(|step| set.source.available(*step))
         .collect();
-    assert_eq!(offered, [Step::Explorer, Step::Notifications, Step::Login]);
+    assert_eq!(available, [Step::Explorer, Step::Notifications, Step::Login]);
     assert!(!set.source.opens_settings() && set.source.answers_later());
-    // On an OS without File Explorer the step is not there either.
+    // On an OS without File Explorer that step is not available either, and no folder is asked for.
     let mut other = hooks(&set.asked, set.platform.clone(), set.first_run.clone());
     other.explorer_step = false;
+    *set.engine.settings_folder.lock().unwrap() = Ok(None);
     let source = EngineSetupSource::new(set.engine.clone(), other);
-    assert!(!source.offers(Step::Explorer) && source.offers(Step::Login));
+    assert!(!source.available(Step::Explorer) && source.available(Step::Login));
+    assert_eq!(source.folder_ask(), FolderAsk::Settled);
+    assert_eq!(
+        set.engine.wakes.load(Ordering::SeqCst),
+        0,
+        "no worker read the settings"
+    );
     // What is not bound claims nothing: no folder, no weight, no estimate, no limit, no passkey.
     assert!(set.source.folders().is_empty());
     assert_eq!(set.source.weight(PreviewSize::K4, PreviewFormat::Heic), None);
@@ -218,7 +283,7 @@ fn only_the_steps_something_answers_for_are_offered() {
 }
 
 #[test]
-fn file_explorer_is_drawn_from_the_engines_view_and_a_refused_start_is_not_adding() {
+fn step_5_follows_the_view() {
     let mut set = set();
     let failed = |code: &str| Explorer::Failed { code: code.into() };
     let refused = Start::Refused(SyncStartRefused::OtherAccountsData);
@@ -236,6 +301,19 @@ fn file_explorer_is_drawn_from_the_engines_view_and_a_refused_start_is_not_addin
             failed("0x8007017C"),
         ),
         (Start::Running, EngineExplorer::Failed { code: None }, failed("")),
+        // Windows refused to register the folder: DW-0280 with Windows' code as text, whatever the entry said.
+        (
+            Start::Refused(SyncStartRefused::RegistrationFailed {
+                code: Some(0x8007_0005_u32 as i32),
+            }),
+            EngineExplorer::Unknown,
+            failed("0x80070005"),
+        ),
+        (
+            Start::Refused(SyncStartRefused::RegistrationFailed { code: None }),
+            EngineExplorer::Adding,
+            failed(""),
+        ),
         // The engine refused the start: nothing is being added, whatever the entry said before.
         (refused, EngineExplorer::Unknown, Explorer::NotSyncing),
         (refused, EngineExplorer::Adding, Explorer::NotSyncing),
@@ -617,8 +695,27 @@ fn press(rt: &mut Runtime<State>, label: &str) {
     rt.frame(0.1);
 }
 
-/// The running app: a gate that shows the first run makes its steps for that session; only the steps something
-/// answers for are there; each switch is drawn once it was answered; "Open my Beebeeb" ends it.
+/// Through the four steps nothing answers for in this version: each keeps its place and its name, says that it
+/// is not in this version, and "Continue" leaves it with nothing asked of the engine.
+fn to_file_explorer(rt: &mut Runtime<State>) {
+    for step in [
+        "Add a passkey",
+        "Lock Beebeeb",
+        "Back up your folders",
+        "Thumbnails and previews",
+    ] {
+        let heading = rt
+            .elements()
+            .iter()
+            .any(|e| !e.exiting && e.role == "heading" && e.text.as_deref() == Some(step));
+        assert!(heading, "the step's own name: {step}");
+        assert!(says(rt, "This isn't in this version of Beebeeb yet"), "{step}");
+        press(rt, "Continue");
+    }
+}
+
+/// The running app: a gate that shows the first run makes its steps for that session; the seven steps are there,
+/// and the ones nothing answers for say so; each switch is drawn once it was answered; "Open my Beebeeb" ends it.
 #[test]
 fn the_first_run_in_the_window_shows_its_real_steps_and_ends_in_the_main_window() {
     let set = set();
@@ -640,19 +737,17 @@ fn the_first_run_in_the_window_shows_its_real_steps_and_ends_in_the_main_window(
         before + 1,
         "sync is asked to start with the first run: its File Explorer step is about the sync folder"
     );
-    // The list at the left: the three steps, none of the four nothing answers for.
-    for step in ["Beebeeb in File Explorer", "Notifications", "Open at login"] {
-        assert!(says(&rt, step), "{step}");
+    // The list at the left: the seven steps.
+    for step in Step::STEPS {
+        assert!(says(&rt, step.label()), "{}", step.label());
     }
-    for step in [
-        "Add a passkey",
-        "Lock Beebeeb",
-        "Back up your folders",
-        "Thumbnails and previews",
-        "2,431",
-        "20 GB",
-    ] {
-        assert!(!says(&rt, step), "{step}");
+    // None of the board's sample values, and no control of a step nothing answers for.
+    for sample in ["2,431", "20 GB", "Turn on backup", "Compare", "Not now"] {
+        assert!(!says(&rt, sample), "{sample}");
+    }
+    to_file_explorer(&mut rt);
+    for sample in ["2,431", "20 GB"] {
+        assert!(!says(&rt, sample), "{sample}");
     }
     // File Explorer follows the engine's view without a press.
     engine.set(
@@ -680,8 +775,12 @@ fn the_first_run_in_the_window_shows_its_real_steps_and_ends_in_the_main_window(
     assert_eq!(engine.notified.lock().unwrap().clone(), [(session(1), true)]);
     assert_eq!(platform.autostart_writes(), [true]);
     for row in ["Passkey", "App lock", "Backup", "Previews"] {
-        assert!(!says(&rt, row), "no row for a step this first run did not have: {row}");
+        assert!(
+            says(&rt, &format!("{row}, Not available yet")),
+            "a step nothing answered for claims no value: {row}"
+        );
     }
+    assert!(says(&rt, "File Explorer, On"));
     assert!(
         !rt.elements().iter().any(|e| !e.exiting && e.role == "link"),
         "the rows are values: nothing opens a setting from here"
@@ -704,6 +803,7 @@ fn a_switch_that_could_not_be_set_is_said_and_not_drawn_as_set() {
     let (mut rt, _engine, fixture, ..) = window(set);
     fixture.set_gate_for_scene(ShellGate::FirstRun);
     wait_for(&mut rt, "the first run", |rt| rt.state.setup.is_some());
+    to_file_explorer(&mut rt);
     press(&mut rt, "Continue");
     press(&mut rt, "Allow notifications");
     press(&mut rt, "Continue");
@@ -723,8 +823,9 @@ fn the_first_run_is_dropped_with_its_session_and_made_again_for_another_account(
     let (mut rt, engine, fixture, ..) = window(set);
     fixture.set_gate_for_scene(ShellGate::FirstRun);
     wait_for(&mut rt, "the first run", |rt| rt.state.setup.is_some());
+    to_file_explorer(&mut rt);
     press(&mut rt, "Continue");
-    assert!(says(&rt, "Allow notifications"), "on step two");
+    assert!(says(&rt, "Allow notifications"), "on the step after File Explorer");
     // Locked: nothing of the first run stays.
     fixture.set_gate_for_scene(ShellGate::Locked);
     wait_for(&mut rt, "dropped", |rt| rt.state.setup.is_none());
@@ -732,14 +833,16 @@ fn the_first_run_is_dropped_with_its_session_and_made_again_for_another_account(
     *engine.stamp.lock().unwrap() = (session(2), Some(FIRST.into()));
     fixture.set_gate_for_scene(ShellGate::FirstRun);
     wait_for(&mut rt, "made again", |rt| rt.state.setup.is_some());
-    assert_eq!(rt.state.setup.as_ref().map(|ui| ui.step), Some(Step::Explorer));
+    assert_eq!(rt.state.setup.as_ref().map(|ui| ui.step), Some(Step::Passkey));
+    to_file_explorer(&mut rt);
     press(&mut rt, "Continue");
     // Another account under the same gate: from the first step again, and its presses are its own session's.
     *engine.stamp.lock().unwrap() = (session(3), Some(SECOND.into()));
     fixture.set_account(SECOND);
     wait_for(&mut rt, "the second account's", |rt| {
-        rt.state.setup.as_ref().is_some_and(|ui| ui.step == Step::Explorer)
+        rt.state.setup.as_ref().is_some_and(|ui| ui.step == Step::Passkey)
     });
+    to_file_explorer(&mut rt);
     press(&mut rt, "Continue");
     press(&mut rt, "Allow notifications");
     wait_for(&mut rt, "its write", |_| !engine.notified.lock().unwrap().is_empty());
@@ -809,162 +912,4 @@ fn a_window_without_the_wiring_never_starts_a_first_run() {
     rt.frame(0.0);
     rt.frame(0.1);
     assert!(rt.state.setup.is_none());
-}
-
-// ---------------------------------------------------------------------------
-// The engine's own calls, once, on a real handle against the fake API
-// ---------------------------------------------------------------------------
-
-mod glue {
-    use beebeeb_engine::app::EngineConfig;
-    use beebeeb_engine::config::{CONFIG_DIR_OVERRIDE, DesktopConfig};
-    use beebeeb_engine::host::ChannelHost;
-    use beebeeb_engine::identity::TEST;
-    use beebeeb_engine::signin::memory_store::MemoryCredentials;
-    use beebeeb_engine::test_api::FakeApi;
-    use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
-    use zeroize::Zeroizing;
-
-    use super::*;
-
-    const PASSWORD: &str = "an invented password for setup";
-
-    type Messages = std::sync::mpsc::Receiver<beebeeb_engine::host::HostMessage>;
-
-    /// A handle on a fake API of its own, signed in and unlocked.
-    fn signed_in() -> (Arc<Engine<MemoryCredentials>>, FakeApi, String) {
-        let (engine, api, phrase, _messages) = signed_in_with_messages();
-        (engine, api, phrase)
-    }
-
-    fn signed_in_with_messages() -> (Arc<Engine<MemoryCredentials>>, FakeApi, String, Messages) {
-        let (account, phrase) = FakeAccount::register(FIRST, PASSWORD, TEST_PHRASE);
-        let account = Arc::new(account);
-        let api = FakeApi::start(account_handler(account.clone()));
-        let (host, messages) = ChannelHost::new(|| {});
-        let config = EngineConfig {
-            account_id: "setup-test-slot".into(),
-            state_dir: crate::engine_host::tests::process_state_dir(),
-            api_base: api.base.clone(),
-        };
-        let engine = Arc::new(Engine::open(&TEST, config, host, MemoryCredentials::default()).expect("opens"));
-        engine.restore();
-        engine
-            .sign_in_password(FIRST, Zeroizing::new(PASSWORD.into()))
-            .expect("the fake accepts the password");
-        engine
-            .unlock_with_phrase(Zeroizing::new(phrase.clone()))
-            .expect("the phrase unlocks");
-        (engine, api, phrase, messages)
-    }
-
-    /// The gate the shell reads from the live engine: the first-run steps for a signed-in, unlocked session of a
-    /// PC that still has its first run to do, only once the app's start wired it, and the main window after.
-    #[test]
-    fn the_live_engines_gate_shows_the_first_run_only_while_it_is_due_and_wired() {
-        use crate::engine_host::LiveEngine;
-        use crate::engine_host::open::Opened;
-        use crate::shell::actions::EngineActions;
-        let (engine, _api, _phrase, messages) = signed_in_with_messages();
-        let opened = Opened {
-            engine: engine.clone(),
-            identity: &TEST,
-            gate: engine.gate(),
-        };
-        let live = Arc::new(LiveEngine::new(&opened, messages));
-        assert_eq!(live.session().gate, ShellGate::Ready, "nobody wired a first run");
-        in_own_settings(|| live.wire_first_run());
-        assert_eq!(live.session().gate, ShellGate::FirstRun, "due, signed in and unlocked");
-        // Locked: the lock screen, never the first run.
-        engine.lock();
-        assert_eq!(live.session().gate, ShellGate::Locked);
-        // The first run ends (the adapter's flag, through the hooks the app hands it): the main window.
-        let hooks = live.setup_hooks(Arc::new(FakePlatform::default()));
-        hooks.first_run.end();
-        assert_eq!(live.session().gate, ShellGate::Locked);
-        assert!(!hooks.first_run.due());
-        // A PC that had its first run: wiring it shows none.
-        in_own_settings(|| {
-            DesktopConfig::update_for(&TEST, |config| {
-                config.known_folder_onboarding_seen = true;
-                (true, ())
-            })
-            .expect("written");
-            live.wire_first_run();
-        });
-        assert!(!hooks.first_run.due());
-    }
-
-    /// The settings file of this test alone (the process's is shared with every other test).
-    fn in_own_settings<T>(run: impl FnOnce() -> T) -> T {
-        let dir = tempfile::tempdir().expect("a folder for the settings file");
-        CONFIG_DIR_OVERRIDE.sync_scope(dir.path().to_path_buf(), run)
-    }
-
-    #[test]
-    fn the_first_run_flag_and_the_notifications_switch_are_written_for_the_session_of_the_press_only() {
-        let (engine, _api, phrase) = signed_in();
-        in_own_settings(|| {
-            let file = || DesktopConfig::load_for(&TEST).expect("the settings file reads");
-            let turn = engine.session_turn();
-            // A PC that never had a first run: it is due, and nothing was written by asking.
-            assert_eq!(Engine::first_run_due(&*engine), Ok(true));
-            assert!(
-                file().notify_allow,
-                "precondition: notifications are allowed by default"
-            );
-            // The switch, both ways, for this session.
-            assert_eq!(engine.set_notifications_allowed_for(turn, false), Ok(()));
-            assert!(!file().notify_allow);
-            assert_eq!(engine.set_notifications_allowed_for(turn, true), Ok(()));
-            assert!(file().notify_allow);
-            assert_eq!(
-                Engine::first_run_due(&*engine),
-                Ok(true),
-                "a switch does not end the first run"
-            );
-
-            // Another session (a lock and an unlock): a press stamped with the old one writes nothing.
-            engine.lock();
-            assert_eq!(
-                engine.set_notifications_allowed_for(turn, false),
-                Err(SetupRefused::SessionMoved)
-            );
-            assert_eq!(engine.mark_first_run_done_for(turn), Err(SetupRefused::SessionMoved));
-            engine
-                .unlock_with_phrase(Zeroizing::new(phrase.clone()))
-                .expect("the phrase unlocks");
-            assert_eq!(
-                engine.set_notifications_allowed_for(turn, false),
-                Err(SetupRefused::SessionMoved)
-            );
-            assert_eq!(engine.mark_first_run_done_for(turn), Err(SetupRefused::SessionMoved));
-            assert!(file().notify_allow, "nothing was written");
-            assert_eq!(Engine::first_run_due(&*engine), Ok(true), "nothing was written");
-
-            // The session of now: the first run is done, and stays done (also for the adapter's own glue).
-            let now = engine.session_turn();
-            assert_eq!(SetupEngine::mark_done_for(&*engine, now), Ok(()));
-            assert_eq!(SetupEngine::first_run_due(&*engine), Ok(false));
-            assert!(
-                file().known_folder_onboarding_seen,
-                "the settings file's own show-once flag"
-            );
-            assert_eq!(engine.mark_first_run_done_for(now), Ok(()), "twice is the same");
-            assert_eq!(SetupEngine::set_notifications_for(&*engine, now, false), Ok(()));
-            assert!(!file().notify_allow);
-            // The glue's stamp is the handle's session and account.
-            assert_eq!(SetupEngine::stamp(&*engine), (now, Some(FIRST.to_string())));
-            assert_eq!(SetupEngine::view(&*engine).gate, GateState::Ready);
-        });
-        // A PC that went through the first run in the app before this one (its flag is set): not due.
-        in_own_settings(|| {
-            DesktopConfig::update_for(&TEST, |config| {
-                config.known_folder_onboarding_seen = true;
-                (true, ())
-            })
-            .expect("written");
-            assert_eq!(Engine::first_run_due(&*engine), Ok(false));
-        });
-    }
 }

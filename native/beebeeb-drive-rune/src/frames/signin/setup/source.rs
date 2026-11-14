@@ -24,6 +24,47 @@ pub enum Explorer {
     NotSyncing,
 }
 
+/// The sync folder, while the first run still has to ask for it (the sync-start contract's ruling Q2: the first
+/// run asks for the folder before the first start). The board has no frame for it: it is the first state of the
+/// File Explorer step.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum FolderAsk {
+    /// Nothing to ask: the settings name the folder, or it was chosen in this first run.
+    #[default]
+    Settled,
+    Ask {
+        /// The folder that is suggested, as the person's own PC writes it. Shown, never logged.
+        folder: String,
+        /// Why the last choice was not taken.
+        said: Option<FolderSaid>,
+        /// A choice is being checked, or Windows' folder picker is open: no second one is asked.
+        busy: bool,
+    },
+}
+
+/// Why a folder was not taken as the sync folder. Nothing was created or written for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderSaid {
+    /// A folder on the network.
+    Network,
+    /// A drive itself, or a folder of Windows or its programs.
+    System,
+    /// The home folder itself, or the folder apps keep their data in.
+    Home,
+    /// Beebeeb's own data.
+    OwnData,
+    /// Not a folder.
+    NotAFolder,
+    /// Another app's sync folder.
+    AnotherApps,
+    /// The folder could not be read.
+    Unreadable,
+    /// Not a full path to a folder on this PC.
+    NotAFullPath,
+    /// Windows' folder picker could not be opened.
+    NoPicker,
+}
+
 /// A switch of setup whose change is answered after the press ([`SetupSource::take_outcomes`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Switch {
@@ -132,11 +173,26 @@ pub struct Sample {
 pub const BUNDLED_SAMPLE_PNG: &[u8] = include_bytes!("../../../../assets/sample/compare-sample.png");
 
 pub trait SetupSource {
-    /// Whether this source answers for a step. `false`: the step is not shown, in the list at the left, as a
-    /// step, or as a row of "You're set up": never a step that looks done while nothing was set. The fixture
-    /// answers for all of them (the board).
-    fn offers(&self, _step: super::Step) -> bool {
+    /// Whether something answers for a step. `false`: the step keeps its place in the list (the first run has
+    /// its seven steps), says that it is not available in this version yet, and turns nothing on; its row of
+    /// "You're set up" says so too. Never a step that looks done while nothing was set. The fixture answers for
+    /// all of them (the board).
+    fn available(&self, _step: super::Step) -> bool {
         true
+    }
+    /// Whether the first run still has to ask for the sync folder, and what it suggests.
+    fn folder_ask(&self) -> FolderAsk {
+        FolderAsk::Settled
+    }
+    /// "Use this folder": the suggested folder is the sync folder, if it may be; then sync starts.
+    fn keep_folder(&mut self) {}
+    /// "Choose another folder": Windows' folder picker; the folder picked there is the sync folder, if it may
+    /// be; then sync starts.
+    fn choose_folder(&mut self) {}
+    /// Whether another folder can still be chosen after a start that was refused: only while no folder was
+    /// kept in the settings (no start has worked yet).
+    fn can_choose_again(&self) -> bool {
+        false
     }
     /// Whether a row of "You're set up" leads to its setting. `false`: the rows are values, not links.
     fn opens_settings(&self) -> bool {

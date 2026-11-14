@@ -196,7 +196,8 @@ pub enum GateState {
     KeyStoreUnavailable,
     /// Signed in and unlocked, setup on this PC is not finished: the first-run steps (DW-0201
     /// to DW-0208, "A window of its own between sign-in and the main window"). Not a variant
-    /// of `gate.rs` yet: the first-run lane adds it there.
+    /// of the engine's gate (`gate.rs`), which is Ready: the engine host shows this one while the
+    /// settings' `native_setup_done` is not set (`engine_host::setup::FirstRun`).
     FirstRun,
 }
 

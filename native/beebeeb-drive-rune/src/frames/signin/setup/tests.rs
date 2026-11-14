@@ -554,7 +554,8 @@ fn an_answered_switch_draws_what_the_answer_says_not_what_was_asked() {
     });
     assert!(ui.results.notifications);
     assert_eq!(ui.answered(Switch::Notifications), None);
-    // The fixture's changes are made at once: nothing waits, and every step and row is there (the board).
-    assert_eq!(ui.steps(), Step::STEPS);
-    assert!(ui.opens_settings() && ui.has(Setting::Passkey));
+    // The fixture's changes are made at once: nothing waits, every step is answered for, and no folder is
+    // asked for (the board).
+    assert!(Step::STEPS.into_iter().all(|step| ui.available(step)));
+    assert!(ui.opens_settings() && !ui.asks_folder() && !ui.can_choose_again());
 }

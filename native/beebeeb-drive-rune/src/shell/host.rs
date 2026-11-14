@@ -663,9 +663,9 @@ fn start_first_run(s: &mut State) {
 }
 
 /// The refusal modal (the owner's ruling Q3 on the sync-start contract): it opens once per refused start attempt,
-/// over whatever the window shows, only while the gate is Ready. An attempt refused while the gate is closed is
-/// never shown later (a stale refusal); another dialog in front keeps it waiting until that one closes. `true`: it
-/// opened.
+/// over whatever the window shows, only while the gate is Ready or the first run shows ("the first run uses the
+/// same modal", S2). An attempt refused while the gate is closed is never shown later (a stale refusal); another
+/// dialog in front keeps it waiting until that one closes. `true`: it opened.
 fn open_sync_refusal(s: &mut State) -> bool {
     let Some(refusal) = s.shell.actions.sync_refusal() else {
         return false;
@@ -673,7 +673,8 @@ fn open_sync_refusal(s: &mut State) -> bool {
     if s.shell.refusal_seen == Some(refusal.attempt) {
         return false;
     }
-    if s.shell.app.gate() != super::app::GateState::Ready {
+    let gate = s.shell.app.gate();
+    if gate != super::app::GateState::Ready && gate != super::app::GateState::FirstRun {
         s.shell.refusal_seen = Some(refusal.attempt);
         return false;
     }
