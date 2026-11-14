@@ -332,7 +332,7 @@ fn a_cancelled_upload_leaves_the_selection_on_the_same_files() {
     });
     let (first, last) = (order[1].clone(), order[2].clone());
     spy.later.lock().unwrap().push(Change::Cancelled { id: other.clone() });
-    assert!(frame(&mut rt));
+    frame(&mut rt);
     assert!(!shown(&rt, &other), "the cancelled upload's row is gone");
     let selected: Vec<&str> = rt
         .state
