@@ -223,10 +223,8 @@ fn why(refused: ShareLinkError) -> ActionError {
         ShareLinkError::Offline => ActionError::Offline,
         ShareLinkError::NotAFile => ActionError::NotYet,
         ShareLinkError::HasLink => ActionError::HasLink,
-        ShareLinkError::SessionEnded
-        | ShareLinkError::NotFound
-        | ShareLinkError::KeyUnavailable
-        | ShareLinkError::Invalid
-        | ShareLinkError::Refused => ActionError::Failed,
+        // Asking again changes nothing (nothing was sent, and nothing would be): said without Try again.
+        ShareLinkError::NotFound | ShareLinkError::KeyUnavailable => ActionError::Unavailable,
+        ShareLinkError::SessionEnded | ShareLinkError::Invalid | ShareLinkError::Refused => ActionError::Failed,
     }
 }

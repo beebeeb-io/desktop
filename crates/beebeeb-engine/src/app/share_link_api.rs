@@ -42,8 +42,23 @@ use crate::{auth_transport, owner_keys};
 #[path = "share_link_api_tests.rs"]
 mod tests;
 
-/// Where a link points: the web app. Core refuses anything that is not `https` (or loopback).
-const WEB_APP_URL: &str = "https://app.beebeeb.io";
+/// The local web app of a development stack (the API on loopback).
+const LOCAL_WEB_APP: &str = "http://localhost:5173";
+
+/// Where a link points: the web app of the SAME deployment as the API this handle talks to, so a build pointed
+/// at another API never hands out a link to production. `https://api.<domain>` is `https://app.<domain>`; an
+/// API on loopback is the local web app; for any other API base no link is made. (Core refuses anything that
+/// is not `https` or loopback as well.)
+fn web_origin(api_base: &str) -> Option<String> {
+    let base = api_base.trim_end_matches('/');
+    if let Some(domain) = base.strip_prefix("https://api.") {
+        let plain = |c: char| c.is_ascii_alphanumeric() || c == '.' || c == '-';
+        return (!domain.is_empty() && domain.chars().all(plain)).then(|| format!("https://app.{domain}"));
+    }
+    let host = base.strip_prefix("http://")?;
+    let host = host.split(':').next().unwrap_or_default();
+    matches!(host, "localhost" | "127.0.0.1").then(|| LOCAL_WEB_APP.to_string())
+}
 const MINE: &str = "/api/v1/shares/mine";
 
 /// What the Share dialog chose for a new link. `None` is "never" / "no password".
@@ -140,8 +155,8 @@ impl std::fmt::Display for ShareLinkError {
 
 impl<C: CredentialStores> Engine<C> {
     /// WRITES on the server (at most one new link): the link to the file `file_id` of the account of `session`.
-    /// `choices`: `None` is the plain Copy link (the file's live link if it has one, else a new link that never
-    /// expires); `Some` is the Share dialog's (a new link with them). See the module's doc for the session rule,
+    /// `choices`: `None`, or choices with nothing chosen, is the plain Copy link (the file's live link if it has
+    /// one, else a new link that never expires); an expiry or a password asks for a new link with them. See the module's doc for the session rule,
     /// for "never two links" and for what leaves this call.
     pub fn share_link_for(
         &self,
@@ -150,6 +165,7 @@ impl<C: CredentialStores> Engine<C> {
         choices: Option<&LinkChoices>,
     ) -> Result<MadeLink, ShareLinkError> {
         let id = canonical(file_id)?;
+        let app_url = web_origin(&self.config.api_base).ok_or(ShareLinkError::Refused)?;
         // A password that was asked for and is only spaces: core would drop it and make a link that asks for
         // none. Such a link is never made.
         let blank = |c: &LinkChoices| c.passphrase.as_ref().is_some_and(|typed| typed.trim().is_empty());
@@ -190,10 +206,15 @@ impl<C: CredentialStores> Engine<C> {
         };
 
         let mut link = None;
-        if choices.is_none() {
+        // Nothing chosen (no choices at all, or a dialog left on "never" with no password) is the plain request:
+        // the file's own live link, never a second one behind it. Only a real choice asks for a new link.
+        let plain = choices.is_none_or(|c| c.expires_in_hours.is_none() && c.passphrase.is_none());
+        if plain {
             let mine = listed(send(get(format!("{MINE}?file_id={id}")))?)?;
             let live = live_links(&mine, id);
-            link = live.iter().find_map(|share| rebuilt(&master, &file_key, share));
+            link = live
+                .iter()
+                .find_map(|share| rebuilt(&app_url, &master, &file_key, share));
             // A live link that cannot be checked is not handed out, and no second one is made.
             if link.is_none() && !live.is_empty() {
                 return Err(ShareLinkError::HasLink);
@@ -208,7 +229,7 @@ impl<C: CredentialStores> Engine<C> {
                     passphrase: choices.and_then(|c| c.passphrase.clone()),
                 };
                 let (mut flow, mut req) =
-                    CreateLink::start(WEB_APP_URL, id, &master, &file_key, &options).map_err(flow_refusal)?;
+                    CreateLink::start(&app_url, id, &master, &file_key, &options).map_err(flow_refusal)?;
                 loop {
                     match flow.on_response(send(req)?).map_err(flow_refusal)? {
                         LinkStep::Send(next) => req = next,
@@ -315,18 +336,19 @@ fn live_links<'a>(mine: &'a [Value], id: &str) -> Vec<&'a Value> {
 /// asked for (core's recipient-side opener). The list is the server's word: a row that names this file and
 /// carries another file's link is not handed out. `None` when a part is absent, does not open, or is not this
 /// file's.
-fn rebuilt(master: &MasterKey, file_key: &FileKey, share: &Value) -> Option<Zeroizing<String>> {
+fn rebuilt(app_url: &str, master: &MasterKey, file_key: &FileKey, share: &Value) -> Option<Zeroizing<String>> {
     let text = |field: &str| share.get(field).and_then(Value::as_str);
     let wrapped = text("wrapped_file_key")?;
     let link = rebuild_link(
-        WEB_APP_URL,
+        app_url,
         master,
         text("owner_wrapped_key"),
         text("owner_wrapped_token"),
         wrapped,
     )?;
-    let key_part = link.split_once("#key=")?.1;
-    let opens = open_link_file_key(key_part, wrapped).ok()?;
+    // The key part, read by core's own link parser (never split out by hand).
+    let key_part = Zeroizing::new(beebeeb_core::share_link::parse(&link).ok()?.key);
+    let opens = open_link_file_key(&key_part, wrapped).ok()?;
     // Every byte is compared, whatever the first difference.
     let differs = opens
         .as_bytes()

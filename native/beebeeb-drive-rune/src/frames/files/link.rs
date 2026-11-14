@@ -86,7 +86,12 @@ impl State {
         };
         match asked {
             // Accepted, not made: said, and copied, when the source answered ([`poll`]).
-            Ok(()) if self.actions.source.answers_later() => self.actions.link.asked = Some(ids),
+            Ok(()) if self.actions.source.answers_later() => {
+                // An earlier message ("Link copied" of another file, a failure's Try again) is not this press's.
+                self.actions.toast = None;
+                self.actions.toast_until = None;
+                self.actions.link.asked = Some(ids);
+            }
             Ok(()) => self.show_toast(Toast::LinkCopied, tx),
             Err(why) => {
                 self.actions.link.again = match why {

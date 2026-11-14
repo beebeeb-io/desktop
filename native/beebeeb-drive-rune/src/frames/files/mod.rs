@@ -160,7 +160,10 @@ impl Toast {
             ActionError::NotAll => " Some items were left as they were.",
             ActionError::NotOnThisSystem => " It is not available on this computer yet.",
             ActionError::NotYet => " It is not available yet.",
-            ActionError::HasLink => " This file already has a link, and copying it again is not available yet.",
+            ActionError::HasLink => {
+                " This file already has a link that can't be copied here yet. To get a new link, stop sharing the \
+                 file in the web app first."
+            }
             ActionError::NotSent => " It has changes that are not uploaded yet.",
             ActionError::HoldsKept => " Something in it is kept on this PC.",
             _ => "",

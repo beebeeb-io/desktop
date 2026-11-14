@@ -260,7 +260,7 @@ fn a_plain_copy_link_makes_one_link_that_opens_to_the_files_own_key() {
     // key the file is encrypted with: core's derivation for this id under this account's vault key.
     let link = made.expose();
     assert!(
-        link.starts_with(&format!("https://app.beebeeb.io/s/{}#key=", text(&posted[0], "token"))),
+        link.starts_with(&format!("http://localhost:5173/s/{}#key=", text(&posted[0], "token"))),
         "the link's shape"
     );
     let opened = share_flow::link::open_link_file_key(key_part(link), text(&posted[0], "wrapped_file_key"))
@@ -317,6 +317,70 @@ fn a_file_that_has_a_live_link_never_gets_a_second_one_behind_it() {
     let new = engine.share_link_for(turn, NOTE, None).expect("a new link");
     assert_ne!(new.expose(), first.expose());
     assert_eq!(fake.count(POST), 3);
+}
+
+#[test]
+fn a_dialog_with_nothing_chosen_is_the_plain_request_and_makes_no_second_link() {
+    let (fake, engine, _state, turn) = ready("nothing-chosen");
+    let nothing = LinkChoices::default();
+    engine
+        .share_link_for(turn, NOTE, Some(&nothing))
+        .expect("the first link");
+    assert_eq!(fake.api.routes(), [LIST, POST], "the account's links are read first");
+    // Pressed again, and again: the file has a live link, and no other is made behind it.
+    for _ in 0..3 {
+        assert_eq!(
+            refusal(engine.share_link_for(turn, NOTE, Some(&nothing))),
+            ShareLinkError::HasLink
+        );
+    }
+    assert_eq!(fake.count(POST), 1);
+    assert_eq!(fake.first.links().len(), 1);
+    // Once the list carries the wrapped key, the same link comes back for it.
+    fake.first.list_links_with_their_wrapped_key(true);
+    assert!(engine.share_link_for(turn, NOTE, Some(&nothing)).is_ok());
+    assert_eq!(fake.count(POST), 1);
+}
+
+#[test]
+fn a_link_points_at_the_web_app_of_the_api_it_was_made_on_and_nowhere_else() {
+    assert_eq!(
+        web_origin("https://api.beebeeb.io").as_deref(),
+        Some("https://app.beebeeb.io")
+    );
+    assert_eq!(
+        web_origin("https://api.beebeeb.io/").as_deref(),
+        Some("https://app.beebeeb.io")
+    );
+    assert_eq!(
+        web_origin("https://api.staging.example.eu").as_deref(),
+        Some("https://app.staging.example.eu")
+    );
+    for local in ["http://127.0.0.1:3001", "http://localhost:3001", "http://localhost"] {
+        assert_eq!(web_origin(local).as_deref(), Some("http://localhost:5173"), "{local}");
+    }
+    // Anything else has no web app this handle can name: never production by default.
+    for other in [
+        "https://beebeeb.io",
+        "https://example.eu",
+        "http://api.beebeeb.io",
+        "http://10.0.0.5:3001",
+        "https://api.",
+        "https://api.evil.example/x?y=https://app.beebeeb.io",
+        "",
+    ] {
+        assert_eq!(web_origin(other), None, "{other}");
+    }
+    // A handle on such an API makes no link, and asks nothing.
+    let fake = fake("origin");
+    let elsewhere = engine_at("http://10.255.255.1:9");
+    signed_in(&elsewhere, &fake.first);
+    let _state = local_state(&elsewhere, &fake.first);
+    assert_eq!(
+        refusal(elsewhere.share_link_for(elsewhere.session_turn(), NOTE, None)),
+        ShareLinkError::Refused
+    );
+    assert_eq!(fake.api.requests().len(), 0);
 }
 
 #[test]

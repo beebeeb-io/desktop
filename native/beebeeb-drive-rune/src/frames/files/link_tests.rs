@@ -263,6 +263,84 @@ fn a_press_whose_answer_was_dropped_does_not_keep_the_next_one_from_being_asked(
 }
 
 #[test]
+fn an_accepted_press_takes_the_earlier_message_away() {
+    let (mut rt, spy, _, _) = window();
+    // File A's link landed: "Link copied".
+    rt.update(|s, tx| assert!(s.copy_link(tx)));
+    spy.answer(Action::CopyLink, Ok(LINK));
+    frame(&mut rt);
+    assert_eq!(rt.state.actions.toast, Some(Toast::LinkCopied));
+    // File B, at once: A's message is not B's, and it goes at the press.
+    select_only(&mut rt, 1);
+    rt.update(|s, tx| assert!(s.copy_link(tx)));
+    assert_eq!(
+        rt.state.actions.toast, None,
+        "the earlier file's \"Link copied\" still stands"
+    );
+    spy.answer(Action::CopyLink, Ok(LINK));
+    frame(&mut rt);
+    // The same for the dialog's link.
+    assert_eq!(rt.state.actions.toast, Some(Toast::LinkCopied));
+    rt.update(|s, tx| {
+        assert!(s.begin_share());
+        s.share_copy_link(tx);
+    });
+    assert_eq!(rt.state.actions.toast, None);
+}
+
+#[test]
+fn the_dialog_keeps_what_was_typed_while_another_link_is_on_its_way() {
+    let (mut rt, spy, _, ids) = window();
+    rt.update(|s, tx| assert!(s.copy_link(tx)));
+    spy.asked();
+    select_only(&mut rt, 1);
+    rt.update(|s, tx| {
+        assert!(s.begin_share());
+        if let Some(Dialog::Share(share)) = &mut s.actions.dialog {
+            share.password_on = true;
+        }
+        s.actions.share_password = rune::TextEdit::new("an invented password").secure();
+        s.share_copy_link(tx);
+    });
+    assert_eq!(spy.asked(), [], "a second link was asked for");
+    assert!(rt.state.actions.dialog.is_some(), "the dialog closed");
+    assert_eq!(
+        rt.state.actions.share_password.text, "an invented password",
+        "what was typed is gone"
+    );
+    assert_eq!(
+        rt.state.actions.toast,
+        Some(Toast::Failed(Action::ShareLink, ActionError::InFlight))
+    );
+    assert!(!rt.state.offers_try_again(Action::ShareLink, ActionError::InFlight));
+    // The first link answered: the same press, with the same password still there, is asked now.
+    spy.answer(Action::CopyLink, Ok(LINK));
+    frame(&mut rt);
+    rt.update(|s, tx| s.share_copy_link(tx));
+    assert_eq!(spy.asked(), [(Action::ShareLink, vec![ids[1].clone()])]);
+}
+
+#[test]
+fn what_nothing_here_can_do_is_said_without_try_again_and_a_file_with_a_link_says_what_to_do() {
+    let (mut rt, spy, _, _) = window();
+    rt.update(|s, tx| assert!(s.copy_link(tx)));
+    spy.asked();
+    spy.answer(Action::CopyLink, Err(ActionError::Unavailable));
+    assert!(frame(&mut rt));
+    assert_eq!(
+        rt.state.actions.toast,
+        Some(Toast::Failed(Action::CopyLink, ActionError::Unavailable))
+    );
+    assert!(!rt.state.offers_try_again(Action::CopyLink, ActionError::Unavailable));
+    rt.update(|s, tx| s.retry(tx));
+    assert_eq!(spy.asked(), [], "a Try again that changes nothing was asked");
+    assert!(!rt.state.offers_try_again(Action::ShareLink, ActionError::Unavailable));
+    // The way forward for a file whose link cannot be copied here is in the words.
+    let said = Toast::failure(Action::CopyLink, ActionError::HasLink);
+    assert!(said.contains("stop sharing") && said.contains("web app"), "{said}");
+}
+
+#[test]
 fn a_failure_with_nothing_held_and_a_message_that_went_leave_nothing_to_try_again() {
     let (mut rt, spy, _, _) = window();
     // An answer nobody here pressed for (nothing is held of its press): Try again is not "the selection".

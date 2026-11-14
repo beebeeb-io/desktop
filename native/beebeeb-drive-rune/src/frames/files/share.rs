@@ -137,6 +137,12 @@ impl State {
         if self.needs_session(tx) {
             return;
         }
+        // One link at a time (`link.rs`). Refused before anything is read or closed: the dialog stays as it is,
+        // with what was typed, and the press can be repeated when the link on its way answered.
+        if self.link_on_its_way() {
+            self.show_toast(Toast::Failed(Action::ShareLink, ActionError::InFlight), tx);
+            return;
+        }
         let typed = self.actions.share_password.text.clone();
         // Spaces are not a password: a link made with them would ask for none.
         if share.password_on && typed.trim().is_empty() {
@@ -152,12 +158,7 @@ impl State {
             password: share.password_on.then_some(typed),
         };
         self.forget_undo();
-        // One link at a time (`link.rs`): while one is on its way, a second is not asked for.
-        let answer = if self.link_on_its_way() {
-            Err(ActionError::InFlight)
-        } else {
-            self.actions.source.share_link(&share.items, &options)
-        };
+        let answer = self.actions.source.share_link(&share.items, &options);
         drop(options);
         // The dialog closes either way; a failure says so, with Try again (DW-0109).
         self.close_dialog(tx);
@@ -165,6 +166,9 @@ impl State {
             // Accepted, not made: "Link copied" is said when the link is on the clipboard (`link.rs`), and a
             // failure then opens this dialog again as a refusal at the press does.
             Ok(()) if self.actions.source.answers_later() => {
+                // An earlier message is not this press's.
+                self.actions.toast = None;
+                self.actions.toast_until = None;
                 self.actions.retry_share = None;
                 self.actions.link.share = Some(Share {
                     password_missing: false,

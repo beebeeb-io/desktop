@@ -87,7 +87,10 @@ impl State {
                 Action::KeepOffline | Action::RemoveOffline | Action::FreeUpSpace => self.local_can_retry(action),
                 Action::Trash => self.trash_can_retry(),
                 Action::Restore => self.undo_can_retry(),
-                Action::CopyLink => self.link_can_retry(),
+                // "Nothing can do it" (no session, no key here, no such file): asking again changes nothing.
+                Action::CopyLink => why != ActionError::Unavailable && self.link_can_retry(),
+                // The dialog is where a link with choices is asked again; not while another is on its way.
+                Action::ShareLink => !matches!(why, ActionError::Unavailable | ActionError::InFlight),
                 _ => true,
             }
     }

@@ -268,7 +268,7 @@ fn a_link_is_asked_for_on_a_worker_and_handed_over_only_once_beebeeb_answered() 
     let token = posted[0]["token"].as_str().expect("the posted token");
     assert!(
         link.expose()
-            .starts_with(&format!("https://app.beebeeb.io/s/{token}#key=")),
+            .starts_with(&format!("http://localhost:5173/s/{token}#key=")),
         "the link Beebeeb accepted"
     );
     // What a `{:?}` of the answer prints holds nothing of the link.
@@ -316,6 +316,40 @@ fn the_dialogs_choices_are_sent_and_a_view_only_link_is_refused_unsent() {
     let posted = fake.first.links();
     assert_eq!(posted[0]["expires_in_hours"], 24 * 7);
     assert_eq!(posted[0]["passphrase"], "an invented link password");
+}
+
+#[test]
+fn the_dialog_with_nothing_chosen_makes_no_second_link_and_a_file_not_here_offers_no_retry_kind() {
+    let fake = fake("plain-dialog");
+    let (_engine, mut source, _state) = signed_in(&fake);
+    let nothing = ShareOptions {
+        access: LinkAccess::Download,
+        expires: LinkExpiry::Never,
+        password: None,
+    };
+    for expected in [None, Some(ActionError::HasLink), Some(ActionError::HasLink)] {
+        let ended = watch_next_call(&mut source);
+        assert_eq!(source.share_link(&file(NOTES), &nothing), Ok(()));
+        ended.recv_timeout(WAIT).expect("the call ended");
+        let answer = answers(&mut source).pop().expect("an answer").1;
+        assert_eq!(answer.err(), expected);
+    }
+    assert_eq!(
+        fake.first.links().len(),
+        1,
+        "one link, however often the dialog was pressed"
+    );
+
+    // A file that is not in this account's local state: nothing is sent, and it is not said as "failed" (which
+    // would offer a Try again that changes nothing).
+    const NOT_HERE: &str = "a0000000-0000-4000-8000-000000000899";
+    let before = sent(&fake).len();
+    copy_now(&mut source, NOT_HERE);
+    assert_eq!(
+        answers(&mut source),
+        [(Action::CopyLink, Err(ActionError::Unavailable))]
+    );
+    assert_eq!(sent(&fake).len(), before, "nothing was sent");
 }
 
 #[test]
