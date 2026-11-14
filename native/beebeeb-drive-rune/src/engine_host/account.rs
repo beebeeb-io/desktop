@@ -78,6 +78,8 @@ mod sign_out_session;
 mod tests;
 #[path = "account_twofactor.rs"]
 mod twofactor;
+#[path = "account_twofactor_status.rs"]
+mod twofactor_status;
 #[path = "account_values.rs"]
 mod values;
 
@@ -221,6 +223,7 @@ pub struct EngineAccountSource<C: CredentialStores> {
     actions: actions::Actions<C>,
     /// Sign-in activity (`account_activity.rs`).
     activity: activity::ActivityPart<C>,
+    two_factor_status: twofactor_status::StatusPart<C>,
     passkeys: PasskeyCalls<C>,
     notices: Line,
     /// How sign-outs ended that the person has not been told: answered after they left Devices and sessions,
@@ -251,6 +254,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         Self {
             actions: actions::Actions::new(engine.clone()),
             activity: activity::ActivityPart::new(engine.clone()),
+            two_factor_status: twofactor_status::StatusPart::new(engine.clone()),
             passkeys: PasskeyCalls::new(engine.clone()),
             engine,
             overview: None,
@@ -705,6 +709,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
 
     fn opened(&mut self, pane: Pane) {
         self.activity.opened(pane);
+        self.two_factor_status.opened(pane);
         self.password.forget();
         self.passkeys.opened(pane);
         self.showing = Kind::of(pane);
@@ -741,6 +746,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
 
     fn closed(&mut self) {
         self.activity.closed();
+        self.two_factor_status.closed();
         self.password.forget();
         self.passkeys.closed();
         self.showing = None;
@@ -831,11 +837,16 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         changed |= self.notices.len() + self.later.len() != before;
         // The other parts: sign-in activity, and the confirmations and waits of what the window asks to do.
         let (log_changed, log_busy, log_wake) = self.activity.pump();
-        changed |= log_changed | self.actions.pump();
+        let (status_changed, status_busy) = self.two_factor_status.pump();
+        changed |= log_changed | status_changed | self.actions.pump();
         let wake_in = match (wake_in, log_wake) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
+        // A wait before "Send again" counts down: look again every second while it does.
+        let resend_tick = self.resend_tick();
+        changed |= resend_tick.is_some();
+        let wake_in = [wake_in, resend_tick].into_iter().flatten().min();
         self.dirty = false;
         let (passkeys_changed, passkeys_busy, passkeys_wake) = self.passkeys.pump();
         let (changed, wake_in) = (
@@ -848,6 +859,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
                 || self.sessions_reads.reading.is_some()
                 || !self.changing.is_empty()
                 || log_busy
+                || status_busy
                 || self.actions.busy()
                 || passkeys_busy,
             // Nothing wakes the window when the engine's flag clears: look again while a pane says so.
@@ -1076,9 +1088,12 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         Err(CodeRefused::Offline)
     }
     fn resend_wait(&self) -> u32 {
-        0
+        self.resend_left()
     }
     fn send_again(&mut self) -> bool {
+        false
+    }
+    fn can_send_again_deletion(&self) -> bool {
         false
     }
     fn password_strength(&self, candidate: &Password<'_>) -> Strength {
@@ -1120,9 +1135,8 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn add_passkey(&mut self) -> Result<(), Refused> {
         super::passkeys::add_without_password()
     }
-    /// Beebeeb has no route to rename a passkey: the menu does not offer it (`can_rename_passkey`).
-    fn rename_passkey(&mut self, _id: &str, _name: &str) -> bool {
-        false
+    fn rename_passkey(&mut self, id: &str, name: &str) -> bool {
+        self.passkeys.rename(id, name)
     }
     fn remove_passkey(&mut self, _id: &str) -> bool {
         false
@@ -1142,10 +1156,14 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn remove_passkey_confirmed(&mut self, id: &str, password: Password<'_>) -> bool {
         super::passkeys::remove_confirmed(&mut self.passkeys, id, password)
     }
-    /// Stopping the recording is not done from here (`can_stop_activity` is false): Beebeeb wants the password's
-    /// own proof for it, which the pane's code dialog does not give. Never reached from a drawn control.
     fn stop_activity(&mut self, _code: &str) -> Result<(), CodeRefused> {
         Err(CodeRefused::Offline)
+    }
+    fn stop_activity_needs_password(&self) -> bool {
+        true
+    }
+    fn stop_activity_confirmed(&mut self, password: Password<'_>) -> bool {
+        super::passkeys::wiping(&password).is_some_and(|password| self.activity.stop(password))
     }
     fn deletion(&self) -> Deletion {
         Deletion::None

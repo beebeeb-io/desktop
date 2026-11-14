@@ -250,7 +250,7 @@ fn link_sent(source: &dyn AccountSource, f: &Form, email: &str, t: &Theme) -> El
             .role("status"),
         );
     }
-    children.push(send_again(source, t));
+    children.push(send_again(source, false, t));
     children.push(fm::actions(vec![
         (
             opened.on_press(super::act(|ui: &mut AccountUi| {

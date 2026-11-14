@@ -80,6 +80,7 @@ fn server(mode: &'static AtomicU8) -> (FakeApi, Arc<Mutex<Vec<(bool, bool)>>>) {
                 status: 200,
                 content_type: "text/plain",
                 body: listed.clone().into_bytes(),
+                retry_after: None,
             };
         }
         if request.bearer() != Some(OLD_TOKEN) || mode.load(Ordering::SeqCst) == SESSION_ENDED {

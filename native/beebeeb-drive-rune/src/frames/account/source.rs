@@ -547,6 +547,18 @@ pub enum EmailRefused {
     Offline,
 }
 
+/// Why the email's code was not sent again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resend {
+    /// Too soon: seconds to wait (Beebeeb's `Retry-After`).
+    Wait(u32),
+    /// No more codes for this change: start again.
+    Limit,
+    /// No change is waiting any more: back to step 1.
+    Gone,
+    Offline,
+}
+
 /// The calls of the Account pages that are answered later: a source that sends them on a worker starts one with
 /// [`AccountSource::start_call`] and the window takes the answer with [`AccountSource::call_answer`]; nothing of the
 /// answer is drawn before it came.
@@ -566,6 +578,8 @@ pub enum CallKind {
     CheckCode,
     /// A current code: 8 new backup codes.
     NewBackupCodes,
+    /// "Send again": the email's code once more.
+    ResendEmail,
 }
 
 /// How a started call ended.
@@ -576,6 +590,7 @@ pub enum Answered {
     NewKey(Setup),
     Codes(Vec<Secret>),
     Email(EmailRefused),
+    Resend(Resend),
     Code(CodeRefused),
     Refused(Refused),
 }
@@ -742,6 +757,11 @@ pub trait AccountSource {
     fn can_send_again(&self) -> bool {
         true
     }
+    /// Whether "Send again" is offered for the account deletion's code (DW-A81): `false` when Beebeeb has no route
+    /// that sends it again. A fixture says `true` (the board).
+    fn can_send_again_deletion(&self) -> bool {
+        true
+    }
     /// Engine: `core::password::strength` on this device, and the leak check by hashed prefix.
     fn password_strength(&self, candidate: &Password<'_>) -> Strength;
     /// Engine: core re-wraps the vault key under the new password and registers it with OPAQUE
@@ -786,7 +806,7 @@ pub trait AccountSource {
     fn can_add_passkey(&self) -> bool {
         true
     }
-    /// `false`: Beebeeb has no route to rename a passkey, so the menu draws no "Rename".
+    /// `false`: this source cannot rename a passkey, so the menu draws no "Rename".
     fn can_rename_passkey(&self) -> bool {
         true
     }
@@ -808,6 +828,16 @@ pub trait AccountSource {
     /// Engine: the same, off, with a current two-factor code (the step-up when two-factor is
     /// off): recording stops and what was recorded is deleted within 30 days.
     fn stop_activity(&mut self, code: &str) -> Result<(), CodeRefused>;
+    /// Stopping the recording asks the account PASSWORD (owner ruling 2026-11-14), not a two-factor code: the dialog
+    /// draws a password field and calls `stop_activity_confirmed`. A fixture says `false` (the board's code dialog).
+    fn stop_activity_needs_password(&self) -> bool {
+        false
+    }
+    /// Engine: stop the recording with the password the person typed. `true`: it began; how it ended comes as a toast
+    /// and the log is read again.
+    fn stop_activity_confirmed(&mut self, _password: Password<'_>) -> bool {
+        false
+    }
     /// Whether this source can stop the recording from the pane. A source that cannot (Beebeeb asks for the
     /// password's own proof to stop it, which the pane's code dialog does not give) shows the switch as a value,
     /// with the way on the web.

@@ -79,6 +79,8 @@ mod search;
 mod shares;
 mod tracking;
 pub use tracking::{MyActivity, MyActivityEvent};
+mod two_factor;
+pub use two_factor::TwoFactorStatus;
 mod upload;
 
 #[cfg(any(test, feature = "test-support"))]

@@ -90,7 +90,7 @@ impl ActionError {
     }
 }
 
-fn from_call(error: AccountCallError) -> ActionError {
+pub(super) fn from_call(error: AccountCallError) -> ActionError {
     match error {
         AccountCallError::NotSignedIn => ActionError::NotSignedIn,
         AccountCallError::Offline => ActionError::Offline,
@@ -173,6 +173,21 @@ impl<C: CredentialStores> Engine<C> {
         self.change_for(session, flow)
     }
 
+    /// WRITES: turn the sign-in activity log OFF (`PUT /api/v1/me/tracking` `{opted_in:false}`). Beebeeb asks the
+    /// account PASSWORD's own proof for it (core's `AccountFlow::set_activity_logging(false, Some(password))` does the
+    /// step-up and spends its confirmation on that one request); recording stops and what was recorded is deleted
+    /// by Beebeeb within 30 days. A wrong password is [`ActionError::WrongPassword`] (it counts toward the sign-in
+    /// lockout), an empty one is the same and nothing is sent. The password is wiped when the call ends.
+    pub fn stop_activity_log_for(
+        &self,
+        session: SessionGeneration,
+        password: Zeroizing<String>,
+    ) -> Result<(), ActionError> {
+        let flow = AccountFlow::set_activity_logging(false, Some(password.as_str())).map_err(from_flow)?;
+        drop(password);
+        self.change_for(session, flow)
+    }
+
     /// The sign-in activity log: whether the account records it and, when it does, the newest events
     /// (`GET /api/v1/me/activity`).
     pub fn activity_log(&self) -> Result<Stamped<MyActivity>, ActionError> {
@@ -189,12 +204,12 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// Whether the session in memory is, now, the one `session` names (asked with no session change half done).
-    fn session_is_in_memory(&self, session: SessionGeneration) -> bool {
+    pub(super) fn session_is_in_memory(&self, session: SessionGeneration) -> bool {
         self.acct.while_session_is(&self.writes, session, |_| ()).is_some()
     }
 
     /// The token and the generation of the session in memory, taken under one lock. The copy wipes itself.
-    fn own_session(&self) -> Result<(Zeroizing<String>, SessionGeneration), ActionError> {
+    pub(super) fn own_session(&self) -> Result<(Zeroizing<String>, SessionGeneration), ActionError> {
         let pair = {
             let guard = self.acct.session.lock().map_err(|_| ActionError::NotSignedIn)?;
             let current = guard.as_ref().ok_or(ActionError::NotSignedIn)?;
@@ -208,7 +223,7 @@ impl<C: CredentialStores> Engine<C> {
 
     /// How one call ended, for the engine's run of 401s: a 401 advances it, an answer clears it, any other failure
     /// leaves it. Only while the session in memory is still `session`; `false`: it moved on, nothing was noted.
-    fn note_action(&self, session: SessionGeneration, failed_as: Option<ActionError>) -> bool {
+    pub(super) fn note_action(&self, session: SessionGeneration, failed_as: Option<ActionError>) -> bool {
         self.acct
             .while_session_is(&self.writes, session, |_| match failed_as {
                 None => self.acct.auth_health.note_result(None),

@@ -189,6 +189,10 @@ pub enum Notice {
     ChangeRefused,
     /// Newer lists could not be read; what is shown may be out of date.
     RefreshFailed,
+    /// Decline met an invitation that had been accepted already.
+    AlreadyAccepted,
+    /// "Remove from my list" met a file request that is still open.
+    RequestStillOpen,
 }
 
 /// How an invitation sent with [`SharedSource::start_invite`] ended (DW-0514).
@@ -237,7 +241,7 @@ pub trait SharedSource {
     fn requests(&self) -> Vec<Request>;
     /// Accept an invitation: it joins `with_me`. `false`: no such invitation.
     fn accept(&mut self, id: &str) -> bool;
-    /// Decline an invitation: it goes; the sender is not told why.
+    /// Decline an invitation: it goes, and the sender sees that it was declined.
     fn decline(&mut self, id: &str) -> bool;
     /// Keep something shared with the person on this PC.
     fn keep_offline(&mut self, id: &str) -> bool;

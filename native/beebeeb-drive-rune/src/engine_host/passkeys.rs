@@ -11,7 +11,8 @@
 //!   account of the press; an answer that lands under another is dropped with its toast.
 //! - The system's passkey dialog is the engine's WebAuthn call ([`Engine::add_passkey`]) on a thread of its own,
 //!   owned by this process's window ([`host_window`]); the window is never frozen behind it.
-//! - Rename: Beebeeb has no route for it, so the menu says nothing about it ([`PasskeyCalls::can_rename`]).
+//! - Rename ([`Engine::rename_passkey`], no password: Beebeeb's name for it only): one press, one PATCH, the rows read
+//!   again after the answer. A new passkey keeps its default name until the person renames it.
 //! - Whether a passkey can unlock the data on a new device is the server's word (`prf`); a list that does not say
 //!   draws "Signs you in", never "Sign-in only".
 //!
@@ -41,6 +42,9 @@ pub const STAYS: Duration = Duration::from_secs(6);
 pub const ADDED: &str = "Passkey added.";
 pub const REMOVED: &str = "Passkey removed.";
 const NOT_ADDED: &str = "The passkey was not added. Nothing was changed.";
+const RENAMED: &str = "Passkey renamed.";
+const NOT_RENAMED: &str = "The passkey was not renamed. Nothing was changed.";
+const BAD_NAME: &str = "That name can\u{2019}t be used. Nothing was changed.";
 const NOT_REMOVED: &str = "The passkey was not removed. Nothing was changed.";
 const WRONG: &str = "Incorrect password. Nothing was changed.";
 const OFFLINE: &str = "Beebeeb can't be reached. Nothing was changed.";
@@ -53,6 +57,7 @@ const NO_DIALOG: &str = "Passkeys are not available on this PC. Nothing was chan
 enum Change {
     Add,
     Remove,
+    Rename,
 }
 
 /// One answer from a worker.
@@ -110,9 +115,11 @@ fn kind_words(change: Change, problem: PasskeyProblem) -> &'static str {
         PasskeyProblem::Cancelled => CANCELLED,
         PasskeyProblem::RateLimited => SLOW_DOWN,
         PasskeyProblem::Unavailable => NO_DIALOG,
+        PasskeyProblem::InvalidInput if change == Change::Rename => BAD_NAME,
         _ => match change {
             Change::Add => NOT_ADDED,
             Change::Remove => NOT_REMOVED,
+            Change::Rename => NOT_RENAMED,
         },
     }
 }
@@ -134,8 +141,8 @@ fn passkey_of(row: &PasskeyRow) -> Passkey {
     }
 }
 
-/// The name a new passkey is given: the person is not asked (the system's dialog says where it is saved), and
-/// Beebeeb's own name for it cannot be changed (no route), so it says what it is and when it was made.
+/// The name a new passkey is given: the person is not asked (the system's dialog says where it is saved), so it
+/// says what it is and when it was made; Rename changes it later.
 fn new_name() -> String {
     format!("Windows PC, {}", chrono::Local::now().format("%-d %b %Y"))
 }
@@ -220,9 +227,49 @@ impl<C: CredentialStores + 'static> PasskeyCalls<C> {
         self.engine.passkeys_supported()
     }
 
-    /// Beebeeb has no route to rename a passkey.
+    /// Rename is bound ([`PasskeyCalls::rename`]).
     pub fn can_rename(&self) -> bool {
-        false
+        true
+    }
+
+    /// "Rename" on one passkey of the rows drawn: Beebeeb's name for it only, no password. `false`: nothing was
+    /// started (no such row, a change already on its way, no worker). The new name shows when the rows are read again.
+    pub fn rename(&mut self, id: &str, name: &str) -> bool {
+        let pressed = stamp(&self.engine);
+        if !self.open() || self.changing.is_some() {
+            return false;
+        }
+        if !self
+            .current()
+            .is_some_and(|held| held.pressed == pressed && held.rows.iter().any(|row| row.id == id))
+        {
+            return false;
+        }
+        self.changing = Some(pressed.clone());
+        let (engine, answers) = (self.engine.clone(), self.answers.clone());
+        let (session, mine, id, name) = (pressed.0, pressed.clone(), id.to_string(), name.to_string());
+        let started = std::thread::Builder::new()
+            .name("passkeys-rename".into())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    engine.rename_passkey(session, &id, &name).map(|()| None)
+                }))
+                .unwrap_or(Err(PasskeyProblem::Refused));
+                let _ = answers.send(Answer::Changed {
+                    pressed: mine,
+                    change: Change::Rename,
+                    result,
+                });
+                engine.wake_host();
+            });
+        if started.is_err() {
+            log("passkeys: the rename worker did not start");
+            self.changing = None;
+            self.say(pressed.0, kind_words(Change::Rename, PasskeyProblem::Refused), true);
+            return false;
+        }
+        self.dirty = true;
+        true
     }
 
     /// A read on a worker, stamped at the press. One at a time.
@@ -282,7 +329,7 @@ impl<C: CredentialStores + 'static> PasskeyCalls<C> {
                     return false;
                 }
             },
-            Change::Remove => 0,
+            Change::Remove | Change::Rename => 0,
         };
         self.changing = Some(pressed.clone());
         let (engine, answers) = (self.engine.clone(), self.answers.clone());
@@ -295,6 +342,8 @@ impl<C: CredentialStores + 'static> PasskeyCalls<C> {
                     Change::Remove => engine
                         .remove_passkey(session, password, id.as_deref().unwrap_or_default())
                         .map(|()| None),
+                    // Renaming has its own entry ([`PasskeyCalls::rename`]); never reached with a password.
+                    Change::Rename => Err(PasskeyProblem::Refused),
                 }))
                 .unwrap_or(Err(PasskeyProblem::Refused));
                 let _ = answers.send(Answer::Changed {
@@ -412,6 +461,7 @@ impl<C: CredentialStores + 'static> PasskeyCalls<C> {
                 let (words, failed) = match (change, &result) {
                     (Change::Add, Ok(_)) => (ADDED, false),
                     (Change::Remove, Ok(_)) => (REMOVED, false),
+                    (Change::Rename, Ok(_)) => (RENAMED, false),
                     (change, Err(problem)) => (kind_words(change, *problem), true),
                 };
                 self.say(pressed.0, words, failed);

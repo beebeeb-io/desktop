@@ -9,10 +9,12 @@
 //! - `Member::compared` is always `false`: the safety-number marks are not in the engine crate yet (see the PR).
 //!
 //! Bound changes ([`Engine::share_change`], by id, for the session the row was drawn under): `accept`, `set_access`,
-//! `remove_access` (the view confirms it, DW-0512b). A change is never drawn before Beebeeb confirmed it: the rows
-//! are the server's, read again after the answer; one change per id at a time. NOT bound, each answers `false` and a notice the view draws
-//! ("Not available yet"): `decline`, `stop_sharing`, `close_request` (the view asks no confirmation), `keep_offline`,
-//! `remove_request` (no server route), and the old synchronous `invite` (it cannot wait for the server).
+//! `remove_access` (the view confirms it, DW-0512b), `decline` (`/decline`: the sender sees it declined; 409 is "Already
+//! accepted."), `remove_request` ("Remove from my list" is the server's `/hide`, never DELETE, which destroys the key;
+//! 409 is "Close the request first."). A change is never drawn before Beebeeb confirmed it: the rows
+//! are the server's, read again after the answer; one change per id at a time. NOT bound, each answers `false` and a
+//! notice the view draws ("Not available yet"): `stop_sharing`, `close_request` (the view asks no confirmation),
+//! `keep_offline`, and the old synchronous `invite` (it cannot wait for the server).
 //!
 //! Invite someone (DW-0514, [`Engine::invite_for`]): `start_invite` stamps the press's session and account, runs the
 //! invite on a worker (one per share at a time) and answers through `invite_answer`; an answer under another session
@@ -271,7 +273,11 @@ impl<C: CredentialStores> EngineSharedSource<C> {
                     Ok(()) => self.unmade = false,
                     Err(kind) => {
                         log(format!("shared: a change was not made ({kind})"));
-                        self.notice = Some(Notice::ChangeRefused);
+                        self.notice = Some(match kind {
+                            ShareChangeError::AlreadyAccepted => Notice::AlreadyAccepted,
+                            ShareChangeError::RequestOpen => Notice::RequestStillOpen,
+                            _ => Notice::ChangeRefused,
+                        });
                         self.unmade = true;
                     }
                 }
@@ -447,10 +453,18 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.change(session, id, ShareChange::CloseRequest { request_id: id.into() })
     }
 
-    // Removing a request deletes its keys on the server: what arrived and is not yet saved could never be opened.
-    // Not sent until that is decided (decisions/), so the view says so.
-    fn remove_request(&mut self, _id: &str) -> bool {
-        self.refuse(Notice::NotAvailable)
+    /// "Remove from my list": the server's HIDE (the row stays there with its key, so what arrived can still be
+    /// opened), never the DELETE route that destroys the key. A request that is still open answers 409
+    /// ("Close the request first."). The row leaves when the lists are read again after the answer.
+    fn remove_request(&mut self, id: &str) -> bool {
+        let Some(session) = self
+            .current()
+            .filter(|held| held.requests.iter().any(|r| r.id == id))
+            .map(|held| held.session)
+        else {
+            return false;
+        };
+        self.change(session, id, ShareChange::HideRequest { request_id: id.into() })
     }
     fn invite(&mut self, _share: &str, _email: &str, _access: Access) -> bool {
         self.refuse(Notice::NotAvailable)
