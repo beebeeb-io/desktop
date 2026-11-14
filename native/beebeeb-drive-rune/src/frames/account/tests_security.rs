@@ -272,28 +272,36 @@ fn activity_that_was_not_read_still_leads_to_its_page() {
     assert_eq!(rt.state.account.pane, Pane::Activity);
 }
 
-/// The page is taller than the window. A page opened from a row low on it starts at its own top.
+/// The page is taller than the window. A page opened from a row low on it starts at its own top, also when
+/// that page is itself taller than the window (a short window here, so the activity page is).
 #[test]
 fn a_page_opened_from_low_on_the_page_starts_at_its_top() {
-    let mut rt = runtime("DW-S01");
+    let mut state = init();
+    assert!(super::scene("DW-S01", &mut state));
+    let env = rune::Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, crate::view, (958.0, 360.0), env);
+    rt.on_key = Some(crate::shell::host::on_key);
+    rt.poll = Some(crate::shell::host::poll);
+    rt.frame(0.0);
     let top = info(&rt, "set-title").rect[1];
-    tab_to(&mut rt, "item-4-0");
+    tab_to(&mut rt, "item-2-3");
     assert!(
         info(&rt, "set-title").rect[1] < top - 100.0,
-        "the page scrolled to reach Delete"
+        "the page scrolled to reach the row"
     );
-    for (row, pane) in [("item-4-0", Pane::Delete), ("item-2-3", Pane::Activity)] {
-        let mut rt = runtime("DW-S01");
-        tab_to(&mut rt, "item-4-0");
-        tab_to(&mut rt, row);
-        key(&mut rt, Key::Enter);
-        assert_eq!(rt.state.account.pane, pane);
-        assert_eq!(
-            info(&rt, "set-title").rect[1],
-            top,
-            "{pane:?}: its heading is where a pane's heading is"
-        );
-    }
+    key(&mut rt, Key::Enter);
+    assert_eq!(rt.state.account.pane, Pane::Activity);
+    // The activity page is taller than this window: an offset it inherited would stay.
+    let last = info(&rt, "list-3-body").rect;
+    assert!(last[1] + last[3] > 360.0, "the activity page does not fit: {last:?}");
+    assert_eq!(
+        info(&rt, "set-title").rect[1],
+        top,
+        "its heading is where a pane's heading is"
+    );
 }
 
 fn sign_out_page(mode: SignOutMode) -> Runtime<State> {
@@ -344,6 +352,18 @@ fn a_sign_out_on_its_way_waits_on_the_confirm() {
         rt.state.account.dialog,
         Some(Dialog::SignOutApp),
         "Esc does not call it back"
+    );
+    // The lane's own key handler too (the confirm's own Esc is another layer).
+    let escape = rune::KeyEvent {
+        key: Key::Escape,
+        mods: rune::Mods::default(),
+    };
+    rt.update(move |s, tx| assert!(super::on_key(s, &escape, tx)));
+    settle(&mut rt);
+    assert_eq!(
+        rt.state.account.dialog,
+        Some(Dialog::SignOutApp),
+        "nor through the lane's keys"
     );
     assert_eq!(asked(&rt), Vec::new(), "nothing is shown as signed out");
     assert_eq!(section(&rt), Some(SettingsPane::Security));
