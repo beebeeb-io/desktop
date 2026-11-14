@@ -564,21 +564,31 @@ fn remove_all_shows_its_ask_and_removes_only_on_the_yes() {
     assert!(!has(&rt, "dlg"));
     assert_eq!(rt.state.this_pc.kept_count(), 3);
 
-    // The keyboard reaches the ask's own buttons: Tab to Cancel, Enter presses it.
+    // The keyboard reaches the ask's own buttons: Tab to Cancel, Space presses it. Enter does not press the focused
+    // button (Rune: Return presses the window's default button, and this ask has none), so a stray Enter on
+    // "Remove all" removes nothing.
     open_ask(&mut rt);
-    tab_to(&mut rt, "btn-remove-all-cancel");
+    tab_to(&mut rt, "btn-remove-all-yes");
     press(&mut rt, Key::Enter);
     settle(&mut rt);
-    assert!(!rt.state.this_pc.confirm_remove_all, "Enter on Cancel was heard");
-    assert!(!has(&rt, "dlg"), "Enter on Cancel says no");
+    assert!(
+        rt.state.this_pc.confirm_remove_all,
+        "Enter on Remove all does not answer the ask"
+    );
+    assert_eq!(rt.state.this_pc.kept_count(), 3, "Enter removed nothing");
+    tab_to(&mut rt, "btn-remove-all-cancel");
+    press(&mut rt, Key::Text(" ".into()));
+    settle(&mut rt);
+    assert!(!rt.state.this_pc.confirm_remove_all, "Space on Cancel was heard");
+    assert!(!has(&rt, "dlg"), "Space on Cancel says no");
     assert_eq!(rt.state.this_pc.kept_count(), 3);
 
     // Yes, from the keyboard: everything goes, the ask with it.
     open_ask(&mut rt);
     tab_to(&mut rt, "btn-remove-all-yes");
-    press(&mut rt, Key::Enter);
+    press(&mut rt, Key::Text(" ".into()));
     settle(&mut rt);
-    assert!(!rt.state.this_pc.confirm_remove_all, "Enter on Remove all was heard");
+    assert!(!rt.state.this_pc.confirm_remove_all, "Space on Remove all was heard");
     assert!(!has(&rt, "dlg"));
     assert_eq!(rt.state.this_pc.kept_count(), 0);
     assert_eq!(text(&rt, "empty-title"), "Nothing available offline");

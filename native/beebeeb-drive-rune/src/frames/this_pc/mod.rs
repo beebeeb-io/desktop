@@ -439,8 +439,9 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
 pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let section = s.shell.app.route().section;
     let ui = &mut s.this_pc;
-    // The ask before Remove all: Esc says no, and the list under it hears no key. Tab, Enter and Space are the
-    // ask's own buttons' (not handled here, so focus moves and the focused button presses).
+    // The ask before Remove all: Esc says no, and the list under it hears no key. Tab and Space are the
+    // ask's own buttons' (not handled here, so focus moves and the focused button presses); Enter presses no focused
+    // button in Rune and the ask has no default button, so a stray Enter removes nothing.
     if ui.confirm_remove_all {
         return match ev.key {
             Key::Escape => {
