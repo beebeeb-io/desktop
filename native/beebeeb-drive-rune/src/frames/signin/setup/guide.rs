@@ -300,6 +300,9 @@ enum Arrow {
 struct Spot {
     target: String,
     out: [f32; 4],
+    /// The ring's own width, where the board gives one: the ring then stands from the target's right edge, and
+    /// its left edge does not move with the target's measured width.
+    width: Option<f32>,
     radius: f32,
     arrow: Arrow,
 }
@@ -307,16 +310,20 @@ struct Spot {
 fn spot(n: u8, s: &State) -> Option<Spot> {
     Some(match n {
         // The board places the ring at whole points (left 964, top 37, 88 x 36) around New
-        // (967.73, 40.75, 80.27 x 28): 3.73 left of it, 3.75 over it, 4 right of it, 4.25 under it.
+        // (967.73, 40.75, 80.27 x 28): 3.73 left of it, 3.75 over it, 4 right of it, 4.25 under it. New's label is
+        // measured by the font at hand (80.5 wide on one machine), so the ring is the board's 88 wide from 4 right
+        // of New: its left edge is the board's 964 whatever the label measures.
         1 => Spot {
             target: "new-btn".into(),
             out: [3.73, 3.75, 4.0, 4.25],
+            width: Some(88.0),
             radius: 10.0,
             arrow: Arrow::Up(202.0),
         },
         2 => Spot {
             target: format!("row-{}", file_row(s)?),
             out: [0.0; 4],
+            width: None,
             radius: 7.0,
             arrow: Arrow::Up(40.0),
         },
@@ -324,12 +331,14 @@ fn spot(n: u8, s: &State) -> Option<Spot> {
         3 => Spot {
             target: "Shared-row".into(),
             out: [2.0, 1.0, 1.5, 3.0],
+            width: None,
             radius: 8.0,
             arrow: Arrow::Left(20.0),
         },
         4 => Spot {
             target: "Photos-row".into(),
             out: [2.0, 1.0, 1.5, 3.0],
+            width: None,
             radius: 8.0,
             arrow: Arrow::Left(20.0),
         },
@@ -337,6 +346,7 @@ fn spot(n: u8, s: &State) -> Option<Spot> {
         _ => Spot {
             target: "settings-btn".into(),
             out: [4.5, 9.5, 3.5, -1.5],
+            width: None,
             radius: 9.0,
             arrow: Arrow::Down(32.0),
         },
@@ -544,6 +554,8 @@ pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
         return layer;
     };
     let [l, top, r, b] = spot.out;
+    // Never narrower than the target with its right-hand distance.
+    let l = spot.width.map_or(l, |width| (width - w - r).max(0.0));
     let rect = [x - l, y - top, w + l + r, h + top + b];
     let card = tip_card(n, spot.arrow, &t);
     // The card's corner, from the ring (the board's distances).

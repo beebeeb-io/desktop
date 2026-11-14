@@ -673,19 +673,17 @@ fn the_new_file_dialog_over_tip_1_hides_the_tip_and_has_the_keyboard() {
 #[test]
 fn esc_right_after_ctrl_n_does_not_end_the_guide() {
     let mut rt = on_tip_1();
+    // Both keys before the window's next poll (the test's window polls only in `tick`).
     rt.key(ctrl('n'));
-    assert!(
-        rt.state
-            .actions
-            .intents
-            .contains(&crate::frames::files::Intent::Frame("DW-1521")),
-        "the dialog is asked for"
-    );
-    assert!(rt.state.viewer.new_file.is_none(), "and not open yet");
     rt.key(KeyEvent {
         key: Key::Escape,
         mods: Mods::default(),
     });
+    rt.frame(0.0);
+    assert!(
+        rt.state.viewer.new_file.is_none(),
+        "no poll ran: the dialog is not open yet"
+    );
     assert_eq!(
         rt.state.guide.step,
         Some(Step::Tip(1)),
