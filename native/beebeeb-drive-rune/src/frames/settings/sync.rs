@@ -14,7 +14,7 @@ use crate::ui::settings_notice::{self as notices, Tone};
 use crate::ui::settings_shell as shell;
 use rune::{El, Link, Span, col, el, rich};
 
-use super::drive::{Kept, Repair, SyncStatus};
+use super::drive::{Control, Kept, Repair, SyncStatus};
 use super::{Dialog, Intent, SettingsUi};
 
 pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
@@ -55,16 +55,18 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
     }
     explorer.push(lists::item_with(0, 0, &place, show.into_iter().collect(), t));
     let on = sy.status_on_files;
-    explorer.push(lists::item_with(
-        0,
-        1,
-        &Item::new(Some(&ic::SYNC_BADGE), "Show sync status on files").ruled(),
-        vec![
-            lists::switch("item-0-1", "Show sync status on files", on, t)
-                .on_press(move |s: &mut State| s.settings.drive.set_status_on_files(!on)),
-        ],
-        t,
-    ));
+    if ui.drive.shows(Control::StatusOnFiles) {
+        explorer.push(lists::item_with(
+            0,
+            1,
+            &Item::new(Some(&ic::SYNC_BADGE), "Show sync status on files").ruled(),
+            vec![
+                lists::switch("item-0-1", "Show sync status on files", on, t)
+                    .on_press(move |s: &mut State| s.settings.drive.set_status_on_files(!on)),
+            ],
+            t,
+        ));
+    }
     let repairing = sy.repair == Repair::Running;
     let repair =
         (!repairing).then(|| button("Repair…").on_press(|s: &mut State| s.settings.dialog = Some(Dialog::Repair)));

@@ -175,8 +175,25 @@ pub struct SyncPane {
     pub not_uploaded: Option<(u32, String)>,
 }
 
+/// A control a source may not be able to honour: it is not drawn where the source says so (the honest state of a
+/// setting no engine call answers for).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Control {
+    /// Sync and File Explorer: "Show sync status on files".
+    StatusOnFiles,
+    /// Bandwidth: "Sync on metered connections".
+    SyncOnMetered,
+    /// Bandwidth: the speed test, and the link to it in Diagnostics.
+    SpeedTest,
+}
+
 /// What Drive's settings panes read and change.
 pub trait DriveSettings {
+    /// Whether `control` is drawn. A source with nothing behind it says `false`: no switch that does nothing.
+    fn shows(&self, control: Control) -> bool {
+        let _ = control;
+        true
+    }
     /// `false` for a pane nothing answers for yet: it draws the shell's "not built yet" frame
     /// instead of any value.
     fn wired(&self, pane: super::Pane) -> bool {

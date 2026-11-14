@@ -30,6 +30,8 @@ struct Fake {
     account: Mutex<Option<String>>,
     /// What `set_kept` was asked, in order.
     kept_calls: Mutex<Vec<(String, bool)>>,
+    /// How many session-bound keep changes the engine refused (the session had moved on).
+    kept_for_refused: std::sync::atomic::AtomicUsize,
     /// The engine's session: a test moves it on as a sign-in, a lock or a sign-out does.
     session: AtomicU64,
     /// Runs inside the next read of the local state, on the worker (a test changes the session under it).
@@ -57,6 +59,7 @@ impl Fake {
             broken: AtomicBool::new(false),
             account: Mutex::new(Some(email.to_string())),
             kept_calls: Mutex::new(Vec::new()),
+            kept_for_refused: std::sync::atomic::AtomicUsize::new(0),
             session: AtomicU64::new(1),
             during_read: Mutex::new(None),
             after_kept: Mutex::new(None),
@@ -98,6 +101,13 @@ impl ThisPcEngine for Fake {
     }
     fn syncing(&self) -> bool {
         self.syncing.load(Ordering::SeqCst)
+    }
+    fn set_kept_for(&self, session: SessionGeneration, file_id: &str, kept: bool) -> Result<(), String> {
+        if session != self.session() {
+            self.kept_for_refused.fetch_add(1, Ordering::SeqCst);
+            return Err("session moved on".into());
+        }
+        self.set_kept(file_id, kept)
     }
     fn set_kept(&self, file_id: &str, kept: bool) -> Result<(), String> {
         self.kept_calls.lock().unwrap().push((file_id.to_string(), kept));
@@ -653,6 +663,30 @@ fn a_read_refused_for_the_session_keeps_what_is_held_and_is_asked_again() {
     assert!(source.read_at.is_none(), "and the next opening reads again");
 }
 
+/// A FIRST read answered "not now" (nothing held) is asked again by itself, shortly after: the window never stays on
+/// "reading" until the person reopens the pane.
+#[test]
+fn a_first_read_answered_not_now_is_asked_again() {
+    let fake = busy_pc();
+    let mut source = EngineThisPcSource::new(fake.clone());
+    settle(&mut source);
+    source.held = None;
+    source.inbox_for_test(Answer {
+        generation: source.generation,
+        whose: source.seen.clone(),
+        refused: None,
+        read: Err(NoRead::NotNow),
+    });
+    let pumped = source.pump();
+    assert_eq!(source.standing(), Standing::Reading, "nothing held yet");
+    assert!(source.retry_at.is_some(), "a new read is due");
+    assert!(pumped.busy, "the window keeps polling until it is asked");
+    source.retry_at = Some(Instant::now() - Duration::from_millis(1));
+    settle(&mut source);
+    assert_eq!(source.standing(), Standing::Ready, "the second read answered");
+    assert!(source.retry_at.is_none());
+}
+
 /// The one rule, by its parts: the generation, an answer that names a session, and that session being the window's.
 #[test]
 fn counts_needs_the_generation_and_the_same_session() {
@@ -845,4 +879,32 @@ fn place_and_kind_follow_the_path_and_the_name() {
     assert_eq!(kind_of("Talk.M4A", false), Kind::Audio);
     assert_eq!(kind_of("Plan.key", false), Kind::Deck);
     assert_eq!(kind_of("x", true), Kind::Folder);
+}
+
+/// Remove from this PC goes through the session-bound keep change: a session that moves on between the window's
+/// own check and the engine's call changes nothing (the engine refuses it itself).
+#[test]
+fn remove_is_refused_by_the_engine_when_the_session_moves_after_the_check() {
+    let fake = busy_pc();
+    let whose = whose_now(&*fake).unwrap();
+    *fake.during_read.lock().unwrap() = Some(Box::new(|fake: &Fake| {
+        fake.session.fetch_add(1, Ordering::SeqCst);
+    }));
+    let (answers, inbox) = mpsc::channel();
+    run(
+        &*fake,
+        &answers,
+        Job {
+            ask: Ask::Release(vec!["f-sheet".into()]),
+            whose,
+            generation: 1,
+        },
+    );
+    assert_eq!(
+        fake.kept_for_refused.load(Ordering::SeqCst),
+        1,
+        "the engine was asked under the old session"
+    );
+    assert!(fake.kept_calls.lock().unwrap().is_empty(), "and changed nothing");
+    assert_eq!(inbox.try_recv().unwrap().refused, Some(NOT_REMOVED));
 }

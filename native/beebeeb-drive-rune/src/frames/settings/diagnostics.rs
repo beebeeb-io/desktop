@@ -16,6 +16,7 @@ use crate::ui::settings_shell as shell;
 use rune::tok::Family;
 use rune::{El, Shape, Span, canvas, el, rich, row};
 
+use super::drive::Control;
 use super::{Intent, SettingsUi};
 
 /// What one row of App activity measures.
@@ -233,6 +234,22 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         ));
     }
 
+    if d.activity.is_empty() {
+        // Nothing samples the app's own use of this PC in this version: said, not left out.
+        children.push(lists::list(
+            0,
+            Some("App activity"),
+            vec![lists::item(
+                0,
+                0,
+                &Item::new(Some(&ic::GAUGE), "Not available in this version yet."),
+                t,
+            )],
+            None,
+            t,
+        ));
+    }
+
     children.push(lists::list(
         1,
         Some("Support bundle"),
@@ -254,10 +271,9 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         t,
     ));
 
-    children.push(lists::list(
-        2,
-        Some("Help"),
-        vec![
+    let mut help = Vec::new();
+    if ui.drive.shows(Control::SpeedTest) {
+        help.push(
             lists::item(
                 2,
                 0,
@@ -267,21 +283,22 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
                 t,
             )
             .on_press(|s: &mut State| super::go(s, "DW-0785")),
-            lists::item(
-                2,
-                1,
-                &Item::new(Some(&ic::CHAT), "Get help")
-                    .sub("Opens our support page in your browser.")
-                    .trailing(lists::Trailing::External)
-                    .role(lists::Role::Link),
-                t,
-            )
-            .on_press(|s: &mut State| s.settings.ask(Intent::Web("support"))),
-            lists::item(2, 2, &Item::new(Some(&ic::INFO), "Report a problem").opens(), t)
-                .on_press(|s: &mut State| super::go(s, "DW-0782")),
-        ],
-        None,
-        t,
-    ));
+        );
+    }
+    help.extend([
+        lists::item(
+            2,
+            1,
+            &Item::new(Some(&ic::CHAT), "Get help")
+                .sub("Opens our support page in your browser.")
+                .trailing(lists::Trailing::External)
+                .role(lists::Role::Link),
+            t,
+        )
+        .on_press(|s: &mut State| s.settings.ask(Intent::Web("support"))),
+        lists::item(2, 2, &Item::new(Some(&ic::INFO), "Report a problem").opens(), t)
+            .on_press(|s: &mut State| super::go(s, "DW-0782")),
+    ]);
+    children.push(lists::list(2, Some("Help"), help, None, t));
     (shell::pane(children, t), None)
 }

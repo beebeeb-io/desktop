@@ -24,7 +24,7 @@ use super::bandwidth_data::{
     Bandwidth, Device, DeviceKind, DeviceState, Direction, Flow, History, PRESET_LABELS, PRESETS, STEP_SECONDS,
     SpeedTest, Step, limit_label,
 };
-use super::drive::BoardDrive;
+use super::drive::{BoardDrive, Control};
 use super::{Menu, MenuKind, SettingsUi};
 
 /// Where each limit's menu goes: the point its row marks (the Limits list is the pane's second).
@@ -167,11 +167,13 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
         list += 1;
     }
     if crop != Crop::Head {
-        children.push(limits(list, &bw, ui.menu, t));
+        children.push(limits(list, &bw, ui.menu, ui.drive.shows(Control::SyncOnMetered), t));
         list += 1;
     }
     if matches!(crop, Crop::Whole | Crop::FromDevices) {
-        children.push(speed_test(list, &bw.test, t));
+        if ui.drive.shows(Control::SpeedTest) {
+            children.push(speed_test(list, &bw.test, t));
+        }
     }
     let overlay = [Direction::Upload, Direction::Download]
         .into_iter()
@@ -620,7 +622,7 @@ fn devices(list: usize, devices: &[Device], t: &Theme) -> El {
 }
 
 /// Limits: the two pop-up buttons and the metered switch.
-fn limits(list: usize, bw: &Bandwidth, menu: Option<Menu>, t: &Theme) -> El {
+fn limits(list: usize, bw: &Bandwidth, menu: Option<Menu>, metered_switch: bool, t: &Theme) -> El {
     let pop = |index: usize, direction: Direction, limit: Option<u32>| {
         let kind = MenuKind::SpeedLimit(direction);
         let icon = match direction {
@@ -651,10 +653,12 @@ fn limits(list: usize, bw: &Bandwidth, menu: Option<Menu>, t: &Theme) -> El {
             "Off: sync waits on networks Windows marks as metered"
         })
         .ruled();
-    let rows = vec![
+    let mut rows = vec![
         pop(0, Direction::Upload, bw.upload_limit),
         pop(1, Direction::Download, bw.download_limit),
-        lists::item_with(
+    ];
+    if metered_switch {
+        rows.push(lists::item_with(
             list,
             2,
             &metered,
@@ -663,8 +667,8 @@ fn limits(list: usize, bw: &Bandwidth, menu: Option<Menu>, t: &Theme) -> El {
                     .on_press(move |s: &mut State| s.settings.drive.set_sync_on_metered(!on)),
             ],
             t,
-        ),
-    ];
+        ));
+    }
     lists::list(
         list,
         Some("Limits"),

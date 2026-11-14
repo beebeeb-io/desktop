@@ -92,6 +92,14 @@ struct Fake {
     limit_changes: Mutex<Vec<TransferLimitsChange>>,
     /// Reads of the limits (the Bandwidth pane's).
     limit_reads: AtomicUsize,
+    /// What the engine answers a repair and a turn-off, and how often each was asked (with the session).
+    explorer_answer: Mutex<Result<(), ExplorerChangeRefused>>,
+    explorer_calls: Mutex<Vec<(&'static str, SessionGeneration)>>,
+    /// What each speed step answers (`None`: the step fails offline), and the steps asked.
+    speed_answers: Mutex<Vec<Option<SpeedFigure>>>,
+    speed_asked: Mutex<Vec<SpeedStep>>,
+    /// What an export answers.
+    bundle_answer: Mutex<Result<SavedBundle, BundleRefused>>,
 }
 
 impl Fake {
@@ -127,6 +135,11 @@ impl Fake {
             limits: Mutex::new(TransferLimits::default()),
             limit_changes: Mutex::new(Vec::new()),
             limit_reads: AtomicUsize::new(0),
+            explorer_answer: Mutex::new(Ok(())),
+            explorer_calls: Mutex::new(Vec::new()),
+            speed_answers: Mutex::new(Vec::new()),
+            speed_asked: Mutex::new(Vec::new()),
+            bundle_answer: Mutex::new(Err(BundleRefused::NoQueue)),
         })
     }
 
@@ -213,6 +226,31 @@ impl DriveEngine for Fake {
             limits.downloaded_copies_bytes = limit;
         }
         Ok(*limits)
+    }
+    fn repair_explorer(&self, session: SessionGeneration) -> Result<(), ExplorerChangeRefused> {
+        self.explorer_calls.lock().unwrap().push(("repair", session));
+        *self.explorer_answer.lock().unwrap()
+    }
+    fn turn_off_explorer(&self, session: SessionGeneration) -> Result<(), ExplorerChangeRefused> {
+        self.explorer_calls.lock().unwrap().push(("turn off", session));
+        *self.explorer_answer.lock().unwrap()
+    }
+    fn speed_step(
+        &self,
+        _session: SessionGeneration,
+        step: SpeedStep,
+        progress: &(dyn Fn(u32, u32) + Sync),
+    ) -> Result<SpeedFigure, AccountCallError> {
+        self.speed_asked.lock().unwrap().push(step);
+        progress(1, 3);
+        let mut answers = self.speed_answers.lock().unwrap();
+        if answers.is_empty() {
+            return Err(AccountCallError::Offline);
+        }
+        answers.remove(0).ok_or(AccountCallError::Offline)
+    }
+    fn export_bundle(&self, _session: SessionGeneration) -> Result<SavedBundle, BundleRefused> {
+        self.bundle_answer.lock().unwrap().clone()
     }
 }
 
