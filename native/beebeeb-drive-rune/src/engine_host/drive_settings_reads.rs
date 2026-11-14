@@ -69,7 +69,7 @@ pub(crate) fn mbps(kib_per_s: u64) -> Option<u32> {
     (kib_per_s > 0).then(|| u32::try_from(((kib_per_s * 1_024 + 62_500) / 125_000).max(1)).unwrap_or(u32::MAX))
 }
 
-pub(crate) fn read_local<E: DriveEngine>(engine: &E, platform: &dyn Platform, account: &str, send: &dyn Fn(Answer)) {
+pub(super) fn read_local<E: DriveEngine>(engine: &E, platform: &dyn Platform, account: &str, send: &dyn Fn(Answer)) {
     send(Answer::OpenAtLogin(platform.autostart_enabled().ok()));
     if !still_for(engine, account) {
         // Locked, signed out or another account: no folder name stays in memory.

@@ -62,7 +62,7 @@ use beebeeb_engine::app::transfer_limits_api::{TransferLimits, TransferLimitsCha
 use beebeeb_engine::app::{CredentialStores, Engine, ExplorerChangeRefused, LocalStateRefused};
 use beebeeb_engine::backup_protect::BackupsTree;
 use beebeeb_engine::config::DesktopConfig;
-use beebeeb_engine::drive_v2::{dto::DriveItem, model, status};
+use beebeeb_engine::drive_v2::{dto::DriveItem, model};
 use beebeeb_engine::signin::gate::GateState;
 use beebeeb_engine::state_db::{BandwidthSample, FileEntry, PinState, StateDb};
 use beebeeb_engine::sync_view::{Explorer, SyncView};
