@@ -297,6 +297,12 @@ fn an_answer_that_comes_late_is_dropped_for_every_way_a_file_opens() {
                 assert!(matches!(other.body, Body::Decrypting { .. }), "{what}");
                 drop(door);
                 until("both reads returned", || fake.s().returned == returned + 2);
+                // Asked about the late file while the other file's answer is on its way or waiting: nothing, and
+                // the other file's answer is not taken by the ask.
+                for _ in 0..100 {
+                    assert_eq!(source.poll(id), None, "{what}");
+                    std::thread::sleep(Duration::from_millis(2));
+                }
                 // The other file shows its own words, never the first one's content.
                 assert_eq!(words(&answered(&mut source, OTHER)).trim_end(), OTHER_WORDS, "{what}");
             }

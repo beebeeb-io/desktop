@@ -761,8 +761,8 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 Err(OpenFileError::NothingSynced) => return Err(OpenError::NothingSynced),
                 Err(OpenFileError::NotYours) => return Err(OpenError::NotThisAccounts),
                 Err(OpenFileError::SessionEnded) => return Err(OpenError::SessionEnded),
-                // The read was refused for the session: there is none any more, or it changed during the read.
-                Err(OpenFileError::NotSignedIn) if !self.engine.has_session() => return Err(OpenError::SignedOut),
+                // The read was refused for the session: there is none any more (the next turn of this loop says
+                // signed out), or it changed during the read (asked once more).
                 Err(OpenFileError::NotSignedIn) => {}
                 Err(_) => return Err(OpenError::NotNow),
             }
