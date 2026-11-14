@@ -114,6 +114,8 @@ fn a_set_up_starts_and_the_first_code_turns_it_on_with_the_session_s_token() {
     ]);
     let engine = engine(&base);
     let session = signed_in(&engine);
+    // The owner a sign-in records (a session with none asks Beebeeb first: the last test of this file).
+    engine.remember_session_user_id(Some("user-a".into()));
     let pending = engine.two_factor_begin(session, None).unwrap();
     assert_eq!(pending.key(), "JBSWY3DPEHPK3PXP");
     assert!(pending.otpauth_uri().starts_with("otpauth://"));
