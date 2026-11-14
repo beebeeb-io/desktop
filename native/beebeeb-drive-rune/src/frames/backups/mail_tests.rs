@@ -460,7 +460,7 @@ impl BackupsSource for LateSource {
 }
 
 #[test]
-fn a_late_answer_is_asked_once_and_taken_on_the_next_key() {
+fn a_late_answer_is_asked_once_and_taken_on_the_next_window_key() {
     let late = std::rc::Rc::new(std::cell::RefCell::new(Connection::Idle));
     let asked = std::rc::Rc::new(std::cell::Cell::new(0));
     let mut rt = runtime("DW-0740b");
@@ -502,8 +502,8 @@ fn a_late_answer_is_asked_once_and_taken_on_the_next_key() {
     settle(&mut rt);
     assert_eq!(rt.state.backups.dialog, Some(Dialog::MailAccount));
     assert!(!info(&rt, "btn-1").focusable);
-    // Any key takes it: Choose folders, the password wiped.
-    press(&mut rt, Key::Tab);
+    // The next key that reaches the window takes it: Choose folders, the password wiped.
+    press(&mut rt, Key::ArrowDown);
     assert_eq!(rt.state.backups.dialog, Some(Dialog::MailFolders));
     assert!(rt.state.backups.mail.password.text.is_empty());
     assert_eq!(asked.get(), 1);
