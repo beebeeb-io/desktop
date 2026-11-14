@@ -28,6 +28,7 @@ pub mod media;
 mod media_icons;
 pub mod new_file;
 pub mod office;
+pub mod office_board;
 mod office_icons;
 pub mod office_over;
 mod pdf;
@@ -42,6 +43,8 @@ mod text;
 mod media_tests;
 #[cfg(test)]
 mod new_file_tests;
+#[cfg(test)]
+mod office_tests;
 #[cfg(test)]
 mod tests;
 

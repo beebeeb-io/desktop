@@ -810,6 +810,11 @@ impl ViewerSource for FixtureViewerSource {
     /// The fixture's second try gets as far as the board's DW-1516 draws.
     fn retry(&mut self, file_id: &str) -> Result<OpenFile, OpenError> {
         self.calls.push(format!("retry {file_id}"));
+        // The editor starts at the second try (DW-1556's Try again).
+        if file_id == board::DOCX && self.office == super::office::board::Case::NoEditor {
+            self.office = super::office::board::Case::Plain;
+            return self.open(file_id);
+        }
         let mut file = Self::file(file_id).ok_or(OpenError::NotFound)?;
         file.body = Body::Decrypting {
             done: 0,
