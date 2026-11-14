@@ -190,10 +190,23 @@ fn a_changed_password_stores_the_new_session_and_keeps_the_key() {
     let (api, taken) = server(&MODE);
     let engine = engine(&api.base);
     let turn = signed_in(&engine);
+    // The screen lock's local check record of the OLD password.
+    engine
+        .vault()
+        .set_lock_entry(crate::keychain::LockFlag::ScreenCheck, b"a record of the old password")
+        .unwrap();
 
     engine
         .change_password_for(turn, secret(PASSWORD), secret(NEW_PASSWORD))
         .expect("the change goes through");
+    assert_eq!(
+        engine
+            .vault()
+            .lock_entry(crate::keychain::LockFlag::ScreenCheck)
+            .unwrap(),
+        None,
+        "the old password's record never opens this PC offline again"
+    );
 
     // The token was replaced in the credential store and in memory; the owner tag is beside the new one.
     assert_eq!(stored_token(&engine), NEW_TOKEN);

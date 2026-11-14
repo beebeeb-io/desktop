@@ -504,7 +504,7 @@ impl<C: CredentialStores> Engine<C> {
             .await
             .map_err(|code| self.problem(&code))?;
             // The server accepted this password: stretch it for the screen lock's check record (`lock_password_api`).
-            self.stretch_for_sign_in(&password);
+            self.stretch_for_sign_in(&email, &password);
             drop(password);
             match legs {
                 PasswordLegs::SecondFactor(pending) => {
@@ -585,13 +585,13 @@ impl<C: CredentialStores> Engine<C> {
                 return Err(error);
             }
         };
+        let screen_check = self.take_pending_screen_check(&typed_email);
         let email = match profile.email.trim() {
             "" => typed_email,
             named => named.to_string(),
         };
         // A stored session this sign-in replaces (the strong unlock): it must be this account's, and the key and
         // the engine of the old session leave first (`lock_api`).
-        let screen_check = self.take_pending_screen_check();
         let (turn, replaced) = match self.prepare_replacement(turn, &profile).await {
             Ok(ready) => ready,
             Err(error) => {

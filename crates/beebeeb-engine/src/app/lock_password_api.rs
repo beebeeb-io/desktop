@@ -96,7 +96,8 @@ pub enum StartSettingRefused {
 #[derive(Default)]
 pub(super) struct LockPassword {
     one_at_a_time: Mutex<()>,
-    pending: Mutex<Option<PendingScreenCheck>>,
+    /// The typed password's stretch, with the canonical email of the sign-in it came from.
+    pending: Mutex<Option<(String, PendingScreenCheck)>>,
 }
 
 impl LockPassword {
@@ -525,9 +526,10 @@ impl<C: CredentialStores> Engine<C> {
             .await;
         let response = match sent {
             Ok(response) => response,
-            // Only a connection that was never made, or never answered, is "cannot be reached".
-            Err(error) if error.is_connect() || error.is_timeout() => return Leg::Refused(OnlineProof::Unreachable),
-            Err(_) => return Leg::Refused(OnlineProof::Failed),
+            // No answer at all (never connected, timed out, hung up) is "cannot be reached"; a request that could not
+            // be built or a redirect loop judged nothing. A 5xx is an answer: it is read below, and fails.
+            Err(error) if error.is_builder() || error.is_redirect() => return Leg::Refused(OnlineProof::Failed),
+            Err(_) => return Leg::Refused(OnlineProof::Unreachable),
         };
         let status = response.status().as_u16();
         let retry_after = response
@@ -625,19 +627,25 @@ impl<C: CredentialStores> Engine<C> {
 
     /// A password sign-in was just accepted by the server: stretch the typed password for the screen-lock check
     /// (about a second, on the caller's worker; core: "a stretch that cannot run means no record, not a failed
-    /// sign-in"). Kept until the install, or until the session is forgotten.
-    pub(super) fn stretch_for_sign_in(&self, password: &Zeroizing<String>) {
-        let pending = screen_lock::stretch(password).ok();
+    /// sign-in"). Kept until the install, or until the session is forgotten, and only ever sealed into the sign-in of
+    /// the same `email`: a stretch left by a sign-in that stopped at its second factor never reaches another one.
+    pub(super) fn stretch_for_sign_in(&self, email: &str, password: &Zeroizing<String>) {
+        let pending = screen_lock::stretch(password)
+            .ok()
+            .map(|stretch| (email.to_string(), stretch));
         *self.lock_password.pending.lock().unwrap_or_else(|p| p.into_inner()) = pending;
     }
 
-    /// The stretched password of the sign-in in progress, if any.
-    pub(super) fn take_pending_screen_check(&self) -> Option<PendingScreenCheck> {
-        self.lock_password
+    /// The stretched password of the sign-in in progress for `email`, if any. Taken always (a stretch is used for
+    /// one install at most); returned only for the sign-in it came from.
+    pub(super) fn take_pending_screen_check(&self, email: &str) -> Option<PendingScreenCheck> {
+        let taken = self
+            .lock_password
             .pending
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .take()
+            .take();
+        taken.filter(|(from, _)| from == email).map(|(_, stretch)| stretch)
     }
 
     /// A strong install just stored `profile`'s session: the check record of the password that was proven replaces
