@@ -35,7 +35,7 @@ struct Rig {
 fn put(db: &StateDb, id: &str, name: &str, status: FileStatus) {
     let entry = FileEntry {
         file_id: id.to_string(),
-        path: format!("/{name}"),
+        path: name.to_string(),
         status,
         size_bytes: 10,
         modified_at: 1_794_000_000,
