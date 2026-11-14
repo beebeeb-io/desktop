@@ -58,8 +58,8 @@ use crate::frames::account::Pane;
 use crate::frames::account::approve::{Approval, Denial, Lookup, SignInRequest};
 use crate::frames::account::source::{
     AccountSource, CodeRefused, Count, Deletion, DeletionRefused, DeviceKind, EmailRefused, Event, Factor, Identity,
-    PaneState, Passkey, Password, Plan, PlanDetails, ProductKind, ProductState, Pumped, Purpose, Refused, Secret,
-    Security, SecurityFacts, Session, Setup, SignOutAnswer, StepUp, Strength, TwoFactor,
+    PaneState, Password, Plan, PlanDetails, ProductKind, ProductState, Pumped, Purpose, Refused, Secret, Security,
+    SecurityFacts, Session, Setup, SignOutAnswer, StepUp, Strength, TwoFactor,
 };
 
 #[path = "account_said.rs"]

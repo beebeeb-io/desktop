@@ -574,8 +574,9 @@ macro_rules! passkey_methods {
             &mut self,
             password: $crate::frames::account::source::Password<'_>,
         ) -> Result<(), $crate::frames::account::source::Refused> {
-            match $crate::engine_host::passkeys::wiping(&password) {
-                Some(password) if self.passkeys.add(password) => Ok(()),
+            let started = $crate::engine_host::passkeys::wiping(&password).map(|password| self.passkeys.add(password));
+            match started {
+                Some(true) => Ok(()),
                 _ => Err($crate::frames::account::source::Refused::Offline),
             }
         }
