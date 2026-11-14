@@ -21,6 +21,10 @@ use crate::shell::platform::fake::FakePlatform;
 
 const GB: i64 = 1_000_000_000;
 
+/// The transfer limits and the Bandwidth read.
+#[path = "drive_settings_limits_tests.rs"]
+mod limits;
+
 /// Holds the worker inside one call of the fake (the `at`-th, counted from 1) until the test lets it go: an
 /// answer in flight, with no clock deciding the order.
 #[derive(Default)]
@@ -81,6 +85,13 @@ struct Fake {
     kept_calls: Mutex<Vec<(String, bool)>>,
     freed: Mutex<u32>,
     account: Mutex<Option<String>>,
+    /// The engine's session: a test moves it on as a lock or a sign-in does.
+    session: std::sync::atomic::AtomicU64,
+    /// The settings file's limits, and every change the engine took.
+    limits: Mutex<TransferLimits>,
+    limit_changes: Mutex<Vec<TransferLimitsChange>>,
+    /// Reads of the limits (the Bandwidth pane's).
+    limit_reads: AtomicUsize,
 }
 
 impl Fake {
@@ -112,6 +123,10 @@ impl Fake {
             kept_calls: Mutex::new(Vec::new()),
             freed: Mutex::new(0),
             account: Mutex::new(Some(email.to_string())),
+            session: std::sync::atomic::AtomicU64::new(1),
+            limits: Mutex::new(TransferLimits::default()),
+            limit_changes: Mutex::new(Vec::new()),
+            limit_reads: AtomicUsize::new(0),
         })
     }
 
@@ -173,6 +188,31 @@ impl DriveEngine for Fake {
     }
     fn local_settings(&self) -> Result<(i64, bool), String> {
         Ok((50 * GB, true))
+    }
+    fn session(&self) -> SessionGeneration {
+        SessionGeneration::for_test(self.session.load(Ordering::SeqCst))
+    }
+    fn limits(&self) -> Result<TransferLimits, String> {
+        self.limit_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(*self.limits.lock().unwrap())
+    }
+    /// As the engine: only under the session in memory.
+    fn set_limits(&self, session: SessionGeneration, change: TransferLimitsChange) -> Result<TransferLimits, String> {
+        if session != DriveEngine::session(self) {
+            return Err("the session changed".into());
+        }
+        self.limit_changes.lock().unwrap().push(change);
+        let mut limits = self.limits.lock().unwrap();
+        if let Some(limit) = change.upload_kib_per_s {
+            limits.upload_kib_per_s = limit;
+        }
+        if let Some(limit) = change.download_kib_per_s {
+            limits.download_kib_per_s = limit;
+        }
+        if let Some(limit) = change.downloaded_copies_bytes {
+            limits.downloaded_copies_bytes = limit;
+        }
+        Ok(*limits)
     }
 }
 
@@ -773,4 +813,13 @@ fn the_engines_own_glue_hands_out_nothing_with_no_one_signed_in() {
     assert!(DriveEngine::storage_info(&engine).is_err());
     assert!(DriveEngine::set_kept(&engine, "an-invented-id", true).is_err());
     assert!(!DriveEngine::syncing(&engine));
+    // The limits are this PC's: read without a session, and never changed without the session of a press.
+    assert_eq!(DriveEngine::session(&engine), engine.session_turn());
+    let found = DriveEngine::limits(&engine).expect("the settings file reads");
+    let change = TransferLimitsChange {
+        upload_kib_per_s: Some(found.upload_kib_per_s + 1),
+        ..TransferLimitsChange::default()
+    };
+    assert!(DriveEngine::set_limits(&engine, engine.session_turn(), change).is_err());
+    assert_eq!(DriveEngine::limits(&engine), Ok(found), "nothing was written");
 }

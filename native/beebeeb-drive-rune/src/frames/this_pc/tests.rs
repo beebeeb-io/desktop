@@ -653,7 +653,7 @@ fn a_real_pc_never_draws_the_boards_sample_status_line() {
     let rt = with_source(super::Section::AvailableOffline, Box::new(NoLists(Standing::Ready)));
     assert_eq!(text(&rt, "status-details"), "Nothing available offline");
     let mut rt = with_source(super::Section::AvailableOffline, Box::new(FixtureSource::synced()));
-    rt.state.this_pc.open_menu(0, (430.0, 190.0));
+    rt.update(|s, _| s.this_pc.open_menu(0, (430.0, 190.0)));
     rt.frame(0.0);
     assert!(has(&rt, "menu"));
     assert_ne!(text(&rt, "status-details"), SAMPLE);
@@ -664,10 +664,17 @@ fn a_real_pc_never_draws_the_boards_sample_status_line() {
 fn the_status_line_says_the_sources_sync_word_or_none() {
     // The window's own source has no word for sync (nothing syncs here): no dot, no word, never "Up to date".
     let mut rt = with_source(super::Section::SyncHistory, Box::new(FixtureSource::board()));
-    rt.state.this_pc = super::Ui::new(Box::new(NoLists(Standing::Ready)));
-    rt.state.actions.source = Box::new(crate::frames::files::source::NoEngine);
+    rt.update(|s, _| {
+        s.this_pc = super::Ui::new(Box::new(NoLists(Standing::Ready)));
+        s.actions.source = Box::new(crate::frames::files::source::NoEngine);
+    });
     rt.frame(0.0);
     assert!(!has(&rt, "status-text") && !has(&rt, "status-dot"));
+    // The board's own source says "Up to date": that word, with its dot.
+    rt.update(|s, _| s.actions.source = Box::new(FilesFixture::default()));
+    rt.frame(0.0);
+    assert_eq!(text(&rt, "status-text"), "Up to date");
+    assert!(has(&rt, "status-dot"));
 
     // An item that did not sync: "Sync stopped", whatever the source's word.
     let rt = runtime(scenes::dw_0428, false);
@@ -683,9 +690,11 @@ fn the_sidebar_foot_draws_the_account_and_the_storage_the_window_read() {
 
     // A window whose source names no account and has read no storage: no sample name, no figure, no breakdown.
     let mut rt = with_source(super::Section::SyncHistory, Box::new(NoLists(Standing::Ready)));
-    rt.state.actions.source = Box::new(crate::frames::files::source::NoEngine);
-    rt.state.storage_known = false;
-    rt.state.storage_split = None;
+    rt.update(|s, _| {
+        s.actions.source = Box::new(crate::frames::files::source::NoEngine);
+        s.storage_known = false;
+        s.storage_split = None;
+    });
     rt.frame(0.0);
     assert_eq!(text(&rt, "account-name"), "");
     assert!(has(&rt, "account-email-off") && !has(&rt, "account-email") && !has(&rt, "avatar"));
@@ -704,7 +713,7 @@ fn the_sidebar_foot_draws_the_account_and_the_storage_the_window_read() {
     }
 
     // Storage read, no split from the source: the total, one segment, no Files/Photos line.
-    rt.state.storage_known = true;
+    rt.update(|s, _| s.storage_known = true);
     rt.frame(0.0);
     assert!(text(&rt, "storage-value").contains(" of "));
     assert!(!has(&rt, "storage-breakdown"));

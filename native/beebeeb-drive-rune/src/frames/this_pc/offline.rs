@@ -178,9 +178,11 @@ fn ask_remove_all(count: usize, t: &Theme) -> El {
         ],
         t,
     );
+    // A modal's keys are heard on the modal itself (Esc says no), not on the window under it.
     el().key("dialog-remove-all-from-this-pc")
         .pin(Some(0.0), Some(32.0), Some(0.0), Some(0.0))
         .child(card)
+        .on_key(super::on_key)
 }
 
 /// A row as Files' actions take it (`FilesSource::open`, `show_in_file_explorer`): they find the file by its id.

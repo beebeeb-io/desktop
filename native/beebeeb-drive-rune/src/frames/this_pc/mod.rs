@@ -405,7 +405,8 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     );
     let ui = &mut s.this_pc;
     // The ask before Remove all does not outlive its section, or the items it was about.
-    if ui.confirm_remove_all && (!open || ui.kept_count() == 0) {
+    let offline = s.shell.app.route().section == Section::AvailableOffline;
+    if ui.confirm_remove_all && (!offline || ui.kept_count() == 0) {
         ui.confirm_remove_all = false;
     }
     // A section that just opened: the source reads again when what it holds is old.
