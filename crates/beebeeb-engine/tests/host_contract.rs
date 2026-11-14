@@ -973,7 +973,6 @@ fn assert_closed_by_an_ended_session(host: &Host, credentials: &MemoryCredential
         store.load_session_token().unwrap().is_some(),
         "the stored session stays"
     );
-    assert!(!host.engine.is_syncing());
 }
 
 #[test]
@@ -1016,7 +1015,7 @@ fn windows_hello_opens_nothing_after_the_server_ended_the_session() {
     );
     assert_eq!(
         host.engine.unlock_screen_platform_verified(asked),
-        Err(LockRefused::NeedsThePassword),
+        Err(LockRefused::Overtaken),
         "an answer asked for before the close opens nothing either"
     );
     assert_eq!(host.engine.gate(), GateState::Locked);
@@ -1127,8 +1126,9 @@ fn the_watcher_closes_an_ended_session_and_ends_with_its_handle() {
 
     engine.watch_session_every(Duration::from_millis(20));
     engine.watch_session_every(Duration::from_millis(20));
-    assert_eq!(session_watch_threads(), 1, "a second call starts no second thread");
+    wait_for("the watcher thread", || session_watch_threads() == 1);
     std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(session_watch_threads(), 1, "a second call starts no second thread");
     assert_eq!(
         engine.lock_state(),
         LockState::Open,

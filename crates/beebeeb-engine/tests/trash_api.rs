@@ -323,8 +323,7 @@ fn a_listing_is_bound_to_its_session_and_one_that_outlives_it_is_dropped() {
 }
 
 /// A listing asked while a lock is ending its session is never handed over, not even under the turn the lock
-/// leaves behind: the call ends as "not signed in". The lock is held half done until the listing's request has
-/// reached the fake, and the fake holds its reply until the lock is done (no clock decides the order).
+/// leaves behind: the call ends as "not signed in". The listing is asked while the lock is held half done.
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn a_listing_asked_while_its_session_is_ending_is_never_handed_over() {
@@ -344,27 +343,22 @@ fn a_listing_asked_while_its_session_is_ending_is_never_handed_over() {
         1
     );
 
-    let (reached, was_reached) = std::sync::mpsc::channel::<()>();
-    let (release, released) = std::sync::mpsc::channel::<()>();
-    *account.during.lock().unwrap() = Some(Box::new(move || {
-        let _ = reached.send(());
-        let _ = released.recv_timeout(WAIT);
-    }));
+    // Since a person's call takes its session through the one choke point, a listing asked while the lock is under way
+    // is refused before any request leaves: it never reaches the fake, so there is no reply to hold back.
     let (answered, answer) = std::sync::mpsc::channel();
     let reader = engine.clone();
     engine.during_next_forget_for_test(Box::new(move || {
+        let (ended, ended_in) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = answered.send(reader.trash_listing().map(|listing| listing.items.len()));
+            let _ = ended.send(reader.trash_listing().map(|listing| listing.items.len()));
         });
-        was_reached
-            .recv_timeout(WAIT)
-            .expect("the listing's request reached the fake while the lock was under way");
+        // The lock stays half done until the listing's call ended.
+        let _ = answered.send(ended_in.recv_timeout(WAIT).expect("the listing call ended"));
     }));
     let _ = engine.lock();
     assert!(!engine.has_session(), "locked");
-    release.send(()).expect("the fake still holds the reply");
     assert_eq!(
-        answer.recv_timeout(WAIT).expect("the listing call ended"),
+        answer.recv_timeout(WAIT).expect("the lock saw the listing end"),
         Err(AccountCallError::NotSignedIn),
         "a listing for a session that ended is not handed over"
     );
