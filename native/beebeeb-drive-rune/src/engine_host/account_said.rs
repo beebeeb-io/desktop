@@ -76,9 +76,24 @@ impl About {
     }
 }
 
+/// Where the sign-out a toast is about stands. What the line does with a toast (hold it, let the list correct it,
+/// keep it when the pane is left) is read from this, never from its sentence.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Stage {
+    /// Said, and nothing more is expected (the list may still correct what it is about).
+    Final,
+    /// The result is not known and the list is being read to find out: it stays until that read answered.
+    Checking,
+    /// The result is not known and the check failed too.
+    Unconfirmed,
+    /// A second press while the first is on its way: over with that one's answer.
+    Busy,
+}
+
 /// What a toast says. It is kept with the session it was said in: a toast is never drawn in another session.
 pub(super) struct Said {
     pub(super) words: &'static str,
+    pub(super) stage: Stage,
     /// The sign-out the words are about while the list can still correct them: the next list read after the
     /// answer decides (`EngineAccountSource::words_follow`).
     pub(super) about: Option<About>,
@@ -95,6 +110,7 @@ impl Said {
     pub(super) fn done(words: &'static str) -> Self {
         Self {
             words,
+            stage: Stage::Final,
             about: None,
             again: false,
             failed: false,
@@ -105,10 +121,34 @@ impl Said {
     pub(super) fn failed(words: &'static str, about: Option<About>, again: bool) -> Self {
         Self {
             words,
+            stage: Stage::Final,
             about,
             again,
             failed: true,
             shown_at: None,
+        }
+    }
+
+    /// A timeout or a broken connection: the sign-out may have landed, and the list is read to find out.
+    pub(super) fn checking(about: About) -> Self {
+        Self {
+            stage: Stage::Checking,
+            ..Self::failed(UNKNOWN_SIGN_OUT, Some(about), false)
+        }
+    }
+
+    /// The check itself failed: a toast of its own, with its own time.
+    pub(super) fn unconfirmed(about: Option<About>) -> Self {
+        Self {
+            stage: Stage::Unconfirmed,
+            ..Self::failed(UNCONFIRMED_SIGN_OUT, about, false)
+        }
+    }
+
+    pub(super) fn busy() -> Self {
+        Self {
+            stage: Stage::Busy,
+            ..Self::failed(STILL_SIGNING_OUT, None, false)
         }
     }
 
@@ -135,5 +175,64 @@ pub(super) fn line_up(line: &mut Line, session: SessionGeneration, said: Said) {
     } else {
         line.retain(|(_, old)| old.failed);
         line.push_back((session, said));
+    }
+}
+
+/// A list read after the last answer landed: every toast about a sign-out follows what the list says, the ones
+/// that wait too (`lines`). None of its sessions is listed any more: they are signed out, whatever the answer
+/// was, and there is nothing to send again. One is still listed although the result was not known: it was not
+/// signed out, and the toast offers to send it again. Each toast goes through the line again, so its rules hold
+/// for the new words too (what was not done first, the same sentence once).
+pub(super) fn follow(lines: [&mut Line; 2], turn: SessionGeneration, list: &[Row]) {
+    let others = list.iter().any(|row| !row.current);
+    let follow = |said: Said| {
+        let Some(about) = said.about.clone() else {
+            return said;
+        };
+        if !about.listed_in(list) {
+            Said::done(match (about.elsewhere(), others) {
+                (false, _) => IS_SIGNED_OUT,
+                // The list has sessions that were not confirmed (made since): not "everywhere else".
+                (true, true) => SIGNED_OUT_THOSE,
+                (true, false) => SIGNED_OUT_ELSEWHERE,
+            })
+        } else if matches!(said.stage, Stage::Checking | Stage::Unconfirmed) {
+            Said::failed(about.not_signed_out(), Some(about), true)
+        } else {
+            said
+        }
+    };
+    for line in lines {
+        for (session, said) in std::mem::take(line) {
+            if session == turn {
+                line_up(line, session, follow(said));
+            }
+        }
+    }
+}
+
+/// The poll's part of the line: the first toast shows, for its time from the moment it first showed, and then
+/// the next. "Checking what Beebeeb has" stays while the check is out (`check_out`): the list's answer has the
+/// last word, and it must find the toast to give it to. Answers when to look again.
+pub(super) fn fade(notices: &mut Line, now: Instant, check_out: bool) -> Option<Duration> {
+    while let Some((_, said)) = notices.front_mut() {
+        let shown_at = *said.shown_at.get_or_insert(now);
+        let left = said.stays().saturating_sub(now.saturating_duration_since(shown_at));
+        if left.is_zero() && !(said.stage == Stage::Checking && check_out) {
+            notices.pop_front();
+        } else {
+            return (!left.is_zero()).then_some(left);
+        }
+    }
+    None
+}
+
+/// The window shows another pane: the toasts go. A sign-out that was not done and whose toast never showed (it
+/// waited behind another) is kept in `later`, for when Devices and sessions shows again.
+pub(super) fn leave(notices: &mut Line, later: &mut Line) {
+    for (session, said) in std::mem::take(notices) {
+        if said.failed && said.about.is_some() && said.shown_at.is_none() {
+            line_up(later, session, said);
+        }
     }
 }

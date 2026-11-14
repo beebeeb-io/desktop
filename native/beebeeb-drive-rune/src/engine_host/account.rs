@@ -282,39 +282,9 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             .map(|(_, said)| said)
     }
 
-    /// A list read after the last answer landed: every toast about a sign-out follows what the list says, the
-    /// ones that wait too. None of its sessions is listed any more: they are signed out, whatever the answer
-    /// was, and there is nothing to send again. One is still listed although the result was not known: it was
-    /// not signed out, and the toast offers to send it again.
+    /// A list read after the last answer landed: the toasts about a sign-out follow it (`said::follow`).
     fn words_follow(&mut self, list: &[Row]) {
-        let turn = self.engine.session_turn();
-        let others = list.iter().any(|row| !row.current);
-        let follow = |said: Said| {
-            let Some(about) = said.about.clone() else {
-                return said;
-            };
-            if !about.listed_in(list) {
-                Said::done(match (about.elsewhere(), others) {
-                    (false, _) => IS_SIGNED_OUT,
-                    // The list has sessions that were not confirmed (made since): not "everywhere else".
-                    (true, true) => SIGNED_OUT_THOSE,
-                    (true, false) => SIGNED_OUT_ELSEWHERE,
-                })
-            } else if said.words == UNKNOWN_SIGN_OUT || said.words == UNCONFIRMED_SIGN_OUT {
-                Said::failed(about.not_signed_out(), Some(about), true)
-            } else {
-                said
-            }
-        };
-        // Each toast goes through the line again, so its rules hold for the new words too (what was not done
-        // first, the same sentence once).
-        for line in [&mut self.notices, &mut self.later] {
-            for (session, said) in std::mem::take(line) {
-                if session == turn {
-                    line_up(line, session, follow(said));
-                }
-            }
-        }
+        follow([&mut self.notices, &mut self.later], self.engine.session_turn(), list);
         // Only what was not done is said on return.
         self.later.retain(|(_, said)| said.failed);
         self.dirty = true;
@@ -451,8 +421,8 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             }
             // The check after a sign-out whose result is not known has itself failed: no longer "checking".
             for (_, said) in self.notices.iter_mut().chain(self.later.iter_mut()) {
-                if said.words == UNKNOWN_SIGN_OUT {
-                    said.words = UNCONFIRMED_SIGN_OUT;
+                if said.stage == Stage::Checking {
+                    (said.words, said.stage) = (UNCONFIRMED_SIGN_OUT, Stage::Unconfirmed);
                 }
             }
         }
@@ -561,7 +531,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                     return;
                 }
                 // "Still signing out" is over with the answer.
-                self.notices.retain(|(_, said)| said.words != STILL_SIGNING_OUT);
+                self.notices.retain(|(_, said)| said.stage != Stage::Busy);
                 // Not sent (a session step held the lock for a moment): nothing changed at Beebeeb.
                 let sent = ended > 0 || result != Err(AccountCallError::NotSignedIn);
                 let said = match result {
@@ -577,7 +547,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                     Ok(SessionEnd::Ended) => Said::done(SIGNED_OUT),
                     // Beebeeb has no such session. That is "signed out" only once its list no longer has
                     // the session (`words_follow`): until then it is not known, and said so.
-                    Ok(SessionEnd::AlreadyGone) => Said::failed(UNKNOWN_SIGN_OUT, Some(about), false),
+                    Ok(SessionEnd::AlreadyGone) => Said::checking(about),
                     Err(AccountCallError::NotSignedIn) if ended == 0 => Said::failed(NOT_SENT, Some(about), true),
                     Err(error) => {
                         log(format!("account: a sign-out was not confirmed ({error})"));
@@ -595,7 +565,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                             | AccountCallError::NotSignedIn => Said::failed(words, Some(about), true),
                             // A timeout, a broken connection, an answer that does not read: it may have
                             // landed. The list that is read next says which.
-                            _ => Said::failed(UNKNOWN_SIGN_OUT, Some(about), false),
+                            _ => Said::checking(about),
                         }
                     }
                 };
@@ -683,7 +653,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             return false;
         }
         if self.changing.iter().any(|(s, k)| *s == session && k == key) {
-            self.say(Said::failed(STILL_SIGNING_OUT, None, false));
+            self.say(Said::busy());
             return false;
         }
         let about = About {
@@ -920,20 +890,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         let before = self.notices.len() + self.later.len();
         self.notices.retain(|(session, _)| *session == turn);
         self.later.retain(|(session, _)| *session == turn);
-        let mut wake_in = None;
-        while let Some((_, said)) = self.notices.front_mut() {
-            let shown_at = *said.shown_at.get_or_insert(now);
-            let left = said.stays().saturating_sub(now.saturating_duration_since(shown_at));
-            // "Checking what Beebeeb has" stays while the check is out: the list's answer has the last word,
-            // and it must find the toast to give it to.
-            let checking = said.words == UNKNOWN_SIGN_OUT && self.sessions_reads.reading.is_some();
-            if left.is_zero() && !checking {
-                self.notices.pop_front();
-            } else {
-                wake_in = (!left.is_zero()).then_some(left);
-                break;
-            }
-        }
+        let wake_in = fade(&mut self.notices, now, self.sessions_reads.reading.is_some());
         changed |= self.notices.len() + self.later.len() != before;
         self.dirty = false;
         Pumped {
@@ -986,15 +943,10 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         }
     }
 
-    /// The window shows another pane: the toasts go. A sign-out that was not done and whose toast never showed
-    /// (it waited behind another) is kept for when Devices and sessions shows again.
+    /// The window shows another pane: the toasts go (`said::leave` keeps what must still be said).
     fn clear_notice(&mut self) {
         self.dirty |= !self.notices.is_empty();
-        for (session, said) in std::mem::take(&mut self.notices) {
-            if said.failed && said.about.is_some() && said.shown_at.is_none() {
-                line_up(&mut self.later, session, said);
-            }
-        }
+        leave(&mut self.notices, &mut self.later);
     }
 
     fn identity(&self) -> Identity {
