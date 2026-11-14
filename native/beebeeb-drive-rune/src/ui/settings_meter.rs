@@ -160,8 +160,6 @@ pub fn slider(name: &str, width: f32, at: f32, t: &Theme) -> El {
         .child(
             disc("slider-knob", 18.0, Color::WHITE)
                 .pin(Some(width * at - 9.0), Some(2.0), None, None)
-                // The knob sits where the value is, between device pixels if need be.
-                .pixel_snap(false)
                 .radius(9.0)
                 .box_shadow(kit::drop(1.0, 3.0, Color::BLACK.alpha(0.30)))
                 .box_shadow(kit::ring(kit::HAIR, t.separator)),
