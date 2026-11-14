@@ -29,6 +29,7 @@ mod media_icons;
 pub mod new_file;
 pub mod office;
 mod office_icons;
+pub mod office_over;
 mod pdf;
 mod photo;
 pub mod source;
@@ -293,7 +294,7 @@ impl Ui {
     /// get past (offline, a lock that ended).
     pub fn retry(&mut self) {
         let may = match &self.file.body {
-            Body::Failed => true,
+            Body::Failed | Body::NoEditor => true,
             Body::Stopped(why) => why.can_retry(),
             _ => false,
         };
@@ -614,6 +615,10 @@ pub fn sync(s: &mut State) {
             if ui.dialog.is_some() {
                 ui.keep_editing();
                 true
+            } else if ui.office.over.is_some() {
+                // Esc closes the question or the command search before it leaves the document.
+                ui.office_close_over();
+                true
             } else {
                 // Esc and Back close find, or step out of an archive's folder, before the file.
                 ui.hold_for_changes() || (still_drive && ui.close_inner())
@@ -744,8 +749,10 @@ fn kind_word(file: &OpenFile) -> &str {
 }
 
 fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
-    if let Body::Word(doc) = &ui.file.body {
-        return office::window(s, cx, ui, doc);
+    match &ui.file.body {
+        Body::Word(doc) => return office::window(s, cx, ui, Some(doc)),
+        Body::NoEditor => return office::window(s, cx, ui, None),
+        _ => {}
     }
     let t = tokens::theme(cx.system_dark());
     if let Some(editor) = &ui.editor {
@@ -866,7 +873,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             ui.toast = None;
         }
     }
-    if media::on_key(s, ev) {
+    if media::on_key(s, ev) || office_over::on_key(s, ev, tx) {
         if let Some(key) = ui(s).and_then(|ui| ui.focus.take()) {
             tx.focus(key, true);
         }
@@ -916,7 +923,8 @@ pub fn scene_file(frame: &str) -> Option<&'static str> {
         "DW-1506" => board::PDF_FIND,
         "DW-1514" => board::CSV,
         "DW-1515" => board::ZIP,
-        "DW-1507" => board::DOCX,
+        "DW-1234" | "DW-1507" | "DW-1550" | "DW-1551" | "DW-1552" | "DW-1553" | "DW-1554" | "DW-1556" => board::DOCX,
+        "DW-1511" => board::DOC,
         _ => return None,
     })
 }
@@ -929,7 +937,14 @@ pub fn set_scene(s: &mut State, frame: &str) {
     let Some(file) = scene_file(frame) else { return };
     let source = FixtureViewerSource {
         newer: frame == "DW-1519",
-        conflict: frame == "DW-1526",
+        conflict: matches!(frame, "DW-1526" | "DW-1554"),
+        office: match frame {
+            "DW-1552" | "DW-1553" | "DW-1554" => office::board::Case::Unsaved,
+            "DW-1550" => office::board::Case::Table,
+            "DW-1556" => office::board::Case::NoEditor,
+            "DW-1234" => office::board::Case::Plain,
+            _ => office::board::Case::Selected,
+        },
         ..FixtureViewerSource::new()
     };
     open_from(s, Box::new(source), file);
@@ -960,6 +975,17 @@ pub fn set_scene(s: &mut State, frame: &str) {
         }
     }
     match frame {
+        // The Insert tab, pressed.
+        "DW-1550" => ui.office.tab = office::Tab::Insert,
+        // Ctrl+K, "head".
+        "DW-1551" => {
+            ui.office_palette();
+            if let Some(office_over::Over::Palette(palette)) = ui.office.over.as_mut() {
+                palette.query.insert(office::board::QUERY);
+            }
+        }
+        // Ctrl+S: saved (DW-1553), or the newer version in its way (DW-1554).
+        "DW-1553" | "DW-1554" => ui.office_save(),
         "DW-1524" | "DW-1526" => ui.save(),
         "DW-1525" => {
             ui.hold_for_changes();
@@ -1023,4 +1049,11 @@ pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1514", |s| set_scene(s, "DW-1514")),
     ("DW-1515", |s| set_scene(s, "DW-1515")),
     ("DW-1507", |s| set_scene(s, "DW-1507")),
+    ("DW-1511", |s| set_scene(s, "DW-1511")),
+    ("DW-1550", |s| set_scene(s, "DW-1550")),
+    ("DW-1551", |s| set_scene(s, "DW-1551")),
+    ("DW-1552", |s| set_scene(s, "DW-1552")),
+    ("DW-1553", |s| set_scene(s, "DW-1553")),
+    ("DW-1554", |s| set_scene(s, "DW-1554")),
+    ("DW-1556", |s| set_scene(s, "DW-1556")),
 ];

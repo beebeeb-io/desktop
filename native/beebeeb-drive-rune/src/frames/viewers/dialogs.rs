@@ -15,7 +15,7 @@ use crate::ui::{au, kit};
 
 /// How a dialog button reads.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Look {
+pub(super) enum Look {
     /// The one Amber action.
     Primary,
     /// Paper with a line.
@@ -27,7 +27,11 @@ enum Look {
 }
 
 fn button(index: usize, label: &str, look: Look, t: &Theme) -> El {
-    let key = format!("dlg-btn-{index}");
+    button_keyed(format!("dlg-btn-{index}"), label, look, t)
+}
+
+/// A dialog button under a key of the caller's (`<key>`, `<key>-label`).
+pub(super) fn button_keyed(key: String, label: &str, look: Look, t: &Theme) -> El {
     let ink = match look {
         Look::Primary => t.accent_text_on,
         Look::Outline => t.text,
@@ -63,7 +67,7 @@ fn button(index: usize, label: &str, look: Look, t: &Theme) -> El {
     b.child(style::fitted(format!("{key}-label"), label, BUTTON_MD, ink))
 }
 
-fn foot(t: &Theme) -> El {
+pub(super) fn foot(t: &Theme) -> El {
     el().key("dlg-foot")
         .w_full()
         .gap(8.0)
@@ -77,6 +81,27 @@ fn foot(t: &Theme) -> El {
 /// The card on the scrim. The shadow and the hairline ring are outside the card; the clip
 /// that rounds the foot's corners would cut them, so it sits one level in.
 fn shell(name: &str, role: &'static str, width: f32, head: El, body: Option<El>, foot: El, t: &Theme) -> El {
+    // Esc and a press outside are the way back to the edit.
+    let keep = |s: &mut State| {
+        if let Some(ui) = ui(s) {
+            ui.keep_editing();
+        }
+    };
+    shell_closing(name, role, width, head, body, foot, keep, t)
+}
+
+/// [`shell`] with the caller's way back (Esc, a press outside).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn shell_closing(
+    name: &str,
+    role: &'static str,
+    width: f32,
+    head: El,
+    body: Option<El>,
+    foot: El,
+    close: impl Fn(&mut State) + 'static,
+    t: &Theme,
+) -> El {
     let mut inner = col().key("dlg-clip").w_full().clip_rounded(8.0).child(head);
     if let Some(body) = body {
         inner = inner.child(body);
@@ -100,12 +125,7 @@ fn shell(name: &str, role: &'static str, width: f32, head: El, body: Option<El>,
         .center()
         .fill(scrim_color(t))
         .child(dlg)
-        // Esc and a press outside are the way back to the edit.
-        .modal(false, |s: &mut State| {
-            if let Some(ui) = ui(s) {
-                ui.keep_editing();
-            }
-        })
+        .modal(false, close)
 }
 
 /// The widths of buttons that share a row evenly but never get narrower than their words

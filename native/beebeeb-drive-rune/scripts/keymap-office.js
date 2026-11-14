@@ -29,7 +29,10 @@
       if (hint) { api.textNode(`${key}-label`, word); text(`${key}-hint`, hint, dim(hint)); } else text(`${key}-label`, word);
     };
     const main = q('.mk-main');
-    const ribbon = main && q(':scope > .flex-none.flex.flex-col', main);
+    // The ribbon; a wrapper dims the whole of it while the editor did not start (DW-1556).
+    const ribbon = main && (q(':scope > .flex-none.flex.flex-col', main) || q(':scope > div > .flex-none.flex.flex-col', main));
+    // The dot after the file's name: changes that are not saved.
+    box('crumb-dot', q('.mk-crumbs span.inline-flex > span'));
     if (ribbon) {
       box('rib', ribbon);
       const [tabs, tools] = qa(':scope > div', ribbon);
@@ -81,13 +84,52 @@
       const page = q(':scope > .flex.flex-col', stage);
       if (page) {
         box('page', page);
-        qa(':scope > div, :scope > p', page).forEach((line, i) => text(`pg-${i}`, line, dim(line)));
+        // Lines are numbered in order; a table is `tbl`, its cells `tbl-<row>-<column>`.
+        let np = 0;
+        qa(':scope > div, :scope > p', page).forEach((line) => {
+          if (!line.classList.contains('grid')) { text(`pg-${np++}`, line, dim(line)); return; }
+          box('tbl', line);
+          const cols = getComputedStyle(line).gridTemplateColumns.split(' ').length;
+          qa(':scope > span', line).forEach((cell, i) => text(`tbl-${Math.floor(i / cols)}-${i % cols}`, cell));
+        });
       }
       const float = q(':scope > .glass', stage);
       if (float) {
         box('float', float);
         qa('.mk-tbtn', float).forEach((b, i) => tool(`ft-${i}`, b));
       }
+    }
+    // The editor did not start (DW-1556): the second button (the first is keymap-files.js's `empty-add`).
+    const failed = body && q('.kit-empty', body);
+    if (failed) qa('button.kit-btn', failed).forEach((b, i) => { if (i > 0) button(`empty-btn-${i}`, b); });
+    // The tile of a question's head (`.wn-dlg-alert`).
+    const alert = q('.wn-dlg-alert .kit-tile');
+    if (alert) { box('dlg-tile', alert); icon('dlg-tile-icon', q('svg', alert)); }
+    // The command search (Ctrl+K): the field, the results by group, the foot.
+    const pal = q('[class*="z-[7]"]');
+    if (pal) {
+      box('scrim', q('.mk-scrim'));
+      box('pal', pal);
+      const [head, list, foot] = qa(':scope > div', pal);
+      icon('pal-find-icon', q(':scope > svg', head));
+      api.textNode('pal-query', q(':scope > .t-body', head));
+      box('pal-caret', q('.kit-caret', head));
+      box('pal-esc-box', q('kbd', head));
+      api.textNode('pal-esc', q('kbd', head));
+      let n = 0;
+      qa(':scope > div', list).forEach((group, g) => {
+        text(`pal-g${g}`, q(':scope > .t-label', group));
+        qa(':scope > div.flex', group).forEach((line) => {
+          const k = `pal-${n++}`;
+          box(`${k}-row`, line, { on: getComputedStyle(line).backgroundColor !== 'rgba(0, 0, 0, 0)' });
+          text(k, q(':scope > .t-body', line));
+          const kbd = q('kbd', line);
+          if (kbd) { box(`${k}-kbd-box`, kbd); api.textNode(`${k}-kbd`, kbd); }
+        });
+      });
+      box('pal-foot', foot);
+      icon('pal-foot-icon', q(':scope > svg', foot));
+      api.textNode('pal-foot-text', foot);
     }
     // The status line: what the document is, then how it is kept, zoom, About.
     const foot = main && q(':scope > .mk-foot', main);
@@ -98,6 +140,8 @@
         if (!el || !shown(el)) continue;
         if (el.classList.contains('mk-sep')) { box(`st-sep-${ns++}`, el); continue; }
         if (el.classList.contains('flex-1')) continue;
+        // A state's dot and its words are keymap.js's (`status-dot`, `status-text`).
+        if (el.classList.contains('mk-sdot') || el.tagName === 'B') continue;
         const k = `st-${n++}`;
         const svgs = qa(':scope > svg', el);
         const mono = q(':scope > .font-mono', el);

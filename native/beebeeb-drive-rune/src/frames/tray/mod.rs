@@ -377,11 +377,10 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         shortcuts::open(s);
         s.shortcuts.page = shortcuts::Page::Window;
     }),
-    // The same dialog while a document is open: the editor's four lists. The board draws the
-    // document editor behind it, which is not built; the scene opens the note in the text
-    // editor (DW-1523). No golden, so no gate: `FRAMES.md` says what is left.
+    // The same dialog while a document is open: the editor's four lists, over the text document
+    // in the editor's frame (as DW-1507, nothing selected).
     ("DW-1234", |s| {
-        crate::frames::viewers::set_scene(s, "DW-1523");
+        crate::frames::viewers::set_scene(s, "DW-1234");
         shortcuts::open(s);
     }),
 ];

@@ -73,11 +73,22 @@ pub struct Selection {
     pub tools_at: (f32, f32),
 }
 
-/// One section of a document: its heading and its paragraph.
+/// One section of a document: its heading, its paragraph, and a table under it if it has one
+/// (rows of cells, the first row the headings).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Section {
     pub heading: String,
     pub text: String,
+    pub table: Option<Vec<Vec<String>>>,
+}
+
+/// Whether what is on screen is what is stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kept {
+    /// The version in the status line is what is on screen.
+    Saved,
+    /// There are changes no version holds yet (DW-1552).
+    Unsaved,
 }
 
 /// A text document as the editor shows it (DW-1507).
@@ -96,6 +107,9 @@ pub struct WordDoc {
     /// When this version was saved ("09:12").
     pub saved_at: String,
     pub selection: Option<Selection>,
+    pub kept: Kept,
+    /// An older Word file (.doc): it opens and saves in the same format (DW-1511).
+    pub older: bool,
 }
 
 /// Its counts, never a word of it.
@@ -113,6 +127,9 @@ impl WordDoc {
         for section in &mut self.sections {
             section.heading.zeroize();
             section.text.zeroize();
+            for cell in section.table.iter_mut().flatten().flatten() {
+                cell.zeroize();
+            }
         }
         for line in &mut self.outline {
             line.zeroize();
@@ -144,11 +161,12 @@ impl Tab {
 }
 
 /// What is open inside the editor's frame.
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OfficeUi {
     pub tab: Tab,
     /// The outline pane shows.
     pub outline: bool,
+    /// The question after a save, or the command search (`office_over.rs`).
+    pub over: Option<super::office_over::Over>,
 }
 
 impl Default for OfficeUi {
@@ -156,13 +174,14 @@ impl Default for OfficeUi {
         OfficeUi {
             tab: Tab::Home,
             outline: true,
+            over: None,
         }
     }
 }
 
 /// A command a control of the editor stands for. The editor takes it; until it does the press says
 /// "Not built yet" ([`Ui::intent`]).
-fn ask(command: &'static str) -> impl Fn(&mut State) + 'static {
+pub(super) fn ask(command: &'static str) -> impl Fn(&mut State) + 'static {
     move |s: &mut State| {
         if let Some(ui) = super::ui(s) {
             ui.intent(Intent::Office(command));
@@ -234,7 +253,7 @@ fn tool(key: &str, name: &'static str, face: Face, state: Tool, command: &'stati
 }
 
 /// A hairline between groups of tools (`.mk-sep`). Key: `<key>`.
-fn hairline(key: String, t: &Theme) -> El {
+pub(super) fn hairline(key: String, t: &Theme) -> El {
     el().key(key).w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator)
 }
 
@@ -350,7 +369,11 @@ fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
         t,
     )
     .focusable(true)
-    .on_press(ask("the command search"))
+    .on_press(|s: &mut State| {
+        if let Some(ui) = super::ui(s) {
+            ui.office_palette();
+        }
+    })
     .child(kit::glyph("rib-find-icon", &oi::FIND, 12.0, t.text_tertiary))
     .child(style::fitted(
         "rib-find-text",
@@ -380,7 +403,12 @@ fn tabs_row(ui: &Ui, unsaved: bool, t: &Theme) -> El {
     let save = small_button("rib-btn-1", "Save", &oi::PADLOCK, Some("Ctrl+S"), t);
     // Save is off, at 45 %, while there is nothing to save.
     let save = if unsaved {
-        el().key("rib-save").child(save.focusable(true).on_press(ask("Save")))
+        el().key("rib-save")
+            .child(save.focusable(true).on_press(|s: &mut State| {
+                if let Some(ui) = super::ui(s) {
+                    ui.office_save();
+                }
+            }))
     } else {
         el().key("rib-save").opacity(0.45).child(save.disabled(true))
     };
@@ -440,8 +468,9 @@ fn home_tools(t: &Theme) -> Vec<El> {
 fn ribbon(ui: &Ui, unsaved: bool, t: &Theme) -> El {
     let tools = match ui.office.tab {
         Tab::Home => home_tools(t),
-        // The other tabs' tools are other frames (DW-1550 is Insert's): not drawn here.
-        Tab::Insert | Tab::Layout | Tab::Review => Vec::new(),
+        Tab::Insert => super::office_over::insert_tools(t),
+        // Layout's and Review's tools are on no board frame: not drawn.
+        Tab::Layout | Tab::Review => Vec::new(),
     };
     col()
         .key("rib")
@@ -586,6 +615,9 @@ fn stage(doc: &WordDoc, t: &Theme) -> El {
                     .wrap()
                     .w_full(),
             );
+        if let Some(rows) = &section.table {
+            page = page.child(super::office_over::table(rows, 424.0, ink()));
+        }
     }
     let mut stage = row()
         .key("stage")
@@ -652,37 +684,36 @@ fn stage(doc: &WordDoc, t: &Theme) -> El {
     stage
 }
 
-/// The status line: what the document is, how it is kept, the zoom, About.
-fn status(file: &OpenFile, doc: &WordDoc, unsaved: bool, t: &Theme) -> El {
-    let plain = |key: String, words: String| style::fitted(key, &words, type_::STATUS, t.text_tertiary);
-    let dot = |key: &str| plain(key.to_string(), "\u{00B7}".to_string());
+/// How the document is kept, as the status line and Save show it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Keeping {
+    Saved,
+    Unsaved,
+    /// The last save found a newer version; the question is open (DW-1554).
+    Conflict,
+    /// The editor did not start: the file is shown by nothing here (DW-1556).
+    NoEditor,
+}
+
+/// 11.5px/500 on 17px: a state's words at the start of the status line.
+const STATUS_STATE: TextStyle = TextStyle::new(11.5, 500.0).lh(17.0);
+/// The board's words in the status line of DW-1556.
+pub const PREPARING: &str = "Preparing the editor on this PC\u{2026}";
+pub const OLDER_FORMAT: &str = "An older Word file (.doc). It opens and saves in the same format.";
+
+/// The status line: what the document is, how it is kept, the zoom, About. Its parts are keyed
+/// `st-<N>` in order.
+fn status(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, t: &Theme) -> El {
+    let plain = |key: String, words: &str| style::fitted(key, words, type_::STATUS, t.text_tertiary);
     let sep = |key: &str| el().key(key.to_string()).w(kit::HAIR).h(18.0).mx(2.0).fill(t.separator);
-    let pages = if doc.pages == 1 {
-        "Page 1 of 1".to_string()
-    } else {
-        format!("Page 1 of {}", doc.pages)
+    let mut n = 0;
+    let mut next = || {
+        n += 1;
+        format!("st-{}", n - 1)
     };
-    let words = format!("{} words", thousands(doc.words));
-    let kept = if unsaved {
-        "unsaved changes".to_string()
-    } else {
-        format!("saved as version {} \u{00B7} {}", file.version, doc.saved_at)
-    };
-    let kept_el = if unsaved {
-        plain("st-7".into(), kept.clone())
-    } else {
-        let at = kept.len() - doc.saved_at.len();
-        kit::note_text("st-7", "st-7", &kept, type_::STATUS, t.text_tertiary);
-        rich(&kept, vec![Span::new(at, kept.len()).mono()])
-            .key("st-7")
-            .font(type_::STATUS)
-            .color(t.text_tertiary)
-            .w(rune::text::advance(&kept[..at], type_::STATUS) + rune::text::advance(&doc.saved_at, STATUS_MONO))
-    };
-    row()
+    let mut bar = row()
         .key("status-bar")
         .role("status")
-        .label(format!("{pages}, {words}, {}. Encrypted, {kept}", doc.language))
         .w_full()
         .h(28.0)
         .px(16.0)
@@ -690,46 +721,90 @@ fn status(file: &OpenFile, doc: &WordDoc, unsaved: bool, t: &Theme) -> El {
         .center_y()
         .fill(t.status_bar_bg)
         .border_sides([kit::HAIR, 0.0, 0.0, 0.0], t.separator)
-        .border_layout()
-        .child(plain("st-0".into(), pages))
-        .child(dot("st-1"))
-        .child(plain("st-2".into(), words))
-        .child(dot("st-3"))
-        .child(plain("st-4".into(), doc.language.clone()))
+        .border_layout();
+    let what = match doc {
+        Some(doc) => {
+            let pages = format!("Page 1 of {}", doc.pages.max(1));
+            let words = format!("{} words", thousands(doc.words));
+            bar = bar
+                .child(plain(next(), &pages))
+                .child(plain(next(), "\u{00B7}"))
+                .child(plain(next(), &words))
+                .child(plain(next(), "\u{00B7}"))
+                .child(plain(next(), &doc.language));
+            format!("{pages}, {words}, {}", doc.language)
+        }
+        None => {
+            bar = bar
+                .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(style::warn(t)))
+                .child(kit::label("status-text", PREPARING, STATUS_STATE, t.text_secondary));
+            PREPARING.to_string()
+        }
+    };
+    let kept = match (keeping, doc) {
+        (Keeping::Saved, Some(doc)) => format!("saved as version {} \u{00B7} {}", file.version, doc.saved_at),
+        (Keeping::Unsaved, _) => "unsaved changes".to_string(),
+        (Keeping::Conflict, _) => "not saved \u{00B7} conflict".to_string(),
+        (Keeping::NoEditor, _) | (Keeping::Saved, None) => "read-only for now".to_string(),
+    };
+    let enc = next();
+    let dot = next();
+    let kept_key = next();
+    let kept_el = match (keeping, doc) {
+        // The time is a figure: mono.
+        (Keeping::Saved, Some(doc)) => {
+            let at = kept.len() - doc.saved_at.len();
+            kit::note_text(&kept_key, &kept_key, &kept, type_::STATUS, t.text_tertiary);
+            rich(&kept, vec![Span::new(at, kept.len()).mono()])
+                .key(kept_key)
+                .font(type_::STATUS)
+                .color(t.text_tertiary)
+                .w(rune::text::advance(&kept[..at], type_::STATUS) + rune::text::advance(&doc.saved_at, STATUS_MONO))
+        }
+        _ => plain(kept_key, &kept),
+    };
+    let zoom = next();
+    let about = next();
+    bar.label(format!("{what}. Encrypted, {kept}"))
         .child(el().key("st-gap").grow(1.0))
         .child(
             row()
-                .key("st-5-box")
+                .key(format!("{enc}-box"))
                 .gap(4.0)
                 .center_y()
-                .child(kit::glyph("st-5-icon", &oi::PADLOCK, 11.0, t.accent_deep))
-                .child(style::fitted("st-5", "Encrypted", STATUS_ENC, t.accent_deep)),
+                .child(kit::glyph(format!("{enc}-icon"), &oi::PADLOCK, 11.0, t.accent_deep))
+                .child(style::fitted(enc, "Encrypted", STATUS_ENC, t.accent_deep)),
         )
-        .child(dot("st-6"))
+        .child(plain(dot, "\u{00B7}"))
         .child(kept_el)
         .child(sep("st-sep-0"))
         .child(
             row()
-                .key("st-8")
+                .key(zoom.clone())
                 .role("group")
                 .label("Zoom, 100 per cent")
                 .gap(4.0)
                 .center_y()
-                .child(kit::glyph("st-8-less", &oi::LESS, 12.0, t.text_tertiary))
-                .child(style::fitted("st-8-zoom", "100%", STATUS_MONO, t.text_tertiary))
-                .child(kit::glyph("st-8-more", &oi::MORE, 12.0, t.text_tertiary)),
+                .child(kit::glyph(format!("{zoom}-less"), &oi::LESS, 12.0, t.text_tertiary))
+                .child(style::fitted(
+                    format!("{zoom}-zoom"),
+                    "100%",
+                    STATUS_MONO,
+                    t.text_tertiary,
+                ))
+                .child(kit::glyph(format!("{zoom}-more"), &oi::MORE, 12.0, t.text_tertiary)),
         )
         .child(sep("st-sep-1"))
         .child(
-            el().key("st-9-box")
+            el().key(format!("{about}-box"))
                 .role("link")
                 .label("About this editor")
                 .focusable(true)
                 .on_press(ask("About this editor"))
                 .child({
-                    kit::note_text("st-9", "st-9", "About", type_::STATUS, t.text_tertiary);
+                    kit::note_text(&about, &about, "About", type_::STATUS, t.text_tertiary);
                     rich("About", vec![Span::new(0, 5).underline(t.text_tertiary)])
-                        .key("st-9")
+                        .key(about)
                         .font(type_::STATUS)
                         .color(t.text_tertiary)
                         .w(rune::text::advance("About", type_::STATUS))
@@ -751,7 +826,7 @@ fn thousands(n: u32) -> String {
 }
 
 /// The window's toolbar with the document's path where a folder's title is (`ui::toolbar::bar`).
-fn toolbar(s: &State, ui: &Ui, t: &Theme) -> El {
+fn toolbar(s: &State, ui: &Ui, unsaved: bool, t: &Theme) -> El {
     let file = &ui.file;
     let mut crumbs = row()
         .key("crumbs")
@@ -775,11 +850,40 @@ fn toolbar(s: &State, ui: &Ui, t: &Theme) -> El {
                 t.text_tertiary,
             ));
     }
-    crumbs = crumbs.child(
-        kit::label("crumb-here", file.name.clone(), style::CRUMB_NAME, t.text_tertiary)
-            .truncate()
-            .min_w(0.0),
-    );
+    let name = kit::label(
+        if unsaved { "crumb-name" } else { "crumb-here" },
+        file.name.clone(),
+        style::CRUMB_NAME,
+        t.text_tertiary,
+    )
+    .truncate()
+    .min_w(0.0);
+    crumbs = crumbs.child(if unsaved {
+        // The dot after the name: changes no version holds yet.
+        kit::note_text(
+            "crumb-here",
+            "crumb-here-row",
+            &file.name,
+            style::CRUMB_NAME,
+            t.text_tertiary,
+        );
+        row()
+            .key("crumb-here-row")
+            .gap(6.0)
+            .center_y()
+            .min_w(0.0)
+            .child(name)
+            .child(
+                el().key("crumb-dot")
+                    .role("img")
+                    .label("Unsaved changes")
+                    .size(7.0, 7.0)
+                    .radius(3.5)
+                    .fill(t.text),
+            )
+    } else {
+        name
+    });
     let title = col()
         .key("folder-info")
         .role("group")
@@ -846,29 +950,50 @@ fn toolbar(s: &State, ui: &Ui, t: &Theme) -> El {
     )
 }
 
-/// The window with a text document open in the editor's frame.
-pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &WordDoc) -> El {
+/// The window with the editor's frame: a text document (`doc`), or what is shown when the editor
+/// did not start (`None`, DW-1556).
+pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: Option<&WordDoc>) -> El {
     let t = tokens::theme(cx.system_dark());
-    let unsaved = false;
+    let keeping = match (doc, &ui.office.over) {
+        (None, _) => Keeping::NoEditor,
+        (Some(_), Some(super::office_over::Over::Conflict(_))) => Keeping::Conflict,
+        (Some(doc), _) if doc.kept == Kept::Unsaved => Keeping::Unsaved,
+        (Some(_), _) => Keeping::Saved,
+    };
+    let unsaved = matches!(keeping, Keeping::Unsaved | Keeping::Conflict);
     let mut body = row().key("viewer-row").grow(1.0).min_h(0.0).w_full();
-    if ui.office.outline {
-        body = body.child(outline(doc, &t));
-    }
-    body = body.child(stage(doc, &t));
+    body = match doc {
+        Some(doc) => {
+            if ui.office.outline {
+                body = body.child(outline(doc, &t));
+            }
+            body.child(stage(doc, &t))
+        }
+        None => body.child(super::office_over::no_editor(&t)),
+    };
     if ui.show_details {
         body = body.child(super::details::panel(&ui.file, ui.knows_offline(), &t));
     }
-    let main = col()
+    let mut main = col()
         .key("content-area")
         .role("main")
         .grow(1.0)
         .min_w(0.0)
         .h_full()
         .fill(t.bg)
-        .child(toolbar(s, ui, &t))
-        .child(ribbon(ui, unsaved, &t))
+        .child(toolbar(s, ui, unsaved, &t));
+    if doc.is_some_and(|doc| doc.older) {
+        main = main.child(super::text::banner_el(&super::icons::INFO, OLDER_FORMAT, None, &t));
+    }
+    let ribbon = ribbon(ui, unsaved, &t);
+    main = main
+        .child(match doc {
+            Some(_) => ribbon,
+            // No editor: its controls are drawn at 45 % and take no press and no key.
+            None => el().key("rib-dim").w_full().opacity(0.45).inert().child(ribbon),
+        })
         .child(body)
-        .child(status(&ui.file, doc, unsaved, &t));
+        .child(status(&ui.file, doc, keeping, &t));
     let mut under = el().key("under-caption").grow(1.0).min_h(0.0).w_full().child(
         row()
             .key("body")
@@ -879,6 +1004,9 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &WordDoc) -> El {
     );
     if let Some(words) = &ui.toast {
         under = under.child(super::dialogs::toast(words, &t));
+    }
+    if let Some(over) = super::office_over::over(ui, &t) {
+        under = under.child(over);
     }
     col()
         .key("window")
@@ -891,16 +1019,37 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, doc: &WordDoc) -> El {
         .child(under)
 }
 
-/// The board's sample document (DW-1507), for the fixture source.
+/// The board's sample documents, for the fixture source.
 pub mod board {
-    use super::{Section, Selection, WordDoc};
+    use super::super::office_over::{Command, CommandGroup};
+    use super::{Kept, Section, Selection, WordDoc};
+
+    /// Which board frame's document the fixture hands over.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub enum Case {
+        /// DW-1507: saved, a selection with its tools.
+        #[default]
+        Selected,
+        /// DW-1234: saved, nothing selected.
+        Plain,
+        /// DW-1552: changes that are not saved.
+        Unsaved,
+        /// DW-1550: a table was just inserted under "2. Delivery".
+        Table,
+        /// DW-1556: the editor does not start.
+        NoEditor,
+    }
+
+    fn section(heading: &str, text: &str) -> Section {
+        Section {
+            heading: heading.into(),
+            text: text.into(),
+            table: None,
+        }
+    }
 
     /// DW-1507.
     pub fn service_agreement() -> WordDoc {
-        let section = |heading: &str, text: &str| Section {
-            heading: heading.into(),
-            text: text.into(),
-        };
         let scope = "Northwind Studio photographs the hotel's terrace, rooms and harbour view over two days and delivers 60 edited photos and a 90-second film.";
         let from = scope.find("delivers").unwrap_or(0);
         WordDoc {
@@ -942,6 +1091,106 @@ pub mod board {
                 range: from..scope.len(),
                 tools_at: (239.0, 122.0),
             }),
+            kept: Kept::Saved,
+            older: false,
         }
     }
+
+    /// The agreement as a board frame has it.
+    pub fn service_agreement_as(case: Case) -> WordDoc {
+        let mut doc = service_agreement();
+        match case {
+            Case::Selected | Case::NoEditor => {}
+            Case::Plain => doc.selection = None,
+            Case::Unsaved => {
+                doc.selection = None;
+                doc.kept = Kept::Unsaved;
+            }
+            Case::Table => {
+                doc.selection = None;
+                doc.kept = Kept::Unsaved;
+                doc.sections[1].table = Some(
+                    [
+                        ["Day", "Location", "Hours"],
+                        ["1", "Alfama", "8"],
+                        ["2", "Bel\u{00E9}m", "6.5"],
+                    ]
+                    .iter()
+                    .map(|cells| cells.iter().map(|cell| cell.to_string()).collect())
+                    .collect(),
+                );
+            }
+        }
+        doc
+    }
+
+    /// The agreement after a save at 09:41: nothing selected, nothing unsaved.
+    pub fn service_agreement_saved() -> WordDoc {
+        WordDoc {
+            selection: None,
+            saved_at: "09:41".into(),
+            ..service_agreement()
+        }
+    }
+
+    /// DW-1511: an older Word file.
+    pub fn proposal() -> WordDoc {
+        WordDoc {
+            title: "Proposal".into(),
+            byline: "Northwind Studio \u{00B7} 14 March 2012".into(),
+            sections: vec![
+                section(
+                    "Who we are",
+                    "Northwind Studio is a two-person photography studio in Amsterdam. Since 2009 we have photographed hotels, restaurants and the people who run them.",
+                ),
+                section(
+                    "What we propose",
+                    "One shoot day for the new lobby and twelve rooms, delivered as 40 edited photos within ten working days.",
+                ),
+                section(
+                    "Fee",
+                    "\u{20AC}1,850 for the day, editing included. Prints are quoted separately.",
+                ),
+            ],
+            outline: ["Proposal", "Who we are", "What we propose", "Fee"]
+                .map(String::from)
+                .to_vec(),
+            at: 1,
+            pages: 1,
+            words: 96,
+            language: "English (UK)".into(),
+            saved_at: "14 Mar 2012".into(),
+            selection: None,
+            kept: Kept::Saved,
+            older: true,
+        }
+    }
+
+    /// DW-1551: what the command search finds for "head". Anything else finds nothing here.
+    pub fn commands(query: &str) -> Vec<CommandGroup> {
+        if !query.trim().eq_ignore_ascii_case(QUERY) {
+            return Vec::new();
+        }
+        let group = |title: &str, commands: &[(&str, Option<&str>)]| CommandGroup {
+            title: title.into(),
+            commands: commands
+                .iter()
+                .map(|(name, shortcut)| Command {
+                    name: name.to_string(),
+                    shortcut: shortcut.map(String::from),
+                })
+                .collect(),
+        };
+        vec![
+            group(
+                "Styles",
+                &[("Heading 1", None), ("Heading 2", None), ("Heading 3", None)],
+            ),
+            group("Format", &[("Bold", Some("Ctrl+B"))]),
+            group("Files", &[("Northwind brand guide.pdf", None)]),
+        ]
+    }
+
+    /// What DW-1551 has typed.
+    pub const QUERY: &str = "head";
 }
