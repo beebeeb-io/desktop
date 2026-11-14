@@ -85,6 +85,14 @@ pub struct FakeAccount {
     devices: Mutex<Vec<Value>>,
     /// Client sync sessions.
     sessions: Mutex<Vec<Value>>,
+    /// The account's share links, as `POST /api/v1/shares` stored them (every field of the request, and an id).
+    links: Mutex<Vec<Value>>,
+    /// The next `POST /api/v1/shares` answers "this token is taken" once.
+    link_token_taken: std::sync::atomic::AtomicBool,
+    /// `GET /api/v1/shares/mine` also carries each link's `wrapped_file_key`.
+    links_list_wrapped_key: std::sync::atomic::AtomicBool,
+    /// `GET /api/v1/shares/mine` names this file on every row, whatever file the link is to.
+    links_listed_as: Mutex<Option<String>>,
 }
 
 impl FakeAccount {
@@ -114,6 +122,10 @@ impl FakeAccount {
             quota_bytes: 10 * 1024 * 1024 * 1024, // 10 GiB
             devices: Mutex::new(Vec::new()),
             sessions: Mutex::new(Vec::new()),
+            links: Mutex::new(Vec::new()),
+            link_token_taken: std::sync::atomic::AtomicBool::new(false),
+            links_list_wrapped_key: std::sync::atomic::AtomicBool::new(false),
+            links_listed_as: Mutex::new(None),
         };
         (account, recovery_phrase.to_string())
     }
@@ -258,6 +270,107 @@ impl FakeAccount {
             }
         }
         false
+    }
+
+    /// The account's share links as they were posted: each row is the request's body plus `id` and `revoked`.
+    pub fn links(&self) -> Vec<Value> {
+        self.links.lock().expect("links").clone()
+    }
+
+    /// The next `POST /api/v1/shares` is refused once with 409 `token_taken`, and stores nothing.
+    pub fn take_the_next_link_token(&self) {
+        self.link_token_taken.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether `GET /api/v1/shares/mine` carries each link's `wrapped_file_key` (off: as the listing is today).
+    pub fn list_links_with_their_wrapped_key(&self, on: bool) {
+        self.links_list_wrapped_key.store(on, Ordering::SeqCst);
+    }
+
+    /// A list that lies: from now on every row of `GET /api/v1/shares/mine` names `file_id`, whatever file its
+    /// link is to.
+    pub fn list_every_link_as(&self, file_id: &str) {
+        *self.links_listed_as.lock().expect("links") = Some(file_id.to_string());
+    }
+
+    /// Every link of the account is listed as past its expiry.
+    pub fn expire_links(&self) {
+        for link in self.links.lock().expect("links").iter_mut() {
+            link["listed_expires_at"] = json!("2020-01-01T00:00:00Z");
+        }
+    }
+
+    /// Every link of the account is listed as opened as often as it may be (once).
+    pub fn use_up_links(&self) {
+        for link in self.links.lock().expect("links").iter_mut() {
+            link["max_opens"] = json!(1);
+            link["open_count"] = json!(1);
+        }
+    }
+
+    /// Every link of the account is revoked.
+    pub fn revoke_links(&self) {
+        for link in self.links.lock().expect("links").iter_mut() {
+            link["revoked"] = json!(true);
+        }
+    }
+
+    /// `POST /api/v1/shares`: a link to a live item of this account; another id is not found.
+    fn post_link(&self, body: &Value) -> Reply {
+        let file_id = body.get("file_id").and_then(Value::as_str).unwrap_or_default();
+        let known = self
+            .items
+            .lock()
+            .expect("vault items")
+            .get(file_id)
+            .is_some_and(|item| !item.is_trashed);
+        if !known {
+            return Reply::json(404, json!({ "error": "not_found" }));
+        }
+        if self.link_token_taken.swap(false, Ordering::SeqCst) {
+            return Reply::json(409, json!({ "code": "token_taken" }));
+        }
+        let mut link = body.clone();
+        let id = uuid::Uuid::new_v4().to_string();
+        link["id"] = json!(id);
+        link["revoked"] = json!(false);
+        self.links.lock().expect("links").push(link);
+        Reply::ok(json!({ "id": id }))
+    }
+
+    /// `GET /api/v1/shares/mine`: every link of the account, whatever the query asks for (a client must match the
+    /// file itself), in the listing's shape: no token, and the wrapped file key only when switched on.
+    fn list_links(&self) -> Reply {
+        let with_key = self.links_list_wrapped_key.load(Ordering::SeqCst);
+        let listed_as = self.links_listed_as.lock().expect("links").clone();
+        let shares: Vec<Value> = self
+            .links
+            .lock()
+            .expect("links")
+            .iter()
+            .map(|link| {
+                let mut row = json!({
+                    "id": link["id"],
+                    "file_id": link["file_id"],
+                    "share_type": "file",
+                    "expires_at": link.get("listed_expires_at").cloned().unwrap_or(Value::Null),
+                    "max_opens": link.get("max_opens").cloned().unwrap_or(Value::Null),
+                    "open_count": link.get("open_count").cloned().unwrap_or(json!(0)),
+                    "has_passphrase": link.get("passphrase").is_some(),
+                    "revoked": link["revoked"],
+                    "owner_wrapped_key": link["owner_wrapped_key"],
+                    "owner_wrapped_token": link["owner_wrapped_token"],
+                });
+                if with_key {
+                    row["wrapped_file_key"] = link["wrapped_file_key"].clone();
+                }
+                if let Some(file_id) = &listed_as {
+                    row["file_id"] = json!(file_id);
+                }
+                row
+            })
+            .collect();
+        Reply::ok(json!({ "shares": shares }))
     }
 
     /// `name` encrypted as this account's own item `id` holds it (the envelope a share row carries as
@@ -538,6 +651,20 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
 
             // ── Shares invites ──────────────────────────────────────────
             "GET /api/v1/shares/invites/incoming" => Reply::ok(json!({ "invites": [] })),
+
+            // ── Share links: make one, list the account's ───────────────
+            "POST /api/v1/shares" => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                account.post_link(&req.json())
+            }
+            route_str if route_str.split('?').next() == Some("GET /api/v1/shares/mine") => {
+                if req.bearer() != Some(&account.session_token) {
+                    return Reply::error(401, "unauthorized");
+                }
+                account.list_links()
+            }
 
             // ── One chunk of a file with content (`FakeAccount::add_file_with_content`) ──
             route_str if route_str.starts_with("GET /api/v1/files/") && route_str.contains("/chunks/") => {
