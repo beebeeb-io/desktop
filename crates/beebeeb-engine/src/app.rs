@@ -53,6 +53,8 @@ mod explorer_api;
 pub mod files_facts_api;
 pub mod kept_api;
 pub mod owned_state;
+// What the app window may change of the rows of the Backups tree, for the native Files window.
+pub mod backup_places_api;
 pub mod photos_api;
 pub mod settings_api;
 pub mod setup_api;
