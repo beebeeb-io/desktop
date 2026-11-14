@@ -163,6 +163,10 @@ fn recent_says_loading_then_could_not_load_and_never_no_notifications_unread() {
         !seen.contains("No notifications"),
         "a failed read is not an empty list: {seen}"
     );
+    assert!(
+        !seen.contains("Nothing was changed"),
+        "not claimed: a mark may have been taken: {seen}"
+    );
 
     // "Try again" asks again, and an answer is drawn.
     fake.read_mode.store(ANSWER, Ordering::SeqCst);
@@ -687,6 +691,10 @@ fn the_pane_says_it_in_view_with_try_again_and_no_row_moves() {
         "precondition: the last row is below the fold: {last:?}"
     );
     in_view(&rt, "toast");
+    assert!(
+        find(&rt, "toast-room").is_some(),
+        "room under the last row to scroll it clear of the notice"
+    );
 
     // "Try again", pressed where it is drawn: one read, and its answer is drawn where the rows already were.
     fake.read_mode.store(ANSWER, Ordering::SeqCst);
