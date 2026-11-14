@@ -432,8 +432,8 @@ fn a_passkey_sign_in_with_prf_opens_the_vault_and_without_it_asks_for_the_words(
     assert_eq!(next, NextAfterSignIn::Drive);
     assert_eq!(engine.gate(), GateState::Ready);
 
-    let fake = fake("signin-no-prf");
-    let engine = engine(&fake, false);
+    let fake = self::fake("signin-no-prf");
+    let engine = self::engine(&fake, false);
     let next = engine
         .sign_in_passkey_with(
             &Platform {
