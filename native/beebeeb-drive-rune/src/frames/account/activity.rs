@@ -10,9 +10,12 @@ use crate::ui::account_set::{self as set, Lead, Row, Tail};
 use crate::ui::settings_list as lists;
 use rune::El;
 
-use super::form::Form;
-use super::source::{AccountSource, EventKind};
-use super::{CodeFor, Dialog, icons};
+use super::form::{self, Form, Problem};
+use super::forms::button;
+use super::source::{AccountSource, EventKind, Password};
+use super::{AccountUi, CodeFor, Dialog, icons};
+use crate::ui::account_form::Field;
+use crate::ui::account_set::Look;
 
 pub(super) fn event_icon(kind: EventKind) -> &'static rune::Icon {
     match kind {
@@ -28,6 +31,11 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     let periods = source.activity();
     let on = periods.is_some();
     let confirm = match dialog {
+        // Owner ruling 2026-11-14: a risky action proves the PASSWORD. A source that asks it gets the password dialog
+        // (a known deviation from the board's DW-A78, which asks a code); the board's own source keeps the code.
+        Some(Dialog::Code(CodeFor::StopActivity)) if source.stop_activity_needs_password() => {
+            Some(stop_with_password(f, t))
+        }
         Some(Dialog::Code(CodeFor::StopActivity)) => Some(super::two_factor::code_dialog(CodeFor::StopActivity, f, t)),
         _ => None,
     };
@@ -41,6 +49,13 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
     let switch = lists::switch("item-0-0", "Record sign-in activity", on, t).on_press(move |s: &mut State| {
         if on {
             super::ask(s, Dialog::Code(CodeFor::StopActivity));
+            if s.account
+                .source
+                .as_deref()
+                .is_some_and(|source| source.stop_activity_needs_password())
+            {
+                form::focus(&mut s.account.form, Some(form::CURRENT_KEY));
+            }
         } else if let Some(source) = s.account.source.as_deref_mut() {
             source.start_activity();
         }
@@ -116,4 +131,79 @@ pub fn pane(source: &dyn AccountSource, f: &Form, dialog: Option<&Dialog>, t: &T
         }
     }
     (set::pane(children, t), confirm)
+}
+
+/// "Turn off security logging?" asking the account password (DW-A78 with the password instead of a code).
+fn stop_with_password(f: &Form, t: &Theme) -> El {
+    let wrong = f.problem == Some(Problem::WrongPassword);
+    let (turn_off, turn_off_b) = button(0, "Turn off", Look::Danger, false, t);
+    let (cancel, cancel_b) = button(1, "Cancel", Look::Plain, false, t);
+    let field = fm::field(
+        0,
+        &Field {
+            label: "Password",
+            icon: Some(&icons::PADLOCK),
+            message: Some(if wrong {
+                "Enter your password to confirm it's you."
+            } else {
+                "To confirm it's you."
+            }),
+            error: wrong,
+            input_key: form::CURRENT_KEY,
+        },
+        &f.current,
+        |s: &mut State| &mut s.account.form.current,
+        t,
+    );
+    let title = "Turn off security logging?";
+    let paragraph = fm::lead_paragraph(
+        "You may not notice if someone else gets into your account.",
+        "Nothing new is recorded, and what was recorded is deleted within 30 days. This can't be undone.",
+        t,
+    );
+    let mut turn_off = turn_off
+        .label("Turn off, destructive")
+        .on_press(super::act(confirm_stop_with_password));
+    if !f.current.text.is_empty() {
+        turn_off = turn_off.default_button();
+    }
+    set::dialog_with(
+        title,
+        440.0,
+        title,
+        paragraph,
+        vec![field],
+        vec![
+            (turn_off, turn_off_b),
+            (
+                cancel.on_press(|s: &mut State| {
+                    s.account.dialog = None;
+                    form::arrive(&mut s.account);
+                }),
+                cancel_b,
+            ),
+        ],
+        t,
+    )
+    .modal(false, |s: &mut State| {
+        s.account.dialog = None;
+        form::arrive(&mut s.account);
+    })
+}
+
+/// The press of "Turn off": an empty field keeps the dialog open and asks for the password; otherwise the password
+/// moves to the source's worker and the dialog closes, the answer coming as a toast (the switch moves with the
+/// log read after it).
+fn confirm_stop_with_password(ui: &mut AccountUi) -> Option<&'static str> {
+    if ui.form.current.text.is_empty() {
+        ui.form.problem = Some(Problem::WrongPassword);
+        form::focus(&mut ui.form, Some(form::CURRENT_KEY));
+        return None;
+    }
+    let source = ui.source.as_deref_mut()?;
+    source.stop_activity_confirmed(Password::from_field(&ui.form.current.text));
+    ui.form.current = form::secure();
+    ui.form.problem = None;
+    ui.dialog = None;
+    None
 }

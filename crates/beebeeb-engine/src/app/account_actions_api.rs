@@ -173,6 +173,21 @@ impl<C: CredentialStores> Engine<C> {
         self.change_for(session, flow)
     }
 
+    /// WRITES: turn the sign-in activity log OFF (`PUT /api/v1/me/tracking` `{opted_in:false}`). Beebeeb asks the
+    /// account PASSWORD's own proof for it (core's `AccountFlow::set_activity_logging(false, Some(password))` does the
+    /// step-up and spends its confirmation on that one request); recording stops and what was recorded is deleted
+    /// by Beebeeb within 30 days. A wrong password is [`ActionError::WrongPassword`] (it counts toward the sign-in
+    /// lockout), an empty one is the same and nothing is sent. The password is wiped when the call ends.
+    pub fn stop_activity_log_for(
+        &self,
+        session: SessionGeneration,
+        password: Zeroizing<String>,
+    ) -> Result<(), ActionError> {
+        let flow = AccountFlow::set_activity_logging(false, Some(password.as_str())).map_err(from_flow)?;
+        drop(password);
+        self.change_for(session, flow)
+    }
+
     /// The sign-in activity log: whether the account records it and, when it does, the newest events
     /// (`GET /api/v1/me/activity`).
     pub fn activity_log(&self) -> Result<Stamped<MyActivity>, ActionError> {

@@ -4,7 +4,7 @@
 
 use std::sync::atomic::AtomicBool;
 
-use super::activity::{NOT_STARTED, STARTED};
+use super::activity::{NOT_STARTED, NOT_STOPPED, STARTED, STOPPED, WRONG_PASSWORD};
 use super::*;
 use crate::frames::account::source::{EventKind, NameWhy};
 
@@ -91,6 +91,11 @@ pub(super) fn bound() -> Bound {
                 }
                 if !authed {
                     return Reply::json(401, json!({}));
+                }
+                // Switching it OFF is a security change: the server wants the step-up's confirmation.
+                if req.json()["opted_in"] == json!(false) && req.header("X-Confirm-Token") != Some("an-invented-grant")
+                {
+                    return Reply::error(403, "confirmation_required");
                 }
                 tracking_in.store(req.json()["opted_in"] == json!(true), Ordering::SeqCst);
                 Reply::ok(json!({ "tracking_opted_in": true }))
@@ -406,10 +411,10 @@ fn the_log_shows_sign_ins_and_security_changes_and_nothing_else() {
     assert_eq!(events[1].when_where, "2 days ago", "a city-like value is no country");
     assert_eq!(events[2].kind, EventKind::PasswordChanged);
     assert_eq!(periods.last().expect("a period").0, "Earlier", "a year ago");
-    // The Security page gets the same events, and the recording cannot be stopped from here.
+    // The Security page gets the same events, and the recording can be stopped from here (with the password).
     let facts = source.security_facts();
     assert_eq!(facts.activity.as_ref().and_then(|a| a.as_ref()).map(Vec::len), Some(3));
-    assert!(!source.can_stop_activity());
+    assert!(source.can_stop_activity());
 }
 
 #[test]
@@ -450,6 +455,80 @@ fn a_recording_beebeeb_did_not_switch_on_stays_off_and_says_so() {
     assert_eq!(source.activity(), None);
     assert_eq!(source.notice(), Some(NOT_STARTED));
     assert!(source.notice_failed(), "said as a failure");
+}
+
+#[test]
+fn stopping_the_recording_proves_the_password_and_the_switch_moves_only_with_the_read_after() {
+    let server = bound();
+    let mut source = Source::new(signed_in_on(&server));
+    opened(&mut source, Pane::Activity);
+    assert!(source.activity().is_some(), "on");
+    assert!(source.can_stop_activity() && source.stop_activity_needs_password());
+    // Nothing typed: nothing is started.
+    assert!(!source.stop_activity_confirmed(Password::from_field("")));
+    assert_eq!(server.asked("PUT /api/v1/me/tracking"), 0);
+
+    server.delay_ms.store(300, Ordering::SeqCst);
+    assert!(source.stop_activity_confirmed(Password::from_field(PASSWORD)));
+    assert!(
+        !source.stop_activity_confirmed(Password::from_field(PASSWORD)),
+        "one at a time"
+    );
+    assert!(source.activity().is_some(), "not drawn as off before Beebeeb took it");
+    settle(&mut source);
+    assert_eq!(server.asked("PUT /api/v1/me/tracking"), 1, "sent once per press");
+    assert!(
+        server.asked("POST /api/v1/auth/confirm-opaque-start") >= 1,
+        "the password was proven"
+    );
+    assert!(!server.tracking.load(Ordering::SeqCst));
+    assert_eq!(source.activity(), None, "off, read again");
+    assert_eq!(source.notice(), Some(STOPPED));
+    assert!(!source.notice_failed());
+}
+
+#[test]
+fn a_wrong_password_or_a_refusal_leaves_the_recording_on_and_says_so() {
+    let server = bound();
+    let mut source = Source::new(signed_in_on(&server));
+    opened(&mut source, Pane::Activity);
+    assert!(source.stop_activity_confirmed(Password::from_field("not the password")));
+    settle(&mut source);
+    assert_eq!(
+        server.asked("PUT /api/v1/me/tracking"),
+        0,
+        "nothing is sent without the proof"
+    );
+    assert!(server.tracking.load(Ordering::SeqCst));
+    assert!(source.activity().is_some());
+    assert_eq!(source.notice(), Some(WRONG_PASSWORD));
+    assert!(source.notice_failed());
+
+    server.mode.store(SERVER_ERROR, Ordering::SeqCst);
+    assert!(source.stop_activity_confirmed(Password::from_field(PASSWORD)));
+    settle(&mut source);
+    assert!(server.tracking.load(Ordering::SeqCst));
+    assert_eq!(source.notice(), Some(NOT_STOPPED));
+}
+
+#[test]
+fn a_stop_answered_after_the_session_moved_on_is_dropped() {
+    let server = bound();
+    let engine = signed_in_on(&server);
+    let mut source = Source::new(engine.clone());
+    opened(&mut source, Pane::Activity);
+    server.delay_ms.store(400, Ordering::SeqCst);
+    assert!(source.stop_activity_confirmed(Password::from_field(PASSWORD)));
+    engine.lock();
+    settle(&mut source);
+    std::thread::sleep(Duration::from_millis(700));
+    settle(&mut source);
+    assert_eq!(
+        source.notice(),
+        None,
+        "nothing of the first session is said under another"
+    );
+    assert_eq!(source.activity(), None);
 }
 
 #[test]

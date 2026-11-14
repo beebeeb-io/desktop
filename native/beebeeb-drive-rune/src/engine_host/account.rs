@@ -1142,10 +1142,16 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn remove_passkey_confirmed(&mut self, id: &str, password: Password<'_>) -> bool {
         super::passkeys::remove_confirmed(&mut self.passkeys, id, password)
     }
-    /// Stopping the recording is not done from here (`can_stop_activity` is false): Beebeeb wants the password's
-    /// own proof for it, which the pane's code dialog does not give. Never reached from a drawn control.
+    /// The code dialog is not how this source stops the recording (it asks the password: `stop_activity_confirmed`);
+    /// never reached from a drawn control.
     fn stop_activity(&mut self, _code: &str) -> Result<(), CodeRefused> {
         Err(CodeRefused::Offline)
+    }
+    fn stop_activity_needs_password(&self) -> bool {
+        true
+    }
+    fn stop_activity_confirmed(&mut self, password: Password<'_>) -> bool {
+        super::passkeys::wiping(&password).is_some_and(|password| self.activity.stop(password))
     }
     fn deletion(&self) -> Deletion {
         Deletion::None

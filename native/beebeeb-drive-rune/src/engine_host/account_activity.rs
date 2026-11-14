@@ -8,9 +8,10 @@
 //!
 //! Starting the recording is core's own flow, sent by the engine ([`Engine::start_activity_log_for`]); the log is
 //! read again after the answer and the switch moves only with that read ("never draw a change before the server
-//! made it"). STOPPING it is not done from here: Beebeeb asks for the password's own proof (a step-up token) to
-//! erase the log, and this pane's dialog asks for a code. The pane says so and points to the web
-//! ([`ActivityPart::can_stop`]).
+//! made it"). STOPPING it asks the account PASSWORD (owner ruling 2026-11-14: risky actions prove the password, not a
+//! code; a known deviation from the board's DW-A78, which asks a 2FA code): the dialog has a password field, the
+//! password moves once into a wiping buffer to the engine's call ([`Engine::stop_activity_log_for`]), and the switch
+//! moves only with the read that follows Beebeeb's answer.
 //!
 //! Same session rule as the rest of the account window: an answer for another session or account is dropped; the
 //! read is made when a pane that shows it opens and when what is held is older than [`super::FRESH_FOR`], never
@@ -24,6 +25,7 @@ use beebeeb_engine::api_client::{MyActivity, MyActivityEvent};
 use beebeeb_engine::app::account_actions_api::ActionError;
 use beebeeb_engine::app::{CredentialStores, Engine};
 use chrono::{DateTime, Datelike, Utc};
+use zeroize::Zeroizing;
 
 use super::{FRESH_FOR, Stamp, account_of, ago, log, stamp};
 use crate::frames::account::Pane;
@@ -35,6 +37,11 @@ const STAYS_FAILED: Duration = Duration::from_secs(8);
 
 pub(super) const STARTED: &str = "Recording sign-in activity is on.";
 pub(super) const NOT_STARTED: &str = "Couldn't turn recording on. Nothing changed.";
+pub(super) const STOPPED: &str = "Recording sign-in activity is off.";
+pub(super) const NOT_STOPPED: &str = "Couldn't turn recording off. Nothing changed.";
+pub(super) const WRONG_PASSWORD: &str = "Incorrect password. Nothing was changed.";
+pub(super) const TOO_MANY: &str = "Too many tries. Wait a moment, then try again. Nothing was changed.";
+pub(super) const OFFLINE: &str = "Beebeeb can't be reached. Nothing was changed.";
 pub(super) const NOT_READ: &str = "Couldn't refresh. This is what Beebeeb answered before.";
 
 /// One event with the time it happened (seconds, UTC), when Beebeeb said.
@@ -54,6 +61,10 @@ enum Answer {
         result: Result<Log, ActionError>,
     },
     Started {
+        stamp: Stamp,
+        result: Result<(), ActionError>,
+    },
+    Stopped {
         stamp: Stamp,
         result: Result<(), ActionError>,
     },
@@ -173,9 +184,45 @@ impl<C: CredentialStores + 'static> ActivityPart<C> {
         })
     }
 
-    /// Whether recording can be switched OFF from here: no (see the module's doc).
+    /// Whether recording can be switched OFF from here: yes, with the password (see the module's doc).
     pub(super) fn can_stop(&self) -> bool {
-        false
+        true
+    }
+
+    /// DW-A78 (with the password): switch the recording off. Once per press, on a worker, for the session and
+    /// account of the press; only an account whose log is on and was read for this session can be switched off.
+    /// `false`: nothing was started.
+    pub(super) fn stop(&mut self, password: Zeroizing<String>) -> bool {
+        if self.starting.is_some() || !self.open() || password.is_empty() {
+            return false;
+        }
+        if !matches!(self.current(), Some(Some(_))) {
+            return false;
+        }
+        let asked_as = stamp(&self.engine);
+        let (engine, tx, session) = (self.engine.clone(), self.tx.clone(), asked_as.0);
+        let stamp_in = asked_as.clone();
+        let started = std::thread::Builder::new()
+            .name("account-activity-off".into())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    engine.stop_activity_log_for(session, password)
+                }))
+                .unwrap_or(Err(ActionError::Failed));
+                let _ = tx.send(Answer::Stopped {
+                    stamp: stamp_in,
+                    result,
+                });
+                engine.wake_host();
+            })
+            .is_ok();
+        if started {
+            self.starting = Some(asked_as);
+        } else {
+            log("account: could not start a thread for stopping the recording");
+            self.say(NOT_STOPPED, true);
+        }
+        started
     }
 
     fn read(&mut self) {
@@ -293,6 +340,37 @@ impl<C: CredentialStores + 'static> ActivityPart<C> {
                             log(format!("account: the activity did not answer ({})", error.words()));
                             self.read_at = None;
                             self.failed_for = Some(made_for.0);
+                        }
+                    }
+                }
+                Answer::Stopped { stamp: sent, result } => {
+                    if self.starting.as_ref() == Some(&sent) {
+                        self.starting = None;
+                    }
+                    if !self.is_now(&sent) {
+                        continue;
+                    }
+                    match result {
+                        Ok(()) => {
+                            self.say(STOPPED, false);
+                            // The switch moves with what Beebeeb says now.
+                            self.read_at = None;
+                            self.read();
+                        }
+                        Err(error) => {
+                            log(format!(
+                                "account: the recording was not switched off ({})",
+                                error.words()
+                            ));
+                            self.say(
+                                match error {
+                                    ActionError::WrongPassword => WRONG_PASSWORD,
+                                    ActionError::TooMany => TOO_MANY,
+                                    ActionError::Offline => OFFLINE,
+                                    _ => NOT_STOPPED,
+                                },
+                                true,
+                            );
                         }
                     }
                 }

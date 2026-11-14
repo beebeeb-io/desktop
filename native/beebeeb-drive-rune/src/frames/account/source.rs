@@ -805,6 +805,16 @@ pub trait AccountSource {
     /// Engine: the same, off, with a current two-factor code (the step-up when two-factor is
     /// off): recording stops and what was recorded is deleted within 30 days.
     fn stop_activity(&mut self, code: &str) -> Result<(), CodeRefused>;
+    /// Stopping the recording asks the account PASSWORD (owner ruling 2026-11-14), not a two-factor code: the dialog
+    /// draws a password field and calls `stop_activity_confirmed`. A fixture says `false` (the board's code dialog).
+    fn stop_activity_needs_password(&self) -> bool {
+        false
+    }
+    /// Engine: stop the recording with the password the person typed. `true`: it began; how it ended comes as a toast
+    /// and the log is read again.
+    fn stop_activity_confirmed(&mut self, _password: Password<'_>) -> bool {
+        false
+    }
     /// Whether this source can stop the recording from the pane. A source that cannot (Beebeeb asks for the
     /// password's own proof to stop it, which the pane's code dialog does not give) shows the switch as a value,
     /// with the way on the web.
