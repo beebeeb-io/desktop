@@ -523,10 +523,6 @@ fn a_webp_frame_is_one_bitstream_after_at_most_an_alpha_and_nothing_else() {
             frame(16, 16, &[(b"ALPH", alpha(16, 16))]),
         ),
         (
-            "a chunk after the bitstream",
-            frame(16, 16, &[(b"VP8 ", LOSSY.to_vec()), (b"JUNK", lossy_stating_huge())]),
-        ),
-        (
             "a second bitstream",
             frame(16, 16, &[(b"VP8 ", LOSSY.to_vec()), (b"VP8 ", LOSSY.to_vec())]),
         ),
@@ -556,9 +552,10 @@ fn a_webp_frame_is_one_bitstream_after_at_most_an_alpha_and_nothing_else() {
     // A last frame that states more bytes than the file has.
     let whole = animation(vec![good(), good()]);
     assert_eq!(check(&whole[..whole.len() - 2]), Err(Refused::NotAPicture));
-    // The same frames in a file whose header does not say it is an animation: held to the same rule.
+    // The same frames in a file whose header does not say it is an animation: the decoder walks such frames
+    // differently from `frame()`, so a frame there is refused whether or not it is well formed.
     let unflagged = |data: Vec<u8>| riff(&[(b"VP8X", flagged(0, 64, 48)), (b"ANMF", data)]);
-    assert!(check(&unflagged(good())).is_ok());
+    assert_eq!(check(&unflagged(good())), Err(Refused::NotAPicture));
     assert_eq!(
         check(&unflagged(frame(16, 16, &[(b"JUNK", lossy_stating_huge())]))),
         Err(Refused::NotAPicture)
@@ -574,4 +571,208 @@ fn every_webp_an_encoder_writes_passes_with_its_own_canvas() {
             "{which}"
         );
     }
+}
+
+// ── S-001: every chunk is held to the file; the walk is lazy ─────────────────────────────────────────
+
+/// A still lossy picture with a chunk of `name` stating `stated` bytes after the extended header, `data` present.
+fn still_with(name: &[u8; 4], stated: u32, data: &[u8]) -> Vec<u8> {
+    let mut body = chunk(b"VP8X", &flagged(0, 16, 16));
+    body.extend_from_slice(name);
+    body.extend_from_slice(&stated.to_le_bytes());
+    body.extend_from_slice(data);
+    if data.len() % 2 == 1 {
+        body.push(0);
+    }
+    body.extend(chunk(b"VP8 ", &LOSSY));
+    file(&body)
+}
+
+#[test]
+fn a_chunk_stating_more_than_the_file_has_is_refused_whatever_its_name() {
+    // `check` answering from the bytes alone is what keeps a decoder from starting: a refused file never reaches one.
+    for name in [b"EXIF", b"XMP ", b"ICCP", b"JUNK"] {
+        let bytes = still_with(name, 0x7FFF_FFF0, &[0; 4]);
+        assert_eq!(
+            check(&bytes),
+            Err(Refused::NotAPicture),
+            "{}",
+            String::from_utf8_lossy(name)
+        );
+    }
+    // The same chunks stating what they hold are shown.
+    assert!(check(&still_with(b"EXIF", 4, &[0; 4])).is_ok());
+}
+
+#[test]
+fn a_metadata_chunk_over_a_mebibyte_is_refused_even_when_present() {
+    let two_mib = vec![0u8; 2 << 20];
+    for name in [b"EXIF", b"XMP ", b"ICCP"] {
+        let bytes = still_with(name, two_mib.len() as u32, &two_mib);
+        assert_eq!(
+            check(&bytes),
+            Err(Refused::NotAPicture),
+            "{}",
+            String::from_utf8_lossy(name)
+        );
+    }
+    // An unknown chunk of that size is not metadata and is not capped.
+    assert!(check(&still_with(b"JUNK", two_mib.len() as u32, &two_mib)).is_ok());
+    // Exactly the cap is shown.
+    let cap = vec![0u8; 1 << 20];
+    assert!(check(&still_with(b"EXIF", cap.len() as u32, &cap)).is_ok());
+}
+
+#[test]
+fn a_frame_in_a_file_that_does_not_say_animation_is_refused() {
+    let good = frame(16, 16, &[(b"VP8 ", LOSSY.to_vec())]);
+    let unflagged = riff(&[(b"VP8X", flagged(0, 16, 16)), (b"ANMF", good.clone())]);
+    assert_eq!(check(&unflagged), Err(Refused::NotAPicture));
+    let flagged_file = riff(&[(b"VP8X", flagged(0x02, 16, 16)), (b"ANIM", vec![0; 6]), (b"ANMF", good)]);
+    assert!(check(&flagged_file).is_ok());
+}
+
+#[test]
+fn a_frame_may_hold_chunks_after_its_bitstream_when_they_lie_inside_it() {
+    let animation = |inner: &[(&[u8; 4], Vec<u8>)]| {
+        riff(&[
+            (b"VP8X", flagged(0x02, 16, 16)),
+            (b"ANIM", vec![0; 6]),
+            (b"ANMF", frame(16, 16, inner)),
+        ])
+    };
+    // An unknown chunk (odd length, so padded) after the bitstream, fully inside the frame: shown.
+    let shown = animation(&[(b"VP8 ", LOSSY.to_vec()), (b"JUNK", vec![1; 5])]);
+    assert_eq!(check(&shown).map(|d| (d.width, d.height)), Ok((16, 16)));
+    // Two of them, and after an alpha chunk too.
+    assert!(
+        check(&animation(&[
+            (b"VP8 ", LOSSY.to_vec()),
+            (b"JUNK", vec![]),
+            (b"JUNK", vec![2; 2])
+        ]))
+        .is_ok()
+    );
+    assert!(
+        check(&animation(&[
+            (b"ALPH", alpha(16, 16)),
+            (b"VP8 ", LOSSY.to_vec()),
+            (b"JUNK", vec![3; 4])
+        ]))
+        .is_ok()
+    );
+    // A trailing chunk stating more than is left in the frame: refused. (Built by hand: the frame ends where
+    // the data present ends, and the chunk's stated length runs past it.)
+    let mut inside = frame(16, 16, &[(b"VP8 ", LOSSY.to_vec())]);
+    inside.extend_from_slice(b"JUNK");
+    inside.extend_from_slice(&64u32.to_le_bytes());
+    inside.extend_from_slice(&[0; 8]);
+    assert_eq!(
+        check(&riff(&[
+            (b"VP8X", flagged(0x02, 16, 16)),
+            (b"ANIM", vec![0; 6]),
+            (b"ANMF", inside)
+        ])),
+        Err(Refused::NotAPicture)
+    );
+    // The frame's own chunks end exactly where it ends: a stray byte or two after the trailing chunk is refused.
+    let mut stray = frame(16, 16, &[(b"VP8 ", LOSSY.to_vec()), (b"JUNK", vec![])]);
+    stray.extend_from_slice(&[0; 2]);
+    assert_eq!(
+        check(&riff(&[
+            (b"VP8X", flagged(0x02, 16, 16)),
+            (b"ANIM", vec![0; 6]),
+            (b"ANMF", stray)
+        ])),
+        Err(Refused::NotAPicture)
+    );
+}
+
+#[test]
+fn a_top_level_bitstream_shorter_than_its_header_is_refused() {
+    // The bytes after the chunk are a valid header; the chunk itself is too short to hold one.
+    let mut cut = b"RIFF".to_vec();
+    cut.extend_from_slice(&0u32.to_le_bytes());
+    cut.extend_from_slice(b"WEBP");
+    cut.extend_from_slice(b"VP8 ");
+    cut.extend_from_slice(&4u32.to_le_bytes());
+    cut.extend_from_slice(&LOSSY);
+    assert_eq!(check(&cut), Err(Refused::NotAPicture));
+    cut.truncate(12);
+    cut.extend_from_slice(b"VP8L");
+    cut.extend_from_slice(&2u32.to_le_bytes());
+    cut.extend_from_slice(&LOSSLESS);
+    assert_eq!(check(&cut), Err(Refused::NotAPicture));
+    let mut extended = chunk(b"VP8X", &flagged(0, 16, 16));
+    extended.extend_from_slice(b"VP8 ");
+    extended.extend_from_slice(&4u32.to_le_bytes());
+    extended.extend_from_slice(&LOSSY);
+    assert_eq!(check(&file(&extended)), Err(Refused::NotAPicture));
+}
+
+/// Counts the bytes this thread asks the allocator for while `COUNTING` is set.
+struct Counting;
+thread_local! {
+    static COUNTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static ASKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        if COUNTING.try_with(|on| on.get()).unwrap_or(false) {
+            let _ = ASKED.try_with(|asked| asked.set(asked.get() + layout.size()));
+        }
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new: usize) -> *mut u8 {
+        if COUNTING.try_with(|on| on.get()).unwrap_or(false) {
+            let _ = ASKED.try_with(|asked| asked.set(asked.get() + new));
+        }
+        unsafe { std::alloc::System.realloc(ptr, layout, new) }
+    }
+}
+#[global_allocator]
+static COUNTED: Counting = Counting;
+
+/// The bytes `work` asks the allocator for.
+fn allocated_by<T>(work: impl FnOnce() -> T) -> (T, usize) {
+    ASKED.with(|asked| asked.set(0));
+    COUNTING.with(|on| on.set(true));
+    let out = work();
+    COUNTING.with(|on| on.set(false));
+    (out, ASKED.with(|asked| asked.get()))
+}
+
+#[test]
+fn the_check_does_not_allocate_in_proportion_to_the_number_of_chunks() {
+    // About 8 MiB of empty chunks after a bad first one: the walk stops at the first refused chunk.
+    let tiny = |first: Option<Vec<u8>>, count: usize| {
+        let mut body = chunk(b"VP8X", &flagged(0, 16, 16));
+        body.extend(first.unwrap_or_default());
+        for _ in 0..count {
+            body.extend_from_slice(b"JUNK\0\0\0\0");
+        }
+        file(&body)
+    };
+    let bad_first = {
+        let mut bad = b"EXIF".to_vec();
+        bad.extend_from_slice(&0x7FFF_FFF0u32.to_le_bytes());
+        bad
+    };
+    let big = tiny(Some(bad_first.clone()), 1 << 20);
+    let small = tiny(Some(bad_first), 4);
+    assert!(big.len() > 8 << 20);
+    let ((refused_big, asked_big), (refused_small, asked_small)) =
+        (allocated_by(|| check(&big)), allocated_by(|| check(&small)));
+    assert_eq!(refused_big, Err(Refused::NotAPicture));
+    assert_eq!(refused_small, Err(Refused::NotAPicture));
+    assert_eq!(asked_big, asked_small, "the same work for 4 chunks and for a million");
+    // A million valid empty chunks are walked without collecting them either (no bitstream: not a picture,
+    // but the walk itself asks for nothing in proportion).
+    let walk = |bytes: &[u8]| allocated_by(|| chunks(bytes, 12).into_iter().count()).1;
+    let many = tiny(None, 1 << 20);
+    assert!(many.len() > 8 << 20);
+    assert_eq!(walk(&many), walk(&tiny(None, 4)));
 }
