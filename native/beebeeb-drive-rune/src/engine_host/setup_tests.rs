@@ -493,8 +493,13 @@ fn another_session_or_account_is_never_written_for_and_never_answered() {
         drop(held);
         settle(&mut set, 2);
         assert!(set.source.take_outcomes().is_empty(), "{moved_to:?}");
-        assert!(set.first_run.due(), "{moved_to:?}");
-        assert!(set.engine.marked.lock().unwrap().is_empty(), "{moved_to:?}");
+        // The engine writes only for the session of the press: a session that moved on wrote nothing, and the
+        // first run is not ended. (An account never changes under one session in the engine; the double's
+        // second case keeps the session, so its write is the press's own and stands, for this PC.)
+        let moved = moved_to.0 != session(1);
+        assert_eq!(set.first_run.due(), moved, "{moved_to:?}");
+        assert_eq!(set.engine.marked.lock().unwrap().is_empty(), moved, "{moved_to:?}");
+        assert_eq!(set.engine.notified.lock().unwrap().is_empty(), moved, "{moved_to:?}");
     }
     // Locked (the gate is not Ready): the same.
     let mut set = set();
