@@ -482,10 +482,18 @@ fn picture_body(bytes: &[u8], cancel: &AtomicBool) -> Content {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread handed bytes to a picture decoder: a test asserts that a refusal handed none.
+    static DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The bytes decoded by the toolkit's decoders, waited for on this (the worker's) thread. `None`: it does not
 /// decode. The decoder reads a copy of the bytes; that copy is overwritten here once the decoder let go of it,
 /// and a line is logged if it never did. Only for bytes [`viewer_picture::check`] passed.
 fn picture(bytes: &[u8]) -> Option<rune::Pixels> {
+    #[cfg(test)]
+    DECODES.with(|count| count.set(count.get() + 1));
     let mut encoded: Arc<[u8]> = Arc::from(bytes);
     let image = decoders().load(encoded.clone());
     let decoded = settled(&image);
