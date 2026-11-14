@@ -54,8 +54,9 @@ fn os(what: &str, code: HRESULT) -> PlatformError {
     PlatformError::Os(format!("the folder picker: {what} (0x{:08X})", code.0 as u32))
 }
 
-/// Open the picker with `title`, showing `start`'s parent folder with `start`'s name filled in when that parent
-/// exists. `Ok(None)`: the person closed it without picking.
+/// Open the picker with `title`, in `start` when that folder exists (so "Select Folder" with nothing else chosen
+/// is `start` itself), else in its parent. `Ok(None)`: the person closed it without picking. It has no owner
+/// window: the window behind it stays usable while it is open.
 pub fn pick_folder(title: &str, start: &Path) -> Result<Option<PathBuf>, PlatformError> {
     let _com = Com::enter()?;
     // SAFETY: COM is set up on this thread for the whole block (`_com`). Every interface pointer is owned by its
@@ -72,8 +73,13 @@ pub fn pick_folder(title: &str, start: &Path) -> Result<Option<PathBuf>, Platfor
             .map_err(|error| os("its options could not be set", error.code()))?;
         // The words and the folder it opens in are a help, not a condition: a picker without them still picks.
         let _ = dialog.SetTitle(&HSTRING::from(title));
-        if let Some(parent) = start.parent().filter(|parent| parent.is_dir()) {
-            let shown: Result<IShellItem, _> = SHCreateItemFromParsingName(&HSTRING::from(parent.as_os_str()), None);
+        let opens_in = if start.is_dir() {
+            Some(start)
+        } else {
+            start.parent().filter(|parent| parent.is_dir())
+        };
+        if let Some(opens_in) = opens_in {
+            let shown: Result<IShellItem, _> = SHCreateItemFromParsingName(&HSTRING::from(opens_in.as_os_str()), None);
             if let Ok(shown) = shown {
                 let _ = dialog.SetFolder(&shown);
             }

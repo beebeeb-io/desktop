@@ -74,7 +74,10 @@ pub use folder::start_now;
 #[derive(Default)]
 pub struct FirstRun {
     due: AtomicBool,
-    folder: Mutex<Option<(Stamp, PathBuf)>>,
+    /// The app's start wired a first run into this build (Windows): the folder rule is this build's to ask.
+    wired: AtomicBool,
+    /// The folder, and whose choice it was (the account: a lock and an unlock keep the person's choice).
+    folder: Mutex<Option<(Option<String>, PathBuf)>>,
 }
 
 impl FirstRun {
@@ -86,6 +89,12 @@ impl FirstRun {
             false
         });
         self.due.store(due, Ordering::SeqCst);
+        self.wired.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the app's start wired a first run at all.
+    pub fn wired(&self) -> bool {
+        self.wired.load(Ordering::SeqCst)
     }
 
     pub fn due(&self) -> bool {
@@ -96,17 +105,20 @@ impl FirstRun {
         self.due.store(false, Ordering::SeqCst);
     }
 
-    /// The folder was chosen, under this session and account.
+    /// The folder was chosen, by the account of this stamp. An account that is not known chooses nothing.
     fn choose(&self, stamp: Stamp, folder: PathBuf) {
-        *self.folder.lock().unwrap_or_else(PoisonError::into_inner) = Some((stamp, folder));
+        if stamp.1.is_some() {
+            *self.folder.lock().unwrap_or_else(PoisonError::into_inner) = Some((stamp.1, folder));
+        }
     }
 
-    /// The folder chosen in this first run, when it was chosen under `stamp`.
+    /// The folder chosen in this run of the app, when the account of `stamp` chose it: the person's choice
+    /// holds over a lock and an unlock, and is never another account's.
     fn chosen_for(&self, stamp: &Stamp) -> Option<PathBuf> {
         let chosen = self.folder.lock().unwrap_or_else(PoisonError::into_inner);
         chosen
             .as_ref()
-            .filter(|(chosen_under, _)| chosen_under == stamp)
+            .filter(|(account, _)| stamp.1.is_some() && *account == stamp.1)
             .map(|(_, folder)| folder.clone())
     }
 }
@@ -218,6 +230,8 @@ enum Answer {
     Finished,
     /// Something the view reads through the engine's view may have changed (a start was asked).
     Looked,
+    /// "Try again" did its work.
+    Retried,
 }
 
 /// The first run on the real engine. See the module's doc.
@@ -238,6 +252,10 @@ pub struct EngineSetupSource<E: SetupEngine> {
     asked_folder: bool,
     /// Sync was seen running in this first run: the folder is settled.
     ran: bool,
+    /// A folder choice is on its way (the rule's check, or Windows' picker is open): no second one is asked.
+    choosing: bool,
+    /// A "Try again" is on its way: no second one is asked.
+    retrying: bool,
     outcomes: Vec<Outcome>,
     changed: bool,
     answers: mpsc::Sender<(Stamp, Answer)>,
@@ -282,6 +300,8 @@ impl<E: SetupEngine> EngineSetupSource<E> {
             suggested: String::new(),
             asked_folder: false,
             ran: false,
+            choosing: false,
+            retrying: false,
             outcomes: Vec::new(),
             changed: false,
             answers,
@@ -394,24 +414,26 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
 
     /// "Try again" (DW-0280). Sync does not run: one start is asked for, the shell's way. Sync runs and Windows
     /// refused the entry: only a start asks Windows, so sync is stopped and started again.
+    /// One at a time: a second press while the first is on its way would stop what the first just started.
     fn retry_explorer(&mut self) {
-        let running = self.engine.view().start == Start::Running;
-        let start = self.hooks.start_sync.clone();
-        if self.mine() {
-            self.look_after_the_grace();
+        if self.retrying || !self.mine() {
+            return;
         }
+        self.retrying = true;
+        let start = self.hooks.start_sync.clone();
+        self.look_after_the_grace();
         self.ask(
             "first-run-explorer",
             move |engine, _| {
-                if running {
+                if engine.view().start == Start::Running {
                     engine.stop_sync();
                 }
                 if !start() {
                     log("first run: a sync start could not be asked for");
                 }
-                Answer::Looked
+                Answer::Retried
             },
-            None,
+            Some(Answer::Retried),
         );
     }
 
@@ -522,6 +544,7 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
                 Answer::Folder(found) => self.take_in_folder(found),
                 Answer::Finished => self.hooks.first_run.end(),
                 Answer::Looked => {}
+                Answer::Retried => self.retrying = false,
             }
         }
         self.ran |= mine && self.engine.view().start == Start::Running;

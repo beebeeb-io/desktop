@@ -644,8 +644,9 @@ fn on_gate_change(s: &mut State) {
     s.selected = None;
     let gate = s.shell.app.gate();
     start_first_run(s);
-    // The first run's File Explorer step is about the sync folder: sync starts with it, as it does when the main
-    // window opens. A start refused during the first run is said by that step; the modal is the main window's.
+    // The first run's File Explorer step is about the sync folder: a start is asked for with it, as when the main
+    // window opens (the start worker holds it back until the first run has a folder). A start refused during
+    // the first run is said by that step and by the refusal modal (`open_sync_refusal`).
     if gate == super::app::GateState::Ready || gate == super::app::GateState::FirstRun {
         s.shell.start_sync();
     }

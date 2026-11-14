@@ -65,7 +65,20 @@ pub fn start_now<E: SetupEngine>(engine: &E, name: &Mutex<Option<String>>, first
         Ok(None) => match first_run.chosen_for(&engine.stamp()) {
             Some(chosen) => (chosen, false),
             None if first_run.due() => return log("sync was not started: the first run has no folder yet"),
-            None => (engine.suggested_folder(), false),
+            // Nobody chose (the first run was skipped, or this build has none): the suggestion, as before. Where
+            // this build asks for the folder, the suggestion passes the same rule a choice does.
+            None => {
+                let suggested = engine.suggested_folder();
+                if first_run.wired()
+                    && let Err(refused) = engine.check_folder(&suggested)
+                {
+                    return log(format!(
+                        "sync was not started: the suggested folder ({})",
+                        refused.kind()
+                    ));
+                }
+                (suggested, false)
+            }
         },
     };
     *name.lock().unwrap_or_else(PoisonError::into_inner) =
@@ -137,10 +150,12 @@ impl<E: SetupEngine> EngineSetupSource<E> {
 
     /// Whether a choice can be made now: the question is up and no other choice is on its way.
     fn asking(&self) -> bool {
-        matches!(self.folder, FolderAsk::Ask { busy: false, .. })
+        !self.choosing && matches!(self.folder, FolderAsk::Ask { busy: false, .. })
     }
 
+    /// A choice is on its way, or not any more. The question (when it is up) shows it.
     fn set_busy(&mut self, now: bool) {
+        self.choosing = now;
         if let FolderAsk::Ask { busy, .. } = &mut self.folder {
             *busy = now;
             self.changed = true;
@@ -172,7 +187,7 @@ impl<E: SetupEngine> EngineSetupSource<E> {
     /// was kept.
     pub(super) fn pick_another(&mut self) {
         use crate::frames::signin::setup::source::SetupSource;
-        if !(self.asking() || self.can_choose_again()) || !self.mine() {
+        if !(self.asking() || !self.choosing && self.can_choose_again()) || !self.mine() {
             return;
         }
         self.set_busy(true);
@@ -204,6 +219,7 @@ impl<E: SetupEngine> EngineSetupSource<E> {
 
     /// Take in what a worker found out (the poll's, only for this first run's session and account).
     pub(super) fn take_in_folder(&mut self, found: Found) {
+        self.choosing = false;
         match found {
             Found::Ask(folder) => {
                 self.asked_folder = true;

@@ -274,24 +274,38 @@ fn the_folder_is_not_persisted_on_a_refusal() {
 }
 
 #[test]
-fn a_folder_chosen_under_another_session_or_account_is_never_started_in() {
+fn the_choice_is_the_accounts_it_holds_over_a_lock_and_is_never_another_accounts() {
+    // A lock and an unlock (another session of the same account): the person's choice stands.
+    let mut set = new_pc();
+    set.platform
+        .picks
+        .lock()
+        .unwrap()
+        .push_back(Ok(Some(PathBuf::from(PICKED))));
+    set.source.choose_folder();
+    settle(&mut set, 1);
+    *set.engine.stamp.lock().unwrap() = (session(2), Some(FIRST.to_string()));
+    assert_eq!(chosen(&set), Some(PathBuf::from(PICKED)));
+    start(&set);
+    assert_eq!(started(&set), [PathBuf::from(PICKED)]);
+
+    // Another account: nothing of the first one's choice, and no start while the first run has no folder.
+    let mut set = new_pc();
+    set.source.keep_folder();
+    settle(&mut set, 1);
+    assert!(chosen(&set).is_some());
+    for other in [Some(SECOND.to_string()), None] {
+        *set.engine.stamp.lock().unwrap() = (session(1), other.clone());
+        assert_eq!(chosen(&set), None, "{other:?}");
+        start(&set);
+        assert!(started(&set).is_empty(), "{other:?}");
+    }
+
+    // A press in a first run that was made for another session or account sends nothing and says nothing.
     for moved_to in [
         (session(2), Some(FIRST.to_string())),
         (session(1), Some(SECOND.to_string())),
     ] {
-        let mut set = new_pc();
-        set.source.keep_folder();
-        settle(&mut set, 1);
-        assert!(chosen(&set).is_some());
-        *set.engine.stamp.lock().unwrap() = moved_to.clone();
-        assert_eq!(chosen(&set), None, "{moved_to:?}");
-        start(&set);
-        assert!(
-            started(&set).is_empty(),
-            "the first run is still due and this session chose nothing: {moved_to:?}"
-        );
-
-        // And a press in a first run that was made for the session before sends nothing and says nothing.
         let mut set = new_pc();
         *set.engine.stamp.lock().unwrap() = moved_to.clone();
         set.source.keep_folder();
@@ -302,6 +316,76 @@ fn a_folder_chosen_under_another_session_or_account_is_never_started_in() {
         assert_eq!(set.engine.wakes.load(Ordering::SeqCst), 0, "no worker: {moved_to:?}");
         assert_eq!(starts_asked(&set), 0, "{moved_to:?}");
     }
+}
+
+/// "Skip setup", then "Open my Beebeeb": nobody chose, so the start takes the suggestion, and only when the
+/// engine's rule lets it be the sync folder.
+#[test]
+fn a_skipped_first_run_starts_in_the_suggestion_only_if_the_rule_lets_it() {
+    let set = new_pc();
+    set.first_run.end();
+    *set.engine.rule.lock().unwrap() = Err(SyncFolderRefused::Network);
+    assert_eq!(start(&set), None);
+    assert!(started(&set).is_empty() && set.engine.kept.lock().unwrap().is_empty());
+    assert_eq!(set.engine.checked.lock().unwrap().clone(), [PathBuf::from(SUGGESTED)]);
+    *set.engine.rule.lock().unwrap() = Ok(());
+    start(&set);
+    assert_eq!(started(&set), [PathBuf::from(SUGGESTED)]);
+    assert_eq!(set.engine.kept.lock().unwrap().clone(), [PathBuf::from(SUGGESTED)]);
+
+    // A build that wires no first run (no question is ever asked there) starts as it always did.
+    let engine = fake();
+    *engine.settings_folder.lock().unwrap() = Ok(None);
+    *engine.rule.lock().unwrap() = Err(SyncFolderRefused::Home);
+    let name = Mutex::new(None);
+    start_now(&*engine, &name, &FirstRun::default());
+    assert_eq!(engine.started.lock().unwrap().clone(), [PathBuf::from(SUGGESTED)]);
+    assert!(engine.checked.lock().unwrap().is_empty());
+}
+
+/// After a refused start: one picker at a time, and one "Try again" at a time.
+#[test]
+fn a_second_press_while_the_first_is_on_its_way_asks_nothing() {
+    let mut set = new_pc();
+    set.source.keep_folder();
+    settle(&mut set, 1);
+    set.engine
+        .set(Start::Refused(SyncStartRefused::Other), EngineExplorer::Unknown);
+    let held = set.engine.held.lock().unwrap();
+    set.platform
+        .picks
+        .lock()
+        .unwrap()
+        .push_back(Ok(Some(PathBuf::from(PICKED))));
+    set.platform
+        .picks
+        .lock()
+        .unwrap()
+        .push_back(Ok(Some(PathBuf::from("/invented/second"))));
+    set.source.choose_folder();
+    set.source.choose_folder();
+    drop(held);
+    settle(&mut set, 2);
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(set.platform.pick_asks.lock().unwrap().len(), 1, "one picker");
+    assert_eq!(chosen(&set), Some(PathBuf::from(PICKED)));
+    assert_eq!(starts_asked(&set), 2, "the first choice's start, and this one's");
+    // Answered: the next press is taken again.
+    set.source.choose_folder();
+    settle(&mut set, 3);
+    assert_eq!(set.platform.pick_asks.lock().unwrap().len(), 2);
+
+    // "Try again" while sync runs stops it and starts it again: two presses at once are one of those.
+    let mut set = set_on(fake(), FakePlatform::default());
+    set.engine.set(Start::Running, EngineExplorer::Failed { code: None });
+    set.source.retry_explorer();
+    set.source.retry_explorer();
+    settle(&mut set, 1);
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!((set.engine.stops.load(Ordering::SeqCst), starts_asked(&set)), (1, 1));
+    set.source.retry_explorer();
+    settle(&mut set, 2);
+    assert_eq!((set.engine.stops.load(Ordering::SeqCst), starts_asked(&set)), (2, 2));
 }
 
 #[test]
