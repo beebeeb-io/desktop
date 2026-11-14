@@ -21,6 +21,7 @@
 //! BLOCKS on the handle's runtime: call it from a worker thread or the session watcher, never from the UI thread or a
 //! task of that runtime. Must not: log an id, an address or a token.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
@@ -51,35 +52,64 @@ impl<C: CredentialStores> Engine<C> {
             .is_some()
     }
 
-    /// The session watcher's ask: while the owner of the session in memory is unknown, at most once a minute (and
-    /// one at a time), Beebeeb is asked whose session it is. See the module's doc.
-    pub fn settle_session_owner(&self) -> OwnerSettled {
-        if self.owner_known() {
-            return OwnerSettled::Known;
-        }
+    /// Whether an ask may start now: the owner is unknown, a session is in memory and the screen is open, and no ask
+    /// is out or started less than a minute ago. `true`: the flight is taken (end it with [`Self::end_owner_flight`]).
+    fn take_owner_flight(&self) -> bool {
         // Nothing to ask for (no session, a locked screen): the minute is not spent on it.
-        if self.person_session(|_, _| ()).is_err() {
-            return OwnerSettled::NotNow;
+        if self.owner_known() || self.person_session(|_, _| ()).is_err() {
+            return false;
         }
-        {
-            let mut flight = self
-                .acct
-                .identify_flight
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if flight.in_flight || flight.last_started.is_some_and(|at| at.elapsed() < ASK_AGAIN_AFTER) {
-                return OwnerSettled::NotNow;
-            }
-            flight.in_flight = true;
-            flight.last_started = Some(Instant::now());
+        let mut flight = self
+            .acct
+            .identify_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if flight.in_flight || flight.last_started.is_some_and(|at| at.elapsed() < ASK_AGAIN_AFTER) {
+            return false;
         }
-        let settled = self.settle_session_owner_now();
+        flight.in_flight = true;
+        flight.last_started = Some(Instant::now());
+        true
+    }
+
+    fn end_owner_flight(&self) {
         self.acct
             .identify_flight
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .in_flight = false;
+    }
+
+    /// While the owner of the session in memory is unknown, at most once a minute (and one at a time), Beebeeb is
+    /// asked whose session it is. See the module's doc.
+    pub fn settle_session_owner(&self) -> OwnerSettled {
+        if self.owner_known() {
+            return OwnerSettled::Known;
+        }
+        if !self.take_owner_flight() {
+            return OwnerSettled::NotNow;
+        }
+        let settled = self.settle_session_owner_now();
+        self.end_owner_flight();
         settled
+    }
+
+    /// The session watcher's ask ([`Self::settle_session_owner`]) on a thread of its own, so a slow answer never holds
+    /// back the watcher's other checks. Nothing starts while no ask is due.
+    pub(in crate::app) fn settle_session_owner_aside(self: &Arc<Self>) {
+        if !self.take_owner_flight() {
+            return;
+        }
+        let engine = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("session-owner".to_string())
+            .spawn(move || {
+                engine.settle_session_owner_now();
+                engine.end_owner_flight();
+            });
+        if spawned.is_err() {
+            self.end_owner_flight();
+        }
     }
 
     /// [`Self::settle_session_owner`] at once, for a call that needs the owner now.

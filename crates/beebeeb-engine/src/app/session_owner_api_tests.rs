@@ -86,3 +86,20 @@ fn a_locked_screen_asks_nothing_and_the_unlock_asks_at_once() {
         Some(account.user_id.as_str())
     );
 }
+
+/// The session watcher's ask runs on a thread of its own and records the owner there.
+#[test]
+fn the_watchers_ask_records_the_owner_off_its_own_thread() {
+    let (engine, _api, account) = a_session_from_before_the_owner_tag("owner-aside");
+    let engine = Arc::new(engine);
+    engine.settle_session_owner_aside();
+    let began = std::time::Instant::now();
+    while engine.session_user_id.lock().unwrap().is_none() {
+        assert!(began.elapsed() < std::time::Duration::from_secs(10), "never recorded");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        engine.session_user_id.lock().unwrap().as_deref(),
+        Some(account.user_id.as_str())
+    );
+}
