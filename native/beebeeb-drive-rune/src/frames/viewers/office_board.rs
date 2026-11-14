@@ -19,6 +19,19 @@ pub enum Case {
     NoEditor,
 }
 
+impl Case {
+    /// The document a board frame has open.
+    pub fn of(frame: &str) -> Case {
+        match frame {
+            "DW-1552" | "DW-1553" | "DW-1554" => Case::Unsaved,
+            "DW-1550" => Case::Table,
+            "DW-1556" => Case::NoEditor,
+            "DW-1234" => Case::Plain,
+            _ => Case::Selected,
+        }
+    }
+}
+
 fn section(heading: &str, text: &str) -> Section {
     Section {
         heading: heading.into(),

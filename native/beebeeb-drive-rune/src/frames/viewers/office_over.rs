@@ -174,6 +174,24 @@ impl Ui {
     }
 }
 
+/// A board frame's state on the open document, by the calls a person's presses make.
+pub fn set_scene(ui: &mut Ui, frame: &str) {
+    match frame {
+        // The Insert tab, pressed.
+        "DW-1550" => ui.office.tab = office::Tab::Insert,
+        // Ctrl+K, "head".
+        "DW-1551" => {
+            ui.office_palette();
+            if let Some(Over::Palette(palette)) = ui.office.over.as_mut() {
+                palette.query.insert(office::board::QUERY);
+            }
+        }
+        // Ctrl+S: saved (DW-1553), or the newer version in its way (DW-1554).
+        "DW-1553" | "DW-1554" => ui.office_save(),
+        _ => {}
+    }
+}
+
 /// The keys of what is open over the document. `true`: the key was taken.
 pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     let Some(ui) = super::ui(s) else { return false };

@@ -359,12 +359,17 @@ fn a_storage_location_chosen_under_one_session_is_never_sent_under_another() {
     // While a sign-out is ending the session (it is not yet gone from memory): nothing is sent.
     let (during, said) = (engine.clone(), Arc::new(Mutex::new(None)));
     let heard = said.clone();
+    // Asked from inside the sign-out, under the number the session has AT THAT MOMENT (it has moved; the session
+    // and its token are still in memory): the number check passes, so only the session-write lock can refuse.
     engine.during_next_forget_for_test(Box::new(move || {
-        *heard.lock().unwrap() = Some(during.set_storage_region_for(now, Some("europe"), Some(false)));
+        let still = during.session_turn();
+        *heard.lock().unwrap() = Some((still, during.set_storage_region_for(still, Some("europe"), Some(false))));
     }));
     engine.sign_out_keeping_local_data().expect("signed out");
+    let (still, ending) = said.lock().unwrap().take().expect("the hook ran");
+    assert_ne!(still, now, "the session's number had moved when the hook asked");
     assert_eq!(
-        said.lock().unwrap().take().expect("the hook ran").expect_err("ending"),
+        ending.expect_err("ending"),
         AccountCallError::NotSignedIn,
         "a session that is ending"
     );

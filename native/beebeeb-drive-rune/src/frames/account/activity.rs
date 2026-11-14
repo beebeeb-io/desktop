@@ -14,7 +14,7 @@ use super::form::Form;
 use super::source::{AccountSource, EventKind};
 use super::{CodeFor, Dialog, icons};
 
-fn event_icon(kind: EventKind) -> &'static rune::Icon {
+pub(super) fn event_icon(kind: EventKind) -> &'static rune::Icon {
     match kind {
         EventKind::SignIn => &icons::DEVICE_LAPTOP,
         EventKind::PasskeyAdded => &icons::PASSKEY,

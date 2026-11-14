@@ -16,6 +16,8 @@
 mod archive;
 mod audio;
 mod chrome;
+pub use chrome::{FROM_THIS_PC, FROM_THIS_PC_UNSENT};
+pub use pdf::{PAGE_FAILED, PAGE_LACKS_TEXT, PAGE_RENDERING};
 mod details;
 mod dialogs;
 mod fixture_media;
@@ -46,6 +48,8 @@ mod new_file_tests;
 #[cfg(test)]
 mod office_tests;
 #[cfg(test)]
+mod route_tests;
+#[cfg(test)]
 mod tests;
 
 use rune::{Cx, El, Key, KeyEvent, Tx};
@@ -72,6 +76,8 @@ pub enum Intent {
     SaveCopy,
     /// Edit, where the source cannot save an edit.
     Edit,
+    /// Find, where the source cannot search the document's text.
+    Find,
     /// Available offline, where the source cannot change it.
     KeepOffline,
     /// DW-0782: the report dialog. The report carries the code, never the file's name.
@@ -123,6 +129,7 @@ impl Intent {
             Intent::OpenInAnotherApp => "Open in another app",
             Intent::SaveCopy => "Save a copy",
             Intent::Edit => "Edit and save from here",
+            Intent::Find => "Find in this document",
             Intent::KeepOffline => "Available offline from here",
             Intent::EditInSheets => "Edit in Sheets",
             Intent::VersionHistory => "Version history",
@@ -204,7 +211,26 @@ impl Ui {
     /// Open `file_id` from `source`.
     pub fn open(mut source: Box<dyn ViewerSource>, file_id: &str) -> Result<Ui, OpenError> {
         let file = source.open(file_id)?;
-        Ok(Ui {
+        Ok(Self::on(source, file))
+    }
+
+    /// The file the ROUTE names (Search's Open, Back and Forward, the reopen after an unlock), opened from
+    /// `source`; or, when it cannot be opened, the window saying why (it is gone, the session ended, or it could
+    /// not be read right now, with Try again), never the shell's "not built yet" frame and never nothing. Such a
+    /// window knows no name: what this PC knows of the file was not read. `Err`: nothing of this group to draw
+    /// (no session: the shell's gate says it).
+    pub fn open_or_say_why(mut source: Box<dyn ViewerSource>, file_id: &str) -> Result<Ui, OpenError> {
+        match source.open(file_id) {
+            Ok(file) => Ok(Self::on(source, file)),
+            Err(why) => {
+                let stopped = why.stopped().ok_or(why)?;
+                Ok(Self::on(source, unopened(file_id, stopped)))
+            }
+        }
+    }
+
+    fn on(source: Box<dyn ViewerSource>, file: OpenFile) -> Ui {
+        Ui {
             source,
             media: media::Media::of(&file),
             office: office::OfficeUi::default(),
@@ -218,7 +244,27 @@ impl Ui {
             saved_at: None,
             focus: None,
             intents: Vec::new(),
-        })
+        }
+    }
+
+    /// Where the content on screen was read from (`ViewerSource::origin`).
+    pub(crate) fn origin(&self) -> source::Origin {
+        self.source.origin(&self.file.id)
+    }
+
+    /// Whether the source can store an edit (`ViewerSource::can_save`).
+    pub(crate) fn can_save(&self) -> bool {
+        self.source.can_save()
+    }
+
+    /// What there is of page `page` of the open PDF (`ViewerSource::page_state`).
+    pub(crate) fn page_state(&self, page: u32) -> source::PageState {
+        self.source.page_state(&self.file.id, page)
+    }
+
+    /// Whether "Save a copy…" has somewhere to go (`ViewerSource::saves_copies`).
+    pub(crate) fn saves_copies(&self) -> bool {
+        self.source.saves_copies()
     }
 
     pub fn toggle_details(&mut self) {
@@ -310,8 +356,20 @@ impl Ui {
                 self.toast = None;
                 self.focus = Some(states::TITLE_KEY);
             }
-            // Never a press that does nothing: the file is not there to open now.
-            Err(_) => self.toast = Some(NOT_REOPENED.to_string()),
+            // Never a press that does nothing. A refusal the window can say is said in its place (the file is
+            // gone now, the session ended); the same one again, or one it cannot say, is the toast.
+            Err(why) => match why.stopped() {
+                // The file as a route to a file that did not open draws it: its name and folders are overwritten
+                // and gone, so nothing of them is drawn empty.
+                Some(stopped) if Body::Stopped(stopped) != self.file.body => {
+                    let id = self.file.id.clone();
+                    self.file.wipe();
+                    self.file = unopened(&id, stopped);
+                    self.toast = None;
+                    self.focus = Some(states::TITLE_KEY);
+                }
+                _ => self.toast = Some(NOT_REOPENED.to_string()),
+            },
         }
     }
 
@@ -452,12 +510,19 @@ impl Ui {
     pub fn pump(&mut self) -> bool {
         match self.source.poll(&self.file.id) {
             Some(body) => {
-                if std::mem::discriminant(&body) != std::mem::discriminant(&self.file.body) {
+                let another_kind = std::mem::discriminant(&body) != std::mem::discriminant(&self.file.body);
+                if another_kind {
                     self.focus = Some(states::TITLE_KEY);
                 }
                 // What was shown until now leaves memory overwritten (a session that ended takes the text).
                 self.file.body.wipe();
                 self.file.body = body;
+                // Content that arrives after "Decrypting" starts where its kind starts (a PDF on its first page):
+                // what was open inside the body before belongs to that body. The same kind again (a page of the
+                // open PDF arrived) keeps the page, the zoom and the find bar where the person has them.
+                if another_kind {
+                    self.media = media::Media::of(&self.file);
+                }
                 true
             }
             None => false,
@@ -490,6 +555,20 @@ fn route_item(s: &State) -> Option<String> {
     }
 }
 
+/// The window of a file that could not be opened at all: no name, no path beyond "Files", and why.
+fn unopened(file_id: &str, why: source::Stopped) -> OpenFile {
+    OpenFile {
+        id: file_id.to_string(),
+        path: vec!["Files".to_string()],
+        name: String::new(),
+        facts: String::new(),
+        version: 0,
+        body: Body::Stopped(why),
+        details: source::Details::default(),
+        newer: None,
+    }
+}
+
 /// What the window keeps for this group (`State::viewer`): the open file, and where the route's
 /// files are read from.
 #[derive(Default)]
@@ -501,8 +580,10 @@ pub struct Slot {
     /// route shows the shell's placeholder. The board's fixture is here only in the board's
     /// sample window ([`board_fixture`]), never as a fallback.
     route: Option<RouteSource>,
-    /// The file the route names that the source could not open: it is not asked for again on every poll, only
-    /// once the route names another file or the session gate closed and opened again.
+    /// The file the route names for which there is nothing of this group to draw (no session in memory): it is not
+    /// asked for again on every poll, only once the route names another file or the session gate closed and opened
+    /// again. A file that did not open for a reason the window can say is an open `Ui` saying it instead
+    /// (`Ui::open_or_say_why`), with Try again where trying again may work.
     unopened: Option<String>,
     /// The New file dialog over the Files window (DW-1521, DW-1522), while it is open.
     pub(crate) new_file: Option<new_file::NewFile>,
@@ -562,14 +643,51 @@ pub fn open(s: &mut State, file_id: &str) -> bool {
 
 /// The router by file type, and the ONE way a file of a list opens here: a file whose type has
 /// a viewer (`kinds::viewer_of`) and that the window's source has goes to the route
-/// (`Event::OpenItem`, through [`open`]). `false`: not a file for this group; the caller opens
-/// it as it did before (its own app).
+/// (`Event::OpenItem`). `false`: not a file for this group; the caller opens it as it did before
+/// (its own app).
+///
+/// `true` is "this group's", NOT "it opened": a file this group reads that cannot be opened right now is shown
+/// as that (it is gone, the session ended, or it could not be read, with Try again), and with no session
+/// nothing is shown (the shell's gate says it). It is never handed on to the system's Open because the viewer
+/// could not open it: for a script or a web page that would run it.
 pub fn open_item(s: &mut State, item: &crate::source::DriveItem) -> bool {
+    if !is_this_groups(s, item) {
+        return false;
+    }
+    if crate::shell::session_gate::refuse(s) {
+        return true;
+    }
+    if let Some(Ok(ui)) = route_source(s).map(|source| Ui::open_or_say_why(source, &item.id)) {
+        sync(s);
+        host::dispatch(s, Event::OpenItem(item.id.clone()));
+        s.viewer.ui = Some(ui);
+    }
+    true
+}
+
+/// Whether a list's Open of `item` is this group's ([`open_item`]).
+fn is_this_groups(s: &State, item: &crate::source::DriveItem) -> bool {
     !item.is_folder
         && kinds::viewer_of(&item.name).is_some()
-        // A kind the window's source does not show here stays its own app's.
+        // A kind the window's source does not show here stays its own app's. So does a file whose bytes are kept
+        // on this PC, when its own app shows it (a document, a picture): the system opens it there with the app
+        // the person chose for it, with nothing to download. The viewer is for a file that is NOT on this PC
+        // (shown from memory, no copy lands on disk), and for source code, scripts and web pages wherever they
+        // are: Enter on one reads it, it never runs it (`kinds::its_app_shows_it`).
+        && route_source(s).is_some_and(|source| {
+            source.previews(&item.name)
+                && !(kinds::its_app_shows_it(&item.name) && source.kept_on_this_pc(&item.id))
+        })
+}
+
+/// Whether `item` is a file a list's Open only ever READS here: source code, a script, a web page, a data file
+/// that the window's source shows. With several files selected such a file is left out of what the system is
+/// asked to open (`frames::files`), as one alone opens in the viewer.
+pub fn only_read_here(s: &State, item: &crate::source::DriveItem) -> bool {
+    !item.is_folder
+        && kinds::viewer_of(&item.name).is_some()
+        && !kinds::its_app_shows_it(&item.name)
         && route_source(s).is_some_and(|source| source.previews(&item.name))
-        && open(s, &item.id)
 }
 
 /// [`open`] with the source to read from (the engine's, once it is wired).
@@ -686,7 +804,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     }
     if let (None, Some(id), true) = (&s.viewer.ui, here, gate_open) {
         if s.viewer.unopened.as_deref() != Some(id.as_str()) {
-            match route_source(s).map(|source| Ui::open(source, &id)) {
+            match route_source(s).map(|source| Ui::open_or_say_why(source, &id)) {
                 Some(Ok(ui)) => {
                     s.viewer.ui = Some(ui);
                     return true;
@@ -788,10 +906,17 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
             ),
             details: format!("{} \u{00B7} UTF-8", kind_word(&ui.file)),
         },
-        None => text::status(&TextDoc {
-            lines: Vec::new(),
-            truncated: doc_truncated,
-        }),
+        None => {
+            let mut status = text::status(&TextDoc {
+                lines: Vec::new(),
+                truncated: doc_truncated,
+            });
+            // An edit that cannot be saved is not offered: the status line does not name its key either.
+            if doc_truncated.is_none() && !ui.can_save() {
+                status.details = text::READ_ONLY_HINT.into();
+            }
+            status
+        }
     };
     let banner = text::newer_banner(&ui.file, &t);
     if let Body::Text(doc) = &ui.file.body {
@@ -843,7 +968,7 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
         }
         Body::Pdf(doc) => {
             let (tools, bar, body) = (pdf::tools(ui, &t), pdf::find_bar(ui, &t), pdf::body(ui, doc, &t));
-            return chrome::window(s, cx, ui, pdf::head(ui, doc), tools, bar, body, &pdf::status(), &t);
+            return chrome::window(s, cx, ui, pdf::head(ui, doc), tools, bar, body, &pdf::status(ui), &t);
         }
         Body::Table(doc) => {
             let (tools, body) = (table::tools(&t), table::body(ui, doc, &t));
@@ -855,7 +980,10 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
         }
         _ => {}
     }
-    let (body, status) = match (states::body(&ui.file, &t), states::status(&ui.file.body)) {
+    let (body, status) = match (
+        states::body(&ui.file, ui.saves_copies(), ui.origin(), &t),
+        states::status(&ui.file.body, ui.origin()),
+    ) {
         (Some(body), Some(status)) => (body, status),
         _ => return crate::shell::placeholder::window(s, cx, FrameGroup::Viewer),
     };
@@ -872,7 +1000,22 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             ui.toast = None;
         }
     }
-    if media::on_key(s, ev) || office_over::on_key(s, ev, tx) {
+    // The editor's frame: the question, the command search, Ctrl+K and Ctrl+S.
+    if office_over::on_key(s, ev, tx) {
+        if let Some(key) = ui(s).and_then(|ui| ui.focus.take()) {
+            tx.focus(key, true);
+        }
+        return true;
+    }
+    let page_before = ui(s).map(|ui| ui.media.page);
+    if media::on_key(s, ev) {
+        // A page turned by a key: its thumbnail comes into view, and the page is read from its top.
+        if let Some(ui) = ui(s).filter(|ui| matches!(ui.file.body, Body::Pdf(_))) {
+            if Some(ui.media.page) != page_before {
+                tx.scroll_into_view(pdf::thumb_key(ui.media.page));
+                pdf::show_page_from_its_top(tx);
+            }
+        }
         if let Some(key) = ui(s).and_then(|ui| ui.focus.take()) {
             tx.focus(key, true);
         }
@@ -937,13 +1080,7 @@ pub fn set_scene(s: &mut State, frame: &str) {
     let source = FixtureViewerSource {
         newer: frame == "DW-1519",
         conflict: matches!(frame, "DW-1526" | "DW-1554"),
-        office: match frame {
-            "DW-1552" | "DW-1553" | "DW-1554" => office::board::Case::Unsaved,
-            "DW-1550" => office::board::Case::Table,
-            "DW-1556" => office::board::Case::NoEditor,
-            "DW-1234" => office::board::Case::Plain,
-            _ => office::board::Case::Selected,
-        },
+        office: office::board::Case::of(frame),
         ..FixtureViewerSource::new()
     };
     open_from(s, Box::new(source), file);
@@ -974,17 +1111,7 @@ pub fn set_scene(s: &mut State, frame: &str) {
         }
     }
     match frame {
-        // The Insert tab, pressed.
-        "DW-1550" => ui.office.tab = office::Tab::Insert,
-        // Ctrl+K, "head".
-        "DW-1551" => {
-            ui.office_palette();
-            if let Some(office_over::Over::Palette(palette)) = ui.office.over.as_mut() {
-                palette.query.insert(office::board::QUERY);
-            }
-        }
-        // Ctrl+S: saved (DW-1553), or the newer version in its way (DW-1554).
-        "DW-1553" | "DW-1554" => ui.office_save(),
+        "DW-1550" | "DW-1551" | "DW-1553" | "DW-1554" => office_over::set_scene(ui, frame),
         "DW-1524" | "DW-1526" => ui.save(),
         "DW-1525" => {
             ui.hold_for_changes();

@@ -89,6 +89,12 @@ impl Ui {
         if self.pages() == 0 {
             return;
         }
+        // A source that cannot search the text says so: a find bar that answers "No matches" for words nobody
+        // looked for would be a wrong answer.
+        if !self.source.finds() {
+            self.intent(Intent::Find);
+            return;
+        }
         if self.media.find.is_none() {
             self.media.find = Some(Find {
                 edit: TextEdit::new(String::new()),

@@ -98,6 +98,11 @@ pub struct OwnedState<'e> {
 }
 
 impl OwnedState<'_> {
+    /// The session this handle was made for.
+    pub fn session(&self) -> SessionGeneration {
+        self.generation
+    }
+
     /// Read (or, on a handle for changes, write) through the state database. Refused when the session is no longer
     /// the one this handle was made for, before the closure runs; and when it changed while the closure ran, in
     /// which case the closure's answer is dropped.
@@ -280,6 +285,11 @@ impl<C: CredentialStores> Engine<C> {
         Ok(state)
     }
 }
+
+/// The first-time guide's "done" mark of the session's own account (a child of this module: it resolves the
+/// account's state and proves its owner with this module's own rules).
+#[path = "guide_mark.rs"]
+pub mod guide_mark;
 
 #[cfg(test)]
 #[path = "owned_state_tests.rs"]
