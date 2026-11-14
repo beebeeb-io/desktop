@@ -765,8 +765,11 @@ pub fn render_scene(name: &str) -> Option<Ui> {
         "first-run-summary" => Step::Done,
         _ => Step::Explorer,
     };
-    while ui.step < to {
-        ui.go_on();
+    // At most one press per step: a step that does not move on is left as it is.
+    for _ in Step::STEPS {
+        if ui.step < to {
+            ui.go_on();
+        }
     }
     ui.focus = None;
     Some(ui)
