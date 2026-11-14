@@ -90,6 +90,10 @@ pub struct ShareMember {
 /// A live (not revoked) link of the account's. Its token and keys stay in the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedLink {
+    /// The first live link's id: what the row is named by (never the item's id, which a share with people also has).
+    pub share_id: String,
+    /// Every live link of the item (what taking the row off revokes), `share_id` first.
+    pub share_ids: Vec<String>,
     pub item_id: String,
     pub name: String,
     pub expires_at: Option<String>,
@@ -115,6 +119,14 @@ pub enum ShareChange {
     SetAccess { invite_id: String, can_edit: bool },
     /// Take one person off a share of the account's.
     RemoveMember { invite_id: String },
+    /// Decline an invitation (hide it from the account's inbox, as the web does).
+    Decline { invite_id: String },
+    /// End a share with people: cancel each of its invites (one already gone counts as done).
+    CancelInvites { invite_ids: Vec<String> },
+    /// Take links of the account's off: revoke each (one already revoked counts as done).
+    RevokeLinks { share_ids: Vec<String> },
+    /// Close a file request of the account's: no new uploads, what arrived stays.
+    CloseRequest { request_id: String },
 }
 
 /// Why a change was not made. Fixed words only.
@@ -211,7 +223,7 @@ impl<C: CredentialStores> Engine<C> {
     /// `session` is not the session in memory any more, or an id is not a canonical id.
     pub fn share_change(&self, session: SessionGeneration, change: &ShareChange) -> Result<(), ShareChangeError> {
         let (token, key, _, now) = self.share_session().ok_or(ShareChangeError::NotSignedIn)?;
-        let (req, gone_is_done) = change_request(change)?;
+        let (reqs, gone_is_done) = change_requests(change)?;
         // Asked last before sending, with no session change half done: a change for a session that ended, or that a
         // lock or a sign-out is ending, is never sent.
         if now != session || !self.session_is_still(session, &key) {
@@ -219,23 +231,55 @@ impl<C: CredentialStores> Engine<C> {
         }
         let client = auth_transport::client_for(&self.config.api_base).map_err(|_| ShareChangeError::Offline)?;
         let base = self.config.api_base.trim_end_matches('/');
-        let resp = self
-            .runtime
-            .block_on(auth_transport::send_to(base, &client, Some(&token), req))
-            .map_err(|_| ShareChangeError::Offline)?;
-        match resp.status {
-            200..=299 => Ok(()),
-            // Taking off a person who is already off: done.
-            404 if gone_is_done => Ok(()),
-            404 => Err(ShareChangeError::NotFound),
-            401 => Err(ShareChangeError::SessionEnded),
-            _ => Err(ShareChangeError::Refused),
+        for req in reqs {
+            let resp = self
+                .runtime
+                .block_on(auth_transport::send_to(base, &client, Some(&token), req))
+                .map_err(|_| ShareChangeError::Offline)?;
+            match resp.status {
+                200..=299 => {}
+                // Taking off a person or a link that is already off: done.
+                404 if gone_is_done => {}
+                404 => return Err(ShareChangeError::NotFound),
+                401 => return Err(ShareChangeError::SessionEnded),
+                _ => return Err(ShareChangeError::Refused),
+            }
         }
+        Ok(())
     }
 }
 
 /// The request of a change, through core where core builds it, and whether a 404 means it is already so. An id that
 /// is not a canonical lower-case UUID is refused here (never normalized: core v0.2.8 items 10 and 13).
+fn change_requests(change: &ShareChange) -> Result<(Vec<HttpRequest>, bool), ShareChangeError> {
+    let not_found = |_| ShareChangeError::NotFound;
+    match change {
+        ShareChange::Decline { invite_id } => {
+            let path = format!("/api/v1/shares/invites/{}/hide", canonical(invite_id)?);
+            Ok((vec![request(Method::Post, path)], false))
+        }
+        ShareChange::CancelInvites { invite_ids } => {
+            let reqs = invite_ids
+                .iter()
+                .map(|id| share_flow::cancel_invite_request(canonical(id)?).map_err(not_found))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((reqs, true))
+        }
+        ShareChange::RevokeLinks { share_ids } => {
+            let reqs = share_ids
+                .iter()
+                .map(|id| share_flow::revoke_link_request(canonical(id)?).map_err(not_found))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((reqs, true))
+        }
+        ShareChange::CloseRequest { request_id } => {
+            let req = share_flow::request::close_request(canonical(request_id)?).map_err(not_found)?;
+            Ok((vec![req], false))
+        }
+        other => change_request(other).map(|(req, gone)| (vec![req], gone)),
+    }
+}
+
 fn change_request(change: &ShareChange) -> Result<(HttpRequest, bool), ShareChangeError> {
     let not_found = |_| ShareChangeError::NotFound;
     match change {
@@ -257,6 +301,8 @@ fn change_request(change: &ShareChange) -> Result<(HttpRequest, bool), ShareChan
             let req = share_flow::cancel_invite_request(canonical(invite_id)?).map_err(not_found)?;
             Ok((req, true))
         }
+        // Several requests: [`change_requests`] builds these.
+        _ => Err(ShareChangeError::Refused),
     }
 }
 
@@ -380,11 +426,20 @@ fn own_name(row: &Value, field: &str, item: &str, master_key: &[u8; 32]) -> Stri
 fn owned_links(mine: &Value, by_me: &[SentShare]) -> Vec<OwnedLink> {
     let mut out: Vec<OwnedLink> = Vec::new();
     for share in list(mine, "shares") {
-        let Some(item) = text(share, "file_id") else { continue };
-        if flag(share, "revoked") || out.iter().any(|link| link.item_id == item) {
+        let (Some(item), Some(id)) = (text(share, "file_id"), text(share, "id")) else {
+            continue;
+        };
+        if flag(share, "revoked") {
+            continue;
+        }
+        // One row per item; its other live links are revoked with it, or they would show again.
+        if let Some(link) = out.iter_mut().find(|link| link.item_id == item) {
+            link.share_ids.push(id.to_string());
             continue;
         }
         out.push(OwnedLink {
+            share_id: id.to_string(),
+            share_ids: vec![id.to_string()],
             item_id: item.to_string(),
             name: by_me
                 .iter()

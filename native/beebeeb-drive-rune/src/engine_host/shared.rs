@@ -94,6 +94,8 @@ pub(crate) struct Held {
     pub(crate) people: Vec<PeopleShare>,
     pub(crate) members: HashMap<String, Vec<Member>>,
     pub(crate) links: Vec<LinkShare>,
+    /// A link row's id to every live link behind it (what Stop sharing revokes).
+    pub(crate) link_shares: HashMap<String, Vec<String>>,
     pub(crate) requests: Vec<Request>,
 }
 
@@ -349,19 +351,72 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         )
     }
 
-    // Not bound (the module's doc says why): nothing is sent, and the view says so.
-    fn decline(&mut self, _id: &str) -> bool {
-        self.refuse(Notice::NotAvailable)
+    /// Sent once per press, for an invitation of the current session's lists (the web's Decline: the invitation
+    /// leaves the inbox). The card goes when the lists are read again after Beebeeb answered.
+    fn decline(&mut self, id: &str) -> bool {
+        let Some(session) = self
+            .current()
+            .filter(|held| held.invitations.iter().any(|i| i.id == id))
+            .map(|held| held.session)
+        else {
+            return false;
+        };
+        self.change(session, id, ShareChange::Decline { invite_id: id.into() })
     }
+
+    // Not bound (the module's doc says why): nothing is sent, and the view says so.
     fn keep_offline(&mut self, _id: &str) -> bool {
         self.refuse(Notice::NotAvailable)
     }
-    fn stop_sharing(&mut self, _id: &str) -> bool {
-        self.refuse(Notice::NotAvailable)
+
+    /// Sent once per press: a share with people (cancels every invite of it) or a link (revokes every live link of
+    /// the item). Both stay in the rows until Beebeeb answered and the lists were read again.
+    fn stop_sharing(&mut self, id: &str) -> bool {
+        let Some(held) = self.current() else {
+            return false;
+        };
+        let session = held.session;
+        let change = if held.people.iter().any(|p| p.id == id) {
+            let invite_ids: Vec<String> = held
+                .members
+                .get(id)
+                .into_iter()
+                .flatten()
+                .filter(|m| m.access.is_some())
+                .map(|m| m.id.clone())
+                .collect();
+            if invite_ids.is_empty() {
+                return false;
+            }
+            ShareChange::CancelInvites { invite_ids }
+        } else if let Some(share_ids) = held.link_shares.get(id) {
+            ShareChange::RevokeLinks {
+                share_ids: share_ids.clone(),
+            }
+        } else {
+            return false;
+        };
+        self.change(session, id, change)
     }
-    fn close_request(&mut self, _id: &str) -> bool {
-        self.refuse(Notice::NotAvailable)
+
+    /// Sent once per press, for an open request of the current session's lists.
+    fn close_request(&mut self, id: &str) -> bool {
+        let Some(session) = self
+            .current()
+            .filter(|held| {
+                held.requests
+                    .iter()
+                    .any(|r| r.id == id && r.state == RequestState::Open)
+            })
+            .map(|held| held.session)
+        else {
+            return false;
+        };
+        self.change(session, id, ShareChange::CloseRequest { request_id: id.into() })
     }
+
+    // Removing a request deletes its keys on the server: what arrived and is not yet saved could never be opened.
+    // Not sent until that is decided (decisions/), so the view says so.
     fn remove_request(&mut self, _id: &str) -> bool {
         self.refuse(Notice::NotAvailable)
     }
@@ -490,10 +545,12 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
         });
         members.insert(share.item_id, rows);
     }
+    let mut link_shares = HashMap::new();
     let links = overview
         .links
         .into_iter()
         .map(|link| {
+            link_shares.insert(link.share_id.clone(), link.share_ids.clone());
             let expiry = link.expires_at.as_deref().and_then(seconds_of);
             let expired = expiry.is_some_and(|at| at <= now.timestamp());
             let mut line = match expiry {
@@ -506,7 +563,7 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
             }
             LinkShare {
                 kind: kind(false, &link.name),
-                id: link.item_id,
+                id: link.share_id,
                 name: link.name,
                 line,
                 expired,
@@ -549,6 +606,7 @@ pub(crate) fn held_of(overview: SharesOverview, now: DateTime<Local>) -> Held {
         people,
         members,
         links,
+        link_shares,
         requests,
     }
 }
