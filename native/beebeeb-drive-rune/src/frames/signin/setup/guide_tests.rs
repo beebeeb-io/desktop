@@ -703,8 +703,8 @@ fn every_layer_of_the_files_window_is_in_front_of_a_tip() {
     type Put = fn(&mut State);
     let layers: [(&str, Put); 4] = [
         ("Uploads", |s| {
-            s.actions.uploads_open = true;
-            assert!(s.actions.source.uploads().is_some(), "the board's window has uploads");
+            crate::frames::files::action_scenes::uploads_panel(s);
+            assert!(s.actions.uploads_open && s.actions.source.uploads().is_some());
         }),
         ("the panel that says a file needs a connection", |s| {
             s.global.blocked_preview = Some(("f-1".into(), "An invented name.txt".into()));
@@ -745,6 +745,23 @@ fn every_layer_of_the_files_window_is_in_front_of_a_tip() {
             "{name}: the guide is still there"
         );
     }
+}
+
+/// Uploads' flag can outlive its panel (the uploads finished while it was open): with nothing drawn, nothing is in
+/// front, and the tip shows.
+#[test]
+fn an_uploads_flag_with_no_panel_drawn_hides_no_tip() {
+    let mut rt = on_tip_1();
+    rt.update(|s, _| {
+        assert!(
+            s.actions.source.uploads().is_none(),
+            "nothing uploads in the board's window"
+        );
+        s.actions.uploads_open = true;
+    });
+    rt.frame(0.0);
+    assert_eq!(guide::showing(&rt.state), Some(Step::Tip(1)));
+    assert!(rect(&rt, COACH_KEY).is_some());
 }
 
 /// Search open over Files: Esc ends search, not the guide.
