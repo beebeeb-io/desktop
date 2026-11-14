@@ -247,26 +247,45 @@ fn the_window_under_a_tip_stays_usable() {
     assert!(rect(&rt, COACH_KEY).is_some(), "back on Files the tip shows again");
 }
 
-/// The first-run window on "You're set up", on a PC that has or has not shown the guide.
-fn set_up(guide_shown: bool) -> (Runtime<State>, super::source::CallLog) {
+/// The first run on "You're set up".
+fn set_up_ui() -> super::Ui {
     use super::source::{Explorer, FixtureSetupSource, Script};
-    let source = FixtureSetupSource::new(Script {
+    let mut ui = super::Ui::new(Box::new(FixtureSetupSource::new(Script {
         explorer: Explorer::Added,
-        guide_shown,
         ..Script::default()
-    });
-    let log = source.log();
-    let mut ui = super::Ui::new(Box::new(source));
+    })));
     ui.skip();
+    ui
+}
+
+/// The first-run window on "You're set up", for an account that has or has not done the guide on this PC.
+fn set_up(guide_done: bool) -> Runtime<State> {
     let mut state = init();
+    if guide_done {
+        let account = state.shell.app.account().expect("the fixture is signed in").to_string();
+        state.guide_marks = Box::new(super::guide_marks::FixtureMarks::done_for(&account));
+    }
     host::dispatch(&mut state, Event::Gate(GateState::FirstRun));
-    state.setup = Some(ui);
-    (window_sized(state, (958.0, 638.0)), log)
+    state.setup = Some(set_up_ui());
+    window_sized(state, (958.0, 638.0))
+}
+
+/// A first run ends now ("Open my Beebeeb"), and the window's poll runs: whether the guide started by itself.
+fn a_first_run_ends(rt: &mut Runtime<State>) -> bool {
+    let mut ui = set_up_ui();
+    ui.finish();
+    rt.update(|s, tx| {
+        s.setup = Some(ui);
+        host::poll(s, 0.0, tx);
+    });
+    let started = rt.state.guide.step == Some(Step::Tray);
+    rt.update(|s, _| s.setup = None);
+    started
 }
 
 #[test]
 fn open_my_beebeeb_at_the_end_of_the_first_run_starts_the_guide() {
-    let (mut rt, log) = set_up(false);
+    let mut rt = set_up(false);
     // A row of "You're set up" is not the guide's to take, and starts nothing.
     click(&mut rt, "item-1");
     rt.update(|s, tx| {
@@ -279,11 +298,6 @@ fn open_my_beebeeb_at_the_end_of_the_first_run_starts_the_guide() {
         host::poll(s, 0.0, tx);
     });
     assert_eq!(rt.state.guide.step, Some(Step::Tray));
-    assert!(
-        log.borrow().iter().any(|line| line == "mark_guide_shown"),
-        "{:?}",
-        log.borrow()
-    );
     // The first run's intents are all still there for the shell: the guide read none of them.
     assert_eq!(
         rt.state.setup.as_mut().unwrap().take_intents(),
@@ -310,18 +324,117 @@ fn open_my_beebeeb_at_the_end_of_the_first_run_starts_the_guide() {
 }
 
 #[test]
-fn a_pc_that_has_shown_the_guide_does_not_start_it_again() {
-    let (mut rt, log) = set_up(true);
+fn an_account_that_has_done_the_guide_does_not_get_it_again() {
+    let mut rt = set_up(true);
     click(&mut rt, "btn-0");
     rt.update(|s, tx| {
         host::poll(s, 0.0, tx);
     });
     assert_eq!(rt.state.guide.step, None);
-    assert!(!log.borrow().iter().any(|line| line == "mark_guide_shown"));
     assert_eq!(
         rt.state.setup.as_mut().unwrap().take_intents(),
         [super::Intent::OpenDrive]
     );
+}
+
+/// A window on a fixture engine of the test's own: the test changes the account and the gate on it.
+fn on_engine() -> (std::sync::Arc<crate::shell::actions::FixtureEngine>, Runtime<State>) {
+    let engine = std::sync::Arc::new(crate::shell::actions::FixtureEngine::ready());
+    let shell = host::Shell::fixture_on(
+        engine.clone(),
+        std::sync::Arc::new(crate::shell::platform::fake::FakePlatform::default()),
+    );
+    let mut rt = window(crate::shell::state::init_with(shell));
+    rt.poll = Some(host::poll);
+    (engine, rt)
+}
+
+/// Owner ruling 2026-11-13: done once per ACCOUNT on this PC. Finished or skipped, the account does not get the
+/// guide again, also after a sign-out and a sign-in; another account on the same PC gets it once; and a guide that
+/// ended because the account locked was not done.
+#[test]
+fn the_guide_is_done_once_per_account() {
+    let first = "fixture-account";
+    for ending in ["Done", "Skip", "Esc"] {
+        let (engine, mut rt) = on_engine();
+        assert_eq!(rt.state.shell.app.account(), Some(first));
+        assert!(a_first_run_ends(&mut rt), "{ending}: a first run starts the guide");
+        // Not done yet: started is not done. A lock ends it, and the next first run starts it again.
+        engine.set_gate(GateState::Locked);
+        tick(&mut rt);
+        assert_eq!(rt.state.guide.step, None, "{ending}: the lock ended it");
+        engine.set_gate(GateState::Ready);
+        tick(&mut rt);
+        tick(&mut rt);
+        assert_eq!(
+            rt.state.guide.step,
+            Some(Step::Tray),
+            "{ending}: a guide the lock ended was not done: it starts again when the account is back"
+        );
+
+        match ending {
+            "Done" => {
+                for _ in 0..6 {
+                    click(&mut rt, NEXT_KEY);
+                    tick(&mut rt);
+                }
+            }
+            "Skip" => {
+                click(&mut rt, NEXT_KEY);
+                tick(&mut rt);
+                click(&mut rt, SKIP_KEY);
+            }
+            _ => {
+                tick(&mut rt);
+                press(&mut rt, Key::Escape);
+            }
+        }
+        assert_eq!(rt.state.guide.step, None, "{ending}: the guide ended");
+        assert!(!a_first_run_ends(&mut rt), "{ending}: done for this account");
+
+        // A sign-out and a sign-in of the same account: still done.
+        engine.set_gate(GateState::SignedOut);
+        tick(&mut rt);
+        engine.set_gate(GateState::Ready);
+        tick(&mut rt);
+        assert_eq!(rt.state.shell.app.account(), Some(first));
+        assert!(
+            !a_first_run_ends(&mut rt),
+            "{ending}: still done after a sign-out and a sign-in"
+        );
+
+        // Another account on this PC: once.
+        engine.set_account("user-b");
+        tick(&mut rt);
+        assert_eq!(rt.state.shell.app.account(), Some("user-b"));
+        assert!(a_first_run_ends(&mut rt), "{ending}: another account gets it once");
+        tick(&mut rt);
+        press(&mut rt, Key::Escape);
+        assert_eq!(rt.state.guide.step, None);
+        assert!(!a_first_run_ends(&mut rt), "{ending}: and not again");
+
+        // And the first account's mark is still its own.
+        engine.set_account(first);
+        tick(&mut rt);
+        assert!(!a_first_run_ends(&mut rt), "{ending}: the first account stays done");
+    }
+}
+
+/// An answer is for the account it was asked for: asked under one account and taken in under another, there is
+/// none (so nothing starts); asked and taken in under the same account, there is.
+#[test]
+fn an_answer_asked_under_one_account_is_none_under_another() {
+    use super::guide_marks::{FixtureMarks, GuideMarks, Known};
+    let mut marks = FixtureMarks::done_for("account-a");
+    marks.ask(Some("account-b"));
+    assert_eq!(marks.answer(Some("account-a")), None, "asked for b, taken in under a");
+    assert_eq!(marks.answer(Some("account-b")), None, "and an answer is given once");
+    marks.ask(Some("account-b"));
+    assert_eq!(marks.answer(Some("account-b")), Some(Known::NotDone));
+    marks.ask(Some("account-a"));
+    assert_eq!(marks.answer(Some("account-a")), Some(Known::Done));
+    marks.ask(None);
+    assert_eq!(marks.answer(None), Some(Known::NotKnown), "nobody signed in: not known");
 }
 
 #[test]
@@ -332,7 +445,7 @@ fn the_guide_ends_when_the_account_locks_signs_out_or_changes() {
             host::dispatch(s, Event::Gate(gate));
             guide::poll(s, tx);
         });
-        assert_eq!(rt.state.guide, guide::Guide::default(), "{gate:?}");
+        assert_eq!(rt.state.guide.step, None, "{gate:?}");
         // Back in: no tip resumes.
         rt.update(|s, _| {
             host::dispatch(s, Event::Gate(GateState::Ready));
@@ -463,70 +576,248 @@ fn what_a_section_has_in_front_hides_the_tip_and_gets_esc_first() {
     assert!(rect(&rt, COACH_KEY).is_some());
 }
 
-#[test]
-fn the_new_file_dialog_over_tip_1_hides_the_tip_and_has_the_keyboard() {
-    // Tip 1 rings New; New › "New file…" (DW-1521) asks Files, and the dialog opens on the poll.
+fn ctrl(c: char) -> KeyEvent {
+    KeyEvent {
+        key: Key::Command(c),
+        mods: Mods {
+            cmd: true,
+            ctrl: true,
+            ..Mods::default()
+        },
+    }
+}
+
+/// Tip 1 on screen with the keyboard on the card's Next.
+fn on_tip_1() -> Runtime<State> {
     let mut rt = started();
     click(&mut rt, NEXT_KEY);
     tick(&mut rt);
     assert_eq!(rt.state.guide.step, Some(Step::Tip(1)));
     assert_eq!(focused(&rt).as_deref(), Some(NEXT_KEY), "the card has the keyboard");
-    rt.state
-        .actions
-        .intents
-        .push(crate::frames::files::Intent::Frame("DW-1521"));
-    tick(&mut rt);
-    tick(&mut rt);
-    assert!(rt.state.viewer.new_file.is_some(), "the dialog is open");
-    assert_eq!(guide::showing(&rt.state), None, "the dialog is in front of the tip");
+    rt
+}
+
+#[test]
+fn the_new_file_dialog_over_tip_1_hides_the_tip_and_has_the_keyboard() {
+    // Tip 1 rings New. The two ways a person opens New file (DW-1521) under it: Ctrl+N with the keyboard on the
+    // card (the card lets the key through to Files), and New, then "New file…".
+    for by_keyboard in [true, false] {
+        let mut rt = on_tip_1();
+        if by_keyboard {
+            rt.key(ctrl('n'));
+            rt.frame(0.0);
+        } else {
+            click(&mut rt, "new-btn");
+            assert!(rt.state.actions.menu.is_some(), "New's menu is open");
+            assert_eq!(guide::showing(&rt.state), None, "the menu is in front of the tip");
+            let item = rt
+                .elements()
+                .into_iter()
+                .find(|e| {
+                    !e.exiting && e.role == "menuitem" && e.label.as_deref().is_some_and(|l| l.starts_with("New file"))
+                })
+                .expect("New's menu has New file");
+            let (x, y) = (item.rect[0] + item.rect[2] / 2.0, item.rect[1] + item.rect[3] / 2.0);
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(0.0);
+        }
+        tick(&mut rt);
+        tick(&mut rt);
+        assert!(
+            rt.state.viewer.new_file.is_some(),
+            "keyboard {by_keyboard}: the dialog is open"
+        );
+        assert_eq!(guide::showing(&rt.state), None, "the dialog is in front of the tip");
+        assert!(
+            rect(&rt, COACH_KEY).is_none() && rect(&rt, RING_KEY).is_none(),
+            "no card and no ring over the dialog"
+        );
+        assert_eq!(focused(&rt).as_deref(), Some("type-0"), "the keyboard is the dialog's");
+        // Tab is the dialog's: it never jumps to the card's buttons.
+        press(&mut rt, Key::Tab);
+        let at = focused(&rt);
+        assert!(
+            at.as_deref().is_some_and(|k| !k.starts_with("coach")),
+            "Tab stays in the dialog: {at:?}"
+        );
+        // Enter is the dialog's too: it never presses the card's Next.
+        press(&mut rt, Key::Enter);
+        tick(&mut rt);
+        assert!(rt.state.viewer.new_file.is_some(), "Enter left the dialog open");
+        assert_eq!(
+            rt.state.guide.step,
+            Some(Step::Tip(1)),
+            "Enter did not move the guide on"
+        );
+        assert!(rect(&rt, COACH_KEY).is_none(), "still no card over the dialog");
+        // Esc closes the dialog, not the guide; the tip is there again, and the keyboard is the card's again.
+        press(&mut rt, Key::Escape);
+        tick(&mut rt);
+        tick(&mut rt);
+        assert!(rt.state.viewer.new_file.is_none(), "Esc closed the dialog");
+        assert_eq!(rt.state.guide.step, Some(Step::Tip(1)), "the guide is still on tip 1");
+        assert!(rect(&rt, COACH_KEY).is_some() && rect(&rt, RING_KEY).is_some());
+        assert_eq!(
+            focused(&rt).as_deref(),
+            Some(NEXT_KEY),
+            "keyboard {by_keyboard}: the tip that came back has the keyboard"
+        );
+        // So Enter is Next, never the selected row's.
+        press(&mut rt, Key::Enter);
+        tick(&mut rt);
+        assert_eq!(rt.state.guide.step, Some(Step::Tip(2)), "Enter pressed Next");
+        assert!(rt.state.viewer.ui.is_none(), "and opened no file");
+    }
+}
+
+/// Ctrl+N and Esc with no poll in between: the dialog is asked for and not open yet. Esc is not the tip's Skip.
+#[test]
+fn esc_right_after_ctrl_n_does_not_end_the_guide() {
+    let mut rt = on_tip_1();
+    // Both keys before the window's next poll (the test's window polls only in `tick`).
+    rt.key(ctrl('n'));
+    rt.key(KeyEvent {
+        key: Key::Escape,
+        mods: Mods::default(),
+    });
+    rt.frame(0.0);
     assert!(
-        rect(&rt, COACH_KEY).is_none() && rect(&rt, RING_KEY).is_none(),
-        "no card and no ring over the dialog"
+        rt.state.viewer.new_file.is_none(),
+        "no poll ran: the dialog is not open yet"
     );
-    assert_eq!(focused(&rt).as_deref(), Some("type-0"), "the keyboard is the dialog's");
-    // Tab is the dialog's: it never jumps to the card's buttons.
-    press(&mut rt, Key::Tab);
-    let at = focused(&rt);
-    assert!(
-        at.as_deref().is_some_and(|k| !k.starts_with("coach")),
-        "Tab stays in the dialog: {at:?}"
-    );
-    // Enter is the dialog's too: it never presses the card's Next.
-    press(&mut rt, Key::Enter);
-    tick(&mut rt);
-    assert!(rt.state.viewer.new_file.is_some(), "Enter left the dialog open");
     assert_eq!(
         rt.state.guide.step,
         Some(Step::Tip(1)),
-        "Enter did not move the guide on"
+        "Esc before the poll opened the dialog is not Skip"
     );
-    assert!(rect(&rt, COACH_KEY).is_none(), "still no card over the dialog");
-    // Esc closes the dialog, not the guide; the tip is there again.
+    tick(&mut rt);
+    tick(&mut rt);
+    assert_eq!(rt.state.guide.step, Some(Step::Tip(1)), "the guide is still there");
+}
+
+/// What the Files window has over its list is in front of a tip, each of them: no card and no ring over it, and
+/// Esc is not Skip.
+#[test]
+fn every_layer_of_the_files_window_is_in_front_of_a_tip() {
+    type Put = fn(&mut State);
+    let layers: [(&str, Put); 4] = [
+        ("Uploads", |s| {
+            crate::frames::files::action_scenes::uploads_panel(s);
+            assert!(s.actions.uploads_open && s.actions.source.uploads().is_some());
+        }),
+        ("the panel that says a file needs a connection", |s| {
+            s.global.blocked_preview = Some(("f-1".into(), "An invented name.txt".into()));
+        }),
+        ("a drop hovering", |s| {
+            s.actions.drop_hover = Some(crate::frames::files::uploads::DropHover {
+                row: Some(0),
+                count: None,
+            });
+        }),
+        ("the protected-folder message", |s| {
+            s.actions.protected.alert = Some(crate::frames::files::protected::Words {
+                title: "An invented title".into(),
+                body: "An invented reason.".into(),
+            });
+        }),
+    ];
+    for (name, put) in layers {
+        let mut rt = on_tip_1();
+        assert!(guide::showing(&rt.state).is_some());
+        rt.update(|s, _| put(s));
+        rt.frame(0.0);
+        assert_eq!(guide::showing(&rt.state), None, "{name} is in front of the tip");
+        assert!(
+            rect(&rt, COACH_KEY).is_none() && rect(&rt, RING_KEY).is_none(),
+            "{name}: no card and no ring over it"
+        );
+        rt.update(|s, tx| {
+            let esc = KeyEvent {
+                key: Key::Escape,
+                mods: Mods::default(),
+            };
+            assert!(!guide::on_key(s, &esc, tx), "{name}: Esc is not the tip's");
+        });
+        assert_eq!(
+            rt.state.guide.step,
+            Some(Step::Tip(1)),
+            "{name}: the guide is still there"
+        );
+    }
+}
+
+/// Uploads' flag can outlive its panel (the uploads finished while it was open): with nothing drawn, nothing is in
+/// front, and the tip shows.
+#[test]
+fn an_uploads_flag_with_no_panel_drawn_hides_no_tip() {
+    let mut rt = on_tip_1();
+    rt.update(|s, _| {
+        assert!(
+            s.actions.source.uploads().is_none(),
+            "nothing uploads in the board's window"
+        );
+        s.actions.uploads_open = true;
+    });
+    rt.frame(0.0);
+    assert_eq!(guide::showing(&rt.state), Some(Step::Tip(1)));
+    assert!(rect(&rt, COACH_KEY).is_some());
+}
+
+/// Search open over Files: Esc ends search, not the guide.
+#[test]
+fn esc_in_search_ends_search_and_not_the_guide() {
+    let mut rt = on_tip_1();
+    rt.key(ctrl('f'));
+    tick(&mut rt);
+    assert!(crate::frames::search::is_open(&rt.state), "Ctrl+F opened search");
+    assert_eq!(guide::showing(&rt.state), None, "search is in front of the tip");
     press(&mut rt, Key::Escape);
     tick(&mut rt);
-    assert!(rt.state.viewer.new_file.is_none(), "Esc closed the dialog");
-    assert_eq!(rt.state.guide.step, Some(Step::Tip(1)), "the guide is still on tip 1");
-    assert!(rect(&rt, COACH_KEY).is_some() && rect(&rt, RING_KEY).is_some());
+    assert!(!crate::frames::search::is_open(&rt.state), "Esc ended search");
+    assert_eq!(rt.state.guide.step, Some(Step::Tip(1)), "and not the guide");
+    tick(&mut rt);
+    assert!(rect(&rt, COACH_KEY).is_some(), "the tip is there again");
+}
+
+/// A session the server ended draws its own state over the window: no tip over it, and no key steps the guide.
+#[test]
+fn a_session_the_server_ended_shows_no_tip_and_takes_no_step() {
+    use crate::frames::global::source::{GlobalFixture, board};
+    let mut rt = on_tip_1();
+    rt.update(|s, _| {
+        s.global = crate::frames::global::Ui::new(Box::new(GlobalFixture::of(board::signed_out())));
+    });
+    rt.frame(0.0);
+    assert!(rt.state.session_ended());
+    assert_eq!(guide::showing(&rt.state), None);
+    assert!(rect(&rt, COACH_KEY).is_none() && rect(&rt, RING_KEY).is_none());
+    rt.update(|s, tx| {
+        for key in [Key::Enter, Key::Escape] {
+            let ev = KeyEvent {
+                key,
+                mods: Mods::default(),
+            };
+            assert!(!guide::on_key(s, &ev, tx), "no key is the tip's");
+        }
+    });
+    assert_eq!(
+        rt.state.guide.step,
+        Some(Step::Tip(1)),
+        "no step was taken, and nothing was marked done"
+    );
 }
 
 #[test]
 fn tip_1s_ring_stands_where_the_board_places_it() {
-    // The board's ring: left 964, top 37, 88 x 36, around New at (967.73, 40.75, 80.27 x 28).
+    // The board's ring: left 964, top 37, 88 x 36 (right 1052, bottom 73). Its four edges, as numbers: nothing
+    // here is derived from where New stands.
     let rt = at_scene("DW-0301");
     let ring = rect(&rt, RING_KEY).expect("the ring is drawn");
-    let new = rect(&rt, "new-btn").expect("New is drawn");
-    assert!(
-        (new[1] - 40.75).abs() < 0.01 && (new[3] - 28.0).abs() < 0.01,
-        "New {new:?}"
-    );
-    // Its top and bottom are the board's to the hundredth; its sides follow New's own width.
+    assert!((ring[0] - 964.0).abs() < 0.01, "left {ring:?}");
     assert!((ring[1] - 37.0).abs() < 0.01, "top {ring:?}");
+    assert!((ring[0] + ring[2] - 1052.0).abs() < 0.01, "right {ring:?}");
     assert!((ring[1] + ring[3] - 73.0).abs() < 0.01, "bottom {ring:?}");
-    assert!((ring[0] - (new[0] - 3.73)).abs() < 0.01, "left {ring:?}");
-    assert!(
-        (ring[0] + ring[2] - (new[0] + new[2] + 4.0)).abs() < 0.01,
-        "right {ring:?}"
-    );
 }
 
 #[test]

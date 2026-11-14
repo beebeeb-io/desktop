@@ -48,6 +48,7 @@ mod binding_tests;
 pub mod drive_settings;
 pub mod files;
 mod files_trash;
+pub mod guide;
 pub mod open;
 pub mod photos;
 pub mod search;
