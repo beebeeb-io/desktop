@@ -58,9 +58,14 @@ impl<'a> Device<'a> for Text {
     fn draw_path(&mut self, _: &BezPath, _: DrawProps<'a>, _: &DrawMode) {}
     fn push_clip_path(&mut self, _: &ClipPath) {}
     fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'a>>, _: BlendMode) {}
-    fn draw_glyph_run(&mut self, run: &GlyphRun<'_, 'a>, _: DrawProps<'a>, _: &DrawMode) {
+    fn draw_glyph_run(&mut self, run: &GlyphRun<'_, 'a>, props: DrawProps<'a>, _: &DrawMode) {
         // A run is one string of the page (a Tj / TJ): the next one is a new word unless the text says otherwise.
         self.push_space();
+        // A glyph's own transform places it in text space only. The page's transform is the context's current one
+        // (`find`'s top-down start, then the page's own `cm`s and forms): it comes in `props`. Both, once, put the box
+        // where the page is drawn, as the renderer composes them; without it the box stays in the PDF's bottom-up
+        // space and lands far from the words.
+        let page = props.transform;
         for glyph in run.glyphs() {
             if self.pieces.len() >= FIND_CHARS_MAX {
                 return;
@@ -72,9 +77,8 @@ impl<'a> Device<'a> for Text {
             }
             .map_or(GLYPH_WIDTH_DEFAULT, f64::from)
             .clamp(1.0, GLYPH_WIDTH_MAX);
-            let place = glyph
-                .transform()
-                .transform_rect_bbox(Rect::new(0.0, GLYPH_DESCENT, width, GLYPH_ASCENT));
+            let place =
+                (page * glyph.transform()).transform_rect_bbox(Rect::new(0.0, GLYPH_DESCENT, width, GLYPH_ASCENT));
             let text = match unicode {
                 BfString::Char(c) => c.to_string(),
                 BfString::String(s) => s,
@@ -180,7 +184,8 @@ impl Document {
                 }
                 let (width, height) = page.render_dimensions();
                 let target = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
-                // Page points at 100 %, the top left corner the origin: where the view draws a match.
+                // Page points at 100 %, the top left corner the origin: where the view draws a match. Every glyph box
+                // goes through it once (`draw_glyph_run`).
                 let transform: Affine = page.initial_transform(true).to_kurbo();
                 let mut context = Context::new(transform, target, &cache, page.xref(), InterpreterSettings::default());
                 let mut text = Text::default();
