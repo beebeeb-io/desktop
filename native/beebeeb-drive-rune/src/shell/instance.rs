@@ -298,6 +298,14 @@ pub fn refusal_is_shown(launch: &Launch) -> bool {
     !launch.autostart && !launch.quit_for_update && !launch.tooling
 }
 
+/// Whether a START refusal of `refuse_start` is shown in a native message box. These (decision 2462: a refused
+/// `--api-base`, data made for another server, credentials without data) stop the app until a person acts, so they
+/// are shown at login too: once per login, until fixed. They exist only where `--api-base` or a test build's data
+/// exists, never in a plain release start. Not for the installer's call and not for a tooling run.
+pub fn start_refusal_is_shown(launch: &Launch) -> bool {
+    !launch.quit_for_update && !launch.tooling
+}
+
 /// What the running instance does with one argument a later launch (or the OS) handed it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Forwarded {

@@ -66,6 +66,7 @@ mod files_versions;
 #[path = "engine_host/files_window_support.rs"]
 mod files_window_support;
 pub mod guide;
+mod open_folder;
 // The Windows Hello prompt of the lock screen, behind one seam.
 pub mod hello;
 pub mod open;
@@ -459,9 +460,9 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     }
 
     fn open_in_file_explorer(&self) -> Result<(), actions::ActionError> {
-        Err(actions::ActionError::NotBuilt(
-            "open in File Explorer from the native app",
-        ))
+        let path = open_folder::beebeeb_folder(&self.engine)
+            .map_err(|_| actions::ActionError::NotAvailable("sync is not running"))?;
+        open_path(&path).map_err(|_| actions::ActionError::Failed("the Beebeeb folder did not open".to_string()))
     }
 
     fn profile_holder(&self) -> Option<ProfileHolder> {
