@@ -4,9 +4,13 @@
 //! - What the rows show is ONE read of the engine ([`DownloadsEngine::downloads_for`]) held here with the session and
 //!   account it was read under. [`DownloadCalls::downloads`] only answers from what is held, never reads (it is on a
 //!   draw path), and says nothing under another stamp.
-//! - A read is asked when the window comes to the front, after a copy was kept on this PC, and (in
-//!   [`DownloadCalls::take`], on the engine's wake) again while a copy comes down and what is held is older than a
-//!   second, or for [`WATCH`] after an ask. No timer thread.
+//! - A read is asked on a status press, after a copy was kept on this PC, and when a stamp is first seen (a watch of
+//!   [`WATCH`] starts then and at every ask: the wake reads while it lasts). In [`DownloadCalls::take`], on the
+//!   engine's wake, it reads again (a) at once, whatever the held read's age, when the engine's own status word moved
+//!   while rows are held or it moved to Syncing: a copy that ended leaves the row at the pulse that says so (the
+//!   pattern of `files_facts`); (b) while the engine reports Syncing or rows are held, when the held read is older
+//!   than a second: a download that starts after the watch still gets its bar. Idle and nothing held: no read. No
+//!   timer thread.
 //! - An answer under another session or account, or of an earlier forget, is dropped. Nothing is drawn before the
 //!   engine answered: the figures are the board's, never a made-up bar.
 //!
@@ -84,6 +88,10 @@ pub struct DownloadCalls<E: DownloadsEngine> {
     epoch: u64,
     /// How long a watch lasts.
     watch: Duration,
+    /// The engine's status word the last take saw.
+    word: Option<&'static str>,
+    /// A read is wanted: the engine's word moved while rows were held (or to Syncing) and none could start yet.
+    dirty: bool,
 }
 
 impl<E: DownloadsEngine> DownloadCalls<E> {
@@ -100,6 +108,8 @@ impl<E: DownloadsEngine> DownloadCalls<E> {
             watch_until: None,
             epoch: 0,
             watch: WATCH,
+            word: None,
+            dirty: false,
         }
     }
 
@@ -116,6 +126,7 @@ impl<E: DownloadsEngine> DownloadCalls<E> {
         self.seen = Some(now.clone());
         self.held = None;
         self.reading = false;
+        self.dirty = false;
         // A copy may already come down under this session: the wake reads for a while.
         self.watch_until = Some(Instant::now() + self.watch);
     }
@@ -133,6 +144,7 @@ impl<E: DownloadsEngine> DownloadCalls<E> {
             return;
         }
         self.reading = true;
+        self.dirty = false;
         let session = pressed.0;
         let (engine, answers, epoch) = (self.engine.clone(), self.answers.clone(), self.epoch);
         let started = std::thread::Builder::new()
@@ -174,6 +186,7 @@ impl<E: DownloadsEngine> DownloadCalls<E> {
     pub fn forget(&mut self) {
         self.held = None;
         self.reading = false;
+        self.dirty = false;
         self.watch_until = None;
         // Whatever is on its way now carries the earlier epoch: dropped.
         self.epoch += 1;
@@ -192,17 +205,26 @@ impl<E: DownloadsEngine> DownloadCalls<E> {
             match answer.read {
                 Ok(rows) => self.held = Some((now.clone(), rows, Instant::now())),
                 // An unreadable board is held as "nothing known" (no bar), so a failing read is not asked again at once.
-                Err(_) => {
-                    log("files: the downloads could not be read");
+                Err(refused) => {
+                    // Only a state that could not be read is logged: a locked screen, a new account with nothing
+                    // synced yet and a session that moved are the ordinary refusals.
+                    if refused == LocalStateRefused::Unreadable {
+                        log("files: the downloads could not be read");
+                    }
                     self.held = Some((now.clone(), Vec::new(), Instant::now()));
                 }
             }
         }
+        let word = self.engine.word();
+        let syncing = word == Some(words::SYNCING);
+        let holding = self.held.as_ref().is_some_and(|(_, rows, _)| !rows.is_empty());
+        if word != self.word && (holding || syncing) {
+            self.dirty = true;
+        }
+        self.word = word;
         let watching = self.watch_until.is_some_and(|until| Instant::now() < until);
-        let again = match &self.held {
-            Some((_, rows, at)) => at.elapsed() > STALE && (!rows.is_empty() || watching),
-            None => watching && !self.reading,
-        };
+        let old = self.held.as_ref().is_none_or(|(_, _, at)| at.elapsed() > STALE);
+        let again = self.dirty || (old && (holding || syncing || watching));
         if again {
             self.start_read(now);
         }

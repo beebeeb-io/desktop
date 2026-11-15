@@ -122,6 +122,10 @@ pub struct UploadCalls<E: UploadsEngine> {
     changes: Vec<Change>,
     /// Moves at every forget: an answer of an earlier one is dropped.
     epoch: u64,
+    /// The engine's status word the last take saw.
+    word: Option<&'static str>,
+    /// The engine's word moved while something moved or waited and no read could start yet.
+    dirty: bool,
 }
 
 impl<E: UploadsEngine> UploadCalls<E> {
@@ -139,6 +143,8 @@ impl<E: UploadsEngine> UploadCalls<E> {
             pausing: false,
             changes: Vec::new(),
             epoch: 0,
+            word: None,
+            dirty: false,
         }
     }
 
@@ -151,6 +157,7 @@ impl<E: UploadsEngine> UploadCalls<E> {
         self.reading = false;
         self.in_flight.clear();
         self.pausing = false;
+        self.dirty = false;
         self.changes.clear();
     }
 
@@ -166,6 +173,7 @@ impl<E: UploadsEngine> UploadCalls<E> {
             return;
         }
         self.reading = true;
+        self.dirty = false;
         let session = pressed.0;
         self.work(pressed, move |engine| Said::Read(engine.uploads_for(session)));
     }
@@ -286,6 +294,7 @@ impl<E: UploadsEngine> UploadCalls<E> {
         self.reading = false;
         self.in_flight.clear();
         self.pausing = false;
+        self.dirty = false;
         self.changes.clear();
         // Whatever is on its way now carries the earlier epoch: dropped.
         self.epoch += 1;
@@ -363,14 +372,22 @@ impl<E: UploadsEngine> UploadCalls<E> {
                 }
             }
         }
-        let busy = self.held.as_ref().is_some_and(|(_, read, at)| {
-            at.elapsed() > STALE
-                && read
-                    .rows
+        let word = self.engine.word();
+        let (busy, old) = self.held.as_ref().map_or((false, false), |(_, read, at)| {
+            (
+                read.rows
                     .iter()
-                    .any(|row| !matches!(row.stands, UploadStands::Stopped { .. }))
+                    .any(|row| !matches!(row.stands, UploadStands::Stopped { .. })),
+                at.elapsed() > STALE,
+            )
         });
-        if reread || busy {
+        // The engine's own word moving while something moves or waits (the pulse that says it ended) reads at once,
+        // whatever the held read's age: a finished upload leaves the panel and the status line at that pulse.
+        if busy && word != self.word {
+            self.dirty = true;
+        }
+        self.word = word;
+        if reread || self.dirty || (busy && old) {
             self.start_read(now);
         }
         std::mem::take(&mut self.changes)

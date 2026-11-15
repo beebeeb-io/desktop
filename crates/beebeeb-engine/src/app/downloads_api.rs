@@ -4,8 +4,10 @@
 //! - Read from the transfer board, for the session of the ask: a session that moved on is
 //!   [`LocalStateRefused::SessionChanged`], nothing is handed over.
 //! - The board is one per process: a row whose file this account's local state does not hold is never listed.
-//! - Only whole-file downloads (`Direction::Down`) that have not failed: an upload, a streaming open and a failed
-//!   row are not "a copy coming down".
+//! - Only `Direction::Down` rows that have not failed: an upload, a streaming open and a failed row are not "a copy
+//!   coming down". A `Down` row is not always a keep: a Windows range session (an app reading part of a placeholder),
+//!   a fetch of a placeholder that is not kept and a conflict copy are `Down` rows too, so each row says whether this
+//!   account KEEPS the file (`DownloadRow::kept`); only a kept one may be drawn as Available offline.
 //!
 //! BLOCKS on the local state: a worker's. Must not: log or `Debug` a file id's name.
 
@@ -51,21 +53,21 @@ impl<C: CredentialStores> Engine<C> {
             return Ok(Vec::new());
         }
         let ids: Vec<String> = moving.iter().map(|t| t.file_id.clone()).collect();
-        let mine: HashMap<String, i64> = state
-            .with(|db| db.sizes_of(&ids))?
+        // `with` refuses an answer read under a session that moved on meanwhile.
+        let mine: HashMap<String, (i64, bool)> = state
+            .with(|db| db.sizes_and_kept(&ids))?
             .map_err(|_| LocalStateRefused::Unreadable)?;
-        // The session may have moved while the database was read: nothing is handed over then.
-        if state.session() != session {
-            return Err(LocalStateRefused::SessionChanged);
-        }
         Ok(moving
             .into_iter()
-            .filter(|t| mine.contains_key(&t.file_id))
-            .map(|t| DownloadRow {
-                file_id: t.file_id,
-                done: t.done,
-                total: t.total,
-                kept: false,
+            .filter_map(|t| {
+                let &(size, kept) = mine.get(&t.file_id)?;
+                Some(DownloadRow {
+                    // A fetch holds a total of 0 until its metadata says otherwise: the file's own size then.
+                    total: if t.total == 0 { size.max(0) as u64 } else { t.total },
+                    file_id: t.file_id,
+                    done: t.done,
+                    kept,
+                })
             })
             .collect())
     }

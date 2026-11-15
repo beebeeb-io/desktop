@@ -933,6 +933,9 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
 
     fn forget_uploads(&mut self) {
         self.uploads.forget();
+    }
+
+    fn forget_downloads(&mut self) {
         self.downloads.forget();
     }
 

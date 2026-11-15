@@ -28,6 +28,23 @@ impl StateDb {
         rows.map(|row| row.map(|(entry, _)| entry)).collect()
     }
 
+    /// For each of these files this account holds: its size in bytes and whether it is kept (the same rule as
+    /// [`Self::kept_rows`]), in ONE query. A file with no row is left out.
+    pub fn sizes_and_kept(&self, file_ids: &[String]) -> Result<std::collections::HashMap<String, (i64, bool)>> {
+        if file_ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let marks = vec!["?"; file_ids.len()].join(",");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT file_id, size_bytes, {KEPT_SQL} FROM files WHERE file_id IN ({marks})"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(file_ids.iter()), |row| {
+            Ok((row.get(0)?, (row.get(1)?, row.get::<_, bool>(2)?)))
+        })?;
+        rows.collect()
+    }
+
     /// The count and size of what is kept, worked out by the database. A kept row counts as an item only when no
     /// kept folder holds it (by path: live rows carry the hierarchy in `path`).
     pub fn kept_summary(&self) -> Result<KeptSummary> {
