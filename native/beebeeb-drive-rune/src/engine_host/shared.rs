@@ -14,7 +14,8 @@
 //! 409 is "Close the request first."). A change is never drawn before Beebeeb confirmed it: the rows
 //! are the server's, read again after the answer; one change per id at a time. NOT bound, each answers `false` and a
 //! notice the view draws ("Not available yet"): `stop_sharing`, `close_request` (the view asks no confirmation),
-//! `keep_offline`, and the old synchronous `invite` (it cannot wait for the server).
+//! and the old synchronous `invite` (it cannot wait for the server). `keep_offline` is bound (`shared_offline.rs`):
+//! the engine's pin change for a row of Shared with me, answered like a change.
 //!
 //! Invite someone (DW-0514, [`Engine::invite_for`]): `start_invite` stamps the press's session and account, runs the
 //! invite on a worker (one per share at a time) and answers through `invite_answer`; an answer under another session
@@ -48,7 +49,6 @@ use beebeeb_engine::drive_v2::model::mime_for_name;
 use chrono::{DateTime, Local};
 
 use super::log;
-use super::scaffold::not_wired;
 use super::stamp::{Stamp, stamp};
 use super::trash::{kind_of, seconds_of, when};
 use crate::frames::shared::parts::table::{Extra, Row};
@@ -413,9 +413,9 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         self.change(session, id, ShareChange::Decline { invite_id: id.into() })
     }
 
-    // Not bound (slice B4, `shared_offline.rs`; the module's doc says why): nothing is sent, and the view says so.
+    // Slice B4 (`shared_offline.rs`): sent once per press for a row of "Shared with me".
     fn keep_offline(&mut self, id: &str) -> bool {
-        not_wired(self.shared_offline_keep_offline(id))
+        self.shared_offline_keep_offline(id)
     }
 
     /// Sent once per press: a share with people (cancels every invite of it) or a link (revokes every live link of
