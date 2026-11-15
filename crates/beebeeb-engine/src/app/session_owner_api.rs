@@ -151,7 +151,6 @@ impl<C: CredentialStores> Engine<C> {
             Ok(_) => {}
             Err(error) => tracing::warn!(%error, "could not record the session's owner in the credential store"),
         }
-        self.remember_session_user_id(Some(user_id.to_string()));
         OwnerSettled::Recorded
     }
 }
