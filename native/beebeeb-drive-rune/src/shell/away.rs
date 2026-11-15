@@ -197,7 +197,7 @@ impl AwayLock {
             // the files would still show under the cover while they fade.
             tx.instant();
         }
-        came
+        came || covers != covered
     }
 
     fn measure(
@@ -230,7 +230,7 @@ impl AwayLock {
                 // The engine locked: this frame's gate may have been read before it.
                 self.cover = Cover::Locked;
                 lift_if_open = false;
-            } else if self.cover == Cover::Asked(looked.number) {
+            } else if self.cover != Cover::Locked {
                 // The look that says the wake locked nothing.
                 self.cover = Cover::Off;
             }
