@@ -131,8 +131,8 @@ pub fn pane(ui: &SettingsUi, t: &Theme) -> (El, Option<El>) {
 
     let mut children = vec![shell::heading("General", None, t), appearance];
     if let Update::Available { version, press, says } = &g.update {
-        // The one primary action of this view: Amber. Download first, then Restart to update (spec §4, "Apply");
-        // while a press is worked on the button waits and the banner says what is happening.
+        // The one primary action of this view: Amber. One press, Restart to update: download, check, install (owner
+        // ruling 2026-11-15); while it is worked on the button waits and the banner says the step it is at.
         let press = *press;
         let mut action = controls::button(0, press.label(), None, Emphasis::Primary, t);
         action = if press == Press::Wait {

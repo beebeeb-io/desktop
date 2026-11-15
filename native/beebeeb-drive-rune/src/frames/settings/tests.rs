@@ -846,7 +846,6 @@ fn a_list_of_locations_without_choices_never_panics_and_says_it_could_not_load()
         }
         fn mark_recent_seen(&mut self) {}
         fn check_for_updates(&mut self) {}
-        fn download_update(&mut self) {}
         fn restart_to_update(&mut self) {}
         fn recent_alerts(&self) -> Vec<(String, Vec<source::RecentAlert>)> {
             self.0.recent_alerts()
@@ -956,8 +955,7 @@ fn another_channel_checks_again_and_an_older_channel_says_so() {
         "it links the notes"
     );
     assert!(
-        !rt.state.settings.intents.contains(&Intent::DownloadUpdate)
-            && !rt.state.settings.intents.contains(&Intent::RestartToUpdate),
+        !rt.state.settings.intents.contains(&Intent::RestartToUpdate),
         "nothing is installed or downloaded"
     );
 }
