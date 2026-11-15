@@ -26,7 +26,7 @@ fn without_a_sandbox_module_the_probe_is_not_started() {
 mod windows {
     use std::ffi::c_void;
     use std::io::{BufRead, BufReader, Read, Write};
-    use std::net::{IpAddr, SocketAddr, TcpListener, UdpSocket};
+    use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
@@ -56,7 +56,8 @@ mod windows {
     const ACCESS_DENIED: &str = "err 5";
     /// None of the three folders exists: "path not found", three times.
     const NO_OWN_FOLDER: &str = "own ok=0 codes=3,3,3";
-    /// The system's network library refuses to start inside the container: no socket ever exists.
+    /// The system's socket library refuses to start inside the container, so no verb that goes through it gets a
+    /// socket (what is left below the library: `no_network_verb_succeeds_in_the_confined_helper`).
     const NETWORK_REFUSED: &str = "err network-start 10107";
     /// The system ends a container process that uses a handle value it does not hold (invalid handle).
     const ENDED_FOR_INVALID_HANDLE: u32 = 0xC000_0008;
@@ -1012,26 +1013,165 @@ mod windows {
         assert_eq!(helpers, KEPT_PRIVILEGES, "only what Windows does not remove");
     }
 
-    /// A measurement: whether the confined helper can open the socket driver at all, both ways it is opened (the
-    /// device itself, and a name under it, which is how socket libraries open it). If an open succeeds here, the
-    /// network layer stays "not proven" at this level: the connect tests above remain its proof.
+    /// UDP datagrams that arrived on `socket` (non-blocking), after a short wait for any still on their way.
+    fn datagrams(socket: &UdpSocket) -> usize {
+        std::thread::sleep(Duration::from_millis(200));
+        let mut buffer = [0u8; 64];
+        let mut count = 0;
+        while socket.recv_from(&mut buffer).is_ok() {
+            count += 1;
+        }
+        count
+    }
+
+    /// The port of a `listen` answer (`ok <port>`).
+    fn listening_port(answer: &str) -> u16 {
+        answer
+            .strip_prefix("ok ")
+            .and_then(|port| port.parse().ok())
+            .unwrap_or_else(|| panic!("a listen answer: {answer}"))
+    }
+
+    /// No network verb succeeds in the confined helper: TCP connect (loopback, and this machine's own address on
+    /// its network, a routable one), a UDP datagram to loopback, bind and listen on loopback, a name lookup. Each
+    /// verb is first shown to work for a plain probe, with its effect counted where the test holds the other end.
+    ///
+    /// **Where the refusal happens.** The probe starts the system's socket library before every verb, and in the
+    /// container that start fails (`NETWORK_REFUSED`, measured on the Windows build VM), so every verb is refused
+    /// at that same point. The kernel's network filter for containers without a network capability is therefore
+    /// not reached by these verbs. It was seen refusing only in a mutant: with the package opt-out removed (and
+    /// still no capability) the library starts and a loopback connect times out.
+    ///
+    /// **The socket driver is a measurement, not an assertion.** The device itself refuses the confined helper,
+    /// but a name under it (`\Device\Afd\Endpoint`, the one socket libraries open) opens. An open handle there
+    /// is not a network verb: no address is bound or reached by it, and every verb above is refused. Whether a
+    /// helper that drives the driver directly, without the library, meets the kernel's filter is not measured
+    /// here. Both answers are printed (`--nocapture` or `--show-output` shows them) so a change is seen.
     #[test]
-    fn the_helper_cannot_open_the_socket_driver() {
+    fn no_network_verb_succeeds_in_the_confined_helper() {
         let _serial = serial();
-        let requests = ["open-afd", "open-afd Endpoint"];
+        let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+        tcp.set_nonblocking(true).unwrap();
+        let tcp_loopback = tcp.local_addr().unwrap();
+        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp.set_nonblocking(true).unwrap();
+        let udp_loopback = udp.local_addr().unwrap();
+        let own = own_address();
+        let lookup = "resolve localhost";
+        let listen = "listen 127.0.0.1:0";
+        let driver = ["open-afd", "open-afd Endpoint"];
+
+        // The instrument can fail: each verb works for a plain probe, and its effect is counted.
         let mut plain = Probe::plain();
-        let controls = requests.map(|request| plain.attempt(request));
+        assert_eq!(plain.attempt(&format!("connect {tcp_loopback}")), "ok");
+        assert_eq!(accepted(&tcp), 1, "the listener counts a connection");
+        // A service of the system itself listens on this machine's own address; the first port the plain probe
+        // reaches is the one the confined probe is then refused on.
+        let port = [135u16, 445, 22, 5985, 3389]
+            .into_iter()
+            .find(|&port| plain.attempt(&format!("connect {}", SocketAddr::new(own, port))) == "ok")
+            .expect("the plain probe reaches a listening port on this machine's own address");
+        let routable = SocketAddr::new(own, port);
+        assert_eq!(plain.attempt(&format!("udp-send {udp_loopback}")), "ok 5");
+        assert_eq!(datagrams(&udp), 1, "the socket counts a datagram");
+        let held = listening_port(&plain.attempt(listen));
+        assert!(
+            TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], held)), BOUND).is_ok(),
+            "the plain probe listens: the test connects to it"
+        );
+        let resolved = plain.attempt(lookup);
+        assert!(
+            resolved.starts_with("ok ") && resolved != "ok 0",
+            "the plain probe looks the name up: {resolved}"
+        );
+        let driver_plain = driver.map(|request| plain.attempt(request));
+        drop(plain);
+
         let mut confined = Probe::confined();
-        let answers = requests.map(|request| confined.attempt(request));
-        println!("open-afd: plain {controls:?} confined {answers:?}");
+        let connect_loopback = confined.attempt(&format!("connect {tcp_loopback}"));
+        let connect_routable = confined.attempt(&format!("connect {routable}"));
+        let send_loopback = confined.attempt(&format!("udp-send {udp_loopback}"));
+        let listen_loopback = confined.attempt(listen);
+        let looked_up = confined.attempt(lookup);
+        let driver_confined = driver.map(|request| confined.attempt(request));
+        // What reached the test's own sockets, counted after every confined attempt.
+        let reached = (accepted(&tcp), datagrams(&udp));
+        println!(
+            "network: confined connect loopback {connect_loopback:?}, connect routable {connect_routable:?}, \
+             udp loopback {send_loopback:?}, listen loopback {listen_loopback:?}, lookup {looked_up:?}"
+        );
+        // A measurement (see the doc above): printed, never asserted.
+        println!("measurement socket-driver: plain {driver_plain:?} confined {driver_confined:?}");
+
+        assert_eq!(connect_loopback, NETWORK_REFUSED, "TCP connect to loopback");
         assert_eq!(
-            controls,
-            ["ok", "ok"],
-            "the instrument can fail: a plain child opens the socket driver"
+            connect_routable, NETWORK_REFUSED,
+            "TCP connect to this machine's own address"
+        );
+        assert_eq!(send_loopback, NETWORK_REFUSED, "a UDP datagram to loopback");
+        assert_eq!(listen_loopback, NETWORK_REFUSED, "bind and listen on loopback");
+        assert_eq!(looked_up, NETWORK_REFUSED, "a name lookup");
+        assert_eq!(
+            reached,
+            (0, 0),
+            "connections and datagrams that reached the test's sockets"
+        );
+    }
+
+    /// A file on a network share, opened by its share path, is out of reach of the confined helper: on Windows the
+    /// sandbox is what stands between the helper and the file-sharing client (the Office engine's own refusal of
+    /// such paths is tested in the Office engine).
+    ///
+    /// The literal path `\\127.0.0.1\c$\x` fails for any process (there is no such file), so its answer is
+    /// recorded, and a refusal is asserted, but it cannot show the instrument. The instrument is the system's
+    /// shell, which the confined probe reads by its local path: a plain probe reads the same bytes through the
+    /// administrative share on loopback, and the confined probe is refused there.
+    #[test]
+    fn a_confined_helper_cannot_open_a_path_on_a_network_share() {
+        let _serial = serial();
+        const MISSING: &str = r"\\127.0.0.1\c$\x";
+        let system_root = std::env::var("SystemRoot").expect("SystemRoot");
+        let local = format!(r"{system_root}\System32\cmd.exe");
+        let (drive, rest) = system_root
+            .split_once(':')
+            .expect("the system folder has a drive letter");
+        let shared = format!(
+            r"\\127.0.0.1\{drive}$\{}\System32\cmd.exe",
+            rest.trim_start_matches('\\')
+        );
+
+        let mut plain = Probe::plain();
+        let plain_local = plain.attempt(&format!("read {local}"));
+        let plain_shared = plain.attempt(&format!("read {shared}"));
+        let plain_missing = plain.attempt(&format!("read {MISSING}"));
+        drop(plain);
+
+        let mut confined = Probe::confined();
+        let confined_local = confined.attempt(&format!("read {local}"));
+        let confined_shared = confined.attempt(&format!("read {shared}"));
+        let confined_missing = confined.attempt(&format!("read {MISSING}"));
+        // The recorded answers (codes and byte counts only).
+        println!(
+            "share: plain local {plain_local:?} shared {plain_shared:?} missing {plain_missing:?}; \
+             confined local {confined_local:?} shared {confined_shared:?} missing {confined_missing:?}"
+        );
+
+        assert!(plain_local.starts_with("ok "), "the shell is readable: {plain_local}");
+        assert_eq!(
+            plain_shared, plain_local,
+            "the instrument can fail: a plain probe reads the same bytes through the share"
+        );
+        assert_eq!(
+            confined_local, plain_local,
+            "the confined probe reads the shell by its local path, so a refusal below is about the share"
         );
         assert!(
-            answers.iter().all(|answer| answer.starts_with("err ")),
-            "the confined helper opened the socket driver: {answers:?}"
+            confined_shared.starts_with("err "),
+            "the confined helper read a file through a network share: {confined_shared}"
+        );
+        assert!(
+            confined_missing.starts_with("err "),
+            "the confined helper's open of the share path did not fail: {confined_missing}"
         );
     }
 
