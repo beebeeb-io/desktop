@@ -422,3 +422,40 @@ fn the_release_glue_builds_the_pinned_updater_or_says_why_not() {
     let broken = UpdatesPart::with_mode(Mode::NoWorker, &TEST, Channel::Stable, Channel::Stable, "0.9.1".into());
     assert_eq!(words(&broken), NO_UPDATER);
 }
+
+/// A download the release server did not send (here a 404 for the file): the words say the update did not come,
+/// never that a check failed or that the channel has no update information; the button offers the download again.
+#[test]
+fn a_download_the_server_did_not_send_says_so() {
+    use crate::frames::settings::source::Update;
+    let key = TestKey::generate();
+    let release = Publish::new(Line::Stable, "0.9.2", testkit::artifact_bytes(4096));
+    let artifact = release.url.clone();
+    let mut http = serving(&key, &[release]);
+    http.files.remove(&artifact);
+    let mut rig = rig(&key, "0.9.1", Channel::Stable, http);
+    settle(&mut rig.part);
+    rig.part.download_update();
+    settle(&mut rig.part);
+    assert!(
+        matches!(
+            rig.part.state_for_test(),
+            Some(State::Failed {
+                failure: Failure::ServerStatus(404),
+                resume: Some(_)
+            })
+        ),
+        "{:?}",
+        rig.part.state_for_test()
+    );
+    assert_eq!(words(&rig.part), NOT_SENT);
+    assert_eq!(
+        rig.part.update(),
+        Update::Available {
+            version: "0.9.2".into(),
+            press: Press::Download,
+            says: Some(NOT_SENT.into()),
+        }
+    );
+    assert!(rig.did().is_empty());
+}

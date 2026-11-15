@@ -88,6 +88,9 @@ pub const NOTHING_PUBLISHED: &str = "The release server has no update informatio
 pub const NOT_SIGNED_FILE: &str =
     "The download was not the file Beebeeb signed. It was deleted and nothing was installed.";
 pub const STOPPED_DOWNLOAD: &str = "The download stopped before it was complete. Nothing was installed.";
+/// The release server answered the download with a status instead of the file (a check that failed has nothing to
+/// resume, so these words are a download's alone).
+pub const NOT_SENT: &str = "The release server did not send the update. Nothing was installed. Try again in a moment.";
 pub const OFFER_CHANGED: &str = "The version on offer changed. Nothing was installed.";
 pub const NO_DISK: &str = "The update could not be saved on this PC. Nothing was installed.";
 /// The hand-off's stop was not confirmed. On Windows this is also a stop whose task ended while File Explorer's
@@ -789,6 +792,11 @@ impl UpdatesPart {
                 checked(format!("Version {} is downloaded and verified.", offer.version))
             }
             State::Restarting { .. } => checked(RESTARTING.into()),
+            // A download the server did not send: never "couldn't check", nor "no update information" for a 404.
+            State::Failed {
+                failure: Failure::ServerStatus(_),
+                resume: Some(_),
+            } => checked(NOT_SENT.into()),
             State::Failed { failure, .. } => failed(*failure, report.freshness),
         }
     }

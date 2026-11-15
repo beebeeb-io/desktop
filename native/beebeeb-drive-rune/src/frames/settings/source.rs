@@ -493,6 +493,19 @@ impl BoardSettings {
         self
     }
 
+    /// DW-0781 and DW-0789b at another step of the update: what the button does, and the words in the caption's
+    /// place (the board draws the verified step only, `with_update_available`).
+    #[cfg(test)]
+    pub fn with_update_press(mut self, press: Press, says: Option<&str>) -> Self {
+        self.general.update = Update::Available {
+            version: "0.9.2".into(),
+            press,
+            says: says.map(str::to_string),
+        };
+        self.about.notes.press = press;
+        self
+    }
+
     /// DW-0781: version 0.9.2 can be downloaded.
     pub fn with_update_available(mut self) -> Self {
         self.general.update = Update::Available {

@@ -40,6 +40,8 @@ mod tests_drive;
 mod tests_more;
 #[cfg(test)]
 mod tests_previews;
+#[cfg(test)]
+mod tests_update;
 
 use crate::State;
 use crate::shell::app::{Event, Screen, SettingsPane};
