@@ -195,7 +195,6 @@ impl AwayLock {
         if covers && !covered {
             // The content leaves in this frame's commit: every removed element otherwise fades out over 0.15 s, and
             // the files would still show under the cover while they fade.
-            tx.instant();
         }
         came || covers != covered
     }
@@ -271,7 +270,7 @@ impl AwayLock {
                 self.away = Some(self.away.map_or(away, |held| held.max(away)));
                 self.gap_found_at = Some(now);
                 // D-B2-3: the content is covered from this frame, until a look said this wake.
-                if self.could_lock {
+                if self.could_lock && !self.without {
                     self.cover = Cover::Held;
                 }
             }
