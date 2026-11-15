@@ -93,3 +93,7 @@ pub fn is_contained(root: &std::path::Path, full: &std::path::Path) -> bool {
     };
     full_canon.starts_with(&root_canon)
 }
+
+#[cfg(test)]
+#[path = "path_safety_tests.rs"]
+mod path_safety_tests;

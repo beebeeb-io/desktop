@@ -398,6 +398,10 @@ pub fn is_dangerous_executable(path: &Path) -> bool {
 }
 
 #[cfg(test)]
+#[path = "file_ops_containment_tests.rs"]
+mod file_ops_containment_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
