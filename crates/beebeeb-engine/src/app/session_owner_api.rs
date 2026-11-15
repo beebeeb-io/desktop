@@ -136,7 +136,9 @@ impl<C: CredentialStores> Engine<C> {
         }
         // With no session change half done, and only for the session that was asked about. The turn stays.
         let _writes = self.writes.write().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _ = turn;
+        if !self.acct.session_unchanged_since(turn) {
+            return OwnerSettled::NotNow;
+        }
         match key_owner::settle_owner_after_probe(&self.vault(), token.as_str(), user_id) {
             // The stored token is not the one asked about (another, or none): no tag is written. The id is still the
             // owner of the session in memory, whose token Beebeeb answered for.
