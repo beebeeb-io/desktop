@@ -210,7 +210,10 @@ impl<C: CredentialStores> Engine<C> {
             return Err(ApproveError::WrongPassword);
         }
         let (token, master_key) = self.approval_copy(session, |current| {
-            (Zeroizing::new(current.token.clone()), Zeroizing::new([0u8; 32]))
+            (
+                Zeroizing::new(current.token.clone()),
+                Zeroizing::new(current.master_key),
+            )
         })?;
         let started = request.pending.approve(typed_code, &password, &master_key);
         // Core holds its own wiped copies from here on.

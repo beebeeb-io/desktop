@@ -298,7 +298,6 @@ impl<C: CredentialStores> Engine<C> {
         let view = Arc::new(ViewCell::default());
         let host: Arc<dyn EngineHost> = Arc::new(ViewHost::new(host, view.clone()));
         downloads_api::wake_the_host_for_downloads(&host);
-        credential_stores::adopt_legacy_flat(identity, &config.account_id, &stores);
         Ok(Self {
             identity,
             config,

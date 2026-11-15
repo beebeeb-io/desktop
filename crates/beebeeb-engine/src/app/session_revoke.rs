@@ -14,8 +14,11 @@ pub(crate) async fn revoke(client: &reqwest::Client, base: &str, token: &str) {
     let send = client
         .post(format!("{base}/api/v1/auth/logout"))
         .bearer_auth(token)
+        // The request's own time-out replaces the client's 30 s, so the bound holds even when this future is polled
+        // late; the outer one ends the wait itself.
+        .timeout(REVOKE_BOUND)
         .send();
-    let _ = send.await;
+    let _ = tokio::time::timeout(REVOKE_BOUND, send).await;
 }
 
 #[cfg(test)]

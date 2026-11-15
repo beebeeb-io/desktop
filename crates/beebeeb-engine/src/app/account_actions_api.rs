@@ -122,7 +122,6 @@ impl<C: CredentialStores> Engine<C> {
             if !self.session_is_in_memory(session) {
                 return Err(ActionError::NotSignedIn);
             }
-            let _ = self.delete_recent_searches_at_sign_out(session);
             self.sign_out_holding_step().await.map_err(|_| ActionError::Failed)
         });
         self.publish();
