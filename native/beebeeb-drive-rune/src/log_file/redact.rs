@@ -438,12 +438,18 @@ const REASONS: &[(u16, &str)] = &[
 /// reason from [`REASONS`]. Nothing after the three digits is read, so nothing of it can be written: the only input
 /// bytes this writes are those digits. `None` when there is no such prefix.
 fn http_status_prefix(raw: &str) -> Option<(&str, String)> {
-    for (at, _) in raw.match_indices("HTTP ") {
-        let Some(digits) = raw[at + 5..].get(..3) else { continue };
-        let Ok(code) = digits.parse::<u16>() else { continue };
+    for (at, _) in raw.match_indices("HTTP") {
+        let mut rest = &raw[at + 4..];
+        // `HTTP/1.1 502 ...`: the protocol version is skipped (no byte of it is written either).
+        if let Some(version) = rest.strip_prefix('/') {
+            rest = &version[version.find(' ').unwrap_or(version.len())..];
+        }
+        let Some(rest) = rest.strip_prefix(' ') else { continue };
+        let Some(digits) = rest.get(..3) else { continue };
         if !digits.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
+        let Ok(code) = digits.parse::<u16>() else { continue };
         let status = match REASONS.iter().find(|(known, _)| *known == code) {
             Some((_, reason)) => format!("HTTP {code} {reason}"),
             None => format!("HTTP {code}"),

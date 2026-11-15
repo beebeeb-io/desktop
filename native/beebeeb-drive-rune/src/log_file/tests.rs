@@ -897,6 +897,11 @@ fn a_real_status_is_written_with_the_tables_reason_and_never_the_inputs() {
         // The input's reason is never copied, even when it is a plain phrase that differs from the table's.
         ("HTTP 404 Medical Records: body", "HTTP 404 Not Found: <body omitted>"),
         ("HTTP 599 anything at all", "HTTP 599: <body omitted>"),
+        (
+            "HTTP/1.1 502 Bad Gateway: Medical Records body",
+            "HTTP 502 Bad Gateway: <body omitted>",
+        ),
+        ("HTTP/2 404 Medical Records", "HTTP 404 Not Found: <body omitted>"),
     ] {
         assert_eq!(redact::scrub(input), written, "input: {input}");
     }
