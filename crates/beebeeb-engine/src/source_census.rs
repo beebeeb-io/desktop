@@ -75,6 +75,7 @@ pub fn rust_files_with_native() -> Vec<(String, PathBuf)> {
     let mut files = rust_files();
     let engine_count = files.len();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../native/beebeeb-drive-rune");
+    walk(&root.join("src"), &root, NATIVE_PREFIX, &mut files);
     files.push((format!("{NATIVE_PREFIX}build.rs"), root.join("build.rs")));
     let native_count = files.len() - engine_count;
     assert!(
