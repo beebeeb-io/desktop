@@ -259,6 +259,24 @@ impl StateDb {
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect()
     }
+    /// [`Self::disposable_unpinned_cache_paths`] with each row's id and agreed content (`local_hash`), for the
+    /// reclaim that checks a copy's bytes before it removes it (non-Windows: task 2526).
+    pub fn disposable_unpinned_cache_rows(&self) -> Result<Vec<(String, String, Option<String>)>> {
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "
+            SELECT file_id, cache_path, local_hash
+            FROM files
+            WHERE cache_bytes > 0
+              AND cache_path IS NOT NULL
+              AND status = 'local'
+              AND NOT (pin_state = 'pinned' OR (pin_state = 'inherit' AND inherited_pin_state = 'pinned'))
+            ORDER BY last_opened_at ASC, modified_at ASC, file_id ASC
+            ",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect()
+    }
     /// Unpinned, locally-present files eligible for Windows Cloud Files
     /// dehydration (task 0781). Returns `(file_id, server_relative_path,
     /// size_bytes)` for every row in `local` status that is NOT effectively
