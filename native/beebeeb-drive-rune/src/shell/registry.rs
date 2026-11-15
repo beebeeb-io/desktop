@@ -355,8 +355,15 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     }
     let group = group_for(&s.shell.app);
     // After a wake Windows may not have announced, the content is covered at once, drawn as the lock screen, until the
-    // engine said whether the wake locks (`shell::away`, the owner's ruling D-B2-3): no frame, tip or dialog shows.
-    if s.shell.away.covers() && !matches!(group, FrameGroup::Locked | FrameGroup::SignIn) {
+    // engine said whether the wake locks (`shell::away`, the owner's ruling D-B2-3): no frame, tip or dialog shows. Only
+    // over the gates of an open engine: a closed one's own screen (the lock, sign-in, the recovery phrase, an
+    // unreadable key store) holds nothing of the account's and is never hidden by a lock screen that cannot unlock.
+    if s.shell.away.covers()
+        && matches!(
+            s.shell.app.gate(),
+            GateState::Ready | GateState::FirstRun | GateState::NoPlan
+        )
+    {
         return crate::frames::signin::before_files::cover(s, cx);
     }
     let behind = match frame(group) {

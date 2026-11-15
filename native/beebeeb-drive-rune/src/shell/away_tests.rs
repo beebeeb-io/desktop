@@ -23,7 +23,7 @@ use super::*;
 use crate::engine_host::LiveEngine;
 use crate::engine_host::open::Opened;
 use crate::shell::actions::HostActions;
-use crate::shell::app::GateState;
+use crate::shell::app::{Event, GateState};
 use crate::shell::host::{self, Shell, Wiring};
 use crate::shell::platform::TrayEvent;
 use crate::shell::platform::fake::FakePlatform;
@@ -806,4 +806,50 @@ fn an_engine_without_the_automatic_lock_never_covers() {
     poll(&mut rt);
     assert!(rt.state.shell.away.away.is_some(), "the gap is found");
     assert!(!rt.state.shell.away.covers(), "and covers nothing");
+}
+
+/// The cover stays held while the engine is closed (it lifts at a later open poll), but it is drawn only over the gates
+/// of an open engine: a closed engine's own screen (sign-in, the recovery phrase, an unreadable key store) is never
+/// hidden behind a lock screen whose Unlock cannot answer.
+#[test]
+fn the_cover_never_hides_the_screen_of_a_closed_engine() {
+    let mut rt = Runtime::new(
+        state::init(),
+        registry::view,
+        (1280.0, 800.0),
+        Env {
+            system_dark: false,
+            scale: 1.0,
+        },
+    );
+    rt.frame(0.0);
+    rt.state.shell.away.cover = Cover::Locked;
+    let lock_screen = |rt: &Runtime<State>| {
+        rt.elements()
+            .into_iter()
+            .filter(|e| !e.exiting)
+            .flat_map(|e| [e.text, e.label])
+            .flatten()
+            .any(|words| words == "Beebeeb is locked")
+    };
+    for gate in [
+        GateState::KeyStoreUnavailable,
+        GateState::NeedsRecoveryPhrase,
+        GateState::SignedOut,
+    ] {
+        rt.update(|s, _| {
+            host::dispatch(s, Event::Gate(gate));
+        });
+        rt.frame(0.016);
+        assert_eq!(rt.state.shell.app.gate(), gate);
+        assert!(!lock_screen(&rt), "{gate:?}: its own screen, not the cover");
+    }
+    rt.update(|s, _| {
+        host::dispatch(s, Event::Gate(GateState::Ready));
+    });
+    rt.frame(0.016);
+    assert!(
+        lock_screen(&rt),
+        "over an open engine's Files window the held cover is drawn"
+    );
 }
