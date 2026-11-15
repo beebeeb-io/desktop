@@ -3,6 +3,8 @@
 //! database of the test's own with one shared-with-me row (the file the fake lists as shared with the account) and
 //! one own file; the sync folder is a folder of the test's own. Every name is invented.
 
+use std::collections::HashSet;
+
 use beebeeb_engine::app::bindings::shared_offline::SharedKeepRefused;
 use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, Namespace, PERMISSION_READ, StateDb};
 
@@ -171,4 +173,93 @@ fn shared_keep_offline_refusal_shown() {
         0,
         "no row is drawn as kept on this PC"
     );
+}
+
+/// B2 (K3): after a keep succeeded and the lists were read again, the kept file's row is drawn available offline from
+/// the engine's own state; before the keep no row claims anything, and no other row is marked.
+#[test]
+fn shared_kept_mark_drawn_after_the_engine_says_kept() {
+    let fake = fake("keptmark");
+    let engine = signed_in(&fake);
+    let (_state, _sync, path) = with_state(&engine, &fake.first);
+    let mut source = EngineSharedSource::new(engine.clone());
+    opened(&mut source);
+    assert!(!source.with_me().is_empty());
+    assert!(
+        source.with_me().iter().all(|row| row.pc.is_none()),
+        "nothing is claimed before a keep"
+    );
+
+    assert!(source.keep_offline(OTHERS));
+    let notices = settle(&mut source);
+    assert!(notices.is_empty(), "{notices:?}");
+    assert_eq!(kept(&path), [OTHERS]);
+    let rows = source.with_me();
+    let marked: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.pc == Some(crate::ui::file_list::PcState::AvailableOffline))
+        .map(|row| row.id.as_str())
+        .collect();
+    assert_eq!(marked, [OTHERS], "only the kept row is marked");
+    assert!(
+        rows.iter().filter(|row| row.id != OTHERS).all(|row| row.pc.is_none()),
+        "every other row stays unclaimed"
+    );
+
+    // Read again later (a restart reads the same state): the mark is still drawn.
+    source.opened();
+    settle(&mut source);
+    assert!(
+        source
+            .with_me()
+            .iter()
+            .any(|row| row.id == OTHERS && row.pc == Some(crate::ui::file_list::PcState::AvailableOffline))
+    );
+}
+
+/// A refused keep draws no mark (the local state here is another account's, so the engine refuses).
+#[test]
+fn shared_kept_mark_not_drawn_on_refusal() {
+    let fake = fake("keptmarkrefused");
+    let engine = signed_in(&fake);
+    let (_state, _sync, path) = with_state(&engine, &fake.first);
+    let mut source = EngineSharedSource::new(engine.clone());
+    opened(&mut source);
+    let other = tempfile::tempdir().unwrap();
+    let other_path = other.path().join("state.db");
+    let db = StateDb::open(&other_path).unwrap();
+    db.set_owner(&beebeeb_engine::account_binding::Identity::new(
+        Some(&fake.second.user_id),
+        Some(&fake.second.email),
+    ))
+    .unwrap();
+    drop(db);
+    engine.use_local_state_for_test(other_path);
+
+    assert!(source.keep_offline(OTHERS));
+    let notices = settle(&mut source);
+    assert!(notices.iter().all(|n| *n == Notice::ChangeRefused), "{notices:?}");
+    assert!(kept(&path).is_empty());
+    assert!(
+        source.with_me().iter().all(|row| row.pc.is_none()),
+        "a refused keep marks nothing"
+    );
+}
+
+/// An overview and kept set read for a session that is gone are never applied: another account is signed in when
+/// they land, and nothing of the first account is drawn, marked or not.
+#[test]
+fn shared_kept_mark_of_another_session_dropped() {
+    let fake = fake("keptmarklate");
+    let engine = signed_in(&fake);
+    let (_state, _sync, _path) = with_state(&engine, &fake.first);
+    let mut source = EngineSharedSource::new(engine.clone());
+    let overview = engine.shares_overview().expect("the first account's lists");
+    engine.sign_out_keeping_local_data().expect("signed out");
+    sign_in(&engine, &fake.second, &fake.second_phrase);
+
+    let kept: HashSet<String> = [OTHERS.to_string()].into_iter().collect();
+    source.take_in(super::super::Answer::Read(1, Ok(overview), kept));
+    assert!(source.with_me().is_empty(), "nothing of the first account is drawn");
+    assert!(source.held.is_none(), "and nothing is held for it");
 }
