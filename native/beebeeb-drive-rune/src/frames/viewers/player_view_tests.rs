@@ -7,7 +7,10 @@ use beebeeb_media_protocol::Codec;
 use rune::{Env, Runtime};
 
 use super::super::set_scene;
-use super::{Times, ask_size, letterbox, no_sound_line, no_sound_words, refusal_words, space_toggles};
+use super::{
+    Times, Toggle, ask_size, letterbox, no_sound_line, no_sound_words, refusal_words, refusal_words_with, seek_target,
+    space_toggles, toggle_for,
+};
 use crate::media::player::{NoSound, PlayState, Refusal};
 use crate::theme::tokens::theme;
 use crate::{State, init, view};
@@ -126,12 +129,12 @@ fn refusal_words_name_the_format() {
         "This PC can't play ProRes files here."
     );
     assert_eq!(
-        refusal_words(&Refusal::NoSystemDecoder(Codec::Hevc)),
+        refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)),
         "This PC can't play HEVC video without Microsoft's HEVC extension."
     );
-    // Only HEVC names Microsoft's extension; any other system codec says "here" (row 24).
+    // Switch on: only HEVC names Microsoft's extension; any other system codec says "here" (row 24).
     assert_eq!(
-        refusal_words(&Refusal::NoSystemDecoder(Codec::Aac)),
+        refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Aac)),
         "This PC can't play AAC files here."
     );
     // An edition of Windows with no media codecs (row 25).
@@ -225,6 +228,16 @@ fn reduced_quality_is_said_in_the_details() {
 /// A source with one video and a player that counts how often the view asked for it.
 struct OneVideo {
     asked: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Set when the source is dropped: what the engine's source does to stop the player (`closing_a_video_stops_it`).
+    dropped: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl Drop for OneVideo {
+    fn drop(&mut self) {
+        if let Some(flag) = &self.dropped {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
 }
 
 impl super::super::source::ViewerSource for OneVideo {
@@ -264,7 +277,14 @@ fn space_on_a_files_video_toggles_its_player() {
     use std::sync::atomic::Ordering;
     let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut state = init();
-    let ui = super::super::Ui::open(Box::new(OneVideo { asked: asked.clone() }), "v").expect("the video opens");
+    let ui = super::super::Ui::open(
+        Box::new(OneVideo {
+            asked: asked.clone(),
+            dropped: None,
+        }),
+        "v",
+    )
+    .expect("the video opens");
     state.viewer.ui = Some(ui);
     let before = asked.load(Ordering::SeqCst);
     let key = |text: &str| rune::KeyEvent {
@@ -283,4 +303,91 @@ fn space_on_a_files_video_toggles_its_player() {
         !super::super::media::on_key(&mut state, &key("x")),
         "another key is not"
     );
+}
+
+/// 10. Space is play when paused and pause when playing, whichever way the bar's button or the key asks; nothing
+/// before the player has a state (a fake source's `None` never reaches `play` or `pause`).
+#[test]
+fn space_on_a_video_is_play_then_pause() {
+    let mut s = state(1_000, 10_000);
+    s.playing = true;
+    assert_eq!(toggle_for(Some(&s)), Some(Toggle::Pause), "a playing video pauses");
+    s.playing = false;
+    assert_eq!(toggle_for(Some(&s)), Some(Toggle::Play), "a paused video plays");
+    assert_eq!(toggle_for(None), None, "no state, no command");
+}
+
+/// 11. Esc on a video opened from Files: the shell's Esc leaves the route, the viewer sync closes the file, and the
+/// source (which owns the player's stop) is dropped with it.
+#[test]
+fn esc_on_a_files_video_closes_it_and_stops_the_player() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let dropped = std::sync::Arc::new(AtomicBool::new(false));
+    let source = OneVideo {
+        asked: std::sync::Arc::new(AtomicUsize::new(0)),
+        dropped: Some(dropped.clone()),
+    };
+    let mut state = init();
+    state.viewer.ui = Some(super::super::Ui::open(Box::new(source), "v").expect("the video opens"));
+    assert!(!dropped.load(Ordering::SeqCst), "it is open and playing");
+    // The route is not on the file (the shell's Esc ran): the viewer closes it.
+    super::super::sync(&mut state);
+    assert!(state.viewer.ui.is_none(), "the file is closed");
+    assert!(dropped.load(Ordering::SeqCst), "closing it stopped its player");
+}
+
+/// 12. A press or drag on the scrubber lands proportionally, clamped; no length or no width: nowhere.
+#[test]
+fn the_scrubber_seeks_to_where_it_is_pressed() {
+    assert_eq!(seek_target(200_000, 50.0, 200.0), Some(50_000));
+    assert_eq!(
+        seek_target(200_000, -10.0, 200.0),
+        Some(0),
+        "left of the track is the start"
+    );
+    assert_eq!(
+        seek_target(200_000, 500.0, 200.0),
+        Some(200_000),
+        "right of it is the end"
+    );
+    assert_eq!(seek_target(0, 50.0, 200.0), None, "the length is not known yet");
+    assert_eq!(seek_target(200_000, 50.0, 0.0), None, "no width");
+    assert_eq!(seek_target(200_000, f32::NAN, 200.0), None);
+}
+
+/// 13. Row 29: while the system decoders are not used, no refusal tells a person to install Microsoft's extension.
+#[test]
+fn hevc_words_do_not_ask_for_an_extension_while_the_switch_is_off() {
+    let off = refusal_words_with(false, &Refusal::NoSystemDecoder(Codec::Hevc));
+    assert_eq!(off, "Beebeeb can't play HEVC video yet. Open it in another app.");
+    assert!(!off.contains("Microsoft") && !off.contains("extension"));
+    let aac = refusal_words_with(false, &Refusal::NoSystemDecoder(Codec::Aac));
+    assert!(
+        !aac.contains("This PC can't"),
+        "the cause is Beebeeb's, not the PC's: {aac}"
+    );
+    // With the switch on, today's words.
+    assert_eq!(
+        refusal_words_with(true, &Refusal::NoSystemDecoder(Codec::Hevc)),
+        "This PC can't play HEVC video without Microsoft's HEVC extension."
+    );
+    // The app's own words follow the protocol's constant.
+    assert_eq!(
+        refusal_words(&Refusal::NoSystemDecoder(Codec::Hevc)),
+        refusal_words_with(
+            beebeeb_media_protocol::MEDIA_SYSTEM_DECODER_ON,
+            &Refusal::NoSystemDecoder(Codec::Hevc)
+        )
+    );
+}
+
+/// 14. Row 18: the details panel's flag is the player's `reduced_quality`, and false without a player.
+#[test]
+fn the_details_flag_follows_the_players_state() {
+    let mut s = state(0, 1_000);
+    s.reduced_quality = true;
+    assert!(super::super::details::is_reduced(Some(&s)));
+    s.reduced_quality = false;
+    assert!(!super::super::details::is_reduced(Some(&s)));
+    assert!(!super::super::details::is_reduced(None));
 }

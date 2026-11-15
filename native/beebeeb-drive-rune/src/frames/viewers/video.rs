@@ -7,7 +7,7 @@
 //! Photos viewer's stage. The stage's size goes to the player in device pixels (`PlayerHandle::set_view_size`).
 //! A source that hands no player draws what a kind without a viewer draws, and nothing is downloaded.
 
-use beebeeb_media_protocol::Codec;
+use beebeeb_media_protocol::{Codec, MEDIA_SYSTEM_DECODER_ON};
 use rune::tok::Family;
 use rune::{Align, Color, El, SurfaceFit, TextStyle, col, el, row};
 
@@ -37,8 +37,24 @@ const TIME: TextStyle = TextStyle::new(12.0, 400.0).family(Family::Mono).lh(16.0
 
 /// The words of a refusal. `NoDecoder` names the FORMAT, never the file.
 pub fn refusal_words(why: &Refusal) -> String {
+    refusal_words_with(MEDIA_SYSTEM_DECODER_ON, why)
+}
+
+/// [`refusal_words`] for a given state of `MEDIA_SYSTEM_DECODER_ON`. While the switch is off the app does not use the
+/// PC's own decoders, so a refusal that comes from their absence never tells a person to install one (the app would
+/// not use it, and the PC may have it already): it says Beebeeb can't play the format yet.
+pub fn refusal_words_with(system_decoder_on: bool, why: &Refusal) -> String {
     match why {
         Refusal::NoDecoder(name) => format!("This PC can't play {name} files here."),
+        Refusal::NoSystemDecoder(Codec::Hevc) if !system_decoder_on => {
+            "Beebeeb can't play HEVC video yet. Open it in another app.".into()
+        }
+        Refusal::NoSystemDecoder(codec) if !system_decoder_on => {
+            format!(
+                "Beebeeb can't play {} files yet. Open it in another app.",
+                codec_name(*codec)
+            )
+        }
         Refusal::NoSystemDecoder(Codec::Hevc) => {
             "This PC can't play HEVC video without Microsoft's HEVC extension.".into()
         }
@@ -173,12 +189,57 @@ fn secs(ms: u64) -> u32 {
     u32::try_from(ms / 1000).unwrap_or(u32::MAX)
 }
 
+/// What the bar's button and Space do for a player in this state: pause what plays, play what does not, nothing
+/// before the player has a state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Toggle {
+    Pause,
+    Play,
+}
+
+pub fn toggle_for(state: Option<&PlayState>) -> Option<Toggle> {
+    match state {
+        Some(s) if s.playing => Some(Toggle::Pause),
+        Some(_) => Some(Toggle::Play),
+        None => None,
+    }
+}
+
 /// Play or pause, the way the bar's button and Space do it.
 pub fn toggle(handle: &PlayerHandle) {
-    match handle.state() {
-        Some(s) if s.playing => handle.pause(),
-        Some(_) => handle.play(),
+    match toggle_for(handle.state().as_ref()) {
+        Some(Toggle::Pause) => handle.pause(),
+        Some(Toggle::Play) => handle.play(),
         None => {}
+    }
+}
+
+/// Where a press or drag at `x` on a scrubber `w` wide lands in a file `length_ms` long. `None`: the length is not
+/// known yet or the scrubber has no width, so there is nowhere to go.
+pub fn seek_target(length_ms: u64, x: f32, w: f32) -> Option<u64> {
+    if length_ms == 0 || !(w > 0.0) || x.is_nan() {
+        return None;
+    }
+    let part = f64::from((x / w).clamp(0.0, 1.0));
+    Some((part * length_ms as f64).round() as u64)
+}
+
+/// The scrubber's drag: the press and the release seek to where the pointer is (the player is not asked on every
+/// move); an Esc that cancels the drag seeks nowhere.
+pub fn scrub_drag(handle: PlayerHandle) -> impl Fn(&mut State, &mut rune::Drag, &mut rune::Tx) + 'static {
+    move |_: &mut State, drag: &mut rune::Drag, _: &mut rune::Tx| {
+        let lands = match drag.phase {
+            rune::Phase::Down => true,
+            rune::Phase::Move => false,
+            rune::Phase::Up => !drag.cancelled(),
+        };
+        if !lands {
+            return;
+        }
+        let length = handle.state().map_or(0, |s| s.length_ms);
+        if let Some(at) = seek_target(length, drag.x, drag.w) {
+            handle.seek(at);
+        }
     }
 }
 
@@ -193,6 +254,7 @@ pub fn space_toggles(text_field_has_focus: bool) -> bool {
 pub fn bar(prefix: &'static str, handle: &PlayerHandle, times: Times, ink: Color, track: Color, t: &Theme) -> El {
     let toggle_with = handle.clone();
     let seek_with = handle.clone();
+    let drag_with = handle.clone();
     let part = times.part();
     row()
         .key(format!("{prefix}-bar"))
@@ -236,6 +298,7 @@ pub fn bar(prefix: &'static str, handle: &PlayerHandle, times: Times, ink: Color
                         now.saturating_add(step)
                     });
                 })
+                .on_drag(scrub_drag(drag_with))
                 .focusable(true)
                 .focus_ring(2.0, 2.0, t.accent_deep)
                 .grow(1.0)
