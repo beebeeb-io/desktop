@@ -35,6 +35,8 @@ mod store;
 mod types;
 
 #[cfg(test)]
+mod notify_carry_tests;
+#[cfg(test)]
 mod tests;
 
 pub use error::ConfigError;
