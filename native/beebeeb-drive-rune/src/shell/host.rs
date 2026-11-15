@@ -798,6 +798,10 @@ fn shell_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if crate::frames::signin::setup::guide::on_key(s, ev, tx) {
         return true;
     }
+    // Esc on a presentation that is on leaves Present, not the file.
+    if matches!(ev.key, Key::Escape) && crate::frames::viewers::leave_present(s) {
+        return true;
+    }
     let event = match ev.key {
         Key::Left if plain_alt && !searching => Some(Event::Back),
         Key::Right if plain_alt && !searching => Some(Event::Forward),

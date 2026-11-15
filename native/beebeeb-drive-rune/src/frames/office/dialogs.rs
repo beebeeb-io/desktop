@@ -10,6 +10,7 @@ use rune::{El, TextStyle, col, el, row};
 
 use crate::State;
 use crate::frames::placeholder;
+use crate::frames::viewers;
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
 use crate::ui::settings_dialog::{BUTTON_MD, DIALOG_TITLE};
@@ -65,7 +66,7 @@ pub fn licence_panel(t: &Theme) -> El {
 
 /// The group's board frames and the scene that shows each (`frames::scenes`).
 pub const FRAMES: &[crate::ui::gate::Scene<State>] =
-    &[("DW-1557", placeholder::scene), ("DW-1558", placeholder::scene)];
+    &[("DW-1557", viewers::scene_licence), ("DW-1558", placeholder::scene)];
 
 #[cfg(test)]
 mod tests {

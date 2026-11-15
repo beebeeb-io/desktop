@@ -87,6 +87,8 @@ pub enum Over {
     Conflict(Conflict),
     /// DW-1551.
     Palette(Palette),
+    /// DW-1557: the licences of the Office engine, from the status line's About.
+    Licence,
 }
 
 impl Ui {
@@ -95,6 +97,13 @@ impl Ui {
         match &self.file.body {
             super::source::Body::Word(doc) => Some(doc),
             _ => None,
+        }
+    }
+
+    /// The status line's About: the licences of the Office engine, over the document.
+    pub fn office_about(&mut self) {
+        if self.office.over.is_none() {
+            self.office.over = Some(Over::Licence);
         }
     }
 
@@ -200,6 +209,10 @@ pub fn set_scene(ui: &mut Ui, frame: &str) {
 
 /// The keys of what is open over the document. `true`: the key was taken.
 pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
+    // A presentation's keys (Present's arrows and Space) before the viewer's own.
+    if super::office_glue::on_key(s, ev) {
+        return true;
+    }
     let Some(ui) = super::ui(s) else { return false };
     // Only the editor's frame has these keys.
     if ui.word().is_none() && ui.office.over.is_none() {
@@ -463,11 +476,23 @@ fn palette(ui: &Ui, palette: &Palette, t: &Theme) -> El {
         .modal(false, close)
 }
 
+/// DW-1557: the licence panel on its scrim; Esc or a press outside closes it.
+fn licence(t: &Theme) -> El {
+    col()
+        .key("scrim")
+        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+        .center()
+        .fill(crate::ui::settings_dialog::scrim_color(t))
+        .child(super::office_glue::licence(t))
+        .modal(false, close)
+}
+
 /// What is open over the document, if anything.
 pub fn over(ui: &Ui, t: &Theme) -> Option<El> {
     Some(match ui.office.over.as_ref()? {
         Over::Conflict(other) => conflict(ui.file.version, other, t),
         Over::Palette(p) => palette(ui, p, t),
+        Over::Licence => licence(t),
     })
 }
 

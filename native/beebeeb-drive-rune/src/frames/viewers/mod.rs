@@ -18,8 +18,8 @@ mod audio;
 mod chrome;
 pub use chrome::{FROM_THIS_PC, FROM_THIS_PC_UNSENT};
 pub use pdf::{PAGE_FAILED, PAGE_LACKS_TEXT, PAGE_RENDERING};
-mod details;
-mod dialogs;
+pub(crate) mod details;
+pub(crate) mod dialogs;
 mod fixture_media;
 mod fixture_text;
 pub mod icons;
@@ -33,6 +33,8 @@ mod new_file_scene;
 pub use new_file_scene::set_new_file_scene;
 pub mod office;
 pub mod office_board;
+mod office_glue;
+pub use office_glue::{deck_mut, leave_present, open_deck, scene_licence};
 mod office_icons;
 pub mod office_over;
 mod pdf;
@@ -908,6 +910,7 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
     match &ui.file.body {
         Body::Word(doc) => return office::window(s, cx, ui, Some(doc)),
         Body::NoEditor => return office::window(s, cx, ui, None),
+        Body::Sheet(_) | Body::Deck(_) => return office_glue::window(s, cx, ui),
         _ => {}
     }
     let t = tokens::theme(cx.system_dark());
@@ -1108,6 +1111,7 @@ pub fn scene_file(frame: &str) -> Option<&'static str> {
         "DW-1515" => board::ZIP,
         "DW-1234" | "DW-1507e" | "DW-1550" | "DW-1551" | "DW-1552" | "DW-1553" | "DW-1554" | "DW-1556" => board::DOCX,
         "DW-1511" => board::DOC,
+        "DW-1508" => board::SHEET,
         _ => return None,
     })
 }

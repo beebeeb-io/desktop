@@ -803,7 +803,11 @@ pub(crate) fn status(file: &OpenFile, doc: Option<&WordDoc>, keeping: Keeping, t
                 .role("link")
                 .label("About this editor")
                 .focusable(true)
-                .on_press(ask("About this editor"))
+                .on_press(|s: &mut State| {
+                    if let Some(ui) = super::ui(s) {
+                        ui.office_about();
+                    }
+                })
                 .child({
                     kit::note_text(&about, &about, "About", type_::STATUS, t.text_tertiary);
                     rich("About", vec![Span::new(0, 5).underline(t.text_tertiary)])
