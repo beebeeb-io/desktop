@@ -612,6 +612,8 @@ pub use kept::KeptSummary;
 mod guide_mark;
 mod landing;
 mod ops;
+// Photo sources' folders from Files (DW-0604), per account.
+mod photo_folders;
 mod removals;
 mod schema;
 mod share_marks;
