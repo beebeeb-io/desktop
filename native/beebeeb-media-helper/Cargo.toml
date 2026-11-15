@@ -11,9 +11,10 @@ description = "Decodes one audio or video file inside the sandbox: no key, no na
 # Rules:
 #   - its own workspace, its own `Cargo.lock` and `deny.toml` (the closure audited on its own: `cargo deny check
 #     licenses bans sources` here; 12 MPL-2.0 exceptions, the `symphonia` 0.5.5 crates, decision D-MED-10);
-#   - dependencies: the protocol and FilmCraft, and on Windows only `windows` + `windows-core` 0.62 (Media Foundation,
-#     the system decoder of decision 2541, reached only while `MEDIA_SYSTEM_DECODER_ON` is on); nothing else (no direct
-#     `symphonia`: FilmCraft brings 0.5.5, a second version would add 15 more MPL-2.0 packages);
+#   - dependencies: the protocol, FilmCraft, `symphonia` for a track's title and artist (D-MB2-1 (a); pinned `=0.5.5`,
+#     the version FilmCraft brings, so it adds no package: a second version would add 15 more MPL-2.0 packages), and
+#     on Windows only `windows` + `windows-core` 0.62 (Media Foundation, the system decoder of decision 2541, reached
+#     only while `MEDIA_SYSTEM_DECODER_ON` is on); nothing else;
 #   - `panic = "abort"`: a panic ends the process, and the app sees its pipe close.
 
 [lib]
