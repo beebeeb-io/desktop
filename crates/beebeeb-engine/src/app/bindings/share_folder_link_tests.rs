@@ -359,6 +359,10 @@ fn a_new_folder_link_is_cores_and_its_custody_is_remembered_before_the_request_t
     let at = |route: &str| seen.iter().find(|(r, _)| r.starts_with(route)).expect(route).1;
     assert!(!at(CUSTODY), "nothing remembered before the custody read");
     assert!(
+        at("GET /api/v1/files"),
+        "remembered before the listing, the request the mark rides on"
+    );
+    assert!(
         at(MAKE_FOLDER_LINK),
         "remembered before the link that uses the folder's key"
     );
@@ -667,4 +671,37 @@ fn a_403_is_beebeeb_refusing_never_a_session_that_ended() {
     }
     assert_eq!(checked, 8);
     assert_eq!(f.count(MAKE_FOLDER_LINK), 2, "each new folder link was asked once");
+}
+
+#[test]
+fn a_bundle_made_for_a_session_that_ended_meanwhile_is_not_handed_over() {
+    let f = fixture();
+    let turn = f.engine.session_turn();
+    let engine = f.engine.clone();
+    f.with(|s| s.on_route = Some((MAKE_LINK, Box::new(move || signed_in(&engine)))));
+    let ids = [NOTE.to_string(), PLAN.to_string()];
+    assert_eq!(
+        f.engine.bundle_link_for(turn, &ids, None).unwrap_err(),
+        FolderLinkError::NotSignedIn
+    );
+    assert_eq!(f.count(MAKE_LINK), 1, "it was sent before the session moved");
+}
+
+#[test]
+fn a_rebuilt_folder_link_read_for_a_session_that_ended_meanwhile_is_not_handed_over() {
+    let f = fixture();
+    f.folder_link(FOLDER, None).expect("the folder's link");
+    let turn = f.engine.session_turn();
+    let engine = f.engine.clone();
+    f.with(|s| s.on_route = Some((LINKS, Box::new(move || signed_in(&engine)))));
+    assert_eq!(
+        f.engine.folder_link_for(turn, FOLDER, None).unwrap_err(),
+        FolderLinkError::NotSignedIn
+    );
+    assert_eq!(f.count(MAKE_FOLDER_LINK), 1, "none was made");
+    assert_eq!(
+        f.count(LINKS),
+        2,
+        "the links were read under the old session, then nothing"
+    );
 }

@@ -47,6 +47,8 @@ struct Server {
     status: u16,
     /// Runs once when a new request arrives, before it is answered (a session change while it is out).
     on_create: Option<Box<dyn FnOnce() + Send>>,
+    /// Runs once when the list of requests is read, before it is answered.
+    on_list: Option<Box<dyn FnOnce() + Send>>,
 }
 
 struct Fixture {
@@ -89,6 +91,9 @@ fn handler(server: Arc<Mutex<Server>>) -> Handler {
             return Reply::json(s.status, json!({ "error": "account_frozen" }));
         }
         if route == LIST {
+            if let Some(hook) = s.on_list.take() {
+                hook();
+            }
             return Reply::ok(json!({ "file_requests": s.rows }));
         }
         if let Some(hook) = s.on_create.take() {
@@ -157,6 +162,7 @@ fn fixture() -> Fixture {
         rows: Vec::new(),
         status: 200,
         on_create: None,
+        on_list: None,
     }));
     let api = FakeApi::start(handler(server.clone()));
     let (host, _messages) = ChannelHost::new(|| {});
@@ -358,4 +364,19 @@ fn a_request_made_for_a_session_that_ended_meanwhile_is_not_handed_over() {
         ShareLinkError::NotSignedIn
     );
     assert_eq!(f.count(CREATE), 1, "it was sent before the session moved");
+}
+
+#[test]
+fn a_copied_link_read_for_a_session_that_ended_meanwhile_is_not_handed_over() {
+    let f = fixture();
+    f.create(&choices("Invented drop")).expect("a request");
+    let id = text(&f.server.lock().unwrap().rows[0], "id").to_string();
+    let turn = f.engine.session_turn();
+    let engine = f.engine.clone();
+    f.server.lock().unwrap().on_list = Some(Box::new(move || signed_in(&engine)));
+    assert_eq!(
+        f.engine.file_request_copy_for(turn, &id).unwrap_err(),
+        ShareLinkError::NotSignedIn
+    );
+    assert_eq!(f.count(LIST), 1, "it was read before the session moved");
 }
