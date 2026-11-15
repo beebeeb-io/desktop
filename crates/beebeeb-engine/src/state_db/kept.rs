@@ -16,7 +16,42 @@ pub struct KeptSummary {
     pub bytes: i64,
 }
 
+/// A kept file this PC does not hold, as [`StateDb::kept_files_to_fetch`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptRow {
+    pub file_id: String,
+    pub path: String,
+    pub size_bytes: i64,
+}
+
 impl StateDb {
+    /// The kept files this PC does not hold, oldest row first, at most `limit`: kept by [`KEPT_SQL`] (its own pin or
+    /// an inherited one), a file with bytes, `cloud_only` (and `error` when `failed_too`: a failed Windows fetch ends
+    /// there), with nothing queued and no edit held (the stale rule's two clauses). Task 2523 S6: what a tick fetches.
+    pub fn kept_files_to_fetch(&self, limit: usize, failed_too: bool) -> Result<Vec<KeptRow>> {
+        let statuses = if failed_too {
+            "'cloud_only', 'error'"
+        } else {
+            "'cloud_only'"
+        };
+        let conn = self.0.lock().expect("state_db mutex poisoned");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT file_id, path, size_bytes FROM files WHERE {KEPT_SQL}
+               AND item_kind = 'file' AND size_bytes > 0 AND status IN ({statuses})
+               AND NOT EXISTS (SELECT 1 FROM operation_queue q WHERE q.file_id = files.file_id)
+               AND NOT EXISTS (SELECT 1 FROM held_edits h WHERE h.file_id = files.file_id)
+             ORDER BY rowid LIMIT ?1"
+        ))?;
+        let rows = stmt.query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+            Ok(KeptRow {
+                file_id: row.get(0)?,
+                path: row.get(1)?,
+                size_bytes: row.get(2)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     /// Every kept row (files and folders, a kept folder's contents included), by path, with nothing else of the file
     /// list: one query.
     pub fn kept_rows(&self) -> Result<Vec<FileEntry>> {
@@ -117,6 +152,52 @@ mod tests {
         db.set_recursive_pin("d-a", false, 2).unwrap();
         assert_eq!(db.kept_summary().unwrap(), KeptSummary { items: 1, bytes: 7 });
         assert_eq!(db.kept_rows().unwrap().len(), 1);
+    }
+
+    /// S6 R1: the tick names a kept file this PC does not hold, kept by its own pin or by its folder's, with bytes,
+    /// nothing queued and no edit held; `error` only when the platform's failed fetch ends there (Windows).
+    #[test]
+    fn s6_kept_the_tick_names_kept_files_this_pc_does_not_hold() {
+        let (_dir, db) = db();
+        put(&db, "own", "own.txt", 10, false, FileStatus::CloudOnly);
+        put(&db, "d", "D", 0, true, FileStatus::CloudOnly);
+        put(&db, "inh", "D/in.txt", 10, false, FileStatus::CloudOnly);
+        put(&db, "err", "err.txt", 10, false, FileStatus::Error);
+        put(&db, "free", "free.txt", 10, false, FileStatus::CloudOnly);
+        put(&db, "here", "here.txt", 10, false, FileStatus::Local);
+        put(&db, "down", "down.txt", 10, false, FileStatus::Downloading);
+        put(&db, "conf", "conf.txt", 10, false, FileStatus::Conflict);
+        put(&db, "trash", "trash.txt", 10, false, FileStatus::Trashing);
+        put(&db, "empty", "empty.txt", 0, false, FileStatus::CloudOnly);
+        put(&db, "op", "op.txt", 10, false, FileStatus::CloudOnly);
+        put(&db, "held", "held.txt", 10, false, FileStatus::CloudOnly);
+        for id in [
+            "own", "d", "err", "here", "down", "conf", "trash", "empty", "op", "held",
+        ] {
+            db.set_recursive_pin(id, true, 1).unwrap();
+        }
+        for sql in [
+            "INSERT INTO operation_queue (op_id, kind, file_id) VALUES ('q', 'hydrate_file', 'op')",
+            "INSERT INTO held_edits (file_id, reason, fingerprint, detected_at) VALUES ('held', 'base_unknown', 'f', 1)",
+        ] {
+            db.test_execute(sql).unwrap();
+        }
+        let named = |failed_too: bool| -> Vec<String> {
+            let rows = db.kept_files_to_fetch(100, failed_too).unwrap();
+            rows.into_iter().map(|row| row.file_id).collect()
+        };
+        println!("s6 kept rule: {:?} / {:?}", named(false), named(true));
+        assert_eq!(named(false), ["own", "inh"], "own pin and inherited, cloud-only");
+        assert_eq!(named(true), ["own", "inh", "err"], "a failed fetch's row too");
+        let row = &db.kept_files_to_fetch(1, false).unwrap()[0];
+        assert_eq!(
+            row,
+            &KeptRow {
+                file_id: "own".into(),
+                path: "own.txt".into(),
+                size_bytes: 10
+            }
+        );
     }
 
     /// Nothing kept: no rows, zero and zero.
