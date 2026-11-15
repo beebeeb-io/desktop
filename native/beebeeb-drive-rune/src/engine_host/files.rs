@@ -275,7 +275,20 @@ impl<E: FilesEngine> LocalCopies<E> {
     /// The sidebar's Backups has no folder to show: ask again, now and then, while the answer is none or failed (a
     /// first sync brings the folder in, and a first backup creates it). Never once per session; never while a folder
     /// is known; at most one ask per [`ROOT_RETRY`], and the window is woken for the next one.
-    pub fn look_for_backups(&mut self) {}
+    pub fn look_for_backups(&mut self) {
+        self.look();
+        if matches!(self.root, Some(Some(_))) || !self.seen.0 || self.seen.1.is_none() {
+            return;
+        }
+        if self.root_asked.is_some_and(|at| at.elapsed() < self.root_retry) {
+            return;
+        }
+        self.root_asked = Some(Instant::now());
+        if self.send(Ask::BackupsRoot) {
+            let after = self.root_retry;
+            self.wake_after(after);
+        }
+    }
 
     fn send(&mut self, ask: Ask) -> bool {
         let (true, Some(account)) = self.seen.clone() else {
