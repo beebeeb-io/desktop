@@ -127,9 +127,6 @@ pub(crate) fn clear_legacy_flat<C: CredentialStores>(identity: &'static EngineId
     let Some(legacy) = stores.legacy_flat(identity) else {
         return;
     };
-    if let Err(error) = mark_retired(&legacy) {
-        refused(Step::Mark, &error);
-    }
     if let Err(error) = discard(&legacy) {
         refused(Step::Clear, &error);
     }

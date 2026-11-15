@@ -548,7 +548,7 @@ fn read_answer(secret: &CliEphemeralKey, text: &str) -> Result<Received, DeviceR
     ) else {
         return Err(not_received());
     };
-    let plaintext = Zeroizing::new(B64.decode(payload).map_err(|_| not_received())?);
+    let plaintext = Zeroizing::new(decrypt_payload(secret, approver, nonce, payload).map_err(|_| not_received())?);
     let (token, key) = read_credentials(&plaintext).ok_or_else(not_received)?;
     Ok(Received {
         token,
