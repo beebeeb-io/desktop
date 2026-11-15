@@ -85,8 +85,11 @@
       if (page) {
         box('page', page);
         // Lines are numbered in order; a table is `tbl`, its cells `tbl-<row>-<column>`.
+        // The viewer frames (the plain ids) draw the Office engine's render of the page, a picture: it is
+        // ONE `page` box, gated by its pixels. The editor frames (`e`) keep a key per line (0.9.1).
         let np = 0;
-        qa(':scope > div, :scope > p', page).forEach((line) => {
+        const lines = ofFrame.endsWith('e') ? qa(':scope > div, :scope > p', page) : [];
+        lines.forEach((line) => {
           if (!line.classList.contains('grid')) { text(`pg-${np++}`, line, dim(line)); return; }
           box('tbl', line);
           const cols = getComputedStyle(line).gridTemplateColumns.split(' ').length;
