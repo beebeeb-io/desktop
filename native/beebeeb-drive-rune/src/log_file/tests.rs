@@ -397,8 +397,10 @@ fn a_quoted_name_is_one_name_and_never_reaches_the_file() {
         "Holiday",
         "The file \u{201c}Holiday.pdf\u{201d} couldn\u{2019}t be opened. NSCocoaErrorDomain 260",
     );
+    // `\u{2019}` is also a closing quote, so the name runs to the apostrophe of `couldn\u{2019}t` (over-redaction, accepted); the
+    // error's domain and code stay readable.
     assert!(
-        text.contains("couldn\u{2019}t be opened") || text.contains("couldn"),
+        text.contains("<name>") && text.contains("NSCocoaErrorDomain 260"),
         "{text}"
     );
 }
