@@ -732,6 +732,27 @@ fn leaving_with_changes_asks_first_and_each_answer_does_what_it_says() {
     assert!(!on_a_file(&rt));
 }
 
+/// Delta check of desktop#432, round 3: the engine cannot say who saved the other version (another device, or an
+/// earlier opening of this file on this PC). The question then names nobody: changed since you opened it, the other
+/// version.
+#[test]
+fn the_two_versions_question_names_nobody_when_the_other_side_is_not_known() {
+    let (mut rt, _) = note(false, true);
+    edit_and_type(&mut rt);
+    ctrl(&mut rt, 's');
+    let Some(Dialog::Conflict(mut other)) = viewer(&rt).dialog.clone() else {
+        panic!("the two-versions question is up");
+    };
+    other.from = String::new();
+    rt.state.viewer.ui.as_mut().expect("a file is open").dialog = Some(Dialog::Conflict(other));
+    rt.invalidate();
+    rt.frame(0.0);
+    let sub = info(&rt, "dlg-sub").text.unwrap_or_default();
+    assert!(sub.ends_with(" \u{00B7} changed since you opened it"), "{sub}");
+    assert_eq!(info(&rt, "dlg-card-1-title").text.as_deref(), Some("The other version"));
+    assert_eq!(info(&rt, "dlg-btn-2").label.as_deref(), Some("Keep the other version"));
+}
+
 #[test]
 fn a_save_that_meets_another_devices_version_overwrites_nothing() {
     for (button, keep, version, editing) in [

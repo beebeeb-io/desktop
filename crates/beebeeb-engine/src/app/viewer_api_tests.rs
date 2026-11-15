@@ -12,6 +12,7 @@ use super::super::{Engine, EngineConfig};
 use super::*;
 use crate::account::SessionTransition;
 use crate::account_binding::Identity;
+use crate::app::viewer_edit_api::SaveEnd;
 use crate::host::ChannelHost;
 use crate::identity::REAL;
 use crate::session::Session;
@@ -623,6 +624,87 @@ fn after_the_viewers_own_save_landed_the_older_copy_here_is_not_read_as_it() {
     assert!(
         matches!(local(&engine, NOTE, NO_LIMIT), Ok(LocalCopy::Behind)),
         "the bytes here are version 4's: not read as 5"
+    );
+}
+
+/// The viewer's queued save `op_id`, from `base`, claimed and landed as `version` (as the upload lands a write-keyed
+/// modify: no hash of what was sent).
+fn land_viewer_save(db: &StateDb, op_id: &str, base: i64, version: i64) {
+    let ClaimOutcome::Claimed(claimed) = db.claim_operation(op_id, 21).unwrap() else {
+        panic!("the save is claimed")
+    };
+    let write_id = claimed.write.as_ref().map(|write| write.write_id.clone());
+    let payload = claimed.op.payload_path.clone();
+    let input = LandingInput {
+        op_id,
+        claim_id: Some(&claimed.claim_id),
+        write_id: write_id.as_deref(),
+        local_file_id: NOTE,
+        server_file_id: NOTE,
+        target_path: Some("Invented folder/Deeper/Invented note.txt"),
+        parent_id: None,
+        landed_base: Some(base),
+        produced_version: version,
+        produced_object_version_id: "object-landed",
+        size_bytes: 3_500,
+        content_type: None,
+        mime_type: None,
+        completed_payload: payload.as_deref(),
+        completed_payload_hash: None,
+        finalization: None,
+        now: 22,
+    };
+    let rekey = |op: &PendingOperation, _: &str| -> std::result::Result<Option<String>, StateDbError> {
+        Ok(op.metadata_json.clone())
+    };
+    assert!(db.apply_landing(&input, &rekey).unwrap().is_some(), "it lands");
+}
+
+/// Delta check of desktop#432, round 3: the viewer's own save is stored here (Queued from 4) and lands as 5. The next
+/// save of the SAME opening, from the 4 on screen, continues from 5: it goes out from 5 and its Queued answer names
+/// 5 (the label of the text on screen). A new opening of the file holds none of it: a save from 4 answers Conflict.
+#[test]
+fn a_save_after_the_own_landed_one_goes_out_from_it_and_a_new_opening_answers_conflict() {
+    let fake = fake("adopted");
+    let engine = engine_at("http://127.0.0.1:9");
+    signed_in(&engine, &fake.first);
+    let (_dir, _root, db) = with_folder(&engine, &fake.first, FileStatus::Local, Some(&note_text()));
+    set_current_version(&db, NOTE, 4);
+    let session = engine.acct.session_generation();
+    let opening = engine.viewer_opening(session, NOTE);
+    // Sync does not run here: the save is stored and answers at once.
+    let first = engine.save_text_for(session, NOTE, "first invented edit\n", 4, opening);
+    assert!(
+        matches!(first, Ok(SaveEnd::Queued { base: 4 })),
+        "{:?}",
+        first.map(|_| ())
+    );
+    let op = db
+        .list_operations_for_file(NOTE)
+        .unwrap()
+        .pop()
+        .expect("the save is queued");
+    assert_eq!(op.base_version, Some(4));
+    land_viewer_save(&db, &op.op_id, 4, 5);
+    let second = engine.save_text_for(session, NOTE, "second invented edit\n", 4, opening);
+    assert!(
+        matches!(second, Ok(SaveEnd::Queued { base: 5 })),
+        "continued from the own landed 5, and labelled with it: {:?}",
+        second.map(|_| ())
+    );
+    let ops = db.list_operations_for_file(NOTE).unwrap();
+    assert_eq!(
+        ops.iter().map(|op| op.base_version).collect::<Vec<_>>(),
+        [Some(5)],
+        "sent from 5"
+    );
+    // Opened again (Files, Try again, Show it): the earlier saves are not this opening's.
+    let again = engine.viewer_opening(session, NOTE);
+    let third = engine.save_text_for(session, NOTE, "an edit of 4\n", 4, again);
+    assert!(
+        matches!(third, Ok(SaveEnd::Conflict { theirs: 5 })),
+        "the person decides: {:?}",
+        third.map(|_| ())
     );
 }
 

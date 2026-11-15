@@ -116,8 +116,10 @@ fn a_save_is_bound_to_the_version_it_began_from_and_comes_back_as_the_next_one()
     );
 }
 
+/// Delta check of #432, round 3: the engine cannot say who saved the newer version (another device, or an earlier
+/// opening of this file on this PC): the conflict names nobody.
 #[test]
-fn a_newer_version_is_a_conflict_whose_other_side_is_another_device() {
+fn a_newer_version_is_a_conflict_whose_other_side_is_not_named() {
     let fake = Fake::new();
     fake.s().save_answer = Ok(SaveEnd::Conflict { theirs: 5 });
     let (mut source, file, _) = opened(&fake, NOTE);
@@ -125,7 +127,7 @@ fn a_newer_version_is_a_conflict_whose_other_side_is_another_device() {
     let Settled::Conflict(other) = settled(&mut source, NOTE) else {
         panic!("a conflict");
     };
-    assert_eq!((other.from.as_str(), other.version), ("Another device", 5));
+    assert_eq!((other.from.as_str(), other.version), ("", 5));
 }
 
 #[test]
@@ -183,6 +185,21 @@ fn newer_answer(source: &mut Source, id: &str) -> Option<Settled> {
         std::thread::sleep(Duration::from_millis(2));
     }
     source.settled(id)
+}
+
+impl Fake {
+    /// The upload of a save answered Queued lands as `version`: the local state holds it, and it is the viewer's own
+    /// while the engine still holds that save's record (the same opening).
+    fn land(&self, version: i64) {
+        let mut s = self.s();
+        if let Some(edit) = s.edit.as_mut() {
+            edit.version = version;
+        }
+        let queued = s.queued_save.take();
+        if queued == Some(s.epoch) {
+            s.own_versions.push(version);
+        }
+    }
 }
 
 fn bump(fake: &Fake, version: i64) {
@@ -439,7 +456,7 @@ fn keep_theirs_labels_the_content_with_the_version_read_before_it() {
 /// Review of #432, P1-2: a copy on this PC older than Beebeeb's version now is not shown as it (the engine says
 /// `Behind`): Beebeeb's is downloaded, and the line says the copy here could not be confirmed as this version.
 #[test]
-fn a_copy_behind_beebeebs_version_is_downloaded_and_said_not_in_sync() {
+fn a_copy_behind_beebeebs_version_is_downloaded_and_said_unconfirmed() {
     let fake = Fake::new();
     fake.keep(NOTE, OnThisPc::InSync, Some(b"the older invented words\n"));
     fake.s().local_behind = true;
@@ -447,6 +464,19 @@ fn a_copy_behind_beebeebs_version_is_downloaded_and_said_not_in_sync() {
     assert_eq!(words(&body), NOTE_TEXT, "Beebeeb's version, downloaded");
     assert_eq!(fake.s().fetches, [NOTE.to_string()]);
     assert_eq!(source.origin(NOTE), Origin::BeebeebUnconfirmedHere);
+}
+
+/// Delta check of #432, round 3: a copy here whose change is not settled with Beebeeb, and also behind: the line says
+/// the known fact (not in sync), never the weaker "could not confirm".
+#[test]
+fn a_copy_not_settled_and_behind_is_said_not_in_sync() {
+    let fake = Fake::new();
+    fake.keep(NOTE, OnThisPc::InSync, Some(b"the older invented words\n"));
+    fake.s().files.get_mut(NOTE).expect("the note").unsettled = true;
+    fake.s().local_behind = true;
+    let (source, _, body) = opened(&fake, NOTE);
+    assert_eq!(words(&body), NOTE_TEXT, "Beebeeb's version, downloaded");
+    assert_eq!(source.origin(NOTE), Origin::BeebeebNotThisPcs);
 }
 
 #[test]
@@ -597,8 +627,138 @@ fn no_wake_is_asked_for_while_a_read_is_on_its_way() {
     });
     assert_eq!(source.next_check(), None);
     let wakes = fake.s().wakes;
+    // The read ends without an answer (the local state no longer gives the version): it still wakes the window.
+    fake.s().edit = None;
     drop(door);
     read_done(&source);
     until("the read woke the window", || fake.s().wakes > wakes);
     fake.s().edit_waits = false;
+}
+
+/// Delta check of #432, round 3, P1: a save is on its way when the person leaves the file and opens it again from
+/// Files (another source: its own `busy`). The save ends after that, under the earlier opening: the engine never
+/// takes it as the new opening's own. Its landing is a newer version for the new one, and a save from the version the
+/// new one shows goes out from it, under the new opening (the engine answers Conflict).
+#[test]
+fn a_save_of_an_earlier_opening_that_ends_after_the_file_opened_again_is_not_the_new_ones() {
+    let fake = Fake::new();
+    fake.keep(NOTE, OnThisPc::InSync, Some(NOTE_TEXT.as_bytes()));
+    let (mut first, file, _) = opened(&fake, NOTE);
+    let door = fake.door.lock().unwrap();
+    fake.s().change_waits = true;
+    assert_eq!(first.save(NOTE, "mine\n", file.version), SaveOutcome::Working);
+    // Opened again from Files while the save waits (the copy here: no download through the door).
+    let (mut second, again, _) = opened(&fake, NOTE);
+    assert_eq!(again.version, 3);
+    drop(door);
+    assert!(matches!(settled(&mut first, NOTE), Settled::Saved { version: 4, .. }));
+    fake.s().change_waits = false;
+    bump(&fake, 4);
+    second.changes.every = Duration::ZERO;
+    assert!(
+        matches!(newer_answer(&mut second, NOTE), Some(Settled::Newer(_))),
+        "the earlier opening's save is a newer version for this one"
+    );
+    fake.s().save_answer = Ok(SaveEnd::Conflict { theirs: 4 });
+    assert_eq!(second.save(NOTE, "an edit of 3\n", again.version), SaveOutcome::Working);
+    assert!(matches!(settled(&mut second, NOTE), Settled::Conflict(_)));
+    let s = fake.s();
+    assert_eq!(
+        s.saves.last().map(|save| save.2),
+        Some(3),
+        "sent from the version on screen"
+    );
+    assert_ne!(s.save_openings[0], s.save_openings[1], "each under its own opening");
+}
+
+/// Delta check of #432, round 3, P2: a save is on its way and the Available offline switch is pressed: refused at
+/// once. That refusal never ends the save's turn: Show it still waits, and no second save starts.
+#[test]
+fn a_refused_switch_press_never_ends_a_save_on_its_way() {
+    let fake = Fake::new();
+    fake.s().save_answer = Ok(SaveEnd::Queued { base: 0 });
+    let (mut source, file, _) = opened(&fake, NOTE);
+    let door = fake.door.lock().unwrap();
+    fake.s().change_waits = true;
+    assert_eq!(
+        source.save(NOTE, "first invented words\n", file.version),
+        SaveOutcome::Working
+    );
+    assert!(source.set_offline(NOTE, true), "said at once");
+    assert!(matches!(
+        source.settled(NOTE),
+        Some(Settled::Offline { on: true, done: false })
+    ));
+    assert!(source.saving(), "the save is still on its way");
+    bump(&fake, 4);
+    assert_eq!(source.newer(NOTE).err(), Some(OpenError::NotNow), "Show it waits");
+    assert_eq!(
+        source.save(NOTE, "second invented words\n", file.version),
+        SaveOutcome::Failed,
+        "one change at a time"
+    );
+    drop(door);
+    let Settled::Queued { body, version } = settled(&mut source, NOTE) else {
+        panic!("stored here");
+    };
+    assert_eq!((words(&body).as_str(), version), ("first invented words\n", 3));
+    assert!(!source.saving());
+    assert_eq!(fake.s().saves.len(), 1);
+}
+
+/// Delta check of #432, round 3, P2: the refusal of a switch press and the save's own answer come back in one drain.
+/// The refusal is taken first; the save's answer is kept for the next pump (the window is woken at once), never wiped.
+#[test]
+fn a_save_answer_drained_with_another_answer_is_taken_on_the_next_pump() {
+    let fake = Fake::new();
+    fake.s().save_answer = Ok(SaveEnd::Queued { base: 0 });
+    let (mut source, file, _) = opened(&fake, NOTE);
+    let door = fake.door.lock().unwrap();
+    fake.s().change_waits = true;
+    assert_eq!(
+        source.save(NOTE, "my invented words\n", file.version),
+        SaveOutcome::Working
+    );
+    assert!(source.set_offline(NOTE, true));
+    let wakes = fake.s().wakes;
+    drop(door);
+    until("the save answered", || fake.s().wakes > wakes);
+    assert!(matches!(
+        source.settled(NOTE),
+        Some(Settled::Offline { on: true, done: false })
+    ));
+    assert!(source.saving(), "its answer is not taken yet");
+    assert!(
+        source.next_check().is_some_and(|after| after.is_zero()),
+        "woken at once"
+    );
+    let Some(Settled::Queued { body, version }) = source.settled(NOTE) else {
+        panic!("the save's answer, kept for this pump");
+    };
+    assert_eq!((words(&body).as_str(), version), ("my invented words\n", 3));
+    assert!(!source.saving());
+}
+
+/// Delta check of #432, round 3: a save of an earlier opening that met a newer version says so without naming who
+/// saved it (the engine cannot tell another device from this PC's earlier opening).
+#[test]
+fn an_earlier_openings_conflict_is_said_without_naming_a_device() {
+    let fake = Fake::new();
+    fake.s().save_answer = Ok(SaveEnd::Conflict { theirs: 4 });
+    let (mut source, file, _) = opened(&fake, NOTE);
+    let door = fake.door.lock().unwrap();
+    fake.s().change_waits = true;
+    assert_eq!(source.save(NOTE, "mine\n", file.version), SaveOutcome::Working);
+    // Whatever opened the file again while the save was on its way (Show it waits for it; this goes past that).
+    source.changes.busy = false;
+    bump(&fake, 4);
+    source.newer(NOTE).expect("the newer version opens");
+    drop(door);
+    let Settled::Said(words) = settled(&mut source, NOTE) else {
+        panic!("said, not applied");
+    };
+    assert_eq!(
+        words,
+        "Your earlier edit was not saved: the file changed since you opened it"
+    );
 }

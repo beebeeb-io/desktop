@@ -138,26 +138,31 @@ pub trait ViewerEngine: Send + Sync + 'static {
     fn open_elsewhere(&self, file_id: &str) -> Elsewhere;
     /// Wake the window's loop: an answer or progress is waiting.
     fn wake(&self);
-    /// [`Engine::edit_facts_for`]. `None`: not read (the switch and the editor are not offered).
-    fn edit_facts(&self, _session: SessionGeneration, _file_id: &str) -> Option<EditFacts> {
+    /// [`Engine::edit_facts_for`], for the engine's opening `opening` ([`ViewerEngine::begin_opening`]). `None`: not
+    /// read (the switch and the editor are not offered).
+    fn edit_facts(&self, _session: SessionGeneration, _file_id: &str, _opening: u64) -> Option<EditFacts> {
         None
     }
     /// [`Engine::set_kept_for`]. A worker's.
     fn set_kept(&self, _session: SessionGeneration, _file_id: &str, _kept: bool) -> Result<(), ()> {
         Err(())
     }
-    /// [`Engine::save_text_for`]. A worker's.
+    /// [`Engine::save_text_for`], under the engine's opening `opening`. A worker's.
     fn save_text(
         &self,
         _session: SessionGeneration,
         _file_id: &str,
         _text: &str,
         _base: i64,
+        _opening: u64,
     ) -> Result<SaveEnd, EditRefused> {
         Err(EditRefused::Failed)
     }
-    /// [`Engine::forget_viewer_saves`]: a new opening holds none of the viewer's earlier saves of `file_id`.
-    fn forget_own_saves(&self, _file_id: &str) {}
+    /// [`Engine::viewer_opening`]: a new opening of `file_id`, which holds none of the viewer's earlier saves of it.
+    /// Its number is handed to every read and save of this opening; a save of an earlier one is never its own.
+    fn begin_opening(&self, _session: SessionGeneration, _file_id: &str) -> u64 {
+        0
+    }
     /// [`Engine::save_text_copy_for`]. A worker's.
     fn save_copy(
         &self,
@@ -245,8 +250,8 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
         self.engine.wake_host();
     }
 
-    fn edit_facts(&self, session: SessionGeneration, file_id: &str) -> Option<EditFacts> {
-        self.engine.edit_facts_for(session, file_id).ok()
+    fn edit_facts(&self, session: SessionGeneration, file_id: &str, opening: u64) -> Option<EditFacts> {
+        self.engine.edit_facts_for(session, file_id, opening).ok()
     }
 
     fn set_kept(&self, session: SessionGeneration, file_id: &str, kept: bool) -> Result<(), ()> {
@@ -259,8 +264,9 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
         file_id: &str,
         text: &str,
         base: i64,
+        opening: u64,
     ) -> Result<SaveEnd, EditRefused> {
-        self.engine.save_text_for(session, file_id, text, base)
+        self.engine.save_text_for(session, file_id, text, base, opening)
     }
 
     fn save_copy(
@@ -274,8 +280,8 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
         self.engine.save_text_copy_for(session, file_id, text, device, hhmm)
     }
 
-    fn forget_own_saves(&self, file_id: &str) {
-        self.engine.forget_viewer_saves(file_id);
+    fn begin_opening(&self, session: SessionGeneration, file_id: &str) -> u64 {
+        self.engine.viewer_opening(session, file_id)
     }
 }
 
@@ -337,6 +343,8 @@ struct Opening {
     seen: i64,
     /// Which opening this is (`Changes::openings`): an answer begun under another one is not this one's.
     serial: u64,
+    /// The engine's number for this opening ([`ViewerEngine::begin_opening`]): only saves made under it are its own.
+    epoch: u64,
     /// How the file is shown, and its name (a Keep both names the copy after it).
     shows: Shows,
     name: String,
@@ -739,8 +747,8 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             return Err(OpenError::NotNow);
         }
         let (session, account, facts) = self.facts_now(file_id)?;
-        // The new opening holds none of the viewer's earlier saves: none of them is its own any more.
-        self.engine.forget_own_saves(file_id);
+        // The new opening holds none of the viewer's earlier saves: none of them is its own, however late it lands.
+        let epoch = self.engine.begin_opening(session, file_id);
         if let Some(mut before) = self.open.take() {
             before.end();
         }
@@ -787,9 +795,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             ended: false,
             // Read for the session of this open, from the local state alone, BEFORE the content: the version the
             // view is labelled with is never newer than its bytes.
-            edit: self.engine.edit_facts(session, file_id),
+            edit: self.engine.edit_facts(session, file_id, epoch),
             seen: 0,
             serial: self.changes.openings,
+            epoch,
             shows,
             name: facts.name.clone(),
         };

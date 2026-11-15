@@ -18,9 +18,6 @@ use crate::frames::viewers::source::{Conflict, Newer};
 /// How often the open file's version is read from the local state.
 pub(super) const NEWER_EVERY: Duration = Duration::from_millis(1500);
 
-/// What the other side of a conflict is called: the engine does not say which device saved.
-const OTHER_SIDE: &str = "Another device";
-
 /// One answer on its way back: for which file, under which session and account, for which opening.
 pub(super) struct Message {
     file_id: String,
@@ -33,8 +30,13 @@ pub(super) struct Message {
 
 enum Answer {
     /// A change's answer, and the version the view holds once it is applied (`None`: not moved: a conflict, a
-    /// refusal, the switch, a Keep both copy, which is another file).
-    Change { settled: Settled, holds: Option<i64> },
+    /// refusal, the switch, a Keep both copy, which is another file). `worker`: the answer of the change that made the
+    /// source busy (`Changes::busy`); a refusal said at once (`refuse`) is not, and never ends a change in flight.
+    Change {
+        settled: Settled,
+        holds: Option<i64>,
+        worker: bool,
+    },
     /// A read of the open file's version: what the local state holds, the version the view's own queued save
     /// became (`EditFacts::own`), and when this PC read it ("09:14").
     Read { version: i64, own: bool, at: String },
@@ -53,8 +55,8 @@ pub(super) struct Changes {
     pub(super) every: Duration,
     /// How many files this source opened: each opening's `serial`.
     pub(super) openings: u64,
-    /// Reads that came back in the same drain as a change's answer: weighed on the next pump, against what the view
-    /// holds after that answer (never dropped).
+    /// What came back in the same drain as a change's answer, in order: reads, and any later change's answer. Taken on
+    /// the next pump, against what the view holds after that answer (never dropped, never wiped unread).
     pending: Vec<Message>,
 }
 
@@ -105,6 +107,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             session: opening.session,
             account: opening.account.clone(),
             opening: opening.serial,
+            epoch: opening.epoch,
             shows: opening.shows,
             name: opening.name.clone(),
         })
@@ -127,7 +130,11 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 session: stamp.session,
                 account: stamp.account,
                 opening: stamp.opening,
-                answer: Answer::Change { settled, holds },
+                answer: Answer::Change {
+                    settled,
+                    holds,
+                    worker: true,
+                },
             });
             engine.wake();
         });
@@ -149,7 +156,11 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             session: stamp.session,
             account: stamp.account,
             opening: stamp.opening,
-            answer: Answer::Change { settled, holds: None },
+            answer: Answer::Change {
+                settled,
+                holds: None,
+                worker: false,
+            },
         });
     }
 
@@ -178,10 +189,16 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         if self.changes.busy || !self.can_save() {
             return SaveOutcome::Failed;
         }
-        let (session, shows, name, id) = (stamp.session, stamp.shows, stamp.name.clone(), file_id.to_string());
+        let (session, epoch, shows, name, id) = (
+            stamp.session,
+            stamp.epoch,
+            stamp.shows,
+            stamp.name.clone(),
+            file_id.to_string(),
+        );
         let text = Zeroizing::new(text.to_string());
         if self.spawn(file_id, stamp, move |engine| {
-            let saved = engine.save_text(session, &id, &text, i64::from(base));
+            let saved = engine.save_text(session, &id, &text, i64::from(base), epoch);
             settle_save(saved, &id, &name, &text, shows)
         }) {
             SaveOutcome::Working
@@ -197,13 +214,19 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         if self.changes.busy || !self.can_save() {
             return SaveOutcome::Failed;
         }
-        let (session, shows, name, id) = (stamp.session, stamp.shows, stamp.name.clone(), file_id.to_string());
+        let (session, epoch, shows, name, id) = (
+            stamp.session,
+            stamp.epoch,
+            stamp.shows,
+            stamp.name.clone(),
+            file_id.to_string(),
+        );
         let text = Zeroizing::new(text.to_string());
         let started = self.spawn(file_id, stamp, move |engine| match keep {
             // Mine becomes the newest version: saved from the version the file is at now.
-            Keep::Mine => match engine.edit_facts(session, &id) {
+            Keep::Mine => match engine.edit_facts(session, &id, epoch) {
                 Some(now) => settle_save(
-                    engine.save_text(session, &id, &text, now.version),
+                    engine.save_text(session, &id, &text, now.version, epoch),
                     &id,
                     &name,
                     &text,
@@ -215,7 +238,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             // (as an open reads it): a version that lands during the download makes the label older than the
             // bytes, never newer (a save from there is then a conflict, never an overwrite).
             Keep::Theirs => {
-                let Some(now) = engine.edit_facts(session, &id) else {
+                let Some(now) = engine.edit_facts(session, &id, epoch) else {
                     return (Settled::Failed, None);
                 };
                 let cancel = AtomicBool::new(false);
@@ -268,20 +291,32 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     }
 
     /// The answer for `file_id`, while it is still this session's and this account's. Any other is dropped (its
-    /// text overwritten with it).
+    /// text overwritten with it). One change's answer per pump: what came after it waits for the next one, in order
+    /// (delta check of desktop#432, round 3: a second answer in the same drain is never wiped unread).
     pub(super) fn take_settled(&mut self, file_id: &str) -> Option<Settled> {
         let mut found = None;
-        let mut reads = std::mem::take(&mut self.changes.pending);
+        let mut queue = std::mem::take(&mut self.changes.pending);
         while let Ok(message) = self.changes.rx.try_recv() {
+            queue.push(message);
+        }
+        let (mut reads, mut after) = (Vec::new(), Vec::new());
+        for message in queue {
+            if found.is_some() {
+                after.push(message);
+                continue;
+            }
             let current = self.answers_for(&message, file_id);
             match message.answer {
                 Answer::Read { .. } => reads.push(message),
-                Answer::Change { settled, holds } => {
-                    self.changes.busy = false;
-                    if current && found.is_none() && self.opening_as(message.opening).is_some() {
+                Answer::Change { settled, holds, worker } => {
+                    // Only the change in flight ends it: a refusal said at once (a press while busy) never does.
+                    if worker {
+                        self.changes.busy = false;
+                    }
+                    if current && self.opening_as(message.opening).is_some() {
                         self.hold(message.opening, holds);
                         found = Some(settled);
-                    } else if current && found.is_none() {
+                    } else if current {
                         // Begun under an earlier opening of this file (delta check of #432): it never replaces what
                         // is on screen. Its outcome is said; its text is overwritten.
                         found = earlier(settled, file_id);
@@ -291,9 +326,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 }
             }
         }
-        // A change's answer first: it is what the person pressed. The reads wait for the next pump, and are weighed
-        // then against what the view holds after this answer.
+        // A change's answer first: it is what the person pressed. The reads, and whatever came after it, wait for the
+        // next pump, and are taken then against what the view holds after this answer.
         if found.is_some() {
+            reads.append(&mut after);
             self.changes.pending = reads;
             return found;
         }
@@ -379,14 +415,16 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         let Some(opening) = self.read_for(file_id) else {
             return;
         };
-        let (session, account, serial) = (opening.session, opening.account.clone(), opening.serial);
+        let (session, account, serial, epoch) =
+            (opening.session, opening.account.clone(), opening.serial, opening.epoch);
         let (engine, tx, id) = (self.engine.clone(), self.changes.tx.clone(), file_id.to_string());
         let checking = self.changes.checking.clone();
         checking.store(true, Ordering::SeqCst);
         let started = std::thread::Builder::new().name("viewer-newer".into()).spawn(move || {
-            let facts = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.edit_facts(session, &id)))
-                .ok()
-                .flatten();
+            let facts =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.edit_facts(session, &id, epoch)))
+                    .ok()
+                    .flatten();
             // Sent before the flag is let go: the next read starts after this answer is on its way.
             if let Some(facts) = facts {
                 let _ = tx.send(Message {
@@ -419,6 +457,8 @@ struct Stamp {
     session: SessionGeneration,
     account: Option<String>,
     opening: u64,
+    /// The engine's opening of the file the change is for (`Opening::epoch`): only its saves are its own.
+    epoch: u64,
     shows: Shows,
     name: String,
 }
@@ -463,9 +503,11 @@ fn settle_save(
             ),
             None => (Settled::Failed, None),
         },
+        // Who saved the other version is not known (the engine cannot tell another device from an earlier opening of
+        // this one): `from` stays empty, and the question is worded without it.
         Ok(SaveEnd::Conflict { theirs }) => (
             Settled::Conflict(Conflict {
-                from: OTHER_SIDE.to_string(),
+                from: String::new(),
                 at: hhmm(),
                 version: u32::try_from(theirs).unwrap_or(0),
             }),
@@ -497,7 +539,7 @@ fn earlier(settled: Settled, file_id: &str) -> Option<Settled> {
         Settled::Queued { .. } => {
             "Your earlier edit was saved on this PC \u{00B7} sends when Beebeeb can be reached".to_string()
         }
-        Settled::Conflict(_) => "Your earlier edit was not saved: another device saved this file meanwhile".to_string(),
+        Settled::Conflict(_) => "Your earlier edit was not saved: the file changed since you opened it".to_string(),
         Settled::Failed => "Your earlier edit was not saved".to_string(),
         Settled::Opened { .. } | Settled::Newer(_) | Settled::Said(_) => String::new(),
     };

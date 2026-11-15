@@ -148,6 +148,27 @@ yet (task 2445, B23): its 10 keys (`view-toggle`, `view-list`, `view-grid` and t
   An answer for an earlier opening never replaces what is on screen: it is said (`Settled::Said`: "Your earlier
   edit was saved on this PC · sends when Beebeeb can be reached", "… saved · encrypted · version N", "… saved as a
   copy next to this file", "… not saved: another device saved this file meanwhile", "… not saved"), and its text is
-  overwritten. No board draws these toasts.
+  overwritten. No board draws these toasts. (Round 3 below replaces the record's forget with epochs and changes these words.)
 - **A save stored here is labelled with the version it was saved from** (`Settled::Queued::version`, the base the
   engine used): the label is always the base of the text on screen.
+
+## A newer version: fix round 3 of #432 (lane fix432, 2026-11-15)
+
+- **Every opening has its own number in the engine (an epoch).** `begin` (open from Files, Try again, Show it) asks
+  `Engine::viewer_opening`, which hands out a number never used before and starts an empty record of the file's
+  viewer saves for it. Every read of the version and every save carries that number; the engine writes the record
+  only for its own number and session, under one lock. A save of an earlier opening (or of an earlier source: a file
+  opened again from Files is a new source) that ends late never makes, extends or changes a later opening's record:
+  its landing is announced as a newer version, and a save from the new opening's version answers the two-versions
+  question. The records are the account's (`AccountRuntime::viewer_saves`): a lock, a sign-out or a sign-in empties
+  them, a new opening drops other sessions', and each file keeps only its latest save still to land.
+- **One change at a time, honestly.** Only the answer of the change in flight ends it; a press refused at once (the
+  switch while a save is on its way) never does, so Show it still waits and no second save starts. A second answer
+  that comes back in the same pump as another is kept for the next one (woken at once), never wiped unread.
+- **The two-versions question names nobody while nobody is known.** The engine cannot tell another device from this
+  PC's earlier opening, so the question says **"{file} · changed since you opened it"**, the other side is **"The
+  other version"** and its button **"Keep the other version"** (the board's device name stays for a source that
+  knows it). An earlier opening's conflict says "Your earlier edit was not saved: the file changed since you opened
+  it". Show it during any change on its way says **"Newer version not opened yet: your last change is still on its
+  way"**.
+- **A copy here not settled with Beebeeb says so first:** "not in sync" wins over "couldn't confirm" when both hold.

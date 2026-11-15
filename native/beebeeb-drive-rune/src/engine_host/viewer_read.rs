@@ -44,10 +44,12 @@ pub(super) fn read<E: ViewerEngine>(
         }
     }
     let opened = engine.fetch(file_id, IN_MEMORY_MAX, progress, cancel)?;
-    let origin = if behind {
-        Origin::BeebeebUnconfirmedHere
-    } else if recorded.unsettled {
+    // A copy here with a change of its own not settled says the most: Beebeeb's version is not what is on this PC.
+    // Only then is a copy behind it said as one this PC could not confirm (delta check of desktop#432, round 3).
+    let origin = if recorded.unsettled {
         Origin::BeebeebNotThisPcs
+    } else if behind {
+        Origin::BeebeebUnconfirmedHere
     } else {
         Origin::Beebeeb
     };
