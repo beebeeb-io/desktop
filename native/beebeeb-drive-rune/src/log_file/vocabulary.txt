@@ -19,6 +19,7 @@ accepted
 accepts
 access
 account
+account_mismatch
 ack
 acknowledged
 acquire
@@ -51,6 +52,7 @@ app
 app-local
 applied
 apply
+approved
 archived_legacy_state_dir
 are
 as
@@ -180,6 +182,7 @@ conflict
 connect
 connected
 connection
+connection_lost
 content
 content_unknown
 context
@@ -232,6 +235,7 @@ dehydrated
 delete
 delete_count
 deleted
+denied
 depth
 descendant
 descending
@@ -309,6 +313,8 @@ exclude
 existing
 exists
 exited
+expired
+expires_in
 explorer
 factory
 failed
@@ -444,6 +450,7 @@ keeps
 kept
 kept-folder
 key
+keys_not_received
 kind
 known
 landed
@@ -546,6 +553,7 @@ not_found
 not_here
 not_in_sync
 not_moved
+not_stored
 not_there
 nothing
 notices
@@ -559,6 +567,7 @@ null-envelope
 object
 of
 off
+offline
 offset
 ok
 old
@@ -587,6 +596,7 @@ original
 original_removed
 orphaned
 os
+other
 ours
 out
 outcome
@@ -595,6 +605,7 @@ over
 overlapped
 overlay
 overlays
+overtaken
 overwriting
 owed
 own
@@ -1020,6 +1031,7 @@ via
 violation
 w2
 w3
+waiting
 waits
 walked
 was

@@ -45,6 +45,8 @@ use super::hello::{HelloCancel, HelloDone, HelloPrompter, HelloResult, NoHello};
 use super::{log, map_gate_signin, map_next, map_problem, phrase_problem, two_factor_problem};
 use beebeeb_engine::app::signup_api::SignupAttempt;
 
+#[path = "signin_device.rs"]
+mod signin_device;
 #[path = "signup.rs"]
 mod signup;
 use crate::frames::signin::create_source::{PasswordVerdict, SignUpEvent};
@@ -76,6 +78,8 @@ enum Wait {
     SignUpConfirm,
     SignUpCreate,
     SignUpTick,
+    /// A request to be signed in by another device (`signin_device.rs`): its code, ticks and ending.
+    Device,
     /// A call this source does not bind: answered at once, never stale.
     Unbound,
 }
@@ -110,6 +114,8 @@ pub struct EngineSignInSource<C: CredentialStores> {
     unlocking: Arc<Mutex<Option<LockState>>>,
     /// The account being created, if any: owned here, wiped when sign-up is left (`signup.rs`).
     signup: Arc<SignupAttempt>,
+    /// The request to be signed in by another device that runs, if any (`signin_device.rs`).
+    device: signin_device::DeviceSeat,
 }
 
 impl<C: CredentialStores> EngineSignInSource<C> {
@@ -149,6 +155,7 @@ impl<C: CredentialStores> EngineSignInSource<C> {
             hello_up: None,
             unlocking: Arc::new(Mutex::new(None)),
             signup: Arc::new(SignupAttempt::new()),
+            device: signin_device::DeviceSeat::default(),
         }
     }
 
@@ -486,13 +493,12 @@ impl<C: CredentialStores> SignInSource for EngineSignInSource<C> {
     }
 
     fn begin_device_request(&mut self) {
-        self.not_bound(
-            "begin_device_request",
-            SignInEvent::DeviceRequested(Err(SignInProblem::Other)),
-        );
+        self.device_begin();
     }
 
-    fn cancel_device_request(&mut self) {}
+    fn cancel_device_request(&mut self) {
+        self.device_cancel();
+    }
 
     /// Both kinds go to the same engine step: core reads six digits as an authenticator code and eight as a
     /// backup code, and the screen lets nothing else through.
