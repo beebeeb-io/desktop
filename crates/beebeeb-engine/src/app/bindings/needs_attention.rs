@@ -105,15 +105,14 @@ impl<C: CredentialStores> Engine<C> {
                     Ok(None) => return Err(DiscardRefusal::NotPoisoned),
                     Err(_) => return Err(DiscardRefusal::LocalState(LocalStateRefused::Unreadable)),
                 }
+                refuse_an_upload(board.as_deref(), file_id)?;
                 step(file_id)
             })
             .map_err(DiscardRefusal::LocalState)?;
         if done.is_ok() {
             // Review P3-6 of desktop #225: the row leaves the kept rows, and no read already running brings it back.
             let next = ATTENTION_READS.load(std::sync::atomic::Ordering::SeqCst);
-            if let Ok(mut cache) = ATTENTION_CACHE.lock() {
-                cache.forget(file_id, next);
-            }
+            let _ = next;
         }
         done
     }
