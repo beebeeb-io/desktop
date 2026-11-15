@@ -354,7 +354,17 @@ impl<C: CredentialStores> Engine<C> {
         }
         let path = self.local_state_path(&Identity::new(None, None));
         // `None`: whether any is there could not be read.
-        let any = Some(true);
+        let any = match StateDb::open_read_only(&path) {
+            Ok(proof) => proof.has_any_search_recent().ok(),
+            // Nothing synced, or no state database of this app's (or one too old to hold any): nothing to delete.
+            Err(
+                ReadOnlyOpenError::NotFound
+                | ReadOnlyOpenError::NotADatabase
+                | ReadOnlyOpenError::NotAStateDatabase
+                | ReadOnlyOpenError::OlderSchema,
+            ) => return,
+            Err(ReadOnlyOpenError::Locked | ReadOnlyOpenError::Unreadable) => None,
+        };
         let deleted = match any {
             Some(false) => return,
             Some(true) => StateDb::open(&path)
