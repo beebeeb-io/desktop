@@ -229,6 +229,8 @@ pub enum Body {
     Sheet(super::super::office::sheets::SheetView),
     /// DW-1509, DW-1561: a presentation, read-only (the slide on the stage, and Present).
     Deck(super::super::office::slides::DeckBody),
+    /// DW-1507, DW-1511: a Word document, read-only (the pages' pictures are the source's, asked by number).
+    Doc(super::super::office::docs::DocBody),
     /// DW-1556: an office document, and the editor did not start on this PC. Nothing of the file
     /// is held here and nothing was changed.
     NoEditor,
@@ -251,6 +253,7 @@ impl fmt::Debug for Body {
             Body::NoEditor => f.write_str("NoEditor"),
             Body::Sheet(v) => write!(f, "Sheet({} cells)", v.cells.len()),
             Body::Deck(d) => write!(f, "Deck({} slides)", d.view.slides.len()),
+            Body::Doc(d) => fmt::Debug::fmt(d, f),
             Body::Pdf(doc) => write!(f, "Pdf({} pages)", doc.pages),
             Body::Table(doc) => write!(f, "Table({} rows)", doc.rows.len()),
             Body::Archive(doc) => write!(f, "Archive({} entries)", doc.entries.len()),
@@ -266,6 +269,7 @@ impl Body {
             Body::Markdown(doc) => doc.source.zeroize(),
             Body::Word(doc) => doc.wipe(),
             Body::Sheet(view) => view.wipe(),
+            Body::Doc(doc) => doc.wipe(),
             _ => {}
         }
     }
@@ -684,6 +688,9 @@ pub mod board {
     pub const SHEET: &str = "budget-2026.xlsx";
     /// DW-1509, DW-1561 (the id of `office::slides::slides_fixture::file()`).
     pub const DECK: &str = "lisbon-trip-recap.pptx";
+    /// DW-1507, DW-1511 (the ids of `office::docs::docs_fixture::file`): a Word file in the viewer.
+    pub const DOC_VIEW: &str = super::super::super::office::docs::docs_fixture::DOCX_ID;
+    pub const DOC_OLD_VIEW: &str = super::super::super::office::docs::docs_fixture::DOC_ID;
     /// DW-1513's text, as the note's source (DW-1523 shows it with one more line being typed).
     pub const NOTES_TEXT: &str = "# Meeting notes, 4 Nov\n\nPresent: Anna, Lotte, Jonas\n\n## Harbourlight shoot\n- Final selects due **Friday**\n- Colour grade in `Shoot selects/graded`\n- Send the agreement: [Service agreement](Service agreement.docx)\n\n## Studio\n- Rent goes up in January (see Studio rent 2026.pdf)\n- Book the Lisbon follow-up\n";
 }
@@ -807,6 +814,8 @@ impl FixtureViewerSource {
                 )
             },
             board::DECK => super::super::office::slides::slides_fixture::file(),
+            board::DOC_VIEW => super::super::office::docs::docs_fixture::file(false),
+            board::DOC_OLD_VIEW => super::super::office::docs::docs_fixture::file(true),
             board::FAILED => f(
                 &["Files", "Invoices 2026"],
                 "Invoice 0139.pdf",
