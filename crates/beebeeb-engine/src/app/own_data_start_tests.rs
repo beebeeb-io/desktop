@@ -131,7 +131,7 @@ impl Pc {
     }
 
     fn seams<T>(&self, change: impl FnOnce(&mut TestSeams) -> T) -> T {
-        let seat = self.engine.seat();
+        let seat = self.engine.own_data_seat();
         let mut state = lock(&seat.state);
         change(&mut state.test)
     }
@@ -145,7 +145,7 @@ impl Pc {
     }
 
     fn startup_candidate(&self) -> Option<Identity> {
-        lock(&self.engine.seat().state).startup.candidate.clone()
+        lock(&self.engine.own_data_seat().state).startup.candidate.clone()
     }
 
     /// The start a person makes, with Windows' answers from `port`.
