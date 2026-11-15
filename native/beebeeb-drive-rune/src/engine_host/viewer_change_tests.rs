@@ -437,7 +437,7 @@ fn keep_theirs_labels_the_content_with_the_version_read_before_it() {
 }
 
 /// Review of #432, P1-2: a copy on this PC older than Beebeeb's version now is not shown as it (the engine says
-/// `Behind`): Beebeeb's is downloaded, and the line says the copy here is not in sync with it.
+/// `Behind`): Beebeeb's is downloaded, and the line says the copy here could not be confirmed as this version.
 #[test]
 fn a_copy_behind_beebeebs_version_is_downloaded_and_said_not_in_sync() {
     let fake = Fake::new();
@@ -446,7 +446,7 @@ fn a_copy_behind_beebeebs_version_is_downloaded_and_said_not_in_sync() {
     let (source, _, body) = opened(&fake, NOTE);
     assert_eq!(words(&body), NOTE_TEXT, "Beebeeb's version, downloaded");
     assert_eq!(fake.s().fetches, [NOTE.to_string()]);
-    assert_eq!(source.origin(NOTE), Origin::BeebeebNotThisPcs);
+    assert_eq!(source.origin(NOTE), Origin::BeebeebUnconfirmedHere);
 }
 
 #[test]
@@ -510,7 +510,10 @@ fn show_it_waits_while_a_save_is_on_its_way() {
     let (mut source, file, _) = opened(&fake, NOTE);
     let door = fake.door.lock().unwrap();
     fake.s().change_waits = true;
-    assert_eq!(source.save(NOTE, "mine", file.version), SaveOutcome::Working);
+    assert_eq!(
+        source.save(NOTE, "my invented words\n", file.version),
+        SaveOutcome::Working
+    );
     bump(&fake, 4);
     assert!(source.saving());
     assert_eq!(
@@ -522,11 +525,8 @@ fn show_it_waits_while_a_save_is_on_its_way() {
     let Settled::Queued { version, body } = settled(&mut source, NOTE) else {
         panic!("stored here");
     };
-    assert_eq!(
-        (version, words(&body).as_str()),
-        (3, "mine"),
-        "labelled with its base, not the newer 4"
-    );
+    assert_eq!(version, 3, "labelled with its base, not the newer 4");
+    assert_eq!(words(&body), "my invented words\n");
     assert!(!source.saving());
 }
 
