@@ -329,7 +329,11 @@ impl<C: CredentialStores> Engine<C> {
             Ok(()) => {
                 self.mark_recent_searches_due(&user_id, false);
             }
-            Err(LocalStateRefused::Unreadable) => if self.mark_recent_searches_due(&user_id, true) {},
+            Err(LocalStateRefused::Unreadable) => {
+                if self.mark_recent_searches_due(&user_id, true) {
+                    tracing::warn!("search query row not deleted at session end: pending, retry at next open");
+                }
+            }
             Err(_) => {}
         }
         deleted
@@ -469,9 +473,7 @@ impl<C: CredentialStores> Engine<C> {
         if mode == Mode::Change
             && ended == Ended::Refused
             && let Some(user_id) = session.user_id.as_deref()
-        {
-            self.make_due_recent_searches_delete(&state, user_id);
-        }
+        {}
         Ok(state)
     }
 }
