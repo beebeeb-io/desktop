@@ -140,6 +140,8 @@ impl Ui {
             SaveOutcome::Conflict(other) => self.office.over = Some(Over::Conflict(other)),
             // Not saved: the edit and the question stay as they are, and the person is told.
             SaveOutcome::Failed => self.toast = Some(NOT_SAVED.to_string()),
+            // On its way to the engine: nothing is drawn as saved before it answers; the question and file stay.
+            SaveOutcome::Working => self.toast = Some("Saving\u{2026}".to_string()),
         }
     }
 
@@ -476,14 +478,12 @@ fn palette(ui: &Ui, palette: &Palette, t: &Theme) -> El {
         .modal(false, close)
 }
 
-/// DW-1557: the licence panel on its scrim; Esc or a press outside closes it.
+/// DW-1557: the "About this viewer" card at the bottom right, no dimming; Esc or a press outside closes it.
 fn licence(t: &Theme) -> El {
     col()
         .key("scrim")
         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-        .center()
-        .fill(crate::ui::settings_dialog::scrim_color(t))
-        .child(super::office_glue::licence(t))
+        .child(super::office_glue::licence(t).pin(None, Some(16.0), Some(36.0), None))
         .modal(false, close)
 }
 
@@ -624,4 +624,23 @@ pub fn table(rows: &[Vec<String>], width: f32, ink: Color) -> El {
         grid = grid.child(line);
     }
     grid
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frames::viewers::source::{FixtureViewerSource, board};
+
+    /// A save handed to the engine draws nothing as saved: the toast says it is on its way, the file's version and
+    /// the question over the document stay as they were.
+    #[test]
+    fn office_save_handed_to_the_engine_draws_nothing_as_saved() {
+        let mut ui = Ui::open(Box::new(FixtureViewerSource::new()), board::DOCX).expect("the fixture opens it");
+        let version = ui.file.version;
+        ui.office.over = Some(Over::Licence);
+        ui.office_outcome(SaveOutcome::Working);
+        assert_eq!(ui.toast.as_deref(), Some("Saving\u{2026}"));
+        assert_eq!(ui.file.version, version, "the version did not move");
+        assert!(matches!(ui.office.over, Some(Over::Licence)), "the question stayed");
+    }
 }
