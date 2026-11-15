@@ -24,7 +24,7 @@ use crate::ui::settings_list as lists;
 use crate::ui::settings_shell::PANE_TITLE;
 use rune::{Align, Color, El, TextEdit, Tx, col, el, row};
 
-use super::source::AccountSource;
+use super::source::{AccountSource, Password};
 use super::{AccountUi, Dialog, Pane, icons};
 
 /// The code field's own key (focus, tests).
@@ -315,7 +315,9 @@ pub(super) fn approve(s: &mut State) {
     let (Some(request), Some(source)) = (ui.approve.request.as_ref(), ui.source.as_mut()) else {
         return;
     };
-    source.begin_approval(request.id(), &ui.approve.code.text);
+    // The account password: the field the passkey pane asks it in (`form.current`). Slice A5 draws it on the review.
+    let password = Password::from_field(&ui.form.current.text);
+    source.begin_approval(request.id(), &ui.approve.code.text, password);
     ui.approve.waiting = true;
     ui.approve.problem = None;
     ui.approve.code.focused = false;

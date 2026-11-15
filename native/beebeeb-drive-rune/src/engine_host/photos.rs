@@ -46,6 +46,7 @@ use rune::Pixels;
 
 use super::files_trash::TrashCalls;
 use super::log;
+use super::scaffold::not_wired;
 use super::stamp::{Stamp, stamp};
 use super::thumbs::EngineThumbStore;
 use crate::frames::files::source::{Action, ActionError, Change};
@@ -58,6 +59,9 @@ use crate::source::DriveItem;
 #[cfg(test)]
 #[path = "photos_tests.rs"]
 mod tests;
+// plan40 batch 1: Photo sources' folders and the devices' backup line (slice B1).
+#[path = "photos_folders.rs"]
+mod photos_folders;
 
 /// A library this recent is not read again when the Photos section opens.
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
@@ -154,6 +158,8 @@ pub struct EnginePhotos<C: CredentialStores> {
     /// Tests only: what the next Keep answers in the engine's place (this PC's sync folder is not a test's to set).
     #[cfg(test)]
     keep_says: Option<Result<(), ()>>,
+    /// Slice B1 (`photos_folders.rs`): what it keeps between a press and its answer. Empty until it binds.
+    photos_folders: photos_folders::PhotoFolderCalls,
 }
 
 impl<C: CredentialStores> EnginePhotos<C> {
@@ -186,6 +192,7 @@ impl<C: CredentialStores> EnginePhotos<C> {
             dirty: false,
             #[cfg(test)]
             keep_says: None,
+            photos_folders: Default::default(),
         }
     }
 
@@ -712,10 +719,9 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
             .collect()
     }
 
-    /// Not bound: the engine has no "folder from Files that Photos shows"; every photo and video of the account
-    /// shows already.
+    /// Not bound (slice B1, `photos_folders.rs`).
     fn folders(&self) -> Vec<Folder> {
-        Vec::new()
+        not_wired(self.photos_folders_folders())
     }
 
     fn set_shown(&mut self, source: SourceRef, shown: bool) {
@@ -748,9 +754,9 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
         totals
     }
 
-    /// Not bound: this PC does not know what another device's backup is doing now.
+    /// Not bound (slice B1, `photos_folders.rs`).
     fn backup_status(&self) -> Option<BackupStatus> {
-        None
+        not_wired(self.photos_folders_backup_status())
     }
 
     fn origin(&self) -> String {

@@ -57,6 +57,7 @@ mod session_revoke;
 use session_revoke::revoke;
 pub mod account_twofactor_status_api;
 pub mod backups_api;
+pub mod bindings;
 // Files in two versions and the answer to one, for the native Files window.
 pub mod conflicts_api;
 // Explorer's "Free up space" command asks this handle, and a stop removes its binding (task 2490).

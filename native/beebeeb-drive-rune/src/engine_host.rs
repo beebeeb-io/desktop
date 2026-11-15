@@ -76,6 +76,8 @@ pub mod item_preview;
 pub mod open;
 pub mod passkeys;
 pub mod photos;
+// plan40: `not_wired`, around every batch-1 method not bound yet.
+mod scaffold;
 pub mod search;
 pub mod settings;
 pub mod shared;
@@ -385,6 +387,11 @@ impl<C: CredentialStores> LiveEngine<C> {
         let mut count = 0;
         for message in messages.try_iter() {
             fold(&mut status, &message);
+            // Slice B5: a notice of the engine as a Windows toast (`windows_toast::show`, nothing yet).
+            #[cfg(windows)]
+            if let HostMessage::Notice(notice) = &message {
+                crate::shell::platform::windows_toast::show(notice);
+            }
             count += 1;
         }
         count
