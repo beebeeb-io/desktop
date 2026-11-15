@@ -136,8 +136,16 @@ fn the_running_apps_security_page_says_what_is_known_and_guesses_nothing() {
     ] {
         assert!(!says_anywhere(&rt, sample), "a sample or a guess shows: {sample}");
     }
-    // Nothing that is not bound can be pressed: no switch. (The password and two-factor rows open their pages now.)
-    assert!(!has(&rt, "item-1-0-switch"));
+    // Nothing that is not bound can be pressed. App lock's switch is bound: it is drawn only once the engine answered
+    // for this session (the row says "Not known yet" before; `app_lock_tests` pins that at the source), so the test
+    // waits on that answer, then reads the engine's value (on: "Windows Hello"), never a sample's.
+    wait_for(&mut rt, "app lock's answer", |rt| has(rt, "item-1-0-switch"));
+    assert_eq!(text(&rt, "item-1-0-sub"), "Windows Hello");
+    assert!(!says_anywhere(&rt, "anyone using this PC"));
+    assert!(
+        !has(&rt, "item-1-0-pop"),
+        "no time choice: nothing acts on one in this version"
+    );
     // Devices and sessions is bound: its row opens it.
     click(&mut rt, "item-1-1");
     wait_for(&mut rt, "the sessions", |rt| shows(rt, PHONE));

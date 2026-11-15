@@ -77,10 +77,25 @@ fn refused(error: FlowError) -> LockRefused {
 /// Why a person's call got no session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PersonRefused {
+    /// A session is in memory behind a locked screen.
     ScreenLocked,
-    /// The vault is closed (core's `closed_vault_allows`: a person may only prove, lock or sign out there).
+    /// A session is in memory and the vault is closed (core's `closed_vault_allows`: a person may only prove, lock or
+    /// sign out there; credentials on their way to an install).
     VaultClosed,
+    /// No session in memory (signed out, a closed vault whose key left, a session change under way), whatever the
+    /// lock says: never "locked".
     NoSession,
+}
+
+impl PersonRefused {
+    /// THE one mapping of a refusal to an API's words: `locked` for a session that exists behind a locked screen or a
+    /// closed vault, `not_signed_in` for no session.
+    pub(super) fn said_as<E>(self, locked: E, not_signed_in: E) -> E {
+        match self {
+            Self::ScreenLocked | Self::VaultClosed => locked,
+            Self::NoSession => not_signed_in,
+        }
+    }
 }
 
 /// What [`Engine::lock_vault`] did.
@@ -176,19 +191,21 @@ impl<C: CredentialStores> Engine<C> {
             Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => return Err(PersonRefused::NoSession),
         };
-        match call_may_run(self.lock_state(), Call::Person(action)) {
-            Ok(()) => {}
-            Err(CallRefused::ScreenLocked) => return Err(PersonRefused::ScreenLocked),
-            Err(CallRefused::VaultClosed) => return Err(PersonRefused::VaultClosed),
-        }
+        // The lock's answer, then the session, in this one hold (every lock move waits for it): no session is
+        // `NoSession` whatever the lock says, and a session the lock refuses is never handed to `with`.
+        let answer = call_may_run(self.lock_state(), Call::Person(action));
         let guard = self
             .acct
             .session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match guard.as_ref() {
-            Some(session) => Ok(with(session, self.acct.session_generation())),
-            None => Err(PersonRefused::NoSession),
+        let Some(session) = guard.as_ref() else {
+            return Err(PersonRefused::NoSession);
+        };
+        match answer {
+            Ok(()) => Ok(with(session, self.acct.session_generation())),
+            Err(CallRefused::ScreenLocked) => Err(PersonRefused::ScreenLocked),
+            Err(CallRefused::VaultClosed) => Err(PersonRefused::VaultClosed),
         }
     }
 

@@ -1104,10 +1104,7 @@ impl<C: CredentialStores> Engine<C> {
     /// The session token (cloned for a person's single API call). `Err` when locked (either level) or signed out.
     fn session_token(&self) -> Result<String, String> {
         self.person_session(|session, _| session.token.clone())
-            .map_err(|refused| match refused {
-                lock_api::PersonRefused::ScreenLocked | lock_api::PersonRefused::VaultClosed => "locked".to_string(),
-                lock_api::PersonRefused::NoSession => "not signed in".to_string(),
-            })
+            .map_err(|refused| refused.said_as("locked".to_string(), "not signed in".to_string()))
     }
 }
 
