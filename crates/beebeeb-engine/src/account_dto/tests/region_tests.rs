@@ -53,10 +53,9 @@ fn user_region_null_preferred_parses() {
 // 2050: it sends only the deprecated `example_city`. That key is not read, so it cannot reach the IPC.
 #[test]
 fn region_contract_decodes_older_server_response_and_drops_its_city() {
-    let response: UserRegionResponse = serde_json::from_str(include_str!(
-        "../../../../../src-tauri/tests/fixtures/region-api-older-server.json"
-    ))
-    .expect("an older server's response must decode without provider and without a country");
+    let response: UserRegionResponse =
+        serde_json::from_str(include_str!("../../../tests/fixtures/region-api-older-server.json"))
+            .expect("an older server's response must decode without provider and without a country");
     assert_eq!(response.preferred_region, None);
     assert_eq!(response.regions.len(), 1);
     let region = &response.regions[0];
@@ -81,10 +80,8 @@ fn region_contract_decodes_older_server_response_and_drops_its_city() {
 // `example_city` the server still sends for one release is dropped.
 #[test]
 fn region_country_contract_decodes_and_never_forwards_a_city() {
-    let response: UserRegionResponse = serde_json::from_str(include_str!(
-        "../../../../../src-tauri/tests/fixtures/region-api-country.json"
-    ))
-    .unwrap();
+    let response: UserRegionResponse =
+        serde_json::from_str(include_str!("../../../tests/fixtures/region-api-country.json")).unwrap();
     assert_eq!(response.regions[0].country.as_deref(), Some("Germany"));
     let ipc = serde_json::to_string(&response).unwrap();
     assert!(!ipc.contains("Local") && !ipc.contains("city"), "{ipc}");
@@ -94,10 +91,9 @@ fn region_country_contract_decodes_and_never_forwards_a_city() {
 // (server PR #251, regions.rs at aead1d01), not a live capture: the server is not deployed yet.
 #[test]
 fn region_choices_decode_country_response() {
-    let response: UserRegionResponse = serde_json::from_str(include_str!(
-        "../../../../../src-tauri/tests/fixtures/region-choices-country-api.json"
-    ))
-    .expect("the /me/region country response must decode");
+    let response: UserRegionResponse =
+        serde_json::from_str(include_str!("../../../tests/fixtures/region-choices-country-api.json"))
+            .expect("the /me/region country response must decode");
     assert_eq!(response.preferred_region, None);
     assert!(!response.region_strict);
     let ids: Vec<&str> = response.choices.iter().map(|c| c.id.as_str()).collect();
@@ -132,7 +128,7 @@ fn region_choices_decode_country_response() {
 #[test]
 fn region_choices_decode_older_server_datacenters_and_drop_the_city() {
     let response: UserRegionResponse = serde_json::from_str(include_str!(
-        "../../../../../src-tauri/tests/fixtures/region-choices-older-server-api.json"
+        "../../../tests/fixtures/region-choices-older-server-api.json"
     ))
     .expect("an older server's captured /me/region response must decode");
     let ids: Vec<&str> = response.choices.iter().map(|c| c.id.as_str()).collect();
@@ -164,10 +160,8 @@ fn region_strict_decodes_on_the_get_and_the_put_response() {
 
 #[test]
 fn region_choices_never_forward_provider_or_endpoint_to_the_ipc() {
-    let mut json: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../src-tauri/tests/fixtures/region-choices-country-api.json"
-    ))
-    .unwrap();
+    let mut json: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/region-choices-country-api.json")).unwrap();
     json["choices"][1]["provider"] = serde_json::json!("Never Display Storage Provider");
     json["choices"][1]["endpoint"] = serde_json::json!("https://never.example");
     json["choices"][1]["city"] = serde_json::json!("Never Display City");
@@ -197,10 +191,8 @@ fn region_choices_reject_malformed_entries() {
 
 #[test]
 fn region_contract_ignores_legacy_provider_in_ipc() {
-    let mut json: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../src-tauri/tests/fixtures/region-api-country.json"
-    ))
-    .unwrap();
+    let mut json: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/region-api-country.json")).unwrap();
     json["available_regions"][0]["provider"] = serde_json::json!("Never Display Storage Provider");
     let response: UserRegionResponse = serde_json::from_value(json).unwrap();
     let ipc = serde_json::to_value(response).unwrap();

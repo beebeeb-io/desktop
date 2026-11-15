@@ -20,7 +20,7 @@ pub enum KeptRole {
 /// `document_dir` is `<home>/Library/Containers/<bundle_id>/Data/Documents`; otherwise
 /// `<data_dir>/beebeeb/Changes not sent`, so an unsandboxed build never writes plaintext into the person's real
 /// Documents folder. The bundle id and the data folder's name are the app identity's (`io.beebeeb.app` and
-/// `beebeeb` for the real app; `tauri.conf.json`'s `identifier`, a test pins the two equal).
+/// `beebeeb` for the real app; the identifier 0.8.x installs were made with, a test pins it).
 pub fn kept_root(
     document_dir: Option<&Path>,
     data_dir: Option<&Path>,
@@ -174,15 +174,11 @@ mod tests {
         assert_eq!(kept_root(None, None, &crate::identity::REAL), None);
     }
 
-    /// The bundle id the root is checked against is the app's own (`tauri.conf.json`).
+    /// The bundle id the root is checked against is the app's own: the identifier every 0.8.x install was made with,
+    /// so it can never change.
     #[test]
     fn the_bundle_id_is_the_apps() {
-        let conf: serde_json::Value =
-            serde_json::from_str(include_str!("../../../../src-tauri/tauri.conf.json")).unwrap();
-        assert_eq!(
-            conf["identifier"].as_str(),
-            Some(crate::identity::REAL.bundle_identifier())
-        );
+        assert_eq!(crate::identity::REAL.bundle_identifier(), "io.beebeeb.app");
     }
 
     /// U11, the naming half; the writer's tests hold the disk half.

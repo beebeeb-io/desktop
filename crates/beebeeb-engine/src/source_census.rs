@@ -1,9 +1,9 @@
-//! The one walker the source censuses share: every `.rs` file of the desktop's Rust, in BOTH trees, the shell's
-//! (`src-tauri/src`) and the engine crate's (`crates/beebeeb-engine/src`). A census that read only the shell's tree
-//! stopped seeing a module the day it moved to the engine crate; a rule about production code holds in both.
+//! The one walker the source censuses share: every `.rs` file of the engine crate (`crates/beebeeb-engine/src`),
+//! and, for the rules that hold for every writer in the desktop, the native app's tree too
+//! ([`rust_files_with_native`]).
 //!
-//! A shell file keeps the name the censuses always used (`runner.rs`, `finder_setup/core.rs`). An engine file is
-//! named with [`ENGINE_PREFIX`], so no allow-list entry written for a shell file can match it.
+//! An engine file is named with [`ENGINE_PREFIX`] (`crates/beebeeb-engine/src/state_db.rs`); a native file with
+//! [`NATIVE_PREFIX`], so no allow-list entry written for an engine file can match a native one.
 
 use std::path::{Path, PathBuf};
 
@@ -20,9 +20,8 @@ pub const TEST_ITEM_GATES: [&str; 4] = [
     "#[cfg(all(any(test, feature = \"test-support\")",
 ];
 
-pub fn shell_src() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/src")
-}
+/// What a native file's name starts with.
+pub const NATIVE_PREFIX: &str = "native/beebeeb-drive-rune/";
 
 fn engine_src() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -54,26 +53,41 @@ fn walk(dir: &Path, root: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>)
     }
 }
 
-/// Every `.rs` file of both trees as `(name, path)`, sorted by name. Panics when either tree is missing or
+/// Every `.rs` file of the engine tree as `(name, path)`, sorted by name. Panics when the tree is missing or
 /// near-empty: a census that reads nothing passes for the wrong reason.
 pub fn rust_files() -> Vec<(String, PathBuf)> {
     let mut files = Vec::new();
-    let shell = shell_src();
-    walk(&shell, &shell, "", &mut files);
-    let shell_count = files.len();
     let engine = engine_src();
     walk(&engine, &engine, ENGINE_PREFIX, &mut files);
-    let engine_count = files.len() - shell_count;
     assert!(
-        shell_count > 20 && engine_count > 20,
-        "the census reads both trees: {shell_count} shell files, {engine_count} engine files"
+        files.len() > 20,
+        "the census reads the engine tree: {} engine files",
+        files.len()
     );
     files.sort();
     files
 }
 
-/// The production files of a top-level module, wherever it lives: `<module>.rs` and everything under `<module>/`
-/// that is not a test file, shell first. The text is read with LF line ends.
+/// The engine tree and the native app's tree (`native/beebeeb-drive-rune/src` and its `build.rs`), as
+/// `(name, path)`, sorted by name. For a rule about every production writer in the desktop. Panics when either
+/// tree is near-empty.
+pub fn rust_files_with_native() -> Vec<(String, PathBuf)> {
+    let mut files = rust_files();
+    let engine_count = files.len();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../native/beebeeb-drive-rune");
+    walk(&root.join("src"), &root, NATIVE_PREFIX, &mut files);
+    files.push((format!("{NATIVE_PREFIX}build.rs"), root.join("build.rs")));
+    let native_count = files.len() - engine_count;
+    assert!(
+        engine_count > 20 && native_count > 20,
+        "the census reads both trees: {engine_count} engine files, {native_count} native files"
+    );
+    files.sort();
+    files
+}
+
+/// The production files of a top-level module, in the engine tree: `<module>.rs` and everything under `<module>/`
+/// that is not a test file. The text is read with LF line ends.
 pub fn production_tree_parts(module: &str) -> Vec<String> {
     let own = format!("{module}.rs");
     let under = format!("{module}/");
@@ -89,7 +103,7 @@ pub fn production_tree_parts(module: &str) -> Vec<String> {
                 .replace("\r\n", "\n")
         })
         .collect();
-    assert!(!parts.is_empty(), "no production file of `{module}` in either tree");
+    assert!(!parts.is_empty(), "no production file of `{module}` in the engine tree");
     parts
 }
 
@@ -99,8 +113,18 @@ mod tests {
 
     #[test]
     fn both_trees_are_read_and_an_engine_file_is_named_apart() {
-        let files = rust_files();
-        assert!(files.iter().any(|(name, _)| name == "app_run.rs"));
+        let files = rust_files_with_native();
+        assert!(
+            files
+                .iter()
+                .any(|(name, _)| name == "native/beebeeb-drive-rune/src/engine_host.rs"),
+            "a native file is read, under its own prefix"
+        );
+        assert!(
+            files
+                .iter()
+                .any(|(name, _)| name == "native/beebeeb-drive-rune/build.rs")
+        );
         assert!(
             files
                 .iter()
@@ -109,6 +133,10 @@ mod tests {
         assert!(
             !files.iter().any(|(name, _)| name == "state_db.rs"),
             "the engine's file keeps its prefix"
+        );
+        assert!(
+            rust_files().iter().all(|(name, _)| name.starts_with(ENGINE_PREFIX)),
+            "the engine census reads the engine tree alone"
         );
         assert!(is_test_file(
             "crates/beebeeb-engine/src/state_db/reconcile_tests/pass.rs"

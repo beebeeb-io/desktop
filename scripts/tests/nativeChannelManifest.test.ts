@@ -113,7 +113,7 @@ describe('the native line is signed by the v2 key only', () => {
 
   test('the committed v2 key is a minisign public key and not the 0.8.x one', () => {
     const v2 = fs.readFileSync(V2_PUB, 'utf8').trim()
-    const old = JSON.parse(fs.readFileSync(path.join(import.meta.dir, '..', '..', 'src-tauri', 'tauri.conf.json'), 'utf8')).plugins.updater.pubkey
+    const old = fs.readFileSync(path.join(import.meta.dir, '..', '..', 'crates', 'beebeeb-updater', 'keys', 'updater-0.8.pub'), 'utf8').trim()
     expect(v2).not.toBe(old)
     expect(Buffer.from(v2, 'base64').toString('utf8')).toStartWith('untrusted comment: minisign public key: FED25848C41F2348\n')
     // Pinned in a second place (and a third: release-native-windows.yml): replacing the committed key alone fails.

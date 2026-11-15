@@ -96,7 +96,7 @@ foreach ($source in 'installer.nsi', 'hooks.nsh', 'utils.nsh') {
 }
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$icon = Join-Path $repo 'src-tauri\icons\icon.ico'
+$icon = Join-Path $PSScriptRoot 'icon.ico'
 if (!(Test-Path -LiteralPath $icon)) { Fail "no icon at $icon" }
 $signScript = Join-Path $repo 'scripts\windows\sign-artifact.ps1'
 

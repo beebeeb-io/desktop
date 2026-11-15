@@ -46,9 +46,9 @@ function manifest(sigs: Record<string, string>) {
 }
 
 describe('updater signature key guard', () => {
-  test('reads the key id baked into the real tauri.conf.json pubkey', () => {
-    const conf = JSON.parse(fs.readFileSync(path.join(import.meta.dir, '..', '..', 'src-tauri', 'tauri.conf.json'), 'utf8'))
-    expect(keyIdOfPubkey(conf.plugins.updater.pubkey)).toBe('C6FADFD59D732197')
+  test('reads the key id baked into the 0.8 key file', () => {
+    const pubkey = fs.readFileSync(path.join(import.meta.dir, '..', '..', 'crates', 'beebeeb-updater', 'keys', 'updater-0.8.pub'), 'utf8').trim()
+    expect(keyIdOfPubkey(pubkey)).toBe('C6FADFD59D732197')
   })
 
   test('decodes pubkey and signature key ids in minisign display order', () => {

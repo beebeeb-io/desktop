@@ -169,8 +169,8 @@ try {
   check(readme.includes(sig.keyId), `README names the signing key ID ${sig.keyId} next to the key`)
   // The updater key baked into the app must be the key that signs "latest",
   // otherwise in-app updates are broken and the README's Updating section lies.
-  const conf = JSON.parse(fs.readFileSync(path.join(repoRoot, 'src-tauri', 'tauri.conf.json'), 'utf8'))
-  const bakedB64 = Buffer.from(conf.plugins.updater.pubkey, 'base64').toString('utf8').split('\n')[1] ?? ''
+  const bakedKey = fs.readFileSync(path.join(repoRoot, 'crates', 'beebeeb-updater', 'keys', 'updater-0.8.pub'), 'utf8').trim()
+  const bakedB64 = Buffer.from(bakedKey, 'base64').toString('utf8').split('\n')[1] ?? ''
   const baked = decodeMinisignPublicKey(bakedB64.trim())
   check(Boolean(baked) && baked.keyId === sig.keyId && commandKeys.includes(bakedB64.trim()),
     `README's minisign command uses the app's baked updater key (${baked?.keyId ?? 'unparseable'}), which signs ${release.tag_name}`)
