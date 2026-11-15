@@ -507,6 +507,9 @@ impl AccountSource for BoardAccount {
             None => Err(CodeRefused::Expired),
         }
     }
+    fn email_code_sent_to(&self) -> Option<String> {
+        self.new_email.clone()
+    }
     fn resend_wait(&self) -> u32 {
         self.wait
     }

@@ -30,12 +30,21 @@ pub(super) fn refused(why: Refused) -> Problem {
         Refused::WrongPassword | Refused::NotConfirmed => Problem::WrongPassword,
         Refused::Locked => Problem::Locked,
         Refused::Offline => Problem::Offline,
-        Refused::Weak => Problem::Weak,
+        // Beebeeb's own refusal of the new password (the same as now, too weak, found in a breach): said in words. The
+        // check on this PC before the press stays `Weak` (the strength meter says why).
+        Refused::Weak => Problem::NotAccepted,
         Refused::Unconfirmed => Problem::Unconfirmed,
     }
 }
 
-const OFFLINE: &str = "Beebeeb can't be reached. Nothing was changed.";
+pub(super) const OFFLINE: &str = "Beebeeb can't be reached. Nothing was changed.";
+/// Change email while its code is being sent (this press, or one from an earlier visit).
+pub(super) const STILL_SENDING: &str = "A code is still being sent. Wait for it to finish.";
+/// A code confirm whose call is still out.
+pub(super) const STILL_OUT: &str = "Your earlier request is still being made. Wait for it to finish.";
+/// Beebeeb did not take the new password, whichever of its reasons (the same as now, too weak, found in a breach).
+pub(super) const NOT_ACCEPTED: &str =
+    "Beebeeb did not accept the new password. Nothing was changed. Choose a different one.";
 /// A password change that may have been made (review of desktop#423, P2 #9): never "nothing was changed".
 pub(super) const UNCONFIRMED: &str =
     "We couldn't confirm the change. Try signing in with your new password; if that fails, use your old one.";
@@ -135,17 +144,31 @@ pub(super) fn take_in_name(ui: &mut AccountUi) -> Option<&'static str> {
     }
 }
 
-/// Change email (DW-A65): the new address, and the password to confirm it is the person.
+/// Change email (DW-A65): the new address, and the password to confirm it is the person. While its code is being sent
+/// (this visit's press, or one from an earlier visit) the fields are frozen, Send code is off and the first button
+/// leaves the page: its answer is that press's, and DW-A66 names the address Beebeeb sent the code to.
 pub fn email(f: &Form, t: &Theme) -> El {
+    let out = f.waiting == Some(CallKind::StartEmail);
     let address = match f.problem {
+        _ if out => Some(STILL_SENDING),
         Some(Problem::EmailInUse) => Some("This email is already in use."),
         Some(Problem::NotAnAddress) => Some("Enter an email address."),
         Some(Problem::Offline) => Some(OFFLINE),
         _ => None,
     };
-    let wrong = f.problem == Some(Problem::WrongPassword);
-    let (cancel, cancel_b) = button(0, "Cancel", Look::Plain, false, t);
-    let (send, send_b) = button(1, "Send code", Look::Primary, false, t);
+    let wrong = f.problem == Some(Problem::WrongPassword) && !out;
+    let (cancel, cancel_b) = button(0, if out { "Leave this page" } else { "Cancel" }, Look::Plain, false, t);
+    let (mut send, send_b) = button(1, "Send code", Look::Primary, out, t);
+    if !out {
+        send = send.default_button().on_press(super::act(send_code));
+    }
+    let frozen = |field: El| {
+        if out {
+            field.disabled(true).focusable(false)
+        } else {
+            field
+        }
+    };
     set::pane(
         vec![
             set::heading(
@@ -154,20 +177,26 @@ pub fn email(f: &Form, t: &Theme) -> El {
                 None,
                 t,
             ),
-            fm::field(
+            frozen(fm::field(
                 0,
                 &Field {
                     label: "New email",
                     icon: Some(&icons::MAIL),
                     message: address,
-                    error: address.is_some(),
+                    error: address.is_some() && !out,
                     input_key: form::EMAIL_KEY,
                 },
                 &f.email,
-                |s: &mut State| &mut s.account.form.email,
+                move |s: &mut State| {
+                    if out {
+                        &mut s.account.form.sink
+                    } else {
+                        &mut s.account.form.email
+                    }
+                },
                 t,
-            ),
-            fm::field(
+            )),
+            frozen(fm::field(
                 1,
                 &Field {
                     label: "Password",
@@ -181,12 +210,18 @@ pub fn email(f: &Form, t: &Theme) -> El {
                     input_key: form::CURRENT_KEY,
                 },
                 &f.current,
-                |s: &mut State| &mut s.account.form.current,
+                move |s: &mut State| {
+                    if out {
+                        &mut s.account.form.sink
+                    } else {
+                        &mut s.account.form.current
+                    }
+                },
                 t,
-            ),
+            )),
             fm::actions(vec![
                 (cancel.on_press(|s: &mut State| super::go(s, "DW-A51")), cancel_b),
-                (send.default_button().on_press(super::act(send_code)), send_b),
+                (send, send_b),
             ]),
         ],
         t,
@@ -195,23 +230,25 @@ pub fn email(f: &Form, t: &Theme) -> El {
 
 fn send_code(ui: &mut AccountUi) -> Option<&'static str> {
     ui.source.as_deref()?;
+    if ui.form.waiting.is_some() {
+        return None;
+    }
     let address = ui.form.email.text.trim().to_string();
     if !address.contains('@') {
         ui.form.problem = Some(Problem::NotAnAddress);
         form::focus(&mut ui.form, Some(form::EMAIL_KEY));
         return None;
     }
-    if ui.form.waiting.is_some() {
-        return None;
-    }
-    // Every call starts through `calls::start`, which records the press the answer belongs to.
+    // Every call starts through `calls::start`, which records the press the answer belongs to. The password leaves
+    // the field with the press (a wiping copy for the one call); the field is empty from here on.
     let typed = zeroize::Zeroizing::new(ui.form.current.text.clone());
-    if super::calls::start(ui, CallKind::StartEmail, &address, &typed) {
+    ui.form.current = form::secure();
+    if super::calls::start(ui, CallKind::StartEmail, &address, &typed) != super::calls::Start::NotStarted {
         return None;
     }
     let source = ui.source.as_deref_mut()?;
     let f = &mut ui.form;
-    let confirmation = match source.step_up(Password::from_field(&f.current.text), Purpose::ChangeEmail) {
+    let confirmation = match source.step_up(Password::from_field(&typed), Purpose::ChangeEmail) {
         Ok(confirmation) => confirmation,
         Err(why) => {
             f.problem = Some(refused(why));
@@ -262,7 +299,9 @@ pub(super) fn send_again(source: &dyn AccountSource, email: bool, t: &Theme) -> 
         link.on_press(move |s: &mut State| {
             // The email's code is sent on the source's worker (the answer settles on the page); a source that
             // answers at once, and the deletion's code, use `send_again`.
-            if email && super::calls::start(&mut s.account, CallKind::ResendEmail, "", "") {
+            if email
+                && super::calls::start(&mut s.account, CallKind::ResendEmail, "", "") != super::calls::Start::NotStarted
+            {
                 return;
             }
             if let Some(source) = s.account.source.as_deref_mut() {
@@ -276,6 +315,11 @@ pub(super) fn send_again(source: &dyn AccountSource, email: bool, t: &Theme) -> 
 /// Check your new address (DW-A66): the 8-digit code. Digits can be pasted.
 pub fn email_code(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
     let complete = form::code(f, 8).len() == 8;
+    // The address Beebeeb sent the code to (its own word), never what a field holds now.
+    let sent_to = match source.email_code_sent_to() {
+        Some(address) => format!("We sent an 8-digit code to {address}."),
+        None => "We sent an 8-digit code to your new address.".to_string(),
+    };
     let (back, back_b) = button(0, "Back", Look::Plain, false, t);
     let (confirm, confirm_b) = button(1, "Confirm", Look::Primary, !complete, t);
     let confirm = if complete {
@@ -284,12 +328,7 @@ pub fn email_code(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
         confirm
     };
     let mut children = vec![
-        set::heading(
-            "Check your new address",
-            Some(&format!("We sent an 8-digit code to {}.", f.email.text.trim())),
-            None,
-            t,
-        ),
+        set::heading("Check your new address", Some(&sent_to), None, t),
         fm::digits(
             0,
             8,
@@ -309,6 +348,8 @@ pub fn email_code(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
             (wait > 0).then(|| format!("Wait {wait} s before asking again."))
         }
         Some(Problem::ResendLimit) => Some("No more codes for this change. Start again.".to_string()),
+        Some(Problem::StillOut) if f.waiting == Some(CallKind::ResendEmail) => Some(STILL_SENDING.to_string()),
+        Some(Problem::StillOut) => Some("Your code is still being checked. Wait for it to finish.".to_string()),
         Some(_) => Some("That code is wrong or has expired. Check it, or send a new one.".to_string()),
     };
     if let Some(words) = words {
@@ -324,7 +365,9 @@ pub fn email_code(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
 
 fn confirm_email(ui: &mut AccountUi) -> Option<&'static str> {
     let code = form::code(&ui.form, 8);
-    if ui.form.waiting.is_some() || super::calls::start(ui, CallKind::ConfirmEmail, &code, "") {
+    if ui.form.waiting.is_some()
+        || super::calls::start(ui, CallKind::ConfirmEmail, &code, "") != super::calls::Start::NotStarted
+    {
         return None;
     }
     match ui.source.as_deref_mut()?.confirm_email_change(&code) {
@@ -360,13 +403,12 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
         Some(Problem::Changed) => Some(CHANGED_AWAY),
         _ => None,
     };
-    let weak = f.problem == Some(Problem::Weak);
+    let weak = matches!(f.problem, Some(Problem::Weak | Problem::NotAccepted));
+    let not_accepted = (f.problem == Some(Problem::NotAccepted)).then_some(NOT_ACCEPTED);
     let mismatch = f.problem == Some(Problem::Mismatch);
-    // While the change is out the page takes no press (a second change, a way out): nothing is drawn as changed
-    // before Beebeeb answered, and its answer finds the page it is for.
-    // The fields are not editable and Change is off; Cancel stays, as the way out (the answer is settled when the
-    // page is opened again).
-    // While a change is out the button leaves the page and says so: it does not cancel the change.
+    // While a change is out (from this visit or an earlier one) nothing is drawn as changed before Beebeeb answered:
+    // the fields are frozen and Change is off. The first button leaves the page and says so; it does not cancel the
+    // change. An answer that lands after the person left is said wherever they are (`late`), and here in full.
     let (cancel, cancel_b) = button(0, if out { "Leave this page" } else { "Cancel" }, Look::Plain, false, t);
     let (mut change, change_b) = button(1, "Change password", Look::Primary, out, t);
     let cancel = cancel.on_press(|s: &mut State| super::go(s, "DW-A52"));
@@ -390,7 +432,7 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
             &Field {
                 label: "New password",
                 icon: lock,
-                message: None,
+                message: not_accepted,
                 error: weak,
                 input_key: form::NEW_KEY,
             },
@@ -479,6 +521,7 @@ fn change_password(ui: &mut AccountUi) -> Option<&'static str> {
     if let Some(mark) = source.call_mark(CallKind::ChangePassword).filter(|mark| mark.out) {
         ui.form.waiting_serial = mark.serial;
         ui.form.waiting = Some(CallKind::ChangePassword);
+        ui.form.problem = None;
         return None;
     }
     let f = &mut ui.form;
@@ -499,7 +542,7 @@ fn change_password(ui: &mut AccountUi) -> Option<&'static str> {
             // A source that asks Beebeeb on a worker takes the change here: the page waits for its answer
             // (`calls::settle`). One that answers at once is asked as before.
             let new = zeroize::Zeroizing::new(f.new.text.clone());
-            if super::calls::start(ui, CallKind::ChangePassword, &new, "") {
+            if super::calls::start(ui, CallKind::ChangePassword, &new, "") != super::calls::Start::NotStarted {
                 return None;
             }
             let (Some(source), f) = (ui.source.as_deref_mut(), &mut ui.form) else {

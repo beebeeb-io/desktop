@@ -46,6 +46,11 @@ pub enum Problem {
     Unconfirmed,
     /// A password change that finished while the person was on another page: said when the page is opened again.
     Changed,
+    /// The same call is already out (an earlier press, or a visit before this one): this press started nothing, and
+    /// the page waits for that call's answer.
+    StillOut,
+    /// Beebeeb did not take the new password (the same as now, too weak, or found in a breach): nothing changed.
+    NotAccepted,
 }
 
 pub struct Form {
@@ -82,8 +87,6 @@ pub struct Form {
     pub waiting: Option<CallKind>,
     /// The serial of the call `waiting` is for (`AccountSource::call_mark`): only its answer settles the page.
     pub waiting_serial: u64,
-    /// A password change answered while its page was not open: said when the page opens again, never dropped.
-    pub late_change: Option<(u64, Result<(), super::source::Refused>)>,
     /// The first code was wrong and the key it belonged to was replaced: the page says to scan again.
     pub key_replaced: bool,
 }
@@ -122,7 +125,6 @@ impl Default for Form {
             saving_name: false,
             waiting: None,
             waiting_serial: 0,
-            late_change: None,
             key_replaced: false,
         }
     }
@@ -173,43 +175,38 @@ pub fn code(form: &Form, count: usize) -> String {
 /// was just opened or closed): the last problem goes, the secrets of other pages go, the
 /// field a person types in first gets the keyboard.
 pub fn arrive(ui: &mut AccountUi) {
-    // A password change from an earlier visit may still be out: the page shows that wait (and its answer is that
-    // change's), never a blank form that could start a second one.
-    let change_out = (ui.pane == Pane::Password && ui.dialog.is_none())
-        .then(|| ui.source.as_deref().and_then(|s| s.call_mark(CallKind::ChangePassword)))
-        .flatten()
+    // A password change, or a change of email, from an earlier visit may still be out: the page shows that wait (and
+    // its answer is that call's), never a blank form that could start a second one.
+    let adopts = match ui.pane {
+        Pane::Password if ui.dialog.is_none() => Some(CallKind::ChangePassword),
+        Pane::Email if ui.dialog.is_none() => Some(CallKind::StartEmail),
+        _ => None,
+    };
+    let out = adopts
+        .and_then(|kind| ui.source.as_deref().and_then(|s| s.call_mark(kind)))
         .filter(|mark| mark.out);
-    // A late answer is said only under the session and account it was taken under; otherwise it is dropped.
-    let late_mark = ui.source.as_deref().and_then(|s| s.call_mark(CallKind::ChangePassword));
-    if ui
-        .form
-        .late_change
-        .as_ref()
-        .is_some_and(|(serial, _)| !late_mark.is_some_and(|mark| mark.current && mark.serial == *serial))
-    {
-        ui.form.late_change = None;
-    }
+    // The answer of a change that landed while this page was not open: said here, in full, once (`late`).
+    let late = (ui.pane == Pane::Password && out.is_none())
+        .then(|| super::late::take(ui))
+        .flatten();
     let f = &mut ui.form;
     f.problem = None;
-    f.waiting = change_out.map(|_| CallKind::ChangePassword);
-    f.waiting_serial = change_out.map_or(0, |mark| mark.serial);
+    f.waiting = out.and(adopts);
+    f.waiting_serial = out.map_or(0, |mark| mark.serial);
     f.key_replaced = false;
     f.renaming = None;
     f.saved = None;
     focus(f, None);
-    if ui.pane == Pane::Password && change_out.is_none() {
-        // The answer of a change that landed while another page was open: said here, now.
-        match f.late_change.take().map(|(_, answer)| answer) {
-            Some(Ok(())) => {
-                (f.current, f.new, f.again) = (secure(), secure(), secure());
-                f.problem = Some(Problem::Changed);
-            }
-            Some(Err(why)) => {
-                f.current = secure();
-                f.problem = Some(super::forms::refused(why));
-            }
-            None => {}
+    match late {
+        Some(Ok(())) => {
+            (f.current, f.new, f.again) = (secure(), secure(), secure());
+            f.problem = Some(Problem::Changed);
         }
+        Some(Err(why)) => {
+            (f.current, f.new, f.again) = (secure(), secure(), secure());
+            f.problem = Some(super::forms::refused(why));
+        }
+        None => {}
     }
     if ui.pane != Pane::TwoFactorSetup {
         f.setup = None;
@@ -269,7 +266,9 @@ pub fn arrive(ui: &mut AccountUi) {
         }
         Pane::TwoFactorSetup => {
             ui.form.current = secure();
-            if ui.form.setup.is_none() && !super::calls::start(ui, CallKind::BeginTwoFactor, "", "") {
+            if ui.form.setup.is_none()
+                && super::calls::start(ui, CallKind::BeginTwoFactor, "", "") == super::calls::Start::NotStarted
+            {
                 ui.form.setup = ui.source.as_deref_mut().and_then(|s| s.begin_two_factor(None).ok());
             }
             focus(&mut ui.form, Some(CODE_KEY));

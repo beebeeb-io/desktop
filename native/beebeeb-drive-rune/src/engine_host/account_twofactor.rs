@@ -57,11 +57,11 @@ struct Unseen {
 pub(super) struct Calls {
     /// The calls that are out: a second press of the same call sends nothing.
     out: Vec<CallKind>,
-    /// How many calls were started, and the serial of the latest call of each kind.
+    /// How many calls were started.
     counter: u64,
-    /// The last answer taken, and the session and account it was taken under.
-    taken: Option<(CallKind, Stamp)>,
-    latest: Vec<(CallKind, u64)>,
+    /// The latest call of each kind: its serial and the session and account its press was made under (set at the
+    /// start). A late answer is current only while the engine's session and account are still that press's.
+    latest: Vec<(CallKind, u64, Stamp)>,
     held: Held,
     pending_email: Pending,
     /// A wait Beebeeb asked for before the email's code is sent again.
@@ -80,7 +80,6 @@ impl Calls {
         Self {
             out: Vec::new(),
             counter: 0,
-            taken: None,
             latest: Vec::new(),
             held: Arc::default(),
             pending_email: Arc::default(),
@@ -272,16 +271,14 @@ fn work<C: CredentialStores>(
 impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     /// See [`crate::frames::account::source::AccountSource::call_mark`].
     pub(super) fn a_call_mark(&self, kind: CallKind) -> Option<CallMark> {
-        let (_, serial) = self.calls.latest.iter().find(|(k, _)| *k == kind)?;
+        let (_, serial, made_for) = self.calls.latest.iter().find(|(k, _, _)| *k == kind)?;
+        let out = self.calls.out.contains(&kind);
         Some(CallMark {
             serial: *serial,
-            out: self.calls.out.contains(&kind),
-            current: self.calls.out.contains(&kind)
-                || self
-                    .calls
-                    .taken
-                    .as_ref()
-                    .is_none_or(|(k, under)| *k != kind || (*under == stamp(&self.engine) && self.open())),
+            out,
+            // Per kind and per press (desktop#427, the lead's follow-up): one slot for every kind let another kind's
+            // answer make this one current again, and the turn of the drain let a same-account sign-in say it.
+            current: out || (*made_for == stamp(&self.engine) && self.open()),
         })
     }
 
@@ -300,6 +297,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             return true;
         }
         let made_for = stamp(&self.engine);
+        let made_for_mark = made_for.clone();
         let (engine, held, answers) = (self.engine.clone(), self.calls.held.clone(), self.calls.answers.clone());
         let pending = self.calls.pending_email.clone();
         let input = Zeroizing::new(input.to_string());
@@ -327,8 +325,8 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         if started {
             self.calls.out.push(kind);
             self.calls.counter += 1;
-            self.calls.latest.retain(|(k, _)| *k != kind);
-            self.calls.latest.push((kind, self.calls.counter));
+            self.calls.latest.retain(|(k, _, _)| *k != kind);
+            self.calls.latest.push((kind, self.calls.counter, made_for_mark));
         }
         started
     }
@@ -446,10 +444,19 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             if matches!(answered, Answered::Codes(_)) {
                 self.calls.handed = Some((made_for, kind));
             }
-            self.calls.taken = Some((kind, now));
             return Some((kind, answered));
         }
         None
+    }
+
+    /// The address Beebeeb named for the email change that waits for its code, while the session and account are the
+    /// ones it was named for.
+    pub(super) fn pending_address(&self) -> Option<String> {
+        let now = stamp(&self.engine);
+        let held = self.calls.pending_email.lock().ok()?;
+        held.as_ref()
+            .filter(|(made_for, _)| *made_for == now)
+            .map(|(_, address)| address.clone())
     }
 
     /// Whole seconds before "Send again" may be pressed (Beebeeb's `Retry-After`, counted down); 0: now.

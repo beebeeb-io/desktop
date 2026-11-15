@@ -1087,6 +1087,9 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn resend_wait(&self) -> u32 {
         self.resend_left()
     }
+    fn email_code_sent_to(&self) -> Option<String> {
+        self.pending_address()
+    }
     fn send_again(&mut self) -> bool {
         false
     }

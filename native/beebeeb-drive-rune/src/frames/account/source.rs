@@ -590,8 +590,9 @@ pub enum CallKind {
 pub struct CallMark {
     pub serial: u64,
     pub out: bool,
-    /// The session and the account are still the ones this call's answer was taken under (always true while it is
-    /// out). A late answer that is kept for a page is said only while this holds.
+    /// The session and the account are still the ones this call's press was made under (always true while it is
+    /// out). Kept per kind: another kind's answer never makes it true again. An answer, or a late answer kept for a
+    /// page, is said only while this holds.
     pub current: bool,
 }
 
@@ -749,6 +750,11 @@ pub trait AccountSource {
     fn start_email_change(&mut self, confirmation: StepUp, new_email: &str) -> Result<(), EmailRefused>;
     /// Engine: `POST /api/v1/account/email-change/confirm` with the 8 digits.
     fn confirm_email_change(&mut self, code: &str) -> Result<(), CodeRefused>;
+    /// The address Beebeeb sent the email change's code to (its own word, from the start or a resend), while that
+    /// change waits for its code: DW-A66 names it, never what a field holds. `None`: not known.
+    fn email_code_sent_to(&self) -> Option<String> {
+        None
+    }
     /// Engine: seconds until another code or link may be sent (60 after each one); 0: now.
     fn resend_wait(&self) -> u32;
     /// Engine: sends the code (email change) or the link (deletion) again. `false`: too soon.

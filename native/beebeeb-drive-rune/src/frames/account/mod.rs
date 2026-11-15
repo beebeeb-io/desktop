@@ -23,6 +23,7 @@ mod delete;
 mod form;
 mod forms;
 pub mod icons;
+pub mod late;
 mod overview;
 mod passkeys;
 mod plan;
@@ -282,6 +283,9 @@ pub struct AccountUi {
     told_open: Option<Pane>,
     /// A sign-out asked from the Security page's confirm: waiting for its answer, or refused.
     pub signing_out: security_overview::SigningOut,
+    /// A password change answered while its page was not open, to be said wherever the person is (`late`). Outside
+    /// the form: leaving the account's sections keeps it; the end of the session drops it.
+    pub late_change: Option<late::Late>,
 }
 
 impl Default for AccountUi {
@@ -294,6 +298,7 @@ impl Default for AccountUi {
             source: source::first(instance::DEV_BUILD),
             told_open: None,
             signing_out: security_overview::SigningOut::default(),
+            late_change: None,
         }
     }
 }
@@ -345,6 +350,8 @@ pub fn end_flows(s: &mut State) {
     // desktop#424), and wipes them for a sign-out, a closed vault or another account.
     hand_back_codes(ui);
     ui.form = form::Form::default();
+    // A password answer kept to be said belongs to the session that ended.
+    ui.late_change = None;
     // A sign-out that waited for its answer: the session it was for is over, its late answer is the source's to drop.
     ui.signing_out = security_overview::SigningOut::default();
     ui.show(Pane::root(ui.pane.section()).unwrap_or(Pane::Account));
@@ -408,6 +415,11 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     }
     let pumped = source.pump();
     let call = source.call_answer();
+    // A password answer kept to be said: dropped once its press's session or account is no longer the one now.
+    late::check(ui);
+    let Some(source) = ui.source.as_mut() else {
+        return false;
+    };
     // A sign-out that is out: its answer, when it came. Only then is anything of it drawn.
     let answered = match ui.signing_out.waiting {
         Some(all) => source.sign_out_result().map(|answer| (all, answer)),

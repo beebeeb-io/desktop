@@ -84,6 +84,8 @@ fn setup(f: &Form, t: &Theme) -> El {
                 "That code was wrong, so the key changed. Scan the new code and try again."
             } else if f.problem == Some(Problem::Offline) {
                 "Beebeeb could not be reached. Nothing was changed."
+            } else if f.problem == Some(Problem::StillOut) {
+                super::forms::STILL_OUT
             } else {
                 "Invalid code. Try again."
             },
@@ -100,7 +102,9 @@ fn setup(f: &Form, t: &Theme) -> El {
 /// Checks the first code; on success two-factor is on and the backup codes are shown once.
 pub(super) fn turn_on(ui: &mut AccountUi) -> Option<&'static str> {
     let code = form::code(&ui.form, 6);
-    if ui.form.waiting.is_some() || super::calls::start(ui, CallKind::TurnOnTwoFactor, &code, "") {
+    if ui.form.waiting.is_some()
+        || super::calls::start(ui, CallKind::TurnOnTwoFactor, &code, "") != super::calls::Start::NotStarted
+    {
         return None;
     }
     match ui.source.as_deref_mut()?.turn_on_two_factor(&code) {
@@ -370,8 +374,15 @@ pub(super) fn code_dialog(code_for: CodeFor, f: &Form, t: &Theme) -> El {
         |s: &mut State| &mut s.account.form.code,
         t,
     )];
-    if f.problem.is_some() {
-        extra.push(code_error("Incorrect code. Try again.", t));
+    if let Some(problem) = f.problem {
+        extra.push(code_error(
+            match problem {
+                Problem::Offline => "Beebeeb could not be reached. Nothing was changed.",
+                Problem::StillOut => super::forms::STILL_OUT,
+                _ => "Incorrect code. Try again.",
+            },
+            t,
+        ));
     }
     let foot = vec![
         (act_el, act_b),
@@ -443,7 +454,7 @@ fn confirm_code(ui: &mut AccountUi) -> Option<&'static str> {
     };
     if let Some(kind) = started
         && code.len() == 6
-        && super::calls::start(ui, kind, &code, "")
+        && super::calls::start(ui, kind, &code, "") != super::calls::Start::NotStarted
     {
         return None;
     }
