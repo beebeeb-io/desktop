@@ -57,6 +57,10 @@ struct Fake {
     held: Mutex<()>,
     /// The next write panics on its worker.
     panics: AtomicBool,
+    /// Whether this double reads step 3's folders, what it finds, and a read that waits here until released.
+    reads_choices: AtomicBool,
+    choices: Mutex<Vec<BackupChoice>>,
+    choices_held: Mutex<()>,
 }
 
 fn session(number: u64) -> SessionGeneration {
@@ -87,6 +91,9 @@ fn fake() -> Arc<Fake> {
         wakes: AtomicUsize::new(0),
         held: Mutex::new(()),
         panics: AtomicBool::new(false),
+        reads_choices: AtomicBool::new(false),
+        choices: Mutex::default(),
+        choices_held: Mutex::new(()),
     })
 }
 
@@ -138,6 +145,13 @@ impl SetupEngine for Fake {
     }
     fn sync_folder(&self) -> Option<PathBuf> {
         self.folder.lock().unwrap().clone()
+    }
+    fn backup_choices(&self) -> Vec<BackupChoice> {
+        let _held = self.choices_held.lock().unwrap();
+        self.choices.lock().unwrap().clone()
+    }
+    fn reads_backup_choices(&self) -> bool {
+        self.reads_choices.load(Ordering::SeqCst)
     }
     fn ask_explorer_again(&self) {
         self.entry_asks.fetch_add(1, Ordering::SeqCst);
@@ -250,6 +264,63 @@ fn settle(set: &mut Set, wakes: usize) -> bool {
         std::thread::sleep(Duration::from_millis(5));
     }
     set.source.poll()
+}
+
+/// A first run on `engine` whose folder read is held until the returned guard drops.
+fn backup_read_held(engine: &Arc<Fake>) -> (EngineSetupSource<Fake>, std::sync::MutexGuard<'_, ()>) {
+    engine.reads_choices.store(true, Ordering::SeqCst);
+    let held = engine.choices_held.lock().unwrap();
+    let (asked, platform, first_run) = (
+        Arc::<Asked>::default(),
+        Arc::new(FakePlatform::default()),
+        Arc::<FirstRun>::default(),
+    );
+    first_run.read(&**engine);
+    (
+        EngineSetupSource::new(engine.clone(), hooks(&asked, platform, first_run)),
+        held,
+    )
+}
+
+#[test]
+fn the_backup_step_is_not_called_unavailable_while_its_folders_are_still_being_read() {
+    let engine = fake();
+    let (mut source, held) = backup_read_held(&engine);
+    // The read is on its worker and has not answered: the step must not say "not in this version".
+    assert!(
+        source.available(Step::Backup),
+        "a read that is running is not an absence"
+    );
+    drop(held);
+    let began = Instant::now();
+    // The answer: no folders were found, so now the step says it is not available.
+    while source.available(Step::Backup) {
+        assert!(began.elapsed() < Duration::from_secs(10), "the read never answered");
+        source.poll();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(source.folders().is_empty());
+}
+
+#[test]
+fn the_backup_step_offers_the_folders_the_read_found() {
+    let engine = fake();
+    *engine.choices.lock().unwrap() = vec![BackupChoice {
+        key: "documents".into(),
+        name: "Documents".into(),
+        on: true,
+        items: Some(3),
+    }];
+    let (mut source, held) = backup_read_held(&engine);
+    drop(held);
+    let began = Instant::now();
+    while source.folders().is_empty() {
+        assert!(began.elapsed() < Duration::from_secs(10), "the read never answered");
+        source.poll();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(source.available(Step::Backup));
+    assert_eq!(source.folders()[0].name, "Documents");
 }
 
 #[test]

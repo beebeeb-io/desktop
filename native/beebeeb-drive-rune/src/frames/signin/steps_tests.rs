@@ -977,3 +977,34 @@ fn where_the_source_has_no_in_app_doors_the_board_doors_open_the_web_recovery_pa
     }
     assert!(calls.borrow().is_empty(), "nothing was asked of the engine");
 }
+
+#[test]
+fn where_the_source_has_no_in_app_doors_no_door_to_another_device_is_drawn() {
+    let (mut rt, calls) = form(Script {
+        in_app_doors: false,
+        ..Script::default()
+    });
+    let page = a11y(&rt);
+    assert!(
+        !page.contains("Sign in with another device"),
+        "no door that leads to the web's recovery page under Sign in"
+    );
+    click(&mut rt, "link-0-box");
+    assert_eq!(ui(&mut rt).screen, Screen::Forgot);
+    let page = a11y(&rt);
+    assert!(
+        !page.contains("another device signed in") && !page.contains("Sign in with another device"),
+        "no card that promises approval from another device"
+    );
+    // The doors that are true stay: the phrase's page on the web, and what neither means.
+    assert!(page.contains("I have my recovery phrase") && page.contains("I have neither"));
+    assert!(calls.borrow().is_empty(), "nothing was asked of the engine");
+}
+
+#[test]
+fn where_the_source_has_in_app_doors_both_doors_to_another_device_are_drawn() {
+    let (mut rt, _) = form(Script::default());
+    assert!(a11y(&rt).contains("Sign in with another device"));
+    click(&mut rt, "link-0-box");
+    assert!(a11y(&rt).contains("I have another device signed in"));
+}
