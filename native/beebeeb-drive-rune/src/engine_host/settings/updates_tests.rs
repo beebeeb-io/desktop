@@ -640,3 +640,17 @@ fn the_hand_off_stops_sync_first_and_starts_nothing_outside_windows() {
         }
     ));
 }
+
+/// The menu shows the channel the settings file holds; the build came from `installed_release_channel`, else from
+/// the channel chosen when the app started.
+#[test]
+fn the_saved_channel_and_the_one_the_build_came_from() {
+    assert_eq!(channels(None), (Channel::Stable, Channel::Stable));
+    let mut config = DesktopConfig::default();
+    config.release_channel = ReleaseChannel::Stable;
+    config.installed_release_channel = Some(ReleaseChannel::Beta);
+    assert_eq!(channels(Some(&config)), (Channel::Stable, Channel::Beta));
+    config.release_channel = ReleaseChannel::Alpha;
+    config.installed_release_channel = None;
+    assert_eq!(channels(Some(&config)), (Channel::Alpha, Channel::Alpha));
+}
