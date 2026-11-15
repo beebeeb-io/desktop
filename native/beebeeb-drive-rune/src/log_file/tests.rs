@@ -713,9 +713,12 @@ fn the_cap_holds_while_the_file_is_held_and_the_log_recovers_in_the_same_run() {
         current.contains("after the hold") && current.contains("n=19\n"),
         "the log recovers when the hold ends: {current}"
     );
+    // Only the rotation after the hold can move a line written during it into `.1`: the 40 lines before the hold already
+    // rotated once, so `.1` existing says nothing.
+    let old = fs::read_to_string(dir.path().join(OLD_FILE_NAME)).unwrap_or_default();
     assert!(
-        dir.path().join(OLD_FILE_NAME).exists(),
-        "the full file was rotated once it could be"
+        old.contains("during the hold"),
+        "the full file was rotated once it could be: {old}"
     );
     assert!(current.len() as u64 <= cap);
 }
@@ -741,5 +744,104 @@ fn a_reopen_that_finds_the_file_over_the_cap_drops_the_line() {
         fs::metadata(dir.path().join(FILE_NAME)).unwrap().len(),
         4096,
         "a line was written past the cap"
+    );
+}
+
+// ---- Round 4 (delta review 2 of #442) ----
+
+#[test]
+fn an_http_looking_folder_name_never_writes_what_follows_it() {
+    // A folder called `HTTP 404 Medical Records` under the engine's path-printing texts (Windows and Unix).
+    assert_never_written(
+        "windows path",
+        "Medical",
+        "write lock C:\\Users\\a\\Projects\\HTTP 404 Medical Records\\Rome: Access is denied. (os error 5)",
+    );
+    assert_never_written(
+        "unix path",
+        "Medical",
+        "write lock /home/a/Projects/HTTP 404 Medical Records/Rome: Access is denied. (os error 5)",
+    );
+    assert_never_written(
+        "quoted name",
+        "Smith",
+        "upload of \u{201c}Anna HTTP 404 Smith Files\u{201d} failed: HTTP 500 Internal Server Error: body",
+    );
+    assert_never_written(
+        "quoted name alone",
+        "Anna",
+        "could not read \u{201c}HTTP 200 Anna Smith\u{201d}: The system cannot find the file specified.",
+    );
+    // A status inside a text (after a `: `, a quote or a bracket) is still a status.
+    let text = assert_never_written(
+        "status after a colon",
+        "Medical",
+        "sync ops: HTTP 502 Bad Gateway: Medical Records page",
+    );
+    assert!(
+        text.contains("sync ops: HTTP 502 Bad Gateway: <body omitted>"),
+        "{text}"
+    );
+    // A prefix that is not at a boundary is dropped with the rest, and a later real one is still found (the `€` case).
+    assert_never_written(
+        "multibyte after HTTP",
+        "Anna",
+        "x HTTP 5\u{20ac} then HTTP 500 Internal Server Error: Anna Smith body",
+    );
+}
+
+#[test]
+fn a_path_or_token_with_an_equals_sign_is_read_like_any_other_word() {
+    assert_never_written(
+        "windows path with =",
+        "Anna",
+        "could not read C:\\Users\\Anna\\Downloads\\export=1\\Medical Records\\scan.pdf: Access is denied. (os error 5)",
+    );
+    assert_never_written(
+        "windows path with =, folder",
+        "Medical",
+        "could not read C:\\Users\\Anna\\Downloads\\export=1\\Medical Records\\scan.pdf: Access is denied. (os error 5)",
+    );
+    assert_never_written(
+        "unix path with =",
+        "Medical",
+        "could not read /home/anna/a=b/Medical Records/scan.pdf: Permission denied (os error 13)",
+    );
+    assert_never_written(
+        "file name before =",
+        "scan",
+        "could not read C:\\Users\\Anna\\file=abc.pdf: Access is denied.",
+    );
+    assert_never_written(
+        "padded base64",
+        "dGhpcyBpcyBh",
+        "got dGhpcyBpcyBhIHNlY3JldCB0b2tlbiBmb3IgdGVzdGluZw== from the server",
+    );
+    assert_never_written("email before =", "anna@", "sign in as anna@example.eu=1 failed");
+    assert_never_written("file name before = 2", "Medical", "open Medical.pdf=1 failed");
+}
+
+#[test]
+fn a_credential_keeps_its_label_even_when_it_holds_custom() {
+    assert_never_written("password label", "hunter2", "password: hunter2=custom:abc");
+    assert_never_written("bearer", "eyJhbGciOi", "Authorization: Bearer eyJhbGciOi=custom:x");
+}
+
+#[test]
+fn quotes_of_mixed_styles_mark_from_the_first_opening_to_the_last_closing() {
+    assert_never_written(
+        "backtick then double",
+        "Files",
+        "`sync` failed for \u{201c}Anna`s Files\u{201d} today",
+    );
+    assert_never_written(
+        "single then double",
+        "Files",
+        "\u{2018}Q3\u{2019} moved to \u{201c}Anna\u{2019}s Files\u{201d} today",
+    );
+    assert_never_written(
+        "guillemet then double",
+        "Files",
+        "\u{ab}a\u{bb} moved to \u{201c}Anna\u{bb}s Files\u{201d} today",
     );
 }

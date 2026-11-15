@@ -265,10 +265,15 @@ fn scrub_with(raw: &str, allow_uuid: bool) -> String {
     }
     if let Some((before, status)) = http_status_prefix(raw) {
         let head = scrub_with(before, allow_uuid);
-        return if head.is_empty() {
-            format!("{status}: <body omitted>")
+        let status = if status.is_empty() {
+            "<body omitted>".to_string()
         } else {
-            format!("{head} {status}: <body omitted>")
+            format!("{status}: <body omitted>")
+        };
+        return if head.is_empty() {
+            status
+        } else {
+            format!("{head} {status}")
         };
     }
     if looks_like_body(raw) {
@@ -312,6 +317,20 @@ fn scrub_with(raw: &str, allow_uuid: bool) -> String {
             out.push("<host>".to_string());
             continue;
         }
+        if redact_next {
+            // `Authorization: Bearer x`: the scheme word is shown, the credential after it is not.
+            if ALWAYS_LABELS.contains(&token.to_ascii_lowercase().as_str()) {
+                out.push(token.to_string());
+            } else {
+                redact_next = false;
+                out.push(REDACTED.to_string());
+                // A redacted value that starts a path: its name can hold spaces, nothing after it is trusted.
+                if absolute_start(token) {
+                    break;
+                }
+            }
+            continue;
+        }
         // `category=custom:<name>` inside a text: the same, after the `=`.
         if let Some((key, value)) = token.split_once('=')
             && value.get(..7).is_some_and(|head| head.eq_ignore_ascii_case("custom:"))
@@ -330,20 +349,6 @@ fn scrub_with(raw: &str, allow_uuid: bool) -> String {
             out.push("custom:<name>".to_string());
             break;
         }
-        if redact_next {
-            // `Authorization: Bearer x`: the scheme word is shown, the credential after it is not.
-            if ALWAYS_LABELS.contains(&token.to_ascii_lowercase().as_str()) {
-                out.push(token.to_string());
-            } else {
-                redact_next = false;
-                out.push(REDACTED.to_string());
-                // A redacted value that starts a path: its name can hold spaces, nothing after it is trusted.
-                if absolute_start(token) {
-                    break;
-                }
-            }
-            continue;
-        }
         // `password: x`, `Authorization: Bearer x`: the label decides, and the word after it is its value.
         let label = token.trim_end_matches(':').to_ascii_lowercase();
         if token.ends_with(':') && !token.contains('=') && denied_name(&label)
@@ -356,7 +361,7 @@ fn scrub_with(raw: &str, allow_uuid: bool) -> String {
         let shown = scrub_token(token, allow_uuid);
         // A path that starts at a root can hold spaces (`C:\Users\Anna Smith\x`): nothing after it is trusted.
         let value_starts_a_path = token.split_once('=').is_some_and(|(_, value)| absolute_start(value));
-        if (shown == "<path>" && absolute_start(token)) || value_starts_a_path {
+        if (shown.starts_with("<path>") && absolute_start(token)) || value_starts_a_path {
             out.push(shown);
             break;
         }
@@ -371,7 +376,7 @@ fn scrub_with(raw: &str, allow_uuid: bool) -> String {
 fn http_status_prefix(raw: &str) -> Option<(&str, String)> {
     for (at, _) in raw.match_indices("HTTP ") {
         let rest = &raw[at + 5..];
-        let digits = rest.get(..3)?;
+        let Some(digits) = rest.get(..3) else { continue };
         if !digits.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
@@ -384,6 +389,13 @@ fn http_status_prefix(raw: &str) -> Option<(&str, String)> {
         }
         // The reason is read like any other text: the brackets and the apostrophe are separators, a word with a shape goes.
         let reason = scrub_with(reason, false);
+        // A prefix inside a path or a quoted name (a folder called `HTTP 404 pages`) is not a status: the rest still goes,
+        // but nothing of the prefix is written. Only where `DesktopApiError::HttpStatus` itself can start (the text, a `: `
+        // chain, a Debug quote or bracket) is the status shown.
+        let head = &raw[..at];
+        if !(head.is_empty() || head.ends_with(": ") || head.ends_with('"') || head.ends_with('(')) {
+            return Some((raw[..at].trim(), String::new()));
+        }
         let status = if reason.is_empty() {
             format!("HTTP {digits}")
         } else {
@@ -407,30 +419,26 @@ fn mark_host(raw: &str) -> String {
 }
 
 /// Text between “…”, ‘…’, «…» or backticks is a name (the engine quotes the names it prints): it becomes one mark. The
-/// name ends at the LAST matching closing quote of the text, not the first: a name can hold a closing quote of its own
-/// (`“Anna “Work” Files”`), and `’` is also the apostrophe. Two quoted names become one mark, an over-redaction the
-/// module accepts. An opening quote with no closing one marks the rest of the text.
+/// name runs from the first opening quote of ANY style to the last closing quote of ANY style: a name can hold a
+/// closing quote of its own (`“Anna “Work” Files”`), `’` is also the apostrophe, and a quote of another style can sit
+/// inside a name. Two quoted names become one mark, an over-redaction the module accepts. An opening quote with no
+/// closing one after it marks the rest of the text.
 fn mark_quoted(raw: &str) -> String {
+    const OPENING: [char; 4] = ['\u{201c}', '\u{2018}', '\u{ab}', '`'];
+    const CLOSING: [char; 4] = ['\u{201d}', '\u{2019}', '\u{bb}', '`'];
     let chars: Vec<char> = raw.chars().collect();
     let mut out = String::with_capacity(raw.len());
     let mut i = 0;
     while i < chars.len() {
-        let close = match chars[i] {
-            '\u{201c}' => Some('\u{201d}'),
-            '\u{2018}' => Some('\u{2019}'),
-            '\u{ab}' => Some('\u{bb}'),
-            '`' => Some('`'),
-            _ => None,
-        };
-        let Some(close) = close else {
+        if !OPENING.contains(&chars[i]) {
             out.push(chars[i]);
             i += 1;
             continue;
-        };
+        }
         out.push(' ');
         out.push(NAME_MARK);
         out.push(' ');
-        i = match chars[i + 1..].iter().rposition(|c| *c == close) {
+        i = match chars[i + 1..].iter().rposition(|c| CLOSING.contains(c)) {
             Some(last) => i + 1 + last + 1,
             None => chars.len(),
         };
@@ -471,7 +479,14 @@ fn scrub_token(token: &str, allow_uuid: bool) -> String {
         return token.to_string();
     }
     let (prefix, core, suffix) = (&token[..start], &token[start..end], &token[end..]);
-    // `name=value`: the name decides first, then the value is read as a token of its own.
+    // Trailing `=` padding (base64) belongs to the token, and the part before an `=` is a word like any other: a path,
+    // an email or a file name there is replaced, not written.
+    let unpadded = core.trim_end_matches('=');
+    if unpadded.len() < core.len() && !unpadded.contains('=') {
+        if let Some(marker) = classify(unpadded, allow_uuid) {
+            return format!("{prefix}{marker}{suffix}");
+        }
+    }
     if let Some((key, val)) = core.split_once('=')
         && !key.is_empty()
         && !key.contains("://")
@@ -481,6 +496,7 @@ fn scrub_token(token: &str, allow_uuid: bool) -> String {
         } else {
             scrub_token(val, allow_uuid)
         };
+        let key = classify(key, allow_uuid).map_or(key.to_string(), str::to_string);
         return format!("{prefix}{key}={shown}{suffix}");
     }
     match classify(core, allow_uuid) {
