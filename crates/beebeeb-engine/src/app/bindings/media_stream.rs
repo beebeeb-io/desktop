@@ -17,13 +17,15 @@
 //! What a reader holds: the plan (its file key wipes itself on drop) and a cache of decrypted chunks, each in a
 //! `Zeroizing` buffer, least recently used first out. The cache holds three chunks of the file's stride (the one
 //! before the read, the one read, the next one fetched ahead), never less than [`MEDIA_CACHE_MAX`] and never more
-//! than [`MEDIA_CACHE_CEILING`]; a chunk larger than that is never kept. Chunk 0 (the container's header, read again
-//! and again) is never evicted while it is at most a quarter of that. A worker fetches ahead up to
-//! [`MEDIA_READ_AHEAD`] past each read, when the cache holds two chunks; a read far from it (a seek) gives that up. A
-//! playback never fetches more than twice the file's size plus [`MEDIA_REFETCH_SLACK`] (read-ahead included): past
-//! it every read answers [`MediaReadError::OverBudget`]. Dropping the reader wipes the cache at once (the `Zeroizing`
-//! buffers zero themselves as they are dropped), and the worker, told so, gives up its fetch within [`ASK_EVERY`] and
-//! drops what it fetched.
+//! than [`MEDIA_CACHE_CEILING`]; a stride of [`MEDIA_TWO_STRIDES_FROM`] or more (core's largest, for files over
+//! 4 GiB) may hold two chunks whatever the ceiling (the one read and the next one fetched ahead), at most 512 MiB
+//! (core never plans a stride over 256 MiB, and the plan refuses one that says so). A chunk larger than the cap is
+//! never kept. Chunk 0 (the container's header, read again and again) is never evicted while it is at most a quarter
+//! of the cap. A worker fetches ahead up to [`MEDIA_READ_AHEAD`] past each read, when the cache holds two chunks; a
+//! read far from it (a seek) gives that up. A playback never fetches more than twice the file's size plus
+//! [`MEDIA_REFETCH_SLACK`] (read-ahead included): past it every read answers [`MediaReadError::OverBudget`].
+//! Dropping the reader wipes the cache at once (the `Zeroizing` buffers zero themselves as they are dropped), and
+//! the worker, told so, gives up its fetch within [`ASK_EVERY`] and drops what it fetched.
 //!
 //! The worker lives as long as the reader from its first read of Beebeeb's chunks, and it watches the session: within
 //! [`WATCH_EVERY`] of a lock, a sign-out or an account change it wipes what the reader holds, also when no read comes
@@ -77,8 +79,11 @@ mod tests;
 /// The fewest decrypted chunk bytes one reader may hold (a zeroized LRU): its cap is three chunks of the file's
 /// stride, never under this.
 pub const MEDIA_CACHE_MAX: u64 = 32 << 20;
-/// The most decrypted chunk bytes one reader holds, whatever the stride.
+/// The most decrypted chunk bytes one reader holds, for a stride under [`MEDIA_TWO_STRIDES_FROM`].
 pub const MEDIA_CACHE_CEILING: u64 = 384 << 20;
+/// From this stride on, the cache may hold two chunks whatever the ceiling: the one played and the next one, fetched
+/// ahead, so a play crosses the boundary between two of core's largest chunks (256 MiB) without fetching there.
+pub const MEDIA_TWO_STRIDES_FROM: u64 = 128 << 20;
 /// How far past the last read the reader fetches ahead, on a worker.
 pub const MEDIA_READ_AHEAD: u64 = 8 << 20;
 /// What one playback may fetch beyond twice the file's size (a helper that loops seeks cannot make the app download
@@ -138,8 +143,10 @@ fn sticky(why: MediaReadError) -> bool {
 struct Limits {
     /// The cache's cap is never under this ...
     cache_floor: u64,
-    /// ... and never over this.
+    /// ... and never over this, ...
     cache_ceiling: u64,
+    /// ... but from this stride on, two strides when that is more.
+    two_strides_from: u64,
     read_ahead: u64,
     refetch_slack: u64,
 }
@@ -148,14 +155,21 @@ impl Limits {
     const SHIPPED: Self = Self {
         cache_floor: MEDIA_CACHE_MAX,
         cache_ceiling: MEDIA_CACHE_CEILING,
+        two_strides_from: MEDIA_TWO_STRIDES_FROM,
         read_ahead: MEDIA_READ_AHEAD,
         refetch_slack: MEDIA_REFETCH_SLACK,
     };
 
     /// The most decrypted bytes a reader of chunks of `stride` bytes holds: three chunks (the one before the read,
-    /// the one read, the next one fetched ahead), never under the floor, never over the ceiling.
+    /// the one read, the next one fetched ahead), never under the floor, never over the ceiling; from
+    /// `two_strides_from` on, at least two chunks (the one read and the next one), whatever the ceiling.
     fn cache_cap(&self, stride: u64) -> u64 {
-        stride.saturating_mul(3).max(self.cache_floor).min(self.cache_ceiling)
+        let cap = stride.saturating_mul(3).max(self.cache_floor).min(self.cache_ceiling);
+        if stride >= self.two_strides_from {
+            cap.max(stride.saturating_mul(2))
+        } else {
+            cap
+        }
     }
 }
 
@@ -746,7 +760,7 @@ impl MediaReader {
         Ok(out)
     }
 
-    /// The most decrypted bytes this reader holds: three chunks of the network's stride, within the limits.
+    /// The most decrypted bytes this reader holds: [`Limits::cache_cap`] of the network's stride.
     fn cache_cap(&self, network: &Network) -> u64 {
         self.limits.cache_cap(network.chunk_size)
     }
