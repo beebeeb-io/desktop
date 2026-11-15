@@ -12,6 +12,7 @@ pub mod account;
 pub mod backups;
 pub mod files;
 pub mod global;
+pub mod item;
 pub mod photos;
 pub mod search;
 pub mod settings;
@@ -52,6 +53,7 @@ pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
             signin::create::FRAMES,
             signin::setup::FRAMES,
             signin::setup::RENDER_SCENES,
+            item::scenes::RENDER_SCENES,
             signin::before_files::FRAMES,
             signin::lock::SCENES,
             signin::setup::guide::FRAMES,
@@ -130,8 +132,12 @@ pub struct Ui {
     pub shared: shared::SharedUi,
     pub trash: trash::TrashUi,
     pub find: search::SearchUi,
-    /// The navigation intents emitted so far, oldest first.
+    /// The navigation intents emitted so far, oldest first. The shell's poll takes them
+    /// (`shell::intents::drain_frame_intents`).
     pub intents: Vec<Intent>,
+    /// What an item's read-only Preview over Trash or Shared reads (`item::source`). A window without an engine
+    /// reads nothing (`Unwired`).
+    pub item_preview: Box<dyn item::source::ItemPreviewSource>,
     /// What is typed in the toolbar's search field of these sections (not Files' field).
     pub search: rune::TextEdit,
     pub pc: Box<dyn PcStatus>,
@@ -152,6 +158,7 @@ impl Default for Ui {
             trash: trash::TrashUi::default(),
             find: search::SearchUi::first(crate::shell::instance::DEV_BUILD),
             intents: Vec::new(),
+            item_preview: Box::new(item::source::Unwired),
             search: rune::TextEdit::new(""),
             pc: Box::new(BoardPc),
             first_place: false,

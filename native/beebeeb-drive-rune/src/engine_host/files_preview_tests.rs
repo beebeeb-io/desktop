@@ -392,3 +392,20 @@ fn nothing_is_asked_without_a_session() {
     assert_eq!(previews.later(&item), Previewed::Failed(ActionError::Unavailable));
     assert_eq!(calls(&fake), (0, 0));
 }
+
+/// An item whose size is not known (a row of Trash or of Shared): the byline says its kind alone, never "0 B", and
+/// nothing holds it to the preview limit before the download (the engine refuses an over-limit file by its stated
+/// size before a chunk is asked for).
+#[test]
+fn byline_without_a_size() {
+    let fake = Fake::new(b"first line\nsecond line");
+    let mut previews = Previews::new(fake.clone());
+    let mut item = notes(0);
+    item.size = None;
+    let Previewed::Shown(shown) = preview_now(&mut previews, &item) else {
+        panic!("not shown")
+    };
+    assert_eq!(shown.page.byline, "Text");
+    assert!(!shown.page.byline.contains("0 B"), "{}", shown.page.byline);
+    assert_eq!(calls(&fake), (1, 1), "read like any other text");
+}

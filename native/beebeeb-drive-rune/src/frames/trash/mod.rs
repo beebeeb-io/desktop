@@ -1,5 +1,6 @@
 //! Trash (`DW-0747`, an item's menu `DW-0748`, emptying `DW-0749b`, and its empty state `DW-0117`): what was deleted in the last 30 days and
-//! where it came from. Nothing here opens; an item can be restored.
+//! where it came from. Nothing here opens (an item can be restored); Details and a read-only Preview show over the list
+//! (`frames::item`).
 
 pub mod scenes;
 pub mod source;

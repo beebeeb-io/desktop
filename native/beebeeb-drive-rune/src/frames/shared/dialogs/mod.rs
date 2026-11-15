@@ -20,6 +20,7 @@
 //! every close and when it is sent; it is drawn as dots and is in no label, intent or `Debug`.
 //! A safety number is never computed here: only a scene gives one ([`SafetyNumber`]).
 
+mod item_view;
 mod kit;
 #[cfg(test)]
 mod tests;
@@ -30,9 +31,12 @@ pub use view::layers;
 use super::Tab;
 use super::source::{Access, InviteResult, Member, Notice, PeopleShare};
 use crate::State;
+use crate::frames::files::actions_data::Previewed;
+use crate::frames::item::Origin;
 use crate::frames::{self, Intent};
-use crate::shell::app::Section;
+use crate::shell::app::{GateState, Section};
 use rune::{Key, KeyEvent, TextEdit, Tx};
+use zeroize::Zeroize;
 
 /// The text inputs' keys (tests, `Tx::focus`).
 pub const TITLE_INPUT: &str = "request-title-input";
@@ -80,6 +84,10 @@ pub enum Dialog {
     EmptyTrash,
     /// Delete permanently? (DW-0748's warning, for the Trash item with this id).
     DeleteForever(String),
+    /// Details (DW-0411) of the item with this id in `origin`'s list (`frames::item`).
+    Details { origin: Origin, id: String },
+    /// The read-only Preview (DW-0408's panel) of the item with this id in `origin`'s list (`frames::item`).
+    Preview { origin: Origin, id: String },
 }
 
 impl Dialog {
@@ -87,8 +95,75 @@ impl Dialog {
     pub fn section(&self) -> Section {
         match self {
             Dialog::EmptyTrash | Dialog::DeleteForever(_) => Section::Trash,
+            Dialog::Details { origin, .. } | Dialog::Preview { origin, .. } => origin.section(),
             _ => Section::Shared,
         }
+    }
+}
+
+/// What an item's Preview holds of its file: the page, or why there is none. Decrypted content: wiped when the
+/// dialog closes (`Fields::clear`) and when dropped; a `{:?}` names the state only, never a line of it.
+#[derive(Clone, Default, PartialEq)]
+pub struct PreviewHeld(Option<Previewed>);
+
+impl PreviewHeld {
+    pub fn of(state: Previewed) -> Self {
+        PreviewHeld(Some(state))
+    }
+
+    /// What is held.
+    pub fn state(&self) -> Option<&Previewed> {
+        self.0.as_ref()
+    }
+
+    /// Asked, not answered yet.
+    pub fn is_loading(&self) -> bool {
+        self.0 == Some(Previewed::Loading)
+    }
+
+    /// Overwrite the page's text, then let it go.
+    fn wipe(&mut self) {
+        if let Some(Previewed::Shown(shown)) = self.0.as_mut() {
+            shown.place.zeroize();
+            shown.page.title.zeroize();
+            shown.page.byline.zeroize();
+            for (heading, text) in shown.page.sections.iter_mut() {
+                heading.zeroize();
+                text.zeroize();
+            }
+        }
+        self.0 = None;
+    }
+}
+
+impl Drop for PreviewHeld {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+impl std::fmt::Debug for PreviewHeld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = match &self.0 {
+            None => "None",
+            Some(Previewed::Loading) => "Loading",
+            Some(Previewed::Shown(_)) => "Shown",
+            Some(Previewed::NoPreview) => "NoPreview",
+            Some(Previewed::NotYet) => "NotYet",
+            Some(Previewed::TooLarge) => "TooLarge",
+            Some(Previewed::Failed(_)) => "Failed",
+        };
+        write!(f, "PreviewHeld({state})")
+    }
+}
+
+/// The gate and the account an item dialog was opened under (`frames::item`). A `{:?}` names the gate only.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ItemStamp(pub GateState, pub Option<String>);
+
+impl std::fmt::Debug for ItemStamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ItemStamp").field(&self.0).finish_non_exhaustive()
     }
 }
 
@@ -109,6 +184,10 @@ pub struct Fields {
     pub sending: bool,
     /// Invite someone for an item not shared with anyone yet (no row in By me): its name, for the title.
     pub unlisted: Option<String>,
+    /// An item's Preview: its page, or why there is none.
+    pub preview: PreviewHeld,
+    /// An item dialog: the gate and the account it was opened under.
+    pub item_stamp: Option<ItemStamp>,
 }
 
 impl Default for Fields {
@@ -121,6 +200,8 @@ impl Default for Fields {
             problem: None,
             sending: false,
             unlisted: None,
+            preview: PreviewHeld::default(),
+            item_stamp: None,
         }
     }
 }
@@ -135,6 +216,8 @@ impl Fields {
         self.problem = None;
         self.sending = false;
         self.unlisted = None;
+        self.preview.wipe();
+        self.item_stamp = None;
     }
 }
 
@@ -183,6 +266,9 @@ impl super::SharedUi {
             None => false,
             // Its row may be gone (Trash's poll closes it then): nothing here knows Trash's list.
             Some(Dialog::NewRequest | Dialog::EmptyTrash | Dialog::DeleteForever(_)) => true,
+            // Its row is in another section's list: `frames::item::poll` closes it when the row goes, and
+            // `section_keys` when it is not drawn.
+            Some(Dialog::Details { .. } | Dialog::Preview { .. }) => true,
             Some(Dialog::People { share, .. }) => self.share(share).is_some(),
             // An item not shared with anyone yet has no row: its name is kept with the dialog.
             Some(Dialog::Invite { share, .. }) => self.share(share).is_some() || self.fields.unlisted.is_some(),
@@ -346,17 +432,23 @@ pub fn is_address(email: &str) -> bool {
         && !email.chars().any(char::is_whitespace)
 }
 
-/// The section the window shows, when it is one of this lane's.
+/// The section the window shows, when it is one of this lane's: Shared, Trash, or Files while Search's window
+/// stands over it (an item's Details over the results, `frames::item`).
 pub fn section_shown(s: &State) -> Option<Section> {
-    match crate::shell::registry::group_for(&s.shell.app) {
-        crate::shell::registry::FrameGroup::Section(section @ (Section::Shared | Section::Trash)) => Some(section),
-        _ => None,
-    }
+    crate::frames::item::origin_shown(s).map(Origin::section)
 }
 
-/// Close what is open, through its way back (the modal's Esc, a Cancel).
-pub(crate) fn dismiss(s: &mut State, _tx: &mut Tx) {
-    s.frames.shared.escape_dialog();
+/// Close what is open, through its way back (the modal's Esc, a Cancel). An item's dialog closes, and the keyboard
+/// goes back to its row.
+pub(crate) fn dismiss(s: &mut State, tx: &mut Tx) {
+    if matches!(
+        s.frames.shared.dialog,
+        Some(Dialog::Details { .. } | Dialog::Preview { .. })
+    ) {
+        item_view::close(s, tx);
+    } else {
+        s.frames.shared.escape_dialog();
+    }
 }
 
 /// Close every layer (Done, Cancel of the first dialog).
@@ -413,7 +505,7 @@ pub fn section_keys(s: &mut State, ev: &KeyEvent, tx: &mut Tx, section: Section)
     if !s.frames.shared.dialog_over(section) {
         return None;
     }
-    if s.frames.shared.dialog_drawn() {
+    if s.frames.shared.dialog_drawn() && crate::frames::item::drawn(s) {
         return Some(on_section_key(s, ev, tx));
     }
     s.frames.shared.close_dialog();
@@ -445,6 +537,11 @@ pub fn on_section_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
             true
         }
         Key::Tab => false,
+        // Space opened an item's Preview from the row; Space closes it again, wherever focus is.
+        _ if frames::is_space(ev) && matches!(s.frames.shared.dialog, Some(Dialog::Preview { .. })) => {
+            item_view::close(s, tx);
+            true
+        }
         _ => true,
     }
 }

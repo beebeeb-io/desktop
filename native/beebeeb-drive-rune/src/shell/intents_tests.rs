@@ -110,3 +110,42 @@ fn sign_in_terms_privacy_and_support_reach_the_opener_with_the_tables_address() 
         ]
     );
 }
+
+/// The frames' queue (Trash, Shared, Search) is taken whole: what is not wired yet is taken and logged, never left
+/// to grow.
+#[test]
+fn drain_takes_every_frame_intent() {
+    use crate::frames::Intent as Frame;
+    let mut rt = runtime(FixtureEngine::ready());
+    rt.update(|s, tx| {
+        s.frames.intents = vec![
+            Frame::Frame("DW-0504"),
+            Frame::Do("copy-link", "an-invented-id".into()),
+            Frame::About("DW-0402", "an-invented-id".into()),
+        ];
+        assert!(drain_frame_intents(s, tx), "something was taken");
+        assert!(
+            s.frames.intents.is_empty(),
+            "every intent was taken: {:?}",
+            s.frames.intents
+        );
+        assert!(!drain_frame_intents(s, tx), "nothing left");
+    });
+}
+
+/// The shell's poll itself drains the frames' queue (not only the function called by hand).
+#[test]
+fn the_poll_line_drains_frame_intents() {
+    use crate::frames::Intent as Frame;
+    let mut rt = runtime(FixtureEngine::ready());
+    rt.update(|s, tx| {
+        s.frames.intents.push(Frame::Frame("DW-0406"));
+        s.frames.intents.push(Frame::OpenItem("an-invented-id".into()));
+        poll(s, 0.0, tx);
+        assert!(
+            s.frames.intents.is_empty(),
+            "the poll took them: {:?}",
+            s.frames.intents
+        );
+    });
+}

@@ -740,5 +740,14 @@ pub fn layers(s: &State, t: &Theme) -> Vec<El> {
             .or_else(|| ui.fields.unlisted.clone())
             .map(|name| vec![modal("invite", invite(s, share, &name, t))])
             .unwrap_or_default(),
+        // An item's Details and read-only Preview (`frames::item`): nothing is drawn once its row is not listed.
+        Dialog::Details { origin, id } => super::item_view::details(s, *origin, id, t)
+            .map(|card| modal("details", card))
+            .into_iter()
+            .collect(),
+        Dialog::Preview { origin, id } => super::item_view::preview(s, *origin, id, t)
+            .map(|card| kit::layer("preview", card, super::item_view::preview_keys, dismiss, false, t))
+            .into_iter()
+            .collect(),
     }
 }

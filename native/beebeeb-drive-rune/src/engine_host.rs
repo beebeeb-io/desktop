@@ -68,6 +68,8 @@ mod files_window_support;
 pub mod guide;
 // The Windows Hello prompt of the lock screen, behind one seam.
 pub mod hello;
+// An item's read-only Preview over Trash (from Beebeeb only) and Shared (`item_preview`).
+pub mod item_preview;
 pub mod open;
 pub mod passkeys;
 pub mod photos;

@@ -1088,5 +1088,79 @@ fn while_a_session_change_is_under_way_nothing_is_copied_opened_or_asked() {
     assert_eq!(open(&engine, NOTE, NO_LIMIT).unwrap().bytes.len(), 3_500);
 }
 
+const TRASHED: &str = "a0000000-0000-4000-8000-000000000405";
+const TWIN: &str = "a0000000-0000-4000-8000-000000000406";
+
+/// A file in the trash that this computer never synced opens in memory by the same download path: the server serves
+/// a trashed file until it is erased, and nothing in the engine reads the trashed flag or needs a row here for the
+/// file's own key. Nothing about it is written to the local state. (The read-only Trash preview of the desktop app
+/// reads through this call.)
+#[test]
+fn a_trashed_file_this_computer_never_synced_opens_in_memory_and_nothing_about_it_is_recorded() {
+    let (owner, _) = FakeAccount::register("trashed-one@example.eu", "an invented password", TEST_PHRASE);
+    let owner = Arc::new(owner);
+    let words = b"an invented note that was put in the trash";
+    owner.add_file_with_content(TRASHED, None, "Invented trashed note.txt", words);
+    // The same words under another id: its chunks are sealed under that id's key.
+    owner.add_file_with_content(TWIN, None, "Invented twin.txt", words);
+    assert!(owner.trash_item(TRASHED));
+    let rest = account_handler(owner.clone());
+    let api = FakeApi::start(Arc::new(move |req: &Request| {
+        let reply = rest(req);
+        if req.route() == format!("GET /api/v1/files/{TRASHED}") {
+            // The server's row of a trashed file, as it is served until the file is erased.
+            let mut row: serde_json::Value = serde_json::from_slice(&reply.body).expect("the fake's row");
+            assert_eq!(row["is_trashed"], true, "the row says the file is in the trash");
+            row["trashed_at"] = serde_json::json!("2026-11-14T10:00:00Z");
+            return Reply::ok(row);
+        }
+        reply
+    }));
+    let engine = engine_at(&api.base);
+    signed_in(&engine, &owner);
+    // A local state of this account's that has no row for the trashed file.
+    let (dir, db) = local_state(&engine, &owner);
+    assert!(db.get_file(TRASHED).unwrap().is_none());
+
+    let opened = open(&engine, TRASHED, NO_LIMIT).expect("the trashed file opens in memory");
+    assert_eq!(&*opened.bytes, &words[..], "the decrypted bytes are the trashed file's");
+    assert!(
+        api.requests()
+            .iter()
+            .any(|req| is_chunk(req) && req.path.contains(TRASHED)),
+        "its chunks were downloaded"
+    );
+
+    // Nothing about it was recorded here: no row, no contract, nothing kept; and the id is in no table of the local
+    // state at all (every file of its directory, the database and its write-ahead log, read as bytes).
+    let files_naming = |id: &str| -> Vec<String> {
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                let bytes = std::fs::read(path).expect("a file of the local state reads");
+                bytes.windows(id.len()).any(|w| w == id.as_bytes())
+            })
+            .map(|path| path.display().to_string())
+            .collect()
+    };
+    // The scan finds what IS written: the note's id, a row of this local state.
+    assert!(
+        !files_naming(NOTE).is_empty(),
+        "the scan sees the local state's own rows"
+    );
+    let mentioned = files_naming(TRASHED);
+    assert!(
+        mentioned.is_empty(),
+        "the trashed file's id was written to {mentioned:?}"
+    );
+    assert!(db.get_file(TRASHED).unwrap().is_none(), "no row for the trashed file");
+    assert!(
+        db.get_file_contract_state(TRASHED).unwrap().is_none(),
+        "no contract for it"
+    );
+    assert_eq!(db.kept_rows().unwrap().len(), 0);
+}
+
 #[path = "viewer_chain_tests.rs"]
 mod chain;
