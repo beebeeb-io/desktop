@@ -136,7 +136,7 @@ fn a_docx_opens_and_its_page_renders_through_the_pipe() {
     check_rendered(&ask, &page, out.len, &rendered, &Limits::CONTRACT).expect("the app's check accepts it");
 
     let pixels = memory.bytes(out);
-    let colours: HashSet<&[u8]> = pixels.chunks_exact(4).collect();
+    let colours: HashSet<&[u8; 4]> = pixels.as_chunks::<4>().0.iter().collect();
     assert!(
         colours.len() >= 10,
         "the page was drawn into the buffer: {} distinct colours",
