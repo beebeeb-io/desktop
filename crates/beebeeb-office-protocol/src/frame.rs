@@ -20,6 +20,12 @@ pub const MAX_PAYLOAD: usize = 64 * 1024;
 /// The largest value the length field may hold.
 const MAX_LEN: u32 = (HEADER_LEN + MAX_PAYLOAD) as u32;
 
+/// Whether a payload of `len` bytes fits one frame. [`write_frame`] and every message's `encode` hold this one check,
+/// so a message that encodes can always be written.
+pub const fn fits_one_frame(len: usize) -> bool {
+    len <= MAX_PAYLOAD
+}
+
 /// One message on a pipe.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Frame {
@@ -74,7 +80,7 @@ impl std::error::Error for FrameError {}
 
 /// Writes one frame and flushes. Refuses a payload over [`MAX_PAYLOAD`] without writing anything.
 pub fn write_frame(w: &mut impl Write, kind: u16, id: u32, payload: &[u8]) -> io::Result<()> {
-    if payload.len() > MAX_PAYLOAD {
+    if !fits_one_frame(payload.len()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "frame payload over the cap",

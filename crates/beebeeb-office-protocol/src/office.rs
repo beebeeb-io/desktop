@@ -1,17 +1,21 @@
 //! The Office messages: what the app asks the helper and what the helper answers, each with a fixed little-endian
 //! layout and length-prefixed UTF-8 text. No serde: every byte is read by hand and checked.
 //!
-//! **Units.** Page sizes are in points (1/72 inch). A `Render` asks for a page at a `scale`, where 1.0 is 100 % zoom
-//! on a 96 DPI monitor (the viewer contract §7: scale = zoom x the monitor's DPI factor), so a page `w_pt` wide is
-//! `round(w_pt * scale * 96 / 72)` pixels wide ([`crate::check::page_pixels`]). A `region` is a rectangle in those
-//! pixels (tiles of 512 px at large zooms) and lies inside the page. Pixels are RGBA8, `w * h * 4` bytes, in the
-//! section `out`.
+//! **Units.** Page sizes are in points (1/72 inch). A `Render` asks for a page at a `scale` in device pixels per
+//! point: the app computes it as zoom x the monitor's DPI / 72 ([`crate::check::render_scale`]; 100 % on a 96 DPI
+//! monitor is 4/3). A page `w_pt` wide is `ceil(w_pt * scale)` pixels wide, the product in `f32`
+//! ([`crate::check::page_pixels`]): the Office engine's own rule, so the app and the helper size the same raster. A
+//! `region` is a rectangle in those pixels (tiles of 512 px at large zooms) and lies inside the page. Pixels are RGBA8,
+//! `w * h * 4` bytes, in the section `out`.
 //!
 //! **Ids** are in the frame, not here: an answer (`Opened`, `Rendered`, `Error`, …) carries the id of its request in
 //! the frame header, and `Cancel` carries the id of the request it cancels.
 //!
-//! Encoding a message larger than a frame (an outline or cell block over 64 KiB) succeeds here; `write_frame` then
-//! refuses it, so the helper must keep its answers under the cap.
+//! **One frame per message.** There are no continuation frames, and `encode` refuses a message over one frame with
+//! the check `write_frame` holds ([`EncodeError::OverFrame`]). The answers that could grow past it say so instead: the
+//! outline comes in pages (`Outline { from }` → `OutlineData { next }`), a cell range that does not fit is answered
+//! [`ErrorCode::RangeTooLarge`] and the app asks for each half, and `OpenedSheets` names the sheets that fit and counts
+//! the rest in `more`.
 
 use std::fmt;
 
@@ -83,6 +87,25 @@ impl fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
+/// Why a message was not encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodeError {
+    /// The payload would be over [`crate::frame::MAX_PAYLOAD`]: it cannot travel in one frame
+    /// ([`crate::frame::fits_one_frame`], the check `write_frame` holds).
+    OverFrame,
+}
+
+impl fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            EncodeError::OverFrame => "a message larger than one frame",
+        };
+        f.write_str(text)
+    }
+}
+
+impl std::error::Error for EncodeError {}
+
 /// The Office formats the helper may be asked to open. `.ppt` is not on the list: it has no preview (2482 Q5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocKind {
@@ -145,11 +168,11 @@ pub struct Open {
 }
 
 impl Open {
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
         let mut o = Out::new();
         o.u8(self.kind.tag());
         self.doc.put(&mut o);
-        o.into_vec()
+        o.finish()
     }
 
     pub fn decode(payload: &[u8]) -> Result<Open, DecodeError> {
@@ -176,7 +199,7 @@ pub struct Opened {
 }
 
 impl Opened {
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
         let mut o = Out::new();
         o.u32(self.pages);
         let n = o.count(self.sizes.len());
@@ -184,7 +207,7 @@ impl Opened {
             o.f32(size.w_pt);
             o.f32(size.h_pt);
         }
-        o.into_vec()
+        o.finish()
     }
 
     pub fn decode(payload: &[u8]) -> Result<Opened, DecodeError> {
@@ -222,14 +245,17 @@ impl fmt::Debug for SheetInfo {
     }
 }
 
-/// A workbook opened: its sheets in order.
+/// A workbook opened: its first sheets in order, as many as fit one frame (each name at most
+/// [`crate::check::MAX_SHEET_NAME_CHARS`] characters), and `more`, the number of sheets after them that did not fit.
+/// Those sheets exist and their cells can be asked by index (`sheets.len()` on), but they have no name or size here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenedSheets {
     pub sheets: Vec<SheetInfo>,
+    pub more: u32,
 }
 
 impl OpenedSheets {
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
         let mut o = Out::new();
         let n = o.count(self.sheets.len());
         for sheet in self.sheets.iter().take(n) {
@@ -237,7 +263,8 @@ impl OpenedSheets {
             o.u32(sheet.rows);
             o.u32(sheet.cols);
         }
-        o.into_vec()
+        o.u32(self.more);
+        o.finish()
     }
 
     pub fn decode(payload: &[u8]) -> Result<OpenedSheets, DecodeError> {
@@ -253,8 +280,9 @@ impl OpenedSheets {
                 cols: i.u32()?,
             });
         }
+        let more = i.u32()?;
         i.finish()?;
-        Ok(OpenedSheets { sheets })
+        Ok(OpenedSheets { sheets, more })
     }
 }
 
@@ -277,7 +305,7 @@ pub struct Render {
 }
 
 impl Render {
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
         let mut o = Out::new();
         o.u32(self.page);
         o.f32(self.scale);
@@ -292,7 +320,7 @@ impl Render {
             }
         }
         self.out.put(&mut o);
-        o.into_vec()
+        o.finish()
     }
 
     pub fn decode(payload: &[u8]) -> Result<Render, DecodeError> {
@@ -330,12 +358,12 @@ pub struct Rendered {
 }
 
 impl Rendered {
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
         let mut o = Out::new();
         o.u32(self.w);
         o.u32(self.h);
         o.bool(self.missing_content);
-        o.into_vec()
+        o.finish()
     }
 
     pub fn decode(payload: &[u8]) -> Result<Rendered, DecodeError> {
@@ -408,11 +436,11 @@ pub struct Cells {
 }
 
 impl Cells {
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
         let mut o = Out::new();
         o.u32(self.sheet);
         self.range.put(&mut o);
-        o.into_vec()
+        o.finish()
     }
 
     pub fn decode(payload: &[u8]) -> Result<Cells, DecodeError> {
@@ -486,6 +514,7 @@ pub struct Frozen {
 
 /// The cells of an asked range. `col_widths` has one width per column of the range and `row_heights` one height per
 /// row, in points (0 = hidden); `merges` are the merged areas inside the range; `frozen` is the sheet's frozen panes.
+/// When the range's cells do not fit one frame, the helper answers [`ErrorCode::RangeTooLarge`] instead.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CellData {
     pub cells: Vec<CellText>,
@@ -496,7 +525,7 @@ pub struct CellData {
 }
 
 impl CellData {
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
         let mut o = Out::new();
         let n = o.count(self.cells.len());
         for cell in self.cells.iter().take(n) {
@@ -520,7 +549,7 @@ impl CellData {
         }
         o.u32(self.frozen.rows);
         o.u32(self.frozen.cols);
-        o.into_vec()
+        o.finish()
     }
 
     pub fn decode(payload: &[u8]) -> Result<CellData, DecodeError> {
@@ -575,9 +604,27 @@ impl CellData {
     }
 }
 
-/// Send the outline (headings) of the document.
+/// Send the outline (headings) of the document from entry `from` (zero-based, in reading order) on, as many entries as
+/// fit one frame. The app asks from 0, then again from each answer's `next` until it is `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Outline;
+pub struct Outline {
+    pub from: u32,
+}
+
+impl Outline {
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
+        let mut o = Out::new();
+        o.u32(self.from);
+        o.finish()
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Outline, DecodeError> {
+        let mut i = In::new(payload);
+        let from = i.u32()?;
+        i.finish()?;
+        Ok(Outline { from })
+    }
+}
 
 /// Send the document's counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -590,8 +637,8 @@ pub struct Cancel;
 macro_rules! empty_message {
     ($($t:ident),*) => {$(
         impl $t {
-            pub fn encode(&self) -> Vec<u8> {
-                Vec::new()
+            pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
+                Out::new().finish()
             }
 
             pub fn decode(payload: &[u8]) -> Result<$t, DecodeError> {
@@ -602,7 +649,7 @@ macro_rules! empty_message {
     )*};
 }
 
-empty_message!(Outline, Stats, Cancel);
+empty_message!(Stats, Cancel);
 
 /// One heading: its level (1 = top), its text as shown, and the zero-based page it starts on.
 #[derive(Clone, PartialEq, Eq)]
@@ -623,14 +670,16 @@ impl fmt::Debug for OutlineEntry {
     }
 }
 
-/// The document's outline in reading order.
+/// One page of the document's outline, in reading order: the entries from the asked `from` on, and `next`, the entry
+/// to ask from for the rest (`from` plus the number of entries here), or `None` when this page ends the outline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutlineData {
     pub entries: Vec<OutlineEntry>,
+    pub next: Option<u32>,
 }
 
 impl OutlineData {
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
         let mut o = Out::new();
         let n = o.count(self.entries.len());
         for e in self.entries.iter().take(n) {
@@ -638,7 +687,14 @@ impl OutlineData {
             o.str(&e.text);
             o.u32(e.page);
         }
-        o.into_vec()
+        match self.next {
+            None => o.u8(0),
+            Some(next) => {
+                o.u8(1);
+                o.u32(next);
+            }
+        }
+        o.finish()
     }
 
     pub fn decode(payload: &[u8]) -> Result<OutlineData, DecodeError> {
@@ -655,8 +711,13 @@ impl OutlineData {
                 page: i.u32()?,
             });
         }
+        let next = match i.u8()? {
+            0 => None,
+            1 => Some(i.u32()?),
+            _ => return Err(DecodeError::BadTag),
+        };
         i.finish()?;
-        Ok(OutlineData { entries })
+        Ok(OutlineData { entries, next })
     }
 }
 
@@ -667,10 +728,10 @@ pub struct StatsData {
 }
 
 impl StatsData {
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
         let mut o = Out::new();
         o.u32(self.words);
-        o.into_vec()
+        o.finish()
     }
 
     pub fn decode(payload: &[u8]) -> Result<StatsData, DecodeError> {
@@ -694,6 +755,9 @@ pub enum ErrorCode {
     Password,
     /// Anything else went wrong inside the helper.
     Internal,
+    /// The cells of the asked range do not fit one frame. Only ever the answer to a `Cells`: the app asks for each
+    /// half instead ([`crate::check::halve_range`]).
+    RangeTooLarge,
 }
 
 impl ErrorCode {
@@ -704,6 +768,7 @@ impl ErrorCode {
             ErrorCode::Unsupported => 3,
             ErrorCode::Password => 4,
             ErrorCode::Internal => 5,
+            ErrorCode::RangeTooLarge => 6,
         }
     }
 
@@ -714,6 +779,7 @@ impl ErrorCode {
             3 => Ok(ErrorCode::Unsupported),
             4 => Ok(ErrorCode::Password),
             5 => Ok(ErrorCode::Internal),
+            6 => Ok(ErrorCode::RangeTooLarge),
             _ => Err(DecodeError::BadCode),
         }
     }
@@ -726,10 +792,10 @@ pub struct Error {
 }
 
 impl Error {
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
         let mut o = Out::new();
         o.u16(self.code.code());
-        o.into_vec()
+        o.finish()
     }
 
     pub fn decode(payload: &[u8]) -> Result<Error, DecodeError> {
@@ -778,8 +844,8 @@ impl Message {
         }
     }
 
-    /// The payload for a frame of [`Message::kind`].
-    pub fn encode(&self) -> Vec<u8> {
+    /// The payload for a frame of [`Message::kind`], or [`EncodeError::OverFrame`] when it would not fit one frame.
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
         match self {
             Message::Open(m) => m.encode(),
             Message::Opened(m) => m.encode(),

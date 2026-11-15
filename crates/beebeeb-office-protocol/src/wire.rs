@@ -1,7 +1,8 @@
 //! Fixed little-endian fields and length-prefixed UTF-8 for the Office messages; every declared length is checked
 //! against the bytes that remain before anything is allocated.
 
-use crate::office::DecodeError;
+use crate::frame::fits_one_frame;
+use crate::office::{DecodeError, EncodeError};
 
 /// Writes fields in order.
 pub(crate) struct Out(Vec<u8>);
@@ -49,8 +50,14 @@ impl Out {
         self.0.extend_from_slice(&s.as_bytes()[..n]);
     }
 
-    pub(crate) fn into_vec(self) -> Vec<u8> {
-        self.0
+    /// The payload, or [`EncodeError::OverFrame`] when it would not fit one frame: the check
+    /// [`crate::frame::write_frame`] holds.
+    pub(crate) fn finish(self) -> Result<Vec<u8>, EncodeError> {
+        if fits_one_frame(self.0.len()) {
+            Ok(self.0)
+        } else {
+            Err(EncodeError::OverFrame)
+        }
     }
 }
 
