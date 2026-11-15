@@ -349,7 +349,7 @@ impl<C: CredentialStores> Engine<C> {
     /// read-only connection first, so a start where none is there writes nothing (not even a schema migration), and a
     /// computer where nothing has synced gets no database. A delete that fails is logged.
     pub(super) fn delete_recent_searches_at_signed_out_start(&self, session_stored: bool) {
-        if session_stored || self.unlocked() {
+        if self.unlocked() {
             return;
         }
         let path = self.local_state_path(&Identity::new(None, None));
