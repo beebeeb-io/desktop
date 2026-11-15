@@ -539,3 +539,88 @@ fn try_again_after_a_drop_that_went_in_partly_holds_only_what_was_not_copied() {
     });
     assert_eq!(*spy.uploads.lock().unwrap(), [files.clone(), files[1..].to_vec()]);
 }
+
+/// What a move to Trash did, as a source that answers later says it: per id, whether it was left and why.
+fn trash_answer(spy: &Spy, items: &[(&str, Option<ActionError>)]) {
+    let items = items
+        .iter()
+        .map(|(id, left)| super::super::source::TrashOutcome {
+            id: id.to_string(),
+            left: *left,
+        })
+        .collect();
+    spy.later.lock().unwrap().push(Change::Trash {
+        action: Action::Trash,
+        items,
+    });
+}
+
+/// Review of 2468, L256.2: where every item was left, the message says the reason that says most, whatever the
+/// order of the items in the answer: for a change of what this PC holds, and for a move to Trash.
+#[test]
+fn all_left_reason_does_not_depend_on_order() {
+    for order in [[0usize, 1], [1, 0]] {
+        // Free up space: one file has a change not uploaded yet, the other holds something kept.
+        let (mut rt, spy, ids, _) = window(None, 2, "on_this_pc");
+        rt.update(|s, tx| assert!(s.free_up_space(tx)));
+        let why = [ActionError::NotSent, ActionError::HoldsKept];
+        let answer: Vec<(&str, Option<&str>, Option<ActionError>)> = order
+            .iter()
+            .map(|&i| (ids[i].as_str(), Some("on_this_pc"), Some(why[i])))
+            .collect();
+        spy.answer(Action::FreeUpSpace, &answer);
+        assert!(frame(&mut rt));
+        assert_eq!(
+            rt.state.live_toast(),
+            Some(Toast::Failed(Action::FreeUpSpace, ActionError::NotSent)),
+            "free up space, answered in the order {order:?}"
+        );
+
+        // Move to Trash: one file failed, the other could not be sent without a connection.
+        let (mut rt, spy, ids, _) = window(None, 2, "on_this_pc");
+        rt.update(|s, tx| assert!(s.trash_selection(tx)));
+        let why = [ActionError::Offline, ActionError::Failed];
+        let answer: Vec<(&str, Option<ActionError>)> = order.iter().map(|&i| (ids[i].as_str(), Some(why[i]))).collect();
+        trash_answer(&spy, &answer);
+        assert!(frame(&mut rt));
+        assert_eq!(
+            rt.state.live_toast(),
+            Some(Toast::Failed(Action::Trash, ActionError::Offline)),
+            "move to Trash, answered in the order {order:?}"
+        );
+    }
+}
+
+/// Review of 2468, L256.3: "Keeping on this PC" answered after "Moved to Trash" was said does not take its place:
+/// the rows show the kept file, and the message and its Undo stay.
+#[test]
+fn late_keep_answer_keeps_moved_to_trash_and_undo() {
+    let (mut rt, spy, ids, other) = window(None, 1, "on_this_pc");
+    // Keep on this PC is pressed; its answer comes late.
+    rt.update(|s, tx| assert!(s.toggle_keep_offline(tx)));
+    assert_eq!(spy.asked(), [(Action::KeepOffline, ids.clone())]);
+    // Meanwhile another row is moved to Trash: "Moved to Trash", with Undo.
+    rt.update(|s, tx| {
+        let at = s.listing.items.iter().position(|item| item.id == other).unwrap();
+        s.select_only(at);
+        assert!(s.trash_selection(tx));
+    });
+    trash_answer(&spy, &[(&other, None)]);
+    assert!(frame(&mut rt));
+    assert_eq!(rt.state.actions.toast, Some(Toast::Trashed));
+
+    // Keep's answer lands: the row reads kept, and "Moved to Trash" and its Undo stay.
+    spy.answer(Action::KeepOffline, &[(&ids[0], Some("available_offline"), None)]);
+    frame(&mut rt);
+    assert_eq!(marks(&rt, 1), [mark("available_offline")]);
+    assert_eq!(
+        rt.state.actions.toast,
+        Some(Toast::Trashed),
+        "Keeping took the place of Moved to Trash"
+    );
+    let held: Vec<&str> = rt.state.actions.undo.iter().map(|(_, item)| item.id.as_str()).collect();
+    assert_eq!(held, [other.as_str()], "Undo is still for the row moved to Trash");
+    rt.update(|s, tx| assert!(s.undo(tx)));
+    assert!(rt.state.actions.undo.is_empty());
+    assert_eq!(rt.state.actions.trash.restoring.len(), 1, "Undo asked for it");
+}
