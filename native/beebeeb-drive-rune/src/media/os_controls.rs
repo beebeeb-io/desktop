@@ -298,7 +298,7 @@ mod imp {
         music.SetArtist(&HSTRING::from(now.artist.as_str()))?;
         match now.art.as_ref().and_then(|(w, h, rgba)| encode_art_png(*w, *h, rgba)) {
             Some(png) => updater.SetThumbnail(&reference_from_memory(&png)?)?,
-            None => updater.SetThumbnail(None::<&IRandomAccessStreamReference>)?,
+            None => updater.SetThumbnail(None::<&RandomAccessStreamReference>)?,
         }
         updater.Update()?;
         let timeline = SystemMediaTransportControlsTimelineProperties::new()?;
@@ -312,7 +312,7 @@ mod imp {
     }
 
     /// The picture goes to Windows from this process's memory: an in-memory stream, never a file or an address.
-    fn reference_from_memory(png: &[u8]) -> windows::core::Result<IRandomAccessStreamReference> {
+    fn reference_from_memory(png: &[u8]) -> windows::core::Result<RandomAccessStreamReference> {
         let stream = InMemoryRandomAccessStream::new()?;
         let writer = DataWriter::CreateDataWriter(&stream)?;
         writer.WriteBytes(png)?;
@@ -320,7 +320,7 @@ mod imp {
         // The writer would close the stream with itself: let go of it first.
         let _ = writer.DetachStream();
         stream.Seek(0)?;
-        RandomAccessStreamReference::CreateFromStream(&stream)?.cast::<IRandomAccessStreamReference>()
+        RandomAccessStreamReference::CreateFromStream(&stream)
     }
 
     pub(super) fn clear(controls: &mut OsControls) {

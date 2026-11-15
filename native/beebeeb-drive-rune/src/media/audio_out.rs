@@ -373,7 +373,7 @@ mod device {
         rate: u32,
     ) -> Result<cpal::Stream, cpal::Error>
     where
-        T: cpal::SizedSample,
+        T: cpal::SizedSample + cpal::FromSample<f32>,
     {
         let data_shared = Arc::clone(shared);
         let err_shared = Arc::clone(shared);

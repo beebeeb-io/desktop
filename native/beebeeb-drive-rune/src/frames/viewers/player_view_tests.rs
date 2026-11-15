@@ -6,8 +6,8 @@
 use beebeeb_media_protocol::Codec;
 use rune::{Env, Runtime};
 
-use super::set_scene;
-use super::video::{Times, ask_size, letterbox, refusal_words, space_toggles};
+use super::super::set_scene;
+use super::{Times, ask_size, letterbox, refusal_words, space_toggles};
 use crate::media::player::{PlayState, Refusal};
 use crate::{State, init, view};
 

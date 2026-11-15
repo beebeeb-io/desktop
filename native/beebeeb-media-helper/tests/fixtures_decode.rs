@@ -209,7 +209,7 @@ impl App {
             };
             let output = ChanWriter(helper_tx);
             // The result is the session's own end (Close, EOF or a refused message); the test reads the pipe.
-            let _ = beebeeb_media_helper::session::serve_with_routes(input, output, table);
+            let _ = beebeeb_media_helper::session::run_with(input, output, table);
         });
         App {
             to_helper: ChanWriter(app_tx),

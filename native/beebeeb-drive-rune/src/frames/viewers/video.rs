@@ -41,6 +41,10 @@ pub fn refusal_words(why: &Refusal) -> String {
             "This PC can't play {name} video without Microsoft's {name} extension.",
             name = codec_name(*codec)
         ),
+        Refusal::NoSystemMedia(codec) => format!(
+            "This PC can't play {name} files: this edition of Windows has no media codecs.",
+            name = codec_name(*codec)
+        ),
         Refusal::CouldNotPlay => "This file could not be played.".into(),
         Refusal::NotSignedIn => "Sign in to play this file.".into(),
         Refusal::NotInstalled | Refusal::NoSandbox => "Playback isn't available on this PC.".into(),
