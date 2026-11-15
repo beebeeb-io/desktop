@@ -532,3 +532,28 @@ fn a_page_that_comes_back_can_see_that_a_password_change_is_still_out_and_which_
     assert!(source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""));
     assert_ne!(source.call_mark(CallKind::ChangePassword).unwrap().serial, first.serial);
 }
+
+#[test]
+fn an_answer_taken_under_one_session_is_not_current_once_the_session_moved() {
+    let fake = fake();
+    let engine = signed_in(&fake);
+    let mut source = Source::new(engine.clone());
+    source
+        .step_up(Password::from_field(PASSWORD), Purpose::ChangePassword)
+        .expect("kept");
+    assert!(source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""));
+    assert!(
+        source.call_mark(CallKind::ChangePassword).unwrap().current,
+        "out: current"
+    );
+    assert!(answer(&mut source).is_some());
+    assert!(
+        source.call_mark(CallKind::ChangePassword).unwrap().current,
+        "taken and nothing moved: current"
+    );
+    engine.sign_out_keeping_local_data().expect("signs out");
+    assert!(
+        !source.call_mark(CallKind::ChangePassword).unwrap().current,
+        "another session now: a late answer kept for the page is dropped"
+    );
+}

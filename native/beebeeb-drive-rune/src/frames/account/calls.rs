@@ -36,11 +36,19 @@ pub fn settle(ui: &mut AccountUi, kind: CallKind, answered: Answered) -> Option<
         // A password change that was answered while its page was not open is kept, and said when the page is
         // opened again (`form::arrive`): never dropped, Unconfirmed included.
         if kind == CallKind::ChangePassword {
-            ui.form.late_change = Some(match answered {
-                Answered::Done => Ok(()),
-                Answered::Refused(why) => Err(why),
-                _ => Err(Refused::Offline),
-            });
+            let serial = ui
+                .source
+                .as_deref()
+                .and_then(|s| s.call_mark(kind))
+                .map_or(0, |m| m.serial);
+            ui.form.late_change = Some((
+                serial,
+                match answered {
+                    Answered::Done => Ok(()),
+                    Answered::Refused(why) => Err(why),
+                    _ => Err(Refused::Offline),
+                },
+            ));
         }
         return None;
     }

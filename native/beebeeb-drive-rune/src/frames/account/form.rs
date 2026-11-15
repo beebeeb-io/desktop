@@ -83,7 +83,7 @@ pub struct Form {
     /// The serial of the call `waiting` is for (`AccountSource::call_mark`): only its answer settles the page.
     pub waiting_serial: u64,
     /// A password change answered while its page was not open: said when the page opens again, never dropped.
-    pub late_change: Option<Result<(), super::source::Refused>>,
+    pub late_change: Option<(u64, Result<(), super::source::Refused>)>,
     /// The first code was wrong and the key it belonged to was replaced: the page says to scan again.
     pub key_replaced: bool,
 }
@@ -179,6 +179,16 @@ pub fn arrive(ui: &mut AccountUi) {
         .then(|| ui.source.as_deref().and_then(|s| s.call_mark(CallKind::ChangePassword)))
         .flatten()
         .filter(|mark| mark.out);
+    // A late answer is said only under the session and account it was taken under; otherwise it is dropped.
+    let late_mark = ui.source.as_deref().and_then(|s| s.call_mark(CallKind::ChangePassword));
+    if ui
+        .form
+        .late_change
+        .as_ref()
+        .is_some_and(|(serial, _)| !late_mark.is_some_and(|mark| mark.current && mark.serial == *serial))
+    {
+        ui.form.late_change = None;
+    }
     let f = &mut ui.form;
     f.problem = None;
     f.waiting = change_out.map(|_| CallKind::ChangePassword);
@@ -189,7 +199,7 @@ pub fn arrive(ui: &mut AccountUi) {
     focus(f, None);
     if ui.pane == Pane::Password && change_out.is_none() {
         // The answer of a change that landed while another page was open: said here, now.
-        match f.late_change.take() {
+        match f.late_change.take().map(|(_, answer)| answer) {
             Some(Ok(())) => {
                 (f.current, f.new, f.again) = (secure(), secure(), secure());
                 f.problem = Some(Problem::Changed);

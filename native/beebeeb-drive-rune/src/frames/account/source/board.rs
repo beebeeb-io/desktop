@@ -552,6 +552,7 @@ impl AccountSource for BoardAccount {
         Some(CallMark {
             serial: *serial,
             out: held.out == Some(kind),
+            current: held.out == Some(kind) || !held.moved.get(),
         })
     }
     fn change_password(&mut self, confirmation: StepUp, new: Password<'_>) -> Result<(), Refused> {

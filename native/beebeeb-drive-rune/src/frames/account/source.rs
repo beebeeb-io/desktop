@@ -590,6 +590,9 @@ pub enum CallKind {
 pub struct CallMark {
     pub serial: u64,
     pub out: bool,
+    /// The session and the account are still the ones this call's answer was taken under (always true while it is
+    /// out). A late answer that is kept for a page is said only while this holds.
+    pub current: bool,
 }
 
 /// How a started call ended.

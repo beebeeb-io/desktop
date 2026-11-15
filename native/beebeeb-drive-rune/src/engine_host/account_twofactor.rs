@@ -59,6 +59,8 @@ pub(super) struct Calls {
     out: Vec<CallKind>,
     /// How many calls were started, and the serial of the latest call of each kind.
     counter: u64,
+    /// The last answer taken, and the session and account it was taken under.
+    taken: Option<(CallKind, Stamp)>,
     latest: Vec<(CallKind, u64)>,
     held: Held,
     pending_email: Pending,
@@ -78,6 +80,7 @@ impl Calls {
         Self {
             out: Vec::new(),
             counter: 0,
+            taken: None,
             latest: Vec::new(),
             held: Arc::default(),
             pending_email: Arc::default(),
@@ -273,6 +276,12 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         Some(CallMark {
             serial: *serial,
             out: self.calls.out.contains(&kind),
+            current: self.calls.out.contains(&kind)
+                || self
+                    .calls
+                    .taken
+                    .as_ref()
+                    .is_none_or(|(k, under)| *k != kind || (*under == stamp(&self.engine) && self.open())),
         })
     }
 
@@ -437,6 +446,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             if matches!(answered, Answered::Codes(_)) {
                 self.calls.handed = Some((made_for, kind));
             }
+            self.calls.taken = Some((kind, now));
             return Some((kind, answered));
         }
         None
