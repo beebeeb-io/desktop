@@ -31,7 +31,7 @@ use crate::drive_v2::dto::DriveItem;
 use crate::drive_v2::model::{self, Sort};
 use crate::host::EngineHost;
 use crate::identity::EngineIdentity;
-use crate::keychain::{AuthSecretStore, AuthVault, SecretBytes, SessionToken};
+use crate::keychain::{AuthVault, SecretBytes, SessionToken};
 use crate::runner::{EngineRunner, ResumeTicket};
 use crate::session::Session;
 use crate::signin::gate::{self, GateState, NextAfterSignIn, SignInProblem};
@@ -53,6 +53,7 @@ pub mod account_email_resend_api;
 pub mod account_password_api;
 pub mod account_twofactor_api;
 pub mod backup_devices_api;
+mod credential_stores;
 mod session_revoke;
 use session_revoke::revoke;
 pub mod account_twofactor_status_api;
@@ -103,35 +104,9 @@ pub mod versions_api;
 pub mod viewer_api;
 pub mod viewer_edit_api;
 
+pub use credential_stores::{CredentialStores, PlatformCredentials};
 pub use explorer_api::ExplorerChangeRefused;
 pub use owned_state::{LocalStateRefused, OwnedState};
-
-/// Where the handle keeps an account's session token and vault key. The handle names the app on every call
-/// (`identity` is the one [`Engine::open`] was given): a store has no identity of its own to disagree with it.
-pub trait CredentialStores: Send + Sync + 'static {
-    type Store: AuthSecretStore;
-    fn for_account(&self, identity: &'static EngineIdentity, account_id: &str) -> Self::Store;
-}
-
-/// The platform's credential store (Windows Credential Manager, the macOS Keychain), per app and account id.
-/// It carries no identity: which app's items it reads is the handle's identity, nothing else (review of #309,
-/// P2-1: a test handle given the real app's stores was accepted).
-pub struct PlatformCredentials;
-
-impl CredentialStores for PlatformCredentials {
-    type Store = crate::keychain::PlatformKeychainStore;
-    fn for_account(&self, identity: &'static EngineIdentity, account_id: &str) -> Self::Store {
-        crate::keychain::platform_keychain_store_for(identity, account_id)
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl CredentialStores for crate::signin::memory_store::MemoryCredentials {
-    type Store = crate::signin::memory_store::MemoryStore;
-    fn for_account(&self, _identity: &'static EngineIdentity, account_id: &str) -> Self::Store {
-        self.store_for(account_id)
-    }
-}
 
 /// What the host names once: which account slot, where its local state lives, which API.
 pub struct EngineConfig {
@@ -294,7 +269,7 @@ pub struct Engine<C: CredentialStores> {
 }
 
 impl<C: CredentialStores> Engine<C> {
-    /// Build the handle. Reads nothing yet: call [`Engine::restore`] next.
+    /// Build the handle; a 0.8.x PC's flat-layout session moves into the account's slot. Then [`Engine::restore`].
     pub fn open(
         identity: &'static EngineIdentity,
         config: EngineConfig,
@@ -323,6 +298,7 @@ impl<C: CredentialStores> Engine<C> {
         let view = Arc::new(ViewCell::default());
         let host: Arc<dyn EngineHost> = Arc::new(ViewHost::new(host, view.clone()));
         downloads_api::wake_the_host_for_downloads(&host);
+        credential_stores::adopt_legacy_flat(identity, &config.account_id, &stores);
         Ok(Self {
             identity,
             config,
@@ -1049,6 +1025,7 @@ impl<C: CredentialStores> Engine<C> {
                 .flatten()
                 .map(|token| Zeroizing::new(token.expose_for_request().to_string()));
             self.forget_session(SessionTransition::SignOut);
+            credential_stores::clear_legacy_flat(self.identity, &self.stores);
             vault
                 .clear_session()
                 .map_err(|e| store::keychain_error("clear the stored session", e))?;
