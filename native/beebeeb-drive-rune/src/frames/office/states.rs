@@ -7,10 +7,12 @@
 //! Rules live in [`OfficeState`] (the host maps the engine's answer to it at O-CP3); the window only binds.
 //! DW-1556's "THE REASON LINE IS ONE OF" card is a design note and is not drawn (board fix DW-1556).
 
-use rune::{Color, Cx, El, TextStyle, col, el, row};
+use rune::tok::Family;
+use rune::{Color, Cx, El, Icon, TextStyle, col, el, row};
 
 use crate::State;
-use crate::frames::viewers::source::{Body, board};
+use crate::frames::office::docs::docs_fixture;
+use crate::frames::viewers::source::Body;
 use crate::frames::viewers::{self, Intent, Ui};
 use crate::theme::icons;
 use crate::theme::tokens::{self, Theme, type_};
@@ -51,6 +53,7 @@ pub const TITLE: &str = "We couldn't show this file here.";
 pub const NOT_CHANGED: &str = "The file was not changed.";
 pub const TRY_AGAIN: &str = "Try again";
 pub const OPEN_ELSEWHERE: &str = "Open in another app\u{2026}";
+pub const TRY_HINT: &str = "Try again once; if it stops again, open the file in another app.";
 pub const KEEP_FIRST: &str = "Keep this file on this PC first.";
 pub const KEEP_ACTION: &str = "Keep on this PC";
 pub const QUIET_LINE: &str = "Some content isn't shown.";
@@ -147,9 +150,9 @@ fn state_mut(s: &mut State) -> Option<&mut StateBody> {
 // Scenes
 // ---------------------------------------------------------------------------
 
-/// Open the document, then hold the state `body` says.
+/// Open the viewer's document (facts "Word document \u{00B7} 38 KB": never the editor's), then hold the state `body` says.
 fn scene_of(s: &mut State, body: StateBody) {
-    if viewers::open_from(s, Box::new(viewers::source::FixtureViewerSource::new()), board::DOCX)
+    if viewers::open_doc(s, docs_fixture::file(false))
         && let Some(ui) = viewers::ui(s)
     {
         ui.file.body = Body::OfficeState(body);
@@ -185,14 +188,89 @@ pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[("DW-1563", scene_opening
 const SUB: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
 const STATUS_STATE: TextStyle = TextStyle::new(11.5, 500.0).lh(17.0);
 const STATUS_ENC: TextStyle = TextStyle::new(11.5, 600.0).lh(17.0);
-const OUTLINE_LABEL: TextStyle = TextStyle::new(11.0, 500.0).lh(14.0);
+const HINT: TextStyle = TextStyle::new(11.0, 500.0).lh(13.5);
+const BAR_LABEL: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
+const BAR_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(15.0);
+
+static ZOOM_LESS: Icon = Icon {
+    name: "states-zoom-less",
+    view: 24.0,
+    body: concat!(
+        r#"<g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">"#,
+        r#"<path d="M5 12h14"></path></g>"#
+    ),
+};
+
+static ZOOM_MORE: Icon = Icon {
+    name: "states-zoom-more",
+    view: 24.0,
+    body: concat!(
+        r#"<g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">"#,
+        r#"<path d="M12 5v14M5 12h14"></path></g>"#
+    ),
+};
 
 const PAGE_W: f32 = 520.0;
 const OUTLINE_W: f32 = 210.0;
 
-/// A grey bar of the skeleton: `color-mix(ink 9%, ground)`.
+/// A bar of the skeleton: the board's `color-mix(in oklch, ink 9%, ground)`, taken from THIS theme's ink and ground (in
+/// dark the ink is light, so the bar is a dark grey on the white page and stays visible).
+pub fn bone_fill(t: &Theme) -> Color {
+    let (ink, ground) = (t.text, t.bg);
+    let mix = |a: f32, b: f32| a * 0.09 + b * 0.91;
+    Color {
+        r: mix(ink.r, ground.r),
+        g: mix(ink.g, ground.g),
+        b: mix(ink.b, ground.b),
+        a: 1.0,
+    }
+}
+
 fn bone(key: String, w: f32, h: f32, t: &Theme) -> El {
-    el().key(key).w(w).h(h).radius(3.0).fill(t.text.alpha(0.09))
+    el().key(key).w(w).h(h).radius(3.0).fill(bone_fill(t))
+}
+
+/// The board's `mk-sdot is-warn` (the golden's `status-dot` fill, both themes).
+fn warn_dot(t: &Theme) -> Color {
+    rune::color::hex(if t.dark { "#F67222" } else { "#C94B00" }).unwrap_or(Color::BLACK)
+}
+
+/// The board's `OvBar page="Page 1 of 4"`: zoom, the page words, Open in another app. Drawn here for the skeleton: the
+/// document window's own bar is private to its file.
+fn viewer_bar(t: &Theme) -> El {
+    row()
+        .key("vbar")
+        .role("toolbar")
+        .label("Document")
+        .w_full()
+        .h(38.0)
+        .px(12.0)
+        .gap(12.0)
+        .center_y()
+        .fill(t.bg)
+        .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
+        .border_layout()
+        .child(
+            row()
+                .key("vbar-zoom")
+                .role("group")
+                .label("Zoom, 100 per cent")
+                .gap(6.0)
+                .center_y()
+                .child(kit::glyph("zoom-less-icon", &ZOOM_LESS, 13.0, t.text_secondary))
+                .child(kit::label("zoom", "100%", BAR_MONO, t.text_secondary))
+                .child(kit::glyph("zoom-more-icon", &ZOOM_MORE, 13.0, t.text_secondary)),
+        )
+        .child(el().key("vbar-sep").w(kit::HAIR).h(18.0).fill(t.separator))
+        .child(kit::label("vbar-page", "Page 1 of 4", BAR_LABEL, t.text_secondary))
+        .child(el().key("vbar-gap").grow(1.0))
+        .child(
+            text_button("elsewhere", OPEN_ELSEWHERE, t.text_secondary, true, t).on_press(|s: &mut State| {
+                if let Some(ui) = viewers::ui(s) {
+                    ui.intent(Intent::OpenInAnotherApp);
+                }
+            }),
+        )
 }
 
 fn text_button(key: &str, words: &str, primary_ink: Color, outlined: bool, t: &Theme) -> El {
@@ -201,7 +279,7 @@ fn text_button(key: &str, words: &str, primary_ink: Color, outlined: bool, t: &T
         .role("button")
         .label(words)
         .h(28.0)
-        .px(12.0)
+        .px(if outlined { 13.0 } else { 12.0 })
         .center()
         .radius(7.0)
         .hover(t.hover)
@@ -218,10 +296,11 @@ fn text_button(key: &str, words: &str, primary_ink: Color, outlined: bool, t: &T
 pub fn failure_panel(body: &StateBody, t: &Theme) -> El {
     let reason = body.state.reason_line().unwrap_or_default();
     let line = format!("{reason}. {NOT_CHANGED}");
+
     let mut actions = row().key("empty-actions").gap(8.0).mt(8.0).center_y();
     if body.state.try_again_shown() {
         actions = actions.child(
-            text_button("empty-try", TRY_AGAIN, t.text, true, t).on_press(|s: &mut State| {
+            text_button("empty-add", TRY_AGAIN, t.text, true, t).on_press(|s: &mut State| {
                 if let Some(b) = state_mut(s) {
                     b.try_again();
                 }
@@ -230,7 +309,7 @@ pub fn failure_panel(body: &StateBody, t: &Theme) -> El {
     }
     if body.state.open_elsewhere_offered(body.kept) {
         actions = actions.child(
-            text_button("empty-else", OPEN_ELSEWHERE, t.text_secondary, false, t).on_press(|s: &mut State| {
+            text_button("empty-btn-1", OPEN_ELSEWHERE, t.text_secondary, false, t).on_press(|s: &mut State| {
                 if let Some(ui) = viewers::ui(s) {
                     ui.intent(Intent::OpenInAnotherApp);
                 }
@@ -258,9 +337,9 @@ pub fn failure_panel(body: &StateBody, t: &Theme) -> El {
             el().key("empty-tile")
                 .size(52.0, 52.0)
                 .radius(15.0)
-                .fill(t.tile)
+                .fill(t.red.alpha(0.12))
                 .center()
-                .child(kit::glyph("empty-icon", &viewers::icons::ALERT, 26.0, t.text_secondary)),
+                .child(kit::glyph("empty-icon", &viewers::icons::ALERT, 26.0, t.red)),
         )
         .child(
             kit::label("empty-title", TITLE, DIALOG_TITLE, t.text)
@@ -268,10 +347,23 @@ pub fn failure_panel(body: &StateBody, t: &Theme) -> El {
                 .level(1),
         )
         .child(
-            kit::label("empty-reason", line, SUB, t.text_secondary)
-                .wrap()
-                .w(360.0)
-                .align(rune::Align::Center),
+            // The board's text block: the reason, then the one hint under it (both inside `empty-text`).
+            col()
+                .key("empty-text")
+                .w(227.0)
+                .items_center()
+                .child(
+                    kit::label("empty-reason", line, SUB, t.text_secondary)
+                        .wrap()
+                        .w_full()
+                        .align(rune::Align::Center),
+                )
+                .child(
+                    kit::label("empty-hint", TRY_HINT, HINT, t.text_secondary)
+                        .wrap()
+                        .w(216.68)
+                        .align(rune::Align::Center),
+                ),
         )
         .child(actions)
 }
@@ -288,7 +380,7 @@ pub fn skeleton(t: &Theme) -> El {
         .fill(t.sidebar_bg)
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
         .border_layout()
-        .child(kit::label("outline-label", "Outline", OUTLINE_LABEL, t.text_tertiary).px(8.0));
+        .child(kit::label("outline-label", "OUTLINE", type_::SECTION_LABEL, t.text_tertiary).px(8.0));
     for (i, pct) in [70.0_f32, 54.0, 62.0, 48.0].iter().enumerate() {
         outline = outline.child(bone(format!("ol-bone-{i}"), OUTLINE_W * 0.8 * pct / 100.0, 12.0, t).ml(8.0));
     }
@@ -303,6 +395,7 @@ pub fn skeleton(t: &Theme) -> El {
         .py(44.0)
         .gap(12.0)
         .fill(Color::WHITE)
+        .box_shadow(kit::drop(2.0, 12.0, t.shadow_page))
         .child(bone("pg-bone-title".into(), inner * 0.46, 22.0, t))
         .child(bone("pg-bone-sub".into(), inner * 0.70, 10.0, t));
     for (i, pct) in [96.0_f32, 90.0, 94.0, 60.0, 0.0, 92.0, 97.0, 84.0, 40.0]
@@ -352,7 +445,7 @@ pub fn status_bar(state: OfficeState, left: &[&str], t: &Theme) -> El {
     let mut said = String::new();
     if state.is_opening() {
         bar = bar
-            .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(t.accent_deep))
+            .child(el().key("status-dot").size(7.0, 7.0).radius(3.5).fill(warn_dot(t)))
             .child(kit::label("status-text", OPENING, STATUS_STATE, t.text_secondary));
         said.push_str(OPENING);
     } else {
@@ -371,6 +464,13 @@ pub fn status_bar(state: OfficeState, left: &[&str], t: &Theme) -> El {
             .child(plain("st-quiet".into(), quiet));
         said.push_str(quiet);
     }
+    // The failure frame's bar has nothing on the left: the board's keys count the right side from 0.
+    let numbered = left.is_empty() && !state.is_opening() && state.quiet_line().is_none();
+    let (k_icon, k_enc, k_dot, k_about) = if numbered {
+        ("st-0-icon", "st-0", "st-1", "st-2")
+    } else {
+        ("st-enc-icon", "st-enc", "st-about-dot", "st-about")
+    };
     bar.label(format!("{said}. {ENCRYPTED}"))
         .child(el().key("st-gap").grow(1.0))
         .child(
@@ -378,10 +478,10 @@ pub fn status_bar(state: OfficeState, left: &[&str], t: &Theme) -> El {
                 .key("st-enc-box")
                 .gap(4.0)
                 .center_y()
-                .child(kit::glyph("st-enc-icon", &icons::LOCK, 11.0, t.accent_deep))
-                .child(kit::label("st-enc", ENCRYPTED, STATUS_ENC, t.accent_deep)),
+                .child(kit::glyph(k_icon, &icons::LOCK, 11.0, t.accent_deep))
+                .child(kit::label(k_enc, ENCRYPTED, STATUS_ENC, t.accent_deep)),
         )
-        .child(plain("st-about-dot".into(), "\u{00B7}"))
+        .child(plain(k_dot.into(), "\u{00B7}"))
         .child(
             el().key("st-about-box")
                 .role("link")
@@ -392,7 +492,7 @@ pub fn status_bar(state: OfficeState, left: &[&str], t: &Theme) -> El {
                         ui.office_about();
                     }
                 })
-                .child(plain("st-about".into(), ABOUT)),
+                .child(plain(k_about.into(), ABOUT)),
         )
 }
 
@@ -453,6 +553,7 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, body: &StateBody) -> El {
         .h_full()
         .fill(t.bg)
         .child(viewers::office::toolbar(s, ui, false, &t))
+        .children(state.is_opening().then(|| viewer_bar(&t)))
         .child(middle)
         .child(status_bar(state, left, &t));
     col()
@@ -564,9 +665,9 @@ mod tests {
         assert!(!b.try_again(), "a second failure hides it");
         assert!(keyed(
             &showing(StateBody::new(OfficeState::Stopped { retried: false }, true)),
-            "empty-try"
+            "empty-add"
         ));
-        assert!(!keyed(&showing(b), "empty-try"));
+        assert!(!keyed(&showing(b), "empty-add"));
     }
 
     #[test]
@@ -575,10 +676,10 @@ mod tests {
         assert!(s.open_elsewhere_offered(true));
         assert!(!s.open_elsewhere_offered(false), "not kept: not offered");
         let kept = showing(StateBody::new(s, true));
-        assert!(keyed(&kept, "empty-else") && !keyed(&kept, "empty-keep-first"));
+        assert!(keyed(&kept, "empty-btn-1") && !keyed(&kept, "empty-keep-first"));
         let not_kept = showing(StateBody::new(s, false));
         assert!(
-            !keyed(&not_kept, "empty-else"),
+            !keyed(&not_kept, "empty-btn-1"),
             "no Open in another app for a file not kept"
         );
         assert!(keyed(&not_kept, "empty-keep-first") && keyed(&not_kept, "empty-keep"));
@@ -608,6 +709,119 @@ mod tests {
             "st-quiet"
         ));
         assert!(!keyed(&showing(StateBody::new(OfficeState::Ready, true)), "st-quiet"));
+    }
+
+    fn runtime_dark(state: State, dark: bool) -> Runtime<State> {
+        let env = Env {
+            system_dark: dark,
+            scale: 2.0,
+        };
+        let mut rt = Runtime::new(state, view, (1278.0, 798.0), env);
+        rt.on_key = Some(crate::shell::host::on_key);
+        rt.poll = Some(crate::shell::host::poll);
+        rt.frame(0.0);
+        rt
+    }
+
+    /// Every text the window draws (labels and texts), lower-cased.
+    fn said(rt: &Runtime<State>) -> Vec<String> {
+        rt.elements()
+            .into_iter()
+            .filter(|e| !e.exiting)
+            .flat_map(|e| [e.label.clone(), e.text.clone()])
+            .flatten()
+            .map(|w| w.to_lowercase())
+            .collect()
+    }
+
+    #[test]
+    fn office_states_failure_tile_is_red_and_says_both_lines() {
+        let rt = showing(StateBody::new(OfficeState::Stopped { retried: false }, true));
+        let t = tokens::theme(false);
+        let fill_of = |key: &str| {
+            rt.elements()
+                .into_iter()
+                .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
+                .map(|e| e.fill.hex())
+        };
+        assert_eq!(
+            fill_of("empty-tile"),
+            Some(t.red.alpha(0.12).hex()),
+            "the tile is the theme's red"
+        );
+        assert_ne!(fill_of("empty-tile"), Some(t.tile.hex()), "not the grey tile");
+        assert!(
+            keyed(&rt, "empty-text") && keyed(&rt, "empty-hint"),
+            "both lines are drawn"
+        );
+        let words = said(&rt);
+        assert!(
+            words
+                .iter()
+                .any(|w| w.contains("the viewer stopped. the file was not changed."))
+        );
+        assert!(
+            words.iter().any(|w| w == &TRY_HINT.to_lowercase()),
+            "the hint line says {TRY_HINT}"
+        );
+    }
+
+    #[test]
+    fn office_states_breadcrumb_never_says_editor() {
+        for scene in [scene_failed as fn(&mut State), scene_opening] {
+            let mut state = init();
+            scene(&mut state);
+            let rt = runtime_of(state);
+            for w in said(&rt) {
+                assert!(!w.contains("editor"), "drawn text {w:?} names the editor");
+            }
+            assert!(
+                said(&rt).iter().any(|w| w.contains("word document")),
+                "the viewer's facts show"
+            );
+        }
+    }
+
+    #[test]
+    fn office_states_opening_has_the_viewer_bar_and_capital_outline() {
+        let rt = showing(StateBody::new(OfficeState::Opening, true));
+        let words = said(&rt);
+        assert!(
+            words.iter().any(|w| w == "open in another app\u{2026}"),
+            "the bar's button"
+        );
+        assert!(words.iter().any(|w| w == "page 1 of 4"), "the bar's page words");
+        assert!(words.iter().any(|w| w == "outline"), "the outline header");
+        let header = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("outline-label"))
+            .and_then(|e| e.text.clone());
+        assert_eq!(header.as_deref(), Some("OUTLINE"), "in capitals");
+    }
+
+    #[test]
+    fn office_states_skeleton_is_visible_in_dark() {
+        let away = |c: Color| (1.0 - c.r).abs() + (1.0 - c.g).abs() + (1.0 - c.b).abs();
+        let light = away(bone_fill(&tokens::theme(false)));
+        let dark = away(bone_fill(&tokens::theme(true)));
+        assert!(
+            dark >= light,
+            "dark bar ({dark}) is at least as far from the white page as light ({light})"
+        );
+        let mut state = init();
+        scene_opening(&mut state);
+        let rt = runtime_dark(state, true);
+        let bar = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("pg-bone-0") && !e.exiting)
+            .expect("a page bone is drawn");
+        assert_eq!(
+            bar.fill.hex(),
+            bone_fill(&tokens::theme(true)).hex(),
+            "the drawn bone uses the dark theme's mix"
+        );
     }
 
     #[test]
