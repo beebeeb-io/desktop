@@ -352,6 +352,30 @@ fn approval_answer_dropped_after_session_change() {
     );
 }
 
+/// A prompt taken away and asked again for the same request: the first prompt's late "verified" is not the second's.
+#[test]
+fn an_earlier_prompts_answer_is_not_the_next_ones() {
+    let server = server();
+    let (_engine, mut source, prompts) = with_prompts(&server);
+    let request = found(&mut source);
+    source.begin_approval(request.id(), CODE, password());
+    source.cancel_approval(request.id());
+    source.begin_approval(request.id(), CODE, password());
+    assert_eq!(prompts.asked(), 2);
+    // The first prompt had already decided "verified" when it was taken away.
+    prompts.answer(HelloResult::Verified);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(source.approval_answer(), None, "the second prompt is still up");
+    assert_eq!(
+        asked(&server, "POST /api/v1/auth/confirm-opaque-start"),
+        0,
+        "nothing was sent"
+    );
+    prompts.answer(HelloResult::Cancelled);
+    assert_eq!(answer_of(&mut source), (request.id().to_owned(), Approval::Cancelled));
+    assert_eq!(asked(&server, "POST /api/v1/auth/cli-session"), 0);
+}
+
 /// A Deny ends the request with the code alone: no step-up, no token or key in its body. Denied while Windows Hello
 /// is up, the prompt goes first and its late "verified" claims nothing.
 #[test]
@@ -456,16 +480,23 @@ fn code_never_logged() {
         let lower = code.to_ascii_lowercase();
         assert!(!vocabulary.contains(&lower), "{code} would be written as it is");
     }
-    // Beebeeb's codes: 8 characters of `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, shown XXXX-XXXX. A word of that shape
-    // in the allow-list is a code the log file would write as it is. The one there today is listed here: a new one
-    // turns this red.
-    const ALPHABET: &str = "abcdefghjklmnpqrstuvwxyz23456789";
+    // A code is eight letters and digits, shown XXXX-XXXX. A word of that shape in the allow-list is a code the log
+    // file would write as it is, if one were ever logged. The ones there today are pinned: a new one turns this red.
     let could_be_a_code = |word: &str| {
         let chars: Vec<char> = word.chars().collect();
-        chars.len() == 9 && chars[4] == '-' && chars.iter().enumerate().all(|(at, c)| at == 4 || ALPHABET.contains(*c))
+        chars.len() == 9
+            && chars[4] == '-'
+            && chars
+                .iter()
+                .enumerate()
+                .all(|(at, c)| at == 4 || c.is_ascii_alphanumeric())
     };
     let codes: Vec<&String> = vocabulary.iter().filter(|w| could_be_a_code(w)).collect();
-    assert_eq!(codes, ["half-made"], "words of the allow-list a code can be");
+    assert_eq!(
+        codes,
+        ["half-made", "keep-mine", "open-time", "read-only", "sync-root"],
+        "words of the allow-list in a code's shape"
+    );
     // This slice: no tracing call, and no log line with a value in it.
     let slice = include_str!("account_approve.rs");
     let engine_side = include_str!("../../../../crates/beebeeb-engine/src/app/bindings/approve_sign_in.rs");

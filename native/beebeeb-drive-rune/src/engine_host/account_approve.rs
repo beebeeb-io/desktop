@@ -61,6 +61,9 @@ struct Held {
 struct Begun {
     id: String,
     made_for: Stamp,
+    /// The number of the Windows Hello prompt it asked: an answer of an earlier prompt (one taken away, for the
+    /// same request) is never this one's.
+    prompt: u64,
     waiting: Option<Waiting>,
 }
 
@@ -86,6 +89,7 @@ enum Inner {
     Hello {
         id: String,
         made_for: Stamp,
+        prompt: u64,
         result: HelloResult,
     },
     Approved {
@@ -99,6 +103,8 @@ enum Inner {
 pub(super) struct ApproveCalls {
     held: Vec<Held>,
     next_id: u64,
+    /// Counts the Windows Hello prompts asked.
+    prompts: u64,
     begun: Option<Begun>,
     /// Endings to hand out, oldest first, each with the stamp it was made under.
     ready: VecDeque<(Stamp, String, Approval)>,
@@ -115,6 +121,7 @@ impl Default for ApproveCalls {
         Self {
             held: Vec::new(),
             next_id: 0,
+            prompts: 0,
             begun: None,
             ready: VecDeque::new(),
             approved_here: Vec::new(),
@@ -253,9 +260,12 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         self.account_approve.forget_other(&now);
         while let Ok(inner) = self.account_approve.rx.try_recv() {
             match inner {
-                Inner::Hello { id, made_for, result } => {
-                    self.account_approve_hello_answered(&now, id, made_for, result)
-                }
+                Inner::Hello {
+                    id,
+                    made_for,
+                    prompt,
+                    result,
+                } => self.account_approve_hello_answered(&now, (id, made_for, prompt), result),
                 Inner::Approved { id, made_for, result } => {
                     let calls = &mut self.account_approve;
                     if calls
@@ -286,12 +296,14 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         }
     }
 
-    fn account_approve_hello_answered(&mut self, now: &Stamp, id: String, made_for: Stamp, result: HelloResult) {
+    /// `of`: the request, the stamp and the prompt the answer is for.
+    fn account_approve_hello_answered(&mut self, now: &Stamp, of: (String, Stamp, u64), result: HelloResult) {
+        let (id, made_for, prompt) = of;
         let calls = &mut self.account_approve;
         let Some(begun) = calls
             .begun
             .as_mut()
-            .filter(|begun| begun.id == id && begun.made_for == made_for)
+            .filter(|begun| begun.id == id && begun.made_for == made_for && begun.prompt == prompt)
         else {
             return;
         };
@@ -404,12 +416,15 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         }
         // The review learns that the request ran out on the window's next poll: wake it then.
         if let Some(left) = left.filter(|left| (0..=600).contains(left)) {
-            let engine = self.engine.clone();
+            // A weak handle: a sleeping timer keeps no engine alive.
+            let engine = Arc::downgrade(&self.engine);
             let woke = std::thread::Builder::new()
                 .name("account-approve-expiry".into())
                 .spawn(move || {
                     std::thread::sleep(Duration::from_secs(left as u64 + 1));
-                    engine.wake_host();
+                    if let Some(engine) = engine.upgrade() {
+                        engine.wake_host();
+                    }
                 });
             if woke.is_err() {
                 log("account: could not start a thread for a request's expiry");
@@ -429,8 +444,13 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
     pub(super) fn account_approve_begin_approval(&mut self, request: &str, code: &str, password: Password<'_>) {
         let now = stamp(&self.engine);
         self.account_approve.forget_other(&now);
-        // One approval at a time: a second press while one is up asks nothing.
-        if self.account_approve.begun.is_some() {
+        // One approval at a time. This request's own approval already on its way (the window left and came back):
+        // its ending answers this press. Another request's: this one is not started, and says so.
+        if let Some(begun) = self.account_approve.begun.as_ref() {
+            if begun.id != request {
+                self.account_approve.say(now, request, Approval::Refused);
+                self.engine.wake_host();
+            }
             return;
         }
         // A locked screen, a closed vault or another session first: no prompt, nothing sent (a lock is also a new
@@ -491,12 +511,15 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             password: Zeroizing::new(password.for_opaque().to_vec()),
             cancel: None,
         };
+        calls.prompts += 1;
+        let prompt = calls.prompts;
         let (tx, engine, id, mine) = (calls.tx.clone(), self.engine.clone(), request.to_owned(), now.clone());
         // Windows Hello first. Its answer only goes down the channel; the approval starts on the window's thread.
         let asked = calls.hello.start(Box::new(move |result| {
             let _ = tx.send(Inner::Hello {
                 id,
                 made_for: mine,
+                prompt,
                 result,
             });
             engine.wake_host();
@@ -507,6 +530,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
                 calls.begun = Some(Begun {
                     id: request.to_owned(),
                     made_for: now,
+                    prompt,
                     waiting: Some(waiting),
                 });
             }
