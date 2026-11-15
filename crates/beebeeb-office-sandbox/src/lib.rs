@@ -1,5 +1,8 @@
 //! Starts the Office helper process confined.
 //!
+//! Any helper of ours starts through this crate in the same way: the Office helper now, the media helper next. Each
+//! kind is an executable of its own; the confinement and the four promises below are the same for every one.
+//!
 //! The helper parses files nobody trusts. This crate starts it so that it
 //!
 //! 1. cannot open a network connection,
@@ -7,9 +10,16 @@
 //! 3. cannot start another process,
 //! 4. is gone when its parent is gone, and can be killed by the parent at any time.
 //!
-//! The only things handed to the helper are two unnamed pipes (its standard input and output). It gets no
-//! arguments, no inherited environment and no other handle. Document bytes travel over the pipes (or, later, over
-//! memory the parent shares); they are never written to a file for it.
+//! At its start the helper is handed two unnamed pipes (its standard input and output) and nothing else: no
+//! arguments, no inherited environment, no other handle. Bulk bytes (a document, a rendered page) travel over memory
+//! the parent shares with it afterwards: an unnamed [`Section`] the parent makes and hands over with
+//! [`Child::grant`], one handle at a time, read-only or read-write as the parent decides. Nothing is ever written
+//! to a file for it.
+//!
+//! **Profiles.** How much a helper may do beyond the four promises is a [`Profile`], a closed list chosen in code by
+//! the caller: [`Profile::NoCapabilities`] (every helper, the default) or [`Profile::SystemDecoder`] (the media
+//! helper only, for a file that Windows' own decoders play; it may also read the registry). There is no capability
+//! by name, and every profile keeps the four promises above. The Office helper never names a profile.
 //!
 //! **Fail closed.** There is no unconfined way to start the helper through this crate. On an operating system
 //! without a sandbox module here (everything but Windows today) [`Sandbox::spawn`] returns
@@ -43,7 +53,14 @@ pub const DEFAULT_MEMORY_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
 /// The exit code a helper has after [`Child::kill`] (or after its `Child` was dropped).
 pub const KILLED_EXIT_CODE: u32 = 0xBEEB_DEAD;
 
+/// The largest [`Section`]: 4 GiB.
+pub const MAX_SECTION_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
 /// Resource limits of one helper.
+///
+/// There is no time limit here on purpose: a job's CPU limit would be cumulative over the helper's whole life, so the
+/// time one request may take is the caller's own timer (the viewer's 15 s wall clock, media's 5 s), followed by
+/// [`Child::kill`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// Committed memory the helper may hold, in bytes. An allocation beyond it fails inside the helper.
@@ -58,6 +75,54 @@ impl Default for Limits {
     }
 }
 
+/// What a helper may do beyond the four promises of the crate documentation. A closed list: a caller picks one of
+/// these values, and no capability can be asked for by name.
+///
+/// Every profile is a less-privileged AppContainer (opted out of the "all application packages" group) in the same
+/// job, from the same restricted token, with the same handle list. They differ only in the capabilities the helper's
+/// token holds, and the crate reads that list back from the new process before it runs (Windows): the token must
+/// hold exactly [`Profile::capabilities`], no more and no fewer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Profile {
+    /// No capability at all. Every helper of ours unless its caller names another profile; the Office helper
+    /// never does.
+    #[default]
+    NoCapabilities,
+    /// The media helper, only for a file whose decoder is Windows' own (its route is `System`; decision 2541).
+    ///
+    /// Windows' decoders (Media Foundation) do not start without `registryRead`. With `hevc`, also the four
+    /// capabilities the HEVC decoder from Microsoft's Store extension needs: `lpacCom`, `lpacAppExperience`,
+    /// `lpacIdentityServices` and `lpacMedia` (each one measured necessary, the five together enough).
+    ///
+    /// What it adds, measured: the helper can READ the machine's and the user's registry. What stays denied, as in
+    /// every profile: reading a file of the user, writing anywhere, the network (loopback too) and starting a
+    /// process.
+    SystemDecoder {
+        /// The file is HEVC: add the four capabilities of the Store decoder.
+        hevc: bool,
+    },
+}
+
+/// The capability Media Foundation needs to start in a less-privileged AppContainer.
+const REGISTRY_READ: &str = "registryRead";
+
+impl Profile {
+    /// The capabilities this profile's helper holds, by their Windows names, in the order they are asked for.
+    pub const fn capabilities(self) -> &'static [&'static str] {
+        match self {
+            Profile::NoCapabilities => &[],
+            Profile::SystemDecoder { hevc: false } => &[REGISTRY_READ],
+            Profile::SystemDecoder { hevc: true } => &[
+                REGISTRY_READ,
+                "lpacCom",
+                "lpacAppExperience",
+                "lpacIdentityServices",
+                "lpacMedia",
+            ],
+        }
+    }
+}
+
 /// Why a helper was not started, or why an operation on it failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxError {
@@ -65,7 +130,7 @@ pub enum SandboxError {
     Unsupported,
     /// The helper path was refused before anything was started (the reason is a fixed text, never the path).
     HelperPath(&'static str),
-    /// A limit was refused before anything was started.
+    /// A limit was refused before anything was started (also: a section or grant length out of range).
     Limits(&'static str),
     /// An operating-system call failed. `step` is a fixed name of ours, `code` the system's error code.
     Os {
@@ -123,14 +188,22 @@ pub struct Pipes {
 #[derive(Debug, Clone, Copy)]
 pub struct Sandbox {
     limits: Limits,
+    profile: Profile,
 }
 
 impl Sandbox {
-    /// A sandbox with these limits. Refuses a memory limit of zero or one the platform cannot express.
+    /// A sandbox with these limits and [`Profile::NoCapabilities`]. Refuses a memory limit of zero or one the
+    /// platform cannot express.
     ///
     /// On Windows this also deletes container profiles of ours that a killed parent left behind (only names of
     /// our own shape, only ones older than a minute; see the Windows module).
     pub fn new(limits: Limits) -> Result<Self, SandboxError> {
+        Self::with_profile(limits, Profile::NoCapabilities)
+    }
+
+    /// A sandbox with these limits whose helpers get `profile`. The same refusals and the same clean-up as
+    /// [`Sandbox::new`].
+    pub fn with_profile(limits: Limits, profile: Profile) -> Result<Self, SandboxError> {
         if limits.memory_bytes == 0 {
             return Err(SandboxError::Limits("the memory limit is zero"));
         }
@@ -139,12 +212,17 @@ impl Sandbox {
         }
         // Not part of the confinement: tidies up after a parent that was killed while starting a helper.
         platform::remove_left_over_profiles();
-        Ok(Self { limits })
+        Ok(Self { limits, profile })
     }
 
     /// The limits helpers of this sandbox get.
     pub fn limits(&self) -> Limits {
         self.limits
+    }
+
+    /// The profile helpers of this sandbox get.
+    pub fn profile(&self) -> Profile {
+        self.profile
     }
 
     /// Starts `helper_exe` confined and returns it with its pipes.
@@ -153,9 +231,10 @@ impl Sandbox {
     /// gets no arguments. Its environment is exactly [`helper_environment_names`]. Its standard error is not
     /// connected.
     ///
-    /// Never starts an unconfined process: see the crate documentation.
+    /// Never starts an unconfined process: see the crate documentation. On Windows the helper's token is read back
+    /// before it runs, and a token whose capabilities are not exactly the profile's ends it.
     pub fn spawn(&self, helper_exe: &Path) -> Result<Child, SandboxError> {
-        let (inner, pipes) = platform::spawn(helper_exe, self.limits)?;
+        let (inner, pipes) = platform::spawn(helper_exe, self.limits, self.profile)?;
         Ok(Child {
             inner,
             pipes: Some(pipes),
@@ -202,6 +281,153 @@ impl Child {
     pub fn kill(&self) -> Result<(), SandboxError> {
         self.inner.kill()
     }
+
+    /// Hands `section` to the helper with exactly `access`: the section's handle is duplicated into the helper's
+    /// process with those rights only, and not inheritable. Send the returned [`Granted`] to the helper over the
+    /// pipe; it maps the section with [`helper::map`], which closes that handle again when the mapping ends.
+    ///
+    /// A grant cannot be taken back: the helper can use it until it drops the mapping or ends. Each call places a
+    /// new handle in the helper. The two pipe ends of [`Sandbox::spawn`] stay the only handles a helper inherits.
+    pub fn grant(&self, section: &Section, access: Access) -> Result<Granted, SandboxError> {
+        self.inner.grant(&section.inner, access)
+    }
+}
+
+/// Memory the app shares with a helper: an unnamed section backed by the paging file, mapped read-write in the app.
+///
+/// Nothing can open it by name, its handle is not inheritable, and a helper reaches it only through
+/// [`Child::grant`]. Dropping it overwrites every byte with zero before the memory is released, so a helper that
+/// still holds a grant then sees zeros, never the old bytes.
+///
+/// While a helper holds a read-write grant it can change these bytes at any moment: read them once the helper has
+/// said it is done.
+pub struct Section {
+    inner: platform::SectionInner,
+}
+
+impl Section {
+    /// A section of `len` bytes, all zero. Refuses 0 bytes and more than [`MAX_SECTION_BYTES`].
+    ///
+    /// Off Windows: [`SandboxError::Unsupported`].
+    pub fn new(len: usize) -> Result<Self, SandboxError> {
+        let len = section_length(len as u64)?;
+        Ok(Self {
+            inner: platform::SectionInner::new(len)?,
+        })
+    }
+
+    /// The bytes.
+    pub fn as_slice(&self) -> &[u8] {
+        self.inner.as_slice()
+    }
+
+    /// The bytes, to write.
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.inner.as_mut_slice()
+    }
+
+    /// The length in bytes.
+    pub fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    /// Always false: a section holds at least one byte.
+    pub fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
+}
+
+impl fmt::Debug for Section {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The length only, never the bytes.
+        f.debug_struct("Section")
+            .field("len", &self.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsRawHandle for Section {
+    /// The app's own handle, for checks. It is not inheritable and must stay so: a helper gets the section through
+    /// [`Child::grant`], never by inheritance.
+    fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
+        self.inner.raw_handle()
+    }
+}
+
+/// A length the crate accepts for a section or a grant: 1 byte to [`MAX_SECTION_BYTES`].
+fn section_length(len: u64) -> Result<usize, SandboxError> {
+    if len == 0 {
+        return Err(SandboxError::Limits("a section of zero bytes"));
+    }
+    if len > MAX_SECTION_BYTES {
+        return Err(SandboxError::Limits("a section over 4 GiB"));
+    }
+    usize::try_from(len).map_err(|_| SandboxError::Limits("a section that does not fit this platform"))
+}
+
+/// What a helper may do with a granted [`Section`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// Read only (a document's bytes).
+    Read,
+    /// Read and write (a page the helper renders into).
+    ReadWrite,
+}
+
+/// A section handed to a helper: what the caller sends to the helper over the pipe, for [`helper::map`] there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Granted {
+    /// The handle's value as the helper sees it. It means nothing in the app.
+    pub wire: u64,
+    /// The section's length in bytes.
+    pub len: u64,
+}
+
+/// The helper's side of a grant. Compiled into helpers too; it starts nothing.
+pub mod helper {
+    use std::fmt;
+
+    use crate::{Access, Granted, SandboxError, platform, section_length};
+
+    /// A granted section, mapped into the helper. Unmapped, and the grant's handle closed, when dropped.
+    pub struct Mapped {
+        inner: platform::MappedInner,
+    }
+
+    impl Mapped {
+        /// The section's bytes.
+        pub fn as_slice(&self) -> &[u8] {
+            self.inner.as_slice()
+        }
+
+        /// The section's bytes to write, for a read-write mapping; `None` for a read-only one.
+        pub fn as_mut_slice(&mut self) -> Option<&mut [u8]> {
+            self.inner.as_mut_slice()
+        }
+    }
+
+    impl fmt::Debug for Mapped {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            // The length only, never the bytes.
+            f.debug_struct("Mapped")
+                .field("len", &self.as_slice().len())
+                .finish_non_exhaustive()
+        }
+    }
+
+    /// Maps a section the app granted to this process. `access` is what this side wants; asking for more than the
+    /// grant carries is refused by the system ([`SandboxError::Os`] with code 5). The grant's handle belongs to
+    /// this call: it is closed when the returned value is dropped, or at once when mapping fails, so a grant maps
+    /// once.
+    ///
+    /// Off Windows: [`SandboxError::Unsupported`].
+    pub fn map(granted: Granted, access: Access) -> Result<Mapped, SandboxError> {
+        let len = section_length(granted.len)?;
+        Ok(Mapped {
+            inner: platform::map(granted.wire, len, access)?,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -241,6 +467,7 @@ mod tests {
 
     /// No runtime input may weaken or skip a part of the confinement. The spawn path therefore reads nothing
     /// from the parent's environment, its arguments or a file: this pins that in the source of every module.
+    /// (A [`Profile`] is chosen in code by the caller, from a closed list; it is not such an input.)
     #[test]
     fn the_spawn_path_reads_no_environment_variable_argument_or_switch() {
         let sources = [
@@ -274,6 +501,26 @@ mod tests {
         assert_eq!(checked, 32);
     }
 
+    /// Both lengths are refused before any system call, on every operating system.
+    #[test]
+    fn a_section_of_zero_bytes_or_over_four_gibibytes_is_refused() {
+        assert_eq!(
+            Section::new(0).unwrap_err(),
+            SandboxError::Limits("a section of zero bytes")
+        );
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            Section::new(MAX_SECTION_BYTES as usize + 1).unwrap_err(),
+            SandboxError::Limits("a section over 4 GiB")
+        );
+        let refused = |len| helper::map(Granted { wire: 0, len }, Access::Read).unwrap_err();
+        assert_eq!(refused(0), SandboxError::Limits("a section of zero bytes"));
+        assert_eq!(
+            refused(MAX_SECTION_BYTES + 1),
+            SandboxError::Limits("a section over 4 GiB")
+        );
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn without_a_sandbox_module_nothing_is_started() {
@@ -281,5 +528,72 @@ mod tests {
         // An existing, runnable program: were there an unconfined fallback, this would start it.
         let exe = std::env::current_exe().unwrap();
         assert_eq!(sandbox.spawn(&exe).unwrap_err(), SandboxError::Unsupported);
+    }
+
+    /// The capability lists are pinned word for word, as measured by the media spike (decision 2541). A capability
+    /// added to a list, or a name misspelled (Windows accepts any name, so nothing at run time would notice), turns
+    /// this red.
+    #[test]
+    fn each_profile_asks_for_exactly_its_measured_capabilities() {
+        assert_eq!(Profile::default(), Profile::NoCapabilities);
+        assert_eq!(Profile::NoCapabilities.capabilities(), &[] as &[&str]);
+        assert_eq!(Profile::SystemDecoder { hevc: false }.capabilities(), &["registryRead"]);
+        assert_eq!(
+            Profile::SystemDecoder { hevc: true }.capabilities(),
+            &[
+                "registryRead",
+                "lpacCom",
+                "lpacAppExperience",
+                "lpacIdentityServices",
+                "lpacMedia"
+            ]
+        );
+        let every = [
+            Profile::NoCapabilities,
+            Profile::SystemDecoder { hevc: false },
+            Profile::SystemDecoder { hevc: true },
+        ];
+        let mut counted = 0;
+        for profile in every {
+            let names = profile.capabilities();
+            for (index, name) in names.iter().enumerate() {
+                assert!(!names[index + 1..].contains(name), "{profile:?} names {name} twice");
+                counted += 1;
+            }
+        }
+        assert_eq!(counted, 6, "the instrument counted every name of every profile");
+    }
+
+    #[test]
+    fn a_sandbox_keeps_the_profile_it_was_made_with() {
+        assert_eq!(
+            Sandbox::new(Limits::default()).unwrap().profile(),
+            Profile::NoCapabilities
+        );
+        let hevc = Profile::SystemDecoder { hevc: true };
+        assert_eq!(Sandbox::with_profile(Limits::default(), hevc).unwrap().profile(), hevc);
+        assert_eq!(
+            Sandbox::with_profile(Limits { memory_bytes: 0 }, hevc).unwrap_err(),
+            SandboxError::Limits("the memory limit is zero"),
+            "a profile changes no limit check"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn without_a_sandbox_module_no_profile_starts_anything() {
+        let exe = std::env::current_exe().unwrap();
+        for profile in [
+            Profile::NoCapabilities,
+            Profile::SystemDecoder { hevc: false },
+            Profile::SystemDecoder { hevc: true },
+        ] {
+            let sandbox = Sandbox::with_profile(Limits::default(), profile).unwrap();
+            assert_eq!(
+                sandbox.spawn(&exe).unwrap_err(),
+                SandboxError::Unsupported,
+                "{profile:?}"
+            );
+        }
     }
 }

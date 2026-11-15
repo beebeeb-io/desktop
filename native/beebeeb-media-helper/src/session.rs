@@ -1,7 +1,10 @@
 //! One playback: `Open` → the container's reader-based opener over [`crate::read::PipeReader`] → `Opened`; then
 //! `WantVideo` / `WantAudio` / `Seek` answered in presentation order until the end (`Ended`) or `Close`.
-//! Before a stream's decoder opens, its codec's route ([`crate::routes::check`]) decides: `Rust` decodes here,
-//! `System` is `NoSystemDecoder` (no system module yet), `Unavailable` is `Unsupported`.
+//! Before a stream's decoder opens, its codec's route ([`crate::routes::streams`], the video first) decides: `Rust`
+//! decodes with FilmCraft, `System` with the operating system's decoder over the same ranges
+//! ([`crate::system::SystemStreams`]; where it does not start: `NoSystemDecoder` / `NoSystemMedia`), `Unavailable` is
+//! `Unsupported`. While a message is answered the [`Gate`] is open, so the system decoder's own threads read only
+//! then.
 //!
 //! Never logs, never writes anything but protocol messages, holds no key, no name and no path.
 
@@ -17,8 +20,10 @@ use filmcraft_codecs::{CodecError, Mp4Source};
 use filmcraft_media::{FrameRequest, MediaError, SharedReader, SharedSource, VideoStreamInfo};
 
 use crate::decode::{display_size, mix_channels, scale_letterbox};
+use crate::mf::gate::Gate;
 use crate::read::{PipeReader, ReadFlags, SharedWire, Wire, lock};
-use crate::routes::{check, is_reduced_quality};
+use crate::routes::{Decoder, is_reduced_quality, streams};
+use crate::system::{SystemOpen, SystemStreams};
 use crate::{ROUTES, Route};
 
 /// A file no streaming opener takes is read whole only up to this many bytes; a larger one is `TooLarge`.
@@ -46,6 +51,8 @@ struct Playing {
     audio_origin_ms: u64,
     audio_done: u64,
     flags: Arc<ReadFlags>,
+    /// The streams the operating system decodes (route `System`); the others are FilmCraft's.
+    system: Option<SystemStreams>,
 }
 
 /// Serve one app over standard input and output with the shipped route table.
@@ -58,18 +65,35 @@ pub fn run(input: impl Read + Send + 'static, output: impl Write + Send + 'stati
 pub fn run_with(input: impl Read + Send + 'static, output: impl Write + Send + 'static, table: &[(Codec, Route)]) {
     let wire: SharedWire = Arc::new(Mutex::new(Wire::new(input, output)));
     let flags = Arc::new(ReadFlags::default());
+    let gate = Arc::new(Gate::new());
     let mut playing: Option<Playing> = None;
+    serve(&wire, &flags, &gate, &mut playing, table);
+    // The system decoder's threads may still wait to read: from now on their reads fail at once, so releasing the
+    // decoders does not wait on them.
+    gate.shut();
+    drop(playing);
+}
+
+fn serve(
+    wire: &SharedWire,
+    flags: &Arc<ReadFlags>,
+    gate: &Arc<Gate>,
+    playing: &mut Option<Playing>,
+    table: &[(Codec, Route)],
+) {
     loop {
-        let msg = lock(&wire).recv();
+        let msg = lock(wire).recv();
+        // Reads reach the app only while this message is answered (also the system decoder's, from its threads).
+        gate.open();
         let reply = match msg {
             Err(_) | Ok(ToHelper::Close) => return,
             Ok(ToHelper::Open { len, .. }) => {
                 if playing.is_some() {
                     vec![FromHelper::Error(ErrorCode::Internal)]
                 } else {
-                    match open(&wire, &flags, len, table) {
+                    match open(wire, flags, gate, len, table) {
                         Ok((p, opened)) => {
-                            playing = Some(p);
+                            *playing = Some(p);
                             vec![FromHelper::Opened(opened)]
                         }
                         Err(code) => vec![FromHelper::Error(code)],
@@ -89,8 +113,10 @@ pub fn run_with(input: impl Read + Send + 'static, output: impl Write + Send + '
             // An answer nobody asked for: ignored.
             Ok(ToHelper::Data { .. } | ToHelper::DataFailed { .. }) => Vec::new(),
         };
+        // A read still running finishes first; none starts until the next message.
+        gate.close();
         for msg in reply {
-            if lock(&wire).send(&msg).is_err() {
+            if lock(wire).send(&msg).is_err() {
                 return;
             }
         }
@@ -108,6 +134,7 @@ fn answer(result: Option<Result<FromHelper, ErrorCode>>) -> FromHelper {
 fn open(
     wire: &SharedWire,
     flags: &Arc<ReadFlags>,
+    gate: &Arc<Gate>,
     len: u64,
     table: &[(Codec, Route)],
 ) -> Result<(Playing, Opened), ErrorCode> {
@@ -116,7 +143,9 @@ fn open(
     }
     // First open sets the pool's size; the helper opens one file.
     filmcraft_codecs::set_frame_budget(FRAME_BUDGET);
-    let reader: SharedReader = Arc::new(PipeReader::new(wire.clone(), len, flags.clone()));
+    // One reader of the app's ranges for FilmCraft and the system's decoder alike.
+    let pipe = Arc::new(PipeReader::new(wire.clone(), len, flags.clone()));
+    let reader: SharedReader = pipe.clone();
     let source = filmcraft_media::reader::open_reader_within(
         "",
         reader,
@@ -126,10 +155,15 @@ fn open(
     )
     .map_err(|e| map_error(&e, flags))?;
     let info = source.info().clone();
+    let (video_decoder, audio_decoder) = streams(
+        table,
+        info.video.as_ref().map(|v| v.codec.as_str()),
+        info.audio().map(|a| a.codec.as_str()),
+    )?;
 
-    let video = match &info.video {
-        Some(v) => {
-            let codec = check(table, &v.codec)?;
+    let video = match (&info.video, video_decoder) {
+        (Some(v), Some(decoder)) => {
+            let codec = decoder.codec();
             if v.width == 0 || v.height == 0 {
                 return Err(ErrorCode::Corrupt);
             }
@@ -149,21 +183,41 @@ fn open(
                 v.clone(),
             ))
         }
-        None => None,
+        _ => None,
     };
-    let (audio, reduced_quality) = match info.audio() {
-        Some(a) => {
-            let codec = check(table, &a.codec)?;
+    let system_audio = matches!(audio_decoder, Some(Decoder::System(_)));
+    let (audio, reduced_quality) = match (info.audio(), audio_decoder) {
+        (Some(a), Some(decoder)) => {
+            let codec = decoder.codec();
             let channels = a.channels.clamp(1, u32::from(MAX_CHANNELS)) as u16;
             let rate = a.sample_rate.clamp(1, MAX_RATE);
-            (Some(AudioInfo { rate, channels, codec }), is_reduced_quality(&a.codec))
+            // Windows decodes HE-AAC in full; only FilmCraft plays it at its AAC-LC core.
+            let reduced = is_reduced_quality(&a.codec) && !system_audio;
+            (Some(AudioInfo { rate, channels, codec }), reduced)
         }
-        None => (None, false),
+        _ => (None, false),
     };
     if video.is_none() && audio.is_none() {
         return Err(ErrorCode::NoDecoder);
     }
     let duration_ms = (info.duration.seconds() * 1000.0).round().max(0.0) as u64;
+    let on_system = |decoder: Option<Decoder>| match decoder {
+        Some(Decoder::System(codec)) => Some(codec),
+        _ => None,
+    };
+    let (system_video_codec, system_audio_codec) = (on_system(video_decoder), on_system(audio_decoder));
+    let system = if system_video_codec.is_some() || system_audio_codec.is_some() {
+        Some(SystemStreams::open(SystemOpen {
+            pipe: &pipe,
+            gate,
+            flags,
+            container: &info.container,
+            video: system_video_codec,
+            audio: system_audio_codec,
+        })?)
+    } else {
+        None
+    };
     let opened = Opened {
         duration_ms,
         video: video.as_ref().map(|(v, _)| *v),
@@ -180,6 +234,7 @@ fn open(
         audio_origin_ms: 0,
         audio_done: 0,
         flags: flags.clone(),
+        system,
     };
     Ok((playing, opened))
 }
@@ -187,6 +242,9 @@ fn open(
 fn want_video(p: &mut Playing, w: u32, h: u32) -> Result<FromHelper, ErrorCode> {
     if w == 0 || h == 0 || w > MAX_FRAME_W || h > MAX_FRAME_H {
         return Err(ErrorCode::Internal);
+    }
+    if let Some(system) = p.system.as_mut().filter(|s| s.has_video()) {
+        return system.video_frame(w, h);
     }
     let Some(video) = p.video.as_ref() else {
         return Ok(FromHelper::Ended);
@@ -210,6 +268,9 @@ fn want_video(p: &mut Playing, w: u32, h: u32) -> Result<FromHelper, ErrorCode> 
 fn want_audio(p: &mut Playing, rate: u32, channels: u16, frames: u32) -> Result<FromHelper, ErrorCode> {
     if rate == 0 || rate > MAX_RATE || channels == 0 || channels > MAX_CHANNELS || frames == 0 {
         return Err(ErrorCode::Internal);
+    }
+    if let Some(system) = p.system.as_mut().filter(|s| s.has_audio()) {
+        return system.audio(rate, channels, frames);
     }
     if !p.has_audio {
         return Ok(FromHelper::Ended);
@@ -248,6 +309,9 @@ fn seek(p: &mut Playing, at_ms: u64) {
     } else {
         at_ms
     };
+    if let Some(system) = p.system.as_mut() {
+        system.seek(at_ms);
+    }
     if let Some(video) = p.video.as_ref() {
         let rate = video.frame_rate.sane();
         let index = i128::from(at_ms) * i128::from(rate.num) / (1000 * i128::from(rate.den));

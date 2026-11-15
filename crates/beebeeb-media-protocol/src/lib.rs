@@ -234,6 +234,55 @@ impl ErrorCode {
     }
 }
 
+// ---- Routes and the sandbox profile they need ----
+
+/// How the helper decodes a codec: three kinds (decision D-MED-2, the owner's ruling of 2026-11-15 17:30). The
+/// helper's table (`beebeeb_media_helper::ROUTES`) gives each codec one; the type lives here so the app, which links
+/// this crate and never the helper's, can name it too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// The helper's own Rust decoder, in the helper.
+    Rust,
+    /// The operating system's decoder, inside the (confined) helper: Media Foundation on Windows, Apple's on macOS.
+    /// A PC without one answers [`ErrorCode::NoSystemDecoder`] or [`ErrorCode::NoSystemMedia`]. NEVER the
+    /// helper's own decoder in its place: not as a fallback, not silently.
+    System,
+    /// Not played here: [`ErrorCode::Unsupported`], and the app offers "Open in another app…".
+    Unavailable,
+}
+
+/// Whether a stream whose route is [`Route::System`] is played at all. It needs the helper to start in the
+/// sandbox's system-decoder profile, which may read the registry (decision 2541). OFF until the media checkpoint's
+/// build, the attack probe against both profiles and the security review are green; while it is off,
+/// [`profile_for`] answers `None`, the app keeps the default profile, and such a file shows "Open in another app…".
+pub const MEDIA_SYSTEM_DECODER_ON: bool = false;
+
+/// What the sandbox's system-decoder profile must allow for one file. The app makes it
+/// `beebeeb_office_sandbox::Profile::SystemDecoder { hevc }` (this crate has no dependency, so it cannot name it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SystemDecoderProfile {
+    /// The file is HEVC: the profile adds the four capabilities of Microsoft's Store decoder.
+    pub hevc: bool,
+}
+
+/// The profile to restart the helper in, for a stream of `codec` whose route is `route`; `None` keeps the default
+/// profile. The app learns both from the helper's first answer: `ErrorCode::NoSystemDecoder(codec)` from a helper in
+/// the default profile is a `System` stream (the helper checks the video stream first, so a file with HEVC video
+/// names `Hevc`). Restart once; a helper already in this profile that answers the same is the PC's honest answer.
+pub fn profile_for(route: Route, codec: Codec) -> Option<SystemDecoderProfile> {
+    profile_for_with(MEDIA_SYSTEM_DECODER_ON, route, codec)
+}
+
+/// [`profile_for`] with the switch given: the rule itself, so a test holds it at both values.
+pub fn profile_for_with(on: bool, route: Route, codec: Codec) -> Option<SystemDecoderProfile> {
+    match route {
+        Route::System if on => Some(SystemDecoderProfile {
+            hevc: codec == Codec::Hevc,
+        }),
+        Route::System | Route::Rust | Route::Unavailable => None,
+    }
+}
+
 /// From the app to the helper.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ToHelper {

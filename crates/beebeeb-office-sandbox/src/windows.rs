@@ -1,11 +1,17 @@
-//! Windows: an AppContainer with no capabilities, inside a job object, from a restricted token.
+//! Windows: an AppContainer with its profile's capabilities only, inside a job object, from a restricted token.
 //!
 //! | Layer | What it takes away |
 //! |---|---|
-//! | AppContainer, 0 capabilities, opted out of the "all application packages" group | network (also loopback), the user's files, every writable place |
+//! | AppContainer, opted out of the "all application packages" group, with the profile's capabilities only (none by default) | network (also loopback), the user's files, every writable place |
 //! | Job object: 1 active process, kill on close, memory cap, UI restrictions | child processes; outliving the parent; unbounded memory; clipboard, desktop and global-atom access |
 //! | Restricted token: privileges removed, Administrators deny-only | whatever an elevated parent's token would add |
 //! | Handle list | every handle of the parent except the two pipe ends |
+//!
+//! **Shared memory.** A [`crate::Section`] is an unnamed section backed by the paging file; its handle is not
+//! inheritable. A grant duplicates it into the running helper with exactly the rights asked for (map-read, or
+//! map-read and map-write), never "the same access" as the app's handle. The helper maps it with `map` below, which
+//! owns that handle from then on. Dropping a section writes zeros over all of it (volatile writes) before it is
+//! unmapped, so a helper still holding a view sees zeros. The job's memory cap does not count the app's sections.
 //!
 //! **The container profile exists only while the helper is suspended.** Windows refuses to create an AppContainer
 //! process for an identity that has no registered profile (system code 2, measured), and a registered profile comes
@@ -26,6 +32,11 @@
 //! The job handle is held by the parent only and is not inheritable: when the parent ends, for any reason, the
 //! handle closes and the system ends the helper.
 //!
+//! **Capabilities.** A [`Profile`] names the capabilities by their Windows names; the system derives one identifier
+//! per name, the helper is created with exactly those, and before it runs its token is read back: the identifiers it
+//! holds must be the derived ones, each once, no more and no fewer. Windows accepts any capability name (a misspelled
+//! one too), so the names themselves are pinned by a test of `Profile::capabilities`.
+//!
 //! This is the only module with `unsafe`. Every block is one call into the system, with its invariant stated.
 #![allow(unsafe_code)]
 
@@ -41,14 +52,16 @@ use std::time::Duration;
 
 use windows_sys::Win32::Foundation::FILETIME;
 use windows_sys::Win32::Foundation::{
-    GetLastError, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    DuplicateHandle, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree, SetHandleInformation,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
 use windows_sys::Win32::Security::Isolation::{CreateAppContainerProfile, DeleteAppContainerProfile};
 use windows_sys::Win32::Security::{
-    CreateRestrictedToken, CreateWellKnownSid, DISABLE_MAX_PRIVILEGE, FreeSid, GetTokenInformation, PSID,
-    SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY,
-    TOKEN_DUPLICATE, TOKEN_QUERY, TokenCapabilities, TokenIsAppContainer, WinBuiltinAdministratorsSid,
+    CreateRestrictedToken, CreateWellKnownSid, DISABLE_MAX_PRIVILEGE, DeriveCapabilitySidsFromName, EqualSid, FreeSid,
+    GetTokenInformation, PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID,
+    TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_QUERY, TokenCapabilities, TokenIsAppContainer,
+    WinBuiltinAdministratorsSid,
 };
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
@@ -58,6 +71,10 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_UILIMIT_WRITECLIPBOARD, JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, QueryInformationJobObject,
     SetInformationJobObject, TerminateJobObject,
+};
+use windows_sys::Win32::System::Memory::{
+    CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, PAGE_READWRITE,
+    UnmapViewOfFile,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Registry::{
@@ -75,8 +92,11 @@ use windows_sys::Win32::System::Threading::{
     UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
-use crate::block::{checked_path, command_line, environment_block, is_our_profile_name, profile_name};
-use crate::{ExitStatus, KILLED_EXIT_CODE, Limits, Pipes, SandboxError};
+use crate::block::{checked_path, command_line, environment_block, is_our_profile_name, profile_name, same_members};
+use crate::{Access, ExitStatus, Granted, KILLED_EXIT_CODE, Limits, Pipes, Profile, SandboxError};
+
+/// `SE_GROUP_ENABLED`: the attribute a granted capability carries.
+const SE_GROUP_ENABLED: u32 = 4;
 
 /// `PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT`: the helper's token is not a member of the "all application
 /// packages" group, so the files that group may read on every PC are closed to it as well.
@@ -171,6 +191,180 @@ impl Drop for ChildInner {
         // The job handle closes right after this and would end the helper too; killing first leaves no window.
         let _ = self.kill();
     }
+}
+
+impl ChildInner {
+    /// Places a handle to `section` in the helper with exactly the rights of `access`, not inheritable.
+    pub(crate) fn grant(&self, section: &SectionInner, access: Access) -> Result<Granted, SandboxError> {
+        let mut wire: HANDLE = null_mut();
+        // SAFETY: `section.mapping` is an open section handle; `process` is the helper's open process handle,
+        // returned by process creation with full access (so with the right to place a handle in it); `wire` receives
+        // the value in the helper. Not inheritable; the rights are exactly `granted_rights(access)`, no options (so
+        // not "the same access" as the app's handle).
+        let ok = unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                section.mapping.as_raw_handle(),
+                self.process.as_raw_handle(),
+                &mut wire,
+                granted_rights(access),
+                0,
+                0,
+            )
+        };
+        if ok == 0 {
+            return Err(os("grant"));
+        }
+        Ok(Granted {
+            wire: wire as usize as u64,
+            len: section.len as u64,
+        })
+    }
+}
+
+/// The rights a grant carries into the helper: exactly these, never the rights of the app's own handle.
+fn granted_rights(access: Access) -> u32 {
+    match access {
+        Access::Read => FILE_MAP_READ,
+        Access::ReadWrite => FILE_MAP_READ | FILE_MAP_WRITE,
+    }
+}
+
+/// An unnamed section backed by the paging file, and the app's read-write view of all of it.
+pub(crate) struct SectionInner {
+    mapping: OwnedHandle,
+    view: MEMORY_MAPPED_VIEW_ADDRESS,
+    len: usize,
+}
+
+// SAFETY: the view is memory of this process that only this value unmaps; a shared reference lends it for reading
+// and an exclusive one for writing, as a `Vec<u8>` would.
+unsafe impl Send for SectionInner {}
+// SAFETY: as above.
+unsafe impl Sync for SectionInner {}
+
+impl SectionInner {
+    /// `len` is 1 byte to 4 GiB (checked by the caller).
+    pub(crate) fn new(len: usize) -> Result<Self, SandboxError> {
+        let size = len as u64;
+        let (high, low) = ((size >> 32) as u32, size as u32);
+        // SAFETY: no file (the paging file backs it); null attributes: default security and a handle that is not
+        // inheritable; read-write pages; the size; and a null name, so no other process can open it by name.
+        let raw = unsafe { CreateFileMappingW(INVALID_HANDLE_VALUE, null(), PAGE_READWRITE, high, low, null()) };
+        if raw.is_null() {
+            return Err(os("section"));
+        }
+        let mapping = owned(raw);
+        // SAFETY: `mapping` is the open section just made, `len` bytes long; the view is unmapped once, in `drop`.
+        let view = unsafe { MapViewOfFile(mapping.as_raw_handle(), FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, len) };
+        if view.Value.is_null() {
+            return Err(os("section view"));
+        }
+        Ok(Self { mapping, view, len })
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        // SAFETY: the view is mapped read-write for `len` bytes until `drop`; `&self` lends it for reading only.
+        unsafe { std::slice::from_raw_parts(self.view.Value.cast(), self.len) }
+    }
+
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: as above, and `&mut self` makes this the only reference into the view.
+        unsafe { std::slice::from_raw_parts_mut(self.view.Value.cast(), self.len) }
+    }
+
+    pub(crate) fn raw_handle(&self) -> HANDLE {
+        self.mapping.as_raw_handle()
+    }
+}
+
+impl Drop for SectionInner {
+    fn drop(&mut self) {
+        zeroize(self.as_mut_slice());
+        #[cfg(test)]
+        tests::record_zeroed(self.as_slice());
+        // SAFETY: the address `MapViewOfFile` returned in `new`, unmapped once, here. The section's handle closes
+        // right after, when `mapping` is dropped.
+        unsafe { UnmapViewOfFile(self.view) };
+    }
+}
+
+/// Writes zero over every byte with volatile writes, which the compiler may not leave out.
+fn zeroize(bytes: &mut [u8]) {
+    // SAFETY: every bit pattern is a valid `u64`, so the aligned middle of the bytes may be written as words.
+    let (head, words, tail) = unsafe { bytes.align_to_mut::<u64>() };
+    for word in words {
+        // SAFETY: `word` is a valid, aligned and exclusive reference.
+        unsafe { std::ptr::write_volatile(word, 0) };
+    }
+    for byte in head.iter_mut().chain(tail) {
+        // SAFETY: `byte` is a valid and exclusive reference.
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
+
+/// A granted section, mapped in the helper: its view and the grant's handle, both released on drop.
+pub(crate) struct MappedInner {
+    view: MEMORY_MAPPED_VIEW_ADDRESS,
+    len: usize,
+    writable: bool,
+    _grant: OwnedHandle,
+}
+
+// SAFETY: as for `SectionInner`: the view is memory of this process that only this value unmaps.
+unsafe impl Send for MappedInner {}
+// SAFETY: as above.
+unsafe impl Sync for MappedInner {}
+
+impl MappedInner {
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        // SAFETY: the view is mapped readable for `len` bytes until `drop`; `&self` lends it for reading only.
+        unsafe { std::slice::from_raw_parts(self.view.Value.cast(), self.len) }
+    }
+
+    pub(crate) fn as_mut_slice(&mut self) -> Option<&mut [u8]> {
+        if !self.writable {
+            return None;
+        }
+        // SAFETY: a view mapped read-write for `len` bytes until `drop`; `&mut self` makes this the only reference.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(self.view.Value.cast(), self.len) };
+        Some(bytes)
+    }
+}
+
+impl Drop for MappedInner {
+    fn drop(&mut self) {
+        // SAFETY: the address `MapViewOfFile` returned in `map`, unmapped once, here. The grant's handle closes right
+        // after, when `_grant` is dropped.
+        unsafe { UnmapViewOfFile(self.view) };
+    }
+}
+
+/// The helper's side: maps the section behind `wire`, a handle the app placed in this process with `grant`.
+pub(crate) fn map(wire: u64, len: usize, access: Access) -> Result<MappedInner, SandboxError> {
+    let value = usize::try_from(wire).map_err(|_| SandboxError::Limits("a grant that does not fit this platform"))?;
+    // SAFETY: the value is the handle the app placed in this process for this one grant; nothing else here owns it,
+    // and it is closed once, by this value. In a confined helper a value that names no handle of this process ends
+    // the process at its first use (strict handle checks), before any memory is touched.
+    let grant = unsafe { OwnedHandle::from_raw_handle(value as HANDLE) };
+    let rights = if access == Access::ReadWrite {
+        FILE_MAP_READ | FILE_MAP_WRITE
+    } else {
+        FILE_MAP_READ
+    };
+    // SAFETY: `grant` is a section handle of this process (see above); the view is `len` bytes, the length of the
+    // app's section; it is unmapped once, in `drop`.
+    let view = unsafe { MapViewOfFile(grant.as_raw_handle(), rights, 0, 0, len) };
+    if view.Value.is_null() {
+        return Err(os("map"));
+    }
+    Ok(MappedInner {
+        view,
+        len,
+        writable: access == Access::ReadWrite,
+        _grant: grant,
+    })
 }
 
 /// A process-creation attribute list. The values it points to are borrowed for `'a`, so they outlive it.
@@ -284,6 +478,95 @@ impl Drop for Container {
         }
         // SAFETY: the pointer came from `CreateAppContainerProfile` and is freed once.
         unsafe { FreeSid(self.sid) };
+    }
+}
+
+/// The capability identifiers of one [`Profile`], derived by the system from the profile's names. Everything the
+/// system allocated for them is freed when this is dropped, after the helper's token was read back.
+struct CapabilitySids {
+    /// One enabled entry per capability, in the profile's order.
+    granted: Vec<SID_AND_ATTRIBUTES>,
+    /// Every allocation of the system's: each identifier, then each array that held them. Freed once.
+    allocations: Vec<*mut c_void>,
+}
+
+impl CapabilitySids {
+    fn of(profile: Profile) -> Result<Self, SandboxError> {
+        let mut sids = Self {
+            granted: Vec::new(),
+            allocations: Vec::new(),
+        };
+        for name in profile.capabilities() {
+            let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+            let mut group_sids: *mut PSID = null_mut();
+            let mut group_count = 0u32;
+            let mut capability_sids: *mut PSID = null_mut();
+            let mut capability_count = 0u32;
+            // SAFETY: `wide` is a terminated UTF-16 name; the four out-pointers are valid places for the answers.
+            let ok = unsafe {
+                DeriveCapabilitySidsFromName(
+                    wide.as_ptr(),
+                    &mut group_sids,
+                    &mut group_count,
+                    &mut capability_sids,
+                    &mut capability_count,
+                )
+            };
+            if ok == 0 {
+                return Err(os("capability identifier"));
+            }
+            // SAFETY: on success the system returned arrays of exactly these lengths (or null for none); each entry
+            // and each array is an allocation of its own, recorded here once so `drop` frees it once.
+            unsafe {
+                for index in 0..group_count as usize {
+                    sids.allocations.push(*group_sids.add(index));
+                }
+                for index in 0..capability_count as usize {
+                    sids.allocations.push(*capability_sids.add(index));
+                }
+            }
+            sids.allocations.push(group_sids.cast());
+            sids.allocations.push(capability_sids.cast());
+            if capability_count == 0 || capability_sids.is_null() {
+                return Err(SandboxError::NotConfined("a capability name gave no identifier"));
+            }
+            // SAFETY: the array holds at least one entry (checked above). The first is the capability's own
+            // identifier, as the media spike used and measured.
+            let sid = unsafe { *capability_sids };
+            sids.granted.push(SID_AND_ATTRIBUTES {
+                Sid: sid,
+                Attributes: SE_GROUP_ENABLED,
+            });
+        }
+        Ok(sids)
+    }
+
+    /// The list for process creation: null when the profile has no capability.
+    fn as_mut_ptr(&mut self) -> *mut SID_AND_ATTRIBUTES {
+        if self.granted.is_empty() {
+            null_mut()
+        } else {
+            self.granted.as_mut_ptr()
+        }
+    }
+
+    fn count(&self) -> u32 {
+        self.granted.len() as u32
+    }
+
+    fn identifiers(&self) -> Vec<PSID> {
+        self.granted.iter().map(|entry| entry.Sid).collect()
+    }
+}
+
+impl Drop for CapabilitySids {
+    fn drop(&mut self) {
+        for pointer in self.allocations.drain(..) {
+            if !pointer.is_null() {
+                // SAFETY: an allocation the system made in `of`, recorded once, freed once.
+                unsafe { LocalFree(pointer) };
+            }
+        }
     }
 }
 
@@ -536,8 +819,9 @@ fn directory(
     Ok(buffer)
 }
 
-/// Reads the confinement back from the new, still suspended process.
-fn confirm_confined(process: &OwnedHandle, job: &OwnedHandle) -> Result<(), SandboxError> {
+/// Reads the confinement back from the new, still suspended process: in the job, an AppContainer, and holding
+/// exactly the capabilities in `expected`.
+fn confirm_confined(process: &OwnedHandle, job: &OwnedHandle, expected: &CapabilitySids) -> Result<(), SandboxError> {
     let mut in_job = 0i32;
     // SAFETY: both handles are open; `in_job` is a valid place for the answer.
     if unsafe { IsProcessInJob(process.as_raw_handle(), job.as_raw_handle(), &mut in_job) } == 0 {
@@ -573,9 +857,10 @@ fn confirm_confined(process: &OwnedHandle, job: &OwnedHandle) -> Result<(), Sand
         return Err(SandboxError::NotConfined("not an AppContainer"));
     }
 
-    // The answer is a count followed by that many entries; with no capability it is a count of zero. 512 bytes,
-    // pointer-aligned.
-    let mut capabilities = [0u64; 64];
+    // The answer is a count followed by that many identifier-and-attributes entries whose identifiers point into the
+    // same buffer; with no capability it is a count of zero. 4 KiB, pointer-aligned: room for far more than the five
+    // capabilities a profile has (about 60 bytes each).
+    let mut capabilities = [0u64; 512];
     // SAFETY: the buffer is writable for the length passed and aligned for the structure.
     let ok = unsafe {
         GetTokenInformation(
@@ -589,14 +874,31 @@ fn confirm_confined(process: &OwnedHandle, job: &OwnedHandle) -> Result<(), Sand
     if ok == 0 {
         return Err(os("capabilities read-back"));
     }
-    let count = capabilities[0] as u32;
-    if count != 0 {
-        return Err(SandboxError::NotConfined("has a capability"));
+    let groups = capabilities.as_ptr().cast::<TOKEN_GROUPS>();
+    // SAFETY: the call succeeded, so the buffer starts with the structure; the count is read, not trusted (below).
+    let count = unsafe { (*groups).GroupCount } as usize;
+    let room =
+        (size_of_val(&capabilities) - std::mem::offset_of!(TOKEN_GROUPS, Groups)) / size_of::<SID_AND_ATTRIBUTES>();
+    if count > room {
+        return Err(SandboxError::NotConfined("the capability read-back does not fit"));
+    }
+    // SAFETY: `count` entries follow the count inside the buffer (checked against its room above); each identifier
+    // points into the same buffer, which lives until the comparison below is done.
+    let held: Vec<PSID> = unsafe {
+        let entries = (&raw const (*groups).Groups).cast::<SID_AND_ATTRIBUTES>();
+        (0..count).map(|index| (*entries.add(index)).Sid).collect()
+    };
+    let equal = |a: &PSID, b: &PSID| {
+        // SAFETY: both are valid identifiers: one from the read-back buffer above, one derived by the system.
+        unsafe { EqualSid(*a, *b) != 0 }
+    };
+    if !same_members(&held, &expected.identifiers(), equal) {
+        return Err(SandboxError::NotConfined("holds other capabilities than its profile's"));
     }
     Ok(())
 }
 
-pub(crate) fn spawn(helper_exe: &Path, limits: Limits) -> Result<(ChildInner, Pipes), SandboxError> {
+pub(crate) fn spawn(helper_exe: &Path, limits: Limits, profile: Profile) -> Result<(ChildInner, Pipes), SandboxError> {
     let units: Vec<u16> = helper_exe.as_os_str().encode_wide().collect();
     let application = checked_path(&units)?;
     if !std::fs::metadata(helper_exe).map(|m| m.is_file()).unwrap_or(false) {
@@ -612,11 +914,14 @@ pub(crate) fn spawn(helper_exe: &Path, limits: Limits) -> Result<(ChildInner, Pi
     let job = job(limits)?;
     let token = restricted_token()?;
     let mut container = Container::register()?;
+    // Lives until the end of this function: the attribute list points at its entries, and the read-back compares
+    // the helper's token with them.
+    let mut granted = CapabilitySids::of(profile)?;
 
     let capabilities = [SECURITY_CAPABILITIES {
         AppContainerSid: container.sid,
-        Capabilities: null_mut(),
-        CapabilityCount: 0,
+        Capabilities: granted.as_mut_ptr(),
+        CapabilityCount: granted.count(),
         Reserved: 0,
     }];
     let packages_policy = [ALL_APPLICATION_PACKAGES_OPT_OUT];
@@ -685,7 +990,7 @@ pub(crate) fn spawn(helper_exe: &Path, limits: Limits) -> Result<(ChildInner, Pi
     let thread = owned(created.hThread);
     // The helper has not run yet. Its profile folder goes now; if it cannot be removed, the helper never runs.
     container.unregister()?;
-    confirm_confined(&child.process, &child.job)?;
+    confirm_confined(&child.process, &child.job, &granted)?;
     // SAFETY: `thread` is the open handle of the helper's suspended first thread.
     if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
         return Err(os("resume"));
@@ -701,9 +1006,41 @@ pub(crate) fn spawn(helper_exe: &Path, limits: Limits) -> Result<(ChildInner, Pi
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
 
     const ALREADY_EXISTS: u32 = 0x8007_00B7;
+
+    thread_local! {
+        /// How many bytes of the last section dropped on this thread were zero right before it was unmapped.
+        static ZEROED_AT_DROP: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    /// The test-only hook of `SectionInner::drop`.
+    pub(super) fn record_zeroed(view: &[u8]) {
+        ZEROED_AT_DROP.set(Some(view.iter().filter(|&&byte| byte == 0).count()));
+    }
+
+    #[test]
+    fn a_dropped_section_is_zeroed() {
+        // Neither a multiple of eight nor of the page size, so the zeroing has a tail to cover.
+        let len = 3 * 4096 + 5;
+        let mut section = crate::Section::new(len).unwrap();
+        section.as_mut_slice().fill(0xA5);
+        assert_eq!(
+            section.as_slice().iter().filter(|&&byte| byte == 0).count(),
+            0,
+            "the instrument can fail: before the drop no byte is zero"
+        );
+        ZEROED_AT_DROP.set(None);
+        drop(section);
+        assert_eq!(
+            ZEROED_AT_DROP.get(),
+            Some(len),
+            "every byte was zero when the memory was released"
+        );
+    }
 
     fn wide(name: &str) -> Vec<u16> {
         name.encode_utf16().chain([0]).collect()

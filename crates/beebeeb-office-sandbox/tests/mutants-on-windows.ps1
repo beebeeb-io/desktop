@@ -6,7 +6,8 @@ $ErrorActionPreference = 'Continue'
 $file = Join-Path (Get-Location) 'src\windows.rs'
 $original = [IO.File]::ReadAllText($file)
 
-# name -> (regular expression, replacement). Each expression must match exactly once.
+# name -> (regular expression, replacement[, regular expression, replacement]...), applied in order. Each expression
+# must match exactly once.
 $mutants = [ordered]@{
     'no-container'        = @('attributes\.set\(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities\)\?;', 'let _ = &capabilities;')
     'no-package-opt-out'  = @('attributes\.set\(PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY, &packages_policy\)\?;', 'let _ = &packages_policy;')
@@ -19,6 +20,16 @@ $mutants = [ordered]@{
     'memory-cap-times-64' = @('wanted\.JobMemoryLimit = memory;', 'wanted.JobMemoryLimit = memory * 64;')
     'unrestricted-token'  = @('token\.as_raw_handle\(\),(?=\s+application\.as_ptr\(\),)', 'null_mut(),')
     'switch-put-back'     = @('attributes\.set\(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities\)\?;', 'if std::env::var("BEEBEEB_NO_SANDBOX").is_err() { attributes.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities)?; }')
+    # Shared memory (sections and grants).
+    'read-grant-writable' = @('Access::Read => FILE_MAP_READ,', 'Access::Read => FILE_MAP_READ | FILE_MAP_WRITE,')
+    'read-write-grant-read' = @('Access::ReadWrite => FILE_MAP_READ \| FILE_MAP_WRITE,', 'Access::ReadWrite => FILE_MAP_READ,')
+    'section-inherited'   = @('let mapping = owned\(raw\);', 'unsafe { SetHandleInformation(raw, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) }; let mapping = owned(raw);', 'attributes\.set\(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &inherited\)\?;', 'let _ = &inherited;')
+    'section-named'       = @('PAGE_READWRITE, high, low, null\(\)\)', 'PAGE_READWRITE, high, low, [98u16, 98, 0].as_ptr())')
+    'section-not-zeroed'  = @('zeroize\(self\.as_mut_slice\(\)\);', 'let _ = self.len;')
+    # Profiles (decision 2541).
+    'extra-capability'    = @('for name in profile\.capabilities\(\) \{', 'for name in profile.capabilities().iter().chain(&["internetClient"]) {')
+    'every-profile-hevc'  = @('let mut granted = CapabilitySids::of\(profile\)\?;', 'let mut granted = CapabilitySids::of(Profile::SystemDecoder { hevc: true })?;')
+    'read-back-expects-none' = @('confirm_confined\(&child\.process, &child\.job, &granted\)\?;', 'confirm_confined(&child.process, &child.job, &CapabilitySids::of(Profile::NoCapabilities)?)?;')
 }
 
 $profiles = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings'
@@ -28,10 +39,14 @@ $log = Join-Path $env:TEMP ("beebeeb-sandbox-mutant-{0}.log" -f $PID)
 $red = 0
 try {
     foreach ($name in $mutants.Keys) {
-        $pattern, $replacement = $mutants[$name]
-        $matches_ = [regex]::Matches($original, $pattern).Count
-        if ($matches_ -ne 1) { "mutant ${name}: the pattern matches $matches_ times, expected 1"; exit 4 }
-        [IO.File]::WriteAllText($file, [regex]::Replace($original, $pattern, $replacement))
+        $pairs = $mutants[$name]
+        $mutated = $original
+        for ($i = 0; $i -lt $pairs.Count; $i += 2) {
+            $matches_ = [regex]::Matches($mutated, $pairs[$i]).Count
+            if ($matches_ -ne 1) { "mutant ${name}: pattern $($i / 2 + 1) matches $matches_ times, expected 1"; exit 4 }
+            $mutated = [regex]::Replace($mutated, $pairs[$i], $pairs[$i + 1])
+        }
+        [IO.File]::WriteAllText($file, $mutated)
         & cargo test --locked --no-fail-fast --lib --test sandbox -- --test-threads=1 *> $log
         $lines = Get-Content $log
         $result = (@($lines | Where-Object { $_ -match '^test result:' }) | ForEach-Object { ($_ -replace '; 0 ignored.*$', '') -replace '^test result: ', '' }) -join ' + '

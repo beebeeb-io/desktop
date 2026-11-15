@@ -361,3 +361,46 @@ fn protocol_refuses_truncated_message() {
         Err(WireError::Malformed)
     );
 }
+
+/// The switch is off as this crate ships: no route asks for the system-decoder profile, so the app keeps the default
+/// one and a `System` file shows "Open in another app…".
+#[test]
+fn profile_for_is_none_while_the_system_decoder_switch_is_off() {
+    assert!(
+        !MEDIA_SYSTEM_DECODER_ON,
+        "the switch flips only after the media checkpoint and its security review"
+    );
+    let mut asked = 0;
+    for route in [Route::Rust, Route::System, Route::Unavailable] {
+        for codec in Codec::ALL {
+            assert_eq!(profile_for(route, codec), None, "{route:?} {codec:?}");
+            assert_eq!(profile_for_with(false, route, codec), None, "{route:?} {codec:?}");
+            asked += 1;
+        }
+    }
+    assert_eq!(asked, 3 * Codec::ALL.len());
+}
+
+/// With the switch on, only a `System` stream gets the profile, and only HEVC gets the four Store capabilities.
+#[test]
+fn profile_for_with_the_switch_on_picks_the_system_decoder_profile_for_system_rows_only() {
+    let mut system_rows = 0;
+    for codec in Codec::ALL {
+        assert_eq!(profile_for_with(true, Route::Rust, codec), None, "{codec:?}");
+        assert_eq!(profile_for_with(true, Route::Unavailable, codec), None, "{codec:?}");
+        let wanted = SystemDecoderProfile {
+            hevc: codec == Codec::Hevc,
+        };
+        assert_eq!(profile_for_with(true, Route::System, codec), Some(wanted), "{codec:?}");
+        system_rows += 1;
+    }
+    assert_eq!(system_rows, Codec::ALL.len());
+    assert_eq!(
+        profile_for_with(true, Route::System, Codec::Hevc),
+        Some(SystemDecoderProfile { hevc: true })
+    );
+    assert_eq!(
+        profile_for_with(true, Route::System, Codec::Aac),
+        Some(SystemDecoderProfile { hevc: false })
+    );
+}
