@@ -799,3 +799,68 @@ fn the_engines_own_glue_hands_out_nothing_with_no_one_signed_in() {
         "a selection is reclaimed on Windows alone"
     );
 }
+
+/// A kept file whose change is not sent yet (uploading, in conflict) or that is in error reads the listing's own mark
+/// of that state, never "available_offline" over it; a kept file that is here, or on its way here, still reads kept
+/// (review of 2468, L256.4).
+#[test]
+fn kept_file_with_unsent_change_reads_its_unsent_mark() {
+    use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, PinState, StateDb};
+    let dir = tempfile::tempdir().unwrap();
+    let db = StateDb::open(&dir.path().join("state.db")).unwrap();
+    let put = |id: &str, status: FileStatus| {
+        let entry = FileEntry {
+            file_id: id.into(),
+            path: format!("/{id}"),
+            status,
+            size_bytes: 10,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        };
+        db.upsert_file_with_contract(&entry, |contract| {
+            contract.item_kind = entry.item_kind.clone();
+            contract.pin_state = PinState::Pinned;
+        })
+        .unwrap();
+    };
+    put("kept-uploading", FileStatus::Uploading);
+    put("kept-conflict", FileStatus::Conflict);
+    put("kept-error", FileStatus::Error);
+    put("kept-downloading", FileStatus::Downloading);
+    put("kept-here", FileStatus::Local);
+    let ids: Vec<String> = [
+        "kept-uploading",
+        "kept-conflict",
+        "kept-error",
+        "kept-downloading",
+        "kept-here",
+    ]
+    .iter()
+    .map(|id| id.to_string())
+    .collect();
+    // What a row of each reads in a listing of its folder: the engine's row model, then the window's mark of it.
+    let listed: Vec<Option<Option<String>>> = ids
+        .iter()
+        .map(|id| {
+            let entry = db.get_file(id).unwrap().unwrap();
+            let contract = db.get_file_contract_state(id).unwrap();
+            let row = beebeeb_engine::drive_v2::model::item_from(&entry, contract.as_ref(), None);
+            Some(crate::source_engine::item(row).pc_status)
+        })
+        .collect();
+    let marks = marks_in(&db, &ids);
+    let kept = Some(Some("available_offline".to_string()));
+    assert_eq!(
+        marks[..3],
+        listed[..3],
+        "an unsent change or an error reads its own mark"
+    );
+    assert!(
+        marks[..3].iter().all(|mark| mark != &kept),
+        "kept was drawn over an unsent change or an error"
+    );
+    assert_eq!(marks[3..], [kept.clone(), kept]);
+}

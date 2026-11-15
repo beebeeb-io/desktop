@@ -358,3 +358,238 @@ fn a_cancelled_upload_leaves_the_selection_on_the_same_files() {
     );
     let _ = ids;
 }
+
+/// The ids Undo holds now, in its order.
+fn undo_ids(rt: &Runtime<State>) -> Vec<String> {
+    rt.state.actions.undo.iter().map(|(_, item)| item.id.clone()).collect()
+}
+
+/// Select only the row with this id.
+fn select(rt: &mut Runtime<State>, id: &str) {
+    rt.update(|s, _| {
+        let at = s.listing.items.iter().position(|item| item.id == id).unwrap();
+        s.select_only(at);
+    });
+}
+
+/// Review of 2468, L316: a second Delete after a move that failed takes the old failure away, with its Try again;
+/// Try again of a failure acts on the items it was left for, never on what is selected now.
+#[test]
+fn second_delete_after_failed_move_clears_old_failure() {
+    let (mut rt, spy, ids, other) = window();
+    rt.update(|s, tx| assert!(s.trash_selection(tx)));
+    spy.answer(
+        Action::Trash,
+        &[
+            (&ids[0], Some(ActionError::Offline)),
+            (&ids[1], Some(ActionError::Offline)),
+        ],
+    );
+    assert!(frame(&mut rt));
+    assert_eq!(
+        rt.state.actions.toast,
+        Some(Toast::Failed(Action::Trash, ActionError::Offline))
+    );
+    assert_eq!(spy.asked(), [(Action::Trash, ids.clone())]);
+
+    // A second Delete, of another row, is accepted: the old failure and its Try again go.
+    select(&mut rt, &other);
+    rt.update(|s, tx| assert!(s.trash_selection(tx)));
+    assert_eq!(spy.asked(), [(Action::Trash, vec![other.clone()])]);
+    assert_eq!(rt.state.actions.toast, None, "the old failure still stands");
+    assert_eq!(rt.state.actions.trash.again, None, "and its Try again with it");
+
+    // That move fails too: its own failure, and Try again asks for that row alone, whatever is selected now.
+    spy.answer(Action::Trash, &[(&other, Some(ActionError::Offline))]);
+    assert!(frame(&mut rt));
+    assert_eq!(
+        rt.state.actions.toast,
+        Some(Toast::Failed(Action::Trash, ActionError::Offline))
+    );
+    select(&mut rt, &ids[0]);
+    rt.update(|s, tx| s.retry(tx));
+    assert_eq!(spy.asked(), [(Action::Trash, vec![other.clone()])]);
+}
+
+/// Review of 2468, L317: Undo is for every row moved since the last Undo, not only the last answer's. A partial move
+/// and its Try again are undone together; an Undo pressed between them puts back only what it held.
+#[test]
+fn undo_after_partial_move_and_retry_puts_back_both() {
+    let (mut rt, spy, ids, _) = window();
+    rt.update(|s, tx| assert!(s.trash_selection(tx)));
+    spy.answer(Action::Trash, &[(&ids[0], None), (&ids[1], Some(ActionError::Failed))]);
+    assert!(frame(&mut rt));
+    rt.update(|s, tx| s.retry(tx));
+    assert_eq!(
+        spy.asked(),
+        [(Action::Trash, ids.clone()), (Action::Trash, vec![ids[1].clone()])]
+    );
+    spy.answer(Action::Trash, &[(&ids[1], None)]);
+    assert!(frame(&mut rt));
+    assert_eq!(rt.state.actions.toast, Some(Toast::Trashed));
+    assert_eq!(undo_ids(&rt), ids, "the first one moved is still Undo's");
+    rt.update(|s, tx| assert!(s.undo(tx)));
+    assert_eq!(spy.asked(), [(Action::Restore, ids.clone())], "Undo puts back both");
+    spy.answer(Action::Restore, &[(&ids[0], None), (&ids[1], None)]);
+    assert!(frame(&mut rt));
+    assert!(shown(&rt, &ids[0]) && shown(&rt, &ids[1]));
+
+    // Again, with Undo pressed while the Try again is on its way: it puts back what it held, and the row moved
+    // after it is the next Undo's. (The rows came back in the folder's order: `pair` is that order.)
+    let pair: Vec<String> = rt
+        .state
+        .listing
+        .items
+        .iter()
+        .filter(|item| ids.contains(&item.id))
+        .map(|item| item.id.clone())
+        .collect();
+    rt.update(|s, _| {
+        let rows: Vec<usize> = (0..s.listing.items.len())
+            .filter(|&row| pair.contains(&s.listing.items[row].id))
+            .collect();
+        s.select_only(rows[0]);
+        s.actions.selection.insert(rows[1]);
+    });
+    rt.update(|s, tx| assert!(s.trash_selection(tx)));
+    spy.answer(
+        Action::Trash,
+        &[(&pair[0], None), (&pair[1], Some(ActionError::Failed))],
+    );
+    assert!(frame(&mut rt));
+    rt.update(|s, tx| s.retry(tx));
+    rt.update(|s, tx| assert!(s.undo(tx)));
+    assert_eq!(
+        spy.asked(),
+        [
+            (Action::Trash, pair.clone()),
+            (Action::Trash, vec![pair[1].clone()]),
+            (Action::Restore, vec![pair[0].clone()])
+        ]
+    );
+    spy.answer(Action::Trash, &[(&pair[1], None)]);
+    spy.answer(Action::Restore, &[(&pair[0], None)]);
+    assert!(frame(&mut rt));
+    assert!(shown(&rt, &pair[0]) && !shown(&rt, &pair[1]));
+    assert_eq!(undo_ids(&rt), [pair[1].clone()], "only the row moved after that Undo");
+    rt.update(|s, tx| assert!(s.undo(tx)));
+    assert_eq!(spy.asked(), [(Action::Restore, vec![pair[1].clone()])]);
+}
+
+/// Review of 2468, L318: a move answered after another folder was opened is still said, with Undo for those rows;
+/// their Undo puts nothing in the folder shown now.
+#[test]
+fn move_answered_after_folder_changed_is_still_said() {
+    let (mut rt, spy, ids, _) = window();
+    rt.update(|s, tx| assert!(s.trash_selection(tx)));
+    let folder = rt
+        .state
+        .listing
+        .items
+        .iter()
+        .find(|item| item.is_folder && !item.is_protected)
+        .expect("the board lists a folder")
+        .id
+        .clone();
+    rt.update(|s, _| s.open_folder(Some(folder.clone())));
+    assert_eq!(rt.state.listing.folder.id.as_deref(), Some(folder.as_str()));
+    let rows: Vec<String> = rt.state.listing.items.iter().map(|item| item.id.clone()).collect();
+
+    spy.answer(Action::Trash, &[(&ids[0], None), (&ids[1], None)]);
+    assert!(frame(&mut rt));
+    assert_eq!(rt.state.actions.toast, Some(Toast::Trashed), "moved, and said");
+    assert_eq!(undo_ids(&rt), ids, "with Undo for those rows");
+    let now: Vec<String> = rt.state.listing.items.iter().map(|item| item.id.clone()).collect();
+    assert_eq!(now, rows, "the folder shown did not change");
+
+    rt.update(|s, tx| assert!(s.undo(tx)));
+    assert_eq!(
+        spy.asked(),
+        [(Action::Trash, ids.clone()), (Action::Restore, ids.clone())]
+    );
+    spy.answer(Action::Restore, &[(&ids[0], None), (&ids[1], None)]);
+    frame(&mut rt);
+    let now: Vec<String> = rt.state.listing.items.iter().map(|item| item.id.clone()).collect();
+    assert_eq!(now, rows, "rows of another folder were put in this one");
+    assert!(rt.state.actions.undo.is_empty() && rt.state.actions.trash.restoring.is_empty());
+}
+
+/// Review of 2468, L319: "Moved to Trash" that lands while a failure that offers Try again stands is held, and said
+/// with its Undo once that message went; it is never dropped.
+#[test]
+fn moved_to_trash_during_failure_is_said_after_it() {
+    let (mut rt, spy, ids, other) = window();
+    rt.update(|s, tx| assert!(s.trash_selection(tx)));
+    // A second press, of another row, is refused at once: its message offers Try again.
+    *spy.refuse.lock().unwrap() = Some(ActionError::Offline);
+    select(&mut rt, &other);
+    rt.update(|s, tx| assert!(s.trash_selection(tx)));
+    let failure = Some(Toast::Failed(Action::Trash, ActionError::Offline));
+    assert_eq!(rt.state.actions.toast, failure);
+    assert!(rt.state.offers_try_again(Action::Trash, ActionError::Offline));
+
+    // The first press's answer lands while that message stands: the rows leave, the message stays.
+    spy.answer(Action::Trash, &[(&ids[0], None), (&ids[1], None)]);
+    frame(&mut rt);
+    assert!(!shown(&rt, &ids[0]) && !shown(&rt, &ids[1]));
+    assert_eq!(
+        rt.state.actions.toast, failure,
+        "taken away by an answer nobody pressed for"
+    );
+    assert_eq!(undo_ids(&rt), ids);
+
+    // The failure's time is over: "Moved to Trash" is said now, with its Undo.
+    rt.update(|s, _| {
+        s.actions.toast_until = Some(std::time::Instant::now());
+        super::super::reset::poll(s);
+    });
+    assert!(frame(&mut rt));
+    assert_eq!(rt.state.actions.toast, Some(Toast::Trashed), "the answer was dropped");
+    assert_eq!(undo_ids(&rt), ids);
+}
+
+/// Review of 2468, L320: a row whose move to Trash is on its way is not renamed and not moved to another folder; the
+/// message says the last change is still on its way. Answered, it can be again.
+#[test]
+fn rename_of_row_being_moved_to_trash_is_refused() {
+    let (mut rt, spy, ids, other) = window();
+    rt.update(|s, tx| assert!(s.trash_selection(tx)));
+    select(&mut rt, &ids[0]);
+    rt.update(|s, tx| assert!(s.begin_rename(tx)));
+    assert_eq!(
+        rt.state.actions.rename, None,
+        "a name field on a row on its way to Trash"
+    );
+    assert_eq!(
+        rt.state.actions.toast,
+        Some(Toast::Failed(Action::Rename, ActionError::InFlight))
+    );
+    rt.update(|s, tx| assert!(s.begin_move(tx)));
+    assert!(
+        rt.state.actions.dialog.is_none(),
+        "Move to, for a row on its way to Trash"
+    );
+    assert_eq!(
+        rt.state.actions.toast,
+        Some(Toast::Failed(Action::Move, ActionError::InFlight))
+    );
+
+    // A row whose move is not on its way is renamed as before.
+    select(&mut rt, &other);
+    rt.update(|s, tx| assert!(s.begin_rename(tx)));
+    assert_eq!(
+        rt.state.actions.rename.as_ref().map(|rename| rename.id.clone()),
+        Some(other.clone())
+    );
+    rt.update(|s, tx| s.cancel_rename(tx));
+
+    // Answered (Beebeeb left the first one here): it is no longer on its way, and can be renamed.
+    spy.answer(Action::Trash, &[(&ids[0], Some(ActionError::Failed)), (&ids[1], None)]);
+    assert!(frame(&mut rt));
+    select(&mut rt, &ids[0]);
+    rt.update(|s, tx| assert!(s.begin_rename(tx)));
+    assert_eq!(
+        rt.state.actions.rename.as_ref().map(|rename| rename.id.clone()),
+        Some(ids[0].clone())
+    );
+}

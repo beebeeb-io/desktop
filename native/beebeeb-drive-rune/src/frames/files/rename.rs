@@ -38,6 +38,11 @@ impl State {
             self.failed(Action::Rename, ActionError::Protected, tx);
             return true;
         }
+        // Its move to Trash is on its way: no new name for it (review of 2468, L320).
+        if self.trash_on_its_way(std::slice::from_ref(&self.listing.items[row])) {
+            self.failed(Action::Rename, ActionError::InFlight, tx);
+            return true;
+        }
         self.open_rename(row);
         tx.focus(RENAME_INPUT, false);
         true

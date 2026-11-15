@@ -139,6 +139,11 @@ impl State {
             self.failed(Action::Move, ActionError::Protected, tx);
             return true;
         }
+        // A move to Trash of one of them is on its way: it is not moved anywhere else (review of 2468, L320).
+        if self.trash_on_its_way(&items) {
+            self.failed(Action::Move, ActionError::InFlight, tx);
+            return true;
+        }
         self.open_move(items);
         true
     }
@@ -261,6 +266,12 @@ impl State {
         let Some(Dialog::Move(mut m)) = self.actions.dialog.take() else {
             return;
         };
+        // A move to Trash of one of them began while the dialog was open: the dialog closes, nothing is moved
+        // (review of 2468, L320).
+        if self.trash_on_its_way(&m.items) {
+            self.failed(Action::Move, ActionError::InFlight, tx);
+            return;
+        }
         if m.is_where_they_are() {
             self.actions.dialog = Some(Dialog::Move(m));
             return;
