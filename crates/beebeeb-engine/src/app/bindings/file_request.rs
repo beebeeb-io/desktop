@@ -201,6 +201,10 @@ impl<C: CredentialStores> Engine<C> {
         if !self.session_is_still(run.session, &run.key) {
             return Err(ShareLinkError::NotSignedIn);
         }
+        let query = link
+            .split_once('#')
+            .map(|(display, fragment)| format!("{}?key={}", display, fragment));
+        let link = query.map(Zeroizing::new).unwrap_or(link);
         Ok(MadeLink {
             session: run.session,
             link,

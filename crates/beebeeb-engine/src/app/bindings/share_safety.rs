@@ -618,7 +618,7 @@ fn share_trust_in(
     marks
         .iter()
         .map(|(mark, kind)| trust(Some((mark.as_str(), *kind)), &fp, accepted.as_deref()))
-        .min()
+        .max()
 }
 
 /// The refused invite `member` the changed-key answer named, checked against my sent list: a claimed invite of `item`
