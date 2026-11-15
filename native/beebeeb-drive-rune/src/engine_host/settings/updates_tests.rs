@@ -484,8 +484,15 @@ fn a_file_that_is_not_the_signed_one_is_deleted_and_never_handed_off() {
         says: Some(says.into()),
     };
     assert_eq!(rig.part.update(), banner(Press::Retry, NOT_SIGNED_FILE));
-    // Try again: checked again, downloaded again, refused again; never handed off.
+    // Try again: checked again, downloaded again, refused again; never handed off. While its check runs (held at the
+    // release server) the banner stays, waiting, and says so.
+    rig.gate.close();
     rig.part.restart_to_update();
+    until(&mut rig.part, "the press's check is reported", |part| {
+        matches!(part.state_for_test(), Some(State::Checking { .. }))
+    });
+    assert_eq!(rig.part.update(), banner(Press::Wait, UpdateCheck::Checking.says()));
+    rig.gate.open();
     settle(&mut rig.part);
     assert_eq!(fetched(&rig), 2, "the press ran again");
     assert_eq!(rig.part.update(), banner(Press::Retry, NOT_SIGNED_FILE));

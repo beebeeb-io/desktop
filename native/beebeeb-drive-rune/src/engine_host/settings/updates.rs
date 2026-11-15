@@ -692,7 +692,10 @@ impl UpdatesPart {
     /// button does now, and, while the press is worked on or after it did not go through, the row's words in the
     /// caption's place. Never an older version.
     pub(crate) fn update(&self) -> Update {
-        let Some(version) = self.upgrade().map(|offer| offer.version).or_else(|| self.retry()) else {
+        // While the press's order runs, its version stays in sight at every leg (its check after a dropped offer
+        // included).
+        let version = self.upgrade().map(|offer| offer.version);
+        let Some(version) = version.or_else(|| self.retry()).or_else(|| self.updating()) else {
             return Update::Current;
         };
         let press = self.press();
