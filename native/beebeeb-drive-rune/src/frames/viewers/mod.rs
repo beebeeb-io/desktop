@@ -37,6 +37,7 @@ mod states;
 mod style;
 mod table;
 mod text;
+pub mod video;
 
 #[cfg(test)]
 mod media_tests;
@@ -701,7 +702,9 @@ fn is_this_groups(s: &State, item: &crate::source::DriveItem) -> bool {
         // are: Enter on one reads it, it never runs it (`kinds::its_app_shows_it`).
         && route_source(s).is_some_and(|source| {
             source.previews(&item.name)
-                && !(kinds::its_app_shows_it(&item.name) && source.kept_on_this_pc(&item.id))
+                && !(kinds::its_app_shows_it(&item.name)
+                    && source.kept_on_this_pc(&item.id)
+                    && !source.opens_here_when_kept(&item.name))
         })
 }
 
@@ -990,6 +993,10 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
             let can_play = ui.can_play();
             let (tools, body) = (audio::tools(can_play, &t), audio::body(ui, doc, &t));
             return chrome::window(s, cx, ui, head, tools, None, body, &audio::status(doc, can_play), &t);
+        }
+        Body::Video(_) => {
+            let (body, status) = (video::view(ui, &t), video::status(ui));
+            return chrome::window(s, cx, ui, head, Vec::new(), None, body, &status, &t);
         }
         Body::Pdf(doc) => {
             let (tools, bar, body) = (pdf::tools(ui, &t), pdf::find_bar(ui, &t), pdf::body(ui, doc, &t));

@@ -470,7 +470,7 @@ pub(super) fn kind_word(name: &str) -> &'static str {
         Some(Viewer::Pdf) => "PDF",
         Some(Viewer::Audio) => "Audio",
         Some(Viewer::Archive) => "Archive",
-        None => "File",
+        Some(Viewer::Video) | None => "File",
     }
 }
 
