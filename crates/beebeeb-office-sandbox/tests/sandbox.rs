@@ -1118,6 +1118,50 @@ mod windows {
         );
     }
 
+    /// A TCP connect through the socket driver alone (no socket library) is refused in the confined helper. The
+    /// verbs above stop where the library starts, so they never reach the kernel's network filter; this one goes
+    /// past the library, as a helper that drives the driver itself would.
+    ///
+    /// **The target is a listening TCP port on another machine** (`BB_OFFICE_N1_TARGET=<ip:port>`), never
+    /// loopback or this machine's own address: the filter refuses those even to a container that holds a network
+    /// capability, so only another machine lets the capability mutant (`network-capability` in
+    /// `mutants-on-windows.ps1`) turn this test red. The plain probe connecting there through the driver alone is
+    /// the proof that the instrument can see a connection. Ignored unless asked for; asked for without a target is a
+    /// red with the reason.
+    #[test]
+    #[ignore = "needs BB_OFFICE_N1_TARGET: a listening TCP port on another machine of the network"]
+    fn a_raw_driver_connect_is_refused_in_the_confined_helper() {
+        let _serial = serial();
+        let target = std::env::var("BB_OFFICE_N1_TARGET")
+            .expect("BB_OFFICE_N1_TARGET is not set: this measurement was asked to run and could not");
+        let target: SocketAddr = target.parse().expect("BB_OFFICE_N1_TARGET is <ip:port>");
+        assert!(
+            !target.ip().is_loopback() && target.ip() != own_address(),
+            "the target is another machine, not loopback or this machine's own address"
+        );
+
+        let mut plain = Probe::plain();
+        let plain_raw = plain.attempt(&format!("raw-connect {target}"));
+        let plain_library = plain.attempt(&format!("connect {target}"));
+        drop(plain);
+        let mut confined = Probe::confined();
+        let confined_raw = confined.attempt(&format!("raw-connect {target}"));
+        let confined_library = confined.attempt(&format!("connect {target}"));
+        println!(
+            "raw-connect: plain {plain_raw:?} (library {plain_library:?}); confined {confined_raw:?} (library \
+             {confined_library:?})"
+        );
+
+        assert_eq!(
+            plain_raw, "ok",
+            "the plain probe connects through the socket driver alone"
+        );
+        assert!(
+            confined_raw.starts_with("err "),
+            "the confined helper's connect through the socket driver: {confined_raw}"
+        );
+    }
+
     /// A file on a network share, opened by its share path, is out of reach of the confined helper: on Windows the
     /// sandbox is what stands between the helper and the file-sharing client (the Office engine's own refusal of
     /// such paths is tested in the Office engine).
