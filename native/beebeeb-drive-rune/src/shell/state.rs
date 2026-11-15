@@ -142,11 +142,11 @@ pub fn init_from(shell: Shell, source: Box<dyn DriveSource>, selected: Option<us
     }
 }
 
-/// Search on the engine (`engine_host::search`) in the running app. OFF until task 2488: the search index is built
-/// from this computer's local state, which can still belong to the previous account (a sign-out keeps it, and no
-/// read checks the data's owner against the session), so Search could answer with another account's names. While
-/// this is false the shell hands Search the `Unwired` source and no part of the adapter runs (no index, no worker).
-pub(crate) const SEARCH_ON_ENGINE: bool = false;
+/// Search on the engine (`engine_host::search`) in the running app. ON since task 2488 (the owner's go, 2026-11-15):
+/// the index and the recent searches are read only through the engine's account-bound handle, so a local state a
+/// sign-out kept for the previous account answers nothing to another one. False hands Search the `Unwired` source
+/// and no part of the adapter runs (no index, no worker).
+pub(crate) const SEARCH_ON_ENGINE: bool = true;
 
 /// Makes a first-run source for the session that is signed in when it is called.
 pub type SetupMaker = Box<dyn Fn() -> Box<dyn crate::frames::signin::setup::source::SetupSource>>;
