@@ -9,12 +9,18 @@
 //! | `BBCTL1 show` | bring the main window forward |
 //! | `BBCTL1 open <link>` | the same, on the place an allow-listed link names (`deeplink.rs`) |
 //! | `BBCTL1 quit-for-update` | stop the engine and exit (the installer) |
+//! | `BBCTL1 explorer <verb> <id>` | one of Beebeeb's items in File Explorer's menu, on the item with that id ([`ExplorerVerb`]) |
 //!
 //! The answer is one line: `ok` (the window thread took it) or `busy` (it did not in time).
 //! Everything else is ignored: an unknown verb, a missing or extra part, a link that is not on
 //! the allow-list, a line that is too long, bytes that are not ASCII. The input is untrusted:
 //! any process of this user can write to the pipe, so no verb does more than a click on the b's
 //! menu could, and a link can only ever SHOW a place.
+//!
+//! **A File Explorer verb carries an id, never a path** (slice B6, the lead's ruling of 2026-11-15 16:45): the
+//! launch Explorer started reads the item's id from its placeholder (`platform::windows_verbs`) and sends only the
+//! verb and that id, short and ASCII. The running instance checks everything again (the account, the lock, the
+//! verb), and Share and Copy link only OPEN the window's own Share dialog: nothing is shared from the pipe.
 //!
 //! **A launch checks who serves the channel before it writes anything** ([`check_server`], task
 //! 2455). The channel's name is not a secret and its namespace is shared by everybody on the
@@ -37,6 +43,60 @@ pub enum Request {
     /// A link that parsed against the allow-list when this value was made.
     Open(String),
     QuitForUpdate,
+    /// A verb of Beebeeb's items in File Explorer's menu (DW-1183), on the item with this id (`deeplink::is_item_id`
+    /// held when this value was made). Never a path.
+    Explorer {
+        verb: ExplorerVerb,
+        item: String,
+    },
+}
+
+/// Beebeeb's items in File Explorer's classic menu (DW-1183, "Show more options"), in the board's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ExplorerVerb {
+    /// Share with Beebeeb…: the window's Share dialog (DW-0407) on the file.
+    Share,
+    /// Copy Beebeeb link: the same dialog, whose own button is Copy link. Nothing is copied from the menu.
+    CopyLink,
+    /// Show in Beebeeb: the window comes forward on Files with the file selected (DW-0401).
+    Show,
+    /// Version history…: the file's versions (DW-0413).
+    Versions,
+}
+
+impl ExplorerVerb {
+    /// The board's order.
+    pub const ALL: [ExplorerVerb; 4] = [
+        ExplorerVerb::Share,
+        ExplorerVerb::CopyLink,
+        ExplorerVerb::Show,
+        ExplorerVerb::Versions,
+    ];
+
+    /// The verb's word on the command line (`--explorer-verb=<word>`) and on the control channel.
+    pub fn word(self) -> &'static str {
+        match self {
+            ExplorerVerb::Share => "share",
+            ExplorerVerb::CopyLink => "copy-link",
+            ExplorerVerb::Show => "show",
+            ExplorerVerb::Versions => "versions",
+        }
+    }
+
+    pub fn from_word(word: &str) -> Option<ExplorerVerb> {
+        ExplorerVerb::ALL.into_iter().find(|verb| verb.word() == word)
+    }
+
+    /// The menu's words: the board's for the real app; the test build names itself where the board names Beebeeb.
+    pub fn label(self, identity: AppIdentity) -> String {
+        let name = identity.product_name();
+        match self {
+            ExplorerVerb::Share => format!("Share with {name}\u{2026}"),
+            ExplorerVerb::CopyLink => format!("Copy {name} link"),
+            ExplorerVerb::Show => format!("Show in {name}"),
+            ExplorerVerb::Versions => "Version history\u{2026}".to_string(),
+        }
+    }
 }
 
 impl Request {
@@ -54,6 +114,7 @@ impl Request {
             Request::Show => format!("{MAGIC} show\n"),
             Request::Open(link) => format!("{MAGIC} open {link}\n"),
             Request::QuitForUpdate => format!("{MAGIC} quit-for-update\n"),
+            Request::Explorer { verb, item } => format!("{MAGIC} explorer {} {item}\n", verb.word()),
         }
         .into_bytes()
     }
@@ -69,6 +130,18 @@ impl Request {
             return None;
         }
         let (verb, argument) = (parts.next()?, parts.next());
+        // `explorer <verb> <id>`: the one request of three parts. The id is checked as an item id, the verb against
+        // the board's four; anything else in the line, or missing from it, and nothing is asked.
+        if verb == "explorer" {
+            let (Some(word), Some(item), None) = (argument, parts.next(), parts.next()) else {
+                return None;
+            };
+            let verb = ExplorerVerb::from_word(word)?;
+            return deeplink::is_item_id(item).then(|| Request::Explorer {
+                verb,
+                item: item.to_owned(),
+            });
+        }
         if parts.next().is_some() {
             return None;
         }
@@ -80,6 +153,70 @@ impl Request {
                 .then(|| Request::Open(link.to_owned())),
             _ => None,
         }
+    }
+}
+
+/// What the running instance asks of the engine about the item a File Explorer verb names. The app's is the engine's
+/// account-bound local state (`platform::windows_verbs`); a test's is its own.
+pub trait ItemLookup {
+    /// Whose session the engine holds now, in the words the window's session has them (`EngineActions::session`).
+    /// Never waits.
+    fn account(&self) -> Option<String>;
+    /// The folder the item `id` is in (`Some(None)`: the top of Files), read in the session's OWN local state: refused
+    /// while locked and for a local state that is another account's. `None`: not there, or refused.
+    fn folder_of(&self, id: &str) -> Option<Option<String>>;
+}
+
+/// What the running instance does with a File Explorer verb.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VerbPlan {
+    /// The window comes forward and nothing more. The words are for the log: fixed, never an id.
+    ShowOnly(&'static str),
+    /// Files, in `folder`, with `item` selected; then the verb's own surface (`platform::windows_verbs`).
+    Open {
+        verb: ExplorerVerb,
+        folder: Option<String>,
+        item: String,
+    },
+}
+
+/// The running instance's checks of a verb from the control channel, all of them again (the request is untrusted:
+/// any process of this user can write to the channel), in this order:
+/// 1. the window may act on the account's files now (`window_open`: `session_gate::open`, so not locked, not signed
+///    out, and the engine's session is the one the window shows): else the verb is dropped, the engine not asked;
+/// 2. the engine holds the window's account before AND after the lookup (another sign-in in between drops it);
+/// 3. the item is in that account's own local state.
+pub fn explorer_verb(
+    verb: ExplorerVerb,
+    item: &str,
+    window_open: bool,
+    window_account: Option<&str>,
+    engine: Option<&dyn ItemLookup>,
+) -> VerbPlan {
+    if !window_open {
+        return VerbPlan::ShowOnly("the window is locked or signed out");
+    }
+    if !deeplink::is_item_id(item) {
+        return VerbPlan::ShowOnly("not an item id");
+    }
+    let Some(engine) = engine else {
+        return VerbPlan::ShowOnly("no engine");
+    };
+    let the_windows = |account: Option<String>| account.is_some() && account.as_deref() == window_account;
+    if !the_windows(engine.account()) {
+        return VerbPlan::ShowOnly("another account");
+    }
+    let folder = engine.folder_of(item);
+    if !the_windows(engine.account()) {
+        return VerbPlan::ShowOnly("another account");
+    }
+    match folder {
+        Some(folder) => VerbPlan::Open {
+            verb,
+            folder,
+            item: item.to_owned(),
+        },
+        None => VerbPlan::ShowOnly("not an item of this account"),
     }
 }
 
@@ -436,5 +573,237 @@ mod tests {
             assert_eq!(Reply::decode(bytes), None);
         }
         assert!(Reply::Busy.encode().len() <= MAX_REPLY);
+    }
+
+    /// Slice B6: the four items of File Explorer's classic menu (DW-1183), in the board's order and words. Each verb
+    /// has its own word, and only those four words are verbs.
+    #[test]
+    fn verbs_named_as_the_board() {
+        let labels: Vec<String> = ExplorerVerb::ALL.iter().map(|verb| verb.label(REAL)).collect();
+        assert_eq!(
+            labels,
+            [
+                "Share with Beebeeb\u{2026}",
+                "Copy Beebeeb link",
+                "Show in Beebeeb",
+                "Version history\u{2026}"
+            ]
+        );
+        // The test build names itself where the board says Beebeeb.
+        assert_eq!(
+            ExplorerVerb::Share.label(AppIdentity::Test),
+            "Share with Beebeeb Test\u{2026}"
+        );
+        assert_eq!(ExplorerVerb::Show.label(AppIdentity::Test), "Show in Beebeeb Test");
+        assert_eq!(
+            ExplorerVerb::Versions.label(AppIdentity::Test),
+            "Version history\u{2026}"
+        );
+        let words: Vec<&str> = ExplorerVerb::ALL.iter().map(|verb| verb.word()).collect();
+        assert_eq!(words, ["share", "copy-link", "show", "versions"]);
+        for verb in ExplorerVerb::ALL {
+            assert_eq!(ExplorerVerb::from_word(verb.word()), Some(verb));
+        }
+        for word in [
+            "",
+            "Share",
+            "SHARE",
+            "copy",
+            "copylink",
+            "copy_link",
+            "open",
+            "delete",
+            "share ",
+        ] {
+            assert_eq!(ExplorerVerb::from_word(word), None, "{word:?}");
+        }
+    }
+
+    /// Slice B6: a File Explorer verb goes over the channel as its word and the item's id, round-trips, and stays
+    /// ASCII and under the cap with the longest id an item can have. Any other shape of it is ignored.
+    #[test]
+    fn control_request_round_trips_and_stays_ascii_under_600_bytes() {
+        let longest = "a".repeat(deeplink::MAX_ID_LEN);
+        let mut seen = 0;
+        for verb in ExplorerVerb::ALL {
+            for item in ["0b6f3c1e-9a52-4d0e-8f3a-2c1d5e7a9b10", "local-7", longest.as_str()] {
+                let request = Request::Explorer {
+                    verb,
+                    item: item.into(),
+                };
+                let wire = request.encode();
+                assert!(wire.is_ascii(), "{verb:?}");
+                assert!(wire.len() <= MAX_REQUEST && request_is_complete(&wire), "{verb:?}");
+                assert_eq!(Request::decode(&wire, REAL), Some(request.clone()));
+                // No scheme in it: the test build reads the same line.
+                assert_eq!(Request::decode(&wire, AppIdentity::Test), Some(request));
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 12);
+        assert_eq!(
+            Request::Explorer {
+                verb: ExplorerVerb::CopyLink,
+                item: "local-7".into()
+            }
+            .encode(),
+            b"BBCTL1 explorer copy-link local-7\n"
+        );
+        let ignored: [&[u8]; 14] = [
+            b"BBCTL1 explorer\n",
+            b"BBCTL1 explorer share\n",
+            b"BBCTL1 explorer share \n",
+            b"BBCTL1 explorer  share local-7\n",
+            b"BBCTL1 explorer share local-7 extra\n",
+            b"BBCTL1 explorer delete local-7\n",
+            b"BBCTL1 explorer Share local-7\n",
+            b"BBCTL1 explorer share C:\\Users\\x\\Beebeeb\\a.txt\n",
+            b"BBCTL1 explorer share ../local-7\n",
+            b"BBCTL1 explorer share local/7\n",
+            b"BBCTL1 explorer share local-7\r\n",
+            b"BBCTL1 explorer share local%2D7\n",
+            b"BBCTL1 explorer local-7 share\n",
+            b"BBCTL1 share local-7\n",
+        ];
+        for bytes in ignored {
+            assert_eq!(
+                Request::decode(bytes, REAL),
+                None,
+                "{:?}",
+                String::from_utf8_lossy(bytes)
+            );
+        }
+        let too_long = format!("BBCTL1 explorer show {}\n", "a".repeat(deeplink::MAX_ID_LEN + 1));
+        assert_eq!(
+            Request::decode(too_long.as_bytes(), REAL),
+            None,
+            "an id longer than an item id"
+        );
+        assert_eq!(
+            Request::decode("BBCTL1 explorer show caf\u{e9}\n".as_bytes(), REAL),
+            None,
+            "not ASCII"
+        );
+    }
+
+    // Slice B6: the running instance's checks of a File Explorer verb.
+
+    const A: &str = "a@example.com";
+    const B: &str = "b@example.com";
+
+    /// The engine as the verb checks see it: whose session it holds before the lookup and after it, and one item
+    /// ("contract", at the top of Files). Counts what it was asked.
+    struct Items {
+        before: Option<&'static str>,
+        after: Option<&'static str>,
+        accounts: std::cell::Cell<u32>,
+        lookups: std::cell::Cell<u32>,
+    }
+
+    fn items(before: Option<&'static str>, after: Option<&'static str>) -> Items {
+        Items {
+            before,
+            after,
+            accounts: Default::default(),
+            lookups: Default::default(),
+        }
+    }
+
+    impl ItemLookup for Items {
+        fn account(&self) -> Option<String> {
+            self.accounts.set(self.accounts.get() + 1);
+            let now = if self.lookups.get() == 0 {
+                self.before
+            } else {
+                self.after
+            };
+            now.map(str::to_owned)
+        }
+        fn folder_of(&self, id: &str) -> Option<Option<String>> {
+            self.lookups.set(self.lookups.get() + 1);
+            (id == "contract").then_some(None)
+        }
+    }
+
+    /// Spec rule: the running instance drops a verb for any account but the one the window shows: the engine holding
+    /// another account's session, another sign-in during the lookup, a signed-out engine, or an id the account's own
+    /// state does not hold (a placeholder of another account's sync folder). Mutant: drop the account checks in
+    /// `explorer_verb` (or only the one after the lookup) → the verb opens for the other account.
+    #[test]
+    fn a_verb_for_another_account_is_dropped() {
+        let ours = items(Some(A), Some(A));
+        assert_eq!(
+            explorer_verb(ExplorerVerb::Share, "contract", true, Some(A), Some(&ours)),
+            VerbPlan::Open {
+                verb: ExplorerVerb::Share,
+                folder: None,
+                item: "contract".into()
+            }
+        );
+        let cases = [
+            (Some(B), Some(B), "the engine holds another account's session"),
+            (Some(A), Some(B), "another account signed in during the lookup"),
+            (None, None, "the engine is signed out"),
+            (Some(A), None, "signed out during the lookup"),
+        ];
+        let mut dropped = 0;
+        for (before, after, what) in cases {
+            for verb in ExplorerVerb::ALL {
+                let engine = items(before, after);
+                assert_eq!(
+                    explorer_verb(verb, "contract", true, Some(A), Some(&engine)),
+                    VerbPlan::ShowOnly("another account"),
+                    "{what}: {verb:?}"
+                );
+                dropped += 1;
+            }
+        }
+        assert_eq!(dropped, 16);
+        assert_eq!(
+            explorer_verb(ExplorerVerb::Show, "someone-elses", true, Some(A), Some(&ours)),
+            VerbPlan::ShowOnly("not an item of this account")
+        );
+        assert_eq!(
+            explorer_verb(ExplorerVerb::Show, "contract", true, None, Some(&items(None, None))),
+            VerbPlan::ShowOnly("another account"),
+            "a window that shows no account matches none"
+        );
+        // An id that could not have come out of `Request::decode`: dropped before the engine is asked.
+        let engine = items(Some(A), Some(A));
+        assert_eq!(
+            explorer_verb(ExplorerVerb::Show, "C:\\x", true, Some(A), Some(&engine)),
+            VerbPlan::ShowOnly("not an item id")
+        );
+        assert_eq!(engine.lookups.get(), 0);
+        assert_eq!(
+            explorer_verb(ExplorerVerb::Show, "contract", true, Some(A), None),
+            VerbPlan::ShowOnly("no engine")
+        );
+    }
+
+    /// Spec rule: while the window is locked (or signed out, or its session ended) a verb only brings it forward: it is
+    /// dropped and the engine is asked nothing. The same verbs with the window open are opened, so the check is what
+    /// dropped them. Mutant: drop the `window_open` check in `explorer_verb` → every verb opens behind the lock.
+    #[test]
+    fn a_locked_window_drops_the_verb() {
+        let engine = items(Some(A), Some(A));
+        for verb in ExplorerVerb::ALL {
+            assert_eq!(
+                explorer_verb(verb, "contract", false, Some(A), Some(&engine)),
+                VerbPlan::ShowOnly("the window is locked or signed out"),
+                "{verb:?}"
+            );
+        }
+        assert_eq!(engine.lookups.get(), 0, "nothing is read behind the lock");
+        assert_eq!(engine.accounts.get(), 0);
+        for verb in ExplorerVerb::ALL {
+            assert!(
+                matches!(
+                    explorer_verb(verb, "contract", true, Some(A), Some(&engine)),
+                    VerbPlan::Open { .. }
+                ),
+                "{verb:?}"
+            );
+        }
     }
 }

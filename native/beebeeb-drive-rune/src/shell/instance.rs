@@ -14,12 +14,17 @@
 //!   would start.
 //! - **The command line**, which is untrusted when the OS starts the app for a link:
 //!   see [`parse_args`].
+//!
+//! One read leaves this file pure only in name: a launch File Explorer started for one of Beebeeb's menu items
+//! (`--explorer-verb=<verb> "<path>"`, slice B6) asks the platform for the item's id at the path
+//! ([`explorer_plan`]), and hands on the verb and the id, never the path. The running instance checks that verb
+//! again (`control::explorer_verb`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use super::app::Intent;
+use super::app::{Intent, ItemId};
 use super::autostart::AUTOSTART_FLAG;
-use super::control::Request;
+use super::control::{ExplorerVerb, Request};
 use super::deeplink::{self, DeepLinkError};
 use super::identity::AppIdentity;
 
@@ -27,6 +32,9 @@ use super::identity::AppIdentity;
 pub const QUIT_FOR_UPDATE_FLAG: &str = "--quit-for-update";
 /// The ONLY form in which the app takes a link from its command line: `--open-link <link>`.
 pub const OPEN_LINK_FLAG: &str = "--open-link";
+/// One of Beebeeb's items in File Explorer's menu (DW-1183): `--explorer-verb=<verb> "<path>"`, the command its
+/// registry entry runs (`platform::windows_verbs`). Glued: a bare `--explorer-verb` is not this flag.
+pub const EXPLORER_VERB_FLAG: &str = "--explorer-verb=";
 /// Development only: show the files of that `state.db` (read-only) instead of the fixture.
 pub const DB_FLAG: &str = "--db";
 /// The API base URL (`engine_host::open::api_base`): read by a dev build and by the test build
@@ -60,6 +68,9 @@ pub struct Launch {
     /// The argument after `--open-link`, unparsed and untrusted. When this is set, nothing
     /// else on the command line was honoured.
     pub link: Option<String>,
+    /// A File Explorer verb and the path it was asked on, untrusted. When this is set, nothing else on the command
+    /// line was honoured.
+    pub explorer: Option<ExplorerAsk>,
     /// A Rune tooling run (`--snap`, `--tree`, `--script`, …): a renderer, not the app. It
     /// must not claim the instance, show a tray icon or touch saved state. Dev builds only.
     pub tooling: bool,
@@ -75,6 +86,15 @@ pub struct Launch {
     pub feedback_dir: Option<PathBuf>,
     /// What Rune may read (`App::args`): empty unless this is a dev build without a link.
     pub rune_args: Vec<String>,
+}
+
+/// What a launch File Explorer started asks: `--explorer-verb=<verb>` and the argument after it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExplorerAsk {
+    /// `None`: a word that is not one of the board's four.
+    pub verb: Option<ExplorerVerb>,
+    /// The file Explorer named (`%1`). Empty when nothing followed the flag. Read once, here; never handed on.
+    pub path: PathBuf,
 }
 
 /// Rune's headless tooling flags (`crates/rune/src/tooling/args.rs`). Only these make a run a
@@ -117,6 +137,8 @@ const TOOLING_FLAGS: [&str; 25] = [
 ///   substitutes the link into the registered command line verbatim, so a link that closes
 ///   its quote can append arguments; they must do nothing. A bare `scheme://…` argument
 ///   without `--open-link` is not a link to this app.
+/// - **Then a File Explorer verb** (`--explorer-verb=<verb>` and the path after it) silences everything else the same
+///   way. It is read only after the link: a link that appends `--explorer-verb=…` stays a link launch.
 /// - `--autostart` and `--quit-for-update` are the app's own flags.
 /// - `--api-base` is read only when `api_base` is true; the other dev and diagnostic flags only
 ///   when `dev` is.
@@ -131,6 +153,17 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I, dev: bool, api_base: 
                     .cloned()
                     .unwrap_or_default(),
             ),
+            ..Launch::default()
+        };
+    }
+    if let Some(at) = args.iter().position(|arg| arg.starts_with(EXPLORER_VERB_FLAG)) {
+        return Launch {
+            explorer: Some(ExplorerAsk {
+                verb: args[at]
+                    .strip_prefix(EXPLORER_VERB_FLAG)
+                    .and_then(ExplorerVerb::from_word),
+                path: args.get(at + 1).map(PathBuf::from).unwrap_or_default(),
+            }),
             ..Launch::default()
         };
     }
@@ -245,7 +278,8 @@ pub enum Plan {
     BeTheApp,
     /// Hand this to the running instance, then [`after_hand`].
     Hand(Request),
-    /// `--quit-for-update` with nothing running: exit at once, successfully.
+    /// `--quit-for-update` with nothing running: exit at once, successfully. Also a File Explorer verb that names
+    /// no item of this app's sync folder ([`explorer_plan`]): nothing is handed and nothing starts.
     ExitQuietly,
     Refuse(Refusal),
 }
@@ -254,6 +288,9 @@ pub fn plan(launch: &Launch, claim: Claim, identity: AppIdentity) -> Plan {
     if launch.tooling {
         return Plan::Tooling;
     }
+    if let Some(ask) = &launch.explorer {
+        return explorer_plan(ask, claim, |path| explorer_item(identity, path));
+    }
     match claim {
         Claim::First if launch.quit_for_update => Plan::ExitQuietly,
         Claim::First => Plan::BeTheApp,
@@ -261,6 +298,38 @@ pub fn plan(launch: &Launch, claim: Claim, identity: AppIdentity) -> Plan {
         Claim::Running => Plan::Hand(request_for(launch, identity)),
         Claim::Unavailable => Plan::Refuse(Refusal::ChannelUnavailable),
     }
+}
+
+/// What a launch File Explorer started does (`--explorer-verb=<verb> "<path>"`). `item_of` reads the item id at the
+/// path (the platform's, [`explorer_item`]); it is asked only for one of the board's four verbs and a path that is
+/// there. What is handed on is the verb and the id (`Request::Explorer`), never the path. No item at the path
+/// (outside the sync folder, not a placeholder of this app's, no id, an id that is no item id): nothing is handed
+/// and nothing starts. With no instance running, a plain start: the verb is not carried into it.
+pub fn explorer_plan(ask: &ExplorerAsk, claim: Claim, item_of: impl FnOnce(&Path) -> Option<ItemId>) -> Plan {
+    let request = match ask.verb {
+        Some(verb) if !ask.path.as_os_str().is_empty() => item_of(&ask.path)
+            .filter(|item| deeplink::is_item_id(item))
+            .map(|item| Request::Explorer { verb, item }),
+        _ => None,
+    };
+    match (claim, request) {
+        (_, None) => Plan::ExitQuietly,
+        (Claim::Running, Some(request)) => Plan::Hand(request),
+        (Claim::First, Some(_)) => Plan::BeTheApp,
+        (Claim::Unavailable, Some(_)) => Plan::Refuse(Refusal::ChannelUnavailable),
+    }
+}
+
+/// The item at `path` in this app's sync folder, as Windows holds it: the placeholder's identity, read without
+/// fetching anything (`platform::windows_verbs::item_of`). There is no File Explorer verb anywhere else.
+#[cfg(windows)]
+fn explorer_item(identity: AppIdentity, path: &Path) -> Option<ItemId> {
+    super::platform::windows_verbs::item_of(identity, path)
+}
+
+#[cfg(not(windows))]
+fn explorer_item(_identity: AppIdentity, _path: &Path) -> Option<ItemId> {
+    None
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -784,5 +853,157 @@ mod tests {
             forwarded(&"x".repeat(5_000)),
             Forwarded::ShowOnly(DeepLinkError::TooLong)
         );
+    }
+
+    // Slice B6: File Explorer's verbs. The running instance's checks are tested in `control.rs`; the Windows half (which
+    // paths are read, the registry, the window) in `platform/windows_verbs_tests.rs`.
+
+    const ID: &str = "0b6f3c1e-9a52-4d0e-8f3a-2c1d5e7a9b10";
+
+    fn ask(args: &[&str]) -> ExplorerAsk {
+        parse(args, false).explorer.expect("an explorer launch")
+    }
+
+    /// A verb launch is the verb and the path after it; nothing else on the command line counts, in any build. A
+    /// link's command line that appends the verb flag stays a link launch (the link is read first). Mutant: read the
+    /// verb flag before `--open-link` → the link launch carries a verb.
+    #[test]
+    fn an_explorer_verb_launch_honours_no_other_flag_and_a_link_still_wins() {
+        let path = "C:\\Users\\Someone\\Beebeeb\\a.txt";
+        for dev in [false, true] {
+            let launch = parse(
+                &[
+                    "--snap",
+                    "x.png",
+                    "--explorer-verb=share",
+                    path,
+                    "--autostart",
+                    "--quit-for-update",
+                    "--db",
+                    "y",
+                ],
+                dev,
+            );
+            assert_eq!(
+                launch,
+                Launch {
+                    explorer: Some(ExplorerAsk {
+                        verb: Some(ExplorerVerb::Share),
+                        path: PathBuf::from(path),
+                    }),
+                    ..Launch::default()
+                },
+                "dev={dev}"
+            );
+            let link = parse(
+                &["--open-link", "beebeeb://open/photos\"", "--explorer-verb=share", path],
+                dev,
+            );
+            assert_eq!(link.explorer, None, "dev={dev}");
+            assert_eq!(link.link.as_deref(), Some("beebeeb://open/photos\""));
+        }
+        let named = parse_as(
+            &["--api-base", "http://127.0.0.1:9", "--explorer-verb=show", path],
+            false,
+            true,
+        );
+        assert_eq!(named.api_base, None, "no server is chosen beside a verb");
+        assert_eq!(named.explorer.map(|a| a.verb), Some(Some(ExplorerVerb::Show)));
+        // Glued only: `--explorer-verb share` is not the flag (and a shipped build ignores it).
+        assert_eq!(parse(&["--explorer-verb", "share", path], false), Launch::default());
+        // Not one of the four: still a verb launch, of no verb.
+        assert_eq!(ask(&["--explorer-verb=delete", path]).verb, None);
+    }
+
+    /// Spec rule: the launch Explorer started hands on the verb and the item's id, and nothing of the path: no drive,
+    /// no folder, no name. The path is read once, by the platform's reader; another path of the same item sends the
+    /// same bytes. Mutant: `explorer_plan` hands on `ask.path` (lossy) as the item → the bytes hold the path.
+    #[test]
+    fn the_request_carries_no_path() {
+        let path = "C:\\Users\\Someone\\Beebeeb\\Contracts 2026\\Offer for J\u{e9}r\u{f4}me.pdf";
+        let mut read = Vec::new();
+        let planned = explorer_plan(&ask(&["--explorer-verb=share", path]), Claim::Running, |asked| {
+            read.push(asked.to_path_buf());
+            Some(ID.to_string())
+        });
+        assert_eq!(read, [PathBuf::from(path)], "read once, by the platform");
+        let Plan::Hand(request) = planned.clone() else {
+            panic!("handed to the running instance: {planned:?}");
+        };
+        let wire = request.encode();
+        assert_eq!(wire, format!("BBCTL1 explorer share {ID}\n").into_bytes());
+        let text = String::from_utf8(wire).expect("ASCII");
+        for piece in [
+            "C:",
+            "\\",
+            "Users",
+            "Someone",
+            "Beebeeb",
+            "Contracts",
+            "Offer",
+            "me.pdf",
+            ".pdf",
+            "\u{e9}",
+        ] {
+            assert!(!text.contains(piece), "{piece:?} is not on the wire");
+        }
+        let elsewhere = explorer_plan(
+            &ask(&["--explorer-verb=share", "C:\\Users\\Someone\\Beebeeb\\x.pdf"]),
+            Claim::Running,
+            |_| Some(ID.to_string()),
+        );
+        assert_eq!(elsewhere, Plan::Hand(request));
+    }
+
+    /// A verb launch that names no item: nothing is handed and nothing starts, whoever serves the channel. A verb that
+    /// is not one of the four, or no path, is not even read. With an item: handed to the running instance; with none
+    /// running, a plain start (the verb is not carried into it); with a channel that cannot be used, refused as any.
+    #[test]
+    fn an_explorer_verb_that_names_no_item_starts_and_hands_nothing() {
+        let show = ask(&["--explorer-verb=show", "C:\\elsewhere\\a.txt"]);
+        for claim in [Claim::Running, Claim::First, Claim::Unavailable] {
+            assert_eq!(explorer_plan(&show, claim, |_| None), Plan::ExitQuietly, "{claim:?}");
+            for not_an_id in ["", "a b", "C:\\x", "../x"] {
+                assert_eq!(
+                    explorer_plan(&show, claim, |_| Some(not_an_id.to_string())),
+                    Plan::ExitQuietly,
+                    "{claim:?} {not_an_id:?}"
+                );
+            }
+        }
+        for args in [
+            &["--explorer-verb=delete", "C:\\x"][..],
+            &["--explorer-verb=", "C:\\x"],
+            &["--explorer-verb=Share", "C:\\x"],
+            &["--explorer-verb=share"],
+        ] {
+            let mut read = 0;
+            let planned = explorer_plan(&ask(args), Claim::Running, |_| {
+                read += 1;
+                Some(ID.to_string())
+            });
+            assert_eq!(planned, Plan::ExitQuietly, "{args:?}");
+            assert_eq!(read, 0, "not read: {args:?}");
+        }
+        assert_eq!(
+            explorer_plan(&show, Claim::Running, |_| Some(ID.to_string())),
+            Plan::Hand(Request::Explorer {
+                verb: ExplorerVerb::Show,
+                item: ID.to_string()
+            })
+        );
+        assert_eq!(
+            explorer_plan(&show, Claim::First, |_| Some(ID.to_string())),
+            Plan::BeTheApp
+        );
+        assert_eq!(
+            explorer_plan(&show, Claim::Unavailable, |_| Some(ID.to_string())),
+            Plan::Refuse(Refusal::ChannelUnavailable)
+        );
+        // `plan` takes the same road; off Windows there is no reader, so it names no item.
+        if !cfg!(windows) {
+            let launch = parse(&["--explorer-verb=show", "C:\\x"], false);
+            assert_eq!(plan(&launch, Claim::Running, REAL), Plan::ExitQuietly);
+        }
     }
 }
