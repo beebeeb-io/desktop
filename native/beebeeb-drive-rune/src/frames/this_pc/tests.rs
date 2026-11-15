@@ -945,7 +945,10 @@ fn the_row_offers_only_the_engines_exits() {
     assert!(!has(&rt, "change-0-remove"));
     assert_eq!(rt.state.this_pc.retryable_problem_count(), 0);
 
+    settle(&mut rt);
     click(&mut rt, "change-0-choose");
+    // The dialog comes in with an animation; a press while it runs reaches nothing.
+    settle(&mut rt);
     assert_eq!(text(&rt, "dlg-title"), "Two versions");
     assert_eq!(text(&rt, "dlg-sub"), "Plan.txt");
     assert_eq!(label(&rt, "settle-0"), "Keep both");
@@ -960,6 +963,7 @@ fn the_row_offers_only_the_engines_exits() {
         vec![("op-lost".to_string(), Exit::KeepOther)],
         "asked once, the answer pressed"
     );
+    settle(&mut rt);
     assert!(!has(&rt, "dialog-settle"), "the question closed");
 }
 
@@ -977,17 +981,23 @@ fn remove_from_the_list_asks_once_and_cancel_asks_nothing() {
     )]);
     assert!(!has(&rt, "btn-try-again"));
     assert!(!has(&rt, "change-0-choose"));
+    settle(&mut rt);
     click(&mut rt, "change-0-remove");
+    settle(&mut rt);
     assert_eq!(text(&rt, "dlg-title"), super::settle::REMOVE_TITLE);
     assert_eq!(text(&rt, "dlg-sub"), super::settle::REMOVE_WORDS);
     assert_eq!(label(&rt, "settle-0"), "Remove from the list");
     click(&mut rt, "settle-cancel");
+    settle(&mut rt);
     assert!(!has(&rt, "dialog-settle"));
     click(&mut rt, "change-0-remove");
+    settle(&mut rt);
     press(&mut rt, Key::Escape);
+    settle(&mut rt);
     assert!(!has(&rt, "dialog-settle"), "Esc says no");
     assert!(asked.lock().unwrap().is_empty(), "nothing was asked");
     click(&mut rt, "change-0-remove");
+    settle(&mut rt);
     click(&mut rt, "settle-0");
     assert_eq!(
         *asked.lock().unwrap(),

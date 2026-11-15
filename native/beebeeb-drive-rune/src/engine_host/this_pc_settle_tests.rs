@@ -134,6 +134,36 @@ fn a_late_settle_answer_is_dropped() {
         vec![Exit::KeepOther],
         "read again for the session now: still there"
     );
+
+    // A job stamped with the press's session that reaches the worker after the session moved: the engine is asked
+    // nothing, for the old session or the new one.
+    let pressed_under = Whose {
+        account: "invented@beebeeb.io".into(),
+        session: SessionGeneration::for_test(fake.session.load(Ordering::SeqCst)),
+    };
+    fake.session.fetch_add(1, Ordering::SeqCst);
+    assert_eq!(
+        super::super::settle(&*fake, &pressed_under, "op-p", ParkedPick::KeepOther, Some(1)),
+        None,
+        "a press of an earlier session is not this session's to answer"
+    );
+    assert!(
+        fake.settled.lock().unwrap().is_empty(),
+        "nothing was asked of the engine"
+    );
+
+    // An answer of the earlier generation that arrives after the move says nothing.
+    source.pump();
+    let late = Answer {
+        generation: source.generation.wrapping_sub(1),
+        whose: Some(pressed_under),
+        refused: None,
+        done: Some(SETTLED_KEPT_OTHER),
+        read: Err(NoRead::NotNow),
+    };
+    source.inbox_for_test(late);
+    assert_eq!(source.pump().done, None, "a late answer is dropped");
+    assert!(fake.db().get_operation("op-p").unwrap().is_some());
 }
 
 /// A way out that moved since the row was read changes nothing and says so.
