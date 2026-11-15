@@ -37,3 +37,7 @@ impl fmt::Debug for Session {
             .finish()
     }
 }
+
+#[cfg(test)]
+#[path = "session_tests.rs"]
+mod session_tests;
