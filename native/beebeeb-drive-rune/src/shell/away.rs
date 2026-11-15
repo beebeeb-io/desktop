@@ -127,7 +127,7 @@ impl AwayLock {
         let idle = pc_idle
             .unwrap_or(Duration::MAX)
             .min(now.saturating_duration_since(opened_at));
-        if self.ask(Away::Idle(idle), actions, wake) {
+        if self.ask(Away::Idle(idle), true, actions, wake) {
             self.looking = true;
         } else if !self.without {
             // The worker could not start: try again after the longest wait.
@@ -141,17 +141,24 @@ impl AwayLock {
     /// An event the engine is told at once: Windows' session lock, the main window closing to the tray, a wake from
     /// sleep (as idle time).
     pub fn event(&mut self, seen: Away, actions: &Arc<dyn ShellActions>, wake: Option<&AppHandle<State>>) {
-        self.ask(seen, actions, wake);
+        // An event's answer schedules nothing, also a wake's (idle time, but not the poll's look).
+        self.ask(seen, false, actions, wake);
     }
 
-    /// One look on a worker; its answer comes down the channel and wakes the window. `false`: nothing was asked.
-    fn ask(&mut self, seen: Away, actions: &Arc<dyn ShellActions>, wake: Option<&AppHandle<State>>) -> bool {
+    /// One look on a worker; its answer comes down the channel and wakes the window. `idle`: the poll's own look,
+    /// whose answer says when the next one is due. `false`: nothing was asked.
+    fn ask(
+        &mut self,
+        seen: Away,
+        idle: bool,
+        actions: &Arc<dyn ShellActions>,
+        wake: Option<&AppHandle<State>>,
+    ) -> bool {
         let Some(job) = actions.away_job(seen) else {
             self.without = true;
             return false;
         };
         let (answers, wake) = (self.tx.clone(), wake.cloned());
-        let idle = matches!(seen, Away::Idle(_));
         let started = std::thread::Builder::new()
             .name("away-lock".into())
             .spawn(move || {

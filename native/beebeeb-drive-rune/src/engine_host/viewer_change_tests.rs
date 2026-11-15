@@ -868,3 +868,35 @@ fn a_save_on_its_way_at_a_lock_that_was_not_confirmed_says_so_and_another_accoun
     std::thread::sleep(Duration::from_millis(100));
     assert!(source.settled(NOTE).is_none(), "another account hears nothing");
 }
+
+/// A second lock after the resumed edit was saved (and edited again): the file is opened again once more, a new
+/// opening for the session after that lock, never adopted silently under the earlier opening.
+#[test]
+fn a_second_lock_after_a_resumed_save_opens_the_file_again_once_more() {
+    let fake = Fake::new();
+    let (mut source, file, _) = opened(&fake, NOTE);
+    fake.new_session("a@example.eu");
+    assert_eq!(source.poll(NOTE), Some(Body::Stopped(Stopped::SessionChanged)));
+    assert_eq!(source.save(NOTE, "mine\n", file.version), SaveOutcome::Working);
+    assert!(matches!(settled(&mut source, NOTE), Settled::Saved { version: 4, .. }));
+    let resumed = *fake.s().save_openings.last().unwrap();
+    fake.new_session("a@example.eu");
+    assert_eq!(
+        source.poll(NOTE),
+        Some(Body::Stopped(Stopped::SessionChanged)),
+        "what is under the editor goes at the second lock too"
+    );
+    fake.s().save_answer = Ok(SaveEnd::Saved { version: 5 });
+    assert_eq!(source.save(NOTE, "mine again\n", 4), SaveOutcome::Working);
+    assert!(matches!(settled(&mut source, NOTE), Settled::Saved { version: 5, .. }));
+    let s = fake.s();
+    assert!(
+        s.save_openings.last().is_some_and(|epoch| *epoch > resumed),
+        "a new opening"
+    );
+    assert_eq!(
+        s.save_turns.last(),
+        Some(&SessionGeneration::for_test(3)),
+        "for the session after the second lock"
+    );
+}

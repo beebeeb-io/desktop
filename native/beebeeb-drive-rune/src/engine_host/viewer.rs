@@ -976,11 +976,13 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
     fn poll(&mut self, file_id: &str) -> Option<Body> {
         let opening = self.open.as_mut().filter(|opening| opening.file_id == file_id)?;
         let same_account = self.engine.has_session() && self.engine.account() == opening.account;
+        // Whose session it is, also while a lock keeps the key closed away (the account stays signed in).
+        let same_person = opening.account.is_some() && self.engine.account() == opening.account;
         if opening.ended {
             // An answer that slipped past the worker's own check is dropped here (its text overwritten).
             while opening.inbox.try_recv().is_ok() {}
             // Another account came in, or none is signed in: this opening is over for a save too.
-            opening.resumable &= same_account;
+            opening.resumable &= same_person;
             return None;
         }
         // The session is not the one the file was opened for: everything of it goes NOW, on the window's side.
@@ -993,8 +995,8 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
                 return None;
             }
             opening.end();
-            // A lock of the screen (the same account): an edit the window keeps open across it can still be saved.
-            opening.resumable = same_account;
+            // A lock (the same account): an edit the window keeps open across it can still be saved.
+            opening.resumable = same_person;
             return had.then_some(Body::Stopped(Stopped::SessionChanged));
         }
         match opening.inbox.try_recv() {

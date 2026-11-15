@@ -159,3 +159,24 @@ fn a_sign_out_takes_the_edit_and_its_text() {
     assert!(!w.drawn().contains(TYPED));
     assert!(w.stored_saves().is_empty());
 }
+
+/// A lock that closes the vault (the key leaves memory; the recovery phrase opens it again), the same account: the
+/// edit kept open across it is saved after the unlock too.
+#[test]
+fn an_edit_kept_across_a_closed_vault_is_saved_after_the_phrase_opens_it() {
+    let mut w = signed_in_editing("edit-vault");
+    w.engine.lock();
+    w.settle();
+    assert!(!w.drawn().contains(TYPED));
+    w.engine
+        .unlock_with_phrase(Zeroizing::new(TEST_PHRASE.to_string()))
+        .expect("the phrase unlocks");
+    w.settle();
+    assert!(
+        w.rt.state.viewer.ui.as_ref().is_some_and(|ui| ui.dirty()),
+        "the same account back: the edit is still there"
+    );
+    w.save();
+    w.frames_until("the save was not stored", |w| !w.stored_saves().is_empty());
+    assert_eq!(w.stored_saves(), [Some(3)]);
+}

@@ -249,6 +249,8 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         opening.serial = self.changes.openings;
         opening.ended = false;
         opening.resumable = false;
+        // The window holds the edit: the next lock ends this opening too, and a save after it opens the file again.
+        opening.holds = true;
         // A fresh road for answers: nothing of the earlier session's worker reaches this opening.
         let (_, inbox) = mpsc::channel();
         opening.inbox = inbox;
