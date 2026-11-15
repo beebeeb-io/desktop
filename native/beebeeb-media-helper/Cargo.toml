@@ -29,6 +29,7 @@ beebeeb-media-protocol = { path = "../../crates/beebeeb-media-protocol" }
 # `default-features = false`: only the codecs named in [features] below are built in.
 filmcraft-codecs = { version = "=0.9.0", default-features = false }
 filmcraft-media = { version = "=0.9.0", default-features = false }
+symphonia = { version = "=0.5.5", default-features = false, features = ["mp1", "mp2", "mp3", "flac", "wav", "aiff", "ogg", "isomp4"] }
 
 # The system decoder (decision 2541, `src/mf/`): Media Foundation through `windows` 0.62. Loaded at run time only
 # (`tests/load_time_imports.rs` holds that no media library is a load-time import). MIT OR Apache-2.0.

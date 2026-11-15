@@ -293,3 +293,68 @@ fn helper_hands_a_bare_stream_of_ours_to_filmcraft() {
     assert_eq!(app.open(KindHint::Audio), FromHelper::Error(ErrorCode::NoDecoder));
     app.send(&ToHelper::Close);
 }
+
+fn fixture(name: &str) -> Vec<u8> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(name);
+    std::fs::read(&path).unwrap_or_else(|_| panic!("fixture {name} is missing"))
+}
+
+/// `mp3.mp3` with ffmpeg's ID3v2 tag (an encoder line) replaced by one with a title and an artist.
+fn tagged_mp3() -> Vec<u8> {
+    let file = fixture("mp3.mp3");
+    assert_eq!(&file[..3], b"ID3", "the fixture starts with ffmpeg's tag");
+    let size = file[6..10].iter().fold(0usize, |size, b| (size << 7) | usize::from(*b));
+    let mut body = Vec::new();
+    for (id, text) in [(b"TIT2", "Harbour sessions"), (b"TPE1", "Ana Alvares")] {
+        body.extend(id);
+        body.extend(u32::try_from(text.len() + 1).expect("short").to_be_bytes());
+        body.extend([0, 0, 0]);
+        body.extend(text.as_bytes());
+    }
+    let mut out = vec![b'I', b'D', b'3', 3, 0, 0];
+    out.extend([21, 14, 7, 0].map(|shift| ((body.len() >> shift) & 0x7F) as u8));
+    out.extend(body);
+    out.extend(&file[10 + size..]);
+    out
+}
+
+/// D-MB2-1 (a): an audio file's title and artist come right after `Opened`, read through the app's ranges and never
+/// past the end; a file without them, and a video, send none (the next answer is the asked PCM or frame).
+#[test]
+fn helper_sends_an_audio_files_title_and_artist_after_opened() {
+    let mut app = App::start(tagged_mp3(), ROUTES);
+    let FromHelper::Opened(opened) = app.open(KindHint::Audio) else {
+        panic!("expected Opened");
+    };
+    assert_eq!(opened.audio.map(|a| a.codec), Some(Codec::Mp3));
+    match app.next() {
+        FromHelper::Tags(tags) => {
+            assert_eq!(tags.title, "Harbour sessions");
+            assert_eq!(tags.artist, "Ana Alvares");
+            assert_eq!(tags.art, None);
+        }
+        other => panic!("expected Tags, got {other:?}"),
+    }
+    let len = app.file.len() as u64;
+    assert!(app.reads.iter().all(|(offset, n)| offset + u64::from(*n) <= len));
+    app.send(&ToHelper::Close);
+
+    let mut app = App::start(wav_one_second(), ROUTES);
+    assert!(matches!(app.open(KindHint::Audio), FromHelper::Opened(_)));
+    app.send(&ToHelper::WantAudio {
+        rate: 8000,
+        channels: 1,
+        frames: 800,
+    });
+    assert!(matches!(app.next(), FromHelper::Audio { .. }), "no tags in this WAV");
+    app.send(&ToHelper::Close);
+
+    let mut app = App::start(y4m_five_frames(), ROUTES);
+    assert!(matches!(app.open(KindHint::Video), FromHelper::Opened(_)));
+    app.send(&ToHelper::WantVideo { w: 64, h: 36 });
+    assert!(matches!(app.next(), FromHelper::Frame { .. }), "a video sends no tags");
+    app.send(&ToHelper::Close);
+}

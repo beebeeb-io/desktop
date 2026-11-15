@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use beebeeb_media_protocol::{
     AudioInfo, Codec, ErrorCode, FromHelper, MAX_AUDIO_FRAMES, MAX_CHANNELS, MAX_FRAME_H, MAX_FRAME_W, MAX_RATE,
-    MAX_SOURCE_SIDE, MEDIA_SYSTEM_DECODER_ON, Opened, ToHelper, VideoInfo,
+    MAX_SOURCE_SIDE, MEDIA_SYSTEM_DECODER_ON, Opened, Tags, ToHelper, VideoInfo,
 };
 use filmcraft_codecs::{CodecError, Mp4Source};
 use filmcraft_media::reader::{HEAD_LEN, read_range};
@@ -31,7 +31,7 @@ use crate::read::{PipeReader, ReadFlags, SharedWire, Wire, lock};
 use crate::routes::{Decision, Track, decide, is_reduced_quality, state_for};
 use crate::sniff::{Bare, sniff};
 use crate::system::{SystemOpen, SystemStreams};
-use crate::{ROUTES, Route, SYSTEM_FALLBACK, system};
+use crate::{ROUTES, Route, SYSTEM_FALLBACK, system, tags};
 
 /// A file no streaming opener takes is read whole only up to this many bytes; a larger one is `TooLarge`.
 pub const MAX_WHOLE: u64 = 384 << 20;
@@ -122,9 +122,12 @@ fn serve(
                     vec![FromHelper::Error(ErrorCode::Internal)]
                 } else {
                     match open(wire, flags, gate, len, table, system_on) {
-                        Ok((p, opened)) => {
+                        Ok((p, opened, tags)) => {
                             *playing = Some(p);
-                            vec![FromHelper::Opened(opened)]
+                            // The title and artist follow `Opened` (the app shows them once it has the file).
+                            let mut reply = vec![FromHelper::Opened(opened)];
+                            reply.extend(tags.map(FromHelper::Tags));
+                            reply
                         }
                         Err(code) => vec![FromHelper::Error(code)],
                     }
@@ -168,7 +171,7 @@ fn open(
     len: u64,
     table: &[(Codec, Route)],
     system_on: bool,
-) -> Result<(Playing, Opened), ErrorCode> {
+) -> Result<(Playing, Opened, Option<Tags>), ErrorCode> {
     if len == 0 {
         return Err(ErrorCode::Corrupt);
     }
@@ -280,6 +283,12 @@ fn open(
         reduced_quality,
         no_sound,
     };
+    // An audio file's title and artist (D-MB2-1 (a)); a video shows its file name.
+    let tags = if opened.video.is_none() {
+        tags::read(pipe.clone())
+    } else {
+        None
+    };
     let playing = Playing {
         source,
         video: video.map(|(_, stream)| stream),
@@ -293,7 +302,7 @@ fn open(
         flags: flags.clone(),
         system,
     };
-    Ok((playing, opened))
+    Ok((playing, opened, tags))
 }
 
 /// FilmCraft's source over the app's ranges. A sniffed bare stream gets the name its whole-file opener picks a
