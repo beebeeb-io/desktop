@@ -9,18 +9,19 @@ use std::time::Duration;
 
 use beebeeb_engine::identity::EngineIdentity;
 use beebeeb_media_protocol::{
-    Codec, ErrorCode, FromHelper, MAX_ART, MAX_AUDIO_FRAMES, MAX_CHANNELS, MAX_FRAME_H, MAX_FRAME_W,
+    Codec, ErrorCode, FromHelper, KindHint, MAX_ART, MAX_AUDIO_FRAMES, MAX_CHANNELS, MAX_FRAME_H, MAX_FRAME_W,
     MAX_IN_FLIGHT_READS, MAX_RATE, MAX_READ, MAX_SOURCE_SIDE, Opened, Tags, ToHelper, cut_text,
 };
+use beebeeb_office_sandbox::Profile;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{
     ANSWER_WAIT_MS, AUDIO_PARTS_PER_SECOND, AudioFactory, BATCH_MAX, Clock, Cmd, DEFAULT_FRAME_MS, HELD_FRAMES,
-    LinkFactory, MAX_DURATION_MS, MediaBytes, MediaItem, MediaOpener, NOW_PLAYING_EVERY_MS, OPEN_WAIT_MS,
+    LinkFactory, MAX_DURATION_MS, MediaBytes, MediaItem, MediaOpener, NOW_PLAYING_EVERY_MS, NoSound, OPEN_WAIT_MS,
     PLAYED_AFTER_MS, Phase, Player, PlayerHandle, Refusal, SHOW_LATE_AFTER_MS, Slots, TICK, lock, zero_out,
 };
 use crate::media::os_controls::{NowPlaying, OsButton};
-use crate::media::transport::{LinkError, wipe};
+use crate::media::transport::{LinkError, profile_for_file_with, wipe};
 
 /// Why a worker stopped.
 enum Exit {
@@ -133,6 +134,8 @@ pub(super) struct Start {
     pub(super) links: Arc<dyn LinkFactory>,
     pub(super) audio: Arc<dyn AudioFactory>,
     pub(super) clock: Arc<dyn Clock>,
+    /// Decision 2541's switch, as the player holds it.
+    pub(super) system_on: bool,
     pub(super) slots: Arc<Slots>,
     pub(super) commands: mpsc::Receiver<Cmd>,
     pub(super) previous: Option<thread::JoinHandle<()>>,
@@ -147,6 +150,11 @@ pub(super) struct Worker {
     links: Arc<dyn LinkFactory>,
     audio: Arc<dyn AudioFactory>,
     clock: Arc<dyn Clock>,
+    system_on: bool,
+    /// The profile the current helper was started in: the default one, or (after a restart) the system decoder's.
+    profile: Profile,
+    /// How many helpers were started for this item (at most 2).
+    starts: u32,
     slots: Arc<Slots>,
     commands: mpsc::Receiver<Cmd>,
     previous: Option<thread::JoinHandle<()>>,
@@ -157,8 +165,11 @@ pub(super) struct Worker {
     /// `Opened` is due by this wall-clock time.
     opened_by: Option<u64>,
     frame_ms: u64,
-    /// The sound device's rate and channels; `None`: no sound (no audio track, or no device for a video).
+    /// The sound device's rate and channels; `None`: no sound (no audio track, no device for a video, a track that
+    /// does not play here, or a device that went away).
     out: Option<(u32, u16)>,
+    /// A recording's sound device went away: Play asks for a device again.
+    device_lost: bool,
     reads: VecDeque<Read>,
     want_video: Option<VideoWant>,
     want_audio: Option<AudioWant>,
@@ -190,6 +201,7 @@ pub(super) struct Worker {
 impl Worker {
     pub(super) fn new(start: Start) -> Worker {
         let length_ms = start.item.length_ms;
+        let video = start.item.kind == KindHint::Video;
         Worker {
             generation: start.generation,
             player: start.player,
@@ -198,6 +210,9 @@ impl Worker {
             links: start.links,
             audio: start.audio,
             clock: start.clock,
+            system_on: start.system_on,
+            profile: Profile::default(),
+            starts: 0,
             slots: start.slots,
             commands: start.commands,
             previous: start.previous,
@@ -207,6 +222,7 @@ impl Worker {
             opened_by: None,
             frame_ms: DEFAULT_FRAME_MS,
             out: None,
+            device_lost: false,
             reads: VecDeque::new(),
             want_video: None,
             want_audio: None,
@@ -229,6 +245,7 @@ impl Worker {
                 playing: false,
                 at_ms: 0,
                 length_ms,
+                video,
             },
             now_dirty: false,
             now_shown_at: None,
@@ -285,7 +302,16 @@ impl Worker {
         if self.slots.cancelled() {
             return Err(Exit::Done);
         }
-        let link = self.links.start()?;
+        self.start_helper()?;
+        loop {
+            self.tick()?;
+        }
+    }
+
+    /// Starts a helper in `self.profile`, hands it to the run and sends it `Open`.
+    fn start_helper(&mut self) -> Result<(), Exit> {
+        let link = self.links.start_in(self.profile)?;
+        self.starts += 1;
         if !self.slots.put_link(link) {
             return Err(Exit::Done);
         }
@@ -294,9 +320,40 @@ impl Worker {
             hint: self.item.kind,
         })?;
         self.opened_by = Some(self.clock.now_ms().saturating_add(OPEN_WAIT_MS));
-        loop {
-            self.tick()?;
+        Ok(())
+    }
+
+    /// The helper's refusal. `NoSystemDecoder` before `Opened`, from a helper in the default profile, names a stream
+    /// whose route is `System`: while the switch is on, ONE new helper is started in the system decoder's profile
+    /// (decision 2541). The same answer from that one, or with the switch off, is the PC's answer.
+    fn on_error(&mut self, code: ErrorCode) -> Result<(), Exit> {
+        if let ErrorCode::NoSystemDecoder(codec) = code
+            && self.opened.is_none()
+            && self.profile == Profile::NoCapabilities
+            && let Some(profile) = profile_for_file_with(self.system_on, Some(codec))
+        {
+            return self.restart_in(profile);
         }
+        Err(Exit::Refused(refusal_of(code)))
+    }
+
+    /// Kills the helper, then starts the new one in `profile` and sends `Open` again: the same length and hint, the
+    /// reads start over from the item's bytes (which stay open, with their reader's budget).
+    fn restart_in(&mut self, profile: Profile) -> Result<(), Exit> {
+        let old = lock(&self.slots.link).take();
+        match old {
+            Some(mut old) => old.kill(),
+            None => return Err(Exit::Done),
+        }
+        if self.slots.cancelled() {
+            return Err(Exit::Done);
+        }
+        self.reads.clear();
+        self.want_video = None;
+        self.want_audio = None;
+        self.opened_by = None;
+        self.profile = profile;
+        self.start_helper()
     }
 
     fn tick(&mut self) -> Result<(), Exit> {
@@ -304,7 +361,12 @@ impl Worker {
             return Err(Exit::Done);
         }
         self.take_commands()?;
+        let starts = self.starts;
         for msg in self.receive()? {
+            if self.starts != starts {
+                // The rest of the batch came from the helper the restart killed.
+                break;
+            }
             self.handle(msg)?;
         }
         self.answer_reads()?;
@@ -379,7 +441,7 @@ impl Worker {
                 self.want_audio = None;
                 Ok(())
             }
-            FromHelper::Error(code) => Err(Exit::Refused(refusal_of(code))),
+            FromHelper::Error(code) => self.on_error(code),
         }
     }
 
@@ -387,6 +449,9 @@ impl Worker {
         if self.opened.is_some()
             || opened.duration_ms > MAX_DURATION_MS
             || (opened.video.is_none() && opened.audio.is_none())
+            // A track without sound is said only beside a video that plays, never beside a track that plays (the
+            // protocol's decoder refuses both; a link that skips it is held to it here).
+            || (opened.no_sound.is_some() && (opened.video.is_none() || opened.audio.is_some()))
         {
             return Err(broke());
         }
@@ -399,32 +464,41 @@ impl Worker {
         self.frame_ms = opened.video.map_or(DEFAULT_FRAME_MS, |video| frame_ms(video.fps_milli));
         self.opened = Some(opened);
         self.opened_by = None;
+        // Without a device a video plays its picture on the wall clock (and says so); a recording cannot play.
         if let Some(audio) = opened.audio {
-            self.start_sound(audio.rate, opened.video.is_some())?;
+            let sound = self.open_sound(audio.rate)?;
+            if !sound && opened.video.is_none() {
+                return Err(broke());
+            }
         }
         if self.playing && self.out.is_none() {
             self.mono_from = Some(self.clock.now_ms());
         }
+        let no_sound = match opened.no_sound {
+            Some(codec) => Some(NoSound::Codec(codec)),
+            None if opened.audio.is_some() && self.out.is_none() => Some(NoSound::Device),
+            None => None,
+        };
         self.now.length_ms = opened.duration_ms;
         self.now_dirty = true;
         self.publish(|player| {
             if let Some(state) = player.shown.as_mut() {
                 state.length_ms = opened.duration_ms;
                 state.reduced_quality = opened.reduced_quality;
+                state.no_sound = no_sound;
             }
         })
         .ok_or(Exit::Done)
     }
 
-    /// Opens the sound device. Without one, a video plays its picture on the wall clock; a recording cannot play.
-    fn start_sound(&mut self, rate_hint: u32, has_video: bool) -> Result<(), Exit> {
-        let no_sound = || if has_video { Ok(()) } else { Err(broke()) };
+    /// Opens the sound device. `false`: there is none (or it named a format outside the protocol's limits).
+    fn open_sound(&mut self, rate_hint: u32) -> Result<bool, Exit> {
         let Ok(mut sound) = self.audio.start(rate_hint) else {
-            return no_sound();
+            return Ok(false);
         };
         let (rate, channels) = sound.format();
         if rate == 0 || rate > MAX_RATE || channels == 0 || channels > MAX_CHANNELS {
-            return no_sound();
+            return Ok(false);
         }
         if !self.playing {
             sound.pause();
@@ -433,7 +507,58 @@ impl Worker {
             return Err(Exit::Done);
         }
         self.out = Some((rate, channels));
-        Ok(())
+        Ok(true)
+    }
+
+    /// The sound device went away for good (`AudioSink::failed`: its own code already tried to rebuild it). It is
+    /// dropped and the state says so, never silent: a video goes on on the wall clock from `at`; a recording pauses
+    /// at `at`.
+    fn sound_lost(&mut self, at: u64) -> Result<(), Exit> {
+        drop(lock(&self.slots.sound).take());
+        self.out = None;
+        self.pcm.zeroize();
+        self.pcm_at = 0;
+        if let Some(want) = self.want_audio.as_mut() {
+            // Its answer is checked when it comes, then dropped.
+            want.stale = true;
+        }
+        self.base_ms = at;
+        if self.opened.is_none_or(|opened| opened.video.is_none()) {
+            self.playing = false;
+            self.device_lost = true;
+        }
+        self.mono_from = self.playing.then(|| self.clock.now_ms());
+        self.now_dirty = true;
+        self.publish(|player| {
+            if let Some(state) = player.shown.as_mut() {
+                state.no_sound = Some(NoSound::Device);
+            }
+        })
+        .ok_or(Exit::Done)
+    }
+
+    /// Play on a recording whose device went away: asks for a device again (the default one may be another by now)
+    /// and plays on from where it paused. `false`: still none; it stays paused, and the state still says why.
+    fn sound_back(&mut self) -> Result<bool, Exit> {
+        let Some(audio) = self.opened.and_then(|opened| opened.audio) else {
+            return Ok(true);
+        };
+        if !self.device_lost {
+            return Ok(true);
+        }
+        if !self.open_sound(audio.rate)? {
+            return Ok(false);
+        }
+        self.device_lost = false;
+        // The helper's PCM went on past where the sound stopped: it starts again from there.
+        self.seek(self.base_ms)?;
+        self.publish(|player| {
+            if let Some(state) = player.shown.as_mut() {
+                state.no_sound = None;
+            }
+        })
+        .ok_or(Exit::Done)?;
+        Ok(true)
     }
 
     fn on_frame(&mut self, pts: u64, w: u32, h: u32, rgba: Vec<u8>) -> Result<(), Exit> {
@@ -668,14 +793,20 @@ impl Worker {
         if self.pcm_at >= self.pcm.len() {
             return Ok(());
         }
-        let taken = {
+        let (taken, lost_at) = {
             let left = &self.pcm[self.pcm_at..];
             let mut slot = lock(&self.slots.sound);
             let Some(sound) = slot.as_mut() else {
                 return Err(Exit::Done);
             };
-            sound.push(self.pcm_pts, left).min(left.len())
+            let taken = sound.push(self.pcm_pts, left).min(left.len());
+            // Asked after each push: a device gone for good is said, never played on in silence.
+            let lost_at = sound.failed().then(|| sound.clock_ms().unwrap_or(self.base_ms));
+            (taken, lost_at)
         };
+        if let Some(at) = lost_at {
+            return self.sound_lost(at);
+        }
         if taken == 0 {
             return Ok(());
         }
@@ -750,6 +881,9 @@ impl Worker {
     }
 
     fn set_playing(&mut self, on: bool) -> Result<(), Exit> {
+        if on && !self.sound_back()? {
+            return Ok(());
+        }
         if on && self.ended_shown {
             // Play at the end plays it again.
             self.seek(0)?;

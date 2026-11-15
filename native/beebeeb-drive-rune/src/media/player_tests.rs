@@ -3,8 +3,9 @@
 //! media controls and a wall clock the tests move. Each test builds its own `PlayerHandle`: the shell's one
 //! (`media::SHELL`) is process-wide, and the shell's own tests lock and sign out through it.
 //!
-//! The gate's filter: `player_|helper_|lock_|next_|tags_|no_sandbox|played_`.
+//! The gate's filter: `media::player` (all 20 of them).
 
+use std::collections::VecDeque;
 use std::io::{self, BufReader, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
@@ -15,17 +16,18 @@ use beebeeb_media_protocol::{
     AudioInfo, Codec, ErrorCode, FromHelper, KindHint, MAX_READ, Opened, Tags, ToHelper, VideoInfo, read_to_helper,
     write_msg,
 };
+use beebeeb_office_sandbox::Profile;
 use zeroize::Zeroizing;
 
 use super::worker::{refusal_of, writes_played_line};
 use super::{
-    AudioFactory, AudioSink, Clock, Link, LinkFactory, MediaBytes, MediaItem, MediaOpener, NowPlayingSink, Phase,
-    PlayerHandle, Refusal, lock,
+    AudioFactory, AudioSink, Clock, Link, LinkFactory, MediaBytes, MediaItem, MediaOpener, NoSound, NowPlayingSink,
+    Phase, PlayerHandle, Refusal, lock,
 };
 use crate::media::StopReason;
 use crate::media::audio_out::AudioError;
 use crate::media::os_controls::{NowPlaying, OsButton};
-use crate::media::transport::{HelperLink, LinkError};
+use crate::media::transport::{ErrorReports, Excluded, HELPER_NAME, HelperLink, LinkError, excluded_then};
 use crate::media::video::VideoSurface;
 
 /// The protocol's tag bytes of the two messages these tests write by hand (the protocol's writer refuses them).
@@ -41,19 +43,56 @@ fn script(f: impl FnMut(&ToHelper, &mut Reply) + Send + 'static) -> Script {
     Box::new(f)
 }
 
-/// The fake helper's standard output.
-struct Reply(io::PipeWriter);
+/// The fake helper's standard output: a pipe, or (a [`Direct`] link) the player's inbox, as it is.
+enum Reply {
+    Pipe(io::PipeWriter),
+    Direct(VecDeque<FromHelper>),
+}
 
 impl Reply {
     fn send(&mut self, msg: FromHelper) {
-        let _ = write_msg(&mut self.0, &msg);
+        match self {
+            Reply::Pipe(pipe) => {
+                let _ = write_msg(pipe, &msg);
+            }
+            Reply::Direct(inbox) => inbox.push_back(msg),
+        }
     }
 
     /// Bytes as they are, in ONE write: messages that arrive together, or one the protocol's writer refuses.
     fn raw(&mut self, bytes: &[u8]) {
-        let _ = self.0.write_all(bytes);
-        let _ = self.0.flush();
+        let Reply::Pipe(pipe) = self else {
+            panic!("bytes by hand need the pipe");
+        };
+        let _ = pipe.write_all(bytes);
+        let _ = pipe.flush();
     }
+}
+
+/// A link with no pipes and no decoder: what the script answers reaches the player as it is, so the player's own
+/// checks are seen to hold without the protocol's decoder.
+struct Direct {
+    script: Script,
+    reply: Reply,
+}
+
+impl Link for Direct {
+    fn send(&mut self, msg: &ToHelper) -> io::Result<()> {
+        (self.script)(msg, &mut self.reply);
+        Ok(())
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Result<FromHelper, LinkError> {
+        let Reply::Direct(inbox) = &mut self.reply else {
+            return Err(LinkError::Gone);
+        };
+        inbox.pop_front().ok_or_else(|| {
+            thread::sleep(timeout);
+            LinkError::Timeout
+        })
+    }
+
+    fn kill(&mut self) {}
 }
 
 /// Messages encoded back to back (each one the protocol writes), for one `raw` write.
@@ -82,7 +121,7 @@ fn fake_helper(mut script: Script, seen: Arc<Mutex<Vec<ToHelper>>>) -> HelperLin
     let (helper_in, to_helper) = io::pipe().expect("a pipe");
     thread::spawn(move || {
         let mut input = BufReader::new(helper_in);
-        let mut reply = Reply(helper_out);
+        let mut reply = Reply::Pipe(helper_out);
         while let Ok(msg) = read_to_helper(&mut input) {
             seen.lock().unwrap().push(msg.clone());
             script(&msg, &mut reply);
@@ -101,7 +140,7 @@ struct LinkProbe {
 
 /// A fake helper's link, counted: started, alive (started and not yet killed or dropped), killed.
 struct Counted {
-    inner: HelperLink,
+    inner: Box<dyn Link>,
     probe: Arc<LinkProbe>,
     live: bool,
 }
@@ -136,16 +175,30 @@ impl Drop for Counted {
     }
 }
 
-/// Starts a fake helper with a fresh script from `make`.
+/// Starts a fake helper with a fresh script from `make` (over pipes, or `direct`), and records each start's profile.
 struct Links {
     make: Box<dyn Fn() -> Script + Send + Sync>,
     seen: Arc<Mutex<Vec<ToHelper>>>,
     probe: Arc<LinkProbe>,
+    profiles: Arc<Mutex<Vec<Profile>>>,
+    direct: bool,
 }
 
 impl LinkFactory for Links {
     fn start(&self) -> Result<Box<dyn Link>, Refusal> {
-        let inner = fake_helper((self.make)(), Arc::clone(&self.seen));
+        self.start_in(Profile::default())
+    }
+
+    fn start_in(&self, profile: Profile) -> Result<Box<dyn Link>, Refusal> {
+        self.profiles.lock().unwrap().push(profile);
+        let inner: Box<dyn Link> = if self.direct {
+            Box::new(Direct {
+                script: (self.make)(),
+                reply: Reply::Direct(VecDeque::new()),
+            })
+        } else {
+            Box::new(fake_helper((self.make)(), Arc::clone(&self.seen)))
+        };
         let alive = self.probe.alive.fetch_add(1, SeqCst) + 1;
         self.probe.max_alive.fetch_max(alive, SeqCst);
         self.probe.started.fetch_add(1, SeqCst);
@@ -166,9 +219,17 @@ struct SoundProbe {
     /// What the device's clock says.
     clock: AtomicU64,
     pushed: AtomicUsize,
+    /// The FIRST device opened fails for good after this many pushes; 0: none ever fails.
+    fail_first_after: AtomicUsize,
+    /// Every open fails: this PC has no output device.
+    no_device: AtomicBool,
 }
 
-struct FakeSound(Arc<SoundProbe>);
+struct FakeSound {
+    probe: Arc<SoundProbe>,
+    pushes: usize,
+    fail_after: usize,
+}
 
 impl AudioSink for FakeSound {
     fn format(&self) -> (u32, u16) {
@@ -176,12 +237,13 @@ impl AudioSink for FakeSound {
     }
 
     fn push(&mut self, _pts_ms: u64, samples: &[f32]) -> usize {
-        self.0.pushed.fetch_add(samples.len(), SeqCst);
+        self.pushes += 1;
+        self.probe.pushed.fetch_add(samples.len(), SeqCst);
         samples.len()
     }
 
     fn clock_ms(&self) -> Option<u64> {
-        Some(self.0.clock.load(SeqCst))
+        Some(self.probe.clock.load(SeqCst))
     }
 
     fn pause(&mut self) {}
@@ -189,11 +251,15 @@ impl AudioSink for FakeSound {
     fn resume(&mut self) {}
 
     fn flush(&mut self) {}
+
+    fn failed(&self) -> bool {
+        self.fail_after != 0 && self.pushes >= self.fail_after
+    }
 }
 
 impl Drop for FakeSound {
     fn drop(&mut self) {
-        self.0.dropped.fetch_add(1, SeqCst);
+        self.probe.dropped.fetch_add(1, SeqCst);
     }
 }
 
@@ -201,8 +267,15 @@ struct Sounds(Arc<SoundProbe>);
 
 impl AudioFactory for Sounds {
     fn start(&self, _rate_hint: u32) -> Result<Box<dyn AudioSink>, AudioError> {
+        if self.0.no_device.load(SeqCst) {
+            return Err(AudioError::NoDevice);
+        }
         self.0.started.fetch_add(1, SeqCst);
-        Ok(Box::new(FakeSound(Arc::clone(&self.0))))
+        Ok(Box::new(FakeSound {
+            probe: Arc::clone(&self.0),
+            pushes: 0,
+            fail_after: self.0.fail_first_after.swap(0, SeqCst),
+        }))
     }
 }
 
@@ -210,13 +283,22 @@ impl AudioFactory for Sounds {
 struct ControlsProbe {
     shown: AtomicUsize,
     cleared: AtomicUsize,
+    /// What they showed last.
+    last: Mutex<Option<NowPlaying>>,
+}
+
+impl ControlsProbe {
+    fn last(&self) -> Option<NowPlaying> {
+        self.last.lock().unwrap().clone()
+    }
 }
 
 struct Controls(Arc<ControlsProbe>);
 
 impl NowPlayingSink for Controls {
-    fn show(&mut self, _now: &NowPlaying) {
+    fn show(&mut self, now: &NowPlaying) {
         self.0.shown.fetch_add(1, SeqCst);
+        *self.0.last.lock().unwrap() = Some(now.clone());
     }
 
     fn clear(&mut self) {
@@ -279,11 +361,22 @@ struct Rig {
     wall: Arc<Wall>,
     seen: Arc<Mutex<Vec<ToHelper>>>,
     reads: Arc<AtomicUsize>,
+    profiles: Arc<Mutex<Vec<Profile>>>,
 }
 
 /// A player over the fakes: an item of `len` bytes; each helper it starts runs a fresh script from `make`.
 fn rig(len: u64, make: impl Fn() -> Script + Send + Sync + 'static) -> Rig {
+    rig_of(len, false, make)
+}
+
+/// [`rig`] over [`Direct`] links: no pipes, no protocol decoder.
+fn rig_direct(len: u64, make: impl Fn() -> Script + Send + Sync + 'static) -> Rig {
+    rig_of(len, true, make)
+}
+
+fn rig_of(len: u64, direct: bool, make: impl Fn() -> Script + Send + Sync + 'static) -> Rig {
     let seen = Arc::new(Mutex::new(Vec::new()));
+    let profiles = Arc::new(Mutex::new(Vec::new()));
     let links = Arc::new(LinkProbe::default());
     let sound = Arc::new(SoundProbe::default());
     let controls = Arc::new(ControlsProbe::default());
@@ -298,6 +391,8 @@ fn rig(len: u64, make: impl Fn() -> Script + Send + Sync + 'static) -> Rig {
             make: Box::new(make),
             seen: Arc::clone(&seen),
             probe: Arc::clone(&links),
+            profiles: Arc::clone(&profiles),
+            direct,
         }),
         Arc::new(Sounds(Arc::clone(&sound))),
         Some(Box::new(Controls(Arc::clone(&controls)))),
@@ -312,6 +407,7 @@ fn rig(len: u64, make: impl Fn() -> Script + Send + Sync + 'static) -> Rig {
         wall,
         seen,
         reads,
+        profiles,
     }
 }
 
@@ -348,6 +444,15 @@ impl Rig {
         self.reads.load(SeqCst)
     }
 
+    fn no_sound(&self) -> Option<NoSound> {
+        self.handle.state().and_then(|state| state.no_sound)
+    }
+
+    /// The profile of each helper started, in order.
+    fn profiles(&self) -> Vec<Profile> {
+        self.profiles.lock().unwrap().clone()
+    }
+
     /// Waits for the helper to be killed for breaking a rule: "This file could not be played."
     fn wait_refused(&self) {
         wait_until("the helper refused", || self.refused() == Some(Refusal::CouldNotPlay));
@@ -382,6 +487,7 @@ fn audio_only() -> Opened {
             codec: Codec::Aac,
         }),
         reduced_quality: false,
+        no_sound: None,
     }
 }
 
@@ -396,6 +502,7 @@ fn video_only(w: u32, h: u32) -> Opened {
         }),
         audio: None,
         reduced_quality: false,
+        no_sound: None,
     }
 }
 
@@ -456,6 +563,7 @@ fn player_plays_frames_on_the_audio_clock() {
                     codec: Codec::Aac,
                 }),
                 reduced_quality: false,
+                no_sound: None,
             })),
             ToHelper::WantVideo { w, h } => {
                 if let Some(pts) = times.next() {
@@ -801,4 +909,247 @@ fn helper_error_codes_map_to_refusals() {
     ] {
         assert_eq!(refusal_of(code), Refusal::CouldNotPlay);
     }
+}
+
+// ---- No sound is said; the system decoder's profile; crash reports ----
+
+/// Opens as a 2 x 2 video with sound (with `no_sound`: its audio track does not play here) and answers every want:
+/// a frame every 40 ms, PCM of silence.
+fn plays_video(no_sound: Option<Codec>) -> Script {
+    let mut times = (0u64..).step_by(40);
+    script(move |msg, out| match msg {
+        ToHelper::Open { .. } => out.send(FromHelper::Opened(Opened {
+            audio: no_sound.is_none().then_some(AudioInfo {
+                rate: 48_000,
+                channels: 2,
+                codec: Codec::Aac,
+            }),
+            no_sound,
+            ..video_only(2, 2)
+        })),
+        ToHelper::WantVideo { w, h } => out.send(frame(times.next().unwrap_or(0), *w, *h)),
+        ToHelper::WantAudio { channels, .. } => out.send(silence(*channels)),
+        _ => {}
+    })
+}
+
+/// Answers `Open` with the system decoder's refusal for AAC.
+fn no_system_aac() -> Script {
+    script(|msg, out| {
+        if let ToHelper::Open { .. } = msg {
+            out.send(FromHelper::Error(ErrorCode::NoSystemDecoder(Codec::Aac)));
+        }
+    })
+}
+
+/// Moves the wall clock 40 ms a poll until `more` frames were shown beyond those shown when called.
+fn frames_keep_coming(r: &Rig, more: usize) {
+    let before = r.shown().len();
+    wait_until("frames shown on the wall clock", || {
+        r.wall.0.fetch_add(40, SeqCst);
+        r.shown().len() >= before + more
+    });
+}
+
+#[test]
+fn audio_device_lost_says_so() {
+    // A recording whose device fails for good after 2 pushes: it pauses where it was, and says why.
+    let a = rig(1_000, plays_audio);
+    a.sound.clock.store(1_500, SeqCst);
+    a.sound.fail_first_after.store(2, SeqCst);
+    a.open("a", KindHint::Audio);
+    wait_until("the lost device said", || a.no_sound() == Some(NoSound::Device));
+    wait_until("paused", || a.handle.phase() == Phase::Paused);
+    let state = a.handle.state().expect("a state");
+    assert_eq!((state.playing, state.at_ms, state.refused), (false, 1_500, None));
+    assert_eq!(a.sound.dropped.load(SeqCst), 1, "the lost device was dropped");
+    wait_until("the OS's controls show it paused", || {
+        a.controls.last().is_some_and(|now| !now.playing)
+    });
+    a.wall.0.store(4_000, SeqCst);
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        a.handle.state().map(|state| state.at_ms),
+        Some(1_500),
+        "no silent clock runs on"
+    );
+    // Play asks for a device again. Still none: it stays paused, and still says why.
+    a.sound.no_device.store(true, SeqCst);
+    a.handle.play();
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!((a.handle.phase(), a.no_sound()), (Phase::Paused, Some(NoSound::Device)));
+    // One is there again: it plays on from where it paused.
+    a.sound.no_device.store(false, SeqCst);
+    a.handle.play();
+    wait_until("it plays again", || {
+        a.sound.started.load(SeqCst) == 2 && a.handle.phase() == Phase::Playing
+    });
+    assert_eq!(a.no_sound(), None);
+    wait_until("the seek to where it paused", || {
+        a.seen().contains(&ToHelper::Seek { at_ms: 1_500 })
+    });
+    a.handle.stop(StopReason::Closed);
+    // A video on a PC with no device at all: its frames play on the wall clock, and it says why.
+    let n = rig(1_000, || plays_video(None));
+    n.sound.no_device.store(true, SeqCst);
+    n.handle.set_view_size(2, 2);
+    n.open("v", KindHint::Video);
+    wait_until("no device said", || n.no_sound() == Some(NoSound::Device));
+    frames_keep_coming(&n, 3);
+    assert_eq!((n.refused(), n.handle.phase()), (None, Phase::Playing));
+    n.handle.stop(StopReason::Closed);
+    // A video whose device fails for good after 2 pushes: its frames go on on the wall clock, and it says why.
+    let v = rig(1_000, || plays_video(None));
+    v.sound.fail_first_after.store(2, SeqCst);
+    v.handle.set_view_size(2, 2);
+    v.open("v", KindHint::Video);
+    wait_until("the lost device said", || v.no_sound() == Some(NoSound::Device));
+    assert_eq!(v.sound.dropped.load(SeqCst), 1, "the lost device was dropped");
+    assert_eq!(v.handle.phase(), Phase::Playing);
+    frames_keep_coming(&v, 3);
+    assert_eq!(v.refused(), None);
+    v.handle.stop(StopReason::Closed);
+}
+
+#[test]
+fn opened_without_sound_plays_video_and_says_why() {
+    let r = rig(1_000, || plays_video(Some(Codec::Aac)));
+    r.handle.set_view_size(2, 2);
+    r.open("v", KindHint::Video);
+    wait_until("the missing sound said", || {
+        r.no_sound() == Some(NoSound::Codec(Codec::Aac))
+    });
+    frames_keep_coming(&r, 3);
+    assert_eq!(r.sound.started.load(SeqCst), 0, "no sound device was opened for it");
+    assert!(
+        !r.seen().iter().any(|msg| matches!(msg, ToHelper::WantAudio { .. })),
+        "no sound was asked for"
+    );
+    assert_eq!((r.refused(), r.handle.phase()), (None, Phase::Playing));
+    r.handle.stop(StopReason::Closed);
+    // A track without sound and no video to play (the protocol's decoder refuses it; a link without one hands it
+    // over): killed.
+    let bare = rig_direct(1_000, || {
+        script(|msg, out| {
+            if let ToHelper::Open { .. } = msg {
+                out.send(FromHelper::Opened(Opened {
+                    no_sound: Some(Codec::Aac),
+                    ..audio_only()
+                }));
+            }
+        })
+    });
+    bare.open("a", KindHint::Audio);
+    bare.wait_refused();
+    assert_eq!(bare.sound.started.load(SeqCst), 0);
+}
+
+#[test]
+fn now_playing_says_video_for_a_video() {
+    let v = rig(1_000, || plays_video(None));
+    v.open("v", KindHint::Video);
+    wait_until("the controls fed", || v.controls.last().is_some());
+    assert_eq!(v.controls.last().map(|now| now.video), Some(true));
+    v.handle.stop(StopReason::Closed);
+    let a = rig(1_000, plays_audio);
+    a.open("a", KindHint::Audio);
+    wait_until("the controls fed", || a.controls.last().is_some());
+    assert_eq!(a.controls.last().map(|now| now.video), Some(false));
+    a.handle.stop(StopReason::Closed);
+}
+
+#[test]
+fn system_answer_restarts_once_in_the_system_profile() {
+    let system = Profile::SystemDecoder { hevc: false };
+    // The default profile's helper says AAC needs the system decoder; the one started in its profile plays.
+    let started = AtomicUsize::new(0);
+    let r = rig(1_000, move || {
+        if started.fetch_add(1, SeqCst) == 0 {
+            no_system_aac()
+        } else {
+            plays_audio()
+        }
+    });
+    r.handle.set_system_decoder(true);
+    r.open("a", KindHint::Audio);
+    wait_until("the second helper plays", || r.handle.phase() == Phase::Playing);
+    assert_eq!(r.profiles(), [Profile::NoCapabilities, system]);
+    assert_eq!(
+        (r.killed(), r.links.max_alive.load(SeqCst)),
+        (1, 1),
+        "the first was killed before the second started"
+    );
+    let opens = r
+        .seen()
+        .iter()
+        .filter(|msg| matches!(msg, ToHelper::Open { .. }))
+        .count();
+    assert_eq!((opens, r.refused()), (2, None));
+    r.handle.stop(StopReason::Closed);
+    // The system profile's helper answers the same: that is the PC's answer. Never a third start.
+    let pc = rig(1_000, no_system_aac);
+    pc.handle.set_system_decoder(true);
+    pc.open("a", KindHint::Audio);
+    wait_until("the PC's answer", || pc.refused().is_some());
+    assert_eq!(pc.refused(), Some(Refusal::NoSystemDecoder(Codec::Aac)));
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(pc.profiles(), [Profile::NoCapabilities, system], "exactly 2 starts");
+}
+
+#[test]
+fn switch_off_never_restarts() {
+    let r = rig(1_000, no_system_aac);
+    r.handle.set_system_decoder(false);
+    r.open("a", KindHint::Audio);
+    wait_until("the refusal", || r.refused().is_some());
+    assert_eq!(r.refused(), Some(Refusal::NoSystemDecoder(Codec::Aac)));
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(r.profiles(), [Profile::NoCapabilities], "one start");
+}
+
+#[test]
+fn error_reports_are_excluded_before_the_first_helper_starts() {
+    struct Reports {
+        order: Arc<Mutex<Vec<String>>>,
+        fails: bool,
+    }
+    impl ErrorReports for Reports {
+        fn exclude(&self, exe_name: &str) -> io::Result<()> {
+            self.order.lock().unwrap().push(format!("exclude {exe_name}"));
+            if self.fails {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            Ok(())
+        }
+    }
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let spawn = || {
+        order.lock().unwrap().push("spawn".to_owned());
+        Ok(())
+    };
+    let excluded = Excluded::new();
+    let reports = Reports {
+        order: Arc::clone(&order),
+        fails: false,
+    };
+    assert_eq!(excluded_then(&excluded, &reports, spawn), Ok(()));
+    assert_eq!(excluded_then(&excluded, &reports, spawn), Ok(()));
+    let exclude = format!("exclude {HELPER_NAME}");
+    assert_eq!(
+        *order.lock().unwrap(),
+        [exclude.clone(), "spawn".to_owned(), "spawn".to_owned()],
+        "written once, before the first spawn"
+    );
+    assert!(!HELPER_NAME.contains(['/', '\\']), "the exe's file name, never a path");
+    // A failed write starts nothing.
+    order.lock().unwrap().clear();
+    let failing = Reports {
+        order: Arc::clone(&order),
+        fails: true,
+    };
+    assert_eq!(
+        excluded_then(&Excluded::new(), &failing, spawn),
+        Err(Refusal::NoSandbox)
+    );
+    assert_eq!(*order.lock().unwrap(), [exclude], "0 spawns");
 }
