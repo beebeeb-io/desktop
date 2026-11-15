@@ -117,6 +117,7 @@ pub fn disposable_cache_roots_in(
     // without it a sign-out would skip those copies and leave plaintext on disk. The folders themselves, never the
     // whole data dir.
     roots.extend(staging.candidates());
+    roots.extend(dirs::config_dir().map(|dir| dir.join(crate::identity::REAL.config_dir_name())));
     roots
 }
 
@@ -131,6 +132,9 @@ pub fn is_lifecycle_log_path(identity: &crate::identity::EngineIdentity, path: &
 }
 
 pub fn is_disposable_cache_path(identity: &crate::identity::EngineIdentity, path: &std::path::Path) -> bool {
+    if is_lifecycle_log_path(identity, path) {
+        return false;
+    }
     let canonical_path = match path.canonicalize() {
         Ok(path) => path,
         Err(_) => {
