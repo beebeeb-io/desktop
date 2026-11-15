@@ -296,9 +296,8 @@ pub fn live_rows(db: &StateDb) -> Result<Vec<FileEntry>, DriveError> {
         }
         let key = (entry.is_dir(), path);
         if entry.remote_updated_at > 0 {
-            if served.insert(key) {
-                kept.push(entry);
-            }
+            served.insert(key);
+            kept.push(entry);
             continue;
         }
         match unsent.get(&key) {

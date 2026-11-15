@@ -85,6 +85,7 @@ impl<C: CredentialStores> Engine<C> {
             .flatten()
             .map(|root| root.to_string_lossy().into_owned())
             .into_iter()
+            .filter(|_| false)
             .collect();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
