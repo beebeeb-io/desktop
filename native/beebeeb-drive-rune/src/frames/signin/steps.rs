@@ -94,9 +94,16 @@ impl Ui {
 
     /// The typed secrets of these steps are forgotten, and their waits are over.
     pub(super) fn drop_steps(&mut self) {
+        // The recovery's two screens hold a half-done step too: the engine keeps the key the words derived and the
+        // server's recovery token until the new password is set. Leaving either has the engine forget them at once.
         let partial = matches!(
             self.screen,
-            Screen::TwoFactor { .. } | Screen::Phrase | Screen::NoPhrase | Screen::UnlockVault
+            Screen::TwoFactor { .. }
+                | Screen::Phrase
+                | Screen::NoPhrase
+                | Screen::UnlockVault
+                | Screen::Recover
+                | Screen::NewPassword
         );
         if partial {
             // "Back to sign-in; the partial session is discarded" (DW-A26).

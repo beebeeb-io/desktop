@@ -538,7 +538,8 @@ fn forgot_password_offers_three_honest_options_from_the_keyboard() {
     tab_to(&mut rt, "btn-1");
     press(&mut rt, Key::Enter);
     assert_eq!(ui(&mut rt).screen, Screen::Device { expired: false });
-    assert_eq!(*calls.borrow(), ["device_request"]);
+    // Escape from the recovery's words (above) had the engine forget a recovery it held.
+    assert_eq!(*calls.borrow(), ["discard_partial_sign_in", "device_request"]);
     press(&mut rt, Key::Escape);
     assert_eq!(ui(&mut rt).screen, Screen::SignIn);
 }

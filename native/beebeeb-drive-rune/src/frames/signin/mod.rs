@@ -40,6 +40,8 @@ mod create_tests;
 #[cfg(test)]
 mod lock_tests;
 #[cfg(test)]
+mod recovery_tests;
+#[cfg(test)]
 mod steps_tests;
 #[cfg(test)]
 mod tests;

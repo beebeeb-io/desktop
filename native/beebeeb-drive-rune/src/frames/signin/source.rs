@@ -282,8 +282,11 @@ pub trait SignInSource {
     fn poll(&mut self) -> Option<SignInEvent>;
     /// Added by lane f-signin-rest (a default, so an implementation written before it compiles):
     /// the person went back from a step after the password (the code, the twelve words, the
-    /// vault password). The partial session is discarded (`auth_v2`: drop the partial token) and
-    /// no `TwoFactor`, `PhraseRestored` or `VaultUnlocked` event of it may arrive after this call.
+    /// vault password) or from the recovery's screens (the words, the new password). The partial
+    /// session is discarded (`auth_v2`: drop the partial token), a recovery the engine holds (the
+    /// derived key, the recovery token) is forgotten, and no `TwoFactor`, `PhraseRestored`,
+    /// `VaultUnlocked`, `RecoveryPhraseVerified` or `PasswordSet` event of it may arrive after this
+    /// call.
     fn discard_partial_sign_in(&mut self) {}
     /// Added by lane f-signin-rest (a default): how strong a password being chosen is, by the
     /// same rules as sign-up (DW-A49). Local and at once (it runs on every keystroke); `None`:
@@ -614,7 +617,11 @@ impl SignInSource for FixtureSignInSource {
         self.queue.retain(|e| {
             !matches!(
                 e,
-                SignInEvent::TwoFactor(_) | SignInEvent::PhraseRestored(_) | SignInEvent::VaultUnlocked(_)
+                SignInEvent::TwoFactor(_)
+                    | SignInEvent::PhraseRestored(_)
+                    | SignInEvent::VaultUnlocked(_)
+                    | SignInEvent::RecoveryPhraseVerified(_)
+                    | SignInEvent::PasswordSet(_)
             )
         });
     }
