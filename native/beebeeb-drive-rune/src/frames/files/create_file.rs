@@ -30,9 +30,6 @@ impl State {
     /// Make the file. Not when the session gate closed, or moved to another session, since the press: what was
     /// asked under one session is never made under another (it is dropped, not kept for later).
     fn create_file(&mut self, folder: Option<&str>, name: &str, tx: &mut Tx) {
-        if self.refused_without_session() {
-            return;
-        }
         match self.actions.source.new_file(folder, name) {
             // The engine sees the new file in the sync folder and lists and uploads it as any other.
             Ok(()) => self.forget_undo(),
