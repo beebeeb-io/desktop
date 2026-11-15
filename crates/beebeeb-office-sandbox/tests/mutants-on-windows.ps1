@@ -26,6 +26,10 @@ $mutants = [ordered]@{
     'section-inherited'   = @('let mapping = owned\(raw\);', 'unsafe { SetHandleInformation(raw, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) }; let mapping = owned(raw);', 'attributes\.set\(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &inherited\)\?;', 'let _ = &inherited;')
     'section-named'       = @('PAGE_READWRITE, high, low, null\(\)\)', 'PAGE_READWRITE, high, low, [98u16, 98, 0].as_ptr())')
     'section-not-zeroed'  = @('zeroize\(self\.as_mut_slice\(\)\);', 'let _ = self.len;')
+    # Profiles (decision 2541).
+    'extra-capability'    = @('for name in profile\.capabilities\(\) \{', 'for name in profile.capabilities().iter().chain(&["internetClient"]) {')
+    'every-profile-hevc'  = @('let mut granted = CapabilitySids::of\(profile\)\?;', 'let mut granted = CapabilitySids::of(Profile::SystemDecoder { hevc: true })?;')
+    'read-back-expects-none' = @('confirm_confined\(&child\.process, &child\.job, &granted\)\?;', 'confirm_confined(&child.process, &child.job, &CapabilitySids::of(Profile::NoCapabilities)?)?;')
 }
 
 $profiles = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings'

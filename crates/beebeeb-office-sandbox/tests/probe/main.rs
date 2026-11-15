@@ -26,6 +26,11 @@
 //!   open-afd [<name>]    -> ok | err <status>           (Windows: opens the socket driver, \Device\Afd or
 //!                                                         \Device\Afd\<name>)
 //!   read-font            -> ok | err <system code>      (opens the system's Segoe UI font file, reads 4 bytes)
+//!   read-registry <hive> <key>
+//!                        -> ok | err <system code>      (Windows: opens a registry key to read; hive is hklm, hkcu
+//!                                                         or hkcr)
+//!   capabilities         -> capabilities <n> <identifiers, comma-separated, sorted>  (Windows: the capabilities in
+//!                                                         its own token, as S-1-15-3-... identifiers)
 //!   hang                 -> hanging, then sleeps for ever
 //!   spin                 -> spinning, then burns one core for ever
 //!   exit <code>          -> exits with that code
@@ -553,6 +558,116 @@ fn read_font() -> String {
     }
 }
 
+/// Opens a registry key for reading and closes it again: `<hive> <key>`, hive `hklm`, `hkcu` or `hkcr`. The answer is
+/// the call's own code. Windows' decoders need to read the registry; only the system-decoder profile may.
+#[cfg(windows)]
+fn read_registry(rest: &str) -> String {
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, RegCloseKey, RegOpenKeyExW,
+    };
+    let Some((hive, key)) = rest.split_once(' ') else {
+        return "err parse".into();
+    };
+    let root = match hive {
+        "hklm" => HKEY_LOCAL_MACHINE,
+        "hkcu" => HKEY_CURRENT_USER,
+        "hkcr" => HKEY_CLASSES_ROOT,
+        _ => return "err parse".into(),
+    };
+    let wide: Vec<u16> = key.encode_utf16().chain([0]).collect();
+    let mut opened: HKEY = std::ptr::null_mut();
+    // SAFETY: a predefined root, a terminated UTF-16 key path, read access only; `opened` receives a new handle.
+    let status = unsafe { RegOpenKeyExW(root, wide.as_ptr(), 0, KEY_READ, &mut opened) };
+    if status != 0 {
+        return format!("err {status}");
+    }
+    // SAFETY: the key the call above opened, closed once.
+    unsafe { RegCloseKey(opened) };
+    "ok".into()
+}
+
+#[cfg(not(windows))]
+fn read_registry(_rest: &str) -> String {
+    "err unsupported".into()
+}
+
+/// A security identifier as text (`S-1-15-3-...`), from its bytes: revision, count, a 48-bit big-endian authority,
+/// then `count` 32-bit little-endian parts.
+#[cfg(windows)]
+fn identifier_text(bytes: &[u8]) -> String {
+    let authority = bytes[2..8]
+        .iter()
+        .fold(0u64, |value, &byte| (value << 8) | u64::from(byte));
+    let mut text = format!("S-{}-{authority}", bytes[0]);
+    for part in bytes[8..].chunks_exact(4) {
+        text.push_str(&format!(
+            "-{}",
+            u32::from_le_bytes([part[0], part[1], part[2], part[3]])
+        ));
+    }
+    text
+}
+
+/// The capabilities in this process's own token, as identifiers.
+#[cfg(windows)]
+fn capabilities() -> String {
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Security::{GetTokenInformation, SID_AND_ATTRIBUTES, TOKEN_GROUPS, TokenCapabilities};
+    /// `GetCurrentProcessToken()`: the pseudo-handle of this process's own token; nothing is opened.
+    const OWN_TOKEN: HANDLE = -4isize as HANDLE;
+    // A count, then that many identifier-and-attributes entries whose identifiers point into the same buffer.
+    let mut buffer = [0u64; 512];
+    let mut returned = 0u32;
+    // SAFETY: the pseudo-handle is valid for a query; the buffer is writable for the length passed and aligned for
+    // the structure.
+    let ok = unsafe {
+        GetTokenInformation(
+            OWN_TOKEN,
+            TokenCapabilities,
+            buffer.as_mut_ptr().cast(),
+            size_of_val(&buffer) as u32,
+            &mut returned,
+        )
+    };
+    if ok == 0 {
+        return code(&std::io::Error::last_os_error());
+    }
+    let groups = buffer.as_ptr().cast::<TOKEN_GROUPS>();
+    // SAFETY: the call succeeded, so the buffer starts with the structure; the count is checked against the room.
+    let count = unsafe { (*groups).GroupCount } as usize;
+    let room = (size_of_val(&buffer) - std::mem::offset_of!(TOKEN_GROUPS, Groups)) / size_of::<SID_AND_ATTRIBUTES>();
+    if count > room {
+        return "err room".into();
+    }
+    let start = buffer.as_ptr().cast::<u8>() as usize;
+    let end = start + size_of_val(&buffer);
+    let mut names = Vec::with_capacity(count);
+    for index in 0..count {
+        // SAFETY: entry `index` lies inside the buffer (checked against its room above).
+        let sid = unsafe { (*(&raw const (*groups).Groups).cast::<SID_AND_ATTRIBUTES>().add(index)).Sid };
+        let at = sid as usize;
+        // An identifier is 8 bytes plus 4 per part; it has to lie inside the buffer before it is read.
+        if at < start || at + 8 > end {
+            return "err identifier".into();
+        }
+        // SAFETY: the 8-byte head lies inside the buffer (checked above).
+        let parts = usize::from(unsafe { *sid.cast::<u8>().add(1) });
+        if at + 8 + 4 * parts > end {
+            return "err identifier".into();
+        }
+        // SAFETY: the whole identifier lies inside the buffer (checked above), which lives until this returns.
+        let bytes = unsafe { std::slice::from_raw_parts(sid.cast::<u8>(), 8 + 4 * parts) };
+        names.push(identifier_text(bytes));
+    }
+    names.sort();
+    format!("capabilities {} {}", names.len(), names.join(","))
+}
+
+#[cfg(not(windows))]
+fn capabilities() -> String {
+    "err unsupported".into()
+}
+
 /// The limits of the job this process runs in, read by the process itself.
 #[cfg(windows)]
 fn job() -> String {
@@ -678,6 +793,8 @@ fn main() {
             "privileges" => privileges(),
             "open-afd" => open_afd(rest),
             "read-font" => read_font(),
+            "read-registry" => read_registry(rest),
+            "capabilities" => capabilities(),
             "hang" | "spin" => {
                 let _ = writeln!(stdout, "{}", if request == "hang" { "hanging" } else { "spinning" });
                 let _ = stdout.flush();
