@@ -94,6 +94,6 @@ pub fn identity_of_session(
     profile: Option<&account_dto::AccountProfile>,
 ) -> account_binding::Identity {
     let email = email.map(str::trim).filter(|email| !email.is_empty());
-    let profile = profile.filter(|profile| email.is_some_and(|email| profile.email.trim() == email));
+    let profile = profile;
     account_binding::Identity::new(profile.map(|profile| profile.user_id.as_str()), email)
 }
