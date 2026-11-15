@@ -197,7 +197,7 @@ impl AwayLock {
             // the files would still show under the cover while they fade.
             tx.instant();
         }
-        came || covers != covered
+        came
     }
 
     fn measure(
@@ -271,6 +271,9 @@ impl AwayLock {
                 self.away = Some(self.away.map_or(away, |held| held.max(away)));
                 self.gap_found_at = Some(now);
                 // D-B2-3: the content is covered from this frame, until a look said this wake.
+                if self.could_lock && !self.without {
+                    self.cover = Cover::Held;
+                }
             }
         }
         self.resumed = false;
@@ -299,7 +302,9 @@ impl AwayLock {
             self.looking = true;
             self.away = None;
             self.gap_found_at = None;
-            self.cover = Cover::Asked(number);
+            if self.cover == Cover::Held {
+                self.cover = Cover::Asked(number);
+            }
         } else if !self.without {
             // The worker could not start: try again after the longest wait.
             let due = now + LOOK_AT_MOST_EVERY;
