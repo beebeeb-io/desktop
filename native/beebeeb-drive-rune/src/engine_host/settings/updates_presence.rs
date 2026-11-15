@@ -9,6 +9,13 @@
 //! not move it. So any of these between the press and the hand-off makes the update wait, and the press is offered
 //! again once the lock is open: for the two writes of the person's own, that is a wait they did not need, never an
 //! install they did not ask for.
+//!
+//! The turn alone misses a step that is ASKED but not done: a sign-out, a vault lock, or the close of a session the
+//! server ended that waits behind the hand-off's own stop of sync (the engine's step lock, held for seconds while a
+//! running sync stops) moves the turn only once it runs, after the hand-off asked. So the press also takes the
+//! engine's count of session-ending steps asked (`Engine::session_steps_asked`, counted before such a step waits),
+//! and the hand-off runs only while both are as they were. A password change queued the same way is not counted: the
+//! person is there and their session goes on (wave 2, D-4).
 
 use std::sync::Mutex;
 
@@ -17,8 +24,16 @@ use beebeeb_engine::app::lock_api::LockState;
 
 use super::*;
 
-/// The session turn now (`None`: no session to speak of), and whether its lock is open.
-type Now = Box<dyn Fn() -> (Option<SessionGeneration>, bool) + Send + Sync>;
+/// The session turn now (`None`: no session to speak of), whether its lock is open, and how many session-ending steps
+/// were asked so far.
+type Now = Box<dyn Fn() -> (Option<SessionGeneration>, bool, u64) + Send + Sync>;
+
+/// What a press was taken in: the session turn, and the count of session-ending steps asked at that moment.
+#[derive(Clone, Copy)]
+struct Pressed {
+    turn: SessionGeneration,
+    steps: u64,
+}
 
 /// What the press and the hand-off ask about the person and the session. One per updater: the part takes the press
 /// with it, the worker asks it before the hand-off, and the hand-off asks it again right before the installer starts.
@@ -26,8 +41,11 @@ pub(crate) struct Presence {
     now: Now,
     /// A stop of sync was not confirmed in this process (any account's).
     unconfirmed: Box<dyn Fn() -> bool + Send + Sync>,
-    /// The turn the last press was taken in.
-    pressed: Mutex<Option<SessionGeneration>>,
+    /// The turn and the count the last press was taken in.
+    pressed: Mutex<Option<Pressed>>,
+    /// The last press's hand-off was refused right before the installer, because the person or the session was no
+    /// longer the one of the press: the row says the update waits for them. A new press clears it.
+    refused_at_launch: AtomicBool,
 }
 
 impl Presence {
@@ -35,36 +53,51 @@ impl Presence {
     pub(crate) fn of_engine<C: CredentialStores + 'static>(engine: Arc<Engine<C>>) -> Arc<Self> {
         let stops = engine.clone();
         Arc::new(Self {
-            now: Box::new(move || (Some(engine.session_turn()), engine.lock_state() == LockState::Open)),
+            now: Box::new(move || {
+                (
+                    Some(engine.session_turn()),
+                    engine.lock_state() == LockState::Open,
+                    engine.session_steps_asked(),
+                )
+            }),
             unconfirmed: Box::new(move || any_stop_unconfirmed(&stops)),
             pressed: Mutex::new(None),
+            refused_at_launch: AtomicBool::new(false),
         })
     }
 
     /// No session, no press: the part of a build whose updater did not start (nothing is pressed there).
     pub(crate) fn closed() -> Arc<Self> {
         Arc::new(Self {
-            now: Box::new(|| (None, false)),
+            now: Box::new(|| (None, false, 0)),
             unconfirmed: Box::new(|| false),
             pressed: Mutex::new(None),
+            refused_at_launch: AtomicBool::new(false),
         })
     }
 
-    /// A test's: the lock open in one turn, and no stop left unconfirmed.
+    /// A test's: the lock open in one turn, no session step asked, and no stop left unconfirmed.
     #[cfg(test)]
     pub(crate) fn open() -> Arc<Self> {
-        Self::from_fns(|| (Some(SessionGeneration::for_test(1)), true), || false)
+        Self::from_fns(|| (Some(SessionGeneration::for_test(1)), true), || 0, || false)
     }
 
+    /// A test's: the turn and the lock (`now`), the count of session-ending steps asked (`steps`), and whether a
+    /// stop was left unconfirmed, each from its own function.
     #[cfg(test)]
     pub(crate) fn from_fns(
         now: impl Fn() -> (Option<SessionGeneration>, bool) + Send + Sync + 'static,
+        steps: impl Fn() -> u64 + Send + Sync + 'static,
         unconfirmed: impl Fn() -> bool + Send + Sync + 'static,
     ) -> Arc<Self> {
         Arc::new(Self {
-            now: Box::new(now),
+            now: Box::new(move || {
+                let (turn, open) = now();
+                (turn, open, steps())
+            }),
             unconfirmed: Box::new(unconfirmed),
             pressed: Mutex::new(None),
+            refused_at_launch: AtomicBool::new(false),
         })
     }
 
@@ -73,19 +106,35 @@ impl Presence {
         (self.now)().1
     }
 
-    /// Takes the press in the turn of now, when the lock is open. `false`: no press now.
+    /// Takes the press in the turn and the count of now, when the lock is open. `false`: no press now. A press taken
+    /// starts a new order: the refusal of the last one is no longer what the row says.
     pub(crate) fn press(&self) -> bool {
-        let (turn, open) = (self.now)();
-        let taken = if open { turn } else { None };
+        let (turn, open, steps) = (self.now)();
+        let taken = turn.filter(|_| open).map(|turn| Pressed { turn, steps });
         *self.pressed.lock().unwrap_or_else(|p| p.into_inner()) = taken;
+        if taken.is_some() {
+            self.refused_at_launch.store(false, Ordering::SeqCst);
+        }
         taken.is_some()
     }
 
-    /// The session is still the one the press was taken in, and its lock is open: the hand-off may run.
+    /// The session is still the one the press was taken in, its lock is open, and no session-ending step was asked
+    /// since (one may still wait for the engine's step lock): the hand-off may run.
     pub(crate) fn holds(&self) -> bool {
-        let (turn, open) = (self.now)();
+        let (turn, open, _steps) = (self.now)();
         let pressed = *self.pressed.lock().unwrap_or_else(|p| p.into_inner());
-        open && pressed.is_some() && pressed == turn
+        open && pressed.is_some_and(|pressed| Some(pressed.turn) == turn)
+    }
+
+    /// The hand-off was refused right before the installer ([`Self::holds`] said no): the row says the update waits
+    /// for the person, and offers the press.
+    pub(crate) fn note_refused_at_launch(&self) {
+        self.refused_at_launch.store(true, Ordering::SeqCst);
+    }
+
+    /// The last press's hand-off was refused right before the installer, and no press was taken since.
+    pub(crate) fn waited(&self) -> bool {
+        self.refused_at_launch.load(Ordering::SeqCst)
     }
 
     /// A stop of sync was not confirmed in this process: no installer can start until Beebeeb restarts.

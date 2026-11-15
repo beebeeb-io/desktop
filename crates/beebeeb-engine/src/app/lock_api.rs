@@ -420,6 +420,14 @@ impl<C: CredentialStores> Engine<C> {
         locked
     }
 
+    /// How many session-ending steps were asked in this engine so far (a sign-out, a vault lock, the close of a
+    /// session the server ended, leaving a half-done sign-in). Monotonic, in memory, never waits: a host that took a
+    /// decision in the turn of a moment compares it with the count of that moment, and a step that is on its way to
+    /// end that turn (still waiting for the step lock) has moved it already.
+    pub fn session_steps_asked(&self) -> u64 {
+        self.acct.session_steps_asked()
+    }
+
     /// Start the session watcher: ONE thread (`session-watch`) that asks [`Self::close_ended_session`] every
     /// [`SESSION_WATCH_EVERY`]. It holds only a `Weak` to this handle: it ends with it. A second call starts nothing.
     pub fn watch_session(self: &Arc<Self>) {
@@ -511,6 +519,15 @@ impl<C: CredentialStores> Engine<C> {
     }
 }
 
+/// A test's hold of the engine's step lock (`hold_session_step_for_test`).
+#[cfg(any(test, feature = "test-support"))]
+#[path = "step_hold.rs"]
+pub mod step_hold;
+
 #[cfg(test)]
 #[path = "lock_api_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "session_steps_tests.rs"]
+mod session_steps_tests;
