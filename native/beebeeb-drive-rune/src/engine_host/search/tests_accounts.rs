@@ -17,9 +17,11 @@ use beebeeb_engine::signin::memory_store::MemoryCredentials;
 use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
 use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
 use beebeeb_engine::test_api::{FakeApi, Handler, Request};
+use rune::{Env, Runtime, TextEdit};
 use zeroize::Zeroizing;
 
 use super::*;
+use crate::frames::search::{NOT_THIS_ACCOUNTS, Shows};
 use crate::shell::identity::engine_identity;
 
 const PASSWORD: &str = "an invented password for two searching accounts";
@@ -103,7 +105,8 @@ fn found(source: &mut Source, query: &str) -> Option<Vec<String>> {
     match source.search(query, Narrow::All) {
         Answer::Found { hits, .. } => Some(hits.into_iter().map(|hit| hit.id).collect()),
         Answer::Searching => panic!("the query was not answered"),
-        Answer::Unavailable => None,
+        // Not available, and why (row S8): no result list either way.
+        Answer::Unavailable | Answer::NotThisAccounts => None,
     }
 }
 
@@ -211,5 +214,132 @@ fn search_never_answers_another_accounts_names() {
     let db = StateDb::open(&path).unwrap();
     assert!(!db.has_search_recent_row(&second.user_id).unwrap());
     drop(db);
+    drop(fake);
+}
+
+/// Frames through the window's own poll and draw until Search has no answer on its way (at most 30 s).
+fn drawn(rt: &mut Runtime<crate::State>) -> Vec<String> {
+    let began = Instant::now();
+    loop {
+        for _ in 0..3 {
+            rt.frame(0.016);
+            rt.settle_all();
+        }
+        if !rt.state.frames.find.source.pump().busy {
+            break;
+        }
+        assert!(began.elapsed() < WAIT_FOR, "an answer did not come back");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    rt.frame(0.016);
+    rt.settle_all();
+    rt.elements()
+        .into_iter()
+        .filter(|e| !e.exiting)
+        .filter_map(|e| e.text)
+        .collect()
+}
+
+/// Row S8: the second account over the first account's local state is told WHY Search is not available, and never
+/// with a name. B signs in and unlocks, opens Search and types, through the window's own poll and draw: the answer is
+/// `NotThisAccounts` (the engine refused the state as another account's), with the field empty too; the window shows
+/// the "not available" body and the reason line in Photos' words; nothing of the first account is drawn (its file's
+/// name, its email) and no recent search shows. Mutant S8-M1 (`engine_host/search.rs`, `search`: the refusal answered
+/// `Answer::Unavailable`): red at the first assert. The reason line's draw is the LAST assert: it is red until the
+/// view draws `SearchUi::unavailable_reason` (`frames/search/view.rs`, outside this slice; see the branch notes).
+#[test]
+fn another_accounts_state_says_why_search_is_not_available() {
+    let (first, _) = FakeAccount::register("first-why-2488@example.eu", PASSWORD, TEST_PHRASE);
+    let (second, _) = FakeAccount::register("second-why-2488@example.eu", PASSWORD, OTHER_PHRASE);
+    let (first, second) = (Arc::new(first), Arc::new(second));
+    let fake = two_accounts(first.clone(), second.clone());
+
+    let (channel, _messages) = ChannelHost::new(|| {});
+    let config = EngineConfig {
+        account_id: "search-why-2488-window-slot".into(),
+        state_dir: crate::engine_host::tests::process_state_dir(),
+        api_base: fake.base.clone(),
+    };
+    let engine = Arc::new(
+        Engine::open(engine_identity(), config, channel, MemoryCredentials::default()).expect("the engine opens"),
+    );
+    engine.restore();
+
+    // The first account's local state, as its sync left it, recorded as its own.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.db");
+    let db = StateDb::open(&path).unwrap();
+    put(&db, "f-minutes", &format!("/Board/{NAME}"));
+    put(&db, "f-other", "/notes.txt");
+    db.set_owner(&Identity::new(Some(&first.user_id), Some(&first.email)))
+        .unwrap();
+    drop(db);
+    engine.use_local_state_for_test(path);
+
+    // The second account, signed in and unlocked over it: the engine refuses that state as another account's.
+    sign_in(&engine, &second, OTHER_PHRASE);
+    assert_eq!(
+        engine.local_state_refusal(),
+        Some(LocalStateRefused::OtherAccount),
+        "the control: the engine refuses the first account's state"
+    );
+
+    // B opens Search and types, as the window does it.
+    let mut state = crate::init();
+    state.frames.find.source = Box::new(EngineSearchSource::new(engine.clone()));
+    state.frames.find.open = true;
+    state.search = TextEdit::new(NEEDLE);
+    let env = Env {
+        system_dark: false,
+        scale: 2.0,
+    };
+    let mut rt = Runtime::new(state, crate::view, (958.0, 1100.0), env);
+    rt.on_key = Some(crate::shell::host::on_key);
+    rt.poll = Some(crate::shell::host::poll);
+    let texts = drawn(&mut rt);
+
+    let find = &rt.state.frames.find;
+    assert_eq!(
+        find.source.search(NEEDLE, Narrow::All),
+        Answer::NotThisAccounts,
+        "S8: the second account is not told why Search is not available"
+    );
+    assert_eq!(
+        find.source.search("", Narrow::All),
+        Answer::NotThisAccounts,
+        "with the field empty too"
+    );
+    assert!(!find.source.wired(), "no index of the first account's state");
+    assert!(find.source.recent().is_empty(), "no recent search");
+    assert_eq!(find.source.details("f-minutes"), None);
+    assert_eq!(find.source.details("f-other"), None);
+    assert_eq!(find.shows(NEEDLE), Shows::Unavailable, "the \"not available\" body");
+    assert_eq!(find.shows(""), Shows::Unavailable);
+    assert_eq!(
+        find.unavailable_reason(NEEDLE),
+        Some(NOT_THIS_ACCOUNTS),
+        "the reason the view draws"
+    );
+    assert_eq!(find.unavailable_reason(""), Some(NOT_THIS_ACCOUNTS));
+
+    // Drawn: the body, and nothing of the first account.
+    assert!(
+        texts.iter().any(|t| t == "Search isn't available yet"),
+        "the \"not available\" body is not drawn"
+    );
+    for theirs in [NAME, "Quarterly minutes", first.email.as_str(), first.user_id.as_str()] {
+        assert!(
+            !texts.iter().any(|t| t.contains(theirs)),
+            "the first account's {theirs:?} is drawn"
+        );
+    }
+
+    // LAST: the reason line, drawn (red until `view.rs` draws `unavailable_reason`).
+    for words in [NOT_THIS_ACCOUNTS.0, NOT_THIS_ACCOUNTS.1] {
+        assert!(
+            texts.iter().any(|t| t == words),
+            "S8 view: the reason line is not drawn: {words:?}"
+        );
+    }
     drop(fake);
 }
