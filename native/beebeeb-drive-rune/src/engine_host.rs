@@ -50,6 +50,7 @@ mod binding_tests;
 pub mod drive_settings;
 pub mod files;
 mod files_conflicts;
+mod files_downloads;
 mod files_facts;
 mod files_link;
 #[cfg(test)]
@@ -587,6 +588,8 @@ pub struct EngineFilesSource<C: CredentialStores> {
     places: files_places::Places<C>,
     /// The Uploads panel: what uploads, Try again, Pause all, Cancel.
     uploads: files_uploads::UploadCalls<Engine<C>>,
+    /// The copies coming down: the rows' "Downloading" figures.
+    downloads: files_downloads::DownloadCalls<Engine<C>>,
     /// What the Preview panel shows of a file.
     previews: files_preview::Previews<viewer::LiveViewerEngine<C>>,
 }
@@ -598,6 +601,7 @@ impl<C: CredentialStores> EngineFilesSource<C> {
             copies: files::LocalCopies::new(engine.clone()),
             trash: files_trash::TrashCalls::new(engine.clone()),
             uploads: files_uploads::UploadCalls::new(engine.clone()),
+            downloads: files_downloads::DownloadCalls::new(engine.clone()),
             links: files_link::LinkCalls::new(engine.clone()),
             facts: files_facts::Facts::new(engine.clone()),
             versions: files_versions::VersionCalls::new(engine.clone()),
@@ -709,7 +713,11 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
     /// The status line's word for the handle's view (`sync::sync_word`): read without waiting, on every frame, and
     /// never "Up to date" for an engine that does not run.
     fn sync_state(&self) -> Option<String> {
-        sync::sync_word(&self.engine.view()).map(str::to_string)
+        files_downloads::with_downloads(
+            sync::sync_word(&self.engine.view()),
+            !self.downloads.downloads().is_empty(),
+        )
+        .map(str::to_string)
     }
 
     fn details(&self, item: &DriveItem, folder: &str) -> Details {
@@ -898,8 +906,13 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         self.uploads.uploads()
     }
 
+    fn downloads(&self) -> Vec<crate::frames::files::keeping::Download> {
+        self.downloads.downloads()
+    }
+
     fn ask_uploads(&mut self) {
         self.uploads.ask();
+        self.downloads.ask();
     }
 
     fn retry_upload(&mut self, id: &str) -> Result<(), ActionError> {
@@ -920,6 +933,7 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
 
     fn forget_uploads(&mut self) {
         self.uploads.forget();
+        self.downloads.forget();
     }
 
     fn upload_left(&mut self) -> Option<Vec<PathBuf>> {
@@ -988,7 +1002,13 @@ impl<C: CredentialStores> FilesSource for EngineFilesSource<C> {
         let mut changes = self.trash.take();
         changes.extend(self.uploads.take());
         changes.extend(self.links.take());
-        changes.extend(self.copies.take());
+        let kept = self.copies.take();
+        if !kept.is_empty() {
+            // A copy that was kept comes down now: read how far.
+            self.downloads.ask();
+        }
+        self.downloads.take();
+        changes.extend(kept);
         changes.extend(self.versions.take());
         changes.extend(self.conflicts.take());
         // Where the rows stand in the Backups tree: an arrival redraws by its wake.

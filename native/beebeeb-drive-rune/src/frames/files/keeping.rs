@@ -2,8 +2,9 @@
 //! ("Downloading, 0.7 of 1.2 MB") with a bar, its PC mark is the download tray, the panel's
 //! Available offline card says the same, and the status line says "Syncing".
 //!
-//! The figures come from `FilesSource::downloads`. A source that cannot tell how far a copy has
-//! come (the engine, today) answers nothing, and the row then shows no bar: never a made-up one.
+//! The figures come from `FilesSource::downloads`: on the engine, the transfer board's whole-file
+//! downloads of this account (`Engine::downloads_for`). A source that cannot tell how far a copy has
+//! come answers nothing, and the row then shows no bar: never a made-up one.
 
 use super::source::{Action, FilesFixture};
 use crate::State;

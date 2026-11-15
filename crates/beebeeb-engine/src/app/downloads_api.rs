@@ -30,9 +30,39 @@ pub struct DownloadRow {
 }
 
 impl<C: CredentialStores> Engine<C> {
-    /// See the module's doc.
+    /// See the module's doc. One read of the board, one query to keep this account's files.
     pub fn downloads_for(&self, session: SessionGeneration) -> Result<Vec<DownloadRow>, LocalStateRefused> {
-        let _ = session;
-        Ok(Vec::new())
+        let state = self.local_state()?;
+        if state.session() != session {
+            return Err(LocalStateRefused::SessionChanged);
+        }
+        let moving: Vec<_> = self
+            .host
+            .transfer_board()
+            .map(|b| b.snapshot_dtos())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.direction == Direction::Down && !t.failed)
+            .collect();
+        if moving.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<String> = moving.iter().map(|t| t.file_id.clone()).collect();
+        let mine: HashMap<String, i64> = state
+            .with(|db| db.sizes_of(&ids))?
+            .map_err(|_| LocalStateRefused::Unreadable)?;
+        // The session may have moved while the database was read: nothing is handed over then.
+        if state.session() != session {
+            return Err(LocalStateRefused::SessionChanged);
+        }
+        Ok(moving
+            .into_iter()
+            .filter(|t| mine.contains_key(&t.file_id))
+            .map(|t| DownloadRow {
+                file_id: t.file_id,
+                done: t.done,
+                total: t.total,
+            })
+            .collect())
     }
 }
