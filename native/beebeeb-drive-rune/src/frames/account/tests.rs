@@ -699,13 +699,14 @@ fn a_passkey_is_removed_only_after_its_confirm() {
 }
 
 /// Deleting the account: every step in order, nothing scheduled until the link is used, a
-/// wrong code keeps the proof of the password, and the undo ends on its own screen.
+/// wrong code keeps the proof of the password, and the undo asks the password (D-P40-11) and
+/// ends on its own screen. No length of time is written in the copy: the date is the source's.
 #[test]
 fn deleting_the_account_takes_four_steps_and_can_be_undone() {
     let mut rt = runtime("DW-A58");
     assert_eq!(
         says(&rt, "set-sub"),
-        "After you confirm by email, you have 72 hours to undo it. After that, it can't be undone."
+        "After you confirm by email, you can still undo it until a date we show you. After that, it can't be undone."
     );
     assert_eq!(name(&rt, "btn-1"), "Continue, destructive");
     rt.update(|s, _| form::type_in(&mut s.account.form.current, "wrong"));
@@ -725,6 +726,11 @@ fn deleting_the_account_takes_four_steps_and_can_be_undone() {
         Pane::DeleteFactor,
         "a wrong code stays on step 2"
     );
+    assert!(
+        rt.state.account.form.confirmation.is_some(),
+        "the proof of the password stands: the code is retyped, the password is not asked again"
+    );
+    assert_eq!(says(&rt, "code-msg"), "Incorrect code. Nothing was deleted.");
     assert_eq!(source(&rt).deletion(), Deletion::None);
     rt.update(|s, _| form::type_in(&mut s.account.form.code, BOARD_CODE));
     settle(&mut rt);
@@ -735,16 +741,75 @@ fn deleting_the_account_takes_four_steps_and_can_be_undone() {
     assert_eq!(rt.state.account.pane, Pane::DeleteScheduled);
     assert_eq!(
         says(&rt, "set-sub"),
-        "Your account will be deleted in 72 hours, on 8 November at 19:42."
+        "Your account will be deleted after 8 November at 19:42."
     );
+    // Undo asks the account password first, in a dialog over the page.
     click(&mut rt, "btn-0");
+    assert_eq!(
+        rt.state.account.dialog,
+        Some(Dialog::DeletionPassword(super::delete::DeletionAsk::Undo))
+    );
+    assert!(
+        matches!(source(&rt).deletion(), Deletion::Scheduled { .. }),
+        "nothing changed yet"
+    );
+    rt.update(|s, _| form::type_in(&mut s.account.form.current, "wrong"));
+    settle(&mut rt);
+    click(&mut rt, "btn-4");
+    assert_eq!(says(&rt, "field-0-msg"), "Incorrect password. Nothing changed.");
+    assert_eq!(rt.state.account.pane, Pane::DeleteScheduled);
+    assert!(
+        matches!(source(&rt).deletion(), Deletion::Scheduled { .. }),
+        "a wrong password changes nothing"
+    );
+    assert!(
+        rt.state.account.form.current.text.is_empty(),
+        "the typed password goes with the press"
+    );
+    rt.update(|s, _| form::type_in(&mut s.account.form.current, BOARD_PASSWORD));
+    settle(&mut rt);
+    click(&mut rt, "btn-4");
     assert_eq!(rt.state.account.pane, Pane::DeleteUndone);
+    assert_eq!(rt.state.account.dialog, None);
     assert_eq!(says(&rt, "title"), "Deletion cancelled");
     assert_eq!(source(&rt).deletion(), Deletion::None);
 
     let mut board = BoardAccount::new();
     assert!(!board.stop_activity_confirmed(Password::from_field("not the password")));
     assert!(board.activity().is_some(), "a wrong password stops nothing");
+}
+
+/// Cancel deletion (DW-A81) asks the account password first (D-P40-11): a wrong one changes
+/// nothing, Esc closes the ask, and the right one cancels.
+#[test]
+fn cancelling_a_deletion_asks_the_password_first() {
+    let mut rt = runtime("DW-A81");
+    assert_eq!(name(&rt, "btn-1"), "Cancel deletion");
+    click(&mut rt, "btn-1");
+    assert_eq!(
+        rt.state.account.dialog,
+        Some(Dialog::DeletionPassword(super::delete::DeletionAsk::Cancel))
+    );
+    assert_eq!(source(&rt).deletion(), Deletion::LinkSent, "nothing changed yet");
+    rt.update(|s, _| form::type_in(&mut s.account.form.current, "wrong"));
+    settle(&mut rt);
+    click(&mut rt, "btn-4");
+    assert_eq!(says(&rt, "field-0-msg"), "Incorrect password. Nothing changed.");
+    assert_eq!(
+        source(&rt).deletion(),
+        Deletion::LinkSent,
+        "a wrong password changes nothing"
+    );
+    key(&mut rt, Key::Escape);
+    assert_eq!(rt.state.account.dialog, None, "Esc closes the ask");
+    assert_eq!(source(&rt).deletion(), Deletion::LinkSent);
+    click(&mut rt, "btn-1");
+    rt.update(|s, _| form::type_in(&mut s.account.form.current, BOARD_PASSWORD));
+    settle(&mut rt);
+    click(&mut rt, "btn-4");
+    assert_eq!(rt.state.account.dialog, None);
+    assert_eq!(rt.state.account.pane, Pane::Security);
+    assert_eq!(source(&rt).deletion(), Deletion::None);
 }
 
 /// The board's sample devices, word for word (DW-A55's rows, DW-A56's sentence): the confirm

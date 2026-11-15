@@ -472,11 +472,18 @@ fn delete(source: &dyn AccountSource, t: &Theme) -> El {
         );
     }
     let it = Row::new(Lead::Icon(&icons::TRASH), "Delete your Beebeeb account").danger();
+    // A deletion this session already knows of opens where it stands: the link sent, or the schedule and its undo.
+    let frame = match source.deletion() {
+        super::source::Deletion::Scheduled { .. } => "DW-A82",
+        super::source::Deletion::LinkSent => "DW-A81",
+        super::source::Deletion::None => "DW-A58",
+    };
     lists::list(
         4,
         Some("Delete"),
-        vec![leads(4, 0, it, State_::None, "DW-A58", source, t)],
-        Some("Deletes every product's data after 72 hours to undo. After that it cannot be undone."),
+        vec![leads(4, 0, it, State_::None, frame, source, t)],
+        // How long it can be undone is Beebeeb's: the date is shown once it is scheduled.
+        Some("After you confirm by email you can still undo it for a time. After that it cannot be undone."),
         t,
     )
 }

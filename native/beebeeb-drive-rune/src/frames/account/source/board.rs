@@ -872,9 +872,14 @@ impl AccountSource for BoardAccount {
         self.wire.push("POST account/deletion step-up-token code".into());
         Ok(())
     }
-    fn cancel_deletion_request(&mut self) {
+    fn cancel_deletion_request(&mut self, confirmation: StepUp) -> Result<Deletion, Refused> {
+        if !self.redeem(confirmation, Purpose::DeleteAccount) {
+            return Err(Refused::NotConfirmed);
+        }
+        // The board's flow: a cancel before the link is used stops it.
         self.deletion = Deletion::None;
-        self.wire.push("DELETE account/deletion".into());
+        self.wire.push("POST auth/account/delete-cancel step-up-token".into());
+        Ok(Deletion::None)
     }
     fn deletion_link_used(&mut self) -> bool {
         // The fixture's person opened the link (the board's next frame, DW-A82).
@@ -912,12 +917,14 @@ impl AccountSource for BoardAccount {
         self.wire.push(format!("POST /cli-auth/deny {request}"));
         self.approvals.deny(request)
     }
-    fn undo_deletion(&mut self) -> bool {
-        let scheduled = matches!(self.deletion, Deletion::Scheduled { .. });
-        if scheduled {
-            self.deletion = Deletion::None;
-            self.wire.push("POST account/deletion/undo".into());
+    fn undo_deletion(&mut self, confirmation: StepUp) -> Result<Deletion, Refused> {
+        if !self.redeem(confirmation, Purpose::DeleteAccount) {
+            return Err(Refused::NotConfirmed);
         }
-        scheduled
+        if matches!(self.deletion, Deletion::Scheduled { .. }) {
+            self.deletion = Deletion::None;
+            self.wire.push("POST auth/account/delete-cancel step-up-token".into());
+        }
+        Ok(self.deletion.clone())
     }
 }

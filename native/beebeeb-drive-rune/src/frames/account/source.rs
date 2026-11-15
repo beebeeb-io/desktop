@@ -842,12 +842,20 @@ pub trait AccountSource {
     /// is scheduled until that link is used. A wrong code hands the confirmation back, so the
     /// person retypes the code and not the password.
     fn request_deletion(&mut self, confirmation: StepUp, code: &str) -> Result<(), DeletionRefused>;
-    /// Engine: `DELETE /api/v1/account/deletion` before the link is used: the link stops working.
-    fn cancel_deletion_request(&mut self);
+    /// Engine: the signed-in `POST /api/v1/auth/account/delete-cancel` with the step-up's token (DW-A81's Cancel
+    /// deletion; the password is asked over the page: core and the server require the step-up, D-P40-11). Beebeeb
+    /// cancels only a SCHEDULED deletion: `Ok` is how the deletion stands after it, as Beebeeb says. `Ok(None)`:
+    /// cancelled. `Ok(LinkSent)`: nothing was scheduled, so nothing was cancelled, and the link in the email still
+    /// works until it expires (no route stops it). `Err`: nothing changed (`Unconfirmed`: it was sent and how it
+    /// ended is not known). The confirmation is used up either way.
+    fn cancel_deletion_request(&mut self, confirmation: StepUp) -> Result<Deletion, Refused>;
     /// Engine: `GET /api/v1/account/deletion` again ("I've opened the link"). `true`: scheduled.
     fn deletion_link_used(&mut self) -> bool;
-    /// Engine: `POST /api/v1/account/deletion/undo` during the 72 hours.
-    fn undo_deletion(&mut self) -> bool;
+    /// Engine: the same signed-in cancel with the step-up's token, while the deletion can still be undone (DW-A82's
+    /// Undo deletion, until Beebeeb's `cancel_until`). `Ok(None)`: undone. `Ok(Scheduled)`: Beebeeb did not undo it
+    /// (the time to undo it has passed). `Err`: nothing changed (`Unconfirmed`: not known). The confirmation is used
+    /// up either way.
+    fn undo_deletion(&mut self, confirmation: StepUp) -> Result<Deletion, Refused>;
 
     // ---- Approving a sign-in from another device (DW-A11 to DW-A17). Every method has a body
     // that answers "nothing waits", so a source that does not know them yet keeps compiling.

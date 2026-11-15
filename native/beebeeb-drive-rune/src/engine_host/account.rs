@@ -680,6 +680,9 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         if let Some(state) = self.wired_pane(pane) {
             return state;
         }
+        if let Some(state) = self.account_deletion_pane_state(pane) {
+            return state;
+        }
         if pane == Pane::Passkeys {
             return self.passkeys.pane_state();
         }
@@ -1036,6 +1039,9 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
         if purpose == Purpose::ChangePassword {
             return self.password.keep(password);
         }
+        if purpose == Purpose::DeleteAccount {
+            return self.account_deletion_step_up(password);
+        }
         self.actions.step_up(password, purpose)
     }
 
@@ -1139,21 +1145,21 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn stop_activity_confirmed(&mut self, password: Password<'_>) -> bool {
         super::passkeys::wiping(&password).is_some_and(|password| self.activity.stop(password))
     }
-    // Deleting the account (slice A6, `account_deletion.rs`): not bound yet.
+    // Deleting the account (slice A6, `account_deletion.rs`).
     fn deletion(&self) -> Deletion {
-        not_wired(self.account_deletion_deletion())
+        self.account_deletion_deletion()
     }
     fn request_deletion(&mut self, confirmation: StepUp, code: &str) -> Result<(), DeletionRefused> {
-        not_wired(self.account_deletion_request_deletion(confirmation, code))
+        self.account_deletion_request_deletion(confirmation, code)
     }
-    fn cancel_deletion_request(&mut self) {
-        not_wired(self.account_deletion_cancel_deletion_request())
+    fn cancel_deletion_request(&mut self, confirmation: StepUp) -> Result<Deletion, Refused> {
+        self.account_deletion_cancel_deletion_request(confirmation)
     }
     fn deletion_link_used(&mut self) -> bool {
-        not_wired(self.account_deletion_deletion_link_used())
+        self.account_deletion_deletion_link_used()
     }
-    fn undo_deletion(&mut self) -> bool {
-        not_wired(self.account_deletion_undo_deletion())
+    fn undo_deletion(&mut self, confirmation: StepUp) -> Result<Deletion, Refused> {
+        self.account_deletion_undo_deletion(confirmation)
     }
     // Approving a sign-in from another device (slice A5, `account_approve.rs`): not bound yet.
     fn find_sign_in_request(&mut self, code: &str) -> Lookup {
