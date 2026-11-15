@@ -154,7 +154,7 @@ pub const REPLACED_FOLDER: &str = "Replaced on this PC";
 const INCOMING: &str = ".incoming";
 
 /// 16 hex characters of the SHA-256 of `text`: a folder name that holds nothing of `text` and cannot be a path.
-fn digest_name(text: &str) -> String {
+pub(super) fn digest_name(text: &str) -> String {
     use sha2::Digest as _;
     sha2::Sha256::digest(text.as_bytes())
         .iter()

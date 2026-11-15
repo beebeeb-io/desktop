@@ -295,7 +295,8 @@ fn a_path_that_could_lead_out_of_the_folder_is_refused_and_nothing_is_made() {
 
 /// Data review of #458, P1-1 (Windows): a name part Windows refuses is kept under a name Windows takes, and the copy
 /// is listed in its folder under that name with every byte: never a hidden stream of another file, never a folder
-/// that cannot be made. The review's three names.
+/// that cannot be made. A path that starts like a drive (the review's `a:b.txt`, `x:y/a.txt`) is refused, with nothing
+/// made. The review's three names, and two that are renamed.
 #[cfg(windows)]
 #[test]
 fn names_windows_refuses_are_kept_under_a_name_windows_takes() {
@@ -303,25 +304,34 @@ fn names_windows_refuses_are_kept_under_a_name_windows_takes() {
     let source = dir.path().join("staged");
     std::fs::write(&source, THIS_PC).unwrap();
     let root = dir.path().join("Changes not sent");
-    let cases: [(&str, &[&str]); 3] = [
-        ("a:b.txt", &["a_b.txt"]),
-        ("x:y/a.txt", &["x_y", "a.txt"]),
-        ("NUL.txt", &["_NUL.txt"]),
+    let cases: [(&str, Option<&[&str]>); 5] = [
+        ("a:b.txt", None),
+        ("x:y/a.txt", None),
+        ("NUL.txt", Some(&["_NUL.txt"])),
+        ("Notes 15:11.txt", Some(&["Notes 15_11.txt"])),
+        ("Invented/x:y/a.txt", Some(&["Invented", "x_y", "a.txt"])),
     ];
     let mut wrong = Vec::new();
     for (i, (rel, meant)) in cases.iter().enumerate() {
         let event = format!("e{i}");
-        let expected = meant.iter().fold(root.join(&event), |path, part| path.join(part));
-        match keep_in_changes_not_sent(&root, &event, "op", rel, &source) {
-            Err(e) => wrong.push(format!("{rel}: refused ({e})")),
-            Ok(kept) if kept != expected => wrong.push(format!("{rel}: kept at {}", kept.display())),
-            Ok(kept) => {
+        match (keep_in_changes_not_sent(&root, &event, "op", rel, &source), meant) {
+            (Err(_), None) => {
+                if root.join(&event).exists() {
+                    wrong.push(format!("{rel}: refused, but its event folder is left"));
+                }
+            }
+            (Ok(kept), None) => wrong.push(format!("{rel}: kept at {}", kept.display())),
+            (Err(e), Some(_)) => wrong.push(format!("{rel}: refused ({e})")),
+            (Ok(kept), Some(meant)) => {
+                let expected = meant.iter().fold(root.join(&event), |path, part| path.join(part));
                 let listed: Vec<String> = std::fs::read_dir(kept.parent().unwrap())
                     .unwrap()
                     .flatten()
                     .map(|entry| entry.file_name().to_string_lossy().into_owned())
                     .collect();
-                if listed != [meant[meant.len() - 1].to_string()] {
+                if kept != expected {
+                    wrong.push(format!("{rel}: kept at {}", kept.display()));
+                } else if listed != [meant[meant.len() - 1].to_string()] {
                     wrong.push(format!("{rel}: the folder lists {listed:?}"));
                 } else if std::fs::read(&kept).unwrap() != THIS_PC {
                     wrong.push(format!("{rel}: the kept bytes differ"));
@@ -330,4 +340,121 @@ fn names_windows_refuses_are_kept_under_a_name_windows_takes() {
         }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// P1-1 (check 3): a copy outside its event folder is not taken as kept, whatever it holds.
+#[test]
+fn a_copy_outside_its_event_folder_is_not_taken_as_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let event = dir.path().join("Changes not sent").join("e");
+    std::fs::create_dir_all(&event).unwrap();
+    let outside = dir.path().join("a.txt");
+    std::fs::write(&outside, THIS_PC).unwrap();
+    assert!(kept_where_meant(&event, &outside, "a.txt", THIS_PC.len() as u64).is_err());
+    let inside = event.join("a.txt");
+    std::fs::write(&inside, THIS_PC).unwrap();
+    assert!(kept_where_meant(&event, &inside, "a.txt", THIS_PC.len() as u64).is_ok());
+}
+
+/// P1-1 (check 4): a copy whose own name is not the part meant is not taken as kept.
+#[test]
+fn a_copy_under_another_name_is_not_taken_as_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let event = dir.path().join("e");
+    std::fs::create_dir_all(&event).unwrap();
+    let other = event.join("b.txt");
+    std::fs::write(&other, THIS_PC).unwrap();
+    assert!(kept_where_meant(&event, &other, "a.txt", THIS_PC.len() as u64).is_err());
+    assert!(
+        kept_where_meant(&event, &other, "b.txt", 1).is_err(),
+        "nor one that is not whole"
+    );
+}
+
+/// P1-1 (the Windows names, on every platform): each character Windows refuses becomes `_`, the trailing dots and
+/// spaces it would drop go, a device name gets a `_` in front; every other name is as it was.
+#[test]
+fn the_parts_windows_refuses_become_names_it_takes() {
+    for (part, taken) in [
+        ("a:b.txt", "a_b.txt"),
+        ("x:y", "x_y"),
+        ("NUL.txt", "_NUL.txt"),
+        ("con", "_con"),
+        ("Com1.log", "_Com1.log"),
+        ("LPT\u{b2}", "_LPT\u{b2}"),
+        ("C:", "C_"),
+        ("a\\b", "a_b"),
+        ("what? <now> | \"x\" *.md", "what_ _now_ _ _x_ _.md"),
+        ("tab\there", "tab_here"),
+        ("trailing. . ", "trailing"),
+        ("...", "_"),
+        ("notes.txt", "notes.txt"),
+        ("COM10.txt", "COM10.txt"),
+        ("console.txt", "console.txt"),
+        (".env", ".env"),
+    ] {
+        assert_eq!(part_windows_takes(part), taken, "{part:?}");
+    }
+}
+
+/// P1-1 (check 4 on Windows): a name NTFS reads as a hidden stream of another file is not taken as the kept copy,
+/// though a look at its path reports the stream's full length.
+#[cfg(windows)]
+#[test]
+fn a_hidden_stream_is_not_taken_as_the_kept_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let event = dir.path().join("e");
+    std::fs::create_dir_all(&event).unwrap();
+    let stream = event.join("a:b.txt");
+    std::fs::write(&stream, THIS_PC).unwrap();
+    assert_eq!(
+        std::fs::metadata(&stream).unwrap().len(),
+        THIS_PC.len() as u64,
+        "the look the old check made"
+    );
+    assert!(kept_where_meant(&event, &stream, "a:b.txt", THIS_PC.len() as u64).is_err());
+}
+
+/// P2-2: Keep the other keeps in the signed-in account's own folder inside the engine's local state folder (on
+/// Windows under `%LOCALAPPDATA%`, never the roaming one), named by a digest, never by the account's id or address.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn keep_the_other_keeps_in_this_accounts_folder_in_the_local_state() {
+    let rig = rig("permission_denied", true);
+    let done = rig
+        .engine
+        .settle_parked_for(rig.session, "parked", ParkedPick::KeepOther, Some(1), "PC")
+        .unwrap();
+    let Settled::KeptOther { kept } = done else {
+        panic!("kept the other: {done:?}")
+    };
+    let folder = rig.engine.config.state_dir.join("Changes not sent");
+    assert!(
+        kept.starts_with(&folder),
+        "{} not under the local state folder",
+        kept.display()
+    );
+    let account = kept.strip_prefix(&folder).unwrap().components().next().unwrap();
+    let account = account.as_os_str().to_string_lossy().into_owned();
+    assert_eq!(account, crate::app::conflicts_api::digest_name(&rig.account.user_id));
+    assert!(!account.contains(&rig.account.user_id) && !account.contains("parked-exit"));
+    assert_eq!(std::fs::read(&kept).unwrap(), THIS_PC);
+    assert!(!still_queued(&rig), "then the write goes");
+}
+
+/// P2-2: two accounts keep in two folders; the same account always in the same one.
+#[test]
+fn each_account_keeps_in_its_own_folder() {
+    let state = std::path::Path::new("state");
+    let anna = Identity::new(Some("user-anna"), Some("anna@example.eu"));
+    let ben = Identity::new(Some("user-ben"), Some("ben@example.eu"));
+    let anna_folder = changes_not_sent_in(state, &anna).unwrap();
+    assert_ne!(anna_folder, changes_not_sent_in(state, &ben).unwrap());
+    assert_eq!(anna_folder, changes_not_sent_in(state, &anna).unwrap());
+    assert!(anna_folder.starts_with(state.join("Changes not sent")));
+    assert_ne!(anna_folder, state.join("Changes not sent"));
+    assert!(
+        changes_not_sent_in(state, &Identity::new(None, None)).is_none(),
+        "no account, no folder"
+    );
 }
