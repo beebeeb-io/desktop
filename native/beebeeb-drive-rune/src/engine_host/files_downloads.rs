@@ -9,8 +9,9 @@
 //!   engine's wake, it reads again (a) at once, whatever the held read's age, when the engine's own status word moved
 //!   while rows are held or it moved to Syncing: a copy that ended leaves the row at the pulse that says so (the
 //!   pattern of `files_facts`); (b) while the engine reports Syncing or rows are held, when the held read is older
-//!   than a second: a download that starts after the watch still gets its bar. Idle and nothing held: no read. No
-//!   timer thread.
+//!   than a second: a download that starts after the watch still gets its bar. Idle and nothing held: no read. The
+//!   engine wakes the host when a download row begins, fails or leaves the board (`TransferBoard::set_wake`), so
+//!   Paused, Offline and Sync stopped, which send no pulse, read on that wake too. No timer thread.
 //! - An answer under another session or account, or of an earlier forget, is dropped. Nothing is drawn before the
 //!   engine answered: the figures are the board's, never a made-up bar.
 //!
@@ -127,11 +128,13 @@ impl<E: DownloadsEngine> DownloadCalls<E> {
         self.held = None;
         self.reading = false;
         self.dirty = false;
+        // The first sighting under a stamp is no move of the word.
+        self.word = self.engine.word();
         // A copy may already come down under this session: the wake reads for a while.
         self.watch_until = Some(Instant::now() + self.watch);
     }
 
-    /// Read now (the window came to the front, a copy was kept) and keep watching for a while. One read at a time.
+    /// Read now (a status press, a copy that was kept) and keep watching for a while. One read at a time.
     pub fn ask(&mut self) {
         let now = self.engine.stamp();
         self.look(&now);
@@ -224,7 +227,11 @@ impl<E: DownloadsEngine> DownloadCalls<E> {
         self.word = word;
         let watching = self.watch_until.is_some_and(|until| Instant::now() < until);
         let old = self.held.as_ref().is_none_or(|(_, _, at)| at.elapsed() > STALE);
-        let again = self.dirty || (old && (holding || syncing || watching));
+        // Idle ("Up to date") with nothing held and no watch: no read. Every other word, Paused, Offline and Sync
+        // stopped included, reads on a wake (age-gated): the engine wakes the host when a download row begins or
+        // leaves the board, as it sends no pulse then.
+        let idle = word == Some(words::UP_TO_DATE);
+        let again = self.dirty || (old && (holding || watching || !idle));
         if again {
             self.start_read(now);
         }
