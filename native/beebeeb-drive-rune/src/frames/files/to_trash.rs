@@ -7,6 +7,11 @@
 //!
 //! Try again of a failed move to Trash asks for exactly the items that were left ([`Ui::again`]), never "what is
 //! selected now"; Try again of a failed Undo is Undo again (the rows it was for are held in `Actions::undo`).
+//!
+//! Review of 2468 (L316-L321): a new press takes an earlier failure and its Try again away; Undo holds every row
+//! moved since the last Undo or change of folder; a move answered after the folder changed is still said, with
+//! Undo; a row whose move to Trash is on its way is marked ([`Ui::moving`]) and cannot be renamed or moved;
+//! `Actions::undo` alone says what Undo puts back (the engine's adapter only guards it).
 
 use super::Toast;
 use super::local::Late;
@@ -14,7 +19,7 @@ use super::source::{Action, ActionError, TrashOutcome};
 use crate::State;
 use crate::source::DriveItem;
 use rune::Tx;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// What the window keeps of moves to and from Trash beside `Actions::undo`. All of it is the session's
 /// (`reset::end_session`).
@@ -26,6 +31,21 @@ pub struct Ui {
     /// What Try again of a failed move to Trash asks for: exactly these. `None`: nothing was held (a board scene
     /// set the message, or a protected item was refused), and it is the selection.
     pub again: Option<Vec<String>>,
+    /// The rows a move to Trash was accepted for and that are not answered yet (a source that answers later). Each
+    /// is marked as on its way while it is here: no new name, no move to another folder ([`State::trash_on_its_way`]).
+    /// A change of folder keeps them: a row Beebeeb moved after that is still Undo's.
+    pub moving: Vec<Moving>,
+    /// The folder each row Undo holds was moved from (by id): an Undo answered while another folder is shown puts
+    /// nothing in that one. A row with no entry is the folder shown's.
+    pub from: HashMap<String, Option<String>>,
+}
+
+/// A row whose move to Trash is on its way: the row, the place it had at the press and the folder it was shown in.
+#[derive(Clone, Debug)]
+pub struct Moving {
+    pub place: usize,
+    pub item: DriveItem,
+    pub folder: Option<String>,
 }
 
 impl State {
@@ -45,7 +65,13 @@ impl State {
 
     /// Move exactly these rows to Trash.
     fn trash_these(&mut self, items: Vec<DriveItem>, tx: &mut Tx) {
+        // A new press: the message of an earlier failed move goes with its Try again, so no Try again is left that
+        // would act on what is selected now (review of 2468, L316).
         self.actions.trash.again = None;
+        if matches!(self.actions.toast, Some(Toast::Failed(Action::Trash, _))) {
+            self.actions.toast = None;
+            self.actions.toast_until = None;
+        }
         // Refused before the source is asked (`protected.rs`).
         let asked = if self.protects(&items) {
             Err(ActionError::Protected)
@@ -67,7 +93,17 @@ impl State {
             return;
         }
         // Accepted, not done: the rows leave when the source says Beebeeb moved them (`State::trash_answered`).
+        // Until then each is marked as on its way, with its place and its folder (review of 2468, L318, L320).
         if self.actions.source.answers_later() {
+            let folder = self.listing.folder.id.clone();
+            for item in items {
+                let place = self.listing.items.iter().position(|row| row.id == item.id).unwrap_or(0);
+                self.actions.trash.moving.push(Moving {
+                    place,
+                    item,
+                    folder: folder.clone(),
+                });
+            }
             return;
         }
         self.actions.undo = self.take_out(&ids);
@@ -129,9 +165,13 @@ impl State {
         out
     }
 
-    /// Rows that were taken out stand in the list again, in the order the folder has now.
+    /// Rows that were taken out stand in the list again, in the order the folder has now. A row that is shown
+    /// already (the folder was read again since) is not shown twice.
     fn put_back(&mut self, rows: Vec<(usize, DriveItem)>) {
         for (i, item) in rows {
+            if self.listing.items.iter().any(|row| row.id == item.id) {
+                continue;
+            }
             let at = i.min(self.listing.items.len());
             self.listing.items.insert(at, item);
         }
@@ -166,16 +206,39 @@ impl State {
         let left: Vec<&TrashOutcome> = items.iter().filter(|item| item.left.is_some()).collect();
         // What is selected now, by id: it may have been chosen since the press, and stays.
         let chosen: Vec<String> = self.selected_items().into_iter().map(|item| item.id).collect();
-        let changed = if action == Action::Trash {
-            // By id: a row that is no longer shown (another folder since) is simply not here to leave.
-            let rows = self.take_out(&done);
-            let any = !rows.is_empty();
-            if any {
-                self.actions.undo = rows;
+        let answered: HashSet<&str> = items.iter().map(|outcome| outcome.id.as_str()).collect();
+        // `changed`: rows left or came back in the folder shown. `say`: there is a "done" to say.
+        let (changed, say) = if action == Action::Trash {
+            // Answered, done or left: no longer on its way (review of 2468, L320).
+            let (pressed, still): (Vec<Moving>, Vec<Moving>) = std::mem::take(&mut self.actions.trash.moving)
+                .into_iter()
+                .partition(|moving| answered.contains(moving.item.id.as_str()));
+            self.actions.trash.moving = still;
+            // By id: the rows still shown leave, with the places they have now.
+            let mut moved = self.take_out(&done);
+            let shown = !moved.is_empty();
+            let here = self.listing.folder.id.clone();
+            for (_, item) in &moved {
+                self.actions.trash.from.insert(item.id.clone(), here.clone());
             }
-            any
+            // A row that is no longer shown (another folder since): Beebeeb moved it all the same, so it is said and
+            // Undo is for it too, with the place and the folder it had at the press (L318).
+            for moving in pressed {
+                let id = moving.item.id.clone();
+                if done.contains(&id) && !moved.iter().any(|(_, item)| item.id == id) {
+                    self.actions.trash.from.insert(id, moving.folder);
+                    moved.push((moving.place, moving.item));
+                }
+            }
+            let any = !moved.is_empty();
+            // Undo is for every row moved since the last Undo or change of folder, not only this answer's: a
+            // partial move and its Try again are undone together (L317).
+            self.actions
+                .undo
+                .retain(|(_, held)| !moved.iter().any(|(_, item)| item.id == held.id));
+            self.actions.undo.extend(moved);
+            (shown, any)
         } else {
-            let answered: HashSet<&str> = items.iter().map(|outcome| outcome.id.as_str()).collect();
             let put_back: HashSet<&str> = done.iter().map(String::as_str).collect();
             let (mut back, mut kept) = (Vec::new(), Vec::new());
             for row in std::mem::take(&mut self.actions.trash.restoring) {
@@ -189,26 +252,30 @@ impl State {
             }
             // Not put back: still in Trash, and still what Undo is for.
             self.actions.undo.extend(kept);
+            // Put back in Beebeeb, but moved from another folder than the one shown now: it is back in its own
+            // folder, and nothing is put in this one (review of 2468, L318).
+            let here = self.listing.folder.id.clone();
+            back.retain(|(_, item)| self.actions.trash.from.get(&item.id).is_none_or(|from| *from == here));
             let any = !back.is_empty();
             self.put_back(back);
-            any
+            (any, any)
         };
+        self.forget_folders();
         if changed {
             self.same_rows(&chosen);
         }
-        let Some(first) = left.first().and_then(|outcome| outcome.left) else {
-            if changed {
+        if left.is_empty() {
+            if say {
                 self.actions.local.unsaid.push(Late::Done(action));
             }
             return;
-        };
-        // One message per answer: where some were left, that is the one (Ctrl+Z still undoes the rest).
+        }
+        // One message per answer: where some were left, that is the one (Ctrl+Z still undoes the rest). Where all
+        // were left, the reason that says most, whatever the order of the items (review of 2468, L256.2).
         let why = if !done.is_empty() {
             ActionError::NotAll
-        } else if left.iter().any(|outcome| outcome.left == Some(ActionError::Protected)) {
-            ActionError::Protected
         } else {
-            first
+            super::local::says_most(left.iter().filter_map(|outcome| outcome.left)).unwrap_or(ActionError::Failed)
         };
         self.actions.local.unsaid.push(Late::Left {
             action,
@@ -221,6 +288,26 @@ impl State {
                 .map(|outcome| outcome.id.clone())
                 .collect(),
         });
+    }
+
+    /// Is a move to Trash of one of these on its way (accepted, not answered)? Rename and Move to are refused on
+    /// it, with the words of a change still on its way (review of 2468, L320).
+    pub(super) fn trash_on_its_way(&self, items: &[DriveItem]) -> bool {
+        items
+            .iter()
+            .any(|item| self.actions.trash.moving.iter().any(|moving| moving.item.id == item.id))
+    }
+
+    /// Only the rows Undo holds, or an Undo waits for, keep the folder they were moved from.
+    fn forget_folders(&mut self) {
+        let held: HashSet<String> = self
+            .actions
+            .undo
+            .iter()
+            .chain(&self.actions.trash.restoring)
+            .map(|(_, item)| item.id.clone())
+            .collect();
+        self.actions.trash.from.retain(|id, _| held.contains(id));
     }
 
     /// Is there something Try again of a failed move to Trash would ask for? The items it was left for, still
