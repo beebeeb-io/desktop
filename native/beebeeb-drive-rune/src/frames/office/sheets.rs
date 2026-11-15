@@ -12,13 +12,13 @@
 //!
 //! Keys: the window's own (caption, sidebar, toolbar), then `sh-cellbox`, `sh-fx`, `sh-formula` (the formula bar),
 //! `sh-corner`, `sh-col-<C>` and `sh-row-<R>` (the headers), `sh-cell-<R>-<C>` and its text `sh-cell-<R>-<C>-t`
-//! (zero-based), `sh-tab-<I>`, and `st-<N>` (the status line's parts, numbered as the other Office frames').
+//! (zero-based), `sh-tab-<I>`, `vbar` (zoom, Open in another app…), and `st-<N>` (the status line's parts, numbered as the other Office frames').
 
 use std::collections::HashMap;
 use std::fmt;
 
 use rune::tok::Family;
-use rune::{Cx, El, TextStyle, col, el, row};
+use rune::{Cx, El, Icon, Span, TextStyle, col, el, rich, row};
 use zeroize::Zeroize;
 
 use crate::State;
@@ -27,6 +27,8 @@ use crate::frames::viewers::{self, Ui};
 use crate::theme::icons;
 use crate::theme::tokens::{self, Theme, type_};
 use crate::ui::{caption, kit, sidebar};
+
+use super::docs::{ABOUT, ENCRYPTED, KEEP_FIRST, OPEN_ELSEWHERE};
 
 #[path = "sheets_fixture.rs"]
 pub mod sheets_fixture;
@@ -208,8 +210,16 @@ pub fn status_words(view: &SheetView) -> Vec<String> {
 /// 12px/400 on 16px: a cell's words.
 const CELL: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0);
 const CELL_BOLD: TextStyle = TextStyle::new(12.0, 650.0).lh(16.0);
-/// 11px/500 on 14px: a column letter or a row number.
+/// 11.5px mono on 16px: a figure in a cell (the board's `font-mono t-num`), and its bold twin (the total row).
+const CELL_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(16.0);
+const CELL_MONO_BOLD: TextStyle = TextStyle::new(11.5, 600.0).family(Family::Mono).lh(16.0);
+/// 11px/500 on 14px: a column letter.
 const HEADER: TextStyle = TextStyle::new(11.0, 500.0).lh(14.0);
+/// 11px mono on 14px: a row number (the board's `font-mono`).
+const ROW_NUMBER: TextStyle = TextStyle::new(11.0, 400.0).family(Family::Mono).lh(14.0);
+/// 12px on 15px: the viewer bar's "Open in another app…" and the zoom figure's neighbours.
+const BAR_LABEL: TextStyle = TextStyle::new(12.0, 400.0).lh(15.0);
+const BAR_MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(15.0);
 /// 12px/600 on 15px: the sheet tab that is open; 12px/500 the others.
 const TAB_ON: TextStyle = TextStyle::new(12.0, 600.0).lh(15.0);
 const TAB: TextStyle = TextStyle::new(12.0, 500.0).lh(15.0);
@@ -219,18 +229,21 @@ const MONO: TextStyle = TextStyle::new(11.5, 400.0).family(Family::Mono).lh(17.0
 const STATUS_ENC: TextStyle = TextStyle::new(11.5, 600.0).lh(17.0);
 
 /// Widths in the board: the row numbers' column, the cell box, and the heights of the bars.
-const ROW_HEAD_W: f32 = 44.0;
-const HEADER_H: f32 = 22.0;
+const ROW_HEAD_W: f32 = 40.0;
+const HEADER_H: f32 = 24.0;
 const FORMULA_BAR_H: f32 = 34.0;
-const CELLBOX_W: f32 = 72.0;
+/// The cell's name is plain text 92 wide on the board (no box).
+const CELLBOX_W: f32 = 92.0;
 const TABS_H: f32 = 30.0;
+/// The viewer bar's height (`OvBar`).
+const VBAR_H: f32 = 38.0;
 
 /// A label as wide as its words.
 fn fitted(key: impl Into<String>, words: &str, style: TextStyle, color: rune::Color) -> El {
     kit::label(key, words, style, color).w(rune::text::advance(words, style))
 }
 
-/// The formula bar: the cell box ("B10"), "fx", the formula as read-only text.
+/// The formula bar, read-only: the cell's name as text, "fx", the formula as text. No box around either.
 fn formula_bar(view: &SheetView, t: &Theme) -> El {
     let name = a1(view.current);
     let cellbox = row()
@@ -238,13 +251,7 @@ fn formula_bar(view: &SheetView, t: &Theme) -> El {
         .role("group")
         .label(format!("Cell {name}"))
         .w(CELLBOX_W)
-        .h(24.0)
-        .px(9.0)
         .center_y()
-        .radius(6.0)
-        .fill(t.card)
-        .border(1.0, t.card_border)
-        .border_layout()
         .child(kit::label("sh-cellbox-text", name.clone(), MONO, t.text));
     row()
         .key("sh-formula-bar")
@@ -253,9 +260,9 @@ fn formula_bar(view: &SheetView, t: &Theme) -> El {
         .w_full()
         .h(FORMULA_BAR_H)
         .px(12.0)
-        .gap(10.0)
+        .gap(8.0)
         .center_y()
-        .fill(t.surface)
+        .fill(t.paper)
         .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
         .border_layout()
         .child(cellbox)
@@ -264,6 +271,96 @@ fn formula_bar(view: &SheetView, t: &Theme) -> El {
             kit::label("sh-formula", view.formula.clone(), MONO, t.text)
                 .truncate()
                 .min_w(0.0),
+        )
+}
+
+static LESS: Icon = Icon {
+    name: "sheets-less",
+    view: 24.0,
+    body: concat!(
+        r#"<g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">"#,
+        r#"<path d="M5 12h14"></path></g>"#
+    ),
+};
+
+static MORE: Icon = Icon {
+    name: "sheets-more",
+    view: 24.0,
+    body: concat!(
+        r#"<g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">"#,
+        r#"<path d="M12 5v14M5 12h14"></path></g>"#
+    ),
+};
+
+/// Open in another app…: the file must be kept on this PC; if it is not, the press says so and does nothing else.
+fn open_elsewhere(s: &mut State) {
+    if let Some(ui) = viewers::ui(s) {
+        if ui.file.details.offline {
+            ui.intent(viewers::Intent::OpenInAnotherApp);
+        } else {
+            ui.toast = Some(KEEP_FIRST.to_string());
+        }
+    }
+}
+
+/// The viewer bar under the window's toolbar (the board's `OvBar`, no page words for a sheet): the zoom as "- 100% +"
+/// at the left, "Open in another app…" as a small bordered button at the right. No ribbon.
+fn viewer_bar(t: &Theme) -> El {
+    let glyph = |key: &'static str, label: &'static str, icon: &'static Icon| {
+        row()
+            .key(key)
+            .role("img")
+            .label(label)
+            .size(24.0, 24.0)
+            .center()
+            .child(kit::glyph(format!("{key}-icon"), icon, 13.0, t.text_secondary))
+    };
+    row()
+        .key("vbar")
+        .role("toolbar")
+        .label("Spreadsheet")
+        .w_full()
+        .h(VBAR_H)
+        .px(12.0)
+        .gap(12.0)
+        .center_y()
+        .fill(t.card)
+        .border_sides([0.0, 0.0, kit::HAIR, 0.0], t.separator)
+        .border_layout()
+        .child(
+            row()
+                .key("vbar-zoom")
+                .role("group")
+                .label("Zoom, 100 per cent")
+                .gap(4.0)
+                .center_y()
+                .child(glyph("zoom-less", "Zoom out", &LESS))
+                .child(fitted("zoom", "100%", BAR_MONO, t.text_secondary))
+                .child(glyph("zoom-more", "Zoom in", &MORE)),
+        )
+        .child(el().key("vbar-gap").grow(1.0))
+        .child(
+            row()
+                .key("elsewhere")
+                .role("button")
+                .label(OPEN_ELSEWHERE)
+                .h(28.0)
+                .px(10.0)
+                .center_y()
+                .radius(7.0)
+                .fill(t.card)
+                .border(1.0, t.card_border)
+                .border_layout()
+                .hover(t.hover)
+                .press(t.press)
+                .focusable(true)
+                .on_press(open_elsewhere)
+                .child(kit::label(
+                    "elsewhere-label",
+                    OPEN_ELSEWHERE,
+                    BAR_LABEL,
+                    t.text_secondary,
+                )),
         )
 }
 
@@ -344,7 +441,7 @@ fn grid(view: &SheetView, t: &Theme) -> El {
                 .child(fitted(
                     format!("sh-row-{r}-t"),
                     &number,
-                    HEADER,
+                    ROW_NUMBER,
                     if on { t.text } else { t.text_tertiary },
                 )),
         );
@@ -362,7 +459,7 @@ fn grid(view: &SheetView, t: &Theme) -> El {
                 .key(format!("sh-cell-{r}-{c}"))
                 .w(w)
                 .h(*h)
-                .px(7.0)
+                .px(8.0)
                 .center_y()
                 .fill(if in_selection(r, c) { t.selection } else { t.paper });
             cell = if here == view.current {
@@ -373,7 +470,13 @@ fn grid(view: &SheetView, t: &Theme) -> El {
                     .border_layout()
             };
             if let Some(text) = by_place.get(&(r, c)) {
-                let style = if text.bold { CELL_BOLD } else { CELL };
+                // The board sets figures (the right-aligned cells) in mono 11.5, words in sans 12.
+                let style = match (text.right_aligned, text.bold) {
+                    (true, true) => CELL_MONO_BOLD,
+                    (true, false) => CELL_MONO,
+                    (false, true) => CELL_BOLD,
+                    (false, false) => CELL,
+                };
                 let label = fitted(format!("sh-cell-{r}-{c}-t"), &text.text, style, t.text);
                 cell = if text.right_aligned {
                     cell.child(el().key(format!("sh-cell-{r}-{c}-gap")).grow(1.0))
@@ -416,14 +519,16 @@ fn sheet_tabs(view: &SheetView, t: &Theme) -> El {
         .border_layout();
     for (i, name) in view.tabs.iter().enumerate() {
         let on = i == view.active;
+        // The open sheet is a pill: the content fill, a hairline ring, 22 high, 5 round. The others are plain words.
         let mut tab = el()
             .key(format!("sh-tab-{i}"))
             .role("tab")
             .label(name.clone())
             .checked(on)
-            .h_full()
+            .h(22.0)
             .px(12.0)
             .center()
+            .radius(5.0)
             .child(fitted(
                 format!("sh-tab-{i}-t"),
                 name,
@@ -431,22 +536,32 @@ fn sheet_tabs(view: &SheetView, t: &Theme) -> El {
                 if on { t.text } else { t.text_tertiary },
             ));
         if on {
-            // Ink, not Amber: what is chosen in the window is neutral.
-            tab = tab.child(
-                el().key("sh-tab-on")
-                    .pin(Some(8.0), None, Some(8.0), Some(0.0))
-                    .h(2.0)
-                    .corners([4.0, 4.0, 0.0, 0.0])
-                    .fill(t.text),
-            );
+            tab = tab.fill(t.paper).border(kit::HAIR, t.separator).border_layout();
         }
         tabs = tabs.child(tab);
     }
     tabs
 }
 
-/// The status line: the sheet and the selection's figures on the left, Encrypted on the right.
-/// Its parts are keyed `st-<N>` in order, the "·" between them numbered too.
+/// A status word with its figure in mono, as the board sets it ("Sum " sans, "13,220" mono; "Count 8" is all sans).
+fn status_word(key: String, word: &str, t: &Theme) -> El {
+    let figure_at = ["Sum ", "Average "]
+        .iter()
+        .find(|lead| word.starts_with(**lead))
+        .map(|lead| lead.len());
+    let Some(at) = figure_at else {
+        return fitted(key, word, type_::STATUS, t.text_tertiary);
+    };
+    let mono = type_::STATUS.family(Family::Mono);
+    let width = rune::text::advance(&word[..at], type_::STATUS) + rune::text::advance(&word[at..], mono);
+    kit::label(key, word, type_::STATUS, t.text_tertiary)
+        .spans(vec![Span::new(at, word.len()).mono()])
+        .w(width)
+}
+
+/// The status line (`OvStatus`): the sheet and the selection's figures on the left, then Encrypted, a middle dot and
+/// About on the right. Its parts are keyed `st-<N>` in order, each middle dot between them numbered too: with the
+/// board's four left words that is st-0 to st-6, Encrypted st-7, the dot st-8, About st-9.
 fn status(view: &SheetView, t: &Theme) -> El {
     let words = status_words(view);
     let mut bar = row()
@@ -466,11 +581,13 @@ fn status(view: &SheetView, t: &Theme) -> El {
             bar = bar.child(fitted(format!("st-{n}"), "\u{00B7}", type_::STATUS, t.text_tertiary));
             n += 1;
         }
-        bar = bar.child(fitted(format!("st-{n}"), word, type_::STATUS, t.text_tertiary));
+        bar = bar.child(status_word(format!("st-{n}"), word, t));
         n += 1;
     }
     let enc = format!("st-{n}");
-    bar.label(format!("{}. Encrypted", words.join(", ")))
+    let dot = format!("st-{}", n + 1);
+    let about = format!("st-{}", n + 2);
+    bar.label(format!("{}. {ENCRYPTED}", words.join(", ")))
         .child(el().key("st-gap").grow(1.0))
         .child(
             row()
@@ -478,7 +595,27 @@ fn status(view: &SheetView, t: &Theme) -> El {
                 .gap(4.0)
                 .center_y()
                 .child(kit::glyph(format!("{enc}-icon"), &icons::LOCK, 11.0, t.accent_deep))
-                .child(fitted(enc, "Encrypted", STATUS_ENC, t.accent_deep)),
+                .child(fitted(enc, ENCRYPTED, STATUS_ENC, t.accent_deep)),
+        )
+        .child(fitted(dot, "\u{00B7}", type_::STATUS, t.text_tertiary))
+        .child(
+            el().key(format!("{about}-box"))
+                .role("link")
+                .label("About this viewer")
+                .focusable(true)
+                .on_press(|s: &mut State| {
+                    if let Some(ui) = viewers::ui(s) {
+                        ui.office_about();
+                    }
+                })
+                .child({
+                    kit::note_text(&about, &about, ABOUT, type_::STATUS, t.text_tertiary);
+                    rich(ABOUT, vec![Span::new(0, ABOUT.len()).underline(t.text_tertiary)])
+                        .key(about)
+                        .font(type_::STATUS)
+                        .color(t.text_tertiary)
+                        .w(rune::text::advance(ABOUT, type_::STATUS))
+                }),
         )
 }
 
@@ -492,6 +629,7 @@ pub fn window(s: &State, cx: &mut Cx<State>, ui: &Ui, view: &SheetView) -> El {
             .grow(1.0)
             .min_w(0.0)
             .h_full()
+            .child(viewer_bar(&t))
             .child(formula_bar(view, &t))
             .child(grid(view, &t))
             .child(sheet_tabs(view, &t)),
@@ -687,5 +825,70 @@ mod tests {
                 assert_ne!(e.fill.hex(), amber.hex(), "{key} is Amber");
             }
         }
+    }
+
+    /// The status line ends "Encrypted · About": the board's st-7 Encrypted, st-8 the dot, st-9 About.
+    #[test]
+    fn office_sheets_status_bar_ends_with_encrypted_and_about() {
+        for dark in [false, true] {
+            let rt = runtime_of(scene_state(), dark);
+            assert_eq!(words(&rt, "st-7"), "Encrypted");
+            assert_eq!(words(&rt, "st-8"), "\u{00B7}");
+            assert_eq!(words(&rt, "st-9"), "About");
+            assert!(find(&rt, "st-9-box").is_some(), "About is a link");
+            assert!(find(&rt, "st-10").is_none(), "nothing after About");
+        }
+    }
+
+    /// DW-1508 shows the board's sheet: `SH_DATA` in 8 columns and 19 rows, header "Item / Q1 / Q2 / Q3 / Total".
+    #[test]
+    fn office_sheets_fixture_is_the_boards_sheet() {
+        let view = sheets_fixture::board();
+        let header: Vec<&str> = (0..5)
+            .map(|c| {
+                view.cells
+                    .iter()
+                    .find(|x| x.row == 0 && x.col == c)
+                    .map(|x| x.text.as_str())
+                    .unwrap_or("")
+            })
+            .collect();
+        assert_eq!(header, ["Item", "Q1", "Q2", "Q3", "Total"]);
+        assert_eq!(view.row_heights.len(), 19);
+        assert_eq!(view.col_widths.len(), 8);
+        let at = |r: u32, c: u32| {
+            view.cells
+                .iter()
+                .find(|x| x.row == r && x.col == c)
+                .map(|x| x.text.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(at(1, 0), "Studio rent");
+        assert_eq!(at(9, 1), "13,220");
+        assert_eq!(at(12, 3), "\u{2212}115");
+        // B10 is the current cell and holds the selection's sum.
+        assert_eq!(a1(view.current), "B10");
+        assert_eq!(stats(&view).map(|s| s.count), Some(8));
+    }
+
+    /// The open sheet's tab is a pill (a fill), not an underline; the others have no fill.
+    #[test]
+    fn office_sheets_current_tab_is_a_pill() {
+        for dark in [false, true] {
+            let rt = runtime_of(scene_state(), dark);
+            let paper = tokens::theme(dark).paper.hex();
+            assert!(find(&rt, "sh-tab-on").is_none(), "no underline element");
+            assert_eq!(find(&rt, "sh-tab-0").expect("the open tab").fill.hex(), paper);
+            assert_ne!(find(&rt, "sh-tab-1").expect("another tab").fill.hex(), paper);
+        }
+    }
+
+    /// The viewer bar of the board: zoom "100%" and "Open in another app\u{2026}", no page words.
+    #[test]
+    fn office_sheets_viewer_bar_has_zoom_and_open_elsewhere() {
+        let rt = runtime_of(scene_state(), false);
+        assert_eq!(words(&rt, "zoom"), "100%");
+        assert_eq!(words(&rt, "elsewhere-label"), OPEN_ELSEWHERE);
+        assert!(find(&rt, "vbar-page").is_none(), "a sheet has no page words");
     }
 }
