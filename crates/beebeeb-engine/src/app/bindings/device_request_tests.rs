@@ -586,7 +586,9 @@ fn device_request_secrets_never_reach_a_log_line_or_an_event() {
         }
         calls += 1;
     }
-    assert!(calls >= 4, "the scan found the log calls: {calls}");
+    // 3 since the key-storing step moved to `passkeys_api::keep_handed_over_key` (the one helper the passkey uses too),
+    // with its one log call: fixed words and the store's error, nothing of the key or the token.
+    assert!(calls >= 3, "the scan found the log calls: {calls}");
     let event = &production[production.find("pub enum DeviceRequestEvent").expect("the events")..];
     let event = &event[..event.find("\n}\n").expect("their end")];
     for secret in ["token", "key", "payload", "plaintext"] {
