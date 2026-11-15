@@ -18,10 +18,11 @@
 //! A delete that fails (the state could not be opened or written: the sync engine held it, for one) is logged once and
 //! made at the account's next open for changes; until then this account's recent searches are neither shown nor added
 //! to (`LocalStateRefused::Unreadable`). A screen lock and a vault lock keep them (the same person unlocks). The purge
-//! of an account's rows (`StateDb::clear_account_data`) wipes them as well; Clear deletes the row. Not deleted: after a
-//! crash, and when the app quits after a failed delete before the account's next open (the due delete is held in
-//! memory); the row stays until that account's next session end, Clear or purge, and another account never reads it
-//! (the row is keyed by user id).
+//! of an account's rows (`StateDb::clear_account_data`) wipes them as well; Clear deletes the row. An engine start with
+//! nobody signed in deletes every account's recent searches (lead ruling 23:03: a signed-out start owns nobody's), which
+//! covers a restart after a failed delete (the due delete is held in memory). Kept: by a start under a stored session
+//! (the same person); then a row a crash or a failed delete left stays until that account's next session end, Clear
+//! or purge, and another account never reads it (the row is keyed by user id).
 //!
 //! BLOCKS on the state database: a worker's call. Must not: log a search, a user id, an email or a path.
 

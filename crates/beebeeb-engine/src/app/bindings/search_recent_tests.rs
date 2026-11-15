@@ -13,7 +13,9 @@ use crate::account_binding::Identity;
 use crate::app::EngineConfig;
 use crate::host::ChannelHost;
 use crate::identity::REAL;
+use crate::keychain::{AuthSecretStore, SessionToken};
 use crate::session::Session;
+use crate::signin::gate::GateState;
 use crate::signin::memory_store::MemoryCredentials;
 use crate::state_db::StateDb;
 
@@ -394,6 +396,8 @@ fn a_screen_lock_keeps_the_recent_searches() {
 const NOT_DELETED: &str = "search query row not deleted at session end";
 /// The log line of that delete, made at the next open.
 const DELETED_AT_OPEN: &str = "pending search query row deleted at open";
+/// The log line of a start with nobody signed in that deleted recent searches.
+const DELETED_AT_START: &str = "search query rows deleted at start";
 
 /// Three refusals in a row: the session is held as ended (as the sync loop holds it after three 401s).
 fn the_refusal_run(engine: &TestEngine) {
@@ -572,4 +576,111 @@ fn a_delete_that_works_at_the_watchers_close_logs_nothing_and_leaves_nothing_due
     let (kept, logs) = capture_logs(|| engine.remember_search_for(a2, "new"));
     assert_eq!(kept, Ok(words(&["new"])));
     assert_eq!(logs.matches(DELETED_AT_OPEN).count(), 0, "nothing was due: {logs}");
+}
+
+// ── CP2 row 2.1, lead ruling 23:03: an engine start with nobody signed in wipes every recent search on this PC ──────
+
+/// An engine on `credentials` (as [`engine`]): a restart of the app, when the credentials are the ones it stored.
+fn engine_with(credentials: MemoryCredentials) -> Arc<TestEngine> {
+    let state_dir = crate::state_paths::init_for_test();
+    let (host, _messages) = ChannelHost::new(|| {});
+    let config = EngineConfig {
+        account_id: "an-invented-search-slot".into(),
+        state_dir,
+        api_base: "http://127.0.0.1:9".into(),
+    };
+    Arc::new(Engine::open(&REAL, config, host, credentials).expect("the handle opens"))
+}
+
+/// The lead's case: a sign-out's delete fails (the state was held), the delete's due mark lives in memory and goes
+/// with the process, and the app starts again with nobody signed in: that start owns nobody's searches and deletes
+/// every row still there, another account's too. Mutant: the start's delete removed (both rows stay).
+#[test]
+fn a_failed_delete_then_a_signed_out_restart_leaves_no_recent_searches() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    let path = state(dir.path(), A);
+    engine.use_local_state_for_test(path.clone());
+    let a = signed_in(&engine, A);
+    engine.remember_search_for(a, "contract").unwrap();
+    engine.remember_search_for(a, "invoice 2026").unwrap();
+    open_lock(&engine);
+    let holder = held(&path);
+    let (signed_out, logs) = capture_logs(|| engine.sign_out_keeping_local_data());
+    released(holder);
+    assert_eq!(signed_out, Ok(()), "the premise: signed out");
+    assert_eq!(
+        on_disk(&path, A.0),
+        (true, words(&["invoice 2026", "contract"])),
+        "the premise: the sign-out's delete failed while the database was held"
+    );
+    assert_eq!(logs.matches(NOT_DELETED).count(), 1, "{logs}");
+    StateDb::open(&path)
+        .unwrap()
+        .remember_search(B.0, "holiday", 10)
+        .unwrap();
+    drop(engine);
+
+    // The restart: new credentials (the sign-out cleared the stored session), nobody signed in.
+    let restarted = engine_with(MemoryCredentials::default());
+    restarted.use_local_state_for_test(path.clone());
+    let (gate, logs) = capture_logs(|| restarted.restore());
+
+    assert_eq!(gate, GateState::SignedOut, "the premise: a start with nobody signed in");
+    assert_eq!(
+        on_disk(&path, A.0),
+        (false, Vec::new()),
+        "the signed-out start deleted the row the failed delete left"
+    );
+    assert_eq!(
+        on_disk(&path, B.0),
+        (false, Vec::new()),
+        "and every other account's row"
+    );
+    assert_eq!(logs.matches(DELETED_AT_START).count(), 1, "{logs}");
+    assert!(path.exists(), "the local state itself stays");
+}
+
+/// The control: a start under the same account (its session stored) keeps its recent searches: the same person.
+#[test]
+fn a_restart_under_the_same_account_keeps_the_recent_searches() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = state(dir.path(), A);
+    StateDb::open(&path)
+        .unwrap()
+        .remember_search(A.0, "contract", 10)
+        .unwrap();
+    let credentials = MemoryCredentials::default();
+    let store = credentials.store_for("an-invented-search-slot");
+    store
+        .save_session_token(&SessionToken::new("an-invented-token").unwrap())
+        .unwrap();
+    store.save_session_owner(A.0).unwrap();
+
+    let restarted = engine_with(credentials);
+    restarted.use_local_state_for_test(path.clone());
+    let (gate, logs) = capture_logs(|| restarted.restore());
+
+    assert_ne!(
+        gate,
+        GateState::SignedOut,
+        "the premise: the account's session is stored"
+    );
+    assert_eq!(
+        on_disk(&path, A.0),
+        (true, words(&["contract"])),
+        "kept for the same person"
+    );
+    assert_eq!(logs.matches(DELETED_AT_START).count(), 0, "{logs}");
+}
+
+/// The control: a signed-out start where nothing has synced makes no state database to delete from.
+#[test]
+fn a_signed_out_start_where_nothing_synced_makes_no_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.db");
+    let restarted = engine();
+    restarted.use_local_state_for_test(path.clone());
+    assert_eq!(restarted.restore(), GateState::SignedOut, "the premise");
+    assert!(!path.exists(), "no database was made");
 }

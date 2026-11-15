@@ -10,7 +10,8 @@
 //! the close of that session) deletes the session's OWN recent searches
 //! ([`Engine::delete_own_recent_searches_at_session_end`]). The owner is proven and the session checked as for every
 //! handle; only the server's refusal is not asked, and that handle never leaves this module. A delete that fails is
-//! logged and made at the account's next open for changes.
+//! logged and made at the account's next open for changes. An engine start with nobody signed in deletes every
+//! account's recent searches (lead ruling 2026-11-15 23:03): the one write here with no owner proven.
 //!
 //! What a state that is not the session's means is decided here, once, for every window: nothing is read, and the
 //! reason is a fixed word ([`LocalStateRefused`]).
@@ -338,8 +339,53 @@ impl<C: CredentialStores> Engine<C> {
         deleted
     }
 
+    /// WRITES, at the engine's start ([`Engine::restore`]; lead ruling 2026-11-15 23:03, CP2 row 2.1): a start with
+    /// nobody signed in (`session_stored` false, no session in memory) deletes EVERY account's recent searches still on
+    /// this computer: a signed-out start owns nobody's searches. That covers a restart after a session end whose delete
+    /// failed (its due mark lived in memory). A start with a stored session keeps them: the same person, and the owner
+    /// check keeps any other account out of them.
+    ///
+    /// The one write this module makes with no owner proven, and only of these rows: they are looked for on a
+    /// read-only connection first, so a start where none is there writes nothing (not even a schema migration), and a
+    /// computer where nothing has synced gets no database. A delete that fails is logged.
+    pub(super) fn delete_recent_searches_at_signed_out_start(&self, session_stored: bool) {
+        if session_stored || self.unlocked() {
+            return;
+        }
+        let path = self.local_state_path(&Identity::new(None, None));
+        // `None`: whether any is there could not be read.
+        let any = match StateDb::open_read_only(&path) {
+            Ok(proof) => proof.has_any_search_recent().ok(),
+            // Nothing synced, or no state database of this app's (or one too old to hold any): nothing to delete.
+            Err(
+                ReadOnlyOpenError::NotFound
+                | ReadOnlyOpenError::NotADatabase
+                | ReadOnlyOpenError::NotAStateDatabase
+                | ReadOnlyOpenError::OlderSchema,
+            ) => return,
+            Err(ReadOnlyOpenError::Locked | ReadOnlyOpenError::Unreadable) => None,
+        };
+        let deleted = match any {
+            Some(false) => return,
+            Some(true) => StateDb::open(&path)
+                .and_then(|db| db.clear_every_search_recent())
+                .is_ok(),
+            None => false,
+        };
+        if deleted {
+            self.recent_searches_due
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clear();
+            tracing::info!("search query rows deleted at start");
+        } else {
+            tracing::warn!("search query rows not deleted at start");
+        }
+    }
+
     /// Whether a session end's delete of the recent searches of `user_id` is still due (CP2 row 2.1): it failed, and
-    /// no open made it since. Held in memory: a restart before the account's next open forgets it.
+    /// no open made it since. Held in memory: a restart forgets it, and a start with nobody signed in deletes every
+    /// recent search ([`Self::delete_recent_searches_at_signed_out_start`]).
     pub(super) fn recent_searches_due(&self, user_id: &str) -> bool {
         self.recent_searches_due
             .lock()
