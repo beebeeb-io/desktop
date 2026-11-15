@@ -1,0 +1,87 @@
+//! The ring and the clock: pure parts, no device (slice M4). The null sink's timer test runs on Linux only.
+
+use super::*;
+
+fn ring(rate: u32, channels: u16) -> Ring {
+    Ring::new(rate, channels)
+}
+
+#[test]
+fn ring_never_holds_more_than_two_seconds() {
+    // 1000 Hz stereo: 2 s = 4000 samples.
+    let mut r = ring(1000, 2);
+    assert_eq!(r.push(0, &vec![0.5; 3000]), 3000);
+    // Only 1000 samples are free: the rest is refused, and the count says so.
+    assert_eq!(r.push(0, &vec![0.5; 3000]), 1000);
+    assert_eq!(r.buf.len(), 4000);
+    assert_eq!(r.push(0, &[0.5; 2]), 0, "a full ring takes nothing");
+    // Whole frames only: three samples of stereo take one frame.
+    let mut r = ring(1000, 2);
+    assert_eq!(r.push(0, &[0.1, 0.2, 0.3]), 2);
+}
+
+#[test]
+fn ring_underrun_writes_silence() {
+    let mut r = ring(1000, 1);
+    r.push(0, &[0.25, 0.5, 0.75, 1.0]);
+    let mut out = [9.0f32; 10];
+    assert_eq!(r.fill(&mut out), 4);
+    assert_eq!(&out[..4], &[0.25, 0.5, 0.75, 1.0]);
+    assert!(out[4..].iter().all(|s| *s == 0.0), "the rest is silence");
+    assert_eq!(r.underruns, 1);
+    // Silence is not played sound: the clock counts the 4 real frames only.
+    assert_eq!(r.played_frames, 4);
+}
+
+#[test]
+fn clock_counts_played_frames_from_the_first_pts() {
+    let mut r = ring(1000, 1);
+    assert_eq!(r.clock_ms(0), None, "nothing queued");
+    r.push(5000, &vec![0.1; 1000]);
+    assert_eq!(r.clock_ms(0), None, "queued but not yet played");
+    let mut out = [0.0f32; 500];
+    r.fill(&mut out);
+    assert_eq!(r.clock_ms(0), Some(5500));
+    // The device latency (100 frames) is not heard yet.
+    assert_eq!(r.clock_ms(100), Some(5400));
+    // A later push keeps the first pts as the base.
+    r.push(9999, &[0.1; 10]);
+    assert_eq!(r.clock_ms(0), Some(5500));
+}
+
+#[test]
+fn flush_resets_the_clock_base() {
+    let mut r = ring(1000, 1);
+    r.push(5000, &vec![0.1; 1000]);
+    r.fill(&mut [0.0f32; 500]);
+    assert_eq!(r.clock_ms(0), Some(5500));
+    r.flush();
+    assert!(r.buf.is_empty());
+    assert_eq!(r.clock_ms(0), None);
+    r.push(9000, &vec![0.1; 1000]);
+    r.fill(&mut [0.0f32; 100]);
+    assert_eq!(
+        r.clock_ms(0),
+        Some(9100),
+        "the new base is the first sample pushed after the flush"
+    );
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+#[test]
+fn null_sink_clock_advances_with_time() {
+    let mut out = AudioOut::start(44_100).expect("the null sink always opens");
+    let (rate, channels) = out.format();
+    assert_eq!(out.clock_ms(), None, "nothing played yet");
+    // One second of sound at pts 1000.
+    let one_second = vec![0.0f32; rate as usize * channels as usize];
+    assert_eq!(out.push(1000, &one_second), one_second.len());
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let at = out.clock_ms().expect("the timer has played some");
+    assert!((1140..=2000).contains(&at), "clock {at} ms after 150 ms of wall time");
+    // Paused, the clock stands still.
+    out.pause();
+    let held = out.clock_ms();
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    assert_eq!(out.clock_ms(), held);
+}
