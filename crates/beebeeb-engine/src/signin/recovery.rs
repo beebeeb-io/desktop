@@ -115,7 +115,7 @@ pub fn normalized_phrase(input: &str) -> Result<zeroize::Zeroizing<String>, Stri
         phrase.extend(letters.map(|letter| letter.to_ascii_lowercase()));
         words += 1;
     }
-    if false {
+    if words != 12 {
         return Err("Recovery phrase must contain exactly 12 words.".to_string());
     }
     Ok(phrase)
