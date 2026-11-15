@@ -68,6 +68,22 @@ fn a_save_behind_a_held_sync_folder_edit_says_held() {
     );
 }
 
+/// A `content_unknown` row (a file hydrated before 0.8.13: this PC cannot tell whether it changed) is no earlier change:
+/// behind a queued save, the refusal still says not sent yet, never held back.
+#[test]
+fn a_content_unknown_row_is_not_a_held_change() {
+    let fake = fake("copy-content-unknown");
+    let engine = engine_at("http://127.0.0.1:9");
+    let (_dir, _root, db) = writable_note_at_4(&engine, &fake);
+    first_save_queued(&engine, &db);
+    assert!(
+        db.hold_unsent_edit(NOTE, "content_unknown", "invented-fingerprint", 20)
+            .unwrap()
+    );
+    let save = second_opening_saves(&engine);
+    assert_eq!(save.err(), Some(EditRefused::EarlierChangeNotSent), "waiting, said so");
+}
+
 /// Behind a change that is only waiting to be sent (queued, not parked, nothing held): not sent yet.
 #[test]
 fn a_save_behind_a_queued_change_says_not_sent() {
