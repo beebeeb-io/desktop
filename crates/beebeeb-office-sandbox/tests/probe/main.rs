@@ -4,6 +4,13 @@
 //! Requests (one per line on standard input):
 //!   ping                 -> pong
 //!   connect <ip:port>    -> ok | err <system code> | err network-start <system code>
+//!   udp-send <ip:port>   -> ok <bytes sent> | err <system code> | err network-start <system code>
+//!                                                        (from a UDP socket bound to loopback, sends 5 bytes)
+//!   listen <ip:port>     -> ok <port> | err <system code> | err network-start <system code>
+//!                                                        (binds and listens; holds the listener until the next
+//!                                                         `listen` or the end, so the test can connect to it)
+//!   resolve <name>       -> ok <addresses> | err <system code> | err network-start <system code>
+//!                                                        (a name lookup through the system's resolver)
 //!   job                  -> job flags=<hex> processes=<n> memory=<bytes> ui=<hex> | err <system code>
 //!   write <path>         -> ok | err <system code>      (creates a new file and writes 5 bytes)
 //!   writeown <name>      -> own ok=<n> codes=<...>       (the same, as <name>.0/.1/.2 in the folders its own
@@ -41,8 +48,9 @@
 //! probe (confined through the crate, or plainly), makes it hang, prints `child <process id>` and sleeps.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use beebeeb_office_sandbox::{Access, Granted, SandboxError, helper};
@@ -85,6 +93,54 @@ fn connect(target: &str) -> String {
     };
     match TcpStream::connect_timeout(&address, Duration::from_secs(3)) {
         Ok(_) => "ok".into(),
+        Err(error) => code(&error),
+    }
+}
+
+/// Sends 5 bytes to `target` from a UDP socket bound to loopback (never the wildcard address).
+fn udp_send(target: &str) -> String {
+    if let Err(answer) = network_start() {
+        return answer;
+    }
+    let Ok(address) = target.parse::<SocketAddr>() else {
+        return "err parse".into();
+    };
+    match UdpSocket::bind("127.0.0.1:0").and_then(|socket| socket.send_to(b"probe", address)) {
+        Ok(sent) => format!("ok {sent}"),
+        Err(error) => code(&error),
+    }
+}
+
+/// The listener of the last `listen`, held so the test can connect to it after the answer.
+static LISTENING: Mutex<Option<TcpListener>> = Mutex::new(None);
+
+/// Binds `target` and listens (the standard library does both); answers the port it listens on.
+fn listen(target: &str) -> String {
+    if let Err(answer) = network_start() {
+        return answer;
+    }
+    let Ok(address) = target.parse::<SocketAddr>() else {
+        return "err parse".into();
+    };
+    let listener = match TcpListener::bind(address) {
+        Ok(listener) => listener,
+        Err(error) => return code(&error),
+    };
+    let port = match listener.local_addr() {
+        Ok(local) => local.port(),
+        Err(error) => return code(&error),
+    };
+    *LISTENING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(listener);
+    format!("ok {port}")
+}
+
+/// Looks `name` up through the system's resolver; answers the number of addresses, never the addresses.
+fn resolve(name: &str) -> String {
+    if let Err(answer) = network_start() {
+        return answer;
+    }
+    match (name, 0u16).to_socket_addrs() {
+        Ok(addresses) => format!("ok {}", addresses.count()),
         Err(error) => code(&error),
     }
 }
@@ -778,6 +834,9 @@ fn main() {
         let answer = match request {
             "ping" => "pong".to_string(),
             "connect" => connect(rest),
+            "udp-send" => udp_send(rest),
+            "listen" => listen(rest),
+            "resolve" => resolve(rest),
             "write" => write(rest),
             "writeown" => write_own(rest),
             "ownfolders" => own_folders(),
