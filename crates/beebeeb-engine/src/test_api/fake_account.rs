@@ -799,6 +799,8 @@ pub fn account_handler(account: Arc<FakeAccount>) -> Handler {
                     "platform": body.get("platform"),
                     "bb_version": body.get("bb_version"),
                     "last_seen": "2026-11-15T05:00:00Z",
+                    "created_at": "2026-11-15T05:00:00Z",
+                    "session_count": 0,
                 });
                 match at {
                     Some(i) => devices[i] = device.clone(),
