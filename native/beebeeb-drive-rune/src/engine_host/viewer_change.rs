@@ -381,6 +381,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                 continue;
             }
             let current = self.answers_for(&message, file_id);
+            let before_a_lock = self.before_a_lock(&message, file_id);
             match message.answer {
                 Answer::Read { .. } => reads.push(message),
                 Answer::Change { settled, holds, worker } => {
@@ -395,7 +396,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                         // Begun under an earlier opening of this file (delta check of #432): it never replaces what
                         // is on screen. Its outcome is said; its text is overwritten.
                         found = earlier(settled, file_id);
-                    } else if self.before_a_lock(&message, file_id) {
+                    } else if before_a_lock {
                         // Begun before a lock of the screen, the same account back (review of #452): said the same
                         // way, never its text; what the engine could not confirm is said as that.
                         found = earlier_than_the_lock(settled, file_id);
