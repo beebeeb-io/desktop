@@ -27,7 +27,7 @@ path = "src/main.rs"
 test = false
 
 [dependencies]
-beebeeb-office = { git = "https://github.com/beebeeb-io/desktop-office", rev = "573582cd6da1bc83d739a61a4ddf757cfd17f0f5" }
+beebeeb-office = { git = "https://github.com/beebeeb-io/desktop-office", rev = "a39e602f0792ad55123c243eb9bc8a3968a2e98c" }
 beebeeb-office-protocol = { path = "../../crates/beebeeb-office-protocol" }
 beebeeb-office-sandbox = { path = "../../crates/beebeeb-office-sandbox" }
 log = "0.4"   # only for the no-logger check (`log::max_level()`); already in the Office engine's closure
