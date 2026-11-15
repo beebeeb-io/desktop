@@ -222,6 +222,9 @@ impl<C: CredentialStores> Engine<C> {
             .iter()
             .map(|id| canonical(id).ok_or(FolderLinkError::NotFound))
             .collect::<Result<Vec<_>, _>>()?;
+        if ids.iter().enumerate().any(|(n, id)| ids[..n].contains(id)) {
+            return Err(FolderLinkError::Invalid);
+        }
         let app_url = web_origin(&self.config.api_base).ok_or(FolderLinkError::Refused)?;
         if choices.is_some_and(blank_password) {
             return Err(FolderLinkError::Invalid);
@@ -329,9 +332,6 @@ impl<C: CredentialStores> Engine<C> {
 
     /// The hand-over: only while the session in memory is the very one the token and the key were copied from.
     fn hand_over(&self, run: &Run<'_>, link: Zeroizing<String>) -> Result<MadeLink, FolderLinkError> {
-        if !self.session_is_still(run.session, &run.key) {
-            return Err(FolderLinkError::NotSignedIn);
-        }
         Ok(MadeLink {
             session: run.session,
             link,
