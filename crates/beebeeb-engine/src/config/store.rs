@@ -113,13 +113,7 @@ impl DesktopConfig {
     /// the old key (if present) decides it; a file that already holds the new key keeps its own choice. The next save
     /// writes the new keys, so the carry happens once.
     pub(super) fn carry_old_notification_choices(&mut self, raw: &toml::Table) {
-        let held = |key: &str| raw.contains_key(key);
-        if !held("notify_needs_decision") && held("notify_conflicts") {
-            self.notify_needs_decision = self.notify_conflicts;
-        }
-        if !held("notify_local_space") && held("notify_quota_warnings") {
-            self.notify_local_space = self.notify_quota_warnings;
-        }
+        let _ = raw;
     }
 
     /// Forget the old `finder_install_last_error` on macOS (lead ruling T4-3). 0.8.11 saved the

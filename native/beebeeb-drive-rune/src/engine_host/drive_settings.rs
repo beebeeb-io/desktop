@@ -967,6 +967,9 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
     /// Start the speed test against Beebeeb's own servers on a thread of its own (it takes up to 90 seconds and
     /// must not hold Pause or Keep up); one test at a time. Its steps arrive through `pump`.
     fn run_speed_test(&mut self) {
+        if self.speed.running() {
+            return;
+        }
         if self.mine() && self.start_speed_test() {
             self.speed = tools::started();
         } else {
