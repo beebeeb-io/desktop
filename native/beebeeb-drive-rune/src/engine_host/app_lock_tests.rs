@@ -137,7 +137,7 @@ fn a_pc_without_a_prompt_keeps_it_on_and_says_why() {
     assert!(stored(&engine));
     assert_eq!(
         source.notice(),
-        Some("App lock is still on: turning it off needs Windows Hello, which is not set up on this PC.")
+        Some("App lock is still on: Windows Hello is not set up on this PC. Use your password instead.")
     );
 }
 
@@ -241,7 +241,7 @@ fn a_longer_delay_on_a_pc_without_a_prompt_is_not_changed_and_says_why() {
     assert_eq!(stored_after(&engine), Some(LockAfter::Minutes5));
     assert_eq!(
         source.notice(),
-        Some("The lock delay was not changed: a longer delay needs Windows Hello, which is not set up on this PC.")
+        Some("The lock delay was not changed: Windows Hello is not set up on this PC. Use your password instead.")
     );
     // A shorter one still works without it.
     source.set_lock_after("Immediately");
@@ -310,3 +310,7 @@ fn a_stale_delay_on_the_page_asks_windows_hello_when_the_engine_wants_a_proof() 
     assert_eq!(stored_after(&engine), Some(LockAfter::Minutes30));
     assert_eq!(delay(&source).as_deref(), Some("30 min"));
 }
+
+/// "Use your password" (no board frame: D-2).
+#[path = "app_lock_password_tests.rs"]
+mod password;

@@ -15,6 +15,7 @@
 
 mod activity;
 mod app_lock;
+pub mod app_lock_password;
 pub mod approve;
 #[cfg(test)]
 mod approve_tests;
@@ -185,6 +186,8 @@ pub enum Dialog {
     Plan,
     /// The menu of App lock's delays (DW-0716): the item under the pointer or the keys.
     LockDelay(Option<usize>),
+    /// App lock's change with the account password (no board frame: D-2; `app_lock_password`).
+    LockPassword,
     /// Approving a sign-in: the review with its code field (DW-A13), Windows Hello asking
     /// (DW-A14), and the three ends (DW-A15, DW-A16, DW-A17; `handled`: "Already handled").
     ApproveReview,
@@ -217,6 +220,7 @@ impl std::fmt::Debug for Dialog {
             Dialog::LeaveCodes => f.write_str("LeaveCodes"),
             Dialog::Plan => f.write_str("Plan"),
             Dialog::LockDelay(hot) => write!(f, "LockDelay({hot:?})"),
+            Dialog::LockPassword => f.write_str("LockPassword"),
             Dialog::ApproveReview => f.write_str("ApproveReview"),
             Dialog::ApproveHello => f.write_str("ApproveHello"),
             Dialog::ApproveApproved => f.write_str("ApproveApproved"),
@@ -255,6 +259,8 @@ impl Dialog {
             Dialog::Plan => false,
             // DW-0716: four lengths of time. No key material.
             Dialog::LockDelay(_) => false,
+            // D-2: takes the account password.
+            Dialog::LockPassword => true,
         }
     }
 }
@@ -421,6 +427,8 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     let call = source.call_answer();
     // A password answer kept to be said: dropped once its press's session or account is no longer the one now.
     late::check(ui);
+    // App lock's password step closes once nothing offers it any more.
+    let step_closed = app_lock_password::follow(ui);
     let Some(source) = ui.source.as_mut() else {
         return false;
     };
@@ -460,7 +468,7 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if show_late_codes(s) {
         return true;
     }
-    pumped.changed
+    pumped.changed || step_closed
 }
 
 /// The toast over a pane. Something that worked is the settings toast, as before. Something that was not done
@@ -951,7 +959,10 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 .and_then(|_| source.plan_details())
                 .map(|plan| plan::overlay(&plan, &t)),
         ),
-        Pane::Security => security_overview::pane(source, dialog, &ui.signing_out, &t),
+        Pane::Security => {
+            let (page, over) = security_overview::pane(source, dialog, &ui.signing_out, &t);
+            (page, over.or_else(|| app_lock_password::over(source, form, dialog, &t)))
+        }
         Pane::Sessions => sessions::pane(source, dialog, &t),
         Pane::Name => (forms::name(form, &t), None),
         Pane::Email => (forms::email(form, &t), None),
@@ -1014,7 +1025,7 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, _tx: &mut Tx) -> bool {
     if ev.key != Key::Escape {
         return false;
     }
-    if approve::on_escape(s) {
+    if approve::on_escape(s) || app_lock_password::on_escape(s) {
         return true;
     }
     // A sign-out that is out cannot be called back: its confirm stays until the answer.

@@ -226,8 +226,12 @@ pub fn arrive(ui: &mut AccountUi) {
     f.code = code_edit();
     f.sink = secure();
     if let Some(dialog) = &ui.dialog {
-        if matches!(dialog, Dialog::Code(super::CodeFor::StopActivity)) {
-            // Stopping the recording asks the password (owner ruling 2026-11-14; the board's DW-A78).
+        if matches!(
+            dialog,
+            Dialog::Code(super::CodeFor::StopActivity) | Dialog::LockPassword
+        ) {
+            // Stopping the recording asks the password (owner ruling 2026-11-14; the board's DW-A78), and so does App
+            // lock's change Windows Hello did not confirm (D-2).
             focus(f, Some(CURRENT_KEY));
         } else if matches!(dialog, Dialog::Code(_)) {
             focus(f, Some(CODE_KEY));

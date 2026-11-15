@@ -999,6 +999,7 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
             can_sign_out: self.open(),
             activity: self.activity.facts(),
             app_lock: self.app_lock.facts(),
+            app_lock_password: self.app_lock.password_offer(),
             ..SecurityFacts::unknown()
         }
     }
@@ -1009,6 +1010,10 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     /// "Locks again after" (`app_lock.rs`): longer asks Windows Hello first; the engine stores it.
     fn set_lock_after(&mut self, delay: &str) {
         self.app_lock.set_after(delay);
+    }
+    /// "Use your password" (`app_lock.rs`): the change Windows Hello did not confirm, with the account password.
+    fn app_lock_with_password(&mut self, password: crate::frames::account::app_lock_password::LockPassword) {
+        self.app_lock.with_password(password.into_proof());
     }
 
     fn sign_out_this_app(&mut self) -> SignOutAnswer {
