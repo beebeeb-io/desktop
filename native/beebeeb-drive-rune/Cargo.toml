@@ -31,6 +31,10 @@ url = "2"
 # hand-off machine; no Tauri, no UI. Its https client (feature `net`) is linked on Windows only, the one platform with
 # a release line; the same reqwest 0.12 the engine builds, with its `blocking` client.
 beebeeb-updater = { path = "../../crates/beebeeb-updater" }
+# In-app playback (`media/`): the messages to and from the sandboxed media helper (no dependencies of its own), and
+# the sandbox that starts the helper confined (the Office helper's; `windows-sys` 0.61 is already in the lock).
+beebeeb-media-protocol = { path = "../../crates/beebeeb-media-protocol" }
+beebeeb-office-sandbox = { path = "../../crates/beebeeb-office-sandbox" }
 
 serde_json = "1"
 # The local log file's subscriber (`log_file.rs`): the `tracing` the engine already logs through; already in the lock
@@ -69,9 +73,17 @@ raw-window-handle = "0.6"
 # The first run's folder picker is a COM dialog (`shell/platform/windows_folder.rs`): three more features of it.
 # Toasts are WinRT (`shell/platform/windows_toast.rs`: UI_Notifications, Data_Xml_Dom, the shortcut's app id through
 # Win32_UI_Shell_PropertiesSystem); File Explorer's menu items are registry keys (`shell/platform/windows_verbs.rs`).
-windows = { version = "0.58", features = ["Data_Xml_Dom", "Foundation", "Security_Credentials_UI", "UI_Notifications", "Win32_Foundation", "Win32_System_Com", "Win32_System_Registry", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem"] }
+# The media controls of Windows (`media/os_controls.rs`: System Media Transport Controls, the picture from memory
+# through an in-memory stream): `Media`, `Storage_Streams`.
+windows = { version = "0.58", features = ["Data_Xml_Dom", "Foundation", "Media", "Security_Credentials_UI", "Storage_Streams", "UI_Notifications", "Win32_Foundation", "Win32_System_Com", "Win32_System_Registry", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem"] }
 # The updater's https client (`net`): Windows only (see `beebeeb-updater` above).
 beebeeb-updater = { path = "../../crates/beebeeb-updater", features = ["net"] }
+
+# The sound of in-app playback (`media/audio_out.rs`): WASAPI on Windows, CoreAudio on macOS. Not on Linux, where it
+# would need ALSA on the test machine: the player's tests run on a null sink there. Apache-2.0; pinned to the version
+# the media plan measured.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+cpal = "=0.18.2"
 
 [dev-dependencies]
 # `engine_host` tests open the engine on credential stores in memory, with the settings file in the engine's test

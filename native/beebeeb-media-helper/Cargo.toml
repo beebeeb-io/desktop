@@ -1,0 +1,86 @@
+[package]
+name = "beebeeb-media-helper"
+version = "0.0.1"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-or-later"
+description = "Decodes one audio or video file inside the sandbox: no key, no name, no path, no network. Bytes in by range, frames and PCM out."
+
+# Design: the media plan's (d) "Sandbox" (decision D-MED-3): every parser and decoder of a media file runs in this
+# process, started confined by `crates/beebeeb-office-sandbox`, never in the app that holds the keys.
+# Rules:
+#   - its own workspace, its own `Cargo.lock` and `deny.toml` (the closure audited on its own: `cargo deny check
+#     licenses bans sources` here; 12 MPL-2.0 exceptions, the `symphonia` 0.5.5 crates, decision D-MED-10);
+#   - dependencies: the protocol and FilmCraft, nothing else (no direct `symphonia`: FilmCraft brings 0.5.5, a second
+#     version would add 15 more MPL-2.0 packages);
+#   - `panic = "abort"`: a panic ends the process, and the app sees its pipe close.
+
+[lib]
+name = "beebeeb_media_helper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "beebeeb-media-helper"
+path = "src/main.rs"
+
+[dependencies]
+beebeeb-media-protocol = { path = "../../crates/beebeeb-media-protocol" }
+# `default-features = false`: only the codecs named in [features] below are built in.
+filmcraft-codecs = { version = "=0.9.0", default-features = false }
+filmcraft-media = "=0.9.0"
+
+# The codecs decoded with FilmCraft's own decoders (decision D-MED-2; the legal brief on media codec patents,
+# 2026-11-15, finding F1). A codec whose feature is off is NOT IN THE BINARY: its crate is not linked and its call sites
+# in FilmCraft are compiled out (the Office engine's vendored copy makes each one optional), so turning a route off is
+# never what keeps it out. Two checks hold it: `deny.toml` bans every off codec's crate, and `codec-gate.sh` counts
+# them (0 each) in the dependency tree of both release targets and in the release binary, and wants the licence record
+# of every licensed codec built in (`codec-gate-test.sh` is the gate's own test).
+# - Shipped: `h264` (the owner's ruling, 2026-11-15 18:04: H.264 under the licence's free tier; the release gate wants
+#   the signed licence record before a release with it).
+# - Off and compiled out until counsel clears them: `aac`, `ac3`, `eac3`, `mpeg2` (MPEG-1/2 video), `prores`, `dnx`.
+# - No feature at all: HEVC (the system's decoder only, permanently), APV and MXF (not needed).
+[features]
+default = ["h264"]
+h264 = ["filmcraft-codecs/h264"]
+aac = ["filmcraft-codecs/aac"]
+ac3 = ["filmcraft-codecs/ac3"]
+# E-AC-3 is a module of the AC-3 crate: on, it brings AC-3 too, so its row follows the binary.
+eac3 = ["ac3", "filmcraft-codecs/eac3"]
+mpeg2 = ["filmcraft-codecs/mpeg2"]
+prores = ["filmcraft-codecs/prores"]
+dnx = ["filmcraft-codecs/dnx"]
+
+# Decision D-MED-11 (supply chain): FilmCraft's 26 crates are taken from the Office engine's repository, where they are
+# vendored at the pin as the unmodified crates.io tarballs (the rule of its subtrees), never from crates.io. A bump is
+# its own pull request there, with the diff of every crate this helper links, and then a new `rev` here.
+# `rev`: the commit with the vendored tarballs and the feature patch (the Office engine's `filmcraft/PATCHES.md`).
+[patch.crates-io]
+filmcraft-aac = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-ac3 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-apv = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-av1 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-avi = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-bitstream = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-codecs = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-color = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-dng = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-dnx = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-frame = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-h264 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-hevc = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-isobmff = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-matroska = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-media = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-mpa = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-mpeg2v = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-mpegts = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-mxf = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-ogg = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-opus = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-prores = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-time = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-vp8 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+filmcraft-vp9 = { git = "https://github.com/beebeeb-io/desktop-office", rev = "d4cc7039d23b54110f8c783b4d3c523eef770c1e" }
+
+[profile.release]
+panic = "abort"

@@ -7,6 +7,7 @@
 pub mod account_deletion;
 pub mod approve_sign_in;
 pub mod backup_folders;
+pub mod media_stream;
 pub mod photos_folders;
 pub mod search_recent;
 pub mod shared_offline;

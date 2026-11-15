@@ -30,6 +30,7 @@ mod engine_host;
 mod feedback;
 mod frames;
 mod log_file;
+mod media;
 mod shell;
 mod source;
 // The engine lane's read API (PR 280): only `EngineSource::open` and `list` have a caller
