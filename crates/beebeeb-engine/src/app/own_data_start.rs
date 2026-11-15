@@ -403,7 +403,6 @@ impl<C: CredentialStores> Engine<C> {
             lock(&seat.state).startup.candidate = None;
             tracing::info!("upgrade: this account is recorded as the owner of the local data at its first start");
         }
-        data.db.close_adoption_window().map_err(|_| SyncStartRefused::Other)?;
         Ok(data)
     }
 
