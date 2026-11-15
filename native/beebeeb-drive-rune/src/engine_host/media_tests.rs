@@ -14,7 +14,7 @@ use zeroize::Zeroizing;
 use super::*;
 use crate::engine_host::media::refusal_of;
 use crate::media::audio_out::AudioError;
-use crate::media::player::{AudioFactory, AudioSink, Link, LinkFactory, MediaBytes, MediaOpener, Refusal};
+use crate::media::player::{AudioFactory, AudioSink, Link, LinkFactory, MediaBytes, MediaOpener, Phase, Refusal};
 use crate::media::transport::LinkError;
 
 const FOLDER: &str = "Invented demos";
@@ -193,18 +193,23 @@ struct FakeLinks;
 
 struct FakeLink {
     inbox: Vec<FromHelper>,
+    /// Where the next answered PCM starts.
+    pts_ms: u64,
 }
 
 impl LinkFactory for FakeLinks {
     fn start(&self) -> Result<Box<dyn Link>, Refusal> {
-        Ok(Box::new(FakeLink { inbox: Vec::new() }))
+        Ok(Box::new(FakeLink {
+            inbox: Vec::new(),
+            pts_ms: 0,
+        }))
     }
 }
 
 impl Link for FakeLink {
     fn send(&mut self, msg: &ToHelper) -> io::Result<()> {
-        if let ToHelper::Open { .. } = msg {
-            self.inbox.push(FromHelper::Opened(Opened {
+        match msg {
+            ToHelper::Open { .. } => self.inbox.push(FromHelper::Opened(Opened {
                 duration_ms: 90_000,
                 video: None,
                 audio: Some(AudioInfo {
@@ -214,13 +219,26 @@ impl Link for FakeLink {
                 }),
                 reduced_quality: false,
                 no_sound: None,
-            }));
+            })),
+            // Silence for every ask, as a helper that decodes: an unanswered ask ends the run after the player's
+            // answer deadline as "could not be played", which a test must never read as a pause.
+            ToHelper::WantAudio { rate, channels, frames } => {
+                self.inbox.push(FromHelper::Audio {
+                    pts_ms: self.pts_ms,
+                    channels: *channels,
+                    samples: vec![0.0; *frames as usize * usize::from(*channels)],
+                });
+                self.pts_ms += u64::from(*frames) * 1000 / u64::from((*rate).max(1));
+            }
+            _ => {}
         }
         Ok(())
     }
 
-    fn recv(&mut self, _timeout: Duration) -> Result<FromHelper, LinkError> {
+    fn recv(&mut self, timeout: Duration) -> Result<FromHelper, LinkError> {
         if self.inbox.is_empty() {
+            // As a real link: nothing came within the wait (the worker's tick), not at once.
+            std::thread::sleep(timeout);
             return Err(LinkError::Timeout);
         }
         Ok(self.inbox.remove(0))
@@ -272,9 +290,20 @@ fn source(world: &Arc<World>) -> EngineViewerSource<World> {
     EngineViewerSource::on(world.clone())
 }
 
+/// Stops the test's player when the test ends, a failed assertion too. The world and its player hold each other, so
+/// the player is never dropped, and a run the fake helper keeps fed would go on through the rest of the test binary.
+struct StopsThePlayer(Arc<World>);
+
+impl Drop for StopsThePlayer {
+    fn drop(&mut self) {
+        self.0.handle().stop(crate::media::StopReason::Closed);
+    }
+}
+
 #[test]
 fn audio_open_plays_through_the_shell_player() {
     let world = World::new(true);
+    let _stop = StopsThePlayer(world.clone());
     let mut source = source(&world);
     assert!(
         source.can_play(),
@@ -295,16 +324,28 @@ fn audio_open_plays_through_the_shell_player() {
         vec!["t1".to_string()],
         "the engine opened the pressed file"
     );
+    // `open` shows the file as playing at once; the worker's own word comes after the helper's `Opened`.
+    wait_until("the player's worker plays the file", || {
+        world.handle().phase() == Phase::Playing
+    });
     let state = world.handle().state().expect("the player holds the file");
     assert_eq!(state.file_id, "t1");
     assert!(state.playing, "the player plays it");
+    assert_eq!(state.refused, None);
     assert_eq!(
         world.s().presses,
         vec![SessionGeneration::for_test(1)],
         "the press stamped the session the file was opened for"
     );
     assert!(source.play("t1", false), "pause");
-    assert!(!world.handle().state().is_some_and(|state| state.playing));
+    // The pause is a command to the player's worker, applied at its next tick (`PlayerHandle::pause`): wait for it.
+    wait_until("the pause lands in the player", || {
+        world.handle().phase() == Phase::Paused
+    });
+    let state = world.handle().state().expect("a pause keeps the file");
+    assert_eq!(state.file_id, "t1");
+    assert!(!state.playing, "the player is paused");
+    assert_eq!(state.refused, None, "paused by the press, not ended by a refusal");
 }
 
 #[test]
@@ -334,6 +375,16 @@ fn late_open_under_another_session_is_dropped() {
     assert!(
         !matches!(after, Some(Body::Audio(doc)) if doc.playing),
         "a recording of another session is never drawn as playing"
+    );
+    // The same account is still signed in (a lock, then an unlock): that poll gave the view to the new session, so
+    // the next one draws the recording from the player's state. The late open is never drawn as playing there either.
+    let Some(Body::Audio(doc)) = source.poll("t1") else {
+        panic!("the same account's view draws the recording again");
+    };
+    assert!(!doc.playing, "a late open is never drawn as playing");
+    assert_eq!(
+        doc.title, "invented-one.mp3",
+        "nothing of the refused open is shown as its tags"
     );
 }
 
@@ -401,6 +452,7 @@ fn can_play_false_without_sandbox_or_helper() {
 #[test]
 fn leaving_the_view_keeps_audio_playing() {
     let world = World::new(true);
+    let _stop = StopsThePlayer(world.clone());
     let mut source = source(&world);
     source.open("t1").expect("opens");
     assert!(source.play("t1", true));
@@ -414,6 +466,7 @@ fn leaving_the_view_keeps_audio_playing() {
 #[test]
 fn closing_a_video_stops_it() {
     let world = World::new(true);
+    let _stop = StopsThePlayer(world.clone());
     let mut source = source(&world);
     let file = source.open("v1").expect("opens");
     assert!(matches!(file.body, Body::Video(_)), "a video opens as a video");
