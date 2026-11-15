@@ -194,24 +194,14 @@ fn the_name_and_the_email_rows_are_links_now_their_pages_answer() {
     assert!(!has(&rt, "not-built"));
 }
 
-/// Any other way to the pages nothing answers for (a link, a key) stays on Account too: only the section
-/// itself, when nothing answers for it, is the shell's frame.
+/// Going from Account to Security and back never ends on the shell's frame: only a section nothing answers for
+/// is. (Deleting the account's pages, DW-A58 and DW-A80 to DW-A83, answer since slice A6: their own tests are in
+/// `account_deletion_tests.rs`.)
 #[test]
 fn no_route_from_a_live_pane_ends_on_the_not_built_frame() {
     let server = server();
     let mut rt = window_on(signed_in(&server), SettingsPane::Account);
     wait_for(&mut rt, "the account", |rt| shows(rt, FIRST));
-    // The pages under Security that nothing answers for do not open either: the person stays on Account.
-    for frame in ["DW-A58", "DW-A80", "DW-A81", "DW-A82", "DW-A83"] {
-        rt.update(move |s, _| crate::frames::account::go(s, frame));
-        rt.frame(0.016);
-        rt.frame(0.4);
-        assert!(!has(&rt, "not-built"), "{frame}");
-        assert!(
-            shows(&rt, FIRST) && shows(&rt, "240 GB"),
-            "{frame}: Account still shows"
-        );
-    }
     // Security itself answers: its page, inside settings, with the sidebar.
     rt.update(|s, _| crate::frames::account::go(s, "DW-A52"));
     wait_for(&mut rt, "the Security page", |rt| {
