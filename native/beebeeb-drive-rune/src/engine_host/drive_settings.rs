@@ -20,7 +20,8 @@
 //!   upload and download paths honour them), and the last 20 hours of traffic from the signed-in account's local
 //!   state. Read when the pane opens and after a change, never at launch. Missing: the live figures, the other
 //!   devices, a metered state the engine reads and honours, a speed test.
-//! - Thumbnails and previews, Diagnostics: the trait's defaults (no engine module).
+//! - Thumbnails and previews: wired through [`super::drive_previews::PreviewsHost`] (its own module doc).
+//! - Diagnostics: the trait's defaults (no engine module).
 //!
 //! Whose press: a limit is this PC's own setting, not an account's. It is still changed only under the session it
 //! was pressed in (`Engine::session_turn`, read on the window's thread at the press): a session that moved on
@@ -324,6 +325,8 @@ pub struct EngineDriveSettings<E: DriveEngine> {
     /// When the local sizes and the folder tree were last answered, and whether that read is out.
     local_at: Option<Instant>,
     local_reading: bool,
+    /// Thumbnails and previews (`drive_previews`): off until the app's start hands it the engine.
+    previews: super::drive_previews::PreviewsHost,
 }
 
 impl<E: DriveEngine> EngineDriveSettings<E> {
@@ -359,9 +362,16 @@ impl<E: DriveEngine> EngineDriveSettings<E> {
             open: None,
             local_at: None,
             local_reading: false,
+            previews: super::drive_previews::PreviewsHost::off(),
         };
         // Nothing is read at launch: a pane reads when it opens (`opened`), never before (module doc).
         source
+    }
+
+    /// Thumbnails and previews on the engine (the app's start; a test's fake).
+    pub fn with_previews(mut self, previews: super::drive_previews::PreviewsHost) -> Self {
+        self.previews = previews;
+        self
     }
 
     /// Test builds: the OS's hand-offs of an exported bundle are `os`'s.
@@ -664,6 +674,7 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
     /// Storage insights only: every other pane keeps the shell's frame (the module's doc says why).
     fn wired(&self, pane: Pane) -> bool {
         matches!(pane, Pane::Insights | Pane::Sync | Pane::Bandwidth | Pane::Diagnostics)
+            || (pane == Pane::Previews && self.previews.bound())
     }
 
     /// Controls the engine cannot honour in this version are not drawn (the triage's honest states).
@@ -756,12 +767,18 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
                 Answer::Bundle(bundle) => self.bundle = bundle,
             }
         }
+        changed |= self.previews.pump();
         (changed, !self.idle())
     }
 
     /// A pane of Drive's settings opened: insights reads again when what it holds is old (P2-3).
     fn opened(&mut self, pane: Pane) {
         self.open = Some(pane);
+        if pane == Pane::Previews {
+            self.previews.opened();
+        } else {
+            self.previews.closed();
+        }
         // The local sizes and the folder tree: Sync and Storage show them.
         if matches!(pane, Pane::Sync | Pane::Storage) {
             self.ask_local();
@@ -780,7 +797,7 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
 
     /// A refused change: the window's toast says it once (P2-6).
     fn take_toast(&mut self) -> Option<&'static str> {
-        self.toast.take()
+        self.toast.take().or_else(|| self.previews.take_toast())
     }
 
     fn storage(&self) -> Storage {
@@ -1022,6 +1039,38 @@ impl<E: DriveEngine> DriveSettings for EngineDriveSettings<E> {
             return;
         }
         self.change(Ask::Keep(keep.to_vec(), release.to_vec()));
+    }
+
+    fn photo_previews(&self) -> crate::frames::settings::previews::PhotoPreviews {
+        self.previews.photo_previews()
+    }
+
+    fn set_photo_previews(&mut self, on: bool) {
+        self.previews.set_on(on);
+    }
+
+    fn previews_cost(
+        &self,
+        size: crate::frames::settings::previews::PreviewSize,
+        format: crate::frames::settings::previews::PreviewFormat,
+    ) -> Option<String> {
+        self.previews.cost(size, format)
+    }
+
+    fn apply_previews(
+        &mut self,
+        size: crate::frames::settings::previews::PreviewSize,
+        format: crate::frames::settings::previews::PreviewFormat,
+    ) {
+        self.previews.apply(size, format);
+    }
+
+    fn rebuild_previews(&mut self) {
+        self.previews.rebuild();
+    }
+
+    fn reload_previews(&mut self) {
+        self.previews.reload();
     }
 }
 

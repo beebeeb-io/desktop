@@ -15,6 +15,8 @@ use crate::shell::actions::{EngineActions, FixtureEngine};
 use crate::shell::app::GateState as ShellGate;
 use crate::shell::host::{self, Shell};
 use crate::shell::platform::fake::FakePlatform;
+use beebeeb_engine::app::photo_previews_api::{PreviewsFacts, PreviewsRefused, SampleFacts};
+use beebeeb_engine::photo_previews::PreviewSetting;
 
 #[path = "setup_app_lock_tests.rs"]
 mod app_lock;
@@ -22,6 +24,8 @@ mod app_lock;
 mod folder_tests;
 #[path = "setup_glue_tests.rs"]
 mod glue;
+#[path = "setup_previews_tests.rs"]
+mod previews_tests;
 
 /// The folder a first run suggests, in these tests.
 const SUGGESTED: &str = "/invented/home/Beebeeb";
@@ -67,6 +71,12 @@ struct Fake {
     choices_fail: AtomicBool,
     /// Every app lock write: its session, its value, and whether a proof came with it.
     app_lock: Mutex<Vec<(SessionGeneration, bool, bool)>>,
+    /// Step 4: what the read of the preview setting answers (`None`: this double binds no previews), a read that
+    /// waits here until released, every setting written, and whether a photo of the account is measured.
+    previews: Mutex<Option<Result<PreviewsFacts, PreviewsRefused>>>,
+    previews_held: Mutex<()>,
+    previews_sets: Mutex<Vec<(SessionGeneration, PreviewSetting)>>,
+    previews_photo: AtomicBool,
     /// Every "Lock again after" write: its session, its value, and whether a proof came with it.
     lock_after: Mutex<
         Vec<(
@@ -110,6 +120,10 @@ fn fake() -> Arc<Fake> {
         choices_held: Mutex::new(()),
         choices_fail: AtomicBool::new(false),
         app_lock: Mutex::default(),
+        previews: Mutex::new(None),
+        previews_held: Mutex::new(()),
+        previews_sets: Mutex::default(),
+        previews_photo: AtomicBool::new(false),
         lock_after: Mutex::default(),
     })
 }
@@ -123,6 +137,22 @@ impl Fake {
 }
 
 impl SetupEngine for Fake {
+    fn binds_previews(&self) -> bool {
+        self.previews.lock().unwrap().is_some()
+    }
+    fn previews_facts_for(&self, _session: SessionGeneration) -> Result<PreviewsFacts, PreviewsRefused> {
+        previews_tests::fake_read(self)
+    }
+    fn set_previews_for(&self, session: SessionGeneration, setting: PreviewSetting) -> Result<(), PreviewsRefused> {
+        previews_tests::fake_set(self, session, setting)
+    }
+    fn measure_sample_for(
+        &self,
+        session: SessionGeneration,
+        _: Option<PathBuf>,
+    ) -> Result<SampleFacts, PreviewsRefused> {
+        previews_tests::fake_sample(self, session)
+    }
     // As the engine: a write for a session that is not the one in memory writes nothing, and off needs a proof.
     fn set_app_lock_for(
         &self,

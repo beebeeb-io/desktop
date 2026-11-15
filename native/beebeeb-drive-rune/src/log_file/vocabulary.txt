@@ -276,6 +276,7 @@ elsewhere
 email
 emptied
 empty
+encoded
 encrypted
 ended
 ends
@@ -373,6 +374,7 @@ hash
 head
 heal
 heartbeat
+heic
 held
 held_back
 held_key_replaced
@@ -526,6 +528,7 @@ non-utf8
 none
 not
 not-in-sync
+not_here
 not_in_sync
 not_there
 nothing
@@ -582,6 +585,7 @@ own
 own-tree
 owner
 page
+panic
 panicked
 parameters
 parent
@@ -605,6 +609,7 @@ pending-mark
 per-scan
 periodic
 persisted
+photo
 phrase
 pin
 pinned
@@ -616,6 +621,7 @@ plain
 plaintext
 plaintext_len
 plan
+planned
 planner
 plans
 platform
@@ -631,6 +637,7 @@ pre-upload
 presentation_read_failed
 presented
 preserving
+previews
 previous
 primary
 prior_agent
@@ -794,8 +801,10 @@ server
 server_seq
 session
 session_id
+session_moved
 sessions
 set
+setting
 settings
 settled
 settling

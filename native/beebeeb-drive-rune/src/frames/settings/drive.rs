@@ -328,6 +328,8 @@ pub trait DriveSettings {
     fn apply_previews(&mut self, _size: super::previews::PreviewSize, _format: super::previews::PreviewFormat) {}
     /// Make every preview again at the stored size and format (DW-0744, Rebuild previews).
     fn rebuild_previews(&mut self) {}
+    /// Read Thumbnails and previews again after a failed read (its Try again).
+    fn reload_previews(&mut self) {}
 }
 
 /// The board's sample content for Drive's settings panes.

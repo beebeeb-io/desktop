@@ -607,11 +607,10 @@ fn all_bytes_here(path: &Path) -> bool {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::fs::MetadataExt;
-        const NOT_HERE: u32 = 0x0040_0000 | 0x0004_0000 | 0x0000_1000;
         let Ok(metadata) = std::fs::symlink_metadata(path) else {
             return false;
         };
-        if metadata.file_attributes() & NOT_HERE != 0 {
+        if crate::cloud_attrs::bytes_not_here(metadata.file_attributes()) {
             return false;
         }
         !metadata.is_dir()

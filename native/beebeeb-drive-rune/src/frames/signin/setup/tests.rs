@@ -211,7 +211,7 @@ fn the_compare_view_fits_inside_the_window() {
 fn with_no_photo_of_their_own_the_bundled_sample_is_loaded() {
     let (ui, _) = fixture(Script::default());
     assert!(ui.sample().bundled);
-    assert_eq!(ui.sample().original_png, BUNDLED_SAMPLE_PNG);
+    assert_eq!(&ui.sample().original_png[..], BUNDLED_SAMPLE_PNG);
     assert_eq!(
         &BUNDLED_SAMPLE_PNG[..8],
         b"\x89PNG\r\n\x1a\n",
