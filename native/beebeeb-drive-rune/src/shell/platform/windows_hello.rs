@@ -1,8 +1,13 @@
 //! Windows Hello as a gate: is it set up on this PC, and did the person at the keyboard just confirm it is them.
 //!
-//! Waiting on the core two-level lock (decision 2495): core owns the rules (the lock levels, the offline password
-//! check, when a key is loaded and dropped). Nothing calls this module yet; no frame, the sign-in flow and the lock
-//! do not use it until core says what a confirmed prompt opens.
+//! Core owns the rules (decision 2495: the lock levels, the offline password check, when a key is loaded and
+//! dropped). The app reaches this module through one seam, `engine_host::hello` (`WindowHello`): the lock screen,
+//! app lock on Sign-in and security, and the first run's "Lock Beebeeb" ask it; what a confirmed prompt opens is
+//! core's answer, asked through the engine.
+//!
+//! One prompt at a time, app-wide: a [`start`] while another prompt is up takes that one away, and its owner hears
+//! `Cancelled`. The owner's own [`HelloRequest::cancel`] is the cancel contract of `engine_host::hello::HelloCancel`
+//! (written there, once): after it returns, no answer of that prompt is handed out.
 //!
 //! What it is NOT: no key, password or other secret passes through here, and a `Verified` unlocks nothing by
 //! itself. The prompt is Windows' own (`UserConsentVerifier` through
@@ -44,8 +49,9 @@ pub enum HelloResult {
     Unavailable,
 }
 
-/// Windows' numbers for `UserConsentVerifierAvailability` and `UserConsentVerificationResult`. On Windows the
-/// build fails when one of them differs from the `windows` crate's (`imp`, below).
+/// Windows' numbers for `UserConsentVerifierAvailability`, `UserConsentVerificationResult` and the prompt
+/// operation's `AsyncStatus`. On Windows the build fails when one of them differs from the `windows` crate's
+/// (`imp`, below).
 mod raw {
     pub const AVAILABLE: i32 = 0;
     pub const VERIFIED: i32 = 0;
@@ -56,6 +62,11 @@ mod raw {
     pub const DEVICE_BUSY: i32 = 4;
     pub const RETRIES_EXHAUSTED: i32 = 5;
     pub const CANCELED: i32 = 6;
+    // `AsyncStatus`: how the prompt's operation ended (a different enum from the result's `CANCELED` above).
+    pub const STATUS_STARTED: i32 = 0;
+    pub const STATUS_COMPLETED: i32 = 1;
+    pub const STATUS_CANCELED: i32 = 2;
+    pub const STATUS_ERROR: i32 = 3;
 }
 
 /// `None`: Windows gave no answer. A number Windows may add later is `Unsupported`, never `Available`.
@@ -79,26 +90,39 @@ fn result_from_raw(value: i32) -> HelloResult {
     }
 }
 
+/// How the prompt ended, from what its operation reported: Windows' `AsyncStatus`, and the
+/// `UserConsentVerificationResult` read from it, which is read only when the status is `Completed` (`None`: not
+/// read, or it could not be). `Verified` is the result's zero value, so the status decides first: an operation that
+/// did not complete (`Canceled`, `Error`, still `Started`, or a status Windows may add later) is never `Verified`,
+/// whatever number its result holds. This is the one place a prompt's `Verified` comes from.
+fn outcome_of(status: i32, result: Option<i32>) -> HelloResult {
+    match status {
+        raw::STATUS_COMPLETED => result.map_or(HelloResult::Failed, result_from_raw),
+        raw::STATUS_CANCELED => HelloResult::Cancelled,
+        _ => HelloResult::Failed,
+    }
+}
+
 /// What the platform half saw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Seen {
     /// No prompt was shown.
     NoPrompt,
-    /// The prompt ended with this `UserConsentVerificationResult`.
-    Ended(i32),
+    /// The prompt's operation ended with this `AsyncStatus` and, when it completed, this result ([`outcome_of`]).
+    Ended { status: i32, result: Option<i32> },
     /// Windows refused the request or the wait for it.
     Refused,
 }
 
-/// The answer the caller gets. Once the app asked for the prompt to go, the answer is `Cancelled`, also when the
-/// person confirmed in the same instant: whoever asked has left.
-fn settle(seen: Seen, cancel_asked: bool) -> HelloResult {
-    if cancel_asked {
+/// The answer the caller gets. A prompt that was taken away (a newer one took its place) answers `Cancelled`, also
+/// when the person confirmed in the same instant: the screen that asked has a newer prompt now.
+fn settle(seen: Seen, taken_away: bool) -> HelloResult {
+    if taken_away {
         return HelloResult::Cancelled;
     }
     match seen {
         Seen::NoPrompt => HelloResult::Unavailable,
-        Seen::Ended(value) => result_from_raw(value),
+        Seen::Ended { status, result } => outcome_of(status, result),
         Seen::Refused => HelloResult::Failed,
     }
 }
@@ -135,8 +159,12 @@ impl HelloWindow {
 /// Where one request stands; shared by the prompt's thread and whoever may cancel it.
 #[derive(Default)]
 struct Progress {
+    /// The owner took the prompt away ([`HelloRequest::cancel`]): no answer is handed out from then on.
     cancel_asked: bool,
-    prompt_ended: bool,
+    /// A newer prompt took this one's place ([`start`]): it goes, and its owner is answered `Cancelled`.
+    superseded: bool,
+    /// The prompt's operation ended, with this `AsyncStatus`.
+    ended: Option<i32>,
 }
 
 #[derive(Default)]
@@ -148,8 +176,10 @@ struct Control {
 /// Why the prompt's thread stopped waiting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Woken {
-    PromptEnded,
-    CancelAsked,
+    /// The operation ended, with this `AsyncStatus`.
+    PromptEnded(i32),
+    /// The owner cancelled, or a newer prompt took this one's place.
+    TakenAway,
 }
 
 impl Control {
@@ -158,25 +188,32 @@ impl Control {
         self.changed.notify_all();
     }
 
-    fn prompt_ended(&self) {
-        lock(&self.progress).prompt_ended = true;
+    fn supersede(&self) {
+        lock(&self.progress).superseded = true;
         self.changed.notify_all();
     }
 
-    fn cancel_asked(&self) -> bool {
-        lock(&self.progress).cancel_asked
+    /// The completion handler's call: the operation ended with `status` (its `AsyncStatus`).
+    fn prompt_ended(&self, status: i32) {
+        lock(&self.progress).ended = Some(status);
+        self.changed.notify_all();
     }
 
-    /// Waits for the prompt to end or for a cancel, whichever is first; a cancel wins when both are in. The
+    fn taken_away(&self) -> bool {
+        let progress = lock(&self.progress);
+        progress.cancel_asked || progress.superseded
+    }
+
+    /// Waits for the prompt to end or to be taken away, whichever is first; taken away wins when both are in. The
     /// wait does not depend on Windows taking the prompt away: a cancel ends it by itself.
     fn wait(&self) -> Woken {
         let mut progress = lock(&self.progress);
         loop {
-            if progress.cancel_asked {
-                return Woken::CancelAsked;
+            if progress.cancel_asked || progress.superseded {
+                return Woken::TakenAway;
             }
-            if progress.prompt_ended {
-                return Woken::PromptEnded;
+            if let Some(status) = progress.ended {
+                return Woken::PromptEnded(status);
             }
             progress = self
                 .changed
@@ -185,11 +222,19 @@ impl Control {
         }
     }
 
-    /// Decides the answer and hands it over in one step: a cancel is either in before the answer is decided
-    /// (and the answer is `Cancelled`), or waits until the answer has been handed over.
+    /// Decides the answer under the lock, then hands it over with the lock released: `on_done` may call
+    /// [`HelloRequest::cancel`], which takes the same lock. An owner's cancel that is in before the decision means
+    /// no answer at all: `on_done` is dropped unrun (also outside the lock). A cancel after the decision finds the
+    /// answer handed over already; the owner's own turn check drops it.
     fn answer(&self, seen: Seen, on_done: impl FnOnce(HelloResult)) {
-        let progress = lock(&self.progress);
-        on_done(settle(seen, progress.cancel_asked));
+        let result = {
+            let progress = lock(&self.progress);
+            (!progress.cancel_asked).then(|| settle(seen, progress.superseded))
+        };
+        match result {
+            Some(result) => on_done(result),
+            None => drop(on_done),
+        }
     }
 }
 
@@ -197,16 +242,49 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// A prompt that is up, or about to be. Dropping this leaves the prompt alone.
+/// The one prompt that is up, app-wide.
+struct OneUp {
+    up: Mutex<Option<Arc<Control>>>,
+}
+
+impl OneUp {
+    const fn new() -> Self {
+        Self { up: Mutex::new(None) }
+    }
+
+    /// `control` is the prompt that is up from now on. The one it replaces (still up, or about to be) is taken
+    /// away, and its owner, who did not cancel it, is answered `Cancelled`.
+    fn take_place(&self, control: &Arc<Control>) {
+        let previous = lock(&self.up).replace(control.clone());
+        if let Some(previous) = previous {
+            previous.supersede();
+        }
+    }
+
+    /// `control`'s prompt is over. A newer one that took its place stays.
+    fn leave(&self, control: &Arc<Control>) {
+        let mut up = lock(&self.up);
+        if up.as_ref().is_some_and(|current| Arc::ptr_eq(current, control)) {
+            *up = None;
+        }
+    }
+}
+
+static UP: OneUp = OneUp::new();
+
+/// A prompt that is up, or about to be. Dropping this leaves the prompt alone (a newer [`start`] still takes it
+/// away).
 pub struct HelloRequest {
     control: Arc<Control>,
 }
 
 impl HelloRequest {
-    /// The person left the screen that asked: take the prompt away. When this returns, `on_done` has either
-    /// already run with the prompt's own answer, or it will run with `Cancelled`, whatever the person does in
-    /// the prompt from here on. It runs once in both cases. Windows is asked to close the prompt from the
-    /// prompt's thread, not from this call. Never call this from inside `on_done`.
+    /// The person left the screen that asked: take the prompt away. This is the cancel contract of
+    /// `engine_host::hello::HelloCancel`: once this returns, no answer of this prompt is handed out. `on_done` has
+    /// either been handed its answer already (decided before this call: the owner's own turn check drops it) or it
+    /// never runs and is dropped, whatever the person does in the prompt from here on. Never blocks: Windows is
+    /// asked to close the prompt from the prompt's thread, not from this call. Safe to call from inside `on_done`,
+    /// and on a prompt that is over (it then changes nothing).
     pub fn cancel(&self) {
         self.control.cancel();
     }
@@ -223,26 +301,34 @@ pub fn verify(window: HelloWindow, reason: &str) -> HelloResult {
     settle(imp::verify(window, reason, &Arc::new(Control::default())), false)
 }
 
-/// [`verify`] on a thread of its own. `on_done` runs exactly once, on that thread, never inside this call: post
-/// the answer to the UI loop from it and do nothing else there. `None`: no thread could be started, so there is
-/// no prompt and `on_done` is dropped without running; treat it as [`HelloResult::Failed`].
+/// [`verify`] on a thread of its own. `on_done` runs at most once, on that thread, never inside this call: exactly
+/// once, unless [`HelloRequest::cancel`] returned first. Post the answer to the UI loop from it and do nothing else
+/// there. A prompt that is up for another screen is taken away first; its owner is answered `Cancelled`. `None`: no
+/// thread could be started, so there is no prompt and `on_done` is dropped without running; treat it as
+/// [`HelloResult::Failed`].
 pub fn start(
     window: HelloWindow,
     reason: &str,
     on_done: impl FnOnce(HelloResult) + Send + 'static,
 ) -> Option<HelloRequest> {
     let control = Arc::new(Control::default());
+    UP.take_place(&control);
     let worker = {
         let (control, reason) = (control.clone(), reason.to_owned());
         move || {
             let seen = imp::verify(window, &reason, &control);
+            UP.leave(&control);
             control.answer(seen, on_done);
         }
     };
-    std::thread::Builder::new()
+    if std::thread::Builder::new()
         .name("windows-hello".into())
         .spawn(worker)
-        .ok()?;
+        .is_err()
+    {
+        UP.leave(&control);
+        return None;
+    }
     Some(HelloRequest { control })
 }
 
@@ -250,7 +336,7 @@ pub fn start(
 mod imp {
     use std::sync::Arc;
 
-    use windows::Foundation::{AsyncOperationCompletedHandler, IAsyncOperation};
+    use windows::Foundation::{AsyncOperationCompletedHandler, AsyncStatus, IAsyncOperation};
     use windows::Security::Credentials::UI::{
         UserConsentVerificationResult, UserConsentVerifier, UserConsentVerifierAvailability,
     };
@@ -262,6 +348,10 @@ mod imp {
 
     // The mapping above is written (and tested on every platform) against these numbers.
     const _: () = {
+        assert!(AsyncStatus::Started.0 == raw::STATUS_STARTED);
+        assert!(AsyncStatus::Completed.0 == raw::STATUS_COMPLETED);
+        assert!(AsyncStatus::Canceled.0 == raw::STATUS_CANCELED);
+        assert!(AsyncStatus::Error.0 == raw::STATUS_ERROR);
         assert!(UserConsentVerifierAvailability::Available.0 == raw::AVAILABLE);
         assert!(UserConsentVerifierAvailability::DeviceNotPresent.0 == raw::DEVICE_NOT_PRESENT);
         assert!(UserConsentVerifierAvailability::NotConfiguredForUser.0 == raw::NOT_CONFIGURED_FOR_USER);
@@ -287,8 +377,9 @@ mod imp {
         if availability().is_some_and(|answer| availability_from_raw(Some(answer)) != HelloAvailability::Available) {
             return Seen::NoPrompt;
         }
-        // Whoever asked has already left: no prompt for them. (`settle` makes this `Cancelled`.)
-        if control.cancel_asked() {
+        // Whoever asked has already left, or a newer prompt took this one's place: no prompt for them. (The owner's
+        // cancel hands out no answer; a newer prompt makes this one `Cancelled`.)
+        if control.taken_away() {
             return Seen::Refused;
         }
         let Ok(interop) = windows::core::factory::<UserConsentVerifier, IUserConsentVerifierInterop>() else {
@@ -299,9 +390,10 @@ mod imp {
         let prompt: windows::core::Result<IAsyncOperation<UserConsentVerificationResult>> =
             unsafe { interop.RequestVerificationForWindowAsync(HWND(window.0 as *mut _), &HSTRING::from(reason)) };
         let Ok(prompt) = prompt else { return Seen::Refused };
+        // The handler keeps the operation's status: it decides whether there is a result at all (`outcome_of`).
         let ended = control.clone();
-        let on_end = AsyncOperationCompletedHandler::<UserConsentVerificationResult>::new(move |_, _| {
-            ended.prompt_ended();
+        let on_end = AsyncOperationCompletedHandler::<UserConsentVerificationResult>::new(move |_, status| {
+            ended.prompt_ended(status.0);
             Ok(())
         });
         if prompt.SetCompleted(&on_end).is_err() {
@@ -310,13 +402,20 @@ mod imp {
             return Seen::Refused;
         }
         match control.wait() {
-            Woken::PromptEnded => match prompt.GetResults() {
-                Ok(result) => Seen::Ended(result.0),
-                Err(_) => Seen::Refused,
-            },
-            Woken::CancelAsked => {
+            Woken::PromptEnded(status) => {
+                // Only a completed operation has a result to read. `Verified` is the result's zero value, so
+                // nothing is read from one that was cancelled or failed.
+                let result = if status == raw::STATUS_COMPLETED {
+                    prompt.GetResults().ok().map(|result| result.0)
+                } else {
+                    None
+                };
+                Seen::Ended { status, result }
+            }
+            Woken::TakenAway => {
                 // Asks Windows to close the prompt, from this thread. Whether and when it leaves the screen is
-                // Windows' to decide; the answer does not wait for it and is `Cancelled` either way.
+                // Windows' to decide; the answer does not wait for it: none for an owner's cancel, `Cancelled`
+                // for a prompt a newer one took the place of.
                 let _ = prompt.Cancel();
                 Seen::Refused
             }
@@ -405,22 +504,78 @@ mod tests {
         assert_eq!(result_from_raw(-1), HelloResult::Failed);
     }
 
+    /// A prompt whose operation completed, with this result.
+    fn completed(value: i32) -> Seen {
+        Seen::Ended {
+            status: raw::STATUS_COMPLETED,
+            result: Some(value),
+        }
+    }
+
     #[test]
     fn what_the_platform_saw_settles_into_the_answer() {
         assert_eq!(settle(Seen::NoPrompt, false), HelloResult::Unavailable);
         assert_eq!(settle(Seen::Refused, false), HelloResult::Failed);
         let passed_on = RESULTS
             .iter()
-            .filter(|(value, want)| settle(Seen::Ended(*value), false) == *want)
+            .filter(|(value, want)| settle(completed(*value), false) == *want)
             .count();
         assert_eq!(passed_on, 7);
     }
 
+    /// L271: `Verified` is the result's zero value, so an operation that did not complete must never map to it.
     #[test]
-    fn a_cancelled_request_is_cancelled_whatever_the_prompt_said() {
+    fn non_completed_status_is_never_verified() {
+        // Every status but `Completed` (the named three among them), with the zero value first, no result, and
+        // every other number Windows names.
+        let statuses: Vec<i32> = (-1000..=1000)
+            .filter(|status| *status != raw::STATUS_COMPLETED)
+            .chain([i32::MIN, i32::MAX])
+            .collect();
+        let results: Vec<Option<i32>> = [Some(raw::VERIFIED), None]
+            .into_iter()
+            .chain((1..=7).map(Some))
+            .collect();
+        let (mut checked, mut verified) = (0, 0);
+        for status in &statuses {
+            for result in &results {
+                checked += 1;
+                verified += usize::from(outcome_of(*status, *result) == HelloResult::Verified);
+                verified += usize::from(
+                    settle(
+                        Seen::Ended {
+                            status: *status,
+                            result: *result,
+                        },
+                        false,
+                    ) == HelloResult::Verified,
+                );
+            }
+        }
+        assert_eq!((checked, verified), (2002 * 9, 0));
+        // What each named status says: Windows took the prompt away, it failed, or it never ended.
+        assert_eq!(
+            outcome_of(raw::STATUS_CANCELED, Some(raw::VERIFIED)),
+            HelloResult::Cancelled
+        );
+        assert_eq!(outcome_of(raw::STATUS_ERROR, Some(raw::VERIFIED)), HelloResult::Failed);
+        assert_eq!(
+            outcome_of(raw::STATUS_STARTED, Some(raw::VERIFIED)),
+            HelloResult::Failed
+        );
+        // Completed: the result decides, and a result that could not be read is a failure, never a yes.
+        assert_eq!(
+            outcome_of(raw::STATUS_COMPLETED, Some(raw::VERIFIED)),
+            HelloResult::Verified
+        );
+        assert_eq!(outcome_of(raw::STATUS_COMPLETED, None), HelloResult::Failed);
+    }
+
+    #[test]
+    fn a_superseded_request_is_cancelled_whatever_the_prompt_said() {
         let seen = RESULTS
             .iter()
-            .map(|(value, _)| Seen::Ended(*value))
+            .map(|(value, _)| completed(*value))
             .chain([Seen::NoPrompt, Seen::Refused]);
         let (mut checked, mut cancelled) = (0, 0);
         for seen in seen {
@@ -447,14 +602,23 @@ mod tests {
             act(&control);
             waiter.join().unwrap()
         };
-        assert_eq!(waited(|control| control.cancel()), Woken::CancelAsked);
-        assert_eq!(waited(|control| control.prompt_ended()), Woken::PromptEnded);
+        assert_eq!(waited(|control| control.cancel()), Woken::TakenAway);
+        assert_eq!(waited(|control| control.supersede()), Woken::TakenAway);
+        assert_eq!(
+            waited(|control| control.prompt_ended(raw::STATUS_COMPLETED)),
+            Woken::PromptEnded(raw::STATUS_COMPLETED)
+        );
+        assert_eq!(
+            waited(|control| control.prompt_ended(raw::STATUS_CANCELED)),
+            Woken::PromptEnded(raw::STATUS_CANCELED)
+        );
         let both = Control::default();
-        both.prompt_ended();
+        both.prompt_ended(raw::STATUS_COMPLETED);
         both.cancel();
-        assert_eq!(both.wait(), Woken::CancelAsked);
+        assert_eq!(both.wait(), Woken::TakenAway);
     }
 
+    /// L274: after the owner's cancel no answer is handed out; a prompt a newer one replaced is told `Cancelled`.
     #[test]
     fn the_answer_is_decided_with_the_cancel_that_is_in() {
         let answered = |control: &Control, seen| {
@@ -463,9 +627,67 @@ mod tests {
             got
         };
         let control = Control::default();
-        assert_eq!(answered(&control, Seen::Ended(0)), Some(HelloResult::Verified));
+        assert_eq!(answered(&control, completed(0)), Some(HelloResult::Verified));
         control.cancel();
-        assert_eq!(answered(&control, Seen::Ended(0)), Some(HelloResult::Cancelled));
+        assert_eq!(
+            answered(&control, completed(0)),
+            None,
+            "an answer after the owner's cancel"
+        );
+        let superseded = Control::default();
+        superseded.supersede();
+        assert_eq!(answered(&superseded, completed(0)), Some(HelloResult::Cancelled));
+        // A superseded prompt whose owner then cancelled too: nothing.
+        superseded.cancel();
+        assert_eq!(answered(&superseded, completed(0)), None);
+    }
+
+    /// L272: `on_done` runs with the request's lock released, so a cancel from inside it (a screen that closes on the
+    /// answer) returns. Run on a thread of its own and bounded: a relock would hang that thread, not the test binary.
+    #[test]
+    fn cancel_while_on_done_runs_returns() {
+        let control = Arc::new(Control::default());
+        let request = HelloRequest {
+            control: control.clone(),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            control.answer(completed(raw::VERIFIED), move |result| {
+                request.cancel();
+                let _ = tx.send(result);
+            });
+        });
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(5)),
+            Ok(HelloResult::Verified),
+            "on_done ran under the lock that cancel() takes"
+        );
+    }
+
+    /// L273: one prompt at a time. A newer prompt takes the place of the one that is up: that one's wait ends, its
+    /// owner (who did not cancel) is answered `Cancelled` even on a yes, and its end does not free the newer one's place.
+    #[test]
+    fn a_newer_prompt_takes_the_place_of_the_one_that_is_up() {
+        let one_up = OneUp::new();
+        let (first, second) = (Arc::new(Control::default()), Arc::new(Control::default()));
+        one_up.take_place(&first);
+        assert!(!first.taken_away(), "the first prompt replaces nothing");
+        one_up.take_place(&second);
+        assert!(first.taken_away());
+        assert!(!second.taken_away());
+        assert_eq!(first.wait(), Woken::TakenAway);
+        let mut got = None;
+        first.answer(completed(raw::VERIFIED), |result| got = Some(result));
+        assert_eq!(got, Some(HelloResult::Cancelled));
+
+        one_up.leave(&first);
+        assert!(lock(&one_up.up).as_ref().is_some_and(|up| Arc::ptr_eq(up, &second)));
+        one_up.leave(&second);
+        assert!(lock(&one_up.up).is_none());
+        // Once the slot is free, a new prompt takes the place of nothing.
+        let third = Arc::new(Control::default());
+        one_up.take_place(&third);
+        assert!(!second.taken_away());
     }
 
     // Off Windows there is nothing to show: the answers below are the stub's. On Windows these would raise a
@@ -504,13 +726,13 @@ mod tests {
         }
 
         #[test]
-        fn a_request_cancelled_before_its_answer_ends_cancelled() {
+        fn a_request_cancelled_before_its_answer_hands_out_none() {
             let control = Arc::new(Control::default());
             control.cancel();
             let seen = imp::verify(HelloWindow::from_hwnd(1).unwrap(), "Unlock Beebeeb", &control);
             let mut got = None;
             control.answer(seen, |result| got = Some(result));
-            assert_eq!(got, Some(HelloResult::Cancelled));
+            assert_eq!(got, None);
         }
     }
 }
