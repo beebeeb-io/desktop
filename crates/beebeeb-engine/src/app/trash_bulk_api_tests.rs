@@ -213,3 +213,44 @@ fn a_connection_that_drops_after_the_bulk_delete_left_is_not_confirmed() {
         "the delete did leave"
     );
 }
+
+/// Review of desktop#424 (engine P2-1, crypto P2-2): a locked screen refuses the bulk permanent delete before
+/// anything is sent, also for a turn read while it was locked (an unlock does not move the turn).
+#[test]
+fn a_locked_screen_deletes_nothing_and_sends_nothing() {
+    use crate::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
+    let (account, phrase) = FakeAccount::register("bulk-locked@example.eu", PASSWORD, TEST_PHRASE);
+    let account = Arc::new(account);
+    let api = FakeApi::start(account_handler(account.clone()));
+    let (host, _messages) = crate::host::ChannelHost::new(|| {});
+    let config = crate::app::EngineConfig {
+        account_id: "bulk-locked-slot".into(),
+        state_dir: crate::state_paths::init_for_test(),
+        api_base: api.base.clone(),
+    };
+    let engine = crate::app::Engine::open(
+        &crate::identity::REAL,
+        config,
+        host,
+        crate::signin::memory_store::MemoryCredentials::default(),
+    )
+    .expect("the engine opens");
+    engine.restore();
+    engine
+        .sign_in_password(&account.email, zeroize::Zeroizing::new(PASSWORD.into()))
+        .expect("the fake accepts the password");
+    engine
+        .unlock_with_phrase(zeroize::Zeroizing::new(phrase))
+        .expect("the phrase unlocks");
+    engine.lock_screen().expect("an open lock can lock the screen");
+    let session = engine.session_turn();
+    let before = api.routes().len();
+    let purged = engine.purge_trash_bulk_for(session, &[id(1), id(2)], PASSWORD.as_bytes());
+    assert!(purged.deleted.is_empty());
+    assert_eq!(purged.error, Some(PurgeError::NotSignedIn));
+    assert_eq!(
+        api.routes()[before..].to_vec(),
+        Vec::<String>::new(),
+        "nothing is sent under a locked screen"
+    );
+}

@@ -88,6 +88,8 @@ struct Server {
     hang_once: Option<&'static str>,
     /// Every request: its route, and whether the device remembered the folder's custody when it arrived.
     seen: Vec<(String, bool)>,
+    /// Runs once when the invite arrives, before it is answered (a session change while the invite is out).
+    on_invite: Option<Box<dyn FnOnce() + Send>>,
 }
 
 struct Fixture {
@@ -129,6 +131,11 @@ fn handler(server: Arc<Mutex<Server>>, probe: Arc<StateDb>) -> crate::test_api::
         if s.hang_once == Some(route.as_str()) {
             s.hang_once = None;
             return Reply::hang_up();
+        }
+        if route == INVITES
+            && let Some(hook) = s.on_invite.take()
+        {
+            hook();
         }
         match route.as_str() {
             "GET /api/v1/shares/invites/sent" => Reply::ok(s.sent.clone()),
@@ -218,6 +225,7 @@ fn fixture(recipient: Option<[u8; 32]>) -> Fixture {
         custody: None,
         hang_once: None,
         seen: Vec::new(),
+        on_invite: None,
     }));
     let probe = Arc::new(StateDb::open(&path).unwrap());
     let api = FakeApi::start(handler(server.clone(), probe));
@@ -609,6 +617,37 @@ fn share_invite_cut_off_mid_flow_is_not_sent_and_a_retry_keeps_the_one_folder_ke
     assert_eq!(h.db.share_sealed_key(OWN, INVITE).unwrap(), None);
 }
 
+/// Review of desktop#424 (crypto P2-3): the session's turn moves between the invite (answered "claimed") and its
+/// approval. Nothing is sealed or approved, and the claimed invite, which holds no key, is withdrawn while the same
+/// account is still signed in. Another account: nothing more is sent, and the answer never says nothing was shared
+/// while the claimed invite stays.
+#[test]
+fn share_invite_whose_session_moves_after_the_claim_is_withdrawn_for_the_same_account() {
+    let f = fixture(Some(person(47).public));
+    let (engine, master) = (f.engine.clone(), f.owner_master);
+    f.server.lock().unwrap().on_invite = Some(Box::new(move || signed_in(&engine, master)));
+    assert_eq!(f.invite(FILE), InviteAnswer::Refused(InviteRefused::SessionEnded));
+    let routes = f.routes();
+    assert!(!routes.iter().any(|r| r == APPROVE), "{routes:?}");
+    assert!(
+        routes.iter().any(|r| r == CANCEL),
+        "the claimed invite is withdrawn: {routes:?}"
+    );
+    assert!(sealed_fields(&f.api).is_empty());
+
+    let g = fixture(Some(person(48).public));
+    let engine = g.engine.clone();
+    g.server.lock().unwrap().on_invite = Some(Box::new(move || signed_in(&engine, [9; 32])));
+    let answer = g.invite(FILE);
+    let routes = g.routes();
+    assert!(!routes.iter().any(|r| r == APPROVE || r == CANCEL), "{routes:?}");
+    assert!(sealed_fields(&g.api).is_empty());
+    assert!(
+        !matches!(answer, InviteAnswer::Refused(_)),
+        "a claimed invite that stays is never answered as nothing shared: {answer:?}"
+    );
+}
+
 // Rule 8 (engine side; the window's side is the host's test).
 #[test]
 fn share_invite_for_a_session_that_is_over_sends_nothing() {
@@ -645,7 +684,13 @@ fn share_invite_answers_and_logs_carry_no_key_material() {
         ]
     });
     assert_eq!(answers[2], InviteAnswer::Refused(InviteRefused::InvalidEmail));
-    assert_eq!(answers[0], InviteAnswer::Refused(InviteRefused::Failed));
+    // The withdrawal failed, so the claimed invite stays: never answered as nothing shared (review of desktop#424).
+    assert_eq!(
+        answers[0],
+        InviteAnswer::Unfinished {
+            invite_id: INVITE.into()
+        }
+    );
     assert!(
         logs.contains("an invite that holds no key could not be withdrawn"),
         "the capture reads this module's lines"

@@ -185,8 +185,9 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// The token (and the vault key, when `with_key`) of the session `session` names, copied together, and only
-    /// while that is the session in memory, asked with no session change half done. A session Beebeeb no longer
-    /// accepts: `SessionEnded`, nothing is asked.
+    /// while that is the session in memory, asked through `person_session` (a person's call: a locked screen
+    /// refuses it, also for a turn read while it was locked) with no session change half done. A session Beebeeb no
+    /// longer accepts: `SessionEnded`, nothing is asked.
     fn passkey_secrets(
         &self,
         session: SessionGeneration,
@@ -196,13 +197,16 @@ impl<C: CredentialStores> Engine<C> {
             return Err(PasskeyProblem::NotSignedIn);
         }
         let copied = self
-            .acct
-            .while_session_is(&self.writes, session, |current| {
-                (
-                    Zeroizing::new(current.token.clone()),
-                    with_key.then(|| Zeroizing::new(current.master_key)),
-                )
+            .person_session(|current, generation| {
+                (generation == session).then(|| {
+                    (
+                        Zeroizing::new(current.token.clone()),
+                        with_key.then(|| Zeroizing::new(current.master_key)),
+                    )
+                })
             })
+            .ok()
+            .flatten()
             .ok_or(PasskeyProblem::NotSignedIn)?;
         if self.acct.auth_health.is_expired() {
             return Err(PasskeyProblem::SessionEnded);

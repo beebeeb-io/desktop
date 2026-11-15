@@ -593,3 +593,39 @@ fn a_passkey_is_renamed_for_its_own_session_with_the_servers_refusals_as_kinds()
         count
     );
 }
+
+/// Review of desktop#424 (engine P2-1, crypto P2-2): a locked screen refuses the passkey list, add, remove and rename
+/// before anything is sent, also for a turn read while it was locked (an unlock does not move the turn).
+#[test]
+fn a_locked_screen_refuses_every_passkey_call_and_sends_nothing() {
+    let fake = fake("screen-locked");
+    let engine = engine(&fake, true);
+    engine.lock_screen().expect("an open lock can lock the screen");
+    let session = engine.session_turn();
+    let before = fake.api.routes().len();
+    assert_eq!(engine.passkeys().err(), Some(PasskeyProblem::NotSignedIn));
+    assert_eq!(
+        engine.rename_passkey(session, PASSKEY, "Fine"),
+        Err(PasskeyProblem::NotSignedIn)
+    );
+    assert_eq!(
+        engine.remove_passkey(session, password(PASSWORD), PASSKEY),
+        Err(PasskeyProblem::NotSignedIn)
+    );
+    let platform = Platform {
+        cancel: false,
+        prf: true,
+    };
+    assert_eq!(
+        engine
+            .add_passkey_with(&platform, session, password(PASSWORD), "A key")
+            .err(),
+        Some(PasskeyProblem::NotSignedIn)
+    );
+    assert_eq!(
+        fake.api.routes()[before..].to_vec(),
+        Vec::<String>::new(),
+        "nothing is sent under a locked screen"
+    );
+    assert!(fake.escrow.lock().unwrap().is_empty());
+}

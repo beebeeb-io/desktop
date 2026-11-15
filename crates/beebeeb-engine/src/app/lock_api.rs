@@ -389,6 +389,9 @@ impl<C: CredentialStores> Engine<C> {
                 loop {
                     let Some(engine) = engine.upgrade() else { return };
                     engine.close_ended_session();
+                    // A session stored before the owner tag: its owner, once Beebeeb can say (at most once a minute,
+                    // on a thread of its own).
+                    engine.settle_session_owner_aside();
                     drop(engine);
                     std::thread::sleep(every);
                 }
