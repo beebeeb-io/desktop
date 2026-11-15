@@ -374,7 +374,7 @@ impl<C: CredentialStores> SetupEngine for Engine<C> {
                     })
                     .collect()
             })
-            .unwrap_or_default()
+            .ok()
     }
     fn switch_backup_on(&self, key: &str) -> bool {
         self.set_backup_folder(key, true).is_ok()
