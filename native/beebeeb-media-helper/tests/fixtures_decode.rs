@@ -8,11 +8,11 @@
 //! switch (OFF) on every OS, with the shipped route table (features: `h264` only).
 //!
 //! The `expect` column is exact, by the shipped routes: `play`, `silent` (the video plays, `no_sound` names the audio
-//! codec), `system` (`NoSystemDecoder`), `unsupported` (`Unsupported`), `refuse` (any refusal: the code is not pinned).
+//! codec), `system` (`NoSystemDecoder`), `unsupported` (`Unsupported`), `refuse` (the code `refused_with` pins per file).
 //!
 //! Video claim, honestly stated: the helper answers RGBA, not planes, so a "bit-exact Y plane" cannot be compared. The
 //! test converts the RGBA picture back to luma (BT.601 or BT.709, limited range: the better of the two) and requires
-//! PSNR >= 45 dB against ffmpeg's decoded Y planes (`fixtures/ref/<stem>.y`) for every row that plays.
+//! PSNR >= 45 dB against ffmpeg's decoded Y planes (`fixtures/ref/<file>.y`) for every row that plays.
 //! The manifest's `ref` (the SHA-256 of those planes) is checked against the kept planes, so the reference cannot drift.
 
 use std::collections::VecDeque;
@@ -412,6 +412,16 @@ fn silent_audio_codec(file: &str) -> Codec {
     }
 }
 
+/// The code a `refuse` row is refused with. MPEG-4 part 2 is routed to the system's decoder (none is wired), the
+/// other two have no decoder at all.
+fn refused_with(file: &str) -> ErrorCode {
+    match file {
+        "mpeg4p2.avi" => ErrorCode::NoSystemDecoder(Codec::Mpeg4Part2),
+        "wmv2.wmv" | "wmav2.wma" => ErrorCode::NoDecoder,
+        other => panic!("{other}: a refuse row with no pinned refusal"),
+    }
+}
+
 /// The refusal of a row, at `Open` or at the first want: both are honest, a picture or PCM is not.
 fn refusal(app: &mut App, file: &str, kind: &str, hint: KindHint) -> ErrorCode {
     let answer = match app.open(hint) {
@@ -442,8 +452,13 @@ fn run_row(file: &str) {
 
     match r.expect.as_str() {
         "refuse" => {
-            // Any refusal: no run has printed this row's code yet, so it is not pinned (MCP2's list may pin it).
-            let _code = refusal(&mut app, file, &r.kind, hint);
+            // The SPECIFIC refusal, from the first run's printed codes (MCP2 row 23): a wrong refusal is red.
+            let code = refusal(&mut app, file, &r.kind, hint);
+            assert_eq!(
+                code,
+                refused_with(file),
+                "{file}: refused, but not with the code this row pins"
+            );
         }
         "system" => {
             let code = refusal(&mut app, file, &r.kind, hint);
@@ -495,8 +510,7 @@ fn run_row(file: &str) {
 }
 
 fn check_video(file: &str, r: &Row, app: &mut App) {
-    let stem = file.rsplit_once('.').map_or(file, |(s, _)| s);
-    let planes = read_file(&format!("ref/{stem}.y"));
+    let planes = read_file(&format!("ref/{file}.y"));
     assert_eq!(
         sha256_hex(&planes),
         r.reference,
@@ -598,6 +612,20 @@ fn fixtures_manifest_has_every_row() {
     names.dedup();
     assert_eq!(names.len(), ROWS_EXPECTED, "a file is listed twice");
     assert!(fixtures_dir().join("LICENSE.txt").is_file());
+
+    // One kept reference per picture row, named after its whole file name (MCP2 row 22): two rows never share one.
+    let mut want: Vec<String> = rows
+        .iter()
+        .filter(|r| r.kind == "video" && r.reference != "-")
+        .map(|r| format!("{}.y", r.file))
+        .collect();
+    want.sort_unstable();
+    let mut have: Vec<String> = fs::read_dir(fixtures_dir().join("ref"))
+        .expect("fixtures/ref")
+        .map(|e| e.expect("ref entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    have.sort_unstable();
+    assert_eq!(have, want, "ref/ holds exactly one <file>.y per picture row");
 }
 
 /// One test per row: the shipped route table, the shipped switch (OFF).
