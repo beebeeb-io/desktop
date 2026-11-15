@@ -360,6 +360,36 @@ fn settle(source: &mut Source) {
     }
 }
 
+/// Pump until `done` holds, after a step whose worker COMPUTES: "Use your password" runs core's password check (the
+/// OPAQUE proof and the screen-check record made again, about 1.4 s on an idle PC and past 10 s under a full test run's
+/// load). The clock is not what tells a lost answer here. While the app lock's worker runs, its answer is still on its
+/// way. Once none runs, the answer must arrive within `settle`'s 10 s like any other, or it was lost: the same red.
+/// Only a worker that never ends (a hang) meets the last guard.
+fn until_computed(source: &mut Source, mut done: impl FnMut(&mut Source) -> bool) {
+    let (began, mut idle_since) = (Instant::now(), Instant::now());
+    loop {
+        // Asked before `done`: a worker that has ended sent its answer first, so `done`'s pump takes it in.
+        let computing = source.app_lock.computing();
+        if done(source) {
+            return;
+        }
+        if computing {
+            idle_since = Instant::now();
+        }
+        assert!(
+            idle_since.elapsed() < Duration::from_secs(10),
+            "an answer did not come back"
+        );
+        assert!(began.elapsed() < Duration::from_secs(120), "a worker never ended");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// `settle` after a step whose worker computes (`until_computed`).
+fn settle_computed(source: &mut Source) {
+    until_computed(source, |source| !source.pump().busy);
+}
+
 fn opened(source: &mut Source, pane: Pane) {
     source.opened(pane);
     settle(source);

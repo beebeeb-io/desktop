@@ -54,7 +54,7 @@ fn no_hello_offers_the_password_and_the_password_turns_app_lock_off() {
         "{offer:?}"
     );
     source.app_lock_with_password(password(PASSWORD));
-    settle(&mut source);
+    settle_computed(&mut source);
     assert!(!stored(&engine), "the engine stored off");
     assert_eq!(switch(&source), Some(false), "the row reads off");
     assert_eq!(offered(&source), None, "the step ends");
@@ -78,7 +78,7 @@ fn a_cancelled_hello_offers_the_password_for_a_longer_delay() {
     let offer = offered(&source).expect("Use your password is offered");
     assert!(!offer.turning_off, "for the delay: {offer:?}");
     source.app_lock_with_password(password(PASSWORD));
-    settle(&mut source);
+    settle_computed(&mut source);
     assert_eq!(stored_after(&engine), Some(LockAfter::Minutes30));
     assert_eq!(delay(&source).as_deref(), Some("30 min"));
     assert_eq!(offered(&source), None);
@@ -106,7 +106,7 @@ fn a_wrong_password_changes_nothing_and_is_counted() {
     settle(&mut source);
     for _ in 0..2 {
         source.app_lock_with_password(password(WRONG));
-        settle(&mut source);
+        settle_computed(&mut source);
         let offer = offered(&source).expect("the step stays open");
         assert_eq!(offer.said.as_deref(), Some("That password isn't right."));
         assert!(!offer.checking);
@@ -131,7 +131,7 @@ fn a_wrong_password_changes_nothing_and_is_counted() {
         "the step's two tries were counted: {fifth:?}"
     );
     source.app_lock_with_password(password(PASSWORD));
-    settle(&mut source);
+    settle_computed(&mut source);
     let offer = offered(&source).expect("a wait keeps the step open");
     assert!(
         offer
@@ -156,7 +156,7 @@ fn a_password_offer_from_an_earlier_session_turn_does_nothing() {
     engine.unlock_screen_platform_verified(engine.session_turn()).unwrap();
     let seen = source.app_lock.answers_seen.len();
     source.app_lock_with_password(password(PASSWORD));
-    settle(&mut source);
+    settle_computed(&mut source);
     assert!(stored(&engine), "app lock is still on");
     assert_eq!(switch(&source), Some(true));
     assert!(
@@ -189,15 +189,12 @@ fn a_password_answer_after_the_session_moved_is_dropped_before_it_is_said() {
         moved.elapsed() < Duration::from_millis(1_000),
         "the session moved while the password was checked"
     );
-    let began = Instant::now();
-    while !source.app_lock.answers_seen[seen..]
-        .iter()
-        .any(|answer| answer.starts_with("Set"))
-    {
-        assert!(began.elapsed() < Duration::from_secs(10), "the answer never came");
+    until_computed(&mut source, |source| {
         source.pump();
-        std::thread::sleep(Duration::from_millis(10));
-    }
+        source.app_lock.answers_seen[seen..]
+            .iter()
+            .any(|answer| answer.starts_with("Set"))
+    });
     settle(&mut source);
     assert_eq!(source.notice(), None, "said nothing");
     assert_eq!(offered(&source), None, "no step");
@@ -218,11 +215,11 @@ fn the_password_is_never_printed_kept_or_logged() {
     source.set_app_lock(false);
     settle(&mut source);
     source.app_lock_with_password(password(&format!("{MARKER} wrong")));
-    settle(&mut source);
+    settle_computed(&mut source);
     let kept = format!("{:?} {:?}", source.app_lock.offer, offered(&source));
     assert!(!kept.contains(MARKER), "kept after a wrong try: {kept}");
     source.app_lock_with_password(password(PASSWORD));
-    settle(&mut source);
+    settle_computed(&mut source);
     assert!(!stored(&engine));
     let answers = source.app_lock.answers_seen.join("\n");
     assert!(answers.contains("Set"), "the answers were read: {answers}");
@@ -353,6 +350,35 @@ fn wait_for(rt: &mut Runtime<State>, what: &str, done: impl Fn(&Runtime<State>) 
     }
 }
 
+/// `wait_for` after a press that runs core's password check: `until_computed`'s rule in the window. The source is
+/// the window's own, so the worker is seen through the engine: while more hold it than `before` the press, the
+/// answer is still on its way; once no more do, it must show within 10 s, or it was lost.
+fn wait_computed(
+    rt: &mut Runtime<State>,
+    engine: &TestEngine,
+    before: usize,
+    what: &str,
+    done: impl Fn(&Runtime<State>) -> bool,
+) {
+    let (began, mut idle_since) = (Instant::now(), Instant::now());
+    loop {
+        let computing = Arc::strong_count(engine) > before;
+        if done(rt) {
+            return;
+        }
+        if computing {
+            idle_since = Instant::now();
+        }
+        assert!(idle_since.elapsed() < Duration::from_secs(10), "never: {what}");
+        assert!(
+            began.elapsed() < Duration::from_secs(120),
+            "a worker never ended: {what}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        rt.frame(0.1);
+    }
+}
+
 /// A press on the last element keyed `key` (a dialog is drawn over the page, after it).
 fn click(rt: &mut Runtime<State>, key: &str) {
     let rect = rt
@@ -387,8 +413,9 @@ fn in_the_window_the_password_step_turns_app_lock_off() {
     // A wrong one: said under the field, the field empty and ready for the next try, app lock still on.
     rt.update(|s, _| s.account.form.current.text.push_str(WRONG));
     rt.frame(0.016);
+    let before = Arc::strong_count(&engine);
     click(&mut rt, "btn-0");
-    wait_for(&mut rt, "the wrong password's words", |rt| {
+    wait_computed(&mut rt, &engine, before, "the wrong password's words", |rt| {
         shows(rt, "That password isn't right.")
     });
     assert!(shows(&rt, TITLE), "the step stays open");
@@ -397,8 +424,9 @@ fn in_the_window_the_password_step_turns_app_lock_off() {
     assert!(stored(&engine));
     rt.update(|s, _| s.account.form.current.text.push_str(PASSWORD));
     rt.frame(0.016);
+    let before = Arc::strong_count(&engine);
     click(&mut rt, "btn-0");
-    wait_for(&mut rt, "app lock off and the step closed", |rt| {
+    wait_computed(&mut rt, &engine, before, "app lock off and the step closed", |rt| {
         !shows(rt, TITLE) && shows(rt, "Off: anyone using this PC can open Beebeeb")
     });
     assert!(!stored(&engine));
