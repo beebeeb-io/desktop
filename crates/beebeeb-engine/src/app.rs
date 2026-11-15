@@ -693,8 +693,7 @@ impl<C: CredentialStores> Engine<C> {
                     .ok()
                     .flatten()
                     .is_some_and(|stored| stored.expose_for_request() == token.as_str());
-                let _ = still;
-                if self.unlocked() {
+                if !still || self.unlocked() {
                     return Err(words("changed"));
                 }
                 vault
@@ -1154,7 +1153,13 @@ impl LocalState {
         if !path.exists() {
             state_paths::prepare_beebeeb_state_dir_at(sync_root, state_dir)?;
         }
-        let db = StateDb::open(&path).map_err(|e| format!("open state.db: {e}"))?;
+        let db = match StateDb::open(&path) {
+            Ok(db) => db,
+            Err(_) => {
+                let _ = std::fs::remove_file(&path);
+                StateDb::open(&path).map_err(|e| format!("open state.db: {e}"))?
+            }
+        };
         Ok(Self { db })
     }
 }
