@@ -1,15 +1,18 @@
-//! Search on the real engine: [`EngineSearchSource`]. NOT in the running app: `shell::state::SEARCH_ON_ENGINE` is
-//! still false, so the shell hands Search the `Unwired` source and none of this runs. The index is built only
-//! through the engine's account-bound handle (`Engine::local_state`, task 2488): a local state that is not the
-//! session's (a sign-out keeps the data) builds no index.
+//! Search on the real engine: [`EngineSearchSource`], in the running app (`shell::state::SEARCH_ON_ENGINE`, task
+//! 2488). The index is built only through the engine's account-bound handle (`Engine::local_state`): a local state
+//! that is not the session's account's (a sign-out keeps the data) builds no index, and Search says it is not
+//! available, never another account's names.
 //!
 //! What it answers, and from where:
 //! - `search`: names in this computer's copy of the list (`desktop_search::build_local_index` over the local state,
 //!   then `query_local_index`), any case, narrowed by kind, at most [`SHOWN`] results. Folders are not in the
 //!   engine's index, so the Folders pill finds nothing yet; shared items are left out (ruling 1701).
 //! - `details`: the facts the index holds for a result (kind, size, changed, where, on this PC or online only).
-//! - Not bound: `recent`, `clear_recent`, `remember`. A search term is the person's content and there is no store
-//!   for it yet; nothing is kept, in memory or on disk, until the lead rules where it lives.
+//! - `recent`, `remember`, `clear_recent` (DW-0801, slice A8): the account's recent searches as the engine keeps them
+//!   in its own local state (`Engine::recent_searches_for` and its neighbours: per account, through the same
+//!   account-bound handle; deleted at sign-out and by Clear). Read when Search opens, changed on a worker, one piece
+//!   of work at a time in the order asked; `recent` shows only what the engine answered, for the session of the
+//!   moment. Nothing is kept anywhere else.
 //!
 //! Whose answer (review of desktop#378): an index and a result belong to one SESSION, the engine's own turn
 //! (`Engine::session_turn`: it moves on at every sign-in, unlock, lock and sign-out) together with the account. A
@@ -17,9 +20,10 @@
 //! it sees now. An account's name alone is not enough: it stays the same across a lock.
 //!
 //! What is kept, and until when: everything this source holds (the index, the last result, the query asked, the
-//! work on its way) belongs to ONE session. `opened`, `ask` and `pump` first look whether that is still the
-//! session of the moment and drop all of it when it is not (the window's side, no worker asked); `forget` drops it
-//! when the window says so; and every reader hands out nothing of a session that is gone even before either ran.
+//! recent searches, the work on its way) belongs to ONE session. `opened`, `ask`, `remember`, `clear_recent` and
+//! `pump` first look whether that is still the session of the moment and drop all of it when it is not (the
+//! window's side, no worker asked); `forget` drops it when the window says so; and every reader hands out nothing of
+//! a session that is gone even before either ran.
 //!
 //! When it works (never from a draw): the index is built when Search opens (`opened`) and what is held is older
 //! than [`FRESH_FOR`]; a query runs when the window says the words or the pill changed (`ask`), or when the index
@@ -29,8 +33,9 @@
 //! result answers only the query that asked (the words, the pill and the index it ran on), and `search` says
 //! `Searching` until it lands. The window is woken when either lands.
 //!
-//! Must not: log a query, a name or a path; keep a name of a session that ended.
+//! Must not: log a query, a recent search, a name or a path; keep a name or a search of a session that ended.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -48,6 +53,8 @@ use crate::ui::file_list::PcState;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_accounts;
 
 /// An index this recent is not built again when Search opens.
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
@@ -68,6 +75,15 @@ pub trait SearchHost: Send + Sync + 'static {
     fn unlocked(&self) -> bool;
     /// The index of this computer's local state. `Err`: there is none (nothing synced yet) or it cannot be read.
     fn index(&self) -> Result<LocalSearchIndex, ()>;
+    /// The recent searches of the account of the session `turn`, newest first (disk work: a worker calls it). `Err`:
+    /// none can be read (another account's local state, nothing synced yet, the session moved on).
+    fn recent_searches(&self, turn: Self::Turn) -> Result<Vec<String>, ()>;
+    /// WRITES (disk work): `query` is the newest recent search of the account of the session `turn`. Answers the list
+    /// as it is now kept; `Err`: nothing was kept.
+    fn remember_search(&self, turn: Self::Turn, query: &str) -> Result<Vec<String>, ()>;
+    /// WRITES (disk work, Clear): the recent searches of the account of the session `turn` are deleted. `Err`: they
+    /// were not.
+    fn clear_recent_searches(&self, turn: Self::Turn) -> Result<(), ()>;
     fn wake(&self);
 }
 
@@ -90,6 +106,18 @@ impl<C: CredentialStores> SearchHost for Engine<C> {
         // Task 2488: the signed-in account's local state only; any refusal builds nothing.
         let state = self.local_state().map_err(|_| ())?;
         state.with(|db| build_local_index(db)).map_err(|_| ())?.map_err(|_| ())
+    }
+
+    fn recent_searches(&self, turn: SessionGeneration) -> Result<Vec<String>, ()> {
+        self.recent_searches_for(turn).map_err(|_| ())
+    }
+
+    fn remember_search(&self, turn: SessionGeneration, query: &str) -> Result<Vec<String>, ()> {
+        self.remember_search_for(turn, query).map_err(|_| ())
+    }
+
+    fn clear_recent_searches(&self, turn: SessionGeneration) -> Result<(), ()> {
+        self.clear_recent_searches_for(turn).map_err(|_| ())
     }
 
     fn wake(&self) {
@@ -133,6 +161,19 @@ enum Landed<T> {
     Built(u64, Option<Session<T>>, Result<LocalSearchIndex, ()>),
     /// A query's results, and the session whose index it ran on.
     Found(u64, Session<T>, Asked, Vec<Hit>),
+    /// The recent searches as the engine keeps them after a read or a change, and the session the work ran in
+    /// (`None`: the session was not the same after the work as before).
+    Recent(u64, Option<Session<T>>, Result<Vec<String>, ()>),
+}
+
+/// A piece of work on the recent searches, in the order the window asked for it.
+enum RecentWork {
+    /// Read them (Search opened).
+    Read,
+    /// Keep a search the person ran as the newest.
+    Remember(String),
+    /// Delete them (Clear).
+    Clear,
 }
 
 /// Search on the real engine. See the module's doc.
@@ -157,6 +198,12 @@ pub struct EngineSearchSource<H: SearchHost> {
     asked: Option<(u64, Asked)>,
     /// The last result, and the query it answers.
     found: Option<(Asked, Vec<Hit>)>,
+    /// The recent searches as the engine last answered them, newest first, and the session that work ran in.
+    recent: Option<(Session<H::Turn>, Vec<String>)>,
+    /// The work on the recent searches that is on its way (one at a time), by job number.
+    recent_out: Option<u64>,
+    /// The work on the recent searches that waits for the one on its way, in the order asked.
+    recent_next: VecDeque<RecentWork>,
 }
 
 #[cfg(test)]
@@ -190,6 +237,9 @@ impl<H: SearchHost> EngineSearchSource<H> {
             wanted: None,
             asked: None,
             found: None,
+            recent: None,
+            recent_out: None,
+            recent_next: VecDeque::new(),
         }
     }
 
@@ -207,7 +257,12 @@ impl<H: SearchHost> EngineSearchSource<H> {
         if self.of == now {
             return false;
         }
-        let held = self.held.is_some() || self.found.is_some() || self.building.is_some() || self.asked.is_some();
+        let held = self.held.is_some()
+            || self.found.is_some()
+            || self.building.is_some()
+            || self.asked.is_some()
+            || self.recent.is_some()
+            || self.recent_out.is_some();
         self.forget();
         self.of = now;
         held
@@ -292,6 +347,63 @@ impl<H: SearchHost> EngineSearchSource<H> {
         }
     }
 
+    /// Queue `work` on the recent searches for the session of the moment (none signed in with the vault open:
+    /// nothing is queued), and start it when nothing else on them is on its way.
+    fn ask_recent(&mut self, work: RecentWork) {
+        self.follow();
+        if self.of.is_none() {
+            return;
+        }
+        if matches!(work, RecentWork::Clear) {
+            // What waits would be deleted by this Clear anyway: it goes now.
+            self.recent_next.clear();
+        }
+        self.recent_next.push_back(work);
+        self.start_recent();
+    }
+
+    /// The next work on the recent searches, on a worker, for the session this source's state belongs to: the
+    /// worker asks the engine only while that is still the session, under that session's turn, and its answer counts
+    /// only when the session after the work is the same as before. One at a time, in the order asked.
+    fn start_recent(&mut self) {
+        if self.recent_out.is_some() {
+            return;
+        }
+        let Some(of) = self.of.clone() else {
+            self.recent_next.clear();
+            return;
+        };
+        let Some(work) = self.recent_next.pop_front() else {
+            return;
+        };
+        self.jobs += 1;
+        let (host, answers, job) = (self.host.clone(), self.answers.clone(), self.jobs);
+        let started = std::thread::Builder::new().name("search-recent".into()).spawn(move || {
+            let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let Some(before) = session_of(&*host).filter(|now| *now == of) else {
+                    return (None, Err(()));
+                };
+                let list = match &work {
+                    RecentWork::Read => host.recent_searches(before.turn),
+                    RecentWork::Remember(query) => host.remember_search(before.turn, query),
+                    RecentWork::Clear => host.clear_recent_searches(before.turn).map(|()| Vec::new()),
+                };
+                // The same session after the work as before it, or the answer is nobody's.
+                let same = session_of(&*host).as_ref() == Some(&before);
+                (same.then_some(before), list)
+            }));
+            let (of, list) = done.unwrap_or((None, Err(())));
+            let _ = answers.send(Landed::Recent(job, of, list));
+            host.wake();
+        });
+        if started.is_ok() {
+            self.recent_out = Some(job);
+        } else {
+            log("search: could not start a thread for the recent searches");
+            self.recent_next.clear();
+        }
+    }
+
     fn take_in(&mut self, landed: Landed<H::Turn>) {
         match landed {
             Landed::Built(job, of, result) => {
@@ -333,6 +445,24 @@ impl<H: SearchHost> EngineSearchSource<H> {
                     self.found = Some((asked, hits));
                 }
             }
+            Landed::Recent(job, of, list) => {
+                if self.recent_out != Some(job) {
+                    // Asked before a forget: nobody waits for it.
+                    return;
+                }
+                self.recent_out = None;
+                match (of, list) {
+                    // Only what the engine answered, for the session this source's state belongs to.
+                    (Some(of), Ok(list)) if Some(&of) == self.of.as_ref() => self.recent = Some((of, list)),
+                    // Not read or not kept: what is held still says what the engine keeps (a change that failed
+                    // changed nothing there). Across a change of session: nobody's.
+                    (Some(of), Err(())) if Some(&of) == self.of.as_ref() => {
+                        log("search: the recent searches could not be read or kept")
+                    }
+                    _ => {}
+                }
+                self.start_recent();
+            }
         }
     }
 }
@@ -343,20 +473,40 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
         self.current().is_some() || self.building_now()
     }
 
-    /// Not bound: no store for search terms yet.
+    /// The recent searches the engine answered for the session of the moment, newest first; none while it has not
+    /// (yet) answered, or for another session. Reads only: never asks the engine (a draw calls it).
     fn recent(&self) -> Vec<String> {
-        Vec::new()
+        let Some(now) = session_of(&*self.host) else {
+            return Vec::new();
+        };
+        match &self.recent {
+            Some((of, list)) if *of == now => list.clone(),
+            _ => Vec::new(),
+        }
     }
 
-    /// Not bound: nothing is kept.
-    fn clear_recent(&mut self) {}
+    /// Clear: the engine deletes the account's recent searches (on a worker); the list goes when it answered.
+    fn clear_recent(&mut self) {
+        self.ask_recent(RecentWork::Clear);
+    }
 
-    /// Not bound: the term is not kept.
-    fn remember(&mut self, _query: &str) {}
+    /// A search the person ran: the engine keeps it as the newest (on a worker); the list shows it when it answered.
+    fn remember(&mut self, query: &str) {
+        let query = query.trim();
+        if query.is_empty() {
+            return;
+        }
+        self.ask_recent(RecentWork::Remember(query.to_string()));
+    }
 
-    /// Search opened: the index is built when none of this session is held, or what is held is old.
+    /// Search opened: the recent searches are read when none of this session are held; the index is built when none
+    /// of this session is held, or what is held is old.
     fn opened(&mut self) {
         self.follow();
+        let recent_held = self.recent.as_ref().is_some_and(|(of, _)| Some(of) == self.of.as_ref());
+        if !recent_held && self.recent_out.is_none() && self.recent_next.is_empty() {
+            self.ask_recent(RecentWork::Read);
+        }
         let fresh = self.built_at.is_some_and(|at| at.elapsed() < FRESH_FOR);
         if !fresh {
             self.build();
@@ -385,11 +535,12 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
         }
         Pumped {
             changed,
-            busy: self.building.is_some() || self.asked.is_some(),
+            busy: self.building.is_some() || self.asked.is_some() || self.recent_out.is_some(),
         }
     }
 
-    /// Every name goes: the index, the last result and what was asked. A worker still out answers nobody.
+    /// Every name and every search goes: the index, the last result, what was asked, the recent searches and the
+    /// work on them that waits. A worker still out answers nobody.
     fn forget(&mut self) {
         self.held = None;
         self.found = None;
@@ -397,6 +548,9 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
         self.wanted = None;
         self.building = None;
         self.built_at = None;
+        self.recent = None;
+        self.recent_out = None;
+        self.recent_next.clear();
     }
 
     /// The result of THIS query on the current session's index, else `Searching` while it runs. Reads only: the

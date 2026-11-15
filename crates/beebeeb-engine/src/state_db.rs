@@ -614,6 +614,7 @@ mod landing;
 mod ops;
 mod removals;
 mod schema;
+mod search_recent;
 mod share_marks;
 pub use share_marks::{MarkKind, is_unreadable_mark, normalized_email};
 // Task 2523: copies on this PC whose agreed content is behind the current version.
