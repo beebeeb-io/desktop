@@ -206,4 +206,60 @@ mod tests {
         );
         assert_eq!(ids(&db.list_stale_agreed_copies(10).unwrap()), vec!["g"]);
     }
+
+    /// F2 (task 2523): a landing that did not write the file's place (the viewer on Windows and Linux) moves the
+    /// current version only; the place keeps its agreed version and content, so it reads as behind. One that did
+    /// (a sync-folder upload, a macOS File Provider write) records the landed version, as before.
+    #[test]
+    fn a_landing_that_did_not_write_the_place_leaves_its_agreed_content() {
+        let rekey = |op: &PendingOperation, _: &str| -> std::result::Result<Option<String>, StateDbError> {
+            Ok(op.metadata_json.clone())
+        };
+        let landing = |file_id: &'static str, place_written: bool| LandingInput {
+            op_id: "viewer-op",
+            claim_id: None,
+            write_id: Some("w-viewer"),
+            local_file_id: file_id,
+            server_file_id: file_id,
+            target_path: None,
+            parent_id: None,
+            landed_base: Some(4),
+            produced_version: 5,
+            produced_object_version_id: "object-5",
+            size_bytes: 19,
+            content_type: None,
+            mime_type: None,
+            completed_payload: Some("/staged/viewer"),
+            completed_payload_hash: None,
+            place_written,
+            finalization: None,
+            now: 30,
+        };
+        let (_dir, db) = db_with(&[
+            ("viewer", "local", 4, 4, Some("h4")),
+            ("provider", "local", 4, 4, Some("h4")),
+            ("no-content", "local", 4, 4, None),
+        ]);
+        db.apply_landing(&landing("viewer", false), &rekey)
+            .unwrap()
+            .expect("it lands");
+        db.apply_landing(&landing("provider", true), &rekey)
+            .unwrap()
+            .expect("it lands");
+        db.apply_landing(&landing("no-content", false), &rekey)
+            .unwrap()
+            .expect("it lands");
+        let read = |id| {
+            let c = db.get_file_contract_state(id).unwrap().unwrap();
+            (c.current_version, c.local_base_version, c.local_hash)
+        };
+        assert_eq!(
+            read("viewer"),
+            (5, 4, Some("h4".to_string())),
+            "behind: agreed at 4, current 5"
+        );
+        assert_eq!(read("provider"), (5, 5, None), "as before");
+        assert_eq!(read("no-content"), (5, 5, None), "nothing agreed to keep: as before");
+        assert_eq!(ids(&db.list_stale_agreed_copies(10).unwrap()), vec!["viewer"]);
+    }
 }

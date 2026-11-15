@@ -482,11 +482,19 @@ impl StateDb {
             contract.parent_id = input.parent_id.map(str::to_string);
         }
         contract.current_version = input.produced_version;
-        contract.local_base_version = input.produced_version;
-        // Task 1640 (review-151d P3-6): a landing that could not hash what it sent records no agreed
-        // content: the previous hash would pair the new version with the old bytes (a revert to them
-        // would read as agreed). For a sync-folder upload the content is mixed at that version below.
-        contract.local_hash = input.completed_payload_hash.map(str::to_string);
+        // Task 2523 (F2): a save that did not write the file's place (the viewer on Windows and Linux) leaves the
+        // place's agreed content as it was, at its own version: those bytes ARE that version, so they read as behind
+        // the version that landed (the stale-copy pass brings them to it; an edit made first is sent on its own
+        // version and parks as the two-versions question). Before, the place was recorded at the new version with no
+        // content, and an edit there was held as "content unknown" and never sent.
+        let place_keeps_its_content = !input.place_written && contract.local_hash.is_some();
+        if !place_keeps_its_content {
+            contract.local_base_version = input.produced_version;
+            // Task 1640 (review-151d P3-6): a landing that could not hash what it sent records no agreed
+            // content: the previous hash would pair the new version with the old bytes (a revert to them
+            // would read as agreed). For a sync-folder upload the content is mixed at that version below.
+            contract.local_hash = input.completed_payload_hash.map(str::to_string);
+        }
         contract.current_object_version_id = Some(produced_version_id.as_str().to_string());
         contract.last_sync_at = input.now;
         set_file_contract_state_conn(&tx, &contract)?;

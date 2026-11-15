@@ -228,3 +228,60 @@ async fn stale_2523_f3_a_held_edit_is_never_hydrated_over() {
         "the held edit keeps its bytes"
     );
 }
+
+/// Q2, wanted (the trace's red): after a save from outside the sync folder (the in-app viewer's write-keyed save on
+/// Windows and Linux; saved here through the same write-keyed path), an edit of the sync folder's older copy becomes
+/// the two-versions question (sent on version 1, the version its bytes are, refused as stale, parked), never a held
+/// "from before 0.8.13" row that nothing ever sends. macOS: a File Provider save IS the system's copy.
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn stale_2523_q2_wanted_an_edit_of_the_copy_left_by_a_viewer_save_is_a_decidable_conflict() {
+    let master_key = [232u8; 32];
+    let file = "23200000-0000-4000-8000-000000000001";
+    let (dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+    fp_save(&bridge, dir.path(), file, "notes.txt", b"saved in the viewer", "1");
+    drain_upload_queue(&bridge, &sync_root).await;
+    let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+    println!(
+        "stale-2523 q2 after the landing: current={} local_base={} local_hash_is_v1={}",
+        contract.current_version,
+        contract.local_base_version,
+        contract.local_hash.as_deref() == Some(sha256_hex(b"version one").as_str())
+    );
+    assert_eq!(
+        (contract.current_version, contract.local_base_version),
+        (2, 1),
+        "the folder's copy stays agreed at version 1, behind version 2"
+    );
+    std::fs::write(&local, b"version one, edited in another app").unwrap();
+    crate::watcher::dispatch_local_create(&bridge, &sync_root, &local, "notify");
+    drain_upload_queue(&bridge, &sync_root).await;
+    let kinds = feed_kinds(&bridge);
+    let state = server.finish();
+    println!("stale-2523 q2-wanted kinds={kinds:?} inits={:?}", state.init_summary());
+    assert_eq!(state.latest_plaintext(file, master_key), b"saved in the viewer");
+    assert_eq!(
+        kinds,
+        vec!["stale_base".to_string()],
+        "the person gets the two-versions question"
+    );
+    assert_eq!(std::fs::read(&local).unwrap(), b"version one, edited in another app");
+}
+
+/// F2 with F1 (Linux): after the viewer's save, the next pass brings the folder's copy to the saved version, so
+/// Explorer and every other app read what the person saved in Beebeeb.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[tokio::test]
+async fn stale_2523_after_a_viewer_save_the_folder_copy_is_brought_to_the_saved_version() {
+    let master_key = [238u8; 32];
+    let file = "23800000-0000-4000-8000-000000000001";
+    let (dir, sync_root, server, bridge, local) = regression_1640_synced_file(master_key, file).await;
+    fp_save(&bridge, dir.path(), file, "notes.txt", b"saved in the viewer", "1");
+    drain_upload_queue(&bridge, &sync_root).await;
+    assert_eq!(bridge.refresh_stale_copies(&sync_root).unwrap().queued.len(), 1);
+    drain_upload_queue(&bridge, &sync_root).await;
+    let contract = bridge.db.get_file_contract_state(file).unwrap().unwrap();
+    drop(server.finish());
+    assert_eq!(std::fs::read(&local).unwrap(), b"saved in the viewer");
+    assert_eq!((contract.current_version, contract.local_base_version), (2, 2));
+}

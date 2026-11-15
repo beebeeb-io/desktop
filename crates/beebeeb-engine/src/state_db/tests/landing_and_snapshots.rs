@@ -322,6 +322,7 @@ fn a_landing_rekeys_a_mixed_pair_but_never_rebases_across_it() {
         mime_type: None,
         completed_payload: None,
         completed_payload_hash: None,
+        place_written: true,
         finalization: None,
         now: 20,
     };
@@ -497,6 +498,7 @@ fn task_2204_a_landing_keeps_a_renamed_row_s_path_and_journal() {
         mime_type: None,
         completed_payload: Some("/staged/create"),
         completed_payload_hash: None,
+        place_written: true,
         finalization: Some(&finalization),
         now: 20,
     };
@@ -589,6 +591,7 @@ fn a_landing_journals_its_finalization_in_its_own_transaction() {
         mime_type: None,
         completed_payload: Some("/staged/create"),
         completed_payload_hash: None,
+        place_written: true,
         finalization: Some(&finalization),
         now: 20,
     };
@@ -1175,6 +1178,7 @@ fn blank_landing<'a>(
         mime_type: None,
         completed_payload: None,
         completed_payload_hash: None,
+        place_written: true,
         finalization: None,
         now: 1,
     }
