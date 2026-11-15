@@ -152,6 +152,20 @@ security, wait an hour and try again."); a vault password or a new password the 
   layout (green check, "Password updated") with the words that are true here, and one button, "Sign in", to the form
   with the address kept. DW-A50 itself ("Your vault is unlocked") is drawn only when the recovery signed in. Board,
   please draw it.
+- **A request lost after its code was shown (row 3.4).** The connection dropped (a new connection is a new code, so it
+  cannot be joined again), or Beebeeb ended the request with an error. It was drawn as DW-A10's "This code expired".
+  Now: DW-A10's layout with "This request was lost" / "Nothing was signed in. Ask for a new code." and the pill "Lost"
+  ("lost" is DW-A07's own word for a request that ends). DW-A10 itself is unchanged.
+- **An approval this PC did not take (`Screen::NotSignedIn`, row 3.4).** It was drawn as DW-A08's error state,
+  "Approved, but the keys did not arrive", which is untrue: the keys arrived. Laid out as that error state, with the
+  words of what happened: "Approved, but this PC holds another account" / "Nothing was signed in on this PC, and no
+  keys were kept." when its stored session or its local files are another account's; "Approved, but this PC did not
+  sign in" / "Nothing was signed in. Ask again." when it moved on while it waited (a sign-in, a lock or a sign-out
+  here) or could not store the session. No account is named.
+- **DW-A08 is not seen after a real approval (row 3.4, open).** The engine opens the session before the request's
+  answer reaches the window, and the shell shows Files (or the first run) as soon as the gate opens: the gate decides
+  which screen shows, as after a password sign-in. Nothing in this group can hold DW-A08 on screen over an open gate.
+  Fixing it needs the shell to keep the sign-in window for "Open Drive" (`shell/host.rs`), outside this group.
 
 ## Where each screen lives
 

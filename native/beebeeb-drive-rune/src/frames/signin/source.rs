@@ -111,6 +111,16 @@ pub enum DeviceStatus {
     /// DW-A08's error state: the other device approved, and the key payload did not decrypt
     /// here. Nothing was signed in.
     KeysNotReceived { by: String },
+    /// Added by lane fx-signin (no board frame: `FRAMES.md`, flagged deviations): the request was lost after its
+    /// code was shown: the connection dropped (a new connection is a new code), or Beebeeb ended the request with an
+    /// error. Drawn as DW-A10, with its own words. Nothing was signed in.
+    Lost,
+    /// Added by lane fx-signin: the other device approved an account other than the one this PC holds (its stored
+    /// session, or its local files). Nothing was signed in, and no keys were kept.
+    OtherAccount,
+    /// Added by lane fx-signin: the other device approved, and this PC did not sign in: it moved on while it waited
+    /// (a sign-in, a lock or a sign-out here), or it could not store the session. Nothing was signed in.
+    NotSignedIn,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
