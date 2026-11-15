@@ -405,14 +405,15 @@ fn a_hidden_stream_is_not_taken_as_the_kept_copy() {
     let dir = tempfile::tempdir().unwrap();
     let event = dir.path().join("e");
     std::fs::create_dir_all(&event).unwrap();
-    let stream = event.join("a:b.txt");
+    // A colon after the first two characters: `a:b.txt` would read as drive `a:` and never reach the folder.
+    let stream = event.join("notes 15:11.txt");
     std::fs::write(&stream, THIS_PC).unwrap();
     assert_eq!(
         std::fs::metadata(&stream).unwrap().len(),
         THIS_PC.len() as u64,
         "the look the old check made"
     );
-    assert!(kept_where_meant(&event, &stream, "a:b.txt", THIS_PC.len() as u64).is_err());
+    assert!(kept_where_meant(&event, &stream, "notes 15:11.txt", THIS_PC.len() as u64).is_err());
 }
 
 /// P2-2: Keep the other keeps in the signed-in account's own folder inside the engine's local state folder (on
