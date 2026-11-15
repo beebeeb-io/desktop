@@ -303,14 +303,20 @@ fn the_revoke_gives_up_after_three_seconds() {
     );
 }
 
-/// Rule 2, the control of rule 1: a server that closes the connection at once ends the revoke at once, so rule 1's
-/// three seconds are the bound's and not a closed connection's. Nothing is returned, so nothing changes.
+/// Rule 2, the control of rule 1: a server that is not there, or closes the connection at once, ends the revoke at
+/// once, so rule 1's three seconds are the bound's and not a refused or closed connection's. Nothing is returned, so
+/// nothing changes.
 #[test]
 fn a_closed_port_ends_the_revoke_at_once() {
+    let absent = TestServer::start(Server::Absent, None);
+    let (took, ended) = timed_revoke(&absent.base, &invented_token());
+    assert!(ended);
+    assert!(took < Duration::from_secs(1), "no server: took {took:?}");
+
     let server = TestServer::start(Server::Closes, None);
     let (took, ended) = timed_revoke(&server.base, &invented_token());
     assert!(ended);
-    assert!(took < Duration::from_secs(1), "took {took:?}");
+    assert!(took < Duration::from_secs(1), "a closed connection: took {took:?}");
     assert!(
         server.accepted_within(Duration::from_secs(1)) >= 1,
         "the revoke reached the server"
