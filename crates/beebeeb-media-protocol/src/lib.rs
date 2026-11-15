@@ -56,8 +56,9 @@ pub const MAX_TEXT_BYTES: usize = MAX_TEXT * 4;
 const FRAME_BYTES_MAX: usize = MAX_FRAME_W as usize * MAX_FRAME_H as usize * 4;
 const AUDIO_BYTES_MAX: usize = MAX_AUDIO_FRAMES as usize * MAX_CHANNELS as usize * 4;
 const ART_BYTES_MAX: usize = MAX_ART as usize * MAX_ART as usize * 4;
-/// `Opened`: duration, the video's flag and four fields, the audio's flag and three, the reduced-quality flag.
-const OPENED_BODY: usize = 8 + (1 + 4 + 4 + 4 + 1) + (1 + 4 + 2 + 1) + 1;
+/// `Opened`: duration, the video's flag and four fields, the audio's flag and three, the reduced-quality flag, the
+/// no-sound flag and its codec.
+const OPENED_BODY: usize = 8 + (1 + 4 + 4 + 4 + 1) + (1 + 4 + 2 + 1) + 1 + (1 + 1);
 /// `Tags` without its picture: the two texts with their lengths, the picture's flag and size.
 const TAGS_HEAD: usize = 2 * (2 + MAX_TEXT_BYTES) + 1 + 4 + 4;
 const _: () = assert!(OPENED_BODY <= MAX_CONTROL && TAGS_HEAD <= MAX_CONTROL);
@@ -371,6 +372,9 @@ pub struct Opened {
     pub audio: Option<AudioInfo>,
     /// Played below the file's own quality on this PC (HE-AAC at its AAC-LC core: decision D-MED-7).
     pub reduced_quality: bool,
+    /// The file's audio track that does not play here (its codec): the video plays without sound. Only with a video
+    /// and without `audio`; any other shape is refused on the wire.
+    pub no_sound: Option<Codec>,
 }
 
 /// The file's own video: its size (not the size the app asks for), its rate in frames per 1000 s, its codec.
@@ -530,6 +534,10 @@ fn check_opened(opened: &Opened) -> Result<(), WireError> {
     {
         return Err(WireError::Malformed);
     }
+    // A track without sound is named only beside a video that plays, and never beside audio that plays.
+    if opened.no_sound.is_some() && (opened.audio.is_some() || opened.video.is_none()) {
+        return Err(WireError::Malformed);
+    }
     Ok(())
 }
 
@@ -668,6 +676,13 @@ impl Message for FromHelper {
                     }
                 }
                 head.push(u8::from(opened.reduced_quality));
+                match opened.no_sound {
+                    None => head.push(0),
+                    Some(codec) => {
+                        head.push(1);
+                        head.push(codec.byte());
+                    }
+                }
             }
             FromHelper::Frame { pts_ms, w, h, rgba } => {
                 check_frame(*w, *h)?;
@@ -919,11 +934,17 @@ pub fn read_to_app<R: Read + ?Sized>(r: &mut R) -> Result<FromHelper, WireError>
                     codec: Codec::of(body.u8()?)?,
                 }),
             };
+            let reduced_quality = body.flag()?;
+            let no_sound = match body.flag()? {
+                false => None,
+                true => Some(Codec::of(body.u8()?)?),
+            };
             let opened = Opened {
                 duration_ms,
                 video,
                 audio,
-                reduced_quality: body.flag()?,
+                reduced_quality,
+                no_sound,
             };
             check_opened(&opened)?;
             FromHelper::Opened(opened)

@@ -82,6 +82,19 @@ fn from_helper_messages() -> Vec<FromHelper> {
                 codec: Codec::Flac,
             }),
             reduced_quality: true,
+            no_sound: None,
+        }),
+        FromHelper::Opened(Opened {
+            duration_ms: 61_000,
+            video: Some(VideoInfo {
+                w: 1920,
+                h: 1080,
+                fps_milli: 30_000,
+                codec: Codec::H264,
+            }),
+            audio: None,
+            reduced_quality: false,
+            no_sound: Some(Codec::Aac),
         }),
         FromHelper::Frame {
             pts_ms: 33,
@@ -139,6 +152,7 @@ fn from_helper_messages() -> Vec<FromHelper> {
                 codec,
             }),
             reduced_quality: false,
+            no_sound: None,
         }));
         all.push(FromHelper::Error(ErrorCode::Unsupported(codec)));
         all.push(FromHelper::Error(ErrorCode::NoSystemDecoder(codec)));
@@ -353,6 +367,7 @@ fn protocol_refuses_truncated_message() {
         video: None,
         audio: None,
         reduced_quality: false,
+        no_sound: None,
     }));
     bytes[0] += 1;
     bytes.push(0);
@@ -403,4 +418,109 @@ fn profile_for_with_the_switch_on_picks_the_system_decoder_profile_for_system_ro
         profile_for_with(true, Route::System, Codec::Aac),
         Some(SystemDecoderProfile { hevc: false })
     );
+}
+
+/// C1: a video whose audio track does not play here names that track's codec, and comes back as it was written, for
+/// every codec.
+#[test]
+fn opened_no_sound_round_trips() {
+    for codec in Codec::ALL {
+        let msg = FromHelper::Opened(Opened {
+            duration_ms: 12_345,
+            video: Some(VideoInfo {
+                w: 1280,
+                h: 720,
+                fps_milli: 25_000,
+                codec: Codec::H264,
+            }),
+            audio: None,
+            reduced_quality: false,
+            no_sound: Some(codec),
+        });
+        let bytes = wire(&msg);
+        assert_eq!(read_to_app(&mut Cursor::new(&bytes)), Ok(msg), "{codec:?}");
+    }
+    // Without a silent track the flag is one zero byte, and it still comes back as `None`.
+    let plain = FromHelper::Opened(Opened {
+        duration_ms: 1,
+        video: None,
+        audio: Some(AudioInfo {
+            rate: 48_000,
+            channels: 2,
+            codec: Codec::Opus,
+        }),
+        reduced_quality: false,
+        no_sound: None,
+    });
+    let bytes = wire(&plain);
+    assert_eq!(bytes.last(), Some(&0), "the no-sound flag ends the message");
+    assert_eq!(read_to_app(&mut Cursor::new(&bytes)), Ok(plain));
+}
+
+/// C1: `no_sound` beside audio that plays, or without a video, is a message no honest helper sends: the writer refuses
+/// it, and so does the reader of bytes made by hand (the app's side, which must not trust the helper).
+#[test]
+fn opened_no_sound_with_audio_or_without_video_is_refused() {
+    let video = Some(VideoInfo {
+        w: 640,
+        h: 360,
+        fps_milli: 30_000,
+        codec: Codec::Vp9,
+    });
+    let audio = Some(AudioInfo {
+        rate: 44_100,
+        channels: 2,
+        codec: Codec::Mp3,
+    });
+    // (the valid message the bad bytes are made from, what it would claim)
+    for (video, audio) in [(video, audio), (None, None), (None, audio)] {
+        let claimed = Opened {
+            duration_ms: 5_000,
+            video,
+            audio,
+            reduced_quality: false,
+            no_sound: Some(Codec::Aac),
+        };
+        let mut out = Vec::new();
+        let written = write_msg(&mut out, &FromHelper::Opened(claimed));
+        assert_eq!(
+            written.map_err(|e| e.kind()),
+            Err(io::ErrorKind::InvalidInput),
+            "the writer sent {claimed:?}"
+        );
+
+        // By hand: the same message without the silent track, its last byte (the no-sound flag, 0) turned into
+        // `1` + AAC's codec byte, and the length one more.
+        let mut bytes = wire(&FromHelper::Opened(Opened {
+            no_sound: None,
+            ..claimed
+        }));
+        assert_eq!(bytes.last(), Some(&0));
+        *bytes.last_mut().expect("a message has bytes") = 1;
+        bytes.push(Codec::Aac.byte());
+        let len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) + 1;
+        bytes[..4].copy_from_slice(&len.to_le_bytes());
+        assert_eq!(
+            read_to_app(&mut Cursor::new(&bytes)),
+            Err(WireError::Malformed),
+            "the reader took {claimed:?}"
+        );
+    }
+
+    // The control: the same hand-made bytes from a video without audio are a message.
+    let mut bytes = wire(&FromHelper::Opened(Opened {
+        duration_ms: 5_000,
+        video,
+        audio: None,
+        reduced_quality: false,
+        no_sound: None,
+    }));
+    *bytes.last_mut().expect("a message has bytes") = 1;
+    bytes.push(Codec::Aac.byte());
+    let len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) + 1;
+    bytes[..4].copy_from_slice(&len.to_le_bytes());
+    let Ok(FromHelper::Opened(opened)) = read_to_app(&mut Cursor::new(&bytes)) else {
+        panic!("a video without audio may name its silent track");
+    };
+    assert_eq!(opened.no_sound, Some(Codec::Aac));
 }
