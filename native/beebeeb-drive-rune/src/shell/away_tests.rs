@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use beebeeb_engine::account_binding::Identity;
 use beebeeb_engine::app::lock_api::LockState;
 use beebeeb_engine::app::lock_password_api::{AppLockProof, LockAfter};
 use beebeeb_engine::app::{Engine, EngineConfig};
@@ -12,6 +13,7 @@ use beebeeb_engine::config::CONFIG_DIR_OVERRIDE;
 use beebeeb_engine::host::ChannelHost;
 use beebeeb_engine::identity::TEST;
 use beebeeb_engine::signin::memory_store::MemoryCredentials;
+use beebeeb_engine::state_db::{FileEntry, FileStatus, ItemKind, StateDb};
 use beebeeb_engine::test_api::FakeApi;
 use beebeeb_engine::test_api::fake_account::{FakeAccount, TEST_PHRASE, account_handler};
 use rune::{Env, Runtime};
@@ -29,8 +31,10 @@ use crate::shell::{registry, state};
 
 const EMAIL: &str = "away-lock@example.eu";
 const PASSWORD: &str = "an invented password for the away lock";
-/// A file in the account's root, so a frame that shows the Files window holds its name.
+/// A file in the account's root (on the server and in this PC's local state, recorded as the account's), so a frame
+/// that shows the Files window holds its name.
 const FILE_NAME: &str = "Harbour plan.txt";
+const FILE_ID: &str = "away-lock-file";
 
 type TestEngine = Arc<Engine<MemoryCredentials>>;
 
@@ -39,6 +43,7 @@ struct Live {
     platform: Arc<FakePlatform>,
     rt: Runtime<State>,
     _api: FakeApi,
+    _local_state: tempfile::TempDir,
 }
 
 /// A signed-in, open engine behind the real shell, on the fake platform.
@@ -54,7 +59,8 @@ fn live() -> Live {
 /// `FirstRun`), with the engine signed in and open. No look is waited for.
 fn live_with(first_run: bool) -> Live {
     let (account, phrase) = FakeAccount::register(EMAIL, PASSWORD, TEST_PHRASE);
-    account.add_item("away-lock-file", None, FILE_NAME, false, 2_048);
+    account.add_item(FILE_ID, None, FILE_NAME, false, 2_048);
+    let owner = Identity::new(Some(&account.user_id), Some(&account.email));
     let api = FakeApi::start(account_handler(Arc::new(account)));
     let (engine_host, messages) = ChannelHost::new(|| {});
     let config = EngineConfig {
@@ -64,6 +70,26 @@ fn live_with(first_run: bool) -> Live {
     };
     let engine = Arc::new(Engine::open(&TEST, config, engine_host, MemoryCredentials::default()).expect("opens"));
     engine.restore();
+    // This PC's local state, as the account's sync left it: the Files window lists the file from it.
+    let local_state = tempfile::tempdir().expect("a folder for the local state");
+    let path = local_state.path().join("state.db");
+    let db = StateDb::open(&path).expect("the local state opens");
+    let entry = FileEntry {
+        file_id: FILE_ID.to_string(),
+        path: format!("/{FILE_NAME}"),
+        status: FileStatus::CloudOnly,
+        size_bytes: 2_048,
+        modified_at: 1_794_000_000,
+        content_hash: None,
+        remote_updated_at: 1_794_000_000,
+        parent_id: None,
+        item_kind: ItemKind::File,
+    };
+    db.upsert_file_with_contract(&entry, |contract| contract.item_kind = entry.item_kind.clone())
+        .expect("the file is recorded");
+    db.set_owner(&owner).expect("the local state is the account's");
+    drop(db);
+    engine.use_local_state_for_test(path);
     engine
         .sign_in_password(EMAIL, Zeroizing::new(PASSWORD.into()))
         .expect("the fake accepts the password");
@@ -104,6 +130,7 @@ fn live_with(first_run: bool) -> Live {
         platform,
         rt,
         _api: api,
+        _local_state: local_state,
     }
 }
 
