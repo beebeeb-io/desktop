@@ -321,7 +321,9 @@ impl<C: CredentialStores> Engine<C> {
                         end.stopped = Some(Stopped::Offline);
                         break;
                     }
-                    if !wait_unless_stopped(stop, std::time::Duration::from_secs(1 << (server_errors - 1))) {
+                    if !self.wait_while_running(session, stop, std::time::Duration::from_secs(1 << (server_errors - 1)))
+                    {
+                        end.session_moved = !self.acct.session_unchanged_since(session);
                         break;
                     }
                 }
@@ -367,11 +369,44 @@ impl<C: CredentialStores> Engine<C> {
         }
     }
 
+    /// `photo`'s row read again for `session`: `None` while it is still as planned ([`plan::still_as_planned`]),
+    /// else how this photo ends (`NotHere`: the row moved; `SessionMoved`: the session did).
+    fn row_moved(&self, session: SessionGeneration, photo: &plan::LocalPhoto) -> Option<Made> {
+        match self.local_state() {
+            Ok(state) if state.session() == session => match state.with(|db| plan::still_as_planned(db, photo)) {
+                Ok(true) => None,
+                Ok(false) => Some(Made::NotHere),
+                Err(_) => Some(Made::SessionMoved),
+            },
+            Ok(_)
+            | Err(
+                LocalStateRefused::SessionChanged
+                | LocalStateRefused::SignedOut
+                | LocalStateRefused::Locked
+                | LocalStateRefused::SessionEnded,
+            ) => Some(Made::SessionMoved),
+            Err(_) => Some(Made::NotHere),
+        }
+    }
+
+    /// Sleep `wait` in short steps; `false` as soon as `stop` is set or the session moved (nothing more is sent
+    /// then, and the run's copy of the key goes with the run).
+    fn wait_while_running(&self, session: SessionGeneration, stop: &AtomicBool, wait: std::time::Duration) -> bool {
+        let began = std::time::Instant::now();
+        let running = || !stop.load(Ordering::SeqCst) && self.acct.session_unchanged_since(session);
+        while began.elapsed() < wait {
+            if !running() {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50).min(wait.saturating_sub(began.elapsed())));
+        }
+        running()
+    }
+
     /// One photo: ask the session, check its row is still as planned, read (only when every byte is here), encode,
-    /// ask the session again, seal, and
-    /// upload: the session and `stop` are asked right before every send. A 429 is waited out (watching `stop`). A
-    /// panic while reading or encoding ends this photo only. `kbps` (KiB/s, 0: none): after a send, the rest of its
-    /// time at that speed is waited out.
+    /// ask the session again, seal, and upload: `stop`, the session and the row are asked right before every send. A
+    /// 429 is waited out. A panic while reading or encoding ends this photo only. `kbps` (KiB/s, 0: none): after a
+    /// send, the rest of its time at that speed is waited out. Every wait ends at once on `stop` or a session change.
     #[allow(clippy::too_many_arguments)]
     fn make_one(
         &self,
@@ -391,20 +426,8 @@ impl<C: CredentialStores> Engine<C> {
         }
         // Its row again: what the engine changed since the plan (a pull, an edit here, a held write) waits for a
         // later run.
-        match self.local_state() {
-            Ok(state) if state.session() == session => match state.with(|db| plan::still_as_planned(db, photo)) {
-                Ok(true) => {}
-                Ok(false) => return Made::NotHere,
-                Err(_) => return Made::SessionMoved,
-            },
-            Ok(_)
-            | Err(
-                LocalStateRefused::SessionChanged
-                | LocalStateRefused::SignedOut
-                | LocalStateRefused::Locked
-                | LocalStateRefused::SessionEnded,
-            ) => return Made::SessionMoved,
-            Err(_) => return Made::NotHere,
+        if let Some(made) = self.row_moved(session, photo) {
+            return made;
         }
         let Some(path) = plan::ready_to_read(sync_root, photo) else {
             return Made::NotHere;
@@ -425,6 +448,8 @@ impl<C: CredentialStores> Engine<C> {
         if !self.acct.session_unchanged_since(session) {
             return Made::SessionMoved;
         }
+        #[cfg(test)]
+        SEALED.with(|sealed| sealed.set(sealed.get() + 1));
         let Ok(sealed) = seal::seal_preview(key, &photo.id, &jpeg) else {
             return Made::No;
         };
@@ -439,12 +464,16 @@ impl<C: CredentialStores> Engine<C> {
             if !self.session_is_still(session, key) {
                 return Made::SessionMoved;
             }
+            // A version pulled since the photo was read: its bytes were the older version's, nothing is sent.
+            if let Some(made) = self.row_moved(session, photo) {
+                return made;
+            }
             let sent_at = std::time::Instant::now();
             match self.runtime.block_on(api.upload_preview(&photo.id, px, &sealed)) {
                 Ok(()) => {
                     if kbps > 0 {
                         let budget = std::time::Duration::from_secs_f64(sealed.len() as f64 / (kbps as f64 * 1024.0));
-                        wait_unless_stopped(stop, budget.saturating_sub(sent_at.elapsed()));
+                        self.wait_while_running(session, stop, budget.saturating_sub(sent_at.elapsed()));
                     }
                     return Made::Yes;
                 }
@@ -452,8 +481,12 @@ impl<C: CredentialStores> Engine<C> {
                     let Some(wait) = preview_retry_wait(retries, waited, retry_after) else {
                         return Made::No;
                     };
-                    if !wait_unless_stopped(stop, std::time::Duration::from_secs(wait)) {
-                        return Made::Halted;
+                    if !self.wait_while_running(session, stop, std::time::Duration::from_secs(wait)) {
+                        return if self.acct.session_unchanged_since(session) {
+                            Made::Halted
+                        } else {
+                            Made::SessionMoved
+                        };
                     }
                     retries += 1;
                     waited += wait;
@@ -564,16 +597,10 @@ fn measure(original_bytes: u64, upright: &encode::Upright) -> Result<SamplePhoto
     })
 }
 
-/// Sleep `wait` in short steps; `false` as soon as `stop` is set (nothing more is sent then).
-fn wait_unless_stopped(stop: &AtomicBool, wait: std::time::Duration) -> bool {
-    let began = std::time::Instant::now();
-    while began.elapsed() < wait {
-        if stop.load(Ordering::SeqCst) {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50).min(wait.saturating_sub(began.elapsed())));
-    }
-    !stop.load(Ordering::SeqCst)
+#[cfg(test)]
+thread_local! {
+    /// How many previews this thread sealed (tests: nothing is sealed for a session that moved).
+    pub(crate) static SEALED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// Server errors (5xx) in a row that stop the run.

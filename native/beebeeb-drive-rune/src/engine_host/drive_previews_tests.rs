@@ -43,6 +43,8 @@ pub(crate) struct FakePreviews {
     pub(crate) saw_stop: AtomicBool,
     /// A setting's write waits while this is set (at most 10 s).
     pub(crate) hold_set: AtomicBool,
+    /// A run's work counts nothing (as one waiting for sync's first pass).
+    pub(crate) quiet_make: AtomicBool,
 }
 
 pub(crate) fn fake() -> Arc<FakePreviews> {
@@ -70,6 +72,7 @@ pub(crate) fn fake() -> Arc<FakePreviews> {
         hold_make: AtomicBool::new(false),
         saw_stop: AtomicBool::new(false),
         hold_set: AtomicBool::new(false),
+        quiet_make: AtomicBool::new(false),
     })
 }
 
@@ -162,7 +165,9 @@ impl PreviewsEngine for FakePreviews {
     }
     fn make(&self, session: SessionGeneration, force: bool, stop: &AtomicBool, progress: &dyn Fn(u32, u32)) -> RunEnd {
         self.makes.lock().unwrap().push((session, force));
-        progress(1, 1);
+        if !self.quiet_make.load(Ordering::SeqCst) {
+            progress(1, 1);
+        }
         let began = Instant::now();
         while self.hold_make.load(Ordering::SeqCst) && began.elapsed() < Duration::from_secs(10) {
             if stop.load(Ordering::SeqCst) {
@@ -624,5 +629,30 @@ fn off_stops_a_rebuild_that_was_still_queued() {
     assert!(stopped_in_time(&fake), "Off did not stop the forced run");
     assert!(fake.sets.lock().unwrap().iter().any(|(_, setting)| !setting.enabled));
     fake.gated.store(false, Ordering::SeqCst);
+    fake.hold_make.store(false, Ordering::SeqCst);
+}
+
+/// The pane says previews are being made only once the run counted what it makes: a run that has counted nothing
+/// (one waiting for sync's first pass) says nothing; the next run, counting, says it.
+#[test]
+fn the_making_notice_needs_a_count() {
+    let fake = fake();
+    fake.quiet_make.store(true, Ordering::SeqCst);
+    fake.hold_make.store(true, Ordering::SeqCst);
+    let mut host = opened(&fake);
+    runs(&fake, 1);
+    assert_eq!(ready(&host).unwrap().notice, None, "a run that counted nothing");
+    fake.hold_make.store(false, Ordering::SeqCst);
+    fake.quiet_make.store(false, Ordering::SeqCst);
+    pump_until(&mut host, "the first run ended", |host| {
+        ready(host).is_some_and(|p| p.notice.is_none())
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    fake.hold_make.store(true, Ordering::SeqCst);
+    host.rebuild();
+    runs(&fake, 2);
+    pump_until(&mut host, "the counting run says it", |host| {
+        ready(host).is_some_and(|p| p.notice == Some(REBUILDING))
+    });
     fake.hold_make.store(false, Ordering::SeqCst);
 }

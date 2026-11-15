@@ -222,6 +222,7 @@ fn photo(id: &str, name: &str, status: FileStatus) -> LocalPhoto {
         status,
         held_write: false,
         remote_updated_at: 0,
+        behind: false,
     }
 }
 
@@ -616,5 +617,17 @@ fn encode_refuses_a_picture_over_the_memory_cap() {
     let png = declared_huge_png();
     assert!(png.len() < 200, "{} bytes", png.len());
     assert_eq!(decode(&png).unwrap_err(), encode::EncodeRefused::OverMemory);
-    assert!(encode::memory_needed(8_160, 6_120, 8_160 * 6_120 * 3, true) <= encode::MAX_ALLOC);
+    // A 50 MP phone photo (8160 x 6120, 8-bit RGB) with a 30 MB original.
+    assert!(encode::memory_needed(8_160, 6_120, 8_160 * 6_120 * 3, true, 30_000_000) <= encode::MAX_ALLOC);
+}
+
+/// The original's bytes count: a picture whose phases fit with 4 MiB to spare is refused beside an original of more.
+#[test]
+fn the_originals_bytes_count_toward_the_memory_cap() {
+    // 16-bit RGBA, 8192 x 6112: decoding it holds twice 400.6 MB, 4 MiB under the cap.
+    let decoded = 8_192 * 6_112 * 8;
+    let spare = 4 * 1024 * 1024;
+    assert!(encode::memory_needed(8_192, 6_112, decoded, false, 0) <= encode::MAX_ALLOC);
+    assert!(encode::memory_needed(8_192, 6_112, decoded, false, spare) <= encode::MAX_ALLOC);
+    assert!(encode::memory_needed(8_192, 6_112, decoded, false, spare + 1) > encode::MAX_ALLOC);
 }

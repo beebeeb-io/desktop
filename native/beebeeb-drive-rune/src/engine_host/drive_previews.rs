@@ -571,8 +571,10 @@ impl PreviewsHost {
                 weights.push((size, format_of(*format), bytes_words(*bytes)));
             }
         }
+        // "Making" only once the run counted what it makes: a run that waits (for sync's first pass) says nothing.
         let notice = match self.run_state() {
-            RunState::Making { .. } => Some(REBUILDING),
+            RunState::Making { total, .. } if total > 0 => Some(REBUILDING),
+            RunState::Making { .. } => None,
             RunState::Stopped(Stopped::StorageFull) => Some(STORAGE_FULL),
             RunState::Stopped(Stopped::Offline | Stopped::Failed) => Some(RUN_STOPPED),
             RunState::Stopped(Stopped::Paused) => Some(RUN_PAUSED),

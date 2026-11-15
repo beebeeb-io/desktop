@@ -723,6 +723,179 @@ fn a_row_that_changed_after_the_plan_is_not_opened() {
     assert_eq!(world.previews.puts(), 1);
 }
 
+/// A copy whose recorded base is behind its row's version (a pull wrote the row; the bytes on disk are the older
+/// version's, here of the same size) is no source: the stale-copy rule names it, and nothing of it is sent. With its
+/// re-download queued the stale-copy rule leaves it alone, and it is still no source. A copy at its version is made
+/// (the check can pass).
+#[test]
+fn a_copy_behind_its_version_gets_no_preview() {
+    use crate::state_db::{OperationKind, PendingOperation};
+    let world = world(
+        "behind",
+        &[
+            (ONE, "Invented one.jpg", FileStatus::Local, jpeg(64, 48)),
+            (TWO, "Invented two.jpg", FileStatus::Local, jpeg(64, 48)),
+        ],
+    );
+    world.previews.set_setting(JPEG_1920);
+    let db = StateDb::open(world.db_dir.path().join("state.db")).unwrap();
+    let agreed_at = |id: &str, base: i64, current: i64| {
+        let mut state = db.get_file_contract_state(id).unwrap().unwrap();
+        state.local_hash = Some("an invented hash".into());
+        state.local_base_version = base;
+        state.current_version = current;
+        db.set_file_contract_state(&state).unwrap();
+    };
+    agreed_at(ONE, 1, 2);
+    agreed_at(TWO, 2, 2);
+    let named: Vec<String> = db
+        .list_stale_agreed_copies(10)
+        .unwrap()
+        .into_iter()
+        .map(|copy| copy.file_id)
+        .collect();
+    assert_eq!(named, [ONE], "the stale-copy rule names the copy behind");
+    let make = |force: bool| {
+        let stop = AtomicBool::new(false);
+        let session = world.engine.session_turn();
+        world.run(|| world.engine.make_previews_for(session, force, &stop, &|_, _| {}))
+    };
+    assert_eq!(make(false).made, 1);
+    assert!(
+        world.previews.stored(ONE).is_none(),
+        "nothing of the copy behind was sent"
+    );
+    assert!(world.previews.stored(TWO).is_some(), "the copy at its version was made");
+    db.enqueue_operation(&PendingOperation {
+        op_id: "an-invented-op".into(),
+        kind: OperationKind::HydrateFile,
+        file_id: Some(ONE.into()),
+        parent_id: None,
+        target_path: None,
+        metadata_json: None,
+        payload_path: None,
+        base_version: None,
+        base_object_version_id: None,
+        attempts: 0,
+        max_attempts: 5,
+        next_retry_at: 0,
+        last_error: None,
+        backup_source_key: None,
+        created_at: 1,
+        updated_at: 1,
+    })
+    .unwrap();
+    assert!(
+        db.list_stale_agreed_copies(10).unwrap().is_empty(),
+        "a queued re-download: not the rule's"
+    );
+    assert_eq!(
+        make(true).made,
+        1,
+        "a rebuild makes the copy at its version again, and only it"
+    );
+    assert!(world.previews.stored(ONE).is_none());
+}
+
+/// A version pulled after the photo was read and before its send: the bytes read were the older version's, so
+/// nothing is sent.
+#[test]
+fn a_version_pulled_between_the_open_and_the_send_sends_nothing() {
+    let world = world(
+        "pulled-in-hand",
+        &[(ONE, "Invented one.jpg", FileStatus::Local, jpeg(64, 48))],
+    );
+    world.previews.set_setting(JPEG_1920);
+    let db_path = world.db_dir.path().join("state.db");
+    let read = |path: &Path| {
+        let original = read_original(path);
+        // The pull lands while the photo is in hand: the row now carries a newer version.
+        let db = StateDb::open(&db_path).unwrap();
+        let mut row = db.get_file(ONE).unwrap().unwrap();
+        row.remote_updated_at += 100;
+        db.upsert_file(&row).unwrap();
+        original
+    };
+    let stop = AtomicBool::new(false);
+    let session = world.engine.session_turn();
+    let end = world.run(|| {
+        world
+            .engine
+            .make_previews_reading(session, false, &stop, &|_, _| {}, &read)
+    });
+    assert_eq!((end.made, end.not_here), (0, 1));
+    assert_eq!(world.previews.puts(), 0);
+}
+
+/// A lock during the speed limit's wait after a send ends the run at once (its copy of the key goes with it), not
+/// when the wait is over.
+#[test]
+fn a_lock_during_a_wait_ends_the_run_at_once() {
+    let world = world(
+        "lock-in-wait",
+        &[
+            (ONE, "Invented one.jpg", FileStatus::Local, jpeg(256, 192)),
+            (TWO, "Invented two.jpg", FileStatus::Local, jpeg(256, 192)),
+        ],
+    );
+    world.previews.set_setting(JPEG_1920);
+    let stop = AtomicBool::new(false);
+    let session = world.engine.session_turn();
+    let (engine, previews) = (world.engine.clone(), world.previews.clone());
+    // Once the first preview is sent (the wait of about 5 s at 1 KiB/s has begun), the screen locks.
+    let locker = std::thread::spawn(move || {
+        let began = std::time::Instant::now();
+        while previews.puts() == 0 && began.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        lock_and_unlock(&engine);
+    });
+    let began = std::time::Instant::now();
+    let end = world.run(|| {
+        DesktopConfig::update_for(&REAL, |config| {
+            config.upload_kbps_limit = 1;
+            (true, ())
+        })
+        .unwrap();
+        world.engine.make_previews_for(session, false, &stop, &|_, _| {})
+    });
+    locker.join().unwrap();
+    assert!(end.session_moved);
+    assert_eq!(world.previews.puts(), 1);
+    assert!(
+        began.elapsed() < std::time::Duration::from_secs(3),
+        "the wait ended with the session: {:?}",
+        began.elapsed()
+    );
+}
+
+/// The session moves while the photo is read and encoded: nothing is sealed for it.
+#[test]
+fn nothing_is_sealed_for_a_session_that_moved_during_the_encode() {
+    let world = world(
+        "moved-in-encode",
+        &[(ONE, "Invented one.jpg", FileStatus::Local, jpeg(64, 48))],
+    );
+    world.previews.set_setting(JPEG_1920);
+    let stop = AtomicBool::new(false);
+    let session = world.engine.session_turn();
+    let read = |path: &Path| {
+        let original = read_original(path);
+        lock_and_unlock(&world.engine);
+        original
+    };
+    SEALED.with(|sealed| sealed.set(0));
+    let end = world.run(|| {
+        world
+            .engine
+            .make_previews_reading(session, false, &stop, &|_, _| {}, &read)
+    });
+    assert!(end.session_moved);
+    assert_eq!(SEALED.with(|sealed| sealed.get()), 0, "nothing was sealed");
+    assert_eq!(world.previews.puts(), 0);
+}
+
 /// Off while a photo is in hand: its preview is not sent.
 #[test]
 fn a_stop_while_a_photo_is_in_hand_sends_nothing() {

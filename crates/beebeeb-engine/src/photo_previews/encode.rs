@@ -96,7 +96,7 @@ pub fn decode(original: &[u8]) -> Result<Upright, EncodeRefused> {
         .orientation()
         .unwrap_or(image::metadata::Orientation::NoTransforms);
     let rgb8 = decoder.color_type() == image::ColorType::Rgb8;
-    if memory_needed(w, h, decoder.total_bytes(), rgb8) > MAX_ALLOC {
+    if memory_needed(w, h, decoder.total_bytes(), rgb8, original.len() as u64) > MAX_ALLOC {
         return Err(EncodeRefused::OverMemory);
     }
     let image = DynamicImage::from_decoder(decoder).map_err(|_| EncodeRefused::Undecodable)?;
@@ -116,8 +116,9 @@ pub fn decode(original: &[u8]) -> Result<Upright, EncodeRefused> {
 /// largest of its phases, each counting the buffers alive together. Decoding: the picture and about as much of the
 /// decoder's own. Turning it upright: the picture and its turned copy. Making it RGB (when it is not already 8-bit
 /// RGB): the picture and its RGB copy. Scaling it: the RGB picture and the scaler's intermediate (16 bytes a pixel,
-/// the picture's long edge wide and at most [`LARGEST_EDGE`] high).
-pub fn memory_needed(w: u32, h: u32, decoded: u64, rgb8: bool) -> u64 {
+/// the picture's long edge wide and at most [`LARGEST_EDGE`] high). The `original`'s bytes are held through all of
+/// them.
+pub fn memory_needed(w: u32, h: u32, decoded: u64, rgb8: bool, original: u64) -> u64 {
     let (w, h) = (u64::from(w), u64::from(h));
     let rgb = w.saturating_mul(h).saturating_mul(3);
     let long = w.max(h);
@@ -125,7 +126,7 @@ pub fn memory_needed(w: u32, h: u32, decoded: u64, rgb8: bool) -> u64 {
     let decoding = decoded.saturating_mul(2);
     let converting = if rgb8 { 0 } else { decoded.saturating_add(rgb) };
     let scaling = rgb.saturating_add(intermediate);
-    decoding.max(converting).max(scaling)
+    decoding.max(converting).max(scaling).saturating_add(original)
 }
 
 /// `image` turned upright by `orientation`. A quarter turn makes a new buffer: the one it leaves is wiped before it is
@@ -151,9 +152,23 @@ fn upright(mut image: DynamicImage, orientation: image::metadata::Orientation) -
     turned
 }
 
-fn wipe(image: DynamicImage) {
-    let mut bytes = image.into_bytes();
-    bytes.zeroize();
+/// Zero `image`'s samples where they are, whatever their type, then free them. (`into_bytes` would first copy a
+/// picture that is not 8-bit into new bytes, and free the original unwiped.)
+fn wipe(mut image: DynamicImage) {
+    match &mut image {
+        DynamicImage::ImageLuma8(samples) => (**samples).zeroize(),
+        DynamicImage::ImageLumaA8(samples) => (**samples).zeroize(),
+        DynamicImage::ImageRgb8(samples) => (**samples).zeroize(),
+        DynamicImage::ImageRgba8(samples) => (**samples).zeroize(),
+        DynamicImage::ImageLuma16(samples) => (**samples).zeroize(),
+        DynamicImage::ImageLumaA16(samples) => (**samples).zeroize(),
+        DynamicImage::ImageRgb16(samples) => (**samples).zeroize(),
+        DynamicImage::ImageRgba16(samples) => (**samples).zeroize(),
+        DynamicImage::ImageRgb32F(samples) => (**samples).zeroize(),
+        DynamicImage::ImageRgba32F(samples) => (**samples).zeroize(),
+        // A kind a later `image` adds: its bytes, wiped (a copy, when they are not bytes already).
+        _ => image.into_bytes().zeroize(),
+    }
 }
 
 /// The size of `(w, h)` with its long edge at most `long`: never larger than it is.

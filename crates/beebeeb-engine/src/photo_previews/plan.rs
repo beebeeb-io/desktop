@@ -42,6 +42,8 @@ pub struct LocalPhoto {
     pub held_write: bool,
     /// The server version the local state last took (unix seconds).
     pub remote_updated_at: i64,
+    /// The copy on this PC is an older version than the row's (see [`behind_its_version`]).
+    pub behind: bool,
 }
 
 impl std::fmt::Debug for LocalPhoto {
@@ -50,6 +52,7 @@ impl std::fmt::Debug for LocalPhoto {
             .field("bytes", &self.bytes)
             .field("status", &self.status)
             .field("held_write", &self.held_write)
+            .field("behind", &self.behind)
             .finish_non_exhaustive()
     }
 }
@@ -78,6 +81,7 @@ pub fn local_photos(db: &StateDb) -> Option<Vec<LocalPhoto>> {
             && db.item_presentation(&row.file_id).map_or(true, |presentation| {
                 presentation.is_some_and(|presentation| presentation.held_write_queued)
             });
+        let behind = row.status == FileStatus::Local && behind_its_version(db, &row.file_id);
         photos.push(LocalPhoto {
             id: row.file_id,
             rel_path: row.path,
@@ -86,6 +90,7 @@ pub fn local_photos(db: &StateDb) -> Option<Vec<LocalPhoto>> {
             status: row.status,
             held_write,
             remote_updated_at: row.remote_updated_at,
+            behind,
         });
     }
     Some(photos)
@@ -95,6 +100,7 @@ pub fn local_photos(db: &StateDb) -> Option<Vec<LocalPhoto>> {
 pub fn may_be_source(photo: &LocalPhoto, owned: &HashMap<String, PreviewState>) -> bool {
     photo.status == FileStatus::Local
         && !photo.held_write
+        && !photo.behind
         && decodable(&photo.name)
         && matches!(item_class(&photo.id), Ok(ItemClass::Owner))
         && owned
@@ -102,9 +108,24 @@ pub fn may_be_source(photo: &LocalPhoto, owned: &HashMap<String, PreviewState>) 
             .is_some_and(|state| state.is_the_version_here(photo.remote_updated_at, photo.bytes))
 }
 
-/// Whether `photo`'s row is still what the plan read, right before the photo is opened: `Local`, at the same path,
-/// server version and size, with no write held. A row the engine changed since leaves the photo to a later run; a row
-/// that does not read is taken as changed.
+/// The version part of the stale-copy rule (`state_db/stale_copies.rs`): agreed content recorded at a known version
+/// (a `local_hash`, `local_base_version > 0`) that is behind the row's current version. A pull that raises a file's
+/// version writes the row only, so the bytes on disk are then the older version's, even when the size and the time
+/// agree. A row whose state does not read is taken as behind. A row with no recorded base (0) is not named: for it the
+/// server's time and the size stay the only guards.
+pub fn behind_its_version(db: &StateDb, id: &str) -> bool {
+    db.get_file_contract_state(id).map_or(true, |state| {
+        state.is_some_and(|state| {
+            state.local_hash.is_some()
+                && state.local_base_version > 0
+                && state.current_version > state.local_base_version
+        })
+    })
+}
+
+/// Whether `photo`'s row is still what the plan read, right before the photo is opened and again before each send:
+/// `Local`, at the same path, server version and size, not behind its version, with no write held. A row the engine
+/// changed since leaves the photo to a later run; a row that does not read is taken as changed.
 pub fn still_as_planned(db: &StateDb, photo: &LocalPhoto) -> bool {
     let Ok(Some(row)) = db.get_file(&photo.id) else {
         return false;
@@ -113,6 +134,7 @@ pub fn still_as_planned(db: &StateDb, photo: &LocalPhoto) -> bool {
         && row.path == photo.rel_path
         && row.remote_updated_at == photo.remote_updated_at
         && u64::try_from(row.size_bytes).ok() == Some(photo.bytes)
+        && !behind_its_version(db, &row.file_id)
         && db
             .item_presentation(&row.file_id)
             .is_ok_and(|presentation| !presentation.is_some_and(|presentation| presentation.held_write_queued))
