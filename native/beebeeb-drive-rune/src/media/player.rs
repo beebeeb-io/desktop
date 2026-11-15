@@ -107,10 +107,15 @@ pub enum Refusal {
     /// No decoder here for this format, or its route is off: "This PC can't play <name> files here." The name is
     /// the format's (`Codec::name`), never the file's.
     NoDecoder(String),
-    /// The codec's route is the system's decoder and this PC has none (decision D-MED-2: HEVC on a Windows PC
-    /// without Microsoft's HEVC extension): "This PC can't play HEVC video without Microsoft's HEVC extension." Never
-    /// the helper's own decoder in its place.
+    /// The codec's route is the system's decoder and this PC has none for it. HEVC (decision D-MED-2): "This PC
+    /// can't play HEVC video without Microsoft's HEVC extension."; any other `System` codec (H.264 streams FilmCraft
+    /// cannot decode, AAC, E-AC-3, MPEG-4 Part 2, VC-1, WMA): "This PC can't play <name> files here.", the name
+    /// from `Codec::name`. Never the helper's own decoder in its place.
     NoSystemDecoder(Codec),
+    /// The codec's route is the system's decoder and this Windows has no media codecs at all (an N or KN edition
+    /// without the Media Feature Pack; the legal brief of 2026-11-15, F3 caveat 1): "This PC can't play <name>
+    /// files: this edition of Windows has no media codecs." The same honest state, never the helper's own decoder.
+    NoSystemMedia(Codec),
     /// "This file could not be played." (the helper failed, broke the protocol or timed out; a read failed).
     CouldNotPlay,
     /// No session to read the file for.

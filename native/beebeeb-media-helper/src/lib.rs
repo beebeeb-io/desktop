@@ -34,25 +34,34 @@ pub enum Route {
     Unavailable,
 }
 
-/// The route each codec SHIPS with: one row per codec (a test holds every codec to exactly one row).
+/// The route each codec ships with: one row per codec (a test holds every codec to exactly one row). A row is a
+/// `const`, settled when the helper is built, and follows the codec's Cargo feature: a codec whose feature is off has no
+/// decoder in this binary, so its row can never be `Rust` (the legal brief's F1, 2026-11-15).
 ///
-/// - Patent-pool codecs (D-MED-2 (c)): FilmCraft's decoders, ON until counsel's answer flips a row: H.264, AAC,
-///   AC-3, E-AC-3, MPEG-2, ProRes, DNxHD.
-/// - HEVC: FilmCraft's decoder is built, and its route ships OFF: the shipped route is the system's decoder.
-/// - Royalty-free (or expired) codecs: FilmCraft's decoders.
+/// - H.264: FilmCraft's decoder (`h264`, shipped: the owner's ruling of 2026-11-15 18:04); the system's decoder takes
+///   only the streams FilmCraft cannot decode ([`SYSTEM_FALLBACK`]).
+/// - AAC, E-AC-3: compiled out until counsel clears them; the system's decoder.
+/// - AC-3, MPEG-1/2 video, ProRes, DNxHD: compiled out until counsel clears them; not played here.
+/// - HEVC: the system's decoder only, permanently (D-MED-2); FilmCraft's HEVC is never built into this helper.
+/// - MPEG-4 Part 2, VC-1 / WMV, WMA: the system's decoder (FilmCraft has none).
+/// - Royalty-free or expired: FilmCraft's decoders (VP8, VP9, AV1, MP3, MP1/MP2, FLAC, ALAC, Opus, Vorbis, PCM).
 pub const ROUTES: &[(Codec, Route)] = &[
-    (Codec::H264, Route::Rust),
-    (Codec::Aac, Route::Rust),
-    (Codec::Ac3, Route::Rust),
-    (Codec::Eac3, Route::Rust),
-    (Codec::Mpeg2, Route::Rust),
-    (Codec::ProRes, Route::Rust),
-    (Codec::Dnx, Route::Rust),
+    (Codec::H264, ours_or(cfg!(feature = "h264"), Route::System)),
+    (Codec::Aac, ours_or(cfg!(feature = "aac"), Route::System)),
+    (Codec::Eac3, ours_or(cfg!(feature = "eac3"), Route::System)),
+    (Codec::Ac3, ours_or(cfg!(feature = "ac3"), Route::Unavailable)),
+    (Codec::Mpeg2, ours_or(cfg!(feature = "mpeg2"), Route::Unavailable)),
+    (Codec::ProRes, ours_or(cfg!(feature = "prores"), Route::Unavailable)),
+    (Codec::Dnx, ours_or(cfg!(feature = "dnx"), Route::Unavailable)),
     (Codec::Hevc, Route::System),
+    (Codec::Mpeg4Part2, Route::System),
+    (Codec::Vc1, Route::System),
+    (Codec::Wma, Route::System),
     (Codec::Vp8, Route::Rust),
     (Codec::Vp9, Route::Rust),
     (Codec::Av1, Route::Rust),
     (Codec::Mp3, Route::Rust),
+    (Codec::Mp2, Route::Rust),
     (Codec::Flac, Route::Rust),
     (Codec::Alac, Route::Rust),
     (Codec::Opus, Route::Rust),
@@ -60,6 +69,15 @@ pub const ROUTES: &[(Codec, Route)] = &[
     (Codec::Pcm, Route::Rust),
     (Codec::Other, Route::Unavailable),
 ];
+
+/// `Rust` when the codec's decoder is built in, else `otherwise`.
+const fn ours_or(built_in: bool, otherwise: Route) -> Route {
+    if built_in { Route::Rust } else { otherwise }
+}
+
+/// The `Rust` rows whose streams FilmCraft cannot decode (H.264 interlaced or 10-bit, the kinds its decoder refuses) go
+/// to the system's decoder instead of failing. Only these, only that way: never from `System` to FilmCraft.
+pub const SYSTEM_FALLBACK: &[Codec] = &[Codec::H264];
 
 /// The route of `codec` in `table` ([`ROUTES`] when shipping; a test hands its own). A codec without a row is
 /// `Unavailable`.
@@ -86,20 +104,55 @@ mod tests {
             assert_eq!(rows, 1, "{codec:?}");
         }
         assert_eq!(ROUTES.len(), Codec::ALL.len());
-        // The owner's ruling, as it ships: HEVC on the system's decoder, the other pool codecs on FilmCraft's.
+        assert_eq!(route(Codec::Other), Route::Unavailable);
+        assert_eq!(route_in(&[], Codec::Pcm), Route::Unavailable);
+        // HEVC never has FilmCraft's decoder, whatever is built.
         assert_eq!(route(Codec::Hevc), Route::System);
+        assert!(!SYSTEM_FALLBACK.contains(&Codec::Hevc));
+    }
+
+    /// The rulings as they ship (the default features): H.264 ours, the other pool codecs compiled out (AAC and E-AC-3
+    /// on the system's decoder, the rest not played), HEVC and the Windows formats on the system's decoder.
+    #[cfg(all(
+        feature = "h264",
+        not(any(
+            feature = "aac",
+            feature = "ac3",
+            feature = "eac3",
+            feature = "mpeg2",
+            feature = "prores",
+            feature = "dnx"
+        ))
+    ))]
+    #[test]
+    fn the_shipped_routes_are_the_rulings() {
+        assert_eq!(route(Codec::H264), Route::Rust);
         for codec in [
-            Codec::H264,
             Codec::Aac,
-            Codec::Ac3,
             Codec::Eac3,
-            Codec::Mpeg2,
-            Codec::ProRes,
-            Codec::Dnx,
+            Codec::Hevc,
+            Codec::Mpeg4Part2,
+            Codec::Vc1,
+            Codec::Wma,
+        ] {
+            assert_eq!(route(codec), Route::System, "{codec:?}");
+        }
+        for codec in [Codec::Ac3, Codec::Mpeg2, Codec::ProRes, Codec::Dnx] {
+            assert_eq!(route(codec), Route::Unavailable, "{codec:?}");
+        }
+        for codec in [
+            Codec::Vp8,
+            Codec::Vp9,
+            Codec::Av1,
+            Codec::Mp3,
+            Codec::Mp2,
+            Codec::Flac,
+            Codec::Alac,
+            Codec::Opus,
+            Codec::Vorbis,
+            Codec::Pcm,
         ] {
             assert_eq!(route(codec), Route::Rust, "{codec:?}");
         }
-        assert_eq!(route(Codec::Other), Route::Unavailable);
-        assert_eq!(route_in(&[], Codec::Pcm), Route::Unavailable);
     }
 }

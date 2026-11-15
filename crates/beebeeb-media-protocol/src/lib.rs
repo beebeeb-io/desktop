@@ -79,6 +79,7 @@ pub enum Codec {
     Vp8 = 2,
     Vp9 = 3,
     Av1 = 4,
+    /// MPEG-1 and MPEG-2 video.
     Mpeg2 = 5,
     ProRes = 6,
     Dnx = 7,
@@ -91,13 +92,21 @@ pub enum Codec {
     Pcm = 14,
     Ac3 = 15,
     Eac3 = 16,
+    /// MPEG-1 / MPEG-2 audio, layers I and II (MP3 is [`Codec::Mp3`]).
+    Mp2 = 17,
+    /// MPEG-4 Part 2 video (the DivX / Xvid kind).
+    Mpeg4Part2 = 18,
+    /// VC-1, and the Windows Media Video it is.
+    Vc1 = 19,
+    /// Windows Media Audio.
+    Wma = 20,
     /// A codec this list does not name.
-    Other = 17,
+    Other = 21,
 }
 
 impl Codec {
     /// Every codec, in the order of their wire bytes.
-    pub const ALL: [Codec; 18] = [
+    pub const ALL: [Codec; 22] = [
         Codec::H264,
         Codec::Hevc,
         Codec::Vp8,
@@ -115,6 +124,10 @@ impl Codec {
         Codec::Pcm,
         Codec::Ac3,
         Codec::Eac3,
+        Codec::Mp2,
+        Codec::Mpeg4Part2,
+        Codec::Vc1,
+        Codec::Wma,
         Codec::Other,
     ];
 
@@ -139,6 +152,10 @@ impl Codec {
             Codec::Pcm => "PCM",
             Codec::Ac3 => "AC-3",
             Codec::Eac3 => "E-AC-3",
+            Codec::Mp2 => "MP2",
+            Codec::Mpeg4Part2 => "MPEG-4 Part 2",
+            Codec::Vc1 => "VC-1",
+            Codec::Wma => "WMA",
             Codec::Other => return None,
         })
     }
@@ -160,6 +177,10 @@ pub enum ErrorCode {
     /// The codec's route is the system's decoder and this PC has none for it (HEVC on a Windows PC without
     /// Microsoft's HEVC extension). The helper never decodes it with its own decoder instead.
     NoSystemDecoder(Codec),
+    /// The codec's route is the system's decoder and this Windows has no media codecs at all (an N or KN edition
+    /// without the Media Feature Pack). The same honest state as [`ErrorCode::NoSystemDecoder`], with words that say
+    /// why; never the helper's own decoder instead.
+    NoSystemMedia(Codec),
     /// No decoder for what the file holds (a format the decoders do not read).
     NoDecoder,
     /// The file is damaged or is not what its name says.
@@ -186,6 +207,7 @@ impl ErrorCode {
             ErrorCode::ReadFailed => [5, 0],
             ErrorCode::Timeout => [6, 0],
             ErrorCode::Internal => [7, 0],
+            ErrorCode::NoSystemMedia(codec) => [8, codec.byte()],
         }
     }
 
@@ -206,6 +228,7 @@ impl ErrorCode {
             5 => plain(ErrorCode::ReadFailed),
             6 => plain(ErrorCode::Timeout),
             7 => plain(ErrorCode::Internal),
+            8 => Ok(ErrorCode::NoSystemMedia(Codec::of(codec)?)),
             _ => Err(WireError::Malformed),
         }
     }
