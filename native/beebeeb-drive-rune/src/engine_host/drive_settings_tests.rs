@@ -30,6 +30,10 @@ mod tools_tests;
 #[path = "drive_settings_limits_tests.rs"]
 mod limits;
 
+/// Thumbnails and previews drawn on the engine source.
+#[path = "drive_settings_previews_tests.rs"]
+mod previews_view;
+
 /// Holds the worker inside one call of the fake (the `at`-th, counted from 1) until the test lets it go: an
 /// answer in flight, with no clock deciding the order.
 #[derive(Default)]

@@ -26,6 +26,8 @@ mod windows;
 mod windows_control;
 #[cfg(windows)]
 mod windows_folder;
+#[cfg(windows)]
+mod windows_photo;
 // The lock screen's prompt (`engine_host::hello`). Compiled on every platform (a stub off Windows).
 #[allow(dead_code)]
 pub mod windows_hello;
@@ -133,6 +135,11 @@ pub trait Platform: Send + Sync {
     /// without a folder. The folder is the person's own: shown to them, never logged.
     fn pick_folder(&self, _title: &str, _start: &std::path::Path) -> Result<Option<std::path::PathBuf>, PlatformError> {
         Err(PlatformError::NotBuilt("the folder picker"))
+    }
+    /// Opens the OS's own file picker for one picture this PC decodes, in `start` (photo previews' "Choose
+    /// photo"). BLOCKS: a worker's call. `Ok(None)`: closed without a file. Never logged.
+    fn pick_photo(&self, _title: &str, _start: &std::path::Path) -> Result<Option<std::path::PathBuf>, PlatformError> {
+        Err(PlatformError::NotBuilt("the photo picker"))
     }
     /// Sets or clears the window's capture-exclusion. When set, the window region appears black
     /// (or absent) in screenshots, screen recordings and screen-sharing; clearing restores it.

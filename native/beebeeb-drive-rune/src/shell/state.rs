@@ -190,10 +190,13 @@ pub fn init_on_engine<C: beebeeb_engine::app::CredentialStores>(
     s.global = crate::frames::global::Ui::new(Box::new(crate::engine_host::EngineGlobalSource::new(engine.clone())));
     s.settings.source = Box::new(crate::engine_host::settings::EngineSettingsSource::new(engine.clone()));
     // Drive's panes: Storage insights answers; every other pane is the shell's frame (`engine_host::drive_settings`).
-    s.settings.drive = Box::new(crate::engine_host::drive_settings::EngineDriveSettings::new(
-        engine.clone(),
-        crate::shell::platform::current(),
-    ));
+    s.settings.drive = Box::new(
+        crate::engine_host::drive_settings::EngineDriveSettings::new(engine.clone(), crate::shell::platform::current())
+            .with_previews(crate::engine_host::drive_previews::PreviewsHost::new(
+                engine.clone(),
+                crate::engine_host::drive_previews::shared_run(),
+            )),
+    );
     // The lock screen's Windows Hello prompt is owned by the main window.
     let hello = crate::engine_host::hello::WindowHello::new(s.shell.main_window_slot());
     s.signin = Some(crate::frames::signin::Ui::new(Box::new(

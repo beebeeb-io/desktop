@@ -15,6 +15,8 @@ use crate::shell::actions::{EngineActions, FixtureEngine};
 use crate::shell::app::GateState as ShellGate;
 use crate::shell::host::{self, Shell};
 use crate::shell::platform::fake::FakePlatform;
+use beebeeb_engine::app::photo_previews_api::{PreviewsFacts, PreviewsRefused, SampleFacts};
+use beebeeb_engine::photo_previews::PreviewSetting;
 
 #[path = "setup_app_lock_tests.rs"]
 mod app_lock;
@@ -22,6 +24,8 @@ mod app_lock;
 mod folder_tests;
 #[path = "setup_glue_tests.rs"]
 mod glue;
+#[path = "setup_previews_tests.rs"]
+mod previews_tests;
 
 /// The folder a first run suggests, in these tests.
 const SUGGESTED: &str = "/invented/home/Beebeeb";
@@ -67,6 +71,12 @@ struct Fake {
     choices_fail: AtomicBool,
     /// Every app lock write: its session, its value, and whether a proof came with it.
     app_lock: Mutex<Vec<(SessionGeneration, bool, bool)>>,
+    /// Step 4: what the read of the preview setting answers (`None`: this double binds no previews), a read that
+    /// waits here until released, every setting written, and whether a photo of the account is measured.
+    previews: Mutex<Option<Result<PreviewsFacts, PreviewsRefused>>>,
+    previews_held: Mutex<()>,
+    previews_sets: Mutex<Vec<(SessionGeneration, PreviewSetting)>>,
+    previews_photo: AtomicBool,
 }
 
 fn session(number: u64) -> SessionGeneration {
@@ -102,6 +112,10 @@ fn fake() -> Arc<Fake> {
         choices_held: Mutex::new(()),
         choices_fail: AtomicBool::new(false),
         app_lock: Mutex::default(),
+        previews: Mutex::new(None),
+        previews_held: Mutex::new(()),
+        previews_sets: Mutex::default(),
+        previews_photo: AtomicBool::new(false),
     })
 }
 
@@ -114,6 +128,41 @@ impl Fake {
 }
 
 impl SetupEngine for Fake {
+    fn binds_previews(&self) -> bool {
+        self.previews.lock().unwrap().is_some()
+    }
+    fn previews_facts_for(&self, _session: SessionGeneration) -> Result<PreviewsFacts, PreviewsRefused> {
+        drop(self.previews_held.lock().unwrap());
+        self.previews
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(Err(PreviewsRefused::NotSignedIn))
+    }
+    // As the engine: only for the session in memory.
+    fn set_previews_for(&self, session: SessionGeneration, setting: PreviewSetting) -> Result<(), PreviewsRefused> {
+        if session != self.stamp().0 {
+            return Err(PreviewsRefused::NotSignedIn);
+        }
+        self.previews_sets.lock().unwrap().push((session, setting));
+        Ok(())
+    }
+    fn measure_sample_for(
+        &self,
+        session: SessionGeneration,
+        _picked: Option<PathBuf>,
+    ) -> Result<SampleFacts, PreviewsRefused> {
+        let photo = self.previews_photo.load(Ordering::SeqCst).then(|| {
+            let png = |n: u8| zeroize::Zeroizing::new(vec![0x89, b'P', b'N', b'G', n]);
+            beebeeb_engine::app::photo_previews_api::SamplePhoto {
+                original_bytes: 4_000_000,
+                weights: vec![(1280, 200_000), (1920, 410_000), (2560, 700_000), (3840, 1_200_000)],
+                original_png: png(0),
+                previews_png: vec![(1280, png(1)), (1920, png(2)), (2560, png(3)), (3840, png(4))],
+            }
+        });
+        Ok(SampleFacts { session, photo })
+    }
     // As the engine: a write for a session that is not the one in memory writes nothing, and off needs a proof.
     fn set_app_lock_for(
         &self,

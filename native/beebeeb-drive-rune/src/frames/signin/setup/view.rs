@@ -44,6 +44,8 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
         (Step::Backup, _) if ui.failed(Step::Backup) => folder::backup_failed(&mut k, &t),
         (Step::Backup, _) if ui.folders.is_empty() => folder::backup_none(&mut k, &t),
         (Step::Backup, _) => backup(ui, &mut k, &t),
+        (Step::Previews, _) if ui.loading(Step::Previews) => previews_loading(&mut k, &t),
+        (Step::Previews, _) if ui.failed(Step::Previews) => previews_failed(&mut k, &t),
         (Step::Previews, _) => previews(ui, &mut k, &t),
         (Step::Explorer, _) => match &ui.explorer {
             Explorer::Added => explorer_added(&mut k, &t),
@@ -428,10 +430,49 @@ fn previews(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             t,
             |j, tab| tab.on_press_tx(act(move |ui: &mut Ui| ui.set_format(PreviewFormat::ALL[j]))),
         ))
-        .child(setup::list(k, vec![space], Some(&ui.fit_line()), t))
+        // No limit to state (nothing is kept on this PC yet): no row, only the line under the choices.
+        .child(if limit.is_empty() {
+            setup::note(k, &ui.fit_line(), setup::FOOT, 16.0, t)
+        } else {
+            setup::list(k, vec![space], Some(&ui.fit_line()), t)
+        })
         .child(
             actions()
                 .child(primary(k, "Continue", ButtonState::Enabled, t, Ui::go_on))
+                .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
+        )
+}
+
+/// Step 4 while the account's preview setting is being read: its heading, a line that says so, nothing chosen and
+/// nothing stored until the read answered. "Not now" stays.
+fn previews_loading(k: &mut Keys, t: &Theme) -> El {
+    setup::column()
+        .child(au::heading(
+            "Thumbnails and previews",
+            Some("Reading your preview settings\u{2026}"),
+            false,
+            t,
+        ))
+        .child(
+            actions()
+                .child(primary(k, "Continue", ButtonState::Disabled, t, Ui::go_on))
+                .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
+        )
+}
+
+/// Step 4 when reading the preview setting failed: said as a failure, never as "off" or "not in this version". Try
+/// again reads it again; Not now goes on with nothing changed.
+fn previews_failed(k: &mut Keys, t: &Theme) -> El {
+    setup::column()
+        .child(au::heading(
+            "Thumbnails and previews",
+            Some("Beebeeb couldn\u{2019}t read your preview settings. Nothing is changed."),
+            false,
+            t,
+        ))
+        .child(
+            actions()
+                .child(primary(k, "Try again", ButtonState::Enabled, t, Ui::retry_previews))
                 .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
         )
 }
@@ -793,7 +834,16 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         ),
         ("App lock", switch(Switch::AppLock, r.app_lock).into(), Setting::AppLock),
         ("Backup", backup, Setting::Backup),
-        ("Previews", ui.preview_name(), Setting::Previews),
+        (
+            "Previews",
+            match ui.answered(Switch::Previews) {
+                Some(Answered::NotAsked) => "Not set here".into(),
+                Some(Answered::Waiting) => "Saving\u{2026}".into(),
+                Some(Answered::NotKnown | Answered::NotChanged) => "Not changed".into(),
+                None => ui.preview_name(),
+            },
+            Setting::Previews,
+        ),
         ("File Explorer", explorer.into(), Setting::FileExplorer),
         (
             "Notifications",

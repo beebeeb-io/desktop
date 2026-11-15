@@ -92,6 +92,8 @@ pub enum Switch {
     Backup,
     /// Step 2: app lock.
     AppLock,
+    /// Step 4: photo previews turned on at the chosen size and format.
+    Previews,
 }
 
 /// How a change asked through the source ended.
@@ -179,15 +181,40 @@ impl LockAfter {
     }
 }
 
-/// The photo the compare view shows: an encoded image (PNG) and where it comes from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The photo the compare view shows: an encoded image (PNG) and where it comes from. Shared, never copied: a
+/// window compares it on every poll (the same `Arc` compares without reading the bytes).
+#[derive(Clone, PartialEq, Eq)]
 pub struct Sample {
     /// PNG bytes of the original as the compare view draws it.
-    pub original_png: &'static [u8],
+    pub original_png: std::sync::Arc<[u8]>,
     /// PNG bytes of the preview at the chosen size and format.
-    pub preview_png: &'static [u8],
+    pub preview_png: std::sync::Arc<[u8]>,
     /// `true`: the photo that ships inside the app, because the account has no photo yet.
     pub bundled: bool,
+}
+
+/// A sample can be the person's own photo: its `Debug` prints sizes only.
+impl std::fmt::Debug for Sample {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sample")
+            .field("original_png", &self.original_png.len())
+            .field("preview_png", &self.preview_png.len())
+            .field("bundled", &self.bundled)
+            .finish()
+    }
+}
+
+impl Sample {
+    /// The picture that ships inside the app, said as that.
+    pub fn bundled() -> Self {
+        static BUNDLED: std::sync::OnceLock<std::sync::Arc<[u8]>> = std::sync::OnceLock::new();
+        let png = BUNDLED.get_or_init(|| std::sync::Arc::from(BUNDLED_SAMPLE_PNG)).clone();
+        Sample {
+            original_png: png.clone(),
+            preview_png: png,
+            bundled: true,
+        }
+    }
 }
 
 /// The sample photo that ships inside the app: the picture the board itself draws in the compare
@@ -213,6 +240,8 @@ pub trait SetupSource {
     }
     /// Try again after a failed read of step 3's folders.
     fn retry_backups(&mut self) {}
+    /// Try again after a failed read of step 4's preview setting.
+    fn retry_previews(&mut self) {}
     /// Whether the first run still has to ask for the sync folder, and what it suggests.
     fn folder_ask(&self) -> FolderAsk {
         FolderAsk::Settled
@@ -273,6 +302,11 @@ pub trait SetupSource {
     fn space_limit(&self) -> String;
     /// The photo to compare: one of the account's, or the bundled sample when it has none.
     fn sample(&self) -> Sample;
+    /// The size and format the account has stored, once read: step 4 starts on it, so "Continue" on untouched
+    /// choices changes nothing but turning previews on. `None` (the fixture): the board's own choice.
+    fn stored_previews(&self) -> Option<(PreviewSize, PreviewFormat)> {
+        None
+    }
 
     /// "Add a passkey". Engine: Windows' passkey dialog (WebAuthn create), then
     /// `auth_v2::passkey_register`. `true`: a passkey was added.
@@ -433,11 +467,7 @@ impl SetupSource for FixtureSetupSource {
     }
 
     fn sample(&self) -> Sample {
-        Sample {
-            original_png: BUNDLED_SAMPLE_PNG,
-            preview_png: BUNDLED_SAMPLE_PNG,
-            bundled: true,
-        }
+        Sample::bundled()
     }
 
     fn add_passkey(&mut self) -> bool {

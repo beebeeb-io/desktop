@@ -1,0 +1,174 @@
+//! An original on this PC to a JPEG preview, in memory only.
+//!
+//! Decoded with `image` (a source wider or higher than [`MAX_SIDE`] is refused while decoding), turned upright by its
+//! EXIF orientation, scaled so the long edge is `min(px, its own long edge)` (never upscaled, Lanczos3), then encoded
+//! as JPEG at quality 85, or 70 when that does not fit the server's cap. The output carries no EXIF or other APP1
+//! metadata: the encoder writes none. Every buffer this module owns holding pixels or encoded bytes is wiped when it
+//! is dropped; the decoder's and the scaler's own scratch memory is freed, not overwritten.
+//!
+//! Decodable here: jpg, jpeg, png, webp, gif (its first frame), bmp. Not a source: heic, heif, raw, tif and tiff,
+//! and videos (this PC has no decoder for them).
+
+use std::io::Cursor;
+
+use image::{DynamicImage, ImageDecoder, ImageEncoder as _, ImageReader, RgbImage, imageops::FilterType};
+use zeroize::{Zeroize, Zeroizing};
+
+use super::seal::MAX_PLAINTEXT;
+
+/// The widest and highest original that is decoded at all.
+pub const MAX_SIDE: u32 = 16_384;
+/// The most memory the decoder may take for one original.
+const MAX_ALLOC: u64 = 768 * 1024 * 1024;
+/// The JPEG quality of a preview, and the one tried once when that is over the server's cap.
+pub const QUALITY: u8 = 85;
+pub const QUALITY_SMALLER: u8 = 70;
+/// The long edge of the pictures the compare view draws (its photo at twice its size).
+pub const SHOWN_LONG_EDGE: u32 = 1120;
+
+/// The extensions this PC makes previews from (lowercase, no dot).
+pub const DECODABLE: [&str; 6] = ["jpg", "jpeg", "png", "webp", "gif", "bmp"];
+
+/// Whether a file named `name` is a photo this PC can decode.
+pub fn decodable(name: &str) -> bool {
+    name.rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+        .is_some_and(|ext| DECODABLE.contains(&ext.as_str()))
+}
+
+/// Why no preview was made. Fixed words only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodeRefused {
+    /// Not a picture this PC decodes, a broken one, or over the size or memory caps.
+    Undecodable,
+    /// Even at the lower quality the preview is over the server's cap.
+    TooLarge,
+    Failed,
+}
+
+/// A decoded original, upright, as RGB. Wiped when dropped.
+pub struct Upright {
+    rgb: RgbImage,
+}
+
+impl Drop for Upright {
+    fn drop(&mut self) {
+        let raw: &mut [u8] = &mut self.rgb;
+        raw.zeroize();
+    }
+}
+
+impl std::fmt::Debug for Upright {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Upright").field("size", &self.size()).finish()
+    }
+}
+
+impl Upright {
+    /// Width and height after the EXIF orientation.
+    pub fn size(&self) -> (u32, u32) {
+        self.rgb.dimensions()
+    }
+}
+
+/// Decode `original` (an encoded picture) and turn it upright by its EXIF orientation.
+pub fn decode(original: &[u8]) -> Result<Upright, EncodeRefused> {
+    let mut reader = ImageReader::new(Cursor::new(original))
+        .with_guessed_format()
+        .map_err(|_| EncodeRefused::Undecodable)?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_SIDE);
+    limits.max_image_height = Some(MAX_SIDE);
+    limits.max_alloc = Some(MAX_ALLOC);
+    reader.limits(limits);
+    let mut decoder = reader.into_decoder().map_err(|_| EncodeRefused::Undecodable)?;
+    let (w, h) = decoder.dimensions();
+    if w == 0 || h == 0 || w > MAX_SIDE || h > MAX_SIDE {
+        return Err(EncodeRefused::Undecodable);
+    }
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut image = DynamicImage::from_decoder(decoder).map_err(|_| EncodeRefused::Undecodable)?;
+    image.apply_orientation(orientation);
+    let rgb = match image {
+        DynamicImage::ImageRgb8(rgb) => rgb,
+        other => {
+            let rgb = other.to_rgb8();
+            wipe(other);
+            rgb
+        }
+    };
+    Ok(Upright { rgb })
+}
+
+fn wipe(image: DynamicImage) {
+    let mut bytes = image.into_bytes();
+    bytes.zeroize();
+}
+
+/// The size of `(w, h)` with its long edge at most `long`: never larger than it is.
+pub fn fitted(w: u32, h: u32, long: u32) -> (u32, u32) {
+    let own = w.max(h);
+    if own <= long || own == 0 {
+        return (w, h);
+    }
+    let scale = |side: u32| ((u64::from(side) * u64::from(long) + u64::from(own) / 2) / u64::from(own)).max(1) as u32;
+    (scale(w), scale(h))
+}
+
+/// The picture scaled down to a long edge of at most `long` (Lanczos3), never up. Wiped when dropped.
+pub fn scaled(upright: &Upright, long: u32) -> Upright {
+    let (w, h) = upright.size();
+    let (to_w, to_h) = fitted(w, h, long);
+    let rgb = if (to_w, to_h) == (w, h) {
+        upright.rgb.clone()
+    } else {
+        image::imageops::resize(&upright.rgb, to_w, to_h, FilterType::Lanczos3)
+    };
+    Upright { rgb }
+}
+
+/// JPEG at `quality`, no metadata.
+fn jpeg(picture: &Upright, quality: u8) -> Result<Zeroizing<Vec<u8>>, EncodeRefused> {
+    let mut out = Zeroizing::new(Vec::new());
+    let (w, h) = picture.size();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut *out, quality)
+        .encode(picture.rgb.as_raw(), w, h, image::ExtendedColorType::Rgb8)
+        .map_err(|_| EncodeRefused::Failed)?;
+    Ok(out)
+}
+
+/// A JPEG preview of `upright` with its long edge at `min(px, own)`: quality 85, or 70 once when 85 is over the
+/// server's cap; over that, refused.
+pub fn preview_jpeg(upright: &Upright, px: u32) -> Result<(Zeroizing<Vec<u8>>, (u32, u32)), EncodeRefused> {
+    let picture = scaled(upright, px);
+    let size = picture.size();
+    let first = jpeg(&picture, QUALITY)?;
+    if first.len() <= MAX_PLAINTEXT {
+        return Ok((first, size));
+    }
+    drop(first);
+    let second = jpeg(&picture, QUALITY_SMALLER)?;
+    if second.len() <= MAX_PLAINTEXT {
+        return Ok((second, size));
+    }
+    Err(EncodeRefused::TooLarge)
+}
+
+/// `original` (encoded) to a JPEG preview at `px`: [`decode`] then [`preview_jpeg`].
+pub fn encode_preview(original: &[u8], px: u32) -> Result<(Zeroizing<Vec<u8>>, (u32, u32)), EncodeRefused> {
+    let upright = decode(original)?;
+    preview_jpeg(&upright, px)
+}
+
+/// A picture as PNG bytes for a window to draw, its long edge at most [`SHOWN_LONG_EDGE`]. Wiped when dropped.
+pub fn shown_png(picture: &Upright) -> Result<Zeroizing<Vec<u8>>, EncodeRefused> {
+    let shown = scaled(picture, SHOWN_LONG_EDGE);
+    let (w, h) = shown.size();
+    let mut out = Zeroizing::new(Vec::new());
+    image::codecs::png::PngEncoder::new(&mut *out)
+        .write_image(shown.rgb.as_raw(), w, h, image::ExtendedColorType::Rgb8)
+        .map_err(|_| EncodeRefused::Failed)?;
+    Ok(out)
+}

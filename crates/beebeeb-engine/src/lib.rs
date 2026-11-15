@@ -30,6 +30,7 @@ pub mod callback_gate;
 pub mod cf_keepalive;
 pub mod cf_range;
 pub mod clipboard;
+pub mod cloud_attrs;
 pub mod config;
 pub mod conflict;
 pub mod content_record;
@@ -80,6 +81,7 @@ pub mod owner_keys;
 #[cfg(target_os = "windows")]
 pub mod passkey_windows;
 pub mod path_safety;
+pub mod photo_previews;
 pub mod reauth;
 pub mod runner;
 pub mod session;

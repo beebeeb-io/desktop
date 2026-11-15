@@ -21,8 +21,11 @@
 //! - "Open my Beebeeb": the first run is marked done for this PC ([`Engine::mark_first_run_done_for`]), and the
 //!   shell's gate lets the main window through ([`FirstRun`]).
 //!
+//! - Photo previews (step 4, DW-0204/DW-0209): the account's setting, a sample measured on this PC, Continue
+//!   turns previews on at the chosen size and format (`setup_previews.rs`).
+//!
 //! What it does NOT answer (each is a step that keeps its place and says it is not in this version yet,
-//! [`SetupSource::available`], never a step that looks done): a passkey, the app lock, previews. Backing up
+//! [`SetupSource::available`], never a step that looks done): a passkey. Backing up
 //! folders (step 3) is answered once the engine read this PC's known folders (`SetupEngine::backup_choices`, on a
 //! worker); each chosen folder is then switched on through `Engine::set_backup_folder`. See each method's own
 //! line below.
@@ -54,8 +57,7 @@ use beebeeb_engine::sync_view::{Explorer as EngineExplorer, Start, SyncView};
 use super::log;
 use crate::frames::signin::setup::Step;
 use crate::frames::signin::setup::source::{
-    BUNDLED_SAMPLE_PNG, Explorer, Folder, FolderAsk, LockAfter, Outcome, PreviewFormat, PreviewSize, Sample,
-    SetupSource, Switch,
+    Explorer, Folder, FolderAsk, LockAfter, Outcome, PreviewFormat, PreviewSize, Sample, SetupSource, Switch,
 };
 use crate::shell::platform::Platform;
 
@@ -63,6 +65,8 @@ use crate::shell::platform::Platform;
 mod app_lock;
 #[path = "setup_folder.rs"]
 mod folder;
+#[path = "setup_previews.rs"]
+mod previews;
 #[cfg(test)]
 #[path = "setup_tests.rs"]
 mod tests;
@@ -319,6 +323,49 @@ pub trait SetupEngine: Send + Sync + 'static {
     fn binds_app_lock(&self) -> bool {
         false
     }
+    /// Whether this engine binds photo previews (step 4): the real one does.
+    fn binds_previews(&self) -> bool {
+        false
+    }
+    /// `Engine::photo_previews_for`. BLOCKS.
+    fn previews_facts_for(
+        &self,
+        _session: SessionGeneration,
+    ) -> Result<
+        beebeeb_engine::app::photo_previews_api::PreviewsFacts,
+        beebeeb_engine::app::photo_previews_api::PreviewsRefused,
+    > {
+        Err(beebeeb_engine::app::photo_previews_api::PreviewsRefused::NotSignedIn)
+    }
+    /// `Engine::set_photo_previews_for`. BLOCKS.
+    fn set_previews_for(
+        &self,
+        _session: SessionGeneration,
+        _setting: beebeeb_engine::photo_previews::PreviewSetting,
+    ) -> Result<(), beebeeb_engine::app::photo_previews_api::PreviewsRefused> {
+        Err(beebeeb_engine::app::photo_previews_api::PreviewsRefused::NotSignedIn)
+    }
+    /// `Engine::measure_sample_for`. BLOCKS (decodes a photo).
+    fn measure_sample_for(
+        &self,
+        _session: SessionGeneration,
+        _picked: Option<PathBuf>,
+    ) -> Result<
+        beebeeb_engine::app::photo_previews_api::SampleFacts,
+        beebeeb_engine::app::photo_previews_api::PreviewsRefused,
+    > {
+        Err(beebeeb_engine::app::photo_previews_api::PreviewsRefused::NotSignedIn)
+    }
+    /// `Engine::make_previews_for`: a run's work. BLOCKS.
+    fn make_previews(
+        &self,
+        _session: SessionGeneration,
+        _force: bool,
+        _stop: &AtomicBool,
+        _progress: &dyn Fn(u32, u32),
+    ) -> beebeeb_engine::photo_previews::runner::RunEnd {
+        beebeeb_engine::photo_previews::runner::RunEnd::default()
+    }
 }
 
 /// One folder step 3 offers: the engine's key, its name, whether it starts on, and a bounded count of its files.
@@ -408,6 +455,44 @@ impl<C: CredentialStores> SetupEngine for Engine<C> {
     fn binds_app_lock(&self) -> bool {
         true
     }
+    fn binds_previews(&self) -> bool {
+        true
+    }
+    fn previews_facts_for(
+        &self,
+        session: SessionGeneration,
+    ) -> Result<
+        beebeeb_engine::app::photo_previews_api::PreviewsFacts,
+        beebeeb_engine::app::photo_previews_api::PreviewsRefused,
+    > {
+        self.photo_previews_for(session)
+    }
+    fn set_previews_for(
+        &self,
+        session: SessionGeneration,
+        setting: beebeeb_engine::photo_previews::PreviewSetting,
+    ) -> Result<(), beebeeb_engine::app::photo_previews_api::PreviewsRefused> {
+        self.set_photo_previews_for(session, setting)
+    }
+    fn measure_sample_for(
+        &self,
+        session: SessionGeneration,
+        picked: Option<PathBuf>,
+    ) -> Result<
+        beebeeb_engine::app::photo_previews_api::SampleFacts,
+        beebeeb_engine::app::photo_previews_api::PreviewsRefused,
+    > {
+        Engine::measure_sample_for(self, session, picked)
+    }
+    fn make_previews(
+        &self,
+        session: SessionGeneration,
+        force: bool,
+        stop: &AtomicBool,
+        progress: &dyn Fn(u32, u32),
+    ) -> beebeeb_engine::photo_previews::runner::RunEnd {
+        self.make_previews_for(session, force, stop, progress)
+    }
 }
 
 /// What the adapter asks of the shell around it.
@@ -451,6 +536,15 @@ enum Answer {
     Backups(Option<Vec<BackupChoice>>),
     /// How Windows Hello's prompt for turning app lock off ended (`setup_app_lock.rs`).
     LockProved(crate::engine_host::hello::HelloResult),
+    /// Step 4's read of the account's preview setting and stored previews.
+    PreviewsRead(
+        Result<
+            beebeeb_engine::app::photo_previews_api::PreviewsFacts,
+            beebeeb_engine::app::photo_previews_api::PreviewsRefused,
+        >,
+    ),
+    /// A sample measured on this PC (`Ok(None)`: none here decodes; `Err`: nothing changes).
+    PreviewsSample(Result<Option<crate::engine_host::drive_previews::Measured>, ()>),
 }
 
 /// The first run on the real engine. See the module's doc.
@@ -498,6 +592,8 @@ pub struct EngineSetupSource<E: SetupEngine> {
     inbox: mpsc::Receiver<(Stamp, Answer)>,
     /// The main window's Windows Hello prompt: turning app lock off asks it first.
     hello: Box<dyn crate::engine_host::hello::HelloPrompter>,
+    /// Step 4 (`setup_previews.rs`).
+    previews: previews::StepFour,
 }
 
 /// The engine's view as the step draws it. A start the engine refused is not "adding": nothing is being added.
@@ -554,10 +650,12 @@ impl<E: SetupEngine> EngineSetupSource<E> {
             answers,
             inbox,
             hello: Box::new(crate::engine_host::hello::NoHello),
+            previews: previews::StepFour::default(),
         };
         source.look_after_the_grace();
         source.read_folder();
         source.read_backups();
+        source.read_previews();
         source
     }
 
@@ -655,18 +753,28 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
             // "couldn't read them" (`loading`, `failed`); never "not in this version" while Backups is on.
             Step::Backup => super::backups::TURNED_ON && self.backups_asked,
             Step::Lock => self.engine.binds_app_lock(),
-            Step::Passkey | Step::Previews | Step::Done => false,
+            // Where this first run reads the preview setting the step is always there: loading, the choices, or
+            // "couldn't read" with Try again; never "not in this version" (an account whose previews are on sees its own).
+            Step::Previews => self.engine.binds_previews() && self.previews.asked,
+            Step::Passkey | Step::Done => false,
         }
     }
 
     /// Step 3 while its folders are being read: drawn as loading, then as the answer.
     fn loading(&self, step: Step) -> bool {
-        step == Step::Backup && super::backups::TURNED_ON && self.backups_reading
+        (step == Step::Backup && super::backups::TURNED_ON && self.backups_reading)
+            || (step == Step::Previews && self.previews.reading)
     }
 
     /// Step 3 after a read that FAILED (not "there are none"): it says so and offers Try again.
     fn failed(&self, step: Step) -> bool {
-        step == Step::Backup && super::backups::TURNED_ON && self.backups_failed && !self.backups_reading
+        (step == Step::Backup && super::backups::TURNED_ON && self.backups_failed && !self.backups_reading)
+            || (step == Step::Previews && self.previews.failed())
+    }
+
+    /// Try again on step 4: the preview setting is read again.
+    fn retry_previews(&mut self) {
+        self.read_previews();
     }
 
     /// Try again on step 3: the folders are read again.
@@ -893,6 +1001,8 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
                     self.backups_fresh = true;
                 }
                 Answer::LockProved(result) => self.app_lock_proved(result),
+                Answer::PreviewsRead(read) => self.took_previews_read(read),
+                Answer::PreviewsSample(sample) => self.took_previews_sample(sample),
             }
         }
         let unsaved = self.folder_unsaved();
@@ -955,30 +1065,35 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
     // ---- Not bound. Each belongs to a step this source says is not available (`available`): the step says so
     // and its controls are not drawn, so nothing reaches these; each does nothing and claims nothing.
 
-    /// Previews (step 4, and the compare view): the engine has no function that measures a preview, estimates
-    /// the account's photos, or hands out one of them. No weight, no estimate and no limit is made up.
+    // ---- Previews (step 4 and its compare view): `setup_previews.rs`. Every figure is measured on this PC or the
+    // account's own; nothing is made up.
+
     fn original_weight(&self) -> String {
-        String::new()
+        self.previews_original_weight()
     }
-    fn weight(&self, _size: PreviewSize, _format: PreviewFormat) -> Option<String> {
-        None
+    fn weight(&self, size: PreviewSize, format: PreviewFormat) -> Option<String> {
+        self.previews_weight(size, format)
     }
-    fn fit_line(&self, _size: PreviewSize, _format: PreviewFormat) -> String {
-        String::new()
+    fn fit_line(&self, size: PreviewSize, format: PreviewFormat) -> String {
+        self.previews_fit_line(size, format)
     }
+    /// Nothing is kept on this PC yet (PREV-2): no limit to state, and step 4 draws no such row.
     fn space_limit(&self) -> String {
         String::new()
     }
-    /// The picture that ships inside the app, said as that: none of the account's photos is read here.
+    /// The person's own photo, measured here; else the picture that ships inside the app, said as that.
     fn sample(&self) -> Sample {
-        Sample {
-            original_png: BUNDLED_SAMPLE_PNG,
-            preview_png: BUNDLED_SAMPLE_PNG,
-            bundled: true,
-        }
+        self.previews_sample()
     }
-    fn set_previews(&mut self, _size: PreviewSize, _format: PreviewFormat) {}
-    fn choose_photo(&mut self) {}
+    fn stored_previews(&self) -> Option<(PreviewSize, PreviewFormat)> {
+        self.previews_stored()
+    }
+    fn set_previews(&mut self, size: PreviewSize, format: PreviewFormat) {
+        self.store_previews(size, format);
+    }
+    fn choose_photo(&mut self) {
+        self.pick_previews_photo();
+    }
 
     /// A passkey (step 1): not offered (`available`). The engine adds one ([`beebeeb_engine::app::Engine::add_passkey`]),
     /// but core's flow needs the account password for its step-up, and this step has no password to hand over and
