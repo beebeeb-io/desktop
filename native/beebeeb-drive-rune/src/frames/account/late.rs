@@ -65,13 +65,15 @@ pub(super) fn notice(answer: &Result<(), Refused>) -> &'static str {
 }
 
 /// Over the window, whatever it shows: the notice of a late password answer, with "Show" (the Change password page).
-/// Nothing is wrapped when there is none, so every other frame keeps its tree.
+/// One parent whether the notice shows or not: the frame behind keeps its identity (its keyboard focus, scroll and
+/// hover) when the notice comes and goes.
 pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
+    let window = el().key("window-with-late-change").w_full().h_full().child(behind);
     let Some(late) = s.account.late_change.as_ref() else {
-        return behind;
+        return window;
     };
     if s.shell.app.gate() != crate::shell::app::GateState::Ready {
-        return behind;
+        return window;
     }
     let t = tokens::theme(cx.system_dark());
     let (icon, tone) = match late.answer {
@@ -84,28 +86,24 @@ pub fn over(s: &State, cx: &mut Cx<State>, behind: El) -> El {
         shortcut: None,
         run: |s: &mut State, _| super::go(s, "DW-A67"),
     };
-    el().key("window-with-late-change")
-        .w_full()
-        .h_full()
-        .child(behind)
-        .child(
-            // One toast line above a toast's own place (`ui::toast::layer`: 42 pt): it stands until Show, so it never
-            // covers a screen's own toast (Files' Undo, an account page's notice).
-            row()
-                .key("late-change-layer")
-                .absolute(0.0, 0.0)
-                .w_full()
-                .h_full()
-                .pb(84.0)
-                .justify_center()
-                .items_end()
-                .child(toast::toast_keyed(
-                    "late-change",
-                    icon,
-                    tone,
-                    notice(&late.answer),
-                    Some(show),
-                    &t,
-                )),
-        )
+    window.child(
+        // One toast line above a toast's own place (`ui::toast::layer`: 42 pt): it stands until Show, so it never
+        // covers a screen's own toast (Files' Undo, an account page's notice).
+        row()
+            .key("late-change-layer")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .pb(84.0)
+            .justify_center()
+            .items_end()
+            .child(toast::toast_keyed(
+                "late-change",
+                icon,
+                tone,
+                notice(&late.answer),
+                Some(show),
+                &t,
+            )),
+    )
 }
