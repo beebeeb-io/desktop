@@ -5,6 +5,9 @@
 # Usage:
 #   native/beebeeb-media-helper/codec-gate.sh --exe <release helper> [--exe <another>]... [--pdb <file>]...
 #                                             [--licences <dir>] [--targets "<triple> <triple>"] [-- <cargo tree args>]
+#   native/beebeeb-media-helper/codec-gate.sh --no-tree --exe <file> [--exe <file>]... [--pdb <file>]... [--licences <dir>]
+#   `--no-tree` runs only the binary half and the licence rows: no cargo at all (a Windows exe checked on a machine
+#   without the workspace). It needs at least one `--exe`; `--targets ""` stays refused.
 #   Everything after `--` goes to `cargo tree` unchanged, so the gate sees the feature set the release build uses
 #   (the release builds the default features; pass `-- --features aac` to check a build that adds one).
 #
@@ -40,7 +43,7 @@ OFF_CRATES=(
   "filmcraft-dnx|DNxHD / DNxHR: compiled out until counsel clears it"
   "filmcraft-apv|APV: not needed, compiled out"
   "filmcraft-mxf|MXF: not needed, compiled out"
-  "filmcraft-dng|DNG: not needed (the brief: compiled out); filmcraft-media still links it, see the Office engine's filmcraft/PATCHES.md"
+  "filmcraft-dng|DNG: not needed (the brief: compiled out); filmcraft-media takes it only with its `dng` feature, see the Office engine's filmcraft/PATCHES.md"
 )
 CONTROL_CRATE="filmcraft-codecs"
 # A codec that may ship only with its signed licence record: crate|record file|what.
@@ -48,18 +51,23 @@ LICENSED=(
   "filmcraft-h264|via-la-avc.md|H.264 (Via LA AVC licence)"
 )
 
-exes=(); pdbs=(); licences="${BB_LICENCE_DIR:-}"; targets="x86_64-pc-windows-msvc aarch64-apple-darwin"; tree_args=()
+exes=(); pdbs=(); licences="${BB_LICENCE_DIR:-}"; targets="x86_64-pc-windows-msvc aarch64-apple-darwin"; tree_args=(); no_tree=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --exe) exes+=("${2:?--exe needs a path}"); shift 2 ;;
     --pdb) pdbs+=("${2:?--pdb needs a path}"); shift 2 ;;
     --licences) licences="${2:?--licences needs a directory}"; shift 2 ;;
     --targets) targets="${2:?--targets needs a list}"; shift 2 ;;
+    --no-tree) no_tree=1; shift ;;
     --) shift; tree_args=("$@"); break ;;
-    -h|--help) sed -n '2,30p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,33p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "codec-gate: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+if [ "$no_tree" -eq 1 ]; then
+  if [ "${#exes[@]}" -eq 0 ]; then echo "codec-gate: --no-tree needs at least one --exe (nothing would be checked)" >&2; exit 2; fi
+  targets=""
+fi
 if [ -z "$licences" ]; then
   common="$(git -C "$here" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
   [ -n "$common" ] && licences="$(cd "$common/../../.." 2>/dev/null && pwd)/docs/legal/licences"

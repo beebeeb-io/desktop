@@ -7,7 +7,7 @@
 # Truth line: `codec-gate-test: <n> passed, 0 failed` with n = EXPECTED. Exit 0 only then.
 set -uo pipefail
 
-EXPECTED=17
+EXPECTED=20
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 gate="${CODEC_GATE_SUT:-$here/codec-gate.sh}"
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
@@ -89,6 +89,16 @@ run "missing exe: red"                              1 1 "$work/tree.clean"      
 run "no --exe: partial, never a pass"               3 0 "$work/tree.clean"      --licences "$work/lic-yes"
 BB_LICENCE_DIR="$work/lic-yes" run "record found through BB_LICENCE_DIR" \
                                                     0 0 "$work/tree.clean"      --exe "$work/clean.exe"
+
+# --no-tree: only the binary half, no cargo at all (the stand-in cargo fails, and logs, if it is called).
+: > "$work/args.log"
+FAKE_CARGO_FAIL=1 run "no_tree_runs_only_the_binary_half" 0 0 "$work/tree.clean" --no-tree --exe "$work/clean.exe" --licences "$work/lic-yes"
+if [ ! -s "$work/args.log" ]; then
+  passed=$((passed + 1)); echo "pass  no_tree_runs_only_the_binary_half: cargo never called"
+else
+  failed=$((failed + 1)); echo "FAIL  no_tree_runs_only_the_binary_half: cargo was called:"; sed 's/^/      /' "$work/args.log"
+fi
+run "no_tree_without_exe_is_refused" 2 0 "$work/tree.clean" --no-tree --licences "$work/lic-yes"
 
 # The arguments the gate gave cargo: both default targets, --locked, normal edges, and the pass-through.
 : > "$work/args.log"
