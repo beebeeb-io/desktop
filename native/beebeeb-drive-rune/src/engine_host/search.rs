@@ -6,7 +6,10 @@
 //! What it answers, and from where:
 //! - `search`: names in this computer's copy of the list (`desktop_search::build_local_index` over the local state,
 //!   then `query_local_index`), any case, narrowed by kind, at most [`SHOWN`] results. Folders are not in the
-//!   engine's index, so the Folders pill finds nothing yet; shared items are left out (ruling 1701).
+//!   engine's index, so the Folders pill finds nothing yet; shared items are left out (ruling 1701). While no index
+//!   is held, it says why when the engine refused this PC's local state as not this account's
+//!   (`Answer::NotThisAccounts`: the engine's own word, `LocalStateRefused::not_this_accounts`); any other refusal is
+//!   `Unavailable`.
 //! - `details`: the facts the index holds for a result (kind, size, changed, where, on this PC or online only).
 //! - `recent`, `remember`, `clear_recent` (DW-0801, slice A8): the account's recent searches as the engine keeps them
 //!   in its own local state (`Engine::recent_searches_for` and its neighbours: per account, through the same
@@ -40,7 +43,7 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::account::SessionGeneration;
-use beebeeb_engine::app::{CredentialStores, Engine};
+use beebeeb_engine::app::{CredentialStores, Engine, LocalStateRefused};
 use beebeeb_engine::desktop_search::{LocalSearchIndex, LocalSearchRecord, build_local_index, query_local_index};
 use beebeeb_engine::drive_v2::model::{ROOT_NAME, mime_for_name};
 use chrono::Local;
@@ -73,8 +76,9 @@ pub trait SearchHost: Send + Sync + 'static {
     fn turn(&self) -> Self::Turn;
     /// A session is in memory (signed in and unlocked). Never waits.
     fn unlocked(&self) -> bool;
-    /// The index of this computer's local state. `Err`: there is none (nothing synced yet) or it cannot be read.
-    fn index(&self) -> Result<LocalSearchIndex, ()>;
+    /// The index of this computer's local state. `Err`: why there is none, as the engine's account-bound handle says
+    /// it (another account's local state, nothing synced yet, …); a list that cannot be read is `Unreadable`.
+    fn index(&self) -> Result<LocalSearchIndex, LocalStateRefused>;
     /// The recent searches of the account of the session `turn`, newest first (disk work: a worker calls it). `Err`:
     /// none can be read (another account's local state, nothing synced yet, the session moved on).
     fn recent_searches(&self, turn: Self::Turn) -> Result<Vec<String>, ()>;
@@ -102,10 +106,12 @@ impl<C: CredentialStores> SearchHost for Engine<C> {
         self.has_session()
     }
 
-    fn index(&self) -> Result<LocalSearchIndex, ()> {
-        // Task 2488: the signed-in account's local state only; any refusal builds nothing.
-        let state = self.local_state().map_err(|_| ())?;
-        state.with(|db| build_local_index(db)).map_err(|_| ())?.map_err(|_| ())
+    fn index(&self) -> Result<LocalSearchIndex, LocalStateRefused> {
+        // Task 2488: the signed-in account's local state only; any refusal builds nothing, and keeps its kind.
+        let state = self.local_state()?;
+        state
+            .with(|db| build_local_index(db))?
+            .map_err(|_| LocalStateRefused::Unreadable)
     }
 
     fn recent_searches(&self, turn: SessionGeneration) -> Result<Vec<String>, ()> {
@@ -157,8 +163,9 @@ struct Held<T> {
 
 /// A worker's answer, with the number of the job that asked.
 enum Landed<T> {
-    /// The index, and the session it was built in (`None`: the session was not the same after the build as before).
-    Built(u64, Option<Session<T>>, Result<LocalSearchIndex, ()>),
+    /// The index or why there is none, and the session it was built in (`None`: the session was not the same after
+    /// the build as before).
+    Built(u64, Option<Session<T>>, Result<LocalSearchIndex, LocalStateRefused>),
     /// A query's results, and the session whose index it ran on.
     Found(u64, Session<T>, Asked, Vec<Hit>),
     /// The recent searches as the engine keeps them after a read or a change, and the session the work ran in
@@ -192,6 +199,9 @@ pub struct EngineSearchSource<H: SearchHost> {
     built_at: Option<Instant>,
     /// The build on its way.
     building: Option<u64>,
+    /// Why the last build of a session built nothing, and that session (`None`: it built, or none was refused). Said
+    /// only to that session (`not_this_accounts`).
+    refused: Option<(Session<H::Turn>, LocalStateRefused)>,
     /// What the window asked for last: run again when a new index lands.
     wanted: Option<(String, Narrow)>,
     /// The query on its way.
@@ -234,6 +244,7 @@ impl<H: SearchHost> EngineSearchSource<H> {
             jobs: 0,
             built_at: None,
             building: None,
+            refused: None,
             wanted: None,
             asked: None,
             found: None,
@@ -250,6 +261,18 @@ impl<H: SearchHost> EngineSearchSource<H> {
         self.held.as_ref().filter(|held| held.of == now)
     }
 
+    /// The current session's last build was refused because this PC's local state is not provably this account's
+    /// (the engine's `not_this_accounts`). Asked on every reader, as `current`: a refusal of a session that ended is
+    /// never said, even before the next `pump` drops it.
+    fn not_this_accounts(&self) -> bool {
+        let Some(now) = session_of(&*self.host) else {
+            return false;
+        };
+        self.refused
+            .as_ref()
+            .is_some_and(|(of, refused)| *of == now && refused.not_this_accounts())
+    }
+
     /// Follow the session of the moment: when it is not the one this source's state belongs to, all of that state
     /// goes now. `true`: something a draw reads went.
     fn follow(&mut self) -> bool {
@@ -259,6 +282,7 @@ impl<H: SearchHost> EngineSearchSource<H> {
         }
         let held = self.held.is_some()
             || self.found.is_some()
+            || self.refused.is_some()
             || self.building.is_some()
             || self.asked.is_some()
             || self.recent.is_some()
@@ -290,7 +314,7 @@ impl<H: SearchHost> EngineSearchSource<H> {
                     index,
                 )
             }));
-            let (of, index) = built.unwrap_or((None, Err(())));
+            let (of, index) = built.unwrap_or((None, Err(LocalStateRefused::Unreadable)));
             let _ = answers.send(Landed::Built(job, of, index));
             host.wake();
         });
@@ -427,12 +451,19 @@ impl<H: SearchHost> EngineSearchSource<H> {
                             index: Arc::new(index),
                             number: self.installed,
                         });
+                        self.refused = None;
                         self.found = None;
                         self.asked = None;
                         self.run_wanted();
                     }
-                    // Kept: the index before still answers its own session. None before: not wired.
-                    _ => log("search: the list on this PC could not be read"),
+                    // Kept: the index before still answers its own session. None before: not wired, and why is kept
+                    // for `search` to say (only to this session).
+                    (Some(of), Err(refused)) => {
+                        self.refused = Some((of, refused));
+                        log("search: the list on this PC could not be read");
+                    }
+                    // Not reached: a build of no session returned above.
+                    (None, _) => {}
                 }
             }
             Landed::Found(job, of, asked, hits) => {
@@ -548,18 +579,23 @@ impl<H: SearchHost> SearchSource for EngineSearchSource<H> {
         self.wanted = None;
         self.building = None;
         self.built_at = None;
+        self.refused = None;
         self.recent = None;
         self.recent_out = None;
         self.recent_next.clear();
     }
 
-    /// The result of THIS query on the current session's index, else `Searching` while it runs. Reads only: the
-    /// query is started by `ask`, never here.
+    /// The result of THIS query on the current session's index, else `Searching` while it runs. With no index of this
+    /// session: `NotThisAccounts` when its build was refused as another account's local state, else `Unavailable`.
+    /// Reads only: the query is started by `ask`, never here.
     fn search(&self, query: &str, narrow: Narrow) -> Answer {
         let Some(held) = self.current() else {
             // The first index of this session is being built: the query is answered when it lands.
             return if self.building_now() {
                 Answer::Searching
+            } else if self.not_this_accounts() {
+                // This PC's local state is another account's: Search says why; nothing of it was read.
+                Answer::NotThisAccounts
             } else {
                 Answer::Unavailable
             };

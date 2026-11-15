@@ -123,17 +123,21 @@ impl SearchHost for Host {
         !self.locked.load(Ordering::SeqCst) && self.account.lock().unwrap().is_some()
     }
 
-    fn index(&self) -> Result<LocalSearchIndex, ()> {
+    fn index(&self) -> Result<LocalSearchIndex, LocalStateRefused> {
         self.builds.fetch_add(1, Ordering::SeqCst);
         if self.broken.load(Ordering::SeqCst) {
-            return Err(());
+            return Err(LocalStateRefused::Unreadable);
         }
-        // As the engine's handle: the list of the account it is recorded for, with the vault open.
-        if !self.unlocked() || self.account() != self.owner {
-            return Err(());
+        // As the engine's handle: the list of the account it is recorded for, with the vault open; another account's
+        // is refused with the engine's own word.
+        if !self.unlocked() {
+            return Err(LocalStateRefused::Locked);
         }
-        let db = StateDb::open(&self.db).map_err(|_| ())?;
-        let index = build_local_index(&db).map_err(|_| ());
+        if self.account() != self.owner {
+            return Err(LocalStateRefused::OtherAccount);
+        }
+        let db = StateDb::open(&self.db).map_err(|_| LocalStateRefused::Unreadable)?;
+        let index = build_local_index(&db).map_err(|_| LocalStateRefused::Unreadable);
         let mut hold = self.hold.lock().unwrap();
         if hold.0 {
             hold.0 = false;
@@ -274,6 +278,7 @@ fn found(source: &mut EngineSearchSource<Host>, query: &str, narrow: Narrow) -> 
         }
         Answer::Searching => panic!("the query was not answered"),
         Answer::Unavailable => panic!("search answered Unavailable"),
+        Answer::NotThisAccounts => panic!("search answered NotThisAccounts"),
     }
 }
 
@@ -415,6 +420,53 @@ fn signed_out_builds_nothing_and_another_accounts_index_never_answers() {
     );
 }
 
+/// Row S8, the source alone: another account over this state is told why Search is not available
+/// (`NotThisAccounts`, the engine's refusal), with the field empty too, and only in that session: once the session
+/// moves on (a lock, then the owner's own sign-in) the reason is not said, at once (before a pump), and the window's
+/// side drops it at the next pump. A list that cannot be read stays `Unavailable`
+/// (`a_list_that_cannot_be_read_is_unavailable_never_no_results`). Mutant: `not_this_accounts` reads the refusal
+/// whatever its session (red at "another session, before a pump").
+#[test]
+fn another_accounts_refusal_is_said_only_to_its_own_session() {
+    let host = host(Some(OTHER));
+    let mut source = opened(&host);
+    assert_eq!(
+        host.builds.load(Ordering::SeqCst),
+        1,
+        "the control: the engine was asked for an index"
+    );
+    assert!(!source.wired(), "nothing of another account's state is held");
+    assert!(source.held.is_none());
+    for query in ["draft", "contract", "", "   "] {
+        assert_eq!(
+            source.search(query, Narrow::All),
+            Answer::NotThisAccounts,
+            "{query:?}: the second account is not told why"
+        );
+    }
+    assert_eq!(source.details("f-draft"), None);
+    assert!(source.recent().is_empty());
+
+    host.lock();
+    assert_eq!(
+        source.search("draft", Narrow::All),
+        Answer::Unavailable,
+        "locked, before a pump"
+    );
+    host.sign_in_as(Some(ME));
+    assert_eq!(
+        source.search("draft", Narrow::All),
+        Answer::Unavailable,
+        "another session, before a pump: the reason was the other account's session alone"
+    );
+    assert!(source.pump().changed, "the window's side drops the reason");
+    assert!(
+        source.refused.is_none(),
+        "a refusal of a session that ended is in memory"
+    );
+    assert_eq!(source.search("draft", Narrow::All), Answer::Unavailable);
+}
+
 /// A lock ends the session: the same account's index and results are not handed out, at once, and are gone from
 /// memory at the next pump; an unlock is another session, which builds its own when Search opens.
 #[test]
@@ -450,6 +502,7 @@ fn an_index_landing_after_a_lock_is_never_held() {
     let host = host(Some(ME));
     host.hold_the_next_build();
     let mut source = EngineSearchSource::new(host.clone());
+    let before_open = host.woken.load(Ordering::SeqCst);
     source.opened();
     source.ask("draft", Narrow::All);
     assert!(source.wired(), "the first index is on its way");
@@ -463,6 +516,9 @@ fn an_index_landing_after_a_lock_is_never_held() {
     assert!(!source.wired(), "at once");
     assert_eq!(source.search("draft", Narrow::All), Answer::Unavailable);
     source.pump();
+    // `opened` also started a read of the recent searches: its wake lands first (the build is held, and no query
+    // runs without an index, so it is the only wake there can be), and the wake waited for below is the build's.
+    host.woken_past(before_open);
     let woken = host.woken.load(Ordering::SeqCst);
     host.let_the_build_go();
     host.woken_past(woken);
@@ -493,11 +549,14 @@ fn an_index_landing_after_another_account_signed_in_is_never_held() {
     let host = host(Some(ME));
     host.hold_the_next_build();
     let mut source = EngineSearchSource::new(host.clone());
+    let before_open = host.woken.load(Ordering::SeqCst);
     source.opened();
     source.ask("draft", Narrow::All);
     host.build_is_held();
     host.sign_in_as(Some(OTHER));
     source.pump();
+    // As above: the recent read `opened` started has woken the window before the wake of the build is waited for.
+    host.woken_past(before_open);
     let woken = host.woken.load(Ordering::SeqCst);
     host.let_the_build_go();
     host.woken_past(woken);

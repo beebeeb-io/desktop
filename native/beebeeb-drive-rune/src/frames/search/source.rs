@@ -100,6 +100,10 @@ pub enum Answer {
     Found { hits: Vec<Hit>, loading: Option<Loading> },
     /// The query is being answered (off the window's thread); the view says so, never "no results".
     Searching,
+    /// This PC's local state is another account's: nothing of it is searched or shown. The view says search is not
+    /// available and why, in the words Files and Photos use (`SourceError::NotThisAccounts`,
+    /// `photos::session::Loaded::NotThisAccounts`), and names no account.
+    NotThisAccounts,
 }
 
 /// Search's data. Every call answers at once from what is on this PC.

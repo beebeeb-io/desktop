@@ -144,6 +144,13 @@ impl SearchUi {
     }
 }
 
+/// The reason under "not available" while this PC's local state is another account's (Photos' words, for Search):
+/// the title, then the line. No account's name, email or count.
+pub const NOT_THIS_ACCOUNTS: (&str, &str) = (
+    "This PC holds another account\u{2019}s files",
+    "Search shows your files once this PC has synced with your account.",
+);
+
 /// What the content area shows.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Shows {
@@ -185,10 +192,27 @@ impl SearchUi {
             return Shows::Recent(self.source.recent());
         }
         match self.source.search(query, self.narrow) {
-            Answer::Unavailable => Shows::Unavailable,
+            // The same body; the reason line is `unavailable_reason`'s.
+            Answer::Unavailable | Answer::NotThisAccounts => Shows::Unavailable,
             Answer::Searching => Shows::Searching,
             Answer::Found { hits, loading } if hits.is_empty() => Shows::Nothing { loading },
             Answer::Found { hits, loading } => Shows::Results { hits, loading },
+        }
+    }
+
+    /// Why search is not available, when there is a reason to say: this PC's local state is another account's
+    /// (`Answer::NotThisAccounts`). The title and the line drawn under the "not available" body
+    /// ([`NOT_THIS_ACCOUNTS`]); never an account's name, email or count, and no recent search. `None`: search shows
+    /// something else, or there is nothing to add. Reads only (a draw calls it): the source answers from what it
+    /// holds. Asked while the source is not wired too: a source refused another account's state is never wired.
+    #[cfg_attr(not(test), allow(dead_code))] // waits for its caller in `view.rs` (the reason line; branch notes)
+    pub fn unavailable_reason(&self, typed: &str) -> Option<(&'static str, &'static str)> {
+        if !matches!(self.shows(typed), Shows::Unavailable) {
+            return None;
+        }
+        match self.source.search(typed.trim(), self.narrow) {
+            Answer::NotThisAccounts => Some(NOT_THIS_ACCOUNTS),
+            Answer::Unavailable | Answer::Searching | Answer::Found { .. } => None,
         }
     }
 
