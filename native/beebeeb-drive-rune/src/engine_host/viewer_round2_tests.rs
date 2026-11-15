@@ -737,3 +737,51 @@ fn a_download_that_passed_the_limit_on_its_way_claims_no_size() {
         Body::NotPreviewable(NoPreview::OverLimit { limit: IN_MEMORY_MAX })
     );
 }
+
+#[test]
+fn a_source_that_cannot_save_or_keep_offline_says_so_on_the_press() {
+    // The default source (the board's) can: the editor opens.
+    struct CannotSave(InState);
+    impl ViewerSource for CannotSave {
+        fn open(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.0.open(id)
+        }
+        fn poll(&mut self, id: &str) -> Option<Body> {
+            self.0.poll(id)
+        }
+        fn cancel(&mut self, _: &str) {}
+        fn retry(&mut self, id: &str) -> Result<OpenFile, OpenError> {
+            self.0.retry(id)
+        }
+        fn can_save(&self) -> bool {
+            false
+        }
+        fn knows_offline(&self) -> bool {
+            false
+        }
+    }
+    let text = Body::Text(TextDoc {
+        lines: plain_lines("an invented line"),
+        truncated: None,
+    });
+    let (mut can, _) = ui_in(text.clone(), true);
+    can.edit();
+    assert!(can.editor.is_some(), "a source that saves opens the editor");
+
+    let inner = InState {
+        body: text,
+        retries: Default::default(),
+        there: true,
+    };
+    let mut cannot = crate::frames::viewers::Ui::open(Box::new(CannotSave(inner)), "f-state").expect("it opened");
+    cannot.edit();
+    assert!(cannot.editor.is_none());
+    assert_eq!(cannot.toast.as_deref(), Some("Not built yet: Edit and save from here"));
+    cannot.toggle_offline();
+    assert!(!cannot.file.details.offline, "nothing was switched");
+    assert_eq!(
+        cannot.toast.as_deref(),
+        Some("Not built yet: Available offline from here")
+    );
+    assert!(!cannot.knows_offline());
+}

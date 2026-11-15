@@ -68,7 +68,7 @@ pub const READ_HERE_NOT_KEPT: &str = "Read from the copy on this PC; nothing was
 /// this PC was read as it is: nothing was decrypted, and no state says so.
 fn was_decrypted(origin: Origin) -> bool {
     match origin {
-        Origin::Beebeeb | Origin::BeebeebNotThisPcs => true,
+        Origin::Beebeeb | Origin::BeebeebNotThisPcs | Origin::BeebeebUnconfirmedHere => true,
         Origin::ThisPc { .. } | Origin::ThisPcSyncOff => false,
     }
 }

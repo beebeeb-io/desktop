@@ -106,6 +106,24 @@ pub const NOT_BUILT: &str = "Not built yet";
 /// What Try again says when the file could not even be asked for again (signed out, gone from this PC's list).
 pub const NOT_REOPENED: &str = "Couldn't open this file again. Go back to Files and open it from there.";
 
+/// What Show it says while a change of the open file is still on its way (a save, or the Available offline switch):
+/// nothing is opened meanwhile.
+pub const NOT_WHILE_SAVING: &str = "Newer version not opened yet: your last change is still on its way";
+
+/// What Show it says when the newer version did not open: the version on screen stays, and why.
+pub fn not_shown(why: OpenError) -> String {
+    let reason = match why.stopped() {
+        Some(source::Stopped::Gone) => "the file is gone",
+        Some(source::Stopped::SessionEnded) => "the session ended",
+        Some(source::Stopped::NothingSynced) => "nothing has synced on this PC yet",
+        Some(source::Stopped::NotThisAccounts) => "this PC's data couldn't be confirmed as this account's",
+        // Signed out or locked: the shell's own gate says it.
+        None => "Beebeeb is locked or signed out",
+        Some(_) => "couldn't read it right now",
+    };
+    format!("Newer version not opened: {reason}")
+}
+
 /// What "Open in another app…" says when the account's folder on this PC is not in sync now.
 pub const NEEDS_SYNC_ELSEWHERE: &str =
     "Couldn't open it in another app. It opens from your Beebeeb folder, so sync has to be on for this PC.";
@@ -473,9 +491,18 @@ impl Ui {
         if self.file.newer.is_none() || self.editor.is_some() {
             return;
         }
-        if let Ok(file) = self.source.newer(&self.file.id) {
-            self.replace(file);
-            self.focus = Some("tb-btn-0");
+        // A change still on its way belongs to what is on screen: the newer version waits until it answered.
+        if self.source.saving() {
+            self.toast = Some(NOT_WHILE_SAVING.to_string());
+            return;
+        }
+        match self.source.newer(&self.file.id) {
+            Ok(file) => {
+                self.replace(file);
+                self.focus = Some("tb-btn-0");
+            }
+            // The version on screen stays, still open; the press says why the newer one did not open.
+            Err(why) => self.toast = Some(not_shown(why)),
         }
     }
 
@@ -814,6 +841,10 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     }
     let Some(ui) = ui(s) else { return had || new_file };
     let changed = ui.pump() | ui.refind();
+    // An open text or note whose version is read: woken when the next read is due, not only by a press.
+    if let Some(after) = ui.source.next_check() {
+        tx.wake_after(after);
+    }
     if let Some(key) = ui.focus.take() {
         // Not after a key of this group (those take it in `on_key`): no ring is drawn.
         tx.focus(key, false);

@@ -289,8 +289,9 @@ impl<E: ViewerEngine> Drop for Previews<E> {
 fn first_lines_of<E: ViewerEngine>(engine: &E, id: &str, cancel: &AtomicBool) -> (Option<SessionGeneration>, Outcome) {
     let (session, bytes) = match engine.local(id, READ_WHOLE_MAX as u64, cancel) {
         Ok(LocalCopy::Opened(copy)) => (copy.session, copy.bytes),
-        // Not wholly on this PC: the download is the way.
-        Ok(LocalCopy::NotHere) => match engine.fetch(id, READ_WHOLE_MAX as u64, &|_, _| {}, cancel) {
+        // Not wholly on this PC, or behind the version Beebeeb has now: the download is the way.
+        Ok(LocalCopy::NotHere | LocalCopy::Behind) => match engine.fetch(id, READ_WHOLE_MAX as u64, &|_, _| {}, cancel)
+        {
             Ok(opened) => (opened.session, opened.bytes),
             Err(why) => return (None, Outcome::Failed(why)),
         },

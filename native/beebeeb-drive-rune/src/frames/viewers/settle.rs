@@ -31,10 +31,13 @@ impl Ui {
                 };
                 self.outcome(SaveOutcome::Saved { file, at });
             }
-            Settled::Queued { body } => {
+            // Stored here, not sent yet: a newer version noticed while the save waited stays offered (its banner is
+            // drawn once the editor closes, below).
+            // Labelled with the version it was saved from: the text on screen is based on that one.
+            Settled::Queued { body, version } => {
                 let file = OpenFile {
                     body,
-                    newer: None,
+                    version,
                     ..self.file.clone()
                 };
                 self.show(file);
@@ -50,6 +53,10 @@ impl Ui {
                 self.outcome(SaveOutcome::Opened(file));
             }
             Settled::Conflict(other) => self.outcome(SaveOutcome::Conflict(other)),
+            // The version on screen stays until Show it; a second one replaces the first banner's time.
+            Settled::Newer(newer) => self.file.newer = Some(newer),
+            // A change of an earlier opening: said, nothing on screen changes.
+            Settled::Said(words) => self.toast = Some(words),
             Settled::Failed => {
                 self.dialog = None;
                 self.toast = Some("Not saved".to_string());
