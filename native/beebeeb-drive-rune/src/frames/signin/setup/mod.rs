@@ -325,6 +325,11 @@ impl Ui {
         self.source.available(step)
     }
 
+    /// Whether this step's content is still being read (see `SetupSource::loading`).
+    pub fn loading(&self, step: Step) -> bool {
+        self.source.loading(step)
+    }
+
     /// Whether the File Explorer step is still asking for the sync folder.
     pub fn asks_folder(&self) -> bool {
         self.available(Step::Explorer) && self.folder != FolderAsk::Settled

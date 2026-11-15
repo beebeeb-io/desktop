@@ -165,3 +165,20 @@ pub fn not_yet(step: Step, k: &mut Keys, t: &Theme) -> El {
         ))
         .child(actions().child(primary(k, "Continue", ButtonState::Enabled, t, Ui::go_on)))
 }
+
+/// Step 3 while the folders on this PC are being read: the step's own heading, a line that says what is happening,
+/// no folder and no switch until the read answered. "Not now" stays; turning backup on waits for the folders.
+pub fn backup_loading(k: &mut Keys, t: &Theme) -> El {
+    setup::column()
+        .child(au::heading(
+            "Back up your folders",
+            Some("Looking at the folders on this PC\u{2026}"),
+            false,
+            t,
+        ))
+        .child(
+            actions()
+                .child(primary(k, "Turn on backup", ButtonState::Disabled, t, Ui::go_on))
+                .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
+        )
+}

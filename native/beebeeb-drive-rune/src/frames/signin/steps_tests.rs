@@ -956,25 +956,17 @@ fn the_passkey_door_is_drawn_only_where_the_source_can_sign_in_with_one() {
 }
 
 #[test]
-fn where_the_source_has_no_in_app_doors_the_board_doors_open_the_web_recovery_page() {
+fn where_the_source_has_no_in_app_doors_the_recovery_phrase_card_opens_the_web_recovery_page() {
     let (mut rt, calls) = form(Script {
         in_app_doors: false,
         ..Script::default()
     });
-    assert!(
-        a11y(&rt).contains("Sign in with another device"),
-        "the board's door stays"
-    );
-    click(&mut rt, "btn-1");
-    assert_eq!(ui(&mut rt).take_intents(), vec![Intent::OpenRecoveryPage]);
-    assert_eq!(ui(&mut rt).screen, Screen::SignIn, "the window stays where it was");
     click(&mut rt, "link-0-box");
     assert_eq!(ui(&mut rt).screen, Screen::Forgot);
-    for card in ["btn-0", "btn-1"] {
-        click(&mut rt, card);
-        assert_eq!(ui(&mut rt).take_intents(), vec![Intent::OpenRecoveryPage], "{card}");
-        assert_eq!(ui(&mut rt).screen, Screen::Forgot);
-    }
+    // The one card that is true here: the web does the recovery with the 12 words.
+    click(&mut rt, "btn-0");
+    assert_eq!(ui(&mut rt).take_intents(), vec![Intent::OpenRecoveryPage]);
+    assert_eq!(ui(&mut rt).screen, Screen::Forgot);
     assert!(calls.borrow().is_empty(), "nothing was asked of the engine");
 }
 

@@ -458,6 +458,8 @@ pub struct EngineSetupSource<E: SetupEngine> {
     backups: Vec<BackupChoice>,
     /// A read of them arrived and has not been handed to the window yet.
     backups_fresh: bool,
+    /// The read of them is on its worker and has not answered: the step is a loading state, not an absence.
+    backups_reading: bool,
     changed: bool,
     answers: mpsc::Sender<(Stamp, Answer)>,
     inbox: mpsc::Receiver<(Stamp, Answer)>,
@@ -510,6 +512,7 @@ impl<E: SetupEngine> EngineSetupSource<E> {
             outcomes: Vec::new(),
             backups: Vec::new(),
             backups_fresh: false,
+            backups_reading: false,
             changed: false,
             answers,
             inbox,
@@ -525,6 +528,12 @@ impl<E: SetupEngine> EngineSetupSource<E> {
         if !super::backups::TURNED_ON || !self.engine.reads_backup_choices() {
             return;
         }
+        // Another session's first run asks nothing, so it waits for nothing. Any other read answers: a worker that
+        // could not start or that panicked answers "no folders" (`ask`).
+        if !self.mine() {
+            return;
+        }
+        self.backups_reading = true;
         self.ask(
             "first-run-backups",
             |engine, _| Answer::Backups(engine.backup_choices()),
@@ -602,9 +611,15 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
             Step::Explorer => self.hooks.explorer_step,
             Step::Notifications | Step::Login => true,
             // Passkey, Lock, Backup, Previews: see the methods below. Done is not a step of the list.
-            Step::Backup => super::backups::TURNED_ON && !self.backups.is_empty(),
+            // While the folders are being read the step is drawn as a loading state (`loading`), never as absent.
+            Step::Backup => super::backups::TURNED_ON && (self.backups_reading || !self.backups.is_empty()),
             Step::Passkey | Step::Lock | Step::Previews | Step::Done => false,
         }
+    }
+
+    /// Step 3 while its folders are being read: drawn as loading, then as the answer.
+    fn loading(&self, step: Step) -> bool {
+        step == Step::Backup && super::backups::TURNED_ON && self.backups_reading
     }
 
     /// The first-run window has no way to a setting yet (the main window's settings open after it): the rows of
@@ -820,6 +835,7 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
                 Answer::Retried => self.retrying = false,
                 Answer::Saved => self.saving = false,
                 Answer::Backups(choices) => {
+                    self.backups_reading = false;
                     self.backups = choices;
                     self.backups_fresh = true;
                 }

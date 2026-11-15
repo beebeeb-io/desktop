@@ -580,6 +580,9 @@ pub enum CallKind {
     NewBackupCodes,
     /// "Send again": the email's code once more.
     ResendEmail,
+    /// Change password: `input` is the new password; the current one is the one the step-up kept (never an
+    /// argument of the call). The answer is `Done` or `Refused`.
+    ChangePassword,
 }
 
 /// How a started call ended.

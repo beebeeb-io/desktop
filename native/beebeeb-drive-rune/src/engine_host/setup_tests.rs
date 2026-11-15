@@ -291,6 +291,11 @@ fn the_backup_step_is_not_called_unavailable_while_its_folders_are_still_being_r
         source.available(Step::Backup),
         "a read that is running is not an absence"
     );
+    assert!(
+        source.loading(Step::Backup),
+        "it is drawn as loading until the read answers"
+    );
+    assert!(!source.loading(Step::Notifications), "no other step is loading");
     drop(held);
     let began = Instant::now();
     // The answer: no folders were found, so now the step says it is not available.
@@ -300,6 +305,7 @@ fn the_backup_step_is_not_called_unavailable_while_its_folders_are_still_being_r
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(source.folders().is_empty());
+    assert!(!source.loading(Step::Backup), "the answer ends the loading");
 }
 
 #[test]
@@ -319,7 +325,7 @@ fn the_backup_step_offers_the_folders_the_read_found() {
         source.poll();
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert!(source.available(Step::Backup));
+    assert!(source.available(Step::Backup) && !source.loading(Step::Backup));
     assert_eq!(source.folders()[0].name, "Documents");
 }
 

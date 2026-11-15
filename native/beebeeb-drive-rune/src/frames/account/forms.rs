@@ -25,7 +25,7 @@ pub(super) fn button(index: usize, label: &str, look: Look, dimmed: bool, t: &Th
     )
 }
 
-fn refused(why: Refused) -> Problem {
+pub(super) fn refused(why: Refused) -> Problem {
     match why {
         Refused::WrongPassword | Refused::NotConfirmed => Problem::WrongPassword,
         Refused::Locked => Problem::Locked,
@@ -350,8 +350,15 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
     };
     let weak = f.problem == Some(Problem::Weak);
     let mismatch = f.problem == Some(Problem::Mismatch);
-    let (cancel, cancel_b) = button(0, "Cancel", Look::Plain, false, t);
-    let (change, change_b) = button(1, "Change password", Look::Primary, false, t);
+    // While the change is out the page takes no press (a second change, a way out): nothing is drawn as changed
+    // before Beebeeb answered, and its answer finds the page it is for.
+    let out = f.waiting == Some(CallKind::ChangePassword);
+    let (mut cancel, cancel_b) = button(0, "Cancel", Look::Plain, out, t);
+    let (mut change, change_b) = button(1, "Change password", Look::Primary, out, t);
+    if !out {
+        cancel = cancel.on_press(|s: &mut State| super::go(s, "DW-A52"));
+        change = change.default_button().on_press(super::act(change_password));
+    }
     let lock = Some(&icons::PADLOCK);
     let mut new = rune::col().key("new-password").w_full().gap(6.0).child(fm::field(
         1,
@@ -413,16 +420,16 @@ pub fn password(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
                 false,
                 t,
             ),
-            fm::actions(vec![
-                (cancel.on_press(|s: &mut State| super::go(s, "DW-A52")), cancel_b),
-                (change.default_button().on_press(super::act(change_password)), change_b),
-            ]),
+            fm::actions(vec![(cancel, cancel_b), (change, change_b)]),
         ],
         t,
     )
 }
 
 fn change_password(ui: &mut AccountUi) -> Option<&'static str> {
+    if ui.form.waiting.is_some() {
+        return None;
+    }
     let source = ui.source.as_deref_mut()?;
     let f = &mut ui.form;
     // The new password first: a wrong current password must not be asked twice for a typo.
@@ -436,9 +443,23 @@ fn change_password(ui: &mut AccountUi) -> Option<&'static str> {
         form::focus(f, Some(form::AGAIN_KEY));
         return None;
     }
-    let outcome = source
-        .step_up(Password::from_field(&f.current.text), Purpose::ChangePassword)
-        .and_then(|confirmation| source.change_password(confirmation, Password::from_field(&f.new.text)));
+    let stepped = source.step_up(Password::from_field(&f.current.text), Purpose::ChangePassword);
+    let outcome = match stepped {
+        Ok(confirmation) => {
+            // A source that asks Beebeeb on a worker takes the change here: the page waits for its answer
+            // (`calls::settle`). One that answers at once is asked as before.
+            let new = zeroize::Zeroizing::new(f.new.text.clone());
+            if super::calls::start(ui, CallKind::ChangePassword, &new, "") {
+                return None;
+            }
+            let (Some(source), f) = (ui.source.as_deref_mut(), &mut ui.form) else {
+                return None;
+            };
+            source.change_password(confirmation, Password::from_field(&f.new.text))
+        }
+        Err(why) => Err(why),
+    };
+    let f = &mut ui.form;
     match outcome {
         Ok(()) => Some("DW-A52"),
         Err(why) => {

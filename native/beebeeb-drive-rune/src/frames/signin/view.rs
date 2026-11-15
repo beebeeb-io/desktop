@@ -38,7 +38,7 @@ pub fn view(ui: &Ui, name: &str, cx: &mut Cx<State>) -> El {
         Screen::Phrase => view_steps::phrase(ui, &mut k, &t),
         Screen::UnlockVault => view_steps::unlock(ui, &mut k, &t),
         Screen::NoPhrase => view_recovery::no_phrase(&mut k, &t),
-        Screen::Forgot => view_recovery::forgot(&mut k, &t),
+        Screen::Forgot => view_recovery::forgot(&mut k, ui.in_app_doors(), &t),
         Screen::CannotRecover => view_recovery::cannot_recover(&mut k, &t),
         Screen::Recover => view_recover::recover(ui, &mut k, &t),
         Screen::NewPassword => view_recover::new_password(ui, &mut k, &t),
@@ -271,7 +271,7 @@ fn sign_in(ui: &Ui, name: &str, k: &mut Keys, t: &Theme) -> El {
     if let Some(session) = ui.shared() {
         c = c
             .child(continue_card(session, ui, k, t))
-            .child(other_device_button(ui, k, t))
+            .children(ui.in_app_doors().then(|| other_device_button(ui, k, t)))
             .child(au::or_divider(k, "or use email and password", t));
     }
     c = c.child(au::field(
@@ -383,7 +383,8 @@ fn sign_in(ui: &Ui, name: &str, k: &mut Keys, t: &Theme) -> El {
         submit = submit.on_press_tx(act(Ui::submit)).default_button();
     }
     let mut foot = actions(if with_card { 4.0 } else { 0.0 }).child(submit);
-    if !with_card {
+    // Approval from another device is drawn only where the source can do it: never a door that leads elsewhere.
+    if !with_card && ui.in_app_doors() {
         foot = foot
             .child(au::or_divider(k, "or", t))
             .child(other_device_button(ui, k, t));

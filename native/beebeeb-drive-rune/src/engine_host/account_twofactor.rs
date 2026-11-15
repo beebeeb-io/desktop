@@ -191,6 +191,11 @@ fn work<C: CredentialStores>(
                 EmailResendError::Failed => Resend::Offline,
             }),
         },
+        // The current password is the one the step-up kept, handed in as `password` by `start_a_call`.
+        CallKind::ChangePassword => match engine.change_password_for(session, password, input) {
+            Ok(()) => Answered::Done,
+            Err(why) => Answered::Refused(super::password_change::refusal(why)),
+        },
         CallKind::ConfirmEmail => match engine.email_change_confirm(session, code) {
             Ok(()) => Answered::Done,
             Err(why) => Answered::Code(code_why(why)),
@@ -268,7 +273,17 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
         let made_for = stamp(&self.engine);
         let (engine, held, answers) = (self.engine.clone(), self.calls.held.clone(), self.calls.answers.clone());
         let pending = self.calls.pending_email.clone();
-        let (input, password) = (Zeroizing::new(input.to_string()), Zeroizing::new(password.to_string()));
+        let input = Zeroizing::new(input.to_string());
+        let password = if kind == CallKind::ChangePassword {
+            // The password the step-up of this press kept, for this session and account: used once, here. Nothing
+            // kept (or kept for another session): not started, and the sync method refuses it as not confirmed.
+            match self.password.take_kept_for(&made_for) {
+                Some(kept) => kept,
+                None => return false,
+            }
+        } else {
+            Zeroizing::new(password.to_string())
+        };
         let started = std::thread::Builder::new()
             .name("account-call".into())
             .spawn(move || {

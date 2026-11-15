@@ -38,7 +38,8 @@
 //! - The outcome's key bytes are recorded as the share's sealed key (or a changed key's offered key), so a safety
 //!   number is later computed from exactly those bytes. A claimed invite this engine could not finish holds no key
 //!   the other side can open: it is withdrawn and the answer says nothing was shared (Tauri `record_outcome_in`).
-//!   When the withdrawal cannot be made, the answer is [`InviteAnswer::Unfinished`], never "nothing was shared".
+//!   When the withdrawal cannot be made, the answer is [`InviteAnswer::Unfinished`], never "nothing was shared"; it
+//!   says whether the approval left without an answer (then nobody can say whether they can open the item).
 //!
 //! Every method BLOCKS on the handle's runtime: call it from a worker thread, never from the UI thread, except
 //! [`Engine::share_target_of`], which reads the local state only.
@@ -86,8 +87,11 @@ pub enum InviteAnswer {
     /// stays claimed; the key it carried is kept as this invite's offered key.
     PeerKeyChanged { invite_id: String },
     /// They accepted, but the invite could not be finished (its key never went over) and could not be withdrawn
-    /// either: it stays on Beebeeb, claimed, holding no key they can open, until it is cancelled in Shared.
-    Unfinished { invite_id: String },
+    /// either: it stays on Beebeeb, claimed, until it is cancelled in Shared.
+    /// `approval_sent`: the approval request LEFT and its answer was lost, so Beebeeb may have applied it and they
+    /// may already be able to open the item; `false`: it was refused, never left, or there was no approval (a
+    /// changed key), so they hold no key they can open.
+    Unfinished { invite_id: String, approval_sent: bool },
     /// Nothing was shared.
     Refused(InviteRefused),
 }
@@ -215,7 +219,7 @@ impl<C: CredentialStores> Engine<C> {
             .map_err(|_| InviteRefused::Failed)?;
         let peer_key = expectation_of(&marks).ok_or(InviteRefused::Failed)?;
 
-        let outcome = if is_folder {
+        let (outcome, approval_sent) = if is_folder {
             let shared_folders_write = self.shared_folders_write(&run)?;
             let seen = state
                 .with(|db| db.custody_seen_ids())
@@ -249,7 +253,7 @@ impl<C: CredentialStores> Engine<C> {
             let (flow, first) = started.map_err(flow_refusal)?;
             self.drive_file(&run, flow, first)?
         };
-        Ok(self.finish(&run, &state, &own, outcome))
+        Ok(self.finish(&run, &state, &own, outcome, approval_sent))
     }
 
     /// The token and the vault key of `session`, while it is the session in memory.
@@ -330,7 +334,7 @@ impl<C: CredentialStores> Engine<C> {
         run: &Run<'_>,
         mut flow: MemberInvite,
         first: HttpRequest,
-    ) -> Result<InviteOutcome, InviteRefused> {
+    ) -> Result<(InviteOutcome, bool), InviteRefused> {
         let mut req = first;
         loop {
             let resp = match self.invite_send(run, req) {
@@ -339,7 +343,8 @@ impl<C: CredentialStores> Engine<C> {
                 // was claimed (Tauri `unanswered_invite`).
                 Ok(Err(Unanswered)) => {
                     return match flow.on_response(HttpResponse::new(0, Value::Null)) {
-                        Ok(InviteStep::Done(outcome @ InviteOutcome::AwaitingApproval { .. })) => Ok(outcome),
+                        // The approval left and was not answered: whether it was applied is not known.
+                        Ok(InviteStep::Done(outcome @ InviteOutcome::AwaitingApproval { .. })) => Ok((outcome, true)),
                         _ => Err(InviteRefused::Offline),
                     };
                 }
@@ -347,14 +352,14 @@ impl<C: CredentialStores> Engine<C> {
                 // holds no key: `AwaitingApproval`, which `finish` withdraws. Before that nothing was claimed.
                 Err(refused) => {
                     return match flow.on_response(HttpResponse::new(0, Value::Null)) {
-                        Ok(InviteStep::Done(outcome @ InviteOutcome::AwaitingApproval { .. })) => Ok(outcome),
+                        Ok(InviteStep::Done(outcome @ InviteOutcome::AwaitingApproval { .. })) => Ok((outcome, false)),
                         _ => Err(refused),
                     };
                 }
             };
             match flow.on_response(resp).map_err(flow_refusal)? {
                 InviteStep::Send(next) => req = next,
-                InviteStep::Done(outcome) => return Ok(outcome),
+                InviteStep::Done(outcome) => return Ok((outcome, false)),
             }
         }
     }
@@ -366,7 +371,7 @@ impl<C: CredentialStores> Engine<C> {
         revision: u64,
         mut flow: FolderShare,
         first: FolderStep,
-    ) -> Result<InviteOutcome, InviteRefused> {
+    ) -> Result<(InviteOutcome, bool), InviteRefused> {
         let mut step = first;
         loop {
             let FolderSend {
@@ -374,7 +379,7 @@ impl<C: CredentialStores> Engine<C> {
                 mark_custody_seen,
             } = match step {
                 FolderStep::Send(send) => send,
-                FolderStep::Done(outcome) => return Ok(outcome),
+                FolderStep::Done(outcome) => return Ok((outcome, false)),
                 // A link is never what an invite makes.
                 FolderStep::LinkCreated(_) => return Err(InviteRefused::Failed),
             };
@@ -389,14 +394,14 @@ impl<C: CredentialStores> Engine<C> {
                 Ok(Ok(resp)) => resp,
                 Ok(Err(Unanswered)) => {
                     return match flow.on_response(HttpResponse::new(0, Value::Null)) {
-                        Ok(FolderStep::Done(outcome @ InviteOutcome::AwaitingApproval { .. })) => Ok(outcome),
+                        Ok(FolderStep::Done(outcome @ InviteOutcome::AwaitingApproval { .. })) => Ok((outcome, true)),
                         _ => Err(InviteRefused::Offline),
                     };
                 }
                 // As for a file: a claimed invite whose approval never left is withdrawn in `finish`.
                 Err(refused) => {
                     return match flow.on_response(HttpResponse::new(0, Value::Null)) {
-                        Ok(FolderStep::Done(outcome @ InviteOutcome::AwaitingApproval { .. })) => Ok(outcome),
+                        Ok(FolderStep::Done(outcome @ InviteOutcome::AwaitingApproval { .. })) => Ok((outcome, false)),
                         _ => Err(refused),
                     };
                 }
@@ -407,7 +412,14 @@ impl<C: CredentialStores> Engine<C> {
 
     /// Tauri `record_outcome_in` + `finish_invite`: what the outcome answers, the key record it leaves, and the
     /// withdrawal of a claimed invite that holds no key the other side can open.
-    fn finish(&self, run: &Run<'_>, state: &OwnedState<'_>, own: &str, outcome: InviteOutcome) -> InviteAnswer {
+    fn finish(
+        &self,
+        run: &Run<'_>,
+        state: &OwnedState<'_>,
+        own: &str,
+        outcome: InviteOutcome,
+        approval_sent: bool,
+    ) -> InviteAnswer {
         match outcome {
             InviteOutcome::Shared {
                 invite_id,
@@ -439,7 +451,11 @@ impl<C: CredentialStores> Engine<C> {
                 // bytes): the invite goes.
                 match self.withdraw(run, &invite_id) {
                     Ok(()) => InviteAnswer::Refused(InviteRefused::Failed),
-                    Err(_) => InviteAnswer::Unfinished { invite_id },
+                    // No approval was made for a changed key: nothing they can open.
+                    Err(_) => InviteAnswer::Unfinished {
+                        invite_id,
+                        approval_sent: false,
+                    },
                 }
             }
             InviteOutcome::AwaitingApproval { invite_id, .. } => {
@@ -449,7 +465,10 @@ impl<C: CredentialStores> Engine<C> {
                     Ok(()) if moved => InviteAnswer::Refused(InviteRefused::SessionEnded),
                     Ok(()) => InviteAnswer::Refused(InviteRefused::Failed),
                     // It stays claimed: never "nothing was shared".
-                    Err(_) => InviteAnswer::Unfinished { invite_id },
+                    Err(_) => InviteAnswer::Unfinished {
+                        invite_id,
+                        approval_sent,
+                    },
                 }
             }
             InviteOutcome::Invited { invite_id, .. } => InviteAnswer::Invited { invite_id },

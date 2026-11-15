@@ -232,3 +232,15 @@ fn a_failed_read_is_not_asked_again_every_frame_and_wakes_the_window_at_most_onc
         "a list that could not be read is not drawn"
     );
 }
+
+#[test]
+fn a_failed_read_is_tried_again_after_its_wait_and_then_draws_the_answer() {
+    let engine = Double::new();
+    engine.read_fails.store(true, Ordering::SeqCst);
+    let mut calls = ConflictCalls::new(engine.clone());
+    calls.refresh = Duration::from_millis(100);
+    until(&mut calls, |_| engine.reads.load(Ordering::SeqCst) >= 1);
+    engine.read_fails.store(false, Ordering::SeqCst);
+    until(&mut calls, |c| !c.conflicts().is_empty());
+    assert_eq!(engine.reads.load(Ordering::SeqCst), 2, "one retry, which worked");
+}

@@ -688,8 +688,10 @@ fn share_invite_answers_and_logs_carry_no_key_material() {
     assert_eq!(
         answers[0],
         InviteAnswer::Unfinished {
-            invite_id: INVITE.into()
-        }
+            invite_id: INVITE.into(),
+            approval_sent: false,
+        },
+        "a refused approval: they hold no key they can open"
     );
     assert!(
         logs.contains("an invite that holds no key could not be withdrawn"),
@@ -808,4 +810,23 @@ fn share_invite_asks_beebeeb_whose_account_it_is_when_the_session_does_not_say()
     g.server.lock().unwrap().me = None;
     assert_eq!(g.invite(FILE), InviteAnswer::Refused(InviteRefused::Failed));
     assert!(!g.routes().iter().any(|r| r == INVITES));
+}
+
+/// Review of desktop#426 (P2): an approval that LEFT and got no answer may have been applied, so when the
+/// withdrawal fails too the answer says so (`approval_sent`), for a file and for a folder alike.
+#[test]
+fn share_invite_unfinished_says_whether_the_approval_left_without_an_answer() {
+    for item in [FILE, FOLDER] {
+        let f = fixture(Some(person(48).public));
+        f.server.lock().unwrap().hang_once = Some(APPROVE);
+        f.server.lock().unwrap().cancel_status = 500;
+        assert_eq!(
+            f.invite(item),
+            InviteAnswer::Unfinished {
+                invite_id: INVITE.into(),
+                approval_sent: true,
+            },
+            "{item}: the approval left, its answer was lost, and the withdrawal failed"
+        );
+    }
 }

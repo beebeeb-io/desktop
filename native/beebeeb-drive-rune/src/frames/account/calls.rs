@@ -53,6 +53,14 @@ pub fn settle(ui: &mut AccountUi, kind: CallKind, answered: Answered) -> Option<
             form::focus(f, Some(key));
             None
         }
+        (CallKind::ChangePassword, Answered::Done) => Some("DW-A52"),
+        // DW-A68: the new password is kept, only the current one is retyped.
+        (CallKind::ChangePassword, Answered::Refused(why)) => {
+            f.problem = Some(super::forms::refused(why));
+            f.current = rune::TextEdit::new("").secure();
+            form::focus(f, Some(form::CURRENT_KEY));
+            None
+        }
         (CallKind::ConfirmEmail, Answered::Done) => Some("DW-A51"),
         (CallKind::ResendEmail, Answered::Done) => {
             f.problem = None;
