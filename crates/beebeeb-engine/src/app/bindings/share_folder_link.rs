@@ -410,8 +410,7 @@ fn live_folder_links<'a>(links: &'a [Value], id: &str) -> Vec<&'a Value> {
                 .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
                 .is_some_and(|at| at <= now);
             let used_up = count(row, "max_opens").is_some_and(|most| count(row, "open_count").unwrap_or(0) >= most);
-            let _ = id;
-            !revoked(row) && !expired && !used_up
+            text(row, "folder_id") == Some(id) && !revoked(row) && !expired && !used_up
         })
         .collect()
 }
@@ -420,9 +419,6 @@ fn live_folder_links<'a>(links: &'a [Value], id: &str) -> Vec<&'a Value> {
 /// on it (core can check a password link only with the password) and its stored wrapped folder key present, so core
 /// opens it under the link's key. `None` otherwise.
 fn rebuilt_folder_link(app_url: &str, master: &MasterKey, row: &Value) -> Option<Zeroizing<String>> {
-    if row.get("passphrase_protected").and_then(Value::as_bool) != Some(false) {
-        return None;
-    }
     let wrapped = text(row, "wrapped_folder_key").filter(|w| !w.is_empty())?;
     rebuild_folder_link(
         app_url,
