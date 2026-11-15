@@ -10,7 +10,7 @@
 //! account's own key (the iPhone app's recipe): a JPEG, with its width and height. Never its bytes, never the query.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -36,8 +36,9 @@ pub struct PreviewRoutes {
     /// The media read lists these ids instead of the account's live files.
     media: Mutex<Option<Vec<String>>>,
     quota_full: AtomicBool,
-    /// The next this many preview PUTs are answered `429` with `Retry-After: 0`.
+    /// The next this many preview PUTs are answered `429`, with this `Retry-After` (seconds).
     rate_limited: AtomicUsize,
+    rate_limit_wait: AtomicU64,
     preference_fails: AtomicBool,
     puts: AtomicUsize,
     deletes: AtomicUsize,
@@ -55,6 +56,7 @@ impl PreviewRoutes {
             media: Mutex::new(None),
             quota_full: AtomicBool::new(false),
             rate_limited: AtomicUsize::new(0),
+            rate_limit_wait: AtomicU64::new(0),
             preference_fails: AtomicBool::new(false),
             puts: AtomicUsize::new(0),
             deletes: AtomicUsize::new(0),
@@ -113,8 +115,9 @@ impl PreviewRoutes {
         self.quota_full.store(full, Ordering::SeqCst);
     }
 
-    /// Answer the next `puts` preview PUTs `429` with `Retry-After: 0` (counted as PUTs that reached the routes).
-    pub fn rate_limit_next(&self, puts: usize) {
+    /// Answer the next `puts` preview PUTs `429` with `Retry-After: <wait>` (counted as PUTs that reached the routes).
+    pub fn rate_limit_next(&self, puts: usize, wait: u64) {
+        self.rate_limit_wait.store(wait, Ordering::SeqCst);
         self.rate_limited.store(puts, Ordering::SeqCst);
     }
 
@@ -230,7 +233,9 @@ impl PreviewRoutes {
                     .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                     .is_ok()
                 {
-                    return Some(Reply::error(429, "rate_limited").retry_after(0));
+                    return Some(
+                        Reply::error(429, "rate_limited").retry_after(self.rate_limit_wait.load(Ordering::SeqCst)),
+                    );
                 }
                 if self.quota_full.load(Ordering::SeqCst) {
                     return Some(Reply::json(

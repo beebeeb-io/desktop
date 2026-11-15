@@ -294,11 +294,46 @@ fn run_waits_out_a_429_and_sends_again() {
         &[(ONE, "Invented one.jpg", FileStatus::Local, jpeg(1600, 1200))],
     );
     world.previews.set_setting(JPEG_1920);
-    world.previews.rate_limit_next(1);
+    world.previews.rate_limit_next(1, 0);
     let end = world.make(false);
     assert_eq!((end.made, end.failed, end.stopped), (1, 0, None));
     assert_eq!(world.previews.puts(), 2, "the 429, then the same preview again");
     assert!(world.previews.stored(ONE).is_some());
+}
+
+/// While a 429 is waited out the screen locks: the session is asked again before the preview would be sent again,
+/// and nothing more is sent.
+#[test]
+fn a_429_wait_sends_nothing_for_a_session_that_moved() {
+    let world = world(
+        "rate-lock",
+        &[(ONE, "Invented one.jpg", FileStatus::Local, jpeg(1600, 1200))],
+    );
+    world.previews.set_setting(JPEG_1920);
+    world.previews.rate_limit_next(1, 2);
+    let stop = AtomicBool::new(false);
+    let session = world.engine.session_turn();
+    let (previews, engine) = (world.previews.clone(), world.engine.clone());
+    let locker = std::thread::spawn(move || {
+        let began = std::time::Instant::now();
+        while previews.puts() == 0 {
+            assert!(
+                began.elapsed() < std::time::Duration::from_secs(20),
+                "no preview PUT came"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // The 429 is answered; the run waits 2 s. The screen locks and unlocks now.
+        lock_and_unlock(&engine);
+    });
+    let end = world.run(|| world.engine.make_previews_for(session, false, &stop, &|_, _| {}));
+    locker.join().unwrap();
+    assert!(end.session_moved);
+    assert_eq!(
+        (end.made, world.previews.puts()),
+        (0, 1),
+        "nothing is sent after the lock"
+    );
 }
 
 #[test]

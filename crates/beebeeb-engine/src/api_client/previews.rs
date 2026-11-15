@@ -18,6 +18,8 @@ pub enum PreviewPutError {
     TooLarge,
     /// The server could not be reached, or did not answer.
     Offline,
+    /// 429: Beebeeb asks to wait (`retry_after`: its hint in seconds) before this is sent again.
+    RateLimited { retry_after: Option<u64> },
     /// Any other answer that is not a success (401: the session ended; 404: not the account's own file).
     Status(u16),
 }
@@ -28,6 +30,7 @@ impl std::fmt::Display for PreviewPutError {
             Self::QuotaExceeded => f.write_str("the account's storage is full"),
             Self::TooLarge => f.write_str("the preview is too large"),
             Self::Offline => f.write_str("offline"),
+            Self::RateLimited { .. } => f.write_str("asked to wait"),
             Self::Status(status) => write!(f, "the server answered {status}"),
         }
     }
@@ -106,42 +109,55 @@ impl ApiClient {
     }
 
     /// Store one sealed JPEG preview of the file `file_id` at the long edge `px` (one PUT replaces the file's old
-    /// preview). `sealed` goes as it is: the caller sealed it. A 429 is waited out and sent again within the client's
-    /// bounded budget; the PUT may take a minute plus the time the slowest allowed link needs for its body.
+    /// preview). `sealed` goes as it is: the caller sealed it. ONE attempt: a 429 is handed back with the server's
+    /// wait ([`PreviewPutError::RateLimited`]), so the caller asks its session again before it sends again. The PUT
+    /// may take a minute plus the time the slowest allowed link needs for its body.
     pub async fn upload_preview(&self, file_id: &str, px: u32, sealed: &[u8]) -> Result<(), PreviewPutError> {
         let url = format!(
             "{}/api/v1/files/{}/thumbnail/preview?format=jpeg&px={px}",
             self.base_url,
             encode(file_id)
         );
-        let timeout = super::direct::storage_timeout(sealed.len() as u64);
-        let sent = self
-            .send_with_retry(|| {
-                self.client
-                    .put(&url)
-                    .timeout(timeout)
-                    .header("Content-Type", "application/octet-stream")
-                    .body(sealed.to_vec())
-            })
-            .await;
-        match sent {
-            Ok(_) => Ok(()),
-            Err(DesktopApiError::HttpStatus { status, snippet }) => {
-                if status != reqwest::StatusCode::PAYLOAD_TOO_LARGE {
-                    return Err(PreviewPutError::Status(status.as_u16()));
-                }
-                // Only the body's code is read, never its words.
-                let code = serde_json::from_str::<serde_json::Value>(&snippet)
-                    .ok()
-                    .and_then(|body| body.get("error").and_then(|code| code.as_str()).map(str::to_string));
-                Err(if code.as_deref() == Some("quota_exceeded") {
-                    PreviewPutError::QuotaExceeded
-                } else {
-                    PreviewPutError::TooLarge
-                })
-            }
+        let response = self
+            .client
+            .put(url)
+            .timeout(super::direct::storage_timeout(sealed.len() as u64))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Content-Type", "application/octet-stream")
+            .body(sealed.to_vec())
+            .send()
+            .await
             // The transport error names the URL (the file's id): only its kind leaves.
-            Err(_) => Err(PreviewPutError::Offline),
+            .map_err(|_| PreviewPutError::Offline)?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
         }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(PreviewPutError::RateLimited {
+                retry_after: header_secs(response.headers(), reqwest::header::RETRY_AFTER.as_str()),
+            });
+        }
+        if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+            // Only the body's code is read, never its words.
+            let code = response
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|body| body.get("error").and_then(|code| code.as_str()).map(str::to_string));
+            return Err(if code.as_deref() == Some("quota_exceeded") {
+                PreviewPutError::QuotaExceeded
+            } else {
+                PreviewPutError::TooLarge
+            });
+        }
+        Err(PreviewPutError::Status(status.as_u16()))
     }
+}
+
+/// How long to wait before sending a preview again that was answered 429 (`None`: give up on it): the server's hint
+/// within the client's bounded budget, the rule every retried request follows. `attempt`: the retries already made;
+/// `spent`: the seconds already waited for this preview.
+pub fn preview_retry_wait(attempt: u32, spent: u64, retry_after: Option<u64>) -> Option<u64> {
+    retry_decision(attempt, spent, retry_after, None)
 }

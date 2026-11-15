@@ -22,7 +22,7 @@ use zeroize::Zeroizing;
 use super::settings_api::AccountCallError;
 use super::{CredentialStores, Engine, LocalStateRefused};
 use crate::account::SessionGeneration;
-use crate::api_client::{ApiClient, PreviewPutError};
+use crate::api_client::{ApiClient, PreviewPutError, preview_retry_wait};
 use crate::photo_previews::runner::{RunEnd, Stopped};
 use crate::photo_previews::{
     PX_CHOICES, PreviewFormat, PreviewSetting, PreviewState, PreviewsSummary, averages, encode, plan, seal,
@@ -279,8 +279,9 @@ impl<C: CredentialStores> Engine<C> {
             if stop.load(Ordering::SeqCst) {
                 break;
             }
-            match self.make_one(session, &key, &api, &sync_root, photo, setting.px, read) {
+            match self.make_one(session, &key, &api, &sync_root, photo, setting.px, read, stop) {
                 Made::Yes => end.made += 1,
+                Made::Halted => break,
                 Made::NotHere => end.not_here += 1,
                 Made::No => end.failed += 1,
                 Made::SessionMoved => {
@@ -305,7 +306,8 @@ impl<C: CredentialStores> Engine<C> {
         end
     }
 
-    /// One photo: read (only when every byte is here), encode, seal, ask the session, upload.
+    /// One photo: read (only when every byte is here), encode, seal, ask the session, upload. A 429 is waited out
+    /// (watching `stop`) and the session asked again before the preview is sent again.
     #[allow(clippy::too_many_arguments)]
     fn make_one(
         &self,
@@ -316,6 +318,7 @@ impl<C: CredentialStores> Engine<C> {
         photo: &plan::LocalPhoto,
         px: u32,
         read: Reader<'_>,
+        stop: &AtomicBool,
     ) -> Made {
         let Some(path) = plan::ready_to_read(sync_root, photo) else {
             return Made::NotHere;
@@ -331,16 +334,29 @@ impl<C: CredentialStores> Engine<C> {
             return Made::No;
         };
         drop(jpeg);
-        // Right before the upload: still the very session the key and the token were copied from.
-        if !self.session_is_still(session, key) {
-            return Made::SessionMoved;
-        }
-        match self.runtime.block_on(api.upload_preview(&photo.id, px, &sealed)) {
-            Ok(()) => Made::Yes,
-            Err(PreviewPutError::QuotaExceeded) => Made::Stop(Stopped::StorageFull),
-            Err(PreviewPutError::Offline) => Made::Stop(Stopped::Offline),
-            Err(PreviewPutError::Status(401)) => Made::SessionMoved,
-            Err(PreviewPutError::TooLarge | PreviewPutError::Status(_)) => Made::No,
+        let (mut retries, mut waited) = (0, 0);
+        loop {
+            // Right before every send: still the very session the key and the token were copied from.
+            if !self.session_is_still(session, key) {
+                return Made::SessionMoved;
+            }
+            match self.runtime.block_on(api.upload_preview(&photo.id, px, &sealed)) {
+                Ok(()) => return Made::Yes,
+                Err(PreviewPutError::RateLimited { retry_after }) => {
+                    let Some(wait) = preview_retry_wait(retries, waited, retry_after) else {
+                        return Made::No;
+                    };
+                    if !wait_unless_stopped(stop, std::time::Duration::from_secs(wait)) {
+                        return Made::Halted;
+                    }
+                    retries += 1;
+                    waited += wait;
+                }
+                Err(PreviewPutError::QuotaExceeded) => return Made::Stop(Stopped::StorageFull),
+                Err(PreviewPutError::Offline) => return Made::Stop(Stopped::Offline),
+                Err(PreviewPutError::Status(401)) => return Made::SessionMoved,
+                Err(PreviewPutError::TooLarge | PreviewPutError::Status(_)) => return Made::No,
+            }
         }
     }
 
@@ -441,9 +457,23 @@ fn measure(original_bytes: u64, upright: &encode::Upright) -> Result<SamplePhoto
     })
 }
 
+/// Sleep `wait` in short steps; `false` as soon as `stop` is set (nothing more is sent then).
+fn wait_unless_stopped(stop: &AtomicBool, wait: std::time::Duration) -> bool {
+    let began = std::time::Instant::now();
+    while began.elapsed() < wait {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50).min(wait.saturating_sub(began.elapsed())));
+    }
+    !stop.load(Ordering::SeqCst)
+}
+
 /// How one photo ended.
 enum Made {
     Yes,
+    /// The run was asked to stop while it waited to send again.
+    Halted,
     NotHere,
     No,
     SessionMoved,

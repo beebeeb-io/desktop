@@ -83,7 +83,7 @@ mod two_factor;
 pub use two_factor::TwoFactorStatus;
 mod previews;
 mod upload;
-pub use previews::PreviewPutError;
+pub use previews::{PreviewPutError, preview_retry_wait};
 
 #[cfg(any(test, feature = "test-support"))]
 mod region_set_fixture {

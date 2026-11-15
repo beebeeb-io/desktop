@@ -208,6 +208,10 @@ impl std::fmt::Debug for Sample {
 /// last (its holder lives as long as the app).
 impl Drop for Sample {
     fn drop(&mut self) {
+        if std::sync::Arc::ptr_eq(&self.original_png, &self.preview_png) {
+            // One picture held twice (with HEIC the original is compared with itself): let go of one hold first.
+            self.preview_png = std::sync::Arc::from(&[][..]);
+        }
         wipe_if_last(&mut self.original_png);
         wipe_if_last(&mut self.preview_png);
     }
