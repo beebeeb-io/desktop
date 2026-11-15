@@ -15,9 +15,22 @@
 //!   alloc <mebibytes>    -> ok | err alloc              (reserves and touches every page)
 //!   env                  -> env <names, comma-separated, sorted>
 //!   setevent <handle>    -> ok | err <system code>      (Windows: signals the event behind a handle value)
+//!   read-granted <wire> <len> <byte>
+//!                        -> ok <bytes equal to byte> | err <system code>   (maps a grant read-only, counts)
+//!   write-granted <wire> <len>
+//!                        -> ok <bytes written> | err <system code>          (maps a grant read-write, writes the
+//!                                                                             pattern: byte i is i % 251)
+//!   map-handle <handle>  -> ok <first byte> | err <system code>  (Windows: maps the section behind a handle value
+//!                                                               read-write, then writes 0x5A into its first byte)
+//!   privileges           -> privileges <n> <names, comma-separated, sorted>  (Windows: those in its own token)
+//!   open-afd [<name>]    -> ok | err <status>           (Windows: opens the socket driver, \Device\Afd or
+//!                                                         \Device\Afd\<name>)
+//!   read-font            -> ok | err <system code>      (opens the system's Segoe UI font file, reads 4 bytes)
 //!   hang                 -> hanging, then sleeps for ever
 //!   spin                 -> spinning, then burns one core for ever
 //!   exit <code>          -> exits with that code
+//!
+//! Numbers are decimal, handle values hexadecimal (as `setevent`); a grant's `wire` is decimal (it is a `u64`).
 //!
 //! `beebeeb-sandbox-probe parent sandboxed|plain` is the "parent that dies" of the tests: it starts a second
 //! probe (confined through the crate, or plainly), makes it hang, prints `child <process id>` and sleeps.
@@ -26,6 +39,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::process::{Command, Stdio};
 use std::time::Duration;
+
+use beebeeb_office_sandbox::{Access, Granted, SandboxError, helper};
 
 fn code(error: &std::io::Error) -> String {
     match error.raw_os_error() {
@@ -242,6 +257,302 @@ fn set_event(_value: &str) -> String {
     "err unsupported".into()
 }
 
+/// Exactly `N` decimal numbers, separated by single spaces.
+fn numbers<const N: usize>(rest: &str) -> Option<[u64; N]> {
+    let mut out = [0u64; N];
+    let mut words = rest.split(' ');
+    for slot in &mut out {
+        *slot = words.next()?.parse().ok()?;
+    }
+    words.next().is_none().then_some(out)
+}
+
+/// A refusal of the crate as an answer: the system code where there is one.
+fn refusal(error: SandboxError) -> String {
+    match error {
+        SandboxError::Os { code, .. } => format!("err {code}"),
+        other => format!("err {other:?}"),
+    }
+}
+
+/// The bytes `write-granted` writes: byte `i` is `i % 251`, so a lost page or tail shows.
+fn pattern(index: usize) -> u8 {
+    (index % 251) as u8
+}
+
+fn read_granted(rest: &str) -> String {
+    let Some([wire, len, expected]) = numbers::<3>(rest) else {
+        return "err parse".into();
+    };
+    let Ok(expected) = u8::try_from(expected) else {
+        return "err parse".into();
+    };
+    match helper::map(Granted { wire, len }, Access::Read) {
+        Ok(mapped) => format!("ok {}", count_of(mapped.as_slice(), expected)),
+        Err(error) => refusal(error),
+    }
+}
+
+fn count_of(bytes: &[u8], wanted: u8) -> usize {
+    bytes.iter().filter(|&&byte| byte == wanted).count()
+}
+
+fn write_granted(rest: &str) -> String {
+    let Some([wire, len]) = numbers::<2>(rest) else {
+        return "err parse".into();
+    };
+    let mut mapped = match helper::map(Granted { wire, len }, Access::ReadWrite) {
+        Ok(mapped) => mapped,
+        Err(error) => return refusal(error),
+    };
+    let Some(bytes) = mapped.as_mut_slice() else {
+        return "err read-only".into();
+    };
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = pattern(index);
+    }
+    format!("ok {}", bytes.len())
+}
+
+/// Maps the section behind a handle value read-write, reads its first byte and writes a mark there. Through the
+/// system call itself: the handle is one the app holds, never one of a grant.
+#[cfg(windows)]
+fn map_handle(value: &str) -> String {
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::Memory::{FILE_MAP_READ, FILE_MAP_WRITE, MapViewOfFile, UnmapViewOfFile};
+    /// What the test finds in the first byte of a section this probe could map.
+    const MAPPED_MARK: u8 = 0x5A;
+    let Ok(value) = usize::from_str_radix(value, 16) else {
+        return "err parse".into();
+    };
+    // SAFETY: `MapViewOfFile` takes any handle value; one that is not an open section handle of this process makes
+    // the call fail with an error code (or, under strict handle checks, ends this process), which is the answer the
+    // test wants. One byte is asked for; a whole page is mapped.
+    let view = unsafe { MapViewOfFile(value as HANDLE, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, 1) };
+    if view.Value.is_null() {
+        return code(&std::io::Error::last_os_error());
+    }
+    let first = view.Value.cast::<u8>();
+    // SAFETY: the view is mapped read-write and at least one byte long.
+    let before = unsafe { first.read_volatile() };
+    // SAFETY: as above.
+    unsafe { first.write_volatile(MAPPED_MARK) };
+    // SAFETY: the address the call above returned, unmapped once.
+    unsafe { UnmapViewOfFile(view) };
+    format!("ok {before}")
+}
+
+#[cfg(not(windows))]
+fn map_handle(_value: &str) -> String {
+    "err unsupported".into()
+}
+
+/// The names of the privileges Windows defines, by identifier: 2 is the first, 36 the last. Built in, so that the
+/// answer needs no lookup service, which a confined process might not reach.
+#[cfg(windows)]
+const PRIVILEGE_NAMES: [&str; 35] = [
+    "SeCreateTokenPrivilege",
+    "SeAssignPrimaryTokenPrivilege",
+    "SeLockMemoryPrivilege",
+    "SeIncreaseQuotaPrivilege",
+    "SeMachineAccountPrivilege",
+    "SeTcbPrivilege",
+    "SeSecurityPrivilege",
+    "SeTakeOwnershipPrivilege",
+    "SeLoadDriverPrivilege",
+    "SeSystemProfilePrivilege",
+    "SeSystemtimePrivilege",
+    "SeProfileSingleProcessPrivilege",
+    "SeIncreaseBasePriorityPrivilege",
+    "SeCreatePagefilePrivilege",
+    "SeCreatePermanentPrivilege",
+    "SeBackupPrivilege",
+    "SeRestorePrivilege",
+    "SeShutdownPrivilege",
+    "SeDebugPrivilege",
+    "SeAuditPrivilege",
+    "SeSystemEnvironmentPrivilege",
+    "SeChangeNotifyPrivilege",
+    "SeRemoteShutdownPrivilege",
+    "SeUndockPrivilege",
+    "SeSyncAgentPrivilege",
+    "SeEnableDelegationPrivilege",
+    "SeManageVolumePrivilege",
+    "SeImpersonatePrivilege",
+    "SeCreateGlobalPrivilege",
+    "SeTrustedCredManAccessPrivilege",
+    "SeRelabelPrivilege",
+    "SeIncreaseWorkingSetPrivilege",
+    "SeTimeZonePrivilege",
+    "SeCreateSymbolicLinkPrivilege",
+    "SeDelegateSessionUserImpersonatePrivilege",
+];
+
+/// A privilege's name from its identifier (two 32-bit halves); an identifier Windows does not define is kept as
+/// its number, never dropped.
+#[cfg(windows)]
+fn privilege_name(low: u32, high: u32) -> String {
+    let known = if high == 0 {
+        low.checked_sub(2).and_then(|slot| PRIVILEGE_NAMES.get(slot as usize))
+    } else {
+        None
+    };
+    match known {
+        Some(name) => (*name).to_string(),
+        None => format!("luid-{high}-{low}"),
+    }
+}
+
+/// The privileges in this process's own token, removed or not, by name.
+#[cfg(windows)]
+fn privileges() -> String {
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenPrivileges};
+    /// `GetCurrentProcessToken()`: the pseudo-handle of this process's own token; nothing is opened.
+    const OWN_TOKEN: HANDLE = -4isize as HANDLE;
+    // A count, then 12 bytes per privilege: its identifier as two 32-bit halves, then its attributes. In u32 units.
+    let mut buffer = [0u32; 1024];
+    let mut returned = 0u32;
+    // SAFETY: the pseudo-handle is valid for a query; the buffer is writable for the length passed and aligned for
+    // the structure.
+    let ok = unsafe {
+        GetTokenInformation(
+            OWN_TOKEN,
+            TokenPrivileges,
+            buffer.as_mut_ptr().cast(),
+            size_of_val(&buffer) as u32,
+            &mut returned,
+        )
+    };
+    if ok == 0 {
+        return code(&std::io::Error::last_os_error());
+    }
+    let count = (buffer[0] as usize).min((buffer.len() - 1) / 3);
+    let mut names: Vec<String> = (0..count)
+        .map(|index| privilege_name(buffer[1 + 3 * index], buffer[2 + 3 * index]))
+        .collect();
+    names.sort();
+    format!("privileges {} {}", names.len(), names.join(","))
+}
+
+#[cfg(not(windows))]
+fn privileges() -> String {
+    "err unsupported".into()
+}
+
+/// Opens the socket driver the way socket libraries do, through the system call itself: `\Device\Afd`, or
+/// `\Device\Afd\<name>` when a name is given. The answer is the call's own status.
+#[cfg(windows)]
+fn open_afd(name: &str) -> String {
+    use std::ffi::c_void;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+
+    #[repr(C)]
+    #[allow(dead_code)] // read by the system, not by this code
+    struct CountedText {
+        length: u16,
+        maximum_length: u16,
+        buffer: *const u16,
+    }
+    #[repr(C)]
+    #[allow(dead_code)] // read by the system, not by this code
+    struct ObjectAttributes {
+        length: u32,
+        root_directory: HANDLE,
+        object_name: *const CountedText,
+        attributes: u32,
+        security_descriptor: *const c_void,
+        security_quality_of_service: *const c_void,
+    }
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        #[allow(clippy::too_many_arguments)]
+        fn NtCreateFile(
+            handle: *mut HANDLE,
+            access: u32,
+            attributes: *const ObjectAttributes,
+            io_status: *mut [usize; 2],
+            allocation_size: *const i64,
+            file_attributes: u32,
+            share: u32,
+            disposition: u32,
+            options: u32,
+            extended_attributes: *const c_void,
+            extended_attributes_length: u32,
+        ) -> i32;
+    }
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const SHARE_READ_AND_WRITE: u32 = 0x1 | 0x2;
+    const OPEN_EXISTING_ONLY: u32 = 1;
+    const CASE_INSENSITIVE: u32 = 0x40;
+
+    let path = if name.is_empty() {
+        r"\Device\Afd".to_string()
+    } else {
+        format!(r"\Device\Afd\{name}")
+    };
+    let units: Vec<u16> = path.encode_utf16().collect();
+    let Ok(bytes) = u16::try_from(units.len() * 2) else {
+        return "err parse".into();
+    };
+    let object_name = CountedText {
+        length: bytes,
+        maximum_length: bytes,
+        buffer: units.as_ptr(),
+    };
+    let attributes = ObjectAttributes {
+        length: size_of::<ObjectAttributes>() as u32,
+        root_directory: std::ptr::null_mut(),
+        object_name: &object_name,
+        attributes: CASE_INSENSITIVE,
+        security_descriptor: std::ptr::null(),
+        security_quality_of_service: std::ptr::null(),
+    };
+    let mut handle: HANDLE = std::ptr::null_mut();
+    let mut io_status = [0usize; 2];
+    // SAFETY: `handle` and `io_status` are writable places of the sizes the call writes; `attributes` and the
+    // name it points to live past the call; no allocation size and no extended attributes; open only, never create.
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            SYNCHRONIZE,
+            &attributes,
+            &mut io_status,
+            std::ptr::null(),
+            0,
+            SHARE_READ_AND_WRITE,
+            OPEN_EXISTING_ONLY,
+            0,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status != 0 {
+        return format!("err {status:#010x}");
+    }
+    // SAFETY: the handle the call above opened, closed once.
+    unsafe { CloseHandle(handle) };
+    "ok".into()
+}
+
+#[cfg(not(windows))]
+fn open_afd(_name: &str) -> String {
+    "err unsupported".into()
+}
+
+/// Opens the system's Segoe UI font file and reads its first 4 bytes: the helper draws text with the system's fonts.
+fn read_font() -> String {
+    let Some(system_root) = std::env::var_os("SystemRoot") else {
+        return "err unset".into();
+    };
+    let path = std::path::Path::new(&system_root).join("Fonts").join("segoeui.ttf");
+    let mut head = [0u8; 4];
+    match std::fs::File::open(path).and_then(|mut file| file.read_exact(&mut head)) {
+        Ok(()) => "ok".into(),
+        Err(error) => code(&error),
+    }
+}
+
 /// The limits of the job this process runs in, read by the process itself.
 #[cfg(windows)]
 fn job() -> String {
@@ -361,6 +672,12 @@ fn main() {
             "env" => env(),
             "setevent" => set_event(rest),
             "job" => job(),
+            "read-granted" => read_granted(rest),
+            "write-granted" => write_granted(rest),
+            "map-handle" => map_handle(rest),
+            "privileges" => privileges(),
+            "open-afd" => open_afd(rest),
+            "read-font" => read_font(),
             "hang" | "spin" => {
                 let _ = writeln!(stdout, "{}", if request == "hang" { "hanging" } else { "spinning" });
                 let _ = stdout.flush();
