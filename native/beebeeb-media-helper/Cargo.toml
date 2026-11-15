@@ -11,8 +11,9 @@ description = "Decodes one audio or video file inside the sandbox: no key, no na
 # Rules:
 #   - its own workspace, its own `Cargo.lock` and `deny.toml` (the closure audited on its own: `cargo deny check
 #     licenses bans sources` here; 12 MPL-2.0 exceptions, the `symphonia` 0.5.5 crates, decision D-MED-10);
-#   - dependencies: the protocol and FilmCraft, nothing else (no direct `symphonia`: FilmCraft brings 0.5.5, a second
-#     version would add 15 more MPL-2.0 packages);
+#   - dependencies: the protocol and FilmCraft, and on Windows only `windows` + `windows-core` 0.62 (Media Foundation,
+#     the system decoder of decision 2541, reached only while `MEDIA_SYSTEM_DECODER_ON` is on); nothing else (no direct
+#     `symphonia`: FilmCraft brings 0.5.5, a second version would add 15 more MPL-2.0 packages);
 #   - `panic = "abort"`: a panic ends the process, and the app sees its pipe close.
 
 [lib]
@@ -28,6 +29,21 @@ beebeeb-media-protocol = { path = "../../crates/beebeeb-media-protocol" }
 # `default-features = false`: only the codecs named in [features] below are built in.
 filmcraft-codecs = { version = "=0.9.0", default-features = false }
 filmcraft-media = { version = "=0.9.0", default-features = false }
+
+# The system decoder (decision 2541, `src/mf/`): Media Foundation through `windows` 0.62. Loaded at run time only
+# (`tests/load_time_imports.rs` holds that no media library is a load-time import). MIT OR Apache-2.0.
+[target.'cfg(windows)'.dependencies]
+# `#[implement]` expands to paths under `windows_core`, so the crate is named directly.
+windows-core = "0.62"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",   # PROPVARIANT; IMFSourceReader::SetCurrentPosition is gated on it
+    "Win32_System_Variant",                 # VT_I8; SetCurrentPosition's second gate
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell_PropertiesSystem",      # IPropertyStore; CreateObjectFromByteStream is gated on it
+] }
 
 # The codecs decoded with FilmCraft's own decoders (decision D-MED-2; the legal brief on media codec patents,
 # 2026-11-15, finding F1). A codec whose feature is off is NOT IN THE BINARY: its crate is not linked and its call sites
