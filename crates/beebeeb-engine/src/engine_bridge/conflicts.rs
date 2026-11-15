@@ -348,6 +348,10 @@ impl EngineBridge {
     /// - `Both` (D4): the Mac's bytes are queued as a new file named [`keep_both_name`] beside the
     ///   original, and the op is retired, in ONE transaction (review-169 #3): if it moved, nothing
     ///   is queued.
+    ///
+    /// Task 2530: `Remote` and `Both` also settle the parks This PC offers them for
+    /// ([`crate::state_db::ParkedSettle`]: `Remote` a `predecessor_lost` or `permission_denied` write, `Both` a
+    /// `predecessor_lost` one), with every other guard of the stale base; `Local` stays the stale base's only.
     pub fn resolve_parked(
         &self,
         op_id: &str,
@@ -368,7 +372,11 @@ impl EngineBridge {
                 None => ParkedResolution::Moved,
             });
         }
-        if !self.db.is_decidable_parked_at(op_id, shown)? {
+        let settle = match choice {
+            ParkedChoice::Remote => crate::state_db::ParkedSettle::KeepOther,
+            _ => crate::state_db::ParkedSettle::KeepBoth,
+        };
+        if !self.db.is_settleable_parked_at(op_id, shown, settle)? {
             return Ok(ParkedResolution::Moved);
         }
         let op = self

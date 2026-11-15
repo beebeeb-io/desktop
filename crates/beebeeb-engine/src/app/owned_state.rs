@@ -321,6 +321,11 @@ impl<C: CredentialStores> Engine<C> {
 #[path = "guide_mark.rs"]
 pub mod guide_mark;
 
+/// Task 2530: a way out of a parked upload, chosen on This PC's Sync history (the window reads its rows through this
+/// module's handle).
+#[path = "parked_exit_api.rs"]
+pub mod parked_exit_api;
+
 #[cfg(test)]
 #[path = "owned_state_tests.rs"]
 mod tests;

@@ -119,8 +119,8 @@ fn hhmm() -> String {
     chrono::Local::now().format("%H:%M").to_string()
 }
 
-/// What this PC is called in the name of a Keep both copy.
-fn this_pc() -> String {
+/// What this PC is called in the name of a Keep both copy (also This PC's Keep both, task 2530).
+pub(crate) fn this_pc() -> String {
     ["COMPUTERNAME", "HOSTNAME"]
         .iter()
         .find_map(|name| std::env::var(name).ok().filter(|value| !value.trim().is_empty()))

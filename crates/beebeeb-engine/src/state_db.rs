@@ -626,6 +626,10 @@ mod system_role;
 mod test_hooks;
 // Task 2409: the changes "Not sent" counts, one row each.
 mod unsent;
+// Task 2530: the ways out of a parked upload that This PC offers.
+mod parked_exit;
+pub use parked_exit::{ParkExit, ParkedSettle, RemoveParked};
+use parked_exit::{park_exits_conn, settleable_at_conn};
 // Task 2524: the held edits as This PC lists them.
 mod held_overview;
 pub use held_overview::{HELD_UNCHECKED_NAMES, HeldEdits, HeldRow};

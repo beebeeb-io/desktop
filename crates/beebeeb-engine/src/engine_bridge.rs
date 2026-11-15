@@ -287,6 +287,8 @@ mod tests {
     mod name_alias_2407;
     #[cfg(windows)]
     mod name_alias_2407_windows;
+    // Task 2530: the ways out of a parked upload beyond the stale base.
+    mod parked_exit;
     // Task 2409: Try again on a change that failed.
     mod unsent_retry;
 

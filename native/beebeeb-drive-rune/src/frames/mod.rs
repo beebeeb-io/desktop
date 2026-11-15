@@ -58,6 +58,7 @@ pub fn scenes(shell: &'static [Scene<State>]) -> &'static [Scene<State>] {
             signin::lock::SCENES,
             signin::setup::guide::FRAMES,
             this_pc::scenes::FRAMES,
+            this_pc::scenes::RENDER_SCENES,
             backups::FRAMES,
             tray::FRAMES,
             viewers::FRAMES,
