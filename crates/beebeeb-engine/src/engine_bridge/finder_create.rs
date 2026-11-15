@@ -241,9 +241,7 @@ impl EngineBridge {
         target: FinderWriteTarget,
         contents: Option<&std::fs::File>,
     ) -> anyhow::Result<FpWrite> {
-        if target.kind == FinderWriteItemKind::Folder {
-            return self.queue_finder_create_from(target, contents).map(FpWrite::plain);
-        }
+        if target.kind == FinderWriteItemKind::Folder {}
         self.queue_file_provider_create_retiring(target, contents, None)
             .map_err(land_error_to_anyhow)?
             .map(|(write, _)| write)
