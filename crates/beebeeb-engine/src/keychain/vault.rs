@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// The two flags of the two-level lock that outlive the app (core's `flows::lock::StartFacts`), stored beside the
+/// The flags of the two-level lock that outlive the app (core's `flows::lock::StartFacts`), stored beside the
 /// session under core's own entry names, as the bytes `1` / `0`. Not secrets: they say how the app starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LockFlag {
@@ -16,10 +16,17 @@ pub enum LockFlag {
     /// Not a flag: the screen lock's local check record (`ScreenCheckRecord::to_bytes`), under core's entry name
     /// `lock.screen_check`. Bytes only; never logged.
     ScreenCheck,
+    /// "App lock", the screen level's per-device switch (core's `lock.app_lock`). ABSENT IS ON: read it only with
+    /// [`AuthVault::lock_setting`]`(.., true)`, never [`AuthVault::lock_flag`]; bytes that are neither value, or a
+    /// failed read, count as on.
+    AppLock,
 }
 
 impl LockFlag {
-    pub const ALL: [Self; 4] = [
+    /// App lock first: a removal of every entry that stops part way must never leave `lock.app_lock = 0` behind
+    /// (it would open the next account's start without a proof); every other entry left behind fails closed.
+    pub const ALL: [Self; 5] = [
+        Self::AppLock,
         Self::AskPasswordAtStart,
         Self::VaultClosed,
         Self::Attempts,
@@ -32,6 +39,7 @@ impl LockFlag {
             Self::VaultClosed => "lock.vault_closed",
             Self::Attempts => "lock.attempts",
             Self::ScreenCheck => "lock.screen_check",
+            Self::AppLock => "lock.app_lock",
         }
     }
 }
@@ -301,12 +309,26 @@ impl<S: AuthSecretStore> AuthVault<S> {
     /// A stored lock flag, by core's rule (`read_lock_flag`): absent is off; `None` means it could not be read (a
     /// store failure, or bytes that are neither flag value) and the caller treats the vault as closed.
     pub fn lock_flag(&self, flag: LockFlag) -> Option<bool> {
+        self.lock_setting(flag, false)
+    }
+
+    /// A stored lock setting with what an absent entry means (core's `read_lock_setting`). `None`: it could not be
+    /// read (a store failure, or bytes that are neither value); the caller takes the safe side.
+    pub fn lock_setting(&self, flag: LockFlag, absent: bool) -> Option<bool> {
         match self.store.load_lock_flag(flag) {
-            Ok(None) => Some(false),
+            Ok(None) => Some(absent),
             Ok(Some(bytes)) if bytes == b"1" => Some(true),
             Ok(Some(bytes)) if bytes == b"0" => Some(false),
             Ok(Some(_)) | Err(_) => None,
         }
+    }
+
+    /// Remove every lock entry, app lock first ([`LockFlag::ALL`]'s order); every removal is tried. An account's
+    /// first sign-in on this computer carries nothing of a lock setting (core's first `Session::save`).
+    pub fn clear_lock_entries(&self) -> AuthResult<()> {
+        LockFlag::ALL
+            .into_iter()
+            .fold(Ok(()), |done, flag| done.and(self.store.delete_lock_flag(flag)))
     }
 
     /// The raw bytes of a lock entry that is not a 1/0 flag ([`LockFlag::Attempts`], [`LockFlag::ScreenCheck`]).
@@ -341,6 +363,9 @@ impl<S: AuthSecretStore> AuthVault<S> {
     /// cannot be removed must not leave the vault key, the email or the owner tags behind as well.
     pub fn clear_session(&mut self) -> AuthResult<()> {
         self.lock();
+        // App lock goes FIRST (core's device sign-out): a sign-out cut short must never leave `lock.app_lock = 0`
+        // for the next account. Tried again with the other lock entries below.
+        let app_lock = self.store.delete_lock_flag(LockFlag::AppLock);
         let token = self.store.delete_session_token();
         let key = self.store.delete_wrapped_master_key();
         // Also drop the persisted account email so logout leaves no PII behind.
@@ -351,10 +376,14 @@ impl<S: AuthSecretStore> AuthVault<S> {
         let session_owner = self.store.delete_session_owner();
         // The lock's flags belong to the account on this computer: they leave with its session (core removes them
         // at the same place).
-        let flags = LockFlag::ALL
-            .into_iter()
-            .fold(Ok(()), |done, flag| done.and(self.store.delete_lock_flag(flag)));
-        token.and(key).and(email).and(key_owner).and(session_owner).and(flags)
+        let flags = self.clear_lock_entries();
+        app_lock
+            .and(token)
+            .and(key)
+            .and(email)
+            .and(key_owner)
+            .and(session_owner)
+            .and(flags)
     }
 
     pub fn master_key(&self) -> AuthResult<&[u8]> {

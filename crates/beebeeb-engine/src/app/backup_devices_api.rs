@@ -45,7 +45,6 @@ use beebeeb_core::backup::{
 use beebeeb_types::backup::Platform;
 use zeroize::Zeroizing;
 
-use super::lock_api::PersonRefused;
 use super::settings_api::{AccountCallError, kind_of};
 use super::{CredentialStores, Engine, LocalStateRefused};
 use crate::account::SessionGeneration;
@@ -516,8 +515,13 @@ impl<C: CredentialStores> Engine<C> {
             (generation == session).then(|| (current.token.clone(), Zeroizing::new(current.master_key)))
         }) {
             Ok(Some(held)) => held,
-            Err(PersonRefused::ScreenLocked) => return Err(DevicesRefused::Local(LocalStateRefused::Locked)),
-            Ok(None) | Err(PersonRefused::NoSession) => return Err(DevicesRefused::NotSignedIn),
+            Err(refused) => {
+                return Err(refused.said_as(
+                    DevicesRefused::Local(LocalStateRefused::Locked),
+                    DevicesRefused::NotSignedIn,
+                ));
+            }
+            Ok(None) => return Err(DevicesRefused::NotSignedIn),
         };
         let state = self.local_state().map_err(DevicesRefused::Local)?;
         if state.session() != session {

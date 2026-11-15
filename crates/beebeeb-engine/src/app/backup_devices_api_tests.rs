@@ -657,6 +657,7 @@ fn a_locked_screen_reads_and_deletes_nothing() {
         session_stored: true,
         ask_password_at_start: Some(false),
         vault_closed: Some(false),
+        app_lock: Some(true),
     });
     assert_eq!(rig.engine.lock_state(), super::super::lock_api::LockState::ScreenLocked);
     let session = rig.engine.session_turn();

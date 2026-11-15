@@ -22,12 +22,12 @@ use crate::test_api::{FakeApi, OpaqueAccount, Reply, Request};
 
 type TestEngine = Engine<MemoryCredentials>;
 
-const PASSWORD: &str = "correct horse battery staple";
-const WRONG: &str = "not the right password at all";
+pub(super) const PASSWORD: &str = "correct horse battery staple";
+pub(super) const WRONG: &str = "not the right password at all";
 const TOKEN: &str = "session-of-the-screen-lock";
 const OWNER: &str = "22222222-2222-4222-8222-222222222222";
-const SLOT: &str = "an-invented-slot";
-const T0: u64 = 1_700_000_000_000;
+pub(super) const SLOT: &str = "an-invented-slot";
+pub(super) const T0: u64 = 1_700_000_000_000;
 const HOUR: u64 = 3_600_000;
 
 const ANSWERS: u8 = 0;
@@ -49,7 +49,7 @@ fn account() -> Arc<OpaqueAccount> {
         .clone()
 }
 
-fn server() -> FakeApi {
+pub(super) fn server() -> FakeApi {
     let account = account();
     FakeApi::start(Arc::new(move |request: &Request| {
         let mode = MODE.load(Ordering::SeqCst);
@@ -89,7 +89,7 @@ fn server() -> FakeApi {
     }))
 }
 
-fn secret(text: &str) -> Zeroizing<String> {
+pub(super) fn secret(text: &str) -> Zeroizing<String> {
     Zeroizing::new(text.to_string())
 }
 
@@ -129,7 +129,7 @@ fn locked_engine(base: &str) -> (Arc<TestEngine>, MemoryCredentials) {
     (engine, credentials)
 }
 
-fn entry(credentials: &MemoryCredentials, entry: LockFlag) -> Option<Vec<u8>> {
+pub(super) fn entry(credentials: &MemoryCredentials, entry: LockFlag) -> Option<Vec<u8>> {
     credentials.store_for(SLOT).load_lock_flag(entry).unwrap()
 }
 
@@ -144,7 +144,7 @@ fn starts(api: &FakeApi) -> usize {
         .count()
 }
 
-fn requests(api: &FakeApi) -> usize {
+pub(super) fn requests(api: &FakeApi) -> usize {
     api.routes().len()
 }
 
@@ -160,7 +160,7 @@ fn stored_token(credentials: &MemoryCredentials) -> Vec<u8> {
 }
 
 /// The tests share the loopback mode flags.
-fn serial() -> std::sync::MutexGuard<'static, ()> {
+pub(super) fn serial() -> std::sync::MutexGuard<'static, ()> {
     static SERIAL: Mutex<()> = Mutex::new(());
     let guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     MODE.store(ANSWERS, Ordering::SeqCst);
@@ -472,7 +472,7 @@ fn the_screen_password_path_is_for_a_locked_screen_only() {
     assert_eq!(requests(&api), 0);
 }
 
-fn open_engine(base: &str) -> (Arc<TestEngine>, MemoryCredentials) {
+pub(super) fn open_engine(base: &str) -> (Arc<TestEngine>, MemoryCredentials) {
     let (engine, credentials) = locked_engine(base);
     engine.unlock_screen_platform_verified(engine.session_turn()).unwrap();
     assert_eq!(engine.lock_state(), LockState::Open);
@@ -493,7 +493,10 @@ fn the_start_setting_turns_on_asking_nothing_and_off_only_with_the_password_prov
     );
     assert_eq!(
         engine.set_ask_password_at_start_at(false, Some(secret(WRONG)), T0),
-        Err(StartSettingRefused::Wrong)
+        Err(StartSettingRefused::Wrong {
+            wait_ms: beebeeb_core::screen_lock::wait_after_ms(1),
+            local_check_off: false
+        })
     );
     assert_eq!(
         engine.ask_password_at_start(),

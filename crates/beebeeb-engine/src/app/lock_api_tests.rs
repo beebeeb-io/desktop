@@ -137,3 +137,39 @@ fn every_person_accessor_goes_through_the_choke_point() {
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// What a person's call is told: no session in memory is `NoSession` whatever the lock says (never "locked"); a session
+/// in memory behind a locked screen or a closed vault is that refusal; and the one mapping says it in an API's words.
+#[test]
+fn no_session_is_never_locked_and_a_session_the_lock_refuses_is() {
+    use beebeeb_api::flows::{LockFlow, StartFacts};
+    let engine = engine_with_a_session();
+    let start = |ask_password_at_start, vault_closed| {
+        LockFlow::at_start(StartFacts {
+            session_stored: true,
+            ask_password_at_start,
+            vault_closed,
+            app_lock: Some(true),
+        })
+    };
+    *engine.lock_flow.lock().unwrap() = start(Some(false), Some(false));
+    assert_eq!(engine.person_session(|_, _| ()), Err(PersonRefused::ScreenLocked));
+    // A closed vault that still holds credentials (an install on its way).
+    *engine.lock_flow.lock().unwrap() = start(None, None);
+    assert_eq!(engine.person_session(|_, _| ()), Err(PersonRefused::VaultClosed));
+    // The session leaves memory: no session, whatever the lock says.
+    {
+        let _writes = engine.writes.write().unwrap();
+        *engine.acct.session.lock().unwrap() = None;
+    }
+    assert_eq!(engine.person_session(|_, _| ()), Err(PersonRefused::NoSession));
+    *engine.lock_flow.lock().unwrap() = start(Some(false), Some(false));
+    assert_eq!(engine.person_session(|_, _| ()), Err(PersonRefused::NoSession));
+    for (refused, said) in [
+        (PersonRefused::ScreenLocked, "locked"),
+        (PersonRefused::VaultClosed, "locked"),
+        (PersonRefused::NoSession, "not signed in"),
+    ] {
+        assert_eq!(refused.said_as("locked", "not signed in"), said, "{refused:?}");
+    }
+}

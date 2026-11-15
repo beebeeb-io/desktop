@@ -205,18 +205,20 @@ fn lock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
     let on = ui.lock_on;
     let chosen = LockAfter::ALL.iter().position(|a| *a == ui.lock_after).unwrap_or(1);
     let labels: Vec<&str> = LockAfter::ALL.iter().map(|a| a.label()).collect();
-    let rows = vec![
-        setup::item(
-            k,
-            Some(&icons::FACE),
-            "App lock",
-            Some("Your PC's password works if Windows Hello doesn't"),
-            |key| vec![switch(key, "App lock", on, t, Ui::toggle_lock)],
-            None,
-            false,
-            t,
-        ),
-        setup::item(
+    // A source that sets no delay draws no "Lock again after" (never a choice nothing acts on).
+    let delay = ui.sets_lock_after();
+    let mut rows = vec![setup::item(
+        k,
+        Some(&icons::FACE),
+        "App lock",
+        Some("Your PC's password works if Windows Hello doesn't"),
+        |key| vec![switch(key, "App lock", on, t, Ui::toggle_lock)],
+        None,
+        false,
+        t,
+    )];
+    if delay {
+        rows.push(setup::item(
             k,
             None,
             "Lock again after",
@@ -236,8 +238,8 @@ fn lock(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             None,
             true,
             t,
-        ),
-    ];
+        ));
+    }
     setup::column()
         .child(au::heading(
             "Lock Beebeeb",
@@ -786,7 +788,7 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
             if r.passkey { "Added" } else { "Not added" }.into(),
             Setting::Passkey,
         ),
-        ("App lock", on_off(r.app_lock).into(), Setting::AppLock),
+        ("App lock", switch(Switch::AppLock, r.app_lock).into(), Setting::AppLock),
         ("Backup", backup, Setting::Backup),
         ("Previews", ui.preview_name(), Setting::Previews),
         ("File Explorer", explorer.into(), Setting::FileExplorer),
@@ -839,6 +841,7 @@ fn done(ui: &Ui, k: &mut Keys, t: &Theme) -> El {
         (Switch::Notifications, "notifications"),
         (Switch::OpenAtLogin, "open at login"),
         (Switch::Backup, "backup"),
+        (Switch::AppLock, "app lock"),
     ]
     .into_iter()
     .filter(|(switch, _)| matches!(ui.answered(*switch), Some(Answered::NotChanged | Answered::NotKnown)))

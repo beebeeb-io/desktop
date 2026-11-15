@@ -7,8 +7,10 @@
 //! (`beebeeb-client`'s `auth/lock.rs`, which this engine cannot call: it keeps its own session and credential
 //! store), step for step in that service's order:
 //!
-//! - the two flags a start reads are stored beside the session under core's entry names, as `1` / `0`; a flag that
-//!   cannot be read starts the vault closed, and a start that is closed writes the mark;
+//! - the flags a start reads are stored beside the session under core's entry names, as `1` / `0`; a vault flag that
+//!   cannot be read starts the vault closed, and a start that is closed writes the mark; app lock (absent or
+//!   unreadable is on) is the screen level's alone: off, a start that would be screen-locked starts open
+//!   (`app_lock_api.rs`);
 //! - a vault lock writes the mark BEFORE the key leaves memory, and reads it back after;
 //! - only a strong proof (the password accepted by the server, or the twelve words) clears the mark;
 //! - while the vault is marked closed the key entry is not read at all, not even to ask whether it is there;
@@ -43,6 +45,7 @@ pub(super) const NO_SESSION: StartFacts = StartFacts {
     session_stored: false,
     ask_password_at_start: None,
     vault_closed: None,
+    app_lock: None,
 };
 
 /// Why a step of the lock did nothing.
@@ -74,8 +77,25 @@ fn refused(error: FlowError) -> LockRefused {
 /// Why a person's call got no session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PersonRefused {
+    /// A session is in memory behind a locked screen.
     ScreenLocked,
+    /// A session is in memory and the vault is closed (core's `closed_vault_allows`: a person may only prove, lock or
+    /// sign out there; credentials on their way to an install).
+    VaultClosed,
+    /// No session in memory (signed out, a closed vault whose key left, a session change under way), whatever the
+    /// lock says: never "locked".
     NoSession,
+}
+
+impl PersonRefused {
+    /// THE one mapping of a refusal to an API's words: `locked` for a session that exists behind a locked screen or a
+    /// closed vault, `not_signed_in` for no session.
+    pub(super) fn said_as<E>(self, locked: E, not_signed_in: E) -> E {
+        match self {
+            Self::ScreenLocked | Self::VaultClosed => locked,
+            Self::NoSession => not_signed_in,
+        }
+    }
 }
 
 /// What [`Engine::lock_vault`] did.
@@ -171,17 +191,21 @@ impl<C: CredentialStores> Engine<C> {
             Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => return Err(PersonRefused::NoSession),
         };
-        if call_may_run(self.lock_state(), Call::Person(action)).is_err() {
-            return Err(PersonRefused::ScreenLocked);
-        }
+        // The lock's answer, then the session, in this one hold (every lock move waits for it): no session is
+        // `NoSession` whatever the lock says, and a session the lock refuses is never handed to `with`.
+        let answer = call_may_run(self.lock_state(), Call::Person(action));
         let guard = self
             .acct
             .session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match guard.as_ref() {
-            Some(session) => Ok(with(session, self.acct.session_generation())),
-            None => Err(PersonRefused::NoSession),
+        let Some(session) = guard.as_ref() else {
+            return Err(PersonRefused::NoSession);
+        };
+        match answer {
+            Ok(()) => Ok(with(session, self.acct.session_generation())),
+            Err(CallRefused::ScreenLocked) => Err(PersonRefused::ScreenLocked),
+            Err(CallRefused::VaultClosed) => Err(PersonRefused::VaultClosed),
         }
     }
 
@@ -193,6 +217,8 @@ impl<C: CredentialStores> Engine<C> {
             session_stored,
             ask_password_at_start: vault.lock_flag(LockFlag::AskPasswordAtStart),
             vault_closed: vault.lock_flag(LockFlag::VaultClosed),
+            // Absent is ON, and so is an entry that cannot be read (core's `read_lock_setting(.., true)`).
+            app_lock: vault.lock_setting(LockFlag::AppLock, true),
         };
         let flow = LockFlow::at_start(facts);
         if flow.state() == LockState::VaultClosed && facts.vault_closed != Some(true) {
@@ -239,6 +265,34 @@ impl<C: CredentialStores> Engine<C> {
             SessionMoved::SignedOut => self.flow(LockFlow::signed_out),
             SessionMoved::Ended => self.flow(LockFlow::session_ended),
         }
+    }
+
+    /// The credential store for a sign-in's install (`store_first_sign_in`, which a sign-in and a sign-up both pass),
+    /// with every lock entry of another account removed first. An account's first install on this computer, or one
+    /// after another account's, carries nothing of a lock setting (core's first `Session::save` and its account
+    /// change), so a sign-out cut short never hands its `lock.app_lock = 0` to the next account. The entries stay
+    /// when the stored identity is this account's (a strong unlock, a token the server rejected at a start): the
+    /// session's owner tag, else the key's, else (no tag at all) the stored email. A store that cannot say refuses.
+    pub(super) fn vault_for_install(&self, user_id: &str, email: &str) -> Result<AuthVault<C::Store>, String> {
+        const UNREAD: &str = "the lock settings stored on this computer could not be read";
+        let vault = self.vault();
+        let owner = match vault.session_owner().map_err(|_| UNREAD.to_string())? {
+            Some(owner) => Some(owner),
+            None => vault.vault_key_owner().map_err(|_| UNREAD.to_string())?,
+        };
+        let ours = match owner {
+            Some(owner) => owner.trim() == user_id.trim(),
+            None => vault
+                .account_email()
+                .map_err(|_| UNREAD.to_string())?
+                .is_some_and(|stored| stored.trim().eq_ignore_ascii_case(email.trim())),
+        };
+        if !ours {
+            vault
+                .clear_lock_entries()
+                .map_err(|_| "the lock settings of an earlier account could not be removed".to_string())?;
+        }
+        Ok(vault)
     }
 
     /// Is the vault marked closed (or can the mark not be read)? Then the key entry is not read, also not to ask

@@ -274,7 +274,8 @@ fn sign_in(facts: &SecurityFacts, source: &dyn AccountSource, t: &Theme) -> El {
 }
 
 /// App lock is Drive's own row (the board's `securityExtra` slot, DW-0716): its switch and delay are here,
-/// not on a page behind it.
+/// not on a page behind it. A source that gives no delay (an empty one: nothing acts on it in this version)
+/// gets no delay control and no "locks again after".
 fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
     let it = Row::new(Lead::Icon(&icons::APP_LOCK), "Lock Beebeeb");
     let Some((on, after)) = &facts.app_lock else {
@@ -287,8 +288,9 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
         );
     };
     let on = *on;
+    let delay = on && !after.is_empty();
     let mut controls = Vec::new();
-    if on {
+    if delay {
         controls.push(
             el().key("item-1-0-pop-button")
                 .role("combobox")
@@ -317,8 +319,10 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
     set::item(
         1,
         0,
-        &it.sub(if on {
+        &it.sub(if delay {
             "Windows Hello · locks again after"
+        } else if on {
+            "Windows Hello"
         } else {
             "Off: anyone using this PC can open Beebeeb"
         }),
@@ -519,7 +523,7 @@ pub fn pane(source: &dyn AccountSource, dialog: Option<&Dialog>, signing: &Signi
             t,
         )),
         Some(Dialog::LockDelay(hot)) => match &facts.app_lock {
-            Some((true, after)) => Some(super::app_lock::menu(after, *hot, t)),
+            Some((true, after)) if !after.is_empty() => Some(super::app_lock::menu(after, *hot, t)),
             _ => None,
         },
         _ => None,
