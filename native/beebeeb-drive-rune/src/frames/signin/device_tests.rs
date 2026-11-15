@@ -19,9 +19,15 @@ fn waiting() -> Runtime<State> {
     rt
 }
 
-/// The engine's ending of the request on the screen, as `poll` hands it over.
+/// The engine's ending of the request on the screen, as `poll` hands it over. Through `Runtime::update`, so the window
+/// is drawn again from the new state.
 fn ended(rt: &mut Runtime<State>, status: DeviceStatus) {
-    ui(rt).apply(SignInEvent::Device(status));
+    rt.update(|s, _| {
+        s.signin
+            .as_mut()
+            .expect("the sign-in window is open")
+            .apply(SignInEvent::Device(status));
+    });
     rt.frame(0.0);
 }
 

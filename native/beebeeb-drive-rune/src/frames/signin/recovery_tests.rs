@@ -115,11 +115,14 @@ fn at_new_password() -> (Runtime<State>, Calls) {
     (rt, calls)
 }
 
-/// The engine answered the new password with `problem` (as `poll` hands it over while the step runs).
+/// The engine answered the new password with `problem` (as `poll` hands it over while the step runs). Through
+/// `Runtime::update`, so the window is drawn again from the new state.
 fn answered(rt: &mut Runtime<State>, problem: NewPasswordProblem) {
-    let ui_ = ui(rt);
-    ui_.setting = true;
-    ui_.apply(SignInEvent::PasswordSet(Err(problem)));
+    rt.update(|s, _| {
+        let ui_ = s.signin.as_mut().expect("the sign-in window is open");
+        ui_.setting = true;
+        ui_.apply(SignInEvent::PasswordSet(Err(problem)));
+    });
     rt.frame(0.0);
 }
 
