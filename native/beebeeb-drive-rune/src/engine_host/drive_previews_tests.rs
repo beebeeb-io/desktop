@@ -37,8 +37,12 @@ pub(crate) struct FakePreviews {
     pub(crate) summary_reads: AtomicUsize,
     /// Added to the previews' count (more were made).
     pub(crate) extra: AtomicU64,
-    /// A run's work waits while this is set (at most 10 s).
+    /// A run's work waits while this is set (at most 10 s), or until its stop flag is set.
     pub(crate) hold_make: AtomicBool,
+    /// A held run's work saw its stop flag set.
+    pub(crate) saw_stop: AtomicBool,
+    /// A setting's write waits while this is set (at most 10 s).
+    pub(crate) hold_set: AtomicBool,
 }
 
 pub(crate) fn fake() -> Arc<FakePreviews> {
@@ -64,6 +68,8 @@ pub(crate) fn fake() -> Arc<FakePreviews> {
         summary_reads: AtomicUsize::new(0),
         extra: AtomicU64::new(0),
         hold_make: AtomicBool::new(false),
+        saw_stop: AtomicBool::new(false),
+        hold_set: AtomicBool::new(false),
     })
 }
 
@@ -146,15 +152,23 @@ impl PreviewsEngine for FakePreviews {
         if self.set_fails.load(Ordering::SeqCst) {
             return Err(PreviewsRefused::Offline);
         }
+        let began = Instant::now();
+        while self.hold_set.load(Ordering::SeqCst) && began.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         self.sets.lock().unwrap().push((session, setting));
         *self.setting.lock().unwrap() = setting;
         Ok(())
     }
-    fn make(&self, session: SessionGeneration, force: bool, _stop: &AtomicBool, progress: &dyn Fn(u32, u32)) -> RunEnd {
+    fn make(&self, session: SessionGeneration, force: bool, stop: &AtomicBool, progress: &dyn Fn(u32, u32)) -> RunEnd {
         self.makes.lock().unwrap().push((session, force));
         progress(1, 1);
         let began = Instant::now();
         while self.hold_make.load(Ordering::SeqCst) && began.elapsed() < Duration::from_secs(10) {
+            if stop.load(Ordering::SeqCst) {
+                self.saw_stop.store(true, Ordering::SeqCst);
+                break;
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
         RunEnd {
@@ -547,4 +561,68 @@ fn a_picture_is_wiped_by_whoever_lets_go_of_it_last() {
     let bundled = Sample::bundled();
     drop(Sample::bundled());
     assert_ne!(bundled.original_png.iter().filter(|b| **b != 0).count(), 0);
+}
+
+/// Wait until a held run's work saw its stop flag (at most 5 s).
+fn stopped_in_time(fake: &FakePreviews) -> bool {
+    let began = Instant::now();
+    while !fake.saw_stop.load(Ordering::SeqCst) {
+        if began.elapsed() > Duration::from_secs(5) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    true
+}
+
+/// A lock (or a sign-out, another account) while a run makes previews: the run is told to stop.
+#[test]
+fn a_lock_stops_the_run_of_the_session_before_it() {
+    let fake = fake();
+    fake.hold_make.store(true, Ordering::SeqCst);
+    let mut host = opened(&fake);
+    pump_until(&mut host, "the session's run makes previews", |host| {
+        matches!(host.run_state(), RunState::Making { .. })
+    });
+    assert!(!fake.saw_stop.load(Ordering::SeqCst));
+    fake.ready.store(false, Ordering::SeqCst);
+    host.pump();
+    assert!(
+        stopped_in_time(&fake),
+        "the run of the locked session was not told to stop"
+    );
+    fake.hold_make.store(false, Ordering::SeqCst);
+}
+
+/// Off pressed while a Rebuild is still queued behind other work: once Off is written, the forced run that started
+/// for the Rebuild is stopped.
+#[test]
+fn off_stops_a_rebuild_that_was_still_queued() {
+    let fake = fake();
+    let mut host = opened(&fake);
+    runs(&fake, 1);
+    // The worker is busy with a read the test holds, so the Rebuild and the Off queue behind it and the switch's own
+    // stop comes before the Rebuild's start. The Off's write is held until the forced run has taken its work.
+    fake.gated.store(true, Ordering::SeqCst);
+    host.reload();
+    fake.hold_make.store(true, Ordering::SeqCst);
+    fake.hold_set.store(true, Ordering::SeqCst);
+    host.rebuild();
+    host.set_on(false);
+    fake.permit();
+    runs(&fake, 2);
+    assert_eq!(
+        fake.makes.lock().unwrap()[1].1,
+        true,
+        "the Rebuild's forced run started"
+    );
+    assert!(
+        !fake.saw_stop.load(Ordering::SeqCst),
+        "nothing stopped the forced run before the Off's write"
+    );
+    fake.hold_set.store(false, Ordering::SeqCst);
+    assert!(stopped_in_time(&fake), "Off did not stop the forced run");
+    assert!(fake.sets.lock().unwrap().iter().any(|(_, setting)| !setting.enabled));
+    fake.gated.store(false, Ordering::SeqCst);
+    fake.hold_make.store(false, Ordering::SeqCst);
 }

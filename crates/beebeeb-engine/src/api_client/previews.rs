@@ -60,6 +60,19 @@ struct MediaFileWire {
     preview_format: Option<String>,
     preview_px: Option<i64>,
     preview_bytes: Option<i64>,
+    /// RFC 3339 text, or unix seconds.
+    updated_at: Option<serde_json::Value>,
+    size_bytes: Option<i64>,
+}
+
+/// Unix seconds of a timestamp field: a number, or RFC 3339 text.
+fn seconds_of(value: &serde_json::Value) -> Option<i64> {
+    value.as_i64().or_else(|| {
+        value
+            .as_str()
+            .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+            .map(|at| at.timestamp())
+    })
 }
 
 const PREFERENCE_PATH: &str = "/api/v1/preferences/photo_previews";
@@ -104,6 +117,8 @@ impl ApiClient {
                 format: file.preview_format.as_deref().and_then(PreviewFormat::from_wire),
                 px: file.preview_px.and_then(|px| u32::try_from(px).ok()),
                 bytes: file.preview_bytes.and_then(|bytes| u64::try_from(bytes).ok()),
+                updated_at: file.updated_at.as_ref().and_then(seconds_of),
+                size: file.size_bytes.and_then(|size| u64::try_from(size).ok()),
             })
             .collect())
     }

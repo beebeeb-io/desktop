@@ -214,6 +214,27 @@ impl<C: CredentialStores> Engine<C> {
             stopped: Some(why),
             ..RunEnd::default()
         };
+        // A session mutex a panic poisoned: nothing is copied, nothing is sent.
+        if self.acct.session.is_poisoned() || !self.acct.session_unchanged_since(session) {
+            return moved;
+        }
+        // Sync paused: nothing is read from the sync folder and nothing is sent.
+        if self.is_paused() {
+            tracing::info!("photo previews: sync is paused, nothing is made");
+            return stopped(Stopped::Paused);
+        }
+        // This session's first reconcile pass first: before it committed, a local row can still hold a version the
+        // server has replaced. Waited for before anything of the session is copied, watching the stop, a pause and
+        // the session; never a timer of its own.
+        if !self.first_pass_committed(session, stop) {
+            return if !self.acct.session_unchanged_since(session) {
+                moved
+            } else if self.is_paused() {
+                stopped(Stopped::Paused)
+            } else {
+                RunEnd::default()
+            };
+        }
         // The token and the key of the session asked for: copied through the one way a call reaches the session in
         // memory (the lock asked and the copy made in one hold), and only while it is that very session.
         let Ok(Some((token, key))) = self.person_session(|current, generation| {
@@ -263,25 +284,47 @@ impl<C: CredentialStores> Engine<C> {
             ) => return moved,
             Err(_) => return stopped(Stopped::Failed),
         };
-        let Some(sync_root) = crate::config::DesktopConfig::load_for(self.identity)
-            .ok()
-            .and_then(|config| config.sync_root)
-        else {
+        let config = crate::config::DesktopConfig::load_for(self.identity).ok();
+        let Some(sync_root) = config.as_ref().and_then(|config| config.sync_root.clone()) else {
             return stopped(Stopped::Failed);
         };
+        // The uploads' speed limit (KiB/s, 0: none) paces the previews too.
+        let kbps = config.map_or(0, |config| config.upload_kbps_limit);
         let planned = plan::plan(&photos, &owned, setting, force);
         let total = u32::try_from(planned.len()).unwrap_or(u32::MAX);
         let mut end = RunEnd::default();
+        let mut server_errors = 0u32;
         progress(0, total);
         for (at, photo) in planned.into_iter().enumerate() {
             if stop.load(Ordering::SeqCst) {
                 break;
             }
-            match self.make_one(session, &key, &api, &sync_root, photo, setting.px, read, stop) {
+            if self.is_paused() {
+                end.stopped = Some(Stopped::Paused);
+                break;
+            }
+            let made = self.make_one(session, &key, &api, &sync_root, photo, setting.px, read, stop, kbps);
+            if !matches!(made, Made::ServerError) {
+                server_errors = 0;
+            }
+            match made {
                 Made::Yes => end.made += 1,
                 Made::Halted => break,
                 Made::NotHere => end.not_here += 1,
                 Made::No => end.failed += 1,
+                Made::ServerError => {
+                    end.failed += 1;
+                    server_errors += 1;
+                    // Beebeeb answers with errors: wait a little longer each time, and stop after a few in a row
+                    // (as when it cannot be reached), so an outage is not read, decoded and sent at every photo.
+                    if server_errors >= SERVER_ERRORS_TO_STOP {
+                        end.stopped = Some(Stopped::Offline);
+                        break;
+                    }
+                    if !wait_unless_stopped(stop, std::time::Duration::from_secs(1 << (server_errors - 1))) {
+                        break;
+                    }
+                }
                 Made::SessionMoved => {
                     end.session_moved = true;
                     break;
@@ -304,8 +347,31 @@ impl<C: CredentialStores> Engine<C> {
         end
     }
 
-    /// One photo: read (only when every byte is here), encode, seal, ask the session, upload. A 429 is waited out
-    /// (watching `stop`) and the session asked again before the preview is sent again.
+    /// Whether this session's first reconcile pass has committed (the engine's queue sends nothing before it either):
+    /// every session put in memory asks for one (`auth_resume_asked`), and the engine marks it served once its pass
+    /// committed (`auth_resume_done`). Waits for it in short steps; `false` as soon as `stop` is set, sync is paused or
+    /// the session moved. A Mac runs no reconcile pass (its engine serves a sign-in's resume as it starts), so nothing
+    /// would ever mark one there: a Mac does not wait, and the version rule of the plan still holds.
+    fn first_pass_committed(&self, session: SessionGeneration, stop: &AtomicBool) -> bool {
+        if cfg!(target_os = "macos") {
+            return true;
+        }
+        loop {
+            if self.acct.auth_resume_done.load(Ordering::SeqCst) >= self.acct.auth_resume_asked.load(Ordering::SeqCst) {
+                return true;
+            }
+            if stop.load(Ordering::SeqCst) || self.is_paused() || !self.acct.session_unchanged_since(session) {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    /// One photo: ask the session, check its row is still as planned, read (only when every byte is here), encode,
+    /// ask the session again, seal, and
+    /// upload: the session and `stop` are asked right before every send. A 429 is waited out (watching `stop`). A
+    /// panic while reading or encoding ends this photo only. `kbps` (KiB/s, 0: none): after a send, the rest of its
+    /// time at that speed is waited out.
     #[allow(clippy::too_many_arguments)]
     fn make_one(
         &self,
@@ -317,29 +383,71 @@ impl<C: CredentialStores> Engine<C> {
         px: u32,
         read: Reader<'_>,
         stop: &AtomicBool,
+        kbps: u64,
     ) -> Made {
+        // A lock, a vault close or a sign-out since the last photo: nothing more is opened.
+        if !self.acct.session_unchanged_since(session) {
+            return Made::SessionMoved;
+        }
+        // Its row again: what the engine changed since the plan (a pull, an edit here, a held write) waits for a
+        // later run.
+        match self.local_state() {
+            Ok(state) if state.session() == session => match state.with(|db| plan::still_as_planned(db, photo)) {
+                Ok(true) => {}
+                Ok(false) => return Made::NotHere,
+                Err(_) => return Made::SessionMoved,
+            },
+            Ok(_)
+            | Err(
+                LocalStateRefused::SessionChanged
+                | LocalStateRefused::SignedOut
+                | LocalStateRefused::Locked
+                | LocalStateRefused::SessionEnded,
+            ) => return Made::SessionMoved,
+            Err(_) => return Made::NotHere,
+        }
         let Some(path) = plan::ready_to_read(sync_root, photo) else {
             return Made::NotHere;
         };
-        let Some(original) = read(&path) else {
-            return Made::No;
+        let encoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let original = read(&path)?;
+            encode::encode_preview(&original, px).ok().map(|(jpeg, _)| jpeg)
+        }));
+        let jpeg = match encoded {
+            Ok(Some(jpeg)) => jpeg,
+            Ok(None) => return Made::No,
+            Err(_) => {
+                tracing::warn!("photo previews: a photo could not be read or encoded (a panic), it is skipped");
+                return Made::No;
+            }
         };
-        let Ok((jpeg, _)) = encode::encode_preview(&original, px) else {
-            return Made::No;
-        };
-        drop(original);
+        // Nothing is sealed for a session that moved while this photo was encoded.
+        if !self.acct.session_unchanged_since(session) {
+            return Made::SessionMoved;
+        }
         let Ok(sealed) = seal::seal_preview(key, &photo.id, &jpeg) else {
             return Made::No;
         };
         drop(jpeg);
         let (mut retries, mut waited) = (0, 0);
         loop {
-            // Right before every send: still the very session the key and the token were copied from.
+            // Right before every send: not stopped (Off sends nothing more), and still the very session the key and
+            // the token were copied from.
+            if stop.load(Ordering::SeqCst) {
+                return Made::Halted;
+            }
             if !self.session_is_still(session, key) {
                 return Made::SessionMoved;
             }
+            let sent_at = std::time::Instant::now();
             match self.runtime.block_on(api.upload_preview(&photo.id, px, &sealed)) {
-                Ok(()) => return Made::Yes,
+                Ok(()) => {
+                    if kbps > 0 {
+                        let budget = std::time::Duration::from_secs_f64(sealed.len() as f64 / (kbps as f64 * 1024.0));
+                        wait_unless_stopped(stop, budget.saturating_sub(sent_at.elapsed()));
+                    }
+                    return Made::Yes;
+                }
                 Err(PreviewPutError::RateLimited { retry_after }) => {
                     let Some(wait) = preview_retry_wait(retries, waited, retry_after) else {
                         return Made::No;
@@ -353,6 +461,7 @@ impl<C: CredentialStores> Engine<C> {
                 Err(PreviewPutError::QuotaExceeded) => return Made::Stop(Stopped::StorageFull),
                 Err(PreviewPutError::Offline) => return Made::Stop(Stopped::Offline),
                 Err(PreviewPutError::Status(401)) => return Made::SessionMoved,
+                Err(PreviewPutError::Status(500..=599)) => return Made::ServerError,
                 Err(PreviewPutError::TooLarge | PreviewPutError::Status(_)) => return Made::No,
             }
         }
@@ -467,9 +576,14 @@ fn wait_unless_stopped(stop: &AtomicBool, wait: std::time::Duration) -> bool {
     !stop.load(Ordering::SeqCst)
 }
 
+/// Server errors (5xx) in a row that stop the run.
+const SERVER_ERRORS_TO_STOP: u32 = 3;
+
 /// How one photo ended.
 enum Made {
     Yes,
+    /// Beebeeb answered with a server error (5xx).
+    ServerError,
     /// The run was asked to stop while it waited to send again.
     Halted,
     NotHere,

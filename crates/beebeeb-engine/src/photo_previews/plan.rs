@@ -7,6 +7,9 @@
 //! - is listed by the server among the account's OWN media (the per-file read answers the owner's files only: a
 //!   photo in a folder shared with this account is never listed, so never a source);
 //! - has no held write queued in the local state (a change the server does not hold yet);
+//! - is the server's version: the server's file did not change after the version the local state last took
+//!   (`remote_updated_at`), and has the size of the row (a newer version elsewhere is never given this PC's older
+//!   picture);
 //! - has no preview at exactly the setting's format and size yet, unless this is a rebuild.
 //!
 //! `Local` is the row's status as of the last reconcile pass: the file can have been freed since (File Explorer's
@@ -37,6 +40,8 @@ pub struct LocalPhoto {
     pub bytes: u64,
     pub status: FileStatus,
     pub held_write: bool,
+    /// The server version the local state last took (unix seconds).
+    pub remote_updated_at: i64,
 }
 
 impl std::fmt::Debug for LocalPhoto {
@@ -80,6 +85,7 @@ pub fn local_photos(db: &StateDb) -> Option<Vec<LocalPhoto>> {
             bytes: u64::try_from(row.size_bytes).unwrap_or(0),
             status: row.status,
             held_write,
+            remote_updated_at: row.remote_updated_at,
         });
     }
     Some(photos)
@@ -91,7 +97,25 @@ pub fn may_be_source(photo: &LocalPhoto, owned: &HashMap<String, PreviewState>) 
         && !photo.held_write
         && decodable(&photo.name)
         && matches!(item_class(&photo.id), Ok(ItemClass::Owner))
-        && owned.contains_key(&photo.id)
+        && owned
+            .get(&photo.id)
+            .is_some_and(|state| state.is_the_version_here(photo.remote_updated_at, photo.bytes))
+}
+
+/// Whether `photo`'s row is still what the plan read, right before the photo is opened: `Local`, at the same path,
+/// server version and size, with no write held. A row the engine changed since leaves the photo to a later run; a row
+/// that does not read is taken as changed.
+pub fn still_as_planned(db: &StateDb, photo: &LocalPhoto) -> bool {
+    let Ok(Some(row)) = db.get_file(&photo.id) else {
+        return false;
+    };
+    row.status == FileStatus::Local
+        && row.path == photo.rel_path
+        && row.remote_updated_at == photo.remote_updated_at
+        && u64::try_from(row.size_bytes).ok() == Some(photo.bytes)
+        && db
+            .item_presentation(&row.file_id)
+            .is_ok_and(|presentation| !presentation.is_some_and(|presentation| presentation.held_write_queued))
 }
 
 /// The photos to make a preview for, in order (newest first). `owned`: the server's per-file facts of the account's

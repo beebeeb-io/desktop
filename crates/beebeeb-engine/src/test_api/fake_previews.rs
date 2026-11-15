@@ -1,7 +1,8 @@
 //! Test support: Beebeeb's photo-preview routes over one [`FakeAccount`], as the public API answers them:
 //! `GET/PUT /api/v1/preferences/photo_previews` (unset reads as `{enabled: false, format: "heic", px: 2560}`),
 //! `GET /api/v1/files/previews/summary`, `GET /api/v1/files/media` (the account's own live files, each with
-//! `has_preview`, `preview_format`, `preview_px`, `preview_bytes`), and `PUT /api/v1/files/{id}/thumbnail/preview?
+//! `has_preview`, `preview_format`, `preview_px`, `preview_bytes`, and its version: `updated_at` (RFC 3339) and
+//! `size_bytes`), and `PUT /api/v1/files/{id}/thumbnail/preview?
 //! format=…&px=…` (stores the body as it came; 413 `quota_exceeded` while [`PreviewRoutes::fill_storage`] is on; 404 for
 //! a file that is not the account's). Every delete of a preview is answered and counted, so a test can say none came.
 //!
@@ -35,6 +36,11 @@ pub struct PreviewRoutes {
     stored: Mutex<HashMap<String, StoredPreview>>,
     /// The media read lists these ids instead of the account's live files.
     media: Mutex<Option<Vec<String>>>,
+    /// A listed file's version (`updated_at` in unix seconds, `size_bytes`) where a test set it; otherwise the
+    /// account's own item's.
+    versions: Mutex<HashMap<String, (i64, u64)>>,
+    /// Every preview PUT is answered this server error (`0`: none).
+    put_error: AtomicUsize,
     quota_full: AtomicBool,
     /// The next this many preview PUTs are answered `429`, with this `Retry-After` (seconds).
     rate_limited: AtomicUsize,
@@ -54,6 +60,8 @@ impl PreviewRoutes {
             setting: Mutex::new(None),
             stored: Mutex::new(HashMap::new()),
             media: Mutex::new(None),
+            versions: Mutex::new(HashMap::new()),
+            put_error: AtomicUsize::new(0),
             quota_full: AtomicBool::new(false),
             rate_limited: AtomicUsize::new(0),
             rate_limit_wait: AtomicU64::new(0),
@@ -82,6 +90,19 @@ impl PreviewRoutes {
     /// The media read lists exactly these ids (the account's own media).
     pub fn list_media(&self, ids: &[&str]) {
         *self.media.lock().expect("media") = Some(ids.iter().map(|id| id.to_string()).collect());
+    }
+
+    /// The version the media read lists for `id`: when it last changed (unix seconds) and its size.
+    pub fn set_version(&self, id: &str, updated_at: i64, size_bytes: u64) {
+        self.versions
+            .lock()
+            .expect("versions")
+            .insert(id.to_string(), (updated_at, size_bytes));
+    }
+
+    /// Answer every preview PUT with `status` (a server error), or no longer (`0`).
+    pub fn fail_puts_with(&self, status: u16) {
+        self.put_error.store(usize::from(status), Ordering::SeqCst);
     }
 
     /// A preview stored before the test (another device made it).
@@ -202,6 +223,16 @@ impl PreviewRoutes {
                     .into_iter()
                     .map(|id| {
                         let preview = stored.get(&id);
+                        let version = self
+                            .versions
+                            .lock()
+                            .expect("versions")
+                            .get(&id)
+                            .copied()
+                            .or_else(|| self.account.item_version(&id));
+                        let updated_at = version
+                            .and_then(|(at, _)| chrono::DateTime::from_timestamp(at, 0))
+                            .map(|at| at.to_rfc3339());
                         json!({
                             "id": id,
                             "is_folder": false,
@@ -209,6 +240,8 @@ impl PreviewRoutes {
                             "preview_format": preview.map(|p| p.format.clone()),
                             "preview_px": preview.map(|p| p.px),
                             "preview_bytes": preview.map(|p| p.body.len()),
+                            "updated_at": updated_at,
+                            "size_bytes": version.map(|(_, size)| size),
                         })
                     })
                     .collect();
@@ -228,6 +261,10 @@ impl PreviewRoutes {
             _ => {
                 self.puts.fetch_add(1, Ordering::SeqCst);
                 let id = preview_id.unwrap_or_default();
+                let put_error = self.put_error.load(Ordering::SeqCst);
+                if put_error != 0 {
+                    return Some(Reply::error(u16::try_from(put_error).unwrap_or(500), "internal"));
+                }
                 if self
                     .rate_limited
                     .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))

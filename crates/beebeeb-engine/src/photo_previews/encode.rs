@@ -1,7 +1,8 @@
 //! An original on this PC to a JPEG preview, in memory only.
 //!
-//! Decoded with `image` (a source wider or higher than [`MAX_SIDE`] is refused while decoding), turned upright by its
-//! EXIF orientation, scaled so the long edge is `min(px, its own long edge)` (never upscaled, Lanczos3), then encoded
+//! Decoded with `image` (a source wider or higher than [`MAX_SIDE`] is refused while decoding, and one whose decoding
+//! would take more memory than [`MAX_ALLOC`] is refused before a byte of it is allocated: [`memory_needed`]), turned
+//! upright by its EXIF orientation, scaled so the long edge is `min(px, its own long edge)` (never upscaled, Lanczos3), then encoded
 //! as JPEG at quality 85, or 70 when that does not fit the server's cap. The output carries no EXIF or other APP1
 //! metadata: the encoder writes none. Every buffer this module owns holding pixels or encoded bytes is wiped when it
 //! is dropped, and an encoded output that grows wipes the smaller buffer it leaves ([`Wiping`]); the decoder's, the
@@ -19,8 +20,10 @@ use super::seal::MAX_PLAINTEXT;
 
 /// The widest and highest original that is decoded at all.
 pub const MAX_SIDE: u32 = 16_384;
-/// The most memory the decoder may take for one original.
-const MAX_ALLOC: u64 = 768 * 1024 * 1024;
+/// The most memory making one preview may take, counted before decoding ([`memory_needed`]).
+pub const MAX_ALLOC: u64 = 768 * 1024 * 1024;
+/// The largest long edge a preview is scaled to (4K): the scaler's intermediate is counted at this height.
+const LARGEST_EDGE: u64 = 3840;
 /// The JPEG quality of a preview, and the one tried once when that is over the server's cap.
 pub const QUALITY: u8 = 85;
 pub const QUALITY_SMALLER: u8 = 70;
@@ -44,6 +47,8 @@ pub enum EncodeRefused {
     Undecodable,
     /// Even at the lower quality the preview is over the server's cap.
     TooLarge,
+    /// Decoding, turning and scaling it would take more than [`MAX_ALLOC`] at once: refused before decoding.
+    OverMemory,
     Failed,
 }
 
@@ -90,8 +95,12 @@ pub fn decode(original: &[u8]) -> Result<Upright, EncodeRefused> {
     let orientation = decoder
         .orientation()
         .unwrap_or(image::metadata::Orientation::NoTransforms);
-    let mut image = DynamicImage::from_decoder(decoder).map_err(|_| EncodeRefused::Undecodable)?;
-    image.apply_orientation(orientation);
+    let rgb8 = decoder.color_type() == image::ColorType::Rgb8;
+    if memory_needed(w, h, decoder.total_bytes(), rgb8) > MAX_ALLOC {
+        return Err(EncodeRefused::OverMemory);
+    }
+    let image = DynamicImage::from_decoder(decoder).map_err(|_| EncodeRefused::Undecodable)?;
+    let image = upright(image, orientation);
     let rgb = match image {
         DynamicImage::ImageRgb8(rgb) => rgb,
         other => {
@@ -101,6 +110,45 @@ pub fn decode(original: &[u8]) -> Result<Upright, EncodeRefused> {
         }
     };
     Ok(Upright { rgb })
+}
+
+/// The most memory decoding a `w`×`h` picture of `decoded` bytes and making its largest preview holds at once: the
+/// largest of its phases, each counting the buffers alive together. Decoding: the picture and about as much of the
+/// decoder's own. Turning it upright: the picture and its turned copy. Making it RGB (when it is not already 8-bit
+/// RGB): the picture and its RGB copy. Scaling it: the RGB picture and the scaler's intermediate (16 bytes a pixel,
+/// the picture's long edge wide and at most [`LARGEST_EDGE`] high).
+pub fn memory_needed(w: u32, h: u32, decoded: u64, rgb8: bool) -> u64 {
+    let (w, h) = (u64::from(w), u64::from(h));
+    let rgb = w.saturating_mul(h).saturating_mul(3);
+    let long = w.max(h);
+    let intermediate = long.saturating_mul(LARGEST_EDGE.min(long)).saturating_mul(16);
+    let decoding = decoded.saturating_mul(2);
+    let converting = if rgb8 { 0 } else { decoded.saturating_add(rgb) };
+    let scaling = rgb.saturating_add(intermediate);
+    decoding.max(converting).max(scaling)
+}
+
+/// `image` turned upright by `orientation`. A quarter turn makes a new buffer: the one it leaves is wiped before it is
+/// freed. The other orientations turn it in place.
+fn upright(mut image: DynamicImage, orientation: image::metadata::Orientation) -> DynamicImage {
+    use image::metadata::Orientation::{Rotate90, Rotate90FlipH, Rotate270, Rotate270FlipH};
+    let (clockwise, flip) = match orientation {
+        Rotate90 => (true, false),
+        Rotate270 => (false, false),
+        Rotate90FlipH => (true, true),
+        Rotate270FlipH => (false, true),
+        other => {
+            image.apply_orientation(other);
+            return image;
+        }
+    };
+    let mut turned = if clockwise { image.rotate90() } else { image.rotate270() };
+    wipe(image);
+    if flip {
+        // In place: no third buffer.
+        turned.apply_orientation(image::metadata::Orientation::FlipHorizontal);
+    }
+    turned
 }
 
 fn wipe(image: DynamicImage) {

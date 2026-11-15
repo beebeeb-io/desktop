@@ -221,6 +221,7 @@ fn photo(id: &str, name: &str, status: FileStatus) -> LocalPhoto {
         bytes: 10,
         status,
         held_write: false,
+        remote_updated_at: 0,
     }
 }
 
@@ -235,6 +236,8 @@ fn listed(ids: &[&str]) -> HashMap<String, PreviewState> {
                     format: None,
                     px: None,
                     bytes: None,
+                    updated_at: Some(0),
+                    size: Some(10),
                 },
             )
         })
@@ -307,6 +310,8 @@ fn plan_skips_matching_unless_rebuild() {
         format: Some(format),
         px: Some(px),
         bytes: Some(1),
+        updated_at: Some(0),
+        size: Some(10),
     };
     // A matches; B is the same format at another size; C another format at the same size.
     owned.insert(A.into(), stored(PreviewFormat::Jpeg, 1920));
@@ -385,6 +390,8 @@ fn averages_are_per_setting_from_each_files_bytes() {
         format: Some(format),
         px: Some(px),
         bytes: Some(bytes),
+        updated_at: Some(0),
+        size: Some(10),
     };
     let states = vec![
         state(PreviewFormat::Jpeg, 1920, 300),
@@ -531,4 +538,83 @@ fn a_start_stops_the_run_before_it_and_not_itself() {
         20,
         "the second run was never told to stop"
     );
+}
+
+/// A row is a source only while the server's version is the one it holds: not changed after the row's version, the
+/// same size, and both known.
+#[test]
+fn plan_skips_a_row_that_is_not_the_servers_version() {
+    let photos = [photo(A, "a.jpg", FileStatus::Local)];
+    let mut owned = listed(&[A]);
+    assert_eq!(
+        planned(&photos, &owned, false),
+        [A],
+        "the same version (the check can pass)"
+    );
+    owned.get_mut(A).unwrap().updated_at = Some(1);
+    assert!(
+        planned(&photos, &owned, false).is_empty(),
+        "changed on the server after this PC's version"
+    );
+    owned.get_mut(A).unwrap().updated_at = Some(0);
+    owned.get_mut(A).unwrap().size = Some(11);
+    assert!(planned(&photos, &owned, false).is_empty(), "another size");
+    owned.get_mut(A).unwrap().size = None;
+    assert!(planned(&photos, &owned, false).is_empty(), "an unknown size");
+    owned.get_mut(A).unwrap().size = Some(10);
+    owned.get_mut(A).unwrap().updated_at = None;
+    assert!(planned(&photos, &owned, false).is_empty(), "an unknown version");
+}
+
+/// The CRC-32 of a PNG chunk (its type and data).
+fn png_crc(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    let mut typed = kind.to_vec();
+    typed.extend_from_slice(data);
+    out.extend_from_slice(&typed);
+    out.extend_from_slice(&png_crc(&typed).to_be_bytes());
+}
+
+/// A few hundred bytes that declare a 16384x16384 16-bit RGBA picture with an EXIF orientation (a quarter turn):
+/// decoding it would take 2 GiB, and turning it 2 GiB more. Its pixel data is not even there.
+fn declared_huge_png() -> Vec<u8> {
+    let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    let mut header = Vec::new();
+    header.extend_from_slice(&16_384u32.to_be_bytes());
+    header.extend_from_slice(&16_384u32.to_be_bytes());
+    header.extend_from_slice(&[16, 6, 0, 0, 0]);
+    png_chunk(&mut png, b"IHDR", &header);
+    // EXIF (big-endian TIFF): one IFD entry, Orientation (0x0112) = 6.
+    let exif = [
+        b'M', b'M', 0, 42, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0,
+    ];
+    png_chunk(&mut png, b"eXIf", &exif);
+    png_chunk(&mut png, b"IDAT", &[0x78, 0x9C, 0x03, 0x00]);
+    png_chunk(&mut png, b"IEND", &[]);
+    png
+}
+
+/// A picture whose decoding would take more than the cap is refused before anything of it is allocated (the refusal
+/// is the memory cap's own, not a decode failure), while a 50 MP phone photo still fits.
+#[test]
+fn encode_refuses_a_picture_over_the_memory_cap() {
+    let png = declared_huge_png();
+    assert!(png.len() < 200, "{} bytes", png.len());
+    assert_eq!(decode(&png).unwrap_err(), encode::EncodeRefused::OverMemory);
+    assert!(encode::memory_needed(8_160, 6_120, 8_160 * 6_120 * 3, true) <= encode::MAX_ALLOC);
 }

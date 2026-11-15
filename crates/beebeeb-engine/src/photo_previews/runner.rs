@@ -24,6 +24,8 @@ pub enum Stopped {
     Offline,
     /// The run could not read what it needs (the setting, the account's files, this PC's state).
     Failed,
+    /// Sync is paused on this PC: nothing is made, nothing is sent.
+    Paused,
 }
 
 /// Where the run stands.

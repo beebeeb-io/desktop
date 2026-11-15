@@ -60,6 +60,7 @@ pub const READ_OFFLINE: &str = "Couldn't reach Beebeeb. Check your connection an
 pub const READ_FAILED: &str = "Beebeeb didn't answer as expected. Try again.";
 pub const STORAGE_FULL: &str = "Your Beebeeb storage is full, so no more previews were made.";
 pub const RUN_STOPPED: &str = "Making previews stopped: Beebeeb couldn't be reached.";
+pub const RUN_PAUSED: &str = "Sync is paused, so no previews are being made.";
 pub const CHANGE_FAILED: &str = "Couldn't change photo previews. Try again.";
 pub const CHANGE_BUSY: &str = "A change to photo previews is still on its way.";
 pub const CHANGE_LOCKED: &str = "Unlock Beebeeb to change this.";
@@ -448,6 +449,11 @@ impl PreviewsHost {
         let mut changed = false;
         let now = self.now();
         if now != self.seen {
+            if self.seen.is_some() {
+                // A lock, a vault close, a sign-out or another account: the run of the earlier session ends (after
+                // the photo in hand; the engine sends nothing more for it either).
+                self.run.stop();
+            }
             self.seen = now;
             self.generation += 1;
             self.facts = None;
@@ -569,6 +575,7 @@ impl PreviewsHost {
             RunState::Making { .. } => Some(REBUILDING),
             RunState::Stopped(Stopped::StorageFull) => Some(STORAGE_FULL),
             RunState::Stopped(Stopped::Offline | Stopped::Failed) => Some(RUN_STOPPED),
+            RunState::Stopped(Stopped::Paused) => Some(RUN_PAUSED),
             RunState::Stopped(Stopped::HeicNotMadeHere) | RunState::Idle => None,
         };
         Previews {
@@ -688,6 +695,9 @@ fn work(engine: &Arc<dyn PreviewsEngine>, run: &PreviewRun, job: Job) -> Option<
             let done = engine.set_setting(session, setting);
             match (&done, then_run) {
                 (Ok(()), Some(force)) => start_run(engine.clone(), run, session, force),
+                // Off, once written: the run ends, also one a Rebuild asked for just before it (its start came
+                // through this worker first, so this stop comes after it).
+                (Ok(()), None) if !setting.enabled => run.stop(),
                 (Ok(()), None) => {}
                 (Err(why), _) => log(format!("photo previews: the setting was not changed ({})", why.kind())),
             }

@@ -396,6 +396,12 @@ impl FakeAccount {
         ids
     }
 
+    /// A live item's version: when it last changed (unix seconds) and its size.
+    pub fn item_version(&self, id: &str) -> Option<(i64, u64)> {
+        let items = self.items.lock().expect("vault items");
+        items.get(id).map(|item| (item.updated_at, item.size_bytes))
+    }
+
     /// Restore a trashed item. Returns true if found and was trashed.
     pub fn restore_item(&self, id: &str) -> bool {
         let mut items = self.items.lock().expect("vault items");

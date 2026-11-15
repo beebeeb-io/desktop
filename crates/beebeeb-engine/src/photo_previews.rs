@@ -99,7 +99,8 @@ impl PreviewSetting {
     }
 }
 
-/// One stored preview's facts, as the server lists the owner's media: whether it has one, and at which setting.
+/// One file's facts, as the server lists the owner's media: its version (when it last changed, its size) and whether
+/// it has a stored preview, at which setting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewState {
     pub id: String,
@@ -107,9 +108,19 @@ pub struct PreviewState {
     pub format: Option<PreviewFormat>,
     pub px: Option<u32>,
     pub bytes: Option<u64>,
+    /// When the server's version of the file last changed (unix seconds).
+    pub updated_at: Option<i64>,
+    /// The size of the server's version.
+    pub size: Option<u64>,
 }
 
 impl PreviewState {
+    /// The server's version is the one this PC holds: not changed after the version the local state last took
+    /// (`remote_updated_at`, the base the engine's own conflict check reads), and the same size. Unknown is not.
+    pub fn is_the_version_here(&self, remote_updated_at: i64, bytes: u64) -> bool {
+        self.updated_at.is_some_and(|at| at <= remote_updated_at) && self.size == Some(bytes)
+    }
+
     /// A preview at exactly this format and size is stored.
     pub fn matches(&self, format: PreviewFormat, px: u32) -> bool {
         self.has_preview && self.format == Some(format) && self.px == Some(px)

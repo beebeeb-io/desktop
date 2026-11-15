@@ -87,6 +87,10 @@ fn world(tag: &str, photos: &[(&str, &str, FileStatus, Vec<u8>)]) -> World {
     let previews = Arc::new(PreviewRoutes::new(account.clone()));
     let ids: Vec<&str> = photos.iter().map(|(id, ..)| *id).collect();
     previews.list_media(&ids);
+    for (id, _, _, picture) in photos {
+        // The server's version is the one this PC holds: unchanged since (0) the row's version, the row's size.
+        previews.set_version(id, 0, picture.len() as u64);
+    }
     let (routes, own) = (previews.clone(), account_handler(account.clone()));
     let api = FakeApi::start(Arc::new(move |req: &Request| {
         routes.answer(req).unwrap_or_else(|| own(req))
@@ -262,9 +266,23 @@ fn run_stops_after_lock_unlock() {
             lock_and_unlock(&world.engine);
         }
     };
-    let end = world.run(|| world.engine.make_previews_for(session, false, &stop, &progress));
+    let opened = std::sync::atomic::AtomicUsize::new(0);
+    let read = |path: &Path| {
+        opened.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        read_original(path)
+    };
+    let end = world.run(|| {
+        world
+            .engine
+            .make_previews_reading(session, false, &stop, &progress, &read)
+    });
     assert!(end.session_moved);
     assert_eq!((end.made, world.preview_puts().len()), (1, 1));
+    assert_eq!(
+        opened.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the next photo is never opened after the lock"
+    );
     // A run for the session in memory now makes the rest (the check can pass).
     assert_eq!(world.make(false).made, 2);
 }
@@ -502,4 +520,323 @@ fn the_sample_is_the_newest_own_photo_measured_here() {
     world.previews.list_media(&[]);
     let none = world.run(|| world.engine.measure_sample_for(session, None)).unwrap();
     assert!(none.photo.is_none());
+}
+
+/// The server's file changed after the version this PC holds (another device saved a newer one; this PC has not
+/// taken it yet): no preview is made from this PC's older picture.
+#[test]
+fn a_newer_version_on_the_server_gets_no_preview_from_this_pc() {
+    let picture = jpeg(1600, 1200);
+    let world = world(
+        "newer",
+        &[(ONE, "Invented one.jpg", FileStatus::Local, picture.clone())],
+    );
+    world.previews.set_setting(JPEG_1920);
+    world.previews.set_version(ONE, 5, picture.len() as u64);
+    let end = world.make(false);
+    assert_eq!((end.made, world.previews.puts()), (0, 0));
+    // The same version as here: made (the check can pass).
+    world.previews.set_version(ONE, 0, picture.len() as u64);
+    assert_eq!(world.make(false).made, 1);
+}
+
+/// Sync paused: the run asks the server nothing, opens nothing and sends nothing, and says why.
+#[test]
+fn a_paused_engine_makes_no_preview() {
+    let world = world(
+        "paused",
+        &[(ONE, "Invented one.jpg", FileStatus::Local, jpeg(1600, 1200))],
+    );
+    world.previews.set_setting(JPEG_1920);
+    world.run(|| world.engine.pause()).unwrap();
+    let asked_before = world.api.requests().len();
+    let end = world.make(false);
+    assert_eq!(end.stopped, Some(Stopped::Paused));
+    assert_eq!(world.previews.puts(), 0);
+    assert_eq!(
+        world.api.requests().len(),
+        asked_before,
+        "nothing is asked of the server"
+    );
+}
+
+/// A pause while a run makes previews: the next photo is not opened.
+#[test]
+fn a_pause_during_a_run_stops_it_before_the_next_photo() {
+    let world = world(
+        "pause-during",
+        &[
+            (ONE, "Invented one.jpg", FileStatus::Local, jpeg(1600, 1200)),
+            (TWO, "Invented two.jpg", FileStatus::Local, jpeg(1600, 1200)),
+        ],
+    );
+    world.previews.set_setting(JPEG_1920);
+    let stop = AtomicBool::new(false);
+    let session = world.engine.session_turn();
+    let opened = std::sync::atomic::AtomicUsize::new(0);
+    let read = |path: &Path| {
+        opened.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        read_original(path)
+    };
+    let end = world.run(|| {
+        let progress = |done: u32, _: u32| {
+            if done == 1 {
+                world.engine.pause().unwrap();
+            }
+        };
+        world
+            .engine
+            .make_previews_reading(session, false, &stop, &progress, &read)
+    });
+    assert_eq!((end.made, end.stopped), (1, Some(Stopped::Paused)));
+    assert_eq!(opened.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// Before this session's first reconcile pass committed the run waits: no photo is opened (so nothing is sent); once
+/// it committed, the run goes on. (A Mac runs no such pass and does not wait.)
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_run_waits_for_the_sessions_first_pass() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let world = world(
+        "first-pass",
+        &[(ONE, "Invented one.jpg", FileStatus::Local, jpeg(1600, 1200))],
+    );
+    world.previews.set_setting(JPEG_1920);
+    let acct = &world.engine.acct;
+    acct.auth_resume_asked
+        .store(acct.auth_resume_done.load(SeqCst) + 1, SeqCst);
+    let engine = world.engine.clone();
+    let pass = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let asked = engine.acct.auth_resume_asked.load(SeqCst);
+        engine.acct.auth_resume_done.store(asked, SeqCst);
+    });
+    // Each open records whether the pass had committed by then.
+    let opened_before = std::sync::atomic::AtomicUsize::new(0);
+    let read = |path: &Path| {
+        if acct.auth_resume_done.load(SeqCst) < acct.auth_resume_asked.load(SeqCst) {
+            opened_before.fetch_add(1, SeqCst);
+        }
+        read_original(path)
+    };
+    let stop = AtomicBool::new(false);
+    let session = world.engine.session_turn();
+    let end = world.run(|| {
+        world
+            .engine
+            .make_previews_reading(session, false, &stop, &|_, _| {}, &read)
+    });
+    pass.join().unwrap();
+    assert_eq!(
+        opened_before.load(SeqCst),
+        0,
+        "no photo was opened before the pass committed"
+    );
+    assert_eq!(end.made, 1, "after it, the run went on");
+}
+
+/// A pause while the run waits for the first pass ends the run as paused: nothing is asked of the server, opened or
+/// sent.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_pause_while_waiting_for_the_first_pass_stops_the_run() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let world = world(
+        "pause-waiting",
+        &[(ONE, "Invented one.jpg", FileStatus::Local, jpeg(64, 48))],
+    );
+    world.previews.set_setting(JPEG_1920);
+    let acct = &world.engine.acct;
+    acct.auth_resume_asked
+        .store(acct.auth_resume_done.load(SeqCst) + 1, SeqCst);
+    let engine = world.engine.clone();
+    let pauser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        engine.pause().unwrap();
+        // Should the waiting run not see the pause, the pass commits later and the run goes on to ask the server.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let asked = engine.acct.auth_resume_asked.load(SeqCst);
+        engine.acct.auth_resume_done.store(asked, SeqCst);
+    });
+    let opened = std::sync::atomic::AtomicUsize::new(0);
+    let read = |path: &Path| {
+        opened.fetch_add(1, SeqCst);
+        read_original(path)
+    };
+    let stop = AtomicBool::new(false);
+    let session = world.engine.session_turn();
+    let asked_before = world.api.requests().len();
+    let end = world.run(|| {
+        world
+            .engine
+            .make_previews_reading(session, false, &stop, &|_, _| {}, &read)
+    });
+    pauser.join().unwrap();
+    assert_eq!(end.stopped, Some(Stopped::Paused));
+    assert_eq!(
+        world.api.requests().len(),
+        asked_before,
+        "nothing was asked of the server"
+    );
+    assert_eq!((opened.load(SeqCst), world.previews.puts()), (0, 0));
+}
+
+/// A row the engine changed after the plan read it (here: a newer server version pulled) is not opened in that run.
+#[test]
+fn a_row_that_changed_after_the_plan_is_not_opened() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let world = world(
+        "row-moved",
+        &[
+            (ONE, "Invented one.jpg", FileStatus::Local, jpeg(64, 48)),
+            (TWO, "Invented two.jpg", FileStatus::Local, jpeg(64, 48)),
+        ],
+    );
+    world.previews.set_setting(JPEG_1920);
+    let stop = AtomicBool::new(false);
+    let session = world.engine.session_turn();
+    // After the first photo: both rows move to a newer server version.
+    let db_path = world.db_dir.path().join("state.db");
+    let progress = |done: u32, _: u32| {
+        if done == 1 {
+            let db = StateDb::open(&db_path).unwrap();
+            for id in [ONE, TWO] {
+                let mut row = db.get_file(id).unwrap().unwrap();
+                row.remote_updated_at += 100;
+                db.upsert_file(&row).unwrap();
+            }
+        }
+    };
+    let opened = std::sync::atomic::AtomicUsize::new(0);
+    let read = |path: &Path| {
+        opened.fetch_add(1, SeqCst);
+        read_original(path)
+    };
+    let end = world.run(|| {
+        world
+            .engine
+            .make_previews_reading(session, false, &stop, &progress, &read)
+    });
+    assert_eq!((end.made, end.not_here), (1, 1));
+    assert_eq!(opened.load(SeqCst), 1, "the changed row's photo was not opened");
+    assert_eq!(world.previews.puts(), 1);
+}
+
+/// Off while a photo is in hand: its preview is not sent.
+#[test]
+fn a_stop_while_a_photo_is_in_hand_sends_nothing() {
+    let world = world(
+        "stop-in-hand",
+        &[(ONE, "Invented one.jpg", FileStatus::Local, jpeg(1600, 1200))],
+    );
+    world.previews.set_setting(JPEG_1920);
+    let stop = AtomicBool::new(false);
+    let session = world.engine.session_turn();
+    let read = |path: &Path| {
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        read_original(path)
+    };
+    world.run(|| {
+        world
+            .engine
+            .make_previews_reading(session, false, &stop, &|_, _| {}, &read)
+    });
+    assert_eq!(world.previews.puts(), 0);
+}
+
+/// A panic while one photo is read or encoded ends that photo only: it counts as failed and the run goes on.
+#[test]
+fn a_panic_on_one_photo_skips_that_photo_only() {
+    let world = world(
+        "panic",
+        &[
+            (ONE, "Invented one.jpg", FileStatus::Local, jpeg(1600, 1200)),
+            (TWO, "Invented two.jpg", FileStatus::Local, jpeg(1600, 1200)),
+        ],
+    );
+    world.previews.set_setting(JPEG_1920);
+    let stop = AtomicBool::new(false);
+    let session = world.engine.session_turn();
+    let read = |path: &Path| {
+        if path.ends_with("Invented one.jpg") {
+            panic!("an invented decoder panic");
+        }
+        read_original(path)
+    };
+    let end = world.run(|| {
+        world
+            .engine
+            .make_previews_reading(session, false, &stop, &|_, _| {}, &read)
+    });
+    assert_eq!((end.made, end.failed, end.stopped), (1, 1, None));
+    assert!(world.previews.stored(TWO).is_some());
+}
+
+/// Beebeeb answers every preview with a server error: the run waits longer each time and stops after three in a
+/// row, as when it cannot be reached, instead of reading, encoding and sending every photo.
+#[test]
+fn server_errors_stop_the_run_after_three_in_a_row() {
+    let world = world(
+        "server-errors",
+        &[
+            (ONE, "Invented one.jpg", FileStatus::Local, jpeg(64, 48)),
+            (TWO, "Invented two.jpg", FileStatus::Local, jpeg(64, 48)),
+            (THREE, "Invented three.jpg", FileStatus::Local, jpeg(64, 48)),
+            (CLOUD, "Invented four.jpg", FileStatus::Local, jpeg(64, 48)),
+        ],
+    );
+    world.previews.set_setting(JPEG_1920);
+    world.previews.fail_puts_with(503);
+    let end = world.make(false);
+    assert_eq!(end.stopped, Some(Stopped::Offline));
+    assert_eq!((world.previews.puts(), end.failed), (3, 3));
+}
+
+/// A session mutex a panic poisoned: nothing is copied and nothing is sent.
+#[test]
+fn a_poisoned_session_sends_nothing() {
+    let world = world(
+        "poisoned",
+        &[(ONE, "Invented one.jpg", FileStatus::Local, jpeg(1600, 1200))],
+    );
+    world.previews.set_setting(JPEG_1920);
+    let session = world.engine.session_turn();
+    let engine = world.engine.clone();
+    let _ = std::thread::spawn(move || {
+        let _held = engine.acct.session.lock().unwrap();
+        panic!("an invented panic while the session is held");
+    })
+    .join();
+    assert!(world.engine.acct.session.is_poisoned());
+    let stop = AtomicBool::new(false);
+    let end = world.run(|| world.engine.make_previews_for(session, false, &stop, &|_, _| {}));
+    assert!(end.session_moved);
+    assert_eq!(world.previews.puts(), 0);
+}
+
+/// The uploads' speed limit paces the previews: a preview's send takes at least its size at that speed.
+#[test]
+fn the_upload_speed_limit_paces_the_previews() {
+    let world = world("paced", &[(ONE, "Invented one.jpg", FileStatus::Local, jpeg(256, 192))]);
+    world.previews.set_setting(JPEG_1920);
+    let stop = AtomicBool::new(false);
+    let session = world.engine.session_turn();
+    let began = std::time::Instant::now();
+    let end = world.run(|| {
+        DesktopConfig::update_for(&REAL, |config| {
+            config.upload_kbps_limit = 1;
+            (true, ())
+        })
+        .unwrap();
+        world.engine.make_previews_for(session, false, &stop, &|_, _| {})
+    });
+    assert_eq!(end.made, 1);
+    let sent = world.previews.stored(ONE).unwrap().body.len() as f64;
+    assert!(
+        began.elapsed().as_secs_f64() >= sent / 1024.0,
+        "{} bytes at 1 KiB/s took {:?}",
+        sent,
+        began.elapsed()
+    );
 }
