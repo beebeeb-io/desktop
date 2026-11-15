@@ -70,15 +70,6 @@ fn rendered_exact_ask_is_accepted() {
         check_rendered(&whole(2.0 * S100), &A4, len(1588, 2246), &rendered(1588, 2246), &L),
         Ok(())
     );
-    // ±1 px of rounding on either side.
-    assert_eq!(
-        check_rendered(&whole(S100), &A4, len(793, 1122), &rendered(793, 1122), &L),
-        Ok(())
-    );
-    assert_eq!(
-        check_rendered(&whole(S100), &A4, len(795, 1124), &rendered(795, 1124), &L),
-        Ok(())
-    );
     // A tile inside the page, and one that ends exactly at its corner.
     assert_eq!(
         check_rendered(&tile(0, 512, 512, 300), &A4, len(512, 300), &rendered(512, 300), &L),
@@ -98,8 +89,8 @@ fn rendered_exact_ask_is_accepted() {
 
 #[test]
 fn rendered_with_another_size_is_refused() {
-    // Only the width differs (by more than the rounding), and the section length agrees with the wrong size: the
-    // width comparison alone must refuse it.
+    // Only the width differs, and the section length agrees with the wrong size: the width comparison alone must
+    // refuse it.
     let ask = tile(0, 0, 100, 200);
     assert_eq!(
         check_rendered(&ask, &A4, len(120, 200), &rendered(120, 200), &L),
@@ -137,8 +128,8 @@ fn rendered_with_another_size_is_refused() {
 
 #[test]
 fn rendered_over_4096_is_refused() {
-    // One pixel over the limit is within the rounding of the ask, and the section length agrees: the limit alone
-    // must refuse it.
+    // One pixel over the limit, and the section length agrees: the limit is held before the size is compared, so it
+    // refuses as over the limit.
     let ask = tile(0, 0, 4096, 10);
     assert_eq!(
         check_rendered(&ask, &WIDE, len(4097, 10), &rendered(4097, 10), &L),
@@ -166,6 +157,44 @@ fn rendered_over_4096_is_refused() {
     assert_eq!(
         check_rendered(&whole(S100), &WIDE, len(4267, 134), &rendered(4267, 134), &L),
         Err(Refused::TooLarge)
+    );
+}
+
+/// US Letter, in points: 816 x 1056 px at [`S100`] in single precision (817 x 1057 in double).
+const LETTER: PageSize = PageSize {
+    w_pt: 612.0,
+    h_pt: 792.0,
+};
+
+/// F7: there is no rounding slack. The app and the helper size a page by one rule, so a side one pixel off is a fault,
+/// even when the section's length agrees with it.
+#[test]
+fn a_rendered_page_must_equal_the_ask_exactly() {
+    // A 3 x 2 tile answered 2 x 3: the same 24 bytes, each side one pixel off.
+    let ask = tile(0, 0, 3, 2);
+    assert_eq!(
+        len(3, 2),
+        len(2, 3),
+        "the premise: the section length cannot tell them apart"
+    );
+    assert_eq!(
+        check_rendered(&ask, &A4, len(2, 3), &rendered(2, 3), &L),
+        Err(Refused::WrongSize)
+    );
+    assert_eq!(check_rendered(&ask, &A4, len(3, 2), &rendered(3, 2), &L), Ok(()));
+
+    // A whole Letter page at 100 %: 816 x 1056 is the ask; one pixel more or less on either side is refused.
+    assert_eq!(page_pixels(&LETTER, S100), Some((816, 1056)));
+    for (w, h) in [(817, 1056), (815, 1056), (816, 1057), (816, 1055), (817, 1057)] {
+        assert_eq!(
+            check_rendered(&whole(S100), &LETTER, len(w, h), &rendered(w, h), &L),
+            Err(Refused::WrongSize),
+            "{w} x {h}"
+        );
+    }
+    assert_eq!(
+        check_rendered(&whole(S100), &LETTER, len(816, 1056), &rendered(816, 1056), &L),
+        Ok(())
     );
 }
 

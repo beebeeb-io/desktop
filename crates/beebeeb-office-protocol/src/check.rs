@@ -106,7 +106,7 @@ pub enum Refused {
     /// region that is empty or not inside the page at that scale, or a cell range whose half would lie past the
     /// last row or column a `u32` can name.
     BadAsk,
-    /// The rendered width or height is not what was asked (beyond ±1 px of rounding), or is 0.
+    /// The rendered width or height is not exactly what was asked, or is 0.
     WrongSize,
     /// A rendered side over the limit.
     TooLarge,
@@ -243,7 +243,8 @@ pub fn asked_size(asked: &Render, page: &PageSize, limits: &Limits) -> Result<(u
 }
 
 /// A `Rendered` answer to `asked`, for a page of size `page` (from the checked `Opened`), whose pixels are in a section
-/// of `out_len` bytes: each side within ±1 px of the ask and under the limit, and `w * h * 4 == out_len`.
+/// of `out_len` bytes: each side exactly the ask and under the limit, and `w * h * 4 == out_len`. There is no rounding
+/// slack: the app and the helper size the raster by the same rule ([`page_pixels`]), so any other size is a fault.
 pub fn check_rendered(
     asked: &Render,
     page: &PageSize,
@@ -258,10 +259,10 @@ pub fn check_rendered(
     if got.w == 0 || got.h == 0 {
         return Err(Refused::WrongSize);
     }
-    if got.w.abs_diff(want_w) > 1 {
+    if got.w != want_w {
         return Err(Refused::WrongSize);
     }
-    if got.h.abs_diff(want_h) > 1 {
+    if got.h != want_h {
         return Err(Refused::WrongSize);
     }
     if u64::from(got.w) * u64::from(got.h) * 4 != out_len {
