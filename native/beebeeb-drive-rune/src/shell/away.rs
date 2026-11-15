@@ -16,10 +16,13 @@
 //!   the tray at the suspend and the resume, so the wake's own key press cannot hide it.
 //! - **A gap.** Windows may not send the suspend broadcast (a Modern Standby PC sends it only to a window that
 //!   registered for it: the tray registers, `RegisterSuspendResumeNotification`; review of #452, P2-A). So the poll also
-//!   notes when it last ran, on two clocks. A gap between two polls far past the look interval ([`AWAY_GAP`]) means
-//!   the app did not run: the gap is said to the engine as idle time at once (the wake's own key press cannot hide
-//!   it). No broadcast is needed. The gap alone: where the broadcast did come too, it never locks sooner than the PC's
-//!   own measure (at most the minute between the last poll and the sleep more).
+//!   notes when it last ran, on two clocks, and the idle it measured then. A gap between two polls far past the look
+//!   interval ([`AWAY_GAP`]) means the app did not run: the idle seen last plus the gap is held as idle time and said
+//!   to the engine without waiting for the next look (the wake's own key press cannot hide it), as the tray's resume
+//!   counts the idle before a sleep and the sleep (decision 2539). No broadcast is needed. A resume for the same wake
+//!   measures it better (the poll's measure also counts input made between its last run and the sleep as idle), so it
+//!   replaces the gap: one said before the poll finds the gap means the gap is not held, one said after it drops the
+//!   held gap, and a found gap waits at most [`RESUME_GRACE`] for it before it is said.
 //! - The engine's look reads the credential store and waits for the lock's write hold: it runs on a worker, one idle
 //!   look at a time. The job is made on the window's thread, so it holds the session it was measured for.
 //!
@@ -48,11 +51,22 @@ pub const LOOK_AT_MOST_EVERY: Duration = Duration::from_secs(60);
 /// sooner, never later).
 pub const AWAY_GAP: Duration = Duration::from_secs(120);
 
-/// When the poll last ran while the engine was open, on two clocks.
+/// How long a gap the poll found waits for the tray's resume of the same wake ([`TrayEvent::Resumed`]) before it is
+/// said to the engine. The resume and the first poll after the wake race, and the poll's measure is the cruder one: it
+/// counts input made between its last run and the sleep as idle, so said at once it could lock a person who typed and
+/// then closed the lid. A resume within this replaces the gap; with none (Windows sent no broadcast), the gap is said
+/// after it. Kept short: until then, after a wake without a broadcast the window stays as it was before the sleep.
+///
+/// [`TrayEvent::Resumed`]: super::platform::TrayEvent::Resumed
+pub const RESUME_GRACE: Duration = Duration::from_secs(2);
+
+/// When the poll last ran while the engine was open, on two clocks, and the idle it measured then.
 #[derive(Clone, Copy, Debug)]
 struct Seen {
     at: Instant,
     wall: SystemTime,
+    /// This PC's time without input that poll measured, counted from no earlier than the lock last opened.
+    idle: Duration,
 }
 
 impl Seen {
@@ -88,8 +102,14 @@ pub struct AwayLock {
     without: bool,
     /// The poll's last run while the engine was open (`None`: closed since).
     seen: Option<Seen>,
-    /// Time away found in a gap and not yet said: the next look carries it, whenever it is due.
+    /// Time away found in a gap (the idle seen last plus the gap) and not yet said: the next look carries it, whenever
+    /// it is due, once [`RESUME_GRACE`] passed.
     away: Option<Duration>,
+    /// When the poll found the gap held in `away`: it is not said before [`RESUME_GRACE`] after it.
+    gap_found_at: Option<Instant>,
+    /// A resume (the tray's, as idle time) was said since the poll last ran: a gap that poll finds is that wake,
+    /// already said, and is not held.
+    resumed: bool,
     /// Looks made, answers taken in (idle and events) and wakes armed, for a test.
     pub(crate) looks: usize,
     pub(crate) answered: usize,
@@ -109,6 +129,8 @@ impl Default for AwayLock {
             without: false,
             seen: None,
             away: None,
+            gap_found_at: None,
+            resumed: false,
             looks: 0,
             answered: 0,
             arms: 0,
@@ -149,6 +171,8 @@ impl AwayLock {
             self.due = None;
             self.seen = None;
             self.away = None;
+            self.gap_found_at = None;
+            self.resumed = false;
             return came;
         }
         let opened_at = *self.opened_at.get_or_insert(now);
@@ -156,15 +180,28 @@ impl AwayLock {
         let idle = pc_idle
             .unwrap_or(Duration::MAX)
             .min(now.saturating_duration_since(opened_at));
-        // A gap far past the look interval: the app did not run, and the gap is time away. It is held until a look
-        // carries it (one may be out now), and it does not wait for the next due.
-        if let Some(seen) = self.seen.replace(Seen { at: now, wall }) {
+        // A gap far past the look interval: the app did not run, and the idle seen last plus the gap is time away. It
+        // is held until a look carries it (one may be out now), and it does not wait for the next due. A resume said
+        // since the last poll is this wake, measured better: the gap is not held.
+        if let Some(seen) = self.seen.replace(Seen { at: now, wall, idle }) {
             let gap = seen.gap(now, wall);
-            if gap > AWAY_GAP {
-                self.away = Some(self.away.map_or(gap, |held| held.max(gap)));
+            if gap > AWAY_GAP && !self.resumed {
+                let away = seen.idle.saturating_add(gap);
+                self.away = Some(self.away.map_or(away, |held| held.max(away)));
+                self.gap_found_at = Some(now);
             }
         }
+        self.resumed = false;
         if self.without || self.looking {
+            return came;
+        }
+        // A gap just found waits for a resume of the same wake, which would replace it.
+        if let Some(grace_ends) = self
+            .gap_found_at
+            .map(|found| found + RESUME_GRACE)
+            .filter(|grace_ends| *grace_ends > now)
+        {
+            self.arm(grace_ends, now, tx);
             return came;
         }
         if self.away.is_none()
@@ -177,6 +214,7 @@ impl AwayLock {
         if self.ask(Away::Idle(idle), true, actions, wake) {
             self.looking = true;
             self.away = None;
+            self.gap_found_at = None;
         } else if !self.without {
             // The worker could not start: try again after the longest wait.
             let due = now + LOOK_AT_MOST_EVERY;
@@ -189,6 +227,13 @@ impl AwayLock {
     /// An event the engine is told at once: Windows' session lock, the main window closing to the tray, a wake from
     /// sleep (as idle time).
     pub fn event(&mut self, seen: Away, actions: &Arc<dyn ShellActions>, wake: Option<&AppHandle<State>>) {
+        if matches!(seen, Away::Idle(_)) {
+            // A wake from sleep (the tray's resume, the only idle time said as an event) measured this wake better
+            // than a gap the poll found or is yet to find: a held gap is dropped, and the next poll holds none.
+            self.resumed = true;
+            self.away = None;
+            self.gap_found_at = None;
+        }
         // An event's answer schedules nothing, also a wake's (idle time, but not the poll's look).
         self.ask(seen, false, actions, wake);
     }
