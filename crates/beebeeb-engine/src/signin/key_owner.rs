@@ -164,8 +164,7 @@ pub fn remove_foreign_key<S: AuthSecretStore>(
     match keep {
         // No key and no tag: nothing to do.
         Ok(None) => Ok(false),
-        Ok(Some(true)) => Ok(false),
-        Ok(Some(false)) | Err(_) => {
+        Ok(Some(_)) | Err(_) => {
             let had_key = !matches!(key_present(vault), Ok(false));
             vault.delete_vault_key_and_owner()?;
             Ok(had_key)
