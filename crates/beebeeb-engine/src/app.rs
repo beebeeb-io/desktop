@@ -1016,6 +1016,7 @@ impl<C: CredentialStores> Engine<C> {
         self.runtime.block_on(async {
             let _step = self.session_ending_step().await;
             // The account's recent searches leave this computer while its session is still in memory (`sign_out_for`).
+            let _ = self.delete_own_recent_searches_at_session_end(self.acct.session_generation());
             self.sign_out_holding_step().await
         })
     }
