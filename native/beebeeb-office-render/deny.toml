@@ -54,5 +54,7 @@ unknown-git = "deny"
 # Sources are crates.io plus the git sources the viewer spec (§3) accepted, each pinned by revision.
 allow-git = [
     "https://github.com/storytold/craft-libs",
+    # The Office engine's repository: the helper's one git dependency, pinned by revision in Cargo.toml.
+    "https://github.com/beebeeb-io/desktop-office",
 ]
 required-git-spec = "rev"
