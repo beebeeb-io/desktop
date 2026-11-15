@@ -32,12 +32,18 @@ enum Me {
     HangsUp,
 }
 
-/// A fake API whose session check the test switches, and that keeps when each check arrived with the token it carried.
+/// One session check the fake received: when it arrived, and the token it carried.
+struct Seen {
+    at: Instant,
+    bearer: Option<String>,
+}
+
+/// A fake API whose session check the test switches, and that keeps every check it received ([`Seen`]).
 struct Fake {
     api: FakeApi,
     me: Arc<Mutex<Me>>,
     delay: Arc<Mutex<Duration>>,
-    seen: Arc<Mutex<Vec<(Instant, Option<String>)>>>,
+    seen: Arc<Mutex<Vec<Seen>>>,
     release: Arc<AtomicBool>,
 }
 
@@ -45,7 +51,7 @@ impl Fake {
     fn start(me: Me) -> Self {
         let me = Arc::new(Mutex::new(me));
         let delay = Arc::new(Mutex::new(Duration::ZERO));
-        let seen: Arc<Mutex<Vec<(Instant, Option<String>)>>> = Arc::default();
+        let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
         let release = Arc::new(AtomicBool::new(false));
         let handler: Handler = {
             let (me, delay, seen, release) = (me.clone(), delay.clone(), seen.clone(), release.clone());
@@ -53,9 +59,10 @@ impl Fake {
                 if request.route() != "GET /api/v1/auth/me" {
                     return Reply::error(404, "not_found");
                 }
-                seen.lock()
-                    .unwrap()
-                    .push((Instant::now(), request.bearer().map(str::to_string)));
+                seen.lock().unwrap().push(Seen {
+                    at: Instant::now(),
+                    bearer: request.bearer().map(str::to_string),
+                });
                 // The delay is waited in short steps and read again at each: a test that sets it to zero, or ends
                 // (`release`), lets every waiting answer go at once.
                 let arrived = Instant::now();
@@ -181,7 +188,7 @@ fn the_watch_closes_an_ended_session_with_no_runner() {
             .lock()
             .unwrap()
             .iter()
-            .all(|(_, bearer)| bearer.as_deref() == Some(TOKEN)),
+            .all(|seen| seen.bearer.as_deref() == Some(TOKEN)),
         "each check carried the session in memory's token"
     );
     assert_eq!(
@@ -204,7 +211,7 @@ fn the_watch_closes_an_ended_session_with_no_runner() {
     );
     let took = started.elapsed();
     std::thread::sleep(PERIOD * 6);
-    let checks: Vec<Instant> = fake.seen.lock().unwrap()[before..].iter().map(|(at, _)| *at).collect();
+    let checks: Vec<Instant> = fake.seen.lock().unwrap()[before..].iter().map(|seen| seen.at).collect();
     assert_eq!(
         checks.len(),
         3,
