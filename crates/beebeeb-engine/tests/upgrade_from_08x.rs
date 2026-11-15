@@ -28,13 +28,10 @@
 
 mod common;
 
-// The three `#[ignore = "upgrade gap: …"]` tests need an adoption the native start does not make yet:
-// `LocalState::for_engine_start` shuts the adoption window at every start that binds, and nothing calls
-// `account_binding::adopt_unbound`, so a 0.8.25 PC's unowned queue is "no recorded account" and Windows refuses it.
-// An ignored test is not a pass: `-- --include-ignored` runs them. The fix (the candidate is whose vault key the store
-// holds at the first native startup, the window shuts at that startup, the start adopts for that candidate) makes them
-// pass. Here the store is written by a native handle that restores BEFORE the 0.8.25 `state.db` is put in place, so
-// the first startup that finds the release's `state.db` is the upgraded app's.
+// The adoption (`app/own_data_start.rs`): the candidate is whose vault key the store holds at the first native
+// startup, the window shuts at that startup, and the start adopts for that candidate. Here the store is written by a
+// native handle that restores BEFORE the 0.8.25 `state.db` is put in place, so the first startup that finds the
+// release's `state.db` is the upgraded app's.
 
 /// Rule 1: the store holds A's complete session and the 0.8.25 data has no owner. A's first start keeps
 /// everything: `Started`, A recorded as the owner, the due operation still queued, every local file still there.
@@ -42,8 +39,6 @@ mod common;
 /// Mutant M1 (no candidate at `account_binding.rs:225`): owner `None`, the start refused.
 #[cfg(not(target_os = "macos"))]
 #[test]
-// un-ignore at CP1 with A2
-#[ignore = "upgrade gap: the native start shuts the adoption window and adopts nobody"]
 fn an_upgraded_pc_keeps_its_queue_for_the_account_whose_session_it_held() {
     in_own_process(
         "an_upgraded_pc_keeps_its_queue_for_the_account_whose_session_it_held",
@@ -82,8 +77,6 @@ fn an_upgraded_pc_keeps_its_queue_for_the_account_whose_session_it_held() {
 /// `Ok(())`): B's start runs and B becomes the owner.
 #[cfg(not(target_os = "macos"))]
 #[test]
-// un-ignore at CP1 with A2
-#[ignore = "upgrade gap: the native start shuts the adoption window and adopts nobody"]
 fn another_account_on_an_upgraded_pc_is_refused_and_takes_nothing() {
     in_own_process("another_account_on_an_upgraded_pc_is_refused_and_takes_nothing", || {
         use beebeeb_engine::app::{SyncStart, SyncStartRefused};
@@ -146,6 +139,8 @@ fn another_account_on_an_upgraded_pc_is_refused_and_takes_nothing() {
 /// adopts nobody.
 /// Mutant M3 (`close_adoption_window` a no-op): the window is still open after the second start.
 /// Mutant M2' (see rule 2): the second start resets the unowned data and records A.
+/// Mutants MU1 (`fix_upgrade_candidate_at_startup` returns at once) and MU2 (no `user_version` mark at the startup's
+/// shut): the window is still open after the first startup, before any start.
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn no_vault_key_no_adoption_and_the_window_shuts_after_the_first_start() {
@@ -163,6 +158,16 @@ fn no_vault_key_no_adoption_and_the_window_shuts_after_the_first_start() {
                 GateState::NeedsRecoveryPhrase,
                 "the premise: signed in, no vault key on this PC"
             );
+            // The FIRST startup shut the window, before any start (A2's mutant MU1, the startup step skipped, leaves it
+            // open here; the start's own close would hide that at the end).
+            {
+                let db = pc.db();
+                assert!(
+                    !db.adopt_owner_once(Some(&pc.this_account())).unwrap(),
+                    "the first startup shut the adoption window: an adoption asked before any start adopts nobody"
+                );
+                assert_eq!(db.owner().unwrap(), None);
+            }
             assert_eq!(
                 pc.engine().start_sync(pc.folder()),
                 Ok(SyncStart::NoSession),
@@ -241,8 +246,6 @@ fn an_unidentified_session_adopts_nothing() {
 /// Mutant M5 (the bind after `port.register`): the failed registration comes first and nobody is recorded.
 #[cfg(not(target_os = "macos"))]
 #[test]
-// un-ignore at CP1 with A2
-#[ignore = "upgrade gap: the native start shuts the adoption window and adopts nobody"]
 fn the_adoption_happens_in_the_start_before_any_engine() {
     in_own_process("the_adoption_happens_in_the_start_before_any_engine", || {
         use beebeeb_engine::app::SyncStartRefused;

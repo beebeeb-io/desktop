@@ -230,7 +230,7 @@ impl<C: CredentialStores> Engine<C> {
     pub fn serve_own_data_proofs(self: &Arc<Self>) {
         #[cfg(any(target_os = "windows", test, feature = "test-support"))]
         {
-            let seat = self.seat();
+            let seat = self.own_data_seat();
             if seat.serving.swap(true, Ordering::SeqCst) {
                 return;
             }
@@ -255,7 +255,7 @@ impl<C: CredentialStores> Engine<C> {
     pub(in crate::app) fn proof_owed_on(&self, refused: SyncStartRefused, sync_root: &Path) -> SyncStartRefused {
         #[cfg(any(target_os = "windows", test, feature = "test-support"))]
         if refused == SyncStartRefused::OtherAccountsData {
-            let seat = self.seat();
+            let seat = self.own_data_seat();
             let mut state = lock(&seat.state);
             state.owed = Some(Owed {
                 turn: self.acct.session_generation(),
@@ -273,7 +273,7 @@ impl<C: CredentialStores> Engine<C> {
     pub(in crate::app) fn wake_own_data_proofs(&self) {
         #[cfg(any(target_os = "windows", test, feature = "test-support"))]
         {
-            let seat = self.seat();
+            let seat = self.own_data_seat();
             let mut state = lock(&seat.state);
             if state.owed.is_some() {
                 state.ready = true;
@@ -282,16 +282,17 @@ impl<C: CredentialStores> Engine<C> {
         }
     }
 
-    /// The Lock and the sign-out, first: every proof of this handle stops, and each is waited for (at most
-    /// [`STOP_WAIT`]) until it let go of its client, so the session's token and key are gone before the next engine
-    /// waits for every credential to be released (`runner.rs`). Both callers hold the step lock, which a proof never
+    /// The Lock, the sign-out, the close of a session the server ended and the strong unlock's replacement of a session
+    /// in memory, first: every proof of this handle stops, and each is waited for (at most [`STOP_WAIT`]) until it let
+    /// go of its client, so the session's token and key are gone before the next engine waits for every credential to
+    /// be released (`runner.rs`). Every caller holds the step lock, which a proof never
     /// takes (the start after an adoption takes it as any start does, so it is never cut half way). A proof stopped
     /// after it recorded the owner has recorded this same account's data; one stopped before it recorded nothing.
     pub(in crate::app) async fn stop_proofs(&self) {
         #[cfg(any(target_os = "windows", test, feature = "test-support"))]
         {
             let running = {
-                let seat = self.seat();
+                let seat = self.own_data_seat();
                 let mut state = lock(&seat.state);
                 state.owed = None;
                 state.ready = false;
@@ -346,7 +347,7 @@ impl<C: CredentialStores> Engine<C> {
     /// is fixed all the same: one an older version kept elsewhere is moved in by the first start and judged there.
     /// Writes nothing but the window's `user_version` mark, and makes no folder and no `state.db`.
     pub(in crate::app) fn fix_upgrade_candidate_at_startup(&self) {
-        let seat = self.seat();
+        let seat = self.own_data_seat();
         {
             let mut state = lock(&seat.state);
             if state.startup.fixed {
@@ -391,7 +392,7 @@ impl<C: CredentialStores> Engine<C> {
     ) -> Result<LocalState, SyncStartRefused> {
         let data =
             LocalState::for_engine_start(&self.config.state_dir, sync_root).map_err(|_| SyncStartRefused::Other)?;
-        let seat = self.seat();
+        let seat = self.own_data_seat();
         let candidate = lock(&seat.state).startup.candidate.clone();
         if account_binding::is_the_upgrade_candidate(candidate.as_ref(), session)
             && data
@@ -407,7 +408,7 @@ impl<C: CredentialStores> Engine<C> {
     }
 
     /// This handle's seat (made at the first ask).
-    fn seat(&self) -> Arc<Seat> {
+    fn own_data_seat(&self) -> Arc<Seat> {
         let mut registry = lock(&SEATS);
         registry.retain(|(acct, _)| acct.strong_count() > 0);
         let mine = Arc::as_ptr(&self.acct);
@@ -434,7 +435,7 @@ impl<C: CredentialStores> Engine<C> {
     /// The service thread's part: claim the turn, run the proof and wait for it, then act on its outcome. Blocks:
     /// never on the window's thread or in a task of the runtime.
     fn prove_owed(&self, owed: Owed) {
-        let seat = self.seat();
+        let seat = self.own_data_seat();
         {
             let mut state = lock(&seat.state);
             #[cfg(test)]
@@ -600,7 +601,7 @@ impl<C: CredentialStores> Engine<C> {
             return;
         }
         #[cfg(test)]
-        let port = lock(&self.seat().state).test.restart_port.clone();
+        let port = lock(&self.own_data_seat().state).test.restart_port.clone();
         #[cfg(test)]
         if let Some(port) = port {
             let _ = self.start_on(owed.sync_root, &*port);
@@ -725,7 +726,7 @@ impl<C: CredentialStores> Engine<C> {
     /// The release itself: only the ids in `op_ids` that are still held as found while paused.
     fn release_held(&self, db: &StateDb, op_ids: &[String], now: i64) -> rusqlite::Result<usize> {
         #[cfg(test)]
-        lock(&self.seat().state)
+        lock(&self.own_data_seat().state)
             .test
             .asks_at_release
             .push(self.acct.reconcile_pass_wanted.load(Ordering::SeqCst));

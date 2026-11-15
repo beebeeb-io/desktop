@@ -428,3 +428,82 @@ fn explorers_question_is_answered_while_the_state_is_being_written() {
     assert_eq!(ReclaimOwner::refusal(&*f.engine), None);
     writer.execute_batch("ROLLBACK").unwrap();
 }
+
+/// An engine running in `root`, as a start leaves it: step 9 noted the folder, and a live runner is in the account's
+/// slot. Its task runs until the answer sender is used or dropped (then the engine has ended by itself).
+fn engine_running_in(engine: &TestEngine, root: &std::path::Path) -> tokio::sync::oneshot::Sender<()> {
+    let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+    let task = engine.runtime.spawn(async move {
+        let _ = finished.await;
+    });
+    engine.note_explorer_root(root);
+    *engine.acct.engine.try_lock().expect("the slot is free") =
+        Some(crate::runner::EngineRunner::for_test_with_task(task));
+    finish
+}
+
+/// Ledger 2468 L376: the settings do not name the folder sync runs in (a settings write after the start failed):
+/// `sync_root` answers the running engine's folder, so "Show in File Explorer" opens where the files are.
+/// Mutant L376-M2: `sync_root` saved-first again (the running folder ignored).
+#[test]
+fn explorer_with_unsaved_folder_opens_the_running_one() {
+    let f = fixture();
+    let running = tempfile::tempdir().unwrap();
+    let b = running.path().to_path_buf();
+    let saved = f.engine.sync_root().unwrap();
+    assert_ne!(
+        saved, b,
+        "the premise: the settings do not name the folder sync runs in"
+    );
+
+    let finish = engine_running_in(&f.engine, &b);
+
+    assert_eq!(f.engine.sync_root().unwrap(), b, "the folder sync runs in");
+    drop(finish);
+}
+
+/// Ledger 2468 L376: an engine that ended by itself (no stop took its noted folder) is not where the files are:
+/// `sync_root` answers the saved folder (or the suggestion) again, although the seat still holds the noted one.
+/// Mutant L376-M3: no `is_running()` check (the noted folder used whenever it is there).
+#[test]
+fn sync_root_forgets_a_runner_that_ended_by_itself() {
+    let f = fixture();
+    let running = tempfile::tempdir().unwrap();
+    let b = running.path().to_path_buf();
+    let saved = f.engine.sync_root().unwrap();
+    assert_ne!(
+        saved, b,
+        "the premise: the settings do not name the folder sync runs in"
+    );
+    let finish = engine_running_in(&f.engine, &b);
+    assert_eq!(
+        f.engine.sync_root().unwrap(),
+        b,
+        "the premise: the folder sync runs in, while it runs"
+    );
+
+    drop(finish);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while f
+        .engine
+        .acct
+        .engine
+        .try_lock()
+        .map(|slot| slot.as_ref().is_some_and(crate::runner::EngineRunner::is_running))
+        .unwrap_or(true)
+    {
+        assert!(std::time::Instant::now() < until, "the runner's task did not end");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    assert_eq!(
+        f.engine.running_root(),
+        Some(b),
+        "the premise: the seat still holds the noted folder"
+    );
+    assert_eq!(
+        f.engine.sync_root().unwrap(),
+        saved,
+        "an engine that ended by itself: the saved folder (or the suggestion) again"
+    );
+}
