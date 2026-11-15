@@ -1,5 +1,8 @@
 # The words of every string literal and field name at the engine's and this crate's tracing calls, one per line,
 # sorted, lowercase. A test (vocabulary_sync.rs) fails, naming the words, when a log call's word is missing here.
+!
+$home
++
 0x
 0xc0000001
 10-minute

@@ -3,16 +3,26 @@
 //! with a marker (they make a line readable); whatever they miss is masked here, so a gap in them can make a line
 //! less readable, never leak.
 //!
-//! A word is a run of letters, digits, `-`, `_` and any character that is not whitespace or punctuation; the
-//! punctuation (ASCII, and `“”‘’«»`) between words is kept. A word is written as it is only when it is
+//! A word is a run of any characters that are not whitespace and not one of the split set `.,:;()[]{}<>"'=/\@|` and
+//! `“”‘’«»` (the allow-list spec's set); the split characters between words are kept. So `&`, `+`, `#`, `!`, `?`, `*`,
+//! `%`, `$`, `~` and `^` belong to a word: `Mark&Grant` is one unknown word. A word is written as it is only when it is
 //! 1. in the vocabulary: every word of the engine's and this crate's log calls (`vocabulary.txt`, kept in step by a
 //!    test that scans the sources) and the OS error phrases and units (`vocabulary_os.txt`), case-insensitive;
 //! 2. a number: at most 5 digits, at most one `.` part of at most 3 digits, an optional `-`, an optional unit (`ms`,
-//!    `s`, `KB`, `MB`, `GB`); a version of exactly three parts of 1 to 3 digits (`0.9.0`; four parts, an IPv4
+//!    `s`, `KB`, `MB`, `GB`, `%`); a version of exactly three parts of 1 to 3 digits (`0.9.0`; four parts, an IPv4
 //!    address, are masked); or a `0x` value of at most 8 hex digits (a Windows error code);
 //! 3. one of the markers the first pass writes ([`Mark`], the HTTP status from the fixed table).
 //!
+//! Two more rules mask numbers that are known on their own:
+//! - a number directly next to a masked word (only spaces or split characters between) is masked too, so a house
+//!   number does not stay beside the street it belongs to; a marker is not a masked word (`HTTP 404 Not Found` stays);
+//! - three or more digit-only words in a row, separated by single spaces, whose digits sum to 9 or more, are one
+//!   grouped number (`06 1234 5678`, `4111 1111 1111 1111`) and are masked as one `<…>`; a run of two (`12 345`) stays.
+//!
 //! Consecutive masked words, with the punctuation between them, become one `<…>`.
+//!
+//! Integer FIELDS (a `tracing` field whose value is an integer) are written by the first pass and keep any length;
+//! these rules are about text.
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -88,7 +98,7 @@ pub(crate) const VOCABULARY: &str = include_str!("vocabulary.txt");
 /// The OS error phrases (`std::io::Error`, Windows, Linux, macOS) and `io::ErrorKind` names the engine logs, and units.
 const OS_PHRASES: &str = include_str!("vocabulary_os.txt");
 pub(crate) const MASKED: &str = "<…>";
-const UNITS: [&str; 5] = ["ms", "s", "kb", "mb", "gb"];
+const UNITS: [&str; 6] = ["ms", "s", "kb", "mb", "gb", "%"];
 
 /// A marker the first pass writes in place of a word. While the text is put together each is one private-use
 /// character (the input's private-use characters are blanked first), so the final writer can tell the module's own
@@ -163,7 +173,7 @@ fn marker_text(c: char) -> Option<String> {
 }
 
 fn is_separator(c: char) -> bool {
-    c.is_whitespace() || (c.is_ascii_punctuation() && c != '-' && c != '_') || "“”‘’«»".contains(c) || is_private_use(c)
+    c.is_whitespace() || ".,:;()[]{}<>\"'=/\\@|“”‘’«»".contains(c) || is_private_use(c)
 }
 
 /// The words of `text`, in order (see the module docs for what a word is).
@@ -218,19 +228,26 @@ fn is_known(word: &str) -> bool {
     word.chars().all(|c| c == '-' || c == '_') || is_number(word) || vocabulary().contains(&word.to_lowercase())
 }
 
+/// One piece of the first pass's output: a marker, or a word with what is known about it.
+enum Piece<'a> {
+    Marker(String),
+    Word {
+        text: &'a str,
+        known: bool,
+        number: bool,
+        digits: bool,
+    },
+}
+
 /// Writes `text` (the first pass's output) with only known words, markers and punctuation; see the module docs.
 pub(crate) fn allow_listed(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    // Punctuation and spaces after the last word, not yet written: dropped when they sit between two masked words.
+    // Each piece with the punctuation and spaces held before it.
+    let mut pieces: Vec<(String, Piece)> = Vec::new();
     let mut held = String::new();
-    let mut masked = false;
     let mut rest = text;
     while let Some(c) = rest.chars().next() {
         if let Some(marker) = marker_text(c) {
-            out.push_str(&held);
-            out.push_str(&marker);
-            held.clear();
-            masked = false;
+            pieces.push((std::mem::take(&mut held), Piece::Marker(marker)));
             rest = &rest[c.len_utf8()..];
             continue;
         }
@@ -249,13 +266,92 @@ pub(crate) fn allow_listed(text: &str) -> String {
         }
         let word = &rest[..end];
         rest = &rest[end..];
-        let known = is_known(word) || is_version(word);
-        if known || !masked {
-            out.push_str(&held);
-            out.push_str(if known { word } else { MASKED });
+        let number = is_number(word);
+        pieces.push((
+            std::mem::take(&mut held),
+            Piece::Word {
+                text: word,
+                known: number || is_known(word) || is_version(word),
+                number,
+                digits: word.bytes().all(|b| b.is_ascii_digit()),
+            },
+        ));
+    }
+
+    // Rule 3: three or more digit-only words in a row, single spaces between, 9 or more digits: one grouped number.
+    let mut at = 0;
+    while at < pieces.len() {
+        let is_digits = |i: usize| matches!(pieces[i].1, Piece::Word { digits: true, .. });
+        if !is_digits(at) {
+            at += 1;
+            continue;
         }
-        held.clear();
-        masked = !known;
+        let mut stop = at + 1;
+        while stop < pieces.len() && is_digits(stop) && pieces[stop].0 == " " {
+            stop += 1;
+        }
+        let total: usize = pieces[at..stop]
+            .iter()
+            .map(|(_, p)| {
+                if let Piece::Word { text, .. } = p {
+                    text.len()
+                } else {
+                    0
+                }
+            })
+            .sum();
+        if stop - at >= 3 && total >= 9 {
+            for (_, piece) in &mut pieces[at..stop] {
+                if let Piece::Word { known, .. } = piece {
+                    *known = false;
+                }
+            }
+        }
+        at = stop;
+    }
+
+    // Rule 2: a number next to a masked word (never a marker) is masked too, and so is every number linked to it
+    // through other numbers (`Annastraat 12 13`): one pass forward, one backward, each seeing the last one's result.
+    let unmasked_number = |piece: &Piece| {
+        matches!(
+            piece,
+            Piece::Word {
+                number: true,
+                known: true,
+                ..
+            }
+        )
+    };
+    let masked_word = |piece: &Piece| matches!(piece, Piece::Word { known: false, .. });
+    let order: Vec<usize> = (1..pieces.len())
+        .chain((0..pieces.len().saturating_sub(1)).rev())
+        .collect();
+    for (pass, i) in order.into_iter().enumerate() {
+        let next_to = if pass < pieces.len() - 1 { i - 1 } else { i + 1 };
+        if unmasked_number(&pieces[i].1) && masked_word(&pieces[next_to].1) {
+            if let Piece::Word { known, .. } = &mut pieces[i].1 {
+                *known = false;
+            }
+        }
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut masked = false;
+    for (gap, piece) in &pieces {
+        match piece {
+            Piece::Marker(marker) => {
+                out.push_str(gap);
+                out.push_str(marker);
+                masked = false;
+            }
+            Piece::Word { text, known, .. } => {
+                if *known || !masked {
+                    out.push_str(gap);
+                    out.push_str(if *known { text } else { MASKED });
+                }
+                masked = !*known;
+            }
+        }
     }
     out.push_str(&held);
     out.split_whitespace().collect::<Vec<_>>().join(" ")

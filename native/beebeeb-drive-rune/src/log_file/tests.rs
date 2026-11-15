@@ -1128,3 +1128,72 @@ fn the_word_rules_see_words_through_debug_punctuation() {
     assert_eq!(redact::scrub(phrase), "[\"<phrase>\"]");
     assert_eq!(redact::scrub("(custom:Medical Records)"), "(custom:<name>");
 }
+
+#[test]
+fn a_name_joined_with_an_ampersand_or_a_plus_is_one_masked_word() {
+    for joined in ["Mark&Grant", "Will+Max"] {
+        let text = redact::scrub(&format!("shared with {joined} today"));
+        assert!(
+            !text.contains("Mark") && !text.contains("Grant") && !text.contains("Will") && !text.contains("Max"),
+            "{joined} reached the file: {text}"
+        );
+        assert!(text.contains("<…>"), "{joined} is masked: {text}");
+    }
+}
+
+#[test]
+fn a_percentage_is_still_a_number() {
+    assert_eq!(redact::scrub("disk 50% full"), "disk 50% full");
+}
+
+#[test]
+fn a_number_next_to_a_masked_word_is_masked() {
+    let text = redact::scrub("room Annastraat 12");
+    assert!(!text.contains("Annastraat") && !text.contains("12"), "{text}");
+    assert!(!redact::scrub("room Annastraat 12 13").contains("13"));
+    let text = redact::scrub("room 12 Annastraat");
+    assert!(!text.contains("Annastraat") && !text.contains("12"), "{text}");
+    assert_eq!(redact::scrub("HTTP 404"), "HTTP 404 Not Found: <body omitted>");
+}
+
+#[test]
+fn a_grouped_phone_or_card_number_is_masked() {
+    for number in ["06 1234 5678", "4111 1111 1111 1111", "+31 6 1234 5678"] {
+        let text = redact::scrub(&format!("call {number} now"));
+        let digits = text.bytes().filter(u8::is_ascii_digit).count();
+        assert_eq!(digits, 0, "{number} left digits in the file: {text}");
+        assert!(text.contains("<…>"), "{text}");
+    }
+}
+
+#[test]
+fn two_small_numbers_in_a_row_are_kept() {
+    assert_eq!(redact::scrub("retry 2 of 5"), "retry 2 of 5");
+    assert_eq!(redact::scrub("12 345 bytes"), "12 345 bytes");
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, b| {
+        (hash ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+#[test]
+fn vocabulary_os_is_pinned() {
+    let file = include_str!("vocabulary_os.txt");
+    assert_eq!(
+        fnv1a(file.as_bytes()),
+        0x44e6_681d_9de6_1748,
+        "vocabulary_os.txt changed: update the pin on purpose"
+    );
+    let phrases: Vec<&str> = file.lines().filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
+    assert!(phrases.len() <= 150, "{} phrase lines", phrases.len());
+    for phrase in phrases {
+        assert!(
+            phrase
+                .chars()
+                .all(|c| c.is_ascii_alphabetic() || matches!(c, ' ' | '\'' | ',' | '-' | '.' | '/')),
+            "an OS phrase holds only letters, spaces and ' , - . / (a digit would let a number through): {phrase:?}"
+        );
+    }
+}
