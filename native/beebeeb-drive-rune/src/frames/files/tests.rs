@@ -640,20 +640,17 @@ fn new_opens_its_menu_and_every_entry_and_shortcut_goes_to_its_frame() {
     let mut rt = runtime();
     click(&mut rt, "new-btn");
     assert_eq!(info(&rt, "menu").label.as_deref(), Some("New"));
+    // 0.9.0 has no New document (the Office editor is 0.9.1): four entries, DW-1558 not among them.
     assert_eq!(
         menu_labels(&rt),
         [
             "New folder",
             "New file\u{2026}",
-            "New document\u{2026}",
             "Upload files\u{2026}",
             "Upload a folder\u{2026}"
         ]
     );
-    for (n, expected) in ["DW-0417", "DW-1521", "DW-1558", "DW-0415", "DW-0480"]
-        .into_iter()
-        .enumerate()
-    {
+    for (n, expected) in ["DW-0417", "DW-1521", "DW-0415", "DW-0480"].into_iter().enumerate() {
         if rt.state.actions.menu.is_none() {
             click(&mut rt, "new-btn");
         }
