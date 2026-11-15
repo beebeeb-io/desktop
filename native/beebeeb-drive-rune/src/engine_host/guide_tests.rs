@@ -259,3 +259,116 @@ fn an_answer_for_a_session_that_ended_is_never_taken_in() {
         "asked again under this session, it answers"
     );
 }
+
+/// Review L334: a held mark whose next try meets a session the server ended stays held for its account (as it does
+/// across a sign-out and another account's session), and is kept once that account is signed in and open again;
+/// never for another account.
+#[test]
+fn held_done_mark_survives_sign_out_and_is_kept_after_sign_in() {
+    let fake = fake("guide-survives");
+    let engine = engine_at(&fake.fake.base);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.db");
+    engine.use_local_state_for_test(path.clone());
+    let mut marks = Marks::new(engine.clone());
+    sign_in(&engine, &fake.first, &fake.phrases[0]);
+
+    // Nothing has synced on this PC yet: the mark is held.
+    assert_eq!(asked(&mut marks), Some(Known::NotDone));
+    marks.mark_done(None);
+    settled(&mut marks);
+    assert!(marks.owes(), "held");
+
+    // The server ends the session (three refusals in a row) and the next try meets that: still held.
+    for _ in 0..3 {
+        engine.note_call_for_test(true);
+    }
+    marks.wait_is_over();
+    let _ = marks.answer(None);
+    assert!(marks.busy(), "tried again once the wait is over");
+    settled(&mut marks);
+    assert!(
+        marks.owes(),
+        "a session the server ended does not drop the mark: it waits for the account to be back"
+    );
+
+    // Signed out: held, and nothing is tried.
+    engine.sign_out_keeping_local_data().expect("signed out");
+    marks.wait_is_over();
+    let _ = marks.answer(None);
+    assert!(marks.owes() && !marks.busy(), "signed out: held, and nothing is sent");
+    // Another account in between is not handed the first one's mark.
+    sign_in(&engine, &fake.second, &fake.phrases[1]);
+    marks.wait_is_over();
+    let _ = marks.answer(None);
+    assert!(
+        !marks.busy(),
+        "the first account's mark is not sent under the second account's session"
+    );
+    engine.sign_out_keeping_local_data().expect("signed out");
+
+    // The first account signed in and open again, its state there by now: the held mark is kept.
+    state_of(dir.path(), &fake.first);
+    sign_in(&engine, &fake.first, &fake.phrases[0]);
+    marks.wait_is_over();
+    let _ = marks.answer(None);
+    assert!(marks.busy(), "tried again for its own account");
+    settled(&mut marks);
+    assert!(!marks.owes(), "kept: nothing is owed any more");
+    let db = StateDb::open(&path).unwrap();
+    assert!(db.guide_done(&fake.first.user_id).unwrap());
+    assert!(
+        !db.guide_done(&fake.second.user_id).unwrap(),
+        "nothing was written for the second account"
+    );
+    assert_eq!(
+        asked(&mut Marks::new(engine.clone())),
+        Some(Known::Done),
+        "a window started anew reads it as done: the guide does not come back"
+    );
+}
+
+/// Review L336: a read the state refused for a reason that can pass (here a file that is not a state database yet,
+/// which the engine says as "unreadable", as it says a busy one) is no answer: it is asked again, and the answer
+/// once the state can be read is the answer.
+#[test]
+fn transient_read_refusal_is_asked_again() {
+    let fake = fake("guide-again");
+    let engine = engine_at(&fake.fake.base);
+    let dir = tempfile::tempdir().unwrap();
+    let not_yet = dir.path().join("not-yet.db");
+    std::fs::write(&not_yet, b"an invented file that is not a database yet").unwrap();
+    engine.use_local_state_for_test(not_yet);
+    let mut marks = Marks::new(engine.clone());
+    sign_in(&engine, &fake.first, &fake.phrases[0]);
+
+    // The read is refused: no answer, and a read again is planned (at most 10 s).
+    marks.ask(None);
+    let began = Instant::now();
+    while !marks.reads_again() {
+        assert_eq!(
+            marks.answer(None),
+            None,
+            "a refusal that can pass is not taken in as a final answer"
+        );
+        assert!(began.elapsed() < Duration::from_secs(10), "the read did not answer");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(marks.answer(None), None, "still no answer before it is asked again");
+
+    // The state can be read now (another path: the refused file may still be open on a worker). Asked again, the
+    // read answers, and that answer is final.
+    engine.use_local_state_for_test(state_of(dir.path(), &fake.first));
+    marks.read_again_now();
+    let began = Instant::now();
+    let known = loop {
+        if let Some(known) = marks.answer(None) {
+            break known;
+        }
+        marks.read_again_now();
+        assert!(began.elapsed() < Duration::from_secs(10), "it was not asked again");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(known, Known::NotDone, "asked again, the read answers");
+    assert!(!marks.reads_again(), "a final answer is not asked again");
+}
