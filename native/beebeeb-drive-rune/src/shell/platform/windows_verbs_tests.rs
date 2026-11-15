@@ -194,13 +194,19 @@ fn the_registration_lists_the_verbs_in_the_board_order() {
         sorted, keys,
         "Explorer lists the keys by name: they sort in the board's order"
     );
-    assert_eq!(keys[0], "Software\\Classes\\*\\shell\\Beebeeb.1.share");
+    // The keys are named by the engine identity of THIS build (a test build is `BeebeebTest`), never a literal.
+    let here = crate::shell::identity::engine_identity();
+    let name = here.cloud_files_provider_name();
+    assert_eq!(keys[0], format!("Software\\Classes\\*\\shell\\{name}.1.share"));
     for value in &values {
         assert!(
-            value.key.starts_with("Software\\Classes\\*\\shell\\Beebeeb."),
+            value.key.starts_with(&format!("Software\\Classes\\*\\shell\\{name}.")),
             "{}",
             value.key
         );
+    }
+    for (each, key) in ExplorerVerb::ALL.into_iter().zip(&keys) {
+        assert_eq!(*key, verb_key(here, each));
     }
     for value in values.iter().filter(|value| value.name == "AppliesTo") {
         assert_eq!(value.data, "System.ItemPathDisplay:~<\"C:\\Users\\Someone\\Beebeeb\"");
@@ -241,10 +247,14 @@ fn the_registration_lists_the_verbs_in_the_board_order() {
     }
     let test = menu_entries(AppIdentity::Test, exe, root);
     assert_eq!(test.len(), 16);
-    assert!(
-        test.iter().all(|t| values.iter().all(|real| real.key != t.key)),
-        "the test build never writes over the real app's keys"
-    );
+    // The two apps' keys never meet: both names through their own identity.
+    for verb in ExplorerVerb::ALL {
+        assert_ne!(
+            verb_key(AppIdentity::Real.engine(), verb),
+            verb_key(AppIdentity::Test.engine(), verb),
+            "the test build never writes over the real app's keys"
+        );
+    }
     assert_eq!(test[0].data, "Share with Beebeeb Test\u{2026}");
 }
 
