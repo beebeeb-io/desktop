@@ -178,7 +178,8 @@ fn start_folder_read<C: CredentialStores>(
     let started = std::thread::Builder::new()
         .name("photos-folders".into())
         .spawn(move || {
-            let read = engine.photo_folders_for(asked.0);
+            let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.photo_folders_for(asked.0)))
+                .unwrap_or(Err(PhotoFoldersRefused::NotSaved));
             // Another session or account since the ask: the answer is not kept.
             let still = stamp(&engine) == asked;
             let kept = shared
@@ -222,6 +223,7 @@ impl<C: CredentialStores> EnginePhotos<C> {
     /// on a worker when nothing is held or what is held is older than [`FRESH_FOR`]; never waits.
     pub(super) fn photos_folders_folders(&self) -> Vec<Folder> {
         if !self.engine.has_session() {
+            self.forget_folders();
             return Vec::new();
         }
         let now = stamp(&self.engine);
@@ -229,11 +231,24 @@ impl<C: CredentialStores> EnginePhotos<C> {
             return Vec::new();
         };
         held.follow(&now);
-        let stale = held.at.is_none_or(|at| at.elapsed() > FRESH_FOR);
-        if held.list.is_none() || stale {
+        // Never read for this stamp (`at` is empty), or the last read, answered or refused, is older than `FRESH_FOR`.
+        if held.at.is_none_or(|at| at.elapsed() > FRESH_FOR) {
             start_folder_read(&self.engine, &self.photos_folders.folders, &mut held, &now);
         }
         held.list.as_deref().unwrap_or_default().iter().map(folder_of).collect()
+    }
+
+    /// No session: no folder name of the earlier account stays in memory. The numbers keep growing, so a read on its
+    /// way is not taken later. (`EnginePhotos::forget` does not reach this state; the accessors empty it instead.)
+    fn forget_folders(&self) {
+        if let Ok(mut held) = self.photos_folders.folders.lock() {
+            let started = held.started;
+            *held = HeldFolders {
+                started,
+                taken: started,
+                ..HeldFolders::default()
+            };
+        }
     }
 
     /// The Folder arm of `set_shown` (Photo sources, Done). Done hands every folder over, changed or not: only a
@@ -315,7 +330,9 @@ impl<C: CredentialStores> EnginePhotos<C> {
                 // number is taken after the write, so a read that began before it never replaces this list.
                 let number_now = shared.lock().ok().and_then(|mut held| held.start(&asked));
                 if let Some(list_number) = number_now
-                    && let Ok(list) = engine.photo_folders_for(asked.0)
+                    && let Ok(list) =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.photo_folders_for(asked.0)))
+                            .unwrap_or(Err(PhotoFoldersRefused::NotSaved))
                     && stamp(&engine) == asked
                     && let Ok(mut held) = shared.lock()
                 {
@@ -342,6 +359,7 @@ impl<C: CredentialStores> EnginePhotos<C> {
     /// sources' folders for this session and account, so the dialog opens on the engine's list.
     pub(super) fn photos_folders_backup_status(&self) -> Option<BackupStatus> {
         if !self.engine.has_session() {
+            self.forget_folders();
             return None;
         }
         let now = stamp(&self.engine);
