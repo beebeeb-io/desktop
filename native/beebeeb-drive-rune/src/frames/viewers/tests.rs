@@ -738,9 +738,7 @@ fn leaving_with_changes_asks_first_and_each_answer_does_what_it_says() {
 fn a_refused_save_keeps_the_edit_and_says_why() {
     let (mut rt, _) = note(false, false);
     edit_and_type(&mut rt);
-    let ui = rt.state.viewer.ui.as_mut().expect("a file is open");
-    ui.settle(super::source::Settled::Refused("Not saved: an invented reason".into()));
-    rt.frame(0.0);
+    refuse(&mut rt);
     let ui = viewer(&rt);
     assert!(ui.editor.is_some() && ui.dirty(), "the edit stays, unsaved");
     assert_eq!(ui.dialog, None);
@@ -750,6 +748,15 @@ fn a_refused_save_keeps_the_edit_and_says_why() {
         Some("Not saved: an invented reason")
     );
     assert_eq!(ui.file.version, 3);
+}
+
+/// The engine refused the save (an earlier change to the file is not sent yet), as `pump` hands it over.
+fn refuse(rt: &mut Runtime<State>) {
+    rt.update(|s, _| {
+        let ui = s.viewer.ui.as_mut().expect("a file is open");
+        ui.settle(super::source::Settled::Refused("Not saved: an invented reason".into()));
+    });
+    rt.frame(0.0);
 }
 
 /// Press the control keyed `key` with the pointer, at its middle.
@@ -768,9 +775,7 @@ fn the_refusal_offers_save_a_copy() {
     let (mut rt, calls) = note(false, false);
     edit_and_type(&mut rt);
     let typed = viewer(&rt).editor.as_ref().expect("the editor").edit.text.clone();
-    let ui = rt.state.viewer.ui.as_mut().expect("a file is open");
-    ui.settle(super::source::Settled::Refused("Not saved: an invented reason".into()));
-    rt.frame(0.0);
+    refuse(&mut rt);
     assert_eq!(info(&rt, "banner-btn").label.as_deref(), Some("Save a copy"));
     let before = calls.borrow().len();
     click(&mut rt, "banner-btn");
