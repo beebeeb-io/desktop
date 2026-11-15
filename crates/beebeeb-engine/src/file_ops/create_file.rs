@@ -70,6 +70,11 @@ fn create_file_with(
         return Err(DriveError::NameTaken);
     }
     let path = full_path(sync_root, &rel)?;
+    match name_alias::conflict_below(sync_root, &path) {
+        Ok(None) => {}
+        Ok(Some(_)) => return Err(DriveError::NameTaken),
+        Err(_) => return Err(DriveError::Failed("name check")),
+    }
     write_new(&path, bytes, write)?;
     Ok(rel)
 }
@@ -89,7 +94,6 @@ fn write_new(
     if let Err(error) = write(&mut file, bytes) {
         drop(file);
         // Best effort: when even the removal fails, the write's own error is still the answer.
-        let _ = std::fs::remove_file(path);
         return Err(DriveError::io(error));
     }
     Ok(())
