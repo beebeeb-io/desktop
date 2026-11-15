@@ -87,6 +87,8 @@ pub struct HeldCalls {
     pub started: std::rc::Rc<std::cell::RefCell<Vec<CallKind>>>,
     /// A press of the kind that is already out is "taken" and starts nothing (the engine's rule), instead of refused.
     pub repeat_out: std::rc::Rc<std::cell::Cell<bool>>,
+    /// No session is open: every start is refused (`start_call` is `false`).
+    pub refuse: std::rc::Rc<std::cell::Cell<bool>>,
     out: Option<CallKind>,
     /// What the call that is out was given (the address of a change of email).
     input: String,
@@ -533,6 +535,7 @@ impl AccountSource for BoardAccount {
     #[cfg(test)]
     fn start_call(&mut self, kind: CallKind, input: &str, _password: &str) -> bool {
         match self.held.as_mut() {
+            Some(held) if held.refuse.get() => false,
             Some(held) if held.out == Some(kind) && held.repeat_out.get() => true,
             Some(held) if held.out.is_none() => {
                 held.out = Some(kind);
