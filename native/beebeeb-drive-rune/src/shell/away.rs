@@ -195,6 +195,7 @@ impl AwayLock {
         if covers && !covered {
             // The content leaves in this frame's commit: every removed element otherwise fades out over 0.15 s, and
             // the files would still show under the cover while they fade.
+            tx.instant();
         }
         came || covers != covered
     }
