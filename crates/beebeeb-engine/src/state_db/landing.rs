@@ -146,10 +146,11 @@ impl StateDb {
     /// `shown`, [`retire_parked_conn`]: the op goes, the system reads the server's version, and the
     /// staged copy is released in the journal. Returns that copy for the caller to unlink after the
     /// commit; the caller has already kept the bytes (D1). `None`: not decidable, nothing changed.
+    /// Task 2530: decidable is the stale base or Keep the other's own classes ([`settleable_at_conn`]).
     pub fn drop_parked(&self, op_id: &str, shown: i64) -> Result<Option<Option<String>>> {
         let mut conn = self.0.lock().expect("state_db mutex poisoned");
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if !decidable_parked_at_conn(&tx, op_id, shown)? {
+        if !settleable_at_conn(&tx, op_id, shown, ParkedSettle::KeepOther)? {
             return Ok(None);
         }
         let released = retire_parked_conn(&tx, op_id)?;
@@ -210,9 +211,10 @@ impl StateDb {
             return Ok(AcceptOutcome::CopyGone);
         }
         // Task 2190 (review-169 #3): a create that takes a parked write's place is written only while
-        // that write is still decidable at the version shown, in this transaction.
+        // that write is still decidable at the version shown, in this transaction (task 2530: the stale base, or Keep
+        // both's own classes).
         if let Some(retire) = accept.retire_parked
-            && !decidable_parked_at_conn(&tx, retire.op_id, retire.shown_version)?
+            && !settleable_at_conn(&tx, retire.op_id, retire.shown_version, ParkedSettle::KeepBoth)?
         {
             return Ok(AcceptOutcome::ParkedMoved);
         }

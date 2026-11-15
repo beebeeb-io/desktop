@@ -103,6 +103,10 @@ struct Inner {
     forgets: usize,
     /// A read of the version waits at the door too.
     edit_waits: bool,
+    /// Beebeeb is locked: the session stays in memory, the screen is not open (`ViewerEngine::screen_open`).
+    locked: bool,
+    /// What a Keep both copy answers (`None`: the copy is made).
+    copy_refused: Option<EditRefused>,
 }
 
 struct Fake {
@@ -161,6 +165,8 @@ impl Fake {
                 epoch: 0,
                 forgets: 0,
                 edit_waits: false,
+                locked: false,
+                copy_refused: None,
             }),
             door: Mutex::new(()),
         };
@@ -338,6 +344,11 @@ impl ViewerEngine for Fake {
         self.s().wakes += 1;
     }
 
+    fn screen_open(&self) -> bool {
+        let s = self.s();
+        s.signed_in && !s.locked
+    }
+
     fn edit_facts(&self, _session: SessionGeneration, _file_id: &str, opening: u64) -> Option<EditFacts> {
         if self.s().edit_waits {
             drop(self.door.lock().unwrap());
@@ -410,7 +421,11 @@ impl ViewerEngine for Fake {
         _: &str,
     ) -> Result<NewCopy, EditRefused> {
         self.hold();
-        self.s().copies.push((file_id.to_string(), text.to_string()));
+        let mut s = self.s();
+        s.copies.push((file_id.to_string(), text.to_string()));
+        if let Some(refused) = s.copy_refused {
+            return Err(refused);
+        }
         Ok(NewCopy {
             id: "f-copy".into(),
             name: "Invented harbour note (This PC, 09:41).txt".into(),

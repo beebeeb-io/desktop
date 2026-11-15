@@ -82,8 +82,8 @@ pub struct StaleCopyPass {
     pub queued: Vec<String>,
     /// Windows: emptied and given the current version's size; the next open fetches it.
     pub emptied: Vec<String>,
-    /// Windows: kept files among them, to fetch again now, off the tick (their places).
-    pub refetch: Vec<PathBuf>,
+    /// Windows: kept files among them, to fetch again now, off the tick: they join the tick's kept fetch (S6).
+    pub refetch: Vec<KeptPlace>,
     /// Bytes that are not the agreed content: a change, left as it is.
     pub changed: usize,
     /// Not done this pass (open elsewhere, not wholly on disk, nothing at its place, the row moved): next tick.
@@ -135,7 +135,10 @@ impl EngineBridge {
             Refreshed::Emptied { kept } => {
                 pass.emptied.push(copy.file_id.clone());
                 if kept || copy.pinned {
-                    pass.refetch.push(place.to_path_buf());
+                    pass.refetch.push(KeptPlace {
+                        file_id: copy.file_id.clone(),
+                        place: place.to_path_buf(),
+                    });
                 }
             }
             Refreshed::Changed => pass.changed += 1,
@@ -178,16 +181,19 @@ impl EngineBridge {
     }
 }
 
-/// `true` when `error` is a hydrate this pass queued meeting a change (`UnsentLocalChange`): the copy holds a change
-/// since the pass checked it, so the re-download is dropped (the change keeps its bytes; the pass never queues it
-/// again while its bytes differ from the agreed content).
-pub(super) fn refresh_met_a_change(op: &PendingOperation, error: &anyhow::Error) -> bool {
-    engine_cause::<UnsentLocalChange>(error).is_some() && is_refresh(op)
+/// `true` when `error` is a hydrate a tick queued (this pass's re-download, or a kept fetch) meeting a change
+/// (`UnsentLocalChange`): the place holds a change made since it was checked, so the fetch is dropped, never retried
+/// over it (the change keeps its bytes; neither step queues it again while the place holds it).
+pub(super) fn tick_fetch_met_a_change(op: &PendingOperation, error: &anyhow::Error) -> bool {
+    engine_cause::<UnsentLocalChange>(error).is_some() && is_tick_fetch(op)
 }
 
-/// `true` when `op` is a re-download this pass queued (reason `newer_version`).
-pub(super) fn is_refresh(op: &PendingOperation) -> bool {
-    operation_metadata(op).is_ok_and(|metadata| metadata["reason"] == REFRESH_REASON)
+/// `true` when `op` is a hydrate a tick queued: a re-download this pass queued (reason `newer_version`) or a kept
+/// fetch (S6, reason `kept_refetch`).
+pub(super) fn is_tick_fetch(op: &PendingOperation) -> bool {
+    operation_metadata(op).is_ok_and(|metadata| {
+        metadata["reason"] == REFRESH_REASON || metadata["reason"] == super::kept_refetch::KEPT_REASON
+    })
 }
 
 #[cfg(test)]

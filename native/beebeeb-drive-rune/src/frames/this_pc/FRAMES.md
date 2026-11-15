@@ -66,3 +66,38 @@ account step while the server has not answered says "Connecting…"; the first a
 paused" with Resume. Not built: the other refusals of DW-1403 (server not found, port closed, TLS refused: the
 board gives no sentences), filling the server from the address's domain (DW-1402's rule: it needs a lookup), and
 an account row's own page (the board draws its chevron and no frame for it: the row is drawn and takes no press).
+
+## A parked change's way out (task 2530, wave 2 slice S3)
+
+Sync history › Problems (DW-0428's row) draws, per problem, only the ways out the engine lists for it
+(`drive_v2::status::SyncProblem::exits`; the source refuses any other):
+
+| Row | Engine's ways out | The row's button | Reuses |
+| --- | --- | --- | --- |
+| a change that stopped after its tries, or waits out a backoff | Try again | Try again | DW-0428's Try again, as drawn |
+| a change parked on a stale base (a viewer save another device overtook) | Keep both, Keep the other, Keep this PC's | Choose | DW-0428's row and button cell; the question below |
+| a change whose earlier change was lost | Keep both, Keep the other | Choose | as above |
+| a write the server refused (403) | Keep the other | Choose | as above |
+| a change parked after a failed rekey | Try again | Try again | DW-0428's Try again |
+| a change whose staged copy is gone (no bytes on this PC) | Remove from the list | Remove | DW-0428's row; the question below |
+| a change that waits for an earlier one, a base not known, a sync-folder edit on a stale base, a held edit, files not checked yet | none | none | DW-0428's row, words only |
+
+Words (the engine's, `drive_v2::status::parked_words`): "Not sent: this file changed in Beebeeb before this change
+reached it. Choose which version to keep. Nothing was lost." · "Not sent: this account can no longer change this file
+in Beebeeb. Your change stays on this PC. Nothing was lost." · "Not sent: Beebeeb lost track of the change made before
+this one. Your change stays on this PC. Nothing was lost." · "Waiting: an earlier change to this file on this PC has
+to be sent first. Nothing was lost." · "This PC no longer has the bytes of this change, so it can't be sent. The file
+on Beebeeb is as it was."
+
+**NOT ON THE BOARD (design deviation, flagged; lead ruling 2026-11-15 14:06):** the question a way out asks first
+(`settle.rs`), drawn from the kit as the Files two-versions card (DW-0429) and the Remove-all ask are:
+- Choose: "Two versions", the file's name, one line per answer offered, then the answers the row lists in the order
+  Keep both (default) · Keep the other · Keep this PC's, and Cancel. Keep the other's line says where this PC's version
+  goes: "Changes not sent, in Beebeeb's app data".
+- Remove: "Remove this change?" · "This PC no longer has its bytes. The file on Beebeeb stays as it is." · Remove from
+  the list · Cancel (no default answer: a stray Enter removes nothing).
+- Cancel, Esc and a press outside change nothing. The question closes when its problem leaves the list or the section
+  closes. What an answer did is said in the window's toast ("This PC's version is in Changes not sent, in Beebeeb's app
+  data.", "This change moved since you saw it. Nothing was changed.", …).
+The board has no frame for either card; the integrator's compare.sh covers DW-0428 and DW-1301, whose scenes hold no
+parked row and draw as before.

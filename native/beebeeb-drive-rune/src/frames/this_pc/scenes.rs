@@ -3,8 +3,9 @@
 
 use rune::TextEdit;
 
+use super::source::Exit;
 use super::source::FixtureSource;
-use super::{Filter, RowMenu, Section, Ui};
+use super::{Asking, Filter, RowMenu, Section, Ui};
 use crate::State;
 use crate::shell::app::{Event, Route};
 
@@ -75,4 +76,38 @@ pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-0715", dw_0715),
     ("DW-1306", dw_1306),
     ("DW-0120", dw_0120),
+];
+
+/// Task 2530, render-only: Problems with two parked changes (Choose, Remove). NOT a board frame.
+pub fn parked(s: &mut State) {
+    open(s, Section::SyncHistory, FixtureSource::parked());
+    s.this_pc.filter = Filter::Problems;
+}
+
+/// Task 2530, render-only: the two-versions question of a stale-base save. NOT a board frame (`settle.rs`).
+pub fn parked_choose(s: &mut State) {
+    parked(s);
+    s.this_pc.asking = Some(Asking {
+        problem: "p-plan".into(),
+        name: "Plan.txt".into(),
+        exits: vec![Exit::KeepBoth, Exit::KeepOther, Exit::KeepThisPcs],
+    });
+}
+
+/// Task 2530, render-only: Remove from the list's question. NOT a board frame (`settle.rs`).
+pub fn parked_remove(s: &mut State) {
+    parked(s);
+    s.this_pc.asking = Some(Asking {
+        problem: "p-notes".into(),
+        name: "Notes.md".into(),
+        exits: vec![Exit::RemoveFromList],
+    });
+}
+
+/// Render-only scenes (`--scene this-pc-parked`): no board frame draws them, so they are not board frames and the
+/// gate does not count them; they are the renders a person looks at (FRAMES.md, "NOT ON THE BOARD").
+pub const RENDER_SCENES: &[(&str, fn(&mut State))] = &[
+    ("this-pc-parked", parked),
+    ("this-pc-parked-choose", parked_choose),
+    ("this-pc-parked-remove", parked_remove),
 ];

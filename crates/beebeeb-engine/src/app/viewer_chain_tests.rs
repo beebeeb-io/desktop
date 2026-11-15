@@ -54,7 +54,8 @@ fn a_new_openings_save_never_queues_behind_an_earlier_openings_unsent_save() {
 }
 
 /// The same, while the first opening's save is parked (held back: its base was not known, or it met a newer
-/// version). Deliberate: queued behind it, the new save would park behind it too, unasked.
+/// version). Deliberate: queued behind it, the new save would park behind it too, unasked. Said as held back (task 2530,
+/// item 1): nothing sends it until the person settles it.
 #[test]
 fn a_new_openings_save_never_queues_behind_an_earlier_openings_parked_save() {
     let fake = fake("chain-parked");
@@ -77,7 +78,11 @@ fn a_new_openings_save_never_queues_behind_an_earlier_openings_parked_save() {
     let again = engine.viewer_opening(session, NOTE);
     let second = engine.save_text_for(session, NOTE, "another invented edit, of version 4\n", 4, again);
     assert!(second.is_err(), "nothing queued behind it: {:?}", second.map(|_| ()));
-    assert_eq!(second.err(), Some(EditRefused::EarlierChangeNotSent), "said why");
+    assert_eq!(
+        second.err(),
+        Some(EditRefused::EarlierChangeHeld),
+        "said why: held back"
+    );
     assert_eq!(
         db.list_operations_for_file(NOTE).unwrap().len(),
         1,
@@ -189,3 +194,6 @@ fn a_viewer_save_never_queues_behind_an_unsent_file_provider_save() {
         "the File Provider's op alone"
     );
 }
+
+#[path = "viewer_copy_tests.rs"]
+mod viewer_copy;

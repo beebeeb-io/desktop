@@ -180,3 +180,21 @@ fn an_edit_kept_across_a_closed_vault_is_saved_after_the_phrase_opens_it() {
     w.frames_until("the save was not stored", |w| !w.stored_saves().is_empty());
     assert_eq!(w.stored_saves(), [Some(3)]);
 }
+
+/// Review of #452 (P2-B): a press that reaches the edit while Beebeeb is locked (the lock landed, the screen not redrawn
+/// yet: Ctrl+S in that gap) stores nothing and uses nothing up. After the Hello unlock, Save lands.
+#[test]
+fn a_press_while_locked_uses_nothing_up_and_save_lands_after_the_unlock() {
+    let mut w = signed_in_editing("edit-locked-press");
+    w.engine.lock_screen().expect("the screen locks");
+    w.settle();
+    w.save();
+    w.settle();
+    assert!(w.stored_saves().is_empty(), "nothing is stored while locked");
+    w.unlock();
+    w.save();
+    w.frames_until("the save was not stored after the unlock", |w| {
+        !w.stored_saves().is_empty()
+    });
+    assert_eq!(w.stored_saves(), [Some(3)], "from the version the edit began from");
+}

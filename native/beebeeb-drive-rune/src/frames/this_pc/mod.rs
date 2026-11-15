@@ -15,6 +15,7 @@ mod history;
 pub mod icons;
 mod offline;
 pub mod scenes;
+mod settle;
 pub mod source;
 
 #[cfg(test)]
@@ -25,7 +26,7 @@ use rune::{Cx, El, Key, KeyEvent, TextEdit, Tx};
 use crate::State;
 pub use crate::shell::app::Section;
 use crate::shell::registry::{FeedbackPolicy, Frame, FrameGroup};
-use source::{Change, FixtureSource, Kept, Origin, Standing, ThisPcSource, What};
+use source::{Change, Exit, FixtureSource, Kept, Origin, Standing, ThisPcSource, What};
 
 /// The registry's lines for the two sections (`shell/registry.rs`).
 pub const SYNC_HISTORY: Frame = Frame {
@@ -93,6 +94,18 @@ pub struct RowMenu {
 /// The row menu's items, in the board's order.
 pub const MENU_ITEMS: [&str; 3] = ["Open", "Show in File Explorer", "Remove from this PC"];
 
+/// Task 2530: the question a problem's way out asks first (`settle.rs`): which problem, its name, and the answers its
+/// row lists (the two-versions answers, Keep both first; or Remove from the list alone).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asking {
+    pub problem: String,
+    pub name: String,
+    pub exits: Vec<Exit>,
+}
+
+/// The order the two-versions question draws its answers in: Keep both, the default, first.
+const ANSWER_ORDER: [Exit; 4] = [Exit::KeepBoth, Exit::KeepOther, Exit::KeepThisPcs, Exit::RemoveFromList];
+
 pub struct Ui {
     source: Box<dyn ThisPcSource>,
     pub filter: Filter,
@@ -107,6 +120,10 @@ pub struct Ui {
     intents: Vec<Intent>,
     /// "Remove all from this PC" was pressed: the window asks once before anything is removed.
     pub confirm_remove_all: bool,
+    /// Task 2530: a problem's Choose or Remove was pressed: the window asks before anything changes.
+    pub asking: Option<Asking>,
+    /// Task 2530: what a way out did, and when: the window's toast says it for [`REFUSAL_FOR`].
+    pub said: Option<(&'static str, std::time::Instant)>,
     /// The board's sample PC (the frame gate's scenes): the status lines hold the board's sample words. Never in
     /// the running app.
     sample: bool,
@@ -133,6 +150,8 @@ impl Ui {
             first_place: false,
             intents: Vec::new(),
             confirm_remove_all: false,
+            asking: None,
+            said: None,
             sample: false,
             refusal: None,
             was_open: None,
@@ -224,6 +243,46 @@ impl Ui {
 
     pub fn retry_all(&mut self) {
         self.source.retry_all();
+    }
+
+    /// Task 2530: a problem's Choose (`remove` false: the two-versions answers) or Remove (`remove` true) was pressed:
+    /// the window asks first, with only the answers the problem's row lists. A problem the source no longer lists, or
+    /// one with no such answer, asks nothing.
+    pub fn ask_exit(&mut self, problem: &str, remove: bool) {
+        let Some(change) = self
+            .source
+            .problems()
+            .into_iter()
+            .find(|c| c.problem() == Some(problem))
+        else {
+            return;
+        };
+        let exits: Vec<Exit> = ANSWER_ORDER
+            .into_iter()
+            .filter(|exit| change.exits().contains(exit) && (*exit == Exit::RemoveFromList) == remove)
+            .collect();
+        if !exits.is_empty() {
+            self.asking = Some(Asking {
+                problem: problem.to_string(),
+                name: change.name.clone(),
+                exits,
+            });
+        }
+    }
+
+    /// Task 2530: an answer to the question: asked of the source once, only one the question offered. The question
+    /// closes; the source says what it did.
+    pub fn settle(&mut self, exit: Exit) {
+        if let Some(asking) = self.asking.take()
+            && asking.exits.contains(&exit)
+        {
+            self.source.settle(&asking.problem, exit);
+        }
+    }
+
+    /// Task 2530: Cancel, Esc or a press outside: nothing changes.
+    pub fn ask_cancelled(&mut self) -> bool {
+        self.asking.take().is_some()
     }
 
     pub fn clear_search(&mut self) -> bool {
@@ -417,6 +476,18 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     if ui.confirm_remove_all && (!offline || ui.kept_count() == 0) {
         ui.confirm_remove_all = false;
     }
+    // Task 2530: nor does a problem's question outlive Sync history, or the problem.
+    let history = s.shell.app.route().section == Section::SyncHistory;
+    if let Some(asking) = &ui.asking
+        && (!history
+            || !ui
+                .source
+                .problems()
+                .iter()
+                .any(|c| c.problem() == Some(asking.problem.as_str())))
+    {
+        ui.asking = None;
+    }
     // A section that just opened: the source reads again when what it holds is old.
     let here = open.then(|| s.shell.app.route().section);
     if here.is_some() && here != ui.was_open {
@@ -429,11 +500,19 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         ui.refusal = Some((words, std::time::Instant::now()));
         changed = true;
     }
+    if let Some(words) = pumped.done {
+        ui.said = Some((words, std::time::Instant::now()));
+        changed = true;
+    }
     if ui.refusal.is_some_and(|(_, at)| at.elapsed() >= REFUSAL_FOR) {
         ui.refusal = None;
         changed = true;
     }
-    if pumped.busy || ui.refusal.is_some() {
+    if ui.said.is_some_and(|(_, at)| at.elapsed() >= REFUSAL_FOR) {
+        ui.said = None;
+        changed = true;
+    }
+    if pumped.busy || ui.refusal.is_some() || ui.said.is_some() {
         tx.wake_after(POLL_EVERY);
     }
     changed
@@ -453,6 +532,14 @@ pub fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
                 ui.remove_all_cancelled();
                 true
             }
+            Key::Up | Key::Down | Key::ContextMenu => true,
+            _ => false,
+        };
+    }
+    // Task 2530: a problem's question, the same way: Esc says no; the list under it hears no key.
+    if ui.asking.is_some() {
+        return match ev.key {
+            Key::Escape => ui.ask_cancelled(),
             Key::Up | Key::Down | Key::ContextMenu => true,
             _ => false,
         };
@@ -526,16 +613,24 @@ fn window(s: &State, cx: &mut Cx<State>, here: Section, main: El) -> El {
                 .min_h(0.0)
                 .w_full()
                 .child(chrome::sidebar(s, &s.this_pc, here, &t))
-                .child(match s.this_pc.refusal {
+                .child(match (s.this_pc.refusal, s.this_pc.said) {
                     // A refused change: said over the section, never only in a log line.
-                    Some((words, _)) => main.child(crate::ui::toast::layer(crate::ui::toast::toast(
+                    (Some((words, _)), _) => main.child(crate::ui::toast::layer(crate::ui::toast::toast(
                         &crate::theme::icons_files::ALERT,
                         crate::ui::toast::Tone::Failed,
                         words,
                         None,
                         &t,
                     ))),
-                    None => main,
+                    // Task 2530: what a way out did.
+                    (None, Some((words, _))) => main.child(crate::ui::toast::layer(crate::ui::toast::toast(
+                        &crate::theme::icons_files::CHECK,
+                        crate::ui::toast::Tone::Done,
+                        words,
+                        None,
+                        &t,
+                    ))),
+                    (None, None) => main,
                 }),
         )
 }

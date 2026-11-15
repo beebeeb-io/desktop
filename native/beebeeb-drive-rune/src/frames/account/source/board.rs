@@ -371,6 +371,7 @@ fn all_known(board: &BoardAccount) -> SecurityFacts {
     SecurityFacts {
         backup_codes: sec.two_factor.then_some((two.codes_left, two.codes_total)),
         app_lock: Some((sec.app_lock, sec.lock_after)),
+        app_lock_password: None,
         password_changed: Some(sec.password_changed),
         two_factor: Some(sec.two_factor),
         passkeys: Some(sec.passkeys),

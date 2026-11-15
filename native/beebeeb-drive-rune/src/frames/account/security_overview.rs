@@ -309,6 +309,10 @@ fn app_lock_row(facts: &SecurityFacts, t: &Theme) -> El {
                 .size(0.0, 0.0),
         );
     }
+    // Windows Hello did not confirm turning it off or a longer delay: the account password can (D-2).
+    if facts.app_lock_password.is_some() {
+        controls.push(super::app_lock_password::link(t));
+    }
     controls.push(
         lists::switch("item-1-0", "Lock Beebeeb", on, t).on_press(move |s: &mut State| {
             if let Some(source) = s.account.source.as_mut() {

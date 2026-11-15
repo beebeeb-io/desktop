@@ -1,9 +1,32 @@
 //! What a change that left the window's thread became, applied to the open file.
 
-use super::Ui;
 use super::source::{OpenFile, SaveOutcome, Settled};
+use super::{Dialog, Ui};
 
 impl Ui {
+    /// What a save, a keep or its answer came to, applied.
+    pub(super) fn outcome(&mut self, outcome: SaveOutcome) {
+        match outcome {
+            SaveOutcome::Saved { file, at } => {
+                self.toast = Some(format!("Saved \u{00B7} encrypted \u{00B7} version {}", file.version));
+                self.saved_at = Some(at);
+                self.show(file);
+            }
+            SaveOutcome::Opened(file) => self.show(file),
+            SaveOutcome::Conflict(other) => self.ask(Dialog::Conflict(other)),
+            // Not saved: the edit stays as it is, and so does what the status line says.
+            SaveOutcome::Failed => self.dialog = None,
+            // On its way: the edit stays as it is until the engine answers. An earlier refusal was the last press's.
+            SaveOutcome::Working => {
+                self.dialog = None;
+                self.toast = Some("Saving\u{2026}".to_string());
+                if let Some(editor) = self.editor.as_mut() {
+                    editor.refused = None;
+                }
+            }
+        }
+    }
+
     /// What a change that left the window's thread became.
     pub(super) fn settle(&mut self, settled: Settled) {
         match settled {
@@ -61,10 +84,17 @@ impl Ui {
                 self.dialog = None;
                 self.toast = Some("Not saved".to_string());
             }
-            // Not saved, and why: the edit stays as it is.
+            // Not saved, and why: the edit stays as it is. The words go in the editor's banner, which offers Save a
+            // copy (task 2530, item 1); said once, never also as a toast.
             Settled::Refused(words) => {
                 self.dialog = None;
-                self.toast = Some(words);
+                match self.editor.as_mut() {
+                    Some(editor) => {
+                        editor.refused = Some(words);
+                        self.toast = None;
+                    }
+                    None => self.toast = Some(words),
+                }
             }
         }
     }

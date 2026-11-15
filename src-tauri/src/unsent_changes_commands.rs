@@ -218,6 +218,9 @@ mod tests {
             parked: false,
             retryable: false,
             blocked: None,
+            park: None,
+            exits: Vec::new(),
+            version: None,
         }
     }
 
@@ -339,6 +342,9 @@ mod tests {
                 parked: false,
                 retryable,
                 blocked: None,
+                park: None,
+                exits: Vec::new(),
+                version: None,
             }
         };
         let page = state_db::UnsentPage {

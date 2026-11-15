@@ -38,6 +38,8 @@ struct Fake {
     during_read: Mutex<Option<Box<dyn FnOnce(&Fake) + Send>>>,
     /// Runs after the next `set_kept`, on the worker.
     after_kept: Mutex<Option<Box<dyn FnOnce(&Fake) + Send>>>,
+    /// Task 2530: the ways out the engine applied, in order: `(op, pick, version)`.
+    settled: Mutex<Vec<(String, ParkedPick, Option<i64>)>>,
 }
 
 impl Fake {
@@ -63,6 +65,7 @@ impl Fake {
             session: AtomicU64::new(1),
             during_read: Mutex::new(None),
             after_kept: Mutex::new(None),
+            settled: Mutex::new(Vec::new()),
         })
     }
 
@@ -108,6 +111,52 @@ impl ThisPcEngine for Fake {
             return Err("session moved on".into());
         }
         self.set_kept(file_id, kept)
+    }
+    /// The engine's rule as the fake applies it: for the current session only, through the state database's own
+    /// decisions (`drop_parked`, `rebase_parked`, `remove_parked_without_bytes`); a Keep's copy is not made here (the
+    /// engine's tests cover it).
+    fn settle_parked_for(
+        &self,
+        session: SessionGeneration,
+        op_id: &str,
+        pick: ParkedPick,
+        shown_version: Option<i64>,
+        _device: &str,
+    ) -> Result<Settled, SettleRefused> {
+        if session != self.session() {
+            return Err(SettleRefused::NotSignedIn);
+        }
+        self.settled
+            .lock()
+            .unwrap()
+            .push((op_id.to_string(), pick, shown_version));
+        let db = self.db();
+        if pick == ParkedPick::RemoveFromList {
+            return match db.remove_parked_without_bytes(op_id) {
+                Ok(beebeeb_engine::state_db::RemoveParked::Removed) => Ok(Settled::Removed),
+                Ok(beebeeb_engine::state_db::RemoveParked::Moved) => Ok(Settled::Moved),
+                Ok(beebeeb_engine::state_db::RemoveParked::BytesHere) => Err(SettleRefused::BytesHere),
+                Err(_) => Err(SettleRefused::Failed),
+            };
+        }
+        let Some(shown) = shown_version else {
+            return Ok(Settled::Moved);
+        };
+        if pick == ParkedPick::KeepThisPcs {
+            return match db.rebase_parked(op_id, shown, now()) {
+                Ok(Some(_)) => Ok(Settled::SentAgain),
+                Ok(None) => Ok(Settled::Moved),
+                Err(_) => Err(SettleRefused::Failed),
+            };
+        }
+        match db.drop_parked(op_id, shown) {
+            Ok(Some(_)) if pick == ParkedPick::KeepOther => Ok(Settled::KeptOther {
+                kept: PathBuf::from("kept"),
+            }),
+            Ok(Some(_)) => Ok(Settled::KeptBoth),
+            Ok(None) => Ok(Settled::Moved),
+            Err(_) => Err(SettleRefused::Failed),
+        }
     }
     fn set_kept(&self, file_id: &str, kept: bool) -> Result<(), String> {
         self.kept_calls.lock().unwrap().push((file_id.to_string(), kept));
@@ -294,7 +343,7 @@ fn problems_carry_the_engines_words_and_try_again_reaches_the_queue() {
     settle(&mut source);
     let problems = source.problems();
     assert_eq!(names(&problems), ["Loose note.md"]);
-    let What::Failed { problem, reason } = &problems[0].what else {
+    let What::Failed { problem, reason, .. } = &problems[0].what else {
         panic!("a problem is Failed");
     };
     assert_eq!(problem, "op-1");
@@ -349,7 +398,7 @@ fn a_held_edit_is_a_problem_with_the_engines_words_and_no_try_again() {
         "newest first, with the queue's own problem"
     );
     for (i, word) in [(0, "can’t tell"), (1, "which version")] {
-        let What::Failed { problem, reason } = &problems[i].what else {
+        let What::Failed { problem, reason, .. } = &problems[i].what else {
             panic!("a held edit is Failed");
         };
         assert!(problem.starts_with("held:"), "{problem}");
@@ -736,6 +785,7 @@ fn a_read_refused_for_the_session_keeps_what_is_held_and_is_asked_again() {
         generation: source.generation,
         whose: source.seen.clone(),
         refused: None,
+        done: None,
         read: Err(NoRead::NotNow),
     });
     source.pump();
@@ -756,6 +806,7 @@ fn a_first_read_answered_not_now_is_asked_again() {
         generation: source.generation,
         whose: source.seen.clone(),
         refused: None,
+        done: None,
         read: Err(NoRead::NotNow),
     });
     let pumped = source.pump();
@@ -989,3 +1040,7 @@ fn remove_is_refused_by_the_engine_when_the_session_moves_after_the_check() {
     assert!(fake.kept_calls.lock().unwrap().is_empty(), "and changed nothing");
     assert_eq!(inbox.try_recv().unwrap().refused, Some(NOT_REMOVED));
 }
+
+// Task 2530: a way out of a parked change, through this adapter.
+#[path = "this_pc_settle_tests.rs"]
+mod settle_tests;

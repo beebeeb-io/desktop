@@ -31,7 +31,7 @@ use super::settings_api::AccountCallError;
 use super::{CredentialStores, Engine, LocalStateRefused};
 use crate::account::SessionGeneration;
 use crate::api_client::ApiClient;
-use crate::engine_bridge::{EngineBridge, local_file_path_under_sync_root};
+use crate::engine_bridge::{EngineBridge, PlaceSeen, local_file_path_under_sync_root};
 use crate::state_db::FileStatus;
 
 #[cfg(test)]
@@ -154,7 +154,7 @@ pub const REPLACED_FOLDER: &str = "Replaced on this PC";
 const INCOMING: &str = ".incoming";
 
 /// 16 hex characters of the SHA-256 of `text`: a folder name that holds nothing of `text` and cannot be a path.
-fn digest_name(text: &str) -> String {
+pub(super) fn digest_name(text: &str) -> String {
     use sha2::Digest as _;
     sha2::Sha256::digest(text.as_bytes())
         .iter()
@@ -381,20 +381,23 @@ impl<C: CredentialStores> Engine<C> {
             .flatten()
             .ok_or(ResolveRefused::NoSyncFolder)?;
         // The edit on this PC was never sent: it is in no version history. Keep its bytes, where nothing syncs, before
-        // they go.
+        // they go. S6 (R9): the hydrate's start look is taken first, before the copy reads a byte, and handed to it: a
+        // save after the look (between the copy and the download, or during the download) is never replaced.
         let mut safety = None;
-        if choice == ConflictChoice::KeepThere
-            && let Ok(path) = local_file_path_under_sync_root(&root, &entry.path)
-            && path.is_file()
-        {
-            let folder = self
-                .session_identity()
-                .ok()
-                .and_then(|account| replaced_folder_in(&self.config.state_dir, &account))
-                .map(|account_folder| replaced_folder_of(&account_folder, file_id))
-                .ok_or(ResolveRefused::CopyFailed)?;
-            let copy = SafetyCopy::make(&path, &folder).map_err(|_| ResolveRefused::CopyFailed)?;
-            safety = Some((copy, path));
+        let mut seen = None;
+        if choice == ConflictChoice::KeepThere {
+            let path = local_file_path_under_sync_root(&root, &entry.path).map_err(|_| ResolveRefused::Failed)?;
+            seen = Some(PlaceSeen::take(&path).map_err(|_| ResolveRefused::Failed)?);
+            if path.is_file() {
+                let folder = self
+                    .session_identity()
+                    .ok()
+                    .and_then(|account| replaced_folder_in(&self.config.state_dir, &account))
+                    .map(|account_folder| replaced_folder_of(&account_folder, file_id))
+                    .ok_or(ResolveRefused::CopyFailed)?;
+                let copy = SafetyCopy::make(&path, &folder).map_err(|_| ResolveRefused::CopyFailed)?;
+                safety = Some((copy, path));
+            }
         }
         let done = state
             .with_shared(|db| {
@@ -403,7 +406,10 @@ impl<C: CredentialStores> Engine<C> {
                 self.runtime.block_on(async {
                     match choice {
                         ConflictChoice::KeepHere => bridge.resolve_keep_mine(file_id, &root).await,
-                        ConflictChoice::KeepThere => bridge.resolve_keep_theirs(file_id, &root).await,
+                        ConflictChoice::KeepThere => match seen {
+                            Some(seen) => bridge.resolve_theirs_seen(file_id, &root, seen).await,
+                            None => Err(anyhow::anyhow!("keep there took no look at the place")),
+                        },
                         ConflictChoice::KeepBoth => bridge.auto_resolve_keep_both(&root, &entry).await.map(|_| ()),
                     }
                 })

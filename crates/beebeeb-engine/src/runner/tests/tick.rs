@@ -456,3 +456,41 @@ fn the_tick_runs_the_stale_copy_pass_after_the_pull_and_before_the_queue_step() 
     assert!(body.contains("let stale_copies_allowed = crate::unknown_check::STARTUP_GUARD.allows_freeing();"));
     assert!(body.contains("tokio::task::spawn_blocking(move || pass_bridge.refresh_stale_copies(&pass_root))"));
 }
+
+/// S6: the kept files' step runs at a tick whose pull reached the server, after the stale pass and before the queue
+/// step, never while a sign-out's send phase is armed (a paused tick returned before it); #447's per-file fetch loop
+/// is gone (the stale pass's kept files join the one batch). Asserted on the source, on every platform.
+#[test]
+fn s6_the_tick_runs_the_kept_step_after_the_stale_pass_before_the_queue_step() {
+    let source = include_str!("../../runner.rs").replace("\r\n", "\n");
+    let start = source
+        .find("async fn run(\n    identity: &'static crate::identity::EngineIdentity,\n    app: Host")
+        .expect("run exists");
+    let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+    let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("`run` has {needle}"));
+    let pass = at("pass_bridge.refresh_stale_copies(&pass_root)");
+    let queue = at("let completed_sync_work = queue_step(");
+    for call in [
+        "crate::engine_bridge::spawn_kept_batch(",
+        "crate::engine_bridge::queue_kept_step(",
+    ] {
+        assert_eq!(body.matches(call).count(), 1, "`run` calls {call} once");
+        let call_at = at(call);
+        assert!(
+            pass < call_at && call_at < queue,
+            "{call}: after the stale pass, before the queue step"
+        );
+        let guard_at = body[..call_at].rfind("if ").unwrap();
+        let guard = &body[guard_at..guard_at + body[guard_at..].find('{').unwrap()];
+        assert_eq!(
+            guard.trim_end(),
+            "if tick.reached_server && !send_phase.is_armed()",
+            "{call}: only at a tick whose pull came back, never in a sign-out's send phase"
+        );
+    }
+    assert_eq!(
+        body.matches("hydrate_placeholder(&place)").count(),
+        0,
+        "the per-file fetch loop is gone"
+    );
+}

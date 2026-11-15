@@ -5,7 +5,7 @@ use chrono::{Datelike, NaiveDate, Weekday};
 use rune::{Align, Color, Cx, El, Icon, TextStyle, col, el, row};
 
 use super::chrome::{self, FilesControls};
-use super::source::{Change, Kind, Origin, What};
+use super::source::{Change, Exit, Kind, Origin, What};
 use super::{Filter, Section, Ui, icons};
 use crate::State;
 use crate::theme::icons as base;
@@ -59,7 +59,17 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             "History of the last 30 days, on this PC only".into(),
             &t,
         ));
-    super::window(s, cx, Section::SyncHistory, main)
+    let window = super::window(s, cx, Section::SyncHistory, main);
+    // Task 2530: a problem's question, over the window (not on the board: `settle.rs`).
+    match &ui.asking {
+        Some(asking) => el()
+            .key("window-with-ask")
+            .w_full()
+            .h_full()
+            .child(window)
+            .child(super::settle::ask(asking, &t)),
+        None => window,
+    }
 }
 
 /// The filter (`.kit-seg.kit-seg-sm`): one of four, the chosen one raised.
@@ -258,7 +268,9 @@ fn tile(k: &str, change: &Change, t: &Theme) -> El {
 
 /// One change (`.grid` 30 · rest · 150 · 96 · 48, 44 pt). Keys: `change-<i>` and
 /// `change-<i>-tile|icon|name|sub|device-icon|device|time`; a problem's button is
-/// `btn-try-again`, the second in the frame `btn-try-again-2` (+ `-icon`, `-label`).
+/// `btn-try-again`, the second in the frame `btn-try-again-2` (+ `-icon`, `-label`). Task 2530: the button is only
+/// a way out the engine listed for the row: Try again; else Choose (`change-<i>-choose`), which asks the two-versions
+/// question; else Remove (`change-<i>-remove`), which asks once. A row with none has no button.
 fn change_row(i: usize, change: &Change, retry_no: usize, t: &Theme) -> El {
     let k = format!("change-{i}");
     let line = change.what.line();
@@ -266,7 +278,8 @@ fn change_row(i: usize, change: &Change, retry_no: usize, t: &Theme) -> El {
     let shown = change.clone();
 
     let mut retry = el().key("retry-cell").w(96.0);
-    // A held edit is a problem with no Try again (task 2524).
+    // A held edit is a problem with no Try again (task 2524); a parked one has the ways out the engine lists (2530).
+    let exits = change.exits();
     if let Some(problem) = failed.clone().filter(|_| change.can_retry()) {
         let key = if retry_no > 1 {
             format!("btn-try-again-{retry_no}")
@@ -276,6 +289,16 @@ fn change_row(i: usize, change: &Change, retry_no: usize, t: &Theme) -> El {
         retry = retry.child(
             chrome::outline_button(&key, "Try again", Some(&icons::RETRY), t)
                 .on_press(move |s: &mut State| s.this_pc.retry(&problem)),
+        );
+    } else if let Some(problem) = failed.clone().filter(|_| exits.iter().any(|exit| exit.is_keep())) {
+        retry = retry.child(
+            chrome::outline_button(&format!("{k}-choose"), "Choose", None, t)
+                .on_press(move |s: &mut State| s.this_pc.ask_exit(&problem, false)),
+        );
+    } else if let Some(problem) = failed.clone().filter(|_| exits.contains(&Exit::RemoveFromList)) {
+        retry = retry.child(
+            chrome::outline_button(&format!("{k}-remove"), "Remove", None, t)
+                .on_press(move |s: &mut State| s.this_pc.ask_exit(&problem, true)),
         );
     }
 
