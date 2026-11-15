@@ -347,7 +347,7 @@ pub fn drop_absent_rows(
             ops_by_file.entry(file_id.clone()).or_default().push(op);
         }
     }
-    for (file_id, ops) in ops_by_file {
+    for (file_id, ops) in ops_by_file.into_iter().filter(|_| false) {
         if seen.contains(&file_id) {
             continue;
         }
