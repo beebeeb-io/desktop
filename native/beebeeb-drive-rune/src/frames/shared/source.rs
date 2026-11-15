@@ -259,9 +259,6 @@ pub trait SharedSource {
     /// Take one person off a share (DW-0512b): nothing new opens for them and the share goes
     /// from their list; copies they saved stay with them. `false`: no such person, or the owner.
     fn remove_access(&mut self, share: &str, person: &str) -> bool;
-    /// Share with someone by their email address (DW-0514); they show as invited until they
-    /// accept. `false`: no such share, or they are on it already.
-    fn invite(&mut self, share: &str, email: &str, access: Access) -> bool;
     /// Send an invitation to `email` for the share `share` (an item's id: also one not shared with anyone yet), with
     /// the access Beebeeb gives a new invitation. Answered later, through [`Self::invite_answer`]. `false`: refused
     /// at once (nothing typed, one for this share already on its way, or nothing to send it with); nothing was sent.
@@ -318,6 +315,33 @@ fn from(id: &str, name: &str, kind: Kind, date: &str, size: &str, who: (&str, &s
 }
 
 impl BoardShared {
+    /// Share with someone by their email address (DW-0514); they show as invited until they
+    /// accept. `false`: no such share, or they are on it already. The board's own: the engine path is
+    /// `start_invite`.
+    fn invite(&mut self, share: &str, email: &str, access: Access) -> bool {
+        let email = email.trim();
+        let Some(people) = self.people_of(share) else {
+            return false;
+        };
+        if email.is_empty() || people.iter().any(|m| m.email.eq_ignore_ascii_case(email)) {
+            return false;
+        }
+        people.push(Member {
+            // Its own kind of id: never one of a member's (`m-…`), and one address is invited once.
+            id: format!("invite-{}", email.to_ascii_lowercase()),
+            name: email.to_string(),
+            initials: initial_of(email),
+            hue: 'e',
+            email: email.to_string(),
+            access: Some(access),
+            you: false,
+            invited: true,
+            compared: false,
+            pronoun: Pronoun::They,
+        });
+        self.sync_row(share);
+        true
+    }
     pub fn new() -> Self {
         let person = |initials: &str, hue: char| Person {
             initials: initials.into(),
@@ -683,30 +707,6 @@ impl SharedSource for BoardShared {
         }
         gone
     }
-    fn invite(&mut self, share: &str, email: &str, access: Access) -> bool {
-        let email = email.trim();
-        let Some(people) = self.people_of(share) else {
-            return false;
-        };
-        if email.is_empty() || people.iter().any(|m| m.email.eq_ignore_ascii_case(email)) {
-            return false;
-        }
-        people.push(Member {
-            // Its own kind of id: never one of a member's (`m-…`), and one address is invited once.
-            id: format!("invite-{}", email.to_ascii_lowercase()),
-            name: email.to_string(),
-            initials: initial_of(email),
-            hue: 'e',
-            email: email.to_string(),
-            access: Some(access),
-            you: false,
-            invited: true,
-            compared: false,
-            pronoun: Pronoun::They,
-        });
-        self.sync_row(share);
-        true
-    }
     /// The board's invitation: the address joins the share at once, with the access a new invitation gets
     /// (Can view), and the answer waits for the next poll.
     fn start_invite(&mut self, share: &str, email: &str) -> bool {
@@ -770,9 +770,6 @@ impl SharedSource for Unwired {
         false
     }
     fn remove_access(&mut self, _share: &str, _person: &str) -> bool {
-        false
-    }
-    fn invite(&mut self, _share: &str, _email: &str, _access: Access) -> bool {
         false
     }
 }
