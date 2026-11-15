@@ -32,6 +32,12 @@
 //!   privileges           -> privileges <n> <names, comma-separated, sorted>  (Windows: those in its own token)
 //!   open-afd [<name>]    -> ok | err <status>           (Windows: opens the socket driver, \Device\Afd or
 //!                                                         \Device\Afd\<name>)
+//!   raw-connect <ip:port> -> ok | err <step> <status>   (Windows: a TCP connect through the socket driver alone,
+//!                                                         no socket library: open, bind, connect; a connect that
+//!                                                         has not finished after 5 s answers `err connect timeout`)
+//!   dns <name>           -> ok | err <status>           (Windows: a name lookup through the system resolver's
+//!                                                         interface, which the DNS client service answers; no
+//!                                                         socket library in this process)
 //!   read-font            -> ok | err <system code>      (opens the system's Segoe UI font file, reads 4 bytes)
 //!   hang                 -> hanging, then sleeps for ever
 //!   spin                 -> spinning, then burns one core for ever
@@ -596,6 +602,330 @@ fn open_afd(_name: &str) -> String {
     "err unsupported".into()
 }
 
+/// A TCP connect through the socket driver alone, the way a helper that skips the system's socket library would
+/// make one: an endpoint opened with the driver's create packet (IPv4, stream, TCP), bound to the wildcard address,
+/// then connected. No socket library is loaded or started on this path, so the refusal, if any, comes from the
+/// driver or the kernel's network filter. The answer names the step and the call's own status. Layouts: the
+/// driver's transport-layer mode as published in the native API headers (`AFD_OPEN_PACKET`, `AFD_BIND_INFO_TL`,
+/// `AFD_CONNECT_JOIN_INFO_TL`; codes 0x12003 bind, 0x12007 connect). A plain probe connecting is what proves them.
+#[cfg(windows)]
+fn raw_connect(target: &str) -> String {
+    use std::ffi::c_void;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+
+    #[repr(C)]
+    #[allow(dead_code)] // read by the system, not by this code
+    struct CountedText {
+        length: u16,
+        maximum_length: u16,
+        buffer: *const u16,
+    }
+    #[repr(C)]
+    #[allow(dead_code)] // read by the system, not by this code
+    struct ObjectAttributes {
+        length: u32,
+        root_directory: HANDLE,
+        object_name: *const CountedText,
+        attributes: u32,
+        security_descriptor: *const c_void,
+        security_quality_of_service: *const c_void,
+    }
+    /// One extended attribute named `AfdOpenPacketXX` whose value is the driver's create packet.
+    #[repr(C)]
+    #[allow(dead_code)] // read by the system, not by this code
+    struct OpenPacket {
+        next_entry_offset: u32,
+        flags: u8,
+        name_length: u8,
+        value_length: u16,
+        name: [u8; 16],
+        endpoint_flags: u32,
+        group: u32,
+        address_family: i32,
+        socket_type: i32,
+        protocol: i32,
+        transport_name_length: u32,
+        transport_name: [u16; 1],
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    #[allow(dead_code)] // read by the system, not by this code
+    struct SocketAddressV4 {
+        family: u16,
+        port: [u8; 2],
+        address: [u8; 4],
+        zero: [u8; 8],
+    }
+    #[repr(C)]
+    #[allow(dead_code)] // read by the system, not by this code
+    struct BindInfo {
+        share_access: u32,
+        address: SocketAddressV4,
+    }
+    #[repr(C)]
+    #[allow(dead_code)] // read by the system, not by this code
+    struct ConnectInfo {
+        san_active: u8,
+        root_endpoint: HANDLE,
+        connect_endpoint: HANDLE,
+        remote: SocketAddressV4,
+    }
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        #[allow(clippy::too_many_arguments)]
+        fn NtCreateFile(
+            handle: *mut HANDLE,
+            access: u32,
+            attributes: *const ObjectAttributes,
+            io_status: *mut [usize; 2],
+            allocation_size: *const i64,
+            file_attributes: u32,
+            share: u32,
+            disposition: u32,
+            options: u32,
+            extended_attributes: *const c_void,
+            extended_attributes_length: u32,
+        ) -> i32;
+        #[allow(clippy::too_many_arguments)]
+        fn NtDeviceIoControlFile(
+            handle: HANDLE,
+            event: HANDLE,
+            apc_routine: *const c_void,
+            apc_context: *const c_void,
+            io_status: *mut [usize; 2],
+            code: u32,
+            input: *const c_void,
+            input_length: u32,
+            output: *mut c_void,
+            output_length: u32,
+        ) -> i32;
+        fn NtCancelIoFile(handle: HANDLE, io_status: *mut [usize; 2]) -> i32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateEventW(attributes: *const c_void, manual_reset: i32, initial_state: i32, name: *const u16) -> HANDLE;
+        fn WaitForSingleObject(handle: HANDLE, milliseconds: u32) -> u32;
+    }
+    const GENERIC_READ_WRITE: u32 = 0x8000_0000 | 0x4000_0000;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const SHARE_READ_AND_WRITE: u32 = 0x1 | 0x2;
+    const OPEN_OR_CREATE: u32 = 3;
+    const CASE_INSENSITIVE: u32 = 0x40;
+    const PENDING: i32 = 0x103;
+    const IOCTL_BIND: u32 = 0x12003;
+    const IOCTL_CONNECT: u32 = 0x12007;
+    const WAIT_MS: u32 = 5_000;
+
+    let Ok(SocketAddr::V4(remote)) = target.parse::<SocketAddr>() else {
+        return "err parse".into();
+    };
+    let v4 = |address: [u8; 4], port: u16| SocketAddressV4 {
+        family: 2, // AF_INET
+        port: port.to_be_bytes(),
+        address,
+        zero: [0; 8],
+    };
+
+    let units: Vec<u16> = r"\Device\Afd\Endpoint".encode_utf16().collect();
+    let bytes = (units.len() * 2) as u16;
+    let object_name = CountedText {
+        length: bytes,
+        maximum_length: bytes,
+        buffer: units.as_ptr(),
+    };
+    let attributes = ObjectAttributes {
+        length: size_of::<ObjectAttributes>() as u32,
+        root_directory: std::ptr::null_mut(),
+        object_name: &object_name,
+        attributes: CASE_INSENSITIVE,
+        security_descriptor: std::ptr::null(),
+        security_quality_of_service: std::ptr::null(),
+    };
+    let mut name = [0u8; 16];
+    name[..15].copy_from_slice(b"AfdOpenPacketXX");
+    let packet = OpenPacket {
+        next_entry_offset: 0,
+        flags: 0,
+        name_length: 15,
+        value_length: (size_of::<OpenPacket>() - 24) as u16,
+        name,
+        endpoint_flags: 0,
+        group: 0,
+        address_family: 2, // AF_INET
+        socket_type: 1,    // SOCK_STREAM
+        protocol: 6,       // IPPROTO_TCP
+        transport_name_length: 0,
+        transport_name: [0],
+    };
+    let mut endpoint: HANDLE = std::ptr::null_mut();
+    let mut io_status = [0usize; 2];
+    // SAFETY: `endpoint` and `io_status` are writable places of the sizes the call writes; `attributes`, the name
+    // it points to and `packet` live past the call; the handle is opened for overlapped use (no synchronous flag).
+    let status = unsafe {
+        NtCreateFile(
+            &mut endpoint,
+            GENERIC_READ_WRITE | SYNCHRONIZE,
+            &attributes,
+            &mut io_status,
+            std::ptr::null(),
+            0,
+            SHARE_READ_AND_WRITE,
+            OPEN_OR_CREATE,
+            0,
+            (&packet as *const OpenPacket).cast(),
+            size_of::<OpenPacket>() as u32,
+        )
+    };
+    if status != 0 {
+        return format!("err open {status:#010x}");
+    }
+
+    // One request to the driver, waited for at most `WAIT_MS`; a request still running then is cancelled, and its
+    // status block and event are left alive (leaked) because the driver may still write to them.
+    let request = |code: u32, input: *const c_void, input_length: usize, output: *mut c_void, output_length: usize| {
+        // SAFETY: an unnamed, unsecured, manual-reset event, closed below or deliberately leaked.
+        let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+        if event.is_null() {
+            return Err("event".to_string());
+        }
+        let io_status = Box::into_raw(Box::new([0usize; 2]));
+        // SAFETY: the endpoint handle opened above; input and output point to live buffers of the lengths given;
+        // the status block lives on the heap until the request is known to be finished.
+        let mut status = unsafe {
+            NtDeviceIoControlFile(
+                endpoint,
+                event,
+                std::ptr::null(),
+                std::ptr::null(),
+                io_status,
+                code,
+                input,
+                input_length as u32,
+                output,
+                output_length as u32,
+            )
+        };
+        if status == PENDING {
+            // SAFETY: the event created above.
+            if unsafe { WaitForSingleObject(event, WAIT_MS) } != 0 {
+                let mut cancel_status = [0usize; 2];
+                // SAFETY: the endpoint handle; a local status block for the cancel call itself.
+                unsafe { NtCancelIoFile(endpoint, &mut cancel_status) };
+                return Err("timeout".to_string());
+            }
+            // SAFETY: the request has finished (its event is set), so the driver no longer writes the block.
+            status = unsafe { (*io_status)[0] } as u32 as i32;
+        }
+        // SAFETY: the request is finished; the block came from `Box::into_raw` above and the event from the call.
+        unsafe {
+            drop(Box::from_raw(io_status));
+            CloseHandle(event);
+        }
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(format!("{status:#010x}"))
+        }
+    };
+
+    let bind = BindInfo {
+        share_access: 0, // normal address use
+        address: v4([0, 0, 0, 0], 0),
+    };
+    let mut bound = v4([0; 4], 0);
+    let answer = match request(
+        IOCTL_BIND,
+        (&bind as *const BindInfo).cast(),
+        size_of::<BindInfo>(),
+        (&mut bound as *mut SocketAddressV4).cast(),
+        size_of::<SocketAddressV4>(),
+    ) {
+        Err(why) => format!("err bind {why}"),
+        Ok(()) => {
+            let connect = ConnectInfo {
+                san_active: 0,
+                root_endpoint: std::ptr::null_mut(),
+                connect_endpoint: std::ptr::null_mut(),
+                remote: v4(remote.ip().octets(), remote.port()),
+            };
+            match request(
+                IOCTL_CONNECT,
+                (&connect as *const ConnectInfo).cast(),
+                size_of::<ConnectInfo>(),
+                std::ptr::null_mut(),
+                0,
+            ) {
+                Err(why) => format!("err connect {why}"),
+                Ok(()) => "ok".to_string(),
+            }
+        }
+    };
+    // SAFETY: the endpoint opened above, closed once (a cancelled request ends with it).
+    unsafe { CloseHandle(endpoint) };
+    answer
+}
+
+#[cfg(not(windows))]
+fn raw_connect(_target: &str) -> String {
+    "err unsupported".into()
+}
+
+/// A name lookup through the system resolver's interface (`DnsQuery_W`, an A record, standard options). The lookup
+/// itself is made by the DNS client service, not by this process, so a lookup made on the helper's behalf shows in
+/// that service's cache, which the test reads. The answer is the call's own status (9003: the name does not exist).
+#[cfg(windows)]
+fn dns(name: &str) -> String {
+    use std::ffi::c_void;
+
+    #[link(name = "dnsapi")]
+    unsafe extern "system" {
+        fn DnsQuery_W(
+            name: *const u16,
+            record_type: u16,
+            options: u32,
+            extra: *const c_void,
+            results: *mut *mut c_void,
+            reserved: *mut c_void,
+        ) -> i32;
+        fn DnsRecordListFree(records: *mut c_void, free_type: i32);
+    }
+    const TYPE_A: u16 = 1;
+    const STANDARD: u32 = 0;
+    const FREE_RECORD_LIST: i32 = 1;
+
+    if name.is_empty() {
+        return "err parse".into();
+    }
+    let units: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut records: *mut c_void = std::ptr::null_mut();
+    // SAFETY: a NUL-terminated name that lives past the call; `records` is a writable pointer the call fills in or
+    // leaves null; no extra parameters; the reserved pointer is null as documented.
+    let status = unsafe {
+        DnsQuery_W(
+            units.as_ptr(),
+            TYPE_A,
+            STANDARD,
+            std::ptr::null(),
+            &mut records,
+            std::ptr::null_mut(),
+        )
+    };
+    if !records.is_null() {
+        // SAFETY: the list the call returned, freed once with the documented free type.
+        unsafe { DnsRecordListFree(records, FREE_RECORD_LIST) };
+    }
+    if status == 0 {
+        "ok".into()
+    } else {
+        format!("err {status}")
+    }
+}
+
+#[cfg(not(windows))]
+fn dns(_name: &str) -> String {
+    "err unsupported".into()
+}
+
 /// Opens the system's Segoe UI font file and reads its first 4 bytes: the helper draws text with the system's fonts.
 fn read_font() -> String {
     let Some(system_root) = std::env::var_os("SystemRoot") else {
@@ -736,6 +1066,8 @@ fn main() {
             "map-handle" => map_handle(rest),
             "privileges" => privileges(),
             "open-afd" => open_afd(rest),
+            "raw-connect" => raw_connect(rest),
+            "dns" => dns(rest),
             "read-font" => read_font(),
             "hang" | "spin" => {
                 let _ = writeln!(stdout, "{}", if request == "hang" { "hanging" } else { "spinning" });
