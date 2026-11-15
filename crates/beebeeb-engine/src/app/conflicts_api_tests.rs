@@ -443,3 +443,33 @@ fn keep_there_never_leaves_a_second_file_in_the_sync_folder() {
         b"this PC's edit, never sent"
     );
 }
+
+/// S6 (R9): Keep there takes the hydrate's start look before its safety copy reads a byte, and hands that look to the
+/// download: never the plain `resolve_keep_theirs`, which would look again after the copy (a save between the two
+/// would then be replaced). `resolve_conflict_for` needs a signed-in engine and a server, so the order is asserted on
+/// the source, on every platform; the behaviour is `engine_bridge/tests/start_look_s6.rs` (Linux).
+#[test]
+fn s6_start_keep_there_looks_before_its_safety_copy() {
+    let source = include_str!("conflicts_api.rs").replace("\r\n", "\n");
+    let start = source
+        .find("    pub fn resolve_conflict_for(")
+        .expect("Keep there's fn");
+    let body = &source[start..start + source[start..].find("\n    }\n").unwrap()];
+    let at = |needle: &str| {
+        body.find(needle)
+            .unwrap_or_else(|| panic!("Keep there's fn has {needle}"))
+    };
+    assert_eq!(body.matches("PlaceSeen::take(").count(), 1, "one look");
+    assert!(
+        at("PlaceSeen::take(") < at("SafetyCopy::make("),
+        "the look before the safety copy"
+    );
+    assert!(
+        body.contains("bridge.resolve_theirs_seen(file_id, &root, seen)"),
+        "the look is handed to the download"
+    );
+    assert!(
+        !body.contains("resolve_keep_theirs("),
+        "never the call that looks again"
+    );
+}

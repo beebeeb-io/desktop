@@ -264,3 +264,234 @@ pub(crate) async fn queue_kept_step(bridge: &Arc<EngineBridge>, sync_root: &Path
         Err(error) => tracing::warn!(%error, "kept files: the step panicked; next tick retries"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    /// The status a failed fetch leaves on a row the plan selects again: Windows `error` (R1). Elsewhere the batch
+    /// does not run in production and the plan never selects `error`, so the row stays `cloud_only`.
+    const FAILED: FileStatus = if cfg!(target_os = "windows") {
+        FileStatus::Error
+    } else {
+        FileStatus::CloudOnly
+    };
+
+    fn bridge() -> (tempfile::TempDir, EngineBridge) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(StateDb::open(dir.path().join("state.db")).unwrap());
+        let api = Arc::new(ApiClient::new(
+            "https://api.beebeeb.io".into(),
+            "token".into(),
+            [7u8; 32],
+        ));
+        (dir, EngineBridge::new(&crate::identity::REAL, db, api))
+    }
+
+    /// A kept (own pin) cloud-only file `<id>.txt`.
+    fn kept(bridge: &EngineBridge, id: &str) {
+        let entry = FileEntry {
+            file_id: id.into(),
+            path: format!("{id}.txt"),
+            status: FileStatus::CloudOnly,
+            size_bytes: 10,
+            modified_at: 1,
+            content_hash: None,
+            remote_updated_at: 1,
+            parent_id: None,
+            item_kind: ItemKind::File,
+        };
+        bridge
+            .db
+            .upsert_file_with_contract(&entry, |contract| contract.item_kind = ItemKind::File)
+            .unwrap();
+        bridge.db.set_recursive_pin(id, true, 1).unwrap();
+    }
+
+    fn ids(plan: &[KeptPlace]) -> Vec<String> {
+        plan.iter().map(|kept| kept.file_id.clone()).collect()
+    }
+
+    fn id_of(place: &Path) -> String {
+        place.file_stem().unwrap().to_string_lossy().into_owned()
+    }
+
+    /// Runs `rounds` step runs with `fetch` (given the round and the file id); returns each file's attempted rounds.
+    fn run_rounds(
+        bridge: &EngineBridge,
+        root: &Path,
+        rounds: u64,
+        fetch: impl Fn(&str) -> KeptFetch,
+    ) -> HashMap<String, Vec<u64>> {
+        let state = KeptRefetch::default();
+        let attempts = RefCell::new(HashMap::<String, Vec<u64>>::new());
+        let round = Cell::new(0);
+        for r in 1..=rounds {
+            round.set(r);
+            let plan = bridge.kept_refetch_plan(root, &state, Vec::new()).unwrap();
+            let fake = |place: &Path| {
+                let id = id_of(place);
+                attempts.borrow_mut().entry(id.clone()).or_default().push(round.get());
+                fetch(&id)
+            };
+            state.run_batch(&bridge.db, plan, &fake, &|| true);
+        }
+        attempts.into_inner()
+    }
+
+    /// S6 R3: a step starts at most the cap of the rule's files; the stale pass's kept files come first, once, and do
+    /// not count against it.
+    #[test]
+    fn s6_kept_a_tick_starts_at_most_the_cap() {
+        let (dir, bridge) = bridge();
+        for n in 0..20 {
+            kept(&bridge, &format!("k{n:02}"));
+        }
+        let plan = bridge
+            .kept_refetch_plan(dir.path(), &KeptRefetch::default(), Vec::new())
+            .unwrap();
+        let extra = KeptPlace {
+            file_id: "k05".into(),
+            place: dir.path().join("k05.txt"),
+        };
+        let with_extra = bridge
+            .kept_refetch_plan(dir.path(), &KeptRefetch::default(), vec![extra.clone(), extra.clone()])
+            .unwrap();
+        println!(
+            "s6 kept cap: {} planned; with a stale extra {:?}",
+            plan.len(),
+            ids(&with_extra)
+        );
+        assert_eq!(plan.len(), KEPT_REFETCH_PER_TICK, "at most the cap");
+        assert_eq!(plan[0].place, dir.path().join("k00.txt"), "the file's place");
+        assert_eq!(with_extra.len(), KEPT_REFETCH_PER_TICK + 1, "the extra beside the cap");
+        assert_eq!(with_extra[0], extra, "the extra first");
+        assert_eq!(ids(&with_extra).iter().filter(|id| *id == "k05").count(), 1, "once");
+    }
+
+    /// S6 R6: a file whose fetch failed once is fetched at the next step run; a fetch that lands clears its backoff.
+    #[test]
+    fn s6_kept_fails_once_then_the_next_tick_fetches_it() {
+        let (dir, bridge) = bridge();
+        kept(&bridge, "a");
+        let state = KeptRefetch::default();
+        let first = bridge.kept_refetch_plan(dir.path(), &state, Vec::new()).unwrap();
+        let failing = |_: &Path| {
+            bridge.db.set_status("a", FAILED).unwrap();
+            KeptFetch::Failed
+        };
+        let one = state.run_batch(&bridge.db, first, &failing, &|| true);
+        let second = bridge.kept_refetch_plan(dir.path(), &state, Vec::new()).unwrap();
+        println!("s6 kept retry: round 1 {one:?}, round 2 plans {:?}", ids(&second));
+        assert_eq!(one.failed, 1);
+        assert_eq!(ids(&second), ["a"], "the next step run fetches it again");
+        let landing = |_: &Path| {
+            bridge.db.set_status("a", FileStatus::Local).unwrap();
+            KeptFetch::Done
+        };
+        let two = state.run_batch(&bridge.db, second, &landing, &|| true);
+        assert_eq!(two.fetched, 1);
+        assert!(
+            state.lock_backoff().is_empty(),
+            "a fetch that landed clears the backoff"
+        );
+    }
+
+    /// S6 R6: files that keep failing back off (runs 1, 2, 4, 8, 16), and never hold back the file behind them.
+    #[test]
+    fn s6_kept_repeated_failures_back_off_and_never_starve_the_rest() {
+        let (dir, bridge) = bridge();
+        for n in 0..8 {
+            kept(&bridge, &format!("bad{n}"));
+        }
+        kept(&bridge, "good");
+        let attempts = run_rounds(&bridge, dir.path(), 20, |id| {
+            if id == "good" {
+                bridge.db.set_status(id, FileStatus::Local).unwrap();
+                KeptFetch::Done
+            } else {
+                bridge.db.set_status(id, FAILED).unwrap();
+                KeptFetch::Failed
+            }
+        });
+        println!(
+            "s6 kept backoff: bad0 {:?}, good {:?}",
+            attempts.get("bad0"),
+            attempts.get("good")
+        );
+        for n in 0..8 {
+            assert_eq!(attempts[&format!("bad{n}")], [1, 2, 4, 8, 16], "bad{n} backs off");
+        }
+        assert_eq!(attempts["good"], [3], "the good file is fetched by run 3, once");
+    }
+
+    /// S6 R6: an attempt counts only when the row reads `local` afterwards; a place not there yet is no failure.
+    #[test]
+    fn s6_kept_an_attempt_counts_only_when_the_row_reads_local() {
+        let (dir, bridge) = bridge();
+        kept(&bridge, "stuck");
+        kept(&bridge, "absent");
+        let attempts = run_rounds(&bridge, dir.path(), 4, |id| {
+            if id == "stuck" {
+                bridge.db.set_status(id, FAILED).unwrap();
+                KeptFetch::Done
+            } else {
+                KeptFetch::NotThere
+            }
+        });
+        println!(
+            "s6 kept counts: stuck {:?}, absent {:?}",
+            attempts["stuck"], attempts["absent"]
+        );
+        assert_eq!(
+            attempts["stuck"],
+            [1, 2, 4],
+            "`Done` with the row not local backs off like a failure"
+        );
+        assert_eq!(
+            attempts["absent"],
+            [1, 2, 3, 4],
+            "not there: planned again at the next run"
+        );
+    }
+
+    /// S6 R2 / L3: pause or stop, read before each file, ends the batch; the file being fetched finishes.
+    #[test]
+    fn s6_kept_the_batch_stops_at_pause_or_stop() {
+        let (dir, bridge) = bridge();
+        let batch: Vec<KeptPlace> = ["a", "b", "c"]
+            .iter()
+            .map(|id| KeptPlace {
+                file_id: id.to_string(),
+                place: dir.path().join(format!("{id}.txt")),
+            })
+            .collect();
+        let fetches = Cell::new(0);
+        let fetch = |_: &Path| {
+            fetches.set(fetches.get() + 1);
+            KeptFetch::NotThere
+        };
+        let done = KeptRefetch::default().run_batch(&bridge.db, batch, &fetch, &|| fetches.get() == 0);
+        println!("s6 kept pause: {} fetches, {done:?}", fetches.get());
+        assert_eq!(fetches.get(), 1, "paused after the first file");
+        assert!(done.stopped);
+    }
+
+    /// S6 R5: one batch at a time; the guard frees the next one when dropped, after a panic too.
+    #[test]
+    fn s6_kept_one_batch_at_a_time() {
+        let state = Arc::new(KeptRefetch::default());
+        let running = state.try_start();
+        assert!(running.is_some(), "the first batch starts");
+        assert!(state.try_start().is_none(), "none while it runs");
+        drop(running);
+        assert!(state.try_start().is_some(), "the next one after it ended");
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _running = state.try_start().unwrap();
+            panic!("s6: a batch panicked");
+        }));
+        assert!(panicked.is_err());
+        assert!(state.try_start().is_some(), "and after one panicked");
+    }
+}

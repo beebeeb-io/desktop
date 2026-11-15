@@ -254,6 +254,8 @@ mod tests {
     mod finder_queue_6;
     mod hydrate_files;
     mod ipc;
+    // S6: a kept file this PC does not hold is fetched again (Linux, through the queue).
+    mod kept_refetch_s6;
     mod ld0105_u1_rows;
     mod ld0113_protect;
     mod logging;
@@ -272,6 +274,8 @@ mod tests {
     mod shared_2;
     // Task 2523: another device's version reaches the copy on this PC; a held edit is never hydrated over.
     mod stale_2523;
+    // S6: a hydrate's start look; a save made after it is never replaced (Linux).
+    mod start_look_s6;
     mod sync;
     mod sync_2;
     mod sync_3;

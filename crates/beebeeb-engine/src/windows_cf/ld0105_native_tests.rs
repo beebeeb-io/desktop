@@ -1180,3 +1180,7 @@ mod f2b;
 /// Task 2523 (F1): a copy behind the current version, emptied in the measured order at the new size.
 #[path = "stale_2523_native_tests.rs"]
 mod stale_2523;
+
+/// S6: a kept placeholder this PC does not hold is fetched by the batch's production fetch.
+#[path = "kept_refetch_s6_native_tests.rs"]
+mod kept_refetch_s6;
