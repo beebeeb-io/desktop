@@ -316,6 +316,29 @@ mod tests {
         assert_eq!(tags.artist, "");
     }
 
+    /// Every committed fixture (audio and video, as the parser must survive any bytes): no panic, never a read past
+    /// the end, and no title or artist where ffmpeg wrote none (it writes only its encoder line).
+    #[test]
+    fn the_tag_pass_survives_every_fixture() {
+        let manifest = String::from_utf8(fixture("manifest.tsv")).expect("the manifest is text");
+        let names: Vec<&str> = manifest
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .filter_map(|line| line.split('\t').next())
+            .collect();
+        assert_eq!(names.len(), 26);
+        for name in names {
+            let reader = Counted::new(fixture(name));
+            let tags = read(reader.clone());
+            assert_eq!(reader.past_end.load(Ordering::Relaxed), 0, "{name}");
+            assert!(reader.read.load(Ordering::Relaxed) <= TAG_READ_MAX, "{name}");
+            assert!(
+                tags.as_ref().is_none_or(|t| t.title.is_empty() && t.artist.is_empty()),
+                "{name}: {tags:?}"
+            );
+        }
+    }
+
     /// The pass stops after `TAG_READ_MAX` bytes, however long the file says it is.
     #[test]
     fn the_tag_pass_reads_at_most_its_limit() {
