@@ -13,6 +13,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
 use beebeeb_media_helper::session::run_with_system;
+use beebeeb_media_helper::sniff::{Bare, sniff};
 use beebeeb_media_helper::{ROUTES, Route, route};
 use beebeeb_media_protocol::{Codec, FromHelper, KindHint, ToHelper, read_to_app, write_msg};
 
@@ -286,5 +287,84 @@ fn system_decoder_plays_hevc_frames_at_the_asked_size() {
         other => panic!("expected Frame, got {other:?}"),
     }
     assert_eq!(app.reads_past_end, 0);
+    app.close();
+}
+
+/// The ADTS AAC elementary stream inside a 188-byte transport stream (`h264-aac.ts`, as ffmpeg muxes it): the
+/// payloads of the PID whose packets start a PES of stream id `0xC0`, PES headers dropped.
+fn adts_of_ts(ts: &[u8]) -> Vec<u8> {
+    let mut audio_pid = None;
+    let mut out = Vec::new();
+    for packet in ts.chunks_exact(188) {
+        assert_eq!(packet[0], 0x47, "a 188-byte transport stream");
+        let start = packet[1] & 0x40 != 0;
+        let pid = (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]);
+        let control = (packet[3] >> 4) & 0x03;
+        let mut at = 4;
+        if control & 0x02 != 0 {
+            at += 1 + usize::from(packet[4]);
+        }
+        if control & 0x01 == 0 || at >= packet.len() {
+            continue;
+        }
+        let payload = &packet[at..];
+        if start && payload.starts_with(&[0, 0, 1, 0xC0]) {
+            audio_pid.get_or_insert(pid);
+        }
+        if audio_pid != Some(pid) {
+            continue;
+        }
+        if start {
+            out.extend(&payload[9 + usize::from(payload[8])..]);
+        } else {
+            out.extend(payload);
+        }
+    }
+    assert!(!out.is_empty(), "the transport stream has an audio stream");
+    out
+}
+
+/// Row 14 (MCP2): a bare ADTS AAC stream, with the switch on and Media Foundation running, plays through Windows'
+/// decoder (before, it was refused with `NoSystemDecoder`): `Opened` from Windows' own description, sound that is not
+/// silence, the end, and never a read past the end.
+#[test]
+fn system_decoder_plays_a_bare_adts_stream() {
+    let adts = adts_of_ts(&fixture("h264-aac.ts"));
+    assert_eq!(sniff(&adts[..adts.len().min(64 << 10)]), Some(Bare::Aac));
+    let mut app = App::start(adts);
+    let opened = match app.ask(ToHelper::Open {
+        len: app.file.len() as u64,
+        hint: KindHint::Audio,
+    }) {
+        FromHelper::Opened(opened) => opened,
+        FromHelper::Error(code) => panic!("a bare ADTS stream with Media Foundation running: {code:?}"),
+        other => panic!("expected Opened, got {other:?}"),
+    };
+    let audio = opened.audio.expect("an audio stream");
+    assert_eq!(audio.codec, Codec::Aac);
+    assert!(audio.rate > 0 && audio.channels > 0);
+    assert!(opened.video.is_none());
+    assert!(!opened.reduced_quality, "Windows decodes HE-AAC in full");
+
+    let mut samples = Vec::new();
+    let mut chunks = 0;
+    loop {
+        match app.ask(ToHelper::WantAudio {
+            rate: 48_000,
+            channels: 2,
+            frames: 48_000,
+        }) {
+            FromHelper::Audio { samples: more, .. } => {
+                assert!(more.iter().all(|s| s.is_finite()));
+                samples.extend(more);
+                chunks += 1;
+            }
+            FromHelper::Ended => break,
+            other => panic!("expected Audio or Ended, got {other:?}"),
+        }
+        assert!(chunks < 30, "a short stream ends");
+    }
+    assert!(rms(&samples) > 0.001, "sound, not silence (RMS {:.6})", rms(&samples));
+    assert_eq!(app.reads_past_end, 0, "the helper never asks beyond the stream");
     app.close();
 }

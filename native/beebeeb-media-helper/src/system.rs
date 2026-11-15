@@ -118,6 +118,30 @@ impl SystemStreams {
         }
     }
 
+    /// The audio stream's own rate and channels, as the system's decoder gives them.
+    pub fn audio_format(&self) -> Option<(u32, u16)> {
+        #[cfg(windows)]
+        {
+            self.audio.as_ref().map(crate::mf::SystemAudio::format)
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    /// The file's duration as the system's reader knows it (from the audio stream's reader), when it does.
+    pub fn duration_ms(&self) -> Option<u64> {
+        #[cfg(windows)]
+        {
+            self.audio.as_ref().and_then(crate::mf::SystemAudio::duration_ms)
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
     /// The next frame at exactly `w × h`.
     pub fn video_frame(&mut self, w: u32, h: u32) -> Result<FromHelper, ErrorCode> {
         #[cfg(windows)]

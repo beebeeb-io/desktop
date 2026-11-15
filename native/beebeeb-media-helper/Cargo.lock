@@ -27,6 +27,7 @@ dependencies = [
  "beebeeb-media-protocol",
  "filmcraft-codecs",
  "filmcraft-media",
+ "symphonia",
  "windows",
  "windows-core",
 ]
