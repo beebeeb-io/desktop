@@ -198,9 +198,6 @@ impl<C: CredentialStores> Engine<C> {
         }
         // The words as the boxes hold them, one space between: positions are the boxes'.
         let unknown = unknown_word_positions(&phrase.split(' ').collect::<Vec<&str>>());
-        if !unknown.is_empty() {
-            return Err(RecoveryRefused::UnknownWords(unknown));
-        }
         self.runtime.block_on(self.recovery_verify_step(turn, email, phrase))
     }
 

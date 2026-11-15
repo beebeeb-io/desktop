@@ -400,9 +400,6 @@ impl EngineBridge {
             return Ok(false);
         }
         let content = sync_folder_content(&self.db, file_id, place, None)?;
-        if matches!(content, SyncFolderContent::Changed { .. }) && keep_there && self.db.has_agreed_content(file_id)? {
-            return Ok(false);
-        }
         if matches!(content, SyncFolderContent::Changed { .. } | SyncFolderContent::Queued) {
             return Ok(true);
         }
