@@ -59,6 +59,24 @@ pub enum Reason {
     Held(&'static str),
 }
 
+/// Task 2530: a way out a problem row offers. The engine lists them per row (`drive_v2::status::Exit`); the window
+/// draws exactly those and no other, and the source refuses any other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Exit {
+    TryAgain,
+    KeepBoth,
+    KeepOther,
+    KeepThisPcs,
+    RemoveFromList,
+}
+
+impl Exit {
+    /// One of the two-versions answers (Keep both, Keep the other, Keep this PC's).
+    pub fn is_keep(self) -> bool {
+        matches!(self, Exit::KeepBoth | Exit::KeepOther | Exit::KeepThisPcs)
+    }
+}
+
 impl Reason {
     /// The line under the name: why, and that nothing was lost.
     pub fn line(&self) -> String {
@@ -70,11 +88,6 @@ impl Reason {
             Reason::NameInUse { place } => format!("The name is already in use in {place}. Nothing was lost."),
             Reason::Said(words) | Reason::Held(words) => (*words).to_string(),
         }
-    }
-
-    /// Whether Try again applies: a held edit has no action.
-    pub fn retryable(&self) -> bool {
-        !matches!(self, Reason::Held(_))
     }
 }
 
@@ -101,10 +114,12 @@ pub enum What {
         who: String,
         files: u32,
     },
-    /// It did not sync: `problem` is the id in [`ThisPcSource::problems`].
+    /// It did not sync: `problem` is the id in [`ThisPcSource::problems`]; `exits`, the ways out the engine lists for
+    /// it (task 2530), in the engine's order.
     Failed {
         problem: String,
         reason: Reason,
+        exits: Vec<Exit>,
     },
 }
 
@@ -159,9 +174,17 @@ impl Change {
         }
     }
 
-    /// A problem that Try again applies to (a held edit is one that it does not).
+    /// A problem that Try again applies to: the engine listed it (a held edit or a parked change has none).
     pub fn can_retry(&self) -> bool {
-        matches!(&self.what, What::Failed { reason, .. } if reason.retryable())
+        self.exits().contains(&Exit::TryAgain)
+    }
+
+    /// The ways out of a problem, as the engine listed them (task 2530); none for any other change.
+    pub fn exits(&self) -> &[Exit] {
+        match &self.what {
+            What::Failed { exits, .. } => exits,
+            _ => &[],
+        }
     }
 }
 
@@ -234,6 +257,8 @@ pub struct Pumped {
     pub busy: bool,
     /// A change the person asked for was refused: the window says so (a fixed sentence).
     pub refusal: Option<&'static str>,
+    /// Task 2530: a way out the person picked was taken: the window says what it did (a fixed sentence).
+    pub done: Option<&'static str>,
 }
 
 /// What the two This PC sections read and ask. Engine calls: see the PR body.
@@ -265,6 +290,9 @@ pub trait ThisPcSource {
     fn retry(&mut self, problem: &str);
     /// Try every item again.
     fn retry_all(&mut self);
+    /// Task 2530: a way out of one problem other than Try again (Keep both, Keep the other, Keep this PC's, Remove from
+    /// the list), only one the problem's row lists. The answer comes back through [`Self::pump`].
+    fn settle(&mut self, problem: &str, exit: Exit);
     /// What is kept on this PC.
     fn kept(&self) -> Vec<Kept>;
     /// How many items [`Self::kept`] lists (the sidebar's count, every frame): a source may answer it without a
@@ -320,6 +348,7 @@ impl FixtureSource {
         let studio = || What::Failed {
             problem: "p-studio".into(),
             reason: Reason::OpenInAnotherApp,
+            exits: vec![Exit::TryAgain],
         };
         let (today, yesterday, sun, sat, fri) = (day(3, 11), day(2, 11), day(1, 11), day(31, 10), day(30, 10));
         use Kind::{Audio, Deck, Document, Folder, Photo, Sheet, Video};
@@ -440,6 +469,7 @@ impl FixtureSource {
         let failed = |problem: &str, reason: Reason| What::Failed {
             problem: problem.into(),
             reason,
+            exits: vec![Exit::TryAgain],
         };
         let problems = vec![
             change("c-02", today, "09:38", "Studio walkthrough.mov", Video, studio(), pc()),
@@ -550,6 +580,17 @@ impl ThisPcSource for FixtureSource {
         self.history.retain(|c| c.problem().is_none());
     }
 
+    /// A sample answer works at once, as a retry does: the item leaves the list. Only a way out its row lists.
+    fn settle(&mut self, problem: &str, exit: Exit) {
+        let listed = self
+            .problems
+            .iter()
+            .any(|c| c.problem() == Some(problem) && c.exits().contains(&exit));
+        if listed {
+            self.retry(problem);
+        }
+    }
+
     fn kept(&self) -> Vec<Kept> {
         self.kept.clone()
     }
@@ -582,6 +623,7 @@ impl ThisPcSource for Unwired {
     }
     fn retry(&mut self, _problem: &str) {}
     fn retry_all(&mut self) {}
+    fn settle(&mut self, _problem: &str, _exit: Exit) {}
     fn kept(&self) -> Vec<Kept> {
         Vec::new()
     }

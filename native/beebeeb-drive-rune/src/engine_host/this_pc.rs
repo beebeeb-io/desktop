@@ -6,7 +6,10 @@
 //!   to Trash (`status_views::file_overview_activity`), and the changes that did not sync, at the time they were
 //!   queued; the last 30 days, newest first. A device folder's manifest in Backups never shows (LD-0113).
 //! - The items that did not sync: the queue's problems (`drive_v2::status::sync_problems`), each with the engine's
-//!   own plain words for why. Try again: the queue's `StateDb::retry_unsent_change`, the 0.8 app's rule.
+//!   own plain words for why. Try again: the queue's `StateDb::retry_unsent_change`, the 0.8 app's rule; a parked
+//!   change whose way out is Try again (task 2530): `StateDb::try_parked_again`. Every other way out the engine lists
+//!   for a parked change (Keep both, Keep the other, Keep this PC's, Remove from the list): `Engine::settle_parked_for`,
+//!   for the session of the press, against the file's version the row was read at; only one the row lists.
 //! - What is kept: the top-most kept items (`drive_v2::status::offline_entries`). Remove from this PC: the pin
 //!   change (`Engine::set_kept`), refused while sync does not run.
 //!
@@ -41,6 +44,7 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use beebeeb_engine::account::SessionGeneration;
+use beebeeb_engine::app::owned_state::parked_exit_api::{ParkedPick, SettleRefused, Settled};
 use beebeeb_engine::app::{CredentialStores, Engine, LocalStateRefused};
 use beebeeb_engine::backup_protect::BackupsTree;
 use beebeeb_engine::drive_v2::model;
@@ -52,7 +56,7 @@ use chrono::{NaiveDate, TimeZone};
 
 use super::log;
 use crate::frames::this_pc::source::{
-    Change, Contains, Kept, KeptStatus, Kind, Origin, Pumped, Reason, Standing, ThisPcSource, What,
+    Change, Contains, Exit, Kept, KeptStatus, Kind, Origin, Pumped, Reason, Standing, ThisPcSource, What,
 };
 
 #[cfg(test)]
@@ -101,6 +105,15 @@ const EVENTS: usize = 200;
 pub const NOT_SYNCING: &str = "Sync isn't running, so nothing was removed from this PC.";
 pub const NOT_REMOVED: &str = "Couldn't remove every item from this PC. Try again.";
 pub const NOT_RETRIED: &str = "Couldn't try every item again.";
+/// Task 2530: what a way out of a parked change did, or why it did nothing. Fixed sentences.
+pub const SETTLE_MOVED: &str = "This change moved since you saw it. Nothing was changed.";
+pub const SETTLE_NOT_KEPT: &str = "Couldn't keep this PC's version, so nothing was changed.";
+pub const SETTLE_BYTES_HERE: &str = "This PC has the bytes of this change, so it wasn't removed.";
+pub const SETTLE_FAILED: &str = "Couldn't do that. The change is still listed.";
+pub const SETTLED_KEPT_OTHER: &str = "This PC's version is in Changes not sent, in Beebeeb's app data.";
+pub const SETTLED_KEPT_BOTH: &str = "This PC's version is queued as a new file next to the original.";
+pub const SETTLED_SENT_AGAIN: &str = "This PC's version is queued to be sent.";
+pub const SETTLED_REMOVED: &str = "Removed from the list. The file on Beebeeb is as it was.";
 
 /// What the adapter asks of the engine handle. The app's is `Engine`; a test's is a state database in a folder of
 /// its own.
@@ -124,6 +137,15 @@ pub trait ThisPcEngine: Send + Sync + 'static {
     /// [`Self::set_kept`] bound to `session`, the one of the press: nothing is changed once the engine's session
     /// moved on. Blocks: a worker's.
     fn set_kept_for(&self, session: SessionGeneration, file_id: &str, kept: bool) -> Result<(), String>;
+    /// Task 2530: a way out of the parked change `op_id`, for `session` only (`Engine::settle_parked_for`).
+    fn settle_parked_for(
+        &self,
+        session: SessionGeneration,
+        op_id: &str,
+        pick: ParkedPick,
+        shown_version: Option<i64>,
+        device: &str,
+    ) -> Result<Settled, SettleRefused>;
 }
 
 impl<C: CredentialStores> ThisPcEngine for Engine<C> {
@@ -151,6 +173,16 @@ impl<C: CredentialStores> ThisPcEngine for Engine<C> {
     fn set_kept_for(&self, session: SessionGeneration, file_id: &str, kept: bool) -> Result<(), String> {
         Engine::set_kept_for(self, session, file_id, kept)
     }
+    fn settle_parked_for(
+        &self,
+        session: SessionGeneration,
+        op_id: &str,
+        pick: ParkedPick,
+        shown_version: Option<i64>,
+        device: &str,
+    ) -> Result<Settled, SettleRefused> {
+        Engine::settle_parked_for(self, session, op_id, pick, shown_version, device)
+    }
 }
 
 /// What the lists hold, as last read.
@@ -160,6 +192,9 @@ pub(crate) struct Snapshot {
     pub problems: Vec<Change>,
     /// The queue ids Try again applies to.
     pub retryable: Vec<String>,
+    /// Task 2530: each parked change's other ways out, as the engine listed them, and the file's version they are
+    /// chosen against: `(queue id, exits, version)`. A settle asks only what this lists.
+    pub settles: Vec<(String, Vec<Exit>, Option<i64>)>,
     pub kept: Vec<Kept>,
 }
 
@@ -169,10 +204,11 @@ impl std::fmt::Debug for Snapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Snapshot {{ history: {}, problems: {}, retryable: {}, kept: {} }}",
+            "Snapshot {{ history: {}, problems: {}, retryable: {}, settles: {}, kept: {} }}",
             self.history.len(),
             self.problems.len(),
             self.retryable.len(),
+            self.settles.len(),
             self.kept.len()
         )
     }
@@ -216,6 +252,12 @@ enum Ask {
     Read,
     Retry(Vec<String>),
     Release(Vec<String>),
+    /// Task 2530: one way out of one parked change, against the version its row was read at.
+    Settle {
+        problem: String,
+        pick: ParkedPick,
+        version: Option<i64>,
+    },
 }
 
 /// One job: what is asked, under whose session, in which generation.
@@ -232,6 +274,8 @@ struct Answer {
     generation: u64,
     whose: Option<Whose>,
     refused: Option<&'static str>,
+    /// Task 2530: what a way out did, in words the window says.
+    done: Option<&'static str>,
     read: Result<Snapshot, NoRead>,
 }
 
@@ -310,6 +354,7 @@ impl<E: ThisPcEngine> EngineThisPcSource<E> {
                             generation,
                             whose: Some(whose),
                             refused: None,
+                            done: None,
                             read: Err(NoRead::Unreadable),
                         });
                     }
@@ -363,8 +408,18 @@ fn still_for<E: ThisPcEngine>(engine: &E, whose: &Whose) -> bool {
 /// owns; every job ends with a read, so the lists show what the engine has after it.
 fn run<E: ThisPcEngine>(engine: &E, answers: &mpsc::Sender<Answer>, job: Job) {
     let Job { ask, whose, generation } = job;
+    let mut done = None;
     let refused = match ask {
         Ask::Read => None,
+        Ask::Settle { problem, pick, version } => match settle(engine, &whose, &problem, pick, version) {
+            Some(Ok(words)) => {
+                done = Some(words);
+                None
+            }
+            Some(Err(words)) => Some(words),
+            // The session moved on: nothing was asked, and this answer is not the window's to say.
+            None => None,
+        },
         Ask::Retry(ids) => match retry(engine, &whose, &ids) {
             Some(0) => None,
             Some(failed) => {
@@ -406,8 +461,43 @@ fn run<E: ThisPcEngine>(engine: &E, answers: &mpsc::Sender<Answer>, job: Job) {
         generation,
         whose,
         refused,
+        done,
         read,
     });
+}
+
+/// Task 2530: one way out of `problem` under the session of the press, `whose`, and no other: the engine is asked
+/// for that session only, and asked nothing once it moved on (`None`). What it did, or why not, in fixed words.
+fn settle<E: ThisPcEngine>(
+    engine: &E,
+    whose: &Whose,
+    problem: &str,
+    pick: ParkedPick,
+    version: Option<i64>,
+) -> Option<Result<&'static str, &'static str>> {
+    if !still_for(engine, whose) {
+        return None;
+    }
+    let device = super::viewer_change::this_pc();
+    Some(
+        match engine.settle_parked_for(whose.session, problem, pick, version, &device) {
+            Ok(Settled::KeptOther { .. }) => Ok(SETTLED_KEPT_OTHER),
+            Ok(Settled::KeptBoth) => Ok(SETTLED_KEPT_BOTH),
+            Ok(Settled::SentAgain) => Ok(SETTLED_SENT_AGAIN),
+            Ok(Settled::Removed) => Ok(SETTLED_REMOVED),
+            Ok(Settled::Moved) => Err(SETTLE_MOVED),
+            Err(SettleRefused::NotSignedIn) => return None,
+            Err(SettleRefused::CopyFailed) => {
+                log("this pc: a kept copy could not be made; the change stays");
+                Err(SETTLE_NOT_KEPT)
+            }
+            Err(SettleRefused::BytesHere) => Err(SETTLE_BYTES_HERE),
+            Err(SettleRefused::NoLocalState | SettleRefused::Failed) => {
+                log("this pc: a way out of a parked change did not finish");
+                Err(SETTLE_FAILED)
+            }
+        },
+    )
 }
 
 /// Tries `ids` again in the local state of `whose` account: how many could not be. `None`: the session moved on, or
@@ -417,8 +507,15 @@ fn retry<E: ThisPcEngine>(engine: &E, whose: &Whose, ids: &[String]) -> Option<u
         return None;
     }
     let now = chrono::Utc::now().timestamp();
+    // A parked change is never re-armed by the queue's rule (spec D8); the one park whose way out is Try again
+    // (task 2530, `rekey_failed`) is made due by its own transaction, and one that is not is counted as not tried.
+    let tried = |db: &StateDb, id: &str| match db.retry_unsent_change(id, now) {
+        Ok(beebeeb_engine::state_db::RetryOutcome::Parked) => db.try_parked_again(id, now).unwrap_or(false),
+        Ok(_) => true,
+        Err(_) => false,
+    };
     engine
-        .change_local_state(|db| ids.iter().filter(|id| db.retry_unsent_change(id, now).is_err()).count())
+        .change_local_state(|db| ids.iter().filter(|id| !tried(db, id)).count())
         .ok()
 }
 
@@ -468,6 +565,11 @@ pub(crate) fn read(db: &StateDb, now: i64) -> Result<Snapshot, String> {
     let held = db.held_edit_overview(QUEUE_LIMIT).map_err(|_| "held")?;
     found.extend(status::held_edit_problems(&held));
     let retryable = found.iter().filter(|p| p.retryable).map(|p| p.id.clone()).collect();
+    let settles = found
+        .iter()
+        .map(|p| (p.id.clone(), exits_of(p), p.version))
+        .filter(|(_, exits, _)| exits.iter().any(|exit| *exit != Exit::TryAgain))
+        .collect();
     let mut problems: Vec<(i64, Change)> = found
         .iter()
         .map(|p| {
@@ -516,8 +618,23 @@ pub(crate) fn read(db: &StateDb, now: i64) -> Result<Snapshot, String> {
         history: history.into_iter().map(|(_, c)| c).collect(),
         problems: problems.into_iter().map(|(_, c)| c).collect(),
         retryable,
+        settles,
         kept: kept(db, &backups)?,
     })
+}
+
+/// Task 2530: the engine's ways out for a problem row, in the window's words for them.
+fn exits_of(p: &SyncProblem) -> Vec<Exit> {
+    p.exits
+        .iter()
+        .map(|exit| match exit {
+            status::Exit::TryAgain => Exit::TryAgain,
+            status::Exit::KeepBoth => Exit::KeepBoth,
+            status::Exit::KeepOther => Exit::KeepOther,
+            status::Exit::KeepThisPcs => Exit::KeepThisPcs,
+            status::Exit::RemoveFromList => Exit::RemoveFromList,
+        })
+        .collect()
 }
 
 fn queued_at(
@@ -546,6 +663,7 @@ fn problem(p: &SyncProblem, at: i64) -> Change {
             } else {
                 Reason::Said(p.reason)
             },
+            exits: exits_of(p),
         },
         origin: Origin::ThisPc,
         date,
@@ -681,6 +799,7 @@ impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
                 generation,
                 whose,
                 refused,
+                done,
                 read,
             } = answer;
             if generation == self.generation {
@@ -693,6 +812,9 @@ impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
             }
             if let Some(words) = refused {
                 pumped.refusal = Some(words);
+            }
+            if let Some(words) = done {
+                pumped.done = Some(words);
             }
             self.read_at = Some(Instant::now());
             match read {
@@ -770,6 +892,33 @@ impl<E: ThisPcEngine> ThisPcSource for EngineThisPcSource<E> {
         let ids = self.held().map(|s| s.retryable.clone()).unwrap_or_default();
         if !ids.is_empty() {
             self.send(Ask::Retry(ids));
+        }
+    }
+
+    /// Task 2530: a way out of one parked change, only one its row lists in what the window holds, against the
+    /// version that row was read at. Stamped with the window's session and generation (`send`); the row leaves the
+    /// list once the read after it no longer finds it a problem.
+    fn settle(&mut self, problem: &str, exit: Exit) {
+        let pick = match exit {
+            Exit::KeepBoth => ParkedPick::KeepBoth,
+            Exit::KeepOther => ParkedPick::KeepOther,
+            Exit::KeepThisPcs => ParkedPick::KeepThisPcs,
+            Exit::RemoveFromList => ParkedPick::RemoveFromList,
+            // Try again is the row's own (`retry`).
+            Exit::TryAgain => return,
+        };
+        let listed = self.held().and_then(|s| {
+            s.settles
+                .iter()
+                .find(|(id, exits, _)| id == problem && exits.contains(&exit))
+                .map(|(_, _, version)| *version)
+        });
+        if let Some(version) = listed {
+            self.send(Ask::Settle {
+                problem: problem.to_string(),
+                pick,
+                version,
+            });
         }
     }
 

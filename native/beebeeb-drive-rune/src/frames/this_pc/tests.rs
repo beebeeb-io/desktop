@@ -3,7 +3,7 @@
 
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
-use super::source::{FixtureSource, ThisPcSource};
+use super::source::{Exit, FixtureSource, ThisPcSource};
 use super::{Filter, Intent, scenes};
 use crate::State;
 use crate::shell::registry::view;
@@ -806,8 +806,11 @@ fn the_sidebar_foot_draws_the_account_and_the_storage_the_window_read() {
     assert_eq!(info(&rt, "meter-fill-1").rect[2], 0.0);
 }
 
-/// Task 2524: a source whose problems are the given changes (the history holds them too, as the engine's does).
-struct Problems(Vec<Change>);
+/// Task 2524: a source whose problems are the given changes (the history holds them too, as the engine's does); task
+/// 2530: the ways out it was asked for, in order.
+struct Problems(Vec<Change>, Asked);
+
+type Asked = std::sync::Arc<std::sync::Mutex<Vec<(String, Exit)>>>;
 
 impl ThisPcSource for Problems {
     fn today(&self) -> chrono::NaiveDate {
@@ -821,6 +824,9 @@ impl ThisPcSource for Problems {
     }
     fn retry(&mut self, _: &str) {}
     fn retry_all(&mut self) {}
+    fn settle(&mut self, problem: &str, exit: Exit) {
+        self.1.lock().unwrap().push((problem.to_string(), exit));
+    }
     fn kept(&self) -> Vec<Kept> {
         Vec::new()
     }
@@ -828,7 +834,17 @@ impl ThisPcSource for Problems {
     fn remove_all_from_pc(&mut self) {}
 }
 
+/// A problem row as the engine host makes it: a held edit has no way out; any other here has Try again.
 fn problem_row(id: &str, name: &str, reason: super::source::Reason) -> Change {
+    let exits = if matches!(reason, super::source::Reason::Held(_)) {
+        Vec::new()
+    } else {
+        vec![Exit::TryAgain]
+    };
+    problem_row_with(id, name, reason, exits)
+}
+
+fn problem_row_with(id: &str, name: &str, reason: super::source::Reason, exits: Vec<Exit>) -> Change {
     Change {
         id: id.into(),
         name: name.into(),
@@ -836,6 +852,7 @@ fn problem_row(id: &str, name: &str, reason: super::source::Reason) -> Change {
         what: super::source::What::Failed {
             problem: id.into(),
             reason,
+            exits,
         },
         origin: super::source::Origin::ThisPc,
         date: chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
@@ -846,9 +863,20 @@ fn problem_row(id: &str, name: &str, reason: super::source::Reason) -> Change {
 const HELD_WORDS: &str = "Not sent: Beebeeb doesn’t know which version this change started from. Your copy stays on this PC. Nothing was lost.";
 
 fn on_problems(rows: Vec<Change>) -> Runtime<State> {
-    with_state(super::Section::SyncHistory, Box::new(Problems(rows)), |s| {
-        s.this_pc.filter = Filter::Problems;
-    })
+    on_problems_asked(rows).0
+}
+
+fn on_problems_asked(rows: Vec<Change>) -> (Runtime<State>, Asked) {
+    let asked = Asked::default();
+    let mut rt = with_state(
+        super::Section::SyncHistory,
+        Box::new(Problems(rows, asked.clone())),
+        |s| {
+            s.this_pc.filter = Filter::Problems;
+        },
+    );
+    rt.on_key = Some(crate::shell::host::on_key);
+    (rt, asked)
 }
 
 /// A held edit is drawn as a problem with its words, and with no Try again (the engine has no action for it); a
@@ -887,4 +915,96 @@ fn only_held_edits_offer_no_try_again_at_all() {
     assert!(!has(&rt, "btn-try-all-again"));
     assert_eq!(rt.state.this_pc.problem_count(), 1);
     assert_eq!(rt.state.this_pc.retryable_problem_count(), 0);
+}
+
+const PARKED_WORDS: &str =
+    "Not sent: Beebeeb lost track of the change made before this one. Your change stays on this PC. Nothing was lost.";
+
+/// Task 2530 (R7): a row draws only the ways out the engine listed for it. A parked change with Keep both and Keep the
+/// other has Choose and no Try again; Choose asks the two-versions question with exactly those two answers, Keep both
+/// first, and an answer is asked of the source once.
+#[test]
+fn the_row_offers_only_the_engines_exits() {
+    use super::source::Reason;
+    let (mut rt, asked) = on_problems_asked(vec![problem_row_with(
+        "op-lost",
+        "Plan.txt",
+        Reason::Said(PARKED_WORDS),
+        vec![Exit::KeepBoth, Exit::KeepOther],
+    )]);
+    assert_eq!(text(&rt, "change-0-sub"), PARKED_WORDS);
+    assert!(!has(&rt, "btn-try-again"), "no Try again the engine did not list");
+    assert!(!has(&rt, "btn-try-all-again"));
+    assert!(!has(&rt, "change-0-remove"));
+    assert_eq!(rt.state.this_pc.retryable_problem_count(), 0);
+
+    click(&mut rt, "change-0-choose");
+    assert_eq!(text(&rt, "dlg-title"), "Two versions");
+    assert_eq!(text(&rt, "dlg-sub"), "Plan.txt");
+    assert_eq!(text(&rt, "settle-0"), "Keep both");
+    assert_eq!(text(&rt, "settle-1"), "Keep the other");
+    assert!(!has(&rt, "settle-2"), "no Keep this PC's: the row did not list it");
+    assert!(has(&rt, "settle-cancel"));
+    assert!(asked.lock().unwrap().is_empty(), "nothing is asked before an answer");
+
+    click(&mut rt, "settle-1");
+    assert_eq!(
+        *asked.lock().unwrap(),
+        vec![("op-lost".to_string(), Exit::KeepOther)],
+        "asked once, the answer pressed"
+    );
+    assert!(!has(&rt, "dialog-settle"), "the question closed");
+}
+
+/// Task 2530: Remove from the list asks once, in the contract's words; Cancel and Esc ask nothing of the source.
+#[test]
+fn remove_from_the_list_asks_once_and_cancel_asks_nothing() {
+    use super::source::Reason;
+    let (mut rt, asked) = on_problems_asked(vec![problem_row_with(
+        "op-missing",
+        "Notes.md",
+        Reason::Said(
+            "This PC no longer has the bytes of this change, so it can’t be sent. The file on Beebeeb is as it was.",
+        ),
+        vec![Exit::RemoveFromList],
+    )]);
+    assert!(!has(&rt, "btn-try-again"));
+    assert!(!has(&rt, "change-0-choose"));
+    click(&mut rt, "change-0-remove");
+    assert_eq!(text(&rt, "dlg-title"), super::settle::REMOVE_TITLE);
+    assert_eq!(text(&rt, "dlg-sub"), super::settle::REMOVE_WORDS);
+    assert_eq!(text(&rt, "settle-0"), "Remove from the list");
+    click(&mut rt, "settle-cancel");
+    assert!(!has(&rt, "dialog-settle"));
+    click(&mut rt, "change-0-remove");
+    press(&mut rt, Key::Escape);
+    assert!(!has(&rt, "dialog-settle"), "Esc says no");
+    assert!(asked.lock().unwrap().is_empty(), "nothing was asked");
+    click(&mut rt, "change-0-remove");
+    click(&mut rt, "settle-0");
+    assert_eq!(
+        *asked.lock().unwrap(),
+        vec![("op-missing".to_string(), Exit::RemoveFromList)]
+    );
+}
+
+/// Task 2530: the question does not outlive its problem (answered elsewhere, or gone after a read).
+#[test]
+fn the_question_closes_when_its_problem_leaves_the_list() {
+    let mut rt = with_state(super::Section::SyncHistory, Box::new(FixtureSource::board()), |s| {
+        s.this_pc.filter = Filter::Problems
+    });
+    rt.update(|s, _| {
+        s.this_pc.asking = Some(super::Asking {
+            problem: "p-gone".into(),
+            name: "Gone.txt".into(),
+            exits: vec![Exit::KeepBoth],
+        })
+    });
+    rt.update(|s, tx| {
+        super::poll(s, tx);
+    });
+    rt.frame(0.0);
+    assert!(rt.state.this_pc.asking.is_none());
+    assert!(!has(&rt, "dialog-settle"));
 }
