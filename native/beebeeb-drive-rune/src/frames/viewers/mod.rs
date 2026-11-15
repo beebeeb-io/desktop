@@ -910,7 +910,7 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
     match &ui.file.body {
         Body::Word(doc) => return office::window(s, cx, ui, Some(doc)),
         Body::NoEditor => return office::window(s, cx, ui, None),
-        Body::Sheet(_) | Body::Deck(_) => return office_glue::window(s, cx, ui),
+        Body::Sheet(_) | Body::Deck(_) | Body::OfficeState(_) => return office_glue::window(s, cx, ui),
         _ => {}
     }
     let t = tokens::theme(cx.system_dark());
@@ -1195,5 +1195,5 @@ pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1552", |s| set_scene(s, "DW-1552")),
     ("DW-1553", |s| set_scene(s, "DW-1553")),
     ("DW-1554", |s| set_scene(s, "DW-1554")),
-    ("DW-1556", |s| set_scene(s, "DW-1556")),
+    ("DW-1556", crate::frames::office::states::scene_failed),
 ];

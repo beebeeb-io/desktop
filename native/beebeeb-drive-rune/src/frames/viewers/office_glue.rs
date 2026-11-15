@@ -11,7 +11,7 @@ use super::office_over::Over;
 use super::source::{Body, FixtureViewerSource, OpenFile, board};
 use crate::State;
 use crate::frames::office::slides::{self, DeckBody};
-use crate::frames::office::{dialogs, sheets};
+use crate::frames::office::{dialogs, sheets, states};
 
 /// The open presentation, while the viewer shows one.
 pub fn deck_mut(s: &mut State) -> Option<&mut DeckBody> {
@@ -33,7 +33,8 @@ pub(super) fn window(s: &State, cx: &mut Cx<State>, ui: &Ui) -> El {
         Body::Sheet(view) => sheets::window(s, cx, ui, view),
         Body::Deck(deck) if deck.presenting => slides::present(cx, deck, &slides::slides_fixture::page),
         Body::Deck(deck) => slides::window(s, cx, ui, deck, &slides::slides_fixture::page),
-        _ => unreachable!("only a sheet or a deck is handed to the Office glue"),
+        Body::OfficeState(body) => states::window(s, cx, ui, body),
+        _ => unreachable!("only a sheet, a deck or a state is handed to the Office glue"),
     }
 }
 
