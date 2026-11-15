@@ -543,10 +543,13 @@ fn the_window_shows_no_name_of_a_locked_session_or_of_the_account_before() {
     poll(&mut rt);
     let seen = words(&rt);
     assert!(seen.contains("Invented contract.pdf"), "the Trash is drawn: {seen}");
-    assert!(
-        !rt.elements().iter().any(|e| e.key.as_deref() == Some("Trash-badge")),
-        "no badge from the engine"
-    );
+    let badge = |rt: &Runtime<State>| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("Trash-badge"))
+            .and_then(|e| e.text)
+    };
+    assert_eq!(badge(&rt).as_deref(), Some("3"), "the badge is the server's count");
 
     let _ = engine.lock();
     poll(&mut rt);
@@ -555,6 +558,7 @@ fn the_window_shows_no_name_of_a_locked_session_or_of_the_account_before() {
         assert!(!seen.contains(name), "{name} is still drawn after the lock");
     }
     assert!(seen.contains("Signed out"), "the signed-out state is drawn: {seen}");
+    assert_eq!(badge(&rt), None, "no badge for a locked session");
 
     engine.sign_out_keeping_local_data().expect("signed out");
     sign_in(&engine, &fake.second, &fake.second_phrase);
@@ -574,6 +578,7 @@ fn the_window_shows_no_name_of_a_locked_session_or_of_the_account_before() {
         seen.contains("Second account budget.xlsx"),
         "the second account's Trash: {seen}"
     );
+    assert_eq!(badge(&rt).as_deref(), Some("1"), "the second account's own count");
 }
 
 #[test]
