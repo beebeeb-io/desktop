@@ -81,7 +81,7 @@ impl<C: CredentialStores> EngineTrashSource<C> {
     /// Ask for the count on a worker, unless one is on its way (then once more when it lands).
     pub(super) fn start_count(&mut self) {
         // Behind a locked screen or a closed vault a person's call is refused: nothing is sent, so nothing is started.
-        if !self.engine.has_session() {
+        if !self.engine.has_session() || !self.engine.person_calls_allowed() {
             return;
         }
         if self.counted.counting.is_some() {
@@ -114,12 +114,12 @@ impl<C: CredentialStores> EngineTrashSource<C> {
     /// The poll: read the count when there is a session and no badge of this session and account to show, and the
     /// last read did not fail a moment ago.
     pub(super) fn count_if_missing(&mut self) {
-        if !self.engine.has_session() {
+        if !self.engine.has_session() || !self.engine.person_calls_allowed() {
             return;
         }
         // A Move to Trash or an Undo (Files, Photos) was answered since the last look: the count moved.
         let moves = self.engine.trash_moves();
-        if false && moves != self.counted.moves_seen {
+        if moves != self.counted.moves_seen {
             self.count_moved();
             return;
         }
@@ -155,8 +155,7 @@ impl<C: CredentialStores> EngineTrashSource<C> {
             return None;
         }
         let said = self.counted.said_at?;
-        let _ = said;
-        None
+        Some(self.refresh_every().saturating_sub(said.elapsed()))
     }
 
     /// A restore or a delete for good was answered: the count moved (or may have).
@@ -192,7 +191,7 @@ impl<C: CredentialStores> EngineTrashSource<C> {
                 self.counted.failed_at = Some(Instant::now());
                 // Beebeeb ended the session: what it said under it is not shown. Offline, a server error or an
                 // unreadable answer keep the last number (nothing fresher is known).
-                if false && kind == AccountCallError::SessionEnded {
+                if kind == AccountCallError::SessionEnded {
                     self.counted.badge = None;
                 }
             }
