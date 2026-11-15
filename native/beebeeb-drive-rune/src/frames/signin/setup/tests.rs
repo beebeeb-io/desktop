@@ -568,3 +568,137 @@ fn an_answered_switch_draws_what_the_answer_says_not_what_was_asked() {
     assert!(Step::STEPS.into_iter().all(|step| ui.available(step)));
     assert!(ui.opens_settings() && !ui.asks_folder() && !ui.can_choose_again());
 }
+
+// ---------------------------------------------------------------------------
+// Step 1, "Add a passkey", with the password (the engine's own path: `engine_host/setup_passkey_tests.rs`)
+// ---------------------------------------------------------------------------
+
+/// What the person types into step 1's field: invented.
+const TYPED: &str = "an invented one";
+
+/// Each refusal says its own line (Settings › Passkeys' words) as an alert; step 1 stays, and "Not now" or "Skip
+/// setup" still leave it, with "Not added" on "You're set up".
+#[test]
+fn setup_add_passkey_each_refusal_says_its_line_and_step_one_stays_skippable() {
+    use super::source::PasskeyRefused;
+    let every = [
+        (
+            PasskeyRefused::WrongPassword,
+            "Incorrect password. Nothing was changed.",
+        ),
+        (
+            PasskeyRefused::Cancelled,
+            "Adding the passkey was cancelled. Nothing was changed.",
+        ),
+        (
+            PasskeyRefused::Offline,
+            "Beebeeb can't be reached. Nothing was changed.",
+        ),
+        (
+            PasskeyRefused::TooManyTries,
+            "Too many tries. Wait a moment, then try again. Nothing was changed.",
+        ),
+        (
+            PasskeyRefused::NotOnThisPc,
+            "Passkeys are not available on this PC. Nothing was changed.",
+        ),
+        (
+            PasskeyRefused::NotAdded,
+            "The passkey was not added. Nothing was changed.",
+        ),
+    ];
+    for (why, words) in every {
+        assert_eq!(super::passkey::refused_words(why), Some(words), "{why:?}");
+        for leave in ["btn-1", "skip"] {
+            let (mut ui_, log) = fixture(Script {
+                passkey_added: false,
+                passkey_refused: why,
+                ..Script::default()
+            });
+            ui_.passkey_password.replace_text(TYPED);
+            let mut rt = runtime_at(ui_, 2.0, false);
+            click(&mut rt, "btn-0");
+            assert_eq!(ui_step(&mut rt), Step::Passkey, "{why:?}: step 1 stays");
+            assert_eq!(info(&rt, "passkey-refused").role, "alert", "{why:?}");
+            assert!(
+                rt.elements()
+                    .iter()
+                    .any(|e| !e.exiting && e.text.as_deref() == Some(words)),
+                "{why:?}: {words}"
+            );
+            assert!(!ui(&mut rt).results.passkey, "{why:?}");
+            assert_eq!(*log.borrow(), ["add_passkey"], "{why:?}");
+            click(&mut rt, leave);
+            assert_eq!(
+                ui_step(&mut rt),
+                if leave == "skip" { Step::Done } else { Step::Lock },
+                "{why:?}: {leave}"
+            );
+            assert_eq!(count(&rt, "passkey-refused"), 0, "{why:?}: the line goes with the step");
+            if leave == "skip" {
+                assert_eq!(info(&rt, "item-0-value").text.as_deref(), Some("Not added"), "{why:?}");
+            }
+        }
+    }
+}
+
+/// A press with no password: the field asks for it (Settings › Passkeys' words), focus goes there, and no line of a
+/// refusal is drawn.
+#[test]
+fn setup_add_passkey_an_empty_password_is_asked_for_in_the_field() {
+    use super::source::PasskeyRefused;
+    let (ui_, _) = fixture(Script {
+        passkey_added: false,
+        passkey_refused: PasskeyRefused::NoPassword,
+        ..Script::default()
+    });
+    let mut rt = runtime_at(ui_, 2.0, false);
+    assert!(
+        rt.elements()
+            .iter()
+            .any(|e| !e.exiting && e.text.as_deref() == Some("To confirm it's you."))
+    );
+    click(&mut rt, "btn-0");
+    assert_eq!(ui_step(&mut rt), Step::Passkey);
+    assert!(
+        rt.elements()
+            .iter()
+            .any(|e| !e.exiting && e.text.as_deref() == Some("Enter your password to confirm it's you."))
+    );
+    assert_eq!(count(&rt, "passkey-refused"), 0);
+    assert_eq!(focused(&rt).as_deref(), Some(super::PASSWORD_KEY));
+}
+
+/// The password is never drawn as text, is wiped from the field right after it was handed over (added or not), and
+/// when step 1 is left with "Not now" or "Skip setup"; the field stays a secure one.
+#[test]
+fn setup_add_passkey_the_password_is_wiped_after_the_call() {
+    for added in [true, false] {
+        let (mut ui_, log) = fixture(Script {
+            passkey_added: added,
+            ..Script::default()
+        });
+        ui_.passkey_password.replace_text(TYPED);
+        let mut rt = runtime_at(ui_, 2.0, false);
+        assert!(
+            !rt.elements()
+                .iter()
+                .any(|e| e.text.as_deref().is_some_and(|t| t.contains(TYPED))
+                    || e.label.as_deref().is_some_and(|l| l.contains(TYPED))),
+            "never drawn as text"
+        );
+        click(&mut rt, "btn-0");
+        assert_eq!(*log.borrow(), ["add_passkey"], "added: {added}");
+        let field = &ui(&mut rt).passkey_password;
+        assert!(field.text.is_empty(), "added: {added}: wiped after the call");
+        assert!(field.is_secure(), "added: {added}");
+    }
+    for leave in [Ui::not_now as fn(&mut Ui), Ui::skip] {
+        let (mut ui_, log) = fixture(Script::default());
+        ui_.passkey_password.replace_text(TYPED);
+        leave(&mut ui_);
+        assert_ne!(ui_.step, Step::Passkey);
+        assert!(ui_.passkey_password.text.is_empty(), "wiped when step 1 is left");
+        assert!(log.borrow().is_empty(), "nothing was sent");
+    }
+}
