@@ -219,6 +219,8 @@ pub struct Ui {
     answered: Vec<(Switch, Answered)>,
     /// The switches that were asked of the source at all.
     asked: Vec<Switch>,
+    /// A size or format was chosen on step 4: the stored one no longer moves it.
+    previews_chosen: bool,
 }
 
 /// Decode a PNG into pixels Rune draws. A file that does not decode draws nothing.
@@ -249,7 +251,7 @@ fn decode(png_bytes: &[u8]) -> Pixels {
 impl Ui {
     pub fn new(source: Box<dyn SetupSource>) -> Self {
         let sample = source.sample();
-        Ui {
+        let mut ui = Ui {
             step: Step::Passkey,
             folder: source.folder_ask(),
             unsaved: source.folder_unsaved(),
@@ -272,14 +274,17 @@ impl Ui {
                 notifications: true,
                 open_at_login: true,
             },
-            original: decode(sample.original_png),
-            preview: decode(sample.preview_png),
+            original: decode(&sample.original_png),
+            preview: decode(&sample.preview_png),
             sample,
             source,
             focus: None,
             intents: Vec::new(),
             finished: false,
-        }
+            previews_chosen: false,
+        };
+        ui.start_on_stored_previews();
+        ui
     }
 
     /// What the shell should open, oldest first.
@@ -342,6 +347,13 @@ impl Ui {
         }
     }
 
+    /// "Try again" on step 4 after a failed read of the preview setting.
+    pub fn retry_previews(&mut self) {
+        if self.step == Step::Previews && self.failed(Step::Previews) {
+            self.source.retry_previews();
+        }
+    }
+
     /// Whether the File Explorer step is still asking for the sync folder.
     pub fn asks_folder(&self) -> bool {
         self.available(Step::Explorer) && self.folder != FolderAsk::Settled
@@ -389,7 +401,7 @@ impl Ui {
                 Switch::Notifications => self.results.notifications = now,
                 Switch::OpenAtLogin => self.results.open_at_login = now,
                 Switch::AppLock => self.results.app_lock = now,
-                Switch::Backup | Switch::LockAfter => {}
+                Switch::Backup | Switch::Previews | Switch::LockAfter => {}
             }
         }
         match (outcome.done, outcome.now) {
@@ -468,7 +480,13 @@ impl Ui {
                 self.results.backup = on;
                 self.asked(Switch::Backup);
             }
-            Step::Previews => self.source.set_previews(self.size, self.format),
+            // Nothing is stored before the account's own setting was read: Continue waits (loading), and a read
+            // that failed offers Try again instead.
+            Step::Previews if self.loading(Step::Previews) || self.failed(Step::Previews) => return,
+            Step::Previews => {
+                self.source.set_previews(self.size, self.format);
+                self.asked(Switch::Previews);
+            }
             Step::Explorer => {
                 // "OK" on the note that the folder cannot be moved yet.
                 if self.folder == FolderAsk::AlreadySyncs {
@@ -563,10 +581,24 @@ impl Ui {
 
     pub fn set_size(&mut self, size: PreviewSize) {
         self.size = size;
+        self.previews_chosen = true;
     }
 
     pub fn set_format(&mut self, format: PreviewFormat) {
         self.format = format;
+        self.previews_chosen = true;
+    }
+
+    /// Step 4 starts on the size and format the account has stored, once the source read them, until the person
+    /// chose one: "Continue" on untouched choices then changes nothing but turning previews on.
+    fn start_on_stored_previews(&mut self) {
+        if self.previews_chosen {
+            return;
+        }
+        if let Some((size, format)) = self.source.stored_previews() {
+            self.size = size;
+            self.format = format;
+        }
     }
 
     /// "Compare" on step 4.
@@ -663,10 +695,11 @@ impl Ui {
         self.explorer = self.source.explorer();
         self.folder = self.source.folder_ask();
         self.unsaved = self.source.folder_unsaved();
+        self.start_on_stored_previews();
         let sample = self.source.sample();
         if sample != self.sample {
-            self.original = decode(sample.original_png);
-            self.preview = decode(sample.preview_png);
+            self.original = decode(&sample.original_png);
+            self.preview = decode(&sample.preview_png);
             self.sample = sample;
         }
         true

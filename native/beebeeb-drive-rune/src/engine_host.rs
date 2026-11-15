@@ -49,6 +49,7 @@ pub mod backups;
 pub mod backups_devices;
 #[cfg(test)]
 mod binding_tests;
+pub mod drive_previews;
 pub mod drive_settings;
 pub mod files;
 mod files_conflicts;

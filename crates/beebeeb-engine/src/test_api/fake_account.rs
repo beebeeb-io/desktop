@@ -384,6 +384,24 @@ impl FakeAccount {
         false
     }
 
+    /// The ids of the account's live files (not folders, not trashed), sorted: what an owner's media read lists.
+    pub fn live_file_ids(&self) -> Vec<String> {
+        let items = self.items.lock().expect("vault items");
+        let mut ids: Vec<String> = items
+            .values()
+            .filter(|item| !item.is_folder && !item.is_trashed)
+            .map(|item| item.id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// A live item's version: when it last changed (unix seconds) and its size.
+    pub fn item_version(&self, id: &str) -> Option<(i64, u64)> {
+        let items = self.items.lock().expect("vault items");
+        items.get(id).map(|item| (item.updated_at, item.size_bytes))
+    }
+
     /// Restore a trashed item. Returns true if found and was trashed.
     pub fn restore_item(&self, id: &str) -> bool {
         let mut items = self.items.lock().expect("vault items");

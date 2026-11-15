@@ -214,6 +214,8 @@ pub fn fixture_handler(
     switches: Switches,
 ) -> Handler {
     let routes = account_handler(account.clone());
+    // The photo-preview routes (PREV-1), with one line per stored preview for the native check.
+    let previews = super::fake_previews::PreviewRoutes::new(account.clone());
     Arc::new(move |request: &Request| {
         let reply = if switches.session_ended.load(Ordering::SeqCst) && request.bearer().is_some() {
             Reply::error(401, "unauthorized")
@@ -221,11 +223,16 @@ pub fn fixture_handler(
             Reply::error(503, "unavailable")
         } else if is_sign_in_leg(request) && !names_email(request, &account.email) {
             Reply::json(401, json!({}))
+        } else if let Some(reply) = previews.answer(request) {
+            reply
         } else {
             routes(request)
         };
         served.fetch_add(1, Ordering::SeqCst);
         lines(&access_line(request, reply.status));
+        if let Some(line) = previews.note(request, reply.status) {
+            lines(&line);
+        }
         reply
     })
 }
