@@ -123,13 +123,10 @@ fn save_a_copy_after_the_refusal_keeps_the_original() {
     assert_eq!(made.len(), 1, "one change for the copy");
     let staged = made[0].payload_path.as_deref().expect("the copy's staged bytes");
     assert_eq!(std::fs::read(staged).expect("the staged copy reads"), EDIT.as_bytes());
-    assert_eq!(
-        db.get_file(&copy.id)
-            .unwrap()
-            .expect("the copy's row")
-            .path
-            .trim_matches('/'),
-        "Invented folder/Deeper/Invented note (Invented-PC, 09:41).txt",
-        "next to the note"
-    );
+    // Next to the note: under the note's own parent (a create's row path is built under its parent; this harness's
+    // rows carry none, so the path is the copy's name alone).
+    let parent = |id: &str| db.get_file_contract_state(id).unwrap().expect("a record").parent_id;
+    assert_eq!(parent(&copy.id), parent(NOTE), "next to the note");
+    let path = db.get_file(&copy.id).unwrap().expect("the copy's row").path;
+    assert_eq!(path.rsplit('/').next(), Some("Invented note (Invented-PC, 09:41).txt"));
 }
