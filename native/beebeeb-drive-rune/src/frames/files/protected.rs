@@ -29,7 +29,7 @@ use crate::ui::banner::{self, Banner, Run, Tone};
 use crate::ui::file_list::{PcState, ROW_H, format_date, pc_glyph};
 use crate::ui::settings_dialog::{self, DIALOG_TITLE, Weight};
 use crate::ui::settings_shell::SUB;
-use crate::ui::{dialog, kit};
+use crate::ui::{dialog, empty, kit};
 use rune::{Align, Color, Cx, El, Icon, Key, KeyEvent, TextStyle, Tx, col, el, row};
 
 /// The words of the message, as the source hands them over.
@@ -254,8 +254,10 @@ pub fn key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> Option<bool> {
 }
 
 /// Is the listing a folder of the tree under `root`?
+///
+/// Anywhere in the path: the fixture's path starts at Backups, the real engine's starts at the Files root.
 fn inside(s: &State, root: &str) -> bool {
-    s.listing.path.first().and_then(|crumb| crumb.id.as_deref()) == Some(root)
+    s.listing.path.iter().any(|crumb| crumb.id.as_deref() == Some(root))
 }
 
 /// Show Backups: the section, on its own folder. What a scene and the section's entrances call.
@@ -292,6 +294,10 @@ pub fn poll(s: &mut State) -> bool {
         return true;
     }
     let Some(root) = s.actions.source.backups_root() else {
+        // On the sidebar's Backups with no folder known: the source looks again (it may throttle itself).
+        if matches!(s.shell.app.screen(), Screen::Drive(r) if r.section == Section::Backups) {
+            s.actions.source.look_for_backups();
+        }
         return false;
     };
     // No folder is read while the session ended (`session.rs`): the sidebar's Backups is refused
@@ -343,9 +349,44 @@ fn section_view(s: &State, cx: &mut Cx<State>) -> El {
     if s.actions.source.backups_root().is_some() {
         crate::shell::files_frame::view(s, cx)
     } else {
-        // Nothing answers for Backups: the shell's "not built yet" frame, never a sample.
-        crate::shell::placeholder::window(s, cx, FrameGroup::Section(Section::Backups))
+        // The source knows no Backups folder (this account has none yet, or it has not been read): an honest empty
+        // state in the shell's own window, never the dev card and never a sample.
+        let t = crate::theme::tokens::theme(cx.system_dark());
+        crate::shell::placeholder::around(s, cx, no_backups(&t))
     }
+}
+
+/// No Backups folder: the Files empty state's look (`kit-empty`, no new colour), and the way to a backup (design note:
+/// the board has no frame for an account without a Backups folder; ruled by the lead 2026-11-15).
+fn no_backups(t: &Theme) -> El {
+    let title = kit::label("backups-none-title", "No backups yet", empty::TITLE, t.text);
+    let link = kit::label(
+        "backups-none-link",
+        "Turn on backups in Settings \u{203A} Backups.",
+        empty::SUB,
+        t.text_secondary,
+    )
+    .role("link")
+    .focusable(true)
+    .on_press(|s: &mut State| s.open_protected_settings());
+    col()
+        .key("backups-none")
+        .role("group")
+        .label("No backups yet")
+        .py(28.0)
+        .px(24.0)
+        .gap(8.0)
+        .items_center()
+        .child(
+            el().key("backups-none-tile")
+                .size(52.0, 52.0)
+                .radius(15.0)
+                .fill(t.tile)
+                .center()
+                .child(kit::glyph("backups-none-icon", &icons::BACKUPS, 26.0, t.text_secondary)),
+        )
+        .child(title)
+        .child(link)
 }
 
 fn section_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {

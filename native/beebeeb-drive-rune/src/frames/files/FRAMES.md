@@ -68,3 +68,5 @@ before those two additions (at `1b2da021`). The 32 truth lines at the PR's head 
 | `DW-0118` | List states | After the first sign-in the list loads in the background; the window works at once. | built by the global lane (`frames::global`, PR 299; its checklist is `../global/FRAMES.md`) |
 | `DW-0119` | List states | Thumbnails arrive one by one: plain tiles until then. | built by the global lane (`frames::global`, PR 299; its checklist is `../global/FRAMES.md`) |
 | `DW-0121` | List states | Offline, and the file isn't on this PC: say so instead of opening nothing. | built by the global lane (`frames::global`, PR 299; its checklist is `../global/FRAMES.md`) |
+
+Design note (lane backon, 2026-11-15, ruled by the lead): the board has no frame for the sidebar's Backups on an account with no Backups folder. It draws the Files empty state's look (`kit-empty`, the tile, a title, one line; no new colour): "No backups yet", and the line "Turn on backups in Settings › Backups." as a link to Settings' Backups. It replaces the dev "not built yet" card in a real build. The card is still what a source that answers nothing for any section shows.
