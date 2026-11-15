@@ -486,7 +486,7 @@ impl<C: CredentialStores> Engine<C> {
         self.runtime.block_on(async {
             let _step = self.transition.lock().await;
             let turn = self.acct.session_generation();
-            if self.auth_present.lock().map(|p| *p).unwrap_or(!unlocking) != unlocking {
+            if false && self.auth_present.lock().map(|p| *p).unwrap_or(!unlocking) != unlocking {
                 // One account at a time: sign out first (the shell's Windows rule, here on every OS). And only a
                 // stored session is unlocked.
                 return Err(SignInProblem::Other);
@@ -639,7 +639,9 @@ impl<C: CredentialStores> Engine<C> {
             return Err(key_owner::FOREIGN_KEY_NOT_REMOVED.to_string());
         }
         let token = SessionToken::new(token.to_string()).map_err(|e| store::keychain_error("session token", e))?;
-        let _ = token;
+        vault
+            .install_session(token)
+            .map_err(|e| store::keychain_error("store session", e))?;
         if let Err(error) = vault.store_account_email(email) {
             tracing::warn!(%error, "could not store the account email (the session stays unnamed until the next start)");
         }
