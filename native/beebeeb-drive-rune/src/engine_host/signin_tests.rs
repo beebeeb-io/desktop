@@ -20,7 +20,7 @@ use beebeeb_engine::test_api::{FakeApi, Handler, Reply, Request};
 use serde_json::{Value, json};
 
 use super::*;
-use crate::frames::signin::source::TwoFactorProblem;
+use crate::frames::signin::source::{NewPasswordProblem, TwoFactorProblem};
 
 const PASSWORD: &str = "an invented password for sign-in";
 const TOTP: &str = "482019";
@@ -671,8 +671,8 @@ fn the_recovery_and_the_device_request_are_bound_and_answer_from_the_engine() {
     source.begin_set_password("an invented new password");
     assert_eq!(
         next(&mut source),
-        SignInEvent::PasswordSet(Err(SignInProblem::Other)),
-        "no recovery is held: the engine refuses"
+        SignInEvent::PasswordSet(Err(NewPasswordProblem::Ended)),
+        "no recovery is held: the engine refuses, and the screen says the recovery ended"
     );
     assert_eq!(
         fake.fake.routes().len(),

@@ -21,7 +21,7 @@ use beebeeb_engine::app::CredentialStores;
 use beebeeb_engine::app::bindings::recovery::{RecoveryDone, RecoveryRefused};
 
 use super::{EngineSignInSource, Wait, phrase_of, secret};
-use crate::frames::signin::source::{PasswordStrength, PhraseProblem, SignInEvent, SignInProblem};
+use crate::frames::signin::source::{NewPasswordProblem, PasswordStrength, PhraseProblem, SignInEvent};
 
 /// The wait the recovery's answers belong to (see the module's doc).
 const RECOVERY: Wait = Wait::Restore;
@@ -42,17 +42,24 @@ fn phrase_problem(refused: RecoveryRefused) -> PhraseProblem {
     }
 }
 
-/// The engine's answer to the new password, as the new-password screen takes it (DW-A49). The screen draws every
-/// problem with the sign-in form's general words.
-fn password_set(done: Result<RecoveryDone, RecoveryRefused>) -> Result<(), SignInProblem> {
+/// The engine's answer to the new password, as the new-password screen takes it (DW-A49): each kind keeps its own words
+/// there. Every kind is named: a new one must be given its words, never fall into another's.
+fn password_set(done: Result<RecoveryDone, RecoveryRefused>) -> Result<(), NewPasswordProblem> {
     match done {
         Ok(RecoveryDone::SignedIn) => Ok(()),
-        // The password WAS changed and nothing was signed in (two-factor: the server wants a normal sign-in). The
-        // screen has no words of its own for this yet; `Ok` would draw "Your vault is unlocked", which is not true.
-        Ok(RecoveryDone::SignInRequired) => Err(SignInProblem::Other),
-        Err(RecoveryRefused::Offline) => Err(SignInProblem::Offline),
-        Err(RecoveryRefused::RateLimited { seconds }) => Err(SignInProblem::RateLimited { seconds }),
-        Err(_) => Err(SignInProblem::Other),
+        // The password WAS changed and nothing was signed in (two-factor: the server wants a normal sign-in). `Ok` would
+        // draw "Your vault is unlocked", which is not true: the window shows the password updated and the way to sign in.
+        Ok(RecoveryDone::SignInRequired) => Err(NewPasswordProblem::SignInRequired),
+        Err(RecoveryRefused::Weak) => Err(NewPasswordProblem::TooShort),
+        Err(RecoveryRefused::Breached) => Err(NewPasswordProblem::Breached),
+        Err(RecoveryRefused::Offline) => Err(NewPasswordProblem::Offline),
+        Err(RecoveryRefused::RateLimited { seconds }) => Err(NewPasswordProblem::RateLimited { seconds }),
+        // Left, ended by the server (its recovery token refused), overtaken, or nothing held: start again from the words.
+        Err(RecoveryRefused::Overtaken) => Err(NewPasswordProblem::Ended),
+        // The words are not checked at this step; a refusal of them here is a step that did not finish.
+        Err(RecoveryRefused::WrongPhrase | RecoveryRefused::UnknownWords(_) | RecoveryRefused::Other) => {
+            Err(NewPasswordProblem::Other)
+        }
     }
 }
 
@@ -93,7 +100,7 @@ impl<C: CredentialStores> EngineSignInSource<C> {
         let password = secret(password);
         self.ask(
             RECOVERY,
-            SignInEvent::PasswordSet(Err(SignInProblem::Other)),
+            SignInEvent::PasswordSet(Err(NewPasswordProblem::Other)),
             move |engine| SignInEvent::PasswordSet(password_set(engine.recovery_set_password_for(turn, password))),
         );
     }
