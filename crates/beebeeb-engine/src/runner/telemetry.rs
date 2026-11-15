@@ -49,12 +49,28 @@ impl AuthHealth {
                 self.expired.store(false, Ordering::Relaxed);
             }
             Some(e) if matches!(classify_operation_error(&e.to_string()), OperationFailureClass::Auth) => {
-                let n = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-                if n >= AUTH_EXPIRED_THRESHOLD {
-                    self.expired.store(true, Ordering::Relaxed);
-                }
+                self.add_refusal();
             }
             Some(_) => {}
+        }
+    }
+
+    /// Record the outcome of one of the engine's own API calls (the heartbeat, the sync tick's pull, the paused
+    /// tick's check), decided on the HTTP status Beebeeb answered and never on the error's text (task 2521, review
+    /// P3-2: a 5xx whose body mentions "401" is not a refusal). `None`: the call worked, which clears the run. A 401
+    /// answer adds one. Anything else (offline, a 5xx, a body that did not read) leaves the run as it is.
+    pub(super) fn note_api_answer(&self, error: Option<&anyhow::Error>) {
+        match error {
+            None => self.note_result(None),
+            Some(e) if is_session_refusal(e) => self.add_refusal(),
+            Some(_) => {}
+        }
+    }
+
+    fn add_refusal(&self) {
+        let n = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+        if n >= AUTH_EXPIRED_THRESHOLD {
+            self.expired.store(true, Ordering::Relaxed);
         }
     }
 
@@ -63,13 +79,31 @@ impl AuthHealth {
     /// with a 401 adds one: three in a row and the session is held as ended, and the session watcher closes the vault.
     /// A pull that failed any other way (offline, a 5xx) leaves the run as it is, and so does a tick that neither
     /// reached the server nor carries the reason: only an answer that came back clears.
+    ///
+    /// One refusal per tick does not space the refusals in time by itself: the tick interval delays a missed tick
+    /// instead of firing it at once (`MissedTickBehavior::Delay`), so a tick that ran long is not followed by a burst.
     pub(super) fn note_tick(&self, tick: &crate::engine_bridge::SyncTickOutcome) {
         if tick.reached_server {
             self.note_result(None);
-        } else if let Some(why) = &tick.pull_refusal {
+        } else if let Some(why) = &tick.pull_failure {
             self.note_result(Some(why));
         }
     }
+}
+
+/// Whether `error` is Beebeeb refusing this session: an HTTP 401 answer, read from the error's chain (the API client's
+/// `DesktopApiError::HttpStatus`, or a `reqwest` error that carries the status), never from its text. Only this
+/// counts toward holding the session as ended.
+pub(crate) fn is_session_refusal(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<crate::api_client::DesktopApiError>(),
+            Some(crate::api_client::DesktopApiError::HttpStatus { status, .. }) if status.as_u16() == 401
+        ) || cause
+            .downcast_ref::<reqwest::Error>()
+            .and_then(reqwest::Error::status)
+            .is_some_and(|status| status.as_u16() == 401)
+    })
 }
 
 /// Fallback heartbeat cadence (seconds) if the server returns no interval and

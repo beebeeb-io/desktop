@@ -781,13 +781,12 @@ pub struct SyncTickOutcome {
     /// tick whose `GET /sync/ops` failed (offline, a 5xx, a 401) still returns `Ok`, so `Ok` alone proves neither that
     /// the server accepts this session's token nor that the rows the reconcile pass plans against are current; the
     /// pass and the resume wait for a tick where this is true.
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub reached_server: bool,
-    /// Task 2521: why the pull did not come back, when it was the server's answer or the network that said so (the
-    /// `GET /sync/ops` error itself). `None` when the pull came back. The runner feeds it to the session's refusal
-    /// run (`AuthHealth::note_tick`): a 401 here is one refusal, so a run of refused ticks closes the
-    /// vault, where an `Ok` tick used to clear the run.
-    pub pull_refusal: Option<anyhow::Error>,
+    /// Task 2521: why the pull did not come back (the `GET /sync/ops` error itself: a refusal of the session, a server
+    /// error or no network). `None` when the pull came back. The runner records it in the session's refusal run
+    /// (`AuthHealth::note_tick`): only an HTTP 401 answer there is a refusal, so a run of refused ticks closes the
+    /// vault; offline or a 5xx is a failure that proves nothing about the session.
+    pub pull_failure: Option<anyhow::Error>,
 }
 
 /// Drop duplicate ids from one tick's applied batch (an item can be applied
