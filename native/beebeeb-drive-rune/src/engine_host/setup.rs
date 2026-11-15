@@ -294,9 +294,9 @@ pub trait SetupEngine: Send + Sync + 'static {
     /// Ask Windows again for the folder's entry in File Explorer; never stops or starts sync. BLOCKS.
     fn ask_explorer_again(&self);
     /// The known folders this PC has, for step 3 (`Engine::backups_overview`). BLOCKS (a disk walk). Empty when
-    /// they cannot be read: the step then says it is not available.
-    fn backup_choices(&self) -> Vec<BackupChoice> {
-        Vec::new()
+    /// they cannot be read: `None`, and the step then says it could not read them (never "not in this version").
+    fn backup_choices(&self) -> Option<Vec<BackupChoice>> {
+        Some(Vec::new())
     }
     /// Switch one known folder's backup on (`Engine::set_backup_folder`). BLOCKS. `false`: it did not happen.
     fn switch_backup_on(&self, _key: &str) -> bool {
@@ -373,7 +373,7 @@ impl<C: CredentialStores> SetupEngine for Engine<C> {
     fn ask_explorer_again(&self) {
         let _ = self.add_to_file_explorer_again();
     }
-    fn backup_choices(&self) -> Vec<BackupChoice> {
+    fn backup_choices(&self) -> Option<Vec<BackupChoice>> {
         use beebeeb_engine::app::backups_api::FolderState;
         self.backups_overview()
             .map(|overview| {
@@ -389,7 +389,7 @@ impl<C: CredentialStores> SetupEngine for Engine<C> {
                     })
                     .collect()
             })
-            .unwrap_or_default()
+            .ok()
     }
     fn switch_backup_on(&self, key: &str) -> bool {
         self.set_backup_folder(key, true).is_ok()
@@ -447,7 +447,8 @@ enum Answer {
     /// A write of the unsaved folder was tried.
     Saved,
     /// The folders step 3 offers, read on a worker.
-    Backups(Vec<BackupChoice>),
+    /// `None`: the read failed.
+    Backups(Option<Vec<BackupChoice>>),
     /// How Windows Hello's prompt for turning app lock off ended (`setup_app_lock.rs`).
     LockProved(crate::engine_host::hello::HelloResult),
 }
@@ -486,6 +487,12 @@ pub struct EngineSetupSource<E: SetupEngine> {
     backups: Vec<BackupChoice>,
     /// A read of them arrived and has not been handed to the window yet.
     backups_fresh: bool,
+    /// The read of them is on its worker and has not answered: the step is a loading state, not an absence.
+    backups_reading: bool,
+    /// The read of them failed (not "there are none"): the step says so and offers Try again.
+    backups_failed: bool,
+    /// This first run asks for the folders at all (Backups is on in this build and the engine reads them).
+    backups_asked: bool,
     changed: bool,
     answers: mpsc::Sender<(Stamp, Answer)>,
     inbox: mpsc::Receiver<(Stamp, Answer)>,
@@ -540,6 +547,9 @@ impl<E: SetupEngine> EngineSetupSource<E> {
             outcomes: Vec::new(),
             backups: Vec::new(),
             backups_fresh: false,
+            backups_reading: false,
+            backups_failed: false,
+            backups_asked: false,
             changed: false,
             answers,
             inbox,
@@ -556,10 +566,18 @@ impl<E: SetupEngine> EngineSetupSource<E> {
         if !super::backups::TURNED_ON || !self.engine.reads_backup_choices() {
             return;
         }
+        // Another session's first run asks nothing, so it waits for nothing. Any other read answers: a worker that
+        // could not start or that panicked answers "could not read" (`ask`).
+        if !self.mine() || self.backups_reading {
+            return;
+        }
+        self.backups_asked = true;
+        self.backups_failed = false;
+        self.backups_reading = true;
         self.ask(
             "first-run-backups",
             |engine, _| Answer::Backups(engine.backup_choices()),
-            Some(Answer::Backups(Vec::new())),
+            Some(Answer::Backups(None)),
         );
     }
 
@@ -633,10 +651,27 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
             Step::Explorer => self.hooks.explorer_step,
             Step::Notifications | Step::Login => true,
             // Passkey, Lock, Backup, Previews: see the methods below. Done is not a step of the list.
-            Step::Backup => super::backups::TURNED_ON && !self.backups.is_empty(),
+            // Where this first run reads the folders the step is always there: loading, the folders, "none found" or
+            // "couldn't read them" (`loading`, `failed`); never "not in this version" while Backups is on.
+            Step::Backup => super::backups::TURNED_ON && self.backups_asked,
             Step::Lock => self.engine.binds_app_lock(),
             Step::Passkey | Step::Previews | Step::Done => false,
         }
+    }
+
+    /// Step 3 while its folders are being read: drawn as loading, then as the answer.
+    fn loading(&self, step: Step) -> bool {
+        step == Step::Backup && super::backups::TURNED_ON && self.backups_reading
+    }
+
+    /// Step 3 after a read that FAILED (not "there are none"): it says so and offers Try again.
+    fn failed(&self, step: Step) -> bool {
+        step == Step::Backup && super::backups::TURNED_ON && self.backups_failed && !self.backups_reading
+    }
+
+    /// Try again on step 3: the folders are read again.
+    fn retry_backups(&mut self) {
+        self.read_backups();
     }
 
     /// The first-run window has no way to a setting yet (the main window's settings open after it): the rows of
@@ -852,7 +887,9 @@ impl<E: SetupEngine> SetupSource for EngineSetupSource<E> {
                 Answer::Retried => self.retrying = false,
                 Answer::Saved => self.saving = false,
                 Answer::Backups(choices) => {
-                    self.backups = choices;
+                    self.backups_reading = false;
+                    self.backups_failed = choices.is_none();
+                    self.backups = choices.unwrap_or_default();
                     self.backups_fresh = true;
                 }
                 Answer::LockProved(result) => self.app_lock_proved(result),

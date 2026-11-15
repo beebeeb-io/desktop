@@ -34,7 +34,7 @@ use zeroize::Zeroizing;
 use super::{EngineAccountSource, Stamp, stamp};
 use crate::frames::account::Pane;
 use crate::frames::account::source::{
-    Answered, CallKind, CodeRefused, EmailRefused, PaneState, Refused, Resend, Secret, Setup, TwoFactor,
+    Answered, CallKind, CallMark, CodeRefused, EmailRefused, PaneState, Refused, Resend, Secret, Setup, TwoFactor,
 };
 
 /// A key made for one session and account, waiting for its first code.
@@ -57,6 +57,11 @@ struct Unseen {
 pub(super) struct Calls {
     /// The calls that are out: a second press of the same call sends nothing.
     out: Vec<CallKind>,
+    /// How many calls were started, and the serial of the latest call of each kind.
+    counter: u64,
+    /// The last answer taken, and the session and account it was taken under.
+    taken: Option<(CallKind, Stamp)>,
+    latest: Vec<(CallKind, u64)>,
     held: Held,
     pending_email: Pending,
     /// A wait Beebeeb asked for before the email's code is sent again.
@@ -74,6 +79,9 @@ impl Calls {
         let (answers, inbox) = mpsc::channel();
         Self {
             out: Vec::new(),
+            counter: 0,
+            taken: None,
+            latest: Vec::new(),
             held: Arc::default(),
             pending_email: Arc::default(),
             resend: super::email::Waiting::default(),
@@ -191,6 +199,11 @@ fn work<C: CredentialStores>(
                 EmailResendError::Failed => Resend::Offline,
             }),
         },
+        // The current password is the one the step-up kept, handed in as `password` by `start_a_call`.
+        CallKind::ChangePassword => match engine.change_password_for(session, password, input) {
+            Ok(()) => Answered::Done,
+            Err(why) => Answered::Refused(super::password_change::refusal(why)),
+        },
         CallKind::ConfirmEmail => match engine.email_change_confirm(session, code) {
             Ok(()) => Answered::Done,
             Err(why) => Answered::Code(code_why(why)),
@@ -257,18 +270,49 @@ fn work<C: CredentialStores>(
 }
 
 impl<C: CredentialStores + 'static> EngineAccountSource<C> {
+    /// See [`crate::frames::account::source::AccountSource::call_mark`].
+    pub(super) fn a_call_mark(&self, kind: CallKind) -> Option<CallMark> {
+        let (_, serial) = self.calls.latest.iter().find(|(k, _)| *k == kind)?;
+        Some(CallMark {
+            serial: *serial,
+            out: self.calls.out.contains(&kind),
+            current: self.calls.out.contains(&kind)
+                || self
+                    .calls
+                    .taken
+                    .as_ref()
+                    .is_none_or(|(k, under)| *k != kind || (*under == stamp(&self.engine) && self.open())),
+        })
+    }
+
     /// See [`crate::frames::account::source::AccountSource::start_call`].
     pub(super) fn start_a_call(&mut self, kind: CallKind, input: &str, password: &str) -> bool {
         if !self.open() {
             return false;
         }
         if self.calls.out.contains(&kind) {
+            if kind == CallKind::ChangePassword {
+                // A second press while a change is out is never "started", and never shares the first one's
+                // answer: refused, and the password its step-up kept is wiped (review of desktop#427).
+                self.password.forget();
+                return false;
+            }
             return true;
         }
         let made_for = stamp(&self.engine);
         let (engine, held, answers) = (self.engine.clone(), self.calls.held.clone(), self.calls.answers.clone());
         let pending = self.calls.pending_email.clone();
-        let (input, password) = (Zeroizing::new(input.to_string()), Zeroizing::new(password.to_string()));
+        let input = Zeroizing::new(input.to_string());
+        let password = if kind == CallKind::ChangePassword {
+            // The password the step-up of this press kept, for this session and account: used once, here. Nothing
+            // kept (or kept for another session): not started, and the sync method refuses it as not confirmed.
+            match self.password.take_kept_for(&made_for) {
+                Some(kept) => kept,
+                None => return false,
+            }
+        } else {
+            Zeroizing::new(password.to_string())
+        };
         let started = std::thread::Builder::new()
             .name("account-call".into())
             .spawn(move || {
@@ -282,6 +326,9 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             .is_ok();
         if started {
             self.calls.out.push(kind);
+            self.calls.counter += 1;
+            self.calls.latest.retain(|(k, _)| *k != kind);
+            self.calls.latest.push((kind, self.calls.counter));
         }
         started
     }
@@ -399,6 +446,7 @@ impl<C: CredentialStores + 'static> EngineAccountSource<C> {
             if matches!(answered, Answered::Codes(_)) {
                 self.calls.handed = Some((made_for, kind));
             }
+            self.calls.taken = Some((kind, now));
             return Some((kind, answered));
         }
         None

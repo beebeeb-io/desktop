@@ -294,8 +294,11 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
             let facts = selected.as_ref().map(|(item, download)| {
                 let mut facts = s.actions.source.details(item, &s.listing.folder.name);
                 if let Some(d) = download {
-                    facts.offline_note = d.panel_words();
-                    facts.kept_offline = true;
+                    // A copy that comes down for another reason (a player reading it) is not a keep.
+                    if d.kept {
+                        facts.offline_note = d.panel_words();
+                        facts.kept_offline = true;
+                    }
                 }
                 (item, facts)
             });

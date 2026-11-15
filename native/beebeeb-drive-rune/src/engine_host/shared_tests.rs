@@ -477,10 +477,7 @@ fn what_is_not_bound_sends_nothing_and_says_not_available() {
     let fake = fake("unbound");
     let mut source = EngineSharedSource::new(signed_in(&fake));
     opened(&mut source);
-    let unbound: [&dyn Fn(&mut EngineSharedSource<MemoryCredentials>) -> bool; 2] =
-        [&|s| s.keep_offline(OTHERS), &|s| {
-            s.invite(TRIP, "new@example.eu", Access::View)
-        }];
+    let unbound: [&dyn Fn(&mut EngineSharedSource<MemoryCredentials>) -> bool; 1] = [&|s| s.keep_offline(OTHERS)];
     for act in unbound {
         assert!(!act(&mut source));
         assert_eq!(settle(&mut source), [Notice::NotAvailable]);
@@ -813,5 +810,30 @@ fn remove_from_my_list_is_the_hide_route_never_the_delete_and_each_409_has_its_w
     assert_eq!(
         changes(&fake.fake).iter().filter(|r| r.starts_with("DELETE ")).count(),
         0
+    );
+}
+
+/// Review of desktop#426 (P2): the words for an invite the engine could not finish say what is known. A refused
+/// approval: they hold no key they can open. An approval that left without an answer: Beebeeb cannot say.
+#[test]
+fn an_unfinished_invite_says_whether_the_approval_left() {
+    let refused = invite_result(&InviteAnswer::Unfinished {
+        invite_id: "an-invented-invite".into(),
+        approval_sent: false,
+    });
+    assert_eq!(refused, InviteResult::Refused(UNFINISHED));
+    let unanswered = invite_result(&InviteAnswer::Unfinished {
+        invite_id: "an-invented-invite".into(),
+        approval_sent: true,
+    });
+    assert_eq!(unanswered, InviteResult::Refused(UNFINISHED_UNCONFIRMED));
+    assert!(
+        UNFINISHED.contains("can\u{2019}t open anything yet"),
+        "true where the approval never took"
+    );
+    assert!(
+        !UNFINISHED_UNCONFIRMED.contains("can\u{2019}t open anything yet")
+            && UNFINISHED_UNCONFIRMED.contains("Check Shared"),
+        "never claims they cannot open it when that is not known"
     );
 }

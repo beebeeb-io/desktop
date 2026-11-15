@@ -23,6 +23,7 @@ struct Double {
     pause_result: Mutex<Result<(), String>>,
     /// The next retry waits on this before it answers.
     hold: Mutex<Option<mpsc::Receiver<()>>>,
+    word: Mutex<Option<&'static str>>,
 }
 
 fn session(n: u64) -> SessionGeneration {
@@ -90,6 +91,7 @@ impl Double {
             cancel_outcome: Mutex::new(CancelOutcome::Cancelled),
             pause_result: Mutex::new(Ok(())),
             hold: Mutex::new(None),
+            word: Mutex::new(Some(crate::ui::status_line::SYNCING)),
         })
     }
     fn move_to(&self, n: u64, account: &str) {
@@ -122,6 +124,9 @@ impl UploadsEngine for Double {
     fn set_paused(&self, _: bool) -> Result<(), String> {
         self.pauses.fetch_add(1, Ordering::SeqCst);
         self.pause_result.lock().unwrap().clone()
+    }
+    fn word(&self) -> Option<&'static str> {
+        *self.word.lock().unwrap()
     }
     fn wake(&self) {}
 }
@@ -342,4 +347,54 @@ fn a_read_that_failed_is_read_again_at_the_next_ask() {
     calls.ask();
     take_until(&mut calls, |c| c.uploads().is_some());
     assert_eq!(engine.reads.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn an_upload_that_finished_leaves_the_panel_at_the_engines_next_pulse_whatever_the_reads_age() {
+    let engine = Double::new(three(1));
+    let mut calls = UploadCalls::new(engine.clone());
+    calls.ask();
+    take_until(&mut calls, |c| c.uploads().is_some());
+    let first = engine.reads.load(Ordering::SeqCst);
+    // Everything went; the engine's word moves to Idle. The held read is a moment old.
+    *engine.read.lock().unwrap() = Ok(read_of(1, Vec::new(), false));
+    *engine.word.lock().unwrap() = Some(crate::ui::status_line::UP_TO_DATE);
+    let start = Instant::now();
+    while calls.uploads().is_some() && start.elapsed() < Duration::from_millis(600) {
+        calls.take();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        calls.uploads().is_none(),
+        "gone within the age gate, by the word's move"
+    );
+    assert!(engine.reads.load(Ordering::SeqCst) > first);
+}
+
+/// A read that failed is held as "tried now": the rows stay, and the next wake does not ask again at once.
+#[test]
+fn a_failed_read_keeps_the_rows_and_is_not_asked_again_inside_the_age_gate() {
+    let engine = Double::new(three(1));
+    let mut calls = UploadCalls::new(engine.clone());
+    calls.ask();
+    take_until(&mut calls, |c| c.uploads().is_some());
+    *engine.read.lock().unwrap() = Err(LocalStateRefused::Unreadable);
+    std::thread::sleep(STALE + Duration::from_millis(100));
+    // The old read is stale: one read is asked and fails.
+    let before = engine.reads.load(Ordering::SeqCst);
+    take_until(&mut calls, |_| engine.reads.load(Ordering::SeqCst) > before);
+    std::thread::sleep(Duration::from_millis(100));
+    calls.take();
+    assert!(calls.uploads().is_some(), "the rows stay");
+    let reads = engine.reads.load(Ordering::SeqCst);
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(600) {
+        calls.take();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        engine.reads.load(Ordering::SeqCst),
+        reads,
+        "not asked again at every wake"
+    );
 }

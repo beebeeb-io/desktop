@@ -470,9 +470,6 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         };
         self.change(session, id, ShareChange::HideRequest { request_id: id.into() })
     }
-    fn invite(&mut self, _share: &str, _email: &str, _access: Access) -> bool {
-        self.refuse(Notice::NotAvailable)
-    }
 
     /// Sent once per press, on a worker, under the session and account of the press. `share` is an item's id (one not
     /// shared with anyone yet too: the engine decides whether it is the account's own). `false`: nothing typed, an
@@ -704,6 +701,9 @@ fn invite_result(answer: &InviteAnswer) -> InviteResult {
         InviteAnswer::PeerKeyChanged { .. } => InviteResult::KeyChanged,
         // A claimed invite that stays (its key never went over, and it could not be withdrawn): never "nothing was
         // shared" (review of desktop#424).
+        InviteAnswer::Unfinished {
+            approval_sent: true, ..
+        } => InviteResult::Refused(UNFINISHED_UNCONFIRMED),
         InviteAnswer::Unfinished { .. } => InviteResult::Refused(UNFINISHED),
         InviteAnswer::Refused(kind) => InviteResult::Refused(refusal_words(*kind)),
     }
@@ -711,6 +711,10 @@ fn invite_result(answer: &InviteAnswer) -> InviteResult {
 
 /// What the invite dialog says when they accepted, but the key never went over and the invite could not be withdrawn.
 pub(crate) const UNFINISHED: &str = "They accepted, but Beebeeb couldn\u{2019}t finish sharing and the invitation is still open. They can\u{2019}t open anything yet. Cancel it in Shared, then invite them again.";
+
+/// What the invite dialog says when the approval was sent and its answer was lost, and the invite could not be
+/// withdrawn either: Beebeeb cannot say whether they can open it now.
+pub(crate) const UNFINISHED_UNCONFIRMED: &str = "Beebeeb couldn\u{2019}t confirm whether they can open it yet. They may already be able to. Check Shared, and cancel it there if you didn\u{2019}t mean to share.";
 
 /// What the invite dialog says for a refusal. Every one ends in what was (not) done.
 pub(crate) fn refusal_words(kind: InviteRefused) -> &'static str {

@@ -29,8 +29,8 @@ mod net_tests;
 mod policy_tests;
 #[cfg(test)]
 mod real_release_tests;
-#[cfg(test)]
-mod testkit;
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit;
 
 pub use machine::{
     Apply, Clock, Config, EngineStopped, Event, Failure, Freshness, Http, Intent, Persisted, Response, State, Store,

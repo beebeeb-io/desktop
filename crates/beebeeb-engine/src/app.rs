@@ -91,6 +91,7 @@ pub mod state_owner;
 pub mod transfer_limits_api;
 pub mod trash_api;
 // What uploads, Try again on one, and the cancel of a new file's upload, for the native Files window.
+pub mod downloads_api;
 pub mod uploads_api;
 // A file's versions and the restore of one, for the native Files window.
 pub mod trash_bulk_api;
@@ -319,6 +320,7 @@ impl<C: CredentialStores> Engine<C> {
         // Every engine started from here reports through the view's host, which goes on to the host given here.
         let view = Arc::new(ViewCell::default());
         let host: Arc<dyn EngineHost> = Arc::new(ViewHost::new(host, view.clone()));
+        downloads_api::wake_the_host_for_downloads(&host);
         Ok(Self {
             identity,
             config,

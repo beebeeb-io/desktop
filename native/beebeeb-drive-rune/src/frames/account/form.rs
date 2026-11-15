@@ -44,6 +44,8 @@ pub enum Problem {
     NameRefused,
     /// A password change whose end is not known: it may have been made.
     Unconfirmed,
+    /// A password change that finished while the person was on another page: said when the page is opened again.
+    Changed,
 }
 
 pub struct Form {
@@ -53,6 +55,8 @@ pub struct Form {
     pub current: TextEdit,
     pub new: TextEdit,
     pub again: TextEdit,
+    /// Where the typing of a frozen password page goes (a change is out): thrown away, never a password field.
+    pub sink: TextEdit,
     /// The digits of a code (secure, shown): the email's 8, the authenticator's 6, a backup code's 8.
     pub code: TextEdit,
     /// A passkey's new name, while it is renamed.
@@ -76,6 +80,10 @@ pub struct Form {
     pub saving_name: bool,
     /// The call that is out and not answered yet (`calls`): a press while it is does nothing.
     pub waiting: Option<CallKind>,
+    /// The serial of the call `waiting` is for (`AccountSource::call_mark`): only its answer settles the page.
+    pub waiting_serial: u64,
+    /// A password change answered while its page was not open: said when the page opens again, never dropped.
+    pub late_change: Option<(u64, Result<(), super::source::Refused>)>,
     /// The first code was wrong and the key it belonged to was replaced: the page says to scan again.
     pub key_replaced: bool,
 }
@@ -100,6 +108,7 @@ impl Default for Form {
             current: secure(),
             new: secure(),
             again: secure(),
+            sink: secure(),
             code: code_edit(),
             rename: TextEdit::new(""),
             problem: None,
@@ -112,6 +121,8 @@ impl Default for Form {
             saved: None,
             saving_name: false,
             waiting: None,
+            waiting_serial: 0,
+            late_change: None,
             key_replaced: false,
         }
     }
@@ -162,13 +173,44 @@ pub fn code(form: &Form, count: usize) -> String {
 /// was just opened or closed): the last problem goes, the secrets of other pages go, the
 /// field a person types in first gets the keyboard.
 pub fn arrive(ui: &mut AccountUi) {
+    // A password change from an earlier visit may still be out: the page shows that wait (and its answer is that
+    // change's), never a blank form that could start a second one.
+    let change_out = (ui.pane == Pane::Password && ui.dialog.is_none())
+        .then(|| ui.source.as_deref().and_then(|s| s.call_mark(CallKind::ChangePassword)))
+        .flatten()
+        .filter(|mark| mark.out);
+    // A late answer is said only under the session and account it was taken under; otherwise it is dropped.
+    let late_mark = ui.source.as_deref().and_then(|s| s.call_mark(CallKind::ChangePassword));
+    if ui
+        .form
+        .late_change
+        .as_ref()
+        .is_some_and(|(serial, _)| !late_mark.is_some_and(|mark| mark.current && mark.serial == *serial))
+    {
+        ui.form.late_change = None;
+    }
     let f = &mut ui.form;
     f.problem = None;
-    f.waiting = None;
+    f.waiting = change_out.map(|_| CallKind::ChangePassword);
+    f.waiting_serial = change_out.map_or(0, |mark| mark.serial);
     f.key_replaced = false;
     f.renaming = None;
     f.saved = None;
     focus(f, None);
+    if ui.pane == Pane::Password && change_out.is_none() {
+        // The answer of a change that landed while another page was open: said here, now.
+        match f.late_change.take().map(|(_, answer)| answer) {
+            Some(Ok(())) => {
+                (f.current, f.new, f.again) = (secure(), secure(), secure());
+                f.problem = Some(Problem::Changed);
+            }
+            Some(Err(why)) => {
+                f.current = secure();
+                f.problem = Some(super::forms::refused(why));
+            }
+            None => {}
+        }
+    }
     if ui.pane != Pane::TwoFactorSetup {
         f.setup = None;
     }
@@ -185,6 +227,7 @@ pub fn arrive(ui: &mut AccountUi) {
         (f.new, f.again) = (secure(), secure());
     }
     f.code = code_edit();
+    f.sink = secure();
     if let Some(dialog) = &ui.dialog {
         if matches!(dialog, Dialog::Code(super::CodeFor::StopActivity))
             && ui.source.as_deref().is_some_and(|s| s.stop_activity_needs_password())

@@ -36,6 +36,7 @@ fn the_fixture_signs_in_a_real_engine_and_nobody_else_does() {
         account,
         Arc::new(move |line: &str| sink.lock().unwrap().push(line.to_string())),
         served.clone(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
     );
     let fake = FakeApi::start_on(listener, handler).unwrap();
 

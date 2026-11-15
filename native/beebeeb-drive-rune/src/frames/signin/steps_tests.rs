@@ -956,24 +956,67 @@ fn the_passkey_door_is_drawn_only_where_the_source_can_sign_in_with_one() {
 }
 
 #[test]
-fn where_the_source_has_no_in_app_doors_the_board_doors_open_the_web_recovery_page() {
+fn where_the_source_has_no_in_app_doors_the_recovery_phrase_card_opens_the_web_recovery_page() {
     let (mut rt, calls) = form(Script {
         in_app_doors: false,
         ..Script::default()
     });
-    assert!(
-        a11y(&rt).contains("Sign in with another device"),
-        "the board's door stays"
-    );
-    click(&mut rt, "btn-1");
-    assert_eq!(ui(&mut rt).take_intents(), vec![Intent::OpenRecoveryPage]);
-    assert_eq!(ui(&mut rt).screen, Screen::SignIn, "the window stays where it was");
     click(&mut rt, "link-0-box");
     assert_eq!(ui(&mut rt).screen, Screen::Forgot);
-    for card in ["btn-0", "btn-1"] {
-        click(&mut rt, card);
-        assert_eq!(ui(&mut rt).take_intents(), vec![Intent::OpenRecoveryPage], "{card}");
-        assert_eq!(ui(&mut rt).screen, Screen::Forgot);
-    }
+    // The one card that is true here: the web does the recovery with the 12 words.
+    click(&mut rt, "btn-0");
+    assert_eq!(ui(&mut rt).take_intents(), vec![Intent::OpenRecoveryPage]);
+    assert_eq!(ui(&mut rt).screen, Screen::Forgot);
     assert!(calls.borrow().is_empty(), "nothing was asked of the engine");
+}
+
+#[test]
+fn where_the_source_has_no_in_app_doors_no_door_to_another_device_is_drawn() {
+    let (mut rt, calls) = form(Script {
+        in_app_doors: false,
+        ..Script::default()
+    });
+    let page = a11y(&rt);
+    assert!(
+        !page.contains("Sign in with another device"),
+        "no door that leads to the web's recovery page under Sign in"
+    );
+    click(&mut rt, "link-0-box");
+    assert_eq!(ui(&mut rt).screen, Screen::Forgot);
+    let page = a11y(&rt);
+    assert!(
+        !page.contains("another device signed in") && !page.contains("Sign in with another device"),
+        "no card that promises approval from another device"
+    );
+    // The doors that are true stay: the phrase's page on the web, and what neither means.
+    assert!(page.contains("I have my recovery phrase") && page.contains("I have neither"));
+    assert!(calls.borrow().is_empty(), "nothing was asked of the engine");
+}
+
+#[test]
+fn where_the_source_has_in_app_doors_both_doors_to_another_device_are_drawn() {
+    let (mut rt, _) = form(Script::default());
+    assert!(a11y(&rt).contains("Sign in with another device"));
+    click(&mut rt, "link-0-box");
+    assert!(a11y(&rt).contains("I have another device signed in"));
+}
+
+/// Review of #427 (P2): the Phrase step's hint offered "approve from another device" where the source has none.
+#[test]
+fn the_phrase_hint_names_another_device_only_where_the_source_has_the_door() {
+    let (rt, _) = signed_in(Script {
+        in_app_doors: false,
+        ..phrase_script()
+    });
+    let page = a11y(&rt);
+    assert!(page.contains("Enter your 12 words"), "the hint is there: {page}");
+    assert!(
+        !page.contains("approve from another device"),
+        "no clause without the door: {page}"
+    );
+    let (rt, _) = signed_in(phrase_script());
+    assert!(
+        a11y(&rt).contains("approve from another device"),
+        "with the door it is drawn"
+    );
 }

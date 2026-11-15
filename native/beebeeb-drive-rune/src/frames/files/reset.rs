@@ -115,6 +115,10 @@ pub fn end_session(s: &mut State, account_left: bool) {
     if account_left && source.uploads().is_some() {
         source.forget_uploads();
     }
+    // The copies read from the engine are the account's too: forgotten whenever it leaves.
+    if account_left {
+        source.forget_downloads();
+    }
     // What Try again would repeat: a share names a file, an upload names paths on this PC.
     *retry_share = None;
     *retry_upload = None;

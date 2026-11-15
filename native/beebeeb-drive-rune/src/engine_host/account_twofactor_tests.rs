@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 use super::*;
-use crate::frames::account::source::{AccountSource, Resend};
+use crate::frames::account::source::{AccountSource, Password, Purpose, Refused, Resend};
 
 const PASSWORD: &str = "an invented password for the account";
 const SETUP: &str = r#"{"secret":"JBSWY3DPEHPK3PXP","qr_uri":"otpauth://totp/Beebeeb:x?secret=JBSWY3DPEHPK3PXP","backup_codes":["11111111","22222222"]}"#;
@@ -417,3 +417,143 @@ fn new_backup_codes_reach_the_pane_when_the_screen_locks_while_the_request_is_ou
 
 #[path = "account_twofactor_tests_window.rs"]
 mod window;
+
+const NEW_PASSWORD: &str = "A New Invented Password 42";
+
+fn asks_for_a_change(fake: &Fake) -> usize {
+    fake.asked
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|route| route.contains("password"))
+        .count()
+}
+
+#[test]
+fn a_password_change_is_asked_on_a_worker_and_answered_through_the_call() {
+    let fake = fake();
+    let mut source = Source::new(signed_in(&fake));
+    source
+        .step_up(Password::from_field(PASSWORD), Purpose::ChangePassword)
+        .expect("the step-up keeps the typed password");
+    assert!(
+        source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""),
+        "taken: the engine's call runs on a worker"
+    );
+    let Some((CallKind::ChangePassword, answered)) = answer(&mut source) else {
+        panic!("the change was not answered");
+    };
+    // The fake has no password route: Beebeeb did not take it, and the form says so (never a fake success).
+    assert!(matches!(answered, Answered::Refused(_)), "nothing went through");
+    assert!(answer(&mut source).is_none(), "one answer for one press");
+}
+
+#[test]
+fn a_password_change_with_nothing_kept_is_not_started_and_asks_nothing() {
+    let fake = fake();
+    let mut source = Source::new(signed_in(&fake));
+    let before = asks_for_a_change(&fake);
+    assert!(
+        !source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""),
+        "no step-up kept a password: nothing starts"
+    );
+    // The form then asks the sync method, which refuses it as not confirmed.
+    let forged = crate::frames::account::source::StepUp::granted(Purpose::ChangePassword, 1);
+    assert_eq!(
+        source.change_password(forged, Password::from_field(NEW_PASSWORD)).err(),
+        Some(Refused::NotConfirmed)
+    );
+    assert_eq!(asks_for_a_change(&fake), before, "nothing was sent");
+}
+
+#[test]
+fn a_password_change_answered_after_the_session_ended_is_dropped() {
+    let fake = fake();
+    let engine = signed_in(&fake);
+    let mut source = Source::new(engine.clone());
+    source
+        .step_up(Password::from_field(PASSWORD), Purpose::ChangePassword)
+        .expect("kept");
+    assert!(source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""));
+    engine.sign_out_keeping_local_data().expect("signs out");
+    std::thread::sleep(Duration::from_millis(700));
+    source.pump();
+    assert!(
+        source.call_answer().is_none(),
+        "nothing of the ended session is answered"
+    );
+}
+
+#[test]
+fn a_second_password_press_while_the_first_is_out_is_never_started() {
+    let fake = fake();
+    let mut source = Source::new(signed_in(&fake));
+    source
+        .step_up(Password::from_field(PASSWORD), Purpose::ChangePassword)
+        .expect("kept");
+    assert!(source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""), "press A");
+    // Press B: its step-up keeps a password again, and the call is refused: not "started", no answer of A's is B's.
+    source
+        .step_up(Password::from_field(PASSWORD), Purpose::ChangePassword)
+        .expect("kept");
+    assert!(
+        !source.start_call(CallKind::ChangePassword, "A Second Invented Password 7", ""),
+        "B is not taken while A is out"
+    );
+    // The password B's step-up kept is wiped: nothing is left to start a change with.
+    assert!(!source.start_call(CallKind::ChangePassword, "A Third Invented Password 9", ""));
+    let Some((CallKind::ChangePassword, _)) = answer(&mut source) else {
+        panic!("A's answer comes");
+    };
+    assert!(answer(&mut source).is_none(), "one answer, for A only");
+}
+
+#[test]
+fn a_page_that_comes_back_can_see_that_a_password_change_is_still_out_and_which_call() {
+    let fake = fake();
+    let mut source = Source::new(signed_in(&fake));
+    assert_eq!(source.call_mark(CallKind::ChangePassword), None);
+    source
+        .step_up(Password::from_field(PASSWORD), Purpose::ChangePassword)
+        .expect("kept");
+    assert!(source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""));
+    let first = source.call_mark(CallKind::ChangePassword).expect("started");
+    assert!(first.out, "out until its answer is taken");
+    assert!(answer(&mut source).is_some());
+    let done = source
+        .call_mark(CallKind::ChangePassword)
+        .expect("the call is remembered");
+    assert!(!done.out, "taken: no longer out");
+    assert_eq!(done.serial, first.serial, "the answer is for the call that was started");
+    // A later press is a later call: its serial is never the earlier one's.
+    source
+        .step_up(Password::from_field(PASSWORD), Purpose::ChangePassword)
+        .expect("kept");
+    assert!(source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""));
+    assert_ne!(source.call_mark(CallKind::ChangePassword).unwrap().serial, first.serial);
+}
+
+#[test]
+fn an_answer_taken_under_one_session_is_not_current_once_the_session_moved() {
+    let fake = fake();
+    let engine = signed_in(&fake);
+    let mut source = Source::new(engine.clone());
+    source
+        .step_up(Password::from_field(PASSWORD), Purpose::ChangePassword)
+        .expect("kept");
+    assert!(source.start_call(CallKind::ChangePassword, NEW_PASSWORD, ""));
+    assert!(
+        source.call_mark(CallKind::ChangePassword).unwrap().current,
+        "out: current"
+    );
+    assert!(answer(&mut source).is_some());
+    assert!(
+        source.call_mark(CallKind::ChangePassword).unwrap().current,
+        "taken and nothing moved: current"
+    );
+    engine.sign_out_keeping_local_data().expect("signs out");
+    assert!(
+        !source.call_mark(CallKind::ChangePassword).unwrap().current,
+        "another session now: a late answer kept for the page is dropped"
+    );
+}

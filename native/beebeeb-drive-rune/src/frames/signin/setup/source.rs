@@ -202,6 +202,17 @@ pub trait SetupSource {
     fn available(&self, _step: super::Step) -> bool {
         true
     }
+    /// Whether this step's content is still being read: the step is drawn as a loading state (never as absent, never
+    /// with a sample), then as what the read found. The fixture has everything from the start.
+    fn loading(&self, _step: super::Step) -> bool {
+        false
+    }
+    /// Whether this step's read FAILED (not "nothing found"): it says it could not read, with Try again.
+    fn failed(&self, _step: super::Step) -> bool {
+        false
+    }
+    /// Try again after a failed read of step 3's folders.
+    fn retry_backups(&mut self) {}
     /// Whether the first run still has to ask for the sync folder, and what it suggests.
     fn folder_ask(&self) -> FolderAsk {
         FolderAsk::Settled

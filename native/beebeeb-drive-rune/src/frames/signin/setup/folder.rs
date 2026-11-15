@@ -165,3 +165,47 @@ pub fn not_yet(step: Step, k: &mut Keys, t: &Theme) -> El {
         ))
         .child(actions().child(primary(k, "Continue", ButtonState::Enabled, t, Ui::go_on)))
 }
+
+/// Step 3 while the folders on this PC are being read: the step's own heading, a line that says what is happening,
+/// no folder and no switch until the read answered. "Not now" stays; turning backup on waits for the folders.
+pub fn backup_loading(k: &mut Keys, t: &Theme) -> El {
+    setup::column()
+        .child(au::heading(
+            "Back up your folders",
+            Some("Looking at the folders on this PC\u{2026}"),
+            false,
+            t,
+        ))
+        .child(
+            actions()
+                .child(primary(k, "Turn on backup", ButtonState::Disabled, t, Ui::go_on))
+                .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
+        )
+}
+
+/// Step 3 when reading the folders failed: said as a failure, never as "not in this version". Try again reads them
+/// again; Not now goes on with nothing turned on.
+pub fn backup_failed(k: &mut Keys, t: &Theme) -> El {
+    setup::column()
+        .child(au::heading(
+            "Back up your folders",
+            Some("Beebeeb couldn\u{2019}t read the folders on this PC. Nothing is turned on."),
+            false,
+            t,
+        ))
+        .child(
+            actions()
+                .child(primary(k, "Try again", ButtonState::Enabled, t, Ui::retry_backup))
+                .child(ghost(k, "Not now", ButtonState::Enabled, t, Ui::not_now)),
+        )
+}
+
+/// What step 3 says when the read worked and found nothing: only what is true (this app cannot add folders).
+pub const BACKUP_NONE: &str = "Beebeeb found no folders it can back up on this PC. Nothing is turned on.";
+
+/// Step 3 when the read worked and this PC has no folder to offer: said as that, with a way on.
+pub fn backup_none(k: &mut Keys, t: &Theme) -> El {
+    setup::column()
+        .child(au::heading("Back up your folders", Some(BACKUP_NONE), false, t))
+        .child(actions().child(primary(k, "Continue", ButtonState::Enabled, t, Ui::not_now)))
+}
