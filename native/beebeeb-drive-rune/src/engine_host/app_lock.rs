@@ -132,6 +132,8 @@ enum Answer {
         result: Result<Stored, AppLockRefused>,
     },
     Hello {
+        /// The prompt's number (`AppLockPart::prompts`).
+        number: u64,
         made_for: Stamp,
         change: Change,
         result: HelloResult,
@@ -163,6 +165,8 @@ pub(super) struct AppLockPart<C: CredentialStores> {
     changing: Option<Stamp>,
     /// The Hello prompt that is up, to take away when the page goes.
     prompt: Option<HelloCancel>,
+    /// The number of the last prompt asked: only the answer of the prompt that is up, under this number, is taken in.
+    prompts: u64,
     /// "Use your password", while it is offered.
     pub(super) offer: Option<Offer>,
     said: Option<Said>,
@@ -265,6 +269,7 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
             showing: false,
             changing: None,
             prompt: None,
+            prompts: 0,
             offer: None,
             said: None,
             #[cfg(test)]
@@ -315,9 +320,11 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
     pub(super) fn closed(&mut self) {
         self.showing = false;
         self.offer = None;
-        // A prompt for a page that is gone is taken away; its answer (Cancelled) changes nothing.
+        // A prompt for a page that is gone is taken away, and the change it was asked for ends with it: after the
+        // cancel no answer of it is taken in (`take_in`), so nothing else would free the switch.
         if let Some(cancel) = self.prompt.take() {
             cancel();
+            self.changing = None;
         }
     }
 
@@ -395,9 +402,12 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
 
     /// Windows Hello for `change`; its answer comes back through the channel.
     fn prove(&mut self, made_for: Stamp, change: Change) {
+        self.prompts += 1;
+        let number = self.prompts;
         let (tx, engine, mine) = (self.tx.clone(), self.engine.clone(), made_for.clone());
         match self.hello.start(Box::new(move |result| {
             let _ = tx.send(Answer::Hello {
+                number,
                 made_for: mine,
                 change,
                 result,
@@ -578,10 +588,17 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
                 self.held = result.ok().map(|on| (made_for, on));
             }
             Answer::Hello {
+                number,
                 made_for,
                 change,
                 result,
             } => {
+                // Only the prompt that is up answers. One that was taken away (the page went, the session moved) may
+                // still have an answer on its way, decided before its cancel (`hello::HelloCancel`): dropped, also
+                // when a newer prompt is up under the same stamp, and that one stays up.
+                if self.prompt.is_none() || number != self.prompts {
+                    return true;
+                }
                 self.prompt = None;
                 if self.changing.as_ref() != Some(&made_for) || !self.is_now(&made_for) {
                     self.changing = None;

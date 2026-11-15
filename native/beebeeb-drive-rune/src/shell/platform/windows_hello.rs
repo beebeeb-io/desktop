@@ -7,7 +7,8 @@
 //!
 //! One prompt at a time, app-wide: a [`start`] while another prompt is up takes that one away, and its owner hears
 //! `Cancelled`. The owner's own [`HelloRequest::cancel`] is the cancel contract of `engine_host::hello::HelloCancel`
-//! (written there, once): after it returns, no answer of that prompt is handed out.
+//! (written there, once): after it returns, no answer of that prompt is decided any more; one decided before it may
+//! still be on its way, and the owner drops that one by its own check.
 //!
 //! What it is NOT: no key, password or other secret passes through here, and a `Verified` unlocks nothing by
 //! itself. The prompt is Windows' own (`UserConsentVerifier` through
@@ -281,11 +282,11 @@ pub struct HelloRequest {
 
 impl HelloRequest {
     /// The person left the screen that asked: take the prompt away. This is the cancel contract of
-    /// `engine_host::hello::HelloCancel`: once this returns, no answer of this prompt is handed out. `on_done` has
-    /// either been handed its answer already (decided before this call: the owner's own turn check drops it) or it
-    /// never runs and is dropped, whatever the person does in the prompt from here on. Never blocks: Windows is
-    /// asked to close the prompt from the prompt's thread, not from this call. Safe to call from inside `on_done`,
-    /// and on a prompt that is over (it then changes nothing).
+    /// `engine_host::hello::HelloCancel`: once this returns, no answer of this prompt is decided any more. `on_done`
+    /// has either been handed its answer already (decided before this call, it may still be running: the owner's
+    /// own turn check drops it) or it never runs and is dropped, whatever the person does in the prompt from here
+    /// on. Never blocks: Windows is asked to close the prompt from the prompt's thread, not from this call. Safe to
+    /// call from inside `on_done`, and on a prompt that is over (it then changes nothing).
     pub fn cancel(&self) {
         self.control.cancel();
     }
@@ -666,7 +667,8 @@ mod tests {
     }
 
     /// L273: one prompt at a time. A newer prompt takes the place of the one that is up: that one's wait ends, its
-    /// owner (who did not cancel) is answered `Cancelled` even on a yes, and its end does not free the newer one's place.
+    /// owner (who did not cancel) is answered `Cancelled` even on a yes, and its end does not free the newer one's
+    /// place.
     #[test]
     fn a_newer_prompt_takes_the_place_of_the_one_that_is_up() {
         let one_up = OneUp::new();
