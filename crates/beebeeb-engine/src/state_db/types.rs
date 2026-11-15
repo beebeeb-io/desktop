@@ -1012,6 +1012,11 @@ pub struct LandingInput<'a> {
     /// The SHA-256 of that payload's plaintext, for a sync-folder upload (no write id): what this
     /// device now agrees with the server on (task 1640). `None` leaves the file's baseline unknown.
     pub completed_payload_hash: Option<&'a str>,
+    /// Task 2523 (F2): the bytes that landed are the copy in the file's place (a sync-folder upload, or a macOS File
+    /// Provider write: the system's copy). `false`: a save uploaded from a staged copy that never touched the place
+    /// (the in-app viewer on Windows and Linux): the place's copy keeps its own agreed version and content, so it
+    /// reads as behind the version that landed.
+    pub place_written: bool,
     /// Windows: a create's finalization journal row, written in the landing's own transaction
     /// so the op is never gone without it. `None` everywhere else.
     pub finalization: Option<&'a UploadFinalization>,

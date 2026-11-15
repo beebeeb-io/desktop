@@ -752,6 +752,43 @@ async fn run(
                                 "the reconcile pass did not complete; held changes stay paused, next tick retries"
                             );
                         }
+                        // Task 2523 (F1): another device's version reaches the copy on this PC. Only at a tick whose
+                        // pull came back (the rows the pass reads are fresh), before the queue step (on Linux that
+                        // step sends the re-downloads it queues). Off the async workers: it may hash files. Windows:
+                        // freeing work, so it waits for the start-up guard's pass, as the stamp pass does (spec U4).
+                        #[cfg(target_os = "windows")]
+                        let stale_copies_allowed = crate::unknown_check::STARTUP_GUARD.allows_freeing();
+                        // macOS: the File Provider fetches on the working-set signal; the pass has nothing to do.
+                        #[cfg(not(target_os = "windows"))]
+                        let stale_copies_allowed = cfg!(not(target_os = "macos"));
+                        if tick.reached_server && stale_copies_allowed {
+                            let (pass_bridge, pass_root) = (bridge.clone(), sync_root.clone());
+                            match tokio::task::spawn_blocking(move || pass_bridge.refresh_stale_copies(&pass_root))
+                                .await
+                            {
+                                // A kept file is fetched again now, off the tick, as a pin does.
+                                #[cfg(target_os = "windows")]
+                                Ok(Ok(pass)) => {
+                                    for place in pass.refetch {
+                                        tokio::task::spawn_blocking(move || {
+                                            if let Err(error) =
+                                                crate::windows_cf::placeholders::hydrate_placeholder(&place)
+                                            {
+                                                tracing::warn!(%error, "stale copy: a kept file was not fetched again; the next open fetches it");
+                                            }
+                                        });
+                                    }
+                                }
+                                #[cfg(not(target_os = "windows"))]
+                                Ok(Ok(_)) => {}
+                                Ok(Err(error)) => {
+                                    tracing::warn!(%error, "stale copies: the pass did not complete; next tick retries")
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%error, "stale copies: the pass panicked; next tick retries")
+                                }
+                            }
+                        }
                         let completed_sync_work = queue_step(
                             &bridge,
                             &sync_root,

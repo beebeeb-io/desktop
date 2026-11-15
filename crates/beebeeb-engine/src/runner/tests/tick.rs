@@ -430,3 +430,29 @@ fn a_late_tick_or_beat_delays_the_next_one_instead_of_a_burst() {
 // failure (Explorer-held handles, 3s drain timeout) was reported as
 // "could not stop the sync engine". The classification must attribute the
 // failure to the stage that actually failed.
+
+/// Task 2523 (F1): the stale-copy pass runs once per tick, only at a tick whose pull reached the server, after the
+/// reconcile pass and before the queue step (on Linux that step sends the re-downloads it queued), off the async
+/// workers; on Windows only once the start-up guard allows freeing work. `run` needs a real window system, so the
+/// wiring is asserted on the source, on every platform.
+#[test]
+fn the_tick_runs_the_stale_copy_pass_after_the_pull_and_before_the_queue_step() {
+    let source = include_str!("../../runner.rs").replace("\r\n", "\n");
+    let start = source
+        .find("async fn run(\n    identity: &'static crate::identity::EngineIdentity,\n    app: Host")
+        .expect("run exists");
+    let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+    let call = "pass_bridge.refresh_stale_copies(&pass_root)";
+    assert_eq!(body.matches(call).count(), 1, "`run` runs the pass once per tick");
+    let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("`run` has {needle}"));
+    assert!(
+        at(".reconcile_then_resume(") < at(call) && at(call) < at("let completed_sync_work = queue_step("),
+        "after the reconcile pass, before the queue step"
+    );
+    assert!(
+        at("if tick.reached_server && stale_copies_allowed {") < at(call),
+        "only after a pull that came back"
+    );
+    assert!(body.contains("let stale_copies_allowed = crate::unknown_check::STARTUP_GUARD.allows_freeing();"));
+    assert!(body.contains("tokio::task::spawn_blocking(move || pass_bridge.refresh_stale_copies(&pass_root))"));
+}

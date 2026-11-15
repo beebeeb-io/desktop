@@ -663,6 +663,47 @@ pub fn write_hydrated_from_reader(
     allowed_roots: &[&Path],
     reader: &mut dyn std::io::Read,
 ) -> std::io::Result<u64> {
+    write_hydrated_from_reader_checked(dest_path, allowed_roots, reader, &mut || true)
+}
+
+/// Task 2523 (review P2-1): the place changed between the hydrate's last look and the replace, so it was not
+/// replaced (the written copy is removed). A write into the file's own place in the sync folder refuses then.
+#[derive(Debug)]
+pub struct PlaceChangedBeforeReplace;
+
+impl std::fmt::Display for PlaceChangedBeforeReplace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the place changed before it was replaced")
+    }
+}
+
+impl std::error::Error for PlaceChangedBeforeReplace {}
+
+/// `error` is [`PlaceChangedBeforeReplace`].
+pub fn place_changed_before_replace(error: &std::io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<PlaceChangedBeforeReplace>())
+}
+
+/// [`write_hydrated_plaintext`], asking `place_unchanged` once the whole copy is written, right before it replaces the
+/// place: `false` leaves the place as it is ([`PlaceChangedBeforeReplace`]).
+pub fn write_hydrated_plaintext_checked(
+    dest_path: &Path,
+    allowed_roots: &[&Path],
+    buf: &[u8],
+    place_unchanged: &mut dyn FnMut() -> bool,
+) -> std::io::Result<()> {
+    write_hydrated_from_reader_checked(dest_path, allowed_roots, &mut &buf[..], place_unchanged).map(|_| ())
+}
+
+#[cfg(unix)]
+fn write_hydrated_from_reader_checked(
+    dest_path: &Path,
+    allowed_roots: &[&Path],
+    reader: &mut dyn std::io::Read,
+    place_unchanged: &mut dyn FnMut() -> bool,
+) -> std::io::Result<u64> {
     use std::os::unix::io::AsRawFd;
     use std::path::Component;
 
@@ -764,6 +805,12 @@ pub fn write_hydrated_from_reader(
         }
     };
 
+    // Task 2523 (review P2-1): the last look, after the whole copy is written and right before the place is replaced.
+    if !place_unchanged() {
+        remove_temp();
+        return Err(std::io::Error::other(PlaceChangedBeforeReplace));
+    }
+
     // Atomically publish: same `dir_fd` for both sides, so this is anchored to
     // the already-validated directory inode, not a fresh path resolution.
     // SAFETY: both name arguments are NUL-terminated `CString`s alive for this
@@ -797,6 +844,17 @@ pub fn write_hydrated_from_reader(
     allowed_roots: &[&Path],
     reader: &mut dyn std::io::Read,
 ) -> std::io::Result<u64> {
+    write_hydrated_from_reader_checked(dest_path, allowed_roots, reader, &mut || true)
+}
+
+/// Windows writes in place (no copy to rename over it): the last look is taken right before the place is opened.
+#[cfg(not(unix))]
+fn write_hydrated_from_reader_checked(
+    dest_path: &Path,
+    allowed_roots: &[&Path],
+    reader: &mut dyn std::io::Read,
+    place_unchanged: &mut dyn FnMut() -> bool,
+) -> std::io::Result<u64> {
     let root = allowed_roots
         .iter()
         .copied()
@@ -808,6 +866,9 @@ pub fn write_hydrated_from_reader(
             )
         })?;
     crate::name_alias::refuse_conflict_below(root, dest_path)?;
+    if !place_unchanged() {
+        return Err(std::io::Error::other(PlaceChangedBeforeReplace));
+    }
     let mut file = match std::fs::symlink_metadata(dest_path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::OpenOptions::new()
             .write(true)
