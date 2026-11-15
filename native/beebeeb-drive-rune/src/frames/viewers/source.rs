@@ -234,6 +234,8 @@ pub enum Body {
     /// DW-1556: an office document, and the editor did not start on this PC. Nothing of the file
     /// is held here and nothing was changed.
     NoEditor,
+    /// DW-1556, DW-1563, DW-1564: the Office viewer's state (a failure, opening, content missing).
+    OfficeState(super::super::office::states::StateBody),
 }
 
 /// The kind and its counts, never a word of the content, a name or a title.
@@ -251,6 +253,7 @@ impl fmt::Debug for Body {
             Body::Audio(_) => f.write_str("Audio"),
             Body::Word(doc) => write!(f, "Word({doc:?})"),
             Body::NoEditor => f.write_str("NoEditor"),
+            Body::OfficeState(b) => write!(f, "OfficeState({:?})", b.state),
             Body::Sheet(v) => write!(f, "Sheet({} cells)", v.cells.len()),
             Body::Deck(d) => write!(f, "Deck({} slides)", d.view.slides.len()),
             Body::Doc(d) => fmt::Debug::fmt(d, f),
