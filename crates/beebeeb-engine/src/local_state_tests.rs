@@ -55,6 +55,37 @@ fn disposable_cache_path_check_accepts_temp_files_only() {
     );
 }
 
+/// A lifecycle log that is itself a link to a file inside a disposable root is still the lifecycle log: the plain path
+/// names `Logs/<dir>/lifecycle.log`, but its canonical path lands in the root with no `Logs` part, so only the first
+/// (plain-path) log check refuses it. Mutant: drop that first check (this goes red, on unix).
+#[cfg(unix)]
+#[test]
+fn a_lifecycle_log_linked_into_a_disposable_root_is_never_disposable() {
+    let temp = std::env::temp_dir();
+    let root_dir = tempfile::tempdir_in(&temp).unwrap();
+    let target = root_dir.path().join("bb_cached_log");
+    std::fs::write(&target, b"log").unwrap();
+    assert!(
+        is_disposable_cache_path(&REAL, &target),
+        "control: the link target is disposable on its own"
+    );
+
+    // The link lives outside the temp root, so the plain path is the only place the log folder shows.
+    let home = tempfile::tempdir().unwrap();
+    let logs = home.path().join("Logs").join(REAL.logs_dir_name());
+    std::fs::create_dir_all(&logs).unwrap();
+    let link = logs.join("lifecycle.log");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    assert!(
+        !is_lifecycle_log_path(&REAL, &target.canonicalize().unwrap()),
+        "control: the canonical path has no log folder in it"
+    );
+    assert!(
+        !is_disposable_cache_path(&REAL, &link),
+        "the lifecycle log linked into a disposable root"
+    );
+}
+
 /// The disposable roots that would hold `config`, ignoring any root that is an ancestor of (or equal to) `home`: such
 /// a root contains the whole home directory, so every home-relative path is "under" it by construction and it says
 /// nothing about the config. That never happens for a real user, but it does for a test run whose `HOME` is a scratch
