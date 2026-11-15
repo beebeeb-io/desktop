@@ -85,3 +85,21 @@ fn null_sink_clock_advances_with_time() {
     std::thread::sleep(std::time::Duration::from_millis(60));
     assert_eq!(out.clock_ms(), held);
 }
+
+#[cfg(not(any(windows, target_os = "macos")))]
+#[test]
+fn the_player_sees_a_lost_device() {
+    // The null sink has no device to lose, so the test sets the same flag `keep_alive` sets when the rebuild fails.
+    let mut out = AudioOut::start(44_100).expect("the null sink always opens");
+    {
+        let sink: &dyn AudioSink = &out;
+        assert!(!sink.failed(), "a fresh output has not failed");
+    }
+    out.failed = true;
+    let sink: &dyn AudioSink = &out;
+    assert!(AudioOut::failed(&out));
+    assert!(
+        sink.failed(),
+        "the player asks through the trait and must hear the failure"
+    );
+}

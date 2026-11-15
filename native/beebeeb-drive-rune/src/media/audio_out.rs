@@ -323,6 +323,10 @@ impl AudioSink for AudioOut {
     fn flush(&mut self) {
         AudioOut::flush(self)
     }
+
+    fn failed(&self) -> bool {
+        AudioOut::failed(self)
+    }
 }
 
 /// The real device: [`AudioOut::start`]. The player's tests hand their own factory.
@@ -373,7 +377,7 @@ mod device {
         rate: u32,
     ) -> Result<cpal::Stream, cpal::Error>
     where
-        T: cpal::SizedSample,
+        T: cpal::SizedSample + cpal::FromSample<f32>,
     {
         let data_shared = Arc::clone(shared);
         let err_shared = Arc::clone(shared);
