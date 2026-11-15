@@ -551,8 +551,10 @@ fn number_key_in(db: &StateDb, own: &str, member_id: &str) -> Result<([u8; 32], 
 
 /// They match / They don't match on the key `fp` (see [`NumberKey`]), written to every slot of the person in one
 /// transaction. "They don't match" on a key a changed-key warning offered keeps the person's marks as they are; with
-/// no mark at all, it is written as `NotMatched`, so nothing is sealed to the person unasked. A mark that cannot be
-/// read stops it.
+/// no mark at all, it is written as `NotMatched`, so nothing is sealed to the person unasked. On that path only, a
+/// mark that cannot be read stops it. They match, and They don't match on a sealed key, write every slot without
+/// reading it (the old shell's rule): the comparison just made replaces whatever a slot held, a row this build
+/// cannot read included.
 fn mark_compared_in(
     db: &StateDb,
     own: &str,

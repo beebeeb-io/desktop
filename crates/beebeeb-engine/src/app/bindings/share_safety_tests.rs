@@ -847,9 +847,10 @@ fn a_mark_write_that_fails_partway_changes_no_key() {
     );
 }
 
-/// A mark that cannot be read stops a comparison too: nothing is written over it.
+/// "They don't match" on an offered key reads the person's marks first (to keep them): a mark that cannot be read
+/// stops it, and nothing is written over it.
 #[test]
-fn a_comparison_over_a_mark_that_cannot_be_read_writes_nothing() {
+fn a_dont_match_on_an_offered_key_over_a_mark_that_cannot_be_read_writes_nothing() {
     let (_dir, db) = db();
     let k2 = key(BOB_PK);
     plant(&db, &format!("share_compared:{OWN}:{UID_B}"), "not a mark");
