@@ -12,7 +12,9 @@
 //! (a scale change) and `WM_ENDSESSION`, and answers while the app's window is closed. The same
 //! window is registered for this session's changes (`WTSRegisterSessionNotification`): a lock of
 //! the Windows session (Win+L, or Windows' own lock) is the away lock's event
-//! ([`TrayEvent::SessionLocked`]), whether the app's window is open or not.
+//! ([`TrayEvent::SessionLocked`]), whether the app's window is open or not. A sleep is too: the
+//! power broadcast's suspend and resume (`WM_POWERBROADCAST`) say how long the PC was away
+//! ([`TrayEvent::Resumed`]).
 //!
 //! # The aliasing rule of this file
 //!
@@ -38,7 +40,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
     ERROR_CLASS_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
@@ -50,6 +52,7 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
+use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICON_VERSION_4,
@@ -64,6 +67,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_ENDSESSION,
     WM_NCCREATE, WM_NCDESTROY, WM_NULL, WM_SETTINGCHANGE, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_TOOLWINDOW,
     WS_POPUP, WTS_SESSION_LOCK,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, WM_POWERBROADCAST,
 };
 
 use super::windows::{os_error, read_taskbar_theme, wide};
@@ -152,6 +158,41 @@ struct Context {
     refresh_again: Cell<bool>,
     /// Panics caught at the procedure's boundary. Zero in a correct build.
     faults: Arc<AtomicU32>,
+    /// The PC is going to sleep or hibernate: when (two clocks) and how long it had been without input then. Taken
+    /// at the resume, which says how long it was away ([`TrayEvent::Resumed`]).
+    suspended: Cell<Option<Suspended>>,
+}
+
+/// What the tray noted at a suspend.
+#[derive(Clone, Copy)]
+struct Suspended {
+    /// `GetTickCount64` then.
+    tick_ms: u64,
+    /// This PC's clock then.
+    wall: std::time::SystemTime,
+    /// The session's time without input then (`None`: Windows did not say; counted as none).
+    idle: Option<Duration>,
+}
+
+impl Suspended {
+    fn now() -> Self {
+        Self {
+            // SAFETY: takes nothing, returns the tick count.
+            tick_ms: unsafe { GetTickCount64() },
+            wall: std::time::SystemTime::now(),
+            idle: super::windows::pc_idle(),
+        }
+    }
+
+    /// How long the PC was away at a resume: its time without input at the suspend, and the sleep, by whichever of
+    /// the two clocks saw more of it. Microsoft's pages do not say that the tick count counts a sleep; the wall clock
+    /// does, and can be set back: the longer of the two never makes the lock come later than one that saw the sleep.
+    fn away_until_now(self) -> Duration {
+        // SAFETY: takes nothing, returns the tick count.
+        let ticks = Duration::from_millis(unsafe { GetTickCount64() }.saturating_sub(self.tick_ms));
+        let wall = self.wall.elapsed().unwrap_or_default();
+        self.idle.unwrap_or_default().saturating_add(ticks.max(wall))
+    }
 }
 
 impl Context {
@@ -549,6 +590,28 @@ fn handle(hwnd: HWND, context: &Context, message: u32, w: WPARAM, l: LPARAM) -> 
             }
             Some(0)
         }
+        // The PC sleeps or hibernates (a top-level window gets this broadcast): what the resume needs
+        // is noted now, on this thread, before the PC stops. The resume says how long it was away,
+        // once (the resume a person's input adds after the automatic one is the same wake); a
+        // resume with no suspend seen says nothing (its length is not known).
+        WM_POWERBROADCAST => {
+            match w as u32 {
+                PBT_APMSUSPEND => {
+                    if context.suspended.get().is_none() {
+                        context.suspended.set(Some(Suspended::now()));
+                    }
+                }
+                PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => {
+                    if let Some(suspended) = context.suspended.take() {
+                        context.send(TrayEvent::Resumed {
+                            away: suspended.away_until_now(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+            Some(1)
+        }
         // Something outside asks the app to close (`taskkill` without /F, Restart Manager, an
         // installer). The window stays (only the app ends the tray); the app is asked to quit.
         WM_CLOSE => {
@@ -716,6 +779,7 @@ fn build(
         refreshing: Cell::new(false),
         refresh_again: Cell::new(false),
         faults,
+        suspended: Cell::new(None),
     });
     let hwnd = create_window(&context, class_name)?;
     Ok((hwnd, context))

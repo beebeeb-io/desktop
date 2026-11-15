@@ -23,14 +23,17 @@ pub enum LockFlag {
     /// Not a flag: "Locks again after", how long the person may be away before an open app locks its screen by
     /// itself while app lock is on (decision 2519: an engine entry beside `lock.app_lock`, `lock.after`). The bytes
     /// are the delay in seconds, one of a closed set (`app::lock_password_api::LockAfter`); read and written only as
-    /// bytes ([`AuthVault::lock_entry`]). Absent is the default; bytes that are not one of the set never lock later
-    /// than the default. Not a secret.
+    /// bytes ([`AuthVault::lock_entry`]). Absent is the default; bytes that are not one of the set, or a failed read,
+    /// count as the strictest choice. Not a secret.
     LockAfter,
 }
 
 impl LockFlag {
     /// App lock first: a removal of every entry that stops part way must never leave `lock.app_lock = 0` behind
-    /// (it would open the next account's start without a proof); every other entry left behind fails closed.
+    /// (it would open the next account's start without a proof). Every removal is tried. An entry left behind by a
+    /// removal that failed fails closed, except `lock.after`: a valid delay left behind stays that delay for the
+    /// next account (a long one is weaker than the default) until that account's first sign-in removes the entries
+    /// again (review of #452, P3-5).
     pub const ALL: [Self; 6] = [
         Self::AppLock,
         Self::AskPasswordAtStart,

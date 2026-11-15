@@ -549,12 +549,12 @@ fn poll_screen(s: &mut State, _seconds: f64, tx: &mut Tx) -> bool {
     // Windows Hello's answer to an approval of another device's sign-in (DW-A14). Read after the
     // session: an answer that comes with a lock or a sign-out finds its wait already ended.
     changed |= crate::frames::account::approve::poll(s);
-    // The away lock: how long this PC had no input, to the engine, while the session is open
-    // (`away.rs`). Read after this poll's refresh, so the gate is the one the window shows.
-    let open = super::session_gate::open(s);
+    // The away lock: how long this PC had no input, to the engine, while the engine's lock is open
+    // (`away.rs`), whatever the window shows: the first-run steps and the no-plan screen too (review
+    // of #452, the lead's ruling: no exception).
     let shell = &mut s.shell;
     changed |= shell.away.poll(
-        open,
+        shell.actions.screen_open(),
         shell.platform.idle_for(),
         &shell.actions,
         shell.wiring.main.as_ref(),
@@ -852,7 +852,14 @@ pub fn on_tray(s: &mut State, event: TrayEvent, tx: &mut Tx) {
                 .away
                 .event(Away::SessionLocked, &shell.actions, shell.wiring.main.as_ref());
         }
-        TrayEvent::Resumed { .. } => {}
+        // The PC woke: how long it was away goes to the engine as idle time, before the wake's own
+        // key press can count as input (review of #452, P2-1).
+        TrayEvent::Resumed { away } => {
+            let shell = &mut s.shell;
+            shell
+                .away
+                .event(Away::Idle(away), &shell.actions, shell.wiring.main.as_ref());
+        }
     }
 }
 

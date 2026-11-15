@@ -500,6 +500,10 @@ impl<C: CredentialStores> EngineActions for LiveEngine<C> {
     fn away_job(&self, seen: actions::Away) -> Option<actions::AwayJob> {
         Some(away::job(&self.engine, seen))
     }
+
+    fn screen_open(&self) -> bool {
+        away::screen_open(&self.engine)
+    }
 }
 
 // ---------------------------------------------------------------------------

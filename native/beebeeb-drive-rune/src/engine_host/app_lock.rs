@@ -14,7 +14,8 @@
 //!   `lock.after`, five minutes while nothing is stored) and drawn only while app lock is on. A shorter delay is
 //!   written at once; a longer one lowers what the lock protects, so Windows Hello is asked first, as for off, and
 //!   only its "verified" goes to the engine ([`Engine::set_lock_after_for`]). A stored value that is not one of the
-//!   menu's is drawn as not known. The away lock that acts on it is the shell's (`shell/away.rs`) and the engine's.
+//!   menu's is drawn as not known (the engine counts it as the strictest). What the page holds can be stale: when the
+//!   engine wants a proof for a change the page thought shorter, Windows Hello is asked then (review of #452). The away lock that acts on it is the shell's (`shell/away.rs`) and the engine's.
 //!
 //! Must not: log anything of the account; keep a Hello answer for a later change; write before the proof answered.
 
@@ -89,6 +90,8 @@ enum Answer {
     Set {
         made_for: Stamp,
         change: Change,
+        /// The write carried Windows Hello's proof.
+        proved: bool,
         result: Result<(), AppLockRefused>,
     },
 }
@@ -278,8 +281,8 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
         let made_for = stamp(&self.engine);
         self.said = None;
         // Shorter than what applies now asks nothing; longer lowers what the lock protects (the engine's rule):
-        // Windows Hello first, as for off.
-        if after <= stored.unwrap_or(LockAfter::DEFAULT) {
+        // Windows Hello first, as for off. A value that is not known counts as the strictest, as in the engine.
+        if after <= stored.unwrap_or(LockAfter::STRICTEST) {
             return self.write(made_for, Change::After(after), None);
         }
         self.prove(made_for, Change::After(after));
@@ -306,6 +309,7 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
 
     fn write(&mut self, made_for: Stamp, change: Change, proof: Option<AppLockProof>) {
         let (engine, tx, mine) = (self.engine.clone(), self.tx.clone(), made_for.clone());
+        let proved = proof.is_some();
         let started = std::thread::Builder::new()
             .name("account-app-lock".into())
             .spawn(move || {
@@ -318,6 +322,7 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
                 let _ = tx.send(Answer::Set {
                     made_for: mine,
                     change,
+                    proved,
                     result,
                 });
                 engine.wake_host();
@@ -420,12 +425,19 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
             Answer::Set {
                 made_for,
                 change,
+                proved,
                 result,
             } => {
                 if self.changing.as_ref() == Some(&made_for) {
                     self.changing = None;
                 }
                 if !self.is_now(&made_for) {
+                    return true;
+                }
+                // What the page held was stale: the engine wants a proof for a change it thought needed none.
+                // Windows Hello is asked for it now (never "did not confirm" for a prompt that was not shown).
+                if matches!(result, Err(AppLockRefused::ProofNeeded)) && !proved {
+                    self.prove(made_for, change);
                     return true;
                 }
                 match result {

@@ -29,3 +29,9 @@ pub(super) fn job<C: CredentialStores + 'static>(engine: &Arc<Engine<C>>, seen: 
         }
     })
 }
+
+/// Core's lock is open: the away lock counts idle time (`shell/away.rs`), whatever the window shows. The lock's state
+/// is one short hold of core's state machine.
+pub(super) fn screen_open<C: CredentialStores + 'static>(engine: &Engine<C>) -> bool {
+    engine.lock_state() == LockState::Open
+}

@@ -13,8 +13,8 @@
 //! at a sign-out and at an account's first sign-in (`keychain::LockFlag::AppLock`). Not a secret.
 //!
 //! "Locks again after" (decision 2519): core holds no clock and no delay ("the host says when"), so the delay the
-//! person chose is this engine's entry `lock.after` beside it ([`LockAfter`]; absent is five minutes; removed with
-//! the other lock entries), used only while app lock is on. The host measures and calls [`Engine::away_for`]; the
+//! person chose is this engine's entry `lock.after` beside it ([`LockAfter`]; absent is five minutes, unreadable or
+//! not one of the choices is the strictest; removed with the other lock entries), used only while app lock is on. The host measures and calls [`Engine::away_for`]; the
 //! comparison with the delay is here, the lock is core's `lock_after_away`. Lengthening it is a weaker lock and asks
 //! core's rule for a weaker app lock: a proof given for that change.
 //!
@@ -84,6 +84,10 @@ pub enum AppLockRefused {
     NotSaved,
 }
 
+/// Delay writes, one at a time (`set_lock_after_for_at`). Taken before the session's write lock's read side, never
+/// while holding it.
+static LOCK_AFTER_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// "Locks again after" (DW-S03, DW-0202): how long the person may be away before an open app locks its screen by
 /// itself, while app lock is on (decision 2519; app lock off never locks, the owner's ruling of 2026-11-14). The
 /// menu's order, strictest first: a later choice is a longer delay, a weaker lock.
@@ -98,8 +102,12 @@ pub enum LockAfter {
 }
 
 impl LockAfter {
-    /// While nothing is stored (decision 2519), and for an entry that is not one of the choices: never later.
+    /// While nothing is stored (decision 2519).
     pub const DEFAULT: Self = Self::Minutes5;
+    /// For an entry that is not one of the choices, or that cannot be read (review of #452, P3-4): the strictest, so a
+    /// stored "Immediately" that reads back as anything else never becomes a longer delay, and no change from it skips
+    /// the proof a longer one needs.
+    pub const STRICTEST: Self = Self::Immediately;
     /// The menu's choices, strictest first.
     pub const ALL: [Self; 4] = [Self::Immediately, Self::Minutes5, Self::Minutes30, Self::Minutes60];
     /// The shortest time without input this app takes as "away" (what [`LockAfter::Immediately`] waits for while the
@@ -295,6 +303,9 @@ impl<C: CredentialStores> Engine<C> {
         if let (true, Some(AppLockProof::Password(password))) = (longer, proof) {
             self.password_proof_checked(session, password, now_ms)?;
         }
+        // One delay write at a time (review of #452, P3-6): the read of what is stored and the write below are one
+        // step, so a write judged against an older value never lands after a newer one.
+        let _one_at_a_time = LOCK_AFTER_WRITES.lock().unwrap_or_else(|p| p.into_inner());
         let _writes = self.writes.read().unwrap_or_else(|p| p.into_inner());
         if !self.acct.session_unchanged_since(session) {
             return Err(AppLockRefused::Overtaken);
@@ -360,9 +371,10 @@ impl<C: CredentialStores> Engine<C> {
         }
     }
 
-    /// The delay the away lock uses: the stored one, else the default (never later).
+    /// The delay the away lock uses, and the base a change is weighed against: the stored one (absent: the default),
+    /// else the strictest.
     fn lock_after_in_force(&self) -> LockAfter {
-        self.stored_lock_after().unwrap_or(LockAfter::DEFAULT)
+        self.stored_lock_after().unwrap_or(LockAfter::STRICTEST)
     }
 
     /// The typed password given as the proof for a change, checked as the screen unlock checks it (online, or the

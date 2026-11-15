@@ -3,14 +3,17 @@
 //! ([`ShellActions::away_job`]), which compares it with the delay the person chose ("Locks again after", stored as
 //! the engine's `lock.after`) and locks through core's `lock_after_away`. No rule lives here.
 //!
-//! - **Idle.** While the session is open, the main window's poll asks the engine with how long this PC has had no
-//!   input ([`Platform::idle_for`]; a platform that cannot say gives this app's own windows' last input), counted
-//!   from no earlier than the session last opened (an unlock by face is no input). The engine answers when an idle
+//! - **Idle.** While the engine's lock is open ([`ShellActions::screen_open`]: whatever the window shows, the first-run
+//!   steps and the no-plan screen too; review of #452), the main window's poll asks the engine with how long this PC
+//!   has had no input ([`Platform::idle_for`]; a platform that cannot say gives this app's own windows' last input),
+//!   counted from no earlier than the lock last opened (an unlock by face is no input). The engine answers when an idle
 //!   time could lock next; the poll arms ONE wake for then (`Tx::wake_after`, which polls a hidden window too), never
 //!   a timer thread, and never more often than [`LOOK_AT_MOST_EVERY`] apart, so a delay changed in Settings (or app
 //!   lock turned on) is followed within that, without a restart.
 //! - **Events.** Windows' session lock (the tray's [`TrayEvent::SessionLocked`]) and the main window closing to the
-//!   tray are said to the engine at once; it decides whether they lock.
+//!   tray are said to the engine at once; it decides whether they lock. So is a wake from sleep
+//!   ([`TrayEvent::Resumed`]), as idle time: the PC's time without input before it slept plus the sleep, measured by
+//!   the tray at the suspend and the resume, so the wake's own key press cannot hide it.
 //! - The engine's look reads the credential store and waits for the lock's write hold: it runs on a worker, one idle
 //!   look at a time. The job is made on the window's thread, so it holds the session it was measured for.
 //!
@@ -18,6 +21,8 @@
 //!
 //! [`Platform::idle_for`]: super::platform::Platform::idle_for
 //! [`TrayEvent::SessionLocked`]: super::platform::TrayEvent::SessionLocked
+//! [`TrayEvent::Resumed`]: super::platform::TrayEvent::Resumed
+//! [`ShellActions::screen_open`]: super::actions::ShellActions::screen_open
 
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -80,7 +85,7 @@ impl Default for AwayLock {
 }
 
 impl AwayLock {
-    /// The main window's poll. `open`: the session is open (the gate the shell shows is past every lock).
+    /// The main window's poll. `open`: the engine's lock is open ([`ShellActions::screen_open`]).
     /// `pc_idle`: [`Platform::idle_for`](super::platform::Platform::idle_for). Returns whether a look's answer came.
     pub fn poll(
         &mut self,
@@ -133,7 +138,8 @@ impl AwayLock {
         came
     }
 
-    /// An event the engine is told at once: Windows' session lock, the main window closing to the tray.
+    /// An event the engine is told at once: Windows' session lock, the main window closing to the tray, a wake from
+    /// sleep (as idle time).
     pub fn event(&mut self, seen: Away, actions: &Arc<dyn ShellActions>, wake: Option<&AppHandle<State>>) {
         self.ask(seen, actions, wake);
     }

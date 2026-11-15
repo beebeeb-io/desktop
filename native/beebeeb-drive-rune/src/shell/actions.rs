@@ -99,6 +99,12 @@ pub trait EngineActions: Send + Sync {
     fn away_job(&self, _seen: Away) -> Option<AwayJob> {
         None
     }
+    /// The engine's lock is open (core's `Open`: the key in memory, the screen not locked), whatever the window shows
+    /// (the first-run steps, the no-plan screen too): the away lock counts idle time then (review of #452, the lead's
+    /// ruling). Asked on every poll: cheap, never a wait on a worker.
+    fn screen_open(&self) -> bool {
+        false
+    }
 }
 
 /// Everything a frame, the tray menu or the flyout may ask the shell to do beyond navigation.
@@ -126,6 +132,10 @@ pub trait ShellActions: Send + Sync {
     /// See [`EngineActions::away_job`].
     fn away_job(&self, _seen: Away) -> Option<AwayJob> {
         None
+    }
+    /// See [`EngineActions::screen_open`].
+    fn screen_open(&self) -> bool {
+        false
     }
 }
 
@@ -189,6 +199,9 @@ impl ShellActions for HostActions {
     }
     fn away_job(&self, seen: Away) -> Option<AwayJob> {
         self.engine.away_job(seen)
+    }
+    fn screen_open(&self) -> bool {
+        self.engine.screen_open()
     }
 }
 

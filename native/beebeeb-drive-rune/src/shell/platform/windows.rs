@@ -282,20 +282,8 @@ impl Platform for WindowsPlatform {
         }
     }
 
-    /// `GetLastInputInfo`: the tick of the session's last input, any app's (a key, the pointer, touch), against
-    /// `GetTickCount`, the same 32-bit millisecond clock (the subtraction wraps as it does, every 49.7 days).
     fn idle_for(&self) -> Option<Duration> {
-        let mut info = LASTINPUTINFO {
-            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
-            dwTime: 0,
-        };
-        // SAFETY: `info` is a live LASTINPUTINFO with its size set, as the call requires; it writes only `dwTime`.
-        if unsafe { GetLastInputInfo(&mut info) } == 0 {
-            return None;
-        }
-        // SAFETY: takes nothing, returns the tick count.
-        let now = unsafe { GetTickCount() };
-        Some(Duration::from_millis(u64::from(now.wrapping_sub(info.dwTime))))
+        pc_idle()
     }
 
     fn set_capture_exclusion(&self, window: Option<&rune::WindowHandle>, exclude: bool) -> Result<(), PlatformError> {
@@ -339,4 +327,21 @@ fn round_corners(hwnd: HWND) -> i32 {
             std::mem::size_of_val(&preference) as u32,
         )
     }
+}
+
+/// How long this Windows session has had no input: `GetLastInputInfo`, the tick of the session's last input, any app's
+/// (a key, the pointer, touch), against `GetTickCount`, the same 32-bit millisecond clock (the subtraction wraps as it
+/// does, every 49.7 days). `None`: Windows did not say. The away lock's idle count, and the tray's at a suspend.
+pub(super) fn pc_idle() -> Option<Duration> {
+    let mut info = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    // SAFETY: `info` is a live LASTINPUTINFO with its size set, as the call requires; it writes only `dwTime`.
+    if unsafe { GetLastInputInfo(&mut info) } == 0 {
+        return None;
+    }
+    // SAFETY: takes nothing, returns the tick count.
+    let now = unsafe { GetTickCount() };
+    Some(Duration::from_millis(u64::from(now.wrapping_sub(info.dwTime))))
 }

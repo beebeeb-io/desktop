@@ -335,6 +335,10 @@ struct Opening {
     origin: Origin,
     /// The session moved on and the view was told: nothing more comes from this opening.
     ended: bool,
+    /// It ended at a lock of the screen, the same account still signed in: an edit kept open across the lock is saved
+    /// under the file opened again for the session after it ([`EngineViewerSource::resume`]). Another account, a
+    /// sign-out: never.
+    resumable: bool,
     /// What the local state said at the open: the version, whether the file is kept, whether it may be changed.
     /// `None`: not read.
     edit: Option<EditFacts>,
@@ -794,6 +798,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
             pages,
             origin: Origin::Beebeeb,
             ended: false,
+            resumable: false,
             // Read for the session of this open, from the local state alone, BEFORE the content: the version the
             // view is labelled with is never newer than its bytes.
             edit: self.engine.edit_facts(session, file_id, epoch),
@@ -970,9 +975,12 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
 
     fn poll(&mut self, file_id: &str) -> Option<Body> {
         let opening = self.open.as_mut().filter(|opening| opening.file_id == file_id)?;
+        let same_account = self.engine.has_session() && self.engine.account() == opening.account;
         if opening.ended {
             // An answer that slipped past the worker's own check is dropped here (its text overwritten).
             while opening.inbox.try_recv().is_ok() {}
+            // Another account came in, or none is signed in: this opening is over for a save too.
+            opening.resumable &= same_account;
             return None;
         }
         // The session is not the one the file was opened for: everything of it goes NOW, on the window's side.
@@ -980,11 +988,13 @@ impl<E: ViewerEngine> ViewerSource for EngineViewerSource<E> {
             let had = opening.fetching || opening.holds;
             // Nothing of the earlier session is held or on its way, and the account is the same (a lock and an
             // unlock): what is on screen says nothing a session decrypted, so the opening is this session's now.
-            if !had && self.engine.has_session() && self.engine.account() == opening.account {
+            if !had && same_account {
                 opening.session = self.engine.session_turn();
                 return None;
             }
             opening.end();
+            // A lock of the screen (the same account): an edit the window keeps open across it can still be saved.
+            opening.resumable = same_account;
             return had.then_some(Body::Stopped(Stopped::SessionChanged));
         }
         match opening.inbox.try_recv() {

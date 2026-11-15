@@ -219,7 +219,44 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         true
     }
 
+    /// Review of #452 (P1-2): the open file ended at a lock of the screen, and the same account is back: the file is
+    /// opened again for the session in memory under the edit the window kept, so that edit can be saved. A NEW
+    /// opening (the engine's record of the earlier one's saves is not this one's) whose facts are read for this
+    /// session, as an open reads them; its content is not read again (the window holds the edit, and the reader
+    /// under it stays the session-changed state). The save goes from the version the edit began from (the window's
+    /// `base`): a file that changed meanwhile is the two-versions question, never overwritten. Nothing while a change
+    /// is on its way; never for another account or after a sign-out.
+    fn resume(&mut self, file_id: &str) {
+        if self.changes.busy {
+            return;
+        }
+        let engine = self.engine.clone();
+        let Some(opening) = self.open.as_mut().filter(|opening| {
+            opening.file_id == file_id
+                && opening.ended
+                && opening.resumable
+                && engine.has_session()
+                && engine.account() == opening.account
+        }) else {
+            return;
+        };
+        let session = engine.session_turn();
+        let epoch = engine.begin_opening(session, file_id);
+        self.changes.openings += 1;
+        opening.session = session;
+        opening.epoch = epoch;
+        opening.edit = engine.edit_facts(session, file_id, epoch);
+        opening.serial = self.changes.openings;
+        opening.ended = false;
+        opening.resumable = false;
+        // A fresh road for answers: nothing of the earlier session's worker reaches this opening.
+        let (_, inbox) = mpsc::channel();
+        opening.inbox = inbox;
+        opening.cancel = Arc::new(AtomicBool::new(false));
+    }
+
     pub(super) fn start_save(&mut self, file_id: &str, text: &str, base: u32) -> SaveOutcome {
+        self.resume(file_id);
         let Some(stamp) = self.stamp_of(file_id) else {
             return SaveOutcome::Failed;
         };
@@ -245,6 +282,7 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     }
 
     pub(super) fn start_resolve(&mut self, file_id: &str, text: &str, keep: Keep) -> SaveOutcome {
+        self.resume(file_id);
         let Some(stamp) = self.stamp_of(file_id) else {
             return SaveOutcome::Failed;
         };
@@ -357,6 +395,10 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
                         // Begun under an earlier opening of this file (delta check of #432): it never replaces what
                         // is on screen. Its outcome is said; its text is overwritten.
                         found = earlier(settled, file_id);
+                    } else if self.before_a_lock(&message, file_id) {
+                        // Begun before a lock of the screen, the same account back (review of #452): said the same
+                        // way, never its text; what the engine could not confirm is said as that.
+                        found = earlier_than_the_lock(settled, file_id);
                     } else {
                         wipe(settled);
                     }
@@ -385,6 +427,15 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
         message.file_id == file_id
             && self.engine.has_session()
             && self.engine.session_turn() == message.session
+            && self.engine.account() == message.account
+    }
+
+    /// The message is for `file_id`, of an earlier session of the account signed in now: a lock of the screen came
+    /// between (a sign-out and a sign-in take the window's file with them).
+    fn before_a_lock(&self, message: &Message, file_id: &str) -> bool {
+        message.file_id == file_id
+            && self.engine.has_session()
+            && self.engine.session_turn() != message.session
             && self.engine.account() == message.account
     }
 
@@ -564,6 +615,15 @@ fn wipe(settled: Settled) {
         settled
     {
         body.wipe();
+    }
+}
+
+/// A change begun before a lock of the screen: as [`earlier`], except a failure, which the engine answers when the lock
+/// landed while the save ran (it may have been stored just before): said as not confirmed, never as not saved.
+fn earlier_than_the_lock(settled: Settled, file_id: &str) -> Option<Settled> {
+    match settled {
+        Settled::Failed => Some(Settled::Said(NOT_CONFIRMED_AT_LOCK.to_string())),
+        settled => earlier(settled, file_id),
     }
 }
 
