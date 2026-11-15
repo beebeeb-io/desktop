@@ -34,7 +34,7 @@ pub use new_file_scene::set_new_file_scene;
 pub mod office;
 pub mod office_board;
 mod office_glue;
-pub use office_glue::{deck_mut, leave_present, open_deck, scene_licence};
+pub use office_glue::{deck_mut, doc_mut, leave_present, open_deck, open_doc, scene_licence};
 mod office_icons;
 pub mod office_over;
 mod pdf;
@@ -910,7 +910,7 @@ fn view(s: &State, ui: &Ui, cx: &mut Cx<State>) -> El {
     match &ui.file.body {
         Body::Word(doc) => return office::window(s, cx, ui, Some(doc)),
         Body::NoEditor => return office::window(s, cx, ui, None),
-        Body::Sheet(_) | Body::Deck(_) => return office_glue::window(s, cx, ui),
+        Body::Sheet(_) | Body::Deck(_) | Body::Doc(_) => return office_glue::window(s, cx, ui),
         _ => {}
     }
     let t = tokens::theme(cx.system_dark());
@@ -1189,7 +1189,7 @@ pub const FRAMES: &[crate::ui::gate::Scene<State>] = &[
     ("DW-1514", |s| set_scene(s, "DW-1514")),
     ("DW-1515", |s| set_scene(s, "DW-1515")),
     ("DW-1507e", |s| set_scene(s, "DW-1507e")),
-    ("DW-1511", |s| set_scene(s, "DW-1511")),
+    ("DW-1511", crate::frames::office::docs::scene_older),
     ("DW-1550", |s| set_scene(s, "DW-1550")),
     ("DW-1551", |s| set_scene(s, "DW-1551")),
     ("DW-1552", |s| set_scene(s, "DW-1552")),

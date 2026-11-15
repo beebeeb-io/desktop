@@ -83,17 +83,14 @@ fn count(lists: &[List]) -> usize {
 fn the_three_contents_hold_the_boards_lists_and_counts() {
     assert_eq!(capitals(APP), ["BEEBEEB", "FILE", "EDIT"]);
     assert_eq!(capitals(WINDOW), ["VIEW", "GO", "WINDOW", "HELP"]);
-    assert_eq!(capitals(EDITOR), ["EDIT", "VIEW", "FORMAT", "INSERT"]);
+    assert_eq!(capitals(EDITOR), ["EDIT", "VIEW"]);
     assert_eq!(APP.iter().map(|l| l.commands.len()).collect::<Vec<_>>(), [8, 22, 7]);
     assert_eq!(
         WINDOW.iter().map(|l| l.commands.len()).collect::<Vec<_>>(),
         [8, 10, 4, 6]
     );
-    assert_eq!(
-        EDITOR.iter().map(|l| l.commands.len()).collect::<Vec<_>>(),
-        [11, 7, 16, 6]
-    );
-    assert_eq!((count(APP), count(WINDOW), count(EDITOR)), (37, 28, 40));
+    assert_eq!(EDITOR.iter().map(|l| l.commands.len()).collect::<Vec<_>>(), [1, 6]);
+    assert_eq!((count(APP), count(WINDOW), count(EDITOR)), (37, 28, 7));
     // No command without its key or its home, and no Ctrl+Alt key (AltGr types characters).
     for (name, home) in [APP, WINDOW, EDITOR]
         .iter()
@@ -205,7 +202,7 @@ fn a_document_open_shows_the_editors_lists_and_has_no_second_page() {
     assert_eq!(registry::group_for(&rt.state.shell.app), FrameGroup::Viewer);
     open(&mut rt);
     assert_eq!(drawn(&rt), capitals(EDITOR));
-    assert_eq!(info(&rt, "sc-0-0-name").text.as_deref(), Some("Undo Typing"));
+    assert_eq!(info(&rt, "sc-0-0-name").text.as_deref(), Some("Copy"));
     press(&mut rt, Key::PageDown);
     assert_eq!(drawn(&rt), capitals(EDITOR));
     assert_eq!(rt.state.shortcuts.page, Page::App);
@@ -261,11 +258,11 @@ fn in_the_smallest_window_the_card_stays_inside_it_and_the_lists_scroll() {
     );
 }
 
-/// DW-1234's scene, held here besides the frame gate: a document open, the dialog in front, the editor's four
+/// DW-1234's scene, held here besides the frame gate: a document open, the dialog in front, the viewer's two
 /// lists in the board's order with the board's first and last commands, and Close and Esc go
 /// back to the document.
 #[test]
-fn the_scene_of_dw_1234_is_the_editors_four_lists_over_an_open_document() {
+fn the_scene_of_dw_1234_is_the_viewers_two_lists_over_an_open_document() {
     let scene = super::FRAMES
         .iter()
         .find(|(id, _)| *id == "DW-1234")
@@ -276,7 +273,7 @@ fn the_scene_of_dw_1234_is_the_editors_four_lists_over_an_open_document() {
     rt.frame(0.0);
     assert_eq!(registry::group_for(&rt.state.shell.app), FrameGroup::Viewer);
     assert!(is_open(&rt), "the dialog is in front");
-    assert_eq!(drawn(&rt), ["EDIT", "VIEW", "FORMAT", "INSERT"]);
+    assert_eq!(drawn(&rt), ["EDIT", "VIEW"]);
     assert_eq!(drawn(&rt), capitals(EDITOR));
     assert_eq!(info(&rt, "sc-title").text.as_deref(), Some(shortcuts::TITLE));
     for (c, list) in EDITOR.iter().enumerate() {
@@ -292,12 +289,12 @@ fn the_scene_of_dw_1234_is_the_editors_four_lists_over_an_open_document() {
             list.name
         );
     }
-    assert!(!has(&rt, "sc-4"), "four lists");
+    assert!(!has(&rt, "sc-2"), "two lists: no Format, no Insert");
     let dialog = info(&rt, "sc-dlg");
     assert_eq!(dialog.role, "dialog");
     assert_eq!(
         dialog.label.as_deref(),
-        Some("Commands and keyboard shortcuts: Edit, View, Format, Insert")
+        Some("Commands and keyboard shortcuts: Edit, View")
     );
     press(&mut rt, Key::Escape);
     assert!(!is_open(&rt), "Esc closes it");

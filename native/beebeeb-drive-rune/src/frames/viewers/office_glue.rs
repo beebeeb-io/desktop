@@ -10,6 +10,7 @@ use super::Ui;
 use super::office_over::Over;
 use super::source::{Body, FixtureViewerSource, OpenFile, board};
 use crate::State;
+use crate::frames::office::docs::{self, DocBody};
 use crate::frames::office::slides::{self, DeckBody};
 use crate::frames::office::{dialogs, sheets};
 
@@ -27,19 +28,40 @@ pub fn open_deck(s: &mut State, file: OpenFile) -> bool {
     super::open_from(s, Box::new(FixtureViewerSource::new()), &file.id) && deck_mut(s).is_some()
 }
 
+/// The open Word document, while the viewer shows one.
+pub fn doc_mut(s: &mut State) -> Option<&mut DocBody> {
+    match &mut super::ui(s)?.file.body {
+        Body::Doc(doc) => Some(doc),
+        _ => None,
+    }
+}
+
+/// Open a Word document in the viewer, from the fixture source (the live host's answer replaces it at O-CP3).
+/// `false`: the file is not a Word document, or it did not open (no session).
+pub fn open_doc(s: &mut State, file: OpenFile) -> bool {
+    super::open_from(s, Box::new(FixtureViewerSource::new()), &file.id) && doc_mut(s).is_some()
+}
+
 /// The window of a spreadsheet or a presentation: what `view` hands over for those bodies.
 pub(super) fn window(s: &State, cx: &mut Cx<State>, ui: &Ui) -> El {
     match &ui.file.body {
         Body::Sheet(view) => sheets::window(s, cx, ui, view),
         Body::Deck(deck) if deck.presenting => slides::present(cx, deck, &slides::slides_fixture::page),
         Body::Deck(deck) => slides::window(s, cx, ui, deck, &slides::slides_fixture::page),
-        _ => unreachable!("only a sheet or a deck is handed to the Office glue"),
+        Body::Doc(doc) => {
+            let older = doc.view.older_format;
+            docs::window(s, cx, ui, doc, &move |n| docs::docs_fixture::page(older, n))
+        }
+        _ => unreachable!("only a sheet, a deck or a document is handed to the Office glue"),
     }
 }
 
 /// The deck's keys (Present's arrows, Space, Esc; F5 and Ctrl+Enter in the window). `true`: taken.
 pub(super) fn on_key(s: &mut State, ev: &KeyEvent) -> bool {
-    deck_mut(s).is_some_and(|deck| deck.on_key(&ev.key, &ev.mods))
+    if deck_mut(s).is_some_and(|deck| deck.on_key(&ev.key, &ev.mods)) {
+        return true;
+    }
+    doc_mut(s).is_some_and(|doc| doc.on_key(&ev.key, &ev.mods))
 }
 
 /// Esc while Present is on leaves Present, not the viewer: the shell asks before it closes the file. `true`: taken.

@@ -377,10 +377,10 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
         shortcuts::open(s);
         s.shortcuts.page = shortcuts::Page::Window;
     }),
-    // The same dialog while a document is open: the editor's four lists, over the text document
-    // in the editor's frame (as DW-1507, nothing selected).
+    // The same dialog while a document is open: the viewer's two lists (Edit, View), over the Word document in the
+    // viewer (as DW-1507). Format and Insert are gone until the editor (0.9.1).
     ("DW-1234", |s| {
-        crate::frames::viewers::set_scene(s, "DW-1234");
+        crate::frames::office::docs::scene_docx(s);
         shortcuts::open(s);
     }),
 ];
