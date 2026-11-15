@@ -7,14 +7,7 @@
 //! path: only the session token changes, the replaced session is ended at the server, a sign-in that cannot be stored
 //! leaves nothing behind, and a sign-in while another account is signed in asks nothing and changes nothing.
 //!
-//! Three tests are IGNORED: they state rules the engine does not have today, found by this port, and fail on the
-//! engine as it is (`--include-ignored`); the change that fixes each un-ignores its tests.
-//! - F1, two tests: R8 rule 1 and spec §5.6. A kept vault key is proved by the server before it is installed: one the
-//!   server no longer accepts never opens the vault, and a proof that cannot complete changes nothing. The strong unlock
-//!   loads the kept key with no proof (`crates/beebeeb-engine/src/app.rs:605`); core's `unlock_known_device` proves it
-//!   first.
-//! - F5, one test: task 1886. A sign-out ends at the server the session it took off this computer, also when its
-//!   clear did not complete (`app.rs:1037-1039` returns before the revoke).
+//! Three tests are ignored until tasks 2543 and 2544 are fixed; each names its task.
 //!
 //! Each test runs in a process of its own (`in_own_process`): the state folder is a process-wide global
 //! (`state_paths`), and `tests/common` makes a new one per setup. Everything is invented; nothing reaches the network
@@ -351,20 +344,10 @@ fn an_unreadable_state_db_settles_nothing_and_the_same_account_then_keeps_its_da
     );
 }
 
-/// FINDING F1. The shell's `a_kept_key_the_server_rejects_is_removed_the_lock_way_and_nothing_else_changes`,
-/// `a_stored_key_the_server_no_longer_accepts_is_removed_and_never_installed` and
-/// `with_the_same_id_the_server_proves_the_kept_key_and_another_id_asks_nothing` (spec §5.6, R8 rule 1): the account's
-/// key was changed on another device, and that change ended every session. The same account signs in again: the server
-/// says the key this computer kept is no longer the account's. That key never opens the vault and never reaches memory,
-/// and the local data's owner, its rows and its queue stay. What happens next differs between the shell (spec §5.6: the
-/// token is stored without the key, the key is removed, the twelve words are asked) and core's `unlock_known_device`
-/// (the proof fails with `KeyProof`, nothing is installed, the stored key is not touched); the fix chooses, so this test
-/// asserts only what both say. The fake answers the route the engine's own proof uses
-/// (`signin/recovery.rs:recovery_check_answer`); a fix that asks another route serves it here too.
-/// Today the strong unlock installs the kept key with no proof (`app.rs:605`) and this test is red.
+/// Task 2543: a kept vault key that the server no longer accepts never opens the vault, and the local data stays.
 #[cfg(not(target_os = "macos"))]
 #[test]
-#[ignore = "FINDING F1 (t-session-reauth): the strong unlock installs a kept key no server proof checked; un-ignore with the fix"]
+#[ignore = "task 2543: un-ignore with its fix"]
 fn a_kept_key_the_server_no_longer_accepts_is_never_installed() {
     in_own_process("a_kept_key_the_server_no_longer_accepts_is_never_installed", || {
         use std::sync::atomic::Ordering;
@@ -405,14 +388,10 @@ fn a_kept_key_the_server_no_longer_accepts_is_never_installed() {
     });
 }
 
-/// FINDING F1, the other half. The shell's `a_proof_that_cannot_complete_changes_nothing_and_decides_nothing` and
-/// `a_400_without_one_of_the_two_codes_settles_nothing_and_the_kept_key_stays`: the server cannot say whether the kept
-/// key is still the account's (an error, or a `400` with neither exact code). Nothing is decided and nothing changes:
-/// the sign-in fails, the replaced session stays the stored one, the key stays stored and out of memory, the vault
-/// stays closed, and the session the server just made is ended. Today the kept key is installed and this test is red.
+/// Task 2543: when the server cannot say whether the kept vault key is still the account's, nothing changes.
 #[cfg(not(target_os = "macos"))]
 #[test]
-#[ignore = "FINDING F1 (t-session-reauth): the strong unlock installs a kept key no server proof checked; un-ignore with the fix"]
+#[ignore = "task 2543: un-ignore with its fix"]
 fn a_kept_key_proof_that_cannot_complete_changes_nothing() {
     in_own_process("a_kept_key_proof_that_cannot_complete_changes_nothing", || {
         use std::sync::atomic::Ordering;
@@ -452,15 +431,10 @@ fn a_kept_key_proof_that_cannot_complete_changes_nothing() {
     });
 }
 
-/// FINDING F5. The shell's sign-out rule (task 1886, `session_apply.rs:end_dropped_sessions`): a sign-out ends on the
-/// server every session it took off this computer, also when its clear did not complete; only a token this computer
-/// still holds is left, so that trying the sign-out again ends it. Here the store refuses the lock entries, so the clear
-/// fails after the session token, the key, the email and both owner tags are gone. Nothing on this computer can end
-/// that session later, so the sign-out must end it now, whatever it answers. Today the sign-out returns before its
-/// revoke (`app.rs:1037-1039`) and this test is red.
+/// Task 2544: a sign-out ends at the server the session it took off this computer, also when its clear failed.
 #[cfg(not(target_os = "macos"))]
 #[test]
-#[ignore = "FINDING F5 (t-session-reauth): a sign-out whose clear fails leaves the session it dropped alive at the server; un-ignore with the fix"]
+#[ignore = "task 2544: un-ignore with its fix"]
 fn a_sign_out_whose_clear_fails_still_ends_the_session_it_took_off_this_computer() {
     in_own_process(
         "a_sign_out_whose_clear_fails_still_ends_the_session_it_took_off_this_computer",
