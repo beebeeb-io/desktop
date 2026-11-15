@@ -174,10 +174,15 @@ fn show_kind(identity: AppIdentity, kind: Kind) -> Result<(), String> {
     notifier.Show(&toast).map_err(|e| e.to_string())
 }
 
+/// The identity `start` was handed by the shell; `show` reads it. Unset: no toast.
+static KEPT_IDENTITY: std::sync::OnceLock<AppIdentity> = std::sync::OnceLock::new();
+
 /// What Windows needs before this app can show a toast: its identity. Registers the AppUserModelID of an
 /// unpackaged app (display name and icon, under HKCU) and sets it as this process's. A failure is logged and ends
 /// nothing: the toasts do not show, the app works.
 pub(crate) fn start(identity: AppIdentity) {
+    // `show` is handed no identity (its caller keeps `show(notice)`), so the one `start` was given is kept here.
+    let _ = KEPT_IDENTITY.set(identity);
     if register(identity).is_err() {
         tracing::warn!("toast identity not set");
     }
@@ -229,8 +234,12 @@ fn set_string(key: &str, name: &str, value: &str) -> Result<(), String> {
 /// One notice of the engine, as the window drains it: a toast when its switch is on (Security: always). The
 /// switches are read now; a settings file that cannot be read means the defaults.
 pub(crate) fn show(notice: &Notice) {
-    let identity = AppIdentity::CURRENT;
-    let switches = Switches::from_config(&DesktopConfig::load_for(identity.engine()).unwrap_or_default());
+    let Some(identity) = KEPT_IDENTITY.get().copied() else {
+        tracing::warn!("toast not shown");
+        return;
+    };
+    let switches =
+        Switches::from_config(&DesktopConfig::load_for(crate::shell::identity::engine_identity()).unwrap_or_default());
     let kind = kind_of(notice);
     if !wanted(kind, &switches) {
         return;

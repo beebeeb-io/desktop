@@ -123,7 +123,7 @@ fn write_menu(identity: AppIdentity, root: &Path) -> Result<(), PlatformError> {
 /// Takes this build's four keys away, with everything under them. A key that is not there is not an error.
 fn remove_menu(identity: AppIdentity) -> Result<(), PlatformError> {
     for verb in ExplorerVerb::ALL {
-        reg_delete_tree(&verb_key(identity, verb))?;
+        reg_delete_tree(&verb_key(crate::shell::identity::engine_identity(), verb))?;
     }
     Ok(())
 }
@@ -137,7 +137,7 @@ pub(crate) fn menu_entries(identity: AppIdentity, exe: &str, root: &Path) -> Vec
     ExplorerVerb::ALL
         .into_iter()
         .flat_map(|verb| {
-            let key = verb_key(identity, verb);
+            let key = verb_key(crate::shell::identity::engine_identity(), verb);
             [
                 RegistryValue {
                     key: key.clone(),
@@ -176,11 +176,11 @@ pub(crate) fn command_line(exe: &str, verb: ExplorerVerb) -> String {
 
 /// One key per verb under every file's classic menu, named for this build (the test build never writes over the real
 /// app's keys) and numbered in the board's order (Explorer lists a menu's own keys by name).
-fn verb_key(identity: AppIdentity, verb: ExplorerVerb) -> String {
+fn verb_key(engine: &'static EngineIdentity, verb: ExplorerVerb) -> String {
     let place = ExplorerVerb::ALL.iter().position(|each| *each == verb).unwrap_or(0) + 1;
     format!(
         "Software\\Classes\\*\\shell\\{}.{place}.{}",
-        identity.engine().cloud_files_provider_name(),
+        engine.cloud_files_provider_name(),
         verb.word()
     )
 }
@@ -244,8 +244,7 @@ fn reg_delete_tree(key: &str) -> Result<(), PlatformError> {
 /// The id of the item at `path`, for the launch Explorer started (`instance::plan`). `None`: no item of this app's
 /// there, and nothing is handed on. This process has no engine: the sync folder comes from the settings, the way the
 /// engine reads it (`Engine::sync_root`).
-pub(crate) fn item_of(identity: AppIdentity, path: &Path) -> Option<String> {
-    let engine = identity.engine();
+pub(crate) fn item_of(engine: &'static EngineIdentity, path: &Path) -> Option<String> {
     let root = beebeeb_engine::config::DesktopConfig::load_for(engine)
         .ok()?
         .sync_root

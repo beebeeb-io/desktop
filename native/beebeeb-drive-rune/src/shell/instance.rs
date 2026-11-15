@@ -323,8 +323,8 @@ pub fn explorer_plan(ask: &ExplorerAsk, claim: Claim, item_of: impl FnOnce(&Path
 /// The item at `path` in this app's sync folder, as Windows holds it: the placeholder's identity, read without
 /// fetching anything (`platform::windows_verbs::item_of`). There is no File Explorer verb anywhere else.
 #[cfg(windows)]
-fn explorer_item(identity: AppIdentity, path: &Path) -> Option<ItemId> {
-    super::platform::windows_verbs::item_of(identity, path)
+fn explorer_item(_identity: AppIdentity, path: &Path) -> Option<ItemId> {
+    super::platform::windows_verbs::item_of(super::identity::engine_identity(), path)
 }
 
 #[cfg(not(windows))]
