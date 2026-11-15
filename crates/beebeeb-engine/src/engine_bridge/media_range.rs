@@ -16,14 +16,16 @@
 //! for exactly the bytes the plan says the span holds.
 //!
 //! Refused here, before a chunk is asked for (each is a [`MediaPlanRefused`]): metadata that does not state a
-//! stride, a count and a size that agree (a legacy row without them), and v2 content whose record carries no version
+//! stride, a count and a size that agree (a legacy row without them), a stride past core's own cap on a chunk
+//! (`MAX_CHUNK_SIZE`, 256 MiB: the stride sizes the buffer a read allocates, and the server states it, so a larger
+//! one is never allocated for), and v2 content whose record carries no version
 //! commitment (core's rule: it opens nothing; the player offers "Open in another app…"). A v1 file is read: v1 frames
 //! bind no position, version or truncation, the I9 gap core names for every v1 read (the whole-file read has it too).
 //! Must not: log or return a name, a key, an id or a byte; write anything.
 
 use std::ops::Range;
 
-use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+use beebeeb_core::chunk_stream::{ExpectedChunkFormat, MAX_CHUNK_SIZE};
 use beebeeb_core::kdf::FileKey;
 use serde_json::Value;
 
@@ -109,9 +111,10 @@ impl MediaPlan {
 }
 
 /// Whether `count` chunks of `stride` bytes (the last one shorter) hold exactly `size` bytes. An empty file is one
-/// empty chunk, as core plans it.
+/// empty chunk, as core plans it. A stride past core's cap on a chunk (`MAX_CHUNK_SIZE`) is no real plan: the server
+/// states it, and it sizes the buffer each read allocates.
 fn geometry_holds(size: u64, stride: u64, count: u32) -> bool {
-    if stride == 0 || count == 0 {
+    if stride == 0 || stride > MAX_CHUNK_SIZE || count == 0 {
         return false;
     }
     let needed = if size == 0 { 1 } else { size.div_ceil(stride) };
@@ -171,7 +174,8 @@ impl EngineBridge {
     /// pinned version (a version that went away is `download_pin::VersionGone`, never a restart on another one), and
     /// every chunk is opened at its own index (see the module's doc). The buffer is sized once, for exactly what the
     /// plan says the span holds, and the read is held to that (a longer body is given up while it streams); a span
-    /// that decrypts to any other length is an error and is wiped.
+    /// that decrypts to any other length is an error and is wiped. A span over `MAX_CHUNK_SIZE` is refused before
+    /// anything is allocated (the reader asks for one chunk at a time, which the plan holds under it).
     pub(crate) async fn media_chunks(
         &self,
         plan: &MediaPlan,
@@ -179,6 +183,7 @@ impl EngineBridge {
     ) -> Result<Zeroizing<Vec<u8>>, EngineError> {
         let want = plan
             .span_len(chunks.clone())
+            .filter(|want| *want <= MAX_CHUNK_SIZE)
             .ok_or_else(|| anyhow::Error::new(MediaPlanRefused::OutsidePlan))?;
         let hint = usize::try_from(want).map_err(|_| anyhow::Error::new(MediaPlanRefused::OutsidePlan))?;
         let data = self
@@ -205,7 +210,7 @@ impl EngineBridge {
 
 #[cfg(test)]
 mod tests {
-    use super::geometry_holds;
+    use super::{MAX_CHUNK_SIZE, geometry_holds};
 
     #[test]
     fn media_plan_geometry_is_the_stride_rule() {
@@ -216,5 +221,15 @@ mod tests {
         assert!(geometry_holds(0, 1_024, 1), "an empty file is one empty chunk");
         assert!(!geometry_holds(10, 0, 1), "no stride");
         assert!(!geometry_holds(10, 1_024, 0), "no chunk");
+        // The server states the stride, and it sizes what a read allocates: never past core's cap on a chunk.
+        assert!(
+            geometry_holds(MAX_CHUNK_SIZE, MAX_CHUNK_SIZE, 1),
+            "core's largest chunk"
+        );
+        assert!(
+            !geometry_holds(MAX_CHUNK_SIZE + 1, MAX_CHUNK_SIZE + 1, 1),
+            "a stride past core's cap is refused before any allocation"
+        );
+        assert!(!geometry_holds(1 << 40, 1 << 40, 1), "a stated terabyte chunk");
     }
 }
