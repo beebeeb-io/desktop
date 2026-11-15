@@ -59,7 +59,9 @@ pub async fn recovery_check_answer(
             Some(INVALID_RECOVERY_PHRASE_CODE) => Ok(RecoveryCheckAnswer::Mismatch),
             Some(RECOVERY_CHECK_MISSING) => Ok(RecoveryCheckAnswer::NoCheckOnFile),
             // Any other 400 says nothing about the key: answered like a server error, never as a mismatch.
-            _ => Ok(RecoveryCheckAnswer::Mismatch),
+            _ => Err(format!(
+                "Could not verify the recovery phrase (server returned {status}). Try again."
+            )),
         };
     }
     if status == reqwest::StatusCode::UNAUTHORIZED {
