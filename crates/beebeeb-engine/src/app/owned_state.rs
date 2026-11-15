@@ -6,10 +6,11 @@
 //! the one the handle was made for: a lock, a sign-out, another sign-in or a session the server ended turns the
 //! handle into a refusal, and an answer that was read across such a change is dropped.
 //!
-//! One step is let through for a session the server ended (CP2 row 2.1, privacy): its close deletes that session's
-//! OWN recent searches ([`Engine::delete_recent_searches_of_ended_session`]), as a sign-out does. The owner is proven
-//! and the session checked as for every handle; only the server's refusal is not asked, and that handle never leaves
-//! this module.
+//! One step is let through for a session the server ended (CP2 row 2.1, privacy): a session end (either sign-out, or
+//! the close of that session) deletes the session's OWN recent searches
+//! ([`Engine::delete_own_recent_searches_at_session_end`]). The owner is proven and the session checked as for every
+//! handle; only the server's refusal is not asked, and that handle never leaves this module. A delete that fails is
+//! logged and made at the account's next open for changes.
 //!
 //! What a state that is not the session's means is decided here, once, for every window: nothing is read, and the
 //! reason is a fixed word ([`LocalStateRefused`]).
@@ -19,7 +20,7 @@
 //!
 //! Must not: log or return a file's name, a path, an email, a user id, a token or a key; write anything before the
 //! owner is proven (the proof reads on a read-only connection); reset, adopt or delete local data (the one wipe
-//! above deletes a single row: the ended session's own recent searches).
+//! above deletes a single row: the ending session's own recent searches).
 
 use std::path::PathBuf;
 
@@ -98,7 +99,7 @@ enum Mode {
 enum Ended {
     /// Every handle and every identity this module answers: refused as [`LocalStateRefused::SessionEnded`].
     Refused,
-    /// Only [`Engine::delete_recent_searches_of_ended_session`], the close's wipe of the ended session's own recent
+    /// Only [`Engine::delete_own_recent_searches_at_session_end`], a session end's wipe of the session's own recent
     /// searches (CP2 row 2.1): it removes that row and writes nothing else.
     OwnSearchesWipe,
 }
@@ -289,29 +290,86 @@ impl<C: CredentialStores> Engine<C> {
         identity
     }
 
-    /// WRITES, one step of closing a session the server ended ([`Engine::close_ended_session`], the session watcher's
-    /// close, and the close a confirmed 401 asks): the recent searches of the account of `session` are deleted from
-    /// this computer while the session is still in memory, as at a sign-out (lead ruling 2026-11-15 17:25). The one
-    /// step the account-bound handle lets through after the refusal run (CP2 row 2.1): it deletes that session's OWN
-    /// row (keyed by its user id, never an email) and writes nothing else. Every other check is the handle's: the
-    /// owner proven on a read-only connection first, `session` still the session in memory before and after. A locked
-    /// screen does not refuse it (the close's own work). `Err`: nothing was deleted; the close goes on.
-    pub(super) fn delete_recent_searches_of_ended_session(
+    /// WRITES, one step of every session end that keeps the local state: both sign-outs ([`Engine::sign_out_for`],
+    /// [`Engine::sign_out_keeping_local_data`]) and the close of a session the server ended
+    /// ([`Engine::close_ended_session`], the session watcher's, and the close a confirmed 401 asks). The recent
+    /// searches of the account of `session` are deleted from this computer while the session is still in memory (lead
+    /// ruling 2026-11-15 17:25). The one step the account-bound handle lets through after the refusal run (CP2 row
+    /// 2.1): it deletes that session's OWN row (keyed by its user id, never an email) and writes nothing else. Every
+    /// other check is the handle's: the owner proven on a read-only connection first, `session` still the session in
+    /// memory before and after. A locked screen does not refuse it (the step's own work, not a person's read).
+    ///
+    /// `Err`: nothing was deleted, and the step goes on. A state that is not provably this account's, or none at all,
+    /// holds nothing of it. A state that could not be opened or written (`Unreadable`: the sync engine held it, for
+    /// one) is logged once, and the delete stays due: it is made at the account's next open for changes, and until
+    /// then the account's recent searches are neither shown nor added to ([`Self::recent_searches_due`]).
+    pub(super) fn delete_own_recent_searches_at_session_end(
         &self,
         session: SessionGeneration,
     ) -> Result<(), LocalStateRefused> {
-        let state = self.owned_state_as(Mode::Change, Call::Work, Ended::OwnSearchesWipe)?;
-        // The handle's session is the one the close named, not a later one that opened in between.
-        if state.session() != session {
-            return Err(LocalStateRefused::SessionChanged);
-        }
+        // The user id first: a delete that fails further on is still due for it.
         let user_id = self
             .session_identity_as(Ended::OwnSearchesWipe)?
             .user_id
             .ok_or(LocalStateRefused::IdentityUnknown)?;
-        state
-            .with(|db| db.clear_search_recent(&user_id))?
-            .map_err(|_| LocalStateRefused::Unreadable)
+        let deleted = self
+            .owned_state_as(Mode::Change, Call::Work, Ended::OwnSearchesWipe)
+            .and_then(|state| {
+                // The handle's session is the one the step named, not a later one that opened in between; the turn only
+                // moves on, so the user id read above is that session's too.
+                if state.session() != session {
+                    return Err(LocalStateRefused::SessionChanged);
+                }
+                state
+                    .with(|db| db.clear_search_recent(&user_id))?
+                    .map_err(|_| LocalStateRefused::Unreadable)
+            });
+        match deleted {
+            Ok(()) => {
+                self.mark_recent_searches_due(&user_id, false);
+            }
+            Err(LocalStateRefused::Unreadable) => {
+                if self.mark_recent_searches_due(&user_id, true) {
+                    tracing::warn!("search query row not deleted at session end: pending, retry at next open");
+                }
+            }
+            Err(_) => {}
+        }
+        deleted
+    }
+
+    /// Whether a session end's delete of the recent searches of `user_id` is still due (CP2 row 2.1): it failed, and
+    /// no open made it since. Held in memory: a restart before the account's next open forgets it.
+    pub(super) fn recent_searches_due(&self, user_id: &str) -> bool {
+        self.recent_searches_due
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(user_id)
+    }
+
+    /// Marks the delete of `user_id`'s recent searches due (`true`) or made (`false`); answers whether that changed.
+    fn mark_recent_searches_due(&self, user_id: &str, due: bool) -> bool {
+        let mut users = self
+            .recent_searches_due
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if due {
+            users.insert(user_id.to_string())
+        } else {
+            users.remove(user_id)
+        }
+    }
+
+    /// The delete a session end could not make, made at a later open for changes of the account's state: through
+    /// `state`, a handle proven the account of `user_id`'s. Fails quietly (it was logged once, and it stays due).
+    fn make_due_recent_searches_delete(&self, state: &OwnedState<'_>, user_id: &str) {
+        if !self.recent_searches_due(user_id) {
+            return;
+        }
+        if let Ok(Ok(())) = state.with(|db| db.clear_search_recent(user_id)) {
+            self.mark_recent_searches_due(user_id, false);
+            tracing::info!("pending search query row deleted at open");
+        }
     }
 
     fn owned_state(&self, mode: Mode, call: Call) -> Result<OwnedState<'_>, LocalStateRefused> {
@@ -365,6 +423,13 @@ impl<C: CredentialStores> Engine<C> {
             ended,
         };
         state.still_this_session()?;
+        // A delete a session end could not make is made at the account's next open for changes (CP2 row 2.1).
+        if mode == Mode::Change
+            && ended == Ended::Refused
+            && let Some(user_id) = session.user_id.as_deref()
+        {
+            self.make_due_recent_searches_delete(&state, user_id);
+        }
         Ok(state)
     }
 }

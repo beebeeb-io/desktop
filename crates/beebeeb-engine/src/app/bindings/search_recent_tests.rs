@@ -306,8 +306,9 @@ fn open_lock(engine: &TestEngine) {
 
 /// Batch 3 row S7 (mutant S7-M1: no delete in `close_session_the_server_refused`): a session the server ended leaves
 /// none of the account's recent searches on this computer, as a sign-out. Through the CONFIRMED close (a 401 that a
-/// second question confirmed, `confirmed_at`). Not covered, and not deleted: the close after the refusal run (the
-/// session watcher's `close_ended_session`), where the account-bound handle refuses as `SessionEnded`.
+/// second question confirmed, `confirmed_at`). The close after the refusal run (the session watcher's
+/// `close_ended_session`) is `tests/a_session_the_watcher_closes_leaves_no_recent_searches.rs`; a sign-out pressed
+/// before the watcher fires is `tests/a_sign_out_before_the_watcher_fires_leaves_no_recent_searches.rs` (CP2 row 2.1).
 #[test]
 fn a_session_the_server_ended_leaves_no_recent_searches() {
     let engine = engine();
@@ -385,4 +386,190 @@ fn a_screen_lock_keeps_the_recent_searches() {
 
     let _ = engine.lock();
     assert_eq!(on_disk(&path, A.0), kept, "the vault lock kept them");
+}
+
+// ── CP2 row 2.1, ruling 2: a session end's delete that fails is logged, and made at the next open ──────────────────
+
+/// The log line of a session end whose delete of the recent searches failed.
+const NOT_DELETED: &str = "search query row not deleted at session end";
+/// The log line of that delete, made at the next open.
+const DELETED_AT_OPEN: &str = "pending search query row deleted at open";
+
+/// Three refusals in a row: the session is held as ended (as the sync loop holds it after three 401s).
+fn the_refusal_run(engine: &TestEngine) {
+    let refused = anyhow::anyhow!("401 Unauthorized");
+    for _ in 0..3 {
+        engine.acct.auth_health.note_result(Some(&refused));
+    }
+    assert!(engine.acct.auth_health.is_expired(), "precondition: the session ended");
+}
+
+/// The account's next session after an ended one, open: the strong unlock clears the refusal run before its session
+/// is installed (`close_ended_session`'s doc). Answers its turn.
+fn next_session(engine: &TestEngine, account: (&str, &str)) -> SessionGeneration {
+    engine.acct.auth_health.note_result(None);
+    let turn = signed_in(engine, account);
+    open_lock(engine);
+    turn
+}
+
+/// The state database held by a writer in exclusive mode, as a long write of the sync engine holds it (the trick of
+/// `state_db::read_only`'s tests): the handle's proof cannot read it.
+fn held(path: &Path) -> rusqlite::Connection {
+    let holder = rusqlite::Connection::open(path).unwrap();
+    holder
+        .execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE; DELETE FROM files WHERE file_id = 'none';")
+        .unwrap();
+    holder
+}
+
+fn released(holder: rusqlite::Connection) {
+    holder.execute_batch("ROLLBACK;").unwrap();
+    drop(holder);
+}
+
+/// Everything `body` logs through `tracing`, at every level, on this thread (as `session_revoke_tests`).
+fn capture_logs<T>(body: impl FnOnce() -> T) -> (T, String) {
+    #[derive(Clone)]
+    struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buffer: Arc<std::sync::Mutex<Vec<u8>>> = Arc::default();
+    let writer = Capture(buffer.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let out = body();
+    drop(guard);
+    let text = String::from_utf8_lossy(&buffer.lock().unwrap()).into_owned();
+    (out, text)
+}
+
+/// The watcher's close while the sync engine holds the state database: the delete fails, and that is logged once
+/// (never dropped silently). The account's next session reads none of the ended session's searches: the next open
+/// deletes the row first, and a new search starts a new list. Mutants: the log line removed (the log count is 0); the
+/// delete at the next open removed (the next read shows the old list).
+#[test]
+fn a_failed_delete_at_the_watchers_close_is_logged_and_made_at_the_next_open() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    let path = state(dir.path(), A);
+    engine.use_local_state_for_test(path.clone());
+    let a = signed_in(&engine, A);
+    engine.remember_search_for(a, "contract").unwrap();
+    engine.remember_search_for(a, "invoice 2026").unwrap();
+    open_lock(&engine);
+    the_refusal_run(&engine);
+
+    let holder = held(&path);
+    let (closed, logs) = capture_logs(|| engine.close_ended_session());
+    released(holder);
+    assert!(closed.is_some(), "the premise: the watcher's close closed the vault");
+    assert_eq!(
+        on_disk(&path, A.0),
+        (true, words(&["invoice 2026", "contract"])),
+        "the premise: the delete failed while the database was held"
+    );
+    assert_eq!(
+        logs.matches(NOT_DELETED).count(),
+        1,
+        "the failed delete is logged once: {logs}"
+    );
+
+    let a2 = next_session(&engine, A);
+    let (read, logs) = capture_logs(|| engine.recent_searches_for(a2));
+    assert_eq!(
+        read,
+        Ok(Vec::new()),
+        "the next read shows none of the ended session's searches"
+    );
+    assert_eq!(
+        logs.matches(DELETED_AT_OPEN).count(),
+        1,
+        "the delete at the next open: {logs}"
+    );
+    assert_eq!(
+        on_disk(&path, A.0),
+        (false, Vec::new()),
+        "the next open deleted the row"
+    );
+    assert_eq!(
+        engine.remember_search_for(a2, "new"),
+        Ok(words(&["new"])),
+        "a new search starts a new list"
+    );
+}
+
+/// The same for a sign-out (the sign-in flow's, which keeps the local data): the failed delete is logged, and the
+/// account's next WRITE is made into a new list, the old row deleted first at its open. Mutant: the delete at a
+/// change handle's open removed (the new search is refused while the delete is due, or joins the old list).
+#[test]
+fn a_failed_delete_at_a_sign_out_is_logged_and_made_at_the_next_open() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    let path = state(dir.path(), A);
+    engine.use_local_state_for_test(path.clone());
+    let a = signed_in(&engine, A);
+    engine.remember_search_for(a, "contract").unwrap();
+    engine.remember_search_for(a, "invoice 2026").unwrap();
+    open_lock(&engine);
+    the_refusal_run(&engine);
+
+    let holder = held(&path);
+    let (signed_out, logs) = capture_logs(|| engine.sign_out_keeping_local_data());
+    released(holder);
+    assert_eq!(signed_out, Ok(()), "the premise: signed out");
+    assert_eq!(
+        on_disk(&path, A.0),
+        (true, words(&["invoice 2026", "contract"])),
+        "the premise: the delete failed while the database was held"
+    );
+    assert_eq!(
+        logs.matches(NOT_DELETED).count(),
+        1,
+        "the failed delete is logged once: {logs}"
+    );
+
+    let a2 = next_session(&engine, A);
+    let (kept, logs) = capture_logs(|| engine.remember_search_for(a2, "new"));
+    assert_eq!(kept, Ok(words(&["new"])), "the first write after it starts a new list");
+    assert_eq!(
+        logs.matches(DELETED_AT_OPEN).count(),
+        1,
+        "the delete at the next open: {logs}"
+    );
+    assert_eq!(on_disk(&path, A.0), (true, words(&["new"])));
+}
+
+/// The control: a session end's delete that works logs neither line, and leaves nothing due for the next open.
+#[test]
+fn a_delete_that_works_at_the_watchers_close_logs_nothing_and_leaves_nothing_due() {
+    let engine = engine();
+    let dir = tempfile::tempdir().unwrap();
+    let path = state(dir.path(), A);
+    engine.use_local_state_for_test(path.clone());
+    let a = signed_in(&engine, A);
+    engine.remember_search_for(a, "contract").unwrap();
+    open_lock(&engine);
+    the_refusal_run(&engine);
+
+    let (closed, logs) = capture_logs(|| engine.close_ended_session());
+    assert!(closed.is_some(), "the premise: the watcher's close closed the vault");
+    assert_eq!(on_disk(&path, A.0), (false, Vec::new()), "deleted at the close");
+    assert_eq!(logs.matches(NOT_DELETED).count(), 0, "{logs}");
+
+    let a2 = next_session(&engine, A);
+    let (kept, logs) = capture_logs(|| engine.remember_search_for(a2, "new"));
+    assert_eq!(kept, Ok(words(&["new"])));
+    assert_eq!(logs.matches(DELETED_AT_OPEN).count(), 0, "nothing was due: {logs}");
 }
