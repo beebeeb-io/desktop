@@ -40,6 +40,11 @@ pub struct BoardAccount {
     sections_only: bool,
     /// How this fixture answers a sign-out of this app.
     sign_out_mode: SignOutMode,
+    /// The answers of calls that were started, handed over on the next poll; the serial of the latest call of each
+    /// kind.
+    queued: std::collections::VecDeque<(CallKind, Answered)>,
+    serial: u64,
+    marks: Vec<(CallKind, u64)>,
     /// A sign-out that answered `Pending`: all apps or this one, and the polls until its answer.
     signing_out: Option<(bool, u32)>,
 }
@@ -231,6 +236,9 @@ impl BoardAccount {
             sections_only: false,
             sign_out_mode: SignOutMode::AtOnce,
             signing_out: None,
+            queued: std::collections::VecDeque::new(),
+            serial: 0,
+            marks: Vec::new(),
         }
     }
 
@@ -313,6 +321,224 @@ impl BoardAccount {
     }
 }
 
+#[cfg(test)]
+impl HeldCalls {
+    fn mark(&self, kind: CallKind) -> Option<CallMark> {
+        let (_, serial) = self.marks.iter().find(|(k, _)| *k == kind)?;
+        Some(CallMark {
+            serial: *serial,
+            out: self.out == Some(kind),
+            current: self.out == Some(kind) || !self.moved.get(),
+        })
+    }
+}
+
+#[cfg(test)]
+impl BoardAccount {
+    fn held_start(&mut self, kind: CallKind, input: &str) -> bool {
+        match self.held.as_mut() {
+            Some(held) if held.refuse.get() => false,
+            Some(held) if held.out == Some(kind) && held.repeat_out.get() => true,
+            Some(held) if held.out.is_none() => {
+                held.out = Some(kind);
+                held.input = input.to_string();
+                held.started.borrow_mut().push(kind);
+                let serial = held.started.borrow().len() as u64;
+                held.marks.retain(|(k, _)| *k != kind);
+                held.marks.push((kind, serial));
+                true
+            }
+            _ => false,
+        }
+    }
+    fn held_answer(&mut self) -> Option<(CallKind, Answered)> {
+        let held = self.held.as_mut()?;
+        let kind = held.out?;
+        let answered = held.answer.borrow_mut().take()?;
+        held.out = None;
+        // The address Beebeeb names for the code is the one the call sent.
+        if let (CallKind::StartEmail, Answered::Done) = (kind, &answered) {
+            self.new_email = Some(std::mem::take(&mut held.input));
+        }
+        Some((kind, answered))
+    }
+}
+
+/// The Security page's facts of the board: it knows every part.
+fn all_known(board: &BoardAccount) -> SecurityFacts {
+    let sec = board.security();
+    let two = board.two_factor.clone();
+    SecurityFacts {
+        backup_codes: sec.two_factor.then_some((two.codes_left, two.codes_total)),
+        app_lock: Some((sec.app_lock, sec.lock_after)),
+        password_changed: Some(sec.password_changed),
+        two_factor: Some(sec.two_factor),
+        passkeys: Some(sec.passkeys),
+        sessions: Count::Known(sec.sessions),
+        activity: Some(
+            board
+                .activity()
+                .map(|periods| periods.into_iter().flat_map(|(_, events)| events).collect()),
+        ),
+        factors: Some(board.factors()),
+        can_sign_out: true,
+        can_sign_out_all: true,
+    }
+}
+
+/// The board's own answers (what its sample server would say), given at once.
+impl BoardAccount {
+    /// The account's security summary, as the board draws it.
+    pub fn security(&self) -> Security {
+        Security {
+            sessions: self.sessions.len(),
+            two_factor: self.two_factor.on,
+            passkeys: self.passkeys.len(),
+            sign_in_activity: self.activity,
+            ..self.security.clone()
+        }
+    }
+    /// The security score's factors, as the board draws them.
+    pub fn factors(&self) -> Vec<Factor> {
+        let sec = self.security();
+        let factor = |kind, done, says: String| Factor { kind, done, says };
+        vec![
+            factor(FactorKind::EmailVerified, true, self.identity().email),
+            factor(
+                FactorKind::TwoFactor,
+                sec.two_factor,
+                if sec.two_factor {
+                    "Authenticator app".into()
+                } else {
+                    "Add a second factor".into()
+                },
+            ),
+            factor(FactorKind::StrongPassword, true, "Strong when it was set".into()),
+            factor(FactorKind::RecoveryPhraseSaved, true, "Confirmed at sign-up".into()),
+            factor(
+                FactorKind::Passkeys,
+                sec.passkeys > 0,
+                match sec.passkeys {
+                    0 => "Add a passkey".into(),
+                    1 => "1 passkey".into(),
+                    n => format!("{n} passkeys"),
+                },
+            ),
+            factor(FactorKind::PasswordNotInBreach, true, "Checked when it was set".into()),
+            factor(FactorKind::Sessions, true, format!("{} signed in", sec.sessions)),
+        ]
+    }
+
+    /// One call's answer, as the board's sample server gives it.
+    fn answer_now(&mut self, kind: CallKind, input: &str, password: &str) -> Answered {
+        let code = input;
+        match kind {
+            CallKind::StartEmail => match self.start_email_change(password, input) {
+                Ok(()) => Answered::Done,
+                Err(why) => Answered::Email(why),
+            },
+            CallKind::ConfirmEmail => match self.confirm_email_change(code) {
+                Ok(()) => Answered::Done,
+                Err(why) => Answered::Code(why),
+            },
+            CallKind::ResendEmail => {
+                if self.wait > 0 {
+                    return Answered::Resend(Resend::Wait(self.wait));
+                }
+                self.wait = 60;
+                self.wire.push("POST send-again".into());
+                Answered::Done
+            }
+            CallKind::BeginTwoFactor => {
+                self.setting_up = true;
+                self.wire.push("POST account/two-factor/setup".into());
+                Answered::Setup(Setup {
+                    modules: crate::frames::signin::qr::board_modules(),
+                    key: Secret::new(BOARD_KEY),
+                })
+            }
+            CallKind::TurnOnTwoFactor => match self.turn_on_two_factor(code) {
+                Ok(codes) => Answered::Codes(codes),
+                Err(why) => Answered::Code(why),
+            },
+            CallKind::NewBackupCodes => match Self::code_ok(code) {
+                Ok(()) => {
+                    self.two_factor.codes_left = 8;
+                    self.wire.push("POST account/two-factor/backup-codes code".into());
+                    Answered::Codes(board_codes())
+                }
+                Err(why) => Answered::Code(why),
+            },
+            CallKind::CheckCode => match Self::code_ok(code) {
+                Ok(()) => Answered::Done,
+                Err(why) => Answered::Code(why),
+            },
+            CallKind::TurnOffTwoFactor => match Self::code_ok(code) {
+                Ok(()) => {
+                    self.two_factor.on = false;
+                    self.two_factor.codes_left = 0;
+                    self.wire.push("DELETE account/two-factor code".into());
+                    Answered::Done
+                }
+                Err(why) => Answered::Code(why),
+            },
+            // The board takes a password change through `change_password` (`start_call` refuses it).
+            CallKind::ChangePassword => Answered::Refused(Refused::NotConfirmed),
+        }
+    }
+    /// The new address and the password: the password is proved first (an OPAQUE step-up: what reaches the wire is
+    /// its message, never the password), then the change is asked.
+    fn start_email_change(&mut self, password: &str, new_email: &str) -> Result<(), EmailRefused> {
+        let confirmation = self
+            .step_up(Password::from_field(password), Purpose::ChangeEmail)
+            .map_err(|_| EmailRefused::NotConfirmed)?;
+        if !self.redeem(confirmation, Purpose::ChangeEmail) {
+            return Err(EmailRefused::NotConfirmed);
+        }
+        let address = new_email.trim();
+        if !address.contains('@') || address.starts_with('@') || address.ends_with('@') {
+            return Err(EmailRefused::NotAnAddress);
+        }
+        if address.eq_ignore_ascii_case("taken@northwind.studio") {
+            return Err(EmailRefused::InUse);
+        }
+        self.wire
+            .push("POST account/email-change step-up-token new-address".into());
+        self.new_email = Some(address.to_string());
+        self.wait = 60;
+        Ok(())
+    }
+    fn confirm_email_change(&mut self, code: &str) -> Result<(), CodeRefused> {
+        if code != BOARD_EMAIL_CODE {
+            return Err(CodeRefused::Wrong);
+        }
+        match self.new_email.take() {
+            Some(address) => {
+                self.email = address;
+                self.wire.push("POST account/email-change/confirm code".into());
+                Ok(())
+            }
+            None => Err(CodeRefused::Expired),
+        }
+    }
+    fn turn_on_two_factor(&mut self, code: &str) -> Result<Vec<Secret>, CodeRefused> {
+        if !self.setting_up {
+            return Err(CodeRefused::Expired);
+        }
+        Self::code_ok(code)?;
+        self.setting_up = false;
+        self.two_factor = TwoFactor {
+            on: true,
+            added: "Today".into(),
+            last_used: "Just now".into(),
+            codes_left: 8,
+            codes_total: 8,
+        };
+        self.wire.push("POST account/two-factor/enable code".into());
+        Ok(board_codes())
+    }
+}
+
 impl AccountSource for BoardAccount {
     fn pane_state(&self, pane: super::super::Pane) -> PaneState {
         use super::super::Pane;
@@ -351,44 +577,6 @@ impl AccountSource for BoardAccount {
             used: "240 GB".into(),
             rest: "used · renews 14 Mar 2027".into(),
         })
-    }
-    fn security(&self) -> Security {
-        Security {
-            sessions: self.sessions.len(),
-            two_factor: self.two_factor.on,
-            passkeys: self.passkeys.len(),
-            sign_in_activity: self.activity,
-            ..self.security.clone()
-        }
-    }
-    fn factors(&self) -> Vec<Factor> {
-        let sec = self.security();
-        let factor = |kind, done, says: String| Factor { kind, done, says };
-        vec![
-            factor(FactorKind::EmailVerified, true, self.identity().email),
-            factor(
-                FactorKind::TwoFactor,
-                sec.two_factor,
-                if sec.two_factor {
-                    "Authenticator app".into()
-                } else {
-                    "Add a second factor".into()
-                },
-            ),
-            factor(FactorKind::StrongPassword, true, "Strong when it was set".into()),
-            factor(FactorKind::RecoveryPhraseSaved, true, "Confirmed at sign-up".into()),
-            factor(
-                FactorKind::Passkeys,
-                sec.passkeys > 0,
-                match sec.passkeys {
-                    0 => "Add a passkey".into(),
-                    1 => "1 passkey".into(),
-                    n => format!("{n} passkeys"),
-                },
-            ),
-            factor(FactorKind::PasswordNotInBreach, true, "Checked when it was set".into()),
-            factor(FactorKind::Sessions, true, format!("{} signed in", sec.sessions)),
-        ]
     }
     fn sessions(&self) -> Vec<Session> {
         self.sessions.clone()
@@ -470,44 +658,14 @@ impl AccountSource for BoardAccount {
         Ok(StepUp::granted(purpose, handle))
     }
 
-    fn set_name(&mut self, name: &str) -> bool {
+    fn save_name(&mut self, name: &str) -> NameAnswer {
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 64 {
-            return false;
+            return NameAnswer::NotSaved(NameWhy::Refused);
         }
         self.name = name.to_string();
         self.wire.push("PATCH account display_name".into());
-        true
-    }
-    fn start_email_change(&mut self, confirmation: StepUp, new_email: &str) -> Result<(), EmailRefused> {
-        if !self.redeem(confirmation, Purpose::ChangeEmail) {
-            return Err(EmailRefused::NotConfirmed);
-        }
-        let address = new_email.trim();
-        if !address.contains('@') || address.starts_with('@') || address.ends_with('@') {
-            return Err(EmailRefused::NotAnAddress);
-        }
-        if address.eq_ignore_ascii_case("taken@northwind.studio") {
-            return Err(EmailRefused::InUse);
-        }
-        self.wire
-            .push("POST account/email-change step-up-token new-address".into());
-        self.new_email = Some(address.to_string());
-        self.wait = 60;
-        Ok(())
-    }
-    fn confirm_email_change(&mut self, code: &str) -> Result<(), CodeRefused> {
-        if code != BOARD_EMAIL_CODE {
-            return Err(CodeRefused::Wrong);
-        }
-        match self.new_email.take() {
-            Some(address) => {
-                self.email = address;
-                self.wire.push("POST account/email-change/confirm code".into());
-                Ok(())
-            }
-            None => Err(CodeRefused::Expired),
-        }
+        NameAnswer::Saved
     }
     fn email_code_sent_to(&self) -> Option<String> {
         self.new_email.clone()
@@ -532,44 +690,53 @@ impl AccountSource for BoardAccount {
             _ => Strength::Strong,
         }
     }
-    #[cfg(test)]
-    fn start_call(&mut self, kind: CallKind, input: &str, _password: &str) -> bool {
-        match self.held.as_mut() {
-            Some(held) if held.refuse.get() => false,
-            Some(held) if held.out == Some(kind) && held.repeat_out.get() => true,
-            Some(held) if held.out.is_none() => {
-                held.out = Some(kind);
-                held.input = input.to_string();
-                held.started.borrow_mut().push(kind);
-                let serial = held.started.borrow().len() as u64;
-                held.marks.retain(|(k, _)| *k != kind);
-                held.marks.push((kind, serial));
-                true
-            }
-            _ => false,
+    /// The board answers every call at once, and hands the answer over on the window's next poll (as a worker's
+    /// would come): a press of a call that is already queued starts nothing (the engine's rule). A password change is
+    /// not one of them: the board takes it through `change_password`.
+    fn start_call(&mut self, kind: CallKind, input: &str, password: &str) -> bool {
+        #[cfg(test)]
+        if self.held.is_some() {
+            return self.held_start(kind, input);
         }
+        if kind == CallKind::ChangePassword {
+            return false;
+        }
+        if self.queued.iter().any(|(k, _)| *k == kind) {
+            return true;
+        }
+        let answered = self.answer_now(kind, input, password);
+        self.serial += 1;
+        self.marks.retain(|(k, _)| *k != kind);
+        self.marks.push((kind, self.serial));
+        self.queued.push_back((kind, answered));
+        true
     }
-    #[cfg(test)]
     fn call_answer(&mut self) -> Option<(CallKind, Answered)> {
-        let held = self.held.as_mut()?;
-        let kind = held.out?;
-        let answered = held.answer.borrow_mut().take()?;
-        held.out = None;
-        // The address Beebeeb names for the code is the one the call sent.
-        if let (CallKind::StartEmail, Answered::Done) = (kind, &answered) {
-            self.new_email = Some(std::mem::take(&mut held.input));
+        #[cfg(test)]
+        if self.held.is_some() {
+            return self.held_answer();
         }
-        Some((kind, answered))
+        self.queued.pop_front()
     }
-    #[cfg(test)]
     fn call_mark(&self, kind: CallKind) -> Option<CallMark> {
-        let held = self.held.as_ref()?;
-        let (_, serial) = held.marks.iter().find(|(k, _)| *k == kind)?;
+        #[cfg(test)]
+        if let Some(held) = self.held.as_ref() {
+            return held.mark(kind);
+        }
+        let (_, serial) = self.marks.iter().find(|(k, _)| *k == kind)?;
+        let out = self.queued.iter().any(|(k, _)| *k == kind);
+        // One sample account, one session: an answer is always this session's.
         Some(CallMark {
             serial: *serial,
-            out: held.out == Some(kind),
-            current: held.out == Some(kind) || !held.moved.get(),
+            out,
+            current: true,
         })
+    }
+    fn pump(&mut self) -> Pumped {
+        Pumped {
+            busy: !self.queued.is_empty(),
+            ..Pumped::default()
+        }
     }
     fn change_password(&mut self, confirmation: StepUp, new: Password<'_>) -> Result<(), Refused> {
         if !self.redeem(confirmation, Purpose::ChangePassword) {
@@ -586,51 +753,11 @@ impl AccountSource for BoardAccount {
     fn two_factor(&self) -> TwoFactor {
         self.two_factor.clone()
     }
-    fn begin_two_factor(&mut self, _confirmation: Option<StepUp>) -> Result<Setup, Refused> {
-        self.setting_up = true;
-        self.wire.push("POST account/two-factor/setup".into());
-        Ok(Setup {
-            modules: crate::frames::signin::qr::board_modules(),
-            key: Secret::new(BOARD_KEY),
-        })
-    }
-    fn turn_on_two_factor(&mut self, code: &str) -> Result<Vec<Secret>, CodeRefused> {
-        if !self.setting_up {
-            return Err(CodeRefused::Expired);
-        }
-        Self::code_ok(code)?;
-        self.setting_up = false;
-        self.two_factor = TwoFactor {
-            on: true,
-            added: "Today".into(),
-            last_used: "Just now".into(),
-            codes_left: 8,
-            codes_total: 8,
-        };
-        self.wire.push("POST account/two-factor/enable code".into());
-        Ok(board_codes())
-    }
-    fn new_backup_codes(&mut self, code: &str) -> Result<Vec<Secret>, CodeRefused> {
-        Self::code_ok(code)?;
-        self.two_factor.codes_left = 8;
-        self.wire.push("POST account/two-factor/backup-codes code".into());
-        Ok(board_codes())
-    }
-    fn check_code(&mut self, code: &str) -> Result<(), CodeRefused> {
-        Self::code_ok(code)
-    }
-    fn turn_off_two_factor(&mut self, code: &str) -> Result<(), CodeRefused> {
-        Self::code_ok(code)?;
-        self.two_factor.on = false;
-        self.two_factor.codes_left = 0;
-        self.wire.push("DELETE account/two-factor code".into());
-        Ok(())
-    }
     fn passkeys(&self) -> Vec<Passkey> {
         self.passkeys.clone()
     }
-    fn add_passkey(&mut self) -> Result<(), Refused> {
-        // The board: Windows Hello adds a passkey saved on this PC, listed as Windows Hello.
+    /// The board: Windows Hello adds a passkey saved on this PC, listed as Windows Hello (no password is asked).
+    fn add_passkey(&mut self, _password: Option<Password<'_>>) -> Result<(), Refused> {
         self.passkeys.push(Passkey {
             id: format!("pk-hello-{}", self.passkeys.len()),
             name: "Windows Hello".into(),
@@ -641,6 +768,11 @@ impl AccountSource for BoardAccount {
         self.wire.push("POST account/passkeys attestation".into());
         Ok(())
     }
+    fn remove_passkey(&mut self, id: &str, _password: Option<Password<'_>>) -> bool {
+        let before = self.passkeys.len();
+        self.passkeys.retain(|p| p.id != id);
+        self.passkeys.len() < before
+    }
     fn rename_passkey(&mut self, id: &str, name: &str) -> bool {
         let name = name.trim();
         match self.passkeys.iter_mut().find(|p| p.id == id) {
@@ -650,11 +782,6 @@ impl AccountSource for BoardAccount {
             }
             _ => false,
         }
-    }
-    fn remove_passkey(&mut self, id: &str) -> bool {
-        let before = self.passkeys.len();
-        self.passkeys.retain(|p| p.id != id);
-        self.passkeys.len() < before
     }
     fn activity(&self) -> Option<Vec<(String, Vec<Event>)>> {
         if !self.activity {
@@ -715,15 +842,6 @@ impl AccountSource for BoardAccount {
     fn start_activity(&mut self) {
         self.activity = true;
         self.wire.push("PUT account/activity-tracking on".into());
-    }
-    fn stop_activity(&mut self, code: &str) -> Result<(), CodeRefused> {
-        Self::code_ok(code)?;
-        self.activity = false;
-        self.wire.push("PUT account/activity-tracking off code".into());
-        Ok(())
-    }
-    fn stop_activity_needs_password(&self) -> bool {
-        true
     }
     fn stop_activity_confirmed(&mut self, password: Password<'_>) -> bool {
         if password.for_opaque() != self.accepts.as_bytes() {

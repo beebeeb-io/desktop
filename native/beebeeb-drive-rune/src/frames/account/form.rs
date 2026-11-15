@@ -226,10 +226,8 @@ pub fn arrive(ui: &mut AccountUi) {
     f.code = code_edit();
     f.sink = secure();
     if let Some(dialog) = &ui.dialog {
-        if matches!(dialog, Dialog::Code(super::CodeFor::StopActivity))
-            && ui.source.as_deref().is_some_and(|s| s.stop_activity_needs_password())
-        {
-            // Stopping the recording asks the password (the board's DW-A78).
+        if matches!(dialog, Dialog::Code(super::CodeFor::StopActivity)) {
+            // Stopping the recording asks the password (owner ruling 2026-11-14; the board's DW-A78).
             focus(f, Some(CURRENT_KEY));
         } else if matches!(dialog, Dialog::Code(_)) {
             focus(f, Some(CODE_KEY));
@@ -269,7 +267,8 @@ pub fn arrive(ui: &mut AccountUi) {
             if ui.form.setup.is_none()
                 && super::calls::start(ui, CallKind::BeginTwoFactor, "", "") == super::calls::Start::NotStarted
             {
-                ui.form.setup = ui.source.as_deref_mut().and_then(|s| s.begin_two_factor(None).ok());
+                // No open session: no key is asked for, and the page says the set-up could not start.
+                ui.form.problem = Some(Problem::Offline);
             }
             focus(&mut ui.form, Some(CODE_KEY));
         }

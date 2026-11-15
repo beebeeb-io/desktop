@@ -275,10 +275,6 @@ fn the_panes_of_email_and_two_factor_are_reachable_and_two_factor_waits_for_the_
         "what Beebeeb does not say is not drawn"
     );
     assert!(
-        source.can_send_again(),
-        "Beebeeb has the route that sends the email's code again"
-    );
-    assert!(
         !source.can_send_again_deletion(),
         "no route sends the deletion's code again"
     );

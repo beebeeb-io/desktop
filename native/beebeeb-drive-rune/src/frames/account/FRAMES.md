@@ -95,6 +95,21 @@ behaviour; a "done" list in the score card is a follow-up if the owner wants it.
 | `DW-A67` | Change the password. | built (light and dark: 0 failing on all six lines) |
 | `DW-A68` | The current password was wrong: nothing changed. | built (light and dark: 0 failing on all six lines) |
 
+### States of these pages with no board frame (lane w1, 2026-11-15; desktop#427's follow-up)
+
+The board draws none of these; each sentence is this app's, and says only what is true:
+- Change email while its code is being sent: the fields frozen, "Leave this page", and under the address
+  "A code is still being sent. Wait for it to finish." DW-A66 names the address Beebeeb sent the code to (its own
+  word), or "your new address" when it is not known; never what the field holds.
+- A password change answered after the person left its page: a notice over the window, whatever it shows
+  ("Your password was changed" / "Your password change could not be confirmed" / "Your password was not changed",
+  with Show), and the full sentence on the Change password page, once.
+- Beebeeb refusing a new password (the same as now, too weak, found in a breach): "Beebeeb did not accept the new
+  password. Nothing was changed. Choose a different one." under New password.
+- A code confirm or the first code while the same call is still out: "Your earlier request is still being made.
+  Wait for it to finish."; the email's code: "Your code is still being checked. Wait for it to finish."
+- With no open session every one of these calls says the page's Offline line and asks nothing.
+
 ## Two-factor and passkeys in settings (8)
 
 | Frame | What it is | Status |

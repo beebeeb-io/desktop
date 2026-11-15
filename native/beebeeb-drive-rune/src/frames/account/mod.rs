@@ -671,6 +671,15 @@ fn open_on(s: &mut State, frame: &'static str) {
     go(s, frame);
 }
 
+/// A scene has no poll: the answers the board gave are taken here, as the window's poll takes them (`poll`).
+fn take_answers(s: &mut State) {
+    while let Some((kind, answered)) = s.account.source.as_deref_mut().and_then(|source| source.call_answer()) {
+        if let Some(frame) = calls::settle(&mut s.account, kind, answered) {
+            go(s, frame);
+        }
+    }
+}
+
 /// The frames of this group that are built: the id, and what shows it on a fresh `State`.
 /// A page whose board frame shows typed text gets that text; the board draws most of them at
 /// a later moment than their opening (fields filled, no field in focus).
@@ -743,14 +752,17 @@ pub const FRAMES: &[(&str, fn(&mut State))] = &[
     }),
     ("DW-A69", |s| {
         open_on(s, "DW-A69");
+        take_answers(s);
         form::type_in(&mut s.account.form.code, "51");
     }),
     ("DW-A70", |s| {
         open_on(s, "DW-A69");
+        take_answers(s);
         form::type_in(&mut s.account.form.code, source::BOARD_CODE);
         if let Some(frame) = two_factor::turn_on(&mut s.account) {
             go(s, frame);
         }
+        take_answers(s);
     }),
     ("DW-A71", |s| open_on(s, "DW-A71")),
     ("DW-A72", |s| {

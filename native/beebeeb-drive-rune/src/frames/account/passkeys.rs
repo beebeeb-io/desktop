@@ -40,12 +40,12 @@ fn add_button(index: usize, t: &Theme) -> (El, bool) {
                     form::focus(f, Some(form::CURRENT_KEY));
                     return None;
                 }
-                let started = source.add_passkey_confirmed(Password::from_field(&f.current.text));
+                let started = source.add_passkey(Some(Password::from_field(&f.current.text)));
                 // The password has left the field once it is handed over.
                 f.current = form::secure();
                 started
             } else {
-                source.add_passkey()
+                source.add_passkey(None)
             };
             match started {
                 Ok(()) => f.problem = None,
@@ -294,27 +294,31 @@ fn remove_confirm(passkey: &Passkey, all: &[Passkey], password: Option<El>, t: &
                                 form::focus(&mut ui.form, Some(form::CURRENT_KEY));
                                 return;
                             }
-                            source.remove_passkey_confirmed(&id, Password::from_field(&ui.form.current.text));
+                            source.remove_passkey(&id, Some(Password::from_field(&ui.form.current.text)));
                             ui.form.current = form::secure();
                             ui.form.problem = None;
                         } else {
-                            source.remove_passkey(&id);
+                            source.remove_passkey(&id, None);
                         }
                         ui.dialog = None;
                     }),
                 remove_b,
             ),
             (
-                // Enter is Cancel: the safe choice.
-                cancel
-                    .default_button()
-                    .on_press(|s: &mut State| s.account.dialog = None),
+                // Enter is Cancel: the safe choice. Cancel and Esc wipe the password typed into the confirm.
+                cancel.default_button().on_press(close_wiping),
                 cancel_b,
             ),
         ],
         t,
     )
-    .modal(false, |s: &mut State| s.account.dialog = None)
+    .modal(false, close_wiping)
+}
+
+/// The remove confirm closes with nothing done: what was typed into its password field goes with it.
+fn close_wiping(s: &mut State) {
+    s.account.dialog = None;
+    form::arrive(&mut s.account);
 }
 
 /// This PC has no passkey dialog: said once where "Add a passkey" would be.

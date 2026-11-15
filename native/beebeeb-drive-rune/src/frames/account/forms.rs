@@ -12,9 +12,7 @@ use crate::ui::au::{self, Keys, Tone};
 use rune::El;
 
 use super::form::{self, Form, Problem};
-use super::source::{
-    AccountSource, CallKind, CodeRefused, EmailRefused, NameAnswer, NameWhy, Password, Purpose, Refused,
-};
+use super::source::{AccountSource, CallKind, NameAnswer, NameWhy, Password, Purpose, Refused};
 use super::{AccountUi, icons};
 
 /// A 28 pt button of a form's foot, and whether it has a drawn border.
@@ -243,32 +241,12 @@ fn send_code(ui: &mut AccountUi) -> Option<&'static str> {
     // the field with the press (a wiping copy for the one call); the field is empty from here on.
     let typed = zeroize::Zeroizing::new(ui.form.current.text.clone());
     ui.form.current = form::secure();
-    if super::calls::start(ui, CallKind::StartEmail, &address, &typed) != super::calls::Start::NotStarted {
-        return None;
+    if super::calls::start(ui, CallKind::StartEmail, &address, &typed) == super::calls::Start::NotStarted {
+        // No open session: nothing was sent, and nothing else is asked (no step-up stands in).
+        ui.form.problem = Some(Problem::Offline);
+        form::focus(&mut ui.form, Some(form::EMAIL_KEY));
     }
-    let source = ui.source.as_deref_mut()?;
-    let f = &mut ui.form;
-    let confirmation = match source.step_up(Password::from_field(&typed), Purpose::ChangeEmail) {
-        Ok(confirmation) => confirmation,
-        Err(why) => {
-            f.problem = Some(refused(why));
-            form::focus(f, Some(form::CURRENT_KEY));
-            return None;
-        }
-    };
-    match source.start_email_change(confirmation, &address) {
-        Ok(()) => Some("DW-A66"),
-        Err(why) => {
-            f.problem = Some(match why {
-                EmailRefused::InUse => Problem::EmailInUse,
-                EmailRefused::NotAnAddress => Problem::NotAnAddress,
-                EmailRefused::NotConfirmed => Problem::WrongPassword,
-                EmailRefused::Offline => Problem::Offline,
-            });
-            form::focus(f, Some(form::EMAIL_KEY));
-            None
-        }
-    }
+    None
 }
 
 /// The words under a row of code boxes when the code was not taken.
@@ -282,11 +260,8 @@ pub(super) fn code_error(words: &str, t: &Theme) -> El {
 
 /// "Didn't get it? Send again in 42 s" (DW-A66, DW-A81).
 pub(super) fn send_again(source: &dyn AccountSource, email: bool, t: &Theme) -> El {
-    let offered = if email {
-        source.can_send_again()
-    } else {
-        source.can_send_again_deletion()
-    };
+    // The email's code can always be sent again (Beebeeb has the route); the deletion's only where a source says so.
+    let offered = email || source.can_send_again_deletion();
     if !offered {
         // Nothing sends it again: no link that does nothing.
         return rune::el().key("resend-none");
@@ -297,11 +272,13 @@ pub(super) fn send_again(source: &dyn AccountSource, email: bool, t: &Theme) -> 
         link
     } else {
         link.on_press(move |s: &mut State| {
-            // The email's code is sent on the source's worker (the answer settles on the page); a source that
-            // answers at once, and the deletion's code, use `send_again`.
-            if email
-                && super::calls::start(&mut s.account, CallKind::ResendEmail, "", "") != super::calls::Start::NotStarted
-            {
+            // The email's code is sent on the source's worker (the answer settles on the page); with no open session
+            // nothing is sent and the page says so. The deletion's code uses `send_again`.
+            if email {
+                if super::calls::start(&mut s.account, CallKind::ResendEmail, "", "") == super::calls::Start::NotStarted
+                {
+                    s.account.form.problem = Some(Problem::Offline);
+                }
                 return;
             }
             if let Some(source) = s.account.source.as_deref_mut() {
@@ -365,22 +342,12 @@ pub fn email_code(source: &dyn AccountSource, f: &Form, t: &Theme) -> El {
 
 fn confirm_email(ui: &mut AccountUi) -> Option<&'static str> {
     let code = form::code(&ui.form, 8);
-    if ui.form.waiting.is_some()
-        || super::calls::start(ui, CallKind::ConfirmEmail, &code, "") != super::calls::Start::NotStarted
+    if ui.form.waiting.is_none()
+        && super::calls::start(ui, CallKind::ConfirmEmail, &code, "") == super::calls::Start::NotStarted
     {
-        return None;
+        ui.form.problem = Some(Problem::Offline);
     }
-    match ui.source.as_deref_mut()?.confirm_email_change(&code) {
-        Ok(()) => Some("DW-A51"),
-        Err(why) => {
-            ui.form.problem = Some(if why == CodeRefused::Offline {
-                Problem::Offline
-            } else {
-                Problem::WrongCode
-            });
-            None
-        }
-    }
+    None
 }
 
 /// Change password (DW-A67), and the same page after a wrong current password (DW-A68: the

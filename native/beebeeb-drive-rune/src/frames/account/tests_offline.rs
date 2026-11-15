@@ -142,5 +142,10 @@ fn with_no_open_session_every_call_form_says_offline_and_asks_nothing() {
         controls += 1;
     }
     assert_eq!(controls, 8, "every control of a call answered later");
-    assert!(fails.is_empty(), "{} of 8 failed:\n{}", fails.len(), fails.join("\n"));
+    assert!(
+        fails.is_empty(),
+        "{} findings over the 8 controls:\n{}",
+        fails.len(),
+        fails.join("\n")
+    );
 }
