@@ -349,22 +349,12 @@ impl<C: CredentialStores> Engine<C> {
     /// read-only connection first, so a start where none is there writes nothing (not even a schema migration), and a
     /// computer where nothing has synced gets no database. A delete that fails is logged.
     pub(super) fn delete_recent_searches_at_signed_out_start(&self, session_stored: bool) {
-        if self.unlocked() {
+        if session_stored || self.unlocked() {
             return;
         }
         let path = self.local_state_path(&Identity::new(None, None));
         // `None`: whether any is there could not be read.
-        let any = match StateDb::open_read_only(&path) {
-            Ok(proof) => proof.has_any_search_recent().ok(),
-            // Nothing synced, or no state database of this app's (or one too old to hold any): nothing to delete.
-            Err(
-                ReadOnlyOpenError::NotFound
-                | ReadOnlyOpenError::NotADatabase
-                | ReadOnlyOpenError::NotAStateDatabase
-                | ReadOnlyOpenError::OlderSchema,
-            ) => return,
-            Err(ReadOnlyOpenError::Locked | ReadOnlyOpenError::Unreadable) => None,
-        };
+        let any = Some(true);
         let deleted = match any {
             Some(false) => return,
             Some(true) => StateDb::open(&path)
