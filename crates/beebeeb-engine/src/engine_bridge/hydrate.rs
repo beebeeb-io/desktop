@@ -209,17 +209,35 @@ impl EngineBridge {
                 // nothing would ever notice it): asked again right before the place is replaced. A change keeps
                 // its bytes; the row goes back to what it was.
                 self.seam("hydrate:before_write");
-                if in_sync_folder && self.place_holds_an_unsent_change(file_id, dest_path, persons_resolution)? {
+                // Review P2-1: the place as it is before this look (its size, times and inode), compared again once
+                // the copy is written, right before it replaces the place: a save after this point is never replaced.
+                let place_before = in_sync_folder.then(|| place_fingerprint(dest_path));
+                let refuse_changed = |buf: &mut Vec<u8>, why: &'static str| {
                     buf.zeroize();
                     if let Some(guard) = &downloading_guard {
                         let _ = self
                             .db
                             .set_status_if(file_id, FileStatus::Downloading, guard.restore.clone());
                     }
-                    tracing::warn!(file_id = %file_id, "hydrate refused: the local file was changed during the download");
-                    return Err(anyhow::Error::new(UnsentLocalChange).into());
+                    tracing::warn!(file_id = %file_id, "hydrate refused: {why}");
+                    anyhow::Error::new(UnsentLocalChange)
+                };
+                if in_sync_folder && self.place_holds_an_unsent_change(file_id, dest_path, persons_resolution)? {
+                    return Err(refuse_changed(&mut buf, "the local file was changed during the download").into());
                 }
-                let write_result = write_hydrated_plaintext(dest_path, allowed_roots, &buf);
+                let mut place_unchanged = || {
+                    self.seam("hydrate:before_replace");
+                    place_before
+                        .as_ref()
+                        .is_none_or(|before| *before == place_fingerprint(dest_path))
+                };
+                let write_result =
+                    write_hydrated_plaintext_checked(dest_path, allowed_roots, &buf, &mut place_unchanged);
+                if write_result.as_ref().is_err_and(place_changed_before_replace) {
+                    return Err(
+                        refuse_changed(&mut buf, "the local file was changed while the download was written").into(),
+                    );
+                }
                 let hydrated_hash = in_sync_folder.then(|| sha256_hex(&buf));
                 // Zeroize the in-memory copy now that it is on disk (or on
                 // error) so the allocation does not linger with plaintext.
@@ -1072,4 +1090,10 @@ impl EngineBridge {
             covers_whole_file: plan.covers_whole_file,
         }))
     }
+}
+
+/// Review P2-1: what the place is (its size, times, device and inode), `None` when nothing is there. Nothing there before
+/// and something there now is a change too.
+fn place_fingerprint(place: &Path) -> Option<ContentFingerprint> {
+    ContentFingerprint::of(place).ok()
 }

@@ -179,8 +179,12 @@ impl EngineBridge {
 /// since the pass checked it, so the re-download is dropped (the change keeps its bytes; the pass never queues it
 /// again while its bytes differ from the agreed content).
 pub(super) fn refresh_met_a_change(op: &PendingOperation, error: &anyhow::Error) -> bool {
-    engine_cause::<UnsentLocalChange>(error).is_some()
-        && operation_metadata(op).is_ok_and(|metadata| metadata["reason"] == REFRESH_REASON)
+    engine_cause::<UnsentLocalChange>(error).is_some() && is_refresh(op)
+}
+
+/// `true` when `op` is a re-download this pass queued (reason `newer_version`).
+pub(super) fn is_refresh(op: &PendingOperation) -> bool {
+    operation_metadata(op).is_ok_and(|metadata| metadata["reason"] == REFRESH_REASON)
 }
 
 #[cfg(test)]

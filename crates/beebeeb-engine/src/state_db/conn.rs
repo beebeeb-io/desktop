@@ -54,6 +54,17 @@ pub(super) fn upsert_file_conn<C: std::ops::Deref<Target = Connection>>(conn: &C
                 || *remote_updated_at != e.remote_updated_at
         }
     };
+    // Task 2523 (review P1-1): a queued hydrate writes where the file is now, never at the place it left (a pull's
+    // remote rename or move, a parent folder's, a shared row's), as `enqueue_local_rename` does for a local rename.
+    if let Some((old_path, ..)) = &old
+        && old_path != &e.path
+    {
+        conn.execute(
+            "UPDATE operation_queue SET target_path = ?2
+             WHERE file_id = ?1 AND kind = 'hydrate_file' AND target_path IS NOT NULL AND target_path != ?2",
+            params![e.file_id, e.path],
+        )?;
+    }
     if changed {
         // A path change is a rename OR a move; Reparented carries the old
         // parent so the materialized-set filter can test old-OR-new
