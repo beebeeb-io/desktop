@@ -16,7 +16,9 @@ use super::chrome::style;
 use super::source::{Answered, Left, Loaded, PhotoId, Viewing};
 use super::{Intent, Original, Toast, Ui, Viewer};
 use crate::State;
+use crate::frames::files::dialogs::Purpose;
 use crate::shell::app::GateState;
+use crate::source::DriveItem;
 use crate::theme::tokens::Theme;
 use crate::ui::kit;
 
@@ -33,6 +35,15 @@ pub enum What {
     Keep(bool),
 }
 
+/// What Files' folder dialog is opened for, from Photos (`poll` opens it; the dialog hands its answer back through
+/// [`Ui::folder_chosen`] and [`Ui::moved`]).
+pub enum Pick {
+    /// Add a folder… in Photo sources (DW-0604).
+    Folder,
+    /// Move… on these photos' files (DW-0409).
+    Move(Vec<DriveItem>),
+}
+
 /// What the window keeps for a source that answers later. All of it is the session's.
 #[derive(Default)]
 pub struct Later {
@@ -41,6 +52,8 @@ pub struct Later {
     was_open: bool,
     /// The open photo a move to Trash was asked for, as it was at the press, and the one that comes in after it.
     open_trash: Option<(Viewing, Option<PhotoId>)>,
+    /// A press on Add a folder… or Move… waits here for the poll, which opens Files' folder dialog over the window.
+    pick: Option<Pick>,
     /// The shell's session gate was closed at the last poll (`shell::session_gate`): a source that answers later
     /// is not asked for a change. The second line; the source's own look at the session at the press is the first.
     closed: bool,
@@ -399,6 +412,14 @@ impl Ui {
                 }
                 // Kept in this window for as long as it is open.
                 Intent::RememberAcross(_) | Intent::StopOriginal(_) => {}
+                // The folder dialog of Files opens over the window at the next poll; its answer comes back as
+                // `folder_chosen` / `moved`. What is not there to ask (no session, a photo that left) is said.
+                Intent::AddFolder if self.later.closed => self.toast = Some(Toast::Words(WORDS_FOLDER)),
+                Intent::AddFolder => self.later.pick = Some(Pick::Folder),
+                Intent::Move(ids) => match self.source.file_items(&ids) {
+                    Some(items) if !items.is_empty() && !self.later.closed => self.later.pick = Some(Pick::Move(items)),
+                    _ => self.toast = Some(Toast::Words(WORDS_MOVE)),
+                },
                 Intent::DownloadOriginal(_) => {
                     // No download was started: the tab does not say one is running.
                     if let Some(viewer) = &mut self.viewer {
@@ -412,8 +433,46 @@ impl Ui {
         any
     }
 
+    /// The folder of Files that the dialog chose goes to Photo sources. What the Sources dialog's switches say now is
+    /// kept first (the list changes when the engine answers, and a switch is by its place in it).
+    pub fn folder_chosen(&mut self, folder_id: &str) {
+        self.keep_the_switches();
+        if !self.source.add_folder(folder_id) {
+            self.toast = Some(Toast::Words(WORDS_FOLDER));
+        }
+        self.relayout();
+    }
+
+    /// Remove, on a folder row of Photo sources (DW-0604): out of the sources, nothing moved or deleted.
+    pub fn remove_folder(&mut self, index: usize) {
+        self.keep_the_switches();
+        self.source.remove_folder(super::source::SourceRef::Folder(index));
+        self.relayout();
+    }
+
+    /// The photos moved: the selection is over and the library is read again (a moved photo may have left a folder
+    /// that Photos shows).
+    pub fn moved(&mut self) {
+        self.end_selecting();
+        self.source.refresh();
+        self.relayout();
+    }
+
+    /// The move was refused (not the name-taken case, which the dialog says itself).
+    pub fn move_left(&mut self) {
+        self.toast = Some(Toast::Words(WORDS_MOVE));
+    }
+
+    /// Done on the Sources dialog, without leaving it to the caller: only when that dialog is the open one.
+    fn keep_the_switches(&mut self) {
+        if matches!(self.dialog, Some(super::Dialog::Sources(_))) {
+            self.confirm_dialog();
+        }
+    }
+
     /// Nothing that names a photo of the account that was here stays.
     fn end_session(&mut self) {
+        self.later.pick = None;
         self.source.forget();
         self.selecting = false;
         self.selected.clear();
@@ -429,6 +488,10 @@ impl Ui {
         self.relayout();
     }
 }
+
+/// What is said when a folder could not be added, and when photos could not be moved.
+const WORDS_FOLDER: &str = "Couldn\u{2019}t add that folder \u{00B7} not available right now";
+const WORDS_MOVE: &str = "Couldn\u{2019}t move \u{00B7} not available right now";
 
 impl Toast {
     /// The words of a message that says something was left.
@@ -585,6 +648,14 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
     // On screen with nothing read and nothing on its way (the session moved on under an unchanged gate): read.
     if open && later && !pumped.busy && ui.source.loaded() == Loaded::Loading {
         ui.source.opened();
+        changed = true;
+    }
+    // Add a folder… / Move… pressed: Files' folder dialog opens over the window.
+    if let Some(pick) = s.photos.later.pick.take() {
+        match pick {
+            Pick::Folder => s.open_move_for(Vec::new(), Purpose::PhotosFolder),
+            Pick::Move(items) => s.open_move_for(items, Purpose::PhotosMove),
+        }
         changed = true;
     }
     changed

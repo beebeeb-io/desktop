@@ -11,10 +11,14 @@
 //! - Move to Trash and Undo: the Files window's calls ([`TrashCalls`]: `Engine::trash_items_for` /
 //!   `restore_items_for`), bound to the session and the account of the press; Undo sends the stamp of the move.
 //! - Keep on this PC: [`Engine::set_kept_for`], for the session of the press.
-//! - not bound (the PR lists why): `folders` and a folder's `set_shown` (the engine has no "folder Photos shows"),
-//!   `backup_status` (this PC does not know what another device's backup is doing). The window's controls whose
-//!   work no source method carries (Original, playing a video, Share, Move, Rename, Search, Version history) say
-//!   "not available in this version yet" (`frames/photos/session.rs`).
+//! - Photo sources' folders and the devices' backup line: `folders`, a folder's `set_shown`, `add_folder` and
+//!   `remove_folder`, and `backup_status` (`photos_folders.rs`; the engine keeps the folders from Files the account
+//!   added). The window's folder dialog (Files' Move-to dialog, in its choose-only mode) hands the chosen folder to
+//!   `add_folder`.
+//! - not bound (the PR lists why): `file_items` (Move… needs the files behind the photos: the trait's default says
+//!   "none", and the window says so). The window's controls whose work no source method carries (Original,
+//!   playing a video, Share, Rename, Search, Version history) say "not available in this version yet"
+//!   (`frames/photos/session.rs`).
 //!
 //! Nothing is drawn before the engine answered: a change is only asked in the call; what it did arrives through
 //! [`PhotosSource::pump`], per item. A photo Beebeeb moved to Trash leaves the library here at that answer (the
@@ -174,7 +178,7 @@ pub struct EnginePhotos<C: CredentialStores> {
     /// Tests only: what the next Keep answers in the engine's place (this PC's sync folder is not a test's to set).
     #[cfg(test)]
     keep_says: Option<Result<(), ()>>,
-    /// Slice B1 (`photos_folders.rs`): what it keeps between a press and its answer. Empty until it binds.
+    /// Slice B1 (`photos_folders.rs`): what it keeps between a press and its answer: the held folder list and the calls on their way.
     photos_folders: photos_folders::PhotoFolderCalls,
 }
 
