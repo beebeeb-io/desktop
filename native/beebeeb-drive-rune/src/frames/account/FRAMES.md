@@ -69,6 +69,12 @@ is: a record of the approved render that fails when the page changes afterwards.
 a design. Proven able to fail: with the score card's padding changed, `DW-S01` reads `geometry: 155 checked, 92
 failing`. When the board draws the page, capture these goldens from the board instead.
 
+Decision (lead, 2026-11-15 02:05, PR #428): the goldens of `DW-S01u` (both themes) are recaptured from the app with the
+honest wording on the "Approve a sign-in" row, "Not available in this version yet. Approve on the web." (the triage's
+honest state, `TRIAGE-fixture-only-1114.md` section 4), in place of the old sub "Let another device sign in" with the
+value "Not available yet". An intended change, not a regression: the page has no board frame, so its golden is the
+app's own record of the approved render (above). `compare.sh DW-S01u` reads 0 failing in both themes after it.
+
 Decision (lane, 2026-11-14): the steps that are DONE are not listed on the page (the checkup listed all seven):
 the ruling's page shows the count, what is left, and the three sign-in rows. Recorded here as a removed
 behaviour; a "done" list in the score card is a follow-up if the owner wants it.
