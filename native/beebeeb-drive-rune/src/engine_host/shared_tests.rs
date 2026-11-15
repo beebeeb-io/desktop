@@ -477,10 +477,7 @@ fn what_is_not_bound_sends_nothing_and_says_not_available() {
     let fake = fake("unbound");
     let mut source = EngineSharedSource::new(signed_in(&fake));
     opened(&mut source);
-    let unbound: [&dyn Fn(&mut EngineSharedSource<MemoryCredentials>) -> bool; 2] =
-        [&|s| s.keep_offline(OTHERS), &|s| {
-            s.invite(TRIP, "new@example.eu", Access::View)
-        }];
+    let unbound: [&dyn Fn(&mut EngineSharedSource<MemoryCredentials>) -> bool; 1] = [&|s| s.keep_offline(OTHERS)];
     for act in unbound {
         assert!(!act(&mut source));
         assert_eq!(settle(&mut source), [Notice::NotAvailable]);

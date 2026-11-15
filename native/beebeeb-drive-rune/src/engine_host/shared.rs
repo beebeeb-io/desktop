@@ -470,9 +470,6 @@ impl<C: CredentialStores> SharedSource for EngineSharedSource<C> {
         };
         self.change(session, id, ShareChange::HideRequest { request_id: id.into() })
     }
-    fn invite(&mut self, _share: &str, _email: &str, _access: Access) -> bool {
-        self.refuse(Notice::NotAvailable)
-    }
 
     /// Sent once per press, on a worker, under the session and account of the press. `share` is an item's id (one not
     /// shared with anyone yet too: the engine decides whether it is the account's own). `false`: nothing typed, an
