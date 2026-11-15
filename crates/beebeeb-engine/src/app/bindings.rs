@@ -11,5 +11,6 @@ pub mod device_request;
 pub mod photos_folders;
 pub mod recovery;
 pub mod search_recent;
+pub mod share_safety;
 pub mod shared_offline;
 pub mod status_on_files;
