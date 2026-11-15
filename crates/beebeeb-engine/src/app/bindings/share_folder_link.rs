@@ -192,13 +192,13 @@ impl<C: CredentialStores> Engine<C> {
                 FolderStep::Done(_) => return Err(FolderLinkError::Refused),
             };
             // L7d: remembered before any key from the record is used. A write that fails: this request is not sent.
-            let resp = self.link_send(&run, request)?;
             if let Some(folder) = mark_custody_seen {
                 state
                     .with(|db| remember_custody(db, &folder, revision))
                     .map_err(state_refusal)?
                     .map_err(|_| FolderLinkError::Refused)?;
             }
+            let resp = self.link_send(&run, request)?;
             step = flow.on_response(resp).map_err(flow_refusal)?;
         };
         self.hand_over(&run, link)
@@ -222,9 +222,6 @@ impl<C: CredentialStores> Engine<C> {
             .iter()
             .map(|id| canonical(id).ok_or(FolderLinkError::NotFound))
             .collect::<Result<Vec<_>, _>>()?;
-        if ids.iter().enumerate().any(|(n, id)| ids[..n].contains(id)) {
-            return Err(FolderLinkError::Invalid);
-        }
         let app_url = web_origin(&self.config.api_base).ok_or(FolderLinkError::Refused)?;
         if choices.is_some_and(blank_password) {
             return Err(FolderLinkError::Invalid);
