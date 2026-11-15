@@ -33,6 +33,8 @@ use zeroize::Zeroizing;
 use crate::engine_host::hello::{HelloCancel, HelloPrompter, HelloResult, NoHello, WindowHello};
 use crate::frames::account::approve::Reported;
 
+use super::*;
+
 /// The line Windows shows in its prompt for an approval.
 pub const APPROVE_REASON: &str = "Approve a sign-in on another device";
 /// How many requests found by code are held at most, for one session and account: the newest.

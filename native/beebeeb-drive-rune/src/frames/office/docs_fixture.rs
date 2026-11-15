@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 
 use rune::Pixels;
 
-use super::docs::{DocBody, DocView};
+use super::{DocBody, DocView};
 use crate::frames::viewers::office::board;
 use crate::frames::viewers::source::{Body, Details, OpenFile};
 
