@@ -88,8 +88,7 @@ fn write_new(
 ) -> Result<(), DriveError> {
     let mut file = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .open(path)
         .map_err(DriveError::io)?;
     if let Err(error) = write(&mut file, bytes) {
