@@ -131,9 +131,6 @@ pub fn is_lifecycle_log_path(identity: &crate::identity::EngineIdentity, path: &
 }
 
 pub fn is_disposable_cache_path(identity: &crate::identity::EngineIdentity, path: &std::path::Path) -> bool {
-    if is_lifecycle_log_path(identity, path) {
-        return false;
-    }
     let canonical_path = match path.canonicalize() {
         Ok(path) => path,
         Err(_) => {
@@ -150,6 +147,9 @@ pub fn is_disposable_cache_path(identity: &crate::identity::EngineIdentity, path
         }
     };
     // A symlink into the log directory is the same directory.
+    if is_lifecycle_log_path(identity, &canonical_path) {
+        return false;
+    }
     disposable_cache_roots(identity)
         .into_iter()
         .filter_map(|root| root.canonicalize().ok())
