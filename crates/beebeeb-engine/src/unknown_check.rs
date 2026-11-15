@@ -1018,9 +1018,10 @@ mod tests {
         assert_eq!(production.matches("retry_kept_originals(").count(), 1);
     }
 
-    /// Desktop 0.8.15 (deliverables 2, 3): the UI reads the start-up guard's progress as
-    /// `startup_guard` (`{running, done, total}`) on every `engine-status` event and on the
-    /// `sync_status` poll, and the changes held back as `changes_on_hold` on `sync_status`.
+    /// Desktop 0.8.15 (deliverable 2): the UI reads the start-up guard's progress as
+    /// `startup_guard` (`{running, done, total}`) on every engine status event. (The 0.8.x `sync_status` poll that
+    /// also carried it, and `changes_on_hold`, went with the old shell; no native reader of the guard's progress
+    /// exists yet.)
     #[test]
     fn desktop_0815_the_ui_reads_the_guard_s_progress_and_the_changes_on_hold() {
         let production = runner_production();
@@ -1034,26 +1035,6 @@ mod tests {
             production.matches("EngineEvent::Status(").count(),
             1,
             "every engine-status event goes through emit_payload"
-        );
-        let lib = crate::root_source::lib_rs().replace("\r\n", "\n");
-        let status = &lib[lib.find("async fn sync_status(").unwrap()..];
-        let status = &status[..status.find("\n}\n").unwrap()];
-        let literal = status.rfind("Ok(serde_json::json!({").unwrap();
-        assert!(
-            status[literal..].contains("\"startup_guard\": crate::unknown_check::STARTUP_GUARD.progress(),"),
-            "{status}"
-        );
-        assert!(status[literal..].contains("\"changes_on_hold\": counts.3,"), "{status}");
-        // Task 2243: the counts come from `sync_status_counts`, which counts through the indexes.
-        assert!(
-            status[..literal].contains(".map(|db| sync_status_counts(&db))"),
-            "{status}"
-        );
-        let counts = &lib[lib.find("fn sync_status_counts(").unwrap()..];
-        let counts = &counts[..counts.find("\n}\n").unwrap()];
-        assert!(
-            counts.contains("db.count_operations_on_hold().unwrap_or(0)"),
-            "{counts}"
         );
         // No engine began a pass in this process: the shape the UI reads, at rest.
         let value = serde_json::to_value(crate::runner::with_startup_guard(crate::engine_status::plain_status(

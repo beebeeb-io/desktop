@@ -57,7 +57,7 @@ ${StrLoc}
 !insertmacro RequireDefine VERSIONWITHBUILD       ; 0.9.0.0
 !insertmacro RequireDefine MAINBINARYNAME         ; "beebeeb-desktop" (release) or "beebeeb-desktop-test" (test)
 !insertmacro RequireDefine MAINBINARYSRCPATH      ; the built native exe, already named ${MAINBINARYNAME}.exe
-!insertmacro RequireDefine INSTALLERICON          ; src-tauri/icons/icon.ico
+!insertmacro RequireDefine INSTALLERICON          ; packaging/windows/icon.ico
 !insertmacro RequireDefine OUTFILE
 !insertmacro RequireDefine ADDITIONALPLUGINSPATH  ; the folder that holds nsis_tauri_utils.dll
 !insertmacro RequireDefine ESTIMATEDSIZE          ; KiB

@@ -141,20 +141,6 @@ fn no_macos_path_queues_content_through_the_entry_points_that_mint_nothing() {
     ];
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let read = |path: &Path| std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
-    // The shell's top-level modules a Mac compiles: their `mod` lines survive in the SHELL's `lib.rs` (this test
-    // moved to the engine crate; read with the engine's `lib.rs`, 40 shell modules were no longer scanned).
-    let lib = macos_compiled(&read(&crate::source_census::shell_src().join("lib.rs")));
-    assert!(
-        lib.lines().any(|line| line.trim() == "mod account_commands;"),
-        "the shell's lib.rs is the one read"
-    );
-    let compiled = |module: &str| {
-        lib.lines().map(str::trim).any(|line| {
-            line == format!("mod {module};")
-                || line == format!("pub mod {module};")
-                || line == format!("mod {module} {{")
-        })
-    };
     let is_call = |line: &str, name: &str| {
         let needle = format!("{name}(");
         !line.contains(&format!("fn {needle}"))
@@ -189,13 +175,13 @@ fn no_macos_path_queues_content_through_the_entry_points_that_mint_nothing() {
         "the engine's lib.rs gates windows_cf: {not_on_macos:?}"
     );
     let mut sources = Vec::new();
-    // Both trees (`source_census`): the shell's and the engine crate's. A Mac compiles the whole engine crate
-    // (its OS-gated items are dropped by `macos_compiled`), so no `mod` line in `lib.rs` decides for its files.
+    // The engine tree (`source_census`). A Mac compiles the whole engine crate except the modules the engine's
+    // `lib.rs` gates to Windows or Linux (its OS-gated items are dropped by `macos_compiled`). The old shell's
+    // macOS modules are not read here: they are the macOS phase's (retired from this census with `src-tauri`).
     for (rel, path) in crate::source_census::rust_files() {
         if crate::source_census::is_test_file(&rel) {
             continue; // test-only files are not production
         }
-        let module = rel.split('/').next().unwrap().trim_end_matches(".rs").to_string();
         // An engine module a Mac does not compile is gated on its `pub mod` line in the engine's `lib.rs`.
         let engine_module = rel
             .strip_prefix(crate::source_census::ENGINE_PREFIX)
@@ -203,7 +189,7 @@ fn no_macos_path_queues_content_through_the_entry_points_that_mint_nothing() {
         let engine_compiled = engine_module
             .as_deref()
             .is_some_and(|name| !not_on_macos.contains(name));
-        if engine_compiled || matches!(module.as_str(), "lib" | "main") || compiled(&module) {
+        if engine_compiled {
             sources.push((rel, macos_compiled(&read(&path))));
         }
     }
@@ -223,7 +209,7 @@ fn no_macos_path_queues_content_through_the_entry_points_that_mint_nothing() {
             }
             let start = (0..i).rev().find(|&j| starts_fn(lines[j])).unwrap_or(0);
             let Some(k) = allowed.iter().position(|(file, call, function, guards, _)| {
-                // Every allowed call is in an engine file: a shell file of the same name is not excused.
+                // Every allowed call is in an engine file.
                 rel.strip_prefix(crate::source_census::ENGINE_PREFIX) == Some(*file)
                     && call == line
                     && lines[start].starts_with(function)
