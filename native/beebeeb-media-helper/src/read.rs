@@ -197,3 +197,53 @@ impl ByteReader for PipeReader {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the helper sent to the app.
+    #[derive(Clone, Default)]
+    struct Sent(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Sent {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Row 3 (MCP2): a read that reaches even one byte past the end is refused as the end of the file, and nothing
+    /// is asked of the app for it; the last byte itself is asked for.
+    #[test]
+    fn a_read_one_byte_past_the_end_is_refused_without_asking() {
+        const LEN: u64 = 1_000;
+        let sent = Sent::default();
+        // The app never answers: a read that gets as far as asking fails on the closed pipe instead.
+        let wire: SharedWire = Arc::new(Mutex::new(Wire::new(io::empty(), sent.clone())));
+        let reader = PipeReader::new(wire, LEN, Arc::new(ReadFlags::default()));
+        for (offset, len) in [(LEN, 1usize), (LEN - 1, 2), (LEN - 3, 4), (0, LEN as usize + 1)] {
+            let mut buf = vec![0u8; len];
+            let err = reader.read_at(offset, &mut buf).expect_err("past the end is refused");
+            assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof, "{len} bytes at {offset}");
+        }
+        assert!(
+            sent.0.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+            "nothing was asked for"
+        );
+        let mut last = [0u8; 1];
+        let err = reader.read_at(LEN - 1, &mut last).expect_err("the pipe is closed");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::BrokenPipe,
+            "the last byte is in the file: it was asked for"
+        );
+        assert!(!sent.0.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+    }
+}
