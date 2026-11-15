@@ -92,6 +92,8 @@ impl BoardAccount {
     #[cfg(test)]
     pub fn holding_calls(mut self, held: HeldCalls) -> Self {
         self.held = Some(held);
+        // No countdown over "Send again": it is pressable, so its call can be started.
+        self.wait = 0;
         self
     }
     /// Windows Hello's prompt stays up: no answer comes (the scene of DW-A14).
