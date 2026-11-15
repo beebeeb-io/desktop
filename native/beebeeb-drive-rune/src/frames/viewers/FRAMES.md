@@ -187,3 +187,17 @@ yet (task 2445, B23): its 10 keys (`view-toggle`, `view-list`, `view-grid` and t
   its version, and a save from here asks the two-versions question. No board draws this toast.
 - **The cost:** until that change is sent, the edit cannot be saved from this opening. Offline, or with the change
   held back, that can last a long time. The edit stays open but is kept nowhere else.
+- **The way out: Save a copy (wave 2, task 2530 item 1).** The refusal is drawn as DW-1519's banner over the editor,
+  its words wrapped, with one button, **Save a copy**: the two-versions question's Keep both, by its press path
+  (`Ui::resolve(Keep::Both)` → `Engine::save_text_copy_for`). The edit becomes a new file next to the original, named
+  as every conflict copy is; the original stays at its version with its queued change. After it, the window shows
+  the copy, as Keep both does. A refusal of the copy is Keep both's "Not saved"; the edit stays. The banner goes with
+  the edit and with the next press. Not the toolbar's "Save a copy…" of a file not shown here (`Intent::SaveCopy`,
+  a decrypted copy to a place on this PC), which stays unbuilt.
+- **Held back is said as held back.** When that earlier change is parked (its write used up its tries) or a held
+  edit of task 2524, the engine answers `EditRefused::EarlierChangeHeld`, and the words promise no send.
+- **Words: planner wave 2, not on the board** (no board draws this state):
+  - not sent yet: **"Not saved: an earlier change to this file on this PC has not been sent yet. Your edit stays
+    open: Save a copy keeps it as a new file."**
+  - held back: **"Not saved: an earlier change to this file on this PC is held back and is not sent until it is
+    settled in Sync history. Your edit stays open: Save a copy keeps it as a new file."**

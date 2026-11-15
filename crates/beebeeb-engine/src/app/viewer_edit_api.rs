@@ -8,7 +8,8 @@
 //!   goes through the one write path every local edit takes (`EngineBridge::queue_file_provider_modify_from`: the staged
 //!   copy, the queued upload, the sync's own conflict handling). A file whose version here is already past the
 //!   base is [`SaveEnd::Conflict`] and nothing is written. A save that would be queued after an unsent write of the
-//!   file that is not its own opening's is [`EditRefused::EarlierChangeNotSent`], and nothing is written.
+//!   file that is not its own opening's is [`EditRefused::EarlierChangeNotSent`] ([`EditRefused::EarlierChangeHeld`]
+//!   when that write is held back), and nothing is written.
 //! - [`Engine::save_text_copy_for`]: Keep both: the text as a new file next to the first, under the
 //!   Keep-both name every conflict copy takes.
 //!
@@ -246,6 +247,10 @@ pub enum EditRefused {
     /// Provider save) has not been sent yet. Queued after it, this save would replace it unasked once both land
     /// (review of desktop#432, delta 3). Nothing is stored; the edit stays with the viewer.
     EarlierChangeNotSent,
+    /// As [`Self::EarlierChangeNotSent`], but the earlier change to this file on this PC is held back (parked: its
+    /// write used up its tries; or a held edit of task 2524): it is not sent until it is settled in Sync history.
+    /// Nothing is stored; the edit stays with the viewer.
+    EarlierChangeHeld,
 }
 
 /// What a save came to.
@@ -259,6 +264,9 @@ pub enum SaveEnd {
     /// The file is already past the version the edit began from; nothing was written.
     Conflict { theirs: i64 },
 }
+
+#[path = "viewer_edit_held.rs"]
+mod viewer_edit_held;
 
 /// The file Keep both made.
 #[derive(Clone, PartialEq, Eq)]
@@ -396,19 +404,24 @@ impl<C: CredentialStores> Engine<C> {
         let (outcome, write_token) = state
             .with_shared(|db| {
                 let api = Arc::new(ApiClient::new(self.config.api_base.clone(), token, *key));
-                EngineBridge::new(self.identity, db, api)
+                let queued = EngineBridge::new(self.identity, db.clone(), api)
                     .with_chain_after(chain)
                     .queue_file_provider_modify_from(target, Some(&held))
-                    .map(|write| (write.outcome, write.token))
+                    .map(|write| (write.outcome, write.token));
+                // Refused behind an earlier write: ONE read, after the refused accept, picks which refusal it is (held
+                // back, or not sent yet). For the words alone: nothing was stored either way, so a change between the
+                // accept and this read can change only the words.
+                queued.map_err(|error| {
+                    if error.downcast_ref::<BehindAnotherWrite>().is_none() {
+                        EditRefused::Failed
+                    } else if viewer_edit_held::earlier_change_is_held(&db, file_id) {
+                        EditRefused::EarlierChangeHeld
+                    } else {
+                        EditRefused::EarlierChangeNotSent
+                    }
+                })
             })
-            .map_err(|_| EditRefused::NotSignedIn)?
-            .map_err(|error| {
-                if error.downcast_ref::<BehindAnotherWrite>().is_some() {
-                    EditRefused::EarlierChangeNotSent
-                } else {
-                    EditRefused::Failed
-                }
-            })?;
+            .map_err(|_| EditRefused::NotSignedIn)??;
         let FinderWriteOutcome::Queued { op_id, .. } = outcome else {
             return Err(EditRefused::Failed);
         };

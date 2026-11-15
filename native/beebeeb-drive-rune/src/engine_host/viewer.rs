@@ -138,6 +138,11 @@ pub trait ViewerEngine: Send + Sync + 'static {
     fn open_elsewhere(&self, file_id: &str) -> Elsewhere;
     /// Wake the window's loop: an answer or progress is waiting.
     fn wake(&self);
+    /// Beebeeb is open: signed in and not locked ([`Engine::lock_state`] is `Open`). Never waits. A screen lock keeps
+    /// the session in memory, so [`ViewerEngine::has_session`] alone does not say it.
+    fn screen_open(&self) -> bool {
+        self.has_session()
+    }
     /// [`Engine::edit_facts_for`], for the engine's opening `opening` ([`ViewerEngine::begin_opening`]). `None`: not
     /// read (the switch and the editor are not offered).
     fn edit_facts(&self, _session: SessionGeneration, _file_id: &str, _opening: u64) -> Option<EditFacts> {
@@ -244,6 +249,10 @@ impl<C: CredentialStores + 'static> ViewerEngine for LiveViewerEngine<C> {
             Ok(Some(path)) if super::open_path(&path).is_ok() => Elsewhere::Opened,
             _ => Elsewhere::Refused,
         }
+    }
+
+    fn screen_open(&self) -> bool {
+        super::away::screen_open(&self.engine)
     }
 
     fn wake(&self) {
@@ -704,21 +713,6 @@ fn body_of(error: OpenFileError) -> Option<Body> {
         OpenFileError::NothingSynced => Body::Stopped(Stopped::NothingSynced),
         OpenFileError::Failed => Body::Failed,
     })
-}
-
-impl Opening {
-    /// Stop everything of this opening: the download is cancelled, the picture released, an answer on its way
-    /// dropped (its text overwritten).
-    fn end(&mut self) {
-        self.cancel.store(true, Ordering::SeqCst);
-        self.picture = None;
-        // The worker that holds the document ends when nobody asks any more: the document and its bytes go.
-        self.pages = None;
-        while self.inbox.try_recv().is_ok() {}
-        self.fetching = false;
-        self.holds = false;
-        self.ended = true;
-    }
 }
 
 impl<E: ViewerEngine> EngineViewerSource<E> {

@@ -19,11 +19,16 @@ use crate::frames::viewers::source::{Conflict, Newer};
 pub(super) const NEWER_EVERY: Duration = Duration::from_millis(1500);
 
 /// What a save says when an earlier change to the file on this PC (another opening's save, or one made in another app)
-/// has not been sent yet: nothing was stored, and the edit stays open (delta 3 of desktop#432). True offline and for a
-/// change held back alike; once that change lands, the banner offers it and a save from here asks the two-versions
-/// question.
-pub(super) const EARLIER_NOT_SENT: &str =
-    "Not saved: an earlier change to this file on this PC has not been sent yet. Your edit stays open.";
+/// has not been sent yet: nothing was stored, and the edit stays open (delta 3 of desktop#432); Save a copy keeps it
+/// as a new file next to this one (task 2530, item 1). Once that change lands, the banner offers it and a save from
+/// here asks the two-versions question.
+pub(super) const EARLIER_NOT_SENT: &str = "Not saved: an earlier change to this file on this PC has not been sent yet. \
+     Your edit stays open: Save a copy keeps it as a new file.";
+
+/// As [`EARLIER_NOT_SENT`], when that earlier change is held back (parked, or a held edit): it is not sent until the
+/// person settles it, so the words promise no send (task 2530, item 1).
+pub(super) const EARLIER_HELD: &str = "Not saved: an earlier change to this file on this PC is held back and is not \
+     sent until it is settled in Sync history. Your edit stays open: Save a copy keeps it as a new file.";
 
 /// What the window says of a save that was on its way when the screen locked and that the engine could not confirm
 /// (the lock landed while it ran: it may have been stored just before). Never "not saved": that is not known. Saving
@@ -120,6 +125,21 @@ fn this_pc() -> String {
         .iter()
         .find_map(|name| std::env::var(name).ok().filter(|value| !value.trim().is_empty()))
         .unwrap_or_else(|| "This PC".to_string())
+}
+
+impl Opening {
+    /// Stop everything of this opening: the download is cancelled, the picture released, an answer on its way
+    /// dropped (its text overwritten).
+    pub(super) fn end(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        self.picture = None;
+        // The worker that holds the document ends when nobody asks any more: the document and its bytes go.
+        self.pages = None;
+        while self.inbox.try_recv().is_ok() {}
+        self.fetching = false;
+        self.holds = false;
+        self.ended = true;
+    }
 }
 
 impl<E: ViewerEngine> EngineViewerSource<E> {
@@ -225,27 +245,39 @@ impl<E: ViewerEngine> EngineViewerSource<E> {
     /// session, as an open reads them; its content is not read again (the window holds the edit, and the reader
     /// under it stays the session-changed state). The save goes from the version the edit began from (the window's
     /// `base`): a file that changed meanwhile is the two-versions question, never overwritten. Nothing while a change
-    /// is on its way; never for another account or after a sign-out.
+    /// is on its way or while Beebeeb is locked; never for another account or after a sign-out.
     fn resume(&mut self, file_id: &str) {
         if self.changes.busy {
             return;
         }
         let engine = self.engine.clone();
-        let Some(opening) = self.open.as_mut().filter(|opening| {
+        // Only while Beebeeb is open (review of #452, P2-B): a press that reaches the view while it is locked (the lock
+        // landed, the screen not redrawn yet) uses nothing up, and the next press after the unlock opens the file again.
+        let resumable = self.open.as_ref().is_some_and(|opening| {
             opening.file_id == file_id
                 && opening.ended
                 && opening.resumable
                 && engine.has_session()
+                && engine.screen_open()
                 && engine.account() == opening.account
-        }) else {
+        });
+        if !resumable {
             return;
-        };
+        }
         let session = engine.session_turn();
         let epoch = engine.begin_opening(session, file_id);
+        // Taken up only once its facts were read: the earlier opening stays ended and resumable until then, so a read
+        // that fails is tried again at the next press, never left as a Save that fails with no words (P2-B).
+        let Some(edit) = engine.edit_facts(session, file_id, epoch) else {
+            return;
+        };
+        let Some(opening) = self.open.as_mut() else {
+            return;
+        };
         self.changes.openings += 1;
         opening.session = session;
         opening.epoch = epoch;
-        opening.edit = engine.edit_facts(session, file_id, epoch);
+        opening.edit = Some(edit);
         opening.serial = self.changes.openings;
         opening.ended = false;
         opening.resumable = false;
@@ -608,6 +640,8 @@ fn settle_save(
         // Delta 3 of desktop#432: an earlier change to this file on this PC has not been sent yet; queued after it,
         // this save would replace it unasked. Nothing was stored: the edit stays, and the person is told why.
         Err(EditRefused::EarlierChangeNotSent) => (Settled::Refused(EARLIER_NOT_SENT.to_string()), None),
+        // Task 2530, item 1: that earlier change is held back; the words promise no send.
+        Err(EditRefused::EarlierChangeHeld) => (Settled::Refused(EARLIER_HELD.to_string()), None),
         Err(_) => (Settled::Failed, None),
     }
 }
