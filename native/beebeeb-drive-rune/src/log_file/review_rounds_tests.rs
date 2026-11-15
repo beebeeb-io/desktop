@@ -53,8 +53,11 @@ fn a_quoted_name_is_one_name_and_never_reaches_the_file() {
         "The file \u{201c}Holiday.pdf\u{201d} couldn\u{2019}t be opened. NSCocoaErrorDomain 260",
     );
     // `\u{2019}` is also a closing quote, so the name runs to the apostrophe of `couldn\u{2019}t` (over-redaction, accepted); the
-    // error's code stays readable (its domain is no log call's word, so it is masked).
-    assert!(text.contains("<name>") && text.contains("<…> 260"), "{text}");
+    // error stays readable: its domain is in the OS phrase list, so its code is not a number beside a masked word.
+    assert!(
+        text.contains("<name>") && text.contains("NSCocoaErrorDomain 260"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -207,7 +210,11 @@ fn the_host_of_the_lock_held_sentence_is_replaced() {
         "Annas",
         "another Beebeeb agent is already syncing this folder: beebeeb-desktop (pid 4242 on Annas-PC, since 2026-11-15T07:00:00+00:00)",
     );
-    assert!(text.contains("4242 on <host>, since"), "{text}");
+    // `pid` is in no log call, so the process id beside it is masked with it (a number next to a masked word).
+    assert!(
+        text.contains("<…> on <host>, since") && !text.contains("4242"),
+        "{text}"
+    );
 }
 
 // ---- Round 3 (delta review of #442) ----
