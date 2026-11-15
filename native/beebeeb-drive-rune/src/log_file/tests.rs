@@ -1107,6 +1107,9 @@ fn rule_5_numbers_and_units_pass() {
         redact::scrub("version 0.9.0, connect 10.0.5.161 timed out"),
         "version 0.9.0, connect <…> timed out"
     );
+    // A dot does not let a long digit run through: the part after it has at most 3 digits, a version part too.
+    assert_eq!(redact::scrub("took 1.123456789 s"), "took <…> s");
+    assert_eq!(redact::scrub("version 12345.12345.12345"), "version <…>");
 }
 
 #[test]

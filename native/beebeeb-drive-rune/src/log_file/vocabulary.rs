@@ -7,9 +7,9 @@
 //! punctuation (ASCII, and `“”‘’«»`) between words is kept. A word is written as it is only when it is
 //! 1. in the vocabulary: every word of the engine's and this crate's log calls (`vocabulary.txt`, kept in step by a
 //!    test that scans the sources) and the OS error phrases and units (`vocabulary_os.txt`), case-insensitive;
-//! 2. a number: at most 5 digits, at most one `.` part, an optional `-`, an optional unit (`ms`, `s`, `KB`, `MB`,
-//!    `GB`), a version of three such parts (`0.9.0`; four parts, an IPv4 address, are masked), or a `0x` value of at
-//!    most 8 hex digits (a Windows error code);
+//! 2. a number: at most 5 digits, at most one `.` part of at most 3 digits, an optional `-`, an optional unit (`ms`,
+//!    `s`, `KB`, `MB`, `GB`); a version of exactly three parts of 1 to 3 digits (`0.9.0`; four parts, an IPv4
+//!    address, are masked); or a `0x` value of at most 8 hex digits (a Windows error code);
 //! 3. one of the markers the first pass writes ([`Mark`], the HTTP status from the fixed table).
 //!
 //! Consecutive masked words, with the punctuation between them, become one `<…>`.
@@ -199,9 +199,19 @@ fn is_number(word: &str) -> bool {
     let fraction = parts.next();
     (1..=5).contains(&whole.len())
         && whole.bytes().all(|b| b.is_ascii_digit())
-        && fraction.is_none_or(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit()))
+        && fraction.is_none_or(|f| (1..=3).contains(&f.len()) && f.bytes().all(|b| b.is_ascii_digit()))
         && parts.next().is_none()
         && (unit.is_empty() || UNITS.contains(&unit))
+}
+
+/// `0.9.0`: exactly three parts of 1 to 3 digits. Four parts (`10.0.5.161`) are an address, which says where a person
+/// is, and longer parts can carry a long digit run: both masked.
+fn is_version(word: &str) -> bool {
+    let parts: Vec<&str> = word.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| (1..=3).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn is_known(word: &str) -> bool {
@@ -239,8 +249,7 @@ pub(crate) fn allow_listed(text: &str) -> String {
         }
         let word = &rest[..end];
         rest = &rest[end..];
-        // `0.9.0` is a version; four parts (`10.0.5.161`) are an address, which says where a person is: masked.
-        let known = is_known(word) || (word.matches('.').count() == 2 && word.split('.').all(is_number));
+        let known = is_known(word) || is_version(word);
         if known || !masked {
             out.push_str(&held);
             out.push_str(if known { word } else { MASKED });
