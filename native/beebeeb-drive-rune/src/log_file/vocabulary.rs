@@ -173,7 +173,7 @@ fn marker_text(c: char) -> Option<String> {
 }
 
 fn is_separator(c: char) -> bool {
-    c.is_whitespace() || (c.is_ascii_punctuation() && c != '-' && c != '_') || is_private_use(c)
+    c.is_whitespace() || ".,:;()[]{}<>\"'=/\\@|“”‘’«»".contains(c) || is_private_use(c)
 }
 
 /// The words of `text`, in order (see the module docs for what a word is).

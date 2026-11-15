@@ -277,7 +277,7 @@ impl<H: SearchHost> EngineSearchSource<H> {
     /// goes now. `true`: something a draw reads went.
     fn follow(&mut self) -> bool {
         let now = session_of(&*self.host);
-        if self.of.as_ref().map(|s| &s.account) == now.as_ref().map(|s| &s.account) {
+        if self.of == now {
             return false;
         }
         let held = self.held.is_some()
@@ -436,12 +436,6 @@ impl<H: SearchHost> EngineSearchSource<H> {
                     return;
                 }
                 self.building = None;
-                if of.is_none() || of != self.of {
-                    // Built for a session that is gone, or across a change of session: dropped, never held. The
-                    // session of the moment builds its own when Search opens.
-                    self.built_at = None;
-                    return;
-                }
                 self.built_at = Some(Instant::now());
                 match (of, result) {
                     (Some(of), Ok(index)) => {
