@@ -9,11 +9,12 @@
 //! - size: the row's `size_bytes` (a file's; a folder's cell is empty); totals add the files' sizes.
 //! - "Where it was": left empty. The parent's name would come from the local state (`trash_entries`), which may
 //!   belong to an earlier account, so that column is not bound.
-//! - the sidebar's count: none ([`TrashSource::count`] is `None`): the engine has no count call, and counting means
-//!   reading and decrypting the whole Trash, which the window must not do to draw a badge.
+//! - the sidebar's count: the server's own number ([`Engine::trash_count_for`], `count.rs`), read apart from the list
+//!   (counting by listing would decrypt the whole Trash for a badge); none until Beebeeb has said it.
 //! - `restore`: [`Engine::restore_items_for`], one item, for the session of the press.
 //! - `purge` (Empty Trash, Delete permanently): [`Engine::purge_trash_for`] after the account PASSWORD is proven for
-//!   each item (`purge.rs`). Not bound: Details and Preview (no engine call; the view says "not available yet").
+//!   each item (`purge.rs`). Not bound: Details and Preview (nothing in the window takes them up yet; the view says
+//!   "not available yet").
 //!
 //! When it reads: when the Trash section opens and the list is missing or older than [`FRESH_FOR`], and after a
 //! restore was answered. Never from a draw call: `items`, `totals`, `loaded` and `count` only read what is here.
@@ -50,6 +51,7 @@ use super::log;
 use crate::frames::shared::parts::table::{Extra, Kind, Row};
 use crate::frames::trash::source::{Emptying, Loaded, Notice, Pumped, PurgeEnd, TrashSource, TrashTotals};
 
+mod count;
 mod purge;
 #[cfg(test)]
 mod tests;
@@ -95,6 +97,8 @@ pub struct EngineTrashSource<C: CredentialStores> {
     /// The delete for good on its way, and how the last one ended (told once, by the next pump).
     purging: Option<purge::Purging>,
     purge_end: Option<PurgeEnd>,
+    /// The sidebar's count (`count.rs`).
+    counted: count::CountState,
 }
 
 struct Listing {
@@ -134,6 +138,8 @@ enum Answer {
     Purged(Stamp, beebeeb_engine::app::trash_purge_api::Purged),
     /// A delete of many for good (one proof, one call) ended, under the session and account of its press.
     BulkPurged(Stamp, beebeeb_engine::app::trash_bulk_api::BulkPurged),
+    /// The count read with this number, the session and account it was asked under, and the server's number or why not.
+    Counted(u64, Stamp, Result<u64, AccountCallError>),
 }
 
 /// The session and the account a restore was pressed under.
@@ -173,6 +179,7 @@ impl<C: CredentialStores> EngineTrashSource<C> {
             dirty: false,
             purging: None,
             purge_end: None,
+            counted: count::CountState::default(),
         }
     }
 
@@ -270,6 +277,8 @@ impl<C: CredentialStores> EngineTrashSource<C> {
                 }
             }
             Answer::Restored(id, pressed, result) => {
+                // The count moved (or may have): asked again, under whoever is here now.
+                self.count_moved();
                 // The row in flight is this press's only when it left the list under the session of this press: an
                 // answer of an earlier session never takes out a row a later press put there.
                 let row = match self.restoring.get(&id) {
@@ -299,8 +308,15 @@ impl<C: CredentialStores> EngineTrashSource<C> {
                 self.read();
             }
             Answer::PurgeProgress(pressed, done) => self.purge_progress(pressed, done),
-            Answer::Purged(pressed, result) => self.purge_ended(pressed, result),
-            Answer::BulkPurged(pressed, result) => self.bulk_purge_ended(pressed, result),
+            Answer::Purged(pressed, result) => {
+                self.purge_ended(pressed, result);
+                self.count_moved();
+            }
+            Answer::BulkPurged(pressed, result) => {
+                self.bulk_purge_ended(pressed, result);
+                self.count_moved();
+            }
+            Answer::Counted(number, asked, result) => self.take_count(number, asked, result),
         }
     }
 }
@@ -335,7 +351,7 @@ impl<C: CredentialStores> EngineTrashSource<C> {
 impl<C: CredentialStores> EngineTrashSource<C> {
     /// A read or a restore is on its way (the tests wait for it).
     fn busy(&self) -> bool {
-        self.reading.is_some() || !self.restoring.is_empty()
+        self.reading.is_some() || !self.restoring.is_empty() || self.counted.busy()
     }
 
     /// The last answer is old: the next opening reads again (instead of waiting [`FRESH_FOR`]).
@@ -434,6 +450,8 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
         if !self.engine.has_session() {
             return;
         }
+        // The badge is read again too: the section is where it is looked at hardest.
+        self.count_moved();
         let fresh = self.current().is_some() && self.read_at.is_some_and(|at| at.elapsed() < FRESH_FOR);
         if !fresh {
             self.read();
@@ -451,6 +469,8 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
             self.take_in(answer);
             changed = true;
         }
+        // The badge is read from every section: a session without one of its own asks for it.
+        self.count_if_missing();
         let mut notice = self.notice.take();
         let purge = self.purge_end.take();
         // Words for the account that pressed: said once its Trash is listed again under a session of its own (the
@@ -468,7 +488,11 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
         let waiting_to_say = self.not_done_for.is_some() && self.current().is_some();
         Pumped {
             changed: changed || notice.is_some() || purge.is_some(),
-            busy: self.reading.is_some() || !self.restoring.is_empty() || waiting_to_say || self.purging.is_some(),
+            busy: self.reading.is_some()
+                || !self.restoring.is_empty()
+                || waiting_to_say
+                || self.purging.is_some()
+                || self.counted.busy(),
             notice,
             purge,
         }
@@ -483,11 +507,12 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
         self.notice = None;
         self.purging = None;
         self.purge_end = None;
+        self.forget_count();
         self.loaded = Loaded::Loading;
         self.dirty = true;
     }
 
-    /// None: the engine has no count call, and the window must not read the whole Trash for a badge.
+    /// The server's own count (`count.rs`): none until it has said one for this session and account.
     fn count(&self) -> Option<usize> {
         None
     }

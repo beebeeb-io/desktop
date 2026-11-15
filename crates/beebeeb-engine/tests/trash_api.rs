@@ -9,7 +9,7 @@
 //! with `#[cfg(not(target_os = "macos"))]`.
 #![cfg_attr(target_os = "macos", allow(unused_imports, dead_code))]
 
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use beebeeb_engine::app::settings_api::AccountCallError;
@@ -49,6 +49,8 @@ struct Account {
     paged: Arc<AtomicBool>,
     /// Runs once, inside the next listing request, before it answers.
     during: Hook,
+    /// What `GET /api/v1/files/count` says is in Trash.
+    count: Arc<AtomicU64>,
     email: String,
     phrase: String,
 }
@@ -71,8 +73,21 @@ fn account(email: &str) -> Account {
     let mode = Arc::new(AtomicU8::new(ANSWER));
     let paged = Arc::new(AtomicBool::new(false));
     let during: Hook = Arc::new(Mutex::new(None));
-    let (mode_in, paged_in, during_in) = (mode.clone(), paged.clone(), during.clone());
+    let count = Arc::new(AtomicU64::new(0));
+    let (mode_in, paged_in, during_in, count_in) = (mode.clone(), paged.clone(), during.clone(), count.clone());
     let fake = FakeApi::start(Arc::new(move |req: &Request| {
+        if req.route() == "GET /api/v1/files/count" {
+            return match mode_in.load(Ordering::SeqCst) {
+                SERVER_ERROR => Reply::json(500, json!({ "error": BODY_MARKER })),
+                SESSION_ENDED => Reply::json(401, json!({ "error": BODY_MARKER })),
+                _ if req.bearer() != Some(token.as_str()) => Reply::json(401, json!({ "error": "unauthorized" })),
+                // The server's shape: the whole counter row, of which the engine reads `trashed_files`.
+                _ => Reply::ok(json!({
+                    "total_files": 9, "total_folders": 1, "total_bytes": 1,
+                    "trashed_files": count_in.load(Ordering::SeqCst), "trashed_bytes": 1
+                })),
+            };
+        }
         let restoring = is_restore(req) || is_trash(req);
         if !restoring && !(req.route() == "GET /api/v1/files" && req.query("trashed") == Some("true")) {
             return rest(req);
@@ -124,6 +139,7 @@ fn account(email: &str) -> Account {
         mode,
         paged,
         during,
+        count,
         email: email.to_string(),
         phrase,
     }
@@ -741,4 +757,60 @@ fn a_session_bound_trash_fails_by_kind() {
         engine.trash_items_for(now, &[CONTRACT]),
         Err(NotTrashed::Call(AccountCallError::Offline))
     );
+}
+
+fn counts(fake: &FakeApi) -> usize {
+    fake.requests()
+        .iter()
+        .filter(|r| r.route() == "GET /api/v1/files/count")
+        .count()
+}
+
+/// The sidebar's count is the server's own number, asked for the session of the press: it lists nothing, it is sent
+/// under no other session (a lock and an unlock, a sign-out and a sign-in in between), a refusal is its kind and
+/// never the server's words, and no session asks nothing.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn the_trash_count_is_the_servers_number_for_the_session_of_the_press() {
+    let account = account("trash-count@example.eu");
+    account.count.store(7, Ordering::SeqCst);
+    let engine = signed_in(&account);
+
+    let now = engine.session_turn();
+    assert_eq!(engine.trash_count_for(now), Ok(7));
+    assert_eq!(
+        (counts(&account.fake), listings(&account.fake)),
+        (1, 0),
+        "one count, no listing"
+    );
+    account.count.store(0, Ordering::SeqCst);
+    assert_eq!(
+        engine.trash_count_for(now),
+        Ok(0),
+        "an empty Trash is a zero the server said"
+    );
+
+    // Another session than the press's: nothing is sent.
+    let before = counts(&account.fake);
+    let _ = engine.lock();
+    engine
+        .unlock_with_phrase(Zeroizing::new(account.phrase.clone()))
+        .expect("the phrase unlocks");
+    assert_eq!(engine.trash_count_for(now), Err(AccountCallError::NotSignedIn));
+    assert_eq!(counts(&account.fake), before, "nothing was sent after the unlock");
+
+    // Refusals are kinds, never the server's body.
+    let now = engine.session_turn();
+    account.mode.store(SERVER_ERROR, Ordering::SeqCst);
+    assert_eq!(engine.trash_count_for(now), Err(AccountCallError::ServerError));
+    account.mode.store(SESSION_ENDED, Ordering::SeqCst);
+    assert_eq!(engine.trash_count_for(now), Err(AccountCallError::SessionEnded));
+
+    let signed_out = engine_at(&account.fake.base);
+    let before = counts(&account.fake);
+    assert_eq!(
+        signed_out.trash_count_for(signed_out.session_turn()),
+        Err(AccountCallError::NotSignedIn)
+    );
+    assert_eq!(counts(&account.fake), before, "nothing is asked without a session");
 }

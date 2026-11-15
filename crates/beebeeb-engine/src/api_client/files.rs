@@ -197,6 +197,19 @@ impl ApiClient {
         Ok(out)
     }
 
+    /// `GET /api/v1/files/count` — how many items are in the account's Trash (`trashed_files`), counted by the
+    /// server: the same set the flat Trash listing returns, without listing or decrypting any of it. A body
+    /// without the number is an error (never a made-up zero).
+    pub async fn trashed_file_count(&self) -> anyhow::Result<u64> {
+        let resp = self
+            .send_with_retry(|| self.client.get(self.url("/api/v1/files/count")))
+            .await?;
+        let body: serde_json::Value = resp.json().await?;
+        body["trashed_files"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("the file counters carry no trashed count"))
+    }
+
     pub async fn list_versions(&self, file_id: &str) -> anyhow::Result<serde_json::Value> {
         let resp = self
             .client

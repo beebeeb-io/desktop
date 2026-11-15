@@ -86,6 +86,14 @@ impl<C: CredentialStores> Engine<C> {
         Ok(TrashListing { session, items })
     }
 
+    /// How many items are in the account's Trash (`GET /api/v1/files/count`, the server's own count), for the session
+    /// `session` names and no other: the token is copied only while that session is still the one in memory, and
+    /// nothing is sent otherwise ([`AccountCallError::NotSignedIn`]). Reads nothing locally and decrypts nothing: the
+    /// sidebar's badge, which must not read the whole Trash. BLOCKS on the handle's runtime: call it from a worker.
+    pub fn trash_count_for(&self, session: SessionGeneration) -> Result<u64, AccountCallError> {
+        self.account_call_for(session, |api| async move { api.trashed_file_count().await })
+    }
+
     /// WRITES: put items back from Trash (`POST /api/v1/files/{id}/restore`, one call each, in order), for the
     /// session a person pressed under and no other. `session` is [`Engine::session_turn`] as the host read it AT
     /// THE PRESS (on its window's thread, before any worker started). Before EACH item the token is copied only
