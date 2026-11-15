@@ -64,8 +64,11 @@ impl AuthHealth {
     /// A pull that failed any other way (offline, a 5xx) leaves the run as it is, and so does a tick that neither
     /// reached the server nor carries the reason: only an answer that came back clears.
     pub(super) fn note_tick(&self, tick: &crate::engine_bridge::SyncTickOutcome) {
-        let _ = tick;
-        self.note_result(None);
+        if tick.reached_server {
+            self.note_result(None);
+        } else if let Some(why) = &tick.pull_refusal {
+            self.note_result(Some(why));
+        }
     }
 }
 

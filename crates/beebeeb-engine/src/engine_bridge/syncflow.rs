@@ -357,12 +357,13 @@ pub async fn sync_tick_outcome(
             // snapshot — just skip this tick and retry next time. The cursor is
             // unchanged, so no op is missed.
             tracing::warn!(error = %e, cursor, "sync_tick: /sync/ops failed; retrying next tick");
-            // The pull did not come back: `Ok`, but not a tick that reached the server (spec D11, review P1).
+            // The pull did not come back: `Ok`, but not a tick that reached the server (spec D11, review P1). It
+            // carries why (task 2521): a 401 here is a refusal of the session, which the runner counts.
             return Ok(SyncTickOutcome {
                 conflicts,
                 applied_item_ids: dedupe(applied_item_ids),
                 reached_server: false,
-                pull_refusal: None,
+                pull_refusal: Some(e),
             });
         }
     };
