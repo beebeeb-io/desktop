@@ -166,6 +166,10 @@ impl EngineBridge {
                 .db
                 .get_file(file_id)?
                 .is_some_and(|entry| matches!(entry.status, FileStatus::Conflict | FileStatus::Error));
+        // L409: Keep there into the file's own place is the person's resolution whose caller took the start look and
+        // kept a copy of the place before this hydrate began (`HydrateStart::Seen`): an edit against agreed content is
+        // then theirs to replace. Every other hydrate keeps the guard's rule as it was.
+        let keep_there = persons_resolution && matches!(start, HydrateStart::Seen(_));
         // S6 (R8): the start look, before the start content look: right before the place is replaced it must still be
         // what this look saw, so a save made at any point after it (during the download included) is never replaced.
         let seen_at_start = match (in_sync_folder, start) {
@@ -179,7 +183,7 @@ impl EngineBridge {
                 Some(PlaceSeen::take_async(dest_path).await?.fingerprint)
             }
         };
-        if in_sync_folder && self.place_holds_an_unsent_change(file_id, dest_path, persons_resolution)? {
+        if in_sync_folder && self.place_holds_an_unsent_change(file_id, dest_path, persons_resolution, keep_there)? {
             tracing::warn!(file_id = %file_id, "hydrate refused: the local file holds a change that is not sent");
             return Err(anyhow::Error::new(UnsentLocalChange).into());
         }
@@ -277,7 +281,9 @@ impl EngineBridge {
                     tracing::warn!(file_id = %file_id, "hydrate refused: {why}");
                     anyhow::Error::new(UnsentLocalChange)
                 };
-                if in_sync_folder && self.place_holds_an_unsent_change(file_id, dest_path, persons_resolution)? {
+                if in_sync_folder
+                    && self.place_holds_an_unsent_change(file_id, dest_path, persons_resolution, keep_there)?
+                {
                     return Err(refuse_changed(&mut buf, "the local file was changed during the download").into());
                 }
                 // Review P2-1, S6 (R8): the place (its size, times and inode) compared with the start look once the copy
@@ -370,16 +376,24 @@ impl EngineBridge {
     /// unknown case covered only files hydrated before 0.8.13, and a held edit after a viewer save was not one).
     /// `persons_resolution`: the row was a conflict or an error when the hydrate began; its unknown bytes are then the
     /// person's to resolve (Keep there keeps a copy first), and only a change against agreed content refuses.
+    /// `keep_there` (L409): that resolution is Keep there into the file's own place, whose caller took the start look
+    /// and kept a copy of the place before the hydrate began. Its file with agreed content recorded and edited bytes is
+    /// then the person's to replace; a queued upload, and a change against content known only from fetches, still
+    /// refuse.
     pub(super) fn place_holds_an_unsent_change(
         &self,
         file_id: &str,
         place: &Path,
         persons_resolution: bool,
+        keep_there: bool,
     ) -> Result<bool, EngineError> {
         if !place.exists() {
             return Ok(false);
         }
         let content = sync_folder_content(&self.db, file_id, place, None)?;
+        if matches!(content, SyncFolderContent::Changed { .. }) && keep_there && self.db.has_agreed_content(file_id)? {
+            return Ok(false);
+        }
         if matches!(content, SyncFolderContent::Changed { .. } | SyncFolderContent::Queued) {
             return Ok(true);
         }
