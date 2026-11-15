@@ -3,7 +3,7 @@
 //! password is invented; nothing here waits on Windows.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use beebeeb_engine::app::lock_api::LockState;
 use beebeeb_engine::app::lock_password_api::{AppLockProof, LockAfter};
@@ -374,26 +374,156 @@ fn a_gap_of_hours_after_an_idle_locks_without_a_resume() {
     });
 }
 
-/// Fifteen minutes without input, then twenty in which the app did not run: said at once (not a minute later), and the
-/// gap alone is short of thirty minutes, so it locks nothing (the brief's rule: a gap under the delay does not lock);
-/// the engine says when the rest could be reached.
+/// Fifteen minutes without input, then twenty in which the app did not run, with no resume said: the idle seen last and
+/// the gap are time away together (thirty-five minutes), so a thirty minute delay locks, as it does after a sleep
+/// Windows announced (decision 2539: the gap alone would wait for a sleep past the delay by itself).
 #[test]
-fn a_gap_short_of_the_delay_is_said_at_once_and_does_not_lock() {
+fn an_idle_then_a_gap_past_the_delay_lock_together_without_a_resume() {
     let mut live = live();
     thirty_minutes(&live);
     idle_for(&mut live, Duration::from_secs(15 * 60));
     looked(&mut live);
-    let before = away(&mut live.rt).answered;
+    assert_eq!(live.engine.lock_state(), LockState::Open, "fifteen minutes of thirty");
     slept(&mut live, Duration::from_secs(20 * 60));
-    answers(&mut live, before + 1);
+    live.rt.frame(0.016);
+    assert!(
+        away(&mut live.rt)
+            .away
+            .is_some_and(|held| held >= Duration::from_secs(35 * 60)),
+        "the idle seen last and the gap are held together"
+    );
+    until(&mut live, "the idle and the gap did not lock together", |live| {
+        live.engine.lock_state() == LockState::ScreenLocked
+    });
+}
+
+/// Frames until [`RESUME_GRACE`] passed since `from`, then until `count` answers were taken in with no idle look out.
+/// `from` is read after the poll that could find a gap, so the frames from then on are past its grace: a gap still held
+/// is asked in the first of them, and its answer is in when this returns.
+fn answers_past_the_grace(live: &mut Live, count: usize, from: Instant) {
+    until(live, "the grace did not pass", |_| from.elapsed() >= RESUME_GRACE);
+    answers(live, count);
+}
+
+/// Five minutes without input, then twenty in which the app did not run: twenty-five minutes of thirty lock nothing.
+/// The gap waits for a resume first (none comes), then it is said once, and the engine says when the rest could be
+/// reached.
+#[test]
+fn an_idle_and_a_gap_short_of_the_delay_do_not_lock_and_are_said_once() {
+    let mut live = live();
+    thirty_minutes(&live);
+    idle_for(&mut live, Duration::from_secs(5 * 60));
+    looked(&mut live);
+    let (before, looks) = (away(&mut live.rt).answered, away(&mut live.rt).looks);
+    slept(&mut live, Duration::from_secs(20 * 60));
+    live.rt.frame(0.016);
+    let found = Instant::now();
+    let lock = away(&mut live.rt);
+    assert!(
+        lock.away.is_some_and(|held| held >= Duration::from_secs(25 * 60)),
+        "the gap is found and held"
+    );
+    assert_eq!(lock.looks, looks, "and waits for a resume before it is said");
+    answers_past_the_grace(&mut live, before + 1, found);
     assert_eq!(
         live.engine.lock_state(),
         LockState::Open,
-        "a gap of twenty minutes, of thirty"
+        "five minutes and twenty, of thirty"
     );
-    assert!(away(&mut live.rt).away.is_none(), "said once");
-    let due = away(&mut live.rt).due.expect("a look is due");
+    let lock = away(&mut live.rt);
+    assert!(lock.away.is_none() && lock.gap_found_at.is_none(), "said once");
+    assert_eq!(lock.looks, looks + 1, "in one look");
+    let due = lock.due.expect("a look is due");
     assert!(due <= Instant::now() + LOOK_AT_MOST_EVERY);
+    for _ in 0..20 {
+        live.rt.frame(0.016);
+    }
+    assert_eq!(away(&mut live.rt).looks, looks + 1, "and not again before it is due");
+}
+
+/// Twenty-nine minutes without input, then three in which the app did not run. The poll finds the gap first and holds
+/// it (thirty-two minutes, which would lock); the tray's resume for the same wake comes within the grace and says
+/// three minutes, measured better. The gap is dropped: the resume is what counts, and it locks nothing.
+#[test]
+fn a_resume_for_the_same_wake_drops_the_gap() {
+    let mut live = live();
+    thirty_minutes(&live);
+    idle_for(&mut live, Duration::from_secs(29 * 60));
+    looked(&mut live);
+    slept(&mut live, Duration::from_secs(3 * 60));
+    live.rt.frame(0.016);
+    let lock = away(&mut live.rt);
+    assert!(
+        lock.away.is_some_and(|held| held >= Duration::from_secs(32 * 60)),
+        "the gap is found and held"
+    );
+    let (before, looks) = (lock.answered, lock.looks);
+    live.rt.update(|s, tx| {
+        host::on_tray(
+            s,
+            TrayEvent::Resumed {
+                away: Duration::from_secs(3 * 60),
+            },
+            tx,
+        )
+    });
+    let resumed = Instant::now();
+    let lock = away(&mut live.rt);
+    assert!(
+        lock.away.is_none() && lock.gap_found_at.is_none(),
+        "the resume drops the gap"
+    );
+    assert_eq!(lock.looks, looks + 1, "and is said itself");
+    answers_past_the_grace(&mut live, before + 1, resumed);
+    assert_eq!(
+        live.engine.lock_state(),
+        LockState::Open,
+        "three minutes of thirty: the resume counts, not the gap"
+    );
+    assert!(away(&mut live.rt).away.is_none());
+}
+
+/// The same wake, with the tray's resume said before the poll runs again: that poll finds the gap and holds none (the
+/// resume already said this wake). Nothing locks.
+#[test]
+fn a_resume_said_first_means_the_poll_holds_no_gap() {
+    let mut live = live();
+    thirty_minutes(&live);
+    idle_for(&mut live, Duration::from_secs(29 * 60));
+    looked(&mut live);
+    // No frame between the gap and the resume: one would find the gap before the resume is said.
+    slept(&mut live, Duration::from_secs(3 * 60));
+    let before = away(&mut live.rt).answered;
+    live.rt.update(|s, tx| {
+        host::on_tray(
+            s,
+            TrayEvent::Resumed {
+                away: Duration::from_secs(3 * 60),
+            },
+            tx,
+        )
+    });
+    live.rt.frame(0.016);
+    let polled = Instant::now();
+    let lock = away(&mut live.rt);
+    // The poll ran and took the gap in: its last run is now, not three minutes back.
+    assert!(
+        lock.seen
+            .is_some_and(|seen| seen.gap(Instant::now(), SystemTime::now()) < AWAY_GAP),
+        "the poll after the resume ran"
+    );
+    assert!(
+        lock.away.is_none() && lock.gap_found_at.is_none(),
+        "the poll holds no gap for a wake the resume said"
+    );
+    assert!(!lock.resumed, "the resume is spent on that poll");
+    answers_past_the_grace(&mut live, before + 1, polled);
+    assert_eq!(
+        live.engine.lock_state(),
+        LockState::Open,
+        "three minutes of thirty: the resume counts, not the gap"
+    );
+    assert!(away(&mut live.rt).away.is_none());
 }
 
 /// Two polls a minute and a half apart are the look interval, not time away: nothing is asked before it is due and
