@@ -203,7 +203,9 @@ fn ending(result: Result<DeviceSignedIn, DeviceRequestRefused>, shown: bool) -> 
             SignInEvent::Device(DeviceStatus::Lost)
         }
         // The keys arrived; this PC did not take them.
-        Err(Refused::AccountMismatch) if shown => SignInEvent::Device(DeviceStatus::OtherAccount),
+        Err(Refused::AccountMismatch) if shown => SignInEvent::Device(DeviceStatus::KeysNotReceived {
+            by: "another device".into(),
+        }),
         Err(Refused::Overtaken | Refused::NotStored) if shown => SignInEvent::Device(DeviceStatus::NotSignedIn),
         Err(Refused::Offline | Refused::ConnectionLost) => SignInEvent::DeviceRequested(Err(SignInProblem::Offline)),
         Err(_) => SignInEvent::DeviceRequested(Err(SignInProblem::Other)),

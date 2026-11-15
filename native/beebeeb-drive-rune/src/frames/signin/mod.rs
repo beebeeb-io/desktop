@@ -300,7 +300,7 @@ impl Ui {
 
     /// The spent code's screen is for a request that was lost (`DeviceStatus::Lost`).
     pub fn lost(&self) -> bool {
-        false
+        self.lost
     }
 
     pub fn reconnecting(&self) -> bool {
