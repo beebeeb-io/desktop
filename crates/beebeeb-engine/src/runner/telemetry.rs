@@ -14,7 +14,10 @@ pub(super) const AUTH_EXPIRED_THRESHOLD: u32 = 3;
 /// Shared, per-account auth-health tracker (task 1546 Codex round 2, finding
 /// 5). Fed by BOTH the heartbeat producer's `post_heartbeat` calls and the
 /// main tick loop's `sync_tick` calls — whichever one talks to the server
-/// next advances or resets the streak. Lives on `AccountRuntime` (`Arc`'d,
+/// next advances or resets the streak. While sync is paused and no heartbeat
+/// runs, the paused tick's check of who is signed in feeds it instead (task
+/// 2521). The engine's own calls are decided on the HTTP status
+/// ([`AuthHealth::note_api_answer`]). Lives on `AccountRuntime` (`Arc`'d,
 /// same pattern as `sync_paused`) so `sync_status` can read [`Self::is_expired`]
 /// without touching the engine task, and is cloned into [`EngineRunner::spawn`]
 /// / [`run`] the same way `sync_paused` already is.
@@ -49,12 +52,28 @@ impl AuthHealth {
                 self.expired.store(false, Ordering::Relaxed);
             }
             Some(e) if matches!(classify_operation_error(&e.to_string()), OperationFailureClass::Auth) => {
-                let n = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-                if n >= AUTH_EXPIRED_THRESHOLD {
-                    self.expired.store(true, Ordering::Relaxed);
-                }
+                self.add_refusal();
             }
             Some(_) => {}
+        }
+    }
+
+    /// Record the outcome of one of the engine's own API calls (the heartbeat, the sync tick's pull, the paused
+    /// tick's check), decided on the HTTP status Beebeeb answered and never on the error's text (task 2521, review
+    /// P3-2: a 5xx whose body mentions "401" is not a refusal). `None`: the call worked, which clears the run. A 401
+    /// answer adds one. Anything else (offline, a 5xx, a body that did not read) leaves the run as it is.
+    pub(super) fn note_api_answer(&self, error: Option<&anyhow::Error>) {
+        match error {
+            None => self.note_result(None),
+            Some(e) if is_session_refusal(e) => self.add_refusal(),
+            Some(_) => {}
+        }
+    }
+
+    fn add_refusal(&self) {
+        let n = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+        if n >= AUTH_EXPIRED_THRESHOLD {
+            self.expired.store(true, Ordering::Relaxed);
         }
     }
 
@@ -63,13 +82,31 @@ impl AuthHealth {
     /// with a 401 adds one: three in a row and the session is held as ended, and the session watcher closes the vault.
     /// A pull that failed any other way (offline, a 5xx) leaves the run as it is, and so does a tick that neither
     /// reached the server nor carries the reason: only an answer that came back clears.
+    ///
+    /// One refusal per tick does not space the refusals in time by itself: the tick interval delays a missed tick
+    /// instead of firing it at once (`MissedTickBehavior::Delay`), so a tick that ran long is not followed by a burst.
     pub(super) fn note_tick(&self, tick: &crate::engine_bridge::SyncTickOutcome) {
         if tick.reached_server {
             self.note_result(None);
-        } else if let Some(why) = &tick.pull_refusal {
-            self.note_result(Some(why));
+        } else if let Some(why) = &tick.pull_failure {
+            self.note_api_answer(Some(why));
         }
     }
+}
+
+/// Whether `error` is Beebeeb refusing this session: an HTTP 401 answer, read from the error's chain (the API client's
+/// `DesktopApiError::HttpStatus`, or a `reqwest` error that carries the status), never from its text. Only this
+/// counts toward holding the session as ended.
+pub(crate) fn is_session_refusal(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<crate::api_client::DesktopApiError>(),
+            Some(crate::api_client::DesktopApiError::HttpStatus { status, .. }) if status.as_u16() == 401
+        ) || cause
+            .downcast_ref::<reqwest::Error>()
+            .and_then(reqwest::Error::status)
+            .is_some_and(|status| status.as_u16() == 401)
+    })
 }
 
 /// Fallback heartbeat cadence (seconds) if the server returns no interval and
@@ -406,6 +443,9 @@ pub(super) fn spawn_heartbeat_producer(
     tokio::spawn(async move {
         let interval = Duration::from_secs(interval_secs.max(MIN_HEARTBEAT_INTERVAL_SECS) as u64);
         let mut ticker = tokio::time::interval(interval);
+        // Task 2521: a beat that ran late (a slow answer, a PC that slept) delays the next one instead of a burst of the
+        // missed beats, whose refusals would otherwise land milliseconds apart and count as the whole run.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // Track the WALL-CLOCK time of the last beat so the speed denominator is
         // the real elapsed interval, not the configured one.
         let mut last_beat_secs = now_secs();
@@ -460,13 +500,13 @@ pub(super) fn spawn_heartbeat_producer(
                     last_beat_secs = now;
 
                     match api.post_heartbeat(&session_id, &body).await {
-                        Ok(()) => auth_health.note_result(None),
+                        Ok(()) => auth_health.note_api_answer(None),
                         Err(e) => {
                             // Fire-and-forget: a missed beat is non-fatal (the next
                             // beat refreshes the row). Network blips + token-rotation
                             // 401s are expected; log at debug to avoid noise.
                             tracing::debug!(error = %e, "heartbeat post failed; will retry next beat");
-                            auth_health.note_result(Some(&e));
+                            auth_health.note_api_answer(Some(&e));
                         }
                     }
                 }

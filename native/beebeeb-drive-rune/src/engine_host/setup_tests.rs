@@ -77,6 +77,14 @@ struct Fake {
     previews_held: Mutex<()>,
     previews_sets: Mutex<Vec<(SessionGeneration, PreviewSetting)>>,
     previews_photo: AtomicBool,
+    /// Every "Lock again after" write: its session, its value, and whether a proof came with it.
+    lock_after: Mutex<
+        Vec<(
+            SessionGeneration,
+            beebeeb_engine::app::lock_password_api::LockAfter,
+            bool,
+        )>,
+    >,
 }
 
 fn session(number: u64) -> SessionGeneration {
@@ -116,6 +124,7 @@ fn fake() -> Arc<Fake> {
         previews_held: Mutex::new(()),
         previews_sets: Mutex::default(),
         previews_photo: AtomicBool::new(false),
+        lock_after: Mutex::default(),
     })
 }
 
@@ -160,6 +169,34 @@ impl SetupEngine for Fake {
         }
         self.app_lock.lock().unwrap().push((session, on, proof.is_some()));
         Ok(())
+    }
+    // As the engine: another session writes nothing, and longer than what is stored (the default while nothing is)
+    // needs a proof.
+    fn set_lock_after_for(
+        &self,
+        session: SessionGeneration,
+        after: beebeeb_engine::app::lock_password_api::LockAfter,
+        proof: Option<beebeeb_engine::app::lock_password_api::AppLockProof>,
+    ) -> Result<(), beebeeb_engine::app::lock_password_api::AppLockRefused> {
+        if session != self.stamp().0 {
+            return Err(beebeeb_engine::app::lock_password_api::AppLockRefused::Overtaken);
+        }
+        let stored = self
+            .lock_after
+            .lock()
+            .unwrap()
+            .last()
+            .map_or(beebeeb_engine::app::lock_password_api::LockAfter::DEFAULT, |write| {
+                write.1
+            });
+        if after > stored && proof.is_none() {
+            return Err(beebeeb_engine::app::lock_password_api::AppLockRefused::ProofNeeded);
+        }
+        self.lock_after.lock().unwrap().push((session, after, proof.is_some()));
+        Ok(())
+    }
+    fn binds_lock_after(&self) -> bool {
+        true
     }
     fn view(&self) -> SyncView {
         *self.view.lock().unwrap()

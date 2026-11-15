@@ -826,6 +826,8 @@ mod queued_save_tests {
             mime_type: None,
             completed_payload: Some("/staged/viewer"),
             completed_payload_hash: None,
+            // The viewer's save never writes the sync folder's copy (task 2523, F2).
+            place_written: false,
             finalization: None,
             now: 22,
         };

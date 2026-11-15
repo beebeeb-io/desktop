@@ -33,6 +33,32 @@ impl From<PlatformError> for ActionError {
     }
 }
 
+/// What the shell saw, for the away lock (decision 2519). The shell measures; the engine compares with the delay
+/// the person chose and locks through core (`engine_host`'s [`EngineActions::away_job`]): the shell holds no rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Away {
+    /// No input on this PC for this long, counted from no earlier than the session last opened.
+    Idle(std::time::Duration),
+    /// The main window closed to the tray: the person left Beebeeb.
+    LeftTheApp,
+    /// The operating system's session was locked (Windows: Win+L, or its own lock).
+    SessionLocked,
+}
+
+/// The engine's answer to one look of the away lock.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AwayAnswer {
+    /// The screen locked because of it.
+    pub locked: bool,
+    /// For an idle time: how long before one could lock, so when to look again (zero: measure again now).
+    /// `None`: nothing an idle time says could lock now (app lock off, the app not open, or it just locked).
+    pub check_again_in: Option<std::time::Duration>,
+}
+
+/// One look of the away lock, made on the window's thread (it holds the session it is for) and run on a worker:
+/// it reads the credential store and waits for the lock's write hold.
+pub type AwayJob = Box<dyn FnOnce() -> AwayAnswer + Send>;
+
 /// The engine and the session, as the shell needs them.
 pub trait EngineActions: Send + Sync {
     /// The gate AND whose session it is (the user id), read together. The shell samples this;
@@ -68,6 +94,17 @@ pub trait EngineActions: Send + Sync {
     fn sync_refusal(&self) -> Option<SyncOff> {
         None
     }
+    /// The away lock's look at `seen`, as a job for a worker ([`AwayJob`]). `None`: this engine has no automatic
+    /// lock (the fixture), and the shell asks nothing more.
+    fn away_job(&self, _seen: Away) -> Option<AwayJob> {
+        None
+    }
+    /// The engine's lock is open (core's `Open`: the key in memory, the screen not locked), whatever the window shows
+    /// (the first-run steps, the no-plan screen too): the away lock counts idle time then (review of #452, the lead's
+    /// ruling). Asked on every poll: cheap, never a wait on a worker.
+    fn screen_open(&self) -> bool {
+        false
+    }
 }
 
 /// Everything a frame, the tray menu or the flyout may ask the shell to do beyond navigation.
@@ -92,6 +129,14 @@ pub trait ShellActions: Send + Sync {
     fn sign_in_again(&self) {}
     /// See [`EngineActions::sync_refusal`].
     fn sync_refusal(&self) -> Option<SyncOff>;
+    /// See [`EngineActions::away_job`].
+    fn away_job(&self, _seen: Away) -> Option<AwayJob> {
+        None
+    }
+    /// See [`EngineActions::screen_open`].
+    fn screen_open(&self) -> bool {
+        false
+    }
 }
 
 /// The real [`ShellActions`]: the engine for what is the engine's, the OS for the rest.
@@ -151,6 +196,12 @@ impl ShellActions for HostActions {
     }
     fn sync_refusal(&self) -> Option<SyncOff> {
         self.engine.sync_refusal()
+    }
+    fn away_job(&self, seen: Away) -> Option<AwayJob> {
+        self.engine.away_job(seen)
+    }
+    fn screen_open(&self) -> bool {
+        self.engine.screen_open()
     }
 }
 

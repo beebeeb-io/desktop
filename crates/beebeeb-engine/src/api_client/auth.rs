@@ -25,6 +25,15 @@ impl ApiClient {
         Ok(self.get_typed("/api/v1/auth/me").await?)
     }
 
+    /// Task 2521: whether Beebeeb still accepts this session, from the status of `GET /api/v1/auth/me` alone (the body
+    /// is not read, so a profile shape the client does not know cannot make an accepted session look failed). `Ok` on
+    /// any 2xx; otherwise the error carries the status (`DesktopApiError::HttpStatus`).
+    pub async fn session_check(&self) -> anyhow::Result<()> {
+        let url = self.url("/api/v1/auth/me");
+        self.send_with_retry(|| self.client.get(&url)).await?;
+        Ok(())
+    }
+
     /// GET /api/v1/me/profile: the name the account shows. `None`: none was set (or only spaces).
     pub async fn account_display_name(&self) -> anyhow::Result<Option<String>> {
         #[derive(serde::Deserialize)]

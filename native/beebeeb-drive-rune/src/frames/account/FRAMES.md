@@ -62,6 +62,13 @@ the running app draws the row ON as "Lock Beebeeb · Windows Hello" with the swi
 nothing acts on), and Setup's step 2 draws no "Lock again after" row. The board's frames (`DW-S03`, `DW-S03b`,
 `DW-0202`) keep theirs and still gate at 0. Ends when the away lock lands.
 
+Ended (lane w5, 2026-11-15, decision 2519): the away lock landed. The delay is the engine's entry `lock.after` (five
+minutes while nothing is stored), read with the switch and drawn as the board draws it, only while app lock is on;
+Setup's step 2 draws its row (with the switch on) and writes it. A longer delay asks Windows Hello first, as off does;
+a stored value the menu does not have is drawn as "Not known". "Immediately" locks when the main window closes to the
+tray and after one minute without input while it stays (no time at all cannot be told from reading). The shell
+measures (Windows' whole-PC idle, its session lock); the engine compares and locks through core's `lock_after_away`.
+
 Decision (lane, 2026-11-13): DW-A52, DW-A84, DW-A84a, DW-A57, DW-A57a, DW-0716 and DW-0716b are retired by the
 owner's ruling of 2026-11-13 (option C of three rendered options: one page), because the two screens listed the
 same subjects twice and the pane was a menu that said nothing about the account's state. The ruling wins over the

@@ -360,6 +360,12 @@ fn switches_and_choices_work_from_the_keyboard() {
     assert_eq!(info(&rt, "item-0-switch").role, "switch");
     press(&mut rt, Key::Text(" ".into()));
     assert!(!ui(&mut rt).lock_on, "Space turns the switch off");
+    // Off never locks: no "Lock again after" while the switch is off.
+    rt.settle_all();
+    rt.frame(0.0);
+    assert_eq!(count(&rt, "seg-0-3-tab"), 0, "no delay row with app lock off");
+    press(&mut rt, Key::Text(" ".into()));
+    assert!(ui(&mut rt).lock_on, "Space turns it on again");
     click(&mut rt, "seg-0-3-tab");
     assert_eq!(ui(&mut rt).lock_after, super::source::LockAfter::Min60);
     assert_eq!(info(&rt, "seg-0-on").label.as_deref(), Some("60 min"));

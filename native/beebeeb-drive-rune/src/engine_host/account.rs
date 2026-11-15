@@ -1006,6 +1006,10 @@ impl<C: CredentialStores + 'static> AccountSource for EngineAccountSource<C> {
     fn set_app_lock(&mut self, on: bool) {
         self.app_lock.set(on);
     }
+    /// "Locks again after" (`app_lock.rs`): longer asks Windows Hello first; the engine stores it.
+    fn set_lock_after(&mut self, delay: &str) {
+        self.app_lock.set_after(delay);
+    }
 
     fn sign_out_this_app(&mut self) -> SignOutAnswer {
         self.actions.sign_out_this_app()

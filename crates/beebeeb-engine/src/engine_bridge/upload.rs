@@ -544,6 +544,7 @@ impl EngineBridge {
                 // Always the op's payload path, whatever `release` is.
                 completed_payload: payload_path.as_deref(),
                 completed_payload_hash: completed_payload_hash.as_deref(),
+                place_written: landing_wrote_the_place(claim.and_then(|c| c.write.as_ref()).is_some()),
                 finalization: finalization.as_ref(),
                 now: now_secs(),
             },
@@ -1152,4 +1153,11 @@ fn sibling_path(path: &str, leaf: &str) -> String {
         Some((dir, _)) if !dir.is_empty() => format!("{dir}/{leaf}"),
         _ => leaf.to_string(),
     }
+}
+
+/// Task 2523 (F2): whether a landing's bytes are the copy in the file's place. A sync-folder upload (no write id) sent
+/// that copy, and a macOS File Provider write is the system's own copy. On Windows and Linux a write-keyed save is the
+/// in-app viewer's, uploaded from a staged copy: the sync folder's copy is not rewritten by it.
+pub(super) fn landing_wrote_the_place(write_keyed: bool) -> bool {
+    !write_keyed || cfg!(target_os = "macos")
 }

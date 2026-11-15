@@ -2,7 +2,7 @@
 //! Lock Beebeeb row drops, and its keyboard. The row itself is `security_overview`'s.
 //!
 //! Nothing here is a secret: the menu holds four lengths of time. Turning the lock off or
-//! changing the delay asks for Windows Hello first; that question is the source's
+//! choosing a longer delay asks for Windows Hello first; that question is the source's
 //! (`AccountSource::set_app_lock`, `set_lock_after`), asked by the engine, never drawn here.
 
 use crate::State;

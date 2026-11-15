@@ -10,15 +10,19 @@
 //!   A cancelled or failed prompt changes nothing and says so; a PC where no prompt can be shown keeps it on and says
 //!   why (the engine also takes the account password as the proof: its window is not in this version yet).
 //! - The switch shows the stored value until the engine answered: it never flips first. One change at a time.
-//! - "Locks again after" is not drawn from here: the away lock it sets is not bound in this version, so the page
-//!   gets no delay (an empty one) and draws none, never a value nothing acts on.
+//! - "Locks again after" (DW-S03): the delay is read with the switch ([`Engine::lock_after_for`], the engine's
+//!   `lock.after`, five minutes while nothing is stored) and drawn only while app lock is on. A shorter delay is
+//!   written at once; a longer one lowers what the lock protects, so Windows Hello is asked first, as for off, and
+//!   only its "verified" goes to the engine ([`Engine::set_lock_after_for`]). A stored value that is not one of the
+//!   menu's is drawn as not known (the engine counts it as the strictest). What the page holds can be stale: when the
+//!   engine wants a proof for a change the page thought shorter, Windows Hello is asked then (review of #452). The away lock that acts on it is the shell's (`shell/away.rs`) and the engine's.
 //!
 //! Must not: log anything of the account; keep a Hello answer for a later change; write before the proof answered.
 
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use beebeeb_engine::app::lock_password_api::{AppLockProof, AppLockRefused};
+use beebeeb_engine::app::lock_password_api::{AppLockProof, AppLockRefused, LockAfter};
 use beebeeb_engine::app::{CredentialStores, Engine};
 
 use super::account::EngineAccountSource;
@@ -37,19 +41,57 @@ const NOT_SAVED: &str = "App lock was not changed: this PC could not store the s
 const SESSION_ENDED: &str = "App lock was not changed: your session ended.";
 const NOT_CHANGED: &str = "App lock was not changed.";
 
+const AFTER_HELLO_NOT_CONFIRMED: &str = "The lock delay was not changed: Windows Hello did not confirm it's you.";
+const AFTER_HELLO_NOT_SET_UP: &str =
+    "The lock delay was not changed: a longer delay needs Windows Hello, which is not set up on this PC.";
+const AFTER_NOT_OPEN: &str = "The lock delay was not changed: Beebeeb is locked.";
+const AFTER_NOT_SAVED: &str = "The lock delay was not changed: this PC could not store the setting.";
+const AFTER_SESSION_ENDED: &str = "The lock delay was not changed: your session ended.";
+const AFTER_NOT_CHANGED: &str = "The lock delay was not changed.";
+
+/// A stored delay that is not one of the menu's: the button says so and no row of the menu is checked.
+const AFTER_NOT_KNOWN: &str = "Not known";
+
+/// The menu's words for each delay (`frames::account::app_lock::DELAYS`, the board's).
+fn label(after: LockAfter) -> &'static str {
+    match after {
+        LockAfter::Immediately => "Immediately",
+        LockAfter::Minutes5 => "5 min",
+        LockAfter::Minutes30 => "30 min",
+        LockAfter::Minutes60 => "60 min",
+    }
+}
+
+fn after_of(words: &str) -> Option<LockAfter> {
+    LockAfter::ALL.into_iter().find(|after| label(*after) == words)
+}
+
+/// One change of this part: the switch, or the delay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Change {
+    AppLock(bool),
+    After(LockAfter),
+}
+
+/// What the engine said is stored: the switch, and the delay (`None`: not one of the menu's).
+type Stored = (bool, Option<LockAfter>);
+
 enum Answer {
     Read {
         number: u64,
         made_for: Stamp,
-        result: Result<bool, AppLockRefused>,
+        result: Result<Stored, AppLockRefused>,
     },
     Hello {
         made_for: Stamp,
+        change: Change,
         result: HelloResult,
     },
     Set {
         made_for: Stamp,
-        on: bool,
+        change: Change,
+        /// The write carried Windows Hello's proof.
+        proved: bool,
         result: Result<(), AppLockRefused>,
     },
 }
@@ -64,7 +106,7 @@ struct Said {
 pub(super) struct AppLockPart<C: CredentialStores> {
     engine: Arc<Engine<C>>,
     hello: Box<dyn HelloPrompter>,
-    held: Option<(Stamp, bool)>,
+    held: Option<(Stamp, Stored)>,
     reads: u64,
     reading: Option<u64>,
     showing: bool,
@@ -78,12 +120,22 @@ pub(super) struct AppLockPart<C: CredentialStores> {
 }
 
 /// What the page is told when a change was refused.
-fn words(refused: AppLockRefused) -> &'static str {
+fn words(change: Change, refused: AppLockRefused) -> &'static str {
+    let (proof, not_open, not_saved, ended, other) = match change {
+        Change::AppLock(_) => (HELLO_NOT_CONFIRMED, NOT_OPEN, NOT_SAVED, SESSION_ENDED, NOT_CHANGED),
+        Change::After(_) => (
+            AFTER_HELLO_NOT_CONFIRMED,
+            AFTER_NOT_OPEN,
+            AFTER_NOT_SAVED,
+            AFTER_SESSION_ENDED,
+            AFTER_NOT_CHANGED,
+        ),
+    };
     match refused {
-        AppLockRefused::ProofNeeded => HELLO_NOT_CONFIRMED,
-        AppLockRefused::NotOpen => NOT_OPEN,
-        AppLockRefused::NotSaved => NOT_SAVED,
-        AppLockRefused::SessionEnded => SESSION_ENDED,
+        AppLockRefused::ProofNeeded => proof,
+        AppLockRefused::NotOpen => not_open,
+        AppLockRefused::NotSaved => not_saved,
+        AppLockRefused::SessionEnded => ended,
         // Answers of the password proof (not asked from this window yet), a check already running, a session
         // that moved on (dropped before it is said): nothing more is known than that it was not changed.
         AppLockRefused::Overtaken
@@ -92,7 +144,17 @@ fn words(refused: AppLockRefused) -> &'static str {
         | AppLockRefused::ServerLimit { .. }
         | AppLockRefused::Offline
         | AppLockRefused::UpgradeNeeded
-        | AppLockRefused::CouldNotCheck => NOT_CHANGED,
+        | AppLockRefused::CouldNotCheck => other,
+    }
+}
+
+/// What the page is told when Windows Hello did not confirm, or cannot be asked.
+fn not_proved(change: Change, unavailable: bool) -> &'static str {
+    match (change, unavailable) {
+        (Change::After(_), false) => AFTER_HELLO_NOT_CONFIRMED,
+        (Change::After(_), true) => AFTER_HELLO_NOT_SET_UP,
+        (Change::AppLock(_), false) => HELLO_NOT_CONFIRMED,
+        (Change::AppLock(_), true) => HELLO_NOT_SET_UP,
     }
 }
 
@@ -122,17 +184,23 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
         self.open() && of.0 == self.engine.session_turn() && of.1 == account_of(&self.engine)
     }
 
-    /// The stored switch, when it was read for this session and account.
-    pub(super) fn known(&self) -> Option<bool> {
+    /// The stored switch and delay, when they were read for this session and account.
+    fn stored(&self) -> Option<Stored> {
         self.held
             .as_ref()
             .filter(|(made_for, _)| self.is_now(made_for))
-            .map(|(_, on)| *on)
+            .map(|(_, stored)| *stored)
     }
 
-    /// What Sign-in and security draws: the switch, and no delay (see the module's doc).
+    /// The stored switch, when it was read for this session and account.
+    pub(super) fn known(&self) -> Option<bool> {
+        self.stored().map(|(on, _)| on)
+    }
+
+    /// What Sign-in and security draws: the switch, and the delay in the menu's words (drawn only while on).
     pub(super) fn facts(&self) -> Option<(bool, String)> {
-        self.known().map(|on| (on, String::new()))
+        self.stored()
+            .map(|(on, after)| (on, after.map_or(AFTER_NOT_KNOWN, label).to_string()))
     }
 
     pub(super) fn opened(&mut self, pane: Pane) {
@@ -161,8 +229,10 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
         let started = std::thread::Builder::new()
             .name("account-app-lock".into())
             .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.app_lock_for(mine.0)))
-                    .unwrap_or(Err(AppLockRefused::CouldNotCheck));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Ok((engine.app_lock_for(mine.0)?, engine.lock_after_for(mine.0)?))
+                }))
+                .unwrap_or(Err(AppLockRefused::CouldNotCheck));
                 let _ = tx.send(Answer::Read {
                     number,
                     made_for: mine,
@@ -190,35 +260,69 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
         let made_for = stamp(&self.engine);
         self.said = None;
         if on {
-            return self.write(made_for, true, None);
+            return self.write(made_for, Change::AppLock(true), None);
         }
-        // Off: Windows Hello first, for this change; its answer comes back through the channel.
+        // Off: Windows Hello first, for this change.
+        self.prove(made_for, Change::AppLock(false));
+    }
+
+    /// A delay was chosen in the menu (its words, `frames::account::app_lock::DELAYS`). Only while app lock is on
+    /// (the row is not drawn while it is off); words the menu does not have choose nothing.
+    pub(super) fn set_after(&mut self, words: &str) {
+        if self.changing.is_some() || !self.open() {
+            return;
+        }
+        let (Some(after), Some((true, stored))) = (after_of(words), self.stored()) else {
+            return;
+        };
+        if stored == Some(after) {
+            return;
+        }
+        let made_for = stamp(&self.engine);
+        self.said = None;
+        // Shorter than what applies now asks nothing; longer lowers what the lock protects (the engine's rule):
+        // Windows Hello first, as for off. A value that is not known counts as the strictest, as in the engine.
+        if after <= stored.unwrap_or(LockAfter::STRICTEST) {
+            return self.write(made_for, Change::After(after), None);
+        }
+        self.prove(made_for, Change::After(after));
+    }
+
+    /// Windows Hello for `change`; its answer comes back through the channel.
+    fn prove(&mut self, made_for: Stamp, change: Change) {
         let (tx, engine, mine) = (self.tx.clone(), self.engine.clone(), made_for.clone());
         match self.hello.start(Box::new(move |result| {
-            let _ = tx.send(Answer::Hello { made_for: mine, result });
+            let _ = tx.send(Answer::Hello {
+                made_for: mine,
+                change,
+                result,
+            });
             engine.wake_host();
         })) {
             Ok(cancel) => {
                 self.prompt = Some(cancel);
                 self.changing = Some(made_for);
             }
-            Err(()) => self.say(HELLO_NOT_SET_UP),
+            Err(()) => self.say(not_proved(change, true)),
         }
     }
 
-    fn write(&mut self, made_for: Stamp, on: bool, proof: Option<AppLockProof>) {
+    fn write(&mut self, made_for: Stamp, change: Change, proof: Option<AppLockProof>) {
         let (engine, tx, mine) = (self.engine.clone(), self.tx.clone(), made_for.clone());
+        let proved = proof.is_some();
         let started = std::thread::Builder::new()
             .name("account-app-lock".into())
             .spawn(move || {
                 let session = mine.0;
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    engine.set_app_lock_for(session, on, proof)
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match change {
+                    Change::AppLock(on) => engine.set_app_lock_for(session, on, proof),
+                    Change::After(after) => engine.set_lock_after_for(session, after, proof),
                 }))
                 .unwrap_or(Err(AppLockRefused::CouldNotCheck));
                 let _ = tx.send(Answer::Set {
                     made_for: mine,
-                    on,
+                    change,
+                    proved,
                     result,
                 });
                 engine.wake_host();
@@ -228,7 +332,7 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
             self.changing = Some(made_for);
         } else {
             self.changing = None;
-            self.say(NOT_CHANGED);
+            self.say(words(change, AppLockRefused::CouldNotCheck));
         }
     }
 
@@ -295,7 +399,11 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
                 }
                 self.held = result.ok().map(|on| (made_for, on));
             }
-            Answer::Hello { made_for, result } => {
+            Answer::Hello {
+                made_for,
+                change,
+                result,
+            } => {
                 self.prompt = None;
                 if self.changing.as_ref() != Some(&made_for) || !self.is_now(&made_for) {
                     self.changing = None;
@@ -303,28 +411,46 @@ impl<C: CredentialStores + 'static> AppLockPart<C> {
                 }
                 match result {
                     // Windows verified the person, for this change: the engine asks core and writes.
-                    HelloResult::Verified => self.write(made_for, false, Some(AppLockProof::PlatformVerified)),
+                    HelloResult::Verified => self.write(made_for, change, Some(AppLockProof::PlatformVerified)),
                     HelloResult::Cancelled | HelloResult::Failed => {
                         self.changing = None;
-                        self.say(HELLO_NOT_CONFIRMED);
+                        self.say(not_proved(change, false));
                     }
                     HelloResult::Unavailable => {
                         self.changing = None;
-                        self.say(HELLO_NOT_SET_UP);
+                        self.say(not_proved(change, true));
                     }
                 }
             }
-            Answer::Set { made_for, on, result } => {
+            Answer::Set {
+                made_for,
+                change,
+                proved,
+                result,
+            } => {
                 if self.changing.as_ref() == Some(&made_for) {
                     self.changing = None;
                 }
                 if !self.is_now(&made_for) {
                     return true;
                 }
+                // What the page held was stale: the engine wants a proof for a change it thought needed none.
+                // Windows Hello is asked for it now (never "did not confirm" for a prompt that was not shown).
+                if matches!(result, Err(AppLockRefused::ProofNeeded)) && !proved {
+                    self.prove(made_for, change);
+                    return true;
+                }
                 match result {
-                    Ok(()) => self.held = Some((made_for, on)),
+                    Ok(()) => {
+                        let (on, after) = self.stored().unwrap_or((true, None));
+                        let now = match change {
+                            Change::AppLock(on) => (on, after),
+                            Change::After(after) => (on, Some(after)),
+                        };
+                        self.held = Some((made_for, now));
+                    }
                     Err(refused) => {
-                        self.say(words(refused));
+                        self.say(words(change, refused));
                         // What is stored now is the engine's word: read it again.
                         self.held = None;
                         self.read();
