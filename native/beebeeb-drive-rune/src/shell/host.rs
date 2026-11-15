@@ -870,11 +870,20 @@ pub fn on_tray(s: &mut State, event: TrayEvent, tx: &mut Tx) {
 }
 
 /// One request from the control channel (a later launch, the installer), on the UI thread.
-/// Untrusted: `Request` can only be one of three things, and a link only ever navigates.
+/// Untrusted: `Request` can only be one of four things, a link only ever navigates, and a File Explorer verb only
+/// opens the window's own surface on an item of the account it shows (`platform::windows_verbs`).
 pub fn on_control(s: &mut State, request: Request, tx: &mut Tx) {
     match request {
         Request::Show => s.shell.open_main(),
         Request::Open(link) => on_open_url(s, &link, tx),
+        // Slice B6: the window comes forward (a locked one to its lock screen); the verb is checked again there.
+        Request::Explorer { verb, item } => {
+            s.shell.open_main();
+            #[cfg(windows)]
+            super::platform::windows_verbs::handle(s, verb, &item, tx);
+            #[cfg(not(windows))]
+            let _ = (verb, item);
+        }
         // The normal quit path: `on_quit` stops the engine, then the app exits.
         Request::QuitForUpdate => {
             s.shell.hide_flyout();
