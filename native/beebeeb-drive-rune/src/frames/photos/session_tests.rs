@@ -648,3 +648,36 @@ fn while_the_session_gate_is_closed_no_change_is_asked_of_the_source() {
     rt.state.photos.press_offline();
     assert_eq!(asked(&script), [("keep", vec![harbour])]);
 }
+
+#[test]
+fn keep_several_failures_are_one_message_with_the_count() {
+    let (mut rt, script) = window();
+    let (a, b) = (id((0, 0)), id((0, 3)));
+    rt.state.photos.check_tile(0, 0);
+    rt.state.photos.check_tile(0, 3);
+    rt.frame(0.0);
+    click(&mut rt, "ph-bulk-btn-1");
+    assert_eq!(asked(&script), [("keep", vec![a]), ("keep", vec![b])]);
+    assert!(rt.state.photos.toast.is_none(), "asked, not answered: nothing is said");
+
+    // Both left: ONE message that counts them, not one that the second overwrites.
+    for left in [a, b] {
+        script.lock().unwrap().answers.push(Answered::Kept {
+            id: left,
+            keep: true,
+            left: Some(Left::Failed),
+        });
+    }
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(
+        rt.state.photos.toast,
+        Some(Toast::Left {
+            what: What::Keep(true),
+            why: Left::Failed,
+            count: 2,
+            again: vec![a, b]
+        })
+    );
+    assert_eq!(text(&rt, "ph-toast-text"), "Couldn\u{2019}t keep 2 on this PC");
+}
