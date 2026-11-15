@@ -14,14 +14,18 @@ import sys
 import tempfile
 
 
-def check(log, cargo_exit_code, retried_ok=False):
+def check(log, cargo_exit_code, retried_ok=False, allow_skip=()):
     current = None
     announced = None
     binaries = 0
     total = 0
     library_seen = False
+    filtered_total = 0
     for raw in log.splitlines():
         line = re.sub(r"\x1b\[[0-9;]*m", "", raw).strip()
+        ran = re.match(r"test (\S+) \.\.\. ", line)
+        if ran and ran.group(1) in allow_skip:
+            raise ValueError(f"{ran.group(1)} ran although it was named in --allow-skip")
         if line.startswith(("Running ", "Doc-tests ")):
             if current is not None:
                 raise ValueError(f"missing result for {current}")
@@ -50,7 +54,10 @@ def check(log, cargo_exit_code, retried_ok=False):
                 if not retried_ok:
                     raise ValueError(f"failed tests in {current}")
                 print(f"  (retried-ok: {failed} failure(s) accepted — retried and passed)")
-            if announced != executed + ignored + measured or filtered:
+            if filtered and not allow_skip:
+                raise ValueError(f"inconsistent or filtered count in {current}")
+            filtered_total += filtered
+            if announced != executed + ignored + measured:
                 raise ValueError(f"inconsistent or filtered count in {current}")
             empty_allowed = current.startswith(("Running unittests src/main.rs (", "Doc-tests "))
             if executed == 0 and not empty_allowed:
@@ -63,6 +70,13 @@ def check(log, cargo_exit_code, retried_ok=False):
         raise ValueError(f"missing result for {current}")
     if not library_seen or total == 0:
         raise ValueError("missing library results or zero total executed tests")
+    if allow_skip:
+        # Each named skip filters exactly one test (it lives in one binary), so the filtered total must equal
+        # the number of names: fewer = a named skip filtered nothing, more = an unnamed skip.
+        if filtered_total > len(allow_skip):
+            raise ValueError(f"{filtered_total} tests filtered out but only {len(allow_skip)} named in --allow-skip: unnamed skip")
+        if filtered_total < len(allow_skip):
+            raise ValueError(f"only {filtered_total} tests filtered out for {len(allow_skip)} --allow-skip names: a named skip filtered nothing")
     if cargo_exit_code != 0:
         if not retried_ok:
             raise ValueError(f"cargo exited {cargo_exit_code}")
@@ -83,6 +97,10 @@ def self_test():
     main = "Running unittests src/main.rs (target/debug/deps/beebeeb_desktop-123.exe)"
     integration = "Running tests/keychain.rs (target/debug/deps/keychain-123.exe)"
     good = fixture(lib, 3) + fixture(main, 0) + fixture(integration, 2) + fixture("Doc-tests beebeeb_desktop_lib", 0)
+    skip_a, skip_b = "link_health::tests::an_unresolvable_host_is_offline", "staged_and_kept_copies_go_under_the_identitys_folder"
+    allow2 = ["--allow-skip", skip_a, "--allow-skip", skip_b]
+    skipped = (fixture(lib, 3).replace("0 filtered", "1 filtered") + fixture(main, 0)
+               + fixture(integration, 2).replace("0 filtered", "1 filtered") + fixture("Doc-tests beebeeb_desktop_lib", 0))
     cases = [
         # (name, log, cargo_exit, error_in_stderr, extra_args)
         ("positive per-binary counts", good, 0, None, []),
@@ -101,6 +119,13 @@ def self_test():
         # task 2448: --retried-ok accepts failures and a non-zero cargo exit
         ("retried-ok: accepts non-zero cargo exit", good, 101, None, ["--retried-ok"]),
         ("retried-ok: accepts failed tests", fixture(lib, 2, failed=1), 1, None, ["--retried-ok"]),
+        # task 2536: --allow-skip accepts exactly the named, documented testrig skips, nothing else
+        ("allow-skip: the two named skips, one filtered each", skipped, 0, None, allow2),
+        ("allow-skip: filtered without the flag still fails", skipped, 0, "inconsistent or filtered count", []),
+        ("allow-skip: a third, unnamed filter fails", skipped.replace("0 filtered", "1 filtered", 1), 0, "unnamed skip", allow2),
+        ("allow-skip: two filtered, only one named", skipped, 0, "unnamed skip", allow2[:2]),
+        ("allow-skip: a named skip that filtered nothing", good, 0, "filtered nothing", allow2),
+        ("allow-skip: a named test that ran anyway", skipped + f"test {skip_a} ... ok\n", 0, "ran although", allow2),
     ]
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "cargo-test.log"
@@ -128,6 +153,9 @@ def main():
     parser.add_argument("--retried-ok", action="store_true",
                         help="accept failures and a non-zero cargo exit (task 2448: the CI retry script already "
                              "confirmed they pass); the binary and count checks still apply")
+    parser.add_argument("--allow-skip", action="append", default=[], metavar="TEST",
+                        help="task 2536: a documented testrig skip (repeatable). With it, a filtered log passes only if "
+                             "the filtered total equals the number of names and none of the named tests ran")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -136,7 +164,7 @@ def main():
             parser.error("log and --cargo-exit-code are required")
         try:
             check(args.log.read_text(encoding="utf-8"), args.cargo_exit_code,
-                  retried_ok=args.retried_ok)
+                  retried_ok=args.retried_ok, allow_skip=tuple(args.allow_skip))
         except (ValueError, OSError) as error:
             print(f"FAIL: {error}", file=sys.stderr)
             return 1
