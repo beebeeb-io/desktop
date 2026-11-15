@@ -59,6 +59,9 @@ pub struct Later {
     closed: bool,
     /// What Undo (Ctrl+Z) puts back: the photos the source said Beebeeb moved to Trash.
     pub(super) undo: Vec<PhotoId>,
+    /// The photos whose move to Trash was accepted and is not answered yet: Move… on one of them is refused, as in
+    /// Files (the file is renamed on this PC while the request runs).
+    trashing: Vec<PhotoId>,
     /// How many answers of a selection's Keep are still to come: their failures are ONE message with a count.
     several: usize,
 }
@@ -75,7 +78,17 @@ impl Ui {
             self.source.trash(ids)
         };
         match asked {
-            Ok(()) => true,
+            Ok(()) => {
+                if self.source.answers_later() {
+                    let new: Vec<PhotoId> = ids
+                        .iter()
+                        .copied()
+                        .filter(|id| !self.later.trashing.contains(id))
+                        .collect();
+                    self.later.trashing.extend(new);
+                }
+                true
+            }
             Err(why) => {
                 self.toast = Some(Toast::Left {
                     what: What::Trash,
@@ -278,6 +291,7 @@ impl Ui {
         };
         match answer {
             Answered::Trashed(items) => {
+                self.later.trashing.retain(|id| !items.iter().any(|item| item.0 == *id));
                 let (done, left) = split(&items);
                 let open = self
                     .later
@@ -416,6 +430,15 @@ impl Ui {
                 // `folder_chosen` / `moved`. What is not there to ask (no session, a photo that left) is said.
                 Intent::AddFolder if self.later.closed => self.toast = Some(Toast::Words(WORDS_FOLDER)),
                 Intent::AddFolder => self.later.pick = Some(Pick::Folder),
+                // A move to Trash of one of them is still on its way: nothing is moved, as Files refuses it.
+                Intent::Move(ids) if ids.iter().any(|id| self.later.trashing.contains(id)) => {
+                    self.toast = Some(Toast::Left {
+                        what: What::Trash,
+                        why: Left::InFlight,
+                        count: ids.len(),
+                        again: Vec::new(),
+                    })
+                }
                 Intent::Move(ids) => match self.source.file_items(&ids) {
                     Some(items) if !items.is_empty() && !self.later.closed => self.later.pick = Some(Pick::Move(items)),
                     _ => self.toast = Some(Toast::Words(WORDS_MOVE)),
@@ -483,6 +506,7 @@ impl Ui {
         self.toast = None;
         self.filter = None;
         self.later.open_trash = None;
+        self.later.trashing.clear();
         self.later.undo.clear();
         self.later.several = 0;
         self.relayout();

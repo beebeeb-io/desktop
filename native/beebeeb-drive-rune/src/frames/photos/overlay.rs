@@ -439,7 +439,9 @@ fn sources(ui: &Ui, draft: &SourcesDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
                 Some(&f.detail),
                 vec![
                     // Takes the folder out of Photo sources (nothing is moved or deleted); the switch only hides it.
+                    // Shown on hover and on keyboard focus only (DW-0604); at rest it is invisible but Tab reaches it.
                     kit::label(format!("ph-item-1-{m}-remove"), "Remove", style::BULK, t.text_secondary)
+                        .group_opacity(0.0, 1.0)
                         .spans(vec![rune::Span::new(0, "Remove".len()).underline(t.text_secondary)])
                         .role("button")
                         .label(format!("Remove {}", f.name))
@@ -450,6 +452,7 @@ fn sources(ui: &Ui, draft: &SourcesDraft, t: &Theme) -> (f32, Vec<El>, Foot) {
                 ],
                 t,
             )
+            .hover_group_focus()
         })
         .collect();
     folder_items.push(
