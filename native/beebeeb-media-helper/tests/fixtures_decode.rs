@@ -4,12 +4,15 @@
 //! `manifest.tsv`: `file kind codec expect sha256 ref`. A fixtures dir with fewer than 26 rows, a row without its file,
 //! or a file whose hash is not the manifest's is a failure, never a skip.
 //!
-//! The session entry point used here is `beebeeb_media_helper::session::serve_with_routes(input, output, table)`: the
-//! scaffold does not name one yet (slice M3 writes it); a signature drift is an issue row at the media checkpoint.
+//! The session entry point used here is `beebeeb_media_helper::session::run_with(input, output, table)`: the shipped
+//! switch (OFF) on every OS, with the shipped route table (features: `h264` only).
+//!
+//! The `expect` column is exact, by the shipped routes: `play`, `silent` (the video plays, `no_sound` names the audio
+//! codec), `system` (`NoSystemDecoder`), `unsupported` (`Unsupported`), `refuse` (any refusal: the code is not pinned).
 //!
 //! Video claim, honestly stated: the helper answers RGBA, not planes, so a "bit-exact Y plane" cannot be compared. The
 //! test converts the RGBA picture back to luma (BT.601 or BT.709, limited range: the better of the two) and requires
-//! PSNR >= 45 dB against ffmpeg's decoded Y planes (`fixtures/ref/<stem>.y`) for every codec, H.264 and HEVC included.
+//! PSNR >= 45 dB against ffmpeg's decoded Y planes (`fixtures/ref/<stem>.y`) for every row that plays.
 //! The manifest's `ref` (the SHA-256 of those planes) is checked against the kept planes, so the reference cannot drift.
 
 use std::collections::VecDeque;
@@ -209,7 +212,7 @@ impl App {
             };
             let output = ChanWriter(helper_tx);
             // The result is the session's own end (Close, EOF or a refused message); the test reads the pipe.
-            let _ = beebeeb_media_helper::session::serve_with_routes(input, output, table);
+            let _ = beebeeb_media_helper::session::run_with(input, output, table);
         });
         App {
             to_helper: ChanWriter(app_tx),
@@ -372,13 +375,57 @@ fn s16_bytes(samples: &[f32]) -> Vec<u8> {
         .collect()
 }
 
-fn refused(code: &ErrorCode) -> bool {
-    matches!(code, ErrorCode::NoDecoder | ErrorCode::Unsupported(_))
-}
-
 // ---------------------------------------------------------------- one case per row
 
-fn run_row(file: &str, table: &'static [(Codec, Route)], hevc_on_system: bool) {
+/// The manifest's `codec` column as the protocol's codec (for the codes a row pins).
+fn codec_of(column: &str) -> Codec {
+    match column {
+        "h264" => Codec::H264,
+        "hevc" => Codec::Hevc,
+        "vp8" => Codec::Vp8,
+        "vp9" => Codec::Vp9,
+        "av1" => Codec::Av1,
+        "mpeg2video" => Codec::Mpeg2,
+        "prores" => Codec::ProRes,
+        "mpeg4" => Codec::Mpeg4Part2,
+        "wmv2" => Codec::Vc1,
+        "mp3" => Codec::Mp3,
+        "aac" => Codec::Aac,
+        "flac" => Codec::Flac,
+        "alac" => Codec::Alac,
+        "opus" => Codec::Opus,
+        "vorbis" => Codec::Vorbis,
+        "pcm_s16le" => Codec::Pcm,
+        "wmav2" => Codec::Wma,
+        "ac3" => Codec::Ac3,
+        "eac3" => Codec::Eac3,
+        other => panic!("manifest codec {other} has no protocol codec"),
+    }
+}
+
+/// The audio codec a `silent` row's container carries (the `codec` column names its video).
+fn silent_audio_codec(file: &str) -> Codec {
+    if file.contains("-aac") {
+        Codec::Aac
+    } else {
+        panic!("{file}: no audio codec known for a silent row")
+    }
+}
+
+/// The refusal of a row, at `Open` or at the first want: both are honest, a picture or PCM is not.
+fn refusal(app: &mut App, file: &str, kind: &str, hint: KindHint) -> ErrorCode {
+    let answer = match app.open(hint) {
+        Err(code) => Err(code),
+        Ok(_) if kind == "audio" => app.first_second().map(|_| ()),
+        Ok(_) => app.frame().map(|_| ()),
+    };
+    match answer {
+        Err(code) => code,
+        Ok(()) => panic!("{file}: a refused row played"),
+    }
+}
+
+fn run_row(file: &str) {
     let r = row(file);
     let bytes = read_file(file);
     assert_eq!(
@@ -391,50 +438,48 @@ fn run_row(file: &str, table: &'static [(Codec, Route)], hevc_on_system: bool) {
     } else {
         KindHint::Video
     };
-    let mut app = App::start(bytes, table);
-
-    // HEVC through the shipped table: the system decoder's row, and this PC has no system module yet.
-    if hevc_on_system {
-        let answer = app.open(hint).and_then(|_| app.frame().map(|_| ()));
-        assert_eq!(
-            answer,
-            Err(ErrorCode::NoSystemDecoder(Codec::Hevc)),
-            "{file}: HEVC ships on the system decoder"
-        );
-        return;
-    }
+    let mut app = App::start(bytes, ROUTES);
 
     match r.expect.as_str() {
         "refuse" => {
-            // The refusal may come at Open or at the first want; both are honest, a picture or PCM is not.
-            let answer = match app.open(hint) {
-                Err(code) => Err(code),
-                Ok(_) if r.kind == "audio" => app.first_second().map(|_| ()),
-                Ok(_) => app.frame().map(|_| ()),
-            };
-            match answer {
-                Err(code) => assert!(
-                    refused(&code),
-                    "{file}: expected NoDecoder or Unsupported, got {code:?}"
-                ),
-                Ok(()) => panic!("{file}: a row marked refuse played"),
-            }
+            // Any refusal: no run has printed this row's code yet, so it is not pinned (MCP2's list may pin it).
+            let _code = refusal(&mut app, file, &r.kind, hint);
         }
-        "reduced" => {
-            let opened = app.open(hint).unwrap_or_else(|c| panic!("{file}: {c:?}"));
-            assert!(
-                opened.reduced_quality,
-                "{file}: HE-AAC plays at its LC core and must say so"
+        "system" => {
+            let code = refusal(&mut app, file, &r.kind, hint);
+            assert_eq!(
+                code,
+                ErrorCode::NoSystemDecoder(codec_of(&r.codec)),
+                "{file}: this codec's route is the system's decoder"
             );
-            check_audio(file, &r, &mut app);
+        }
+        "unsupported" => {
+            let code = refusal(&mut app, file, &r.kind, hint);
+            assert_eq!(
+                code,
+                ErrorCode::Unsupported(codec_of(&r.codec)),
+                "{file}: this codec's route is off"
+            );
+        }
+        "silent" => {
+            let opened = app.open(hint).unwrap_or_else(|c| panic!("{file}: refused with {c:?}"));
+            assert!(opened.video.is_some(), "{file}: no video stream reported");
+            assert!(opened.audio.is_none(), "{file}: a silent row reports an audio stream");
+            assert_eq!(
+                opened.no_sound,
+                Some(silent_audio_codec(file)),
+                "{file}: a silent row names the audio codec it cannot play"
+            );
+            check_video(file, &r, &mut app);
         }
         "play" => {
             let opened = app.open(hint).unwrap_or_else(|c| panic!("{file}: refused with {c:?}"));
             assert!(!opened.reduced_quality, "{file}: not a reduced-quality row");
+            assert_eq!(opened.no_sound, None, "{file}: a play row has every track");
             if r.kind == "video" {
                 assert!(opened.video.is_some(), "{file}: no video stream reported");
                 check_video(file, &r, &mut app);
-                if file.contains("-aac") || file.contains("-mp3") {
+                if file.contains("-mp3") {
                     assert!(
                         opened.audio.is_some(),
                         "{file}: the container's audio stream is missing"
@@ -522,7 +567,10 @@ fn fixtures_manifest_has_every_row() {
             meta.len()
         );
         assert!(
-            matches!(r.expect.as_str(), "play" | "refuse" | "reduced"),
+            matches!(
+                r.expect.as_str(),
+                "play" | "silent" | "system" | "unsupported" | "refuse"
+            ),
             "{}: expect {}",
             r.file,
             r.expect
@@ -534,10 +582,14 @@ fn fixtures_manifest_has_every_row() {
             r.kind
         );
         assert_eq!(r.sha256.len(), 64, "{}: sha256", r.file);
-        assert_eq!(
-            r.reference == "-",
-            r.expect == "refuse",
-            "{}: only a refuse row has no reference",
+        assert!(
+            r.reference != "-" || !matches!(r.expect.as_str(), "play" | "silent"),
+            "{}: a play or silent row needs its reference",
+            r.file
+        );
+        assert!(
+            r.reference == "-" || r.expect != "refuse",
+            "{}: a refuse row has no reference",
             r.file
         );
     }
@@ -548,18 +600,12 @@ fn fixtures_manifest_has_every_row() {
     assert!(fixtures_dir().join("LICENSE.txt").is_file());
 }
 
-/// The shipped table, with HEVC on the system's route: both HEVC fixtures answer `NoSystemDecoder(Hevc)`.
+/// One test per row: the shipped route table, the shipped switch (OFF).
 macro_rules! fixture {
     ($name:ident, $file:literal) => {
         #[test]
         fn $name() {
-            run_row($file, ROUTES, false);
-        }
-    };
-    ($name:ident, $file:literal, hevc) => {
-        #[test]
-        fn $name() {
-            run_row($file, ROUTES, true);
+            run_row($file);
         }
     };
 }
@@ -567,8 +613,8 @@ macro_rules! fixture {
 fixture!(fixture_h264, "h264.mp4");
 fixture!(fixture_h264_interlaced, "h264-interlaced.ts");
 fixture!(fixture_h264_10bit, "h264-10bit.mp4");
-fixture!(fixture_hevc_main, "hevc-main.mp4", hevc);
-fixture!(fixture_hevc_main10, "hevc-main10.mov", hevc);
+fixture!(fixture_hevc_main, "hevc-main.mp4");
+fixture!(fixture_hevc_main10, "hevc-main10.mov");
 fixture!(fixture_vp8, "vp8.webm");
 fixture!(fixture_vp9, "vp9.webm");
 fixture!(fixture_av1, "av1.mkv");
@@ -590,24 +636,3 @@ fixture!(fixture_eac3, "eac3.mka");
 fixture!(fixture_h264_aac, "h264-aac.mkv");
 fixture!(fixture_h264_mp3, "h264-mp3.avi");
 fixture!(fixture_h264_aac_ts, "h264-aac.ts");
-
-/// FilmCraft's HEVC decoder is built and its route ships off; a test table routes HEVC to it and proves it decodes
-/// (the manifest's `play` rows), so both routes are covered. `route_in` names the table the way the shipped one is read.
-static HEVC_ON_RUST: &[(Codec, Route)] = &[
-    (Codec::H264, Route::Rust),
-    (Codec::Hevc, Route::Rust),
-    (Codec::Aac, Route::Rust),
-    (Codec::Mp3, Route::Rust),
-];
-
-#[test]
-fn fixture_hevc_main_rust_route() {
-    assert_eq!(beebeeb_media_helper::route_in(HEVC_ON_RUST, Codec::Hevc), Route::Rust);
-    run_row("hevc-main.mp4", HEVC_ON_RUST, false);
-}
-
-#[test]
-fn fixture_hevc_main10_rust_route() {
-    assert_eq!(beebeeb_media_helper::route_in(HEVC_ON_RUST, Codec::Hevc), Route::Rust);
-    run_row("hevc-main10.mov", HEVC_ON_RUST, false);
-}
