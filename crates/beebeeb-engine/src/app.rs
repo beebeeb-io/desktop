@@ -1027,7 +1027,6 @@ impl<C: CredentialStores> Engine<C> {
                 .flatten()
                 .map(|token| Zeroizing::new(token.expose_for_request().to_string()));
             self.forget_session(SessionTransition::SignOut);
-            credential_stores::clear_legacy_flat(self.identity, &self.stores);
             vault
                 .clear_session()
                 .map_err(|e| store::keychain_error("clear the stored session", e))?;

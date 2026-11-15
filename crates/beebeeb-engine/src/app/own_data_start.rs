@@ -346,8 +346,6 @@ impl<C: CredentialStores> Engine<C> {
     /// is fixed all the same: one an older version kept elsewhere is moved in by the first start and judged there.
     /// Writes nothing but the window's `user_version` mark, and makes no folder and no `state.db`.
     pub(in crate::app) fn fix_upgrade_candidate_at_startup(&self) {
-        #[allow(unreachable_code)]
-        return;
         let seat = self.own_data_seat();
         {
             let mut state = lock(&seat.state);
