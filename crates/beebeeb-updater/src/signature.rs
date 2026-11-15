@@ -27,7 +27,7 @@ pub const UPDATER_V2_PUBKEY: &str = include_str!("../keys/updater-v2.pub");
 /// The updater public key every 0.8.x release since 0.3.0 bakes in (minisign key id `C6FADFD59D732197`), a copy of
 /// `crates/beebeeb-updater/keys/updater-0.8.pub`, the byte copy of the value the 0.8.x line's config carries. A native
 /// build does not trust it. `tests::baked_key_matches_the_08_key_file` fails if the two drift.
-pub const LEGACY_0_8_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM2RkFERkQ1OUQ3MzIxOTcKUldRWElYT2QxZC82eG1ocjBUK0ZUZUZqU25JbmFNdmJoZ0w1dnhidDUxREZMd2wycUlDOGpVNloK";
+pub const LEGACY_0_8_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM2RkFERkQ1OUQ3MzIxOTcKUldTWElYT2QxZC82eG1ocjBUK0ZUZUZqU25JbmFNdmJoZ0w1dnhidDUxREZMd2wycUlDOGpVNloK";
 
 /// Why a key or signature was refused. Never carries key or signature bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
