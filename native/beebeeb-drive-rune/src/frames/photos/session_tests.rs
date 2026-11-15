@@ -39,6 +39,8 @@ struct Script {
     folders_removed: Vec<SourceRef>,
     /// The source refuses to add a folder (`add_folder` answers `false`).
     refuse_folder: bool,
+    /// The engine refused a folder change after the press: told once.
+    folder_refused: bool,
     /// The files behind the photos for Move…; none: the source holds no file for them.
     items: Vec<crate::source::DriveItem>,
 }
@@ -126,6 +128,9 @@ impl PhotosSource for Later {
         }
         script.folders_added.push(folder_id.to_string());
         true
+    }
+    fn folder_refused(&mut self) -> bool {
+        std::mem::take(&mut self.script.lock().unwrap().folder_refused)
     }
     fn remove_folder(&mut self, source: SourceRef) {
         self.script.lock().unwrap().folders_removed.push(source);
@@ -820,4 +825,18 @@ fn remove_on_a_folder_row_takes_the_folder_out_of_the_sources() {
     assert!(has(&rt, "ph-item-1-0-remove"), "a folder row has Remove");
     click(&mut rt, "ph-item-1-0-remove");
     assert_eq!(script.lock().unwrap().folders_removed, [SourceRef::Folder(0)]);
+}
+
+#[test]
+fn a_folder_change_the_engine_refused_later_is_said_once() {
+    let (mut rt, script) = window();
+    assert!(rt.state.photos.toast.is_none());
+    script.lock().unwrap().folder_refused = true;
+    rt.frame(0.0);
+    rt.frame(0.0);
+    assert_eq!(
+        rt.state.photos.toast,
+        Some(Toast::Words("Couldn\u{2019}t change that folder"))
+    );
+    assert_eq!(text(&rt, "ph-toast-text"), "Couldn\u{2019}t change that folder");
 }

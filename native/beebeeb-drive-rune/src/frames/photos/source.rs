@@ -234,6 +234,10 @@ pub trait PhotosSource {
     /// Takes a folder out of Photo sources (Remove): its photos show again. Nothing is moved or deleted. A device:
     /// nothing.
     fn remove_folder(&mut self, _source: SourceRef) {}
+    /// A folder change (add, remove, switch) was refused since the last call: `true`, once. The window says so.
+    fn folder_refused(&mut self) -> bool {
+        false
+    }
     /// The files behind these photos, for Move… (names and ids; Files' folder dialog moves them). `None`: a photo
     /// is not held, or nothing is connected that could say.
     fn file_items(&self, _ids: &[PhotoId]) -> Option<Vec<crate::source::DriveItem>> {

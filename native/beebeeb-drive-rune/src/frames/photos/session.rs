@@ -491,6 +491,7 @@ impl Ui {
 
 /// What is said when a folder could not be added, and when photos could not be moved.
 const WORDS_FOLDER: &str = "Couldn\u{2019}t add that folder \u{00B7} not available right now";
+const WORDS_CHANGE: &str = "Couldn\u{2019}t change that folder";
 const WORDS_MOVE: &str = "Couldn\u{2019}t move \u{00B7} not available right now";
 
 impl Toast {
@@ -621,6 +622,11 @@ pub fn poll(s: &mut State, tx: &mut Tx) -> bool {
         changed |= ui.take_in_intents();
     }
     let pumped = ui.source.pump();
+    // A folder change the engine refused (it answers after the press): said, not only logged.
+    if later && ui.source.folder_refused() {
+        ui.toast = Some(Toast::Words(WORDS_CHANGE));
+        changed = true;
+    }
     if pumped.busy {
         tx.wake_after(POLL_EVERY);
     }

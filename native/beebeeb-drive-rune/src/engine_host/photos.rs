@@ -15,8 +15,9 @@
 //!   `remove_folder`, and `backup_status` (`photos_folders.rs`; the engine keeps the folders from Files the account
 //!   added). The window's folder dialog (Files' Move-to dialog, in its choose-only mode) hands the chosen folder to
 //!   `add_folder`.
-//! - not bound (the PR lists why): `file_items` (Move… needs the files behind the photos: the trait's default says
-//!   "none", and the window says so). The window's controls whose work no source method carries (Original,
+//! - Move…: `file_items` hands the files behind the photos to Files' folder dialog, which moves them. A refused
+//!   folder change is told to the window once (`folder_refused`).
+//! - not bound (the PR lists why): the window's controls whose work no source method carries (Original,
 //!   playing a video, Share, Rename, Search, Version history) say "not available in this version yet"
 //!   (`frames/photos/session.rs`).
 //!
@@ -793,6 +794,23 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
     /// The folders from Files the account added, as the engine last answered (slice K4, `photos_folders.rs`).
     fn folders(&self) -> Vec<Folder> {
         self.photos_folders_folders()
+    }
+
+    fn folder_refused(&mut self) -> bool {
+        self.photos_folders_refused()
+    }
+
+    /// The files behind the photos, for Move…: each with its name (the Files window's move reads the id, and the
+    /// name for "already used there"). A photo that is not in the library: none for all.
+    fn file_items(&self, ids: &[PhotoId]) -> Option<Vec<DriveItem>> {
+        ids.iter()
+            .map(|id| {
+                let photo = self.file_of(*id)?;
+                let mut row = row_of(photo.id.clone());
+                row.name = photo.name.clone();
+                Some(row)
+            })
+            .collect()
     }
 
     fn add_folder(&mut self, folder_id: &str) -> bool {
