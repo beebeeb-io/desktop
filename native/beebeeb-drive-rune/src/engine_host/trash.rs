@@ -514,7 +514,7 @@ impl<C: CredentialStores> TrashSource for EngineTrashSource<C> {
 
     /// The server's own count (`count.rs`): none until it has said one for this session and account.
     fn count(&self) -> Option<usize> {
-        None
+        self.badge()
     }
 
     /// Details and Preview have no engine call yet.
