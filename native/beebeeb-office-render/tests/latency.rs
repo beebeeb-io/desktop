@@ -161,7 +161,8 @@ impl Session {
 }
 
 fn not_flat(pixels: &[u8]) -> bool {
-    pixels.len() >= 8 && pixels.chunks_exact(4).any(|px| px != &pixels[..4])
+    let (px, _) = pixels.as_chunks::<4>();
+    px.len() >= 2 && px.iter().any(|p| p != &px[0])
 }
 
 fn ms(d: Duration) -> f64 {
