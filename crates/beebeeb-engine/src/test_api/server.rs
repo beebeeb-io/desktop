@@ -6,7 +6,9 @@
 //! a recovery check derived from [`TEST_PHRASE`], the sample tree, and a FIXED user id, so a TEST build's local data
 //! stays bound to the same account when the server restarts (the build also binds its data to the origin, port
 //! included: give the same `--listen` again). In front of it, [`fixture_handler`] answers a sign-in for any other email
-//! as a wrong password before OPAQUE runs, and writes one [`access_line`] per answer.
+//! as a wrong password before OPAQUE runs, answers every call with a session token `401` once the session was ended (a
+//! line [`END_SESSION_LINE`] on standard input: a native check of the app's session watcher), and writes one
+//! [`access_line`] per answer.
 //!
 //! The binary (`src/test_api/bin_main.rs`) is built only with `--features fake-server`, which implies `test-support`:
 //! the default feature set never builds it, a release profile refuses to compile it (`lib.rs`), and no app enables it
@@ -19,7 +21,7 @@
 use std::io::{self, BufRead, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
@@ -34,6 +36,8 @@ pub const FIXTURE_EMAIL: &str = "fixture@example.invalid";
 pub const FIXTURE_PASSWORD: &str = "fixture password 2475";
 /// Its user id, the same at every start: a TEST build binds its local data to it.
 pub const FIXTURE_USER_ID: &str = "f1c70000-2475-4000-8000-000000000001";
+/// The line on standard input that ends the fixture account's session (see [`fixture_handler`]).
+pub const END_SESSION_LINE: &str = "end-session";
 /// `--max-seconds` when it is not given.
 pub const DEFAULT_MAX_SECONDS: u64 = 3600;
 const MAX_SECONDS: u64 = 86_400;
@@ -43,7 +47,8 @@ pub const USAGE: &str =
 Serves the engine's fixture account (a fake of the API, for tests) on loopback only; the default address is
 127.0.0.1:0 (a free port). Once it listens it prints ONE line on stdout: `bb-fake-server listening http://<address>`.
 It stops when its standard input closes, on a line `stop`, or after --max-seconds (default 3600), and says why on
-stderr. A development binary: built only with --features fake-server, never in a release profile, never in an app.";
+stderr. A line `end-session` ends the account's session: from then on every request with a session token is answered
+401, as a server that no longer accepts the session (once ended, it stays ended until the server stops). A development binary: built only with --features fake-server, never in a release profile, never in an app.";
 
 /// What the command line asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,13 +183,22 @@ pub fn access_line(request: &Request, status: u16) -> String {
 /// Where the [`access_line`]s go (stderr in the binary, a list in a test).
 pub type LineWriter = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// The fixture account's routes ([`account_handler`]) behind the server's two rules: a sign-in leg for any other email
-/// is answered as a wrong password (`401`, what core reads as "Invalid email or password") before OPAQUE runs, and
-/// every answer is counted in `served` and written as an [`access_line`].
-pub fn fixture_handler(account: Arc<FakeAccount>, lines: LineWriter, served: Arc<AtomicU64>) -> Handler {
+/// The fixture account's routes ([`account_handler`]) behind the server's three rules: once `session_ended` is set (a
+/// line [`END_SESSION_LINE`]), every request with a session token is answered `401` before any route runs, as a server
+/// that no longer accepts the session (the sign-in legs carry no token and are not touched); a sign-in leg for any
+/// other email is answered as a wrong password (`401`, what core reads as "Invalid email or password") before OPAQUE
+/// runs; and every answer is counted in `served` and written as an [`access_line`].
+pub fn fixture_handler(
+    account: Arc<FakeAccount>,
+    lines: LineWriter,
+    served: Arc<AtomicU64>,
+    session_ended: Arc<AtomicBool>,
+) -> Handler {
     let routes = account_handler(account.clone());
     Arc::new(move |request: &Request| {
-        let reply = if is_sign_in_leg(request) && !names_email(request, &account.email) {
+        let reply = if session_ended.load(Ordering::SeqCst) && request.bearer().is_some() {
+            Reply::error(401, "unauthorized")
+        } else if is_sign_in_leg(request) && !names_email(request, &account.email) {
             Reply::json(401, json!({}))
         } else {
             routes(request)
@@ -231,14 +245,18 @@ impl Stop {
     }
 }
 
-/// Read `input` on a thread of its own until it ends or a line `stop` comes (other lines are ignored); the first of
-/// that and `deadline` is the answer.
-pub fn wait_for_stop<R: BufRead + Send + 'static>(input: R, deadline: Duration) -> io::Result<Stop> {
+/// Read `input` on a thread of its own until it ends or a line `stop` comes; the first of that and `deadline` is the
+/// answer. A line [`END_SESSION_LINE`] sets `session_ended` (and says so on stderr, once); other lines are ignored.
+pub fn wait_for_stop<R: BufRead + Send + 'static>(
+    input: R,
+    deadline: Duration,
+    session_ended: Arc<AtomicBool>,
+) -> io::Result<Stop> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("fake-server-input".into())
         .spawn(move || {
-            let _ = tx.send(read_until_stop(input));
+            let _ = tx.send(read_until_stop(input, &session_ended));
         })?;
     Ok(match rx.recv_timeout(deadline) {
         Ok(stop) => stop,
@@ -247,13 +265,20 @@ pub fn wait_for_stop<R: BufRead + Send + 'static>(input: R, deadline: Duration) 
     })
 }
 
-fn read_until_stop<R: BufRead>(mut input: R) -> Stop {
+fn read_until_stop<R: BufRead>(mut input: R, session_ended: &AtomicBool) -> Stop {
     let mut line = String::new();
     loop {
         line.clear();
         match input.read_line(&mut line) {
             Ok(0) | Err(_) => return Stop::InputClosed,
             Ok(_) if line.trim() == "stop" => return Stop::StopLine,
+            Ok(_) if line.trim() == END_SESSION_LINE => {
+                if !session_ended.swap(true, Ordering::SeqCst) {
+                    say(
+                        "bb-fake-server: the session was ended (a line `end-session`): every request with a session token is answered 401 from now on",
+                    );
+                }
+            }
             Ok(_) => {}
         }
     }
@@ -286,9 +311,10 @@ pub fn run<I: IntoIterator<Item = String>>(args: I) -> ExitCode {
     // Register the fixture account (Argon2id, ~27 s) BEFORE binding, so the port does not accept connections while
     // the handler is not ready (P2-3 of the PR #338 review).
     let served = Arc::new(AtomicU64::new(0));
+    let session_ended = Arc::new(AtomicBool::new(false));
     let lines: LineWriter = Arc::new(say);
     let account = fixture_account();
-    let handler = fixture_handler(account, lines, served.clone());
+    let handler = fixture_handler(account, lines, served.clone(), session_ended.clone());
     let listener = match bind(options.listen) {
         Ok(listener) => listener,
         Err(error) => {
@@ -318,6 +344,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I) -> ExitCode {
     let stop = match wait_for_stop(
         io::BufReader::new(io::stdin()),
         Duration::from_secs(options.max_seconds),
+        session_ended,
     ) {
         Ok(stop) => stop,
         Err(error) => {
@@ -473,6 +500,7 @@ mod tests {
             fixture(),
             Arc::new(move |line: &str| sink.lock().unwrap().push(line.to_string())),
             served.clone(),
+            Arc::new(AtomicBool::new(false)),
         );
         // A message OPAQUE cannot read: OPAQUE answers it with 400, the email rule with 401 before OPAQUE is asked.
         let start = |email: &str| {
@@ -602,12 +630,73 @@ mod tests {
 
     #[test]
     fn it_stops_when_the_input_closes_on_a_stop_line_or_at_the_deadline() {
-        let wait = |text: &'static str| wait_for_stop(io::Cursor::new(text), Duration::from_secs(10)).unwrap();
+        let wait = |text: &'static str| {
+            wait_for_stop(
+                io::Cursor::new(text),
+                Duration::from_secs(10),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap()
+        };
         assert_eq!(wait(""), Stop::InputClosed);
         assert_eq!(wait("hello\nnot stop\n"), Stop::InputClosed);
         assert_eq!(wait("hello\n stop \nlater\n"), Stop::StopLine);
         let (_held, rx) = mpsc::channel::<()>();
         let open = io::BufReader::new(OpenInput(rx));
-        assert_eq!(wait_for_stop(open, Duration::from_millis(300)).unwrap(), Stop::Deadline);
+        assert_eq!(
+            wait_for_stop(open, Duration::from_millis(300), Arc::new(AtomicBool::new(false))).unwrap(),
+            Stop::Deadline
+        );
+    }
+
+    #[test]
+    fn a_line_end_session_ends_the_session_and_only_that_line_does() {
+        let ended_by = |text: &'static str| {
+            let ended = Arc::new(AtomicBool::new(false));
+            let stop = wait_for_stop(io::Cursor::new(text), Duration::from_secs(10), ended.clone()).unwrap();
+            (stop, ended.load(Ordering::SeqCst))
+        };
+        assert_eq!(ended_by("hello\nend\nend-sessions\n"), (Stop::InputClosed, false));
+        assert_eq!(ended_by(" end-session \n"), (Stop::InputClosed, true));
+        assert_eq!(ended_by("end-session\nend-session\nstop\n"), (Stop::StopLine, true));
+        // `stop` first: the server stops before it reads the line after it.
+        assert_eq!(ended_by("stop\nend-session\n"), (Stop::StopLine, false));
+    }
+
+    #[test]
+    fn an_ended_session_is_refused_on_every_call_with_a_token_and_the_sign_in_legs_are_not_touched() {
+        let account = fixture();
+        let ended = Arc::new(AtomicBool::new(false));
+        let handler = fixture_handler(
+            account.clone(),
+            Arc::new(|_: &str| {}),
+            Arc::new(AtomicU64::new(0)),
+            ended.clone(),
+        );
+        let with_token = |method: &str, path: &str| Request {
+            method: method.into(),
+            path: path.into(),
+            headers: vec![("Authorization".into(), format!("Bearer {}", account.session_token))],
+            body: Vec::new(),
+        };
+        let calls = [
+            with_token("GET", "/api/v1/sync/snapshot"),
+            with_token("GET", "/api/v1/auth/me"),
+        ];
+        // A message OPAQUE cannot read, for the fixture's email: OPAQUE's own 400, before and after the end.
+        let sign_in_leg = post(
+            "/api/v1/opaque/login-start",
+            json!({ "email": FIXTURE_EMAIL, "client_message": "AA==" }),
+        );
+        let before: Vec<u16> = calls.iter().map(|r| handler(r).status).collect();
+        let leg_before = handler(&sign_in_leg).status;
+        ended.store(true, Ordering::SeqCst);
+        let after: Vec<u16> = calls.iter().map(|r| handler(r).status).collect();
+        let leg_after = handler(&sign_in_leg).status;
+        assert_eq!(
+            (before, leg_before, after, leg_after),
+            (vec![200, 200], 400, vec![401, 401], 400),
+            "calls with the token before, the sign-in leg before, calls after the end, the sign-in leg after"
+        );
     }
 }
