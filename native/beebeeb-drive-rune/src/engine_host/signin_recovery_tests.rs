@@ -17,7 +17,7 @@ use beebeeb_engine::test_api::{FakeApi, Handler, Reply, Request};
 use serde_json::json;
 
 use super::super::{EngineSignInSource, Wait};
-use crate::frames::signin::source::{PhraseProblem, SignInEvent, SignInProblem, SignInSource};
+use crate::frames::signin::source::{NewPasswordProblem, PhraseProblem, SignInEvent, SignInSource};
 
 /// A valid phrase (BIP-39's second test vector): the fake account's.
 const PHRASE: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
@@ -162,7 +162,10 @@ fn signin_recovery_late_answer_dropped() {
 
     // The engine holds no recovery of the first press either: the next step sends nothing.
     source.begin_set_password("An invented new password, 2026");
-    assert_eq!(next(&mut source), SignInEvent::PasswordSet(Err(SignInProblem::Other)));
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::PasswordSet(Err(NewPasswordProblem::Ended))
+    );
     assert_eq!(requests(&fake, REGISTER), 0);
 }
 
@@ -217,7 +220,10 @@ fn signin_recovery_discard_forgets_the_words() {
     // the server's recovery token), so the next step has nothing to go on and sends nothing.
     source.discard_partial_sign_in();
     source.begin_set_password("An invented new password, 2026");
-    assert_eq!(next(&mut source), SignInEvent::PasswordSet(Err(SignInProblem::Other)));
+    assert_eq!(
+        next(&mut source),
+        SignInEvent::PasswordSet(Err(NewPasswordProblem::Ended))
+    );
     assert_eq!(
         requests(&fake, REGISTER),
         0,
@@ -245,4 +251,33 @@ fn signin_recovery_marks_the_box_of_an_unknown_word() {
         "nothing is sent: {:?}",
         fake.fake.routes()
     );
+}
+
+/// Row 3.5 of checkpoint 2: each answer of the new password reaches the screen as its own kind, so the screen can say
+/// what is true (the two-factor account after recovery is told the password WAS changed). Mutant: `SignInRequired` mapped
+/// to `NewPasswordProblem::Other` (the screen then says the step did not finish).
+#[test]
+fn signin_recovery_every_answer_of_the_new_password_keeps_its_kind() {
+    use NewPasswordProblem as Kind;
+    use beebeeb_engine::app::bindings::recovery::{RecoveryDone, RecoveryRefused};
+    assert_eq!(super::password_set(Ok(RecoveryDone::SignedIn)), Ok(()));
+    assert_eq!(
+        super::password_set(Ok(RecoveryDone::SignInRequired)),
+        Err(Kind::SignInRequired)
+    );
+    for (refused, kind) in [
+        (RecoveryRefused::Weak, Kind::TooShort),
+        (RecoveryRefused::Breached, Kind::Breached),
+        (RecoveryRefused::Offline, Kind::Offline),
+        (
+            RecoveryRefused::RateLimited { seconds: 30 },
+            Kind::RateLimited { seconds: 30 },
+        ),
+        (RecoveryRefused::Overtaken, Kind::Ended),
+        (RecoveryRefused::WrongPhrase, Kind::Other),
+        (RecoveryRefused::UnknownWords(vec![3]), Kind::Other),
+        (RecoveryRefused::Other, Kind::Other),
+    ] {
+        assert_eq!(super::password_set(Err(refused.clone())), Err(kind), "{refused:?}");
+    }
 }

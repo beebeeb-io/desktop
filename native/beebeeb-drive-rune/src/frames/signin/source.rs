@@ -111,6 +111,16 @@ pub enum DeviceStatus {
     /// DW-A08's error state: the other device approved, and the key payload did not decrypt
     /// here. Nothing was signed in.
     KeysNotReceived { by: String },
+    /// Added by lane fx-signin (no board frame: `FRAMES.md`, flagged deviations): the request was lost after its
+    /// code was shown: the connection dropped (a new connection is a new code), or Beebeeb ended the request with an
+    /// error. Drawn as DW-A10, with its own words. Nothing was signed in.
+    Lost,
+    /// Added by lane fx-signin: the other device approved an account other than the one this PC holds (its stored
+    /// session, or its local files). Nothing was signed in, and no keys were kept.
+    OtherAccount,
+    /// Added by lane fx-signin: the other device approved, and this PC did not sign in: it moved on while it waited
+    /// (a sign-in, a lock or a sign-out here), or it could not store the session. Nothing was signed in.
+    NotSignedIn,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +161,32 @@ pub enum PasskeyOutcome {
     Succeeded(NextAfterSignIn),
     Cancelled,
     Unavailable,
+}
+
+/// Why the recovery's new password did not end signed in (DW-A49). The engine's set-password step answers from three
+/// places: before anything is sent (the minimum, the breach check), at the registration (the recovery stays held and
+/// the password can be tried again) and at the last request (the recovery is over whatever the answer, and the password
+/// may have changed). The window cannot tell the last two apart for a wait, an outage or a refusal it cannot read, so
+/// their words are true for both: try again, and a password that was set already works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewPasswordProblem {
+    /// Shorter than the account's minimum. Nothing was sent; the words stay verified.
+    TooShort,
+    /// In a list of leaked passwords. Nothing was changed; the words stay verified.
+    Breached,
+    /// No answer from Beebeeb (or the breach check could not be made).
+    Offline,
+    /// Too many tries: the server's wait. No countdown runs for it.
+    RateLimited {
+        seconds: u32,
+    },
+    /// This recovery is over: it was left, the server ended it, or the session here moved. A password that was set
+    /// works; otherwise the recovery starts again from the words.
+    Ended,
+    /// The password WAS changed, and nothing was signed in here: the account asks for a normal sign-in with it
+    /// (two-factor). Not a failure: the window shows the password updated and the way to sign in.
+    SignInRequired,
+    Other,
 }
 
 /// What the strength meter under a new password shows (`.kit-strength`): how many of its four
@@ -198,7 +234,7 @@ pub enum SignInEvent {
     /// Recovery, step 1 (DW-A47): the phrase re-derived this account's key.
     RecoveryPhraseVerified(Result<(), PhraseProblem>),
     /// Recovery, last step (DW-A49).
-    PasswordSet(Result<(), SignInProblem>),
+    PasswordSet(Result<(), NewPasswordProblem>),
     /// Added by lane signin-create: an answer of sign-up (DW-A31 to DW-A44).
     SignUp(SignUpEvent),
     /// Added by lane bind-signin: the person left a step (`discard_partial_sign_in`) and the session that step
@@ -282,8 +318,11 @@ pub trait SignInSource {
     fn poll(&mut self) -> Option<SignInEvent>;
     /// Added by lane f-signin-rest (a default, so an implementation written before it compiles):
     /// the person went back from a step after the password (the code, the twelve words, the
-    /// vault password). The partial session is discarded (`auth_v2`: drop the partial token) and
-    /// no `TwoFactor`, `PhraseRestored` or `VaultUnlocked` event of it may arrive after this call.
+    /// vault password) or from the recovery's screens (the words, the new password). The partial
+    /// session is discarded (`auth_v2`: drop the partial token), a recovery the engine holds (the
+    /// derived key, the recovery token) is forgotten, and no `TwoFactor`, `PhraseRestored`,
+    /// `VaultUnlocked`, `RecoveryPhraseVerified` or `PasswordSet` event of it may arrive after this
+    /// call.
     fn discard_partial_sign_in(&mut self) {}
     /// Added by lane f-signin-rest (a default): how strong a password being chosen is, by the
     /// same rules as sign-up (DW-A49). Local and at once (it runs on every keystroke); `None`:
@@ -614,7 +653,11 @@ impl SignInSource for FixtureSignInSource {
         self.queue.retain(|e| {
             !matches!(
                 e,
-                SignInEvent::TwoFactor(_) | SignInEvent::PhraseRestored(_) | SignInEvent::VaultUnlocked(_)
+                SignInEvent::TwoFactor(_)
+                    | SignInEvent::PhraseRestored(_)
+                    | SignInEvent::VaultUnlocked(_)
+                    | SignInEvent::RecoveryPhraseVerified(_)
+                    | SignInEvent::PasswordSet(_)
             )
         });
     }
