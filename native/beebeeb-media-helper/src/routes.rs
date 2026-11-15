@@ -10,6 +10,7 @@
 
 use beebeeb_media_protocol::{Codec, ErrorCode};
 
+use crate::mf::Unavailable;
 use crate::{Route, route_in, system};
 
 /// What a FilmCraft codec label says the stream is.
@@ -29,6 +30,21 @@ pub fn classify(label: &str) -> Stream {
     let has = |needles: &[&str]| needles.iter().any(|n| l.contains(n));
     if has(&["uncompressed", "motion jpeg"]) {
         Stream::Raw
+    } else if has(&[
+        "mpeg-4 part 2",
+        "mpeg-4 visual",
+        "mp4v",
+        "xvid",
+        "divx",
+        "msmpeg4",
+        "mp43",
+    ]) {
+        Stream::Known(Codec::Mpeg4Part2)
+    } else if has(&["vc-1", "wvc1", "wmv"]) {
+        // Not a bare "vc1": H.264's "avc1" holds it.
+        Stream::Known(Codec::Vc1)
+    } else if has(&["wma", "windows media audio"]) {
+        Stream::Known(Codec::Wma)
     } else if has(&["e-ac-3", "e-ac3", "eac3"]) {
         Stream::Known(Codec::Eac3)
     } else if has(&["ac-3", "ac3"]) {
@@ -73,20 +89,79 @@ pub fn is_reduced_quality(label: &str) -> bool {
     label.to_ascii_lowercase().contains("he-aac")
 }
 
-/// May a stream with this label open its decoder, under `table`? Its codec for the answer, or the error to send.
-pub fn check(table: &[(Codec, Route)], label: &str) -> Result<Codec, ErrorCode> {
+/// Who decodes a stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decoder {
+    /// FilmCraft, in this process.
+    Ours(Codec),
+    /// The operating system's decoder, in this process ([`crate::system`]).
+    System(Codec),
+}
+
+impl Decoder {
+    /// The stream's codec.
+    pub fn codec(self) -> Codec {
+        match self {
+            Decoder::Ours(codec) | Decoder::System(codec) => codec,
+        }
+    }
+}
+
+/// Who decodes a stream with this label under `table`, given whether the system's decoders start in this process
+/// (`starts`); or the error to send. A `System` row never comes back as [`Decoder::Ours`].
+pub fn decoder_with(
+    table: &[(Codec, Route)],
+    label: &str,
+    starts: impl Fn(Codec) -> Result<(), Unavailable>,
+) -> Result<Decoder, ErrorCode> {
     match classify(label) {
-        Stream::Raw => Ok(Codec::Other),
+        Stream::Raw => Ok(Decoder::Ours(Codec::Other)),
         Stream::Unknown => Err(ErrorCode::Unsupported(Codec::Other)),
         Stream::Known(codec) => match route_in(table, codec) {
-            Route::Rust => Ok(codec),
-            Route::System if system::available(codec) => {
-                // A system module that says yes has no decoding path here yet (slice M10 builds it).
-                Err(ErrorCode::Internal)
-            }
-            Route::System => Err(ErrorCode::NoSystemDecoder(codec)),
+            Route::Rust => Ok(Decoder::Ours(codec)),
+            Route::System => match starts(codec) {
+                Ok(()) => Ok(Decoder::System(codec)),
+                Err(why) => Err(system::refusal(why, codec)),
+            },
             Route::Unavailable => Err(ErrorCode::Unsupported(codec)),
         },
+    }
+}
+
+/// [`decoder_with`] with this process's own answer ([`system::availability`]).
+pub fn decoder(table: &[(Codec, Route)], label: &str) -> Result<Decoder, ErrorCode> {
+    decoder_with(table, label, system::availability)
+}
+
+/// Both streams of a file, the video first: its refusal is the one the app hears. So a file with HEVC video names
+/// HEVC whatever its audio is, and the app picks the sandbox profile with the HEVC capabilities
+/// (`beebeeb_media_protocol::profile_for`).
+pub fn streams_with(
+    table: &[(Codec, Route)],
+    video: Option<&str>,
+    audio: Option<&str>,
+    starts: impl Fn(Codec) -> Result<(), Unavailable> + Copy,
+) -> Result<(Option<Decoder>, Option<Decoder>), ErrorCode> {
+    let video = video.map(|label| decoder_with(table, label, starts)).transpose()?;
+    let audio = audio.map(|label| decoder_with(table, label, starts)).transpose()?;
+    Ok((video, audio))
+}
+
+/// [`streams_with`] with this process's own answer.
+pub fn streams(
+    table: &[(Codec, Route)],
+    video: Option<&str>,
+    audio: Option<&str>,
+) -> Result<(Option<Decoder>, Option<Decoder>), ErrorCode> {
+    streams_with(table, video, audio, system::availability)
+}
+
+/// May a stream with this label open FilmCraft's decoder, under `table`? Its codec for the answer, or the error to
+/// send. A stream for the system's decoder is opened by the session (`crate::system::SystemStreams`), never here.
+pub fn check(table: &[(Codec, Route)], label: &str) -> Result<Codec, ErrorCode> {
+    match decoder(table, label)? {
+        Decoder::Ours(codec) => Ok(codec),
+        Decoder::System(_) => Err(ErrorCode::Internal),
     }
 }
 
@@ -128,10 +203,85 @@ mod tests {
             (Codec::Pcm, Route::Unavailable),
             (Codec::Flac, Route::Rust),
         ];
+        // Never FilmCraft's decoder. Where the system's decoders do not start (any system but Windows; the sandbox's
+        // default profile) the refusal names the codec; on a Windows test run they start, and the session opens them.
+        assert_ne!(check(&table, "HEVC"), Ok(Codec::Hevc));
+        #[cfg(not(windows))]
         assert_eq!(check(&table, "HEVC"), Err(ErrorCode::NoSystemDecoder(Codec::Hevc)));
         assert_eq!(check(&table, "PCM"), Err(ErrorCode::Unsupported(Codec::Pcm)));
         assert_eq!(check(&table, "FLAC"), Ok(Codec::Flac));
         assert_eq!(check(&table, "Vorbis"), Err(ErrorCode::Unsupported(Codec::Vorbis)));
         assert_eq!(check(&table, "Uncompressed YUV"), Ok(Codec::Other));
+    }
+
+    #[test]
+    fn the_windows_formats_classify_to_their_codec_and_avc1_stays_h264() {
+        for (label, codec) in [
+            ("MPEG-4 Part 2 (Advanced Simple)", Codec::Mpeg4Part2),
+            ("Xvid", Codec::Mpeg4Part2),
+            ("VC-1 (Advanced)", Codec::Vc1),
+            ("WMV3", Codec::Vc1),
+            ("WMA Pro", Codec::Wma),
+            ("H.264 (avc1)", Codec::H264),
+        ] {
+            assert_eq!(classify(label), Stream::Known(codec), "{label}");
+        }
+    }
+
+    /// A `System` row goes to the system's decoder when it starts here, and is refused with the reason when it does
+    /// not; it never comes back as ours. A `Rust` row never asks the system.
+    #[test]
+    fn a_system_row_goes_to_the_system_or_is_refused_with_the_reason() {
+        let table = [(Codec::Hevc, Route::System), (Codec::Flac, Route::Rust)];
+        let here = |_: Codec| -> Result<(), Unavailable> { Ok(()) };
+        let not_here = |_: Codec| -> Result<(), Unavailable> { Err(Unavailable::NotHere) };
+        let no_media = |_: Codec| -> Result<(), Unavailable> { Err(Unavailable::NoSystemMedia) };
+        assert_eq!(decoder_with(&table, "HEVC", here), Ok(Decoder::System(Codec::Hevc)));
+        assert_eq!(
+            decoder_with(&table, "HEVC", not_here),
+            Err(ErrorCode::NoSystemDecoder(Codec::Hevc))
+        );
+        assert_eq!(
+            decoder_with(&table, "HEVC", no_media),
+            Err(ErrorCode::NoSystemMedia(Codec::Hevc))
+        );
+        let asked = std::cell::Cell::new(0);
+        let counting = |_: Codec| -> Result<(), Unavailable> {
+            asked.set(asked.get() + 1);
+            Ok(())
+        };
+        assert_eq!(decoder_with(&table, "FLAC", counting), Ok(Decoder::Ours(Codec::Flac)));
+        assert_eq!(asked.get(), 0, "a Rust row does not ask for the system's decoder");
+        assert_eq!(check(&table, "FLAC"), Ok(Codec::Flac));
+    }
+
+    /// The video stream is decided first, so its refusal is the one the app hears.
+    #[test]
+    fn the_video_stream_is_decided_first() {
+        let table = [
+            (Codec::Hevc, Route::System),
+            (Codec::Aac, Route::System),
+            (Codec::Opus, Route::Rust),
+            (Codec::Ac3, Route::Unavailable),
+        ];
+        let not_here = |_: Codec| -> Result<(), Unavailable> { Err(Unavailable::NotHere) };
+        let here = |_: Codec| -> Result<(), Unavailable> { Ok(()) };
+        assert_eq!(
+            streams_with(&table, Some("HEVC"), Some("AAC"), not_here),
+            Err(ErrorCode::NoSystemDecoder(Codec::Hevc))
+        );
+        assert_eq!(
+            streams_with(&table, Some("HEVC"), Some("AC-3"), here),
+            Err(ErrorCode::Unsupported(Codec::Ac3))
+        );
+        assert_eq!(
+            streams_with(&table, Some("HEVC"), Some("Opus"), here),
+            Ok((Some(Decoder::System(Codec::Hevc)), Some(Decoder::Ours(Codec::Opus))))
+        );
+        assert_eq!(
+            streams_with(&table, None, Some("AAC"), not_here),
+            Err(ErrorCode::NoSystemDecoder(Codec::Aac))
+        );
+        assert_eq!(streams_with(&table, None, None, here), Ok((None, None)));
     }
 }

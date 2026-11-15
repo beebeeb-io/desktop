@@ -13,6 +13,7 @@
 #![deny(unsafe_code)]
 
 pub mod decode;
+pub mod mf;
 pub mod read;
 pub mod routes;
 pub mod session;
