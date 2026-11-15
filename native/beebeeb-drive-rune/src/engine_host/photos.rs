@@ -54,7 +54,10 @@ use crate::frames::photos::source::{
     Answered, BackupStatus, Day, Detail, Device, DeviceKind, Folder, Kind, Left, Loaded, Photo, PhotoId, PhotosSource,
     Pumped, Shape, SourceRef, StripItem, Totals, Viewing,
 };
+use crate::media::StopReason;
+use crate::media::player::{MediaItem, PlayerHandle, Refusal};
 use crate::source::DriveItem;
+use beebeeb_media_protocol::KindHint;
 
 #[cfg(test)]
 #[path = "photos_tests.rs"]
@@ -62,6 +65,11 @@ mod tests;
 // plan40 batch 1: Photo sources' folders and the devices' backup line (slice B1).
 #[path = "photos_folders.rs"]
 mod photos_folders;
+
+/// Whether this PC can play video: Windows, with the helper next to the app.
+fn playback_here() -> bool {
+    cfg!(windows) && crate::media::transport::helper_exe().is_some()
+}
 
 /// A library this recent is not read again when the Photos section opens.
 pub const FRESH_FOR: Duration = Duration::from_secs(30);
@@ -406,6 +414,46 @@ impl<C: CredentialStores> EnginePhotos<C> {
             }
             self.read();
         }
+    }
+
+    /// Opens the video `id` in `player` for the press made now. `None`: not a video, no playback on this PC, the
+    /// player refused, or the session or the account moved while it opened (the player is then stopped: a late
+    /// open under another session is dropped). `between` runs after the open and before that check (tests only).
+    fn play_with(
+        &mut self,
+        id: PhotoId,
+        player: PlayerHandle,
+        playable: bool,
+        open: impl FnOnce(&PlayerHandle, MediaItem) -> Result<(), Refusal>,
+        between: impl FnOnce(),
+    ) -> Option<PlayerHandle> {
+        // The session and account of the press, read before anything else.
+        let pressed = stamp(&self.engine);
+        self.look(&pressed);
+        if !playable || !self.engine.has_session() {
+            return None;
+        }
+        let file = self.file_of(id)?;
+        if !file.video {
+            return None;
+        }
+        let item = MediaItem {
+            file_id: file.id.clone(),
+            kind: KindHint::Video,
+            length_ms: u64::from(self.thumbs.length(&file.id).unwrap_or(0)) * 1000,
+        };
+        let opened = open(&player, item);
+        between();
+        if opened.is_err() {
+            log("photos: the video could not be opened");
+            return None;
+        }
+        if stamp(&self.engine) != pressed {
+            log("photos: the open of an earlier session was dropped");
+            player.stop(StopReason::AccountChanged);
+            return None;
+        }
+        Some(player)
     }
 
     fn rows(&self, ids: &[PhotoId]) -> Option<Vec<DriveItem>> {
@@ -952,6 +1000,17 @@ impl<C: CredentialStores> PhotosSource for EnginePhotos<C> {
         }
         self.keeping.insert(file_id, pressed.0);
         Ok(())
+    }
+
+    fn play_video(&mut self, id: PhotoId) -> Option<crate::media::player::PlayerHandle> {
+        let player = crate::media::shell_player()?;
+        self.play_with(
+            id,
+            player,
+            playback_here(),
+            |player, item| player.open(item, Vec::new()),
+            || {},
+        )
     }
 
     fn trash(&mut self, ids: &[PhotoId]) -> Result<(), Left> {

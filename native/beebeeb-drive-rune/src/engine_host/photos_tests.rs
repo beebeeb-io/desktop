@@ -879,3 +879,7 @@ fn keep_on_this_pc_is_said_only_once_this_pc_answered() {
         "locked: nothing is asked"
     );
 }
+
+// Media (M8): a video in Photos plays in the shell's player. Declared here so it shares this file's fixtures.
+#[path = "photos_video_tests.rs"]
+mod video;
