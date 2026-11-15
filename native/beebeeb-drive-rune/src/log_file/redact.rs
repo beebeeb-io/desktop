@@ -1,29 +1,32 @@
 //! What may reach the log file: the redaction rules, in one place, with no dependency.
 //!
-//! Two layers, both applied to every event before a byte is written:
+//! Three layers, all applied to every event before a byte is written:
 //!
 //! 1. **By field name** ([`denied_name`]): a field called `path`, `name`, `email`, `token`, `key`, `password`,
 //!    `phrase`, `code`, `body`, `url` and the like is never written, whatever its value; the file shows
 //!    `<redacted>`. A field that ends in `id`, `kind`, `count`, `reason` and the like is an opaque value by
-//!    construction and goes to the shape check instead.
-//! 2. **By shape** ([`scrub`]): every remaining string (the message too) is read word by word (quotes, commas and
-//!    brackets count as spaces and are not written); a word that is a
-//!    URL, an email address, a path, a file name, a long token or hex string, a 6 to 8 digit code, or part of a run of
-//!    12 plain lowercase words (the shape of a recovery phrase) is replaced by a marker. A value that looks like a
-//!    server body (JSON or HTML) is replaced whole. Control characters are blanked, so one event is one line.
+//!    construction and goes to the next layers instead.
+//! 2. **The word rules** ([`scrub`]'s first pass) replace what they recognise with a marker, to keep a line readable:
+//!    a URL, an email address, a path (from a root to the last later word with a `/` or `\`, because a name can hold
+//!    spaces), a file name, a UUID or long hex id (`<id>`), a token, a 6 to 8 digit code, a run of 12 plain lowercase
+//!    words (a recovery phrase), the value after a credential label, a text between “…”, ‘…’, «…» or backticks (the
+//!    engine quotes the names it prints: `<name>`), `custom:<name>` (a backup folder the person picked) and the host
+//!    of the lock-held sentence. A server body (JSON or HTML) is replaced whole. From `HTTP <3 digits>` on, nothing
+//!    of the text is read: the log writes `HTTP <status>` with the status's standard reason from a fixed table
+//!    (`REASONS`), then `<body omitted>`. Control characters are blanked, so one event is one line.
+//! 3. **The allow-list** ([`vocabulary`]) writes the result: a word is written as it is only when it is a word of the
+//!    engine's log calls or the OS's error texts, a number or a marker; every other word becomes `<…>`. This is the
+//!    layer that decides (fail closed): a person's folder or file name can take any shape, so a word the rules above
+//!    do not recognise is masked, and a gap in them makes a line less readable, never leaks. A name is written only
+//!    when it is identical to a word of the engine's own log texts (the residue: generic words such as "Photos").
 //!
-//! Also by shape of the sentence: text between “…”, ‘…’, «…» or backticks is one name (`<name>`: the engine quotes the
-//! names it prints); from `HTTP <3 digits>` on, nothing of the text is written: the log writes `HTTP <status>` and the status's standard
-//! reason from a fixed table (`REASONS`), then `<body omitted>` (an error text keeps the first 300 characters of a
-//! server's answer); no byte after the digits is read; `custom:<name>` is a backup folder the person picked; `on <host>` of the
-//! lock-held sentence is `on <host>`; after an absolute path (also after a redacted label or `key=`) the rest of the
-//! text is dropped, because a name can hold spaces.
-//!
-//! Over-redaction is the accepted failure: a harmless word that looks like a path becomes `<path>`. A name that has
-//! no shape and no quotes (a folder called "Holiday" in free text) cannot be found. The audit of the engine's calls
-//! (PR #442) found three such texts and closed them: the refused sync folder's sentence (quoted, so `<name>`), a relative
-//! `sync_root` (the call no longer prints it) and the lock-held host. Of the 414 calls, 6 formatted a value into the
-//! message text at the first head, 5 do now. A new call that prints a name outside quotes is a review finding.
+//! Decision (lead, 2026-11-15): the allow-list replaced a deny-list because five deny-list rounds of PR #442 each
+//! leaked a new shape.
+
+#[path = "vocabulary.rs"]
+pub(crate) mod vocabulary;
+
+use vocabulary::{Mark, allow_listed, is_private_use, status_mark};
 
 /// Words of a field name (split on `_` and `.`) that make the whole field unwritable.
 const DENIED_WORDS: &[&str] = &[
@@ -165,12 +168,10 @@ const DENIED_PARTS: &[&str] = &[
 const KNOWN_NAMES: &[&str] = &["beebeeb-sync.lock", "desktop.toml", "state.db"];
 
 pub const REDACTED: &str = "<redacted>";
-/// Stand-ins for a quoted name and a host while the text is split into words (`<` and `>` are separators there).
-const NAME_MARK: char = '\u{E000}';
-const HOST_MARK: char = '\u{E001}';
 const VALUE_MAX: usize = 240;
 const MESSAGE_MAX: usize = 400;
 
+/// True when a field of this name is never written.
 /// True when a field of this name is never written.
 pub fn denied_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -203,12 +204,13 @@ pub fn message(raw: &str) -> String {
     cap(scrub(raw), MESSAGE_MAX)
 }
 
-/// A field value, scrubbed and capped. A UUID-shaped word survives only in a field whose name ends in `id`/`ids`
-/// (the engine's opaque `file_id`, `op_id`): anywhere else it could be a credential.
-pub fn value(name: &str, raw: &str) -> String {
-    cap(scrub_with(raw, is_id_name(name)), VALUE_MAX)
+/// A field value, scrubbed and capped. A UUID becomes `<id>` in every field, `file_id` too: it is not a name, but it
+/// correlates.
+pub fn value(_name: &str, raw: &str) -> String {
+    cap(scrub(raw), VALUE_MAX)
 }
 
+/// A number: kept, except a 6 to 8 digit value of a field that is not a plain metric (the shape of a one-time code).
 /// A number: kept, except a 6 to 8 digit value of a field that is not a plain metric (the shape of a one-time code).
 pub fn number(name: &str, shown: String) -> String {
     let lower = name.to_ascii_lowercase();
@@ -236,11 +238,6 @@ pub fn number(name: &str, shown: String) -> String {
     shown
 }
 
-fn is_id_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    matches!(lower.rsplit(['_', '.']).next(), Some("id" | "ids"))
-}
-
 fn cap(mut text: String, max: usize) -> String {
     if text.chars().count() > max {
         text = text.chars().take(max).collect::<String>() + "...";
@@ -248,82 +245,77 @@ fn cap(mut text: String, max: usize) -> String {
     text
 }
 
-/// Replaces every word of `raw` that has a forbidden shape; see the module docs.
+/// What a text may write: the word rules mark what they recognise, then only known words, numbers and markers are
+/// written; see the module docs.
 pub fn scrub(raw: &str) -> String {
-    scrub_with(raw, false)
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c.is_control() || is_private_use(c) { ' ' } else { c })
+        .collect();
+    allow_listed(&first_pass(&cleaned))
 }
 
-fn scrub_with(raw: &str, allow_uuid: bool) -> String {
-    // `HTTP 502 Bad Gateway: <the first 300 characters of the answer>`: the status stays, the answer never does.
+fn first_pass(raw: &str) -> String {
     // `Custom("Medical Records")`: the Debug shape of a backup folder the person picked.
     if let Some(at) = raw.find("Custom(\"") {
-        let head = scrub_with(&raw[..at], allow_uuid);
-        return if head.is_empty() {
-            "custom:<name>".to_string()
-        } else {
-            format!("{head} custom:<name>")
-        };
+        return format!("{} {}", first_pass(&raw[..at]), Mark::Custom.ch());
     }
-    if let Some((before, status)) = http_status_prefix(raw) {
-        let head = scrub_with(before, allow_uuid);
-        let status = format!("{status}: <body omitted>");
-        return if head.is_empty() {
-            status
+    // `HTTP 502 Bad Gateway: <the first 300 characters of the answer>`: the status stays, the answer never does.
+    if let Some((before, code)) = http_status_prefix(raw) {
+        // `Records (HTTP 404`: no gap after an opening bracket or quote.
+        let gap = if before.ends_with(['(', '[', '{', '"', '\'', '“', '‘', '«']) {
+            ""
         } else {
-            format!("{head} {status}")
+            " "
         };
+        return format!("{}{gap}{}: {}", first_pass(before), status_mark(code), Mark::Body.ch());
     }
     if looks_like_body(raw) {
-        return "<body omitted>".to_string();
+        return Mark::Body.ch().to_string();
     }
-    let marked = mark_host(raw);
-    let raw = mark_quoted(&marked);
-    let raw = raw.as_str();
-    // Quotes, commas and brackets are word separators (a Debug value has them between every word); control characters
-    // too, so one event is one line.
-    let blanked: String = raw
-        .chars()
-        .map(|c| {
-            if c.is_control() || "\"'()[]{}<>,;".contains(c) {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect();
-    let tokens: Vec<&str> = blanked.split_whitespace().collect();
-    let mut out: Vec<String> = Vec::with_capacity(tokens.len());
+    let marked = mark_quoted(&mark_host(raw));
+    let tokens = tokens(&marked);
+    let mut out = String::with_capacity(marked.len());
     let mut redact_next = false;
     let mut i = 0;
     while i < tokens.len() {
-        let run = tokens[i..].iter().take_while(|t| is_plain_word(t)).count();
-        if run >= 12 {
-            out.push("<phrase>".to_string());
-            i += run;
-            redact_next = false;
-            continue;
-        }
-        let token = tokens[i];
+        let (token, gap) = tokens[i];
+        let at = i;
         i += 1;
-        if token == NAME_MARK.to_string() {
-            out.push(if redact_next { REDACTED } else { "<name>" }.to_string());
+        if is_splitter(token) {
+            put(&mut out, gap, token);
+            continue;
+        }
+        let (run, run_end) = phrase_run(&tokens, at);
+        if run >= 12 {
+            put(&mut out, gap, Mark::Phrase.ch());
+            i = run_end;
             redact_next = false;
             continue;
         }
-        if token == HOST_MARK.to_string() {
-            out.push("<host>".to_string());
+        if token == Mark::Name.ch().to_string() {
+            put(
+                &mut out,
+                gap,
+                if redact_next { Mark::Redacted } else { Mark::Name }.ch(),
+            );
+            redact_next = false;
+            continue;
+        }
+        if token == Mark::Host.ch().to_string() {
+            put(&mut out, gap, token);
             continue;
         }
         if redact_next {
             // `Authorization: Bearer x`: the scheme word is shown, the credential after it is not.
             if ALWAYS_LABELS.contains(&token.to_ascii_lowercase().as_str()) {
-                out.push(token.to_string());
+                put(&mut out, gap, token);
             } else {
                 redact_next = false;
-                out.push(REDACTED.to_string());
-                // A redacted value that starts a path: its name can hold spaces, nothing after it is trusted.
+                put(&mut out, gap, Mark::Redacted.ch());
+                // A redacted value that starts a path: the whole path is the value.
                 if absolute_start(token) {
-                    break;
+                    i = path_end(&tokens, at) + 1;
                 }
             }
             continue;
@@ -332,18 +324,12 @@ fn scrub_with(raw: &str, allow_uuid: bool) -> String {
         if let Some((key, value)) = token.split_once('=')
             && value.get(..7).is_some_and(|head| head.eq_ignore_ascii_case("custom:"))
         {
-            // The key is a word like any other: a URL, a path or an email before the `=` still goes.
-            let key = if denied_name(key) {
-                REDACTED.to_string()
-            } else {
-                scrub_token(key, allow_uuid)
-            };
-            out.push(format!("{key}=custom:<name>"));
+            put(&mut out, gap, format!("{}={}", shown_key(key), Mark::Custom.ch()));
             break;
         }
         // `custom:<name>`: a backup folder the person picked; its name can hold spaces, so the rest goes too.
         if token.get(..7).is_some_and(|head| head.eq_ignore_ascii_case("custom:")) {
-            out.push("custom:<name>".to_string());
+            put(&mut out, gap, Mark::Custom.ch());
             break;
         }
         // `password: x`, `Authorization: Bearer x`: the label decides, and the word after it is its value.
@@ -352,92 +338,113 @@ fn scrub_with(raw: &str, allow_uuid: bool) -> String {
             || ALWAYS_LABELS.contains(&label.as_str())
         {
             redact_next = true;
-            out.push(token.to_string());
+            put(&mut out, gap, token);
             continue;
         }
-        let shown = scrub_token(token, allow_uuid);
-        // A path that starts at a root can hold spaces (`C:\Users\Anna Smith\x`): nothing after it is trusted.
-        let value_starts_a_path = token.split_once('=').is_some_and(|(_, value)| absolute_start(value));
-        if (shown.starts_with("<path>") && absolute_start(token)) || value_starts_a_path {
-            out.push(shown);
-            break;
+        // A path that starts at a root can hold spaces (`C:\Users\Anna Smith\x`): it runs to its last word.
+        let core = edges(token).1;
+        let key_of_path = core
+            .split_once('=')
+            .filter(|(_, value)| absolute_start(value))
+            .map(|(key, _)| key);
+        if absolute_start(token) || key_of_path.is_some() {
+            let end = path_end(&tokens, at);
+            let key = key_of_path
+                .map(|key| format!("{}=", shown_key(key)))
+                .unwrap_or_default();
+            put(
+                &mut out,
+                gap,
+                format!("{key}{}{}", Mark::Path.ch(), edges(tokens[end].0).2),
+            );
+            i = end + 1;
+            continue;
         }
-        out.push(shown);
+        put(&mut out, gap, scrub_token(token));
     }
-    out.join(" ")
+    out
 }
 
-/// The standard reason phrase of each HTTP status the `http` crate knows (RFC 9110 and its registered extensions). The
-/// log writes THIS text for a status and never the text of the input: three designs that read the reason out of the input
-/// each leaked a name (delta reviews 1 to 3 of #442). An unknown status has no reason.
-const REASONS: &[(u16, &str)] = &[
-    (100, "Continue"),
-    (101, "Switching Protocols"),
-    (102, "Processing"),
-    (200, "OK"),
-    (201, "Created"),
-    (202, "Accepted"),
-    (203, "Non-Authoritative Information"),
-    (204, "No Content"),
-    (205, "Reset Content"),
-    (206, "Partial Content"),
-    (207, "Multi-Status"),
-    (208, "Already Reported"),
-    (226, "IM Used"),
-    (300, "Multiple Choices"),
-    (301, "Moved Permanently"),
-    (302, "Found"),
-    (303, "See Other"),
-    (304, "Not Modified"),
-    (305, "Use Proxy"),
-    (307, "Temporary Redirect"),
-    (308, "Permanent Redirect"),
-    (400, "Bad Request"),
-    (401, "Unauthorized"),
-    (402, "Payment Required"),
-    (403, "Forbidden"),
-    (404, "Not Found"),
-    (405, "Method Not Allowed"),
-    (406, "Not Acceptable"),
-    (407, "Proxy Authentication Required"),
-    (408, "Request Timeout"),
-    (409, "Conflict"),
-    (410, "Gone"),
-    (411, "Length Required"),
-    (412, "Precondition Failed"),
-    (413, "Payload Too Large"),
-    (414, "URI Too Long"),
-    (415, "Unsupported Media Type"),
-    (416, "Range Not Satisfiable"),
-    (417, "Expectation Failed"),
-    (418, "I'm a teapot"),
-    (421, "Misdirected Request"),
-    (422, "Unprocessable Entity"),
-    (423, "Locked"),
-    (424, "Failed Dependency"),
-    (426, "Upgrade Required"),
-    (428, "Precondition Required"),
-    (429, "Too Many Requests"),
-    (431, "Request Header Fields Too Large"),
-    (451, "Unavailable For Legal Reasons"),
-    (500, "Internal Server Error"),
-    (501, "Not Implemented"),
-    (502, "Bad Gateway"),
-    (503, "Service Unavailable"),
-    (504, "Gateway Timeout"),
-    (505, "HTTP Version Not Supported"),
-    (506, "Variant Also Negotiates"),
-    (507, "Insufficient Storage"),
-    (508, "Loop Detected"),
-    (510, "Not Extended"),
-    (511, "Network Authentication Required"),
-];
+/// Characters that split words for the word rules and are written as they are: a Debug value has them between words.
+const SPLITTERS: &str = "\"'()[]{}<>,;";
 
-/// Splits `raw` at the first `HTTP <3 ASCII digits>` (the start of `DesktopApiError::HttpStatus`'s text, which ends in
-/// the first 300 characters of the server's answer): the text before it, and `HTTP <status>` with the status's standard
-/// reason from [`REASONS`]. Nothing after the three digits is read, so nothing of it can be written: the only input
-/// bytes this writes are those digits. `None` when there is no such prefix.
-fn http_status_prefix(raw: &str) -> Option<(&str, String)> {
+fn is_splitter(token: &str) -> bool {
+    token.len() == 1 && SPLITTERS.contains(token)
+}
+
+/// The words of `text` for the word rules, each with whether whitespace came before it; a splitter is a word of its own.
+fn tokens(text: &str) -> Vec<(&str, bool)> {
+    let mut out = Vec::new();
+    let (mut start, mut gap) = (None, false);
+    for (at, c) in text.char_indices() {
+        if !c.is_whitespace() && !SPLITTERS.contains(c) {
+            start.get_or_insert(at);
+            continue;
+        }
+        if let Some(from) = start.take() {
+            out.push((&text[from..at], gap));
+            gap = false;
+        }
+        if c.is_whitespace() {
+            gap = true;
+        } else {
+            out.push((&text[at..at + 1], gap));
+            gap = false;
+        }
+    }
+    out.extend(start.map(|from| (&text[from..], gap)));
+    out
+}
+
+fn put(out: &mut String, gap: bool, piece: impl std::fmt::Display) {
+    use std::fmt::Write as _;
+    let space = if gap && !out.is_empty() { " " } else { "" };
+    let _ = write!(out, "{space}{piece}");
+}
+
+/// The plain words of a recovery phrase from `tokens[at]` on (the splitters between them do not count): how many, and
+/// the index after the last.
+fn phrase_run(tokens: &[(&str, bool)], at: usize) -> (usize, usize) {
+    let (mut run, mut end) = (0, at);
+    for (j, (token, _)) in tokens.iter().enumerate().skip(at) {
+        if is_plain_word(token) {
+            run += 1;
+            end = j + 1;
+        } else if !is_splitter(token) {
+            break;
+        }
+    }
+    (run, end)
+}
+
+/// The last token of a path that starts at `tokens[at]`. A name in it can hold spaces, so the path runs past the last
+/// later token with a `/` or `\` in it, to the first token after that which ends in `:` (`… Records 2026: Access is
+/// denied`: the OS error after it stays readable). With no such `:`, the rest of the text is the path's (the leaf
+/// `Medical Records 2026 exists but …` cannot be told apart from the words after it).
+fn path_end(tokens: &[(&str, bool)], at: usize) -> usize {
+    let last = (at..tokens.len())
+        .rev()
+        .find(|&j| tokens[j].0.contains(['/', '\\']))
+        .unwrap_or(at);
+    (last..tokens.len())
+        .find(|&j| tokens[j].0.ends_with(':'))
+        .unwrap_or(tokens.len() - 1)
+}
+
+/// A key before `=`: `<redacted>` when its name is denied, else a word like any other.
+fn shown_key(key: &str) -> String {
+    if denied_name(key) {
+        Mark::Redacted.ch().to_string()
+    } else {
+        scrub_token(key)
+    }
+}
+
+/// Finds the first `HTTP <3 ASCII digits>` (the start of `DesktopApiError::HttpStatus`'s text, which ends in the
+/// first 300 characters of the server's answer): the text before it, and the status code. Nothing after the three
+/// digits is read, so nothing of it can be written: the only input bytes the status writes are those digits, and its
+/// reason comes from the fixed table (`vocabulary::REASONS`). `None` when there is no such prefix.
+fn http_status_prefix(raw: &str) -> Option<(&str, u16)> {
     for (at, _) in raw.match_indices("HTTP") {
         let mut rest = &raw[at + 4..];
         // `HTTP/1.1 502 ...`: the protocol version is skipped (no byte of it is written either).
@@ -450,11 +457,7 @@ fn http_status_prefix(raw: &str) -> Option<(&str, String)> {
             continue;
         }
         let Ok(code) = digits.parse::<u16>() else { continue };
-        let status = match REASONS.iter().find(|(known, _)| *known == code) {
-            Some((_, reason)) => format!("HTTP {code} {reason}"),
-            None => format!("HTTP {code}"),
-        };
-        return Some((raw[..at].trim(), status));
+        return Some((&raw[..at], code));
     }
     None
 }
@@ -466,7 +469,7 @@ fn mark_host(raw: &str) -> String {
         && let Some(since) = raw[pid + on..].find(", since")
     {
         let from = pid + on + 4;
-        return format!("{} {HOST_MARK} {}", &raw[..from], &raw[pid + on + since..]);
+        return format!("{}{}{}", &raw[..from], Mark::Host.ch(), &raw[pid + on + since..]);
     }
     raw.to_string()
 }
@@ -489,7 +492,7 @@ fn mark_quoted(raw: &str) -> String {
             continue;
         };
         out.push(' ');
-        out.push(NAME_MARK);
+        out.push(Mark::Name.ch());
         out.push(' ');
         let rest = &chars[i + 1..];
         // Fails closed: the name runs to the last closing quote of ANY style only when it is well formed. With no closing
@@ -517,9 +520,10 @@ fn mark_quoted(raw: &str) -> String {
 }
 
 fn absolute_start(token: &str) -> bool {
+    let token = token.trim_start_matches(|c| "\"'([{<".contains(c));
     let b = token.as_bytes();
-    // A path glued to the word before it (`at:/home/anna/...`, `at:C:\Users\...`) starts a path too.
-    let glued = (token.contains(":/") && !token.contains("://")) || token.contains(":\\");
+    // A path glued to the word before it (`at:/home/anna/...`, `at:C:\Users\...`, `at:~/...`) starts a path too.
+    let glued = (token.contains(":/") && !token.contains("://")) || token.contains(":\\") || token.contains(":~");
     glued
         || token.starts_with('/')
         || token.starts_with('\\')
@@ -543,74 +547,81 @@ fn looks_like_body(raw: &str) -> bool {
         || raw.to_ascii_lowercase().contains("</html")
 }
 
-fn scrub_token(token: &str, allow_uuid: bool) -> String {
+/// A word's leading punctuation, its core and its trailing punctuation.
+fn edges(token: &str) -> (&str, &str, &str) {
     let start = token.find(|c: char| !"\"'([{<".contains(c)).unwrap_or(token.len());
     let end = token
         .rfind(|c: char| !"\"')]}>,;.:!?".contains(c))
         .map_or(start, |i| i + token[i..].chars().next().map_or(1, char::len_utf8));
     if start >= end {
+        return (token, "", "");
+    }
+    (&token[..start], &token[start..end], &token[end..])
+}
+
+fn scrub_token(token: &str) -> String {
+    let (prefix, core, suffix) = edges(token);
+    if core.is_empty() {
         return token.to_string();
     }
-    let (prefix, core, suffix) = (&token[..start], &token[start..end], &token[end..]);
+    let marked = |mark: Mark| format!("{prefix}{}{suffix}", mark.ch());
     // An email address is one word, even with an `=` in it (`anna=smith@example.eu`): never split at the `=`.
     if core.find('@').is_some_and(|at| core[at..].contains('.')) {
-        return format!("{prefix}<email>{suffix}");
+        return marked(Mark::Email);
     }
     // Trailing `=` padding (base64) belongs to the token, and the part before an `=` is a word like any other: a path,
     // an email or a file name there is replaced, not written.
     let unpadded = core.trim_end_matches('=');
-    if unpadded.len() < core.len() && !unpadded.contains('=') {
-        if let Some(marker) = classify(unpadded, allow_uuid) {
-            return format!("{prefix}{marker}{suffix}");
-        }
+    if unpadded.len() < core.len()
+        && !unpadded.contains('=')
+        && let Some(mark) = classify(unpadded)
+    {
+        return marked(mark);
     }
     if let Some((key, val)) = core.split_once('=')
         && !key.is_empty()
         && !key.contains("://")
     {
         let shown = if denied_name(key) {
-            REDACTED.to_string()
+            Mark::Redacted.ch().to_string()
         } else {
-            scrub_token(val, allow_uuid)
+            scrub_token(val)
         };
-        let key = classify(key, allow_uuid).map_or(key.to_string(), str::to_string);
+        let key = classify(key).map_or(key.to_string(), |mark| mark.ch().to_string());
         return format!("{prefix}{key}={shown}{suffix}");
     }
-    match classify(core, allow_uuid) {
-        Some(marker) => format!("{prefix}{marker}{suffix}"),
-        None => token.to_string(),
-    }
+    classify(core).map_or_else(|| token.to_string(), marked)
 }
 
-fn classify(core: &str, allow_uuid: bool) -> Option<&'static str> {
+fn classify(core: &str) -> Option<Mark> {
     if core.contains("://") || core.starts_with("mailto:") {
-        return Some("<url>");
+        return Some(Mark::Url);
     }
     if let Some(at) = core.find('@')
         && core[at..].contains('.')
     {
-        return Some("<email>");
+        return Some(Mark::Email);
     }
     let bytes = core.as_bytes();
     let drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
     let env = core.len() > 2 && core.starts_with('%') && core.ends_with('%');
     if core.contains('/') || core.contains('\\') || drive || env || (core.starts_with('~') && core.len() > 1) {
-        return Some("<path>");
+        return Some(Mark::Path);
     }
-    if is_uuid(core) {
-        return if allow_uuid { None } else { Some("<secret>") };
+    if is_uuid(core) || is_long_hex(core) {
+        return Some(Mark::Id);
     }
     if is_jwt(core) {
-        return Some("<secret>");
+        return Some(Mark::Secret);
     }
     if is_file_name(core) {
-        return Some("<name>");
+        return Some(Mark::Name);
     }
     if is_secret(core) {
-        return Some("<secret>");
+        return Some(Mark::Secret);
     }
     if (6..=8).contains(&core.len()) && bytes.iter().all(u8::is_ascii_digit) {
-        return Some("<code>");
+        return Some(Mark::Code);
     }
     None
 }
@@ -636,16 +647,16 @@ fn is_file_name(core: &str) -> bool {
     ext.bytes().all(|b| b.is_ascii_alphanumeric()) && ext.bytes().any(|b| b.is_ascii_alphabetic())
 }
 
+fn is_long_hex(core: &str) -> bool {
+    !core.starts_with("0x") && core.len() >= 16 && core.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 fn is_secret(core: &str) -> bool {
-    if core.starts_with("0x") {
-        return false;
-    }
-    let hex = core.len() >= 16 && core.bytes().all(|b| b.is_ascii_hexdigit());
     let tokenish = core.len() >= 20
         && core.bytes().all(|b| b.is_ascii_alphanumeric() || b"+_-=".contains(&b))
         && core.bytes().any(|b| b.is_ascii_digit())
         && core.bytes().any(|b| b.is_ascii_alphabetic());
-    hex || tokenish
+    tokenish
 }
 
 /// Three or more dot-separated base64url parts: the shape of a JWT.

@@ -13,7 +13,9 @@
 //! - **Size:** two files of at most [`MAX_FILE_BYTES`] (plus one line): when the current file would pass the cap it
 //!   becomes the `.1` file, the previous `.1` is deleted, and a new file starts. The oldest lines are dropped.
 //! - **Privacy (hard rule):** no file or folder name, path, email address, token, key, password, phrase, code or
-//!   server body reaches the file: [`redact`] drops fields by name and replaces words by shape before any write.
+//!   server body reaches the file: [`redact`] drops fields by name, marks what it recognises, and then writes a word
+//!   only when it is a word of the engine's own log calls, an OS error word or a number (an allow-list; every other
+//!   word becomes `<…>`).
 //! - **No network sink**, ever: the only writer is the file. Spans are not recorded (their fields are not read).
 //! - **Never a reason not to start:** a folder that cannot be made or a write that fails loses the line and nothing
 //!   else; the window and stderr behave as before (no subscriber wrote to them).

@@ -5,6 +5,9 @@ use std::path::Path;
 
 use super::{AppLog, FILE_NAME, MAX_FILE_BYTES, OLD_FILE_NAME, redact};
 
+#[path = "vocabulary_sync.rs"]
+mod vocabulary_sync;
+
 /// Runs `body` with the file log (cap `max_bytes`) as the thread's subscriber, then returns the current file's text.
 fn logged(dir: &Path, max_bytes: u64, body: impl FnOnce()) -> String {
     let log = AppLog::open(dir, max_bytes).expect("the log opens");
@@ -25,9 +28,10 @@ fn an_engine_warning_reaches_the_file_with_its_opaque_fields() {
         text.contains(" WARN beebeeb_engine::runner upload parked with its bytes kept in the queue"),
         "{text}"
     );
+    // A UUID correlates even where it is not a name: it is `<id>` in every field (round 6).
     assert!(
-        text.contains(file_id),
-        "an opaque file id is the diagnostic and stays: {text}"
+        text.contains("file_id=<id>") && !text.contains(file_id),
+        "an opaque file id is written as <id>: {text}"
     );
     assert!(
         text.contains("attempt=3") && text.contains("reason=attempts_used_up"),
@@ -39,15 +43,15 @@ fn an_engine_warning_reaches_the_file_with_its_opaque_fields() {
 fn info_is_written_and_debug_and_trace_are_not() {
     let dir = tempfile::tempdir().unwrap();
     let text = logged(dir.path(), MAX_FILE_BYTES, || {
-        tracing::error!("e-line");
-        tracing::warn!("w-line");
-        tracing::info!("i-line");
-        tracing::debug!("d-line");
-        tracing::trace!("t-line");
+        tracing::error!("sync 1");
+        tracing::warn!("sync 2");
+        tracing::info!("sync 3");
+        tracing::debug!("sync 4");
+        tracing::trace!("sync 5");
     });
     assert_eq!(text.lines().count(), 3, "{text}");
-    assert!(text.contains("e-line") && text.contains("w-line") && text.contains("i-line"));
-    assert!(!text.contains("d-line") && !text.contains("t-line"), "{text}");
+    assert!(text.contains("sync 1") && text.contains("sync 2") && text.contains("sync 3"));
+    assert!(!text.contains("sync 4") && !text.contains("sync 5"), "{text}");
 }
 
 /// Every shape the brief forbids, as (what it is, the secret part that must never be in the file, the text it is in).
@@ -209,10 +213,7 @@ fn the_cap_holds_two_files_and_the_oldest_lines_go() {
     let log = AppLog::open(dir.path(), cap).unwrap();
     tracing::subscriber::with_default(log, || {
         for i in 0..400_u64 {
-            tracing::warn!(
-                n = i,
-                "a line of the cap test, long enough to fill a file in a few dozen events"
-            );
+            tracing::warn!(n = i, "upload parked with its bytes kept in the queue");
         }
     });
     let current = fs::read_to_string(dir.path().join(FILE_NAME)).unwrap();
@@ -236,9 +237,9 @@ fn the_cap_holds_two_files_and_the_oldest_lines_go() {
 #[test]
 fn the_log_appends_to_what_an_earlier_run_left() {
     let dir = tempfile::tempdir().unwrap();
-    logged(dir.path(), MAX_FILE_BYTES, || tracing::warn!("first run"));
-    let text = logged(dir.path(), MAX_FILE_BYTES, || tracing::warn!("second run"));
-    assert!(text.contains("first run") && text.contains("second run"), "{text}");
+    logged(dir.path(), MAX_FILE_BYTES, || tracing::warn!("run 1"));
+    let text = logged(dir.path(), MAX_FILE_BYTES, || tracing::warn!("run 2"));
+    assert!(text.contains("run 1") && text.contains("run 2"), "{text}");
 }
 
 #[test]
@@ -255,10 +256,10 @@ fn harmless_shapes_stay_readable() {
     // Over-redaction is accepted, but the lines a person reads in a support case must mostly survive.
     let text =
         redact::scrub("sync tick failed (status 503) retry in 30 s, hresult 0x80070005, version 0.9.0, state.db busy");
-    // The brackets and commas are separators and are not written; every word stays.
+    // Every word is a log call's word or a number, so the line is written as it is, its punctuation too.
     assert_eq!(
         text,
-        "sync tick failed status 503 retry in 30 s hresult 0x80070005 version 0.9.0 state.db busy"
+        "sync tick failed (status 503) retry in 30 s, hresult 0x80070005, version 0.9.0, state.db busy"
     );
 }
 
@@ -287,13 +288,15 @@ fn credential_labels_and_shapes_the_first_round_missed_never_reach_the_file() {
 }
 
 #[test]
-fn a_uuid_survives_only_in_an_id_field_and_a_credential_word_beats_an_id_suffix() {
+fn a_uuid_is_an_id_in_every_field_and_a_credential_word_beats_an_id_suffix() {
     let id = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let dir = tempfile::tempdir().unwrap();
     let text = logged(dir.path(), MAX_FILE_BYTES, || {
         tracing::warn!(file_id = %id, session_id = %id, key_id = %id, error = %id, "ids");
     });
-    assert_eq!(text.matches(id).count(), 1, "only file_id keeps its value: {text}");
+    // Rule 6 of round 6: a UUID is `<id>` everywhere, `file_id` too (it correlates).
+    assert_eq!(text.matches(id).count(), 0, "no field keeps a UUID: {text}");
+    assert!(text.contains("file_id=<id>") && text.contains("error=<id>"), "{text}");
     assert!(
         text.contains("session_id=<redacted>") && text.contains("key_id=<redacted>"),
         "{text}"
@@ -398,11 +401,8 @@ fn a_quoted_name_is_one_name_and_never_reaches_the_file() {
         "The file \u{201c}Holiday.pdf\u{201d} couldn\u{2019}t be opened. NSCocoaErrorDomain 260",
     );
     // `\u{2019}` is also a closing quote, so the name runs to the apostrophe of `couldn\u{2019}t` (over-redaction, accepted); the
-    // error's domain and code stay readable.
-    assert!(
-        text.contains("<name>") && text.contains("NSCocoaErrorDomain 260"),
-        "{text}"
-    );
+    // error's code stays readable (its domain is no log call's word, so it is masked).
+    assert!(text.contains("<name>") && text.contains("<…> 260"), "{text}");
 }
 
 #[test]
@@ -434,7 +434,10 @@ fn an_http_status_keeps_its_prefix_and_never_its_body() {
     // A bare status, or "HTTP" in prose, is not a prefix.
     // A status is always written with its standard reason and `<body omitted>`: nothing after the digits is read.
     assert_eq!(redact::scrub("HTTP 404"), "HTTP 404 Not Found: <body omitted>");
-    assert_eq!(redact::scrub("the HTTP client was built"), "the HTTP client was built");
+    assert_eq!(
+        redact::scrub("the HTTP client was created"),
+        "the HTTP client was created"
+    );
 }
 
 fn refuse(_: &std::path::Path, _: &std::path::Path) -> std::io::Result<()> {
@@ -457,10 +460,7 @@ fn the_cap_holds_when_the_file_can_be_neither_renamed_nor_deleted() {
     let log = AppLog::open_with(dir.path(), cap, ops).unwrap();
     tracing::subscriber::with_default(log, || {
         for i in 0..600_u64 {
-            tracing::warn!(
-                n = i,
-                "a line of the held-file test, long enough to pass the cap in a few dozen events"
-            );
+            tracing::warn!(n = i, "upload parked with its bytes kept in the queue");
         }
     });
     let text = fs::read_to_string(dir.path().join(FILE_NAME)).unwrap();
@@ -489,16 +489,16 @@ fn a_rotation_that_works_again_resumes_the_log() {
         let log = AppLog::open_with(dir.path(), cap, ops).unwrap();
         tracing::subscriber::with_default(log, || {
             for i in 0..300_u64 {
-                tracing::warn!(
-                    n = i,
-                    "a line of the held-file test, long enough to pass the cap in a few dozen events"
-                );
+                tracing::warn!(n = i, "upload parked with its bytes kept in the queue");
             }
         });
     }
     // The next run (the hold is gone): the full file rotates and the new line is kept.
-    let text = logged(dir.path(), cap, || tracing::warn!("after the hold"));
-    assert!(text.contains("after the hold"), "{text}");
+    // A line as long as the ones that filled the file: it cannot fit in what is left, so the file must rotate.
+    let text = logged(dir.path(), cap, || {
+        tracing::warn!(n = 999_u64, "upload parked with its bytes kept in the queue")
+    });
+    assert!(text.contains("n=999"), "{text}");
     assert!(dir.path().join(OLD_FILE_NAME).exists());
 }
 
@@ -555,10 +555,7 @@ fn the_host_of_the_lock_held_sentence_is_replaced() {
         "Annas",
         "another Beebeeb agent is already syncing this folder: beebeeb-desktop (pid 4242 on Annas-PC, since 2026-11-15T07:00:00+00:00)",
     );
-    assert!(
-        text.contains("<host>") && text.contains("pid 4242") && text.contains("since"),
-        "{text}"
-    );
+    assert!(text.contains("4242 on <host>, since"), "{text}");
 }
 
 // ---- Round 3 (delta review of #442) ----
@@ -656,7 +653,10 @@ fn a_custom_key_is_caught_after_an_equals_sign_and_in_a_debug_value() {
     );
     assert_never_written("email before =custom:", "anna@", "see anna@example.eu=custom:X today");
     // The word "custom" in prose is not the key.
-    assert_eq!(redact::scrub("a custom folder was added"), "a custom folder was added");
+    assert_eq!(
+        redact::scrub("a custom folder was created"),
+        "a custom folder was created"
+    );
 }
 
 static HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -689,38 +689,29 @@ fn the_cap_holds_while_the_file_is_held_and_the_log_recovers_in_the_same_run() {
     let log = AppLog::open_with(dir.path(), cap, ops).unwrap();
     tracing::subscriber::with_default(log, || {
         for i in 0..40_u64 {
-            tracing::warn!(
-                n = i,
-                "a line before the hold, long enough to fill the file in a few dozen events"
-            );
+            tracing::warn!(n = i, "upload parked before the lock, with its bytes kept in the queue");
         }
         HELD.store(true, std::sync::atomic::Ordering::SeqCst);
         for i in 40..340_u64 {
-            tracing::warn!(
-                n = i,
-                "a line during the hold, long enough to fill the file in a few dozen events"
-            );
+            tracing::warn!(n = i, "upload parked during the lock, with its bytes kept in the queue");
         }
         let held = fs::metadata(dir.path().join(FILE_NAME)).unwrap().len();
         assert!(held <= cap, "the file passed its cap while held: {held} bytes");
         HELD.store(false, std::sync::atomic::Ordering::SeqCst);
         for i in 0..20_u64 {
-            tracing::warn!(
-                n = i,
-                "after the hold, a line long enough to fill the file in a few dozen events"
-            );
+            tracing::warn!(n = i, "sync started after the lock, with its bytes kept in the queue");
         }
     });
     let current = fs::read_to_string(dir.path().join(FILE_NAME)).unwrap();
     assert!(
-        current.contains("after the hold") && current.contains("n=19\n"),
+        current.contains("sync started after the lock") && current.contains("n=19\n"),
         "the log recovers when the hold ends: {current}"
     );
     // Only the rotation after the hold can move a line written during it into `.1`: the 40 lines before the hold already
     // rotated once, so `.1` existing says nothing.
     let old = fs::read_to_string(dir.path().join(OLD_FILE_NAME)).unwrap_or_default();
     assert!(
-        old.contains("during the hold"),
+        old.contains("during the lock"),
         "the full file was rotated once it could be: {old}"
     );
     assert!(current.len() as u64 <= cap);
@@ -969,4 +960,168 @@ fn a_path_glued_to_the_word_before_it_is_cut_off() {
         "Medical",
         "at:C:\\Users\\Anna\\My Medical Records\\x: Access is denied.",
     );
+}
+
+// ---- Round 6: the allow-list (fail closed) ----
+
+/// Words of the reviewers' corpora that are a person's (no log call has them): each must be masked when alone.
+const NAME_WORDS: [&str; 14] = [
+    "Anna",
+    "Smith",
+    "Medical",
+    "Holiday",
+    "Rome",
+    "Trip",
+    "corp",
+    "Hotel",
+    "MacBook",
+    "hunter2",
+    "Notes",
+    "Budget",
+    "Projects",
+    "Downloads",
+];
+
+/// The engine texts that print a path or a name (`state_paths.rs`, `sync_root_owner.rs`, the write lock, a read),
+/// with the shapes delta reviews 1 to 4 found leaking, as message and as field value.
+fn round6_corpus() -> Vec<String> {
+    let names = [
+        r"C:\Users\Anna\Beebeeb\Medical Records Anna 2026\Holiday Photos Rome\scan.pdf",
+        r"C:\Users\Anna\x=1\anna@corp.eu\My Medical Records\Rome",
+        r"C:\Users\Anna\Backups\anna@corp.eu\My Medical Records\Rome",
+        r"C:\Users\Anna\Pictures\Trip@Rome.2024\My Medical Records\scan.pdf",
+        "/home/anna@corp.example.eu/My Medical Records/Rome",
+        "/home/anna/a://b/My Medical Records/x",
+        r"C:\Users\Anna\Projects\Site (HTTP 404 Medical Records)\Rome",
+        r"\\fileserver\Anna\export=1\HTTP 404 Medical Records\Rome",
+        r"C:\Users\Anna\Medical Records Anna 2026",
+        "at:~/My Medical Records/x",
+        "x/home/anna/My Medical Records/x",
+    ];
+    let templates = [
+        "could not read {}: Access is denied. (os error 5)",
+        "legacy state path {} exists but is not a directory",
+        "create state dir {}: Permission denied (os error 13)",
+        "write lock {}: Access is denied. (os error 5)",
+    ];
+    let folders = [
+        "The \u{201c}Final\u{201d} Medical Records (HTTP 404)",
+        "Q3 \u{201c}Final\u{201d} Medical Records HTTP 404 notes",
+        "Anna\u{2019}s Medical Records (HTTP 404)",
+        "Medical Records",
+    ];
+    let sentences = [
+        "The folder \u{201c}{}\u{201d} is already the sync folder of OneDrive. Nothing was changed. Choose another folder.",
+        "Windows could not say whose sync folder \u{201c}{}\u{201d} is. Nothing was changed. Try again, or choose another folder.",
+    ];
+    let mut corpus: Vec<String> = templates
+        .iter()
+        .flat_map(|t| names.iter().map(move |n| t.replace("{}", n)))
+        .chain(
+            sentences
+                .iter()
+                .flat_map(|t| folders.iter().map(move |f| t.replace("{}", f))),
+        )
+        .collect();
+    corpus.extend(
+        [
+            "Anna Smith Medical Records",
+            "lock held: desktop (pid 1 on Anna HTTP 404 Mac, since x)",
+            "Medical Records: HTTP 404 {\"a\":1}",
+            "\u{201c}a\u{201d} Medical Records HTTP 404 x\u{201d}",
+            "`a` and `Anna Files today",
+            "sign in as Anna=work@example.eu failed",
+            "upload of Holiday Rome failed: Hotel MacBook hunter2",
+            "BackupFolder { category: Custom( \"Medical Records\", ) }",
+            "filter=category=custom:Medical Records",
+            "ignoring non-absolute sync_root in desktop.toml: Medical Records",
+        ]
+        .map(str::to_string),
+    );
+    corpus
+}
+
+#[test]
+fn rule_1_no_word_of_a_persons_name_reaches_the_file_whatever_its_shape() {
+    for word in NAME_WORDS {
+        assert_eq!(
+            redact::scrub(word),
+            "<…>",
+            "`{word}` is no log call's word, so it is masked"
+        );
+    }
+    let corpus = round6_corpus();
+    assert!(corpus.len() >= 60, "{}", corpus.len());
+    let mut written = 0;
+    for text in &corpus {
+        for out in [redact::message(text), redact::value("error", text)] {
+            written += 1;
+            for word in NAME_WORDS {
+                let found = out
+                    .split(|c: char| !c.is_alphanumeric())
+                    .any(|w| w.eq_ignore_ascii_case(word));
+                assert!(!found, "`{word}` reached the file: {text} => {out}");
+            }
+        }
+    }
+    assert_eq!(written, corpus.len() * 2);
+}
+
+#[test]
+fn rule_2_a_real_status_line_keeps_its_status_and_drops_its_body() {
+    assert_eq!(
+        redact::scrub("sync ops: HTTP 502 Bad Gateway: <html><title>Anna</title></html>"),
+        "sync ops: HTTP 502 Bad Gateway: <body omitted>"
+    );
+}
+
+#[test]
+fn rule_3_an_os_error_stays_readable_after_a_path() {
+    assert_eq!(
+        redact::scrub(r"could not read C:\Users\Anna\Medical Records\scan.pdf: Access is denied. (os error 5)"),
+        "could not read <path>: Access is denied. (os error 5)"
+    );
+    assert_eq!(
+        redact::scrub(
+            "could not read /home/anna/x=1/anna@corp.eu/My Medical Records/scan.pdf: Permission denied (os error 13)"
+        ),
+        "could not read <path>: Permission denied (os error 13)"
+    );
+    // A leaf with spaces and no `:` after it: the rest of the text is the path's (its words cannot be told apart).
+    assert_eq!(
+        redact::scrub(r"legacy state path C:\Users\Anna\Medical Records 2026 exists but is not a directory"),
+        "legacy state path <path>"
+    );
+}
+
+#[test]
+fn rule_5_numbers_and_units_pass() {
+    assert_eq!(
+        redact::scrub("uploaded 3 files, 12.5 MB in 840 ms"),
+        "uploaded 3 files, 12.5 MB in 840 ms"
+    );
+    // A long digit run can be a phone, account or citizen number: 6 to 8 digits stay `<code>`, longer is masked.
+    assert_eq!(redact::scrub("uploaded 123456789 files"), "uploaded <…> files");
+    // A version stays; an IPv4 address says where a person is and is masked.
+    assert_eq!(
+        redact::scrub("version 0.9.0, connect 10.0.5.161 timed out"),
+        "version 0.9.0, connect <…> timed out"
+    );
+}
+
+#[test]
+fn rule_6_a_uuid_is_an_id() {
+    let id = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    assert_eq!(redact::scrub(&format!("upload {id} parked")), "upload <id> parked");
+    assert_eq!(redact::value("file_id", id), "<id>");
+}
+
+#[test]
+fn the_word_rules_see_words_through_debug_punctuation() {
+    // A label, a phrase and `custom:` inside brackets and quotes: the punctuation is written, the value is not.
+    assert_eq!(redact::scrub("(code: 4821)"), "(code: <redacted>)");
+    assert_eq!(redact::scrub("Some(\"pin: 1234\")"), "Some(\"pin: <redacted>\")");
+    let phrase = "[\"abandon\",\"ability\",\"able\",\"about\",\"above\",\"absent\",\"absorb\",\"abstract\",\"absurd\",\"abuse\",\"access\",\"accident\"]";
+    assert_eq!(redact::scrub(phrase), "[\"<phrase>\"]");
+    assert_eq!(redact::scrub("(custom:Medical Records)"), "(custom:<name>");
 }
