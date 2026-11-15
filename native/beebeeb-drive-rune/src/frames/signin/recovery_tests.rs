@@ -161,7 +161,7 @@ fn every_answer_of_the_new_password_is_said_in_its_own_words() {
         ),
         (
             NewPasswordProblem::Offline,
-            "Connect, then try again. If your new password was already set",
+            "couldn't check this password against known breaches. Try again. If your new password was already set",
         ),
         (
             NewPasswordProblem::RateLimited { seconds: 30 },

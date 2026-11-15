@@ -19,7 +19,9 @@ use crate::ui::kit;
 /// the registration the window cannot tell whether the password changed, so those words are true either way.
 const TOO_SHORT: &str = "Too short for your account. Nothing was changed: choose a longer password.";
 const BREACHED: &str = "This password appears in known data breaches. Nothing was changed: choose a different one.";
-const SET_OFFLINE: &str = "Connect, then try again. If your new password was already set, sign in with it.";
+// The engine's `Offline` is also a breach check that could not be made: words true for both.
+const SET_OFFLINE: &str = "Beebeeb couldn't be reached, or couldn't check this password against known breaches. Try \
+     again. If your new password was already set, sign in with it.";
 const SET_RATE_LIMITED: &str = "Too many tries. Wait a moment, then try again.";
 const SET_ENDED: &str =
     "If your new password was set, sign in with it. If not, go back and enter your recovery phrase again.";
@@ -179,7 +181,7 @@ fn set_banner(k: &mut Keys, problem: NewPasswordProblem, t: &Theme) -> Option<El
         NewPasswordProblem::TooShort | NewPasswordProblem::Breached | NewPasswordProblem::SignInRequired => {
             return None;
         }
-        NewPasswordProblem::Offline => (Tone::Neutral, &icons::OFFLINE, Some("You're offline"), SET_OFFLINE),
+        NewPasswordProblem::Offline => (Tone::Neutral, &icons::INFO, None, SET_OFFLINE),
         NewPasswordProblem::RateLimited { .. } => (Tone::Red, &icons::INFO, None, SET_RATE_LIMITED),
         NewPasswordProblem::Ended => (Tone::Red, &icons::INFO, Some("This recovery has ended"), SET_ENDED),
         NewPasswordProblem::Other => (Tone::Red, &icons::INFO, None, SET_OTHER),

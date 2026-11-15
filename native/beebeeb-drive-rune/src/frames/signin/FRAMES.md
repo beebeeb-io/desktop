@@ -143,8 +143,9 @@ security, wait an hour and try again."); a vault password or a new password the 
 - **The new password's answers (DW-A49, row 3.5).** The board draws no error on DW-A49, and every refusal used to show
   the sign-in form's "We couldn't sign you in. Nothing was unlocked.", which was untrue when the password had changed.
   Each answer now has its own words (`view_recover.rs`): too short and breached under the field ("Nothing was
-  changed"), and a banner above the fields, as DW-A48 draws its own, for offline, too many tries, an ended recovery
-  and a step that did not finish. Past the registration request the window cannot tell whether the password changed,
+  changed"), and a banner above the fields, as DW-A48 draws its own, for Beebeeb unreachable (or a breach check that
+  could not be made: the engine names both `Offline`), too many tries, an ended recovery and a step that did not
+  finish. Past the registration request the window cannot tell whether the password changed,
   so those words are true either way ("If your new password was already set, sign in with it"). An ended recovery
   turns "Set new password" off and adds "Sign in". No countdown is promised for the wait (none runs).
 - **Password updated, sign in to open the vault (`Screen::PasswordChanged`, row 3.5).** The password WAS changed and
@@ -163,8 +164,9 @@ security, wait an hour and try again."); a vault password or a new password the 
   sign in" / "Nothing was signed in. Ask again." when it moved on while it waited (a sign-in, a lock or a sign-out
   here) or could not store the session. No account is named.
 - **DW-A08 is not seen after a real approval (row 3.4, open).** The engine opens the session before the request's
-  answer reaches the window, and the shell shows Files (or the first run) as soon as the gate opens: the gate decides
-  which screen shows, as after a password sign-in. Nothing in this group can hold DW-A08 on screen over an open gate.
+  answer reaches the window, and the shell draws this group only while signed out (`shell/app.rs` `AppMachine::screen`:
+  `SignedOut` is the sign-in window, `Ready` is Files, the first run is its own gate). The gate decides which screen
+  shows, as after a password sign-in. Nothing in this group can hold DW-A08 on screen over an open gate.
   Fixing it needs the shell to keep the sign-in window for "Open Drive" (`shell/host.rs`), outside this group.
 
 ## Where each screen lives
