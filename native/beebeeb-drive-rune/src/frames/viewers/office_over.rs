@@ -483,7 +483,7 @@ fn licence(t: &Theme) -> El {
     col()
         .key("scrim")
         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-        .child(super::office_glue::licence(t).pin(None, Some(16.0), Some(36.0), None))
+        .child(super::office_glue::licence(t).pin(None, None, Some(16.0), Some(36.0)))
         .modal(false, close)
 }
 
