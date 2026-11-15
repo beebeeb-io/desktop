@@ -602,7 +602,8 @@ fn show_notification(_message: &str) {}
 
 /// Slice A9: tell the person a folder a Beebeeb service keeps was not moved, renamed or deleted
 /// ([`crate::host::Notice::ServiceFolderRefused`], no words of its own: no path). Held back by the same
-/// [`NoticeGate`] as a refusal's words, under a key no words can be; never blocks the caller. Returns whether it was due.
+/// [`NoticeGate`] as a refusal's words, under a key no words can be; never blocks the caller. Returns whether it
+/// was due.
 #[cfg(target_os = "windows")]
 pub fn note_service_folder_refused() -> bool {
     let due = NOTICES.lock().is_ok_and(|mut gate| {
@@ -613,7 +614,7 @@ pub fn note_service_folder_refused() -> bool {
     if due && let Some(app) = NOTIFIER.get().cloned() {
         std::thread::spawn(move || {
             if let Err(error) = app.notify(crate::host::Notice::ServiceFolderRefused) {
-                tracing::debug!(%error, "a service folder's refusal notification could not be shown");
+                tracing::debug!(%error, "backup protection: the folder refusal notification could not be shown");
             }
         });
     }
