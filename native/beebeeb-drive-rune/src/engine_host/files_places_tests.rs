@@ -413,3 +413,61 @@ fn this_pcs_backup_row_says_this_pc_and_others_say_nothing() {
         "exactly one row says it is this PC's:\n{now}"
     );
 }
+
+// ── The sidebar's Backups on the real adapter (BACKUPS_SECTION_ON) ───────────────────────────────
+
+/// Pump the source until it hands out the Backups id (the worker's read lands on `changes`).
+fn backups_root_of(source: &mut Source) -> Option<String> {
+    let until = std::time::Instant::now() + WAIT;
+    while std::time::Instant::now() < until {
+        source.changes();
+        if let Some(root) = source.backups_root() {
+            return Some(root);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    None
+}
+
+#[test]
+fn the_real_adapter_hands_the_backups_id_to_the_files_window() {
+    let (_world, mut source) = first_signed_in("root-id");
+    assert_eq!(backups_root_of(&mut source).as_deref(), Some(ROOT));
+}
+
+#[test]
+fn the_sidebars_backups_opens_the_device_rows_and_nothing_in_the_tree_changes() {
+    let world = world("sidebar");
+    let mut rt = window(&world.engine);
+    sign_in(&world.engine, &world.first, TEST_PHRASE);
+    settle(&mut rt);
+    // The sidebar's Backups: the section asks for its folder, which the adapter must know.
+    let until = std::time::Instant::now() + WAIT;
+    let mut opened = false;
+    while !opened && std::time::Instant::now() < until {
+        rt.update(|s, _| opened = crate::frames::files::protected::show_backups(s));
+        if !opened {
+            settle(&mut rt);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    assert!(opened, "the adapter never handed out the Backups folder");
+    until_drawn(&mut rt, "Invented Phone");
+    until_drawn(&mut rt, "This PC");
+    let now = drawn(&rt);
+    assert!(now.contains("Invented Laptop"), "the device rows are drawn:\n{now}");
+    assert_eq!(rt.state.listing.folder.id.as_deref(), Some(ROOT));
+    // Nothing in the tree offers rename, move or delete: the root, a device row and a file inside one.
+    assert!(rt.state.in_protected_folder());
+    assert!(rt.state.selects_one_at_a_time());
+    let devices = [row(THIS_PC, Some(ROOT), true), row(OTHER_PC, Some(ROOT), true)];
+    assert!(rt.state.protects(&devices[..1]) && rt.state.protects(&devices[1..]));
+    assert_eq!(
+        rt.state.actions.source.protection(Some(ROOT), None),
+        Some(Protection::BackupsRoot)
+    );
+    assert_eq!(
+        rt.state.actions.source.protection(Some(ROOT), Some(&devices[0])),
+        Some(Protection::DeviceBackup(THIS_PC.into()))
+    );
+}
