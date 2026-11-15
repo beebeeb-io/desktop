@@ -1087,3 +1087,6 @@ fn while_a_session_change_is_under_way_nothing_is_copied_opened_or_asked() {
     // The change over, the same session opens the file.
     assert_eq!(open(&engine, NOTE, NO_LIMIT).unwrap().bytes.len(), 3_500);
 }
+
+#[path = "viewer_chain_tests.rs"]
+mod chain;
